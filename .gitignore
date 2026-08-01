@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.env
+*.log
+
+# Measurement output: numbers belong in the issue that asked for them, not in git.
+runs/
+digests/
+*.jsonl
