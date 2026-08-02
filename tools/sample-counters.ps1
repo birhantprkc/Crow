@@ -11,12 +11,17 @@ is normal behaviour, not a broken counter register - do NOT run lodctr /R over i
 The WMI raw classes carry language-neutral property names, so this tool reads those.
 Measured 2026-08-02: the English Get-Counter paths fail, Win32_PerfRawData_* works.
 
-WHY RAW AND NOT FORMATTED: Win32_PerfFormattedData_* returned 0 for every counter on
-a single call at idle, and a value that cannot tell "no load" from "counter dead" is
-a zero without a denominator. Raw values are cumulative, so every rate here is a
-delta over Timestamp_PerfTime. The formatted value is logged ALONGSIDE, as a cross
-check - if it moves under load the shortcut is usable after all, and the note in the
-vault gets corrected.
+WHY RAW AND NOT FORMATTED - and the first version of this paragraph was wrong.
+It said Win32_PerfFormattedData could not be trusted because a single call at idle
+returned 0 for every counter. Measured 2026-08-02 against a known ~10,000 MB/s load,
+all three paths agree within 4 %: raw delta 9983-10220, formatted 9826-10421,
+Get-Counter on localized paths 9975-10213 MB/s. The idle zeros were idle, not a dead
+counter, and THAT CLAIM IS WITHDRAWN.
+The raw path stays, for reasons that survive the measurement: it is language-neutral
+without resolving localized names, and it needs one query per sample rather than two.
+Raw values are cumulative, so every rate here is a delta over Timestamp_PerfTime.
+-WithFormatted still logs the formatted value alongside, now as a running cross check
+rather than as an open question.
 
 WHY NOT -Pid: PowerShell reserves $Pid for the current process and refuses to bind a
 parameter of that name ("Die Variable Pid kann nicht ueberschrieben werden"). Measured
@@ -78,6 +83,14 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+
+# Every number written to the CSV goes through this. PowerShell's -f operator
+# formats in the SYSTEM culture, which on this machine is German: 9874.61 comes out
+# as "9874,61" and blows a comma-separated file apart one field per decimal. Measured
+# 2026-08-02 - a 14-column header sat over rows that had 28 fields, and the file was
+# unreadable while the console numbers were correct. An artefact nobody can parse is
+# not an artefact, and artefacts are the whole reason this tool exists.
+$inv = [System.Globalization.CultureInfo]::InvariantCulture
 
 # ---------------------------------------------------------------- helpers
 
@@ -280,7 +293,7 @@ function Invoke-Sampling {
 
         if ($status -ne 'ok') {
             $result.Invalid++
-            Add-Content -Path $csv -Encoding utf8 -Value ("{0:F2},,,,,,,,,,,,,{1}" -f $elapsed, $status)
+            Add-Content -Path $csv -Encoding utf8 -Value ([string]::Format($inv, "{0:F2},,,,,,,,,,,,,{1}", $elapsed, $status))
             $prev = $cur; $n++
             continue
         }
@@ -313,10 +326,10 @@ function Invoke-Sampling {
         $fmtList += $cur.fmtPages
         if (-not [double]::IsNaN($procIoMBs)) { $procIoList += $procIoMBs }
 
-        Add-Content -Path $csv -Encoding utf8 -Value (
-            "{0:F2},{1:F1},{2:F1},{3:F2},{4:F1},{5:F2},{6:F1},{7:F0},{8:F3},{9:F2},{10:F1},{11:F2},{12:F1},ok" -f `
+        Add-Content -Path $csv -Encoding utf8 -Value ([string]::Format($inv,
+            "{0:F2},{1:F1},{2:F1},{3:F2},{4:F1},{5:F2},{6:F1},{7:F0},{8:F3},{9:F2},{10:F1},{11:F2},{12:F1},ok",
             $elapsed, $pagesRate, $readsRate, $faultMBs, $perRead, $diskMBs, $dReadsRate,
-            $avgBytes, $queue, $procIoMBs, $procFaults, $wsGb, $cur.fmtPages)
+            $avgBytes, $queue, $procIoMBs, $procFaults, $wsGb, $cur.fmtPages))
 
         $prev = $cur; $n++
     }
