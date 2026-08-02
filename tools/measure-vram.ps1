@@ -12,35 +12,55 @@ them is not measuring what its name suggests. See Crow #33.
 
 The difference between either measurement and the prediction is the overhead the
 prediction deliberately omits - KV cache, compute buffers, CUDA context. That
-overhead is what decides Crow's 12 GB operating point, so it is the number this
-script exists to produce.
+overhead is what decides Crow's operating point, so it is the number this script
+exists to produce. (It used to say "12 GB operating point" here. That target was
+dropped by robin on 2026-08-02 - spending more VRAM measured 1.7x SLOWER - and no
+number has replaced it yet, deliberately. See #25.)
+
+NEGATIVE CONTROL, and why it is not the obvious one: a -ot rule that matches nothing
+is accepted in silence, so a run can look like a clean null result while measuring the
+default. The tempting check - "did any tensor get overridden?" - proves nothing,
+because --n-cpu-moe is itself implemented as an override and produces hundreds of such
+lines on its own. What separates them is the DESTINATION: -ncmoe sends experts to
+CUDA_Host, while a "...=CUDA0" rule must produce at least one "overridden to CUDA0".
+So every destination named in -PlacementArgs has to appear in the log, or the run is
+declared void here rather than quietly written down.
 
 NOTE: this file is deliberately ASCII-only. Windows PowerShell 5.1 reads a .ps1
 without a BOM as ANSI, and a stray em dash breaks the parse in a way that looks
 like a missing brace.
 
-Usage:  measure-vram.ps1 [-Ncmoe 36] [-LogDir <path>]
-Exit 0 = the load succeeded and a peak was captured.
+Usage:  measure-vram.ps1 [-Ncmoe 36] [-LogDir <path>] [-Model <path to part 1>]
+Exit 0 = the load succeeded, a peak was captured, and every placement took effect.
 #>
 param(
     [int]$Ncmoe = 36,
     [string]$LogDir = $env:TEMP,
     # Replaces "-ncmoe N" outright, for placements -ncmoe cannot express.
-    # A placement rule that matches nothing fails silently, so any run using one
-    # has to be checked here: the CUDA0 model buffer is the proof it took effect.
+    # A placement rule that matches nothing fails silently - see the negative control
+    # in the header. Checked below, not assumed.
     [string]$PlacementArgs = '',
+    # Point at part 1 of a split GGUF; llama.cpp finds the rest. Same switch name as
+    # run-probes.ps1 and measure-loadmode.ps1 on purpose. Until 2026-08-02 this path
+    # was hard-coded to MXFP4, which meant the one quant that actually fits this
+    # machine - UD-IQ1_S at 76.87 GiB - could not be measured by this tool at all.
+    [string]$Model = 'C:\Users\robin\dev\crow-lab\models\DeepSeek-V4-Flash-MXFP4.gguf',
     [string]$Label = ''
 )
 
 $ErrorActionPreference = 'Continue'
 
 $bin    = 'C:\Users\robin\dev\crow-lab\bin'
-$model  = 'C:\Users\robin\dev\crow-lab\models\DeepSeek-V4-Flash-MXFP4.gguf'
+$model  = $Model
 $prompt = Join-Path $PSScriptRoot 'prompts\probe-a-chat.txt'
 
 foreach ($p in @("$bin\llama-completion.exe", $model, $prompt)) {
     if (-not (Test-Path $p)) { Write-Output "SETUP ERROR: not found: $p"; exit 2 }
 }
+# Same as measure-loadmode.ps1 does. Without it a missing -LogDir surfaces as
+# "the system cannot find the path" from cmd.exe after the sampler has already
+# started, which reads like a broken measurement rather than a missing folder.
+if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
 
 $placement = if ($PlacementArgs -ne '') { $PlacementArgs } else { "-ncmoe $Ncmoe" }
 $tag       = if ($Label -ne '') { $Label } else { "ncmoe$Ncmoe" }
@@ -94,6 +114,38 @@ if ($acct) { $acct | ForEach-Object { "  " + ($_.Line.Trim()) } | Select-Object 
 else { Write-Output "  nothing matched - this build does not print buffer sizes even at -v" }
 
 Write-Output ""
+Write-Output "=== 3. did the placement take effect? ==="
+$placementOk = $true
+if ($PlacementArgs -match '-ot\s') {
+    # Every "=DEST" named in the rule must show up as "overridden to DEST". Counting
+    # overrides alone is not enough: -ncmoe produces them too, just to CUDA_Host.
+    $dests = [regex]::Matches($PlacementArgs, '=([A-Za-z0-9_]+)') |
+             ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+    if ($dests.Count -eq 0) {
+        Write-Output "  FAILED: -ot given but no '=DESTINATION' found in it. Cannot verify."
+        $placementOk = $false
+    }
+    foreach ($d in $dests) {
+        $hits = @(Select-String -Path $llamaLog -Pattern "buffer type overridden to $d" -ErrorAction SilentlyContinue).Count
+        if ($hits -gt 0) {
+            Write-Output "  ok      $hits tensors overridden to $d"
+        } else {
+            Write-Output "  FAILED  0 tensors overridden to $d - the rule matched nothing"
+            $placementOk = $false
+        }
+    }
+    if (-not $placementOk) {
+        Write-Output ""
+        Write-Output "  A rule that matches nothing is accepted in silence, so this run measured"
+        Write-Output "  the default placement, not the one asked for. Recording it would put a"
+        Write-Output "  wrong label on a real number. Declared void."
+    }
+} else {
+    $hostHits = @(Select-String -Path $llamaLog -Pattern 'buffer type overridden to CUDA_Host' -ErrorAction SilentlyContinue).Count
+    Write-Output "  -ncmoe $Ncmoe sent $hostHits tensors to CUDA_Host (informational; -ncmoe cannot silently miss)"
+}
+
+Write-Output ""
 Write-Output "generated output:"
 Select-String -Path $llamaLog -Pattern 'Answer briefly' -ErrorAction SilentlyContinue |
     ForEach-Object { "  " + $_.Line.Trim() } | Select-Object -First 3
@@ -101,4 +153,4 @@ Select-String -Path $llamaLog -Pattern 'Answer briefly' -ErrorAction SilentlyCon
 Write-Output ""
 Write-Output "logs: $smiLog"
 Write-Output "      $llamaLog"
-exit $(if ($code -eq 0) { 0 } else { 1 })
+exit $(if ($code -eq 0 -and $placementOk) { 0 } else { 1 })

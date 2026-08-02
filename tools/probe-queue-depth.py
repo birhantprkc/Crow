@@ -22,8 +22,19 @@ model run part of the file sits in the standby list, so some reads hit RAM and e
 absolute number here is optimistic. That inflation applies to every queue depth
 roughly equally, so THE RATIO BETWEEN LEVELS is the finding; the absolute MB/s is not.
 
+NEGATIVE CONTROL (--negative-control): the caveat above is exactly what could make the
+whole finding an artefact. If the ratio comes from threads scaling rather than from the
+drive being fed, a file that sits ENTIRELY in RAM would show the same climb - there is
+no drive to feed there. So the same sweep runs against a small, deliberately warmed
+file, and its ratio must stay well below the disk ratio. If it does not, this harness
+measures Python's thread scaling and the disk finding is void. The sequential control
+above proves the harness can show speed; this one proves the speed it shows is the
+drive's. A green result without both is not evidence.
+
 Usage:  probe-queue-depth.py <big-file> [--seconds 4] [--block-kb 68]
-Exit 0 = the control passed and the sweep completed. 1 = control failed, sweep void.
+                             [--negative-control <small-warm-file>]
+Exit 0 = both controls passed and the sweep completed.
+     1 = a control failed, sweep void.
 """
 
 import os
@@ -34,6 +45,12 @@ import time
 CONTROL_MIN_MB_S = 3000.0   # generous against a drive measured at 5,300 MB/s
 CONTROL_BLOCK = 4 * 1024 * 1024
 SEQ_BYTES = 4 * 1024 * 1024 * 1024
+
+# The disk sweep has to out-climb the cached sweep by at least this factor, or the
+# climb is not about the disk. Set at 2.0 rather than "cached must be flat": reads
+# from the page cache still cross a syscall boundary, so some thread scaling there is
+# expected and honest. What must not happen is the two being comparable.
+NEG_CONTROL_MIN_SEPARATION = 2.0
 
 
 def human(mb_s):
@@ -93,6 +110,22 @@ def random_reads(path, size, block, depth, seconds):
     return total / dt / 1e6, total, dt
 
 
+def run_sweep(path, size, block, seconds, label):
+    """The sweep itself. Returns (ratio_at_max_depth, rows) so a caller can compare two."""
+    print(f"=== sweep: random reads against queue depth - {label} ===")
+    print("  depth        rate        vs depth 1")
+    base = None
+    rows = []
+    for depth in (1, 4, 8, 16, 32, 64):
+        mb, got, dt = random_reads(path, size, block, depth, seconds)
+        if base is None:
+            base = mb
+        ratio = mb / base
+        rows.append((depth, mb, ratio))
+        print(f"  {depth:5}   {human(mb)}   {ratio:8.2f}x")
+    return rows[-1][2], rows
+
+
 def main(argv):
     if len(argv) < 2:
         print(__doc__)
@@ -100,13 +133,19 @@ def main(argv):
     path = argv[1]
     seconds = 4.0
     block_kb = 68
+    neg_path = None
     for i, a in enumerate(argv):
         if a == "--seconds" and i + 1 < len(argv):
             seconds = float(argv[i + 1])
         if a == "--block-kb" and i + 1 < len(argv):
             block_kb = int(argv[i + 1])
+        if a == "--negative-control" and i + 1 < len(argv):
+            neg_path = argv[i + 1]
     if not os.path.exists(path):
         print(f"SETUP ERROR: no such file: {path}")
+        return 2
+    if neg_path and not os.path.exists(neg_path):
+        print(f"SETUP ERROR: no such negative-control file: {neg_path}")
         return 2
 
     block = block_kb * 1024
@@ -128,17 +167,48 @@ def main(argv):
     print(f"  VERDICT: OK - above {CONTROL_MIN_MB_S:.0f} MB/s, the harness can measure speed.")
     print()
 
-    print("=== sweep: random reads against queue depth ===")
-    print("  depth        rate        vs depth 1")
-    base = None
-    for depth in (1, 4, 8, 16, 32, 64):
-        mb, got, dt = random_reads(path, size, block, depth, seconds)
-        if base is None:
-            base = mb
-        print(f"  {depth:5}   {human(mb)}   {mb/base:8.2f}x")
+    disk_ratio, _ = run_sweep(path, size, block, seconds, "the real file, on disk")
     print()
     print("The ratio column is the finding. Absolute values are optimistic because")
     print("this does not bypass the page cache - see the caveat in the header.")
+    print()
+
+    if neg_path is None:
+        print("NOTE: no --negative-control given. The sweep above cannot distinguish")
+        print("between feeding the drive and Python threads scaling. Treat it as")
+        print("indicative, not as evidence.")
+        return 0
+
+    neg_size = os.path.getsize(neg_path)
+    print(f"=== negative control: {neg_path} ===")
+    print(f"  size        {neg_size:,} bytes - small enough to sit entirely in RAM")
+    print("  warming it so every read below is a cache hit, not a disk read")
+    warm = 0
+    with open(neg_path, "rb", buffering=0) as fh:
+        while True:
+            b = fh.read(CONTROL_BLOCK)
+            if not b:
+                break
+            warm += len(b)
+    print(f"  warmed      {warm/1e9:.2f} GB")
+    print()
+    neg_ratio, _ = run_sweep(neg_path, neg_size, block, seconds, "warm file, no disk involved")
+    print()
+
+    separation = disk_ratio / neg_ratio if neg_ratio else float("inf")
+    print("=== verdict ===")
+    print(f"  disk sweep    depth 64 vs 1: {disk_ratio:6.2f}x")
+    print(f"  cached sweep  depth 64 vs 1: {neg_ratio:6.2f}x")
+    print(f"  separation:                  {separation:6.2f}x   (must be >= {NEG_CONTROL_MIN_SEPARATION})")
+    if separation < NEG_CONTROL_MIN_SEPARATION:
+        print()
+        print("  VERDICT: FAILED - a file that never touches the drive climbs about as")
+        print("  much as the real one. That makes this harness a thread-scaling meter,")
+        print("  not a disk meter, and the concurrency finding on #30 rests on nothing.")
+        return 1
+    print()
+    print("  VERDICT: OK - the climb needs the drive. A RAM-resident file does not")
+    print("  reproduce it, so the ratio above is about feeding the disk.")
     return 0
 
 

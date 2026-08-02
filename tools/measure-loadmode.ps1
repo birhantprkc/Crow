@@ -92,6 +92,14 @@ $started = Get-Date
 $proc = Start-Process -FilePath $bin -ArgumentList $cliArgs `
     -RedirectStandardOutput $outFile -RedirectStandardError $errFile `
     -PassThru -WindowStyle Hidden
+# Touch .Handle once while the process is still alive. This is the fix, and it is the
+# cause rather than the second guess: .NET only caches the process handle if something
+# asks for it. Without that cache the OS handle is released when the process exits and
+# ExitCode has nothing left to read - WaitForExit() below does not help, because by then
+# there is nothing to wait on a handle for. Measured 2026-08-02: a successful 30.3 s run
+# (14 tokens prefilled, "Paris" generated, content check green) still reported exit -1
+# with WaitForExit() alone in place.
+$null = $proc.Handle
 
 $lastCpu = 0.0
 $lastT   = $started
@@ -124,10 +132,9 @@ while (-not $proc.HasExited) {
 }
 
 $wall = [math]::Round(((Get-Date) - $started).TotalSeconds,1)
-# WaitForExit() before reading ExitCode. Without it the property comes back empty on a
-# process started with -PassThru, and an empty value compares unequal to 0 - which turns
-# a successful run into a reported failure. That happened on 2026-08-02 and the run was
-# fine; only this script was wrong.
+# WaitForExit() makes sure the process is really finished before ExitCode is read. It is
+# NOT what makes ExitCode readable - that is the .Handle touch right after Start-Process.
+# Keep both: the handle so the value exists, this so it is final.
 $proc.WaitForExit()
 $code = $proc.ExitCode
 if ($null -eq $code) { $code = -1; Write-Output "  (exit code unavailable, reported as -1)" }
