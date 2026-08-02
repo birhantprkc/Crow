@@ -26,9 +26,21 @@ mojibake on its own (llama.cpp #26423) and would contaminate this.
 NOTE: ASCII-only on purpose. Windows PowerShell 5.1 reads a .ps1 without a BOM as
 ANSI, and a stray non-ASCII character breaks the parse in a misleading way.
 
+-Bin points at the directory holding llama-completion.exe. It defaults to the
+downloaded b10223 binaries. A self-built tree is a DIFFERENT directory on purpose:
+the download ships 14 ggml-cpu-*.dll variants and picks one at runtime, a local
+build with GGML_CPU_ALL_VARIANTS=OFF ships one generic variant. Mixing both sets in
+one directory would let a run silently load the wrong DLL, and nothing in the output
+would say so. So the two stay apart and -Bin selects which one is under test.
+
+Consequence for -Baseline: a character-exact match across two DIFFERENT builds is
+not required and its absence proves nothing. The verdict is the want/forbid
+criterion; the baseline diff is context.
+
 Usage:
   run-probes.ps1 -Ncmoe 999 -OutDir <dir>                 # make the baseline
   run-probes.ps1 -Ncmoe 42  -OutDir <dir> -Baseline <dir> # compare against it
+  run-probes.ps1 -Ncmoe 999 -OutDir <dir> -Bin <dir>      # test a different build
 
 Exit 0 = every probe behaved as required. Non-zero = read the VERDICT lines.
 #>
@@ -46,12 +58,14 @@ param(
     # Point at part 1 of a split GGUF; llama.cpp finds the rest. A different
     # quantisation needs its OWN baseline - the correct output is not the same
     # text across quants, which the upstream reports show directly.
-    [string]$Model = 'C:\Users\robin\dev\crow-lab\models\DeepSeek-V4-Flash-MXFP4.gguf'
+    [string]$Model = 'C:\Users\robin\dev\crow-lab\models\DeepSeek-V4-Flash-MXFP4.gguf',
+    # Directory holding llama-completion.exe. See the header on why builds stay apart.
+    [string]$Bin = 'C:\Users\robin\dev\crow-lab\bin'
 )
 
 $ErrorActionPreference = 'Continue'
 
-$bin   = 'C:\Users\robin\dev\crow-lab\bin'
+$bin   = $Bin
 $model = $Model
 
 $probes = @(
