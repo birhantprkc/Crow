@@ -168,10 +168,57 @@ def sequential_control(path, block=CONTROL_BLOCK):
     return read / dt / 1e6, read, dt
 
 
-def random_reads(path, size, block, depth, seconds, direct=False):
-    """`depth` threads, one file handle each, random offsets, for `seconds`."""
+def _validate_sweep(errors, counts, depth):
+    """Turn a swallowed thread exception - or a reader that read nothing - into a
+    named invalidity.
+
+    Called after join() and before any division. The order matters: dividing
+    first is what turned a dead thread into a plausible-looking slow number.
+
+    TWO failure shapes, and the second was found by running the first one under
+    load on 2026-08-03. A reader can also finish without raising and without
+    reading a single byte, when setting up its handle outruns the time budget.
+    Nothing is dead then, errors[] is empty - and the sweep still yields 0 MB/s,
+    which becomes the divisor for every later depth. That is the ZeroDivisionError
+    the handover recorded as "sporadic": not sporadic at all, but load-dependent.
+    """
+    dead = [(i, e) for i, e in enumerate(errors) if e is not None]
+    if dead:
+        detail = "; ".join(f"thread {i}: {type(e).__name__}: {e}" for i, e in dead)
+        raise SweepInvalid(f"{len(dead)} of {depth} readers died - {detail}")
+
+    empty = [i for i, n in enumerate(counts) if n == 0]
+    if empty:
+        raise SweepInvalid(
+            f"{len(empty)} of {depth} readers read 0 bytes (threads {empty}) - "
+            f"the time budget expired before they read anything. Raise --seconds, "
+            f"or take the machine out of whatever else it is doing."
+        )
+
+
+class SweepInvalid(Exception):
+    """A thread died, so the sweep measured fewer readers than it reported.
+
+    This exists because the alternative is worse than an error: before it, a
+    thread that raised left counts[idx] at zero, threading printed the traceback
+    to stderr, and the sweep divided by a total that was missing one reader's
+    bytes. The run then looked SLOW rather than BROKEN - and at depth 1 it
+    divided by zero instead, which is how the defect was first noticed. A sweep
+    with a dead reader is not a slow sweep; it is not a measurement at all.
+    """
+
+
+def random_reads(path, size, block, depth, seconds, direct=False, fail_thread=None):
+    """`depth` threads, one file handle each, random offsets, for `seconds`.
+
+    fail_thread is for the failing case only: that thread raises on purpose, so
+    the guards below can be shown to fire. Never set it in a real measurement.
+    """
     stop = time.perf_counter() + seconds
     counts = [0] * depth
+    # One slot per thread. threading swallows exceptions into stderr and the
+    # joiner learns nothing, so each worker has to hand its own failure back.
+    errors = [None] * depth
     # Offsets are derived per thread from a fixed stride so runs are reproducible
     # without Math.random-style nondeterminism, and so no two threads walk in step.
     span = size - block
@@ -183,12 +230,21 @@ def random_reads(path, size, block, depth, seconds, direct=False):
             pos = (idx * 7_919_357) % span
             rd = DirectReader(path, block)
             try:
+                reads = 0
                 while time.perf_counter() < stop:
+                    if fail_thread == idx and reads == 3:
+                        raise RuntimeError(f"selftest: thread {idx} failing on purpose")
                     n += rd.read_at(pos)
+                    reads += 1
                     pos = (pos + stride) % span
+            except BaseException as exc:      # noqa: BLE001 - re-raised via errors[]
+                errors[idx] = exc
             finally:
+                # BOTH assignments belong in finally. counts[idx] used to sit
+                # after the try block, so a raising thread left it at zero and
+                # its bytes vanished from the total without a word.
+                counts[idx] = n
                 rd.close()
-            counts[idx] = n
 
         threads = [threading.Thread(target=worker_direct, args=(i,)) for i in range(depth)]
         t0 = time.perf_counter()
@@ -197,6 +253,7 @@ def random_reads(path, size, block, depth, seconds, direct=False):
         for t in threads:
             t.join()
         dt = time.perf_counter() - t0
+        _validate_sweep(errors, counts, depth)
         total = sum(counts)
         return total / dt / 1e6, total, dt
 
@@ -211,12 +268,21 @@ def random_reads(path, size, block, depth, seconds, direct=False):
         # sweep exists to measure.
         buf = bytearray(block)
         mv = memoryview(buf)
-        with open(path, "rb", buffering=0) as fh:
-            while time.perf_counter() < stop:
-                fh.seek(pos)
-                n += fh.readinto(mv)
-                pos = (pos + stride) % span
-        counts[idx] = n
+        try:
+            reads = 0
+            with open(path, "rb", buffering=0) as fh:
+                while time.perf_counter() < stop:
+                    if fail_thread == idx and reads == 3:
+                        raise RuntimeError(f"selftest: thread {idx} failing on purpose")
+                    fh.seek(pos)
+                    n += fh.readinto(mv)
+                    reads += 1
+                    pos = (pos + stride) % span
+        except BaseException as exc:          # noqa: BLE001 - re-raised via errors[]
+            errors[idx] = exc
+        finally:
+            # See worker_direct: this used to sit after the with block.
+            counts[idx] = n
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(depth)]
     t0 = time.perf_counter()
@@ -225,18 +291,28 @@ def random_reads(path, size, block, depth, seconds, direct=False):
     for t in threads:
         t.join()
     dt = time.perf_counter() - t0
+    _validate_sweep(errors, counts, depth)
     total = sum(counts)
     return total / dt / 1e6, total, dt
 
 
-def run_sweep(path, size, block, seconds, label, direct=False):
-    """The sweep itself. Returns (ratio_at_max_depth, rows) so a caller can compare two."""
+def run_sweep(path, size, block, seconds, label, direct=False, fail_thread=None):
+    """The sweep itself. Returns (ratio_at_max_depth, rows) so a caller can compare two.
+
+    Raises SweepInvalid if any reader died. It does not return a partial table:
+    a sweep with one depth level missing its readers cannot be compared against
+    the others, and a ratio computed across it is a number without a meaning.
+    """
     print(f"=== sweep: random reads against queue depth - {label} ===")
     print("  depth        rate        vs depth 1")
     base = None
     rows = []
     for depth in (1, 4, 8, 16, 32, 64):
-        mb, got, dt = random_reads(path, size, block, depth, seconds, direct)
+        try:
+            mb, got, dt = random_reads(path, size, block, depth, seconds, direct, fail_thread)
+        except SweepInvalid as exc:
+            print(f"  {depth:5}   INVALID - {exc}")
+            raise
         if base is None:
             base = mb
         ratio = mb / base
@@ -254,6 +330,7 @@ def main(argv):
     block_kb = 68
     neg_path = None
     direct = False
+    fail_thread = None
     for i, a in enumerate(argv):
         if a == "--seconds" and i + 1 < len(argv):
             seconds = float(argv[i + 1])
@@ -263,6 +340,10 @@ def main(argv):
             neg_path = argv[i + 1]
         if a == "--direct":
             direct = True
+        # The failing case. A guard that has never fired is indistinguishable
+        # from one that is not wired up, so it needs a way to be made to fire.
+        if a == "--selftest-fail-thread" and i + 1 < len(argv):
+            fail_thread = int(argv[i + 1])
     if direct and sys.platform != "win32":
         print("SETUP ERROR: --direct is Windows-only (FILE_FLAG_NO_BUFFERING)")
         return 2
@@ -299,7 +380,32 @@ def main(argv):
     mode = "UNBUFFERED, past the page cache" if direct else "buffered, page cache in play"
     print(f"  mode        {mode}")
     print()
-    disk_ratio, disk_rows = run_sweep(path, size, block, seconds, "the real file, on disk", direct)
+    if fail_thread is not None:
+        print(f"=== SELFTEST: thread {fail_thread} will raise on purpose ===")
+        print("  Required outcome: a named invalidity and exit 1. NOT 0 MB/s, NOT a")
+        print("  ZeroDivisionError, NOT a plausible-looking slow number.")
+        print()
+        try:
+            run_sweep(path, size, block, seconds, "selftest", direct, fail_thread)
+        except SweepInvalid as exc:
+            print()
+            print(f"  caught: SweepInvalid: {exc}")
+            print("  RESULT: PASS - the guard fires and the sweep is refused.")
+            return 1
+        print()
+        print("  RESULT: FAIL - the sweep completed although a reader was told to die.")
+        print("  The guard is not wired up; every number this tool produces is unverified.")
+        return 1
+
+    try:
+        disk_ratio, disk_rows = run_sweep(path, size, block, seconds, "the real file, on disk", direct)
+    except SweepInvalid as exc:
+        print()
+        print(f"  VERDICT: FAILED - {exc}")
+        print("  The sweep is invalid, not slow. A total that is missing a reader's bytes")
+        print("  divided by the full wall time understates the drive by exactly the share")
+        print("  that died - and says nothing about it. No ratio is reported.")
+        return 1
     print()
     # A rate above the sequential ceiling cannot come from the platter. Without --direct
     # this is the loudest sign that the cache is answering; with --direct it means the
