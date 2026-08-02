@@ -10,3 +10,7 @@ venv/
 runs/
 digests/
 *.jsonl
+
+# Compiler artefacts from tools/probe-89.bat
+tools/obj/
+*.obj
