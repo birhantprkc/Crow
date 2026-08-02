@@ -37,10 +37,92 @@ Exit 0 = both controls passed and the sweep completed.
      1 = a control failed, sweep void.
 """
 
+import ctypes
 import os
 import sys
 import threading
 import time
+
+# --- Windows unbuffered reads -------------------------------------------------
+# Why this exists: at 68 KB blocks the page cache barely interferes, but at expert
+# size (12.75 MiB) it dominates completely. Measured 2026-08-02: depth 1 returned
+# 7499 MB/s on a drive that does 5813 MB/s sequentially - impossible from the
+# platter, so it was RAM. The negative control caught it (separation 1.05x) and the
+# sweep was declared void. FILE_FLAG_NO_BUFFERING is the same mechanism kimi-k3-in-c
+# uses as O_DIRECT: the read goes to the device, never to the cache.
+#
+# Its price is alignment: offset, length AND buffer address must all be multiples of
+# the sector size. VirtualAlloc returns page-aligned memory, which satisfies 4096.
+GENERIC_READ = 0x80000000
+FILE_SHARE_READ = 0x00000001
+OPEN_EXISTING = 3
+FILE_FLAG_NO_BUFFERING = 0x20000000
+FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000
+MEM_COMMIT_RESERVE = 0x3000
+MEM_RELEASE = 0x8000
+PAGE_READWRITE = 0x04
+SECTOR = 4096
+
+_k32 = ctypes.WinDLL("kernel32", use_last_error=True) if sys.platform == "win32" else None
+
+if _k32 is not None:
+    # Declaring these is not optional on 64-bit. Without an explicit restype ctypes
+    # assumes int, which truncates a HANDLE or a pointer to 32 bits. The truncated
+    # handle is not -1, so CreateFileW appears to succeed and every ReadFile then
+    # returns 0 bytes without raising. Cost of finding that out the hard way:
+    # one ZeroDivisionError, 2026-08-02.
+    _k32.CreateFileW.restype = ctypes.c_void_p
+    _k32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                                 ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                 ctypes.c_void_p]
+    _k32.VirtualAlloc.restype = ctypes.c_void_p
+    _k32.VirtualAlloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                                  ctypes.c_uint32, ctypes.c_uint32]
+    _k32.VirtualFree.restype = ctypes.c_int
+    _k32.VirtualFree.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32]
+    _k32.SetFilePointerEx.restype = ctypes.c_int
+    _k32.SetFilePointerEx.argtypes = [ctypes.c_void_p, ctypes.c_int64,
+                                      ctypes.c_void_p, ctypes.c_uint32]
+    _k32.ReadFile.restype = ctypes.c_int
+    _k32.ReadFile.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32,
+                              ctypes.POINTER(ctypes.c_uint32), ctypes.c_void_p]
+    _k32.CloseHandle.restype = ctypes.c_int
+    _k32.CloseHandle.argtypes = [ctypes.c_void_p]
+
+
+class DirectReader:
+    """One handle plus one page-aligned buffer, reading past the page cache."""
+
+    def __init__(self, path, block):
+        if block % SECTOR:
+            raise ValueError(f"block {block} is not a multiple of {SECTOR}")
+        self.block = block
+        self.h = _k32.CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, None,
+                                  OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, None)
+        if self.h is None or self.h == 0xFFFFFFFFFFFFFFFF:
+            raise OSError(f"CreateFileW failed, error {ctypes.get_last_error()}")
+        self.buf = _k32.VirtualAlloc(None, block, MEM_COMMIT_RESERVE, PAGE_READWRITE)
+        if not self.buf:
+            raise OSError(f"VirtualAlloc failed, error {ctypes.get_last_error()}")
+        self._got = ctypes.c_uint32(0)
+
+    def read_at(self, pos):
+        """Read one block at `pos`, which is rounded DOWN to a sector boundary."""
+        pos -= pos % SECTOR
+        if not _k32.SetFilePointerEx(self.h, pos, None, 0):
+            raise OSError(f"SetFilePointerEx failed, error {ctypes.get_last_error()}")
+        if not _k32.ReadFile(self.h, self.buf, self.block,
+                             ctypes.byref(self._got), None):
+            raise OSError(f"ReadFile failed at {pos}, error {ctypes.get_last_error()}")
+        return self._got.value
+
+    def close(self):
+        if self.buf:
+            _k32.VirtualFree(ctypes.c_void_p(self.buf), ctypes.c_size_t(0), MEM_RELEASE)
+            self.buf = None
+        if self.h:
+            _k32.CloseHandle(self.h)
+            self.h = None
 
 CONTROL_MIN_MB_S = 3000.0   # generous against a drive measured at 5,300 MB/s
 CONTROL_BLOCK = 4 * 1024 * 1024
@@ -66,19 +148,27 @@ def sequential_control(path, block=CONTROL_BLOCK):
     the thing it is controlling for, and here that is the drive plus the harness's
     ability to show speed at all, not the interpreter's syscall cost.
     """
+    # readinto into a preallocated buffer, NOT read(). Measured 2026-08-02 on the same
+    # 155 GB file: read() gave 3041 MB/s, readinto gave 5851 MB/s - a factor of 1.92,
+    # and the whole difference is Python allocating a fresh bytes object per call. The
+    # earlier figure made the drive look slower than the 5300 MB/s on record and made
+    # this very control fail twice on a healthy disk. A control that measures the
+    # interpreter cannot vouch for the drive.
+    buf = bytearray(block)
+    mv = memoryview(buf)
     read = 0
     t0 = time.perf_counter()
     with open(path, "rb", buffering=0) as fh:
         while read < SEQ_BYTES:
-            b = fh.read(block)
-            if not b:
+            n = fh.readinto(mv)
+            if not n:
                 break
-            read += len(b)
+            read += n
     dt = time.perf_counter() - t0
     return read / dt / 1e6, read, dt
 
 
-def random_reads(path, size, block, depth, seconds):
+def random_reads(path, size, block, depth, seconds, direct=False):
     """`depth` threads, one file handle each, random offsets, for `seconds`."""
     stop = time.perf_counter() + seconds
     counts = [0] * depth
@@ -86,16 +176,45 @@ def random_reads(path, size, block, depth, seconds):
     # without Math.random-style nondeterminism, and so no two threads walk in step.
     span = size - block
 
+    if direct:
+        def worker_direct(idx):
+            n = 0
+            stride = 1_000_003 * (idx * 2 + 1)
+            pos = (idx * 7_919_357) % span
+            rd = DirectReader(path, block)
+            try:
+                while time.perf_counter() < stop:
+                    n += rd.read_at(pos)
+                    pos = (pos + stride) % span
+            finally:
+                rd.close()
+            counts[idx] = n
+
+        threads = [threading.Thread(target=worker_direct, args=(i,)) for i in range(depth)]
+        t0 = time.perf_counter()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        dt = time.perf_counter() - t0
+        total = sum(counts)
+        return total / dt / 1e6, total, dt
+
     def worker(idx):
         n = 0
         # A large odd stride per thread walks the whole file without repeating soon.
         stride = 1_000_003 * (idx * 2 + 1)
         pos = (idx * 7_919_357) % span
+        # One buffer per thread, allocated once. See the note in sequential_control:
+        # read() costs 1.92x here, and it costs most exactly where the drive is
+        # fastest - at high queue depth - which would flatten the ratio this whole
+        # sweep exists to measure.
+        buf = bytearray(block)
+        mv = memoryview(buf)
         with open(path, "rb", buffering=0) as fh:
             while time.perf_counter() < stop:
                 fh.seek(pos)
-                b = fh.read(block)
-                n += len(b)
+                n += fh.readinto(mv)
                 pos = (pos + stride) % span
         counts[idx] = n
 
@@ -110,14 +229,14 @@ def random_reads(path, size, block, depth, seconds):
     return total / dt / 1e6, total, dt
 
 
-def run_sweep(path, size, block, seconds, label):
+def run_sweep(path, size, block, seconds, label, direct=False):
     """The sweep itself. Returns (ratio_at_max_depth, rows) so a caller can compare two."""
     print(f"=== sweep: random reads against queue depth - {label} ===")
     print("  depth        rate        vs depth 1")
     base = None
     rows = []
     for depth in (1, 4, 8, 16, 32, 64):
-        mb, got, dt = random_reads(path, size, block, depth, seconds)
+        mb, got, dt = random_reads(path, size, block, depth, seconds, direct)
         if base is None:
             base = mb
         ratio = mb / base
@@ -134,6 +253,7 @@ def main(argv):
     seconds = 4.0
     block_kb = 68
     neg_path = None
+    direct = False
     for i, a in enumerate(argv):
         if a == "--seconds" and i + 1 < len(argv):
             seconds = float(argv[i + 1])
@@ -141,6 +261,15 @@ def main(argv):
             block_kb = int(argv[i + 1])
         if a == "--negative-control" and i + 1 < len(argv):
             neg_path = argv[i + 1]
+        if a == "--direct":
+            direct = True
+    if direct and sys.platform != "win32":
+        print("SETUP ERROR: --direct is Windows-only (FILE_FLAG_NO_BUFFERING)")
+        return 2
+    if direct and (block_kb * 1024) % SECTOR:
+        print(f"SETUP ERROR: --direct needs a block that is a multiple of {SECTOR} B; "
+              f"{block_kb} KB is not")
+        return 2
     if not os.path.exists(path):
         print(f"SETUP ERROR: no such file: {path}")
         return 2
@@ -167,8 +296,20 @@ def main(argv):
     print(f"  VERDICT: OK - above {CONTROL_MIN_MB_S:.0f} MB/s, the harness can measure speed.")
     print()
 
-    disk_ratio, _ = run_sweep(path, size, block, seconds, "the real file, on disk")
+    mode = "UNBUFFERED, past the page cache" if direct else "buffered, page cache in play"
+    print(f"  mode        {mode}")
     print()
+    disk_ratio, disk_rows = run_sweep(path, size, block, seconds, "the real file, on disk", direct)
+    print()
+    # A rate above the sequential ceiling cannot come from the platter. Without --direct
+    # this is the loudest sign that the cache is answering; with --direct it means the
+    # flag did not take.
+    fastest = max(r[1] for r in disk_rows)
+    if fastest > mb:
+        print(f"  NOTE: peak {fastest:.0f} MB/s exceeds the sequential ceiling of {mb:.0f} MB/s.")
+        print("  A platter cannot beat its own sequential rate on random reads, so part of")
+        print("  this came from RAM." + ("" if direct else " Try --direct."))
+        print()
     print("The ratio column is the finding. Absolute values are optimistic because")
     print("this does not bypass the page cache - see the caveat in the header.")
     print()
@@ -192,11 +333,34 @@ def main(argv):
             warm += len(b)
     print(f"  warmed      {warm/1e9:.2f} GB")
     print()
-    neg_ratio, _ = run_sweep(neg_path, neg_size, block, seconds, "warm file, no disk involved")
+    neg_label = "warm file, read UNBUFFERED - warmth must not help" if direct \
+                else "warm file, no disk involved"
+    neg_ratio, neg_rows = run_sweep(neg_path, neg_size, block, seconds, neg_label, direct)
     print()
 
-    separation = disk_ratio / neg_ratio if neg_ratio else float("inf")
     print("=== verdict ===")
+    if direct:
+        # With --direct the control asks a different question. The point is no longer
+        # "does a RAM file climb less" - it is "does the flag actually bypass the
+        # cache". A deliberately warmed file read through FILE_FLAG_NO_BUFFERING must
+        # NOT reach RAM speed. If it does, the flag was ignored and every number above
+        # is a cache measurement wearing a different label.
+        neg_depth1 = neg_rows[0][1]
+        print(f"  warm file, unbuffered, depth 1: {neg_depth1:8.1f} MB/s")
+        print(f"  sequential ceiling:             {mb:8.1f} MB/s")
+        if neg_depth1 > mb:
+            print()
+            print("  VERDICT: FAILED - a file that is entirely in RAM still read faster")
+            print("  than the drive's sequential rate. FILE_FLAG_NO_BUFFERING did not")
+            print("  take effect, so these numbers are the page cache under a new name.")
+            return 1
+        print()
+        print("  VERDICT: OK - the flag took. Even a fully warmed file had to come from")
+        print("  the device, so the sweep above is a property of the drive.")
+        print(f"  Depth 64 vs 1 on the real file: {disk_ratio:.2f}x")
+        return 0
+
+    separation = disk_ratio / neg_ratio if neg_ratio else float("inf")
     print(f"  disk sweep    depth 64 vs 1: {disk_ratio:6.2f}x")
     print(f"  cached sweep  depth 64 vs 1: {neg_ratio:6.2f}x")
     print(f"  separation:                  {separation:6.2f}x   (must be >= {NEG_CONTROL_MIN_SEPARATION})")

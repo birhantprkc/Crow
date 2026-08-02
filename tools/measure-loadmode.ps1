@@ -42,7 +42,13 @@ param(
     # other. Same parameter name as run-probes.ps1 and measure-vram.ps1 on purpose:
     # these three answer nearly the same question and their switches should not
     # diverge, or callers trip over which one takes what.
-    [string]$Label = ''
+    [string]$Label = '',
+    # Pass -v to llama. Off by default because it makes the log ~550 KB, on when the
+    # run has to PROVE where the tensors went. Without it the log carries no
+    # load_tensors, no buffer size and no "overridden to" line, so any statement about
+    # placement is arithmetic on the -ncmoe value, not a measurement. A curator found
+    # exactly that hole in the B1 series of 2026-08-02.
+    [switch]$LlamaVerbose
 )
 
 $ErrorActionPreference = 'Continue'
@@ -77,6 +83,7 @@ $cliArgs = @(
     '--temp', '0', '--seed', '1234', '-n', "$Predict", '-c', '4096', '-np', '1',
     '--no-warmup', '-ngl', '99', '-ncmoe', "$Ncmoe", '--load-mode', $LoadMode
 )
+if ($LlamaVerbose) { $cliArgs += '-v' }
 
 Write-Output "=== run: --load-mode $LoadMode  -ncmoe $Ncmoe  prompt $Prompt ==="
 $osB = Get-CimInstance Win32_OperatingSystem
@@ -159,7 +166,45 @@ Write-Output ""
 Write-Output ("  generated: " + ($text -replace "`r",'' -replace "`n",'\n'))
 Write-Output ("  contains 'Paris': " + ($text -match 'Paris'))
 
+# The result block goes to a FILE, not only to the console. Until 2026-08-02 these four
+# numbers existed nowhere on disk: the console scrolled away and the run was gone. Three
+# of the five columns in the B1 series had no artefact for exactly this reason, which
+# makes them assertions rather than measurements. key=value so a later run can be diffed
+# against this one without re-reading prose.
+$resultFile = Join-Path $LogDir "loadmode-$tag.result.txt"
+$hostLines = @(Select-String -Path $errFile -Pattern 'buffer type overridden to CUDA_Host' -ErrorAction SilentlyContinue).Count
+$gpuLines  = @(Select-String -Path $errFile -Pattern 'buffer type overridden to CUDA0' -ErrorAction SilentlyContinue).Count
+$fitWarn   = @(Select-String -Path $errFile -Pattern 'failed to fit params to free device memory' -ErrorAction SilentlyContinue).Count
+$result = @(
+    "tag=$tag"
+    "load_mode=$LoadMode"
+    "ncmoe=$Ncmoe"
+    "model=$model"
+    "prompt=$Prompt"
+    "predict=$Predict"
+    "verbose=$([bool]$LlamaVerbose)"
+    "exit=$code"
+    "wall_s=$wall"
+    "peak_working_set_gb=$maxWs"
+    "lowest_free_ram_gb=$(if ($cpuRows.Count -eq 0) { 'not sampled - run ended before the first 10 s tick' } else { $minFree })"
+    "ram_total_gb=$ramTotal"
+    "mean_cpu_pct=$meanCpu"
+    "samples=$($cpuRows.Count)"
+    # Placement, measured rather than derived from the -ncmoe value - but only if -v ran.
+    "overridden_to_cuda_host=$(if ($LlamaVerbose) { $hostLines } else { 'unknown - rerun with -LlamaVerbose' })"
+    "overridden_to_cuda0=$(if ($LlamaVerbose) { $gpuLines } else { 'unknown - rerun with -LlamaVerbose' })"
+    # llama.cpp's own verdict on whether the placement fits free VRAM. Its absence is
+    # as much a finding as its presence: it appeared at -ncmoe 29 and 27 on 2026-08-02
+    # and not at 34 or 31, which is where the VRAM boundary sits.
+    "fit_warning=$fitWarn"
+    "contains_paris=$($text -match 'Paris')"
+)
+$result += @(Select-String -Path $errFile -Pattern 'prompt eval time|eval time|load time' -ErrorAction SilentlyContinue |
+             ForEach-Object { "perf: " + ($_.Line -replace '^[0-9.]+ I ','').Trim() })
+$result | Set-Content -Path $resultFile -Encoding UTF8
+
 Write-Output ""
-Write-Output "  logs: $outFile"
-Write-Output "        $errFile"
+Write-Output "  logs:   $outFile"
+Write-Output "          $errFile"
+Write-Output "  result: $resultFile"
 exit $(if ($code -eq 0) { 0 } else { 1 })
