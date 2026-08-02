@@ -48,6 +48,22 @@ come back red, and each one covers a different way this tool could be silently b
 WHAT THIS TOOL DOES NOT DO: it never starts llama. It attaches to a PID or runs free
 standing, because the idle baseline is a run WITHOUT a process to attach to.
 
+TWO PATHS A CURATOR FOUND UNTESTED, now measured 2026-08-02:
+  * The stop file. It had never fired: with a pid attached the process-gone branch
+    always won first, so "the sampler is asked to stop, not killed" was an untested
+    claim. Run free standing with -Seconds 120 and the flag dropped at 8 s, it ended
+    after 8.4 s with exit 0 and its closing line. The path works.
+  * The pages half of the idle gate. -MaxIdlePages had only ever been set to -1
+    (always red) or infinity (always green), so 200 was a threshold nobody had made
+    fail. Under random mmap reads across the 155 GB file it read 135,322.8 pages/s
+    and the gate went red. In the same run fault throughput was 528.60 MB/s against
+    529.07 MB/s at the disk driver - 0.09 % apart, two independent counter paths.
+
+COLD START: the first WMI query in a fresh PowerShell process costs about 6 s. A run
+launched with Start-Process therefore loses its first few ticks; the schedule below
+skips them rather than firing them late. On a 614 s run that is one percent, but a
+short run started cold can come back with far fewer rows than its duration suggests.
+
 NOTE: ASCII-only on purpose. Windows PowerShell 5.1 reads a .ps1 without a BOM as
 ANSI, and a stray non-ASCII character breaks the parse in a misleading way.
 
@@ -268,10 +284,20 @@ function Invoke-Sampling {
         # Absolute schedule, not "sleep Ms then work". A sample costs 93-364 ms
         # depending on -WithFormatted, and sleeping a fixed Ms on top of that drifts:
         # a 5 s run at a nominal 1 Hz produced 3 rows, not 5. Measured 2026-08-02.
+        #
+        # AND IT DOES NOT CATCH UP. The first version of this schedule floored the
+        # sleep at 20 ms, so after a stall it fired several samples in quick
+        # succession. Measured 2026-08-02: a 2.86 s stall produced three samples
+        # 0.11-0.17 s apart. The WMI counters do not refresh that fast, so those rows
+        # read near zero and the whole backlog landed in the NEXT one - 10,627,477
+        # pages/s, i.e. 41 GB/s on a drive that does 5. The corrupt row was not the
+        # fast one but the one after it, which is exactly why dropping "too fast" rows
+        # alone would have left the damage in place. Skipping whole ticks keeps every
+        # interval at half the requested one or more, so no delta is ever cut short.
         $tick++
-        $sleepMs = ($tick * $Ms) - ((Get-Date) - $started).TotalMilliseconds
-        if ($sleepMs -lt 20) { $sleepMs = 20 }
-        Start-Sleep -Milliseconds ([int]$sleepMs)
+        $nowMs = ((Get-Date) - $started).TotalMilliseconds
+        while ((($tick * $Ms) - $nowMs) -lt ($Ms * 0.5)) { $tick++ }
+        Start-Sleep -Milliseconds ([int](($tick * $Ms) - $nowMs))
 
         $elapsed = ((Get-Date) - $started).TotalSeconds
         if ($elapsed -ge $Secs) { break }
@@ -282,6 +308,9 @@ function Invoke-Sampling {
         }
 
         $cur = Get-Snapshot -ProcId $ProcId -WithFormatted:$Formatted
+        $dtSample = if ($null -ne $cur -and $null -ne $prev -and $cur.freq -gt 0) {
+                        ($cur.ts - $prev.ts) / $cur.freq
+                    } else { 0.0 }
         $status = 'ok'
         if ($null -eq $cur -or $null -eq $prev) {
             $status = 'invalid_null'
@@ -289,6 +318,12 @@ function Invoke-Sampling {
             # A cumulative raw value that drops means the counter restarted. Every
             # delta across that point is garbage, so the row is marked, not skipped.
             $status = 'invalid_counter_reset'
+        } elseif ($dtSample -lt ($Ms / 2000.0)) {
+            # The net under the no-catch-up schedule above. If an interval still comes
+            # out under half the requested one, the counters may not have refreshed
+            # across it and any rate computed from it is noise, so the row is marked
+            # rather than published as a number.
+            $status = 'invalid_too_fast'
         }
 
         if ($status -ne 'ok') {
