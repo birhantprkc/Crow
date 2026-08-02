@@ -48,7 +48,24 @@ param(
     # load_tensors, no buffer size and no "overridden to" line, so any statement about
     # placement is arithmetic on the -ncmoe value, not a measurement. A curator found
     # exactly that hole in the B1 series of 2026-08-02.
-    [switch]$LlamaVerbose
+    [switch]$LlamaVerbose,
+    # Run tools\sample-counters.ps1 alongside this run. It is a SEPARATE tool and not
+    # a mode of this one, for two reasons that do not go away: the idle baseline is a
+    # sampler run with no process to attach to, and the loop below deliberately ticks
+    # at 10 s while the counters need 1 Hz. Changing this loop's interval would make
+    # every run incomparable with the B1 series already in the archive.
+    # run-probes.ps1 and measure-vram.ps1 do NOT get this switch: neither holds a
+    # process object (both call llama through cmd.exe and never see a pid), so there
+    # is nothing for the sampler to attach to there.
+    [switch]$Sample,
+    # Idle thresholds handed to the sampler's gate below. Chosen, not measured: one
+    # idle reading on 2026-08-02 gave 16.78 pages/s and 0.08 MB/s, rounded up roughly
+    # tenfold. The 20 s baselines themselves produce the distribution that replaces them.
+    [double]$MaxIdlePages = 200,
+    [double]$MaxIdleDiskMBs = 10,
+    # Hard ceiling for the sampler, not its normal end. It normally stops because this
+    # script drops a stop file, or because the llama process is gone.
+    [int]$SampleMaxSeconds = 1800
 )
 
 $ErrorActionPreference = 'Continue'
@@ -85,6 +102,31 @@ $cliArgs = @(
 )
 if ($LlamaVerbose) { $cliArgs += '-v' }
 
+# THE IDLE GATE, and it has to sit HERE - above Start-Process, not below it. A run
+# that begins with foreign load in the background cannot be told apart afterwards
+# from one where llama caused the traffic, because the memory counters have no
+# process dimension at all. The gate costs 20 s and saves an 11 minute run that
+# would have produced an unusable number.
+# Placing it after the process starts would make it useless AND make its own check
+# untestable: a failure there could never be observed without a llama log next to it.
+$sampler = $null
+if ($Sample) {
+    $samplerTool = Join-Path $PSScriptRoot 'sample-counters.ps1'
+    if (-not (Test-Path $samplerTool)) { Write-Output "SETUP ERROR: not found: $samplerTool"; exit 2 }
+    Write-Output "=== idle gate: 20 s baseline, must stay under $MaxIdlePages pages/s and $MaxIdleDiskMBs MB/s ==="
+    & $samplerTool -LogDir $LogDir -Label "$tag-idle" -Seconds 20 `
+                   -MaxIdlePages $MaxIdlePages -MaxIdleDiskMBs $MaxIdleDiskMBs
+    $gateCode = $LASTEXITCODE
+    if ($gateCode -ne 0) {
+        Write-Output "  VERDICT: FAILED - the machine is not quiet, exit $gateCode."
+        Write-Output "  llama was NOT started. A measurement taken under foreign load cannot be"
+        Write-Output "  separated from it afterwards, so there is nothing to salvage by running anyway."
+        exit 2
+    }
+    Write-Output "  VERDICT: OK - quiet enough to attribute the traffic to this run."
+    Write-Output ""
+}
+
 Write-Output "=== run: --load-mode $LoadMode  -ncmoe $Ncmoe  prompt $Prompt ==="
 $osB = Get-CimInstance Win32_OperatingSystem
 $ramTotal = [math]::Round($osB.TotalVisibleMemorySize/1MB,1)
@@ -107,6 +149,22 @@ $proc = Start-Process -FilePath $bin -ArgumentList $cliArgs `
 # (14 tokens prefilled, "Paris" generated, content check green) still reported exit -1
 # with WaitForExit() alone in place.
 $null = $proc.Handle
+
+# The sampler attaches AFTER the handle grab, because before it there is no pid to
+# attach to. It is started with Start-Process and not with & so this script can go on
+# to its own 10 s loop; the two run side by side at different intervals on purpose.
+$samplerCsv = ''
+if ($Sample) {
+    $samplerCsv = Join-Path $LogDir "counters-$tag.csv"
+    $sampler = Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'sample-counters.ps1'),
+                      '-LogDir', $LogDir, '-Label', $tag, '-TargetPid', $proc.Id,
+                      '-Seconds', $SampleMaxSeconds `
+        -RedirectStandardOutput (Join-Path $LogDir "counters-$tag.out.txt") `
+        -PassThru -WindowStyle Hidden
+    $null = $sampler.Handle
+    Write-Output "  sampler pid $($sampler.Id) -> $samplerCsv"
+}
 
 $lastCpu = 0.0
 $lastT   = $started
@@ -145,6 +203,26 @@ $wall = [math]::Round(((Get-Date) - $started).TotalSeconds,1)
 $proc.WaitForExit()
 $code = $proc.ExitCode
 if ($null -eq $code) { $code = -1; Write-Output "  (exit code unavailable, reported as -1)" }
+
+# Ask the sampler to stop; do NOT kill it. measure-vram.ps1:89-90 kills nvidia-smi
+# with Stop-Process -Force, and copying that here would break three promises at once:
+# the sampler could never write its closing "# complete samples=<n>" line, so EVERY
+# csv would count as aborted; its exit value would carry no meaning; and the check
+# that a counter object was actually queried rests on exactly that closing line.
+# Force stays as a last resort after 30 s, and when it fires it is written down.
+$samplerNote = 'not sampled'
+if ($Sample -and $null -ne $sampler) {
+    $flag = Join-Path $LogDir "stop-$tag.flag"
+    Set-Content -Path $flag -Value 'stop' -Encoding utf8
+    if (-not $sampler.WaitForExit(30000)) {
+        Write-Output "  WARNUNG: sampler did not stop within 30 s, forcing it. The csv is incomplete."
+        try { Stop-Process -Id $sampler.Id -Force -ErrorAction Stop } catch {}
+        $samplerNote = 'forced - csv incomplete'
+    } else {
+        $samplerNote = "exit $($sampler.ExitCode)"
+    }
+    if (Test-Path $flag) { Remove-Item $flag -Force -ErrorAction SilentlyContinue }
+}
 
 $meanCpu = if ($cpuRows.Count -gt 0) { [math]::Round(($cpuRows | Measure-Object -Average).Average,1) } else { 0 }
 
@@ -198,6 +276,12 @@ $result = @(
     # and not at 34 or 31, which is where the VRAM boundary sits.
     "fit_warning=$fitWarn"
     "contains_paris=$($text -match 'Paris')"
+    # Counter capture. A csv without the closing "# complete samples=" line is an
+    # aborted run and its numbers do not count - that is why the line is recorded
+    # here rather than just the file name.
+    "counters_csv=$(if ($Sample) { $samplerCsv } else { 'not sampled - pass -Sample' })"
+    "counters_sampler=$samplerNote"
+    "counters_complete=$(if ($Sample -and (Test-Path $samplerCsv)) { [bool]((Get-Content $samplerCsv -Tail 1) -match '^# complete samples=') } else { 'n/a' })"
 )
 $result += @(Select-String -Path $errFile -Pattern 'prompt eval time|eval time|load time' -ErrorAction SilentlyContinue |
              ForEach-Object { "perf: " + ($_.Line -replace '^[0-9.]+ I ','').Trim() })
