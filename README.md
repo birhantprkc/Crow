@@ -147,6 +147,7 @@ cannot be told apart from one that checks nothing.
 | `measure-loadmode.ps1` | whether bypassing the page cache changes the thrashing regime | an invalid `--load-mode` must be rejected before anything is measured |
 | `probe-queue-depth.py` | random read rate against queue depth — the number the streaming direction rests on | a warm, RAM-resident file must NOT climb the same way; with `--direct`, it must not even read fast |
 | `run-probes.ps1` | correctness against a self-made baseline | asks for a different capital, must not answer Paris |
+| `sample-counters.ps1` | how much disk traffic a run causes through hard page faults — the denominator the 445 MB/s on [#30](https://github.com/nibor1896/Crow/issues/30) was borrowed for | three, and each covers a different silent failure: a threshold of `-1` must trip the idle gate, a dead PID must write no rows rather than zeros, and `-ExpectDisableValue 1` must trip the registry check that would otherwise be a green nobody tested |
 
 ### Open
 
