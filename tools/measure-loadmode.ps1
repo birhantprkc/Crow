@@ -35,13 +35,20 @@ param(
     [Parameter(Mandatory = $true)][string]$LogDir,
     [int]$Ncmoe = 999,
     [string]$Prompt = 'probe-d-long-france.txt',
-    [int]$Predict = 32
+    [int]$Predict = 32,
+    # Point at part 1 of a split GGUF; llama.cpp finds the rest.
+    [string]$Model = 'C:\Users\robin\dev\crow-lab\models\DeepSeek-V4-Flash-MXFP4.gguf',
+    # Names the log files. Without it two runs of the same load mode overwrite each
+    # other. Same parameter name as run-probes.ps1 and measure-vram.ps1 on purpose:
+    # these three answer nearly the same question and their switches should not
+    # diverge, or callers trip over which one takes what.
+    [string]$Label = ''
 )
 
 $ErrorActionPreference = 'Continue'
 
 $bin    = 'C:\Users\robin\dev\crow-lab\bin\llama-completion.exe'
-$model  = 'C:\Users\robin\dev\crow-lab\models\DeepSeek-V4-Flash-MXFP4.gguf'
+$model  = $Model
 $prompt = Join-Path $PSScriptRoot "prompts\$Prompt"
 
 foreach ($p in @($bin, $model, $prompt)) {
@@ -62,8 +69,9 @@ if ($negCode -eq 0) {
 Write-Output "  VERDICT: OK - rejected, exit $negCode. The flag is parsed."
 Write-Output ""
 
-$outFile = Join-Path $LogDir "loadmode-$LoadMode.out.txt"
-$errFile = Join-Path $LogDir "loadmode-$LoadMode.log.txt"
+$tag     = if ($Label -ne '') { $Label } else { $LoadMode }
+$outFile = Join-Path $LogDir "loadmode-$tag.out.txt"
+$errFile = Join-Path $LogDir "loadmode-$tag.log.txt"
 $cliArgs = @(
     '-m', $model, '-f', $prompt, '-no-cnv', '--no-display-prompt',
     '--temp', '0', '--seed', '1234', '-n', "$Predict", '-c', '4096', '-np', '1',

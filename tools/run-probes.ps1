@@ -42,13 +42,17 @@ param(
     [string]$PlacementArgs = '',
     [string]$Label = '',
     # Probe ids to run, e.g. 'abc' or 'de'. Empty runs all of them.
-    [string]$Only = ''
+    [string]$Only = '',
+    # Point at part 1 of a split GGUF; llama.cpp finds the rest. A different
+    # quantisation needs its OWN baseline - the correct output is not the same
+    # text across quants, which the upstream reports show directly.
+    [string]$Model = 'C:\Users\robin\dev\crow-lab\models\DeepSeek-V4-Flash-MXFP4.gguf'
 )
 
 $ErrorActionPreference = 'Continue'
 
 $bin   = 'C:\Users\robin\dev\crow-lab\bin'
-$model = 'C:\Users\robin\dev\crow-lab\models\DeepSeek-V4-Flash-MXFP4.gguf'
+$model = $Model
 
 $probes = @(
     @{ id = 'a'; file = 'probe-a-chat.txt';       want = 'Paris'; forbid = '';      kind = 'positive' },
