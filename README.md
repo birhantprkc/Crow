@@ -148,6 +148,7 @@ cannot be told apart from one that checks nothing.
 | `probe-queue-depth.py` | random read rate against queue depth — the number the streaming direction rests on | a warm, RAM-resident file must NOT climb the same way; with `--direct`, it must not even read fast |
 | `run-probes.ps1` | correctness against a self-made baseline | asks for a different capital, must not answer Paris |
 | `sample-counters.ps1` | how much disk traffic a run causes through hard page faults — the denominator the 445 MB/s on [#30](https://github.com/nibor1896/Crow/issues/30) was borrowed for | three, and each covers a different silent failure: a threshold of `-1` must trip the idle gate, a dead PID must write no rows rather than zeros, and `-ExpectDisableValue 1` must trip the registry check that would otherwise be a green nobody tested |
+| `wait_share.py` | what share of a run is spent on disk traffic and at what **queue depth** — throughput alone cannot tell a saturated drive from one that is merely asked for one block at a time ([#39](https://github.com/nibor1896/Crow/issues/39)) | pass the run's own CSV as the idle control: a baseline that does not separate from the run means the tool is reading noise, and every number above it is void |
 
 ### Open
 
