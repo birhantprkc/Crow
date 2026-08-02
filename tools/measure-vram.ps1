@@ -24,7 +24,12 @@ Exit 0 = the load succeeded and a peak was captured.
 #>
 param(
     [int]$Ncmoe = 36,
-    [string]$LogDir = $env:TEMP
+    [string]$LogDir = $env:TEMP,
+    # Replaces "-ncmoe N" outright, for placements -ncmoe cannot express.
+    # A placement rule that matches nothing fails silently, so any run using one
+    # has to be checked here: the CUDA0 model buffer is the proof it took effect.
+    [string]$PlacementArgs = '',
+    [string]$Label = ''
 )
 
 $ErrorActionPreference = 'Continue'
@@ -37,8 +42,12 @@ foreach ($p in @("$bin\llama-completion.exe", $model, $prompt)) {
     if (-not (Test-Path $p)) { Write-Output "SETUP ERROR: not found: $p"; exit 2 }
 }
 
-$smiLog   = Join-Path $LogDir "vram-smi-ncmoe$Ncmoe.txt"
-$llamaLog = Join-Path $LogDir "vram-llama-ncmoe$Ncmoe.txt"
+$placement = if ($PlacementArgs -ne '') { $PlacementArgs } else { "-ncmoe $Ncmoe" }
+$tag       = if ($Label -ne '') { $Label } else { "ncmoe$Ncmoe" }
+Write-Output "placement  $placement"
+
+$smiLog   = Join-Path $LogDir "vram-smi-$tag.txt"
+$llamaLog = Join-Path $LogDir "vram-llama-$tag.txt"
 
 $baseline = [int](nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | Select-Object -First 1)
 $total    = [int](nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | Select-Object -First 1)
@@ -51,7 +60,7 @@ $smi = Start-Process -FilePath 'nvidia-smi' `
 
 # llama.cpp logs to stderr; routing it through cmd keeps PowerShell from wrapping
 # each line in an ErrorRecord and reporting a failure the program did not have.
-$cliArgs = "-m `"$model`" -f `"$prompt`" -no-cnv --temp 0 --seed 1234 -n 1 -c 4096 -np 1 --no-warmup -ngl 99 -ncmoe $Ncmoe -v"
+$cliArgs = "-m `"$model`" -f `"$prompt`" -no-cnv --temp 0 --seed 1234 -n 1 -c 4096 -np 1 --no-warmup -ngl 99 $placement -v"
 $started = Get-Date
 cmd.exe /c "`"$bin\llama-completion.exe`" $cliArgs > `"$llamaLog`" 2>&1"
 $code = $LASTEXITCODE

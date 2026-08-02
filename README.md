@@ -5,7 +5,7 @@
 <h1 align="center">Crow</h1>
 
 <p align="center">
-  A frontier coding LLM running on 12 GB of VRAM.
+  A frontier coding LLM, made runnable on a single consumer GPU.
 </p>
 
 ---
@@ -18,57 +18,147 @@ A frontier-scale mixture-of-experts coding model, streamed layer by layer, on a 
 already own. Plus an agent platform on top of it, in the spirit of `NousResearch/hermes-agent` —
 that one is an example for scope, not a specification.
 
-Target model: **`deepseek-ai/DeepSeek-V4-Flash`** — 284 B total, **13 B active per token**, 155 GB
-at Q4, MIT licensed, LiveCodeBench 91.7 per its model card. Not the largest model wins, but the
-sparsest one that still scores at frontier level on code.
+Target model: **`deepseek-ai/DeepSeek-V4-Flash`**, MIT licensed. Per its model card: 284 B total,
+13 B active per token, LiveCodeBench 91.7. Those are the vendor's numbers about the vendor's
+harness, kept here as such. Not the largest model wins, but the sparsest one that still scores at
+frontier level on code.
 
-## Why it is not obviously impossible
+The file in use is `ggml-org/DeepSeek-V4-Flash-GGUF` → `DeepSeek-V4-Flash-MXFP4.gguf`,
+**154,991,536,896 bytes**, `sha256:78a9a077…`. Read from its header on 2026-08-02: 1328 tensors,
+52 KV pairs, `block_count 43`, `expert_count 256`, `expert_used_count 6`, `hash_layer_count 3`.
+
+## The machine, and the constraint that actually binds
 
 Measured on the development machine, 2026-08-02:
 
 | Tier | Capacity | Bandwidth |
 |---|---|---|
-| VRAM | 32.6 GB dev — **12 GB target** | ~1,800 GB/s |
+| VRAM | 32,607 MiB on the development card | ~1,800 GB/s |
 | RAM | 63.4 GB DDR5-5600 | **~45 GB/s measured** |
-| NVMe | 905 GB free | **~5.3 GB/s measured** |
+| NVMe | 741 GB free | **~5.3 GB/s measured** |
 
-Per token only the *active* parameters are read: 13 B × ~0.55 bytes ≈ **7.1 GB**. Straight out of
-RAM that is 6.3 tok/s. With a hot expert set resident in VRAM at a 90 % hit rate it is ~52 tok/s.
+**How much VRAM the target profile assumes is open** and is decided on
+[#25](https://github.com/nibor1896/Crow/issues/25), on measurements rather than on a number carried
+forward from a document. The figures below are the measured footprints of specific configurations,
+not a specification.
 
-The whole project is the fight for that hit rate — and Amdahl is merciless: at 80 % the misses eat
-91 % of the time. The target is 95 %.
+**The binding constraint is RAM, not VRAM.** 63.4 GB is smaller than every usable quantisation of
+this model — the smallest published one is `unsloth/UD-IQ1_S` at 82.5 GB, and the file in use is
+155 GB. So the expert weights cannot live in RAM, and the NVMe is in the loop on every token.
+
+Read from the tensor table, then confirmed against llama.cpp's own load accounting:
+
+| | measured |
+|---|---:|
+| expert tensors per layer | 3 × 1088 MiB = **3,264 MiB** (all 256 experts) |
+| per expert, per layer | 12.75 MiB |
+| **expert weights read per token** | 6 active × 43 layers ≈ **3.21 GiB** |
+| non-expert weights, GPU-resident | 6,917.82 MiB |
+| KV cache | 8.06 KiB per token — 32.25 MiB at `-c 4096` |
+| KV + compute buffers + CUDA context | 1,295.15 MiB at `-c 4096` |
+
+That per-token figure sets the ceiling: entirely out of RAM at 45 GB/s it would be ~13 tok/s;
+entirely off the NVMe at 5.3 GB/s, ~1.5 tok/s.
+
+## What it actually does today
+
+Measured 2026-08-02, `--temp 0 --seed 1234 -n 32 -c 4096 -np 1 -ngl 99`, batch 1, single
+unrepeated runs. `-ncmoe N` keeps the experts of the first N of 43 blocks on the CPU.
+
+| `-ncmoe` | expert layers on GPU | VRAM | generation |
+|---|---|---|---|
+| 999 | 0 | 9.5 GiB | 4.57 tok/s |
+| **42** | 1 | **11.21 GiB** | **4.78 tok/s** |
+| 37 | 6 | ~27.8 GiB | 2.87 tok/s |
+| 36 | 7 — the most this card holds | 30.33 GiB | 2.76 tok/s |
+
+**Filling the card with experts made it slower, by a factor of 1.7.** `--n-cpu-moe` moves the
+computation and not only the weights, so mixed placement pays PCIe round-trips per layer per token
+that the all-CPU configuration never pays. That reading is unverified; the numbers are not.
+
+The consequence is worth stating plainly: **the fastest configuration measured here occupies
+11.21 GiB, and spending the rest of a 32 GiB card made it slower.** Where VRAM could still pay is
+KV cache and batching across parallel agent runs — and batch scaling has not been measured at all
+([#38](https://github.com/nibor1896/Crow/issues/38)). Until it is, more VRAM has no measured
+argument on this model.
+
+## The upstream blocker, and what measuring it actually settled
+
+`ggml-org/llama.cpp` [#25582](https://github.com/ggml-org/llama.cpp/issues/25582): `deepseek4`
+produces garbage when MoE experts run on CUDA, correct only at `--n-cpu-moe 999`. That is exactly
+the configuration this project needs, so it was measured before anything was built
+([#33](https://github.com/nibor1896/Crow/issues/33)).
+
+Across four placements plus a targeted `-ot` run that put the experts of blocks 34–42 — the
+reporter's own failure region — on CUDA, **every output was character-identical to the all-CPU
+reference**, including a 146-character continuation. A negative control asking for a different
+capital held every time.
+
+That is a narrower result than it first looks, and the difference matters:
+
+- **Only one quantisation was tested.** Quant dependence is documented upstream on one machine and
+  one build: `UD-IQ3_XXS` broken, `UD-Q2_K_XL` clean. MXFP4 is not one of the quants anyone has
+  reported on, in either direction.
+- **283 builds separate us from the report.** It was filed against b9940, this was measured on
+  b10223, and nine CUDA commits sit in between. "Fixed in the meantime" fits the evidence as well as
+  "does not occur here".
+- **Short prompts only exercise the smallest kernel tile.** `mul_mat_id` dispatches by token count;
+  for MXFP4 on sm_120 the MMVQ ceiling is 7 tokens, above that it is MMQ.
+- **Character equality is a coarse detector.** At `--temp 0` identical text only means no difference
+  was large enough to flip an argmax.
+
+Nothing has been closed on the strength of it.
 
 ## Where the novelty actually sits
 
 Stated plainly, because the opposite would be a claim we cannot hold: **three-tier expert caching is
-not unprecedented.** llama.cpp RFC #20757 (March 2026) specifies it point for point; MoE-Infinity,
-FlashMoE, DALI, WiSP and ReMoE have published and measured the family. Its pull request was
-withdrawn, not refuted — it failed on review capacity.
+not unprecedented.** llama.cpp RFC #20757 specifies it point for point; MoE-Infinity, FlashMoE and
+others have published on the family. Its pull request was withdrawn, not refuted.
 
-Two things are genuinely open:
+What remains genuinely open:
 
-1. **Nobody has quantified expert locality for a coding workload.** Domain specialisation in MoE is
-   established; coding specifically is not, across five literature queries. That measurement is free
-   and it is where this project starts — [#23](https://github.com/nibor1896/Crow/issues/23).
-2. **A working implementation** where the existing one stalled.
+1. **Expert locality for this model is unpublished.** Not merely unmeasured by us — no source
+   quantifies how often DeepSeek-V4-Flash reuses experts across consecutive tokens. And the evidence
+   from other architectures splits: one coder model concentrates 80 % of hits in 28 % of its
+   experts, while `gpt-oss-120B` routes so flatly that nearly doubling cache coverage bought 2.3 %.
+   Which of the two this model is decides whether the whole caching lever is worth anything —
+   [#23](https://github.com/nibor1896/Crow/issues/23).
+2. **Nobody has run this file.** The MXFP4 build has a few hundred downloads and no published
+   correctness or throughput result in either direction.
+3. **A working implementation** where the existing one stalled.
 
-## Current state: measurement phase
+## Current state
 
-No product code yet, deliberately. Every step measures something, and nothing is built until the
-measurements say what to build. The rule the project runs on:
+Measurement phase. No product code, deliberately — `tools/` holds measuring instruments and
+nothing else. The rule the project runs on:
 
 > Every expense needs a zero-cost measurement first that shows what it buys.
 
-| Next | Question |
+Every instrument here carries a case that has to fail. A probe that has only ever seen good input
+cannot be told apart from one that checks nothing.
+
+| Tool | What it establishes | Its failing case |
+|---|---|---|
+| `probe-89.bat` | whether `quantize.cu` compiles for `compute_89` | `compute_50`, dropped in CUDA 13, must be rejected |
+| `gguf_header.py` | the download is intact, from the header, without hashing 155 GB | — |
+| `test_gguf_header.py` | that the header checker can fail | truncated file, broken magic, wrong expectation |
+| `vram-calibrate.bat` | that VRAM is the binding constraint | 43 expert layers on a 31 GiB card must OOM |
+| `measure-vram.ps1` | what llama.cpp actually places, two instruments on one load | — |
+| `run-probes.ps1` | correctness against a self-made baseline | asks for a different capital, must not answer Paris |
+
+### Open
+
+| | Question |
 |---|---|
 | [#23](https://github.com/nibor1896/Crow/issues/23) | Does a coding workload keep hitting the same experts? |
-| [#24](https://github.com/nibor1896/Crow/issues/24) | What do llama.cpp and ktransformers already reach here? |
-| [#25](https://github.com/nibor1896/Crow/issues/25) | 12 GB VRAM — and how much RAM may we assume? |
+| [#25](https://github.com/nibor1896/Crow/issues/25) | What VRAM and RAM may the target profile assume? |
 | [#26](https://github.com/nibor1896/Crow/issues/26) | One yardstick: tokens/s **and** a quality gate |
+| [#33](https://github.com/nibor1896/Crow/issues/33) | Does the upstream MoE fault affect us, on quants we have not tried? |
+| [#38](https://github.com/nibor1896/Crow/issues/38) | Does throughput scale with batch size, and does VRAM then pay? |
 
-Three levers are measured separately and compared on that one yardstick
-([#32](https://github.com/nibor1896/Crow/issues/32)): fewer bytes per token, higher effective
-bandwidth, amortisation across tokens. None is discarded in advance.
+Unmeasured and named as such: prefill throughput, anything above batch 1, any quantisation other
+than MXFP4, longer contexts, and quality — no benchmark has been run, and a model answering two
+capital-city questions is not a quality statement.
 
 Full plan: [project board](https://github.com/users/nibor1896/projects/7).
 
@@ -80,6 +170,7 @@ Full plan: [project board](https://github.com/users/nibor1896/projects/7).
   the one measurement that would settle it.
 - A number from a vendor's own model card is a statement about that vendor's harness plus the model,
   not about the model. It is labelled as such.
+- A cited number needs its suite in the same commit, and that suite needs a case that fails.
 - No issue without a parent. The two roots are #1 (platform) and #2 (model).
 - Closed issues are not deleted. Fourteen of them record a project that was planned against a
   handover document which had narrowed the brief — that failure is worth keeping.

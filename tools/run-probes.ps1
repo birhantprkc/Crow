@@ -36,7 +36,13 @@ param(
     [Parameter(Mandatory = $true)][int]$Ncmoe,
     [Parameter(Mandatory = $true)][string]$OutDir,
     [string]$Baseline = '',
-    [int]$Predict = 32
+    [int]$Predict = 32,
+    # Replaces "-ncmoe N" outright. For placements -ncmoe cannot express - e.g.
+    # -ot on single tensors of specific blocks. $Ncmoe is then only a label.
+    [string]$PlacementArgs = '',
+    [string]$Label = '',
+    # Probe ids to run, e.g. 'abc' or 'de'. Empty runs all of them.
+    [string]$Only = ''
 )
 
 $ErrorActionPreference = 'Continue'
@@ -47,16 +53,29 @@ $model = 'C:\Users\robin\dev\crow-lab\models\DeepSeek-V4-Flash-MXFP4.gguf'
 $probes = @(
     @{ id = 'a'; file = 'probe-a-chat.txt';       want = 'Paris'; forbid = '';      kind = 'positive' },
     @{ id = 'b'; file = 'probe-b-completion.txt'; want = 'Paris'; forbid = '';      kind = 'positive' },
-    @{ id = 'c'; file = 'probe-c-negative.txt';   want = 'Tokyo'; forbid = 'Paris'; kind = 'NEGATIVE CONTROL' }
+    @{ id = 'c'; file = 'probe-c-negative.txt';   want = 'Tokyo'; forbid = 'Paris'; kind = 'NEGATIVE CONTROL' },
+    # d and e carry ~2000 tokens of neutral filler before the same question. Purpose:
+    # a 14-token prompt is one MMQ call at the smallest tile. mul_mat_id dispatches by
+    # token count (ggml-cuda.cu:1868-1907) and for MXFP4 on sm_120 the MMVQ ceiling is
+    # 7 tokens (mmvq.cu:141-152), so short prompts only ever exercise the corner.
+    # Cybertiron ran -ub 512. These fill the tile. The filler contains neither answer.
+    @{ id = 'd'; file = 'probe-d-long-france.txt'; want = 'Paris'; forbid = '';      kind = 'positive' },
+    @{ id = 'e'; file = 'probe-e-long-japan.txt';  want = 'Tokyo'; forbid = 'Paris'; kind = 'NEGATIVE CONTROL' }
 )
+if ($Only -ne '') { $probes = @($probes | Where-Object { $Only.Contains($_.id) }) }
+if ($probes.Count -eq 0) { Write-Output "SETUP ERROR: -Only '$Only' selected no probes"; exit 2 }
 
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir | Out-Null }
 foreach ($p in @("$bin\llama-completion.exe", $model)) {
     if (-not (Test-Path $p)) { Write-Output "SETUP ERROR: not found: $p"; exit 2 }
 }
 
+$placement = if ($PlacementArgs -ne '') { $PlacementArgs } else { "-ncmoe $Ncmoe" }
+$tag = if ($Label -ne '') { $Label } else { "ncmoe$Ncmoe" }
+
 Write-Output "model    $model"
-Write-Output "-ncmoe   $Ncmoe    -n $Predict    --temp 0 --seed 1234 -c 4096 -np 1 -ngl 99"
+Write-Output "place    $placement"
+Write-Output "args     -n $Predict --temp 0 --seed 1234 -c 4096 -np 1 -ngl 99"
 Write-Output "KV cache left at the f16 default on purpose (see header)"
 Write-Output ""
 
@@ -65,11 +84,11 @@ foreach ($probe in $probes) {
     $promptFile = Join-Path $PSScriptRoot "prompts\$($probe.file)"
     if (-not (Test-Path $promptFile)) { Write-Output "SETUP ERROR: no prompt $promptFile"; exit 2 }
 
-    $outFile = Join-Path $OutDir "ncmoe$Ncmoe-probe$($probe.id).txt"
-    $rawFile = Join-Path $OutDir "ncmoe$Ncmoe-probe$($probe.id).raw.txt"
+    $outFile = Join-Path $OutDir "$tag-probe$($probe.id).txt"
+    $rawFile = Join-Path $OutDir "$tag-probe$($probe.id).raw.txt"
 
     $cliArgs = "-m `"$model`" -f `"$promptFile`" -no-cnv --no-display-prompt " +
-               "--temp 0 --seed 1234 -n $Predict -c 4096 -np 1 --no-warmup -ngl 99 -ncmoe $Ncmoe"
+               "--temp 0 --seed 1234 -n $Predict -c 4096 -np 1 --no-warmup -ngl 99 $placement"
     $started = Get-Date
     cmd.exe /c "`"$bin\llama-completion.exe`" $cliArgs > `"$outFile`" 2> `"$rawFile`""
     $code = $LASTEXITCODE
