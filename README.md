@@ -35,7 +35,7 @@ Measured on the development machine, 2026-08-02:
 |---|---|---|
 | VRAM | 32,607 MiB on the development card | ~1,800 GB/s |
 | RAM | 63.4 GB DDR5-5600 | **~45 GB/s measured** |
-| NVMe | 741 GB free | **~5.3 GB/s measured** |
+| NVMe | 574 GB free, Phison 2 TB | **5.8 GB/s measured** sequential, single thread, 4 MB blocks |
 
 **How much VRAM the target profile assumes is open** and is decided on
 [#25](https://github.com/nibor1896/Crow/issues/25), on measurements rather than on a number carried
@@ -140,10 +140,12 @@ cannot be told apart from one that checks nothing.
 | Tool | What it establishes | Its failing case |
 |---|---|---|
 | `probe-89.bat` | whether `quantize.cu` compiles for `compute_89` | `compute_50`, dropped in CUDA 13, must be rejected |
-| `gguf_header.py` | the download is intact, from the header, without hashing 155 GB | — |
+| `gguf_header.py` | the download is intact, from the header, without hashing 155 GB | its failing case lives in `test_gguf_header.py`, next row |
 | `test_gguf_header.py` | that the header checker can fail | truncated file, broken magic, wrong expectation |
 | `vram-calibrate.bat` | that VRAM is the binding constraint | 43 expert layers on a 31 GiB card must OOM |
-| `measure-vram.ps1` | what llama.cpp actually places, two instruments on one load | — |
+| `measure-vram.ps1` | what llama.cpp actually places, two instruments on one load | a `-ot` rule matching nothing must void the run — checked by destination, since `--n-cpu-moe` emits override lines too |
+| `measure-loadmode.ps1` | whether bypassing the page cache changes the thrashing regime | an invalid `--load-mode` must be rejected before anything is measured |
+| `probe-queue-depth.py` | random read rate against queue depth — the number the streaming direction rests on | a warm, RAM-resident file must NOT climb the same way; with `--direct`, it must not even read fast |
 | `run-probes.ps1` | correctness against a self-made baseline | asks for a different capital, must not answer Paris |
 
 ### Open
