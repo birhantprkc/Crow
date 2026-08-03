@@ -59,6 +59,18 @@ param(
     [string]$Model  = 'C:\Users\robin\dev\crow-lab\models\DeepSeek-V4-Flash-MXFP4.gguf',
     [string]$Bin    = 'C:\Users\robin\dev\crow-lab\src\build-native\bin\Release',
     [string]$Ncmoe  = '-ncmoe 999',
+    # The context size, and it is a switch rather than a constant because of what it did
+    # on 2026-08-03. A run recorded at 08:17 took 20129.63 ms for the same 31 decode steps
+    # that this series ran in 6472-7106 ms - a factor of 3.1 in the SAME phase. That run
+    # differed in three ways at once: conversation mode instead of -no-cnv, a 23-token
+    # prompt instead of 6, and n_ctx = 1048576 instead of 4096. The last is 256 times
+    # larger and allocates a KV cache to match, on a machine already at 99 % physical
+    # memory with a 155 GB mapping beside it.
+    #
+    # Which of the three does it is UNMEASURED. This switch exists so the context can be
+    # changed while everything else stays fixed, because three knobs turned together
+    # explain nothing.
+    [int]$Ctx = 4096,
     # Runs the parser against one real file and against two deliberately broken ones, then
     # stops. Before this existed, the only evidence the regexes matched was the printf in
     # the C++ source - and a cause read from code is a guess.
@@ -204,13 +216,13 @@ if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir | Out
 
 Write-Output "model     $Model"
 Write-Output "prompt    $Prompt"
-Write-Output "args      -n $Predict --temp 0 --seed 1234 -c 4096 -np 1 --no-warmup -ngl 99 $Ncmoe"
+Write-Output "args      -n $Predict --temp 0 --seed 1234 -c $Ctx -np 1 --no-warmup -ngl 99 $Ncmoe"
 Write-Output "runs      $Runs, LLAMA_TOKEN_TIMING=1"
 Write-Output ""
 
 $env:LLAMA_TOKEN_TIMING = '1'
 $cliArgs = "-m `"$Model`" -f `"$Prompt`" -no-cnv --no-display-prompt --temp 0 --seed 1234 " +
-           "-n $Predict -c 4096 -np 1 --no-warmup -ngl 99 $Ncmoe"
+           "-n $Predict -c $Ctx -np 1 --no-warmup -ngl 99 $Ncmoe"
 
 if ($Reanalyse -ne '') {
     $Runs = (Get-ChildItem -Path $OutDir -Filter 'run-*.raw.txt' | Measure-Object).Count
