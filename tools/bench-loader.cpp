@@ -39,14 +39,42 @@
 //
 // Both arms read through the SAME primitive at the SAME offsets with the SAME block
 // size. Only the buffering differs, which is the only way the comparison says anything.
+//
+// THE THIRD ARM: --threads N [--shared]
+//   Time-boxed random reads, one std::thread per worker, each passing its own worker_id
+//   into read_raw_at so that each gets a private handle out of llama_file's pool.
+//
+//   Why it exists: measured 2026-08-03 with probe-queue-depth.py, a private handle per
+//   thread reaches 2.22x the single-thread rate at queue depth 8 while ONE SHARED handle
+//   reaches 1.01x - through an OVERLAPPED offset just as much as through
+//   SetFilePointerEx. Windows serialises on the file object. But that figure is a Python
+//   program asking the drive; ISSUE-30's "still synthetic on the numerator side" applies
+//   to it exactly as it applied to the block-size figure before stage 5. This arm asks
+//   the same question through llama_file.
+//
+//   --shared is the control and it lives INSIDE this binary on purpose: same threads,
+//   same offsets, same block size, worker_id forced to -1 so every worker lands on the
+//   shared handle. If the shared arm does NOT collapse to about 1.0x, then the pool is
+//   not what produces the difference and the 2.22x means something other than assumed.
+//   A separate build would answer a different question - whether the feature exists -
+//   and build-bench.ps1 already covers that by putting the b10223 header first.
+//
+//   Offsets follow probe-queue-depth.py:365-366 to the digit - span = size - block, a
+//   large odd stride per thread - so both tools walk the same file in the same order.
+//   Giving each thread a contiguous chunk instead would measure N sequential streams,
+//   which is neither the Python baseline nor the sequential arm above, and a ratio
+//   across two different load shapes is not a ratio.
 
 #include "llama-mmap.h"
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <windows.h>
 #include <malloc.h>
@@ -72,6 +100,73 @@ struct aligned_buffer {
     aligned_buffer & operator=(const aligned_buffer &) = delete;
 };
 
+struct worker_result {
+    size_t      bytes  = 0;
+    size_t      blocks = 0;
+    bool        failed = false;
+    std::string error;
+};
+
+// One worker of the parallel arm. Buffer, counters and error slot are its own; the
+// llama_file and the file behind it are shared, and that sharing is the thing under
+// test rather than an accident.
+//
+// The error comes back through `out` instead of escaping: std::thread turns an escaping
+// exception into std::terminate, which would end the run with no output at all and look
+// like a crash in the read path rather than a failure in one worker.
+static void bench_worker(llama_file & file, worker_result & out,
+                         int idx, int worker_id,
+                         size_t span, size_t alignment, LONGLONG stop_ticks) {
+    // probe-queue-depth.py:365-366, digit for digit. A large odd stride per thread walks
+    // the whole file without repeating soon and keeps no two threads in step.
+    const size_t stride = size_t(1000003) * (size_t(idx) * 2 + 1);
+    size_t       pos    = (size_t(idx) * 7919357) % span;
+    const size_t align  = alignment > 1 ? alignment : 1;
+
+    // One aligned buffer PER worker. The sequential arm's single buffer would be a data
+    // race here, and a race inside the instrument is the one defect that cannot show up
+    // in the instrument's own output.
+    aligned_buffer buf(BLOCK_SIZE, alignment > 1 ? alignment : 4096);
+    if (buf.p == nullptr) {
+        out.failed = true;
+        out.error  = "_aligned_malloc failed";
+        return;
+    }
+    // Touched once outside the timed window, same reason as the sequential arm.
+    std::memset(buf.p, 0, BLOCK_SIZE);
+
+    LARGE_INTEGER now;
+    for (;;) {
+        QueryPerformanceCounter(&now);
+        if (now.QuadPart >= stop_ticks) {
+            break;
+        }
+        // Round DOWN to a sector. Direct I/O refuses an unaligned offset outright with
+        // ERROR_INVALID_PARAMETER - measured 2026-08-03 - and this is the same rounding
+        // probe-queue-depth.py:212 does before every read.
+        const size_t at = pos - (pos % align);
+        try {
+            const size_t got = file.read_raw_at(buf.p, BLOCK_SIZE, at, worker_id);
+            if (got != BLOCK_SIZE) {
+                // span keeps every read wholly inside the file, so a short count here is
+                // not the tail. It is a defect, and adding it to the total would average
+                // it away into a number that still looks like a measurement.
+                out.failed = true;
+                out.error  = "short read of " + std::to_string(got) +
+                             " bytes at offset " + std::to_string(at);
+                return;
+            }
+            out.bytes += got;
+            out.blocks++;
+        } catch (const std::exception & e) {
+            out.failed = true;
+            out.error  = e.what();
+            return;
+        }
+        pos = (pos + stride) % span;
+    }
+}
+
 int main(int argc, char ** argv) {
     // Unbuffered, and not for cosmetics: when the stage 4 test crashed, buffered stdout
     // was never flushed and the failure looked like it happened before main() started.
@@ -80,10 +175,22 @@ int main(int argc, char ** argv) {
     bool buffered = false;
     const char * path = nullptr;
 
+    // 0 keeps the sequential arm exactly as it was - that arm carries stage 5's figure
+    // and must not change shape underneath a number already published on ISSUE-30.
+    int    threads = 0;
+    bool   shared  = false;
+    double seconds = 4.0;   // the dwell probe-queue-depth.py uses per depth level
+
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
         if (a == "--buffered") {
             buffered = true;
+        } else if (a == "--threads" && i + 1 < argc) {
+            threads = atoi(argv[++i]);
+        } else if (a == "--shared") {
+            shared = true;
+        } else if (a == "--seconds" && i + 1 < argc) {
+            seconds = atof(argv[++i]);
         } else if (path == nullptr) {
             path = argv[i];
         } else {
@@ -94,8 +201,27 @@ int main(int argc, char ** argv) {
 
     if (path == nullptr) {
         fprintf(stderr, "usage: bench-loader.exe <file> [--buffered]\n");
-        fprintf(stderr, "  default     unbuffered direct I/O - the measurement\n");
+        fprintf(stderr, "                              [--threads N [--shared]] [--seconds S]\n");
+        fprintf(stderr, "  default     unbuffered direct I/O, one sequential pass - the measurement\n");
         fprintf(stderr, "  --buffered  buffered - the control, must be FASTER on a warm file\n");
+        fprintf(stderr, "  --threads N N workers, random offsets, time-boxed; each gets its own\n");
+        fprintf(stderr, "              handle out of the pool\n");
+        fprintf(stderr, "  --shared    the control for --threads: same workers, same offsets,\n");
+        fprintf(stderr, "              every one of them forced onto the SHARED handle\n");
+        return 2;
+    }
+
+    if (shared && threads == 0) {
+        fprintf(stderr, "SETUP ERROR: --shared needs --threads. It answers what the private\n");
+        fprintf(stderr, "             handles buy, and with one worker there is nothing to share.\n");
+        return 2;
+    }
+    if (threads < 0) {
+        fprintf(stderr, "SETUP ERROR: --threads must be positive\n");
+        return 2;
+    }
+    if (threads > 0 && seconds <= 0.0) {
+        fprintf(stderr, "SETUP ERROR: --seconds must be positive\n");
         return 2;
     }
 
@@ -139,6 +265,100 @@ int main(int argc, char ** argv) {
             return 1;
         }
 
+        LARGE_INTEGER freq, t0, t1;
+        QueryPerformanceFrequency(&freq);
+
+        // ---------------------------------------------------------------------------
+        // The parallel arm. Returns from here; the sequential arm below is untouched.
+        // ---------------------------------------------------------------------------
+        if (threads > 0) {
+            const size_t pool = file.direct_io_handles();
+            printf("threads     %d\n", threads);
+            printf("handles     %zu private%s\n", pool,
+                   shared ? "  (IGNORED - every worker forced onto the shared handle)"
+                          : "  (one per worker)");
+            printf("seconds     %.1f\n", seconds);
+
+            // Legal but ruinous. Surplus workers fall back to the shared handle, so the
+            // figure would be part pool and part serialisation and would belong to
+            // neither arm - the shape of result this project keeps having to withdraw.
+            if (!shared && pool > 0 && size_t(threads) > pool) {
+                fprintf(stderr, "\nABORT: %d workers against %zu private handles. The surplus\n",
+                        threads, pool);
+                fprintf(stderr, "       would read through the shared handle and the figure would\n");
+                fprintf(stderr, "       mix both arms. No figure is printed.\n");
+                return 1;
+            }
+            if (file_size <= BLOCK_SIZE) {
+                fprintf(stderr, "\nABORT: file is not larger than one block. No figure.\n");
+                return 1;
+            }
+            // span, exactly as the Python sweep defines it: every read lands wholly
+            // inside the file, so no short count can enter the numerator.
+            const size_t span = file_size - BLOCK_SIZE;
+
+            std::vector<worker_result> results((size_t) threads);
+            std::vector<std::thread>   ts;
+            ts.reserve((size_t) threads);
+
+            QueryPerformanceCounter(&t0);
+            const LONGLONG stop_ticks = t0.QuadPart + LONGLONG(seconds * double(freq.QuadPart));
+
+            for (int i = 0; i < threads; i++) {
+                // The single difference between the two arms, and it is this one value.
+                // Same threads, same offsets, same block size, same primitive.
+                const int wid = shared ? -1 : i;
+                ts.emplace_back(bench_worker, std::ref(file),
+                                std::ref(results[(size_t) i]),
+                                i, wid, span, alignment, stop_ticks);
+            }
+            for (std::thread & t : ts) {
+                t.join();
+            }
+            QueryPerformanceCounter(&t1);
+
+            // The stage 2 guard, carried down from probe-queue-depth.py. A worker that
+            // died, or one that finished without reading a byte, makes the run INVALID -
+            // not slow. Dividing first is what once turned a dead reader into a
+            // plausible-looking number and, at one worker, into a division by zero.
+            for (int i = 0; i < threads; i++) {
+                const worker_result & r = results[(size_t) i];
+                if (r.failed) {
+                    fprintf(stderr, "\nABORT: worker %d failed: %s\n", i, r.error.c_str());
+                    fprintf(stderr, "       The run is invalid, not slow. No figure.\n");
+                    return 1;
+                }
+                if (r.bytes == 0) {
+                    fprintf(stderr, "\nABORT: worker %d read 0 bytes - the time budget expired\n", i);
+                    fprintf(stderr, "       before it read anything. Raise --seconds. No figure.\n");
+                    return 1;
+                }
+            }
+
+            size_t total_bytes  = 0;
+            size_t total_blocks = 0;
+            for (const worker_result & r : results) {
+                total_bytes  += r.bytes;
+                total_blocks += r.blocks;
+            }
+
+            const double dt = double(t1.QuadPart - t0.QuadPart) / double(freq.QuadPart);
+            if (dt <= 0.0) {
+                fprintf(stderr, "\nABORT: elapsed time is not positive. No figure.\n");
+                return 1;
+            }
+            const double mb_s = double(total_bytes) / dt / 1e6;
+
+            printf("blocks      %zu\n", total_blocks);
+            printf("read        %zu bytes\n", total_bytes);
+            printf("elapsed     %.3f s\n", dt);
+            printf("\nRESULT      %.1f MB/s   (%d threads, %s, bytes/s/1e6, %.2f GB)\n",
+                   mb_s, threads,
+                   shared ? "SHARED handle" : "handle per worker",
+                   double(total_bytes) / 1e9);
+            return 0;
+        }
+
         aligned_buffer buf(BLOCK_SIZE, buf_align);
         if (buf.p == nullptr) {
             fprintf(stderr, "\nABORT: _aligned_malloc of %zu bytes failed\n", BLOCK_SIZE);
@@ -147,9 +367,6 @@ int main(int argc, char ** argv) {
         // Touch the pages once, outside the timed window, so first-touch faults do not
         // land in the measurement.
         std::memset(buf.p, 0, BLOCK_SIZE);
-
-        LARGE_INTEGER freq, t0, t1;
-        QueryPerformanceFrequency(&freq);
 
         size_t offset = 0;
         size_t total  = 0;
