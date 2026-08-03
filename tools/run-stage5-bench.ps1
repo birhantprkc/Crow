@@ -51,7 +51,33 @@ param(
     # parses AND that a broken run does not come back as 0.0 MB/s. Before this existed,
     # the only evidence the parser matched was the printf in the C++ source, and a cause
     # read from code is a guess.
-    [string]$SelfTest = ''
+    [string]$SelfTest = '',
+    # Overrides the control file. The 49.98 GB default was chosen because it sits above
+    # the 46.5 GB threshold the plan sets for the drive's own cache - but measured
+    # 2026-08-03, Windows kept only 1.5 GiB of it resident after a full sequential pass,
+    # so the control never got the warm file its verdict depends on. A smaller file trades
+    # that threshold away for a control that can actually be resident. The trade is
+    # conservative: if the drive's cache does inflate the unbuffered arm, the buffered arm
+    # has to beat a HIGHER number, so a control that still holds holds honestly.
+    [string]$ControlModel = '',
+    # Stops after arm 1. The large-file passes mean nothing until the control holds.
+    [switch]$ControlOnly,
+    # Proves - or refutes - that direct I/O bypasses the page cache, on the file given.
+    #
+    # Measured 2026-08-03, and it is why this mode exists: on a file held 100 % resident,
+    # a buffered read reached 6555.8 MB/s while an unbuffered read of the same file
+    # reached 8463.2 MB/s. The page cache is SLOWER than this drive, so the original
+    # control - "buffered on a warm file must win, it is reading RAM" - cannot pass here
+    # no matter how well direct I/O works. That premise was wrong, not the code.
+    #
+    # This asks the question that does not depend on which path is faster: if direct I/O
+    # really bypasses the cache, then whether the file is cached must not matter to it.
+    # Read it direct with the cache flushed, fill the cache, read it direct again. Same
+    # number means the cache is irrelevant to that path. A jump means it is leaking.
+    [string]$BypassTest = '',
+    # Read buffered to push the target out of the cache before the cold pass. Without it
+    # step 1 measures a file that is still resident from an earlier run.
+    [string]$EvictWith = ''
 )
 
 $ErrorActionPreference = 'Continue'
@@ -68,6 +94,7 @@ $GgmlDll  = Join-Path $ToolsDir 'build-bench\ggml-base.dll'
 
 $ModelLarge = 'C:\Users\robin\dev\crow-lab\models\DeepSeek-V4-Flash-MXFP4.gguf'
 $ModelSmall = 'C:\Users\robin\dev\crow-lab\models\UD-IQ1_S\DeepSeek-V4-Flash-UD-IQ1_S-00002-of-00003.gguf'
+if ($ControlModel -ne '') { $ModelSmall = $ControlModel }
 
 if ($LogDir -eq '') {
     $LogDir = Join-Path $ToolsDir ('..\runs\' + (Get-Date -Format 'yyyy-MM-dd') + '\stage5')
@@ -99,9 +126,12 @@ function Get-MemSnapshot {
     $standby = [double]$mem.StandbyCacheNormalPriorityBytes +
                [double]$mem.StandbyCacheReserveBytes +
                [double]$mem.StandbyCacheCoreBytes
+    # GiB, and named GiB. PowerShell's 1GB is 1073741824, while the throughput line and
+    # the file sizes above are decimal. Mixing the two silently made a 49.98 GB file
+    # appear as "46.5 GB" in the same run - the units have to say which they are.
     return [pscustomobject]@{
-        FreeGB    = [double]$os.FreePhysicalMemory * 1KB / 1GB
-        StandbyGB = $standby / 1GB
+        FreeGiB    = [double]$os.FreePhysicalMemory * 1KB / 1GB
+        StandbyGiB = $standby / 1GB
     }
 }
 
@@ -200,22 +230,117 @@ if ($SelfTest -ne '') {
     exit 1
 }
 
+if ($BypassTest -ne '') {
+    if ($EvictWith -eq '') { $EvictWith = $ModelSmall }
+    if (-not (Test-Path $BypassTest)) { Write-Output "no such file: $BypassTest"; exit 1 }
+    if (-not (Test-Path $EvictWith))  { Write-Output "no such file: $EvictWith";  exit 1 }
+
+    $tgtGiB = (Get-Item $BypassTest).Length / 1GB
+    Write-Output ""
+    Write-Output "--- bypass test: does the cache state change the direct path? ---"
+    Write-Output ("target  {0:N0} bytes ({1:N1} GiB)  {2}" -f (Get-Item $BypassTest).Length, $tgtGiB, $BypassTest)
+    Write-Output ("evict   {0}" -f $EvictWith)
+
+    # 1. Flush. The target is resident from any earlier run, so a "cold" pass without
+    #    this step is not cold at all - it just looks like a baseline.
+    Write-Output ""
+    Write-Output "  1. flushing the target out of the cache (buffered pass over another file)"
+    $mBefore = Get-MemSnapshot
+    Show-Bench (Invoke-Bench -Model $EvictWith -Buffered $true -LogName 'bypass-evict')
+    $mFlushed = Get-MemSnapshot
+    Write-Output ("     standby cache {0:N1} -> {1:N1} GiB" -f $mBefore.StandbyGiB, $mFlushed.StandbyGiB)
+
+    # 2. Cold direct.
+    Write-Output ""
+    Write-Output "  2. direct read, cache flushed"
+    $rCold = Invoke-Bench -Model $BypassTest -Buffered $false -LogName 'bypass-direct-cold'
+    Show-Bench $rCold
+
+    # 3. Fill the cache with the target and prove it landed.
+    #
+    # TWO passes, and two independent witnesses, because either one alone can be blind.
+    # Standby GROWTH only shows residency while the cache has room to grow: measured
+    # 2026-08-03, after the flush above left it at 51.0 GiB the cache merely REPLACED
+    # pages, grew 0.5 GiB against a 30.3 GiB file, and the test called itself
+    # inconclusive while the file may well have been resident.
+    # The second witness does not care: if pass 2 is clearly faster than pass 1, pass 2
+    # was served from memory. That is residency showing itself rather than being counted.
+    Write-Output ""
+    Write-Output "  3. two buffered reads to make the target resident"
+    $mPre = Get-MemSnapshot
+    $fill1 = Invoke-Bench -Model $BypassTest -Buffered $true -LogName 'bypass-warm-fill1'
+    Show-Bench $fill1
+    $fill2 = Invoke-Bench -Model $BypassTest -Buffered $true -LogName 'bypass-warm-fill2'
+    Show-Bench $fill2
+    $mPost = Get-MemSnapshot
+    $grew = $mPost.StandbyGiB - $mPre.StandbyGiB
+    $resident = 100 * $grew / $tgtGiB
+    Write-Output ("     standby cache {0:N1} -> {1:N1} GiB, grew {2:N1} GiB against {3:N1} GiB -> {4:N0} % by growth" -f $mPre.StandbyGiB, $mPost.StandbyGiB, $grew, $tgtGiB, $resident)
+
+    $speedup = 0.0
+    if ($null -ne $fill1.MBs -and $null -ne $fill2.MBs) {
+        $speedup = 100.0 * ($fill2.MBs - $fill1.MBs) / $fill1.MBs
+        Write-Output ("     buffered pass 2 against pass 1: {0:+0.0;-0.0;0.0} %" -f $speedup)
+    }
+    if ($resident -lt 80 -and $speedup -lt 15.0) {
+        Write-Output "     neither witness shows residency"
+    } else {
+        # Either witness is enough; they answer the same question by different means.
+        $resident = 100
+    }
+
+    # 4. Warm direct.
+    Write-Output ""
+    Write-Output "  4. direct read, target now resident"
+    $rWarm = Invoke-Bench -Model $BypassTest -Buffered $false -LogName 'bypass-direct-warm'
+    Show-Bench $rWarm
+
+    Write-Output ""
+    Write-Output "=== bypass verdict ==="
+    if ($null -eq $rCold.MBs -or $null -eq $rWarm.MBs) {
+        Write-Output "INCONCLUSIVE: a pass did not produce a figure."
+        exit 1
+    }
+    if ($resident -lt 80) {
+        # Without residency the warm pass is not warm and the comparison says nothing.
+        Write-Output "INCONCLUSIVE: the target did not become resident by either witness, so the"
+        Write-Output "              warm pass was not warm and proves nothing either way."
+        exit 1
+    }
+    $delta = 100.0 * ($rWarm.MBs - $rCold.MBs) / $rCold.MBs
+    Write-Output ("cold {0:N1} MB/s   warm {1:N1} MB/s   delta {2:+0.00;-0.00;0.00} %" -f $rCold.MBs, $rWarm.MBs, $delta)
+    if ([math]::Abs($delta) -le 5.0) {
+        Write-Output "BYPASS PROVEN: filling the cache did not change the direct path. Whether the"
+        Write-Output "               data sits in RAM is invisible to it, which is what"
+        Write-Output "               FILE_FLAG_NO_BUFFERING is supposed to mean."
+        exit 0
+    }
+    if ($delta -gt 5.0) {
+        Write-Output "LEAK: the direct path got faster once the data was in RAM. It is reading"
+        Write-Output "      cache, and every direct figure in this project is suspect."
+        exit 1
+    }
+    Write-Output "UNEXPECTED: the direct path got slower with the data resident. Not a leak,"
+    Write-Output "            but not explained either - do not quote a figure on this."
+    exit 1
+}
+
 Write-Output ""
-Write-Output "--- arm 1: control on the 49.98 GB file ---"
+Write-Output ("--- arm 1: control on {0} ---" -f (Split-Path -Leaf $ModelSmall))
 
 $before = Get-MemSnapshot
-Write-Output ("  memory before warm-up: free {0:N1} GB, standby cache {1:N1} GB" -f $before.FreeGB, $before.StandbyGB)
+Write-Output ("  memory before warm-up: free {0:N1} GiB, standby cache {1:N1} GiB" -f $before.FreeGiB, $before.StandbyGiB)
 
 Write-Output "  warming the file into the page cache (buffered pass, not measured)"
 Show-Bench (Invoke-Bench -Model $ModelSmall -Buffered $true -LogName 'small-warmup')
 
 $after = Get-MemSnapshot
-$cached = $after.StandbyGB - $before.StandbyGB
-$smallGB = (Get-Item $ModelSmall).Length / 1GB
+$cachedGiB = $after.StandbyGiB - $before.StandbyGiB
+$smallGiB  = (Get-Item $ModelSmall).Length / 1GB
 # An approximation, and named as one: the standby cache grows for other reasons too.
 # It is still a measurement rather than the assumption that the file "is warm".
-Write-Output ("  memory after  warm-up: free {0:N1} GB, standby cache {1:N1} GB" -f $after.FreeGB, $after.StandbyGB)
-Write-Output ("  standby cache grew by {0:N1} GB against a {1:N1} GB file -> roughly {2:N0} % resident (approximation)" -f $cached, $smallGB, (100 * $cached / $smallGB))
+Write-Output ("  memory after  warm-up: free {0:N1} GiB, standby cache {1:N1} GiB" -f $after.FreeGiB, $after.StandbyGiB)
+Write-Output ("  standby cache grew by {0:N1} GiB against a {1:N1} GiB file -> roughly {2:N0} % resident (approximation)" -f $cachedGiB, $smallGiB, (100 * $cachedGiB / $smallGiB))
 
 $rBuffered = Invoke-Bench -Model $ModelSmall -Buffered $true  -LogName 'small-buffered'
 Show-Bench $rBuffered
@@ -226,18 +351,20 @@ $ctlBuffered = $rBuffered.MBs
 $ctlDirect   = $rDirect.MBs
 
 # --------------------------------------------------------------------------------
-Write-Output ""
-Write-Output "--- arm 2: three unbuffered passes over the 155 GB model ---"
-
 $runs = @()
-for ($i = 1; $i -le 3; $i++) {
-    if ($i -gt 1) {
-        Write-Output "  pause 5 s"
-        Start-Sleep -Seconds 5
+if (-not $ControlOnly) {
+    Write-Output ""
+    Write-Output "--- arm 2: three unbuffered passes over the 155 GB model ---"
+
+    for ($i = 1; $i -le 3; $i++) {
+        if ($i -gt 1) {
+            Write-Output "  pause 5 s"
+            Start-Sleep -Seconds 5
+        }
+        $r = Invoke-Bench -Model $ModelLarge -Buffered $false -LogName ("large-direct-run$i")
+        Show-Bench $r
+        $runs += ,$r.MBs
     }
-    $r = Invoke-Bench -Model $ModelLarge -Buffered $false -LogName ("large-direct-run$i")
-    Show-Bench $r
-    $runs += ,$r.MBs
 }
 
 # --------------------------------------------------------------------------------
@@ -245,9 +372,10 @@ Write-Output ""
 Write-Output "=== results ==="
 Write-Output ("control buffered (RAM)   {0}" -f $(if ($null -eq $ctlBuffered) { 'FAILED' } else { '{0:N1} MB/s' -f $ctlBuffered }))
 Write-Output ("control direct   (disk)  {0}" -f $(if ($null -eq $ctlDirect)   { 'FAILED' } else { '{0:N1} MB/s' -f $ctlDirect }))
-for ($i = 0; $i -lt 3; $i++) {
+for ($i = 0; $i -lt $runs.Count; $i++) {
     Write-Output ("large run $($i+1)             {0}" -f $(if ($null -eq $runs[$i]) { 'FAILED' } else { '{0:N1} MB/s' -f $runs[$i] }))
 }
+if ($ControlOnly) { Write-Output "large runs               skipped (-ControlOnly)" }
 
 $ok = $true
 
@@ -257,22 +385,40 @@ if ($null -eq $ctlBuffered -or $null -eq $ctlDirect) {
     Write-Output "VOID: the control did not complete. The main figures are not interpretable."
     $ok = $false
 } else {
+    # The first version of this gate demanded buffered >= 1.5x direct, on the assumption
+    # that a warm file is read from RAM and RAM wins. Measured 2026-08-03 on a file held
+    # 100 % resident: buffered 6555.8, direct 8463.2 - the page cache is slower than this
+    # drive, so that gate could never pass here however well the flag worked. It was the
+    # premise that was wrong.
+    #
+    # What the two arms CAN settle without assuming which is faster: if the flag did
+    # nothing, both would be the same code path and would land on the same number.
+    # Separation in either direction means two paths; no separation means one. Which
+    # path is faster is a finding, not a pass criterion.
     $ratio = $ctlBuffered / $ctlDirect
+    $sep   = [math]::Max($ctlBuffered, $ctlDirect) / [math]::Min($ctlBuffered, $ctlDirect)
     Write-Output ""
-    Write-Output ("control ratio buffered/direct: {0:N2}x" -f $ratio)
-    if ($ratio -lt 1.5) {
-        Write-Output "VOID: the buffered control did not break out above the unbuffered read."
-        Write-Output "      Either the file never got warm, or FILE_FLAG_NO_BUFFERING is not"
-        Write-Output "      taking hold - in both cases the large-file figures may be page"
-        Write-Output "      cache and must not be quoted."
+    Write-Output ("control ratio buffered/direct: {0:N2}x   separation: {1:N2}x" -f $ratio, $sep)
+    if ($sep -lt 1.05) {
+        Write-Output "VOID: the two arms landed within noise of each other, so they are taking"
+        Write-Output "      the same path. FILE_FLAG_NO_BUFFERING is not doing anything and the"
+        Write-Output "      figures must not be quoted."
         $ok = $false
     } else {
-        Write-Output "control HELD: buffered reads RAM, unbuffered does not."
+        Write-Output "control HELD: the arms are measurably different paths."
+        if ($ratio -lt 1.0) {
+            Write-Output ("      Direct is the faster of the two ({0:N2}x). Not the direction the" -f (1 / $ratio))
+            Write-Output "      first design expected - see the note above. Separation, not"
+            Write-Output "      direction, is what this gate tests. Whether direct actually"
+            Write-Output "      bypasses the cache is settled by -BypassTest, not here."
+        }
     }
 }
 
 $good = @($runs | Where-Object { $null -ne $_ })
-if ($good.Count -eq 3) {
+if ($ControlOnly) {
+    Write-Output "spread: not applicable, the large-file passes were skipped."
+} elseif ($good.Count -eq 3) {
     $mx = ($good | Measure-Object -Maximum).Maximum
     $mn = ($good | Measure-Object -Minimum).Minimum
     $spread = 100.0 * ($mx - $mn) / $mn
