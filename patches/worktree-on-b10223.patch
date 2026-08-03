@@ -102,10 +102,10 @@ index 919c0ea..ee22d2e 100644
  
      ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K
 diff --git a/common/sampling.cpp b/common/sampling.cpp
-index 256ac16..6f161aa 100644
+index 256ac16..70dcf97 100644
 --- a/common/sampling.cpp
 +++ b/common/sampling.cpp
-@@ -547,6 +547,73 @@ void common_perf_print(const struct llama_context * ctx, const struct common_sam
+@@ -547,6 +547,80 @@ void common_perf_print(const struct llama_context * ctx, const struct common_sam
          LOG_INF("%s: unaccounted time = %10.2f ms / %5.1f %%      (total - sampling - prompt eval - eval) / (total)\n", __func__, t_unacc_ms, t_unacc_pc);
          LOG_INF("%s:    graphs reused = %10d\n", __func__, data.n_reused);
  
@@ -114,10 +114,17 @@ index 256ac16..6f161aa 100644
 +        // and on this machine decode varies by up to a factor of 2 between two identically
 +        // configured runs with the cause unmeasured.
 +        //
-+        // Formatted here rather than inside llama.dll: measured 2026-08-03, LLAMA_LOG_INFO
-+        // from the library does not survive the default log verbosity - every line above
-+        // is proof that LOG_INF from common does. Two attempts to print from inside the
-+        // library produced nothing at all.
++        // Formatted here rather than inside llama.dll, and the reason is narrower than it
++        // looked when this was written. Library INFO is not unreachable, it is DEMOTED:
++        // common_get_verbosity maps GGML_LOG_LEVEL_INFO to LOG_LEVEL_TRACE (4) while
++        // params.verbosity defaults to 3, so common_log_default_callback drops it on
++        // 4 <= 3. Only messages from the library go through that callback - LOG_INF from
++        // common calls common_log_add directly and is never filtered, which is why the
++        // lines above appear and the library's did not. Measured 2026-08-03: -lv 4 brings
++        // library INFO through in full.
++        //
++        // The series stays here anyway. A diagnostic that needs a flag nobody remembers is
++        // a diagnostic that will be missing on the run that mattered.
 +        //
 +        // Not gated on the environment variable a second time. The series is only filled
 +        // when the gate was open at context creation, so an empty one already means "off",
