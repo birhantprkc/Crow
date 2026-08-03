@@ -1,0 +1,760 @@
+﻿diff --git a/src/llama-mmap.cpp b/src/llama-mmap.cpp
+index ed572da..c94d657 100644
+--- a/src/llama-mmap.cpp
++++ b/src/llama-mmap.cpp
+@@ -34,6 +34,11 @@
+         #define PATH_MAX MAX_PATH
+     #endif
+     #include <io.h>
++    // IOCTL_STORAGE_QUERY_PROPERTY and STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR: the device
++    // is asked for its sector sizes rather than told what they are.
++    #include <winioctl.h>
++    // _aligned_malloc / _aligned_free, the Windows counterpart to posix_memalign.
++    #include <malloc.h>
+ #endif
+ 
+ #if defined(__APPLE__)
+@@ -67,7 +72,30 @@ static std::string llama_format_win_err(DWORD err) {
+ 
+ struct llama_file::impl {
+ #if defined(_WIN32)
+-    HANDLE fp_win32;
++    HANDLE fp_win32 = INVALID_HANDLE_VALUE;
++
++    // True only when this class opened the handle itself with CreateFileW, which is
++    // exactly when direct I/O is in effect. On the buffered path fp_win32 is derived
++    // from the CRT stream and belongs to it - closing it here would be a double close.
++    // The destructor asks about OWNERSHIP, not about mode, which is why this is not
++    // called is_direct_io.
++    bool owns_handle = false;
++
++    // The file position under direct I/O, kept here instead of in the kernel.
++    //
++    // Measured 2026-08-03: FILE_FLAG_NO_BUFFERING makes SetFilePointerEx reject any
++    // unaligned position outright with ERROR_INVALID_PARAMETER. The POSIX branch does
++    // not have this problem - lseek positions freely and only read() must be aligned -
++    // which is why read_aligned_chunk, copied from there, could not work here at all.
++    //
++    // So seek() writes to this variable and every read goes through read_raw_at, whose
++    // OVERLAPPED offset never touches the kernel's pointer. Note that this does NOT
++    // lift the alignment requirement: the OVERLAPPED offset must be sector-aligned too.
++    // It only removes the requirement from POSITIONING, which is what was fatal.
++    size_t logical_pos = 0;
++
++    std::string fname;
++
+     std::string GetErrorMessageWin32(DWORD error_code) const {
+         std::string ret;
+         LPSTR lpMsgBuf = NULL;
+@@ -83,10 +111,123 @@ struct llama_file::impl {
+         return ret;
+     }
+ 
+-    impl(const char * fname, const char * mode, [[maybe_unused]] const bool use_direct_io = false) {
+-        fp = ggml_fopen(fname, mode);
++    impl(const char * fname, const char * mode, const bool use_direct_io = false) : fname(fname) {
++        // Try unbuffered I/O for read only, mirroring what the POSIX branch does with
++        // O_DIRECT. Until now this parameter was accepted and dropped: the constructor
++        // took use_direct_io, ignored it, and has_direct_io() reported true regardless.
++        // That combination is a promise the code did not keep.
++        if (use_direct_io && std::strcmp(mode, "rb") == 0) {
++            if (init_direct()) {
++                return;
++            }
++            LLAMA_LOG_WARN("Failed to open file '%s' unbuffered: %s. Falling back to buffered I/O\n",
++                           fname, GetErrorMessageWin32(GetLastError()).c_str());
++        }
++        init_fp(mode);
++    }
++
++    // Ask the device for its sector sizes. Returns 0 when the question cannot be
++    // answered, which makes the caller fall back to buffered I/O WITH A WARNING.
++    //
++    // Deliberately no default of 4096. That constant is written three times across this
++    // ecosystem and on this drive it happens to be right - measured 2026-08-03, 512
++    // logical and 4096 physical. Correct by luck is not correct by construction, and a
++    // silent default would turn "the device never answered" into something that looks
++    // like an answer.
++    //
++    // The alignment DUTY of FILE_FLAG_NO_BUFFERING is the LOGICAL sector size; the
++    // PHYSICAL one is Microsoft's performance recommendation. Reading aligned to the
++    // logical size on a 512e drive is permitted and costs read-modify-write on the
++    // controller, so the physical size is what we take.
++    size_t query_sector_size(char drive_letter) const {
++        char volume[] = "\\\\.\\X:";
++        volume[4] = drive_letter;
++
++        // Access 0 asks for metadata only; this needs no elevation.
++        HANDLE hv = CreateFileA(volume, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
++                                OPEN_EXISTING, 0, NULL);
++        if (hv == INVALID_HANDLE_VALUE) {
++            return 0;
++        }
++
++        STORAGE_PROPERTY_QUERY query = {};
++        query.PropertyId = StorageAccessAlignmentProperty;
++        query.QueryType  = PropertyStandardQuery;
++
++        STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR desc = {};
++        DWORD returned = 0;
++        const BOOL ok = DeviceIoControl(hv, IOCTL_STORAGE_QUERY_PROPERTY,
++                                        &query, sizeof(query),
++                                        &desc, sizeof(desc), &returned, NULL);
++        CloseHandle(hv);
++
++        if (!ok || returned < sizeof(desc) || desc.BytesPerPhysicalSector == 0) {
++            return 0;
++        }
++        return (size_t) desc.BytesPerPhysicalSector;
++    }
++
++    bool init_direct() {
++        // UTF-8 to UTF-16. ggml_fopen does the same conversion, but its helper is
++        // static inside ggml.c and there is no exported equivalent.
++        const int wlen = MultiByteToWideChar(CP_UTF8, 0, fname.c_str(), -1, NULL, 0);
++        if (wlen == 0) {
++            return false;
++        }
++        std::vector<wchar_t> wname(wlen);
++        if (MultiByteToWideChar(CP_UTF8, 0, fname.c_str(), -1, wname.data(), wlen) == 0) {
++            return false;
++        }
++
++        // Resolve to an absolute path BEFORE deriving the volume. The sector size can
++        // only be asked of a drive letter, and a relative path has none - so a relative
++        // path used to make direct I/O silently unavailable and fall back to buffered
++        // reads. The loader happens to pass absolute paths, which is luck rather than
++        // construction; the test below passes a relative one and is how this was found.
++        wchar_t abs_path[MAX_PATH];
++        const DWORD abs_len = GetFullPathNameW(wname.data(), MAX_PATH, abs_path, NULL);
++        if (abs_len == 0 || abs_len >= MAX_PATH) {
++            return false;
++        }
++        if (abs_path[1] != L':') {
++            // A UNC path has no volume to ask, so the sector size stays unknown and
++            // unbuffered reads cannot be aligned safely.
++            SetLastError(ERROR_NOT_SUPPORTED);
++            return false;
++        }
++
++        HANDLE h = CreateFileW(abs_path, GENERIC_READ, FILE_SHARE_READ, NULL,
++                               OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, NULL);
++        if (h == INVALID_HANDLE_VALUE) {
++            return false;
++        }
++
++        const size_t sector = query_sector_size((char) abs_path[0]);
++        if (sector == 0) {
++            CloseHandle(h);
++            SetLastError(ERROR_NOT_SUPPORTED);
++            return false;
++        }
++
++        LARGE_INTEGER li;
++        if (!GetFileSizeEx(h, &li)) {
++            const DWORD err = GetLastError();
++            CloseHandle(h);
++            SetLastError(err);
++            return false;
++        }
++
++        fp_win32    = h;
++        owns_handle = true;
++        alignment   = sector;
++        size        = (size_t) li.QuadPart;
++        return true;
++    }
++
++    void init_fp(const char * mode) {
++        fp = ggml_fopen(fname.c_str(), mode);
+         if (fp == NULL) {
+-            throw std::runtime_error(format("failed to open %s: %s", fname, strerror(errno)));
++            throw std::runtime_error(format("failed to open %s: %s", fname.c_str(), strerror(errno)));
+         }
+         fp_win32 = (HANDLE) _get_osfhandle(_fileno(fp));
+         seek(0, SEEK_END);
+@@ -94,7 +235,7 @@ struct llama_file::impl {
+         seek(0, SEEK_SET);
+     }
+ 
+-    impl(FILE * file) : owns_fp(false) {
++    impl(FILE * file) : fname("(file*)"), owns_fp(false) {
+         fp = file;
+         fp_win32 = (HANDLE) _get_osfhandle(_fileno(fp));
+         seek(0, SEEK_END);
+@@ -103,6 +244,10 @@ struct llama_file::impl {
+     }
+ 
+     size_t tell() const {
++        if (owns_handle) {
++            return logical_pos;
++        }
++
+         LARGE_INTEGER li;
+         li.QuadPart = 0;
+         BOOL ret = SetFilePointerEx(fp_win32, li, &li, FILE_CURRENT);
+@@ -113,11 +258,25 @@ struct llama_file::impl {
+         return li.QuadPart;
+     }
+ 
+-    void seek(size_t offset, int whence) const {
++    void seek(size_t offset, int whence) {
+         static_assert(SEEK_SET == FILE_BEGIN, "SEEK_SET != FILE_BEGIN");
+         static_assert(SEEK_CUR == FILE_CURRENT, "SEEK_CUR != FILE_CURRENT");
+         static_assert(SEEK_END == FILE_END, "SEEK_END != FILE_END");
+ 
++        if (owns_handle) {
++            // Never ask the kernel. See the note on logical_pos: an unaligned position
++            // is refused outright here, and refusing to seek is not something callers
++            // expect from seek().
++            switch (whence) {
++                case SEEK_SET: logical_pos = offset;                break;
++                case SEEK_CUR: logical_pos += offset;               break;
++                case SEEK_END: logical_pos = size + offset;         break;
++                default:
++                    throw std::runtime_error(format("seek error: bad whence %d", whence));
++            }
++            return;
++        }
++
+         LARGE_INTEGER li;
+         li.QuadPart = offset;
+         BOOL ret = SetFilePointerEx(fp_win32, li, NULL, whence);
+@@ -126,7 +285,24 @@ struct llama_file::impl {
+         }
+     }
+ 
+-    void read_raw(void * ptr, size_t len) {
++    void read_raw_unsafe(void * ptr, size_t len) {
++        if (owns_handle) {
++            // Direct I/O never uses the kernel's file pointer - see logical_pos.
++            const size_t got = read_raw_at(ptr, len, logical_pos);
++            if (got < len) {
++                // End of file. An aligned request necessarily overshoots a file whose
++                // size is not a sector multiple, and none of the four model files here
++                // ends on a boundary, so this is the normal case rather than an edge
++                // one. Measured 2026-08-03 on all four: ReadFile returns TRUE and
++                // reports exactly the bytes up to the logical EOF. Zero the padding and
++                // carry on; the caller knows the tensor size and trims it. Same
++                // behaviour as the POSIX branch.
++                std::memset(reinterpret_cast<char*>(ptr) + got, 0, len - got);
++            }
++            logical_pos += got;
++            return;
++        }
++
+         size_t bytes_read = 0;
+         while (bytes_read < len) {
+             size_t chunk_size = std::min<size_t>(len - bytes_read, 64*1024*1024);
+@@ -136,6 +312,19 @@ struct llama_file::impl {
+                 throw std::runtime_error(format("read error: %s", GetErrorMessageWin32(GetLastError()).c_str()));
+             }
+             if (chunk_read < chunk_size || chunk_read == 0) {
++                // A short count at the end of the file. Under direct I/O this is the
++                // NORMAL case, not an edge one: an aligned request necessarily runs past
++                // a file whose size is not a sector multiple, and none of the four model
++                // files on this machine ends on a sector boundary.
++                //
++                // Measured 2026-08-03 on all four: with FILE_FLAG_NO_BUFFERING, ReadFile
++                // returns TRUE and reports exactly the bytes up to the logical EOF. The
++                // padding is zeroed and the caller - which knows the tensor size and
++                // trims the padding itself - carries on. This mirrors the POSIX branch.
++                //
++                // Reached only on the buffered path now, which never asks for more than
++                // it wants - so a short count here is still a real failure, exactly as
++                // it was before this file learned about direct I/O.
+                 throw std::runtime_error("unexpectedly reached end of file");
+             }
+ 
+@@ -143,6 +332,91 @@ struct llama_file::impl {
+         }
+     }
+ 
++    // Read `size_to_read` bytes from the current position, coping with an offset or
++    // length that direct I/O will not accept. Reads the enclosing sector-aligned range
++    // into an aligned bounce buffer and copies out the part that was asked for.
++    //
++    // Lives here as an implementation detail, not in the header. The header used to
++    // declare read_aligned_chunk() publicly while no llama_file method of that name
++    // existed on any platform and nobody called it - a promise with nothing behind it.
++    void read_aligned_chunk(void * dest, size_t size_to_read) {
++        const size_t offset                = tell();
++        const size_t aligned_offset        = offset & ~(alignment - 1);
++        const size_t offset_from_alignment = offset - aligned_offset;
++        const size_t bytes_to_read         = (offset_from_alignment + size_to_read + alignment - 1) & ~(alignment - 1);
++
++        // The buffer ADDRESS has to be sector-aligned too, not just the offset and the
++        // length. Missing that is what turned the first attempt at this into a
++        // 0xC0000409 with no output at all.
++        void * raw_buffer = _aligned_malloc(bytes_to_read, alignment);
++        if (raw_buffer == nullptr) {
++            throw std::runtime_error(format("_aligned_malloc of %zu bytes failed", bytes_to_read));
++        }
++
++        struct aligned_buffer_deleter {
++            void operator()(void * p) const { _aligned_free(p); }
++        };
++        std::unique_ptr<void, aligned_buffer_deleter> buffer(raw_buffer);
++
++        // Reads at the ALIGNED offset directly, without moving any file pointer. The
++        // earlier form seek(aligned_offset) + read was copied from POSIX and could not
++        // work here: the caller's unaligned position had already been rejected by the
++        // kernel before this function was ever reached.
++        const size_t got = read_raw_at(buffer.get(), bytes_to_read, aligned_offset);
++        if (got < offset_from_alignment + size_to_read) {
++            throw std::runtime_error("unexpectedly reached end of file");
++        }
++
++        std::memcpy(dest, reinterpret_cast<char*>(buffer.get()) + offset_from_alignment, size_to_read);
++
++        // The logical position advances by what the caller asked for, not by what the
++        // bounce buffer had to read around it.
++        logical_pos = offset + size_to_read;
++    }
++
++    void read_raw(void * ptr, size_t len) {
++        if (has_direct_io()) {
++            read_aligned_chunk(ptr, len);
++        } else {
++            read_raw_unsafe(ptr, len);
++        }
++    }
++
++    // The positional read Windows never had in llama_file. The offset travels in the
++    // OVERLAPPED structure, so no seek is needed and the shared file pointer is not
++    // touched - which is what makes it safe to call from several threads on one handle.
++    //
++    // It does NOT make those threads concurrent. Measured 2026-08-03: one shared handle
++    // across 64 threads reaches 0.99x the throughput of a single thread, while one
++    // handle per thread reaches 2.12x and 10592.0 MB/s at depth 8. The serialisation is
++    // Windows' behaviour on a synchronous handle, not this function's.
++    size_t read_raw_at(void * ptr, size_t len, size_t offset) {
++        size_t total = 0;
++        while (total < len) {
++            const size_t chunk_size = std::min<size_t>(len - total, 64*1024*1024);
++            const size_t pos = offset + total;
++
++            OVERLAPPED ov = {};
++            ov.Offset     = (DWORD) (pos & 0xFFFFFFFFull);
++            ov.OffsetHigh = (DWORD) (pos >> 32);
++
++            DWORD chunk_read = 0;
++            if (!ReadFile(fp_win32, reinterpret_cast<char*>(ptr) + total, (DWORD) chunk_size, &chunk_read, &ov)) {
++                const DWORD err = GetLastError();
++                if (err == ERROR_HANDLE_EOF) {
++                    return total;
++                }
++                throw std::runtime_error(format("read error: %s", GetErrorMessageWin32(err).c_str()));
++            }
++            total += chunk_read;
++            if (chunk_read < chunk_size) {
++                // Short read means end of file - see the note in read_raw_unsafe.
++                return total;
++            }
++        }
++        return total;
++    }
++
+     uint32_t read_u32() {
+         uint32_t val;
+         read_raw(&val, sizeof(val));
+@@ -170,12 +444,27 @@ struct llama_file::impl {
+         write_raw(&val, sizeof(val));
+     }
+ 
++    // Used to return true unconditionally, on a branch that never opened anything
++    // unbuffered. The single in-tree caller sits in the POSIX branch, so the lie was
++    // harmless in this repository and would only have been found by external code
++    // asking the question - PR #25294 is exactly that code, and it logs
++    // "uses O_DIRECT (page cache bypassed)" on Windows because of this line.
++    //
++    // Asks about ownership AND alignment, so it stays honest when the constructor fell
++    // back to buffered I/O.
+     bool has_direct_io() const {
+-        return true;
++        return owns_handle && alignment > 1;
+     }
+ 
+     ~impl() {
+-        if (fp && owns_fp) {
++        if (owns_handle) {
++            if (fp_win32 != INVALID_HANDLE_VALUE) {
++                CloseHandle(fp_win32);
++            }
++        } else if (fp && owns_fp) {
++            // Buffered path: the CRT stream owns fp_win32. Closing both would be a
++            // double close, and closing fp when owns_fp is false would close a stream
++            // that belongs to the caller.
+             std::fclose(fp);
+         }
+     }
+@@ -348,6 +637,32 @@ struct llama_file::impl {
+         }
+     }
+ 
++    // Positional read; see the Windows counterpart for what it is for. pread does not
++    // move the file pointer, which is what lets two threads share one descriptor.
++    size_t read_raw_at(void * ptr, size_t len, size_t offset) {
++#if defined(fileno)
++        const int use_fd = (fd != -1) ? fd : fileno(fp);
++#else
++        const int use_fd = (fd != -1) ? fd : ::fileno(fp);
++#endif
++        size_t total = 0;
++        while (total < len) {
++            const ssize_t ret = ::pread(use_fd, reinterpret_cast<char *>(ptr) + total,
++                                        len - total, (off_t) (offset + total));
++            if (ret == -1) {
++                if (errno == EINTR) {
++                    continue;  // Interrupted by signal, retry
++                }
++                throw std::runtime_error(format("read error: %s", strerror(errno)));
++            }
++            if (ret == 0) {
++                return total;  // end of file
++            }
++            total += (size_t) ret;
++        }
++        return total;
++    }
++
+     uint32_t read_u32() {
+         uint32_t ret;
+         read_raw(&ret, sizeof(ret));
+@@ -410,6 +725,20 @@ bool llama_file::has_direct_io() const { return pimpl->has_direct_io(); }
+ 
+ int llama_file::file_id() const {
+ #ifdef _WIN32
++    if (pimpl->owns_handle) {
++        // A direct-I/O file has no CRT descriptor, and a HANDLE cannot be squeezed
++        // through an int: it is a 64-bit pointer, so a cast drops the upper half and
++        // yields something that still looks like a valid handle and reads zero bytes
++        // without raising. That exact truncation has already cost this project a day
++        // once, in ctypes rather than C++ (see Crow/tools/probe-queue-depth.py:69-73).
++        //
++        // An exception rather than GGML_ASSERT on purpose: an assert can be compiled
++        // out by build configuration, and a guard that disappears in release is no
++        // guard at all. Failing here is safe because the two are mutually exclusive by
++        // construction - the model loader only opens files unbuffered for
++        // LLAMA_LOAD_MODE_DIRECT_IO, and that mode does not use mmap.
++        throw std::runtime_error("file_id() is not available on a direct-I/O handle on Windows");
++    }
+     return _fileno(pimpl->fp);
+ #else
+     if (pimpl->fd != -1) {
+@@ -425,11 +754,15 @@ int llama_file::file_id() const {
+ 
+ void llama_file::seek(size_t offset, int whence) const { pimpl->seek(offset, whence); }
+ void llama_file::read_raw(void * ptr, size_t len) { pimpl->read_raw(ptr, len); }
+-#ifdef _WIN32
+-void llama_file::read_raw_unsafe(void * ptr, size_t len) { pimpl->read_raw(ptr, len); }
+-#else
++
++// The #ifdef that used to sit here routed Windows to read_raw, because the Windows
++// impl had no read_raw_unsafe at all. It has one now - the same loop as before plus
++// the end-of-file case - so the buffered path is unchanged.
+ void llama_file::read_raw_unsafe(void * ptr, size_t len) { pimpl->read_raw_unsafe(ptr, len); }
+-#endif
++
++size_t llama_file::read_raw_at(void * ptr, size_t len, size_t offset) {
++    return pimpl->read_raw_at(ptr, len, offset);
++}
+ 
+ uint32_t llama_file::read_u32() { return pimpl->read_u32(); }
+ 
+diff --git a/src/llama-mmap.h b/src/llama-mmap.h
+index b7d5c61..00b39f2 100644
+--- a/src/llama-mmap.h
++++ b/src/llama-mmap.h
+@@ -27,7 +27,16 @@ struct llama_file {
+ 
+     void read_raw(void * ptr, size_t len);
+     void read_raw_unsafe(void * ptr, size_t len);
+-    void read_aligned_chunk(void * dest, size_t size);
++
++    // Positional read: does not move the file pointer, so callers need not seek first
++    // and two threads may read one file without fighting over a shared position.
++    // Returns the bytes actually read, which is short only at end of file.
++    //
++    // This is the RAW form. Under direct I/O the caller is responsible for alignment
++    // of all three of offset, length and the address of `ptr` - unlike read_raw(),
++    // which bounces through an aligned buffer and accepts anything.
++    size_t read_raw_at(void * ptr, size_t len, size_t offset);
++
+     uint32_t read_u32();
+ 
+     void write_raw(const void * ptr, size_t len) const;
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 881e55c..8edaf61 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -259,6 +259,15 @@ set_tests_properties(test-thread-safety PROPERTIES FIXTURES_REQUIRED test-downlo
+ 
+ llama_build_and_test(test-arg-parser.cpp)
+ 
++# Covers llama_file's read path, which nothing else does. llama_file is internal and
++# the llama library does not export it - WINDOWS_EXPORT_ALL_SYMBOLS is set on common
++# and on the tools, but not on llama itself, which is the same reason the block above
++# is disabled on Windows. So the sources are compiled into the test rather than linked
++# from the library. llama-impl.cpp comes along because llama-mmap.cpp calls format()
++# and llama_log_internal() from it, and neither is exported either.
++llama_build_and_test(test-llama-file.cpp ../src/llama-mmap.cpp ../src/llama-impl.cpp)
++target_include_directories(test-llama-file PRIVATE ${PROJECT_SOURCE_DIR}/src)
++
+ if (NOT LLAMA_SANITIZE_ADDRESS AND NOT GGML_SCHED_NO_REALLOC)
+   # TODO: repair known memory leaks
+   llama_build_and_test(test-opt.cpp)
+diff --git a/tests/test-llama-file.cpp b/tests/test-llama-file.cpp
+new file mode 100644
+index 0000000..400cef3
+--- /dev/null
++++ b/tests/test-llama-file.cpp
+@@ -0,0 +1,248 @@
++// Covers llama_file's read path, which until now no test touched at all: grepping
++// tests/ for load_mode found only argument parsing (test-arg-parser.cpp), load
++// cancellation (test-model-load-cancel.cpp) and quantisation statistics
++// (test-quantize-stats.cpp). Nothing went red when the reading itself broke.
++//
++// The cases that MUST fail are the point of this file. A test that only calls
++// functions and checks they return proves that they return.
++//
++// llama_file is internal and the llama library does not export it - see the comment
++// at tests/CMakeLists.txt above the block of tests disabled on Windows for that very
++// reason - so this test compiles llama-mmap.cpp in directly rather than linking it.
++
++#include "llama-mmap.h"
++
++#include <cstdint>
++#include <cstdio>
++#include <cstring>
++#include <string>
++#include <vector>
++
++#ifdef _WIN32
++#include <malloc.h>
++#endif
++
++// Deliberately NOT a multiple of any plausible sector size. All four model files on
++// this machine end mid-sector, so an aligned read running past EOF is the normal case
++// rather than an edge one, and a test file ending on a boundary would never reach it.
++static const size_t FILE_SIZE  = 1024 * 1024 + 1234;
++static const size_t SECTOR     = 4096;
++
++static int g_failed = 0;
++
++// The buffer address must be sector-aligned for unbuffered reads, exactly as much as
++// the offset and the length must be. Handing a std::vector to read_raw_at is what
++// killed the first attempt at this test with 0xC0000409 and no output at all - the
++// warning had been sitting in Crow/tools/probe-queue-depth.py:54-55 since 2026-08-02.
++struct aligned_buffer {
++    size_t   size;
++    uint8_t * data;
++
++    explicit aligned_buffer(size_t raw_size) {
++        size = (raw_size + SECTOR - 1) & ~(SECTOR - 1);
++#ifdef _WIN32
++        data = (uint8_t *) _aligned_malloc(size, SECTOR);
++#else
++        data = nullptr;
++        if (posix_memalign((void **) &data, SECTOR, size) != 0) {
++            data = nullptr;
++        }
++#endif
++        if (data == nullptr) {
++            throw std::bad_alloc();
++        }
++        std::memset(data, 0, size);
++    }
++
++    ~aligned_buffer() {
++        if (data) {
++#ifdef _WIN32
++            _aligned_free(data);
++#else
++            free(data);
++#endif
++        }
++    }
++
++    aligned_buffer(const aligned_buffer &) = delete;
++    aligned_buffer & operator=(const aligned_buffer &) = delete;
++};
++
++static void check(bool condition, const char * what) {
++    if (condition) {
++        printf("  ok    %s\n", what);
++    } else {
++        printf("  FAIL  %s\n", what);
++        g_failed++;
++    }
++}
++
++static uint8_t pattern_byte(size_t i) {
++    return (uint8_t) ((i * 31 + 7) & 0xFF);
++}
++
++static bool write_test_file(const std::string & path) {
++    FILE * f = fopen(path.c_str(), "wb");
++    if (f == nullptr) {
++        return false;
++    }
++    std::vector<uint8_t> buf(FILE_SIZE);
++    for (size_t i = 0; i < FILE_SIZE; i++) {
++        buf[i] = pattern_byte(i);
++    }
++    const size_t written = fwrite(buf.data(), 1, FILE_SIZE, f);
++    fclose(f);
++    return written == FILE_SIZE;
++}
++
++int main() {
++    // Unbuffered stdout, and it is not cosmetic: when this test crashed the buffered
++    // output was never flushed, so the failure looked like it happened before main()
++    // started. Every line below has to be on screen the moment it is written, or the
++    // next crash is just as blind as the last one.
++    setvbuf(stdout, NULL, _IONBF, 0);
++
++    // A RELATIVE path on purpose. The first attempt could not derive a volume from one
++    // and fell back to buffered I/O without saying so, which made every case below
++    // silently skip while the run still reported PASS.
++    const std::string path = "test-llama-file.tmp";
++
++    if (!write_test_file(path)) {
++        printf("SETUP ERROR: could not write %s\n", path.c_str());
++        return 2;
++    }
++    printf("test file  %s, %zu bytes (%zu past the last %zu boundary)\n\n",
++           path.c_str(), FILE_SIZE, FILE_SIZE % SECTOR, SECTOR);
++
++    // -----------------------------------------------------------------------------
++    // Case 1: has_direct_io() must say FALSE when nobody asked for direct I/O. On
++    // Windows this returned a hard true on every path - it answered a question it had
++    // never been in a position to answer.
++    // -----------------------------------------------------------------------------
++    printf("buffered open, use_direct_io = false:\n");
++    {
++        llama_file f(path.c_str(), "rb");
++        check(!f.has_direct_io(),
++              "has_direct_io() is false when direct I/O was never requested");
++        check(f.read_alignment() == 1, "read_alignment() is 1 on a buffered file");
++        check(f.size() == FILE_SIZE, "size() matches the file on disk");
++
++        aligned_buffer got(64);
++        const size_t n = f.read_raw_at(got.data, 64, 1000);
++        bool match = (n == 64);
++        for (size_t i = 0; i < 64 && match; i++) {
++            match = got.data[i] == pattern_byte(1000 + i);
++        }
++        check(match, "read_raw_at returns the bytes at the requested offset");
++
++        // The failing half of the same check. If a wrong expectation also passed, the
++        // check above would only prove that the function returns.
++        bool wrong_matches = true;
++        for (size_t i = 0; i < 64; i++) {
++            if (got.data[i] != pattern_byte(2000 + i)) {
++                wrong_matches = false;
++                break;
++            }
++        }
++        check(!wrong_matches,
++              "the same read does NOT match the bytes of a different offset");
++    }
++
++    // -----------------------------------------------------------------------------
++    // Case 2: the direct-I/O open. Windows accepted use_direct_io and dropped it;
++    // FILE_FLAG_NO_BUFFERING appeared nowhere in llama-mmap.cpp.
++    // -----------------------------------------------------------------------------
++    printf("\nunbuffered open, use_direct_io = true:\n");
++    {
++        llama_file f(path.c_str(), "rb", true);
++
++        if (!f.has_direct_io()) {
++            // Reporting PASS here would be worse than having no test: a green light for
++            // something nobody checked. The first version of this file did exactly that
++            // and hid a real defect for a whole run.
++            printf("  FAIL  direct I/O was requested and is not in effect\n");
++            printf("        The constructor fell back to buffered I/O, so none of the\n");
++            printf("        cases this test exists for were exercised.\n");
++            g_failed++;
++        } else {
++            const size_t align = f.read_alignment();
++            check(align > 1, "read_alignment() reports the device's sector size, not 1");
++            printf("        alignment = %zu\n", align);
++            check(f.size() == FILE_SIZE, "size() matches the file on disk");
++
++            // An unaligned offset AND an unaligned length - exactly what direct I/O
++            // refuses at the syscall level. This works only if the bounce buffer does
++            // its job, and the destination here may be an ordinary vector: read_raw
++            // copies out of its own aligned buffer.
++            std::vector<uint8_t> plain(777);
++            bool match = false;
++            try {
++                f.seek(333, SEEK_SET);
++                f.read_raw(plain.data(), plain.size());
++                match = true;
++                for (size_t i = 0; i < plain.size(); i++) {
++                    if (plain[i] != pattern_byte(333 + i)) {
++                        match = false;
++                        break;
++                    }
++                }
++            } catch (const std::exception & e) {
++                // Catching is not politeness, it is the measurement. An uncaught C++
++                // exception ends in MSVC's abort(), which raises
++                // __fastfail(FAST_FAIL_FATAL_APP_EXIT) - reported as 0xC0000409, the
++                // same code a stack buffer overrun produces. Without this handler the
++                // failure is indistinguishable from memory corruption, and that is
++                // exactly how it was misread once already.
++                printf("  EXCEPTION during unaligned read_raw: %s\n", e.what());
++            }
++            check(match, "read_raw handles an unaligned offset and length");
++
++            // -------------------------------------------------------------------
++            // Case 3: the read whose aligned end lies past the logical EOF.
++            // Measured 2026-08-03 on all four model files: ReadFile returns TRUE and
++            // reports exactly the bytes up to EOF. This pins that behaviour so a
++            // future change cannot quietly turn it into a throw or a full count.
++            //
++            // Offset, length and buffer address are all sector-aligned here. This is
++            // the raw positional read; it does not bounce.
++            // -------------------------------------------------------------------
++            const size_t last_aligned = (FILE_SIZE / SECTOR) * SECTOR;
++            aligned_buffer tail(SECTOR);
++            const size_t n = f.read_raw_at(tail.data, SECTOR, last_aligned);
++
++            check(n == FILE_SIZE - last_aligned,
++                  "a read past EOF reports exactly the bytes up to the end of file");
++            printf("        offset %zu, asked %zu, got %zu (file ends %zu in)\n",
++                   last_aligned, SECTOR, n, FILE_SIZE - last_aligned);
++
++            // The failing half: it must NOT report the full request. If it did, the
++            // caller would copy uninitialised bytes into a tensor and never know.
++            check(n != SECTOR,
++                  "it does NOT report the full request when the file ends first");
++
++            bool tail_match = (n == FILE_SIZE - last_aligned);
++            for (size_t i = 0; i < n && tail_match; i++) {
++                tail_match = tail.data[i] == pattern_byte(last_aligned + i);
++            }
++            check(tail_match, "the bytes it did return are the right ones");
++
++            // Wholly past the end, and the offset is sector-aligned like every other
++            // unbuffered read - an unaligned one here is what took the first attempt
++            // down together with the unaligned buffer.
++            const size_t beyond_offset = last_aligned + 4 * SECTOR;
++            aligned_buffer beyond(SECTOR);
++            const size_t none = f.read_raw_at(beyond.data, SECTOR, beyond_offset);
++            check(none == 0, "a read starting entirely past EOF returns 0 bytes");
++        }
++    }
++
++    remove(path.c_str());
++
++    printf("\n");
++    if (g_failed != 0) {
++        printf("RESULT: FAIL - %d check(s) failed\n", g_failed);
++        return 1;
++    }
++    printf("RESULT: PASS - all checks behaved as required\n");
++    return 0;
++}
