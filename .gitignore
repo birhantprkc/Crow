@@ -14,3 +14,8 @@ digests/
 # Compiler artefacts from tools/probe-89.bat
 tools/obj/
 *.obj
+
+# Build output of tools/build-bench.ps1: binary, objects and the ggml-base.dll it
+# needs beside it. Rebuilt from source, and tied to a build-native tree that the next
+# ninja run replaces.
+tools/build-bench/
