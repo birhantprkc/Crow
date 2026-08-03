@@ -203,7 +203,32 @@ What remains genuinely open:
    test that covers the read path — upstream has none. It is the one piece of this work that is
    useful to llama.cpp whether or not #25294 is ever merged.
 
-## Current state
+### How the hit rate compares, and why the second column decides it
+
+Surveyed on 2026-08-03 across 22 systems that solve the same problem. **Twelve of them report no hit
+rate at all** — KTransformers, ik_llama.cpp, MoE-Infinity, Fiddler, HOBBIT, AdapMoE, Klotski,
+DeepSpeed, vLLM, SGLang, Ollama, LM Studio. Two more publish it only as a figure with no number in
+the text. Where a number does exist:
+
+| System | Hit rate | Cache share | Source |
+|---|---:|---:|---|
+| Gemma 4, 8 slots/layer, 100 tokens | 47 % | small | [#20757](https://github.com/ggml-org/llama.cpp/issues/20757), cited |
+| the same, from 500 tokens on | 67 % | small | ditto, cited |
+| **Crow, 40 slots / 256 experts** | **72.3 %** | **15.6 %** | **measured here**, 384 tokens, batch 2 |
+| PR #25294, 64 slots / 256 | 73 % | 25.0 % | [#25294](https://github.com/ggml-org/llama.cpp/pull/25294) body, cited |
+| PR #25294, 90 slots / 256 | 79 % | 35.2 % | ditto, cited |
+| Metal slot pool, Qwen3-30B | 97–99 % | large | [#20757](https://github.com/ggml-org/llama.cpp/issues/20757), cited |
+| offline simulation, 88 of 128 | 98.8 % | 68.8 % | ditto, cited — a simulation, not a running system |
+
+**The right-hand column is the whole point.** A hit rate without the resident share is not a figure:
+98.8 % is reached with 69 % of the expert set already in cache, which is the easier problem, not the
+better method. Crow reaches 72.3 % holding 15.6 % — PR #25294, running the same mechanism, needs a
+60 % larger cache share for 73 %.
+
+**What this comparison does not establish.** The models differ (GLM-5.2 at ~754 B against
+DeepSeek-V4-Flash), and "hit rate" is not one quantity: #25294 counts requested experts, one report
+counts share of hit traffic, another counts bytes. Those three do not convert into each other. The
+rows are a rough placement, not a ranking. Only the Crow row was measured on this machine.
 
 Measurement phase. No product code, deliberately. `tools/` holds measuring instruments, plus the two
 scripts that make a measurement reproducible — one that builds an instrument, one that preserves the
