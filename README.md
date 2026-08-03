@@ -198,7 +198,9 @@ What remains genuinely open:
    Which of the two this model is decides whether the whole caching lever is worth anything —
    [#23](https://github.com/nibor1896/Crow/issues/23).
 2. **Nobody has run this file.** The MXFP4 build has a few hundred downloads and no published
-   correctness or throughput result in either direction.
+   correctness or throughput result in either direction. As of 2026-08-03 there is one, below: the
+   streamed output is byte-identical to a non-streamed run over 512 tokens, and the generated code
+   executes correctly.
 3. **Windows had no positional unbuffered read in llama.cpp.** That gap is now closed here, with a
    test that covers the read path — upstream has none. It is the one piece of this work that is
    useful to llama.cpp whether or not #25294 is ever merged.
@@ -229,6 +231,39 @@ better method. Crow reaches 72.3 % holding 15.6 % — PR #25294, running the sam
 DeepSeek-V4-Flash), and "hit rate" is not one quantity: #25294 counts requested experts, one report
 counts share of hit traffic, another counts bytes. Those three do not convert into each other. The
 rows are a rough placement, not a ranking. Only the Crow row was measured on this machine.
+
+### Quality: the streamed output is byte-identical, and that is now measured
+
+Of the 22 systems surveyed, **three** have ever measured output quality against a non-streamed
+reference run. PR #25294 — the same mechanism Crow runs — claims bit-exactness in its body and
+narrows it in the same sentence ("when both paths use the same kernels/ubatch"). It publishes no
+figure.
+
+Measured here on 2026-08-03, on a real coding task rather than a corpus
+([#26](https://github.com/nibor1896/Crow/issues/26)):
+
+```
+31f4f91759174d553ce533f3e1d0fb69327f7252e6faae73e4de91d63cfa159d  reference arm
+31f4f91759174d553ce533f3e1d0fb69327f7252e6faae73e4de91d63cfa159d  streamed arm
+```
+
+512 tokens, both arms run alternating in one session, identical but for the four streaming
+switches. The `-n 16` preliminary pair matched as well.
+
+| Check | Result |
+|---|---|
+| generated code executed | **runs and is correct**, 3 of 3 cases, first complete function block |
+| raw output as written | **does not run** — the base model has no stop criterion and writes past its answer |
+| `waves = …` in the streamed arm | absent, so `-ub 6` held and the comparison moves one variable |
+| streaming counters | 22 661 remap calls, 65.00 % hit rate — the arm really streamed |
+| check against a wrong implementation | red before the model ever started |
+
+**Two things this does not say.** Character equality under `--temp 0` means only that no difference
+was large enough to flip an argmax — not that there is none. And the failing case meant to prove the
+comparison is sensitive did **not** hold: a third run without `-nr` produced the same hash, so `-nr`
+turned out not to be needed here, and the sensitivity of the check rests on nothing stronger than
+16 and 512 tokens hashing differently. `tools/prompts/probe-f-coding.txt` and `probe-f-check.py`
+carry the task and its assertions.
 
 Measurement phase. No product code, deliberately. `tools/` holds measuring instruments, plus the two
 scripts that make a measurement reproducible — one that builds an instrument, one that preserves the
