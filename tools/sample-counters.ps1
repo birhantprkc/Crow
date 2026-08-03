@@ -31,8 +31,8 @@ WHY THE PROCESS IS FILTERED BY PID AND NOT BY NAME: Microsoft documents that the
 suffixes on duplicate instance names are reassigned between samples and then yield
 WRONG formatted values rather than none. IDProcess is stable for the life of a process.
 
-THE NEGATIVE CONTROL, and why these three: a sampler that only ever prints numbers
-cannot be told from one that prints noise. -Selftest runs three cases that each MUST
+THE NEGATIVE CONTROL, and why these four: a sampler that only ever prints numbers
+cannot be told from one that prints noise. -Selftest runs four cases that each MUST
 come back red, and each one covers a different way this tool could be silently broken:
 
   1. -MaxIdlePages -1  ->  the idle gate must trip. Any non-negative rate violates a
@@ -44,6 +44,9 @@ come back red, and each one covers a different way this tool could be silently b
   3. -ExpectDisableValue 1  ->  the registry check must trip. Windows disables a
      counter DLL silently after a load error and sets the value itself; without a case
      that fails, the check is a green that was never tested.
+  4. -CpuInstance on a core that does not exist  ->  must exit 2 and write NO rows.
+     Added 2026-08-03 with the CPU arms. A blank context-switch column reads as "the
+     scheduler was quiet", which is the exact opposite of "nobody asked it".
 
 WHAT THIS TOOL DOES NOT DO: it never starts llama. It attaches to a PID or runs free
 standing, because the idle baseline is a run WITHOUT a process to attach to.
@@ -95,6 +98,12 @@ param(
     # call costs 271 ms of a 1000 ms interval (measured, see Get-Snapshot). It is the
     # cross check for whether the formatted shortcut works at all - stage 2 sets it.
     [switch]$WithFormatted,
+    # Which ProcessorInformation instance the CPU arm reads. '_Total' averages every
+    # core. On this machine that hides something: the CPU is an Intel Core Ultra 9
+    # 285K, 24 cores with no SMT, i.e. P-cores and E-cores mixed. A thread moved from
+    # a P-core to an E-core slows down while '_Total' barely moves. Per-core names
+    # look like '0,0'. -Selftest uses this parameter for its failing case.
+    [string]$CpuInstance = '_Total',
     [switch]$Selftest
 )
 
@@ -119,9 +128,41 @@ $inv = [System.Globalization.CultureInfo]::InvariantCulture
 # Without the switch a sample costs ~93 ms with a pid, so a 1000 ms interval really
 # is 1 Hz. With it, ~364 ms, and a 5 s run produced 3 rows instead of 5.
 function Get-Snapshot {
-    param([int]$ProcId, [switch]$WithFormatted)
+    param([int]$ProcId, [switch]$WithFormatted, [string]$CpuInstance = '_Total')
     $mem  = Get-CimInstance Win32_PerfRawData_PerfOS_Memory -ErrorAction SilentlyContinue
     $disk = Get-CimInstance Win32_PerfRawData_PerfDisk_PhysicalDisk -Filter "Name='_Total'" -ErrorAction SilentlyContinue
+    # CPU arms, added 2026-08-03 after the disk was measured innocent: a slow decode
+    # moved 1.9 % LESS data than a fast one, so whatever paces it sits above the I/O
+    # subsystem.
+    #
+    # PerfOS_System and not PerfProc_Thread. Measured 2026-08-03: the thread class has
+    # NO _Total instance - the names are "<process>/<index>" - and it carries 6066 of
+    # them on this machine, which is far too much to pull once a second. The
+    # system-wide context switch counter lives here instead, and this class carries
+    # ProcessorQueueLength as well, which is the most direct reading Windows offers of
+    # threads waiting for a core.
+    $sys = Get-CimInstance Win32_PerfRawData_PerfOS_System -ErrorAction SilentlyContinue
+    # The FORMATTED processor class on purpose. PercentofMaximumFrequency is a
+    # percentage the provider computes; the raw class needs its own base and gives
+    # nothing extra here. Measured 2026-08-03: ProcessorFrequency is STATIC at 3366 MHz
+    # across seven samples - it is the nominal clock, not the live one, so throttling
+    # is only visible through PercentofMaximumFrequency.
+    #
+    # Queried WITHOUT an instance filter, and that is the point. This CPU is an Intel
+    # Core Ultra 9 285K: 24 cores, no SMT, P-cores and E-cores mixed. '_Total' averages
+    # the two classes together, so a thread pushed from a P-core onto an E-core barely
+    # moves it. The unfiltered call returns every core in the same round trip, so the
+    # per-core spread costs no extra WMI time - only a Measure-Object in user space.
+    # Aggregate rows ('_Total', '0,_Total') are excluded from the spread; they are
+    # averages, not cores.
+    $cpuAll = Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation -ErrorAction SilentlyContinue
+    $cpu = $cpuAll | Where-Object { $_.Name -eq $CpuInstance } | Select-Object -First 1
+    $cores = @($cpuAll | Where-Object { $_.Name -notlike '*_Total*' })
+    $freqMin = [double]::NaN; $freqMax = [double]::NaN
+    if ($cores.Count -gt 0) {
+        $m = $cores | Measure-Object -Property PercentofMaximumFrequency -Minimum -Maximum
+        $freqMin = [double]$m.Minimum; $freqMax = [double]$m.Maximum
+    }
     $fmt  = $null
     if ($WithFormatted) {
         $fmt = Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory -ErrorAction SilentlyContinue
@@ -133,6 +174,16 @@ function Get-Snapshot {
     }
     if ($null -eq $mem -or $null -eq $disk) { return $null }
     [pscustomobject]@{
+        sysCtx    = if ($null -ne $sys) { [double]$sys.ContextSwitchesPersec } else { [double]::NaN }
+        sysTs     = if ($null -ne $sys) { [double]$sys.Timestamp_PerfTime }    else { [double]::NaN }
+        sysFreq   = if ($null -ne $sys) { [double]$sys.Frequency_PerfTime }    else { [double]::NaN }
+        sysQueue  = if ($null -ne $sys) { [double]$sys.ProcessorQueueLength }  else { [double]::NaN }
+        cpuPctMax = if ($null -ne $cpu) { [double]$cpu.PercentofMaximumFrequency } else { [double]::NaN }
+        cpuLimit  = if ($null -ne $cpu) { [double]$cpu.PercentPerformanceLimit }   else { [double]::NaN }
+        cpuTime   = if ($null -ne $cpu) { [double]$cpu.PercentProcessorTime }      else { [double]::NaN }
+        cpuFreqMin = $freqMin
+        cpuFreqMax = $freqMax
+        cpuFound  = (($null -ne $sys) -and ($null -ne $cpu) -and ($cores.Count -gt 0))
         ts        = [double]$mem.Timestamp_PerfTime
         freq      = [double]$mem.Frequency_PerfTime
         ts100     = [double]$disk.Timestamp_Sys100NS
@@ -222,6 +273,7 @@ function Invoke-Sampling {
     param(
         [int]$ProcId, [string]$Dir, [string]$Tag, [int]$Secs, [int]$Ms,
         [double]$GatePages, [double]$GateDiskMBs, [int]$ExpectDisable,
+        [string]$CpuInst = '_Total',
         [switch]$Formatted, [switch]$Quiet
     )
 
@@ -257,7 +309,7 @@ function Invoke-Sampling {
     $result.Csv = $csv
 
     if ($ProcId -gt 0) {
-        $probe = Get-Snapshot -ProcId $ProcId
+        $probe = Get-Snapshot -ProcId $ProcId -CpuInstance $CpuInst
         if ($null -eq $probe -or -not $probe.procFound) {
             $result.Reason = "no live process with PID $ProcId - writing no rows rather than zeros"
             if (-not $Quiet) { Write-Output "  SETUP ERROR: $($result.Reason)" }
@@ -265,17 +317,35 @@ function Invoke-Sampling {
         }
     }
 
+    # Same reasoning as the dead-PID check above, one layer over: if a CPU class does
+    # not answer, every row would carry a blank where the scheduling reading belongs,
+    # and a column of blanks reads as "nothing happening" rather than "nobody asked".
+    $cpuProbe = Get-Snapshot -ProcId 0 -CpuInstance $CpuInst
+    if ($null -eq $cpuProbe -or -not $cpuProbe.cpuFound) {
+        $result.Reason = "CPU counters unavailable for instance '$CpuInst' " +
+                         "(Win32_PerfRawData_PerfOS_System / " +
+                         "Win32_PerfFormattedData_Counters_ProcessorInformation) - writing no rows"
+        if (-not $Quiet) { Write-Output "  SETUP ERROR: $($result.Reason)" }
+        return $result
+    }
+
     $stopFlag = Join-Path $Dir "stop-$Tag.flag"
     if (Test-Path $stopFlag) { Remove-Item $stopFlag -Force }
 
+    # The five CPU columns are APPENDED, ahead of status only. Every existing column
+    # keeps its position, so anything reading these files by name or by index still
+    # finds what it found before.
     $header = 't_s,pages_in_per_s,page_reads_per_s,fault_mb_s,bytes_per_fault_read_kb,' +
               'disk_read_mb_s,disk_reads_per_s,disk_avg_bytes_per_read,disk_read_queue,' +
-              'proc_io_read_mb_s,proc_page_faults_per_s,proc_ws_gb,formatted_pages_in,status'
+              'proc_io_read_mb_s,proc_page_faults_per_s,proc_ws_gb,formatted_pages_in,' +
+              'ctx_sw_per_s,proc_queue_len,cpu_pct_max_freq,cpu_pct_perf_limit,cpu_pct_time,' +
+              'cpu_pct_max_freq_min,cpu_pct_max_freq_max,' +
+              'status'
     Set-Content -Path $csv -Value $header -Encoding utf8
 
     $pagesList = @(); $diskList = @(); $faultList = @(); $procIoList = @(); $fmtList = @()
     $started = Get-Date
-    $prev = Get-Snapshot -ProcId $ProcId -WithFormatted:$Formatted
+    $prev = Get-Snapshot -ProcId $ProcId -WithFormatted:$Formatted -CpuInstance $CpuInst
     if ($null -ne $prev -and $prev.pagesIn -gt 0 -and $prev.dBytes -gt 0) { $result.RawsNonZero = $true }
     $n = 0
     $tick = 0
@@ -307,7 +377,7 @@ function Invoke-Sampling {
             if ($null -eq $alive) { break }
         }
 
-        $cur = Get-Snapshot -ProcId $ProcId -WithFormatted:$Formatted
+        $cur = Get-Snapshot -ProcId $ProcId -WithFormatted:$Formatted -CpuInstance $CpuInst
         $dtSample = if ($null -ne $cur -and $null -ne $prev -and $cur.freq -gt 0) {
                         ($cur.ts - $prev.ts) / $cur.freq
                     } else { 0.0 }
@@ -324,11 +394,23 @@ function Invoke-Sampling {
             # across it and any rate computed from it is noise, so the row is marked
             # rather than published as a number.
             $status = 'invalid_too_fast'
+        } elseif (-not $cur.cpuFound -or -not $prev.cpuFound) {
+            # One of the CPU classes returned nothing. Writing zeros for it would read
+            # as "no context switches, no queue, no clock" - a dead arm that looks like
+            # a quiet system.
+            $status = 'invalid_cpu_missing'
+        } elseif ($cur.sysCtx -le $prev.sysCtx) {
+            # Context switches are cumulative and a running Windows never stops making
+            # them - measured 2026-08-03, 30,000 to 35,000 per second on an IDLE
+            # machine. A counter that does not advance is broken, not calm, and the
+            # rate computed from it would be a flat zero in exactly the runs where the
+            # scheduling question matters most.
+            $status = 'invalid_cpu_stalled'
         }
 
         if ($status -ne 'ok') {
             $result.Invalid++
-            Add-Content -Path $csv -Encoding utf8 -Value ([string]::Format($inv, "{0:F2},,,,,,,,,,,,,{1}", $elapsed, $status))
+            Add-Content -Path $csv -Encoding utf8 -Value ([string]::Format($inv, "{0:F2},,,,,,,,,,,,,,,,,,,,{1}", $elapsed, $status))
             $prev = $cur; $n++
             continue
         }
@@ -361,10 +443,18 @@ function Invoke-Sampling {
         $fmtList += $cur.fmtPages
         if (-not [double]::IsNaN($procIoMBs)) { $procIoList += $procIoMBs }
 
+        # Context switches are a cumulative raw counter with their own timestamp pair,
+        # so the rate is a delta like the others. The remaining four are instantaneous
+        # readings and are written as sampled.
+        $ctxRate = Get-Rate $prev.sysCtx $cur.sysCtx $prev.sysTs $cur.sysTs $cur.sysFreq
+
         Add-Content -Path $csv -Encoding utf8 -Value ([string]::Format($inv,
-            "{0:F2},{1:F1},{2:F1},{3:F2},{4:F1},{5:F2},{6:F1},{7:F0},{8:F3},{9:F2},{10:F1},{11:F2},{12:F1},ok",
+            "{0:F2},{1:F1},{2:F1},{3:F2},{4:F1},{5:F2},{6:F1},{7:F0},{8:F3},{9:F2},{10:F1},{11:F2},{12:F1}," +
+            "{13:F0},{14:F0},{15:F0},{16:F0},{17:F0},{18:F0},{19:F0},ok",
             $elapsed, $pagesRate, $readsRate, $faultMBs, $perRead, $diskMBs, $dReadsRate,
-            $avgBytes, $queue, $procIoMBs, $procFaults, $wsGb, $cur.fmtPages))
+            $avgBytes, $queue, $procIoMBs, $procFaults, $wsGb, $cur.fmtPages,
+            $ctxRate, $cur.sysQueue, $cur.cpuPctMax, $cur.cpuLimit, $cur.cpuTime,
+            $cur.cpuFreqMin, $cur.cpuFreqMax))
 
         $prev = $cur; $n++
     }
@@ -443,6 +533,18 @@ if ($Selftest) {
     else { Write-Output "    VERDICT: OK - refused, as required" }
     Write-Output ""
 
+    Write-Output "--- case 4: -CpuInstance on a core that does not exist (must exit 2, NO rows) ---"
+    $c4 = Invoke-Sampling -ProcId 0 -Dir $dir -Tag 'case4' -Secs 5 -Ms 1000 `
+                          -GatePages ([double]::PositiveInfinity) -GateDiskMBs ([double]::PositiveInfinity) `
+                          -ExpectDisable $ExpectDisableValue -CpuInst '_NoSuchCore' -Quiet
+    $c4File = Join-Path $dir 'counters-case4.csv'
+    $c4Wrote = Test-Path $c4File
+    Write-Output ("    exit $($c4.Code), rows $($c4.Rows), csv written: $c4Wrote")
+    Write-Output ("    reason: " + $(if ($c4.Reason) { $c4.Reason } else { '(none)' }))
+    if ($c4.Code -ne 2 -or $c4Wrote) { $failedToFail += 'case 4 (CPU arm)'; Write-Output "    VERDICT: FAILED - it sampled a CPU instance that does not exist" }
+    else { Write-Output "    VERDICT: OK - refused, as required" }
+    Write-Output ""
+
     Write-Output "--- case 3: -ExpectDisableValue 1 against a registry that reads 0/absent ---"
     $c3 = Invoke-Sampling -ProcId 0 -Dir $dir -Tag 'case3' -Secs 5 -Ms 1000 `
                           -GatePages ([double]::PositiveInfinity) -GateDiskMBs ([double]::PositiveInfinity) `
@@ -483,8 +585,8 @@ if ($Selftest) {
         Write-Output ("  cases that stayed green: " + ($failedToFail -join ', '))
         exit 1
     }
-    if (-not $posOk) { Write-Output "RESULT: FAIL - all three negatives are red but the positive does not run."; exit 1 }
-    Write-Output "RESULT: PASS - the three checks go red when they should, and the sampler keeps its schedule."
+    if (-not $posOk) { Write-Output "RESULT: FAIL - all four negatives are red but the positive does not run."; exit 1 }
+    Write-Output "RESULT: PASS - the four checks go red when they should, and the sampler keeps its schedule."
     Write-Output "  NOT shown by this test: that the counters rise under load. That is the stage-2 run."
     Write-Output "  artefacts: $dir"
     exit 0
@@ -494,7 +596,7 @@ if ($Selftest) {
 
 $tag = if ($Label -ne '') { $Label } else { "pid$TargetPid" }
 Write-Output "=== sample-counters: tag $tag, $Seconds s at $IntervalMs ms, pid $TargetPid ==="
-$r = Invoke-Sampling -ProcId $TargetPid -Dir $LogDir -Tag $tag -Secs $Seconds -Ms $IntervalMs `
+$r = Invoke-Sampling -ProcId $TargetPid -Dir $LogDir -Tag $tag -Secs $Seconds -Ms $IntervalMs -CpuInst $CpuInstance `
                      -GatePages $MaxIdlePages -GateDiskMBs $MaxIdleDiskMBs -ExpectDisable $ExpectDisableValue `
                      -Formatted:$WithFormatted
 
