@@ -6,8 +6,14 @@ behaviour applied to a drive nobody measured in this mode. This measures it.
 
 Why it matters (Crow #30): during a 1,659-token prefill the Resource Monitor showed
 a disk queue length of 0.79 - fewer than one outstanding request on average - while
-llama read 445 MB/s from a drive measured at 5,300 MB/s sequential. 6,540 hard
+llama read 707.07 MB/s from a drive measured at 5,300 MB/s sequential. 6,540 hard
 faults per second at 68 KB each. The drive was idle between requests, not saturated.
+
+That rate used to read 445 MB/s here, and that number is WITHDRAWN: it was read off
+the Resource Monitor rather than measured. The 707.07 MB/s replacing it comes from
+539 samples with two independent counter paths 0.03 % apart
+(runs/2026-08-02/counters-mxfp4-999.csv). The conclusion is unchanged - the drive is
+still idle between requests - but the figure it rests on is now one that was counted.
 If concurrency is what is missing, issuing many reads at once should recover most of
 the gap. If it does not, the whole "stream experts in parallel" direction is dead and
 that is worth knowing in minutes rather than weeks.

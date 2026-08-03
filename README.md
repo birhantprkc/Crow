@@ -160,9 +160,12 @@ cannot be told apart from one that checks nothing.
 | [#33](https://github.com/nibor1896/Crow/issues/33) | Does the upstream MoE fault affect us, on quants we have not tried? |
 | [#38](https://github.com/nibor1896/Crow/issues/38) | Does throughput scale with batch size, and does VRAM then pay? |
 
-Unmeasured and named as such: prefill throughput, anything above batch 1, any quantisation other
-than MXFP4, longer contexts, and quality — no benchmark has been run, and a model answering two
-capital-city questions is not a quality statement.
+Measured since 2026-08-02: prefill throughput, at **707.07 MB/s** over 539 samples with two counter
+paths 0.03 % apart.
+
+Unmeasured and named as such: decode — every run so far ended after a single token, so every number
+here is prefill — anything above batch 1, longer contexts, and quality. No benchmark has been run,
+and a model answering two capital-city questions is not a quality statement.
 
 Full plan: [project board](https://github.com/users/nibor1896/projects/7).
 
