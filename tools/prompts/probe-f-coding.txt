@@ -1,0 +1,7 @@
+Write a Python function with exactly this signature:
+
+    def merge_intervals(intervals):
+
+It takes a list of [start, end] integer pairs. It returns a new list of merged pairs, sorted by start, where intervals that overlap or merely touch are combined into one. An empty input returns an empty list. The input must not be modified.
+
+Use only the standard library. Output the function definition and nothing else: no explanation, no example, no markdown fences.
