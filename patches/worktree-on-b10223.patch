@@ -721,7 +721,7 @@ index 7ed490c..b03da27 100644
      ggml_tensor * build_norm(
               ggml_tensor * cur,
 diff --git a/src/llama-mmap.cpp b/src/llama-mmap.cpp
-index ed572da..157e9eb 100644
+index ed572da..1b39716 100644
 --- a/src/llama-mmap.cpp
 +++ b/src/llama-mmap.cpp
 @@ -34,6 +34,11 @@
@@ -736,7 +736,7 @@ index ed572da..157e9eb 100644
  #endif
  
  #if defined(__APPLE__)
-@@ -67,7 +72,54 @@ static std::string llama_format_win_err(DWORD err) {
+@@ -67,7 +72,57 @@ static std::string llama_format_win_err(DWORD err) {
  
  struct llama_file::impl {
  #if defined(_WIN32)
@@ -761,10 +761,13 @@ index ed572da..157e9eb 100644
 +    // no difference at all; sharing the handle makes all of it. Windows serialises on the
 +    // file object, not on the file pointer.
 +    //
-+    // 18 slots because that is PR #25294's MOE_STREAM_IO_THREADS_MAX. Saturation was
-+    // measured at depth 8 and depth 64 buys nothing, so the last ten slots are not there
-+    // because they pay - they are there so a legal worker id cannot quietly land back on
-+    // the shared handle and take the serialisation with it.
++    // The count is a ceiling on worker ids, not a throughput setting. Saturation sits at
++    // depth 8: depth 64 measured 2.15x against 2.22x at depth 8, so slots past the eighth
++    // buy no bandwidth. They are there so that a caller running more readers than the
++    // saturation point still gets a private handle for each of them - a worker id at or
++    // past n_pool falls back to the shared handle and takes the serialisation with it,
++    // which is the one failure this pool exists to prevent. 18 is that headroom, and the
++    // price for it is 18 open handles on one file.
 +    //
 +    // n_pool counts what was actually opened, always contiguous from 0. That is why the
 +    // array needs no sentinel: slots at or past n_pool were never opened, so the
@@ -792,7 +795,7 @@ index ed572da..157e9eb 100644
      std::string GetErrorMessageWin32(DWORD error_code) const {
          std::string ret;
          LPSTR lpMsgBuf = NULL;
-@@ -83,10 +135,150 @@ struct llama_file::impl {
+@@ -83,10 +138,150 @@ struct llama_file::impl {
          return ret;
      }
  
@@ -946,7 +949,7 @@ index ed572da..157e9eb 100644
          }
          fp_win32 = (HANDLE) _get_osfhandle(_fileno(fp));
          seek(0, SEEK_END);
-@@ -94,7 +286,7 @@ struct llama_file::impl {
+@@ -94,7 +289,7 @@ struct llama_file::impl {
          seek(0, SEEK_SET);
      }
  
@@ -955,7 +958,7 @@ index ed572da..157e9eb 100644
          fp = file;
          fp_win32 = (HANDLE) _get_osfhandle(_fileno(fp));
          seek(0, SEEK_END);
-@@ -103,6 +295,10 @@ struct llama_file::impl {
+@@ -103,6 +298,10 @@ struct llama_file::impl {
      }
  
      size_t tell() const {
@@ -966,7 +969,7 @@ index ed572da..157e9eb 100644
          LARGE_INTEGER li;
          li.QuadPart = 0;
          BOOL ret = SetFilePointerEx(fp_win32, li, &li, FILE_CURRENT);
-@@ -113,11 +309,25 @@ struct llama_file::impl {
+@@ -113,11 +312,25 @@ struct llama_file::impl {
          return li.QuadPart;
      }
  
@@ -993,7 +996,7 @@ index ed572da..157e9eb 100644
          LARGE_INTEGER li;
          li.QuadPart = offset;
          BOOL ret = SetFilePointerEx(fp_win32, li, NULL, whence);
-@@ -126,7 +336,24 @@ struct llama_file::impl {
+@@ -126,7 +339,24 @@ struct llama_file::impl {
          }
      }
  
@@ -1019,7 +1022,7 @@ index ed572da..157e9eb 100644
          size_t bytes_read = 0;
          while (bytes_read < len) {
              size_t chunk_size = std::min<size_t>(len - bytes_read, 64*1024*1024);
-@@ -136,6 +363,19 @@ struct llama_file::impl {
+@@ -136,6 +366,19 @@ struct llama_file::impl {
                  throw std::runtime_error(format("read error: %s", GetErrorMessageWin32(GetLastError()).c_str()));
              }
              if (chunk_read < chunk_size || chunk_read == 0) {
@@ -1039,7 +1042,7 @@ index ed572da..157e9eb 100644
                  throw std::runtime_error("unexpectedly reached end of file");
              }
  
-@@ -143,6 +383,102 @@ struct llama_file::impl {
+@@ -143,6 +386,102 @@ struct llama_file::impl {
          }
      }
  
@@ -1142,15 +1145,15 @@ index ed572da..157e9eb 100644
      uint32_t read_u32() {
          uint32_t val;
          read_raw(&val, sizeof(val));
-@@ -170,12 +506,41 @@ struct llama_file::impl {
+@@ -170,12 +509,41 @@ struct llama_file::impl {
          write_raw(&val, sizeof(val));
      }
  
 +    // Used to return true unconditionally, on a branch that never opened anything
 +    // unbuffered. The single in-tree caller sits in the POSIX branch, so the lie was
 +    // harmless in this repository and would only have been found by external code
-+    // asking the question - PR #25294 is exactly that code, and it logs
-+    // "uses O_DIRECT (page cache bypassed)" on Windows because of this line.
++    // asking the question. Any caller that logs "O_DIRECT in effect" on the strength of
++    // this answer would have printed it on Windows while reading through the page cache.
 +    //
 +    // Asks about ownership AND alignment, so it stays honest when the constructor fell
 +    // back to buffered I/O.
@@ -1186,7 +1189,7 @@ index ed572da..157e9eb 100644
              std::fclose(fp);
          }
      }
-@@ -348,6 +713,39 @@ struct llama_file::impl {
+@@ -348,6 +716,39 @@ struct llama_file::impl {
          }
      }
  
@@ -1195,9 +1198,9 @@ index ed572da..157e9eb 100644
 +    size_t read_raw_at(void * ptr, size_t len, size_t offset, int worker_id = -1) {
 +        // POSIX needs no handle pool. pread carries its offset in the call and does not
 +        // hold the file object while it runs, so several threads on ONE descriptor are
-+        // already concurrent - which is exactly why PR #25294 uses it unchanged here and
-+        // capitulates to a mutex on Windows. The parameter exists so that a caller need
-+        // not know which platform it is compiled for.
++        // already concurrent. Windows has no such call, which is why the pool exists over
++        // there and not here. The parameter is accepted on both so that a caller need not
++        // know which platform it is compiled for.
 +        (void) worker_id;
 +
 +#if defined(fileno)
@@ -1226,7 +1229,7 @@ index ed572da..157e9eb 100644
      uint32_t read_u32() {
          uint32_t ret;
          read_raw(&ret, sizeof(ret));
-@@ -373,6 +771,13 @@ struct llama_file::impl {
+@@ -373,6 +774,13 @@ struct llama_file::impl {
          return fd != -1 && alignment > 1;
      }
  
@@ -1240,7 +1243,7 @@ index ed572da..157e9eb 100644
      ~impl() {
          if (fd != -1) {
              close(fd);
-@@ -410,6 +815,20 @@ bool llama_file::has_direct_io() const { return pimpl->has_direct_io(); }
+@@ -410,6 +818,20 @@ bool llama_file::has_direct_io() const { return pimpl->has_direct_io(); }
  
  int llama_file::file_id() const {
  #ifdef _WIN32
@@ -1248,8 +1251,8 @@ index ed572da..157e9eb 100644
 +        // A direct-I/O file has no CRT descriptor, and a HANDLE cannot be squeezed
 +        // through an int: it is a 64-bit pointer, so a cast drops the upper half and
 +        // yields something that still looks like a valid handle and reads zero bytes
-+        // without raising. That exact truncation has already cost this project a day
-+        // once, in ctypes rather than C++ (see Crow/tools/probe-queue-depth.py:69-73).
++        // without raising. That exact truncation is easy to hit through any FFI layer
++        // that defaults a handle-returning call to a 32-bit result type.
 +        //
 +        // An exception rather than GGML_ASSERT on purpose: an assert can be compiled
 +        // out by build configuration, and a guard that disappears in release is no
@@ -1261,7 +1264,7 @@ index ed572da..157e9eb 100644
      return _fileno(pimpl->fp);
  #else
      if (pimpl->fd != -1) {
-@@ -425,11 +844,17 @@ int llama_file::file_id() const {
+@@ -425,11 +847,17 @@ int llama_file::file_id() const {
  
  void llama_file::seek(size_t offset, int whence) const { pimpl->seek(offset, whence); }
  void llama_file::read_raw(void * ptr, size_t len) { pimpl->read_raw(ptr, len); }
@@ -2816,10 +2819,10 @@ index 881e55c..8edaf61 100644
    llama_build_and_test(test-opt.cpp)
 diff --git a/tests/test-llama-file.cpp b/tests/test-llama-file.cpp
 new file mode 100644
-index 0000000..779a8b6
+index 0000000..c4bdbac
 --- /dev/null
 +++ b/tests/test-llama-file.cpp
-@@ -0,0 +1,392 @@
+@@ -0,0 +1,417 @@
 +// Covers llama_file's read path, which until now no test touched at all: grepping
 +// tests/ for load_mode found only argument parsing (test-arg-parser.cpp), load
 +// cancellation (test-model-load-cancel.cpp) and quantisation statistics
@@ -2853,10 +2856,23 @@ index 0000000..779a8b6
 +
 +static int g_failed = 0;
 +
++// Whether a direct-I/O open is expected to succeed at all on this platform.
++//
++// llama_file implements an unbuffered path on Windows (FILE_FLAG_NO_BUFFERING) and on
++// Linux (O_DIRECT). Everywhere else the constructor has nothing to open unbuffered and
++// correctly falls back to buffered I/O, so failing the run there would report a defect
++// where the behaviour is right. On the two platforms that do have the path, that same
++// fallback is exactly the defect these cases exist to catch, so it must stay a failure
++// there - skipping everywhere would turn this file into a test that cannot go red.
++#if defined(_WIN32) || defined(__linux__)
++#  define DIRECT_IO_EXPECTED 1
++#else
++#  define DIRECT_IO_EXPECTED 0
++#endif
++
 +// The buffer address must be sector-aligned for unbuffered reads, exactly as much as
 +// the offset and the length must be. Handing a std::vector to read_raw_at is what
-+// killed the first attempt at this test with 0xC0000409 and no output at all - the
-+// warning had been sitting in Crow/tools/probe-queue-depth.py:54-55 since 2026-08-02.
++// killed the first attempt at this test with 0xC0000409 and no output at all.
 +struct aligned_buffer {
 +    size_t   size;
 +    uint8_t * data;
@@ -2994,11 +3010,19 @@ index 0000000..779a8b6
 +        if (!f.has_direct_io()) {
 +            // Reporting PASS here would be worse than having no test: a green light for
 +            // something nobody checked. The first version of this file did exactly that
-+            // and hid a real defect for a whole run.
++            // and hid a real defect for a whole run. On a platform without an unbuffered
++            // path the same state is the documented behaviour, so it is reported and
++            // skipped rather than counted as a failure.
++#if DIRECT_IO_EXPECTED
 +            printf("  FAIL  direct I/O was requested and is not in effect\n");
 +            printf("        The constructor fell back to buffered I/O, so none of the\n");
 +            printf("        cases this test exists for were exercised.\n");
 +            g_failed++;
++#else
++            printf("  SKIP  this platform has no unbuffered read path in llama_file\n");
++            printf("        The fallback to buffered I/O is correct here, so the\n");
++            printf("        direct-I/O cases do not apply.\n");
++#endif
 +        } else {
 +            const size_t align = f.read_alignment();
 +            check(align > 1, "read_alignment() reports the device's sector size, not 1");
@@ -3088,8 +3112,12 @@ index 0000000..779a8b6
 +
 +        llama_file f(path.c_str(), "rb", true);
 +        if (!f.has_direct_io()) {
++#if DIRECT_IO_EXPECTED
 +            printf("  FAIL  direct I/O not in effect, the pool cannot be checked\n");
 +            g_failed++;
++#else
++            printf("  SKIP  no unbuffered read path on this platform, no pool to check\n");
++#endif
 +        } else {
 +            const size_t n_handles = f.direct_io_handles();
 +            printf("        private handles = %zu\n", n_handles);
