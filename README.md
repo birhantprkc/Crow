@@ -5,7 +5,7 @@
 <h1 align="center">Crow</h1>
 
 <p align="center">
-  A frontier coding LLM, made runnable on a single consumer GPU.
+  A frontier coding LLM, made runnable by streaming its experts off the SSD.
 </p>
 
 ---
@@ -14,9 +14,9 @@
 
 **The model is not trained. It is made runnable.**
 
-A frontier-scale mixture-of-experts coding model, streamed layer by layer, on a card most people
-already own. Plus an agent platform on top of it, in the spirit of `NousResearch/hermes-agent` —
-that one is an example for scope, not a specification.
+A frontier-scale mixture-of-experts coding model, with its expert weights read from disk on demand
+instead of held in memory. Plus an agent platform on top of it, in the spirit of
+`NousResearch/hermes-agent` — that one is an example for scope, not a specification.
 
 Target model: **`deepseek-ai/DeepSeek-V4-Flash`**, MIT licensed. Per its model card: 284 B total,
 13 B active per token, LiveCodeBench 91.7. Those are the vendor's numbers about the vendor's
@@ -27,7 +27,7 @@ The file in use is `ggml-org/DeepSeek-V4-Flash-GGUF` → `DeepSeek-V4-Flash-MXFP
 **154,991,536,896 bytes**, `sha256:78a9a077…`. Read from its header on 2026-08-02: 1328 tensors,
 52 KV pairs, `block_count 43`, `expert_count 256`, `expert_used_count 6`, `hash_layer_count 3`.
 
-## The machine, and the constraint that actually binds
+## The card is not the problem. The disk is.
 
 Measured on the development machine, 2026-08-02:
 
@@ -37,14 +37,15 @@ Measured on the development machine, 2026-08-02:
 | RAM | 63.4 GB DDR5-5600 | **~45 GB/s measured** |
 | NVMe | 574 GB free, Phison 2 TB | **5.8 GB/s measured** sequential, single thread, 4 MB blocks |
 
-**How much VRAM the target profile assumes is open** and is decided on
-[#25](https://github.com/nibor1896/Crow/issues/25), on measurements rather than on a number carried
-forward from a document. The figures below are the measured footprints of specific configurations,
-not a specification.
-
 **The binding constraint is RAM, not VRAM.** 63.4 GB is smaller than every usable quantisation of
 this model — the smallest published one is `unsloth/UD-IQ1_S` at 82.5 GB, and the file in use is
 155 GB. So the expert weights cannot live in RAM, and the NVMe is in the loop on every token.
+
+And the card turned out to be the cheap part. **The fastest configuration measured here occupies
+11.21 GiB, and spending the rest of a 32 GiB card made it 1.7× slower** — the numbers are in the
+next section. That is a measurement about this model on this machine, not a system requirement:
+**what the target profile may assume is still open** and is decided on
+[#25](https://github.com/nibor1896/Crow/issues/25).
 
 Read from the tensor table, then confirmed against llama.cpp's own load accounting:
 
@@ -76,11 +77,79 @@ unrepeated runs. `-ncmoe N` keeps the experts of the first N of 43 blocks on the
 computation and not only the weights, so mixed placement pays PCIe round-trips per layer per token
 that the all-CPU configuration never pays. That reading is unverified; the numbers are not.
 
-The consequence is worth stating plainly: **the fastest configuration measured here occupies
-11.21 GiB, and spending the rest of a 32 GiB card made it slower.** Where VRAM could still pay is
-KV cache and batching across parallel agent runs — and batch scaling has not been measured at all
-([#38](https://github.com/nibor1896/Crow/issues/38)). Until it is, more VRAM has no measured
-argument on this model.
+Where VRAM could still pay is KV cache and batching across parallel agent runs — and batch scaling
+has not been measured at all ([#38](https://github.com/nibor1896/Crow/issues/38)). Until it is, more
+VRAM has no measured argument on this model. Which is why the work moved to the read path.
+
+## The read path, and the 14.90× that is now on llama.cpp's own code
+
+This is where the project spent 2026-08-02 and 2026-08-03, and it is the part with numbers.
+
+```mermaid
+flowchart TD
+    R["Router: 6 of 256 experts per layer, 43 layers = 3.21 GiB per token"]
+
+    R --> A["mmap region"]
+    A --> B["page fault, synchronous, one per thread"]
+    B --> N[("NVMe")]
+    N --> C["65.8 KB per read = 707 MB/s"]
+    C --> G["expert GEMM on CPU"]
+
+    R -.->|built, never executed| S["expert slot cache, miss"]
+    S -.-> W["18 I/O workers, one private handle each"]
+    W -.-> N
+    N -.-> P["12.75 MiB per read = 10,533 MB/s"]
+    P -.-> G
+```
+
+Solid is what runs today. Dashed is what is in the tree and has no switch yet. Same drive both
+times — the difference is how it is asked.
+
+**The problem, measured.** Under mmap the expert weights arrive by page fault: **65.8 KB per read**,
+**707.07 MB/s** over 539 samples with two counter paths 0.03 % apart. The same drive, asked properly
+— large blocks, several requests in flight — delivers **10,523.9 MB/s at queue depth 8**
+(`probe-queue-depth.py`, one file handle per thread, negative control held). The gap is not the
+hardware.
+
+**Why it could not simply be parallelised on Windows.** llama.cpp had no positional read on Windows:
+one handle, one shared file pointer, `ReadFile` with `lpOverlapped == NULL`. Removing the race on
+the file position is not enough either — measured here, a **shared** handle read through an
+`OVERLAPPED` offset still reaches only **1.01×** at depth 8, while **one handle per thread** reaches
+**2.22×**. Windows serialises on the file *object*, not on the file pointer.
+
+**What was built into `llama_file`** (upstream code, not a private fork of the loader):
+
+- unbuffered opening via `CreateFileW` + `FILE_FLAG_NO_BUFFERING`, with a loud fallback to buffered
+- the sector size asked of the device at run time via `IOCTL_STORAGE_QUERY_PROPERTY` instead of a
+  compile-time 4096 — measured **512 logical / 4096 physical** on this drive, which is 512e
+- a positional `read_raw_at`, with the file position held in the class rather than in the kernel
+- end-of-file handling, because **none of the four model files ends on a sector boundary**
+- `has_direct_io()` answering from what the constructor achieved, instead of returning `true`
+- a pool of **18 private handles**, one per reader, selected without a lock
+
+**What that reaches, through llama.cpp's own file path** — same binary, one flag apart:
+
+| arm | throughput | ratio |
+|---|---:|---:|
+| 1 thread, private handle | 5,009.2 MB/s | 1.000× |
+| **8 threads, one handle each** | **10,533.4 MB/s** | **2.103×** |
+| 8 threads, **shared** handle | 4,963.3 MB/s | **0.991×** |
+
+The counter-arm sits in the *same* binary behind a single flag, not in a second build. Against the
+mmap fault path that is **10,533.4 / 707.07 = 14.90×**, with both sides now measured through
+llama.cpp code rather than one of them through a Python program.
+
+**Still a synthetic access pattern through production code, not an inference run.** No tok/s follows
+from this yet.
+
+**Where the streaming itself stands.** PR
+[ggml-org/llama.cpp#25294](https://github.com/ggml-org/llama.cpp/pull/25294) supplies the caller —
+router top-k, slot cache, I/O worker pool. Its graph half and its loader half are both in the tree
+(47 of its 53 hunks), and its Windows branch — a process-wide mutex that reported `O_DIRECT` while
+reading buffered and serialised — has been replaced by the pooled positional read. **It has never
+executed**: the enabling path is deliberately still out, so the switch does not exist, and every
+regression probe stays character-identical. Decision and reasoning:
+[#44](https://github.com/nibor1896/Crow/issues/44).
 
 ## The upstream blocker, and what measuring it actually settled
 
@@ -113,7 +182,12 @@ Nothing has been closed on the strength of it.
 
 Stated plainly, because the opposite would be a claim we cannot hold: **three-tier expert caching is
 not unprecedented.** llama.cpp RFC #20757 specifies it point for point; MoE-Infinity, FlashMoE and
-others have published on the family. Its pull request was withdrawn, not refuted.
+others have published on the family.
+
+**And the field is crowded, not abandoned.** Checked on 2026-08-03: `#21067` (tensor-override
+prefetch) has been open since 2026-03-27, `#25294` (stream MoE experts from disk) since 2026-07-04,
+`#26414` (pin the hottest experts in RAM) since 2026-08-01. An earlier version of this README said
+the work had been withdrawn; that was the state of one attempt, not of the area.
 
 What remains genuinely open:
 
@@ -125,12 +199,15 @@ What remains genuinely open:
    [#23](https://github.com/nibor1896/Crow/issues/23).
 2. **Nobody has run this file.** The MXFP4 build has a few hundred downloads and no published
    correctness or throughput result in either direction.
-3. **A working implementation** where the existing one stalled.
+3. **Windows had no positional unbuffered read in llama.cpp.** That gap is now closed here, with a
+   test that covers the read path — upstream has none. It is the one piece of this work that is
+   useful to llama.cpp whether or not #25294 is ever merged.
 
 ## Current state
 
-Measurement phase. No product code, deliberately — `tools/` holds measuring instruments and
-nothing else. The rule the project runs on:
+Measurement phase. No product code, deliberately. `tools/` holds measuring instruments, plus the two
+scripts that make a measurement reproducible — one that builds an instrument, one that preserves the
+build under test. The rule the project runs on:
 
 > Every expense needs a zero-cost measurement first that shows what it buys.
 
@@ -145,31 +222,60 @@ cannot be told apart from one that checks nothing.
 | `vram-calibrate.bat` | that VRAM is the binding constraint | 43 expert layers on a 31 GiB card must OOM |
 | `measure-vram.ps1` | what llama.cpp actually places, two instruments on one load | a `-ot` rule matching nothing must void the run — checked by destination, since `--n-cpu-moe` emits override lines too |
 | `measure-loadmode.ps1` | whether bypassing the page cache changes the thrashing regime | an invalid `--load-mode` must be rejected before anything is measured |
-| `probe-queue-depth.py` | random read rate against queue depth — the number the streaming direction rests on | a warm, RAM-resident file must NOT climb the same way; with `--direct`, it must not even read fast |
+| `probe-queue-depth.py` | random read rate against queue depth, shared handle against handle-per-thread, and the read past end of file | a warm, RAM-resident file must NOT climb the same way; with `--direct`, it must not even read fast; a thread that dies must void the sweep instead of reporting a silent zero |
 | `run-probes.ps1` | correctness against a self-made baseline | asks for a different capital, must not answer Paris |
 | `sample-counters.ps1` | how much disk traffic a run causes through hard page faults — the denominator the 445 MB/s on [#30](https://github.com/nibor1896/Crow/issues/30) was borrowed for | three, and each covers a different silent failure: a threshold of `-1` must trip the idle gate, a dead PID must write no rows rather than zeros, and `-ExpectDisableValue 1` must trip the registry check that would otherwise be a green nobody tested |
 | `wait_share.py` | what share of a run is spent on disk traffic and at what **queue depth** — throughput alone cannot tell a saturated drive from one that is merely asked for one block at a time ([#39](https://github.com/nibor1896/Crow/issues/39)) | pass the run's own CSV as the idle control: a baseline that does not separate from the run means the tool is reading noise, and every number above it is void |
+| `preserve-build.ps1` | that the way back to b10223 is a fact and not a sentence — binary plus the commit that produced it | the manifest is written **last**: a crash mid-copy must leave a folder with no manifest rather than one that looks complete, and a directory missing a DLL must go red instead of green with zero probes |
+| `build-bench.ps1` | builds `bench-loader.exe` against llama.cpp's internal `llama_file` | measured on the first build: without `ggml-base.lib` the link leaves 12 unresolved externals — the link step is the check, and it is not skippable |
+| `bench-loader.cpp` | read throughput through llama.cpp's **own** file path, closing the "synthetic on the numerator side" gap on [#30](https://github.com/nibor1896/Crow/issues/30) | `--shared` in the same binary must NOT scale: 8 threads on one handle measured 0.991×, against 2.103× pooled. One value apart, or the figure is about the drive and not the code |
+| `run-stage5-bench.ps1` | drives the whole stage-5 measurement in one deterministic pass, so the order is written down instead of remembered | arm 1 is the control on a 49.98 GB file, above the 46.5 GB the drive's own cache can serve: buffered must come out clearly faster, unbuffered must stay at disk speed. If they land close, `FILE_FLAG_NO_BUFFERING` never took hold and the run is VOID — two figures have already been withdrawn here for exactly that missing half |
+| `run-token-series.ps1` | whether per-token decode time is a shape or a spread — the same positions slow in every run, or positions that move | `-SelfTest` feeds one real series and three broken forms; the discriminator is spread-within-a-run against spread-at-a-fixed-position, not a correlation coefficient |
 
 ### Open
 
 | | Question |
 |---|---|
 | [#23](https://github.com/nibor1896/Crow/issues/23) | Does a coding workload keep hitting the same experts? |
+| [#24](https://github.com/nibor1896/Crow/issues/24) | Baseline on this machine: what do existing tools reach? |
 | [#25](https://github.com/nibor1896/Crow/issues/25) | What VRAM and RAM may the target profile assume? |
 | [#26](https://github.com/nibor1896/Crow/issues/26) | One yardstick: tokens/s **and** a quality gate |
+| [#30](https://github.com/nibor1896/Crow/issues/30) | Three-tier expert cache — the parent of the read-path work |
 | [#33](https://github.com/nibor1896/Crow/issues/33) | Does the upstream MoE fault affect us, on quants we have not tried? |
 | [#38](https://github.com/nibor1896/Crow/issues/38) | Does throughput scale with batch size, and does VRAM then pay? |
+| [#39](https://github.com/nibor1896/Crow/issues/39) | What share of a token's time is spent waiting on the SSD? |
+| [#43](https://github.com/nibor1896/Crow/issues/43) | Windows positional unbuffered read in `llama_file` |
+| [#44](https://github.com/nibor1896/Crow/issues/44) | Adopt #25294 on top of the Windows primitive, or build our own |
 
-Measured since 2026-08-02: prefill throughput, at **707.07 MB/s** over 539 samples with two counter
-paths 0.03 % apart.
+Closed on a measurement rather than on an opinion:
+[#42](https://github.com/nibor1896/Crow/issues/42) — Windows read semantics, shared handle against
+handle-per-thread. [#40](https://github.com/nibor1896/Crow/issues/40) (return path) and
+[#41](https://github.com/nibor1896/Crow/issues/41) (the silent zero) carry work that has been driven
+and are still open; the tickets lag the tree, which is recorded here rather than tidied away.
 
-Decode has been measured, and the result is that a single run does not measure it: across three runs
-prefill reproduced within **2.0 %**, while decode varied by **91 %** between two byte-identically
-configured runs (212.21 against 405.36 ms per token). No decode figure is quoted here for that
-reason. Why it varies is **unmeasured** — no counter run was taken during decode.
+**Measured since 2026-08-02:** prefill throughput at **707.07 MB/s** over 539 samples, two counter
+paths 0.03 % apart. Read throughput through `llama_file` at **10,533.4 MB/s** at depth 8. The
+alignment requirement of this drive, 512 logical and 4096 physical. The behaviour of a read past end
+of file under `FILE_FLAG_NO_BUFFERING`, on 4 of 4 model files.
 
-Unmeasured and named as such: anything above batch 1, longer contexts, and quality. No benchmark has
-been run, and a model answering two capital-city questions is not a quality statement.
+**Decode is a shape, not noise — and it is still not explained.** A single run cannot measure it:
+prefill reproduces within **2.0 %**, while total decode time varied by **91 %** between two
+byte-identically configured runs. Warm and repeated it is far tighter — **1.098×** and **1.120×**
+across two series of five runs — but *inside* one run the per-token step time spreads **3.15×**,
+while the same position across runs holds to **1.12×**. So the step index carries information; the
+cause does not follow from that. Five candidates have been refuted by measurement: platter volume,
+cache hit rate, thermal throttling, power limit, and context size (**1.032×** at a 256× larger
+context). One run of the same day took **2.89×** longer than the series and remains unexplained.
+
+Consequence for every later comparison: **both arms of a before/after run in the same session, back
+to back.** Compared across days or after a cold start, the 2.89× is back in play and the number is
+unreadable.
+
+Unmeasured and named as such: anything above batch 1, quality, and any tok/s figure for expert
+streaming — that path is built but has never run. No benchmark has been run, and a model answering
+two capital-city questions is not a quality statement.
+
+Spent so far: **0 €.**
 
 Full plan: [project board](https://github.com/users/nibor1896/projects/7).
 
@@ -182,6 +288,8 @@ Full plan: [project board](https://github.com/users/nibor1896/projects/7).
 - A number from a vendor's own model card is a statement about that vendor's harness plus the model,
   not about the model. It is labelled as such.
 - A cited number needs its suite in the same commit, and that suite needs a case that fails.
+- A measurement is only a statement once a case was included that had to fail — at the same place
+  the statement hangs on.
 - No issue without a parent. The two roots are #1 (platform) and #2 (model).
 - Closed issues are not deleted. Fourteen of them record a project that was planned against a
   handover document which had narrowed the brief — that failure is worth keeping.
