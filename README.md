@@ -232,6 +232,38 @@ DeepSeek-V4-Flash), and "hit rate" is not one quantity: #25294 counts requested 
 counts share of hit traffic, another counts bytes. Those three do not convert into each other. The
 rows are a rough placement, not a ranking. Only the Crow row was measured on this machine.
 
+### Prefill is the fastest part of the system, not the bottleneck
+
+Measured 2026-08-04 on the streaming path, one model load for all three points:
+
+| prompt tokens | T_PP | **S_PP** |
+|---:|---:|---:|
+| 6 | 0.995 s | 6.03 t/s |
+| 512 | 8.856 s | **57.81 t/s** |
+| 1024 | 17.790 s | **57.56 t/s** |
+
+Scaling is linear — 0.4 % apart between 512 and 1024, so twice the length costs twice the time. The
+6-token row measures warm-up, not rate.
+
+This replaces the figure that made an agent look impossible. The previous prefill number on record
+was **2.85 t/s**, which put 30 000 tokens of context at 2.9 hours just to read the prompt. Measured
+now it is **8.7 minutes**.
+
+**Why it works although prefill takes the multi-wave path.** At an ubatch of 512 the graph computes
+`n_touch_max = min(n_expert, n_tokens * n_expert_used)` = all 256 experts, and with
+`stream_wave_cap` at 17 that is 16 waves per layer. The counters say why it is fast anyway: hit rate
+**82.55 %** against 65–72 % in decode, with **19 381 preloads issued, 4 228 ready on arrival**.
+Prefill routes a whole ubatch at once, so the expert ids for the next step exist before compute
+starts — which is exactly what the preloader is for, and exactly what decode cannot offer, because
+the router of layer N+1 reads the state layer N produces.
+
+**So the bottleneck is generation, not reading:** 57.6 t/s in against 8.11 t/s out, a factor of 7.
+The suspicion that an agent would fail on context length is refuted; if it fails, it fails on answer
+length.
+
+The same run's `S_TG` column reads 4.2–4.9 t/s rather than 8.11 — eight generated tokens are almost
+pure warm-up. Not a contradiction, measured too short. Lengths above 1024 were not run.
+
 ### Quality: the streamed output is byte-identical, and that is now measured
 
 Of the 22 systems surveyed, **three** have ever measured output quality against a non-streamed
