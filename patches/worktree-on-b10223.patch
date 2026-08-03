@@ -1,8 +1,111 @@
+diff --git a/common/arg.cpp b/common/arg.cpp
+index 79480e0..98f0fc7 100644
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -2645,6 +2645,50 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+             }
+         }
+     ).set_env("LLAMA_ARG_N_CPU_MOE"));
++    add_opt(common_arg(
++        {"--moe-stream"},
++        "stream Mixture of Experts (MoE) routed expert weights from disk on demand",
++        [](common_params & params) {
++            params.moe_stream = true;
++        }
++    ).set_env("LLAMA_ARG_MOE_STREAM"));
++    add_opt(common_arg(
++        {"--moe-stream-cache"}, "<NG|Ns>",
++        "expert cache for --moe-stream: memory budget in GiB (e.g. 40) or exact slots per layer with an 's' suffix (e.g. 64s); implies --moe-stream (default: auto)",
++        [](common_params & params, const std::string & value) {
++            params.moe_stream = true;
++            size_t pos = 0;
++            const uint64_t n = std::stoull(value, &pos);
++            std::string suffix = value.substr(pos);
++            for (auto & c : suffix) {
++                c = std::tolower(c);
++            }
++            if (suffix == "s" || suffix == "slot" || suffix == "slots") {
++                params.moe_stream_slots = n;
++            } else if (suffix.empty() || suffix == "g" || suffix == "gb" || suffix == "gib") {
++                params.moe_stream_budget = n * 1024ull * 1024ull * 1024ull;
++            } else {
++                throw std::invalid_argument("invalid value");
++            }
++        }
++    ).set_env("LLAMA_ARG_MOE_STREAM_CACHE"));
++    add_opt(common_arg(
++        {"--moe-stream-io-threads"}, "N",
++        "I/O threads for --moe-stream expert loads; implies --moe-stream (default: auto)",
++        [](common_params & params, int value) {
++            params.moe_stream = true;
++            params.moe_stream_io_threads = value;
++        }
++    ).set_env("LLAMA_ARG_MOE_STREAM_IO_THREADS"));
++    add_opt(common_arg(
++        {"--moe-stream-direct"},
++        "use O_DIRECT for --moe-stream expert reads (bypass the page cache); implies --moe-stream. "
++        "falls back to buffered reads if O_DIRECT is unsupported by the OS or filesystem",
++        [](common_params & params) {
++            params.moe_stream = true;
++            params.moe_stream_direct = true;
++        }
++    ).set_env("LLAMA_ARG_MOE_STREAM_DIRECT"));
+     GGML_ASSERT(params.n_gpu_layers < 0); // string_format would need to be extended for a default >= 0
+     add_opt(common_arg(
+         {"-ngl", "--gpu-layers", "--n-gpu-layers"}, "N",
+diff --git a/common/common.cpp b/common/common.cpp
+index ff27d39..7416ee8 100644
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -1418,6 +1418,13 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
+         common_set_adapter_lora(lctx, params.lora_adapters);
+     }
+ 
++    if (params.warmup && params.moe_stream) {
++        // the warmup graph routes every token through all experts at once, which cannot fit the
++        // streaming expert cache
++        COM_TRC("%s", "skipping warmup: not supported with MoE expert streaming\n");
++        params.warmup = false;
++    }
++
+     if (params.warmup) {
+         COM_TRC("%s", "warming up the model with an empty run - please wait ... (--no-warmup to disable)\n");
+ 
+@@ -1603,6 +1610,12 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
+     mparams.use_extra_bufts = !params.no_extra_bufts;
+     mparams.no_host         = params.no_host;
+ 
++    mparams.moe_stream            = params.moe_stream;
++    mparams.moe_stream_slots      = params.moe_stream_slots;
++    mparams.moe_stream_budget     = params.moe_stream_budget;
++    mparams.moe_stream_io_threads = params.moe_stream_io_threads;
++    mparams.moe_stream_direct     = params.moe_stream_direct;
++
+     if (params.kv_overrides.empty()) {
+         mparams.kv_overrides = NULL;
+     } else {
+diff --git a/common/common.h b/common/common.h
+index 919c0ea..ee22d2e 100644
+--- a/common/common.h
++++ b/common/common.h
+@@ -580,6 +580,12 @@ struct common_params {
+     bool no_extra_bufts    = false; // disable extra buffer types (used for weight repacking)
+     bool no_host           = false; // bypass host buffer allowing extra buffers to be used
+ 
++    bool     moe_stream            = false; // stream MoE routed expert weights from disk on demand
++    uint32_t moe_stream_slots      = 0;     // expert cache slots per streamed layer (0 = auto)
++    uint64_t moe_stream_budget     = 0;     // total expert cache byte budget, used when slots == 0 (0 = auto)
++    int32_t  moe_stream_io_threads = 0;     // expert load I/O threads (<= 0 = default)
++    bool     moe_stream_direct     = false; // use O_DIRECT for expert reads (bypass page cache)
++
+     bool single_turn       = false; // single turn chat conversation
+ 
+     ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K
 diff --git a/common/sampling.cpp b/common/sampling.cpp
-index 256ac16..0ae70c1 100644
+index 256ac16..6f161aa 100644
 --- a/common/sampling.cpp
 +++ b/common/sampling.cpp
-@@ -547,6 +547,65 @@ void common_perf_print(const struct llama_context * ctx, const struct common_sam
+@@ -547,6 +547,73 @@ void common_perf_print(const struct llama_context * ctx, const struct common_sam
          LOG_INF("%s: unaccounted time = %10.2f ms / %5.1f %%      (total - sampling - prompt eval - eval) / (total)\n", __func__, t_unacc_ms, t_unacc_pc);
          LOG_INF("%s:    graphs reused = %10d\n", __func__, data.n_reused);
  
@@ -64,6 +167,14 @@ index 256ac16..0ae70c1 100644
 +                }
 +            }
 +        }
++
++        // Upstream PR #25294 inserts its expert-streaming statistics at exactly this anchor, in
++        // front of common_memory_breakdown_print. The per-token series above wants the same spot.
++        // Both are kept and both print: the series explains the shape of a token's time, the
++        // streaming stats explain how much of it was spent fetching experts, and reading one
++        // without the other is how a stall gets blamed on the wrong tier. No-op while streaming
++        // is off.
++        llama_moe_stream_print_stats(llama_get_model(ctx));
 +
          common_memory_breakdown_print(ctx);
      }
@@ -140,6 +251,20 @@ index 320784c..2aaa8c3 100644
              llama-quant.cpp
              llama-sampler.cpp
              llama-vocab.cpp
+diff --git a/src/llama-adapter.cpp b/src/llama-adapter.cpp
+index 3e0fe66..b679f7d 100644
+--- a/src/llama-adapter.cpp
++++ b/src/llama-adapter.cpp
+@@ -329,6 +329,9 @@ static void llama_adapter_lora_init_impl(llama_model & model, const char * path_
+         // device buft and device ctx
+         const auto * model_tensor = model.get_tensor(name.c_str());
+         if (!model_tensor) {
++            if (model.moe_stream() && name.find("_exps.") != std::string::npos) {
++                throw std::runtime_error("LoRA tensor '" + name + "' targets an SSD-streamed expert tensor, which is not supported");
++            }
+             throw std::runtime_error("LoRA tensor '" + name + "' does not exist in base model (hint: maybe wrong base model?)");
+         }
+ 
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
 index 5ef7bec..e201334 100644
 --- a/src/llama-context.cpp
