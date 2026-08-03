@@ -37,12 +37,14 @@ measures Python's thread scaling and the disk finding is void. The sequential co
 above proves the harness can show speed; this one proves the speed it shows is the
 drive's. A green result without both is not evidence.
 
-THREE ARMS ANSWER THE WINDOWS QUESTIONS THAT STAND BEFORE ANY DIRECT-IO BUILD.
+FOUR ARMS ANSWER THE WINDOWS QUESTIONS THAT STAND BEFORE ANY DIRECT-IO BUILD.
 The plan (Crow/02_docs/windows-braucht-zuerst-eine-positionierte-leseoperation.md,
 stage 3) names three things that are documented or predicted but never measured on
-this machine. Each is a switch here rather than a second program, because this file
-already carries CreateFileW, FILE_FLAG_NO_BUFFERING, the page-aligned buffer, the
-negative control and the ctypes trap that cost a day to find.
+this machine. The fourth arrived later, from stage 6: Arm 1 turned out to answer a
+narrower question than it was being read as answering. Each is a switch here rather
+than a second program, because this file already carries CreateFileW,
+FILE_FLAG_NO_BUFFERING, the page-aligned buffer, the negative control and the ctypes
+trap that cost a day to find.
 
   --shared-handle   Arm 1. Same file, same offsets, same blocks, one SHARED handle
                     across all threads instead of one per thread. MS Learn says
@@ -58,6 +60,42 @@ negative control and the ctypes trap that cost a day to find.
                     thread: ReadFile writes the byte count into that counter, so
                     sharing it would let one thread read another's result and the
                     throughput would rest on a corrupted numerator.
+
+  --shared-overlapped
+                    Arm 4. The same one shared handle as Arm 1, but the offset
+                    travels in an OVERLAPPED structure and SetFilePointerEx is never
+                    called - byte for byte what llama_file::read_raw_at has done
+                    since stage 4 (src/llama-mmap.cpp:393).
+                    Why Arm 1 does not already answer this: it shared the handle AND
+                    the kernel file pointer, so its 0.99x has two possible causes and
+                    separates neither. This arm removes the pointer and leaves the
+                    handle shared - which is the form PR #25294's worker pool would
+                    run in if it were wired to read_raw_at as it stands today.
+                    THE RATIO IS THE VERDICT, not the absolute rate. Near 1.0x means
+                    Windows locks the file object itself, and a handle pool inside
+                    llama_file becomes mandatory before #25294 can be adopted. Near
+                    2.1x means the primitive already carries a pool.
+                    Shorthand for --shared-handle --overlapped-read.
+
+  --overlapped-read A read mechanism, not an arm: the offset goes in the OVERLAPPED
+                    structure instead of through SetFilePointerEx. Needed on its own
+                    - WITHOUT --shared-handle - as the control for Arm 4. If the
+                    shared arm comes out flat, that flat could be the shared handle
+                    or it could be this mechanism; the per-thread form of the same
+                    mechanism is the only thing that tells the two apart. Arm 1
+                    lacking its equivalent control is exactly why Arm 4 had to exist.
+
+  --selftest-overlapped
+                    The failing cases for Arm 4, run against the given file.
+                    (1) OFFSET IDENTITY: the OVERLAPPED path must return bytes
+                    identical to the SetFilePointerEx path at the same offset, and
+                    must return different bytes at a different offset. Without this
+                    a fast rate could equally mean the offset was ignored and every
+                    thread read block 0 - the same shape as the truncated HANDLE
+                    below, which also looked like success.
+                    (2) ALIGNMENT DUTY: an unaligned offset in the structure must be
+                    REFUSED. src/llama-mmap.cpp:92-93 asserts this; nobody measured it.
+                    Exit 0 only if both hold.
 
   --eof-tail        Arm 2. Read the last sector-multiple block of the file, the one
                     whose end lies PAST the logical EOF, under FILE_FLAG_NO_BUFFERING.
@@ -77,13 +115,15 @@ in one run leaves nobody able to say which arm produced the number.
 
 Usage:  probe-queue-depth.py <big-file> [--seconds 4] [--block-kb 68]
                              [--negative-control <small-warm-file>]
-                             [--direct] [--shared-handle]
+                             [--direct] [--shared-handle] [--overlapped-read]
+                             [--shared-overlapped] [--selftest-overlapped]
                              [--eof-tail] [--sector-query]
 Exit 0 = both controls passed and the sweep completed.
      1 = a control failed, sweep void.
 """
 
 import ctypes
+import hashlib
 import os
 import sys
 import threading
@@ -168,6 +208,26 @@ class STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR(ctypes.Structure):
                 ("BytesOffsetForSectorAlignment", ctypes.c_uint32)]
 
 
+class OVERLAPPED(ctypes.Structure):
+    """Arm 4. The real OVERLAPPED carries a union whose other member is a pointer;
+    for a file read the Offset/OffsetHigh pair is the member in use, so it is
+    spelled out directly here.
+
+    On a handle opened WITHOUT FILE_FLAG_OVERLAPPED - which is every handle this
+    file opens, and every handle llama_file opens - passing this structure does NOT
+    make the read asynchronous. ReadFile still returns only when the data is there,
+    and ERROR_IO_PENDING never appears. The structure buys one thing: the read takes
+    its position from here instead of from the kernel's file pointer. Whether that
+    is enough to let two threads proceed at once is the question Arm 4 asks, and
+    nobody has measured it on this machine.
+    """
+    _fields_ = [("Internal",     ctypes.c_void_p),
+                ("InternalHigh", ctypes.c_void_p),
+                ("Offset",       ctypes.c_uint32),
+                ("OffsetHigh",   ctypes.c_uint32),
+                ("hEvent",       ctypes.c_void_p)]
+
+
 def open_direct_handle(path):
     """One unbuffered handle. Separate from DirectReader so Arm 1 can share it.
 
@@ -206,6 +266,13 @@ class DirectReader:
         if not self.buf:
             raise OSError(f"VirtualAlloc failed, error {ctypes.get_last_error()}")
         self._got = ctypes.c_uint32(0)
+        # Arm 4's structure, one per reader for the same reason the byte counter is
+        # one per reader: ReadFile writes into it. Two threads sharing it would be
+        # writing each other's offsets, and the sweep would measure something nobody
+        # asked for. The address is taken once - computing it per call would put a
+        # ctypes conversion inside the loop whose speed is the measurement.
+        self._ov = OVERLAPPED()
+        self._ov_addr = ctypes.addressof(self._ov)
 
     def read_at(self, pos):
         """Read one block at `pos`, which is rounded DOWN to a sector boundary."""
@@ -233,6 +300,66 @@ class DirectReader:
         ok = _k32.ReadFile(self.h, self.buf, length, ctypes.byref(self._got), None)
         err = 0 if ok else ctypes.get_last_error()
         return bool(ok), self._got.value, err
+
+    def _arm_overlapped(self, pos):
+        """Zero the structure and put `pos` in it, exactly as llama_file does.
+
+        llama_file::read_raw_at builds a fresh `OVERLAPPED ov = {}` on every call
+        (src/llama-mmap.cpp:399-401). Reusing one instance is what makes this fast
+        enough to measure, so the four fields it would have zeroed are zeroed here
+        by hand. Internal and InternalHigh are the ones that matter: Windows writes
+        status into them, and leaving last call's status in place is the kind of
+        difference that shows up once in a thousand reads and never reproduces.
+        """
+        self._ov.Internal = None
+        self._ov.InternalHigh = None
+        self._ov.hEvent = None
+        self._ov.Offset = pos & 0xFFFFFFFF
+        self._ov.OffsetHigh = (pos >> 32) & 0xFFFFFFFF
+
+    def read_at_overlapped(self, pos):
+        """Arm 4's sweep read: position travels in the structure, never through the
+        kernel's file pointer. `pos` is rounded DOWN to a sector, like read_at.
+
+        Deliberately identical to read_at in every other respect - same handle, same
+        buffer, same block, same rounding, same raise-on-failure. The one difference
+        is where the position comes from, so the difference in the number has one
+        possible source.
+        """
+        pos -= pos % SECTOR
+        self._arm_overlapped(pos)
+        if not _k32.ReadFile(self.h, self.buf, self.block,
+                             ctypes.byref(self._got), self._ov_addr):
+            raise OSError(f"ReadFile(OVERLAPPED) failed at {pos}, "
+                          f"error {ctypes.get_last_error()}")
+        return self._got.value
+
+    def probe_at_overlapped(self, pos, length):
+        """The selftest's read: exact position, exact length, does NOT raise.
+
+        Same split as read_at against read_probe, and for the same reason: the
+        alignment case asks what Windows DOES with a bad offset, so a failure has
+        to come back as data rather than as an exception.
+        Returns (ok, bytes_reported, win32_error).
+        """
+        if length > self.block:
+            raise ValueError(f"length {length} exceeds the reader's buffer {self.block}")
+        self._arm_overlapped(pos)
+        self._got.value = 0
+        ok = _k32.ReadFile(self.h, self.buf, length,
+                           ctypes.byref(self._got), self._ov_addr)
+        err = 0 if ok else ctypes.get_last_error()
+        return bool(ok), self._got.value, err
+
+    def snapshot(self, n):
+        """Copy the first n bytes out of the buffer, so two reads can be compared.
+
+        Only the selftest uses this. The sweep must never call it: it allocates a
+        fresh bytes object per call, which is the 1.92x cost measured in
+        sequential_control, and it would land hardest exactly where the drive is
+        fastest.
+        """
+        return ctypes.string_at(self.buf, n)
 
     def close(self):
         if self.buf:
@@ -328,13 +455,18 @@ class SweepInvalid(Exception):
 
 
 def random_reads(path, size, block, depth, seconds, direct=False, fail_thread=None,
-                 shared_handle=False):
+                 shared_handle=False, overlapped=False):
     """`depth` threads, one file handle each, random offsets, for `seconds`.
 
     shared_handle flips that to ONE handle for all threads - Arm 1. Everything
     else stays identical: same file, same offset sequence, same block size, same
     flag. Only the handle changes, so the difference in the number is the answer
     and nothing else.
+
+    overlapped flips the read mechanism to the OVERLAPPED offset - Arm 4 when it
+    runs together with shared_handle, and Arm 4's control when it runs without.
+    The two switches are independent on purpose: crossing them is the only way to
+    say whether a flat result belongs to the shared handle or to the mechanism.
 
     fail_thread is for the failing case only: that thread raises on purpose, so
     the guards below can be shown to fire. Never set it in a real measurement.
@@ -344,6 +476,11 @@ def random_reads(path, size, block, depth, seconds, direct=False, fail_thread=No
         # would fall through to the buffered path and quietly measure the ordinary
         # sweep a second time, under Arm 1's name.
         raise ValueError("shared_handle requires direct=True (FILE_FLAG_NO_BUFFERING)")
+    if overlapped and not direct:
+        # Same shape as above. The buffered worker never builds a DirectReader, so
+        # overlapped would be silently dropped and the run would report Arm 4's
+        # label over the ordinary sweep's numbers.
+        raise ValueError("overlapped requires direct=True (FILE_FLAG_NO_BUFFERING)")
     stop = time.perf_counter() + seconds
     counts = [0] * depth
     # One slot per thread. threading swallows exceptions into stderr and the
@@ -365,12 +502,17 @@ def random_reads(path, size, block, depth, seconds, direct=False, fail_thread=No
             stride = 1_000_003 * (idx * 2 + 1)
             pos = (idx * 7_919_357) % span
             rd = DirectReader(path, block, handle=shared_h)
+            # Bound once, outside the loop. An `if overlapped` per iteration would
+            # put a branch in the thing being timed; more to the point, binding it
+            # here makes it impossible for the two arms to differ in anything but
+            # this one name.
+            do_read = rd.read_at_overlapped if overlapped else rd.read_at
             try:
                 reads = 0
                 while time.perf_counter() < stop:
                     if fail_thread == idx and reads == 3:
                         raise RuntimeError(f"selftest: thread {idx} failing on purpose")
-                    n += rd.read_at(pos)
+                    n += do_read(pos)
                     reads += 1
                     pos = (pos + stride) % span
             except BaseException as exc:      # noqa: BLE001 - re-raised via errors[]
@@ -439,7 +581,7 @@ def random_reads(path, size, block, depth, seconds, direct=False, fail_thread=No
 
 
 def run_sweep(path, size, block, seconds, label, direct=False, fail_thread=None,
-              shared_handle=False):
+              shared_handle=False, overlapped=False):
     """The sweep itself. Returns (ratio_at_max_depth, rows) so a caller can compare two.
 
     Raises SweepInvalid if any reader died. It does not return a partial table:
@@ -453,7 +595,7 @@ def run_sweep(path, size, block, seconds, label, direct=False, fail_thread=None,
     for depth in (1, 4, 8, 16, 32, 64):
         try:
             mb, got, dt = random_reads(path, size, block, depth, seconds, direct,
-                                       fail_thread, shared_handle)
+                                       fail_thread, shared_handle, overlapped)
         except SweepInvalid as exc:
             print(f"  {depth:5}   INVALID - {exc}")
             raise
@@ -463,6 +605,113 @@ def run_sweep(path, size, block, seconds, label, direct=False, fail_thread=None,
         rows.append((depth, mb, ratio))
         print(f"  {depth:5}   {human(mb)}   {ratio:8.2f}x")
     return rows[-1][2], rows
+
+
+ERROR_INVALID_PARAMETER = 87
+
+
+def overlapped_selftest(path, block):
+    """Arm 4's two failing cases. Neither is optional before a rate is quoted.
+
+    Case 1 exists because of what a fast wrong answer would look like. If the
+    OVERLAPPED offset were ignored - a field in the wrong place, a 32-bit
+    truncation of the high half, a structure Windows rejected silently - every
+    thread would read the same block, that block would sit in the drive's own
+    cache after the first read, and the sweep would report a magnificent number
+    with a perfect ratio. This file has already paid for one bug of exactly that
+    shape: the HANDLE truncated to 32 bits, which made CreateFileW look like it
+    succeeded. A rate is only evidence once the bytes are known to come from where
+    they were asked for.
+
+    Case 2 tests a claim that is currently only written down. src/llama-mmap.cpp:92-93
+    says the alignment duty of FILE_FLAG_NO_BUFFERING covers the OVERLAPPED offset
+    too. If that is wrong, the C++ carries a comment that will be believed by the
+    next reader; if it is right, stage 6 knows one more thing it cannot get away with.
+    """
+    size = os.path.getsize(path)
+    print("=== Arm 4 selftest: the two cases that must hold before any sweep counts ===")
+    print(f"  file        {path}")
+    print(f"  size        {size:,} bytes")
+    print(f"  block       {block:,} B")
+    print()
+
+    # Two aligned offsets far apart, both deep inside the tensor payload rather
+    # than in the header, so that identical content at both would be a freak event
+    # rather than a structural one.
+    a = ((size // 3) // SECTOR) * SECTOR
+    b = ((size // 3 * 2) // SECTOR) * SECTOR
+    if b + block > size:
+        b = ((size - block) // SECTOR) * SECTOR
+    if a == b or a + block > size or a < 0 or b < 0:
+        print("  SETUP ERROR: this file cannot hold two disjoint blocks of that size.")
+        return 2
+
+    def digest(data):
+        return hashlib.sha256(data).hexdigest()[:16]
+
+    rd = DirectReader(path, block)
+    try:
+        print("  (1) OFFSET IDENTITY - the OVERLAPPED path must read where it is told")
+        print(f"      offset A    {a:,}")
+        print(f"      offset B    {b:,}")
+        print()
+        seek_a = rd.snapshot(rd.read_at(a))
+        ov_a = rd.snapshot(rd.read_at_overlapped(a))
+        seek_b = rd.snapshot(rd.read_at(b))
+        ov_b = rd.snapshot(rd.read_at_overlapped(b))
+        print(f"      A via SetFilePointerEx   {len(seek_a):,} B   sha256 {digest(seek_a)}")
+        print(f"      A via OVERLAPPED         {len(ov_a):,} B   sha256 {digest(ov_a)}")
+        print(f"      B via SetFilePointerEx   {len(seek_b):,} B   sha256 {digest(seek_b)}")
+        print(f"      B via OVERLAPPED         {len(ov_b):,} B   sha256 {digest(ov_b)}")
+        print()
+
+        if seek_a == seek_b:
+            print("      RESULT: INCONCLUSIVE - the two offsets hold identical bytes, so")
+            print("      reading the same block twice would pass this test. Nothing is")
+            print("      proven about the offset. Re-run against a different file.")
+            return 1
+        if ov_a != seek_a or ov_b != seek_b:
+            print("      RESULT: FAIL - the OVERLAPPED path did not return the bytes that")
+            print("      live at the offset it was given. Every rate this arm could")
+            print("      produce would be a rate for reading the wrong thing.")
+            return 1
+        if ov_a == ov_b:
+            print("      RESULT: FAIL - both OVERLAPPED reads returned the same bytes")
+            print("      although the offsets differ. The offset is being ignored.")
+            return 1
+        print("      RESULT: PASS - bit-identical to the seek path at both offsets, and")
+        print("      different from each other. The offset in the structure is honoured.")
+        print()
+
+        print("  (2) ALIGNMENT DUTY - an unaligned offset must be REFUSED")
+        bad = a + 1
+        print(f"      offset      {bad:,}   (offset A plus one byte)")
+        print(f"      expected    ReadFile FALSE, error {ERROR_INVALID_PARAMETER}")
+        ok, got, err = rd.probe_at_overlapped(bad, block)
+        print(f"      ReadFile    {'TRUE' if ok else 'FALSE'}, reported {got:,} bytes"
+              + ("" if ok else f", error {err}"))
+        print()
+        if ok:
+            print("      RESULT: FAIL - Windows accepted an unaligned OVERLAPPED offset.")
+            print("      That contradicts the comment at src/llama-mmap.cpp:92-93, which")
+            print("      the next reader of that file would otherwise believe. The comment")
+            print("      is what needs correcting, not this test.")
+            return 1
+        if err != ERROR_INVALID_PARAMETER:
+            print(f"      RESULT: PASS WITH A DIFFERENCE - refused, but with error {err}")
+            print(f"      rather than the expected {ERROR_INVALID_PARAMETER}. The duty holds;")
+            print("      the error code on record does not. Quote this number, not that one.")
+            return 0
+        print("      RESULT: PASS - refused with ERROR_INVALID_PARAMETER. The alignment")
+        print("      duty covers the OVERLAPPED offset, as the C++ comment asserts.")
+    finally:
+        rd.close()
+
+    print()
+    print("=== verdict ===")
+    print("  Both cases hold. A rate measured through read_at_overlapped is a rate for")
+    print("  reading the bytes that were asked for, at the offsets they were asked at.")
+    return 0
 
 
 def eof_tail_probe(path, block):
@@ -641,6 +890,9 @@ def main(argv):
     direct = False
     fail_thread = None
     shared_handle = False
+    overlapped = False
+    shared_overlapped = False
+    selftest_overlapped = False
     eof_tail = False
     sector_query = False
     for i, a in enumerate(argv):
@@ -658,28 +910,56 @@ def main(argv):
             fail_thread = int(argv[i + 1])
         if a == "--shared-handle":
             shared_handle = True
+        if a == "--overlapped-read":
+            overlapped = True
+        if a == "--shared-overlapped":
+            shared_overlapped = True
+        if a == "--selftest-overlapped":
+            selftest_overlapped = True
         if a == "--eof-tail":
             eof_tail = True
         if a == "--sector-query":
             sector_query = True
 
     # One arm at a time. Two arms in one run leaves nobody able to say which one
-    # produced the number - and each of the three answers a different question, so
-    # there is no reading of a combined run that is worth having.
+    # produced the number - and each of them answers a different question, so there
+    # is no reading of a combined run that is worth having.
+    #
+    # --overlapped-read is deliberately NOT in this list. It is a mechanism, like
+    # --direct, and it has to be free to combine with --shared-handle - that
+    # combination IS Arm 4, and the same mechanism without the sharing is Arm 4's
+    # control. Naming them mutually exclusive would forbid the measurement.
     arms = [n for n, on in (("--shared-handle", shared_handle),
+                            ("--shared-overlapped", shared_overlapped),
+                            ("--selftest-overlapped", selftest_overlapped),
                             ("--eof-tail", eof_tail),
                             ("--sector-query", sector_query)) if on]
     if len(arms) > 1:
         print(f"SETUP ERROR: the arms run one at a time; got {', '.join(arms)}")
         return 2
+
+    # Arm 4 is exactly these two together, and it carries its own name because that
+    # name is what gets quoted. Expanding it here rather than threading a third flag
+    # through means the sweep cannot tell Arm 4 from the pair spelled out by hand -
+    # which is the point, since they must be the same run.
+    if shared_overlapped:
+        shared_handle = True
+        overlapped = True
+
     if shared_handle and not direct:
         print("SETUP ERROR: --shared-handle needs --direct. The question is whether")
         print("Windows serialises unbuffered reads on one synchronous handle; without")
         print("the flag the page cache answers instead of the drive.")
         return 2
+    if overlapped and not direct:
+        print("SETUP ERROR: --overlapped-read and --shared-overlapped need --direct.")
+        print("The buffered sweep never builds a DirectReader, so the mechanism would")
+        print("be dropped without a word and the run would carry Arm 4's label over")
+        print("the ordinary sweep's numbers.")
+        return 2
 
-    needs_windows = direct or eof_tail or sector_query
-    needs_alignment = direct or eof_tail
+    needs_windows = direct or eof_tail or sector_query or selftest_overlapped
+    needs_alignment = direct or eof_tail or selftest_overlapped
     if needs_windows and sys.platform != "win32":
         print("SETUP ERROR: --direct, --eof-tail and --sector-query are Windows-only")
         return 2
@@ -704,6 +984,8 @@ def main(argv):
         return sector_query_probe(path)
     if eof_tail:
         return eof_tail_probe(path, block)
+    if selftest_overlapped:
+        return overlapped_selftest(path, block)
     print(f"file        {path}")
     print(f"size        {size:,} bytes")
     print(f"block       {block_kb} KB   (the measured average hard-fault size)")
@@ -722,15 +1004,32 @@ def main(argv):
     print()
 
     mode = "UNBUFFERED, past the page cache" if direct else "buffered, page cache in play"
-    handles = "ONE SHARED handle for all threads (Arm 1)" if shared_handle \
+    handles = "ONE SHARED handle for all threads" if shared_handle \
               else "one handle per thread"
+    reads = "OVERLAPPED offset, kernel file pointer never touched" if overlapped \
+            else "SetFilePointerEx then ReadFile, shared kernel file pointer"
+    # The name is derived from what is actually switched on, not from which spelling
+    # the caller used. --shared-overlapped and "--shared-handle --overlapped-read"
+    # are the same run and must not be able to print different headings.
+    arm_name = {(True, True): "Arm 4",
+                (True, False): "Arm 1",
+                (False, True): "Arm 4's control",
+                (False, False): "baseline"}[(shared_handle, overlapped)]
     print(f"  mode        {mode}")
     print(f"  handles     {handles}")
+    print(f"  reads       {reads}")
+    print(f"  arm         {arm_name}")
     if shared_handle:
-        print("              buffer and byte counter stay per thread; only the handle")
-        print("              is shared, so the numerator of every rate below is sound")
-        print("  reference   per-thread form, 2026-08-02: 4812.2 MB/s at depth 1,")
-        print("              10523.9 MB/s at depth 8")
+        print("              buffer, byte counter and OVERLAPPED structure stay per")
+        print("              thread; only the handle is shared, so the numerator of")
+        print("              every rate below is sound")
+    if overlapped:
+        print("  mirrors     llama_file::read_raw_at, src/llama-mmap.cpp:393")
+    print()
+    print("  reference, same file and block, measured 2026-08-03 - RATIOS, because")
+    print("  the absolute rates carry page-cache inflation and the ratio does not:")
+    print("     per-thread, SetFilePointerEx   4828.9 -> 10592.0 MB/s   2.19x at depth 8")
+    print("     shared,     SetFilePointerEx   5020.0 ->  4895.7 MB/s   0.98x at depth 8")
     print()
     if fail_thread is not None:
         print(f"=== SELFTEST: thread {fail_thread} will raise on purpose ===")
@@ -739,7 +1038,7 @@ def main(argv):
         print()
         try:
             run_sweep(path, size, block, seconds, "selftest", direct, fail_thread,
-                      shared_handle)
+                      shared_handle, overlapped)
         except SweepInvalid as exc:
             print()
             print(f"  caught: SweepInvalid: {exc}")
@@ -751,10 +1050,9 @@ def main(argv):
         return 1
 
     try:
-        disk_label = "the real file, on disk, ONE SHARED handle" if shared_handle \
-                     else "the real file, on disk"
+        disk_label = f"the real file, on disk - {arm_name}, {handles.lower()}"
         disk_ratio, disk_rows = run_sweep(path, size, block, seconds, disk_label,
-                                          direct, None, shared_handle)
+                                          direct, None, shared_handle, overlapped)
     except SweepInvalid as exc:
         print()
         print(f"  VERDICT: FAILED - {exc}")
@@ -799,10 +1097,14 @@ def main(argv):
                 else "warm file, no disk involved"
     if shared_handle:
         neg_label += ", ONE SHARED handle"
-    # The control runs in the SAME handle form as the sweep it vouches for. Run it
-    # per-thread while the sweep is shared and the two are no longer comparable.
+    if overlapped:
+        neg_label += ", OVERLAPPED offset"
+    # The control runs in the SAME handle form AND the same read mechanism as the
+    # sweep it vouches for. Run it per-thread while the sweep is shared, or through
+    # the seek path while the sweep used OVERLAPPED, and the two are no longer
+    # comparable - the control would be vouching for a run that never happened.
     neg_ratio, neg_rows = run_sweep(neg_path, neg_size, block, seconds, neg_label,
-                                    direct, None, shared_handle)
+                                    direct, None, shared_handle, overlapped)
     print()
 
     print("=== verdict ===")
