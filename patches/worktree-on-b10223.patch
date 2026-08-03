@@ -1549,10 +1549,10 @@ index 056a6ef..02553b5 100644
      virtual ~llama_model_base() = default;
 diff --git a/src/llama-moe-stream.cpp b/src/llama-moe-stream.cpp
 new file mode 100644
-index 0000000..ce17396
+index 0000000..e1efc20
 --- /dev/null
 +++ b/src/llama-moe-stream.cpp
-@@ -0,0 +1,845 @@
+@@ -0,0 +1,871 @@
 +#include "llama-moe-stream.h"
 +
 +#include "llama-impl.h"
@@ -1612,16 +1612,41 @@ index 0000000..ce17396
 +// read len bytes at file offset offs into staging (thread-safe positional read); staging must have
 +// room for len (+ 2*MOE_STREAM_DIRECT_ALIGN when direct). returns a pointer to the len bytes
 +// within staging, or nullptr on failure
-+static const uint8_t * llama_moe_stream_pread(llama_file & file, uint8_t * staging, size_t len, size_t offs, bool direct) {
++static const uint8_t * llama_moe_stream_pread(llama_file & file, uint8_t * staging, size_t len, size_t offs, bool direct, int worker_id) {
 +#ifdef _WIN32
 +    GGML_UNUSED(direct);
-+    // no positional read primitive; serialize the seek+read pairs
-+    static std::mutex io_mtx;
-+    std::lock_guard<std::mutex> lock(io_mtx);
++    // Windows has a positional read now, out of a pool of private handles - one per worker_id.
++    // The mutex this replaces bought correctness by serialising every reader, and that is not a
++    // small price: measured 2026-08-03, a shared handle stays at 1.01x at queue depth 8 while a
++    // handle per thread reaches 2.22x. Windows serialises on the file OBJECT, not the file pointer,
++    // so removing the seek was never going to be enough on its own.
++    //
++    // The alignment is asked of the file rather than derived from `direct`, because read_raw_at is
++    // the RAW form and the file is the only one who knows what it actually opened: 1 when buffered,
++    // which degenerates the arithmetic below into a plain read, and the device sector size under
++    // direct I/O - including the case where a direct open fell back to buffered on its own.
++    const size_t a = file.read_alignment();
++    if (a == 0 || a > MOE_STREAM_DIRECT_ALIGN) {
++        // staging carries 2*MOE_STREAM_DIRECT_ALIGN of slack and not one byte more, so a larger
++        // sector would run off the end of it. A named failure, not a heap overrun.
++        LLAMA_LOG_WARN("%s: read alignment %zu is outside the staging slack of %zu\n",
++                __func__, a, MOE_STREAM_DIRECT_ALIGN);
++        return nullptr;
++    }
++
++    // same head/tail dance as the O_DIRECT branch below; a == 1 makes it a no-op
++    const size_t aoffs = offs & ~(a - 1);
++    const size_t head  = offs - aoffs;
++    const size_t total = ((head + len + a - 1)/a)*a;
++
 +    try {
-+        file.seek(offs, SEEK_SET);
-+        file.read_raw(staging, len);
-+        return staging;
++        const size_t got = file.read_raw_at(staging, total, aoffs, worker_id);
++        // short only at end of file, and the aligned tail may legitimately run past it - what has
++        // to arrive is the payload, not the padding
++        if (got < head + len) {
++            return nullptr;
++        }
++        return staging + head;
 +    } catch (...) {
 +        return nullptr;
 +    }
@@ -1829,7 +1854,8 @@ index 0000000..ce17396
 +        if (ok) {
 +            uint8_t * probe = (uint8_t *) moe_aligned_alloc(MOE_STREAM_DIRECT_ALIGN);
 +            GGML_ASSERT(probe != nullptr);
-+            ok = llama_moe_stream_pread(*files.front(), probe, MOE_STREAM_DIRECT_ALIGN, 0, /*direct =*/ true) != nullptr;
++            // -1: single-threaded, before any worker starts, so it reads through the shared handle
++            ok = llama_moe_stream_pread(*files.front(), probe, MOE_STREAM_DIRECT_ALIGN, 0, /*direct =*/ true, /*worker_id =*/ -1) != nullptr;
 +            moe_aligned_free(probe);
 +        }
 +        if (!ok) {
@@ -1860,13 +1886,13 @@ index 0000000..ce17396
 +    workers_started = true;
 +    workers.reserve(n_io_threads);
 +    for (int32_t i = 0; i < n_io_threads; i++) {
-+        workers.emplace_back([this]() { worker_loop(); });
++        workers.emplace_back([this, i]() { worker_loop((int) i); });
 +    }
 +}
 +
 +// I/O worker: pops a reserved load, reads its expert slab(s) from the GGUF file into the cache
 +// slot, and marks the slot RESIDENT (or flags load_failed); stale/duplicate items are skipped
-+void llama_moe_stream::worker_loop() {
++void llama_moe_stream::worker_loop(int worker_id) {
 +    // page-aligned staging (Metal private buffers require page-aligned source + page-multiple
 +    // length; O_DIRECT needs the extra head/tail slack for its aligned reads)
 +    uint8_t * staging = (uint8_t *) moe_aligned_alloc(max_nb_expert + 2*MOE_STREAM_DIRECT_ALIGN);
@@ -1895,7 +1921,7 @@ index 0000000..ce17396
 +
 +        bool ok = true;
 +        for (const auto & wt : sl.weights) {
-+            const uint8_t * data = llama_moe_stream_pread(*files[wt.file_idx], staging, wt.nb_expert, wt.offs + (size_t) w.expert*wt.nb_expert, use_direct_io);
++            const uint8_t * data = llama_moe_stream_pread(*files[wt.file_idx], staging, wt.nb_expert, wt.offs + (size_t) w.expert*wt.nb_expert, use_direct_io, worker_id);
 +            if (data == nullptr) {
 +                ok = false;
 +                break;
@@ -2400,10 +2426,10 @@ index 0000000..ce17396
 +}
 diff --git a/src/llama-moe-stream.h b/src/llama-moe-stream.h
 new file mode 100644
-index 0000000..95032fa
+index 0000000..097e0ce
 --- /dev/null
 +++ b/src/llama-moe-stream.h
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,204 @@
 +#pragma once
 +
 +#include "llama-mmap.h"
@@ -2586,7 +2612,10 @@ index 0000000..95032fa
 +
 +    // internals
 +    void start_workers_locked();
-+    void worker_loop();
++    // worker_id is the worker's dense index, 0..n_io_threads-1, and is passed all the way down to
++    // llama_file::read_raw_at - on Windows it selects that worker's private handle, which is what
++    // makes the pool parallel rather than merely correct
++    void worker_loop(int worker_id);
 +    int32_t pick_victim_locked(llama_moe_stream_layer & sl, const uint8_t * keep) const;
 +    void reserve_slot_locked(llama_moe_stream_layer & sl, int32_t expert, int32_t slot);
 +
