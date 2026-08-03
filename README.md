@@ -163,9 +163,13 @@ cannot be told apart from one that checks nothing.
 Measured since 2026-08-02: prefill throughput, at **707.07 MB/s** over 539 samples with two counter
 paths 0.03 % apart.
 
-Unmeasured and named as such: decode — every run so far ended after a single token, so every number
-here is prefill — anything above batch 1, longer contexts, and quality. No benchmark has been run,
-and a model answering two capital-city questions is not a quality statement.
+Decode has been measured, and the result is that a single run does not measure it: across three runs
+prefill reproduced within **2.0 %**, while decode varied by **91 %** between two byte-identically
+configured runs (212.21 against 405.36 ms per token). No decode figure is quoted here for that
+reason. Why it varies is **unmeasured** — no counter run was taken during decode.
+
+Unmeasured and named as such: anything above batch 1, longer contexts, and quality. No benchmark has
+been run, and a model answering two capital-city questions is not a quality statement.
 
 Full plan: [project board](https://github.com/users/nibor1896/projects/7).
 
