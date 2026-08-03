@@ -1,5 +1,5 @@
-﻿diff --git a/src/llama-mmap.cpp b/src/llama-mmap.cpp
-index ed572da..c94d657 100644
+diff --git a/src/llama-mmap.cpp b/src/llama-mmap.cpp
+index ed572da..157e9eb 100644
 --- a/src/llama-mmap.cpp
 +++ b/src/llama-mmap.cpp
 @@ -34,6 +34,11 @@
@@ -14,7 +14,7 @@ index ed572da..c94d657 100644
  #endif
  
  #if defined(__APPLE__)
-@@ -67,7 +72,30 @@ static std::string llama_format_win_err(DWORD err) {
+@@ -67,7 +72,54 @@ static std::string llama_format_win_err(DWORD err) {
  
  struct llama_file::impl {
  #if defined(_WIN32)
@@ -27,6 +27,30 @@ index ed572da..c94d657 100644
 +    // The destructor asks about OWNERSHIP, not about mode, which is why this is not
 +    // called is_direct_io.
 +    bool owns_handle = false;
++
++    // One private handle per concurrent reader. This is the whole point of the pool, and
++    // it is not an optimisation of the OVERLAPPED read - it is the thing the OVERLAPPED
++    // read could not buy.
++    //
++    // Measured 2026-08-03 on this machine, 12.75 MiB blocks, FILE_FLAG_NO_BUFFERING,
++    // same file and offsets throughout: one shared handle read through an OVERLAPPED
++    // offset reaches 1.01x at queue depth 8; one handle per thread reaches 2.22x. The
++    // same pair through SetFilePointerEx gives 0.98x and 2.19x. The read mechanism makes
++    // no difference at all; sharing the handle makes all of it. Windows serialises on the
++    // file object, not on the file pointer.
++    //
++    // 18 slots because that is PR #25294's MOE_STREAM_IO_THREADS_MAX. Saturation was
++    // measured at depth 8 and depth 64 buys nothing, so the last ten slots are not there
++    // because they pay - they are there so a legal worker id cannot quietly land back on
++    // the shared handle and take the serialisation with it.
++    //
++    // n_pool counts what was actually opened, always contiguous from 0. That is why the
++    // array needs no sentinel: slots at or past n_pool were never opened, so the
++    // destructor closes exactly [0, n_pool) and an aggregate initialiser that fills with
++    // NULL rather than INVALID_HANDLE_VALUE cannot turn into a CloseHandle(NULL).
++    static constexpr int POOL_SLOTS = 18;
++    HANDLE h_pool[POOL_SLOTS] = {};
++    int    n_pool = 0;
 +
 +    // The file position under direct I/O, kept here instead of in the kernel.
 +    //
@@ -46,7 +70,7 @@ index ed572da..c94d657 100644
      std::string GetErrorMessageWin32(DWORD error_code) const {
          std::string ret;
          LPSTR lpMsgBuf = NULL;
-@@ -83,10 +111,123 @@ struct llama_file::impl {
+@@ -83,10 +135,150 @@ struct llama_file::impl {
          return ret;
      }
  
@@ -162,6 +186,33 @@ index ed572da..c94d657 100644
 +        owns_handle = true;
 +        alignment   = sector;
 +        size        = (size_t) li.QuadPart;
++
++        // Open the private handles here: single-threaded, after the path, the flags and
++        // the sector size are all known good, and before anyone can read.
++        //
++        // A short pool is NOT fatal. read_raw_at falls back to the shared handle for any
++        // slot that is missing, which costs throughput and correctness nothing. It is
++        // logged rather than swallowed, because a pool that came up empty reads exactly
++        // the same bytes as one that works - it simply never scales, and that is the
++        // failure shape this file keeps finding.
++        //
++        // FILE_SHARE_READ, the same as the handle above. Win32 grants the second open
++        // only if its access is permitted by every existing handle's share mode AND its
++        // own share mode permits every existing handle's access; read-only on both sides
++        // satisfies that. Asking for FILE_SHARE_WRITE here as well would still be granted
++        // and would still mean two different sharing contracts on one file.
++        for (int i = 0; i < POOL_SLOTS; i++) {
++            const HANDLE hp = CreateFileW(abs_path, GENERIC_READ, FILE_SHARE_READ, NULL,
++                                          OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, NULL);
++            if (hp == INVALID_HANDLE_VALUE) {
++                LLAMA_LOG_WARN("%s: opened %d of %d private read handles for '%s': %s. "
++                               "Concurrent reads fall back to the shared handle and will not scale\n",
++                               __func__, i, POOL_SLOTS, fname.c_str(),
++                               GetErrorMessageWin32(GetLastError()).c_str());
++                break;
++            }
++            h_pool[n_pool++] = hp;
++        }
 +        return true;
 +    }
 +
@@ -173,7 +224,7 @@ index ed572da..c94d657 100644
          }
          fp_win32 = (HANDLE) _get_osfhandle(_fileno(fp));
          seek(0, SEEK_END);
-@@ -94,7 +235,7 @@ struct llama_file::impl {
+@@ -94,7 +286,7 @@ struct llama_file::impl {
          seek(0, SEEK_SET);
      }
  
@@ -182,7 +233,7 @@ index ed572da..c94d657 100644
          fp = file;
          fp_win32 = (HANDLE) _get_osfhandle(_fileno(fp));
          seek(0, SEEK_END);
-@@ -103,6 +244,10 @@ struct llama_file::impl {
+@@ -103,6 +295,10 @@ struct llama_file::impl {
      }
  
      size_t tell() const {
@@ -193,7 +244,7 @@ index ed572da..c94d657 100644
          LARGE_INTEGER li;
          li.QuadPart = 0;
          BOOL ret = SetFilePointerEx(fp_win32, li, &li, FILE_CURRENT);
-@@ -113,11 +258,25 @@ struct llama_file::impl {
+@@ -113,11 +309,25 @@ struct llama_file::impl {
          return li.QuadPart;
      }
  
@@ -220,7 +271,7 @@ index ed572da..c94d657 100644
          LARGE_INTEGER li;
          li.QuadPart = offset;
          BOOL ret = SetFilePointerEx(fp_win32, li, NULL, whence);
-@@ -126,7 +285,24 @@ struct llama_file::impl {
+@@ -126,7 +336,24 @@ struct llama_file::impl {
          }
      }
  
@@ -246,7 +297,7 @@ index ed572da..c94d657 100644
          size_t bytes_read = 0;
          while (bytes_read < len) {
              size_t chunk_size = std::min<size_t>(len - bytes_read, 64*1024*1024);
-@@ -136,6 +312,19 @@ struct llama_file::impl {
+@@ -136,6 +363,19 @@ struct llama_file::impl {
                  throw std::runtime_error(format("read error: %s", GetErrorMessageWin32(GetLastError()).c_str()));
              }
              if (chunk_read < chunk_size || chunk_read == 0) {
@@ -266,7 +317,7 @@ index ed572da..c94d657 100644
                  throw std::runtime_error("unexpectedly reached end of file");
              }
  
-@@ -143,6 +332,91 @@ struct llama_file::impl {
+@@ -143,6 +383,102 @@ struct llama_file::impl {
          }
      }
  
@@ -322,13 +373,24 @@ index ed572da..c94d657 100644
 +
 +    // The positional read Windows never had in llama_file. The offset travels in the
 +    // OVERLAPPED structure, so no seek is needed and the shared file pointer is not
-+    // touched - which is what makes it safe to call from several threads on one handle.
++    // touched - which is what makes it SAFE to call from several threads on one handle.
 +    //
-+    // It does NOT make those threads concurrent. Measured 2026-08-03: one shared handle
-+    // across 64 threads reaches 0.99x the throughput of a single thread, while one
-+    // handle per thread reaches 2.12x and 10592.0 MB/s at depth 8. The serialisation is
-+    // Windows' behaviour on a synchronous handle, not this function's.
-+    size_t read_raw_at(void * ptr, size_t len, size_t offset) {
++    // Safe was never the same as concurrent, and that distinction cost a measurement to
++    // establish. Passing OVERLAPPED to a handle opened without FILE_FLAG_OVERLAPPED does
++    // not make the read asynchronous: measured 2026-08-03, one shared handle across 8
++    // threads reaches 1.01x the throughput of a single thread whether the offset comes
++    // from the structure or from SetFilePointerEx. A private handle each reaches 2.22x.
++    //
++    // Hence worker_id. It selects this caller's own handle out of the pool, and no lock
++    // guards that selection because none is needed: each index is read by exactly one
++    // thread, and the array is filled once in init_direct before any reader exists.
++    size_t read_raw_at(void * ptr, size_t len, size_t offset, int worker_id = -1) {
++        // Anything the pool does not cover - a negative id, an id past what opened, or a
++        // buffered file that has no pool at all - reads through the shared handle. That
++        // is correct and merely serialised, which is the right way round: a caller that
++        // knows nothing about pools must not be able to index past the array.
++        const HANDLE h_read = (worker_id >= 0 && worker_id < n_pool) ? h_pool[worker_id] : fp_win32;
++
 +        size_t total = 0;
 +        while (total < len) {
 +            const size_t chunk_size = std::min<size_t>(len - total, 64*1024*1024);
@@ -339,7 +401,7 @@ index ed572da..c94d657 100644
 +            ov.OffsetHigh = (DWORD) (pos >> 32);
 +
 +            DWORD chunk_read = 0;
-+            if (!ReadFile(fp_win32, reinterpret_cast<char*>(ptr) + total, (DWORD) chunk_size, &chunk_read, &ov)) {
++            if (!ReadFile(h_read, reinterpret_cast<char*>(ptr) + total, (DWORD) chunk_size, &chunk_read, &ov)) {
 +                const DWORD err = GetLastError();
 +                if (err == ERROR_HANDLE_EOF) {
 +                    return total;
@@ -358,7 +420,7 @@ index ed572da..c94d657 100644
      uint32_t read_u32() {
          uint32_t val;
          read_raw(&val, sizeof(val));
-@@ -170,12 +444,27 @@ struct llama_file::impl {
+@@ -170,12 +506,41 @@ struct llama_file::impl {
          write_raw(&val, sizeof(val));
      }
  
@@ -373,10 +435,24 @@ index ed572da..c94d657 100644
      bool has_direct_io() const {
 -        return true;
 +        return owns_handle && alignment > 1;
++    }
++
++    size_t direct_io_handles() const {
++        return (size_t) n_pool;
      }
  
      ~impl() {
 -        if (fp && owns_fp) {
++        // The pool first. These handles are always ours - nothing else can hold them,
++        // since they are opened in init_direct and handed out by value nowhere. Closing
++        // exactly n_pool of them is what lets the array go without a sentinel: the slots
++        // from n_pool upward were never opened, so they are NULL rather than
++        // INVALID_HANDLE_VALUE and must not reach CloseHandle at all.
++        for (int i = 0; i < n_pool; i++) {
++            CloseHandle(h_pool[i]);
++        }
++        n_pool = 0;
++
 +        if (owns_handle) {
 +            if (fp_win32 != INVALID_HANDLE_VALUE) {
 +                CloseHandle(fp_win32);
@@ -388,13 +464,20 @@ index ed572da..c94d657 100644
              std::fclose(fp);
          }
      }
-@@ -348,6 +637,32 @@ struct llama_file::impl {
+@@ -348,6 +713,39 @@ struct llama_file::impl {
          }
      }
  
 +    // Positional read; see the Windows counterpart for what it is for. pread does not
 +    // move the file pointer, which is what lets two threads share one descriptor.
-+    size_t read_raw_at(void * ptr, size_t len, size_t offset) {
++    size_t read_raw_at(void * ptr, size_t len, size_t offset, int worker_id = -1) {
++        // POSIX needs no handle pool. pread carries its offset in the call and does not
++        // hold the file object while it runs, so several threads on ONE descriptor are
++        // already concurrent - which is exactly why PR #25294 uses it unchanged here and
++        // capitulates to a mutex on Windows. The parameter exists so that a caller need
++        // not know which platform it is compiled for.
++        (void) worker_id;
++
 +#if defined(fileno)
 +        const int use_fd = (fd != -1) ? fd : fileno(fp);
 +#else
@@ -421,7 +504,21 @@ index ed572da..c94d657 100644
      uint32_t read_u32() {
          uint32_t ret;
          read_raw(&ret, sizeof(ret));
-@@ -410,6 +725,20 @@ bool llama_file::has_direct_io() const { return pimpl->has_direct_io(); }
+@@ -373,6 +771,13 @@ struct llama_file::impl {
+         return fd != -1 && alignment > 1;
+     }
+ 
++    // Always zero here, and that is the honest answer rather than a stub: this branch
++    // holds no private handles because pread does not need them. A caller comparing the
++    // number against its thread count learns the right thing on both platforms.
++    size_t direct_io_handles() const {
++        return 0;
++    }
++
+     ~impl() {
+         if (fd != -1) {
+             close(fd);
+@@ -410,6 +815,20 @@ bool llama_file::has_direct_io() const { return pimpl->has_direct_io(); }
  
  int llama_file::file_id() const {
  #ifdef _WIN32
@@ -442,7 +539,7 @@ index ed572da..c94d657 100644
      return _fileno(pimpl->fp);
  #else
      if (pimpl->fd != -1) {
-@@ -425,11 +754,15 @@ int llama_file::file_id() const {
+@@ -425,11 +844,17 @@ int llama_file::file_id() const {
  
  void llama_file::seek(size_t offset, int whence) const { pimpl->seek(offset, whence); }
  void llama_file::read_raw(void * ptr, size_t len) { pimpl->read_raw(ptr, len); }
@@ -456,17 +553,19 @@ index ed572da..c94d657 100644
  void llama_file::read_raw_unsafe(void * ptr, size_t len) { pimpl->read_raw_unsafe(ptr, len); }
 -#endif
 +
-+size_t llama_file::read_raw_at(void * ptr, size_t len, size_t offset) {
-+    return pimpl->read_raw_at(ptr, len, offset);
++size_t llama_file::read_raw_at(void * ptr, size_t len, size_t offset, int worker_id) {
++    return pimpl->read_raw_at(ptr, len, offset, worker_id);
 +}
++
++size_t llama_file::direct_io_handles() const { return pimpl->direct_io_handles(); }
  
  uint32_t llama_file::read_u32() { return pimpl->read_u32(); }
  
 diff --git a/src/llama-mmap.h b/src/llama-mmap.h
-index b7d5c61..00b39f2 100644
+index b7d5c61..5dcb2c8 100644
 --- a/src/llama-mmap.h
 +++ b/src/llama-mmap.h
-@@ -27,7 +27,16 @@ struct llama_file {
+@@ -27,7 +27,26 @@ struct llama_file {
  
      void read_raw(void * ptr, size_t len);
      void read_raw_unsafe(void * ptr, size_t len);
@@ -479,11 +578,36 @@ index b7d5c61..00b39f2 100644
 +    // This is the RAW form. Under direct I/O the caller is responsible for alignment
 +    // of all three of offset, length and the address of `ptr` - unlike read_raw(),
 +    // which bounces through an aligned buffer and accepts anything.
-+    size_t read_raw_at(void * ptr, size_t len, size_t offset);
++    //
++    // worker_id names a caller that reads concurrently with other callers, and it is
++    // what makes those callers actually concurrent on Windows. Removing the race on the
++    // file position was not enough: measured 2026-08-03, several threads on one handle
++    // reach 1.01x the throughput of a single thread at queue depth 8, while a private
++    // handle each reaches 2.22x. Windows serialises on the file OBJECT.
++    //
++    // Pass a dense index starting at 0 - one per thread, stable for that thread's life.
++    // -1, or an index the pool does not cover, reads through the shared handle: correct,
++    // simply serialised. Callers that do not read concurrently pass nothing.
++    size_t read_raw_at(void * ptr, size_t len, size_t offset, int worker_id = -1);
 +
      uint32_t read_u32();
  
      void write_raw(const void * ptr, size_t len) const;
+@@ -35,6 +54,14 @@ struct llama_file {
+ 
+     size_t read_alignment() const;
+     bool has_direct_io() const;
++
++    // How many private per-worker handles this file holds. 0 whenever direct I/O is not
++    // in effect, and 0 on POSIX, where pread on one descriptor is already parallel-safe.
++    //
++    // Exists so the pool can be asserted rather than assumed: a pool that failed to open
++    // and a pool that works look identical from the outside - both read the right bytes,
++    // one of them just never scales.
++    size_t direct_io_handles() const;
+ private:
+     struct impl;
+     std::unique_ptr<impl> pimpl;
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
 index 881e55c..8edaf61 100644
 --- a/tests/CMakeLists.txt
@@ -506,10 +630,10 @@ index 881e55c..8edaf61 100644
    llama_build_and_test(test-opt.cpp)
 diff --git a/tests/test-llama-file.cpp b/tests/test-llama-file.cpp
 new file mode 100644
-index 0000000..400cef3
+index 0000000..779a8b6
 --- /dev/null
 +++ b/tests/test-llama-file.cpp
-@@ -0,0 +1,248 @@
+@@ -0,0 +1,392 @@
 +// Covers llama_file's read path, which until now no test touched at all: grepping
 +// tests/ for load_mode found only argument parsing (test-arg-parser.cpp), load
 +// cancellation (test-model-load-cancel.cpp) and quantisation statistics
@@ -528,6 +652,7 @@ index 0000000..400cef3
 +#include <cstdio>
 +#include <cstring>
 +#include <string>
++#include <thread>
 +#include <vector>
 +
 +#ifdef _WIN32
@@ -590,7 +715,19 @@ index 0000000..400cef3
 +}
 +
 +static uint8_t pattern_byte(size_t i) {
-+    return (uint8_t) ((i * 31 + 7) & 0xFF);
++    // The first term alone repeats every 256 bytes, and 256 divides every sector size in
++    // play - so two sector-ALIGNED reads of the same length used to return byte-identical
++    // data no matter which sector they came from. Every unbuffered read in this file is
++    // aligned by definition, which made the pattern unable to tell one sector from
++    // another: a reader that ignored the offset it was given would have passed.
++    //
++    // Found on 2026-08-03 by the worker-slot case, which compared offset 2*SECTOR against
++    // the bytes of 5*SECTOR and found them equal. That looked like a defect in the handle
++    // pool and was a defect in this function.
++    //
++    // The second term changes once per sector and 17 is odd, so it is invertible modulo
++    // 256 and two sectors fewer than 256 apart can never carry the same bytes.
++    return (uint8_t) ((i * 31 + 7 + (i >> 12) * 17) & 0xFF);
 +}
 +
 +static bool write_test_file(const std::string & path) {
@@ -745,6 +882,137 @@ index 0000000..400cef3
 +            aligned_buffer beyond(SECTOR);
 +            const size_t none = f.read_raw_at(beyond.data, SECTOR, beyond_offset);
 +            check(none == 0, "a read starting entirely past EOF returns 0 bytes");
++        }
++    }
++
++    // -----------------------------------------------------------------------------
++    // Case 4: the per-worker handle pool.
++    //
++    // This is the one case whose absence cannot be seen in the bytes. A pool that never
++    // opened reads exactly what a working pool reads - it just serialises every thread
++    // behind one file object, which is what was measured at 1.01x against 2.22x on
++    // 2026-08-03. So the pool is asserted by COUNT first and by behaviour second;
++    // checking only that the reads come back right would pass on the old code.
++    // -----------------------------------------------------------------------------
++    printf("\nper-worker handle pool:\n");
++    {
++        llama_file buffered(path.c_str(), "rb");
++        check(buffered.direct_io_handles() == 0,
++              "a buffered file holds no private handles");
++
++        llama_file f(path.c_str(), "rb", true);
++        if (!f.has_direct_io()) {
++            printf("  FAIL  direct I/O not in effect, the pool cannot be checked\n");
++            g_failed++;
++        } else {
++            const size_t n_handles = f.direct_io_handles();
++            printf("        private handles = %zu\n", n_handles);
++
++            // The failing case for this stage. On the build before the pool this is 0,
++            // and the whole section below would otherwise still be green.
++            check(n_handles > 1,
++                  "direct I/O opened more than one handle on the file");
++
++            // Every slot must read the file, not just slot 0. An off-by-one in the bounds
++            // check would leave the last worker silently on the shared handle - correct
++            // bytes, no concurrency, and nothing to see.
++            bool all_slots_ok = true;
++            for (size_t slot = 0; slot < n_handles; slot++) {
++                aligned_buffer b(SECTOR);
++                const size_t n = f.read_raw_at(b.data, SECTOR, 2 * SECTOR, (int) slot);
++                if (n != SECTOR) {
++                    all_slots_ok = false;
++                    break;
++                }
++                for (size_t i = 0; i < SECTOR; i++) {
++                    if (b.data[i] != pattern_byte(2 * SECTOR + i)) {
++                        all_slots_ok = false;
++                        break;
++                    }
++                }
++                if (!all_slots_ok) {
++                    break;
++                }
++            }
++            check(all_slots_ok,
++                  "every worker slot returns the bytes at the requested offset");
++
++            // The failing half again: a slot that read the right bytes must not also
++            // match a different offset, or the loop above proves only that it returned.
++            aligned_buffer probe(SECTOR);
++            f.read_raw_at(probe.data, SECTOR, 2 * SECTOR, 0);
++            bool wrong_matches = true;
++            for (size_t i = 0; i < SECTOR; i++) {
++                if (probe.data[i] != pattern_byte(5 * SECTOR + i)) {
++                    wrong_matches = false;
++                    break;
++                }
++            }
++            check(!wrong_matches,
++                  "a worker-slot read does NOT match the bytes of a different offset");
++
++            // Out of range in both directions. A caller that knows nothing about pools
++            // must land on the shared handle rather than past the array - serialised is
++            // an acceptable answer here, reading somebody else's memory is not.
++            bool oob_ok = true;
++            for (int bad : { -5, (int) n_handles, 999 }) {
++                aligned_buffer b(SECTOR);
++                const size_t n = f.read_raw_at(b.data, SECTOR, 3 * SECTOR, bad);
++                if (n != SECTOR) {
++                    oob_ok = false;
++                    break;
++                }
++                for (size_t i = 0; i < SECTOR; i++) {
++                    if (b.data[i] != pattern_byte(3 * SECTOR + i)) {
++                        oob_ok = false;
++                        break;
++                    }
++                }
++                if (!oob_ok) {
++                    break;
++                }
++            }
++            check(oob_ok,
++                  "an out-of-range worker id falls back to the shared handle and still reads");
++
++            // All slots at once. This does not measure throughput - the file is a
++            // megabyte and lives in RAM by now - it checks that nothing is shared that
++            // should not be. If the OVERLAPPED structure or the byte counter were held
++            // per FILE instead of per call, this is where the offsets would cross.
++            const size_t n_threads = n_handles < 8 ? n_handles : 8;
++            std::vector<int> ok((size_t) n_threads, 1);
++            std::vector<std::thread> ts;
++            for (size_t t = 0; t < n_threads; t++) {
++                ts.emplace_back([&f, &ok, t]() {
++                    // Each thread reads its OWN offset. Reading the same one everywhere
++                    // would pass even if every thread ignored the offset it was given.
++                    const size_t off = (t + 4) * SECTOR;
++                    for (int rep = 0; rep < 16; rep++) {
++                        aligned_buffer b(SECTOR);
++                        if (f.read_raw_at(b.data, SECTOR, off, (int) t) != SECTOR) {
++                            ok[t] = 0;
++                            return;
++                        }
++                        for (size_t i = 0; i < SECTOR; i++) {
++                            if (b.data[i] != pattern_byte(off + i)) {
++                                ok[t] = 0;
++                                return;
++                            }
++                        }
++                    }
++                });
++            }
++            for (auto & t : ts) {
++                t.join();
++            }
++            bool concurrent_ok = true;
++            for (size_t t = 0; t < n_threads; t++) {
++                if (!ok[t]) {
++                    concurrent_ok = false;
++                }
++            }
++            check(concurrent_ok,
++                  "all slots read their own offsets correctly at the same time");
 +        }
 +    }
 +
