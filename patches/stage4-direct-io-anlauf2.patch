@@ -1,3 +1,246 @@
+diff --git a/common/sampling.cpp b/common/sampling.cpp
+index 256ac16..0ae70c1 100644
+--- a/common/sampling.cpp
++++ b/common/sampling.cpp
+@@ -547,6 +547,65 @@ void common_perf_print(const struct llama_context * ctx, const struct common_sam
+         LOG_INF("%s: unaccounted time = %10.2f ms / %5.1f %%      (total - sampling - prompt eval - eval) / (total)\n", __func__, t_unacc_ms, t_unacc_pc);
+         LOG_INF("%s:    graphs reused = %10d\n", __func__, data.n_reused);
+ 
++        // Per-token decode times, right after the eval-time line they explain. That line
++        // is one sum over all steps and cannot tell "evenly slow" from "a few stalls",
++        // and on this machine decode varies by up to a factor of 2 between two identically
++        // configured runs with the cause unmeasured.
++        //
++        // Formatted here rather than inside llama.dll: measured 2026-08-03, LLAMA_LOG_INFO
++        // from the library does not survive the default log verbosity - every line above
++        // is proof that LOG_INF from common does. Two attempts to print from inside the
++        // library produced nothing at all.
++        //
++        // Not gated on the environment variable a second time. The series is only filled
++        // when the gate was open at context creation, so an empty one already means "off",
++        // and two checks are two things that can disagree.
++        const int32_t n_steps = llama_perf_context_eval_steps(ctx, nullptr, 0);
++        if (n_steps > 0) {
++            std::vector<int64_t> steps(n_steps);
++            const int32_t n_got = llama_perf_context_eval_steps(ctx, steps.data(), n_steps);
++
++            // THE CHECK, and it is not the sum. Each delta goes into t_eval_us and into
++            // the series in the same statement, so their total can never disagree - a test
++            // on it would pass against anything. What CAN go wrong is the mapping: n_eval
++            // counts decode steps, the series counts the ones that were timed, and if
++            // several single tokens are evaluated without a synchronisation in between
++            // they collapse into one measurement. That is the FIXME at the top of
++            // llama_context::synchronize(), and it would leave a distribution that answers
++            // a different question than the one asked.
++            if (n_got != data.n_eval) {
++                LOG_INF("%s: per-token eval = INVALID - %d steps timed against %d in n_eval\n",
++                        __func__, n_got, data.n_eval);
++                LOG_INF("%s:                  Steps were merged; one entry is not one token.\n", __func__);
++                LOG_INF("%s:                  No distribution is reported.\n", __func__);
++            } else {
++                int64_t t_min = steps[0];
++                int64_t t_max = steps[0];
++                for (const int64_t t : steps) {
++                    t_min = std::min(t_min, t);
++                    t_max = std::max(t_max, t);
++                }
++
++                LOG_INF("%s: per-token eval = %d steps, min %8.2f ms, max %8.2f ms, max/min %6.2fx\n",
++                        __func__, n_got, 1e-3*t_min, 1e-3*t_max,
++                        t_min > 0 ? (double) t_max / (double) t_min : 0.0);
++
++                // Raw microseconds, because this is the evidence and every later analysis
++                // divides it. Eight per line keeps a 32-token run readable and a longer
++                // one greppable.
++                std::string line;
++                for (int32_t i = 0; i < n_got; i++) {
++                    char buf[32];
++                    snprintf(buf, sizeof(buf), "%9lld", (long long) steps[i]);
++                    line += buf;
++                    if ((i + 1) % 8 == 0 || i + 1 == n_got) {
++                        LOG_INF("%s:    steps [us]:%s\n", __func__, line.c_str());
++                        line.clear();
++                    }
++                }
++            }
++        }
++
+         common_memory_breakdown_print(ctx);
+     }
+ }
+diff --git a/include/llama.h b/include/llama.h
+index 6e53e22..0ca7dfc 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -1564,6 +1564,25 @@ extern "C" {
+     LLAMA_API void                           llama_perf_context_print(const struct llama_context * ctx);
+     LLAMA_API void                           llama_perf_context_reset(      struct llama_context * ctx);
+ 
++    // Read the per-token decode times, in microseconds, in the order they were measured.
++    // Copies at most n_max into out, and RETURNS THE FULL COUNT - which is what lets a
++    // caller notice that its buffer was too small instead of reporting a truncated series
++    // as a complete one. Pass out = NULL, n_max = 0 to ask for the count alone.
++    //
++    // Returns 0 unless the environment variable LLAMA_TOKEN_TIMING was set when the
++    // context was created. That single gate is deliberate: a second check on the reading
++    // side could disagree with the one on the writing side.
++    //
++    // A getter rather than a printer, and rather than a field on llama_perf_context_data.
++    // The struct is copied by value across the ABI and a variable-length series does not
++    // belong in it. The printing lives in the application layer because llama.cpp's own
++    // LLAMA_LOG_INFO does not survive the default log verbosity - measured 2026-08-03,
++    // two attempts to print from inside the library reached nobody.
++    LLAMA_API int32_t llama_perf_context_eval_steps(
++            const struct llama_context * ctx,
++                              int64_t  * out,
++                              int32_t    n_max);
++
+     // NOTE: the following work only with samplers constructed via llama_sampler_chain_init
+     LLAMA_API struct llama_perf_sampler_data llama_perf_sampler      (const struct llama_sampler * chain);
+     LLAMA_API void                           llama_perf_sampler_print(const struct llama_sampler * chain);
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 5ef7bec..03d9159 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -280,6 +280,15 @@ llama_context::llama_context(
+         }
+     }
+ 
++    {
++        const char * LLAMA_TOKEN_TIMING = getenv("LLAMA_TOKEN_TIMING");
++        token_timing = LLAMA_TOKEN_TIMING ? (atoi(LLAMA_TOKEN_TIMING) != 0) : token_timing;
++
++        if (token_timing) {
++            LLAMA_LOG_WARN("%s: per-token timing enabled\n", __func__);
++        }
++    }
++
+     // ref: https://github.com/ggml-org/llama.cpp/pull/17046#discussion_r2503085732
+     cparams.n_ctx = GGML_PAD(cparams.n_ctx, 256);
+ 
+@@ -711,7 +720,14 @@ void llama_context::synchronize() {
+     // add the evaluation to the stats
+     if (n_queued_tokens == 1) {
+         if (!cparams.no_perf) {
+-            t_eval_us += ggml_time_us() - t_compute_start_us;
++            // The single-token duration was already being computed here and thrown into
++            // the sum in the same expression. Keeping it costs one push_back against a
++            // step that takes hundreds of milliseconds on this machine.
++            const int64_t t_step_us = ggml_time_us() - t_compute_start_us;
++            t_eval_us += t_step_us;
++            if (token_timing) {
++                t_eval_steps_us.push_back(t_step_us);
++            }
+         }
+         n_eval++;
+     } else if (n_queued_tokens > 1) {
+@@ -3221,11 +3237,20 @@ llama_perf_context_data llama_context::perf_get_data() const {
+     return data;
+ }
+ 
++const std::vector<int64_t> & llama_context::perf_eval_steps() const {
++    return t_eval_steps_us;
++}
++
+ void llama_context::perf_reset() {
+     t_start_us  = ggml_time_us();
+     t_eval_us   = n_eval = 0;
+     t_p_eval_us = n_p_eval = 0;
+     n_reused    = 0;
++
++    // Cleared with the counter it belongs to. Left behind, a second measurement would
++    // append to the first and the step count would no longer match n_eval - which is
++    // the one check that says the distribution is per token at all.
++    t_eval_steps_us.clear();
+ }
+ 
+ llama_memory_breakdown llama_context::memory_breakdown() const {
+@@ -4135,6 +4160,32 @@ void llama_perf_context_print(const llama_context * ctx) {
+     LLAMA_LOG_INFO("%s:    graphs reused = %10d\n", __func__, data.n_reused);
+ }
+ 
++// A getter, not a printer, and that distinction was paid for twice on 2026-08-03. First
++// attempt: the block sat in llama_perf_context_print, which common_perf_print never calls
++// - it rebuilds the same lines itself from llama_perf_context(). Second attempt: exported
++// as a printer and called from common, it ran and still reached nobody, because
++// LLAMA_LOG_INFO from this library is filtered at the default verbosity while LOG_INF from
++// common is not. The series is data; the formatting belongs where the other perf lines are
++// written.
++int32_t llama_perf_context_eval_steps(const llama_context * ctx, int64_t * out, int32_t n_max) {
++    if (ctx == nullptr) {
++        return 0;
++    }
++
++    const std::vector<int64_t> & steps = ctx->perf_eval_steps();
++    const int32_t n = (int32_t) steps.size();
++
++    if (out != nullptr && n_max > 0) {
++        const int32_t n_copy = std::min(n, n_max);
++        std::copy(steps.begin(), steps.begin() + n_copy, out);
++    }
++
++    // The FULL count, never the copied one. Returning min(n, n_max) would let a caller
++    // with a short buffer report a truncated series as a complete measurement, which is
++    // the failure shape this project keeps finding: a result that looks like an answer.
++    return n;
++}
++
+ void llama_perf_context_reset(llama_context * ctx) {
+     ctx->perf_reset();
+ }
+diff --git a/src/llama-context.h b/src/llama-context.h
+index bf91daa..59bd763 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -187,6 +187,15 @@ struct llama_context {
+     llama_perf_context_data perf_get_data() const;
+     void perf_reset();
+ 
++    // The per-token evaluation times, in microseconds, in the order they were measured.
++    //
++    // Deliberately NOT part of llama_perf_context_data: that struct is public ABI in
++    // include/llama.h, and a diagnostic does not justify moving it. This accessor is on
++    // the opaque context instead, so nothing outside the library sees a new type.
++    //
++    // Empty unless LLAMA_TOKEN_TIMING is set - see the note on token_timing.
++    const std::vector<int64_t> & perf_eval_steps() const;
++
+     llama_memory_breakdown memory_breakdown() const;
+ 
+     //
+@@ -378,12 +387,32 @@ private:
+     // env: LLAMA_GRAPH_REUSE_DISABLE
+     bool graph_reuse_disable = false;
+ 
++    // env: LLAMA_TOKEN_TIMING
++    //
++    // Decode varies by up to a factor of 2 between two identically configured runs on
++    // this machine, measured over 14 runs, and four guesses at the cause have already
++    // been refuted. What common_perf_print reports is one sum over all decode steps,
++    // which cannot tell "evenly slower" from "a few stalls" - and that distinction
++    // decides everything downstream. A 1 Hz Windows counter cannot see it either.
++    //
++    // Off by default and gated by an environment variable rather than a CLI flag: a
++    // flag would have to cross common_params, common/arg.cpp and llama_context_params,
++    // and the last of those is public ABI. The pattern is the one already used by
++    // graph_reuse_disable a few lines above.
++    bool token_timing = false;
++
+     // perf
+     mutable int64_t t_start_us  = 0;
+     mutable int64_t t_load_us   = 0;
+     mutable int64_t t_p_eval_us = 0;
+     mutable int64_t t_eval_us   = 0;
+ 
++    // One entry per decode step, filled only when token_timing is on. The value is the
++    // SAME delta that t_eval_us accumulates, so the two can never disagree by
++    // construction - which is exactly why the sum is not the test. The test is that the
++    // number of entries matches n_eval; see the FIXME in synchronize().
++    mutable std::vector<int64_t> t_eval_steps_us;
++
+     mutable int64_t t_compute_start_us = 0;
+     mutable int64_t n_queued_tokens    = 0;
+ 
 diff --git a/src/llama-mmap.cpp b/src/llama-mmap.cpp
 index ed572da..157e9eb 100644
 --- a/src/llama-mmap.cpp
