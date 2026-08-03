@@ -1429,7 +1429,7 @@ index 7ad3807..e8d94d8 100644
      llama_fver  fver;
  
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 91c2fc9..9358726 100644
+index 91c2fc9..c5fe6fa 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -7,6 +7,7 @@
@@ -1450,7 +1450,7 @@ index 91c2fc9..9358726 100644
      std::vector<float> tensor_split_owned;
  };
  
-@@ -1250,6 +1254,79 @@ void llama_model_base::load_vocab(llama_model_loader & ml) {
+@@ -1250,6 +1254,116 @@ void llama_model_base::load_vocab(llama_model_loader & ml) {
      vocab.load(ml, kv);
  }
  
@@ -1469,7 +1469,44 @@ index 91c2fc9..9358726 100644
 +// like select_weight_buft, but only consider each device's default buffer type: extra buffer
 +//   types (e.g. CPU weight repacking) may not support the partial writes that slot-wise expert
 +//   cache updates require
-+static ggml_backend_buffer_type_t llama_moe_stream_select_buft(const llama_hparams & hparams, ggml_tensor * meta, const buft_list_t * buft_list) {
++// Picks the buffer type that backs one layer's expert cache.
++//
++// The override check has to be repeated here rather than inherited. Streamed experts
++// leave the regular path at llama_model::create_tensor before the loader reaches its own
++// override handling (llama-model-loader.cpp:1160-1186), so without this a --cpu-moe or
++// -ot asking for the experts on the host is accepted on the command line, reported as
++// applied, and then silently ignored for exactly the tensors it names - the cache lands
++// in device memory anyway. The same regex and the same CPU special case are used as on
++// the regular path so that one flag cannot mean two things.
++//
++// This is what makes the cache size a RAM question instead of a VRAM question: on device
++// memory the slot count is capped by what the card has left after the model, and the
++// graph needs 2*cap + n_expert_used slots (llama-graph.cpp:2002), so the reachable batch
++// width is capped with it.
++static ggml_backend_buffer_type_t llama_moe_stream_select_buft(
++        const llama_hparams & hparams, ggml_tensor * meta, const std::string & name,
++        const llama_model_tensor_buft_override * overrides,
++        const buft_list_t * buft_list, const buft_list_t * buft_list_cpu) {
++    if (overrides) {
++        for (const auto * ov = overrides; ov->pattern != nullptr; ++ov) {
++            std::regex pattern(ov->pattern);
++            if (!std::regex_search(name, pattern)) {
++                continue;
++            }
++            // an override to CPU goes through the CPU list so that the extra buffer types
++            // (a host-pinned type, for one) still get their say
++            ggml_backend_buffer_type_t buft = (ov->buft == ggml_backend_cpu_buffer_type())
++                ? select_weight_buft(hparams, meta, GGML_OP_MUL_MAT_ID, buft_list_cpu)
++                : ov->buft;
++            if (buft) {
++                LLAMA_LOG_DEBUG("%s: streamed tensor %s -> %s (override)\n",
++                        __func__, name.c_str(), ggml_backend_buft_name(buft));
++                return buft;
++            }
++            break;
++        }
++    }
++
 +    for (const auto & [dev, buft] : *buft_list) {
 +        if (buft != ggml_backend_dev_buffer_type(dev)) {
 +            continue;
@@ -1530,7 +1567,7 @@ index 91c2fc9..9358726 100644
  bool llama_model_base::load_tensors(llama_model_loader & ml) {
      const auto & split_mode   = params.split_mode;
      const bool use_mlock      = params.load_mode == LLAMA_LOAD_MODE_MLOCK || params.load_mode == LLAMA_LOAD_MODE_MMAP_MLOCK;
-@@ -1339,6 +1416,18 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+@@ -1339,6 +1453,18 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
      // assign the output layer
      pimpl->dev_output = get_layer_buft_list(n_layer_all);
  
@@ -1549,7 +1586,7 @@ index 91c2fc9..9358726 100644
      const auto TENSOR_NOT_REQUIRED = llama_model_loader::TENSOR_NOT_REQUIRED;
  
      // create tensors for the weights
-@@ -1620,6 +1709,18 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+@@ -1620,6 +1746,18 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
          ctx_buf_maps.emplace_back(ctx, buf_map);
      }
  
@@ -1568,7 +1605,7 @@ index 91c2fc9..9358726 100644
      if (llama_supports_gpu_offload()) {
          const int n_gpu = std::min(n_gpu_layers, n_layer_all);
  
-@@ -1666,6 +1767,37 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+@@ -1666,6 +1804,38 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
  
  ggml_tensor * llama_model_base::create_tensor(llama_model_loader & ml, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
      const buft_list_t * buft_list_layer = tn.bid == -1 ? nullptr : pimpl->dev_layer.at(tn.bid).buft_list;
@@ -1594,7 +1631,8 @@ index 91c2fc9..9358726 100644
 +                hparams, &pimpl->cpu_buft_list, pimpl->dev_input.buft_list, pimpl->dev_output.buft_list, buft_list_layer,
 +                tn, ne, flags | TENSOR_STREAMED);
 +
-+            ggml_backend_buffer_type_t buft = llama_moe_stream_select_buft(hparams, w->tensor, buft_list_layer);
++            ggml_backend_buffer_type_t buft = llama_moe_stream_select_buft(
++                    hparams, w->tensor, name, ml.tensor_buft_overrides, buft_list_layer, &pimpl->cpu_buft_list);
 +            if (buft == nullptr) {
 +                throw std::runtime_error(format("failed to find a buffer type for streamed tensor %s", name.c_str()));
 +            }
@@ -1606,7 +1644,7 @@ index 91c2fc9..9358726 100644
      return ml.create_tensor(
          hparams, &pimpl->cpu_buft_list, pimpl->dev_input.buft_list, pimpl->dev_output.buft_list, buft_list_layer,
          tn, ne, flags);
-@@ -2013,6 +2145,16 @@ bool llama_model::has_tensor_overrides() const {
+@@ -2013,6 +2183,16 @@ bool llama_model::has_tensor_overrides() const {
      return pimpl->has_tensor_overrides;
  }
  
@@ -1623,7 +1661,7 @@ index 91c2fc9..9358726 100644
  const ggml_tensor * llama_model::get_tensor(const char * name) const {
      auto it = std::find_if(tensors_by_name.begin(), tensors_by_name.end(),
              [name](const std::pair<std::string, ggml_tensor *> & it) {
-@@ -2385,12 +2527,17 @@ llama_model_params llama_model_default_params() {
+@@ -2385,12 +2565,17 @@ llama_model_params llama_model_default_params() {
          /*.progress_callback           =*/ nullptr,
          /*.progress_callback_user_data =*/ nullptr,
          /*.kv_overrides                =*/ nullptr,
@@ -1641,7 +1679,7 @@ index 91c2fc9..9358726 100644
      };
  
      return result;
-@@ -2803,7 +2950,8 @@ llama_model_base::llama_model_base(const struct llama_model_params & params) : l
+@@ -2803,7 +2988,8 @@ llama_model_base::llama_model_base(const struct llama_model_params & params) : l
      TENSOR_DUPLICATED     (llama_model_loader::TENSOR_DUPLICATED),
      TENSOR_NOT_REQUIRED   (llama_model_loader::TENSOR_NOT_REQUIRED),
      TENSOR_SKIP           (llama_model_loader::TENSOR_SKIP),
@@ -1684,10 +1722,10 @@ index 056a6ef..02553b5 100644
      virtual ~llama_model_base() = default;
 diff --git a/src/llama-moe-stream.cpp b/src/llama-moe-stream.cpp
 new file mode 100644
-index 0000000..e1efc20
+index 0000000..931308e
 --- /dev/null
 +++ b/src/llama-moe-stream.cpp
-@@ -0,0 +1,871 @@
+@@ -0,0 +1,884 @@
 +#include "llama-moe-stream.h"
 +
 +#include "llama-impl.h"
@@ -2140,6 +2178,9 @@ index 0000000..e1efc20
 +            n_touched > 0 ? 100.0*stats.n_hit/n_touched : 0.0);
 +    LLAMA_LOG_INFO("%s: moe stream: load stall = %.2f ms total (%.3f ms per remap call)\n",
 +            __func__, stats.t_stall_us/1000.0, stats.n_calls > 0 ? stats.t_stall_us/1000.0/stats.n_calls : 0.0);
++    LLAMA_LOG_INFO("%s: moe stream: slot wait = %.2f ms total over %" PRId64 " waits (%.1f%% of the two stalls)\n",
++            __func__, stats.t_victim_us/1000.0, stats.n_victim_waits,
++            (stats.t_victim_us + stats.t_stall_us) > 0 ? 100.0*stats.t_victim_us/(stats.t_victim_us + stats.t_stall_us) : 0.0);
 +    if (stats.n_wave_calls > 0) {
 +        LLAMA_LOG_INFO("%s: moe stream: waves = %" PRId64 " (%" PRId64 " non-empty), preloads issued = %" PRId64 " (ready on arrival = %" PRId64 "), wave stall = %.2f ms\n",
 +                __func__, stats.n_wave_calls, stats.n_waves_run, stats.n_preload_issued, stats.n_preload_ready, stats.t_stall_wave_us/1000.0);
@@ -2228,13 +2269,23 @@ index 0000000..e1efc20
 +            sl->keep[s] = 1;
 +            sl->demand_slots.push_back(s);
 +        } else {
-+            int32_t v;
-+            while ((v = mgr->pick_victim_locked(*sl, sl->keep.data())) < 0) {
-+                // every allowed slot is loading; wait for a commit and retry
-+                mgr->cv_done.wait(lk);
-+                if (mgr->load_failed) {
-+                    GGML_ABORT("MoE expert streaming: expert load failed (I/O error)");
-+                }
++            int32_t v = mgr->pick_victim_locked(*sl, sl->keep.data());
++            if (v < 0) {
++                // every allowed slot is loading; wait for a commit and retry.
++                //
++                // timed separately from t_stall_us on purpose: this wait happens BEFORE the demand
++                // loads are issued, so the stall timer below cannot cover it. the two answer
++                // different questions - t_stall_us is time spent waiting on the disk, this is time
++                // spent waiting for the cache to give a slot back. they call for opposite fixes.
++                const int64_t t0 = ggml_time_us();
++                do {
++                    mgr->cv_done.wait(lk);
++                    if (mgr->load_failed) {
++                        GGML_ABORT("MoE expert streaming: expert load failed (I/O error)");
++                    }
++                } while ((v = mgr->pick_victim_locked(*sl, sl->keep.data())) < 0);
++                mgr->stats.t_victim_us += ggml_time_us() - t0;
++                mgr->stats.n_victim_waits++;
 +            }
 +            if (!sl->seen[e]) {
 +                mgr->stats.n_miss_cold++;
@@ -2561,10 +2612,10 @@ index 0000000..e1efc20
 +}
 diff --git a/src/llama-moe-stream.h b/src/llama-moe-stream.h
 new file mode 100644
-index 0000000..097e0ce
+index 0000000..290232d
 --- /dev/null
 +++ b/src/llama-moe-stream.h
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,211 @@
 +#pragma once
 +
 +#include "llama-mmap.h"
@@ -2736,7 +2787,14 @@ index 0000000..097e0ce
 +        int64_t n_hit       = 0; // touched experts already resident or loading
 +        int64_t n_miss      = 0; // demand loads issued
 +        int64_t n_miss_cold = 0; // first-ever touch of an expert
-+        int64_t t_stall_us  = 0; // wait time in miss handling
++        int64_t t_stall_us  = 0; // wait time in miss handling, from the point every miss is issued
++
++        // wait for a free slot, which t_stall_us cannot see: it starts only once all demand loads
++        // are issued, while this one happens before, when every allowed slot is already loading and
++        // pick_victim_locked has nothing to hand out. under a tight cache the thread waits here and
++        // no counter used to notice, which made every wait-share figure a lower bound.
++        int64_t t_victim_us = 0; // wait time for a slot to free up
++        int64_t n_victim_waits = 0; // how often that wait was entered at all
 +
 +        int64_t n_wave_calls     = 0; // wave-ids invocations (>= n_calls under multi-pass prefill)
 +        int64_t n_waves_run      = 0; // non-empty waves
