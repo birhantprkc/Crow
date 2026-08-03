@@ -258,12 +258,22 @@ switches. The `-n 16` preliminary pair matched as well.
 | streaming counters | 22 661 remap calls, 65.00 % hit rate — the arm really streamed |
 | check against a wrong implementation | red before the model ever started |
 
-**Two things this does not say.** Character equality under `--temp 0` means only that no difference
-was large enough to flip an argmax — not that there is none. And the failing case meant to prove the
-comparison is sensitive did **not** hold: a third run without `-nr` produced the same hash, so `-nr`
-turned out not to be needed here, and the sensitivity of the check rests on nothing stronger than
-16 and 512 tokens hashing differently. `tools/prompts/probe-f-coding.txt` and `probe-f-check.py`
-carry the task and its assertions.
+**The check is sensitive, and that is measured too.** The failing case originally written for this —
+a run without `-nr` — did not hold: it produced the same hash, so `-nr` turned out not to be needed
+here. The gap was closed with an arm that *must* differ, the same line with `--temp 0.8 --seed 7`
+instead of `--temp 0`:
+
+```
+454da56ee344dd13ffb8...  reference, greedy
+34d2ad4082b899133021...  identical but sampled
+```
+
+The outputs diverge after eight characters. So the equality over 512 tokens is a statement, not the
+output of a check that checks nothing.
+
+**What it still does not say.** Character equality under `--temp 0` means only that no difference was
+large enough to flip an argmax — not that there is none. `tools/prompts/probe-f-coding.txt` and
+`probe-f-check.py` carry the task and its assertions.
 
 Measurement phase. No product code, deliberately. `tools/` holds measuring instruments, plus the two
 scripts that make a measurement reproducible — one that builds an instrument, one that preserves the
