@@ -191,12 +191,24 @@ the work had been withdrawn; that was the state of one attempt, not of the area.
 
 What remains genuinely open:
 
-1. **Expert locality for this model is unpublished.** Not merely unmeasured by us — no source
-   quantifies how often DeepSeek-V4-Flash reuses experts across consecutive tokens. And the evidence
-   from other architectures splits: one coder model concentrates 80 % of hits in 28 % of its
-   experts, while `gpt-oss-120B` routes so flatly that nearly doubling cache coverage bought 2.3 %.
-   Which of the two this model is decides whether the whole caching lever is worth anything —
-   [#23](https://github.com/nibor1896/Crow/issues/23).
+1. ~~**Expert locality for this model is unpublished.**~~ **Measured 2026-08-04, and it is the
+   concentrated kind** — [#23](https://github.com/nibor1896/Crow/issues/23). A per-expert counter
+   without decay, 43 layers, 256 experts each, 11 008 remap calls per run:
+
+   | | 50 % of selections | 80 % | 95 % | Gini | hit rate |
+   |---|---:|---:|---:|---:|---:|
+   | **coding** | 8.9 % of experts | **25.7 %** | 47.3 % | **0.713** | 68.04 % |
+   | prose | 6.8 % | 21.4 % | 41.8 % | 0.761 | 73.76 % |
+
+   Against the two reference points: one coder model concentrates 80 % of hits in 28 % of its
+   experts — this one does it in **25.7 %**. `gpt-oss-120B` routes so flatly that nearly doubling
+   cache coverage bought 2.3 %; this model is nowhere near that. **So the caching lever holds.**
+
+   Coding routes *wider* than prose, and those 4.3 points cost **5.7 points of hit rate** — which is
+   why the ticket asks about a coding workload specifically. It also explains why 40 of 256 slots
+   work at all: 15.6 % residency covering roughly two thirds of selections matches the measured
+   67–72 %. What it does **not** explain is why more cache buys nothing — 64 slots should cover
+   ~80 % by this distribution and reach only 69.14 %. That gap is where the cold first-touches live.
 2. **Nobody has run this file.** The MXFP4 build has a few hundred downloads and no published
    correctness or throughput result in either direction. As of 2026-08-03 there is one, below: the
    streamed output is byte-identical to a non-streamed run over 512 tokens, and the generated code

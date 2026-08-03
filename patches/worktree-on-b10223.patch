@@ -1722,10 +1722,10 @@ index 056a6ef..02553b5 100644
      virtual ~llama_model_base() = default;
 diff --git a/src/llama-moe-stream.cpp b/src/llama-moe-stream.cpp
 new file mode 100644
-index 0000000..931308e
+index 0000000..3e3ee5f
 --- /dev/null
 +++ b/src/llama-moe-stream.cpp
-@@ -0,0 +1,884 @@
+@@ -0,0 +1,960 @@
 +#include "llama-moe-stream.h"
 +
 +#include "llama-impl.h"
@@ -1963,6 +1963,7 @@ index 0000000..931308e
 +        sl->slot_gen     .resize(n_slots, 0);
 +        sl->slot_last_use.resize(n_slots, 0);
 +        sl->route_hotness.resize(n_expert, 0);
++        sl->route_total.resize(n_expert, 0);
 +        sl->seen         .resize(n_expert, 0);
 +        sl->keep         .resize(n_slots, 0);
 +    }
@@ -2185,6 +2186,80 @@ index 0000000..931308e
 +        LLAMA_LOG_INFO("%s: moe stream: waves = %" PRId64 " (%" PRId64 " non-empty), preloads issued = %" PRId64 " (ready on arrival = %" PRId64 "), wave stall = %.2f ms\n",
 +                __func__, stats.n_wave_calls, stats.n_waves_run, stats.n_preload_issued, stats.n_preload_ready, stats.t_stall_wave_us/1000.0);
 +    }
++
++    print_locality();
++}
++
++// Expert locality: how concentrated the routing is. A cache only pays if a minority of experts
++// carries a majority of the selections; if routing is flat, no cache size helps and the whole
++// streaming lever is bounded by disk bandwidth alone.
++//
++// Reported per layer as the share of experts needed to cover 50/80/95 % of that layer's selections,
++// then aggregated. The Gini coefficient is printed beside it because the coverage figures alone
++// cannot tell a mildly skewed distribution from a bimodal one.
++void llama_moe_stream::print_locality() const {
++    std::vector<double> cov50, cov80, cov95, ginis;
++    uint64_t n_layers_seen = 0;
++
++    for (const auto & sl : layers) {
++        if (!sl || sl->route_total.empty()) {
++            continue;
++        }
++        std::vector<uint64_t> c = sl->route_total;
++        uint64_t total = 0;
++        for (const uint64_t v : c) {
++            total += v;
++        }
++        if (total == 0) {
++            continue;
++        }
++        n_layers_seen++;
++
++        std::sort(c.begin(), c.end(), std::greater<uint64_t>());
++        const double n = (double) c.size();
++
++        uint64_t acc = 0;
++        double c50 = 0, c80 = 0, c95 = 0;
++        for (size_t i = 0; i < c.size(); i++) {
++            acc += c[i];
++            const double share = (double) acc/total;
++            const double frac  = (double) (i + 1)/n;
++            if (c50 == 0 && share >= 0.50) { c50 = frac; }
++            if (c80 == 0 && share >= 0.80) { c80 = frac; }
++            if (c95 == 0 && share >= 0.95) { c95 = frac; }
++        }
++        cov50.push_back(c50);
++        cov80.push_back(c80);
++        cov95.push_back(c95);
++
++        // Gini; 0 = every expert used equally, 1 = one expert takes all.
++        //
++        // The textbook form (2*sum(i*x_i))/(n*sum(x)) - (n+1)/n assumes ASCENDING order. c is sorted
++        // descending for the coverage figures above, which flips the sign, so the terms are swapped
++        // here rather than sorting the vector twice.
++        double weighted = 0;
++        for (size_t i = 0; i < c.size(); i++) {
++            weighted += (double) (i + 1)*c[i];
++        }
++        ginis.push_back((n + 1.0)/n - (2.0*weighted)/(n*total));
++    }
++
++    if (n_layers_seen == 0) {
++        return;
++    }
++
++    auto mean = [](const std::vector<double> & v) {
++        double s = 0;
++        for (const double x : v) { s += x; }
++        return s/v.size();
++    };
++
++    LLAMA_LOG_INFO("%s: moe stream: expert locality over %" PRIu64 " layers, %u experts each\n",
++            __func__, n_layers_seen, layers.empty() || !layers[0] ? 0 : layers[0]->n_expert);
++    LLAMA_LOG_INFO("%s: moe stream:   50%% of selections covered by %.1f%% of experts, 80%% by %.1f%%, 95%% by %.1f%%\n",
++            __func__, 100.0*mean(cov50), 100.0*mean(cov80), 100.0*mean(cov95));
++    LLAMA_LOG_INFO("%s: moe stream:   Gini = %.3f (0 = flat, 1 = one expert takes everything)\n",
++            __func__, mean(ginis));
 +}
 +
 +// custom-op callback (single-threaded on ith 0): given the router's expert ids, ensure every touched
@@ -2240,6 +2315,7 @@ index 0000000..931308e
 +    // route hotness for eviction; halved periodically so a formerly-hot expert ages out
 +    for (const int32_t e : sl->uniq) {
 +        sat_inc(sl->route_hotness[e]);
++        sl->route_total[e]++;
 +    }
 +    if (mgr->hot_decay_interval > 0 && mgr->stats.n_calls % mgr->hot_decay_interval == 0) {
 +        for (auto & sl2 : mgr->layers) {
@@ -2612,10 +2688,10 @@ index 0000000..931308e
 +}
 diff --git a/src/llama-moe-stream.h b/src/llama-moe-stream.h
 new file mode 100644
-index 0000000..290232d
+index 0000000..f61f88e
 --- /dev/null
 +++ b/src/llama-moe-stream.h
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,217 @@
 +#pragma once
 +
 +#include "llama-mmap.h"
@@ -2692,6 +2768,11 @@ index 0000000..290232d
 +    std::unordered_map<int32_t, int32_t> expert_slot;   // RESIDENT and LOADING entries
 +
 +    std::vector<uint32_t> route_hotness; // [n_expert] decayed selection counts, for eviction
++
++    // [n_expert] undecayed selection counts, for measuring expert locality only. route_hotness
++    // cannot answer that question: it is halved periodically so eviction can forget a formerly hot
++    // expert, which is right for eviction and wrong for a histogram.
++    std::vector<uint64_t> route_total;
 +    std::vector<uint8_t>  seen;          // [n_expert] for cold-miss attribution
 +    int64_t use_counter = 0;
 +
@@ -2757,6 +2838,7 @@ index 0000000..290232d
 +    size_t size_bufs() const;
 +
 +    void print_stats() const;
++    void print_locality() const; // expert selection concentration; called from print_stats
 +
 +    bool use_direct_io = false; // O_DIRECT streaming reads (LLAMA_MOE_STREAM_DIRECT), no page cache
 +
