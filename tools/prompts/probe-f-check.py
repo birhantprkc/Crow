@@ -28,14 +28,37 @@ def check(fn):
             return f"{name}: input was modified"
     return None
 
+# The failing case the header promises. It was described here from the start but never
+# actually run - found 2026-08-04, when a generated file raised NameError inside check()
+# and this script died with a traceback instead of a verdict. A checker that has only
+# ever seen good input cannot be told apart from one that checks nothing, so it now
+# proves on every invocation that CASES rejects a wrong implementation.
+def self_test():
+    def never_merges(intervals):
+        return [list(p) for p in intervals]
+    if check(never_merges) is None:
+        print("RESULT: CHECKER BROKEN - a non-merging implementation passed CASES")
+        sys.exit(3)
+
 if __name__ == "__main__":
+    self_test()
+
     path = sys.argv[1]
     try:
         fn = load(path)
     except Exception as e:
         print(f"RESULT: DOES NOT RUN - {type(e).__name__}: {e}")
         sys.exit(2)
-    err = check(fn)
+
+    # Generated code fails at call time as often as at import time: truncated functions
+    # reference names that were never bound. That is still "does not run", not a crash
+    # of the harness - a traceback here would report the checker's failure, not the model's.
+    try:
+        err = check(fn)
+    except Exception as e:
+        print(f"RESULT: DOES NOT RUN - {type(e).__name__}: {e}")
+        sys.exit(2)
+
     if err:
         print(f"RESULT: RUNS BUT WRONG - {err}")
         sys.exit(1)

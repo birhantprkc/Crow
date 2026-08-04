@@ -495,7 +495,7 @@ index bf91daa..59bd763 100644
      mutable int64_t n_queued_tokens    = 0;
  
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 6d1c8f4..18a2ba9 100644
+index 6d1c8f4..890ad04 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -4,6 +4,7 @@
@@ -537,29 +537,7 @@ index 6d1c8f4..18a2ba9 100644
          res = ggml_mul(ctx0, res, s);
      }
      for (const auto & lora : *loras) {
-@@ -1920,6 +1927,21 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
-         cb(selection_probs, "ffn_moe_probs_masked", il);
-     }
- 
-+    // MoE expert streaming: optionally bias the router toward experts the cache already holds,
-+    //   before top-k decides. Off unless LLAMA_MOE_STREAM_ROUTE_BIAS is set; at 0 the hook is not
-+    //   built at all, so the default path stays bit-identical. This deliberately changes which
-+    //   experts are selected - it is a measurement instrument for trading routing fidelity against
-+    //   residency, not a default.
-+    if (mstream) {
-+        llama_moe_stream_layer * msl_bias = mstream->layer(il);
-+        if (msl_bias && msl_bias->matches(gate_exps, up_exps, down_exps, gate_up_exps) &&
-+                mstream->route_bias != 0.0f) {
-+            selection_probs = ggml_map_custom1(ctx0, ggml_cont(ctx0, selection_probs),
-+                    llama_moe_stream_route_bias, 1, msl_bias); // [n_expert, n_tokens]
-+            cb(selection_probs, "ffn_moe_probs_cache_biased", il);
-+        }
-+    }
-+
-     // select experts
-     ggml_tensor * selected_experts = selected_experts_in;
-     if (selected_experts == nullptr) {
-@@ -1971,6 +1993,45 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -1971,6 +1978,45 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
      //call early so that topk-moe can be used
      ggml_build_forward_expand(gf, weights);
  
@@ -605,7 +583,7 @@ index 6d1c8f4..18a2ba9 100644
      cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
  
      if (weight_before_ffn) {
-@@ -1980,12 +2041,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -1980,12 +2026,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          cb(cur, "ffn_moe_weighted", il);
      }
  
@@ -622,7 +600,7 @@ index 6d1c8f4..18a2ba9 100644
          cb(gate_up, "ffn_moe_gate_up", il);
  
          if (up_exps_s) {
-@@ -2004,7 +2068,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2004,7 +2053,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          cb(up, "ffn_moe_up", il);
      } else {
          // separate gate and up path
@@ -631,7 +609,7 @@ index 6d1c8f4..18a2ba9 100644
          cb(up, "ffn_moe_up", il);
  
          if (up_exps_s) {
-@@ -2017,7 +2081,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2017,7 +2066,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          }
  
          if (gate_exps) {
@@ -640,7 +618,7 @@ index 6d1c8f4..18a2ba9 100644
              cb(cur, "ffn_moe_gate", il);
          } else {
              cur = up;
-@@ -2106,7 +2170,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2106,7 +2155,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
              GGML_ABORT("fatal error");
      }
  
@@ -649,7 +627,7 @@ index 6d1c8f4..18a2ba9 100644
      cb(experts, "ffn_moe_down", il);
  
      if (down_exps_s) {
-@@ -2118,6 +2182,45 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2118,6 +2167,45 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          cb(experts, "ffn_moe_down_biased", il);
      }
  
@@ -1744,10 +1722,10 @@ index 056a6ef..02553b5 100644
      virtual ~llama_model_base() = default;
 diff --git a/src/llama-moe-stream.cpp b/src/llama-moe-stream.cpp
 new file mode 100644
-index 0000000..eda555b
+index 0000000..3e3ee5f
 --- /dev/null
 +++ b/src/llama-moe-stream.cpp
-@@ -0,0 +1,1017 @@
+@@ -0,0 +1,960 @@
 +#include "llama-moe-stream.h"
 +
 +#include "llama-impl.h"
@@ -1921,16 +1899,6 @@ index 0000000..eda555b
 +
 +    debug         = std::getenv("LLAMA_MOE_STREAM_DEBUG") != nullptr;
 +    use_direct_io = direct;
-+
-+    // Router bias toward resident experts. Read once here rather than per call so a run cannot
-+    // change policy halfway through and leave counters that describe two different experiments.
-+    if (const char * s = std::getenv("LLAMA_MOE_STREAM_ROUTE_BIAS")) {
-+        route_bias = std::strtof(s, nullptr);
-+        if (route_bias != 0.0f) {
-+            LLAMA_LOG_INFO("%s: MoE expert streaming: router biased toward resident experts by %+.4f\n",
-+                    __func__, route_bias);
-+        }
-+    }
 +}
 +
 +// stop and join the I/O workers before the cache buffers and files they use are destroyed
@@ -2299,53 +2267,6 @@ index 0000000..eda555b
 +// then rewrite each id to its cache slot. this only relabels ids, so the same experts are computed
 +// in the same order; the result matches a non-streamed run (bit-exact when both paths use the same
 +// kernels, as on CUDA; a CPU build that repacks the non-streamed weights can differ in the last bits).
-+// Adds mgr->route_bias to the selection logits of the experts this layer currently holds. Runs on
-+// the CPU right before top-k, under the same lock the remap takes, so the residency it reads is the
-+// one the remap acts on a moment later.
-+//
-+// Masked-out entries stay masked: group masking writes -inf and -inf + bias is still -inf, but the
-+// isfinite guard states that instead of relying on it. A bias of 0 copies the input unchanged, which
-+// is what makes the off-case verifiable against a run without the hook at all.
-+void llama_moe_stream_route_bias(ggml_tensor * dst, const ggml_tensor * a, int ith, int nth, void * userdata) {
-+    GGML_UNUSED(nth);
-+    if (ith != 0) {
-+        return;
-+    }
-+
-+    auto * sl  = (llama_moe_stream_layer *) userdata;
-+    auto * mgr = sl->mgr;
-+
-+    GGML_ASSERT(a->type   == GGML_TYPE_F32);
-+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
-+    GGML_ASSERT(ggml_are_same_shape(a, dst));
-+    GGML_ASSERT(ggml_is_contiguous(a));
-+    GGML_ASSERT(ggml_is_contiguous(dst));
-+
-+    memcpy(dst->data, a->data, ggml_nbytes(a));
-+
-+    const float bias = mgr->route_bias;
-+    if (bias == 0.0f) {
-+        return;
-+    }
-+
-+    const int64_t n_expert = a->ne[0];
-+    const int64_t n_tokens = ggml_nelements(a) / n_expert;
-+
-+    float * out = (float *) dst->data;
-+
-+    std::unique_lock<std::mutex> lk(mgr->mtx);
-+
-+    for (int64_t t = 0; t < n_tokens; t++) {
-+        float * row = out + t*n_expert;
-+        for (const auto & kv : sl->expert_slot) {
-+            const int32_t e = kv.first;
-+            if (e >= 0 && e < n_expert && std::isfinite(row[e])) {
-+                row[e] += bias;
-+            }
-+        }
-+    }
-+}
-+
 +void llama_moe_stream_remap(ggml_tensor * dst, const ggml_tensor * a, int ith, int nth, void * userdata) {
 +    GGML_UNUSED(nth);
 +    if (ith != 0) {
@@ -2767,10 +2688,10 @@ index 0000000..eda555b
 +}
 diff --git a/src/llama-moe-stream.h b/src/llama-moe-stream.h
 new file mode 100644
-index 0000000..89dc309
+index 0000000..f61f88e
 --- /dev/null
 +++ b/src/llama-moe-stream.h
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,217 @@
 +#pragma once
 +
 +#include "llama-mmap.h"
@@ -2921,12 +2842,6 @@ index 0000000..89dc309
 +
 +    bool use_direct_io = false; // O_DIRECT streaming reads (LLAMA_MOE_STREAM_DIRECT), no page cache
 +
-+    // Router bias toward cache-resident experts: added to the selection logits before top-k
-+    // (LLAMA_MOE_STREAM_ROUTE_BIAS, a float; 0 disables the hook entirely). Every miss begins as a
-+    // selection, so this trades routing fidelity for residency - it deliberately changes the output
-+    // and is a measurement instrument, not a default.
-+    float route_bias = 0.0f;
-+
 +    llama_files files; // privately reopened GGUF files, same indices as the loader's
 +
 +    size_t  max_nb_expert      = 0;
@@ -2987,11 +2902,6 @@ index 0000000..89dc309
 +
 +// callback of the id-remapping custom op inserted by build_moe_ffn
 +void llama_moe_stream_remap(ggml_tensor * dst, const ggml_tensor * a, int ith, int nth, void * userdata);
-+
-+// Adds mgr->route_bias to the selection logits of every expert this layer currently holds
-+// (resident or loading), leaving masked-out entries at -inf untouched. Runs before top-k, so it
-+// changes which experts are selected. A bias of 0 copies the input unchanged.
-+void llama_moe_stream_route_bias(ggml_tensor * dst, const ggml_tensor * a, int ith, int nth, void * userdata);
 +
 +// callbacks of the multi-pass prefill custom ops inserted by build_moe_ffn when a ubatch touches
 +// more experts than the cache holds; each src[0] is the contiguous selected ids
