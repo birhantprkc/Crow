@@ -165,14 +165,11 @@ capital held every time.
 
 That is a narrower result than it first looks, and the difference matters:
 
-- **Two quantisations tested now, both clean.** Quant dependence is documented upstream on one
-  machine and one build: `UD-IQ3_XXS` broken, `UD-Q2_K_XL` clean. MXFP4 is not one of the quants
-  anyone has reported on, in either direction. Measured here 2026-08-04: **`UD-IQ1_S` loads on the
-  streaming path with experts on CUDA0 and answers correctly** — one more data point on quant
-  dependence, and it does not resolve it. That run also settled the first rung of the quantisation
-  ladder ([#28](https://github.com/nibor1896/Crow/issues/28)): IQ1_S halves expert size and gives
-  **8.01 t/s against 5.07** at the same slot count, but emits no runnable function at all —
-  `DOES NOT RUN` against the same check MXFP4 passes with 3 of 3 cases.
+- **Three quantisations tested here now, all clean on CUDA.** Quant dependence is documented
+  upstream on one machine and one build: `UD-IQ3_XXS` broken, `UD-Q2_K_XL` clean. MXFP4 is not one
+  of the quants anyone has reported on, in either direction. Measured here 2026-08-04: **`UD-IQ1_S`
+  and `UD-Q2_K_XL` both load on the streaming path with experts on CUDA0 and answer correctly.**
+  Three data points on quant dependence, and they do not resolve it — see the ladder below.
 - **283 builds separate us from the report.** It was filed against b9940, this was measured on
   b10223, and nine CUDA commits sit in between. "Fixed in the meantime" fits the evidence as well as
   "does not occur here".
@@ -182,6 +179,66 @@ That is a narrower result than it first looks, and the difference matters:
   was large enough to flip an argmax.
 
 Nothing has been closed on the strength of it.
+
+## The quantisation ladder, and the operating point it moved
+
+Measured 2026-08-04 on the coding prompt, `-c 4096 -n 256 --temp 0 --seed 1234`, direct I/O, 8 I/O
+threads. Expert size is read from `alloc_bufs`, not from the file size.
+
+| | MXFP4 | **UD-Q2_K_XL** | UD-IQ1_S |
+|---|---:|---:|---:|
+| file | 155.0 GB | **96.8 GB** | 82.5 GB |
+| per expert per layer | 12.75 MiB | **7.78 MiB** | 6.55 MiB |
+| slots in the same 21,930 MiB | 40 | **~64** | ~78 |
+| coding check | RUNS AND CORRECT | **RUNS AND CORRECT** | **DOES NOT RUN** |
+
+**IQ1_S is past the break point.** It is the fastest of the three — 8.01 t/s against 5.07 at equal
+slot count — and it emits no function at all: it repeats the prompt, appends its own "Hints", and
+drifts into reasoning until the token budget runs out. Speed without an answer.
+
+**Q2_K_XL is the new operating point.** Half again the expert size means 64 slots fit on the card
+instead of 40, and both effects compound:
+
+| model / slots | remap calls | hit rate | **ms per token** | tok/s |
+|---|---:|---:|---:|---:|
+| MXFP4 / 40 | 11,008 | 68.04 % | 197.26 | 5.07 |
+| Q2_K_XL / 56 | 11,008 | 73.97 % | 117.57 | 8.51 |
+| **Q2_K_XL / 64** | 11,008 | **78.76 %** | **100.14** | **9.99** |
+
+**A factor of 1.97 against the previous operating point, at an identical workload** — same remap
+count, same prompt, and the coding check still green. Both repetitions per arm are character-identical
+in every counter; the timings spread under 0.3 %.
+
+Quality is measured against MXFP4 by KL divergence rather than perplexity — the project decided that
+in #26, because a perplexity comparison carries two error bars and answers less. On the same token
+sequence: **PPL ratio 1.0184 ± 0.0078**, mean KLD 0.0741 ± 0.0039 with a median of only 0.0025, and
+**92.92 ± 0.40 % identical top tokens**. So the models agree most of the time and disagree sharply in
+a narrow tail — under greedy decoding roughly every fourteenth token differs. Two chunks only, and
+the corpus is llama.cpp source the model has likely seen.
+
+### Bending the router toward the cache
+
+Every miss begins as a selection, so the selection is a lever. `LLAMA_MOE_STREAM_ROUTE_BIAS` adds a
+constant to the gate logits of every expert the layer already holds, before top-k. At 0 the graph
+node is not built and a run is byte-identical to one from before the change.
+
+| slots | bias | hit rate | ms/token | coding check |
+|---:|---:|---:|---:|---|
+| 40 | 0 | 67.30 % | 137.99 | RUNS AND CORRECT |
+| 40 | **0.005** | **71.13 %** | **129.10** | **RUNS AND CORRECT** |
+| 40 | 0.02 | 71.27 % | 129.19 | RUNS BUT WRONG — input modified |
+| 40 | 0.1 | 75.13 % | 116.26 | DOES NOT RUN |
+| **64** | **0** | **78.76 %** | **100.14** | **RUNS AND CORRECT** |
+| 64 | 0.005 | 77.88 % | 107.64 | DOES NOT RUN |
+
+**Where the cache is tight it buys 3.8 points and 6.4 % of time for free. Where slots are available
+it does the opposite** — fewer hits, more time, broken code. The dosing band is narrow: 0.005 and
+0.02 are indistinguishable in throughput and differ only in the verdict. The switch stays for the
+case that returns: a bigger model, a smaller card, a context that eats the VRAM.
+
+This is the first change here that touches the *compute* path rather than the load path. It couples
+the graph to cache state and is deliberately **not** upstream material. The idea came from the dosing
+method in arXiv 2607.28607, not from its subject.
 
 ## Where the novelty actually sits
 
@@ -423,6 +480,7 @@ cannot be told apart from one that checks nothing.
 | [#24](https://github.com/nibor1896/Crow/issues/24) | Baseline on this machine: what do existing tools reach? |
 | [#25](https://github.com/nibor1896/Crow/issues/25) | What VRAM and RAM may the target profile assume? |
 | [#26](https://github.com/nibor1896/Crow/issues/26) | One yardstick: tokens/s **and** a quality gate |
+| [#28](https://github.com/nibor1896/Crow/issues/28) | The quantisation ladder: speed against quality |
 | [#30](https://github.com/nibor1896/Crow/issues/30) | Three-tier expert cache — the parent of the read-path work |
 | [#33](https://github.com/nibor1896/Crow/issues/33) | Does the upstream MoE fault affect us, on quants we have not tried? |
 | [#38](https://github.com/nibor1896/Crow/issues/38) | Does throughput scale with batch size, and does VRAM then pay? |
@@ -454,9 +512,13 @@ Consequence for every later comparison: **both arms of a before/after run in the
 to back.** Compared across days or after a cold start, the 2.89× is back in play and the number is
 unreadable.
 
-Unmeasured and named as such: anything above batch 1, quality, and any tok/s figure for expert
-streaming — that path is built but has never run. No benchmark has been run, and a model answering
-two capital-city questions is not a quality statement.
+Unmeasured and named as such, current to 2026-08-04: **quality beyond one coding task** — the check
+runs one prompt with three cases, and the KL divergence against MXFP4 rests on two chunks of a corpus
+the model has likely seen. **Several concurrent agent runs** — `--prompt-cache` holds exactly one
+state per file, and `llama-server`'s slot caching has not been run here. **The dip at 8,192 prompt
+tokens**, where the prefill rate falls to 33.27 t/s and recovers afterwards; every point in that
+series is a single run. **Batch depth on Q2_K_XL** — the batch figures are MXFP4. No benchmark has
+been run, and a model answering two capital-city questions is not a quality statement.
 
 Spent so far: **0 €.**
 
