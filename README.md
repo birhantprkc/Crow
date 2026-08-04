@@ -299,8 +299,30 @@ Scaling is linear — 0.4 % apart between 512 and 1024, so twice the length cost
 6-token row measures warm-up, not rate.
 
 This replaces the figure that made an agent look impossible. The previous prefill number on record
-was **2.85 t/s**, which put 30 000 tokens of context at 2.9 hours just to read the prompt. Measured
-now it is **8.7 minutes**.
+was **2.85 t/s**, which put 30 000 tokens of context at 2.9 hours just to read the prompt.
+
+**Scaling does not hold beyond 1 024 tokens, and the 8.7-minute extrapolation that first stood here
+is withdrawn.** Measured 2026-08-04 at `-c 32768`, one model load for all five points:
+
+| prompt tokens | T_PP | S_PP |
+|---:|---:|---:|
+| 1,024 | 18.5 s | 55.48 t/s |
+| 4,096 | 82.5 s | 49.64 t/s |
+| 8,192 | 246.3 s | **33.27 t/s** |
+| 16,384 | 453.7 s | 36.11 t/s |
+| **30,000** | **785.0 s** | **38.22 t/s** |
+
+**30 000 tokens cost 13.1 minutes, not 8.7** — the rate falls from 55 to 38 t/s. Against 2.9 hours
+that is still an order of magnitude, but the figure is now measured rather than extended from two
+points. The dip at 8 192 with a recovery after it is unexplained, and every row is a single point
+without repetition.
+
+**And for an agent it is paid once, not per round.** `--prompt-cache` was measured on the same day:
+a 4 490-token prompt costs 125.6 s to prefill and write the cache; the identical prompt with
+`--prompt-cache-ro` reports `prompt eval time = 0.00 ms / 1 tokens` and finishes in **8 seconds**.
+The failing case holds — a prompt diverging 100 bytes in reuses nothing and pays the full 144 s. The
+cache file is 271 MB for 4 490 tokens. **The condition is strict: append to the context, never
+insert at the front.** Details: [#1](https://github.com/nibor1896/Crow/issues/1).
 
 **Why it works although prefill takes the multi-wave path.** At an ubatch of 512 the graph computes
 `n_touch_max = min(n_expert, n_tokens * n_expert_used)` = all 256 experts, and with
@@ -310,9 +332,9 @@ Prefill routes a whole ubatch at once, so the expert ids for the next step exist
 starts — which is exactly what the preloader is for, and exactly what decode cannot offer, because
 the router of layer N+1 reads the state layer N produces.
 
-**So the bottleneck is generation, not reading:** 57.6 t/s in against 8.11 t/s out, a factor of 7.
-The suspicion that an agent would fail on context length is refuted; if it fails, it fails on answer
-length.
+**So the bottleneck is generation, not reading:** 55.5 t/s in at 1 024 tokens and 38.2 at 30 000,
+against 8.11 t/s out — a factor of 6.8 shrinking to 4.7. The suspicion that an agent would fail on
+context length is refuted; if it fails, it fails on answer length.
 
 The same run's `S_TG` column reads 4.2–4.9 t/s rather than 8.11 — eight generated tokens are almost
 pure warm-up. Not a contradiction, measured too short. Lengths above 1024 were not run.
@@ -386,6 +408,7 @@ cannot be told apart from one that checks nothing.
 | `bench-loader.cpp` | read throughput through llama.cpp's **own** file path, closing the "synthetic on the numerator side" gap on [#30](https://github.com/nibor1896/Crow/issues/30) | `--shared` in the same binary must NOT scale: 8 threads on one handle measured 0.991×, against 2.103× pooled. One value apart, or the figure is about the drive and not the code |
 | `run-stage5-bench.ps1` | drives the whole stage-5 measurement in one deterministic pass, so the order is written down instead of remembered | arm 1 is the control on a 49.98 GB file, above the 46.5 GB the drive's own cache can serve: buffered must come out clearly faster, unbuffered must stay at disk speed. If they land close, `FILE_FLAG_NO_BUFFERING` never took hold and the run is VOID — two figures have already been withdrawn here for exactly that missing half |
 | `run-token-series.ps1` | whether per-token decode time is a shape or a spread — the same positions slow in every run, or positions that move | `-SelfTest` feeds one real series and three broken forms; the discriminator is spread-within-a-run against spread-at-a-fixed-position, not a correlation coefficient |
+| `run-cache-sweep.ps1` | hit rate and time against cache size at each placement, in one pass, so the order is written down instead of remembered | four, and each covers a different silent failure: a run without `print_stats` is invalid rather than empty, a run without `alloc_bufs` cannot say where the cache landed, a host request landing on `CUDA0` is rejected — that is what the buft-override bug did — and arms with differing remap counts void the sweep instead of averaging into a difference. Proven against a real failure too: 16 slots cannot satisfy the graph's `3*n_expert_used`, and the sweep reports VOID with exit 1 rather than green with zero arms |
 
 ### Open
 
