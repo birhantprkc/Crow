@@ -165,9 +165,14 @@ capital held every time.
 
 That is a narrower result than it first looks, and the difference matters:
 
-- **Only one quantisation was tested.** Quant dependence is documented upstream on one machine and
-  one build: `UD-IQ3_XXS` broken, `UD-Q2_K_XL` clean. MXFP4 is not one of the quants anyone has
-  reported on, in either direction.
+- **Two quantisations tested now, both clean.** Quant dependence is documented upstream on one
+  machine and one build: `UD-IQ3_XXS` broken, `UD-Q2_K_XL` clean. MXFP4 is not one of the quants
+  anyone has reported on, in either direction. Measured here 2026-08-04: **`UD-IQ1_S` loads on the
+  streaming path with experts on CUDA0 and answers correctly** — one more data point on quant
+  dependence, and it does not resolve it. That run also settled the first rung of the quantisation
+  ladder ([#28](https://github.com/nibor1896/Crow/issues/28)): IQ1_S halves expert size and gives
+  **8.01 t/s against 5.07** at the same slot count, but emits no runnable function at all —
+  `DOES NOT RUN` against the same check MXFP4 passes with 3 of 3 cases.
 - **283 builds separate us from the report.** It was filed against b9940, this was measured on
   b10223, and nine CUDA commits sit in between. "Fixed in the meantime" fits the evidence as well as
   "does not occur here".
