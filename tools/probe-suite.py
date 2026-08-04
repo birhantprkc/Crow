@@ -38,6 +38,7 @@
 #   probe-suite.py selftest
 #   probe-suite.py check <task-name> <generated.py>
 #   probe-suite.py run --url http://127.0.0.1:8081 --out runs/2026-08-04/quality
+#   probe-suite.py compare <run-dir-a> <run-dir-b>
 #
 # Exit codes: 0 all green, 1 at least one task not correct, 2 harness could not run,
 #             3 CHECKER BROKEN.
@@ -649,6 +650,65 @@ def run_suite(url, out_dir, max_tokens, timeout, only=None):
     return 0 if green == len(tasks) else 1
 
 
+# ---------------------------------------------------------------- comparison
+
+def compare_runs(dir_a, dir_b):
+    """Compare two runs task by task.
+
+    THE POINT IS THE VERDICT COLUMN, NOT THE BYTES. Two runs of the same configuration
+    may generate different code and still agree on every verdict; that is the property
+    this gate needs, and it is weaker than determinism. Reporting only byte-equality
+    would condemn a gate that works, and reporting only verdicts would hide that the
+    model is not reproducible at all. Both columns are printed for that reason.
+    """
+    def load(d):
+        with open(os.path.join(d, "summary.json"), "r", encoding="utf-8") as fh:
+            return {r["task"]: r for r in json.load(fh)["results"]}
+
+    try:
+        a, b = load(dir_a), load(dir_b)
+    except Exception as e:
+        print("RESULT: cannot compare - %s" % e)
+        return 2
+
+    shared = [t["name"] for t in TASKS if t["name"] in a and t["name"] in b]
+    if not shared:
+        print("RESULT: no task appears in both runs - refusing to compare nothing.")
+        return 2
+
+    print("  %-22s %-18s %-18s %-9s %s" % ("task", "A", "B", "verdict", "bytes"))
+    same_verdict = same_bytes = 0
+    for name in shared:
+        va, vb = a[name]["verdict"], b[name]["verdict"]
+        agree = va == vb
+        same_verdict += agree
+        pa = os.path.join(dir_a, name + ".py")
+        pb = os.path.join(dir_b, name + ".py")
+        if os.path.isfile(pa) and os.path.isfile(pb):
+            with open(pa, "rb") as fh1, open(pb, "rb") as fh2:
+                identical = fh1.read() == fh2.read()
+        else:
+            identical = False
+        same_bytes += identical
+        print("  %-22s %-18s %-18s %-9s %s" % (
+            name, va, vb, "same" if agree else "CHANGED",
+            "identical" if identical else "differ"))
+
+    n = len(shared)
+    print()
+    print("RESULT: %d of %d verdicts unchanged, %d of %d outputs byte-identical"
+          % (same_verdict, n, same_bytes, n))
+    if same_verdict == n:
+        print("  The gate is verdict-stable across these two runs. That is what a lever")
+        print("  comparison needs; byte-equality is not required and was not observed.")
+    else:
+        changed = [t for t in shared if a[t]["verdict"] != b[t]["verdict"]]
+        print("  NOT verdict-stable: %s" % ", ".join(changed))
+        print("  A one-task difference between configurations cannot be attributed to")
+        print("  the configuration while the gate moves on its own.")
+    return 0 if same_verdict == n else 1
+
+
 # ---------------------------------------------------------------- entry point
 
 def main():
@@ -675,12 +735,18 @@ def main():
     p_run.add_argument("--only", nargs="*", default=None,
                        help="run only these task names (a rerun, never a replacement)")
 
+    p_cmp = sub.add_parser("compare", help="two run directories: verdict stability")
+    p_cmp.add_argument("dir_a")
+    p_cmp.add_argument("dir_b")
+
     args = ap.parse_args()
 
     if args.cmd == "selftest":
         return 0 if selftest() else 3
     if args.cmd == "check":
         return check_file(args.task, args.path)
+    if args.cmd == "compare":
+        return compare_runs(args.dir_a, args.dir_b)
     return run_suite(args.url, args.out, args.max_tokens, args.timeout, args.only)
 
 
