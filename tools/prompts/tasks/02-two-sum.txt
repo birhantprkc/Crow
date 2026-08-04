@@ -1,0 +1,7 @@
+Write a Python function with exactly this signature:
+
+    def two_sum(nums, target):
+
+It takes a list of integers and an integer target. It returns a list of the two indices [i, j] with i < j such that nums[i] + nums[j] == target. If no such pair exists it returns an empty list. If several pairs exist, return the one with the smallest i, and for equal i the smallest j. The input must not be modified.
+
+Use only the standard library. Output the function definition and nothing else: no explanation, no example, no markdown fences.

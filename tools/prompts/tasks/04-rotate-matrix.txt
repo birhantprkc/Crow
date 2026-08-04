@@ -1,0 +1,7 @@
+Write a Python function with exactly this signature:
+
+    def rotate_matrix(matrix):
+
+It takes a list of equal-length rows of integers and returns a NEW matrix rotated 90 degrees clockwise. An empty matrix returns an empty list. The input must not be modified.
+
+Use only the standard library. Output the function definition and nothing else: no explanation, no example, no markdown fences.

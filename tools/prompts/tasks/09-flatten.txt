@@ -1,0 +1,7 @@
+Write a Python function with exactly this signature:
+
+    def flatten(items):
+
+It takes a list that may contain further lists, nested to any depth, and returns a flat list of the non-list elements in left-to-right order. Strings count as elements, not as lists. An empty list returns an empty list. The input must not be modified.
+
+Use only the standard library. Output the function definition and nothing else: no explanation, no example, no markdown fences.

@@ -1,0 +1,7 @@
+Write a Python function with exactly this signature:
+
+    def longest_common_prefix(words):
+
+It takes a list of strings and returns the longest string that is a prefix of every one of them. If the list is empty, or the strings share no prefix, it returns the empty string.
+
+Use only the standard library. Output the function definition and nothing else: no explanation, no example, no markdown fences.

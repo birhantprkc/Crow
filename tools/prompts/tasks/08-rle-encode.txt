@@ -1,0 +1,7 @@
+Write a Python function with exactly this signature:
+
+    def rle_encode(text):
+
+It takes a string and returns its run-length encoding as a list of [character, count] pairs, in order of appearance. Consecutive equal characters form one run. An empty string returns an empty list.
+
+Use only the standard library. Output the function definition and nothing else: no explanation, no example, no markdown fences.

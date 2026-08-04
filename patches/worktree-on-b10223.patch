@@ -3027,6 +3027,31 @@ index d6e0bbf..0b5a340 100644
          llama_model_loader ml(metadata, set_tensor_data, set_tensor_data_ud, fname, splits, file, params.load_mode,
              params.check_tensors, params.no_alloc, params.load_mtp, params.kv_overrides, params.tensor_buft_overrides);
  
+diff --git a/src/models/dflash.cpp b/src/models/dflash.cpp
+index dcff3ae..4d47533 100644
+--- a/src/models/dflash.cpp
++++ b/src/models/dflash.cpp
+@@ -24,7 +24,19 @@ void llama_model_dflash::load_arch_hparams(llama_model_loader & ml) {
+     // DFlash has a single rope, so the SWA rope == main rope.
+     if (ml.get_key(LLM_KV_ATTENTION_SLIDING_WINDOW, hparams.n_swa, false) && hparams.n_swa > 0) {
+         hparams.swa_type = LLAMA_SWA_TYPE_STANDARD;
+-        ml.get_key_or_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.is_swa_impl, hparams.n_layer());
++        // The pattern array is optional, as the comment above says and as every other arch that
++        // reads this key assumes (afmoe, cohere2, exaone4, gemma2/3, ... all pass required=false).
++        // Only this call demanded it, and no published DSpark GGUF carries the key - neither the
++        // fork build (YanissAmz) nor the one linked from the upstream PR (am17an): both set
++        // dflash.attention.sliding_window = 128 and stop there, so both failed to load with
++        // "key not found in model: dflash.attention.sliding_window_pattern".
++        // Fallback mirrors deepseek4, the target this drafter shadows: llama_model_deepseek4
++        // sets swa_type STANDARD and set_swa_pattern(0), i.e. EVERY layer is SWA, and asserts
++        // is_swa(il) in its graph. The drafter copies that attention design (same head_count,
++        // key_length, q_lora_rank, sliding_window), so all-SWA is the derived default, not a guess.
++        if (!ml.get_key_or_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.is_swa_impl, hparams.n_layer(), false)) {
++            hparams.set_swa_pattern(0);
++        }
+         hparams.rope_freq_base_train_swa  = hparams.rope_freq_base_train;
+         hparams.rope_freq_scale_train_swa = hparams.rope_freq_scale_train;
+     }
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
 index 881e55c..8edaf61 100644
 --- a/tests/CMakeLists.txt

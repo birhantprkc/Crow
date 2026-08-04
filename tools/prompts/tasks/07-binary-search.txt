@@ -1,0 +1,7 @@
+Write a Python function with exactly this signature:
+
+    def binary_search(sorted_nums, target):
+
+It takes a list of integers sorted in ascending order and a target integer. It returns the index of the target, or -1 if the target is not present. If the target occurs several times, return the index of the FIRST occurrence. It must not scan the list linearly.
+
+Use only the standard library. Output the function definition and nothing else: no explanation, no example, no markdown fences.

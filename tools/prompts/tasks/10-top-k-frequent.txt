@@ -1,0 +1,7 @@
+Write a Python function with exactly this signature:
+
+    def top_k_frequent(items, k):
+
+It takes a list of strings and an integer k, and returns the k most frequent strings, most frequent first. Ties are broken by first appearance in the input. If k is larger than the number of distinct strings, all of them are returned. The input must not be modified.
+
+Use only the standard library. Output the function definition and nothing else: no explanation, no example, no markdown fences.

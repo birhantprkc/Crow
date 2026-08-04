@@ -1,0 +1,7 @@
+Write a Python function with exactly this signature:
+
+    def group_anagrams(words):
+
+It takes a list of lowercase strings and groups those that are anagrams of each other. It returns a list of groups; each group keeps the words in their original order, and the groups are ordered by the first appearance of their first word. An empty input returns an empty list.
+
+Use only the standard library. Output the function definition and nothing else: no explanation, no example, no markdown fences.
