@@ -207,8 +207,28 @@ What remains genuinely open:
    Coding routes *wider* than prose, and those 4.3 points cost **5.7 points of hit rate** — which is
    why the ticket asks about a coding workload specifically. It also explains why 40 of 256 slots
    work at all: 15.6 % residency covering roughly two thirds of selections matches the measured
-   67–72 %. What it does **not** explain is why more cache buys nothing — 64 slots should cover
-   ~80 % by this distribution and reach only 69.14 %. That gap is where the cold first-touches live.
+   67–72 %.
+
+   **And the distribution holds at 64 slots too — measured 2026-08-04, after an earlier figure of
+   69.14 % was found to belong to a different run.** On the coding workload, one value apart, both
+   arms in host RAM, each run twice:
+
+   | slots | placement | hit rate | misses | of which cold | waves | decode |
+   |---:|---|---:|---:|---:|---:|---:|
+   | 40 | CUDA_Host | 69.03 % | 21,854 | 8,279 | 688 | 4.33 t/s |
+   | **64** | CUDA_Host | **77.35 %** | 15,984 | 8,279 | 387 | 5.04 t/s |
+   | 40 | CUDA0 | 68.04 % | 22,545 | 8,274 | 688 | 5.07 t/s |
+
+   **+8.32 points, against the ~80 % the distribution predicts.** The 69.14 % came from a 38-token
+   `llama-batched-bench` run — 1,462 remap calls, cold first touches at **35.2 %** of accesses,
+   where 80 % was unreachable by construction. Here the cold share is 11.7 %, so the arithmetic
+   ceiling is 88.3 % and the remaining gap is 2.65 points, not eleven.
+
+   **What does not follow is throughput.** 64 slots in RAM deliver 5.04 t/s against 5.07 for 40
+   slots in VRAM — the better hit rate is consumed exactly by the slower memory it is bought with,
+   and 64 slots do not fit on this card (35,088 MiB against 30,991 MiB free). So cache size is a
+   lever for hit rate and not for tok/s on this machine. Details and controls:
+   [#23](https://github.com/nibor1896/Crow/issues/23), [#30](https://github.com/nibor1896/Crow/issues/30).
 2. **Nobody has run this file.** The MXFP4 build has a few hundred downloads and no published
    correctness or throughput result in either direction. As of 2026-08-03 there is one, below: the
    streamed output is byte-identical to a non-streamed run over 512 tokens, and the generated code
