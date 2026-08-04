@@ -229,6 +229,27 @@ What remains genuinely open:
    and 64 slots do not fit on this card (35,088 MiB against 30,991 MiB free). So cache size is a
    lever for hit rate and not for tok/s on this machine. Details and controls:
    [#23](https://github.com/nibor1896/Crow/issues/23), [#30](https://github.com/nibor1896/Crow/issues/30).
+
+   **And what host RAM costs is now measured too** — same six runs, three cache sizes on each
+   placement, one value apart:
+
+   | slots | decode CUDA0 → CUDA_Host | prefill CUDA0 → CUDA_Host |
+   |---:|---:|---:|
+   | 24 | 58,520 → 63,130 ms (**+7.9 %**) | 6,947 → 37,389 ms (**5.38×**) |
+   | 32 | 53,773 → 59,219 ms (**+10.1 %**) | 8,644 → 26,591 ms (**3.08×**) |
+   | 40 | 50,300 → 58,450 ms (**+16.2 %**) | 6,641 → 23,633 ms (**3.56×**) |
+
+   **The surcharge is not in the loading.** Load stall is *lower* in the RAM arm at every cache size
+   (44,988 against 52,726 · 40,603 against 47,733 · 39,048 against 44,533). The RAM arm waits less on
+   the SSD and is slower anyway, so the time appears where compute reads the cache, not where it is
+   filled. Prefill suffers most because an ubatch of 512 touches all 256 experts per layer against
+   6 in decode.
+
+   **On CUDA0 decode time is linear in the hit count, in host RAM it is not** — 1.291 and 1.227 ms
+   saved per additional hit across three points (5.2 % apart), against 1.123 / 0.275 / 1.499 ms in
+   RAM (a factor of 5.4). That is why no per-access cost figure is quoted here: the measurement does
+   not carry one. Repetition spread: 1.5 % at 40 slots, 3.9 % at 64. The 24- and 32-slot points were
+   run once each.
 2. **Nobody has run this file.** The MXFP4 build has a few hundred downloads and no published
    correctness or throughput result in either direction. As of 2026-08-03 there is one, below: the
    streamed output is byte-identical to a non-streamed run over 512 tokens, and the generated code
