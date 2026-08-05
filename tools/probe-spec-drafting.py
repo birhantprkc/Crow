@@ -140,16 +140,19 @@ def read_mean_lengths(path):
     if not path or not os.path.isfile(path):
         return []
     raw = open(path, "rb").read()
-    text = None
-    for enc in ("utf-8", "utf-16"):
-        try:
-            text = raw.decode(enc)
-            break
-        except Exception:
-            continue
-    if text is None:
-        return []
-    return [float(m) for m in re.findall(r"mean len\s*=\s*([0-9.]+)", text)]
+    # Decode with errors="replace", never strictly. A server log at -lv 5 carries raw
+    # token bytes, and one invalid sequence made strict utf-8 AND utf-16 both fail, which
+    # returned [] and dropped every mean-len value without a word. Measured 2026-08-05:
+    # byte 0xef at offset 7339 of a 1,938,549-byte log, 0 of 3 values extracted while the
+    # lines were plainly present. The pattern is ASCII; a mangled byte elsewhere in the
+    # file is no reason to abandon it.
+    text = raw.decode("utf-8", errors="replace")
+    values = [float(m) for m in re.findall(r"mean len\s*=\s*([0-9.]+)", text)]
+    if not values and re.search(r"draft acceptance\s*=", text):
+        # Acceptance lines are there but no mean len parsed - say so instead of
+        # returning an empty list that reads like "the server never drafted".
+        print("  NOTE: server log has 'draft acceptance' lines but no parsable 'mean len'.")
+    return values
 
 
 def main():
