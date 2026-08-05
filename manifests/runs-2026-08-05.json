@@ -1,13 +1,14 @@
 {
     "note":  "Fingerprint only. These files are NOT in git - runs/ is ignored (.gitignore:10). This manifest detects deletion and modification; it is not a backup and does not make the protocols recoverable.",
     "day":  "2026-08-05",
-    "pattern":  "^e9|^e10",
+    "pattern":  "^e9|^e10|^e11",
     "root":  "Crow/runs",
-    "written":  "2026-08-05T21:58:27.4720738+02:00",
-    "files":  178,
-    "bytes":  4825376,
+    "written":  "2026-08-05T22:20:46.7232894+02:00",
+    "files":  214,
+    "bytes":  14485674,
     "stages":  {
                    "E10":  65,
+                   "E11":  36,
                    "E9":  113
                },
     "entries":  [
@@ -400,6 +401,222 @@
                         "stage":  "E10",
                         "bytes":  1011,
                         "sha256":  "BF364182C1F55891FEC99052C14CF26E4F8849B7FFDD0B7BF9EB7A7A6082C64D"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/negative.cmdline.txt",
+                        "stage":  "E11",
+                        "bytes":  235,
+                        "sha256":  "2E5808F7B3227691C6B2A3D5DE4F6000C3C3DEF05AB09A40F562E195FDAB7436"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/negative.err",
+                        "stage":  "E11",
+                        "bytes":  2878680,
+                        "sha256":  "50B728371E9FB5A2F861F4C99A3F3F0861D387313E5DA505D9EBDE5FC337BF18"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/negative.out",
+                        "stage":  "E11",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/negative-probe.log",
+                        "stage":  "E11",
+                        "bytes":  1872,
+                        "sha256":  "4C4B7E794ED57140269CC442EB803B1860D9894FB91A19A4BDBA4E22E942558A"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/negative-probe/run-1.txt",
+                        "stage":  "E11",
+                        "bytes":  328,
+                        "sha256":  "14717AA7D99E36BE9C0DD2CC30A57C1477CE3308F9C446669037C0B42E534918"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/negative-probe/run-2.txt",
+                        "stage":  "E11",
+                        "bytes":  328,
+                        "sha256":  "14717AA7D99E36BE9C0DD2CC30A57C1477CE3308F9C446669037C0B42E534918"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/negative-probe/run-3.txt",
+                        "stage":  "E11",
+                        "bytes":  328,
+                        "sha256":  "14717AA7D99E36BE9C0DD2CC30A57C1477CE3308F9C446669037C0B42E534918"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/negative-probe/summary.json",
+                        "stage":  "E11",
+                        "bytes":  2453,
+                        "sha256":  "E5D173414CBF1028F5402D1D7A4BEAE8D752BA0FBC11763A229E0279EA173FA9"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/negative-timings.json",
+                        "stage":  "E11",
+                        "bytes":  800,
+                        "sha256":  "6C2117F2CA44946D9537B1316A70E06D13A8F88A62292C905001E633B8EC9113"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/positive.cmdline.txt",
+                        "stage":  "E11",
+                        "bytes":  280,
+                        "sha256":  "A3DB93784DC7345E06E68B24CBEC4E6834D9F4BF306A110C748913883EDD85CC"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/positive.err",
+                        "stage":  "E11",
+                        "bytes":  1938549,
+                        "sha256":  "9B3EF71D8AC5AC9DD3368860826D13F27334FEDE126B3E14AD7147CECD0EE0C4"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/positive.out",
+                        "stage":  "E11",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/positive-probe.log",
+                        "stage":  "E11",
+                        "bytes":  1854,
+                        "sha256":  "28D4C663F3D7F0A0AD4D15EE5A8BC0BFEF16DF3494920407CBA75D45725B4F56"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/positive-probe/run-1.txt",
+                        "stage":  "E11",
+                        "bytes":  328,
+                        "sha256":  "14717AA7D99E36BE9C0DD2CC30A57C1477CE3308F9C446669037C0B42E534918"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/positive-probe/run-2.txt",
+                        "stage":  "E11",
+                        "bytes":  328,
+                        "sha256":  "14717AA7D99E36BE9C0DD2CC30A57C1477CE3308F9C446669037C0B42E534918"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/positive-probe/run-3.txt",
+                        "stage":  "E11",
+                        "bytes":  328,
+                        "sha256":  "14717AA7D99E36BE9C0DD2CC30A57C1477CE3308F9C446669037C0B42E534918"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/positive-probe/summary.json",
+                        "stage":  "E11",
+                        "bytes":  2460,
+                        "sha256":  "7488D625FE269E0C99769880CBCFB5183FE5579273982498CDAF4698C258196A"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting/positive-timings.json",
+                        "stage":  "E11",
+                        "bytes":  801,
+                        "sha256":  "66A0FCCBE52221E5CF8341CC3A03C087FE53D50B58C678E182E31DEFBEF34575"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/negative.cmdline.txt",
+                        "stage":  "E11",
+                        "bytes":  235,
+                        "sha256":  "2E5808F7B3227691C6B2A3D5DE4F6000C3C3DEF05AB09A40F562E195FDAB7436"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/negative.err",
+                        "stage":  "E11",
+                        "bytes":  2875491,
+                        "sha256":  "C194FA6AEFC1812EB1AD545478CEE27892EFEA2A916B93DBC1206199817D980C"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/negative.out",
+                        "stage":  "E11",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/negative-probe.log",
+                        "stage":  "E11",
+                        "bytes":  1872,
+                        "sha256":  "E4D0119E28AAF5658B62883D6D0BC40B57DE25A659A89BD85474B1ACE749AA3B"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/negative-probe/run-1.txt",
+                        "stage":  "E11",
+                        "bytes":  328,
+                        "sha256":  "14717AA7D99E36BE9C0DD2CC30A57C1477CE3308F9C446669037C0B42E534918"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/negative-probe/run-2.txt",
+                        "stage":  "E11",
+                        "bytes":  328,
+                        "sha256":  "14717AA7D99E36BE9C0DD2CC30A57C1477CE3308F9C446669037C0B42E534918"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/negative-probe/run-3.txt",
+                        "stage":  "E11",
+                        "bytes":  328,
+                        "sha256":  "14717AA7D99E36BE9C0DD2CC30A57C1477CE3308F9C446669037C0B42E534918"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/negative-probe/summary.json",
+                        "stage":  "E11",
+                        "bytes":  2453,
+                        "sha256":  "64F4C81365A3B238F7517DAD638C4DAE6F95D4D1A7DFCFD7E99D3AF2890CF9CB"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/negative-timings.json",
+                        "stage":  "E11",
+                        "bytes":  798,
+                        "sha256":  "C63DF83F6A0A9435A43F75DB9C3134349448F59E598DA47E041CE4CBC500E208"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/positive.cmdline.txt",
+                        "stage":  "E11",
+                        "bytes":  280,
+                        "sha256":  "A3DB93784DC7345E06E68B24CBEC4E6834D9F4BF306A110C748913883EDD85CC"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/positive.err",
+                        "stage":  "E11",
+                        "bytes":  1942135,
+                        "sha256":  "5F41A6CBB60C0E74D3B17119B47864A19B0965FF4566FBFB70CDE89B92F804E5"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/positive.out",
+                        "stage":  "E11",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/positive-probe.log",
+                        "stage":  "E11",
+                        "bytes":  1854,
+                        "sha256":  "29041933355A2FE683B23288F0325AEB18E23D3448D61E6089540D6CC1074C9B"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/positive-probe/run-1.txt",
+                        "stage":  "E11",
+                        "bytes":  328,
+                        "sha256":  "14717AA7D99E36BE9C0DD2CC30A57C1477CE3308F9C446669037C0B42E534918"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/positive-probe/run-2.txt",
+                        "stage":  "E11",
+                        "bytes":  328,
+                        "sha256":  "14717AA7D99E36BE9C0DD2CC30A57C1477CE3308F9C446669037C0B42E534918"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/positive-probe/run-3.txt",
+                        "stage":  "E11",
+                        "bytes":  328,
+                        "sha256":  "14717AA7D99E36BE9C0DD2CC30A57C1477CE3308F9C446669037C0B42E534918"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/positive-probe/summary.json",
+                        "stage":  "E11",
+                        "bytes":  2462,
+                        "sha256":  "03AFA8B951006C08C572DC76879DEBF7CFB7253746EB1FFF75A3F50F39BD7D93"
+                    },
+                    {
+                        "path":  "2026-08-05/e11-drafting-run1-wrongcriterion/positive-timings.json",
+                        "stage":  "E11",
+                        "bytes":  798,
+                        "sha256":  "295AB08B991A42179C6E4D714507C28A76C46AFB87E1FDA9E6D6E81D8332CBC5"
                     },
                     {
                         "path":  "2026-08-05/e9a-b10269/b10269-probea.raw.txt",
