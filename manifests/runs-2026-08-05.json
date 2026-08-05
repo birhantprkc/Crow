@@ -1,15 +1,16 @@
 {
     "note":  "Fingerprint only. These files are NOT in git - runs/ is ignored (.gitignore:10). This manifest detects deletion and modification; it is not a backup and does not make the protocols recoverable.",
     "day":  "2026-08-05",
-    "pattern":  "^e9|^e10|^e11",
+    "pattern":  "^e9|^e10|^e11|^e12",
     "root":  "Crow/runs",
-    "written":  "2026-08-05T22:27:18.5068742+02:00",
-    "files":  214,
-    "bytes":  14485674,
+    "written":  "2026-08-05T22:47:13.5913046+02:00",
+    "files":  231,
+    "bytes":  29386614,
     "stages":  {
                    "E10":  65,
                    "E11":  36,
-                   "E9":  113
+                   "E9":  113,
+                   "unknown":  17
                },
     "entries":  [
                     {
@@ -617,6 +618,108 @@
                         "stage":  "E11",
                         "bytes":  798,
                         "sha256":  "295AB08B991A42179C6E4D714507C28A76C46AFB87E1FDA9E6D6E81D8332CBC5"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/ab-runs.json",
+                        "stage":  "unknown",
+                        "bytes":  6269,
+                        "sha256":  "E2D418193E00C06D3A67B5067A6A04AE755636A5491F3C9F4E233C269F8D8917"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/block1-A.err",
+                        "stage":  "unknown",
+                        "bytes":  1600538,
+                        "sha256":  "F0ED64F8EB78C631CAF5D0BB25564781CC15C6EDF8237B8B6532A74CF685886B"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/block1-A.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/block2-B.err",
+                        "stage":  "unknown",
+                        "bytes":  2124667,
+                        "sha256":  "B9A53AF087DBAF68E900996D287444DC020CE0F47BA0BA05C46BA5FF1BAC009B"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/block2-B.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/block3-B.err",
+                        "stage":  "unknown",
+                        "bytes":  2124929,
+                        "sha256":  "B51092322043485BFBE436EF5350E37C96E8C74DF8CD6B79614D78C2583C122F"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/block3-B.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/block4-A.err",
+                        "stage":  "unknown",
+                        "bytes":  1599983,
+                        "sha256":  "80284FED26430EC5D5BE91281E86D338E9D1DD1F8E664EEE20C92FD2FE2DC10E"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/block4-A.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/block5-A.err",
+                        "stage":  "unknown",
+                        "bytes":  1599197,
+                        "sha256":  "33B2D04590864794C05D866633BB2285AB17402EE58677A373241DCE5BCD9376"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/block5-A.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/block6-B.err",
+                        "stage":  "unknown",
+                        "bytes":  2118320,
+                        "sha256":  "5B53D81A1AEE70FF82D01F6FE634165D216BA95FB43EEB9878D8DB1C079ECFF5"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/block6-B.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/block7-B.err",
+                        "stage":  "unknown",
+                        "bytes":  2124819,
+                        "sha256":  "59663953124F6BD4BC145561EA0925154BE16DF3AD77E3F6E69E5E4AB98AE371"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/block7-B.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/block8-A.err",
+                        "stage":  "unknown",
+                        "bytes":  1602218,
+                        "sha256":  "E93D614E33073A0A59229ABE4C3E35805EC65BB959E853D4BECE455B595E2A89"
+                    },
+                    {
+                        "path":  "2026-08-05/e12-ab-drafting/block8-A.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
                     },
                     {
                         "path":  "2026-08-05/e9a-b10269/b10269-probea.raw.txt",
