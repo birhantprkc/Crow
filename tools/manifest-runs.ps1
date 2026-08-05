@@ -52,8 +52,12 @@ param(
     [string]$RunsDir  = '',
     [string]$OutDir   = '',
     [string]$Manifest = '',
-    # Which run directories to fingerprint. Default covers the E9 and E10 stages.
-    [string]$Pattern  = '^e9|^e10',
+    # Which run directories to fingerprint. The default used to be '^e9|^e10', which
+    # SILENTLY dropped e11 and e12 - the E11 and ABBA protocols were recorded as manifested
+    # while the default run never touched them. A filter that omits without saying so is the
+    # same failure as a counter that returns 0: it looks like coverage. Default now spans
+    # every stage that has produced runs.
+    [string]$Pattern  = '^e9|^e1[012]',
     [string]$Day      = '2026-08-05',
     [switch]$Verify
 )
@@ -81,6 +85,7 @@ function Collect-Entries {
             '^e9'  { 'E9';      break }
             '^e10' { 'E10';     break }
             '^e11' { 'E11';     break }
+            '^e12' { 'E12';     break }
             default { 'unknown' }
         }
         foreach ($f in (Get-ChildItem $d.FullName -Recurse -File | Sort-Object FullName)) {
