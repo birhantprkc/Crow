@@ -41,14 +41,23 @@ takes only the first four lines; group (ii) alone anchors one line later and bri
 a brace of its own. Both orders yield identical text -- verified, see below.
 
 MEASURED 2026-08-05, all against the live tree by SHA-256 after CR removal:
-  group (i)  17 foreign files + 3 of our own, group (ii) 4, group (iii) 1
+  group (i)  18 foreign files + 3 of our own, group (ii) 4, group (iii) 1
   each patch alone on pristine b10223: applies
-  all three, all six orders, `git apply --3way`: 23 of 23, no conflict markers
+  all three, all six orders, `git apply --3way`: 22 of 22 plus common/sampling.cpp,
+    no conflict markers. sampling.cpp is the ONE approved deviation from the live
+    tree: group (i) is re-anchored behind common_memory_breakdown_print, so the
+    streaming stats print after the memory breakdown instead of before. Statements
+    are identical - compared as a sorted, comment-stripped set - so nothing is lost
+    or added, only the order and the comment differ.
   all three, all six orders, plain `git apply`: NONE work -- the second patch to
     touch llama-context.cpp or llama.h fails, because both were diffed against
     pristine and their context lines overlap. --3way IS MANDATORY for combining,
     and it works only because the b10223 blobs are in the same object store.
   second run of this tool: all three patches byte-identical
+
+THREE FILES ARE SHARED between groups, and every one of them for the same reason:
+the streaming change and the timing change wanted the same anchor. include/llama.h
+splits by hunk, src/llama-context.cpp and common/sampling.cpp split by line.
 
 Usage: split-patch-groups.py <u0.patch> <group: i|ii|iii> <srcdir> <outdir>
        Writes that group's target files into outdir; run `git diff` there to get
@@ -62,7 +71,6 @@ import subprocess
 import sys
 
 WHOLE_FILE = {
-    "common/sampling.cpp": "ii",
     "src/llama-context.h": "ii",
     "src/models/dflash.cpp": "iii",
 }
@@ -71,7 +79,37 @@ HUNKS_II = {
     "include/llama.h": {3},
     "src/llama-context.cpp": {3, 4, 9, 10},
 }
-SPLIT_FILE, SPLIT_HUNK = "src/llama-context.cpp", 11
+
+# Hunks carrying BOTH groups, split by line. Two so far, and both for the same
+# reason: the streaming change and the timing change wanted the same anchor.
+BRACE_SPLIT = ("src/llama-context.cpp", 11)
+SAMPLING_SPLIT = ("common/sampling.cpp", 1)
+# The line that starts the group (i) tail of the sampling hunk. Matched on text and
+# not on an index, because an index silently shifts when the comment above it grows.
+SAMPLING_MARKER = "Upstream PR #25294"
+
+# The group (i) tail is RE-ANCHORED one original line down, after this call.
+# Why: both blocks originally insert at the same base line (b10223 sampling.cpp:549,
+# in front of common_memory_breakdown_print), and two independent inserts at ONE base
+# line cannot be carried by two patches that each have to apply on their own. Measured
+# 2026-08-05: sharing the anchor left exactly one conflict marker in all six
+# application orders, 22 of 23. Moving this block behind the call gives it an anchor
+# of its own. The cost is the print order, and the comment now says so instead of
+# claiming the old position.
+SAMPLING_ANCHOR_AFTER = "common_memory_breakdown_print"
+SAMPLING_TAIL = [
+    "",
+    "        // Expert-streaming statistics, printed AFTER common_memory_breakdown_print and",
+    "        // not in front of it, where upstream PR #25294 places them. The per-token series",
+    "        // above wants that same anchor, and two independent inserts at one base line",
+    "        // cannot be split across two patches that each have to apply on their own:",
+    "        // measured 2026-08-05, sharing it left a conflict in all six orders. Both still",
+    "        // print, because the series explains the shape of a token's time while these",
+    "        // stats explain how much of it went on fetching experts, and reading one without",
+    "        // the other is how a stall gets blamed on the wrong tier. No-op while streaming",
+    "        // is off.",
+]
+
 BASE_TAG = "b10223"
 
 HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -81,6 +119,10 @@ class Hunk:
     def __init__(self, old_start, old_len):
         self.old_start, self.old_len = old_start, old_len
         self.removed, self.added = [], []
+        # Optional: text the pristine line directly above this insert must contain.
+        # A re-anchored hunk that is one line off would otherwise still apply, and
+        # produce a file that looks right.
+        self.expect_above = None
 
 
 def parse(path):
@@ -111,9 +153,10 @@ def parse(path):
     return files
 
 
-def split_mixed(h):
+def split_brace(h):
+    """llama-context.cpp hunk 11 -> (group i, group ii)."""
     if h.old_len != 0 or h.removed:
-        sys.exit(f"FAIL: hunk {SPLIT_HUNK} of {SPLIT_FILE} is not a pure insertion")
+        sys.exit(f"FAIL: hunk {BRACE_SPLIT[1]} of {BRACE_SPLIT[0]} is not a pure insertion")
     if len(h.added) < 6 or h.added[4] != "}":
         sys.exit(f"FAIL: expected a closing brace at added line 5, got {h.added[4]!r}. "
                  "The file changed shape; re-read the hunk before trusting this split.")
@@ -121,6 +164,51 @@ def split_mixed(h):
     a.added = h.added[0:4]
     b = Hunk(h.old_start + 1, 0)
     b.added = h.added[5:] + ["}"]
+    return a, b
+
+
+def split_sampling(h):
+    """common/sampling.cpp hunk 1 -> (group i tail, group ii head).
+
+    The plan calls this file "group (ii) only, 74 of 74 lines". Measured 2026-08-05
+    the hunk is 66 to 8: the tail is a comment plus llama_moe_stream_print_stats(),
+    which is group (i). Leaving it in (ii) cost two things - token-timing alone
+    failed to compile with C3861, and the core patch lost the only print path that
+    survives default verbosity, so after the jump the streaming statistics would be
+    silent.
+
+    Two line counts, and they are NOT the same number. 66/8 is how the original hunk
+    divides. What ships is 66 for group (ii) unchanged and 11 for group (i), because
+    re-anchoring rewrites the comment - measured: sampling.cpp goes from 887 pristine
+    lines to 953 under (ii) alone and to 898 under (i) alone.
+
+    Split on the marker text rather than an index: the comment above it will grow.
+    """
+    if h.old_len != 0 or h.removed:
+        sys.exit(f"FAIL: hunk {SAMPLING_SPLIT[1]} of {SAMPLING_SPLIT[0]} is not a pure insertion")
+    at = [i for i, l in enumerate(h.added) if SAMPLING_MARKER in l]
+    if len(at) != 1:
+        sys.exit(f"FAIL: expected {SAMPLING_MARKER!r} exactly once in the sampling hunk, "
+                 f"found {len(at)}. Re-read the hunk before trusting this split.")
+    cut = at[0]
+    head, tail = h.added[:cut], h.added[cut:]
+    # The check that would have caught the original mis-grouping: the group (i)
+    # symbol must end up in group (i) and nowhere else.
+    call = [l for l in tail if "llama_moe_stream_print_stats" in l]
+    if len(call) != 1:
+        sys.exit(f"FAIL: expected exactly one llama_moe_stream_print_stats call in the "
+                 f"group (i) tail, found {len(call)}")
+    if any("llama_moe_stream_print_stats" in l for l in head):
+        sys.exit("FAIL: llama_moe_stream_print_stats is still in the group (ii) head")
+
+    # Group (i): re-anchored one original line down, with a rewritten comment. The
+    # call line itself is carried over verbatim rather than retyped.
+    a = Hunk(h.old_start + 1, 0)
+    a.added = SAMPLING_TAIL + call
+    a.expect_above = SAMPLING_ANCHOR_AFTER
+    # Group (ii): unchanged, still at the original anchor.
+    b = Hunk(h.old_start, 0)
+    b.added = head
     return a, b
 
 
@@ -133,8 +221,10 @@ def pick(f, group):
     ii = HUNKS_II.get(name, set())
     out = []
     for idx, h in enumerate(f["hunks"], start=1):
-        if name == SPLIT_FILE and idx == SPLIT_HUNK:
-            out.append(split_mixed(h)[0 if group == "i" else 1])
+        if (name, idx) == BRACE_SPLIT:
+            out.append(split_brace(h)[0 if group == "i" else 1])
+        elif (name, idx) == SAMPLING_SPLIT:
+            out.append(split_sampling(h)[0 if group == "i" else 1])
         elif (idx in ii) == (group == "ii"):
             out.append(h)
     return out
@@ -174,6 +264,13 @@ def main():
                     continue
                 lines[at:at + h.old_len] = h.added
             else:
+                if h.expect_above:
+                    above = lines[h.old_start - 1] if h.old_start >= 1 else ""
+                    if h.expect_above not in above:
+                        print(f"  MISMATCH {name} @{h.old_start}: expected the line above a "
+                              f"re-anchored insert to contain {h.expect_above!r}, found {above!r}")
+                        rc = 1
+                        continue
                 lines[h.old_start:h.old_start] = h.added
 
         dest = os.path.join(outdir, name)

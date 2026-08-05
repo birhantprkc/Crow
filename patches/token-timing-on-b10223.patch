@@ -1,8 +1,8 @@
 diff --git a/common/sampling.cpp b/common/sampling.cpp
-index 256ac16..70dcf97 100644
+index 256ac16..1fd0152 100644
 --- a/common/sampling.cpp
 +++ b/common/sampling.cpp
-@@ -547,6 +547,80 @@ void common_perf_print(const struct llama_context * ctx, const struct common_sam
+@@ -547,6 +547,72 @@ void common_perf_print(const struct llama_context * ctx, const struct common_sam
          LOG_INF("%s: unaccounted time = %10.2f ms / %5.1f %%      (total - sampling - prompt eval - eval) / (total)\n", __func__, t_unacc_ms, t_unacc_pc);
          LOG_INF("%s:    graphs reused = %10d\n", __func__, data.n_reused);
  
@@ -71,14 +71,6 @@ index 256ac16..70dcf97 100644
 +                }
 +            }
 +        }
-+
-+        // Upstream PR #25294 inserts its expert-streaming statistics at exactly this anchor, in
-+        // front of common_memory_breakdown_print. The per-token series above wants the same spot.
-+        // Both are kept and both print: the series explains the shape of a token's time, the
-+        // streaming stats explain how much of it was spent fetching experts, and reading one
-+        // without the other is how a stall gets blamed on the wrong tier. No-op while streaming
-+        // is off.
-+        llama_moe_stream_print_stats(llama_get_model(ctx));
 +
          common_memory_breakdown_print(ctx);
      }
