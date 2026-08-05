@@ -492,6 +492,16 @@ def normalise_arg(arg):
 
 def load_function(path, func_name):
     spec = importlib.util.spec_from_file_location("gen", path)
+    if spec is None or spec.loader is None:
+        # Measured 2026-08-05: pointed at a stored answer with a .txt extension, this raised
+        # "AttributeError: 'NoneType' object has no attribute 'loader'" - twelve times in a
+        # row, which reads like twelve broken answers and was twelve broken invocations.
+        # A raw transcript is not the input to this step; `run` writes the EXTRACTED source to
+        # a .py file first, and a caller doing it by hand has to do the same.
+        raise ImportError(
+            "%r has no Python loader (extension %r). Extract the function first and pass a "
+            ".py file - `run` does this with extract_function()."
+            % (os.path.basename(path), os.path.splitext(path)[1] or "none"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return getattr(mod, func_name)
