@@ -11,15 +11,35 @@
 # running code" - they do not prove "as good as MXFP4 on the real repositories". That set
 # would come from the repos themselves and is a separate, more expensive decision.
 #
-# THE THREE VERDICTS PER TASK, and why the third exists separately
+# THE FOUR VERDICTS PER TASK, and why the fourth is not a failure
 #   RUNS AND CORRECT   - extracted, imported, all cases passed
 #   RUNS BUT WRONG     - extracted and imported, a case failed
 #   DOES NOT RUN       - no function extracted, or it raised at import or at call time
-# Truncation is reported as its own reason inside DOES NOT RUN. Measured 2026-08-04: with a
-# tight token budget the server returns finish_reason="length", an EMPTY content and a full
-# reasoning_content. A harness reading content alone records that as "the model wrote
-# nothing", which is indistinguishable from a real refusal. It is a harness fault, not a
-# model fault, and it must say so.
+#   UNDECIDED          - the budget ran out before the model reached its answer
+# Measured 2026-08-04: with a tight token budget the server returns finish_reason="length",
+# an EMPTY content and a full reasoning_content. A harness reading content alone records
+# that as "the model wrote nothing", which is indistinguishable from a real refusal. It is
+# a harness fault, not a model fault.
+#
+# Until 2026-08-05 that case was a reason inside DOES NOT RUN - it was named, but it still
+# counted as a failed task. Two runs of the SAME configuration then differed by two tasks
+# (#46), and the two flips had different causes: top-k-frequent was a real model error
+# (NameError on Counter), two-sum blew even the 4096 budget. Folding a budget artefact into
+# the quality score mixes two measurements.
+#
+# THE ANSWER IS TO ASK AGAIN, NOT TO DROP THE TASK
+# A cut-off turn carries an EMPTY content: there is no code, so right-or-wrong is not
+# determinable from that turn at all. The only thing that settles it is a larger budget, so
+# the runner asks again at twice the budget and judges the answer it gets. The denominator
+# stays at ten. UNDECIDED is what remains when even the rerun is cut off - a state the
+# harness admits to rather than a verdict it invents.
+#
+# THE DANGER IN THAT CHANGE, NAMED SO IT CANNOT BE FORGOTTEN
+# A shrinking denominator makes any gate look better. Three rules keep it honest: the
+# denominator printed is the number of tasks actually judged, any task still undecided is
+# COUNTED AND NAMED, and a run with anything undecided cannot exit 0. The tasks that needed
+# a rerun are named too - how often the reference budget was too small is a fact about the
+# harness, and a silent rerun would hide it.
 #
 # THE EXTRACTION STEP IS WRITTEN ONCE, ON PURPOSE
 # On 2026-08-04 a per-task regex `^\s*def merge_intervals` matched the INDENTED signature
@@ -40,8 +60,11 @@
 #   probe-suite.py run --url http://127.0.0.1:8081 --out runs/2026-08-04/quality
 #   probe-suite.py compare <run-dir-a> <run-dir-b>
 #
-# Exit codes: 0 all green, 1 at least one task not correct, 2 harness could not run,
-#             3 CHECKER BROKEN.
+# Exit codes: 0 every task judged and correct, 1 at least one judged task not correct,
+#             2 harness could not run, 3 CHECKER BROKEN,
+#             4 every judged task correct BUT at least one task still undecided after its
+#               rerun - an incomplete measurement, deliberately not 0, so a caller cannot
+#               read it as all green.
 
 import argparse
 import importlib.util
@@ -396,6 +419,43 @@ def merge_intervals(intervals):
 """
 
 
+# ---------------------------------------------------------------- verdicts
+
+CORRECT = "RUNS AND CORRECT"
+WRONG = "RUNS BUT WRONG"
+DEAD = "DOES NOT RUN"
+UNDECIDED = "UNDECIDED"
+
+# A cut-off turn is asked again at a larger budget instead of leaving a hole in the
+# denominator. ONE rerun, at TWICE the budget:
+#   * two-sum is the only task observed to blow a budget, and its reasoning length for the
+#     same prompt and seed has been seen at 2582, 3942 and >4096 tokens. Doubling is the
+#     smallest step that clears that spread.
+#   * it is also the most expensive task in the set (342 s at 3942 tokens), so every further
+#     attempt is paid on the slowest turn. A second rerun would cost more than it decides.
+# If the rerun is cut off too, the task stays UNDECIDED - the harness says it could not
+# decide rather than inventing a verdict.
+RERUN_ATTEMPTS = 1
+RERUN_FACTOR = 2
+
+
+def truncation_reason(finish_reason, content, reasoning_content):
+    """Return a reason string when the turn was cut off before the answer, else None.
+
+    The trigger is exactly the shape measured on 2026-08-04 and nothing wider:
+    finish_reason "length" TOGETHER WITH an empty content. A cut-off turn that still
+    carries a complete function is judged normally - it earned its verdict before the cap.
+    Widening this to every finish_reason="length" would let the harness declare answers
+    undecided that it could perfectly well judge, which is the same sin as scoring them.
+
+    It is a separate function so it can be proven without a server; `selftest` does that.
+    """
+    if finish_reason == "length" and not (content or "").strip():
+        return ("truncated: finish_reason=length, content empty, "
+                "reasoning_content %d chars" % len(reasoning_content or ""))
+    return None
+
+
 # ---------------------------------------------------------------- checking
 
 def normalise(value):
@@ -503,24 +563,24 @@ def selftest(verbose=True):
 def check_file(task_name, path):
     task = next((t for t in TASKS if t["name"] == task_name), None)
     if task is None:
-        print("RESULT: DOES NOT RUN - unknown task %r" % task_name)
+        print("RESULT: %s - unknown task %r" % (DEAD, task_name))
         return 2
     try:
         fn = load_function(path, task["func"])
     except Exception as e:
-        print("RESULT: DOES NOT RUN - %s: %s" % (type(e).__name__, e))
+        print("RESULT: %s - %s: %s" % (DEAD, type(e).__name__, e))
         return 2
     try:
         err = run_cases(task, fn)
     except Exception as e:
-        # Truncated code references names that were never bound. That is the model's
+        # Code that references names which were never bound fails here. That is the model's
         # failure, not the harness's, and it must not surface as a traceback.
-        print("RESULT: DOES NOT RUN - %s: %s" % (type(e).__name__, e))
+        print("RESULT: %s - %s: %s" % (DEAD, type(e).__name__, e))
         return 2
     if err:
-        print("RESULT: RUNS BUT WRONG - %s" % err)
+        print("RESULT: %s - %s" % (WRONG, err))
         return 1
-    print("RESULT: RUNS AND CORRECT - %d cases" % len(task["cases"]))
+    print("RESULT: %s - %d cases" % (CORRECT, len(task["cases"])))
     return 0
 
 
@@ -564,90 +624,133 @@ def run_suite(url, out_dir, max_tokens, timeout, only=None):
         with open(prompt_path, "r", encoding="utf-8") as fh:
             prompt = fh.read()
 
-        try:
-            body, secs = ask_model(url, prompt, max_tokens, timeout)
-        except Exception as e:
-            print("  %-22s DOES NOT RUN - endpoint: %s" % (task["name"], e))
-            results.append({"task": task["name"], "verdict": "DOES NOT RUN",
-                            "reason": "endpoint: %s" % e})
-            continue
+        # A cut-off turn is not a hole in the denominator - it is a turn that was not asked
+        # properly. It is asked again at a larger budget, and only a SECOND cut-off leaves
+        # the task undecided. Attempt 0 is the reference budget, attempt 1 the rerun.
+        budget = max_tokens
+        outcome = None
+        for attempt in range(RERUN_ATTEMPTS + 1):
+            try:
+                body, secs = ask_model(url, prompt, budget, timeout)
+            except Exception as e:
+                print("  %-22s %s - endpoint: %s" % (task["name"], DEAD, e))
+                outcome = {"task": task["name"], "verdict": DEAD,
+                           "reason": "endpoint: %s" % e, "max_tokens": budget}
+                break
 
-        choice = body["choices"][0]
-        finish = choice.get("finish_reason")
-        content = (choice["message"].get("content") or "")
-        reasoning = (choice["message"].get("reasoning_content") or "")
-        usage = body.get("usage", {})
+            choice = body["choices"][0]
+            finish = choice.get("finish_reason")
+            content = (choice["message"].get("content") or "")
+            reasoning = (choice["message"].get("reasoning_content") or "")
+            usage = body.get("usage", {})
+            base = {"task": task["name"], "seconds": round(secs, 2),
+                    "completion_tokens": usage.get("completion_tokens"),
+                    "max_tokens": budget, "attempt": attempt + 1}
 
-        with open(os.path.join(out_dir, task["name"] + ".json"), "w",
-                  encoding="utf-8") as fh:
-            json.dump(body, fh, indent=2)
+            # The discarded transcript is kept under its own name. A rerun that overwrote
+            # the truncated one would erase the evidence that the budget was ever too small.
+            suffix = "" if attempt == 0 else "-rerun"
+            with open(os.path.join(out_dir, task["name"] + suffix + ".json"), "w",
+                      encoding="utf-8") as fh:
+                json.dump(body, fh, indent=2)
 
-        # Truncation first. An empty content with finish_reason "length" means the budget
-        # ran out inside the reasoning block - a harness fault, and it says so rather than
-        # blaming the model.
-        if finish == "length" and not content.strip():
-            reason = ("truncated: finish_reason=length, content empty, "
-                      "reasoning_content %d chars" % len(reasoning))
-            print("  %-22s DOES NOT RUN - %s" % (task["name"], reason))
-            results.append({"task": task["name"], "verdict": "DOES NOT RUN",
-                            "reason": reason, "seconds": round(secs, 2),
-                            "completion_tokens": usage.get("completion_tokens")})
-            continue
+            reason = truncation_reason(finish, content, reasoning)
+            if reason is not None:
+                if attempt < RERUN_ATTEMPTS:
+                    budget *= RERUN_FACTOR
+                    print("  %-22s cut off at %s tokens (%s) - asking again at %d"
+                          % (task["name"], base["max_tokens"], reason.split(",")[0],
+                             budget))
+                    continue
+                # Even the larger budget did not reach an answer. Say so; do not score it.
+                print("  %-22s %s - %s (also at %d tokens)"
+                      % (task["name"], UNDECIDED, reason, budget))
+                outcome = dict(base, verdict=UNDECIDED, reason=reason)
+                break
 
-        src = extract_function(content, task["func"])
-        if src is None:
-            reason = "no column-0 definition of %s in %d chars of content" % (
-                task["func"], len(content))
-            print("  %-22s DOES NOT RUN - %s" % (task["name"], reason))
-            results.append({"task": task["name"], "verdict": "DOES NOT RUN",
-                            "reason": reason, "seconds": round(secs, 2),
-                            "completion_tokens": usage.get("completion_tokens")})
-            continue
+            src = extract_function(content, task["func"])
+            if src is None:
+                reason = "no column-0 definition of %s in %d chars of content" % (
+                    task["func"], len(content))
+                print("  %-22s %s - %s" % (task["name"], DEAD, reason))
+                outcome = dict(base, verdict=DEAD, reason=reason)
+                break
 
-        gen_path = os.path.join(out_dir, task["name"] + ".py")
-        with open(gen_path, "w", encoding="utf-8") as fh:
-            fh.write(src)
+            gen_path = os.path.join(out_dir, task["name"] + ".py")
+            with open(gen_path, "w", encoding="utf-8") as fh:
+                fh.write(src)
 
-        # The verdict is taken in a separate process. A generated file may call sys.exit,
-        # spin, or import something that rewrites state this runner depends on; in-process
-        # execution would let the prüfling decide the prüfer's fate.
-        proc = subprocess.run(
-            [sys.executable, os.path.abspath(__file__), "check", task["name"], gen_path],
-            capture_output=True, text=True, timeout=120,
-        )
-        verdict_line = (proc.stdout or proc.stderr or "").strip().splitlines()
-        verdict_line = verdict_line[-1] if verdict_line else "RESULT: DOES NOT RUN - no output"
-        if proc.returncode == 3:
-            print("  %-22s %s" % (task["name"], verdict_line))
-            print("\nCHECKER BROKEN - aborting")
-            return 3
+            # The verdict is taken in a separate process. A generated file may call sys.exit,
+            # spin, or import something that rewrites state this runner depends on; in-process
+            # execution would let the prüfling decide the prüfer's fate.
+            proc = subprocess.run(
+                [sys.executable, os.path.abspath(__file__), "check", task["name"], gen_path],
+                capture_output=True, text=True, timeout=120,
+            )
+            verdict_line = (proc.stdout or proc.stderr or "").strip().splitlines()
+            verdict_line = verdict_line[-1] if verdict_line else "RESULT: %s - no output" % DEAD
+            if proc.returncode == 3:
+                print("  %-22s %s" % (task["name"], verdict_line))
+                print("\nCHECKER BROKEN - aborting")
+                return 3
 
-        verdict = ("RUNS AND CORRECT" if proc.returncode == 0 else
-                   "RUNS BUT WRONG" if proc.returncode == 1 else "DOES NOT RUN")
-        print("  %-22s %s  (%.1fs, %s tokens)" % (
-            task["name"], verdict_line, secs, usage.get("completion_tokens")))
-        results.append({"task": task["name"], "verdict": verdict,
-                        "reason": verdict_line, "seconds": round(secs, 2),
-                        "completion_tokens": usage.get("completion_tokens")})
+            verdict = (CORRECT if proc.returncode == 0 else
+                       WRONG if proc.returncode == 1 else DEAD)
+            note = "" if attempt == 0 else "  [rerun at %d tokens]" % budget
+            print("  %-22s %s  (%.1fs, %s tokens)%s" % (
+                task["name"], verdict_line, secs, usage.get("completion_tokens"), note))
+            outcome = dict(base, verdict=verdict, reason=verdict_line)
+            break
+
+        results.append(outcome)
 
     if not results:
         print("RESULT: no task produced a verdict - refusing to report a clean run "
               "over nothing.")
         return 2
 
-    green = sum(1 for r in results if r["verdict"] == "RUNS AND CORRECT")
+    green = sum(1 for r in results if r["verdict"] == CORRECT)
+    undecided = [r["task"] for r in results if r["verdict"] == UNDECIDED]
+    judged = len(tasks) - len(undecided)
+
     print()
-    print("RESULT: %d of %d correct" % (green, len(tasks)))
-    for verdict in ("RUNS BUT WRONG", "DOES NOT RUN"):
+    if judged == 0:
+        # A zero without a denominator is not a statement.
+        print("RESULT: NO TASK WAS JUDGED - all %d turns were cut off by the budget."
+              % len(tasks))
+    else:
+        # The denominator is the number of tasks actually judged, and the undecided ones are
+        # named on every run. A denominator that shrinks quietly is how a gate starts looking
+        # better than it is.
+        print("RESULT: %d of %d judged correct, %d undecided (of %d tasks)"
+              % (green, judged, len(undecided), len(tasks)))
+    for verdict in (WRONG, DEAD, UNDECIDED):
         names = [r["task"] for r in results if r["verdict"] == verdict]
         if names:
             print("  %-16s %s" % (verdict + ":", ", ".join(names)))
+    # How often the reference budget was too small is a number about the HARNESS, not the
+    # model, and it stays visible. A silent rerun would hide that the budget needs raising.
+    reran = [r["task"] for r in results if r.get("attempt", 1) > 1]
+    if reran:
+        print("  %-16s %s (at %d tokens)"
+              % ("rerun:", ", ".join(reran), max_tokens * RERUN_FACTOR))
+    if undecided:
+        print("  Still undecided after the rerun - not scored, and not counted as failed.")
 
     with open(os.path.join(out_dir, "summary.json"), "w", encoding="utf-8") as fh:
-        json.dump({"total": len(tasks), "correct": green, "max_tokens": max_tokens,
+        json.dump({"total": len(tasks), "judged": judged, "correct": green,
+                   "undecided": len(undecided), "undecided_tasks": undecided,
+                   "reran_tasks": reran, "max_tokens": max_tokens,
+                   "rerun_max_tokens": max_tokens * RERUN_FACTOR,
                    "results": results}, fh, indent=2)
 
-    return 0 if green == len(tasks) else 1
+    # Exit 0 means every task was judged AND correct. Anything undecided is an incomplete
+    # measurement and gets its own code, so no caller can read it as all green.
+    if judged == 0:
+        return 4
+    if green != judged:
+        return 1
+    return 4 if undecided else 0
 
 
 # ---------------------------------------------------------------- comparison
@@ -660,6 +763,10 @@ def compare_runs(dir_a, dir_b):
     this gate needs, and it is weaker than determinism. Reporting only byte-equality
     would condemn a gate that works, and reporting only verdicts would hide that the
     model is not reproducible at all. Both columns are printed for that reason.
+
+    A task undecided in either run is left out of the stability statement and counted
+    separately. It was never judged there, so it can neither agree nor disagree - and the
+    count is printed every time, because it is the part of the comparison that was not made.
     """
     def load(d):
         with open(os.path.join(d, "summary.json"), "r", encoding="utf-8") as fh:
@@ -676,10 +783,21 @@ def compare_runs(dir_a, dir_b):
         print("RESULT: no task appears in both runs - refusing to compare nothing.")
         return 2
 
-    print("  %-22s %-18s %-18s %-9s %s" % ("task", "A", "B", "verdict", "bytes"))
+    print("  %-22s %-18s %-18s %-11s %s" % ("task", "A", "B", "verdict", "bytes"))
     same_verdict = same_bytes = 0
+    comparable, undecided = [], []
     for name in shared:
         va, vb = a[name]["verdict"], b[name]["verdict"]
+
+        # A task undecided in either run was never judged there, so it can neither agree
+        # nor disagree. Counting it as a flip would blame the model for the budget;
+        # counting it as agreement would invent a stability that was not measured.
+        if UNDECIDED in (va, vb):
+            undecided.append(name)
+            print("  %-22s %-18s %-18s %-11s %s" % (name, va, vb, "undecided", "-"))
+            continue
+
+        comparable.append(name)
         agree = va == vb
         same_verdict += agree
         pa = os.path.join(dir_a, name + ".py")
@@ -690,19 +808,30 @@ def compare_runs(dir_a, dir_b):
         else:
             identical = False
         same_bytes += identical
-        print("  %-22s %-18s %-18s %-9s %s" % (
+        print("  %-22s %-18s %-18s %-11s %s" % (
             name, va, vb, "same" if agree else "CHANGED",
             "identical" if identical else "differ"))
 
-    n = len(shared)
+    n = len(comparable)
     print()
+    if n == 0:
+        print("RESULT: NOTHING COMPARABLE - all %d shared tasks were undecided in at "
+              "least one run." % len(shared))
+        print("  Rerun with a larger budget before comparing anything.")
+        return 2
+
     print("RESULT: %d of %d verdicts unchanged, %d of %d outputs byte-identical"
           % (same_verdict, n, same_bytes, n))
+    if undecided:
+        # Printed every time, because this number is the part of the comparison that was
+        # not made. Silence here would read as a clean sweep over ten tasks.
+        print("  Outside the statement: %d of %d task(s) undecided in at least one run "
+              "(%s)." % (len(undecided), len(shared), ", ".join(undecided)))
     if same_verdict == n:
-        print("  The gate is verdict-stable across these two runs. That is what a lever")
-        print("  comparison needs; byte-equality is not required and was not observed.")
+        print("  The gate is verdict-stable over the tasks it judged in both runs. That is")
+        print("  what a lever comparison needs; byte-equality is not required.")
     else:
-        changed = [t for t in shared if a[t]["verdict"] != b[t]["verdict"]]
+        changed = [t for t in comparable if a[t]["verdict"] != b[t]["verdict"]]
         print("  NOT verdict-stable: %s" % ", ".join(changed))
         print("  A one-task difference between configurations cannot be attributed to")
         print("  the configuration while the gate moves on its own.")
