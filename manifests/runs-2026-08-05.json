@@ -1,0 +1,1083 @@
+{
+    "note":  "Fingerprint only. These files are NOT in git - runs/ is ignored (.gitignore:10). This manifest detects deletion and modification; it is not a backup and does not make the protocols recoverable.",
+    "day":  "2026-08-05",
+    "pattern":  "^e9|^e10",
+    "root":  "Crow/runs",
+    "written":  "2026-08-05T21:58:27.4720738+02:00",
+    "files":  178,
+    "bytes":  4825376,
+    "stages":  {
+                   "E10":  65,
+                   "E9":  113
+               },
+    "entries":  [
+                    {
+                        "path":  "2026-08-05/e10-b10269/apply.log",
+                        "stage":  "E10",
+                        "bytes":  2744,
+                        "sha256":  "806A3908FF16E32721446587A206FCC3E83BD3B4AE47B551A86BBF5D7CC133E6"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-b10269/build-again.log",
+                        "stage":  "E10",
+                        "bytes":  728,
+                        "sha256":  "0F00D851EA47D9BD32C69EA18125020B1ECE4A6FEE73C6615B3051E25E4696BB"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-b10269/build-errorlines.txt",
+                        "stage":  "E10",
+                        "bytes":  38,
+                        "sha256":  "2060BFC5694DE1D74253EF431EB22B00093F2AE7126D78B4C40984BC50556286"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-b10269/build-tail.txt",
+                        "stage":  "E10",
+                        "bytes":  2301,
+                        "sha256":  "AB6AB4D696A0BC18E6A895DD0734431F87C543D84073817199666AAFB6B199A5"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-b10269/cache-drift.txt",
+                        "stage":  "E10",
+                        "bytes":  48,
+                        "sha256":  "0983973A7F3C292396A6FB51EAF323271153193CCA43D9350537C2FB73ED1290"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-b10269/configure.log",
+                        "stage":  "E10",
+                        "bytes":  8658,
+                        "sha256":  "9F4D74C5156AD33BC63EC973FF5E1CB3D1C9A9CECBD40B0FEFD19F46B0F1393C"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-b10269/configure-args.txt",
+                        "stage":  "E10",
+                        "bytes":  327,
+                        "sha256":  "978E91FEF896EE1E20E0DCBBE70DC411E011B8567C9950B0854A4AE9D9073775"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-b10269/configure-cuda.txt",
+                        "stage":  "E10",
+                        "bytes":  906,
+                        "sha256":  "8E4ACB689ECA41673736A7724F05885CC45F3917C14EE57C54495AA499E7E41A"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-b10269/guard-patched.log",
+                        "stage":  "E10",
+                        "bytes":  444,
+                        "sha256":  "113FDE2C557877B48157E94C87E5E16DB2ED752342BD56265356A63E4E179989"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-b10269/guard-pristine.log",
+                        "stage":  "E10",
+                        "bytes":  410,
+                        "sha256":  "D761DDC9A20F150D6D4B18A80B8FE2928AD589E758788618AE4830C457ED89E6"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-b10269/summary.json",
+                        "stage":  "E10",
+                        "bytes":  882,
+                        "sha256":  "F6CB081F7A004FE61F7DFA5D50A7BB8FB99D92A2965CA6D8445BC6397D883665"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load/artefacts-after.json",
+                        "stage":  "E10",
+                        "bytes":  1034,
+                        "sha256":  "C30A0FA5050BAF48AD94D14E8ACE9860477FD2354F4D3584B7F75A8EFB2A9492"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load/artefacts-before.json",
+                        "stage":  "E10",
+                        "bytes":  1034,
+                        "sha256":  "C30A0FA5050BAF48AD94D14E8ACE9860477FD2354F4D3584B7F75A8EFB2A9492"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load/commandline-delta.txt",
+                        "stage":  "E10",
+                        "bytes":  106,
+                        "sha256":  "7309AA8AB7225F8522E917137CEE557E5AC773B5FFEF2387CFE74561E504C4DB"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load/negative.cmdline.txt",
+                        "stage":  "E10",
+                        "bytes":  173,
+                        "sha256":  "E0817FE98F401C3785D36CB973C6F8D9612F8ADF36EE549D838C069B7CC42B98"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load/negative.err",
+                        "stage":  "E10",
+                        "bytes":  516788,
+                        "sha256":  "9B823433625C362590008FBA6D731E78CD8D57CE7714E77B8EEF8934B7F3262C"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load/negative.out",
+                        "stage":  "E10",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load/negative.win32-commandline.txt",
+                        "stage":  "E10",
+                        "bytes":  257,
+                        "sha256":  "94EB16CD8A7812A703B42981755EE11E402B7A5110E45DB6D74A7F19D843C91C"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load/negative-error-lines.txt",
+                        "stage":  "E10",
+                        "bytes":  1192,
+                        "sha256":  "11A0DD68FA5430DCECBF0485F5F2863D00CA895AF5C128CEE66093753209FB15"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load/negative-termination.json",
+                        "stage":  "E10",
+                        "bytes":  227,
+                        "sha256":  "B308AD60BFE5A302AF43496640D97E39AC60A99DE8E3B828C7FA28D652C4A4CC"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load/positive.cmdline.txt",
+                        "stage":  "E10",
+                        "bytes":  255,
+                        "sha256":  "A396140D02CBB3AF43C00960482BAF49D4EEA70D103EF3A045580E1F96071ED0"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load/positive.err",
+                        "stage":  "E10",
+                        "bytes":  1005021,
+                        "sha256":  "2CC28F5D758BC061E0E8BA64DFC436251B7B2AEEEA4BD243B955CE772420396C"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load/positive.out",
+                        "stage":  "E10",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load/positive.win32-commandline.txt",
+                        "stage":  "E10",
+                        "bytes":  332,
+                        "sha256":  "A95647D2190D43D7F9AD09D7EC3AD001CA4CD2E814DC85EEC84BC70002D09F26"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load/positive-response.json",
+                        "stage":  "E10",
+                        "bytes":  1621,
+                        "sha256":  "1F18308D21A10944D0ED3254DB5D7137FFA5C947FF569F72DEC6BCEC37D83078"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load/positive-timings.json",
+                        "stage":  "E10",
+                        "bytes":  247,
+                        "sha256":  "5931B7BDE73A98BB7076FF7785FB343F74A35BB24E1927A3C02A31EC90F02E0F"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load/summary.json",
+                        "stage":  "E10",
+                        "bytes":  977,
+                        "sha256":  "E94FC861398C1047D3C975C8DC3D92E131836D864E2C89E7A724A4280165A98E"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run1-checkerdefect/artefacts-after.json",
+                        "stage":  "E10",
+                        "bytes":  1034,
+                        "sha256":  "C30A0FA5050BAF48AD94D14E8ACE9860477FD2354F4D3584B7F75A8EFB2A9492"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run1-checkerdefect/artefacts-before.json",
+                        "stage":  "E10",
+                        "bytes":  1034,
+                        "sha256":  "C30A0FA5050BAF48AD94D14E8ACE9860477FD2354F4D3584B7F75A8EFB2A9492"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run1-checkerdefect/commandline-delta.txt",
+                        "stage":  "E10",
+                        "bytes":  106,
+                        "sha256":  "7309AA8AB7225F8522E917137CEE557E5AC773B5FFEF2387CFE74561E504C4DB"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run1-checkerdefect/negative.cmdline.txt",
+                        "stage":  "E10",
+                        "bytes":  173,
+                        "sha256":  "E0817FE98F401C3785D36CB973C6F8D9612F8ADF36EE549D838C069B7CC42B98"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run1-checkerdefect/negative.err",
+                        "stage":  "E10",
+                        "bytes":  516788,
+                        "sha256":  "1AA1AEFCED91A331AD095F05371D0992D9FE845E1B57B870FE07CDD019D48D6A"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run1-checkerdefect/negative.out",
+                        "stage":  "E10",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run1-checkerdefect/negative.win32-commandline.txt",
+                        "stage":  "E10",
+                        "bytes":  257,
+                        "sha256":  "94EB16CD8A7812A703B42981755EE11E402B7A5110E45DB6D74A7F19D843C91C"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run1-checkerdefect/negative-error-lines.txt",
+                        "stage":  "E10",
+                        "bytes":  1192,
+                        "sha256":  "142DEA7B67EADAC503D0BD87DEED89418415D93DA10F45B0AA200F112D553E5F"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run1-checkerdefect/positive.cmdline.txt",
+                        "stage":  "E10",
+                        "bytes":  255,
+                        "sha256":  "A396140D02CBB3AF43C00960482BAF49D4EEA70D103EF3A045580E1F96071ED0"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run1-checkerdefect/positive.err",
+                        "stage":  "E10",
+                        "bytes":  983654,
+                        "sha256":  "9F1A1DEEA8147F5BDC77294C81D37103945EAB8E8A33A31DE32A58D3D314A0D2"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run1-checkerdefect/positive.out",
+                        "stage":  "E10",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run1-checkerdefect/positive.win32-commandline.txt",
+                        "stage":  "E10",
+                        "bytes":  332,
+                        "sha256":  "A95647D2190D43D7F9AD09D7EC3AD001CA4CD2E814DC85EEC84BC70002D09F26"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run1-checkerdefect/positive-response.json",
+                        "stage":  "E10",
+                        "bytes":  1591,
+                        "sha256":  "2A55158C34DC2FB30321B3FE42AF849C1EACE007992D37920D375CE4B4ED2EAB"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run1-checkerdefect/summary.json",
+                        "stage":  "E10",
+                        "bytes":  980,
+                        "sha256":  "D766D5D621F30C25344038ACF5187344224DD9938C136EDDD111859A81BB782C"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run2-exitcode/artefacts-after.json",
+                        "stage":  "E10",
+                        "bytes":  1034,
+                        "sha256":  "C30A0FA5050BAF48AD94D14E8ACE9860477FD2354F4D3584B7F75A8EFB2A9492"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run2-exitcode/artefacts-before.json",
+                        "stage":  "E10",
+                        "bytes":  1034,
+                        "sha256":  "C30A0FA5050BAF48AD94D14E8ACE9860477FD2354F4D3584B7F75A8EFB2A9492"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run2-exitcode/commandline-delta.txt",
+                        "stage":  "E10",
+                        "bytes":  106,
+                        "sha256":  "7309AA8AB7225F8522E917137CEE557E5AC773B5FFEF2387CFE74561E504C4DB"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run2-exitcode/negative.cmdline.txt",
+                        "stage":  "E10",
+                        "bytes":  173,
+                        "sha256":  "E0817FE98F401C3785D36CB973C6F8D9612F8ADF36EE549D838C069B7CC42B98"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run2-exitcode/negative.err",
+                        "stage":  "E10",
+                        "bytes":  516788,
+                        "sha256":  "9C54D38B130BB66EC4FB3C2DAE935239C22008DAC79637F60441E07185DD0B78"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run2-exitcode/negative.out",
+                        "stage":  "E10",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run2-exitcode/negative.win32-commandline.txt",
+                        "stage":  "E10",
+                        "bytes":  257,
+                        "sha256":  "94EB16CD8A7812A703B42981755EE11E402B7A5110E45DB6D74A7F19D843C91C"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run2-exitcode/negative-error-lines.txt",
+                        "stage":  "E10",
+                        "bytes":  1192,
+                        "sha256":  "28E58B3591669F2C2B7BF9BD29A6A3E8D2F25B6658605A7BD3CB606746FDA771"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run2-exitcode/negative-termination.json",
+                        "stage":  "E10",
+                        "bytes":  227,
+                        "sha256":  "7371410819B8A091B871BF0F77D90D9C8C446D43509DD8860F2EE3E9607A95BE"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run2-exitcode/positive.cmdline.txt",
+                        "stage":  "E10",
+                        "bytes":  255,
+                        "sha256":  "A396140D02CBB3AF43C00960482BAF49D4EEA70D103EF3A045580E1F96071ED0"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run2-exitcode/positive.err",
+                        "stage":  "E10",
+                        "bytes":  1005021,
+                        "sha256":  "B916DF61BEAD44EB8976028D3DE9141E656B76779CB8C052B340E81517107D3B"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run2-exitcode/positive.out",
+                        "stage":  "E10",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run2-exitcode/positive.win32-commandline.txt",
+                        "stage":  "E10",
+                        "bytes":  332,
+                        "sha256":  "A95647D2190D43D7F9AD09D7EC3AD001CA4CD2E814DC85EEC84BC70002D09F26"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run2-exitcode/positive-response.json",
+                        "stage":  "E10",
+                        "bytes":  1613,
+                        "sha256":  "C231FDAE861B0B64738317DDA0B8D1DD135FC95170EDB5F6EE25382DA41D81DB"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run2-exitcode/positive-timings.json",
+                        "stage":  "E10",
+                        "bytes":  247,
+                        "sha256":  "D1C431563B8B9920C0559E8CC76FBD64395D006DA4681A1314CFB29A366CABFE"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-drafter-load-run2-exitcode/summary.json",
+                        "stage":  "E10",
+                        "bytes":  980,
+                        "sha256":  "09619969A3E7F7A33FE95C2164DF1B2FC396D47EBBBD81B91A8E3B5428551647"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-neg-b10223/build-errorlines.txt",
+                        "stage":  "E10",
+                        "bytes":  38,
+                        "sha256":  "D677EDEC1C2E103A56A52B0B6960A19722255097AF0F6EADE30E7C115C5510E2"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-neg-b10223/build-errors.txt",
+                        "stage":  "E10",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-neg-b10223/build-tail.txt",
+                        "stage":  "E10",
+                        "bytes":  2337,
+                        "sha256":  "9BD0FFD5C5D239BE8BDB4B79631E0C2FD6C8B7C625DAC2279064E0DA27483B3A"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-neg-b10223/cache-drift.txt",
+                        "stage":  "E10",
+                        "bytes":  48,
+                        "sha256":  "0983973A7F3C292396A6FB51EAF323271153193CCA43D9350537C2FB73ED1290"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-neg-b10223/configure.log",
+                        "stage":  "E10",
+                        "bytes":  8680,
+                        "sha256":  "D6D654948AC4719CE9C81CB43DE2D07A6A19C7D795E2695C0F4156946341A88C"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-neg-b10223/configure-args.txt",
+                        "stage":  "E10",
+                        "bytes":  338,
+                        "sha256":  "05D5AD330AC887A7A7B48637EFC2233933DC6969D2D427FFCCA3078CF728FDB0"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-neg-b10223/configure-cuda.txt",
+                        "stage":  "E10",
+                        "bytes":  906,
+                        "sha256":  "8E4ACB689ECA41673736A7724F05885CC45F3917C14EE57C54495AA499E7E41A"
+                    },
+                    {
+                        "path":  "2026-08-05/e10-neg-b10223/negative-identity.json",
+                        "stage":  "E10",
+                        "bytes":  1011,
+                        "sha256":  "BF364182C1F55891FEC99052C14CF26E4F8849B7FFDD0B7BF9EB7A7A6082C64D"
+                    },
+                    {
+                        "path":  "2026-08-05/e9a-b10269/b10269-probea.raw.txt",
+                        "stage":  "E9",
+                        "bytes":  2193,
+                        "sha256":  "02D4311AF6C0927801F7373444D40D04E9A7AE32970CE52D419CA22BCB4A7BB5"
+                    },
+                    {
+                        "path":  "2026-08-05/e9a-b10269/b10269-probea.txt",
+                        "stage":  "E9",
+                        "bytes":  26,
+                        "sha256":  "277F04A09300D21277E42A06FE5D4C7140A5C8F62CA908880CB093F634D67A66"
+                    },
+                    {
+                        "path":  "2026-08-05/e9a-b10269/b10269-probeb.raw.txt",
+                        "stage":  "E9",
+                        "bytes":  2193,
+                        "sha256":  "AB5A4D5C22DFF0A99B78ECB0D74B66458A41B949342AD300A2BC914100D8515C"
+                    },
+                    {
+                        "path":  "2026-08-05/e9a-b10269/b10269-probeb.txt",
+                        "stage":  "E9",
+                        "bytes":  146,
+                        "sha256":  "DDCFF91265FE00EBFE610E0E90076791EEDA11B9319DBA64AFA801273CF72013"
+                    },
+                    {
+                        "path":  "2026-08-05/e9a-b10269/b10269-probec.raw.txt",
+                        "stage":  "E9",
+                        "bytes":  2193,
+                        "sha256":  "E1385D40EFBBD6F4CD2F4CA5B2A5C987F64050764206210C9470A17D2F34345C"
+                    },
+                    {
+                        "path":  "2026-08-05/e9a-b10269/b10269-probec.txt",
+                        "stage":  "E9",
+                        "bytes":  25,
+                        "sha256":  "CAADEDDFD8909EDA29FD389BEE32DFBAA0120F198809CA1FDE0688321CA57BAE"
+                    },
+                    {
+                        "path":  "2026-08-05/e9a-b10269/b10269-probed.raw.txt",
+                        "stage":  "E9",
+                        "bytes":  2193,
+                        "sha256":  "4E8A78F4A2CAE96CFC5997CE380BCA6756682EBDB36EBE12C1628336107049C1"
+                    },
+                    {
+                        "path":  "2026-08-05/e9a-b10269/b10269-probed.txt",
+                        "stage":  "E9",
+                        "bytes":  51,
+                        "sha256":  "E8FA8FC9554FADB2129184AC82F7BFE3816B28CD0E055154576AE3F1598373A6"
+                    },
+                    {
+                        "path":  "2026-08-05/e9a-b10269/b10269-probee.raw.txt",
+                        "stage":  "E9",
+                        "bytes":  2193,
+                        "sha256":  "D1D283BE6816B0B7328ECDF6BDEFE8A97FDCE5A7CEA6226F89B4E174C3648BA7"
+                    },
+                    {
+                        "path":  "2026-08-05/e9a-b10269/b10269-probee.txt",
+                        "stage":  "E9",
+                        "bytes":  50,
+                        "sha256":  "A12E6948543F4F46647B964C46C32F890287AA3E85F77D81B170158997252DF7"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-b10269/run-1.txt",
+                        "stage":  "E9",
+                        "bytes":  328,
+                        "sha256":  "14717AA7D99E36BE9C0DD2CC30A57C1477CE3308F9C446669037C0B42E534918"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-b10269/run-2.txt",
+                        "stage":  "E9",
+                        "bytes":  328,
+                        "sha256":  "14717AA7D99E36BE9C0DD2CC30A57C1477CE3308F9C446669037C0B42E534918"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-b10269/run-3.txt",
+                        "stage":  "E9",
+                        "bytes":  328,
+                        "sha256":  "14717AA7D99E36BE9C0DD2CC30A57C1477CE3308F9C446669037C0B42E534918"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-b10269/run-4.txt",
+                        "stage":  "E9",
+                        "bytes":  328,
+                        "sha256":  "14717AA7D99E36BE9C0DD2CC30A57C1477CE3308F9C446669037C0B42E534918"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-b10269/server-identity.json",
+                        "stage":  "E9",
+                        "bytes":  460,
+                        "sha256":  "AAFB9C2B23D455BB0B361EADC257A70AA40A6B041AC890256896ECE3FF6981BB"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-b10269/server-none.log",
+                        "stage":  "E9",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-b10269/server-none.log.err",
+                        "stage":  "E9",
+                        "bytes":  78841,
+                        "sha256":  "4C62483BB23790CDE2D3ED7CEF130CADD129FB2780D2135F21EF4E2D3C48C33F"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-b10269/summary.json",
+                        "stage":  "E9",
+                        "bytes":  3171,
+                        "sha256":  "2F963824038FAFF7B80E711D2C2E593EB919821A54F5652A5CB47D42D4F52F54"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/__pycache__/binary-search.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  572,
+                        "sha256":  "A9E2E59D6B3701CF5F7520781A25DC56B5448323D4C6E14B298A92AE84B9390B"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/__pycache__/flatten.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  537,
+                        "sha256":  "B49A0F9C7D1A08647AF48186F04CED6CA80194811A697817F454914078DE52D0"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/__pycache__/group-anagrams.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  672,
+                        "sha256":  "0F374B9D665433F0BC02C109BE4D49D04821F6D30F7D8B997F8349A1CC26310D"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  596,
+                        "sha256":  "B9AF47463432986F6BC73AD17A7433883DAFF40BE186C0BA6B71457908967AB4"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/__pycache__/longest-common-prefix.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  612,
+                        "sha256":  "6ED618BEC8E7203DCD5BDF3749AFF0D65E7AB6293DB262A3C83AA3FF100231AB"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/__pycache__/merge-intervals.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  837,
+                        "sha256":  "09CC25B413040C0B1B2DA218CC3C395A3529299F094ED2F9ECA4AB444B1A9FE5"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/__pycache__/rle-encode.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  593,
+                        "sha256":  "34080F57EAD3CB4CBF723A6D6397CBF2435B208B5E883BEE7287D15F46A2D002"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/__pycache__/rotate-matrix.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  459,
+                        "sha256":  "E79B80E49271A04CB4402643F545F8C60A407A896EF109D0707C4D6E65529453"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/__pycache__/top-k-frequent.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  903,
+                        "sha256":  "7EFE2ADC5C1F922B2FB690436ABB792694570FBD06461034DADB3AD11E03F052"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  687,
+                        "sha256":  "B3D526B63EC56EE040FAD4ED643E3C4F8DA74026E05243D61CDF0FABA4D55189"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/binary-search.json",
+                        "stage":  "E9",
+                        "bytes":  1953,
+                        "sha256":  "47E76BDF611CDA6C85AE0CE8C9FC7F2196FF4A7E6DDBCE071C6DBB134876E162"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/binary-search.py",
+                        "stage":  "E9",
+                        "bytes":  336,
+                        "sha256":  "AB0C7259A10F3DBC0654CCF424589C1D632D6AD9F20FCCE00DEB94510980F634"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/flatten.json",
+                        "stage":  "E9",
+                        "bytes":  2489,
+                        "sha256":  "759CEA3F7CE99A2776A14D20545BBBB1B98448C5CD5E02077364643434DC8495"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/flatten.py",
+                        "stage":  "E9",
+                        "bytes":  205,
+                        "sha256":  "4BDBD4E7450413EDA7D2A5E1F2F49D2AE48AC509ACD898917F8C76E6B778DEBB"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/group-anagrams.json",
+                        "stage":  "E9",
+                        "bytes":  2908,
+                        "sha256":  "CBBFFE7FB13997C985BF600A31CB92F1E417A763A4D5F0CCD22C2A4F7868B8B1"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/group-anagrams.py",
+                        "stage":  "E9",
+                        "bytes":  312,
+                        "sha256":  "A8E04F8BDADC82242EDE617552D34A4180A8BD05C06E78E7B869FD23A67A2F12"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/is-balanced.json",
+                        "stage":  "E9",
+                        "bytes":  1536,
+                        "sha256":  "011DA1F4F6D3A878B121B17A6F8A2BBC184A4CB3B013657247D024333595BF84"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/is-balanced.py",
+                        "stage":  "E9",
+                        "bytes":  298,
+                        "sha256":  "EBAD09A767018E012DE287E2021B86711E46E2F521B6AF148A0E0D81C623D23A"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/longest-common-prefix.json",
+                        "stage":  "E9",
+                        "bytes":  2030,
+                        "sha256":  "EE75BB0B62C27BFAE446CBAC959D6FD7A98461E34D1F8819013D4F9F2B83222A"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/longest-common-prefix.py",
+                        "stage":  "E9",
+                        "bytes":  282,
+                        "sha256":  "B52DC9176F0DFB0349364870E2AA229927C3A07C25E94B64E138BA456A305454"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/merge-intervals.json",
+                        "stage":  "E9",
+                        "bytes":  2682,
+                        "sha256":  "CDAB188931F7300D06963071509EC94072854FEE997172147025919E88A6C1AD"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/merge-intervals.py",
+                        "stage":  "E9",
+                        "bytes":  494,
+                        "sha256":  "6DE3E115AD55AA5BE53039C648B1B918DC8EA918388446F73EAD6DB25A4B2235"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/rle-encode.json",
+                        "stage":  "E9",
+                        "bytes":  1764,
+                        "sha256":  "51F81EA4B39BCDD78A58B323077E1F626B6A8B63DE36BC2497355569729A1961"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/rle-encode.py",
+                        "stage":  "E9",
+                        "bytes":  370,
+                        "sha256":  "4CD7877CA8AFCD5BE09EE37A9BE0D6268E0048256A798C8484A55B998B92C2ED"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/rotate-matrix.json",
+                        "stage":  "E9",
+                        "bytes":  4565,
+                        "sha256":  "B19A650D7D810290B7A5C2B751CD8F18571C6D85BE165FA770F5632F9D8232AD"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/rotate-matrix.py",
+                        "stage":  "E9",
+                        "bytes":  119,
+                        "sha256":  "AB2D1869100647D0A6BF51FDE197CF60B787C34DDBCD42BADCA5B6E8E8594FA7"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/summary.json",
+                        "stage":  "E9",
+                        "bytes":  2643,
+                        "sha256":  "E96B5CCB963F61193F94201C8E2AF1FE91763EEC295C319D35EC0A4DAB4839E3"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/top-k-frequent.json",
+                        "stage":  "E9",
+                        "bytes":  6187,
+                        "sha256":  "430D7FEC7C831C15041865ECE9D8EF3F21D62A68B511C0DC78552C583031BF21"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/top-k-frequent.py",
+                        "stage":  "E9",
+                        "bytes":  361,
+                        "sha256":  "E138C6515B49BB0952F7E0F3A96CDE5C14B303D914185D6D2DABB6ED4DE5D425"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/two-sum.json",
+                        "stage":  "E9",
+                        "bytes":  7199,
+                        "sha256":  "57469DB9280F6F168C749EA9B54CF2C90533566C9295D57F380DAB5540784AC3"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-1/two-sum.py",
+                        "stage":  "E9",
+                        "bytes":  408,
+                        "sha256":  "678D3BDC68A818A7AB414BDE0B38BEE36E1A16AB6BE7085511DE46BAA562494F"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/__pycache__/binary-search.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  572,
+                        "sha256":  "3BBB1CDC1BEBF3ED146D2B53B8C0C79B4C9F3C3B8DB994877E704F4D09E9AC60"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/__pycache__/flatten.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  537,
+                        "sha256":  "7996D5EEE9598843CB36B00498CA70E580246CE8AB43A57BF8F378EF90C2F459"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/__pycache__/group-anagrams.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  672,
+                        "sha256":  "B0C1BD7B55FCC3DA189482B1D4F57C130B10F1E13EFB6A5BB17265D4E35E4992"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  596,
+                        "sha256":  "F32621743E7975213724BAAF51EF2E90F7102E4E44C75B2C89512C03820E242C"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/__pycache__/longest-common-prefix.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  612,
+                        "sha256":  "BBD13B3E4FF53DC9070819AB6450BAE855CBA479C4E874F79593AFC8E0C9F1A5"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/__pycache__/merge-intervals.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  837,
+                        "sha256":  "92B7D689F244F7410EB74026D122F7AE5881FE8EAC9D3B33574F434FB70D74B6"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/__pycache__/rle-encode.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  593,
+                        "sha256":  "91427E68A1C577103B23CD2DED38DCD3D06512FCE8AA9A6F3BF2E1BEC04522FA"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/__pycache__/rotate-matrix.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  433,
+                        "sha256":  "92FB0694669B42F1921841FA38E063074C598DB15B1EA8C843FA9FDC0CCB10BD"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/__pycache__/top-k-frequent.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  826,
+                        "sha256":  "88EFF0E439C4A9EA899D9915274BDEBD9C4192D2A83882C26629E094BB9E0679"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  832,
+                        "sha256":  "0DA9ADC142DE6B2F1757DF3E5092AAE9E5FF459040A30F5498D996199707427A"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/binary-search.json",
+                        "stage":  "E9",
+                        "bytes":  1945,
+                        "sha256":  "4BBBE0FC75EA3784E9EF37C0A49A8C8766800B665F0A158DD64A3467D94570C8"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/binary-search.py",
+                        "stage":  "E9",
+                        "bytes":  336,
+                        "sha256":  "AB0C7259A10F3DBC0654CCF424589C1D632D6AD9F20FCCE00DEB94510980F634"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/flatten.json",
+                        "stage":  "E9",
+                        "bytes":  1994,
+                        "sha256":  "79D35C60620D1C286CB1AFAFCC160863E6F688734B557567819B9164B1D28317"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/flatten.py",
+                        "stage":  "E9",
+                        "bytes":  205,
+                        "sha256":  "4BDBD4E7450413EDA7D2A5E1F2F49D2AE48AC509ACD898917F8C76E6B778DEBB"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/group-anagrams.json",
+                        "stage":  "E9",
+                        "bytes":  2243,
+                        "sha256":  "87AC2F42B99A93961D2CC94A11CE867FFC7A4B46F7288DBC8BD4811D0020FA4D"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/group-anagrams.py",
+                        "stage":  "E9",
+                        "bytes":  321,
+                        "sha256":  "6FCD37F1787BE76ED7812C0D0CE2D2DAC817822E2B268F334DCB54EE1FB86862"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/is-balanced.json",
+                        "stage":  "E9",
+                        "bytes":  1526,
+                        "sha256":  "ED87260EE714A89D1C756CB5D367A1B3E278B5D0AD25461D53B9D21084E2B687"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/is-balanced.py",
+                        "stage":  "E9",
+                        "bytes":  298,
+                        "sha256":  "EBAD09A767018E012DE287E2021B86711E46E2F521B6AF148A0E0D81C623D23A"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/longest-common-prefix.json",
+                        "stage":  "E9",
+                        "bytes":  2020,
+                        "sha256":  "1236FF1694E40F9F87F355C7A0A7B8DFF53E04DB83B54434EA470F560D307F12"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/longest-common-prefix.py",
+                        "stage":  "E9",
+                        "bytes":  282,
+                        "sha256":  "B52DC9176F0DFB0349364870E2AA229927C3A07C25E94B64E138BA456A305454"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/merge-intervals.json",
+                        "stage":  "E9",
+                        "bytes":  2691,
+                        "sha256":  "BBBDD15E930B0C2E5DE0E4C93AF1051B294D432F697336A0ECF3E8B2C2D6FF3D"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/merge-intervals.py",
+                        "stage":  "E9",
+                        "bytes":  494,
+                        "sha256":  "197CE7FF5DC6FD3C41473AF66B855CFB43D0A91E3ABAD67FC282FE47317D0871"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/rle-encode.json",
+                        "stage":  "E9",
+                        "bytes":  1754,
+                        "sha256":  "07AA1AA1E95CACA258D031CAFAE4BB8721D05051F44A7235E6EE0A7B372356E1"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/rle-encode.py",
+                        "stage":  "E9",
+                        "bytes":  370,
+                        "sha256":  "4CD7877CA8AFCD5BE09EE37A9BE0D6268E0048256A798C8484A55B998B92C2ED"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/rotate-matrix.json",
+                        "stage":  "E9",
+                        "bytes":  3520,
+                        "sha256":  "5E4787BE2C87EC4DCDC1547625B9876655367D795BADB22CDFE8858A57096AE5"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/rotate-matrix.py",
+                        "stage":  "E9",
+                        "bytes":  80,
+                        "sha256":  "D84EFAFB2D93B987CF99CFE06D1DB762A48BDC3BB25D0652918881294881DA0D"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/summary.json",
+                        "stage":  "E9",
+                        "bytes":  2642,
+                        "sha256":  "9FAB806FB4A670D0C4F29E235ECFE142F4F99B3CEFE3F5DCBA82B3761BC46879"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/top-k-frequent.json",
+                        "stage":  "E9",
+                        "bytes":  5997,
+                        "sha256":  "9FFC707C2D7773D7BEE615C1C3BFDD269546F2B18D2710A99AD5197AACC17032"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/top-k-frequent.py",
+                        "stage":  "E9",
+                        "bytes":  352,
+                        "sha256":  "883E8D59AC57A448A262A31CB50D0F13FFAC2D501BD7A8C821970261A4D2DA27"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/two-sum.json",
+                        "stage":  "E9",
+                        "bytes":  9514,
+                        "sha256":  "BBA782B7AB335F143C8359663D6E65A4E9B0677D111F9A218AAAF4BBE8B37288"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-2/two-sum.py",
+                        "stage":  "E9",
+                        "bytes":  485,
+                        "sha256":  "148914C3C3FEDC61B458065453455B213D9E09B81C5B08071D428D953C67FD32"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/__pycache__/binary-search.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  572,
+                        "sha256":  "38D18307C3EFCFBB341A4C606DE72F3AE260B3A34B7370E7D58892EFCD1ECE41"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/__pycache__/flatten.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  537,
+                        "sha256":  "9BEDE7B74582EDE9BD543BC902CDD83B8CC982C54C5EAC037750F45E3EE9045D"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/__pycache__/group-anagrams.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  672,
+                        "sha256":  "1F15B426F932708DCEF5AF712EAC914D7AC458BD6DB835169B3136B00E08E622"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  596,
+                        "sha256":  "5CDE32FF8996B70AC73B5E1586B3479A1E88E6158E749D53BD4DD239C5B17D23"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/__pycache__/longest-common-prefix.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  612,
+                        "sha256":  "B8156CCF5EFD164E2102FD1E9D6972F1B3FDA29AAA53C4297C53E42C12C88FE5"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/__pycache__/merge-intervals.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  815,
+                        "sha256":  "6C3268F5B3A1836EA633FCA8D6768FD122FF7EC0D1F8136CE8E3AA11157A09FB"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/__pycache__/rle-encode.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  593,
+                        "sha256":  "11C9C76C2921730A3242A66B2254332539ED7DAEF85A28225E1835DF467B5A23"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/__pycache__/rotate-matrix.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  438,
+                        "sha256":  "735CF81D50600BBDACDE182385BA9F1D15E21B63F160AE52B9DCC5DFB8FF05C7"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/__pycache__/top-k-frequent.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  484,
+                        "sha256":  "55C9C1F14F09F4247C06C6E745464666B607ED112F1A656FF63530548FF29D52"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "E9",
+                        "bytes":  642,
+                        "sha256":  "995BED2246FC26D933719841072A830945BBCFE0A6582725403FFDE5FA64D5E0"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/binary-search.json",
+                        "stage":  "E9",
+                        "bytes":  1946,
+                        "sha256":  "3BE178CC443F6652DEAAFFEB1956A15C5F7A603615DB08C93E7FB96C92E8A4C1"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/binary-search.py",
+                        "stage":  "E9",
+                        "bytes":  336,
+                        "sha256":  "AB0C7259A10F3DBC0654CCF424589C1D632D6AD9F20FCCE00DEB94510980F634"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/flatten.json",
+                        "stage":  "E9",
+                        "bytes":  1985,
+                        "sha256":  "18BA040DC5780A38308D4E9DAE55FED9C1DDB9E4EDFA923C9E0707DB834F7494"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/flatten.py",
+                        "stage":  "E9",
+                        "bytes":  205,
+                        "sha256":  "4BDBD4E7450413EDA7D2A5E1F2F49D2AE48AC509ACD898917F8C76E6B778DEBB"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/group-anagrams.json",
+                        "stage":  "E9",
+                        "bytes":  2232,
+                        "sha256":  "3E7978FFE0C58FCA86D58F68E7A12D44621F0544101C60E4028B2F1EAAC2A6D4"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/group-anagrams.py",
+                        "stage":  "E9",
+                        "bytes":  321,
+                        "sha256":  "6FCD37F1787BE76ED7812C0D0CE2D2DAC817822E2B268F334DCB54EE1FB86862"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/is-balanced.json",
+                        "stage":  "E9",
+                        "bytes":  1527,
+                        "sha256":  "1709BEB6DBCBE4593CDAB603C5336DC05ED5FCE1C196DFE185E1EE1E12BAB39E"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/is-balanced.py",
+                        "stage":  "E9",
+                        "bytes":  298,
+                        "sha256":  "EBAD09A767018E012DE287E2021B86711E46E2F521B6AF148A0E0D81C623D23A"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/longest-common-prefix.json",
+                        "stage":  "E9",
+                        "bytes":  2021,
+                        "sha256":  "53336F39E8C74E2F904254ABA220768261216285AC4E39F2FE81753E9355E6E9"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/longest-common-prefix.py",
+                        "stage":  "E9",
+                        "bytes":  282,
+                        "sha256":  "B52DC9176F0DFB0349364870E2AA229927C3A07C25E94B64E138BA456A305454"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/merge-intervals.json",
+                        "stage":  "E9",
+                        "bytes":  2048,
+                        "sha256":  "858D14344F1522820307DA14C1E757C2176F1393EDC66F050F312BC4A9CC6BB6"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/merge-intervals.py",
+                        "stage":  "E9",
+                        "bytes":  424,
+                        "sha256":  "6530C2E16D67DB00350F9716335698AED8DB58824C85733675B21592EED373E8"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/rle-encode.json",
+                        "stage":  "E9",
+                        "bytes":  1753,
+                        "sha256":  "248325670CFD121CD9DBE16AD513E60693F1BE18555375B772AB341A22DAACA9"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/rle-encode.py",
+                        "stage":  "E9",
+                        "bytes":  370,
+                        "sha256":  "4CD7877CA8AFCD5BE09EE37A9BE0D6268E0048256A798C8484A55B998B92C2ED"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/rotate-matrix.json",
+                        "stage":  "E9",
+                        "bytes":  3774,
+                        "sha256":  "4AA86307CC2398A6E2E8F7A8DACAE55311AC4B3179E6117C7004B71797512E1C"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/rotate-matrix.py",
+                        "stage":  "E9",
+                        "bytes":  84,
+                        "sha256":  "63A71F81EA4727CCBA5F88E2B36055F1FEA24D85C4C2AA5ED604E85B4F0B544A"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/summary.json",
+                        "stage":  "E9",
+                        "bytes":  2664,
+                        "sha256":  "D812D688D799B110A5B83004428C24DE9FB3401542F4DE579786F169E345F9F7"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/top-k-frequent.json",
+                        "stage":  "E9",
+                        "bytes":  3164,
+                        "sha256":  "8562B3C1A25DF79FFA80189A2E9AF1A25D8956E393BF05BA8B226FB6FB3479EC"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/top-k-frequent.py",
+                        "stage":  "E9",
+                        "bytes":  116,
+                        "sha256":  "ACA636452EE669C0E10C19193D8C96DA257111B81FB9389337228BFE16F33ACA"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/two-sum.json",
+                        "stage":  "E9",
+                        "bytes":  7610,
+                        "sha256":  "62F34A92030100EB3005BD45B2DC61777C8038C5F63DF3DB5F79EF7E064FBD54"
+                    },
+                    {
+                        "path":  "2026-08-05/e9b-quality/run-3/two-sum.py",
+                        "stage":  "E9",
+                        "bytes":  425,
+                        "sha256":  "5E68022EBBF5B1FC07DA41D35E1657151D16A6027F9951CC419B26B4315653F7"
+                    },
+                    {
+                        "path":  "2026-08-05/e9-preflight/b10269-binary-identity.json",
+                        "stage":  "E9",
+                        "bytes":  1722,
+                        "sha256":  "E404519BCF2501C42EBF18A05933D32D62D066C3C912179ACCDEB30E2BA26B00"
+                    },
+                    {
+                        "path":  "2026-08-05/e9-preflight/model-identity.json",
+                        "stage":  "E9",
+                        "bytes":  1110,
+                        "sha256":  "840BAE87F6725D6D2B5076C96589613DA9DC90282E5D3DD928DDD6F5DD9A3582"
+                    }
+                ]
+}
