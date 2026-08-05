@@ -31,6 +31,17 @@ _FIXED = {
 
 
 class Reader:
+    # Numeric arrays short enough to read at a glance are printed with their values.
+    # A loader condition like "every compress_ratio must be 0" cannot be checked
+    # against "<array of 3 type 6>". Longer arrays keep their shape — a 130k token
+    # list is not something anyone reads, and holding it costs memory for nothing.
+    #
+    # 64 and not 16: these arrays are per-layer, so the limit has to clear a real
+    # layer count or the check silently stops working on the bigger model. The
+    # 44-entry deepseek4.attention.compress_ratios in DeepSeek-V4-Flash-MXFP4.gguf
+    # is the counter-sample this output is verified against, and at 16 it fell out.
+    ARRAY_VALUE_LIMIT = 64
+
     def __init__(self, fh):
         self.fh = fh
 
@@ -54,12 +65,20 @@ class Reader:
         if t == ARRAY:
             elem_t = self.fixed(UINT32)
             n = self.fixed(UINT64)
-            # Arrays here are token lists and the like; keep the shape, not the payload.
+            # Long arrays are token lists and the like; keep the shape, not the payload.
             if elem_t == STRING:
                 for _ in range(n):
                     self.string()
             elif elem_t == ARRAY:
                 raise ValueError("nested arrays are not supported")
+            elif n <= self.ARRAY_VALUE_LIMIT:
+                vals = [self.fixed(elem_t) for _ in range(n)]
+                if elem_t == BOOL:
+                    vals = [bool(v) for v in vals]
+                # The element count is printed even when the values are: an array
+                # read as empty prints as [], and [] must never be mistakable for
+                # "every value is 0" by whoever checks a loader condition.
+                return f"{vals} ({n} values, type {elem_t})"
             else:
                 _, size = _FIXED[elem_t]
                 self.raw(size * n)

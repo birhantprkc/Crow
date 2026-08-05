@@ -1,0 +1,5 @@
+# core.autocrlf is true on this machine, so a checked-out shell script would carry
+# CRLF and Git Bash would die on the \r in the shebang before the first command.
+# Scoped to *.sh on purpose: the PowerShell and Python tools are unaffected and
+# stay exactly as they are.
+*.sh text eol=lf
