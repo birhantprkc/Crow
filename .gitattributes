@@ -3,3 +3,10 @@
 # Scoped to *.sh on purpose: the PowerShell and Python tools are unaffected and
 # stay exactly as they are.
 *.sh text eol=lf
+
+# Patch files must keep their LF line terminators. A patch whose own lines end in
+# CRLF does not apply -- measured 2026-08-05: the three group patches converted to
+# CRLF made tools/verify-patch-groups.sh go red across all six orders. CR inside
+# the described content is fine and expected (crow-lab/src is checked out CRLF);
+# it is the framing that has to stay LF. -text so git never rewrites either side.
+*.patch -text
