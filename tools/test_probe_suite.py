@@ -97,7 +97,7 @@ def answer(kind, task):
 class Endpoint:
     """A local /v1/chat/completions that answers by task, chosen per scenario."""
 
-    def __init__(self, plan, default="correct"):
+    def __init__(self, plan, default="correct", port=0):
         # A plan value is either one kind for every call, or a list consumed per attempt -
         # that second form is what lets a task be cut off first and answered on the rerun.
         self.plan = plan              # {task-name: kind or [kind, kind, ...]}
@@ -135,10 +135,23 @@ class Endpoint:
                 self.end_headers()
                 self.wfile.write(data)
 
+            def do_GET(self):
+                # /health, because anything driving the real server checks it first. A fake
+                # endpoint that cannot answer it is not a stand-in for the real one.
+                if self.path.rstrip("/") != "/health":
+                    self.send_error(404)
+                    return
+                data = b'{"status":"ok"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
             def log_message(self, *args):
                 pass                  # the suite's output is the only output
 
-        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
         self.port = self.server.server_port
 
     def __enter__(self):
