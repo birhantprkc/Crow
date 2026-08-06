@@ -564,6 +564,33 @@ function Get-TreeIdentity([string]$ExePath) {
     return [pscustomobject]@{ ok = $false; root = ''; commit = ''; tag = '' }
 }
 
+# Which drafting-related abort criteria apply. A VALUE function, because the criterion follows the
+# MODE and not the binary count - and because getting that wrong is what happened.
+#
+# Keyed on "-not TwoBinary", the drafter criteria applied to arm-flags too, and the first #24
+# baseline run stopped with "the drafter side did not draft" on a run configured --spec-type none
+# that was never meant to draft. Four aborts fired, every number in the run was usable, and the
+# result line said FAIL. A gate that fires on a correct run is the same defect class as one that
+# cannot fire at all: in both cases the verdict stops describing the run.
+function Get-DraftAborts {
+    param(
+        [string]$Mode, [string]$Side, [int]$BlockNo,
+        $Drafted, $MeanLen, $LogRate
+    )
+    $out = @()
+    if ($Mode -eq 'md-toggle') {
+        if ($Side -eq 'A' -and $Drafted -le 0)  { $out += "block $BlockNo (A): drafted 0 - the drafter side did not draft" }
+        if ($Side -eq 'B' -and $Drafted -ne 0)  { $out += "block $BlockNo (B): drafted $Drafted - the control side drafted" }
+        if ($Side -eq 'A' -and $null -eq $MeanLen) { $out += "block $BlockNo (A): no mean accepted len parsed while the side drafted" }
+        if ($Side -eq 'B' -and $null -ne $LogRate) { $out += "block $BlockNo (B): acceptance line present on the control side" }
+    } else {
+        # two-binary and arm-flags both run with -md off on BOTH sides, so any drafting at all means
+        # the operating point is not what the comparison assumes. That is a stop, not a footnote.
+        if ($Drafted -ne 0) { $out += "block $BlockNo ($Side): drafted $Drafted while -md is off on both sides" }
+    }
+    return $out
+}
+
 # The request body. A VALUE function for the same reason as Get-SideArgs: what a request states is
 # part of the contract, so it must be assertable without a server.
 #
@@ -756,6 +783,17 @@ function Invoke-Selftest {
     Case 'request carries the prompt verbatim' ($bodyObj.messages[0].content -eq 'x') 'prompt passed through unaltered'
     $bodyOther = (Get-RequestBody -Prompt 'x' -MaxTokens 512 -SeedValue 7) | ConvertFrom-Json
     Case 'a different seed reaches the body' ($bodyOther.seed -eq 7) ("seed=" + $bodyOther.seed)
+
+    # 16c  the drafting abort criteria follow the MODE. Case 1 is the defect this cost a run to
+    #      find; the three beside it stop the fix from becoming "never abort on drafting".
+    $a1 = Get-DraftAborts -Mode 'arm-flags' -Side 'A' -BlockNo 1 -Drafted 0 -MeanLen $null -LogRate $null
+    Case 'arm-flags: not drafting is NOT an abort' ($a1.Count -eq 0) ("aborts=" + $a1.Count)
+    $a2 = Get-DraftAborts -Mode 'arm-flags' -Side 'A' -BlockNo 1 -Drafted 7 -MeanLen 2.0 -LogRate 0.5
+    Case 'arm-flags: drafting IS an abort'         ($a2.Count -eq 1) ($a2 -join '; ')
+    $a3 = Get-DraftAborts -Mode 'md-toggle' -Side 'A' -BlockNo 1 -Drafted 0 -MeanLen $null -LogRate $null
+    Case 'md-toggle: A not drafting is still an abort' ($a3.Count -eq 2) ("aborts=" + $a3.Count)
+    $a4 = Get-DraftAborts -Mode 'two-binary' -Side 'B' -BlockNo 1 -Drafted 3 -MeanLen 2.0 -LogRate 0.5
+    Case 'two-binary: drafting is still an abort'  ($a4.Count -eq 1) ($a4 -join '; ')
 
     # 17  the two other modes are unchanged - the negative control for case 16. If arm-flags had
     #     leaked into them, these would go red and the E12/#53 callers would be measuring something
@@ -1176,17 +1214,14 @@ foreach ($blk in $seq) {
         Say ("            TELEMETRY REFUSED: {0}" -f $m.telemetry.why)
     }
 
-    # abort criteria, checked per request rather than at the end
-    if (-not $TwoBinary) {
-        if ($side -eq 'A' -and $m.drafted -le 0)  { $aborts += "block $blockNo (A): drafted 0 - the drafter side did not draft" }
-        if ($side -eq 'B' -and $m.drafted -ne 0)  { $aborts += "block $blockNo (B): drafted $($m.drafted) - the control side drafted" }
-        if ($side -eq 'A' -and $null -eq $m.mean_accepted_len) { $aborts += "block $blockNo (A): no mean accepted len parsed while the side drafted" }
-        if ($side -eq 'B' -and $null -ne $m.log_rate)          { $aborts += "block $blockNo (B): acceptance line present on the control side" }
-    } else {
-        # two builds, -md off on both: any drafting at all means the operating point is not what
-        # the comparison assumes, and that is a stop, not a footnote
-        if ($m.drafted -ne 0) { $aborts += "block $blockNo ($side): drafted $($m.drafted) while -md is off on both sides" }
-    }
+    # Abort criteria, checked per request rather than at the end. The criterion follows the MODE
+    # and not the binary count: md-toggle is the only mode where a side is supposed to draft. Keyed
+    # on -not $TwoBinary, arm-flags inherited the drafter criteria and stopped a complete, correct
+    # run with "the drafter side did not draft" - on a run that was configured --spec-type none and
+    # was never meant to draft. Measured 2026-08-06: all four aborts of the first #24 baseline run
+    # were this, and every number in that run was usable.
+    $aborts += Get-DraftAborts -Mode $AbMode -Side $side -BlockNo $blockNo `
+                               -Drafted $m.drafted -MeanLen $m.mean_accepted_len -LogRate $m.log_rate
     if ($m.finish -ne 'stop')                 { $aborts += "block $blockNo ($side): finish_reason $($m.finish)" }
     if (-not $m.identity_stable)              { $aborts += "block $blockNo ($side): server identity changed during the request" }
     if (-not $m.log_read_ok)                  { $aborts += "block $blockNo ($side): log unreadable - $($m.log_read_why)" }
