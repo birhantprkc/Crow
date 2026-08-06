@@ -27,6 +27,11 @@ and measures the build.
 param(
     [string]$Root     = 'C:\Users\robin\dev\crow-lab',
     [string]$OutDir   = '',
+    # Build ONE named tree instead of the #53 pair. Added for the #35 correctness probe, which
+    # needs a single fresh binary used on BOTH sides of its comparison - the variable there is
+    # expert placement, not the base. Leaving both empty keeps the #53 behaviour unchanged.
+    [string]$Label    = '',
+    [string]$Wt       = '',
     [switch]$Selftest
 )
 
@@ -197,6 +202,12 @@ $TREES = @(
     [pscustomobject]@{ label = 'A-b10223'; wt = Join-Path $Root 'wt-53-b10223' },
     [pscustomobject]@{ label = 'B-b10269'; wt = Join-Path $Root 'wt-53-b10269' }
 )
+if ($Label -and $Wt) {
+    $TREES = @([pscustomobject]@{ label = $Label; wt = $Wt })
+    Say ("single-tree mode: {0} -> {1}" -f $Label, $Wt)
+} elseif ($Label -or $Wt) {
+    throw '-Label and -Wt must be given together'
+}
 
 $results = @()
 foreach ($t in $TREES) {
@@ -282,7 +293,7 @@ $out = [pscustomobject]@{ flags = ($CMAKE_FLAGS -join ' '); trees = $results; ca
 $out | ConvertTo-Json -Depth 8 | Out-File (Join-Path $OutDir 'build-53.json') -Encoding utf8
 Say ("JSON: {0}" -f (Join-Path $OutDir 'build-53.json'))
 
-$allGreen = ($results.Count -eq 2) -and
+$allGreen = ($results.Count -eq $TREES.Count) -and
             (@($results | Where-Object { $_.buildRc -ne 0 }).Count -eq 0) -and
             (@($results | Where-Object { $_.facts -and $_.facts.errorLines -ne 0 }).Count -eq 0) -and
             (@($results | Where-Object { -not $_.cudaInCache }).Count -eq 0)
