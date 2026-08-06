@@ -3,14 +3,15 @@
     "day":  "2026-08-06",
     "pattern":  "^e[0-9]+",
     "root":  "Crow/runs",
-    "written":  "2026-08-06T19:30:07.3741482+02:00",
-    "files":  182,
-    "bytes":  867628011,
+    "written":  "2026-08-06T20:02:22.6207313+02:00",
+    "files":  204,
+    "bytes":  988708395,
     "stages":  {
                    "E54":  7,
+                   "E13":  29,
                    "E53":  30,
                    "E24":  106,
-                   "E13":  29,
+                   "E25":  22,
                    "E35":  10
                },
     "entries":  [
@@ -823,6 +824,138 @@
                         "stage":  "E24",
                         "bytes":  16498,
                         "sha256":  "AEE2588B7CBFA39EC92AD7587047315F66244BF850137EB4B9032C91B8C83267"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-build/apply.log",
+                        "stage":  "E25",
+                        "bytes":  1435,
+                        "sha256":  "66A044486CBA947CB855E7757DA1712CCF14389227DDF28DE00E9CF9C7C7F0C7"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-build/build.log",
+                        "stage":  "E25",
+                        "bytes":  111241160,
+                        "sha256":  "F522B1B988684068BE78EE7DC2C0AA47736A85936F3CAC76CBA35835D8455DE4"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-build/build-again.log",
+                        "stage":  "E25",
+                        "bytes":  364,
+                        "sha256":  "7385DC664B143E5A326E9139B43355B47BAD5E280EEB42BD1BCB31CF19A4D587"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-build/cache-drift.txt",
+                        "stage":  "E25",
+                        "bytes":  48,
+                        "sha256":  "0983973A7F3C292396A6FB51EAF323271153193CCA43D9350537C2FB73ED1290"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-build/configure.log",
+                        "stage":  "E25",
+                        "bytes":  4329,
+                        "sha256":  "1215D7320AD25307864E17FABF9DE25205377B68BAD85C737DE0B935964732DB"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-build/configure-args.txt",
+                        "stage":  "E25",
+                        "bytes":  324,
+                        "sha256":  "F9DBDE1D2090577AABF5BCB6EBC0BA0C4DF362150ED1AF15925CACC2F7EE166B"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-build/configure-cuda.txt",
+                        "stage":  "E25",
+                        "bytes":  906,
+                        "sha256":  "8E4ACB689ECA41673736A7724F05885CC45F3917C14EE57C54495AA499E7E41A"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-build/dryrun.log",
+                        "stage":  "E25",
+                        "bytes":  43809,
+                        "sha256":  "FD93FEF4E605045E4CFC2F35B0E8DAB9B7EB258472C3032727BD9DCE82FBB297"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-build/guard-patched.log",
+                        "stage":  "E25",
+                        "bytes":  443,
+                        "sha256":  "71F161A9B535972C1AF8E6DAF084371751A67C9761320FB7E621BB8FF7870AA0"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-build/guard-pristine.log",
+                        "stage":  "E25",
+                        "bytes":  409,
+                        "sha256":  "97044B3DC89A515F92580C0C6AE1423D94FF50C5209B12A911EA1980B8A939D6"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-build/summary.json",
+                        "stage":  "E25",
+                        "bytes":  1532,
+                        "sha256":  "6F6A74713A01440FBC32848B89B08C44B5F855B7FE7A9B0BED0D36978C58F639"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-build/targets-help.log",
+                        "stage":  "E25",
+                        "bytes":  25202,
+                        "sha256":  "A045243CE0A3E252711B920B2222FFF9E84981B1571DE03D29CFC1D3F02292F8"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-cache-18-32/block1-A.err",
+                        "stage":  "E25",
+                        "bytes":  2732989,
+                        "sha256":  "A7DD6BD85B916DD79276F94AE88859896360C0962C39A29F273B45B0FFCF7F03"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-cache-18-32/block1-A.out",
+                        "stage":  "E25",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-cache-18-32/block2-B.err",
+                        "stage":  "E25",
+                        "bytes":  1684895,
+                        "sha256":  "1331FE003F86A7BEB0B86529FC77CA8E95722F9F88F233E17B54F82EFA36E929"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-cache-18-32/block2-B.out",
+                        "stage":  "E25",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-cache-18-32/probe-runs.json",
+                        "stage":  "E25",
+                        "bytes":  16651,
+                        "sha256":  "62B4CA9008A7B3A848D054751B71A6CB59E6213A44C720A5172FC6251A96EAD1"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-cache-48-64/block1-A.err",
+                        "stage":  "E25",
+                        "bytes":  3182931,
+                        "sha256":  "7018D64CEC9C12699343CE81B20825ABDA27CDBAB4332FE84A1084B8B902C4AB"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-cache-48-64/block1-A.out",
+                        "stage":  "E25",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-cache-48-64/block2-B.err",
+                        "stage":  "E25",
+                        "bytes":  2126308,
+                        "sha256":  "A3DADC15410BF6DA1ED02B70693998D380C51EE611587257BB2A51E584FDF2DF"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-cache-48-64/block2-B.out",
+                        "stage":  "E25",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e25-cache-48-64/probe-runs.json",
+                        "stage":  "E25",
+                        "bytes":  16649,
+                        "sha256":  "5E4731535F68CDD7D7FA478FE6A01694958F77720C062D875C80EF50F08C4495"
                     },
                     {
                         "path":  "2026-08-06/e35-build/build-53.json",
