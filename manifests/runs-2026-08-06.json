@@ -3,11 +3,13 @@
     "day":  "2026-08-06",
     "pattern":  "^e[0-9]+",
     "root":  "Crow/runs",
-    "written":  "2026-08-06T20:02:22.6207313+02:00",
-    "files":  204,
-    "bytes":  988708395,
+    "written":  "2026-08-06T20:56:44.3445398+02:00",
+    "files":  214,
+    "bytes":  995449463,
     "stages":  {
+                   "E4":  6,
                    "E54":  7,
+                   "E45":  4,
                    "E13":  29,
                    "E53":  30,
                    "E24":  106,
@@ -1016,6 +1018,66 @@
                         "stage":  "E35",
                         "bytes":  1881,
                         "sha256":  "CDE77E6721E4EF007D1C3CCBC3053D5AA93E1B38FBC4F025B513E2405E78BEC3"
+                    },
+                    {
+                        "path":  "2026-08-06/e45-np4/cmd.txt",
+                        "stage":  "E45",
+                        "bytes":  305,
+                        "sha256":  "C6703DA1CDCED856281F71ACF959708D2BDF32CF6CACA0976A397EFAE01BE51C"
+                    },
+                    {
+                        "path":  "2026-08-06/e45-np4/np4-results.json",
+                        "stage":  "E45",
+                        "bytes":  2727,
+                        "sha256":  "1AC32425341846330E01D9B31908037797E90AF2C88EAEBBBF8F4D4E78B5CECD"
+                    },
+                    {
+                        "path":  "2026-08-06/e45-np4/server.err",
+                        "stage":  "E45",
+                        "bytes":  1586915,
+                        "sha256":  "3C32345672F4EBD1C935FAAE47C3369EEAF67293D16681793974A9DFC030162B"
+                    },
+                    {
+                        "path":  "2026-08-06/e45-np4/server.out",
+                        "stage":  "E45",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e4-hermes/agent-run.log",
+                        "stage":  "E4",
+                        "bytes":  17703,
+                        "sha256":  "725691EC5D02C988C6C4582F230E7181A377E922D53D49D31FF5702C7973D5AF"
+                    },
+                    {
+                        "path":  "2026-08-06/e4-hermes/agent-run-64k.log",
+                        "stage":  "E4",
+                        "bytes":  31564,
+                        "sha256":  "82B98D6198D339CE1C4D26A3FFEEA5A3E6FC172A00D7DFD80E896C164C84FF55"
+                    },
+                    {
+                        "path":  "2026-08-06/e4-hermes/server.err",
+                        "stage":  "E4",
+                        "bytes":  635613,
+                        "sha256":  "1380DD2B578C66DFC86A9F89AFB8254381C960C79DDF18551C189992E3591542"
+                    },
+                    {
+                        "path":  "2026-08-06/e4-hermes/server.out",
+                        "stage":  "E4",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e4-hermes/server-64k.err",
+                        "stage":  "E4",
+                        "bytes":  4466241,
+                        "sha256":  "46B72AB4028FB855E088365F260C3C438A4BC4FE48EBD175FBC78892C5F3D78D"
+                    },
+                    {
+                        "path":  "2026-08-06/e4-hermes/server-64k.out",
+                        "stage":  "E4",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
                     },
                     {
                         "path":  "2026-08-06/e53-build/A-b10223/build.log",
