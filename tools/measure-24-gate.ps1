@@ -72,6 +72,25 @@ function Read-OpenLog([string]$Path) {
     } catch { return '' }
 }
 
+# Value function. A k/N below N is a RESULT and not a malfunction, and this tool must not turn one
+# into the other - "the quality gate produced a technical error rather than a factual one" is an
+# abort criterion, so the two have to stay apart. probe-suite.py documents its codes: 0 every task
+# judged and correct, 1 at least one judged task not correct, 2 harness could not run,
+# 3 CHECKER BROKEN. Only 2 and 3 say the measurement did not happen.
+#
+# Measured 2026-08-06: the streaming gate returned 9 of 10 with 0 undecided and exit 1, and this
+# tool reported FAIL over a perfectly good measurement whose one failing task is the documented
+# unstable case from #46.
+function Test-GateOutcome([int]$ExitCode) {
+    switch ($ExitCode) {
+        0 { return [pscustomobject]@{ measured = $true;  all_correct = $true;  why = 'every task judged and correct' } }
+        1 { return [pscustomobject]@{ measured = $true;  all_correct = $false; why = 'at least one judged task not correct - a result, not a malfunction' } }
+        2 { return [pscustomobject]@{ measured = $false; all_correct = $false; why = 'harness could not run' } }
+        3 { return [pscustomobject]@{ measured = $false; all_correct = $false; why = 'CHECKER BROKEN - a wrong implementation passed' } }
+        default { return [pscustomobject]@{ measured = $false; all_correct = $false; why = "unknown probe-suite exit $ExitCode" } }
+    }
+}
+
 # Value function. Returns what the SERVER said about its own placement, plus the positive control
 # that proves the log was readable at all. A caller may not read the counts without it.
 function Get-Placement([string]$LogText) {
@@ -127,6 +146,16 @@ if ($Selftest) {
     try { $txt = Read-OpenLog $tmp; Case 'log readable while still held open' ($txt -match 'held open') ("chars=" + $txt.Length) }
     finally { $held.Dispose(); Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
     Case 'missing file reads as empty, not as a throw' ((Read-OpenLog (Join-Path $env:TEMP 'no-such-file-here.log')) -eq '') 'empty string'
+
+    # A k/N below N is a result; a broken harness is not. Both directions are asserted, because a
+    # tool that called everything "measured" would be as useless as the one that called 9 of 10 a
+    # failure - which is what this tool did on 2026-08-06 before these four cases existed.
+    $o0 = Test-GateOutcome 0; $o1 = Test-GateOutcome 1; $o2 = Test-GateOutcome 2; $o3 = Test-GateOutcome 3
+    Case 'exit 0: measured and all correct'      ($o0.measured -and $o0.all_correct)          $o0.why
+    Case 'exit 1: MEASURED, not all correct'     ($o1.measured -and -not $o1.all_correct)     $o1.why
+    Case 'exit 2: NOT measured'                  (-not $o2.measured)                          $o2.why
+    Case 'exit 3: NOT measured (checker broken)' (-not $o3.measured)                          $o3.why
+    Case 'an unknown exit code is not measured'  (-not (Test-GateOutcome 99).measured)        (Test-GateOutcome 99).why
 
     Write-Output ''
     Say ('=' * 78)
@@ -215,9 +244,14 @@ $summary = [pscustomobject]@{
 }
 $summary | ConvertTo-Json -Depth 6 | Out-File (Join-Path $OutRoot ("{0}-summary.json" -f $Label)) -Encoding ascii
 
+$outcome = Test-GateOutcome $gateExit
+Say ("  gate outcome                 {0}" -f $outcome.why)
+
 if (-not $pl.readable -or $pl.control_hits -lt 1) {
     Write-Output 'RESULT: FAIL - the server log could not be read, so its zeros state nothing'; exit 1
 }
-if ($gateExit -ne 0) { Write-Output ("RESULT: FAIL - probe-suite exited {0}" -f $gateExit); exit 1 }
-Write-Output ("RESULT: PASS - gate ran on '{0}', placement read back from the log." -f $Label)
+if (-not $outcome.measured) {
+    Write-Output ("RESULT: FAIL - the gate did not measure: {0} (probe-suite exit {1})" -f $outcome.why, $gateExit); exit 1
+}
+Write-Output ("RESULT: PASS - gate ran on '{0}', placement read back from the log. Quality verdict: {1}" -f $Label, $outcome.why)
 exit 0
