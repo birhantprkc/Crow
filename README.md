@@ -49,6 +49,8 @@ own movement and is not read as a quality difference.
 
 Every figure here has its raw run on disk and its reasoning on the issue that asked for it.
 
+**Spent so far: 0 €.** No rented compute, no API calls — everything measured on the machine above.
+
 ## Architecture
 
 ```mermaid
