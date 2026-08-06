@@ -102,10 +102,10 @@ index 78d0877..0972058 100644
  
      ggml_type cache_type_k = GGML_TYPE_F16; // KV cache data type for the K
 diff --git a/common/sampling.cpp b/common/sampling.cpp
-index ba5504e..69fe675 100644
+index ba5504e..78976f5 100644
 --- a/common/sampling.cpp
 +++ b/common/sampling.cpp
-@@ -565,6 +565,17 @@ void common_perf_print(const struct llama_context * ctx, const struct common_sam
+@@ -565,6 +565,22 @@ void common_perf_print(const struct llama_context * ctx, const struct common_sam
          LOG_INF("%s:    graphs reused = %10d\n", __func__, data.n_reused);
  
          common_memory_breakdown_print(ctx);
@@ -119,12 +119,17 @@ index ba5504e..69fe675 100644
 +        // stats explain how much of it went on fetching experts, and reading one without
 +        // the other is how a stall gets blamed on the wrong tier. No-op while streaming
 +        // is off.
-+        llama_moe_stream_print_stats(llama_get_model(ctx));
++        //
++        // No role here, deliberately. This path runs in the single-model tools (llama-completion,
++        // llama-tts), which have exactly one streaming model, and a NULL role prints the block
++        // unchanged - the same bytes these tools printed before the server needed labels. The
++        // label belongs where two instances share one log, which is the server.
++        llama_moe_stream_print_stats(llama_get_model(ctx), NULL);
      }
  }
  
 diff --git a/include/llama.h b/include/llama.h
-index fb2ca38..975af20 100644
+index fb2ca38..ecc1366 100644
 --- a/include/llama.h
 +++ b/include/llama.h
 @@ -331,6 +331,13 @@ extern "C" {
@@ -149,12 +154,18 @@ index fb2ca38..975af20 100644
      };
  
      struct llama_sampler_seq_config {
-@@ -1570,6 +1578,9 @@ extern "C" {
+@@ -1570,6 +1578,15 @@ extern "C" {
      LLAMA_API void                           llama_perf_sampler_print(const struct llama_sampler * chain);
      LLAMA_API void                           llama_perf_sampler_reset(      struct llama_sampler * chain);
  
-+    // print MoE expert streaming statistics (no-op when streaming is not enabled)
-+    LLAMA_API void llama_moe_stream_print_stats(const struct llama_model * model);
++    // print MoE expert streaming statistics (no-op when streaming is not enabled, and when
++    // model is NULL). role labels the model instance and is printed in front of every line
++    // ("target: moe stream: ..."); pass NULL for an unlabelled block. A process that holds
++    // more than one streaming model - target and draft model each hold their own - needs the
++    // label, because the blocks are otherwise distinguishable only by the order they arrive in.
++    // The counters are CUMULATIVE per model instance and are never reset; a per-request figure
++    // is the difference between two consecutive blocks.
++    LLAMA_API void llama_moe_stream_print_stats(const struct llama_model * model, const char * role);
 +
      //
      // training
@@ -186,7 +197,7 @@ index 3e0fe66..b679f7d 100644
          }
  
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 19cca7d..1f16552 100644
+index 19cca7d..c0437e7 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -9,6 +9,7 @@
@@ -271,13 +282,17 @@ index 19cca7d..1f16552 100644
          /*.samplers    =*/ sampling.samplers,
          /*.n_outputs   =*/ n_outputs,
          /*.cb          =*/ graph_get_cb(),
-@@ -4137,6 +4174,10 @@ void llama_perf_context_print(const llama_context * ctx) {
+@@ -4137,6 +4174,14 @@ void llama_perf_context_print(const llama_context * ctx) {
              __func__, data.t_eval_ms, data.n_eval, data.t_eval_ms / data.n_eval, 1e3 / data.t_eval_ms * data.n_eval);
      LLAMA_LOG_INFO("%s:       total time = %10.2f ms / %5d tokens\n", __func__, (t_end_ms - data.t_start_ms), (data.n_p_eval + data.n_eval));
      LLAMA_LOG_INFO("%s:    graphs reused = %10d\n", __func__, data.n_reused);
 +
 +    if (const auto * mstream = ctx->get_model().moe_stream()) {
-+        mstream->print_stats();
++        // No role: this path belongs to one context and therefore one streaming model, and its
++        // callers (llama-bench, perplexity, imatrix, batched-bench, mtmd-cli) print exactly one
++        // block. NULL reproduces the line they printed before roles existed. The label is for
++        // the server, where two managers write into one log.
++        mstream->print_stats(nullptr);
 +    }
  }
  
@@ -1246,7 +1261,7 @@ index d6b31c2..25cbef1 100644
      llama_fver  fver;
  
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 333f506..9a3e13a 100644
+index 333f506..89e5989 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -7,6 +7,7 @@
@@ -1504,9 +1519,9 @@ index 333f506..9a3e13a 100644
 +    return pimpl->moe_stream.get();
 +}
 +
-+void llama_moe_stream_print_stats(const llama_model * model) {
++void llama_moe_stream_print_stats(const llama_model * model, const char * role) {
 +    if (model && model->moe_stream()) {
-+        model->moe_stream()->print_stats();
++        model->moe_stream()->print_stats(role);
 +    }
 +}
 +
@@ -1574,10 +1589,10 @@ index 6b9e94a..e3c44e5 100644
      virtual ~llama_model_base() = default;
 diff --git a/src/llama-moe-stream.cpp b/src/llama-moe-stream.cpp
 new file mode 100644
-index 0000000..eda555b
+index 0000000..40189c1
 --- /dev/null
 +++ b/src/llama-moe-stream.cpp
-@@ -0,0 +1,1017 @@
+@@ -0,0 +1,1035 @@
 +#include "llama-moe-stream.h"
 +
 +#include "llama-impl.h"
@@ -1586,6 +1601,7 @@ index 0000000..eda555b
 +
 +#include <algorithm>
 +#include <cinttypes>
++#include <cstdio>
 +#include <cstdlib>
 +#include <cstring>
 +#include <stdexcept>
@@ -2032,24 +2048,41 @@ index 0000000..eda555b
 +    return size;
 +}
 +
-+void llama_moe_stream::print_stats() const {
++// EVERY NUMBER HERE IS CUMULATIVE over the lifetime of this manager, i.e. over the model
++// instance, i.e. over the server process. There is no reset and none is wanted: a reset is a
++// second piece of state that two callers can disagree about, and the request-local figure is a
++// difference between two consecutive blocks, which the reader can form and the writer cannot.
++// A restarted server starts the counts at zero because the manager is new, not because anything
++// was cleared.
++void llama_moe_stream::print_stats(const char * role) const {
 +    std::lock_guard<std::mutex> lock(mtx);
 +
-+    const int64_t n_touched = stats.n_hit + stats.n_miss;
-+    LLAMA_LOG_INFO("%s: moe stream: remap calls = %" PRId64 ", expert hits = %" PRId64 ", misses = %" PRId64 " (%" PRId64 " cold), hit rate = %.2f%%\n",
-+            __func__, stats.n_calls, stats.n_hit, stats.n_miss, stats.n_miss_cold,
-+            n_touched > 0 ? 100.0*stats.n_hit/n_touched : 0.0);
-+    LLAMA_LOG_INFO("%s: moe stream: load stall = %.2f ms total (%.3f ms per remap call)\n",
-+            __func__, stats.t_stall_us/1000.0, stats.n_calls > 0 ? stats.t_stall_us/1000.0/stats.n_calls : 0.0);
-+    LLAMA_LOG_INFO("%s: moe stream: slot wait = %.2f ms total over %" PRId64 " waits (%.1f%% of the two stalls)\n",
-+            __func__, stats.t_victim_us/1000.0, stats.n_victim_waits,
-+            (stats.t_victim_us + stats.t_stall_us) > 0 ? 100.0*stats.t_victim_us/(stats.t_victim_us + stats.t_stall_us) : 0.0);
-+    if (stats.n_wave_calls > 0) {
-+        LLAMA_LOG_INFO("%s: moe stream: waves = %" PRId64 " (%" PRId64 " non-empty), preloads issued = %" PRId64 " (ready on arrival = %" PRId64 "), wave stall = %.2f ms\n",
-+                __func__, stats.n_wave_calls, stats.n_waves_run, stats.n_preload_issued, stats.n_preload_ready, stats.t_stall_wave_us/1000.0);
++    // "target: " / "drafter: ", or nothing at all. Built once and passed down so that every line
++    // of one block - including the locality lines below - carries the same role token; a block
++    // whose first line is labelled and whose rest is not cannot be attributed when two models
++    // print into one log.
++    char pfx[32];
++    if (role && role[0]) {
++        snprintf(pfx, sizeof(pfx), "%s: ", role);
++    } else {
++        pfx[0] = '\0';
 +    }
 +
-+    print_locality();
++    const int64_t n_touched = stats.n_hit + stats.n_miss;
++    LLAMA_LOG_INFO("%s: %smoe stream: remap calls = %" PRId64 ", expert hits = %" PRId64 ", misses = %" PRId64 " (%" PRId64 " cold), hit rate = %.2f%%\n",
++            __func__, pfx, stats.n_calls, stats.n_hit, stats.n_miss, stats.n_miss_cold,
++            n_touched > 0 ? 100.0*stats.n_hit/n_touched : 0.0);
++    LLAMA_LOG_INFO("%s: %smoe stream: load stall = %.2f ms total (%.3f ms per remap call)\n",
++            __func__, pfx, stats.t_stall_us/1000.0, stats.n_calls > 0 ? stats.t_stall_us/1000.0/stats.n_calls : 0.0);
++    LLAMA_LOG_INFO("%s: %smoe stream: slot wait = %.2f ms total over %" PRId64 " waits (%.1f%% of the two stalls)\n",
++            __func__, pfx, stats.t_victim_us/1000.0, stats.n_victim_waits,
++            (stats.t_victim_us + stats.t_stall_us) > 0 ? 100.0*stats.t_victim_us/(stats.t_victim_us + stats.t_stall_us) : 0.0);
++    if (stats.n_wave_calls > 0) {
++        LLAMA_LOG_INFO("%s: %smoe stream: waves = %" PRId64 " (%" PRId64 " non-empty), preloads issued = %" PRId64 " (ready on arrival = %" PRId64 "), wave stall = %.2f ms\n",
++                __func__, pfx, stats.n_wave_calls, stats.n_waves_run, stats.n_preload_issued, stats.n_preload_ready, stats.t_stall_wave_us/1000.0);
++    }
++
++    print_locality(pfx);
 +}
 +
 +// Expert locality: how concentrated the routing is. A cache only pays if a minority of experts
@@ -2059,7 +2092,7 @@ index 0000000..eda555b
 +// Reported per layer as the share of experts needed to cover 50/80/95 % of that layer's selections,
 +// then aggregated. The Gini coefficient is printed beside it because the coverage figures alone
 +// cannot tell a mildly skewed distribution from a bimodal one.
-+void llama_moe_stream::print_locality() const {
++void llama_moe_stream::print_locality(const char * pfx) const {
 +    std::vector<double> cov50, cov80, cov95, ginis;
 +    uint64_t n_layers_seen = 0;
 +
@@ -2116,12 +2149,12 @@ index 0000000..eda555b
 +        return s/v.size();
 +    };
 +
-+    LLAMA_LOG_INFO("%s: moe stream: expert locality over %" PRIu64 " layers, %u experts each\n",
-+            __func__, n_layers_seen, layers.empty() || !layers[0] ? 0 : layers[0]->n_expert);
-+    LLAMA_LOG_INFO("%s: moe stream:   50%% of selections covered by %.1f%% of experts, 80%% by %.1f%%, 95%% by %.1f%%\n",
-+            __func__, 100.0*mean(cov50), 100.0*mean(cov80), 100.0*mean(cov95));
-+    LLAMA_LOG_INFO("%s: moe stream:   Gini = %.3f (0 = flat, 1 = one expert takes everything)\n",
-+            __func__, mean(ginis));
++    LLAMA_LOG_INFO("%s: %smoe stream: expert locality over %" PRIu64 " layers, %u experts each\n",
++            __func__, pfx, n_layers_seen, layers.empty() || !layers[0] ? 0 : layers[0]->n_expert);
++    LLAMA_LOG_INFO("%s: %smoe stream:   50%% of selections covered by %.1f%% of experts, 80%% by %.1f%%, 95%% by %.1f%%\n",
++            __func__, pfx, 100.0*mean(cov50), 100.0*mean(cov80), 100.0*mean(cov95));
++    LLAMA_LOG_INFO("%s: %smoe stream:   Gini = %.3f (0 = flat, 1 = one expert takes everything)\n",
++            __func__, pfx, mean(ginis));
 +}
 +
 +// custom-op callback (single-threaded on ith 0): given the router's expert ids, ensure every touched
@@ -2597,10 +2630,10 @@ index 0000000..eda555b
 +}
 diff --git a/src/llama-moe-stream.h b/src/llama-moe-stream.h
 new file mode 100644
-index 0000000..62c1d3a
+index 0000000..fe1fb02
 --- /dev/null
 +++ b/src/llama-moe-stream.h
-@@ -0,0 +1,284 @@
+@@ -0,0 +1,288 @@
 +#pragma once
 +
 +#include "llama-mmap.h"
@@ -2802,8 +2835,12 @@ index 0000000..62c1d3a
 +
 +    size_t size_bufs() const;
 +
-+    void print_stats() const;
-+    void print_locality() const; // expert selection concentration; called from print_stats
++    // role names the model instance this manager belongs to and is printed in front of every
++    // line ("target: moe stream: ..."). One process holds one manager per model, so without it
++    // two blocks are separable only by their order - which is not a property a parser can rely
++    // on. nullptr prints no prefix at all and reproduces the pre-role output byte for byte.
++    void print_stats(const char * role) const;
++    void print_locality(const char * pfx) const; // expert selection concentration; called from print_stats
 +
 +    bool use_direct_io = false; // O_DIRECT streaming reads (LLAMA_MOE_STREAM_DIRECT), no page cache
 +
@@ -3356,3 +3393,36 @@ index 0000000..c4bdbac
 +    printf("RESULT: PASS - all checks behaved as required\n");
 +    return 0;
 +}
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 5d2798c..45774b3 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -674,6 +674,28 @@ struct server_slot {
+         }
+ 
+         common_speculative_print_stats(spec);
++
++        // MoE expert streaming counters, one block per model instance. THIS IS THE ONLY PLACE
++        // IN THE SERVER THEY CAN BE PRINTED, and the reason is a lock: print_stats takes the
++        // same mutex as the expert remap, and the remap runs inside a custom op during
++        // llama_decode - which this server calls from exactly one place, on this thread. Here
++        // the decode has returned and the slot is finished, so the lock is uncontended and no
++        // request is delayed. Printing from anywhere that can overlap a decode would stall the
++        // stream instead of measuring it.
++        //
++        // The counters are CUMULATIVE over the model instance, i.e. over the server process,
++        // and nothing here resets them: a request-local figure is the difference between two
++        // consecutive blocks. The discarded warm-up request is therefore still contained in
++        // every later block and has to be subtracted, not assumed away. A restarted server
++        // starts from zero because the model instance is new.
++        //
++        // Two calls, because target and draft model each own a manager (llama-model.cpp) and
++        // their misses, stalls and locality are the two numbers the streaming question needs
++        // apart. The role token is what separates them in the log; the order is not a contract.
++        llama_moe_stream_print_stats(llama_get_model(ctx_tgt), "target");
++        if (ctx_dft) {
++            llama_moe_stream_print_stats(llama_get_model(ctx_dft), "drafter");
++        }
+     }
+ 
+     json to_json(bool only_metrics = false) const {
