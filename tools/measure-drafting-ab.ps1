@@ -82,7 +82,17 @@ param(
     [string]$Drafter = 'models/DSV4-Flash-DSpark-draft-bf16.gguf',
     [string]$SpecType = 'draft-dspark',
     # Fixed before the start. Two evaluable runs per side for the cause probe.
+    #
+    # A block is ONE server process: one discarded warm-up plus N evaluated requests. 'A' means
+    # one evaluated request, 'A2' means two out of the same server. The default keeps the E12
+    # shape (four blocks, one request each) so every existing caller measures what it did before.
     [string]$Blocks  = 'A,B,B,A',
+    # TWO-BINARY MODE. E12 asked "same build, -md on or off", so A and B differed by a flag.
+    # #53 asks "two BASES at the same operating point", where the variable is the executable and
+    # -md is off on both sides. Set both and the harness switches the exe per block and adds no
+    # -md at all; leave them empty and nothing about the E12 behaviour changes.
+    [string]$ServerExeA = '',
+    [string]$ServerExeB = '',
     [int]   $Port    = 8081,
     [int]   $Ctx     = 4096,
     [int]   $Ngl     = 99,
@@ -465,6 +475,60 @@ function Diff-Foreign([object[]]$Prev, [object[]]$Now) {
     return [pscustomobject]@{ added = $added; removed = $removed }
 }
 
+# --------------------------------------------------------------------------- block spec
+# 'A' is one evaluated request, 'A2' is two out of the SAME server process. A value function:
+# it returns the parsed sequence or a refusal and narrates nothing, so a caller can test it.
+#
+# Parsed before anything starts. A typo in the sequence is otherwise discovered after the first
+# twenty-minute block, by which time the machine state the run assumed is gone.
+function Parse-Blocks([string]$Spec, [switch]$AllowUnbalanced) {
+    $seq = @()
+    foreach ($tok in ($Spec -split ',')) {
+        $t = $tok.Trim().ToUpper()
+        if ($t -notmatch '^([AB])(\d*)$') {
+            return [pscustomobject]@{ ok = $false; why = "unknown block '$t' (expected A, B, A2, B4, ...)"; seq = @(); nA = 0; nB = 0 }
+        }
+        $n = $(if ($Matches[2]) { [int]$Matches[2] } else { 1 })
+        if ($n -lt 1) {
+            return [pscustomobject]@{ ok = $false; why = "block '$t' asks for $n requests"; seq = @(); nA = 0; nB = 0 }
+        }
+        $seq += [pscustomobject]@{ side = $Matches[1]; n = $n }
+    }
+    if ($seq.Count -eq 0) { return [pscustomobject]@{ ok = $false; why = 'empty sequence'; seq = @(); nA = 0; nB = 0 } }
+    $nA = (@($seq | Where-Object { $_.side -eq 'A' } | ForEach-Object { $_.n }) | Measure-Object -Sum).Sum
+    $nB = (@($seq | Where-Object { $_.side -eq 'B' } | ForEach-Object { $_.n }) | Measure-Object -Sum).Sum
+    if (-not $nA) { $nA = 0 }
+    if (-not $nB) { $nB = 0 }
+    # An unbalanced sequence is refused HERE rather than noticed in the report. Six against four
+    # is not a smaller comparison, it is a different one: the side with more requests carries more
+    # of whatever drifted during the series, and no amount of care in the analysis undoes that.
+    # -AllowUnbalanced exists so the refusal itself can be exercised from both directions.
+    if (-not $AllowUnbalanced -and $nA -ne $nB) {
+        return [pscustomobject]@{ ok = $false; why = "unbalanced sequence: A $nA against B $nB"; seq = @(); nA = $nA; nB = $nB }
+    }
+    if ($nA -eq 0 -or $nB -eq 0) {
+        return [pscustomobject]@{ ok = $false; why = "one-sided sequence: A $nA, B $nB"; seq = @(); nA = $nA; nB = $nB }
+    }
+    return [pscustomobject]@{ ok = $true; why = ''; seq = $seq; nA = $nA; nB = $nB }
+}
+
+# Which tree an executable came out of, and at which commit. Recorded per request because
+# "b10223" in a filename is a claim and `git rev-parse` in the tree that produced the binary is
+# a measurement. Walks up from the exe until it finds the worktree root (.git is a FILE in a
+# linked worktree, not a directory - both are accepted).
+function Get-TreeIdentity([string]$ExePath) {
+    $dir = Split-Path -Parent $ExePath
+    for ($i = 0; $i -lt 8 -and $dir; $i++) {
+        if (Test-Path (Join-Path $dir '.git')) {
+            $sha = (& git -C $dir rev-parse HEAD 2>$null)
+            $desc = (& git -C $dir describe --tags --exact-match HEAD 2>$null)
+            return [pscustomobject]@{ ok = $true; root = $dir; commit = "$sha".Trim(); tag = "$desc".Trim() }
+        }
+        $dir = Split-Path -Parent $dir
+    }
+    return [pscustomobject]@{ ok = $false; root = ''; commit = ''; tag = '' }
+}
+
 # --------------------------------------------------------------------------- selftest
 # Every case below must be able to go RED. Where a case asserts an absence, a presence
 # from the same run stands beside it - a zero without its non-zero is not a measurement.
@@ -486,6 +550,26 @@ function Invoke-Selftest {
     $prodPath = Join-Path $Lab 'src\build-native\bin\Release\llama-server.exe'
     $r2b = Resolve-ServerExe $prodPath $Lab
     Case 'production build refused' ($r2b.ok -eq $false) $r2b.why
+
+    # 2b  block spec: counts, the preserved default, and two controls that MUST refuse
+    $bp1 = Parse-Blocks 'A2,B4,A3,B2,A1'
+    $sumA = (@($bp1.seq | Where-Object { $_.side -eq 'A' } | ForEach-Object { $_.n }) | Measure-Object -Sum).Sum
+    $sumB = (@($bp1.seq | Where-Object { $_.side -eq 'B' } | ForEach-Object { $_.n }) | Measure-Object -Sum).Sum
+    Case 'block spec: 5 blocks parsed' ($bp1.ok -and $bp1.seq.Count -eq 5) ("blocks=" + $bp1.seq.Count)
+    Case 'block spec: 6 requests per side' ($sumA -eq 6 -and $sumB -eq 6) ("A=$sumA B=$sumB")
+    $bp2 = Parse-Blocks 'A,B,B,A'
+    $sumA2 = (@($bp2.seq | Where-Object { $_.side -eq 'A' } | ForEach-Object { $_.n }) | Measure-Object -Sum).Sum
+    Case 'block spec: bare letter still means one request' ($bp2.ok -and $bp2.seq.Count -eq 4 -and $sumA2 -eq 2) ("A=$sumA2 blocks=" + $bp2.seq.Count)
+    $bp3 = Parse-Blocks 'A,C'
+    Case 'block spec: unknown side REFUSED' ($bp3.ok -eq $false) $bp3.why
+    $bp4 = Parse-Blocks 'A0'
+    Case 'block spec: zero requests REFUSED' ($bp4.ok -eq $false) $bp4.why
+    $bp5 = Parse-Blocks 'A2,B4'
+    Case 'block spec: unbalanced REFUSED' ($bp5.ok -eq $false) $bp5.why
+    $bp6 = Parse-Blocks 'A2,B4' -AllowUnbalanced
+    Case 'block spec: same input accepted when imbalance is allowed' ($bp6.ok -eq $true -and $bp6.nA -eq 2 -and $bp6.nB -eq 4) ("A=" + $bp6.nA + " B=" + $bp6.nB)
+    $bp7 = Parse-Blocks 'A2,A4'
+    Case 'block spec: one-sided REFUSED' ($bp7.ok -eq $false) $bp7.why
 
     # 3  pid change / pid reuse
     $a = [pscustomobject]@{ pid_ = 4242; exe = 'x'; created = '2026-08-05T23:00:00.0000000Z' }
@@ -603,13 +687,30 @@ if ($Selftest) { Invoke-Selftest }
 if (-not $OutRoot) { $OutRoot = Join-Path $CROW ("runs\{0}\e12-cause-probe" -f (Get-Date -Format 'yyyy-MM-dd')) }
 if (-not (Test-Path $OutRoot)) { New-Item -ItemType Directory -Path $OutRoot -Force | Out-Null }
 
-$exeReq = Join-Path $WT (Join-Path $Bin 'llama-server.exe')
+$TwoBinary = [bool]($ServerExeA -and $ServerExeB)
+
+$exeReq = $(if ($TwoBinary) { $ServerExeA } else { Join-Path $WT (Join-Path $Bin 'llama-server.exe') })
 $res = Resolve-ServerExe $exeReq $Lab
 if (-not $res.ok) { Die $res.why }
 $full = $res.full
 $implDll = Join-Path (Split-Path -Parent $full) 'llama-server-impl.dll'
 $shaExe  = Get-Sha $full
 $shaDll  = Get-Sha $implDll
+
+# The B binary gets the same treatment as A, including the refusal to measure the production
+# build. Two exes that hash the same would make the whole comparison a null experiment, so that
+# is checked here rather than discovered in the numbers.
+$fullB = ''; $shaExeB = ''; $shaDllB = ''
+if ($TwoBinary) {
+    $resB = Resolve-ServerExe $ServerExeB $Lab
+    if (-not $resB.ok) { Die $resB.why }
+    $fullB   = $resB.full
+    $implDllB= Join-Path (Split-Path -Parent $fullB) 'llama-server-impl.dll'
+    $shaExeB = Get-Sha $fullB
+    $shaDllB = Get-Sha $implDllB
+    if ($full -eq $fullB)       { Die "two-binary mode with one path: $full" }
+    if ($shaDll -eq $shaDllB)   { Die "two-binary mode but llama-server-impl.dll is identical on both sides ($shaDll) - there is nothing to compare" }
+}
 
 # A foreign llama-server before the series is evidence, not litter. Killing it would
 # destroy the only sign that the machine was not in the state this run assumes.
@@ -631,6 +732,15 @@ function Stop-OurServer([object]$Proc) {
     return [pscustomobject]@{ how = 'Kill+WaitForExit'; exit_code = $code; port_free = $free }
 }
 
+# ONE prompt for every request on both sides. Hoisted out of Ask so it can be hashed once and
+# recorded per request: "both sides got the same prompt" is otherwise a claim about the source.
+$PROMPT_TEXT = 'Write a Python function that reverses a linked list. Code only.'
+function Get-Sha16([string]$s) {
+    $h = [Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($s))
+    return (($h | ForEach-Object { '{0:x2}' -f $_ }) -join '').Substring(0,16)
+}
+$PROMPT_SHA = Get-Sha16 $PROMPT_TEXT
+
 function Ask {
     param([int]$MaxTokens, [int]$TargetPid, [string]$LogPath, [object]$Identity)
 
@@ -640,7 +750,7 @@ function Ask {
     $diskBefore= Get-DiskCounter
     $sampler   = Start-Sampler $TargetPid $SampleMs
 
-    $body = @{ model='x'; messages=@(@{role='user'; content='Write a Python function that reverses a linked list. Code only.'})
+    $body = @{ model='x'; messages=@(@{role='user'; content=$PROMPT_TEXT})
                max_tokens=$MaxTokens; temperature=0; stream=$false } | ConvertTo-Json -Depth 5
     $t0 = Get-Date
     $r = $null
@@ -658,8 +768,17 @@ function Ask {
     $tm = $r.timings
     $content = [string]$r.choices[0].message.content
     $reason  = [string]$r.choices[0].message.reasoning_content
-    $h = [Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($content))
-    $sha16 = (($h | ForEach-Object { '{0:x2}' -f $_ }) -join '').Substring(0,16)
+    # THE EFFECTIVE ANSWER. content when it carries anything, otherwise reasoning_content. Both
+    # empty is refused and never hashed: SHA-256 of "" is e3b0c442..., so two empty answers agree
+    # perfectly and "unchanged across the bases" would be true for the wrong reason.
+    $answerSrc = ''
+    $answer    = ''
+    if ($content.Length -gt 0)     { $answerSrc = 'content';           $answer = $content }
+    elseif ($reason.Length -gt 0)  { $answerSrc = 'reasoning_content'; $answer = $reason }
+    if ($answerSrc -eq '') {
+        return [pscustomobject]@{ ok = $false; why = 'content and reasoning_content are both empty: no comparable answer' }
+    }
+    $sha16 = Get-Sha16 $answer
 
     $tail = Read-LogTail $LogPath $logOffset
     $draft = Parse-DraftLog $tail.text
@@ -698,6 +817,9 @@ function Ask {
         completion    = $completion
         finish        = [string]$r.choices[0].finish_reason
         answer_sha    = $sha16
+        answer_source = $answerSrc
+        prompt_sha    = $PROMPT_SHA
+        prompt_text   = $PROMPT_TEXT
         answer_chars  = $content.Length
         reasoning_chars = $reason.Length
 
@@ -742,8 +864,22 @@ function Ask {
 }
 
 # =========================================================================== run
-$seq = @($Blocks -split ',' | ForEach-Object { $_.Trim().ToUpper() })
-foreach ($s in $seq) { if ($s -ne 'A' -and $s -ne 'B') { Die "unknown block '$s' in -Blocks" } }
+$parsed = Parse-Blocks $Blocks
+if (-not $parsed.ok) { Die ("-Blocks: " + $parsed.why) }
+$seq = $parsed.seq
+$planA = $parsed.nA
+$planB = $parsed.nB
+
+# The mode is written into every record. The two meanings of A/B - a flag on one build, or two
+# builds - produce artefacts that look alike and answer different questions; a reader six months
+# from now has only this field to tell them apart.
+$AbMode = $(if ($TwoBinary) { 'two-binary' } else { 'md-toggle' })
+$treeA  = Get-TreeIdentity $full
+$treeB  = $(if ($TwoBinary) { Get-TreeIdentity $fullB } else { $treeA })
+Say ("mode {0}" -f $AbMode)
+Say ("tree A {0}  commit {1}  tag {2}" -f $treeA.root, $treeA.commit, $treeA.tag)
+if ($TwoBinary) { Say ("tree B {0}  commit {1}  tag {2}" -f $treeB.root, $treeB.commit, $treeB.tag) }
+
 
 $baseArgs = @('-m', $Model, '--host','127.0.0.1','--port',"$Port",'-c',"$Ctx",'-ngl',"$Ngl",'-np','1',
               '-lv', "$Verbosity",
@@ -751,16 +887,27 @@ $baseArgs = @('-m', $Model, '--host','127.0.0.1','--port',"$Port",'-c',"$Ctx",'-
               '--spec-type', $SpecType)
 
 Say ('=' * 78)
-Say ("A/B CAUSE PROBE   sequence {0}   tokens {1}   ONE discarded warm-up per block" -f ($seq -join ' '), $Tokens)
-Say ("exe {0}" -f $full)
-Say ("sha exe {0}" -f $shaExe)
-Say ("sha impl-dll {0}" -f $shaDll)
-Say ("A = with -md {0}   B = same build without -md   (only variable)" -f $Drafter)
+Say ("A/B CAUSE PROBE   sequence {0}   tokens {1}   ONE discarded warm-up per block" -f
+     (@($seq | ForEach-Object { "$($_.side)x$($_.n)" }) -join ' '), $Tokens)
+Say ("planned evaluated requests: A {0}   B {1}   blocks {2}" -f $planA, $planB, $seq.Count)
+Say ("exe A {0}" -f $full)
+Say ("sha exe A {0}" -f $shaExe)
+Say ("sha impl-dll A {0}" -f $shaDll)
+if ($TwoBinary) {
+    Say ("exe B {0}" -f $fullB)
+    Say ("sha exe B {0}" -f $shaExeB)
+    Say ("sha impl-dll B {0}" -f $shaDllB)
+    Say  "A and B are two BUILDS at the same operating point; -md is off on both sides"
+} else {
+    Say ("A = with -md {0}   B = same build without -md   (only variable)" -f $Drafter)
+}
 Say ("sampling every {0} ms, at least {1} samples per request, largest gap {2} ms" -f $SampleMs, $MinSamples, $MaxGapMs)
 Say ('=' * 78)
 
 $results = @(); $aborts = @(); $blockNo = 0; $prevForeign = @()
-foreach ($side in $seq) {
+foreach ($blk in $seq) {
+    $side = $blk.side
+    $nReq = $blk.n
     $blockNo++
     $foreign = Get-ForeignProcs
     $fdiff = Diff-Foreign $prevForeign $foreign
@@ -768,10 +915,14 @@ foreach ($side in $seq) {
     Say ("block {0}  side {1}   foreign[{2}]  added[{3}]  gone[{4}]" -f $blockNo, $side,
          ((@($foreign | ForEach-Object { "$($_.name):$($_.pid_)" }) -join ',')), ($fdiff.added -join ','), ($fdiff.removed -join ','))
 
-    $srvArgs = $(if ($side -eq 'A') { $baseArgs + @('-md', $Drafter) } else { $baseArgs })
+    # In two-binary mode the executable IS the variable and neither side gets a drafter.
+    $sideExe = $(if ($TwoBinary -and $side -eq 'B') { $fullB } else { $full })
+    $sideShaExe = $(if ($TwoBinary -and $side -eq 'B') { $shaExeB } else { $shaExe })
+    $sideShaDll = $(if ($TwoBinary -and $side -eq 'B') { $shaDllB } else { $shaDll })
+    $srvArgs = $(if (-not $TwoBinary -and $side -eq 'A') { $baseArgs + @('-md', $Drafter) } else { $baseArgs })
     $logBase = Join-Path $OutRoot ("block{0}-{1}" -f $blockNo, $side)
     $errLog  = "$logBase.err"
-    $p = Start-Process -FilePath $full -ArgumentList $srvArgs -WorkingDirectory $Lab `
+    $p = Start-Process -FilePath $sideExe -ArgumentList $srvArgs -WorkingDirectory $Lab `
             -RedirectStandardOutput "$logBase.out" -RedirectStandardError $errLog -PassThru -WindowStyle Hidden
     # Start-Process -PassThru releases the handle when the process ends and .ExitCode then
     # reads EMPTY - no exception, nothing. This flag keeps the handle alive.
@@ -794,8 +945,8 @@ foreach ($side in $seq) {
         $aborts += "block $blockNo ($side): no Win32_Process row for pid $($p.Id)"
         [void](Stop-OurServer $p); continue
     }
-    if ($ident.exe -and ($ident.exe -ne $full)) {
-        $aborts += "block $blockNo ($side): running exe '$($ident.exe)' is not the requested '$full'"
+    if ($ident.exe -and ($ident.exe -ne $sideExe)) {
+        $aborts += "block $blockNo ($side): running exe '$($ident.exe)' is not the requested '$sideExe'"
         [void](Stop-OurServer $p); continue
     }
     $others = @(Get-Process llama-server -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $p.Id })
@@ -813,21 +964,38 @@ foreach ($side in $seq) {
     }
     Say ("  warm-up (discarded)  decode {0} ms/tok   prefill {1} ms / {2} tok   drafted {3}" -f (N $warm.decode_ms_tok 2), (N $warm.prompt_ms 1), $warm.prompt_n, $warm.drafted)
 
-    $m = Ask -MaxTokens $Tokens -TargetPid $p.Id -LogPath $errLog -Identity $ident
-    if (-not $m.ok) {
-        $aborts += "block $blockNo ($side): measured request failed"
-        [void](Stop-OurServer $p); continue
+    # N evaluated requests out of THIS server process. The discarded warm-up above is not
+    # removed from anything - its counters stay inside every later block, which is why each
+    # request records its own log offset and the per-request figure is a difference.
+    $blockRuns = @(); $blockFailed = $false
+    for ($rq = 1; $rq -le $nReq; $rq++) {
+        $one = Ask -MaxTokens $Tokens -TargetPid $p.Id -LogPath $errLog -Identity $ident
+        if (-not $one.ok) {
+            $aborts += "block $blockNo ($side): evaluated request $rq of $nReq failed"
+            $blockFailed = $true; break
+        }
+        $one | Add-Member -NotePropertyName req_in_block -NotePropertyValue $rq -Force
+        $blockRuns += $one
+        Say ("  request {0}/{1}  decode {2} ms/tok   prefill {3} ms / {4} tok" -f
+             $rq, $nReq, (N $one.decode_ms_tok 2), (N $one.prompt_ms 1), $one.prompt_n)
     }
 
     $stop = Stop-OurServer $p
+    if ($blockFailed) { continue }
+
+    foreach ($m in $blockRuns) {
     $m | Add-Member -NotePropertyName side       -NotePropertyValue $side -Force
     $m | Add-Member -NotePropertyName block      -NotePropertyValue $blockNo -Force
     $m | Add-Member -NotePropertyName server_pid -NotePropertyValue $ident.pid_ -Force
     $m | Add-Member -NotePropertyName server_created -NotePropertyValue $ident.created -Force
-    $m | Add-Member -NotePropertyName server_exe  -NotePropertyValue $full -Force
+    $m | Add-Member -NotePropertyName server_exe  -NotePropertyValue $sideExe -Force
     $m | Add-Member -NotePropertyName server_cmd  -NotePropertyValue $ident.commandline -Force
-    $m | Add-Member -NotePropertyName sha_exe     -NotePropertyValue $shaExe -Force
-    $m | Add-Member -NotePropertyName sha_impl_dll -NotePropertyValue $shaDll -Force
+    $m | Add-Member -NotePropertyName sha_exe     -NotePropertyValue $sideShaExe -Force
+    $m | Add-Member -NotePropertyName sha_impl_dll -NotePropertyValue $sideShaDll -Force
+    $m | Add-Member -NotePropertyName ab_mode      -NotePropertyValue $AbMode -Force
+    $m | Add-Member -NotePropertyName base_tag     -NotePropertyValue $(if ($side -eq 'B') { $treeB.tag } else { $treeA.tag }) -Force
+    $m | Add-Member -NotePropertyName base_commit  -NotePropertyValue $(if ($side -eq 'B') { $treeB.commit } else { $treeA.commit }) -Force
+    $m | Add-Member -NotePropertyName tree_root    -NotePropertyValue $(if ($side -eq 'B') { $treeB.root } else { $treeA.root }) -Force
     $m | Add-Member -NotePropertyName server_started -NotePropertyValue $startedAt -Force
     $m | Add-Member -NotePropertyName server_stop  -NotePropertyValue $stop -Force
     $m | Add-Member -NotePropertyName foreign      -NotePropertyValue $foreign -Force
@@ -850,20 +1018,30 @@ foreach ($side in $seq) {
         Say ("            TELEMETRY REFUSED: {0}" -f $m.telemetry.why)
     }
 
-    # abort criteria, checked per block rather than at the end
-    if ($side -eq 'A' -and $m.drafted -le 0)  { $aborts += "block $blockNo (A): drafted 0 - the drafter side did not draft" }
-    if ($side -eq 'B' -and $m.drafted -ne 0)  { $aborts += "block $blockNo (B): drafted $($m.drafted) - the control side drafted" }
-    if ($side -eq 'A' -and $null -eq $m.mean_accepted_len) { $aborts += "block $blockNo (A): no mean accepted len parsed while the side drafted" }
-    if ($side -eq 'B' -and $null -ne $m.log_rate)          { $aborts += "block $blockNo (B): acceptance line present on the control side" }
+    # abort criteria, checked per request rather than at the end
+    if (-not $TwoBinary) {
+        if ($side -eq 'A' -and $m.drafted -le 0)  { $aborts += "block $blockNo (A): drafted 0 - the drafter side did not draft" }
+        if ($side -eq 'B' -and $m.drafted -ne 0)  { $aborts += "block $blockNo (B): drafted $($m.drafted) - the control side drafted" }
+        if ($side -eq 'A' -and $null -eq $m.mean_accepted_len) { $aborts += "block $blockNo (A): no mean accepted len parsed while the side drafted" }
+        if ($side -eq 'B' -and $null -ne $m.log_rate)          { $aborts += "block $blockNo (B): acceptance line present on the control side" }
+    } else {
+        # two builds, -md off on both: any drafting at all means the operating point is not what
+        # the comparison assumes, and that is a stop, not a footnote
+        if ($m.drafted -ne 0) { $aborts += "block $blockNo ($side): drafted $($m.drafted) while -md is off on both sides" }
+    }
     if ($m.finish -ne 'stop')                 { $aborts += "block $blockNo ($side): finish_reason $($m.finish)" }
     if (-not $m.identity_stable)              { $aborts += "block $blockNo ($side): server identity changed during the request" }
     if (-not $m.log_read_ok)                  { $aborts += "block $blockNo ($side): log unreadable - $($m.log_read_why)" }
     if (-not $m.proc_read_ok)                 { $aborts += "block $blockNo ($side): process read counter unusable - $($m.proc_read_why)" }
     if (-not $m.telemetry.ok)                 { $aborts += "block $blockNo ($side): telemetry unusable - $($m.telemetry.why)" }
-    if (-not $stop.port_free)                 { $aborts += "block $blockNo ($side): port $Port still held after stop" }
     if ($m.drafted -gt 0 -and $null -ne $m.log_drafted -and $m.log_drafted -ne $m.drafted) {
         $aborts += "block $blockNo ($side): api drafted $($m.drafted) against log drafted $($m.log_drafted)"
     }
+    }
+
+    # per-BLOCK checks: one server, one log, one port - counting them per request would report
+    # the same fact N times and make a single fault look like N faults
+    if (-not $stop.port_free) { $aborts += "block $blockNo ($side): port $Port still held after stop" }
     $err = @([IO.File]::ReadAllLines($errLog) | Where-Object { $_ -match 'CUDA error|out of memory|cudaMalloc failed|failed to load' }).Count
     if ($err -gt 0) { $aborts += "block $blockNo ($side): $err GPU/load error lines" }
 }

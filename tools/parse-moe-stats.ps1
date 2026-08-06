@@ -316,8 +316,17 @@ function Get-Deltas([object[]]$Requests) {
                 request = $r.index; role = $key
                 n_calls = $b.n_calls; n_hit = $b.n_hit; n_miss = $b.n_miss; n_miss_cold = $b.n_miss_cold
                 t_stall_ms = $b.t_stall_ms; t_victim_ms = $b.t_victim_ms
+                # read since the first version, handed out since #53 needed the wait side of the
+                # question and not only the miss side
+                n_victim_waits = $b.n_victim_waits
+                n_wave_calls = $b.n_wave_calls; n_waves_run = $b.n_waves_run
+                n_preload_issued = $b.n_preload_issued; n_preload_ready = $b.n_preload_ready
+                t_stall_wave_ms = $b.t_stall_wave_ms
                 d_calls = $null; d_hit = $null; d_miss = $null; d_miss_cold = $null
                 d_stall_ms = $null; d_victim_ms = $null
+                d_victim_waits = $null
+                d_wave_calls = $null; d_waves_run = $null
+                d_preload_issued = $null; d_preload_ready = $null; d_stall_wave_ms = $null
                 complete = $b.complete
             }
             if ($prev.ContainsKey($key)) {
@@ -328,7 +337,25 @@ function Get-Deltas([object[]]$Requests) {
                 $row.d_miss_cold = $b.n_miss_cold - $p.n_miss_cold
                 $row.d_stall_ms  = $b.t_stall_ms  - $p.t_stall_ms
                 $row.d_victim_ms = $b.t_victim_ms - $p.t_victim_ms
-                foreach ($f in @('d_calls', 'd_hit', 'd_miss', 'd_miss_cold', 'd_stall_ms', 'd_victim_ms')) {
+
+                # The waves line prints ONLY when the wave path ran, so these are legally absent
+                # on a correct run. A difference is formed only when BOTH sides carry a value:
+                # $null - 5 is -5 in PowerShell, which would arrive below as a counter running
+                # backwards and be reported as a fault that never happened.
+                foreach ($pair in @(
+                        @('d_victim_waits',   'n_victim_waits'),
+                        @('d_wave_calls',     'n_wave_calls'),
+                        @('d_waves_run',      'n_waves_run'),
+                        @('d_preload_issued', 'n_preload_issued'),
+                        @('d_preload_ready',  'n_preload_ready'),
+                        @('d_stall_wave_ms',  't_stall_wave_ms'))) {
+                    $dst = $pair[0]; $src = $pair[1]
+                    if ($null -ne $b.$src -and $null -ne $p.$src) { $row.$dst = $b.$src - $p.$src }
+                }
+
+                foreach ($f in @('d_calls', 'd_hit', 'd_miss', 'd_miss_cold', 'd_stall_ms', 'd_victim_ms',
+                                 'd_victim_waits', 'd_wave_calls', 'd_waves_run',
+                                 'd_preload_issued', 'd_preload_ready', 'd_stall_wave_ms')) {
                     if ($null -ne $row.$f -and $row.$f -lt 0) {
                         # A cumulative counter cannot fall. Rejected rather than reported as a
                         # delta: a negative difference means the blocks were mismatched or the
@@ -528,6 +555,39 @@ function Invoke-Selftest {
          $p15.blocks[0].n_waves_run -eq 7 -and $p15.blocks[0].gini -eq 0.412 -and $p15.blocks[0].cov50 -eq 12.5 -and `
          $p15.problems.Count -eq 0) `
         ("lines={0} waves_run={1} gini={2} problems={3}" -f $p15.blocks[0].lines, $p15.blocks[0].n_waves_run, $p15.blocks[0].gini, $p15.problems.Count)
+
+    # 15b - the six counters #53 needs are differenced like the rest. A wave line on both
+    #       requests, so every one of them has a defined delta.
+    $wv = { param($w,$nr,$pi,$pr,$ws)
+            "0.01.000.004 I print_stats: target: moe stream: waves = $w ($nr non-empty), preloads issued = $pi (ready on arrival = $pr), wave stall = $ws ms" }
+    $t15b = (Blk 'target' 100 900 100 40 12.5 1.5 3)  + "`n" + (& $wv 10 7 20 5 '3.25') + "`n" +
+            (Blk 'target' 250 2200 260 55 30.0 2.5 8) + "`n" + (& $wv 26 19 44 12 '9.75')
+    $g15b = Group-Requests (Parse-MoeStats $t15b).blocks
+    $d15b = Get-Deltas $g15b.requests
+    $r15b = $d15b.rows[1]
+    Case '15b wave, preload and slot-wait counters are differenced' `
+        ($r15b.d_wave_calls -eq 16 -and $r15b.d_waves_run -eq 12 -and $r15b.d_preload_issued -eq 24 -and `
+         $r15b.d_preload_ready -eq 7 -and $r15b.d_stall_wave_ms -eq 6.5 -and $r15b.d_victim_waits -eq 5 -and `
+         $d15b.problems.Count -eq 0) `
+        ("waves={0} run={1} pi={2} pr={3} wstall={4} waits={5} problems={6}" -f `
+         $r15b.d_wave_calls, $r15b.d_waves_run, $r15b.d_preload_issued, $r15b.d_preload_ready, `
+         $r15b.d_stall_wave_ms, $r15b.d_victim_waits, $d15b.problems.Count)
+
+    # 15c - NEGATIVE CONTROL for 15b. Without a waves line the counters are absent, and absent
+    #       must stay absent: $null - 5 is -5 in PowerShell, so a careless difference would
+    #       invent a wave delta AND report the counter as running backwards. The slot-wait count
+    #       stands beside it as a non-null, so a blanket "everything is null" cannot pass either.
+    $t15c = (Blk 'target' 100 900 100 40 12.5 1.5 3) + "`n" + (Blk 'target' 250 2200 260 55 30.0 2.5 8)
+    $g15c = Group-Requests (Parse-MoeStats $t15c).blocks
+    $d15c = Get-Deltas $g15c.requests
+    $r15c = $d15c.rows[1]
+    Case '15c no waves line: wave deltas stay NULL, slot-wait delta does not' `
+        ($null -eq $r15c.d_wave_calls -and $null -eq $r15c.d_waves_run -and `
+         $null -eq $r15c.d_preload_issued -and $null -eq $r15c.d_stall_wave_ms -and `
+         $r15c.d_victim_waits -eq 5 -and $d15c.problems.Count -eq 0) `
+        ("wave_calls={0} waits={1} problems={2}" -f `
+         $(if ($null -eq $r15c.d_wave_calls) { 'null' } else { $r15c.d_wave_calls }), `
+         $r15c.d_victim_waits, $d15c.problems.Count)
 
     # 16 - the volume figures, per block rather than averaged. A single "lines per block" cannot
     #      say whether the drafter block or the target block is the large one.
