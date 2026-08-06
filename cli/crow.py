@@ -34,6 +34,15 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8081/v1"
 DEFAULT_MODEL = "crow"
 VERSION = "0.0.0.0.1"
 
+# Without a system prompt the model picks its own language — measured: "yo"
+# came back in Chinese. Kept to one short line on purpose: it sits at the head
+# of every context, so it is paid for in prefill exactly once and then cached,
+# but only while it stays byte-identical.
+DEFAULT_SYSTEM = (
+    "You are Crow, a local coding assistant. "
+    "Always reply in the same language the user wrote in."
+)
+
 # ASCII only, deliberately: the Windows console falls back to cp1252 and
 # would mangle box-drawing or emoji mid-animation.
 BANNER = r"""
@@ -413,8 +422,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"model name sent to the endpoint (default: {DEFAULT_MODEL})")
     parser.add_argument("--api-key", default="local-no-provider",
                         help="placeholder key; the local server does not check it")
-    parser.add_argument("--system", default=None,
+    parser.add_argument("--system", default=DEFAULT_SYSTEM,
                         help="system prompt; stays byte-identical for the whole session")
+    parser.add_argument("--no-system", dest="system", action="store_const", const=None,
+                        help="send no system prompt at all (the model then picks its own language)")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--timeout", type=float, default=1800.0,
                         help="socket timeout in seconds (default: 1800)")

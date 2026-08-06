@@ -193,6 +193,25 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(args.base_url, "http://x:9/v1")
         self.assertEqual(args.model, "other")
 
+    def test_a_system_prompt_is_sent_by_default(self):
+        """Without one the model answered in Chinese to an English 'yo'."""
+        args = crow.build_parser().parse_args([])
+        self.assertEqual(args.system, crow.DEFAULT_SYSTEM)
+        self.assertIn("same language", args.system)
+
+    def test_no_system_switches_it_off(self):
+        args = crow.build_parser().parse_args(["--no-system"])
+        self.assertIsNone(args.system)
+
+    def test_explicit_system_wins(self):
+        args = crow.build_parser().parse_args(["--system", "CUSTOM"])
+        self.assertEqual(args.system, "CUSTOM")
+
+    def test_default_system_is_one_line(self):
+        """It is prefilled on every cold start; keep it cheap."""
+        self.assertNotIn("\n", crow.DEFAULT_SYSTEM)
+        self.assertLess(len(crow.DEFAULT_SYSTEM), 200)
+
 
 class EndpointFailureTests(unittest.TestCase):
     def test_dead_port_raises_crow_error(self):
