@@ -3,12 +3,13 @@
     "day":  "2026-08-06",
     "pattern":  "^e[0-9]+",
     "root":  "Crow/runs",
-    "written":  "2026-08-06T16:20:40.6665440+02:00",
-    "files":  66,
-    "bytes":  485177339,
+    "written":  "2026-08-06T17:40:05.5617503+02:00",
+    "files":  76,
+    "bytes":  710749033,
     "stages":  {
-                   "E53":  30,
                    "E13":  29,
+                   "E35":  10,
+                   "E53":  30,
                    "E54":  7
                },
     "entries":  [
@@ -185,6 +186,66 @@
                         "stage":  "E13",
                         "bytes":  0,
                         "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e35-build/build-53.json",
+                        "stage":  "E35",
+                        "bytes":  3983,
+                        "sha256":  "23AE88B3DBDA06887022C7D21180E0BB098AB38114E422FC4CB235B1DA1745F8"
+                    },
+                    {
+                        "path":  "2026-08-06/e35-build/M35-b10269/build.log",
+                        "stage":  "E35",
+                        "bytes":  222481958,
+                        "sha256":  "0254660B7E51385ABFF3EE51DA8BE1D431060B9790A0BAF206C890BB49C0985E"
+                    },
+                    {
+                        "path":  "2026-08-06/e35-build/M35-b10269/configure.log",
+                        "stage":  "E35",
+                        "bytes":  8512,
+                        "sha256":  "B2D8018B86DDB5F5CFBF027EE4514DAC7EC154DF2C6F5C39E1CE1111F2C01F2A"
+                    },
+                    {
+                        "path":  "2026-08-06/e35-build/M35-b10269/configure-args.txt",
+                        "stage":  "E35",
+                        "bytes":  324,
+                        "sha256":  "6EACAC79E6CD063D998B2DF390ADCF5FE0F74C8DFAF6440EE425438C02FD0629"
+                    },
+                    {
+                        "path":  "2026-08-06/e35-correctness/cpu-ncmoe999.err",
+                        "stage":  "E35",
+                        "bytes":  1703908,
+                        "sha256":  "05463F2F88BCCC228E7183CEF9C61B386DCA2A91A1F9E81D15C02086622D0672"
+                    },
+                    {
+                        "path":  "2026-08-06/e35-correctness/cpu-ncmoe999.out",
+                        "stage":  "E35",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e35-correctness/gpu-cuda0-cache.err",
+                        "stage":  "E35",
+                        "bytes":  1368843,
+                        "sha256":  "7004CE545D46E0B744406862034534F8965584693C881E36703F51CBEE343452"
+                    },
+                    {
+                        "path":  "2026-08-06/e35-correctness/gpu-cuda0-cache.out",
+                        "stage":  "E35",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e35-correctness/probe-35-cpu-ncmoe999.json",
+                        "stage":  "E35",
+                        "bytes":  2285,
+                        "sha256":  "80F6E8181E7289DC31B0CB7A3EA6BFE5F6B443E0CB1916F3529CDC40BB85843E"
+                    },
+                    {
+                        "path":  "2026-08-06/e35-correctness/probe-35-gpu-cuda0-cache.json",
+                        "stage":  "E35",
+                        "bytes":  1881,
+                        "sha256":  "CDE77E6721E4EF007D1C3CCBC3053D5AA93E1B38FBC4F025B513E2405E78BEC3"
                     },
                     {
                         "path":  "2026-08-06/e53-build/A-b10223/build.log",
