@@ -93,6 +93,13 @@ param(
     # -md at all; leave them empty and nothing about the E12 behaviour changes.
     [string]$ServerExeA = '',
     [string]$ServerExeB = '',
+    # ONE BINARY, TWO PLACEMENTS. #24 asks what CPU-MoE and SSD streaming reach on this machine,
+    # so the variable is the MoE flag set and the executable must NOT move - a difference in the
+    # binary would put the placement question and the build question into one number. Set both
+    # and the harness drops the fixed streaming flags from the base and appends the per-arm set
+    # instead; leave them empty and nothing about the E12 or #53 behaviour changes.
+    [string[]]$ArmFlagsA = @(),
+    [string[]]$ArmFlagsB = @(),
     [int]   $Port    = 8081,
     [int]   $Ctx     = 4096,
     [int]   $Ngl     = 99,
@@ -346,6 +353,7 @@ function Get-TelemetryStats([object[]]$Samples, [datetime]$T0, [datetime]$T1, [i
         first_offset_ms = $null; last_before_end_ms = $null; max_gap_ms = $null
         gpu_util = $null; mem_util = $null; vram_mib = $null
         sm_mhz = $null; mem_mhz = $null; power_w = $null; temp_c = $null
+        ws_mib = $null; ws_private_mib = $null; sys_avail_mib = $null; ws_peak_mib = $null
         throttle_nonzero = 0; throttle_values = @()
     }
     if ($n -lt $MinN) { $res.why = "only $n samples, want at least $MinN"; return $res }
@@ -366,6 +374,13 @@ function Get-TelemetryStats([object[]]$Samples, [datetime]$T0, [datetime]$T1, [i
     $res.mem_mhz  = Stat @($Samples | ForEach-Object { $_.mem_mhz })
     $res.power_w  = Stat @($Samples | ForEach-Object { $_.power_w })
     $res.temp_c   = Stat @($Samples | ForEach-Object { $_.temp_c })
+    $res.ws_mib         = Stat @($Samples | ForEach-Object { $_.ws_mib })
+    $res.ws_private_mib = Stat @($Samples | ForEach-Object { $_.ws_private_mib })
+    $res.sys_avail_mib  = Stat @($Samples | ForEach-Object { $_.sys_avail_mib })
+    # Not a Stat: WorkingSetPeak is monotone over the life of the process, so a median of it
+    # means nothing. Only its last value is a statement, and it is the process peak.
+    $wsp = @($Samples | ForEach-Object { $_.ws_peak_mib } | Where-Object { $null -ne $_ })
+    $res.ws_peak_mib = $(if ($wsp.Count) { ($wsp | Measure-Object -Maximum).Maximum } else { $null })
     $tv = @($Samples | ForEach-Object { $_.throttle } | Sort-Object -Unique)
     $res.throttle_values = $tv
     $res.throttle_nonzero = @($Samples | Where-Object { $_.throttle -and ($_.throttle -replace '0x0*', '') -ne '' }).Count
@@ -418,18 +433,36 @@ function Start-Sampler([int]$TargetPid, [int]$IntervalMs) {
             } catch { }
 
             $pr = $null; $dk = $null; $alive = $false
+            $ws = $null; $wsPeak = $null; $wsPriv = $null; $availMib = $null
             try {
-                $q = Get-CimInstance -Query "SELECT IOReadBytesPersec FROM Win32_PerfRawData_PerfProc_Process WHERE IDProcess=$targetPid" -ErrorAction SilentlyContinue
-                if ($q) { $pr = [uint64]$q.IOReadBytesPersec; $alive = $true }
+                # One query, four values. WorkingSetPeak is kept BESIDE the sampled WorkingSet on
+                # purpose: the sampled series can only see peaks that happen to fall on a tick,
+                # and the OS-maintained peak cannot miss one. If the two disagree, the sampling
+                # rate was too coarse - which is a finding about the measurement, not noise.
+                $q = Get-CimInstance -Query "SELECT IOReadBytesPersec,WorkingSet,WorkingSetPeak,WorkingSetPrivate FROM Win32_PerfRawData_PerfProc_Process WHERE IDProcess=$targetPid" -ErrorAction SilentlyContinue
+                if ($q) {
+                    $pr = [uint64]$q.IOReadBytesPersec; $alive = $true
+                    $ws     = [math]::Round(([uint64]$q.WorkingSet)        / 1MB, 1)
+                    $wsPeak = [math]::Round(([uint64]$q.WorkingSetPeak)    / 1MB, 1)
+                    $wsPriv = [math]::Round(([uint64]$q.WorkingSetPrivate) / 1MB, 1)
+                }
             } catch { }
             try {
                 $q = Get-CimInstance -Query "SELECT DiskReadBytesPersec FROM Win32_PerfRawData_PerfDisk_PhysicalDisk WHERE Name='_Total'" -ErrorAction SilentlyContinue
                 if ($q) { $dk = [uint64]$q.DiskReadBytesPersec }
             } catch { }
+            try {
+                # AvailableMBytes, not "free": standby pages count as available. Named accordingly
+                # so nobody later reads it as unused memory - #38 already had that confusion once.
+                $q = Get-CimInstance -Query "SELECT AvailableMBytes FROM Win32_PerfRawData_PerfOS_Memory" -ErrorAction SilentlyContinue
+                if ($q) { $availMib = [double]$q.AvailableMBytes }
+            } catch { }
 
             $row = [pscustomobject]@{
                 at = $at; proc_alive = $alive
                 proc_read_bytes = $pr; disk_read_bytes = $dk
+                ws_mib = $ws; ws_peak_mib = $wsPeak; ws_private_mib = $wsPriv
+                sys_avail_mib = $availMib
                 gpu_util = $(if ($gpu) { $gpu.gpu_util } else { $null })
                 mem_util = $(if ($gpu) { $gpu.mem_util } else { $null })
                 vram_mib = $(if ($gpu) { $gpu.vram_mib } else { $null })
@@ -527,6 +560,26 @@ function Get-TreeIdentity([string]$ExePath) {
         $dir = Split-Path -Parent $dir
     }
     return [pscustomobject]@{ ok = $false; root = ''; commit = ''; tag = '' }
+}
+
+# Which arguments a side gets. A VALUE function: it starts nothing and narrates nothing, so the
+# three modes can be asserted without a server, a model or a GPU. Inline, this decision was three
+# nested ifs in the block loop and the only way to check it was to read a 400 MB server log.
+function Get-SideArgs {
+    param(
+        [string[]]$Base,
+        [string]  $Side,
+        [string]  $Mode,
+        [string[]]$FlagsA = @(),
+        [string[]]$FlagsB = @(),
+        [string]  $DrafterPath = ''
+    )
+    switch ($Mode) {
+        'arm-flags' { return @($Base) + @($(if ($Side -eq 'A') { $FlagsA } else { $FlagsB })) }
+        'md-toggle' { return @($Base) + @($(if ($Side -eq 'A') { @('-md', $DrafterPath) } else { @() })) }
+        # two-binary: the executable is the variable, so both sides get identical arguments.
+        default     { return @($Base) }
+    }
 }
 
 # --------------------------------------------------------------------------- selftest
@@ -659,6 +712,63 @@ function Invoke-Selftest {
     $g = Get-GpuSample
     Case 'gpu sample parses all eight fields' ($null -ne $g) $(if ($g) { "util=$($g.gpu_util) temp=$($g.temp_c) throttle=$($g.throttle)" } else { 'nvidia-smi query failed' })
 
+    # 16  arm-flags mode: one binary, the MoE placement is the only variable. Each case has its
+    #     counterpart - a mode that gave both sides the same arguments would pass an "A carries
+    #     its flags" check on its own, so "B does NOT carry A's flags" stands beside it.
+    $bA = @('-m','model.gguf','-c','4096','-ngl','99','-np','1','--spec-type','none')
+    $fa = @('--n-cpu-moe','999')
+    $fb = @('--moe-stream','--moe-stream-cache','64s','--moe-stream-io-threads','8','--moe-stream-direct')
+    $sA = Get-SideArgs -Base $bA -Side 'A' -Mode 'arm-flags' -FlagsA $fa -FlagsB $fb
+    $sB = Get-SideArgs -Base $bA -Side 'B' -Mode 'arm-flags' -FlagsA $fa -FlagsB $fb
+    Case 'arm-flags: A carries the CPU-MoE set'      (($sA -join ' ').Contains('--n-cpu-moe 999')) ($sA -join ' ')
+    Case 'arm-flags: A does NOT carry the stream set' (-not ($sA -contains '--moe-stream'))        'no --moe-stream on A'
+    Case 'arm-flags: B carries the stream set'        ($sB -contains '--moe-stream-direct')        ($sB -join ' ')
+    Case 'arm-flags: B does NOT carry the CPU-MoE set' (-not ($sB -contains '--n-cpu-moe'))        'no --n-cpu-moe on B'
+    Case 'arm-flags: the shared base is identical on both sides' `
+         ((($sA | Select-Object -First $bA.Count) -join ' ') -eq (($sB | Select-Object -First $bA.Count) -join ' ')) `
+         'base survives on both arms'
+    Case 'arm-flags: neither side gets -md'           ((-not ($sA -contains '-md')) -and (-not ($sB -contains '-md'))) 'drafting stays out of this mode'
+
+    # 17  the two other modes are unchanged - the negative control for case 16. If arm-flags had
+    #     leaked into them, these would go red and the E12/#53 callers would be measuring something
+    #     other than what they measured before.
+    $mA = Get-SideArgs -Base $bA -Side 'A' -Mode 'md-toggle' -DrafterPath 'draft.gguf'
+    $mB = Get-SideArgs -Base $bA -Side 'B' -Mode 'md-toggle' -DrafterPath 'draft.gguf'
+    Case 'md-toggle unchanged: A gets -md, B does not' `
+         (($mA -contains '-md') -and (-not ($mB -contains '-md'))) ("A=" + $mA.Count + " B=" + $mB.Count)
+    $tA = Get-SideArgs -Base $bA -Side 'A' -Mode 'two-binary'
+    $tB = Get-SideArgs -Base $bA -Side 'B' -Mode 'two-binary'
+    Case 'two-binary unchanged: both sides identical' (($tA -join ' ') -eq ($tB -join ' ')) 'arguments shared, exe is the variable'
+
+    # 18  memory telemetry. ws_peak_mib is monotone, so it must be the MAXIMUM and never a median -
+    #     a median would silently under-report the peak this issue asks for. The falling series is
+    #     physically impossible for a peak counter and exists to prove the aggregation is not
+    #     "take the last value", which would return 10 here.
+    $t0m = [DateTime]::UtcNow
+    $memRows = @(0..5 | ForEach-Object {
+        [pscustomobject]@{
+            at = $t0m.AddMilliseconds(500*$_).ToString('o')
+            gpu_util=1; mem_util=1; vram_mib=(1000+$_); sm_mhz=1; mem_mhz=1; power_w=1; temp_c=1; throttle='0x0'
+            ws_mib=(100*$_); ws_private_mib=(90*$_); sys_avail_mib=(5000-$_)
+            ws_peak_mib=$(if ($_ -eq 3) { 999 } else { 10 })
+        }
+    })
+    $ms = Get-TelemetryStats $memRows $t0m $t0m.AddMilliseconds(3000) 5 2000
+    Case 'memory telemetry: stats computed at all'  ($ms.ok -eq $true) $ms.why
+    Case 'ws_peak_mib is the maximum, not the last' ($ms.ws_peak_mib -eq 999) ("got=" + $ms.ws_peak_mib)
+    Case 'ws_mib aggregated with a real spread'     ($ms.ws_mib.max -eq 500 -and $ms.ws_mib.min -eq 0) ("min=" + $ms.ws_mib.min + " max=" + $ms.ws_mib.max)
+    Case 'sys_avail_mib aggregated'                 ($ms.sys_avail_mib.max -eq 5000) ("max=" + $ms.sys_avail_mib.max)
+    # The negative control: all-null memory columns must yield null, not 0. A zero would read as
+    # "the process used no memory" and is indistinguishable from a counter that never answered.
+    $nullRows = @($memRows | ForEach-Object {
+        [pscustomobject]@{
+            at = $_.at; gpu_util=1; mem_util=1; vram_mib=1; sm_mhz=1; mem_mhz=1; power_w=1; temp_c=1; throttle='0x0'
+            ws_mib=$null; ws_private_mib=$null; sys_avail_mib=$null; ws_peak_mib=$null
+        }
+    })
+    $ns = Get-TelemetryStats $nullRows $t0m $t0m.AddMilliseconds(3000) 5 2000
+    Case 'absent memory counters give null, not zero' ($null -eq $ns.ws_peak_mib) ("got=" + $(if ($null -eq $ns.ws_peak_mib) { 'null' } else { $ns.ws_peak_mib }))
+
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 
     Write-Output ''
@@ -688,6 +798,18 @@ if (-not $OutRoot) { $OutRoot = Join-Path $CROW ("runs\{0}\e12-cause-probe" -f (
 if (-not (Test-Path $OutRoot)) { New-Item -ItemType Directory -Path $OutRoot -Force | Out-Null }
 
 $TwoBinary = [bool]($ServerExeA -and $ServerExeB)
+# The two modes answer different questions and cannot be combined: two-binary holds the flags
+# fixed and moves the executable, arm-flags holds the executable fixed and moves the flags.
+# Setting both would move both and the result would attribute nothing.
+$ArmFlags  = [bool]($ArmFlagsA.Count -gt 0 -and $ArmFlagsB.Count -gt 0)
+if ($ArmFlags -and $TwoBinary) {
+    Write-Output "SETUP ERROR: -ArmFlagsA/-ArmFlagsB and -ServerExeA/-ServerExeB are exclusive; both would move two variables at once"
+    exit 2
+}
+if (($ArmFlagsA.Count -gt 0) -xor ($ArmFlagsB.Count -gt 0)) {
+    Write-Output "SETUP ERROR: -ArmFlagsA and -ArmFlagsB must both be set; one alone makes the arms differ in an unstated way"
+    exit 2
+}
 
 $exeReq = $(if ($TwoBinary) { $ServerExeA } else { Join-Path $WT (Join-Path $Bin 'llama-server.exe') })
 $res = Resolve-ServerExe $exeReq $Lab
@@ -873,7 +995,7 @@ $planB = $parsed.nB
 # The mode is written into every record. The two meanings of A/B - a flag on one build, or two
 # builds - produce artefacts that look alike and answer different questions; a reader six months
 # from now has only this field to tell them apart.
-$AbMode = $(if ($TwoBinary) { 'two-binary' } else { 'md-toggle' })
+$AbMode = $(if ($TwoBinary) { 'two-binary' } elseif ($ArmFlags) { 'arm-flags' } else { 'md-toggle' })
 $treeA  = Get-TreeIdentity $full
 $treeB  = $(if ($TwoBinary) { Get-TreeIdentity $fullB } else { $treeA })
 Say ("mode {0}" -f $AbMode)
@@ -882,9 +1004,13 @@ if ($TwoBinary) { Say ("tree B {0}  commit {1}  tag {2}" -f $treeB.root, $treeB.
 
 
 $baseArgs = @('-m', $Model, '--host','127.0.0.1','--port',"$Port",'-c',"$Ctx",'-ngl',"$Ngl",'-np','1',
-              '-lv', "$Verbosity",
-              '--moe-stream','--moe-stream-cache','64s','--moe-stream-io-threads','8','--moe-stream-direct',
-              '--spec-type', $SpecType)
+              '-lv', "$Verbosity")
+# In arm-flags mode the MoE placement IS the variable, so it must not sit in the shared base.
+# Everything above stays shared, and each side appends exactly what it was given.
+if (-not $ArmFlags) {
+    $baseArgs += @('--moe-stream','--moe-stream-cache','64s','--moe-stream-io-threads','8','--moe-stream-direct')
+}
+$baseArgs += @('--spec-type', $SpecType)
 
 Say ('=' * 78)
 Say ("A/B CAUSE PROBE   sequence {0}   tokens {1}   ONE discarded warm-up per block" -f
@@ -919,7 +1045,8 @@ foreach ($blk in $seq) {
     $sideExe = $(if ($TwoBinary -and $side -eq 'B') { $fullB } else { $full })
     $sideShaExe = $(if ($TwoBinary -and $side -eq 'B') { $shaExeB } else { $shaExe })
     $sideShaDll = $(if ($TwoBinary -and $side -eq 'B') { $shaDllB } else { $shaDll })
-    $srvArgs = $(if (-not $TwoBinary -and $side -eq 'A') { $baseArgs + @('-md', $Drafter) } else { $baseArgs })
+    $srvArgs = Get-SideArgs -Base $baseArgs -Side $side -Mode $AbMode `
+                            -FlagsA $ArmFlagsA -FlagsB $ArmFlagsB -DrafterPath $Drafter
     $logBase = Join-Path $OutRoot ("block{0}-{1}" -f $blockNo, $side)
     $errLog  = "$logBase.err"
     $p = Start-Process -FilePath $sideExe -ArgumentList $srvArgs -WorkingDirectory $Lab `
