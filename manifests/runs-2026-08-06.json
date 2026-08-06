@@ -3,11 +3,13 @@
     "day":  "2026-08-06",
     "pattern":  "^e[0-9]+",
     "root":  "Crow/runs",
-    "written":  "2026-08-06T06:00:03.4854331+02:00",
-    "files":  29,
-    "bytes":  7783080,
+    "written":  "2026-08-06T16:20:40.6665440+02:00",
+    "files":  66,
+    "bytes":  485177339,
     "stages":  {
-                   "E13":  29
+                   "E53":  30,
+                   "E13":  29,
+                   "E54":  7
                },
     "entries":  [
                     {
@@ -183,6 +185,228 @@
                         "stage":  "E13",
                         "bytes":  0,
                         "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-build/A-b10223/build.log",
+                        "stage":  "E53",
+                        "bytes":  226799880,
+                        "sha256":  "76EB689925B22A22201146D40D129CFC99AC5FFFF323BCB5ED766099BDB77FD9"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-build/A-b10223/configure.log",
+                        "stage":  "E53",
+                        "bytes":  8526,
+                        "sha256":  "00A1FDC0CA225EA307B609ACAFA3CD86465C5726E5141E66B4BC328E049D94D5"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-build/A-b10223/configure-args.txt",
+                        "stage":  "E53",
+                        "bytes":  338,
+                        "sha256":  "F201AB2EE26A56A6F6D9AFA35CD9D94C0F0EE348167F5568A66EFF739A13CF5E"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-build/B-b10269/build.log",
+                        "stage":  "E53",
+                        "bytes":  226800062,
+                        "sha256":  "821110617DB2247BBCFD1F0BFE84AF972786C0DFDEF9D9CF528EA7C6340E6F2E"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-build/B-b10269/configure.log",
+                        "stage":  "E53",
+                        "bytes":  8526,
+                        "sha256":  "0857A332CA73AAB461E692C77A3DED38364C0BDDB72C7E8BDD47BA2AD73D8A40"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-build/B-b10269/configure-args.txt",
+                        "stage":  "E53",
+                        "bytes":  338,
+                        "sha256":  "C0C2FDBF8AE4067B764257488040E91A0DC5649135D4A76B36A45C032D9095AC"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-build/build-53.json",
+                        "stage":  "E53",
+                        "bytes":  7685,
+                        "sha256":  "D374A0AE1AE8FD72D211DED3644789DE9AC2CAA39459D63F8F85AA086D1CB166"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-build/diag-54-on-b10223.local.patch",
+                        "stage":  "E53",
+                        "bytes":  10775,
+                        "sha256":  "82B9F31BA232232C31DD497F18E334FBAF66A2F3EB0D7F6F24E6D1A16021383D"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-series/block1-A.err",
+                        "stage":  "E53",
+                        "bytes":  2780774,
+                        "sha256":  "B1E20F85D91C6474BCE5DBB4891B251710D8DF11D20795F642C203123A9A884D"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-series/block1-A.out",
+                        "stage":  "E53",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-series/block2-B.err",
+                        "stage":  "E53",
+                        "bytes":  4378485,
+                        "sha256":  "D21AC57B211F6D99E72B53BF9EE87C854907C6B072F15B7DB89DA79D2211C10E"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-series/block2-B.out",
+                        "stage":  "E53",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-series/block3-A.err",
+                        "stage":  "E53",
+                        "bytes":  3525959,
+                        "sha256":  "B108F90BFD7E19E3D7B5F770B1F26B556E5C7F3D386D8D53006C8ACD5D95047A"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-series/block3-A.out",
+                        "stage":  "E53",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-series/block4-B.err",
+                        "stage":  "E53",
+                        "bytes":  2874308,
+                        "sha256":  "6F375EFBD76E7982BBF6B6955FA87F96412E210631E35478A49D9690869695A2"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-series/block4-B.out",
+                        "stage":  "E53",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-series/block5-A.err",
+                        "stage":  "E53",
+                        "bytes":  2026244,
+                        "sha256":  "9952DEFDE869270C0403D717609E368B505C2B15D53A65239CE8A7885E0D6C7D"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-series/block5-A.out",
+                        "stage":  "E53",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-series/matrix-53.json",
+                        "stage":  "E53",
+                        "bytes":  19540,
+                        "sha256":  "2DE8119432BBDD86E1212151A9330BDF251EBAA3148043DE36A51C9CFA21D9D6"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-series/probe-runs.json",
+                        "stage":  "E53",
+                        "bytes":  86809,
+                        "sha256":  "49EAE311893B6A8B0CE9A2F113167BD800D25D0CD659FF4108CD9C7FB976297E"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-symmetry/block1-A.err",
+                        "stage":  "E53",
+                        "bytes":  810251,
+                        "sha256":  "9CAB511F14B922FE52A648A6B991CF941EAA2A6CE2563CF063D4F8E360F87EE0"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-symmetry/block1-A.out",
+                        "stage":  "E53",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-symmetry/block2-B.err",
+                        "stage":  "E53",
+                        "bytes":  907205,
+                        "sha256":  "1870C6F51A7B95C19BA254EB812CC6122B142FF1E5C952A18695DB4EDBB761D8"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-symmetry/block2-B.out",
+                        "stage":  "E53",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-symmetry/probe-runs.json",
+                        "stage":  "E53",
+                        "bytes":  14538,
+                        "sha256":  "D09609567DCC9896464A8304499F794BD0C54116885D03BC18B2594BF40E5617"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-symmetry-512/block1-A.err",
+                        "stage":  "E53",
+                        "bytes":  2022900,
+                        "sha256":  "5D8FFD77DED07E009C444F165EB79249BFDA0535802E03A796E80CC1768D0AF6"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-symmetry-512/block1-A.out",
+                        "stage":  "E53",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-symmetry-512/block2-B.err",
+                        "stage":  "E53",
+                        "bytes":  2126314,
+                        "sha256":  "435180C001F33A33B167240FF41987C9206A8906D41ECFDF1CEB156A6EC09446"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-symmetry-512/block2-B.out",
+                        "stage":  "E53",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e53-symmetry-512/probe-runs.json",
+                        "stage":  "E53",
+                        "bytes":  14541,
+                        "sha256":  "97E44D6E078AE9E58A1DED499F5D749A1BA43B5DB33967DDE6EC7053C6812550"
+                    },
+                    {
+                        "path":  "2026-08-06/e54-server-stats/probeAC.err",
+                        "stage":  "E54",
+                        "bytes":  1045848,
+                        "sha256":  "FDCA6B16309A7F31F0D06CEA9DD89C0A8C00A22CA27A3AF0E6AE2BE9D2E74C56"
+                    },
+                    {
+                        "path":  "2026-08-06/e54-server-stats/probeAC.out",
+                        "stage":  "E54",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e54-server-stats/probeB.err",
+                        "stage":  "E54",
+                        "bytes":  1081458,
+                        "sha256":  "ACF825BA27EEA608FB884D3D71D8F9E663119F7CCD8DB0698FC5F33C501324F6"
+                    },
+                    {
+                        "path":  "2026-08-06/e54-server-stats/probeB.out",
+                        "stage":  "E54",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e54-server-stats/probeD.err",
+                        "stage":  "E54",
+                        "bytes":  1687,
+                        "sha256":  "2B799A4E36E1F78553A61E5B597DB0E1634C0BC1EED4330D873EC98458893C23"
+                    },
+                    {
+                        "path":  "2026-08-06/e54-server-stats/probeD.out",
+                        "stage":  "E54",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e54-server-stats/probe-runs.json",
+                        "stage":  "E54",
+                        "bytes":  41268,
+                        "sha256":  "09C4DB3BA4B10F5F56ADC23ECE0C598330F60533C8DE51D05DBB2531D258C81A"
                     }
                 ]
 }
