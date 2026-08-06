@@ -101,6 +101,8 @@ param(
     [string[]]$ArmFlagsA = @(),
     [string[]]$ArmFlagsB = @(),
     [int]   $Port    = 8081,
+    # Sent with every request, so the artefact states it instead of inheriting a server default.
+    [int]   $Seed    = 1234,
     [int]   $Ctx     = 4096,
     [int]   $Ngl     = 99,
     [int]   $Tokens  = 512,
@@ -562,6 +564,20 @@ function Get-TreeIdentity([string]$ExePath) {
     return [pscustomobject]@{ ok = $false; root = ''; commit = ''; tag = '' }
 }
 
+# The request body. A VALUE function for the same reason as Get-SideArgs: what a request states is
+# part of the contract, so it must be assertable without a server.
+#
+# The seed is sent even though temperature 0 makes decoding greedy and a seed should never reach a
+# sampler. "Should never" is exactly why it is stated: unstated, it is an assumption about the
+# server's default rather than a fixed parameter, and #24 requires it eliminated as a variable
+# instead of argued away. Should stating it move the answer hash, that is a finding about greedy
+# decoding on this stack - and an abort criterion, not a surprise for a later reader.
+function Get-RequestBody {
+    param([string]$Prompt, [int]$MaxTokens, [int]$SeedValue)
+    return (@{ model='x'; messages=@(@{role='user'; content=$Prompt})
+               max_tokens=$MaxTokens; temperature=0; seed=$SeedValue; stream=$false } | ConvertTo-Json -Depth 5)
+}
+
 # Which arguments a side gets. A VALUE function: it starts nothing and narrates nothing, so the
 # three modes can be asserted without a server, a model or a GPU. Inline, this decision was three
 # nested ifs in the block loop and the only way to check it was to read a 400 MB server log.
@@ -729,6 +745,18 @@ function Invoke-Selftest {
          'base survives on both arms'
     Case 'arm-flags: neither side gets -md'           ((-not ($sA -contains '-md')) -and (-not ($sB -contains '-md'))) 'drafting stays out of this mode'
 
+    # 16b  the request states its own sampling parameters. The absence case is the point: a body
+    #      without a seed is what this tool sent until 2026-08-06, and it looked identical from
+    #      the outside because the server has a default.
+    $bodyTxt = Get-RequestBody -Prompt 'x' -MaxTokens 512 -SeedValue 1234
+    $bodyObj = $bodyTxt | ConvertFrom-Json
+    Case 'request states seed 1234'        ($bodyObj.seed -eq 1234)        ("seed=" + $bodyObj.seed)
+    Case 'request states temperature 0'    ($bodyObj.temperature -eq 0)    ("temp=" + $bodyObj.temperature)
+    Case 'request states its token budget' ($bodyObj.max_tokens -eq 512)   ("max_tokens=" + $bodyObj.max_tokens)
+    Case 'request carries the prompt verbatim' ($bodyObj.messages[0].content -eq 'x') 'prompt passed through unaltered'
+    $bodyOther = (Get-RequestBody -Prompt 'x' -MaxTokens 512 -SeedValue 7) | ConvertFrom-Json
+    Case 'a different seed reaches the body' ($bodyOther.seed -eq 7) ("seed=" + $bodyOther.seed)
+
     # 17  the two other modes are unchanged - the negative control for case 16. If arm-flags had
     #     leaked into them, these would go red and the E12/#53 callers would be measuring something
     #     other than what they measured before.
@@ -872,8 +900,7 @@ function Ask {
     $diskBefore= Get-DiskCounter
     $sampler   = Start-Sampler $TargetPid $SampleMs
 
-    $body = @{ model='x'; messages=@(@{role='user'; content=$PROMPT_TEXT})
-               max_tokens=$MaxTokens; temperature=0; stream=$false } | ConvertTo-Json -Depth 5
+    $body = Get-RequestBody -Prompt $PROMPT_TEXT -MaxTokens $MaxTokens -SeedValue $Seed
     $t0 = Get-Date
     $r = $null
     try { $r = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/chat/completions" -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 900 }
@@ -1024,6 +1051,10 @@ if ($TwoBinary) {
     Say ("sha exe B {0}" -f $shaExeB)
     Say ("sha impl-dll B {0}" -f $shaDllB)
     Say  "A and B are two BUILDS at the same operating point; -md is off on both sides"
+} elseif ($ArmFlags) {
+    Say ("A = {0}" -f ($ArmFlagsA -join ' '))
+    Say ("B = {0}" -f ($ArmFlagsB -join ' '))
+    Say  "one BUILD, one model, one prompt; the MoE placement is the only variable and -md is off on both sides"
 } else {
     Say ("A = with -md {0}   B = same build without -md   (only variable)" -f $Drafter)
 }
