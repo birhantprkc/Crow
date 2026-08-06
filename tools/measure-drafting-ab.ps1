@@ -596,6 +596,18 @@ function Get-DraftAborts {
     return $out
 }
 
+# The headline text describing how blocks are warmed. A VALUE function, and it exists because the
+# same defect appeared twice: the run headline said "-md on / -md off" while arm-flags was running,
+# and then "ONE discarded warm-up per block" while -NoWarmup was running. Both times the commands
+# were right and the protocol lied about them.
+#
+# Hard-coded narration cannot track the modes it describes, and a later reader holds exactly these
+# lines against the artefact. So the text is derived from the state rather than typed next to it.
+function Get-WarmupHeadline([bool]$Skipped) {
+    if ($Skipped) { return 'NO warm-up (-NoWarmup): the single request per block is the COLD one' }
+    return 'ONE discarded warm-up per block'
+}
+
 # What the artefact records about the warm-up. A VALUE function so the absent case is assertable:
 # a skipped warm-up must be null and never 0, because a zero reads as "the warm-up was instant" and
 # cannot be told apart from "none ran". A warm-up that genuinely measured 0.0 keeps its 0.0.
@@ -802,6 +814,11 @@ function Invoke-Selftest {
     Case 'no warm-up records null, never 0'  ($null -eq (Get-WarmupField $null))           'null, so it cannot read as instant'
     Case 'a real warm-up reports its figure' ((Get-WarmupField ([pscustomobject]@{ decode_ms_tok = 93.87 })) -eq 93.87) 'value passed through'
     Case 'a warm-up of 0.0 stays 0.0, not null' ((Get-WarmupField ([pscustomobject]@{ decode_ms_tok = 0.0 })) -eq 0.0) 'a measured zero is not an absence'
+    # The headline must track the state. Twice now a hard-coded line described a mode that was not
+    # running, so both directions are asserted rather than the one that happened to be wrong.
+    Case 'headline states the warm-up when there is one' ((Get-WarmupHeadline $false) -match 'ONE discarded warm-up') (Get-WarmupHeadline $false)
+    Case 'headline states its ABSENCE when skipped'      ((Get-WarmupHeadline $true)  -match 'NO warm-up')            (Get-WarmupHeadline $true)
+    Case 'the two headlines are not the same text'       ((Get-WarmupHeadline $true) -ne (Get-WarmupHeadline $false)) 'a headline that never changes describes nothing'
 
     # 16c  the drafting abort criteria follow the MODE. Case 1 is the defect this cost a run to
     #      find; the three beside it stop the fix from becoming "never abort on drafting".
@@ -1097,8 +1114,8 @@ if (-not $ArmFlags) {
 $baseArgs += @('--spec-type', $SpecType)
 
 Say ('=' * 78)
-Say ("A/B CAUSE PROBE   sequence {0}   tokens {1}   ONE discarded warm-up per block" -f
-     (@($seq | ForEach-Object { "$($_.side)x$($_.n)" }) -join ' '), $Tokens)
+Say ("A/B CAUSE PROBE   sequence {0}   tokens {1}   {2}" -f
+     (@($seq | ForEach-Object { "$($_.side)x$($_.n)" }) -join ' '), $Tokens, (Get-WarmupHeadline $NoWarmup))
 Say ("planned evaluated requests: A {0}   B {1}   blocks {2}" -f $planA, $planB, $seq.Count)
 Say ("exe A {0}" -f $full)
 Say ("sha exe A {0}" -f $shaExe)
