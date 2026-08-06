@@ -1,9 +1,9 @@
 {
     "note":  "Fingerprint only. These files are NOT in git - runs/ is ignored (.gitignore:10). This manifest detects deletion and modification; it is not a backup and does not make the protocols recoverable.",
     "day":  "2026-08-05",
-    "pattern":  "^e9|^e1[012]",
+    "pattern":  "^e[0-9]+",
     "root":  "Crow/runs",
-    "written":  "2026-08-05T23:28:35.8844087+02:00",
+    "written":  "2026-08-06T06:00:03.7244958+02:00",
     "files":  240,
     "bytes":  36877755,
     "stages":  {

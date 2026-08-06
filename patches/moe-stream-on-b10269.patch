@@ -186,7 +186,7 @@ index 3e0fe66..b679f7d 100644
          }
  
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 19cca7d..0ce61ba 100644
+index 19cca7d..1f16552 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -9,6 +9,7 @@
@@ -230,33 +230,40 @@ index 19cca7d..0ce61ba 100644
      if (model.arch == LLM_ARCH_QWEN3NEXT ||
          model.arch == LLM_ARCH_KIMI_LINEAR ||
          model.arch == LLM_ARCH_QWEN35 ||
-@@ -2357,11 +2377,21 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
+@@ -2357,11 +2377,27 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
          (model.arch == LLM_ARCH_DFLASH && model.hparams.dsv4_hc_mult > 0) ||
          model.arch == LLM_ARCH_NANBEIGE ||
          model.arch == LLM_ARCH_MINIMAX_M3) {
 -        return std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors());
+-    }
+-    uint32_t res = std::max<uint32_t>(1024u, 8u*model.n_tensors());
+-    for (const auto & lora : model.loras) {
+-        res += lora->get_n_nodes();
 +        res = std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors());
 +    } else {
 +        res = std::max<uint32_t>(1024u, 8u*model.n_tensors());
 +        for (const auto & lora : model.loras) {
 +            res += lora->get_n_nodes();
 +        }
-     }
--    uint32_t res = std::max<uint32_t>(1024u, 8u*model.n_tensors());
--    for (const auto & lora : model.loras) {
--        res += lora->get_n_nodes();
++    }
 +    if (const auto * mstream = model.moe_stream()) {
-+        // multi-pass streamed prefill adds a bounded number of extra nodes per wave per streamed layer
-+        const uint32_t n_eu = model.hparams.n_expert_used;
-+        uint32_t cap = mstream->n_slots > n_eu ? (mstream->n_slots - n_eu)/2 : 0;
-+        cap = std::max<uint32_t>(cap, 1);
-+        const uint32_t n_touch_max = std::min<uint32_t>(model.hparams.n_expert, n_tokens*n_eu);
-+        const uint32_t n_waves = (n_touch_max + cap - 1)/cap;
-+        res += 24u*n_waves*(uint32_t) mstream->layers.size();
++        // multi-pass streamed prefill adds a bounded number of extra nodes per wave per streamed
++        //   layer. Same plan as build_moe_ffn, from the same function, so the budget cannot drift
++        //   away from the graph it is budgeting for.
++        const llama_moe_stream_wave_budget wb = llama_moe_stream_wave_plan(
++                mstream->n_slots, model.hparams.n_expert, model.hparams.n_expert_used, n_tokens);
++        // only STREAMED layers produce wave nodes; layers[] carries a null for every other one
++        uint32_t n_streamed = 0;
++        for (const auto & sl : mstream->layers) {
++            if (sl) {
++                n_streamed++;
++            }
++        }
++        res += 24u*wb.n_waves*n_streamed;
      }
      return res;
  }
-@@ -2446,6 +2476,7 @@ llm_graph_params llama_context::graph_params(
+@@ -2446,6 +2482,7 @@ llm_graph_params llama_context::graph_params(
          /*.loras       =*/ loras.get(),
          /*.mctx        =*/ mctx,
          /*.cross       =*/ &cross,
@@ -264,7 +271,7 @@ index 19cca7d..0ce61ba 100644
          /*.samplers    =*/ sampling.samplers,
          /*.n_outputs   =*/ n_outputs,
          /*.cb          =*/ graph_get_cb(),
-@@ -4137,6 +4168,10 @@ void llama_perf_context_print(const llama_context * ctx) {
+@@ -4137,6 +4174,10 @@ void llama_perf_context_print(const llama_context * ctx) {
              __func__, data.t_eval_ms, data.n_eval, data.t_eval_ms / data.n_eval, 1e3 / data.t_eval_ms * data.n_eval);
      LLAMA_LOG_INFO("%s:       total time = %10.2f ms / %5d tokens\n", __func__, (t_end_ms - data.t_start_ms), (data.n_p_eval + data.n_eval));
      LLAMA_LOG_INFO("%s:    graphs reused = %10d\n", __func__, data.n_reused);
@@ -276,7 +283,7 @@ index 19cca7d..0ce61ba 100644
  
  void llama_perf_context_reset(llama_context * ctx) {
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 2be3b75..cd9758d 100644
+index 2be3b75..0d0ff14 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -4,6 +4,7 @@
@@ -340,7 +347,7 @@ index 2be3b75..cd9758d 100644
      // select experts
      ggml_tensor * selected_experts = selected_experts_in;
      if (selected_experts == nullptr) {
-@@ -2075,6 +2097,45 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2075,6 +2097,35 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
      //call early so that topk-moe can be used
      ggml_build_forward_expand(gf, weights);
  
@@ -355,25 +362,15 @@ index 2be3b75..cd9758d 100644
 +    //   waves of at most stream_wave_cap experts, the pairs of the other waves masked to zero and the
 +    //   wave outputs summed. n_touch_max caps at n_expert, so each expert is loaded at most once per
 +    //   ubatch regardless of batch size - wave splitting bounds prefill I/O to one sweep of them.
++    // the plan itself lives in llama_moe_stream_wave_plan, because graph_max_nodes needs the same
++    //   numbers to size its node budget and the two used to compute them separately
 +    uint32_t n_stream_waves  = 1;
 +    uint32_t stream_wave_cap = 0;
 +    if (msl) {
-+        // worst-case distinct experts: n_expert_used per token, but never more than n_expert total
-+        const uint64_t n_touch_max = std::min<uint64_t>((uint64_t) n_expert, (uint64_t) n_tokens*n_expert_used);
-+        if (n_touch_max > msl->n_slots) {
-+            // the cache must hold three sets at once: this wave's experts, the next wave's preloaded
-+            //   experts (so its loads overlap this wave's compute), and n_expert_used parking slots
-+            //   the masked-out pairs GEMM against (Metal needs a slot at most once per token row).
-+            //   so cap + cap + n_expert_used = n_slots -> cap = (n_slots - n_expert_used)/2
-+            stream_wave_cap = msl->n_slots > (uint32_t) n_expert_used ? (msl->n_slots - (uint32_t) n_expert_used)/2 : 0;
-+            if (stream_wave_cap < (uint32_t) n_expert_used) {
-+                // a wave must fit at least n_expert_used experts, i.e. n_slots >= 3*n_expert_used
-+                GGML_ABORT("MoE expert streaming: multi-pass expert GEMMs need an expert cache of at least "
-+                           "3*n_expert_used slots (have %u, need %u); increase --moe-stream-cache or reduce -ub",
-+                        msl->n_slots, 3*(uint32_t) n_expert_used);
-+            }
-+            n_stream_waves = (uint32_t) ((n_touch_max + stream_wave_cap - 1)/stream_wave_cap); // ceil(n_touch_max/cap)
-+        }
++        const llama_moe_stream_wave_budget wb = llama_moe_stream_wave_plan(
++                msl->n_slots, (uint32_t) n_expert, (uint32_t) n_expert_used, (uint32_t) n_tokens);
++        n_stream_waves  = wb.n_waves;
++        stream_wave_cap = wb.cap;
 +    }
 +
 +    ggml_tensor * ids_gemm = selected_experts;
@@ -386,7 +383,7 @@ index 2be3b75..cd9758d 100644
      cur = ggml_reshape_3d(ctx0, cur, n_embd, 1, n_tokens);
  
      if (weight_before_ffn) {
-@@ -2084,12 +2145,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2084,12 +2135,15 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          cb(cur, "ffn_moe_weighted", il);
      }
  
@@ -403,7 +400,7 @@ index 2be3b75..cd9758d 100644
          cb(gate_up, "ffn_moe_gate_up", il);
  
          if (up_exps_s) {
-@@ -2108,7 +2172,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2108,7 +2162,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          cb(up, "ffn_moe_up", il);
      } else {
          // separate gate and up path
@@ -412,7 +409,7 @@ index 2be3b75..cd9758d 100644
          cb(up, "ffn_moe_up", il);
  
          if (up_exps_s) {
-@@ -2121,7 +2185,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2121,7 +2175,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          }
  
          if (gate_exps) {
@@ -421,7 +418,7 @@ index 2be3b75..cd9758d 100644
              cb(cur, "ffn_moe_gate", il);
          } else {
              cur = up;
-@@ -2210,7 +2274,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2210,7 +2264,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
              GGML_ABORT("fatal error");
      }
  
@@ -430,7 +427,7 @@ index 2be3b75..cd9758d 100644
      cb(experts, "ffn_moe_down", il);
  
      if (down_exps_s) {
-@@ -2222,6 +2286,45 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
+@@ -2222,6 +2276,45 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
          cb(experts, "ffn_moe_down_biased", il);
      }
  
@@ -1249,7 +1246,7 @@ index d6b31c2..25cbef1 100644
      llama_fver  fver;
  
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 333f506..14e6d0b 100644
+index 333f506..9a3e13a 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
 @@ -7,6 +7,7 @@
@@ -1270,7 +1267,7 @@ index 333f506..14e6d0b 100644
      std::vector<float> tensor_split_owned;
  };
  
-@@ -1251,6 +1255,116 @@ void llama_model_base::load_vocab(llama_model_loader & ml) {
+@@ -1251,6 +1255,147 @@ void llama_model_base::load_vocab(llama_model_loader & ml) {
      vocab.load(ml, kv);
  }
  
@@ -1350,13 +1347,28 @@ index 333f506..14e6d0b 100644
 +
 +// resolve the per-layer expert cache slot count; returns 0 when streaming should not be enabled
 +// (not a MoE model, or the cache would hold every expert anyway)
-+static uint32_t llama_moe_stream_resolve_slots(const llama_model_params & params, const llama_hparams & hparams, const llama_model_loader & ml) {
++// Resolves the per-layer expert cache size and VALIDATES it here, where the user's input is still
++// visible. Returns false only for a capacity that cannot work; n_slots_out == 0 means "streaming
++// is not applicable", which is not an error.
++//
++// Why the validation sits here and not in the graph: it used to fire inside build_moe_ffn, on the
++// first batch that touched more experts than the cache holds, as a GGML_ABORT. That is late (the
++// model is loaded, the request is running), it is far from the option that caused it, and the
++// DEFAULT walked into it - clamp(2*n_expert_used, 16, n_expert) gives 16 for n_expert_used = 6
++// while the wave path needs 18. Measured 2026-08-03, runs/2026-08-03/stream-a1-on/run-01.raw.txt:
++// "have 16, need 18".
++static bool llama_moe_stream_resolve_slots(const llama_model_params & params, const llama_hparams & hparams, const llama_model_loader & ml, uint32_t & n_slots_out) {
++    n_slots_out = 0;
++
 +    if (hparams.n_expert == 0 || hparams.n_expert_used == 0) {
 +        LLAMA_LOG_WARN("%s: MoE expert streaming requires a MoE model -- disabled\n", __func__);
-+        return 0;
++        return true;
 +    }
 +
++    const uint32_t n_min = llama_moe_stream_min_slots(hparams.n_expert_used);
++
 +    uint32_t n_slots = params.moe_stream_slots;
++    const char * source = "--moe-stream-cache <N>s";
 +
 +    if (n_slots == 0 && params.moe_stream_budget > 0) {
 +        // derive the per-layer slot count from the total byte budget
@@ -1368,31 +1380,51 @@ index 333f506..14e6d0b 100644
 +        }
 +        if (nb_expert_sum > 0) {
 +            n_slots = std::max<uint64_t>(params.moe_stream_budget/nb_expert_sum, hparams.n_expert_used);
++            source  = "--moe-stream-cache <N> GiB";
 +        }
 +    }
 +
 +    if (n_slots == 0) {
-+        n_slots = std::clamp<uint32_t>(2*hparams.n_expert_used, 16, hparams.n_expert);
++        // The default must satisfy the wave path's own precondition. It was 2*n_expert_used, which
++        // does not. std::max/std::min rather than std::clamp: clamp with lo > hi is undefined, and
++        // lo > hi happens for any model with fewer than 16 experts.
++        n_slots = std::min<uint32_t>(std::max<uint32_t>(n_min, 16), hparams.n_expert);
++        source  = "the default";
 +    }
 +
 +    if (n_slots >= hparams.n_expert) {
 +        LLAMA_LOG_WARN("%s: MoE expert cache of %u slots covers all %u experts -- streaming disabled, loading normally\n",
 +                __func__, n_slots, hparams.n_expert);
-+        return 0;
++        return true;
 +    }
 +
-+    return n_slots;
++    if (n_slots < n_min) {
++        // An explicit value is never silently raised: it decides the cache footprint, it is what
++        // the command line says, and a later performance figure would otherwise be reported
++        // against a capacity the user did not choose.
++        LLAMA_LOG_ERROR("%s: invalid MoE stream cache capacity: %u slots (from %s), need at least %u "
++                        "for n_expert_used=%u; raise --moe-stream-cache to %us or more\n",
++                __func__, n_slots, source, n_min, hparams.n_expert_used, n_min);
++        return false;
++    }
++
++    n_slots_out = n_slots;
++    return true;
 +}
 +
  bool llama_model_base::load_tensors(llama_model_loader & ml) {
      const auto & split_mode   = params.split_mode;
      const bool use_mlock      = params.load_mode == LLAMA_LOAD_MODE_MLOCK || params.load_mode == LLAMA_LOAD_MODE_MMAP_MLOCK;
-@@ -1340,6 +1454,18 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+@@ -1340,6 +1485,22 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
      // assign the output layer
      pimpl->dev_output = get_layer_buft_list(n_layer_all);
  
 +    if (params.moe_stream) {
-+        const uint32_t n_slots = llama_moe_stream_resolve_slots(params, hparams, ml);
++        uint32_t n_slots = 0;
++        if (!llama_moe_stream_resolve_slots(params, hparams, ml, n_slots)) {
++            // the capacity cannot work; the message named the value, the minimum and the option
++            return false;
++        }
 +        if (n_slots > 0) {
 +            if (pimpl->has_tensor_overrides) {
 +                LLAMA_LOG_WARN("%s: tensor buffer overrides (-ot/--cpu-moe) do not apply to SSD-streamed expert tensors\n", __func__);
@@ -1406,7 +1438,7 @@ index 333f506..14e6d0b 100644
      const auto TENSOR_NOT_REQUIRED = llama_model_loader::TENSOR_NOT_REQUIRED;
  
      // create tensors for the weights
-@@ -1621,6 +1747,18 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+@@ -1621,6 +1782,18 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
          ctx_buf_maps.emplace_back(ctx, buf_map);
      }
  
@@ -1425,7 +1457,7 @@ index 333f506..14e6d0b 100644
      if (llama_supports_gpu_offload()) {
          const int n_gpu = std::min(n_gpu_layers, n_layer_all);
  
-@@ -1667,6 +1805,38 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
+@@ -1667,6 +1840,38 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
  
  ggml_tensor * llama_model_base::create_tensor(llama_model_loader & ml, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
      const buft_list_t * buft_list_layer = tn.bid == -1 ? nullptr : pimpl->dev_layer.at(tn.bid).buft_list;
@@ -1464,7 +1496,7 @@ index 333f506..14e6d0b 100644
      return ml.create_tensor(
          hparams, &pimpl->cpu_buft_list, pimpl->dev_input.buft_list, pimpl->dev_output.buft_list, buft_list_layer,
          tn, ne, flags);
-@@ -2014,6 +2184,16 @@ bool llama_model::has_tensor_overrides() const {
+@@ -2014,6 +2219,16 @@ bool llama_model::has_tensor_overrides() const {
      return pimpl->has_tensor_overrides;
  }
  
@@ -1481,7 +1513,7 @@ index 333f506..14e6d0b 100644
  const ggml_tensor * llama_model::get_tensor(const char * name) const {
      auto it = std::find_if(tensors_by_name.begin(), tensors_by_name.end(),
              [name](const std::pair<std::string, ggml_tensor *> & it) {
-@@ -2446,12 +2626,17 @@ llama_model_params llama_model_default_params() {
+@@ -2446,12 +2661,17 @@ llama_model_params llama_model_default_params() {
          /*.progress_callback           =*/ nullptr,
          /*.progress_callback_user_data =*/ nullptr,
          /*.kv_overrides                =*/ nullptr,
@@ -1499,7 +1531,7 @@ index 333f506..14e6d0b 100644
      };
  
      return result;
-@@ -2868,7 +3053,8 @@ llama_model_base::llama_model_base(const struct llama_model_params & params) : l
+@@ -2868,7 +3088,8 @@ llama_model_base::llama_model_base(const struct llama_model_params & params) : l
      TENSOR_NOT_REQUIRED   (llama_model_loader::TENSOR_NOT_REQUIRED),
      TENSOR_SKIP           (llama_model_loader::TENSOR_SKIP),
      TENSOR_SKIP_IF_VIRTUAL(llama_model_loader::TENSOR_SKIP_IF_VIRTUAL),
@@ -2565,16 +2597,17 @@ index 0000000..eda555b
 +}
 diff --git a/src/llama-moe-stream.h b/src/llama-moe-stream.h
 new file mode 100644
-index 0000000..89dc309
+index 0000000..62c1d3a
 --- /dev/null
 +++ b/src/llama-moe-stream.h
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,284 @@
 +#pragma once
 +
 +#include "llama-mmap.h"
 +
 +#include "ggml-cpp.h"
 +
++#include <algorithm>
 +#include <condition_variable>
 +#include <cstdint>
 +#include <deque>
@@ -2687,6 +2720,61 @@ index 0000000..89dc309
 +    int32_t  slot   = -1;
 +    uint64_t gen    = 0; // stale unless it matches slot_gen[slot]
 +};
++
++// The smallest expert cache the multi-pass path can work with.
++//
++// The cache must hold three sets at once: this wave's experts, the next wave's preloaded experts
++// (so its loads overlap this wave's compute), and n_expert_used parking slots the masked-out pairs
++// GEMM against (Metal needs a slot at most once per token row). That gives
++// cap + cap + n_expert_used = n_slots, and a wave must fit at least n_expert_used experts, so
++// n_slots >= 3*n_expert_used.
++//
++// This is a PRECONDITION on the configuration, checked where n_slots is resolved. It used to be
++// discovered inside graph building instead, on the first batch that touched more experts than the
++// cache holds - measured 2026-08-03 in runs/2026-08-03/stream-a1-on/run-01.raw.txt as
++// "have 16, need 18", where 16 was what the DEFAULT resolved to.
++static inline uint32_t llama_moe_stream_min_slots(uint32_t n_expert_used) {
++    return 3*n_expert_used;
++}
++
++// Worst-case wave plan for one ubatch. cap is experts per wave, n_waves passes over the expert
++// GEMMs; split is false when the ubatch cannot touch more experts than the cache already holds.
++struct llama_moe_stream_wave_budget {
++    uint32_t cap     = 0;     // experts per wave; 0 when no split is needed
++    uint32_t n_waves = 1;     // passes over the expert GEMMs
++    bool     split   = false;
++};
++
++// The one place this is computed.
++//
++// It stood twice - in build_moe_ffn, whose cap becomes the runtime plan_capacity, and in
++// graph_max_nodes, which sizes a node budget - and the two copies had already drifted in four
++// ways: the budget copy left out the "does it need splitting at all" gate, clamped cap to 1
++// instead of refusing an impossible capacity, computed n_touch_max in 32 bit, and multiplied by
++// every layer instead of the streamed ones. Only the graph copy feeds the runtime, so none of
++// that could make a run WRONG - but the two disagreed, measured for n_tokens between 5 and 10 at
++// the 64-slot operating point, where the graph built one wave and the budget assumed three.
++//
++// UNIT: experts. PRECONDITION: n_slots >= llama_moe_stream_min_slots(n_expert_used), enforced at
++// resolve time. The assert below is an invariant, not the error path for a user's value.
++static inline llama_moe_stream_wave_budget llama_moe_stream_wave_plan(
++        uint32_t n_slots, uint32_t n_expert, uint32_t n_expert_used, uint32_t n_tokens) {
++    llama_moe_stream_wave_budget b;
++
++    // worst-case distinct experts: n_expert_used per token, but never more than n_expert total.
++    // 64 bit on purpose - one of the two old copies multiplied in 32.
++    const uint64_t n_touch_max = std::min<uint64_t>((uint64_t) n_expert, (uint64_t) n_tokens*n_expert_used);
++    if (n_touch_max <= (uint64_t) n_slots) {
++        return b; // everything this ubatch can touch is already resident-able: one pass
++    }
++
++    GGML_ASSERT(n_slots >= llama_moe_stream_min_slots(n_expert_used));
++
++    b.split   = true;
++    b.cap     = (n_slots - n_expert_used)/2;
++    b.n_waves = (uint32_t) ((n_touch_max + b.cap - 1)/b.cap); // ceil(n_touch_max/cap)
++    return b;
++}
 +
 +struct llama_moe_stream {
 +    uint32_t n_slots      = 0; // expert cache slots per streamed layer

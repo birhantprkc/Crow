@@ -308,7 +308,11 @@ if ($s -ge 0 -and $e -gt $s) {
     $nRet = Count-Pattern $body '^\s*return\b'
     $iSur = -1; $iRet = -1; $iArch = -1
     for ($i = 0; $i -lt $body.Count; $i++) {
-        if (($iSur -lt 0)  -and ($body[$i] -match 'res \+= 24u\*n_waves'))                 { $iSur = $i }
+        # 'res += 24u*' and not the old 'res += 24u*n_waves': E13 moved the wave plan into
+        # llama_moe_stream_wave_plan, so the local is now wb.n_waves. The property under test is
+        # WHERE the surcharge is added, not what the variable is called - a yardstick pinned to a
+        # spelling reports red for a rename and green for a moved line.
+        if (($iSur -lt 0)  -and ($body[$i] -match 'res \+= 24u\*'))                        { $iSur = $i }
         if (($iRet -lt 0)  -and ($body[$i] -match '^\s*return res;'))                      { $iRet = $i }
         if (($iArch -lt 0) -and ($body[$i] -match 'res = std::max<uint32_t>\(n_tokens \* 40')) { $iArch = $i }
     }

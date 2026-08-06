@@ -52,12 +52,12 @@ param(
     [string]$RunsDir  = '',
     [string]$OutDir   = '',
     [string]$Manifest = '',
-    # Which run directories to fingerprint. The default used to be '^e9|^e10', which
-    # SILENTLY dropped e11 and e12 - the E11 and ABBA protocols were recorded as manifested
-    # while the default run never touched them. A filter that omits without saying so is the
-    # same failure as a counter that returns 0: it looks like coverage. Default now spans
-    # every stage that has produced runs.
-    [string]$Pattern  = '^e9|^e1[012]',
+    # Which run directories to fingerprint. This was '^e9|^e10' and SILENTLY dropped e11 and
+    # e12 - their protocols were recorded as manifested while the default run never touched
+    # them. Widening it stage by stage repeats that failure at every new stage, so the filter
+    # is now generic: any eNN directory. A filter that omits without saying so is the same
+    # failure as a counter that returns 0 - it looks like coverage.
+    [string]$Pattern  = '^e[0-9]+',
     [string]$Day      = '2026-08-05',
     [switch]$Verify
 )
@@ -81,13 +81,12 @@ function Collect-Entries {
     foreach ($d in (Get-ChildItem $dayDir -Directory | Where-Object { $_.Name -match $Pattern } | Sort-Object Name)) {
         # The stage comes from the directory name, which is how the runs were laid out.
         # An unmatched name is labelled 'unknown' rather than guessed into a stage.
-        $stage = switch -Regex ($d.Name) {
-            '^e9'  { 'E9';      break }
-            '^e10' { 'E10';     break }
-            '^e11' { 'E11';     break }
-            '^e12' { 'E12';     break }
-            default { 'unknown' }
-        }
+        # Derived from the directory name rather than listed: a hand-kept list labelled every
+        # new stage 'unknown' until someone remembered to extend it, which is a silent gap in a
+        # record whose whole job is completeness. e9a/e9b fold into E9, as they always did.
+        $stage = 'unknown'
+        $m = [regex]::Match($d.Name, '^(e[0-9]+)')
+        if ($m.Success) { $stage = $m.Groups[1].Value.ToUpper() }
         foreach ($f in (Get-ChildItem $d.FullName -Recurse -File | Sort-Object FullName)) {
             $rel = $f.FullName.Substring($RunsDir.Length).TrimStart('\', '/') -replace '\\', '/'
             $out += [pscustomobject]@{

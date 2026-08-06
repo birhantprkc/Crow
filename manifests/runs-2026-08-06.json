@@ -1,0 +1,188 @@
+{
+    "note":  "Fingerprint only. These files are NOT in git - runs/ is ignored (.gitignore:10). This manifest detects deletion and modification; it is not a backup and does not make the protocols recoverable.",
+    "day":  "2026-08-06",
+    "pattern":  "^e[0-9]+",
+    "root":  "Crow/runs",
+    "written":  "2026-08-06T06:00:03.4854331+02:00",
+    "files":  29,
+    "bytes":  7783080,
+    "stages":  {
+                   "E13":  29
+               },
+    "entries":  [
+                    {
+                        "path":  "2026-08-06/e13-after/capacity-cases.json",
+                        "stage":  "E13",
+                        "bytes":  2317,
+                        "sha256":  "E5C219E19B81B6D8D0C717990D254C3F46B680386F0A9D70C45066A6E0A57F33"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-after/case-16s.err",
+                        "stage":  "E13",
+                        "bytes":  289684,
+                        "sha256":  "1DE70DE93B1F0871E9014F1F08B03C6EEF0DA4DCE7B0F29AC71780315E1FAF3B"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-after/case-16s.out",
+                        "stage":  "E13",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-after/case-18s.err",
+                        "stage":  "E13",
+                        "bytes":  846955,
+                        "sha256":  "85B21B2D1843C4974A973281E511C9B20BF59D3753111ACEE1A2990E17434A08"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-after/case-18s.out",
+                        "stage":  "E13",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-after/case-64s.err",
+                        "stage":  "E13",
+                        "bytes":  823942,
+                        "sha256":  "1774C7BBA1189DA8C9F36FC9AB65B2EB4DB0EAA036D388F28103A48C12CD8F5D"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-after/case-64s.out",
+                        "stage":  "E13",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-after/case-default.err",
+                        "stage":  "E13",
+                        "bytes":  845359,
+                        "sha256":  "D232F8C96B2AFF84C07B56D6D6F31CABAA22C1BA1DDCE4DE07D0020098293D05"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-after/case-default.out",
+                        "stage":  "E13",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-before-b10269/capacity-cases.json",
+                        "stage":  "E13",
+                        "bytes":  2497,
+                        "sha256":  "1BA46F93C4D0A8AEF28FA4EDCB00EA1E448E95B0EC7C211723F04486A0F8ED9A"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-before-b10269/case-16s.err",
+                        "stage":  "E13",
+                        "bytes":  299498,
+                        "sha256":  "7EF2C40CB2C428381BF932FA6CA1FED5045C16CC950C91F9A192C5614BE846EA"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-before-b10269/case-16s.out",
+                        "stage":  "E13",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-before-b10269/case-18s.err",
+                        "stage":  "E13",
+                        "bytes":  846955,
+                        "sha256":  "4074DFBD2593CFF615E07D6D057A7DF66600817E84815C6A54969BA79036ED65"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-before-b10269/case-18s.out",
+                        "stage":  "E13",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-before-b10269/case-64s.err",
+                        "stage":  "E13",
+                        "bytes":  823942,
+                        "sha256":  "4684AF491675722CAD342D088862456DDE989B0EED510D9D4638FC5D89F8364D"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-before-b10269/case-64s.out",
+                        "stage":  "E13",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-before-b10269/case-default.err",
+                        "stage":  "E13",
+                        "bytes":  315560,
+                        "sha256":  "B56049EEB85EE1076818036A464A7224B23B02CF7E773C223B2D21CA3DAC6769"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-before-b10269/case-default.out",
+                        "stage":  "E13",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-capacity/capacity-cases.json",
+                        "stage":  "E13",
+                        "bytes":  2479,
+                        "sha256":  "F6925CA9C88A864D4946B33FCE1E047B6D5BC280157A277564D2085DD7279F14"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-capacity/case-16s.err",
+                        "stage":  "E13",
+                        "bytes":  259271,
+                        "sha256":  "A7817CAE515BA1064327C2C9DEF27B6177B84D96708E0B4857A6B924ADAE7127"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-capacity/case-16s.out",
+                        "stage":  "E13",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-capacity/case-18s.err",
+                        "stage":  "E13",
+                        "bytes":  746815,
+                        "sha256":  "90A04965EB5374577B6EE54C21B526748650618DCD770AD818E556A267129CD7"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-capacity/case-18s.out",
+                        "stage":  "E13",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-capacity/case-64s.err",
+                        "stage":  "E13",
+                        "bytes":  726988,
+                        "sha256":  "7C64C1D9EC54AA683B2D94945F3FF727989FADBE644EE2C49418FF6CEA339FD9"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-capacity/case-64s.out",
+                        "stage":  "E13",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-capacity/case-default.err",
+                        "stage":  "E13",
+                        "bytes":  251987,
+                        "sha256":  "CC050BC2C7B7B4A539AF4FA80B15469D654ACE49C8B0CD88348E4133134415F4"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-capacity/case-default.out",
+                        "stage":  "E13",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-gatewindow/srv.err",
+                        "stage":  "E13",
+                        "bytes":  698831,
+                        "sha256":  "3D7D9C335AADD985C6ADBAE11C6E1864BE16E4379BA53698122CB2A2C1DF4986"
+                    },
+                    {
+                        "path":  "2026-08-06/e13-gatewindow/srv.out",
+                        "stage":  "E13",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    }
+                ]
+}
