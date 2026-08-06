@@ -3,14 +3,15 @@
     "day":  "2026-08-06",
     "pattern":  "^e[0-9]+",
     "root":  "Crow/runs",
-    "written":  "2026-08-06T17:40:05.5617503+02:00",
-    "files":  76,
-    "bytes":  710749033,
+    "written":  "2026-08-06T19:30:07.3741482+02:00",
+    "files":  182,
+    "bytes":  867628011,
     "stages":  {
-                   "E13":  29,
-                   "E35":  10,
+                   "E54":  7,
                    "E53":  30,
-                   "E54":  7
+                   "E24":  106,
+                   "E13":  29,
+                   "E35":  10
                },
     "entries":  [
                     {
@@ -186,6 +187,642 @@
                         "stage":  "E13",
                         "bytes":  0,
                         "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-baseline/block1-A.err",
+                        "stage":  "E24",
+                        "bytes":  3825253,
+                        "sha256":  "810B738C1A84EF5D85D36FCA69167AE73DBA3F45F49EE0F619FDDE37C5510F05"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-baseline/block1-A.out",
+                        "stage":  "E24",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-baseline/block2-B.err",
+                        "stage":  "E24",
+                        "bytes":  2871070,
+                        "sha256":  "EC5FB721322BEB030D9A5233BD9C0262DACE83F61231879A71B13908ED5D3949"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-baseline/block2-B.out",
+                        "stage":  "E24",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-baseline/probe-runs.json",
+                        "stage":  "E24",
+                        "bytes":  32826,
+                        "sha256":  "B729B4DD619038FBA2FD198E6DD588EA6C86787F9BC15BC59FB95F00E751E32F"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build/apply.log",
+                        "stage":  "E24",
+                        "bytes":  1435,
+                        "sha256":  "66A044486CBA947CB855E7757DA1712CCF14389227DDF28DE00E9CF9C7C7F0C7"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build/build.log",
+                        "stage":  "E24",
+                        "bytes":  111241160,
+                        "sha256":  "1DCBD7817A1D5D57C0B6A161C5E3203D93C6E74E142D0CF569E8D37B2D36E540"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build/build-again.log",
+                        "stage":  "E24",
+                        "bytes":  364,
+                        "sha256":  "CAA561E1687CF1DC0E7950DC286460F770F63BC5D0C938DB693DD96DC16CBF6A"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build/build-negative.log",
+                        "stage":  "E24",
+                        "bytes":  39595,
+                        "sha256":  "0782EC11AF249982BFDDAD6BFAEDA6E32D66FF0990EFD7061E607623147047DC"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build/build-test.log",
+                        "stage":  "E24",
+                        "bytes":  829,
+                        "sha256":  "CCFC42F5C29EFE974ED83A4E0B9D0C59AF6EA8A14B61E78B9220B92C4E1619F9"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build/cache-drift.txt",
+                        "stage":  "E24",
+                        "bytes":  48,
+                        "sha256":  "0983973A7F3C292396A6FB51EAF323271153193CCA43D9350537C2FB73ED1290"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build/configure.log",
+                        "stage":  "E24",
+                        "bytes":  4329,
+                        "sha256":  "49F530304CBBA75B65B8897937640F7A8B7F4326900D6C0B9ACB912191186719"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build/configure-args.txt",
+                        "stage":  "E24",
+                        "bytes":  324,
+                        "sha256":  "90260FE77C2F9932C3A8E10123561D432D7797A24431BD1004ACEDE30F4D3190"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build/configure-cuda.txt",
+                        "stage":  "E24",
+                        "bytes":  906,
+                        "sha256":  "8E4ACB689ECA41673736A7724F05885CC45F3917C14EE57C54495AA499E7E41A"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build/ctest.log",
+                        "stage":  "E24",
+                        "bytes":  306,
+                        "sha256":  "3E9F8E3D01C6A9238BD017345C2DBC63EB0381B701E81060A3035C6C3018B99D"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build/dryrun.log",
+                        "stage":  "E24",
+                        "bytes":  43809,
+                        "sha256":  "FD93FEF4E605045E4CFC2F35B0E8DAB9B7EB258472C3032727BD9DCE82FBB297"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build/guard-patched.log",
+                        "stage":  "E24",
+                        "bytes":  443,
+                        "sha256":  "C2AF4E8B75C88CFE23BF27856ED0FEB0D405651914ACD6866B5E9A9B3D22E7AB"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build/guard-pristine.log",
+                        "stage":  "E24",
+                        "bytes":  409,
+                        "sha256":  "41B8563428F8EA2D8C244794960931148F2E983E9499E3571B766B80C78236CB"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build/LastTest.log",
+                        "stage":  "E24",
+                        "bytes":  2277,
+                        "sha256":  "C27C127CA1EA3649975CF007D249C00023BD91A0CF86BAC853A09570E703B0FB"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build/summary.json",
+                        "stage":  "E24",
+                        "bytes":  1570,
+                        "sha256":  "FDD2E2F1D17155C1670198A8EF0953FCDD529E6072FC9CCD2066E36B43AE30FB"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build/targets-help.log",
+                        "stage":  "E24",
+                        "bytes":  25202,
+                        "sha256":  "ADA7987846FDBE758F2055DD0F110F2F2EA3AF40801E22D6C9A9D8D048FF2B55"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build-patched/apply.log",
+                        "stage":  "E24",
+                        "bytes":  1435,
+                        "sha256":  "66A044486CBA947CB855E7757DA1712CCF14389227DDF28DE00E9CF9C7C7F0C7"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build-patched/build.log",
+                        "stage":  "E24",
+                        "bytes":  37856,
+                        "sha256":  "9BC8F41C0FDBFED8468AB09F92CC5BFAD05692522A9A1A158F7B1C6146EA8A42"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build-patched/build-again.log",
+                        "stage":  "E24",
+                        "bytes":  364,
+                        "sha256":  "CAA561E1687CF1DC0E7950DC286460F770F63BC5D0C938DB693DD96DC16CBF6A"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build-patched/cache-drift.txt",
+                        "stage":  "E24",
+                        "bytes":  48,
+                        "sha256":  "0983973A7F3C292396A6FB51EAF323271153193CCA43D9350537C2FB73ED1290"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build-patched/configure.log",
+                        "stage":  "E24",
+                        "bytes":  1792,
+                        "sha256":  "25EE801365271B31022020D785EBCF6FC9375F7FC7BF9F4018F6A0500517E6ED"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build-patched/configure-args.txt",
+                        "stage":  "E24",
+                        "bytes":  324,
+                        "sha256":  "90260FE77C2F9932C3A8E10123561D432D7797A24431BD1004ACEDE30F4D3190"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build-patched/configure-cuda.txt",
+                        "stage":  "E24",
+                        "bytes":  352,
+                        "sha256":  "D1AD01CC5DE7C28F137DD722D212EFA55D056F689A29C94E50F8B88849FD7E2F"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build-patched/dryrun.log",
+                        "stage":  "E24",
+                        "bytes":  22326,
+                        "sha256":  "B529846451336C43EFF8D6E9B9A80D102F746EEEEBF4AF964EBC389E4CCE79D1"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build-patched/guard-patched.log",
+                        "stage":  "E24",
+                        "bytes":  443,
+                        "sha256":  "C2AF4E8B75C88CFE23BF27856ED0FEB0D405651914ACD6866B5E9A9B3D22E7AB"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build-patched/guard-pristine.log",
+                        "stage":  "E24",
+                        "bytes":  409,
+                        "sha256":  "41B8563428F8EA2D8C244794960931148F2E983E9499E3571B766B80C78236CB"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build-patched/summary.json",
+                        "stage":  "E24",
+                        "bytes":  1530,
+                        "sha256":  "516DE4AB2CC534461062BFDBFFE2C9E9B530864A94C26B7017A43FA8443F2FD7"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-build-patched/targets-help.log",
+                        "stage":  "E24",
+                        "bytes":  25202,
+                        "sha256":  "ADA7987846FDBE758F2055DD0F110F2F2EA3AF40801E22D6C9A9D8D048FF2B55"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe.err",
+                        "stage":  "E24",
+                        "bytes":  17410427,
+                        "sha256":  "C3C497DA3A9547CADEA45546B130C9A3D56B555175FC1C010E85B14576472A34"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe.out",
+                        "stage":  "E24",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/__pycache__/binary-search.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  593,
+                        "sha256":  "FC69B1C733445A2C4288B698520A35772ABC5E827D2A718B062F6FA12715ABD8"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/__pycache__/flatten.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  536,
+                        "sha256":  "9C81A5A1BC3C578DF7EEAC427F8F2CB27A5926820DC41F61448B1CB17E716804"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/__pycache__/group-anagrams.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  644,
+                        "sha256":  "AB980C3E8376662D7273233BC83090E3041BCDA567149D1430C1920767091539"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  595,
+                        "sha256":  "55A6351F3F7D7CC8ED41EBC77FDAF62A7DC2FA61065D4F831834290CD4DC1E77"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/__pycache__/longest-common-prefix.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  588,
+                        "sha256":  "D4E90356397853451E92DFBECAF48710229121D7ED699C95A202680A9F57AB63"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/__pycache__/merge-intervals.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  814,
+                        "sha256":  "FC7FE05F89B5371E01DBFC6C7E290FA399D81E9EEA09ACFFFA9803AC648AF6F4"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/__pycache__/rle-encode.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  589,
+                        "sha256":  "C27D6F1ACD77B7061695CC0B02BB57C40F0878EA5B1E9599C20E6B47DAF01B45"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/__pycache__/rotate-matrix.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  432,
+                        "sha256":  "7D0B21242C8FE34037A4029C5C30C63BA81319F700E7DF4A69ED6E545E6D672B"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/__pycache__/top-k-frequent.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  831,
+                        "sha256":  "BA9E1B888466BD24F99CE9C2289829386FF90ED50BDB3D0DAC4D1A2A4F93E18C"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  517,
+                        "sha256":  "A1BA345AF4CF34E96B7F5A660052D35170C94A55C6461ADD1B675DA082627A36"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/binary-search.json",
+                        "stage":  "E24",
+                        "bytes":  3255,
+                        "sha256":  "40A42FAE339D86F6844332D2FE173E612794D1172A87457B7E96E8F53A85A388"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/binary-search.py",
+                        "stage":  "E24",
+                        "bytes":  409,
+                        "sha256":  "66D87DD7963DECC35ADA354D61F66DCB1BE242C66D55EAC13411108D964EFA76"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/flatten.json",
+                        "stage":  "E24",
+                        "bytes":  2730,
+                        "sha256":  "91061943C01B6415CD52526944923A6C51D44EA6EA591E81655B5FCF25F9BEEF"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/flatten.py",
+                        "stage":  "E24",
+                        "bytes":  205,
+                        "sha256":  "4BDBD4E7450413EDA7D2A5E1F2F49D2AE48AC509ACD898917F8C76E6B778DEBB"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/group-anagrams.json",
+                        "stage":  "E24",
+                        "bytes":  2915,
+                        "sha256":  "38B8BC614EC366C10C2343935A16004AA6F1AEB21E0389D43CBC93830C61679F"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/group-anagrams.py",
+                        "stage":  "E24",
+                        "bytes":  287,
+                        "sha256":  "70B4D86811AB5AF32F26DA5DF4B0F855B0B9D595540C9013640640B8E3EF52E0"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/is-balanced.json",
+                        "stage":  "E24",
+                        "bytes":  1794,
+                        "sha256":  "F6BF954C56D57F89AA999117A38B25F902CBCE9F722E6A94119AA7A18142B372"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/is-balanced.py",
+                        "stage":  "E24",
+                        "bytes":  298,
+                        "sha256":  "EBAD09A767018E012DE287E2021B86711E46E2F521B6AF148A0E0D81C623D23A"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/longest-common-prefix.json",
+                        "stage":  "E24",
+                        "bytes":  4940,
+                        "sha256":  "838B0A720C17C27A8EC17FCA1ABC3673FC0FA2E84F308C61263840F37B322AC5"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/longest-common-prefix.py",
+                        "stage":  "E24",
+                        "bytes":  277,
+                        "sha256":  "13D13B4554DCF917693B2F900B61F2AB7162B409369D64FF2F0900E88A039503"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/merge-intervals.json",
+                        "stage":  "E24",
+                        "bytes":  2480,
+                        "sha256":  "4B2178C45A6FD0946A597FE992C3056BE820CF448A0B003779623B68BFC6CEA2"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/merge-intervals.py",
+                        "stage":  "E24",
+                        "bytes":  424,
+                        "sha256":  "BF33612FD54EDCF8CA3CC1E8FC692D9DB40BB0F8A846B5FB6943F27D28E77AAC"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/rle-encode.json",
+                        "stage":  "E24",
+                        "bytes":  1737,
+                        "sha256":  "AE19F66B08C9191A841F8CB8E184B3CD04E9E565194285FFA37995E9B7E0BF60"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/rle-encode.py",
+                        "stage":  "E24",
+                        "bytes":  364,
+                        "sha256":  "754852D1769B11A5FF8A82E12A2DE559CB66155C37BA544516F257194BBC5F5A"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/rotate-matrix.json",
+                        "stage":  "E24",
+                        "bytes":  3263,
+                        "sha256":  "7A0943B414C5F5C0AC987D290BFB833937359EB1F97844F0C366B277AD0842D2"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/rotate-matrix.py",
+                        "stage":  "E24",
+                        "bytes":  80,
+                        "sha256":  "D84EFAFB2D93B987CF99CFE06D1DB762A48BDC3BB25D0652918881294881DA0D"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/summary.json",
+                        "stage":  "E24",
+                        "bytes":  2640,
+                        "sha256":  "93E7A7275B57489F73F1438C7CA5C5C790377409B2A0F27601CE222A376D021B"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/top-k-frequent.json",
+                        "stage":  "E24",
+                        "bytes":  3103,
+                        "sha256":  "7CD7ED5DCC65BDB7F6986953127664B6399BF49CB49F9BE90C637EAF46D61CFC"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/top-k-frequent.py",
+                        "stage":  "E24",
+                        "bytes":  356,
+                        "sha256":  "2705BEDAC8486630D9944BCFF549CC9856D254484199CAA897CDDB234B7CB4FE"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/two-sum.json",
+                        "stage":  "E24",
+                        "bytes":  9037,
+                        "sha256":  "1BF4D0D7E34629264C629D00963DF341ED778CFABA0845BFB9D0E5487C5E3C90"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe/two-sum.py",
+                        "stage":  "E24",
+                        "bytes":  195,
+                        "sha256":  "940665A91572F3B372FFA7DB16DCA05E7250B94488C749AF936D9ACCBC4E9ED7"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/cpu-moe-summary.json",
+                        "stage":  "E24",
+                        "bytes":  1280,
+                        "sha256":  "CD5C3D660404026D906CB85DF71CB9025187F68BE03624537C9C163844B50946"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming.err",
+                        "stage":  "E24",
+                        "bytes":  18104345,
+                        "sha256":  "EAA2D13DA04645CED7C8263675DAA3D4AC438E7614977E71E2CD0126C4028883"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming.out",
+                        "stage":  "E24",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/__pycache__/binary-search.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  594,
+                        "sha256":  "8E78422D0D1B6DEBF50B1DB74B9F0ABED4133E20471EE5F21EB2C80048A42F8D"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/__pycache__/flatten.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  538,
+                        "sha256":  "DC214E96845680C14108F20A835960E088211C96EB466B30DC5C41BB25F6A3B4"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/__pycache__/group-anagrams.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  673,
+                        "sha256":  "7E9415D6DA71FE52E7DAE27BABEA45864D241A21C45B8007E55E901F843ABEA2"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  597,
+                        "sha256":  "75CF7BFB0C6514AD8DE375C34CDC1B130158FDDEE3116D5972895D23DC6EDD06"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/__pycache__/longest-common-prefix.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  588,
+                        "sha256":  "64FA9B072242A76AA20D53E9FA7D27C7F227642415AC05D9388BDBEEE66C5415"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/__pycache__/merge-intervals.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  816,
+                        "sha256":  "7437D2DA18786AECC7D611E0D67F5BE1089C2614803ACA8EEFD90AC4C739B9F3"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/__pycache__/rle-encode.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  591,
+                        "sha256":  "CEC73A1743C12811B64E8B4E089F5E855A805733EF1E775F0E231DD562DE512A"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/__pycache__/rotate-matrix.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  731,
+                        "sha256":  "DBED1BF736359AE69EDEB87DE515C56EA1A14FEBD63B92BDFAA749B1DFEC13AE"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/__pycache__/top-k-frequent.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  877,
+                        "sha256":  "925C6BAE643A94A10ACD2EC2CE4F092FD14999F120493CE0D2B950BA6D717D81"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "E24",
+                        "bytes":  868,
+                        "sha256":  "653B0CF9FCEBACB95B6F3FC1D92C9CCD28DD663202B109C4A2277AB4E5D6F06D"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/binary-search.json",
+                        "stage":  "E24",
+                        "bytes":  3516,
+                        "sha256":  "99EE2470F6BD75CD1780C9B6A452701F2EB1803EB2CBCB5EEEAC9865F8A033FD"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/binary-search.py",
+                        "stage":  "E24",
+                        "bytes":  344,
+                        "sha256":  "2AD1E930EB43206E5A7BA37D7A0A09F04BCD7A4EC78FBD96AC3410E2B927003A"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/flatten.json",
+                        "stage":  "E24",
+                        "bytes":  2270,
+                        "sha256":  "B95C8F7C2D368345509DE113957717538C1BF1D834372A7B00CF6648289788DE"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/flatten.py",
+                        "stage":  "E24",
+                        "bytes":  205,
+                        "sha256":  "4BDBD4E7450413EDA7D2A5E1F2F49D2AE48AC509ACD898917F8C76E6B778DEBB"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/group-anagrams.json",
+                        "stage":  "E24",
+                        "bytes":  2359,
+                        "sha256":  "1FADCD0382ED1A1650D6DCD9BEE426B7891C928CFADC626F49CC344629FC7CFA"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/group-anagrams.py",
+                        "stage":  "E24",
+                        "bytes":  312,
+                        "sha256":  "A8E04F8BDADC82242EDE617552D34A4180A8BD05C06E78E7B869FD23A67A2F12"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/is-balanced.json",
+                        "stage":  "E24",
+                        "bytes":  1536,
+                        "sha256":  "E73474AC95D6E4E3432B8A9786870D9B8C1B095E8932394B776B5A5F067163D5"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/is-balanced.py",
+                        "stage":  "E24",
+                        "bytes":  298,
+                        "sha256":  "EBAD09A767018E012DE287E2021B86711E46E2F521B6AF148A0E0D81C623D23A"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/longest-common-prefix.json",
+                        "stage":  "E24",
+                        "bytes":  2510,
+                        "sha256":  "590522BE5866F960B97166B85E5C17E9F2C24C954A8C89D4F5DEDCFC6AFC36B1"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/longest-common-prefix.py",
+                        "stage":  "E24",
+                        "bytes":  271,
+                        "sha256":  "577C0010694FC06FD0B2DE66A6B6FD338078B97F91EB3D2B2E58C6674A035391"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/merge-intervals.json",
+                        "stage":  "E24",
+                        "bytes":  2447,
+                        "sha256":  "89EC6FB5831CCA4DA0CAAFC464192092AD5FF26EDA1AEBE20A53C8D61C68C136"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/merge-intervals.py",
+                        "stage":  "E24",
+                        "bytes":  424,
+                        "sha256":  "BF33612FD54EDCF8CA3CC1E8FC692D9DB40BB0F8A846B5FB6943F27D28E77AAC"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/rle-encode.json",
+                        "stage":  "E24",
+                        "bytes":  1761,
+                        "sha256":  "FC3571FEE79C596DF2CA03E023589864AD03F5E9C59CD31A492ADAD95838A4CF"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/rle-encode.py",
+                        "stage":  "E24",
+                        "bytes":  364,
+                        "sha256":  "754852D1769B11A5FF8A82E12A2DE559CB66155C37BA544516F257194BBC5F5A"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/rotate-matrix.json",
+                        "stage":  "E24",
+                        "bytes":  6010,
+                        "sha256":  "8A941180BFB6339218660CA6C2A8A4D587D6366EDC04C58B60EF1A1E413E4842"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/rotate-matrix.py",
+                        "stage":  "E24",
+                        "bytes":  306,
+                        "sha256":  "B8217DAFE8D1A69CBDF8FBF4570C746870075C083E0B00110D7524F82AEF36D3"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/summary.json",
+                        "stage":  "E24",
+                        "bytes":  2656,
+                        "sha256":  "919827A5B18A4E08010D996182078B0FA5466227899EA5E9D3D2DCB4F718F455"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/top-k-frequent.json",
+                        "stage":  "E24",
+                        "bytes":  2794,
+                        "sha256":  "5063ECA692E3BBA92D6297C4C30DE0E1D9758FCA370674C539A581BF0AA23272"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/top-k-frequent.py",
+                        "stage":  "E24",
+                        "bytes":  321,
+                        "sha256":  "DDBCA83F5D2B80DA63417B96606E0D4E298BBCE12D5BA46E0D3DA9A2C8644D11"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/two-sum.json",
+                        "stage":  "E24",
+                        "bytes":  9466,
+                        "sha256":  "A65E78CB02F712B11BA3A310CE579EB23029F048A45CD84DED470AC479CF8043"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming/two-sum.py",
+                        "stage":  "E24",
+                        "bytes":  473,
+                        "sha256":  "B13E8B82E099503F037D380A0A517C81A6D2F812F16B03016EA3D52FA039182F"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-gate/streaming-summary.json",
+                        "stage":  "E24",
+                        "bytes":  1506,
+                        "sha256":  "6DD4DAFB3BE7D6F354327E216BF04822997B393C8EF43F20FE7B161CF4C86F92"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-prefill/block1-A.err",
+                        "stage":  "E24",
+                        "bytes":  1697475,
+                        "sha256":  "0935A29D9D0D0ED5DA71D196451F44DD92C80BBB3AAB3FFA0D6ED57C603736FC"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-prefill/block1-A.out",
+                        "stage":  "E24",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-prefill/block2-B.err",
+                        "stage":  "E24",
+                        "bytes":  1368767,
+                        "sha256":  "19E4AFF0BF08B92BB8FAD234A02C9715D8F9B24FAD21507F2B4AA20AEE7D2F1E"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-prefill/block2-B.out",
+                        "stage":  "E24",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-06/e24-prefill/probe-runs.json",
+                        "stage":  "E24",
+                        "bytes":  16498,
+                        "sha256":  "AEE2588B7CBFA39EC92AD7587047315F66244BF850137EB4B9032C91B8C83267"
                     },
                     {
                         "path":  "2026-08-06/e35-build/build-53.json",
