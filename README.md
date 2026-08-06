@@ -18,8 +18,11 @@ A frontier-scale mixture-of-experts coding model whose expert weights are read f
 instead of held in memory. The host no longer needs to fit the model — a 90 GiB file runs in
 1.3 GiB of process memory.
 
-Target model: **`deepseek-ai/DeepSeek-V4-Flash`**, MIT licensed. On top of it, an agent platform is
-planned; that part has not been built.
+Target model: **`deepseek-ai/DeepSeek-V4-Flash`**, MIT licensed.
+
+On top of it, an agent platform — in the spirit of **`NousResearch/hermes-agent`**, which serves as
+an example for scope and not as a specification. That part has not been built; the model side is
+what exists today.
 
 This is a research repository. It carries the patch against `llama.cpp`, the measuring tools and
 the record of what was measured — not a product.
