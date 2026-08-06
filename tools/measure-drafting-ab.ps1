@@ -103,6 +103,11 @@ param(
     [int]   $Port    = 8081,
     # Sent with every request, so the artefact states it instead of inheriting a server default.
     [int]   $Seed    = 1234,
+    # Skip the discarded warm-up. ONLY for measuring an uncached prefill - the warm-up fills the
+    # server's prefix cache, which turns every later prompt_n into 4 against a 17-token prompt.
+    # Everything else in this tool assumes a warmed server, so the decode figure of a -NoWarmup
+    # block carries cold experts and is a control value, not a steady-state rate.
+    [switch]$NoWarmup,
     [int]   $Ctx     = 4096,
     [int]   $Ngl     = 99,
     [int]   $Tokens  = 512,
@@ -591,6 +596,14 @@ function Get-DraftAborts {
     return $out
 }
 
+# What the artefact records about the warm-up. A VALUE function so the absent case is assertable:
+# a skipped warm-up must be null and never 0, because a zero reads as "the warm-up was instant" and
+# cannot be told apart from "none ran". A warm-up that genuinely measured 0.0 keeps its 0.0.
+function Get-WarmupField($Warm) {
+    if ($null -eq $Warm) { return $null }
+    return $Warm.decode_ms_tok
+}
+
 # The request body. A VALUE function for the same reason as Get-SideArgs: what a request states is
 # part of the contract, so it must be assertable without a server.
 #
@@ -783,6 +796,12 @@ function Invoke-Selftest {
     Case 'request carries the prompt verbatim' ($bodyObj.messages[0].content -eq 'x') 'prompt passed through unaltered'
     $bodyOther = (Get-RequestBody -Prompt 'x' -MaxTokens 512 -SeedValue 7) | ConvertFrom-Json
     Case 'a different seed reaches the body' ($bodyOther.seed -eq 7) ("seed=" + $bodyOther.seed)
+
+    # 16d  a skipped warm-up must be visible in the artefact. A zero would read as an instant
+    #      warm-up and is indistinguishable from none having run, so the field stays null.
+    Case 'no warm-up records null, never 0'  ($null -eq (Get-WarmupField $null))           'null, so it cannot read as instant'
+    Case 'a real warm-up reports its figure' ((Get-WarmupField ([pscustomobject]@{ decode_ms_tok = 93.87 })) -eq 93.87) 'value passed through'
+    Case 'a warm-up of 0.0 stays 0.0, not null' ((Get-WarmupField ([pscustomobject]@{ decode_ms_tok = 0.0 })) -eq 0.0) 'a measured zero is not an absence'
 
     # 16c  the drafting abort criteria follow the MODE. Case 1 is the defect this cost a run to
     #      find; the three beside it stop the fix from becoming "never abort on drafting".
@@ -1153,12 +1172,24 @@ foreach ($blk in $seq) {
     Say ("  pid {0}  created {1}" -f $ident.pid_, $ident.created)
     Say ("  cmd {0}" -f $ident.commandline)
 
-    $warm = Ask -MaxTokens $Tokens -TargetPid $p.Id -LogPath $errLog -Identity $ident
-    if (-not $warm.ok) {
-        $aborts += "block $blockNo ($side): warm-up request failed"
-        [void](Stop-OurServer $p); continue
+    # The warm-up is the default because a first request pays cold experts and would otherwise be
+    # averaged into a steady-state figure. It also populates the server's PREFIX CACHE, and that
+    # makes it fatal for exactly one measurement: prefill. Measured 2026-08-06 - with a warm-up in
+    # front, all four evaluated requests reported prompt_n = 4 against a 17-token prompt, so the
+    # recorded prompt_ms timed a cache hit. -NoWarmup exists for that measurement and no other:
+    # the single evaluated request then IS the cold one, and its decode figure carries cold
+    # experts and is a control value rather than a steady-state rate.
+    $warm = $null
+    if ($NoWarmup) {
+        Say '  warm-up SKIPPED (-NoWarmup): this block measures an uncached prefill, and its decode is a control value'
+    } else {
+        $warm = Ask -MaxTokens $Tokens -TargetPid $p.Id -LogPath $errLog -Identity $ident
+        if (-not $warm.ok) {
+            $aborts += "block $blockNo ($side): warm-up request failed"
+            [void](Stop-OurServer $p); continue
+        }
+        Say ("  warm-up (discarded)  decode {0} ms/tok   prefill {1} ms / {2} tok   drafted {3}" -f (N $warm.decode_ms_tok 2), (N $warm.prompt_ms 1), $warm.prompt_n, $warm.drafted)
     }
-    Say ("  warm-up (discarded)  decode {0} ms/tok   prefill {1} ms / {2} tok   drafted {3}" -f (N $warm.decode_ms_tok 2), (N $warm.prompt_ms 1), $warm.prompt_n, $warm.drafted)
 
     # N evaluated requests out of THIS server process. The discarded warm-up above is not
     # removed from anything - its counters stay inside every later block, which is why each
@@ -1196,7 +1227,10 @@ foreach ($blk in $seq) {
     $m | Add-Member -NotePropertyName server_stop  -NotePropertyValue $stop -Force
     $m | Add-Member -NotePropertyName foreign      -NotePropertyValue $foreign -Force
     $m | Add-Member -NotePropertyName foreign_added -NotePropertyValue $fdiff.added -Force
-    $m | Add-Member -NotePropertyName warmup_decode_ms_tok -NotePropertyValue $warm.decode_ms_tok -Force
+    # null rather than 0 when there was no warm-up: a zero here would read as "the warm-up was
+    # instant" and is indistinguishable from "no warm-up ran".
+    $m | Add-Member -NotePropertyName warmup_decode_ms_tok -NotePropertyValue (Get-WarmupField $warm) -Force
+    $m | Add-Member -NotePropertyName warmed_up -NotePropertyValue (-not [bool]$NoWarmup) -Force
     $results += $m
 
     Say ("  MEASURED  decode {0} ms/tok   prefill {1} ms / {2} tok   completion {3}   sha {4}" -f (N $m.decode_ms_tok 2), (N $m.prompt_ms 1), $m.prompt_n, $m.completion, $m.answer_sha)
