@@ -1589,10 +1589,10 @@ index 6b9e94a..e3c44e5 100644
      virtual ~llama_model_base() = default;
 diff --git a/src/llama-moe-stream.cpp b/src/llama-moe-stream.cpp
 new file mode 100644
-index 0000000..40189c1
+index 0000000..329a200
 --- /dev/null
 +++ b/src/llama-moe-stream.cpp
-@@ -0,0 +1,1035 @@
+@@ -0,0 +1,1073 @@
 +#include "llama-moe-stream.h"
 +
 +#include "llama-impl.h"
@@ -1838,6 +1838,7 @@ index 0000000..40189c1
 +        sl->slot_expert  .resize(n_slots, -1);
 +        sl->slot_state   .resize(n_slots, LLAMA_MOE_STREAM_SLOT_EMPTY);
 +        sl->slot_claimed .resize(n_slots, 0);
++        sl->slot_parts_left.resize(n_slots, 0);
 +        sl->slot_gen     .resize(n_slots, 0);
 +        sl->slot_last_use.resize(n_slots, 0);
 +        sl->route_hotness.resize(n_expert, 0);
@@ -1961,32 +1962,53 @@ index 0000000..40189c1
 +        q_demand.pop_front();
 +
 +        auto & sl = *w.sl;
++        const uint8_t bit = (w.weight >= 0 && w.weight < 8) ? (uint8_t) (1u << w.weight) : 0u;
 +        if (w.gen != sl.slot_gen[w.slot] ||
 +            sl.slot_state[w.slot] != LLAMA_MOE_STREAM_SLOT_LOADING ||
 +            sl.slot_expert[w.slot] != w.expert ||
-+            sl.slot_claimed[w.slot]) {
-+            continue; // stale or duplicate item
++            (bit && (sl.slot_claimed[w.slot] & bit))) {
++            // Stale (the slot was re-reserved under us) or a duplicate item for a
++            // tensor another worker already owns. The claim is per TENSOR now; a
++            // per-slot flag would make the first worker lock its colleagues out of
++            // the very parallelism this split exists to create.
++            continue;
 +        }
-+        sl.slot_claimed[w.slot] = 1;
++        sl.slot_claimed[w.slot] |= bit;
 +
 +        lk.unlock();
 +
 +        bool ok = true;
-+        for (const auto & wt : sl.weights) {
++        {
++            const auto & wt = sl.weights[w.weight];
 +            const uint8_t * data = llama_moe_stream_pread(*files[wt.file_idx], staging, wt.nb_expert, wt.offs + (size_t) w.expert*wt.nb_expert, use_direct_io, worker_id);
 +            if (data == nullptr) {
 +                ok = false;
-+                break;
++            } else {
++                // The READ above is the parallel part and stays outside the lock;
++                // only the upload is serialised. See upload_mtx in the header for
++                // the measurement that made this necessary.
++                std::lock_guard<std::mutex> up(upload_mtx);
++                ggml_backend_tensor_set(wt.cache, data, (size_t) w.slot*wt.nb_expert, wt.nb_expert);
 +            }
-+            ggml_backend_tensor_set(wt.cache, data, (size_t) w.slot*wt.nb_expert, wt.nb_expert);
 +        }
 +
 +        lk.lock();
 +
-+        sl.slot_claimed[w.slot] = 0;
++        // Re-check the generation: this worker held no lock while reading, and the
++        // slot may have been evicted and re-reserved for another expert meanwhile.
++        // Decrementing that generation's counter would publish a slot whose tensors
++        // were never all written.
++        if (w.gen != sl.slot_gen[w.slot]) {
++            cv_done.notify_all();
++            continue;
++        }
++
++        sl.slot_claimed[w.slot] &= (uint8_t) ~bit;
 +        if (!ok) {
 +            load_failed = true;
-+        } else {
++        } else if (sl.slot_parts_left[w.slot] > 0 && --sl.slot_parts_left[w.slot] == 0) {
++            // RESIDENT only when the LAST tensor of this slot has landed. Publishing
++            // at the first one would hand out a slot that is part garbage.
 +            sl.slot_state[w.slot] = LLAMA_MOE_STREAM_SLOT_RESIDENT;
 +        }
 +        cv_done.notify_all();
@@ -2038,6 +2060,27 @@ index 0000000..40189c1
 +    sl.slot_last_use[slot] = ++sl.use_counter;
 +    sl.expert_slot[expert] = slot;
 +    sl.seen[expert] = 1;
++    // A reservation starts owing one read per weight tensor, and owns none of them
++    // yet. Both are reset HERE rather than at enqueue: bumping slot_gen above has
++    // just invalidated every in-flight part of the previous occupant, and a stale
++    // worker finishing afterwards must not decrement this generation's counter.
++    sl.slot_parts_left[slot] = (uint16_t) sl.weights.size();
++    sl.slot_claimed[slot]    = 0;
++}
++
++// Queue one read per weight tensor of this slot. THE POINT OF THE SPLIT: a single
++// item per expert meant one worker read 2-3 tensors in a for loop, strictly one at
++// a time, which is the whole reason the drive saw a queue depth of 1.6. One item
++// per tensor lets that many workers pull in parallel out of the same pool.
++void llama_moe_stream::enqueue_slot_locked(llama_moe_stream_layer & sl, int32_t expert, int32_t slot) {
++    const int32_t n = (int32_t) sl.weights.size();
++    for (int32_t w = 0; w < n; w++) {
++        q_demand.push_back({ &sl, expert, slot, sl.slot_gen[slot], w });
++    }
++    // notify_all, not notify_one: several items just arrived and one woken worker
++    // would take one and leave the rest queued behind a sleeping pool - exactly the
++    // serialisation this change exists to remove.
++    cv_work.notify_all();
 +}
 +
 +size_t llama_moe_stream::size_bufs() const {
@@ -2279,8 +2322,7 @@ index 0000000..40189c1
 +        if (it != sl->expert_slot.end()) {
 +            const int32_t s = it->second;
 +            if (sl->slot_state[s] == LLAMA_MOE_STREAM_SLOT_LOADING) {
-+                mgr->q_demand.push_back({ sl, e, s, sl->slot_gen[s] });
-+                mgr->cv_work.notify_one();
++                mgr->enqueue_slot_locked(*sl, e, s);
 +                waited = true;
 +            }
 +            mgr->stats.n_hit++;
@@ -2309,8 +2351,7 @@ index 0000000..40189c1
 +                mgr->stats.n_miss_cold++;
 +            }
 +            mgr->reserve_slot_locked(*sl, e, v);
-+            mgr->q_demand.push_back({ sl, e, v, sl->slot_gen[v] });
-+            mgr->cv_work.notify_one();
++            mgr->enqueue_slot_locked(*sl, e, v);
 +            mgr->stats.n_miss++;
 +            waited = true;
 +            sl->keep[v] = 1;
@@ -2426,8 +2467,7 @@ index 0000000..40189c1
 +                // already in the cache (resident, or still loading from the previous wave's preload)
 +                const int32_t s = it->second;
 +                if (sl.slot_state[s] == LLAMA_MOE_STREAM_SLOT_LOADING) {
-+                    q_demand.push_back({ &sl, e, s, sl.slot_gen[s] }); // promote to demand, wait for it
-+                    cv_work.notify_one();
++                    enqueue_slot_locked(sl, e, s); // promote to demand, wait for it
 +                    waited = true;
 +                } else {
 +                    stats.n_preload_ready++; // resident from the previous wave's preload
@@ -2448,8 +2488,7 @@ index 0000000..40189c1
 +                    stats.n_miss_cold++;
 +                }
 +                reserve_slot_locked(sl, e, v);
-+                q_demand.push_back({ &sl, e, v, sl.slot_gen[v] });
-+                cv_work.notify_one();
++                enqueue_slot_locked(sl, e, v);
 +                stats.n_miss++;
 +                waited = true;
 +                sl.keep[v] = 1;
@@ -2475,8 +2514,7 @@ index 0000000..40189c1
 +            }
 +            reserve_slot_locked(sl, e, v);
 +            sl.keep[v] = 1;
-+            q_demand.push_back({ &sl, e, v, sl.slot_gen[v] });
-+            cv_work.notify_one();
++            enqueue_slot_locked(sl, e, v);
 +            stats.n_preload_issued++;
 +        }
 +    }
@@ -2630,10 +2668,10 @@ index 0000000..40189c1
 +}
 diff --git a/src/llama-moe-stream.h b/src/llama-moe-stream.h
 new file mode 100644
-index 0000000..fe1fb02
+index 0000000..c22a7a1
 --- /dev/null
 +++ b/src/llama-moe-stream.h
-@@ -0,0 +1,288 @@
+@@ -0,0 +1,336 @@
 +#pragma once
 +
 +#include "llama-mmap.h"
@@ -2705,7 +2743,17 @@ index 0000000..fe1fb02
 +    // residency state, guarded by mgr->mtx
 +    std::vector<int32_t>                 slot_expert;   // [n_slots] expert id or -1
 +    std::vector<uint8_t>                 slot_state;    // [n_slots] llama_moe_stream_slot_state
-+    std::vector<uint8_t>                 slot_claimed;  // [n_slots] a worker owns the load
++    // [n_slots] BITMASK over weights: bit w set means a worker already owns the read
++    // of tensor w for this slot. It was a plain flag while one item carried the whole
++    // expert; with one item per tensor several workers legitimately share a slot, and
++    // a flag would let the first of them shut the others out.
++    std::vector<uint8_t>                 slot_claimed;
++    // [n_slots] tensors of this slot still to arrive. Set to weights.size() when the
++    // slot is reserved and decremented by each finishing part; the slot turns RESIDENT
++    // only at zero. With one item per expert this was implicit in the for loop that
++    // read them; with one item per tensor it has to be counted, or a slot would be
++    // published while some of its tensors are still unwritten.
++    std::vector<uint16_t>                slot_parts_left;
 +    std::vector<uint64_t>                slot_gen;      // [n_slots] reservation generation
 +    std::vector<int64_t>                 slot_last_use; // [n_slots] LRU stamps
 +    std::unordered_map<int32_t, int32_t> expert_slot;   // RESIDENT and LOADING entries
@@ -2745,13 +2793,31 @@ index 0000000..fe1fb02
 +                 const ggml_tensor * down, const ggml_tensor * gate_up) const;
 +};
 +
-+// one queued expert load
++// One queued read. ONE PER WEIGHT TENSOR, not one per expert.
++//
++// An expert is 2 or 3 tensors (fused gate_up + down, or gate/up/down). Until
++// 2026-08-07 a single work item carried the whole expert and one worker read
++// its tensors in a for loop - strictly one read in flight at a time, which is
++// why the drive saw a queue depth of 1.6 while it needs 8 to reach its rate.
++//
++// Splitting the item is what puts several reads in flight for a SINGLE token
++// stream, with no extra bytes, no extra VRAM and no change to routing.
++// Measured 2026-08-07 (runs/2026-08-07/striping): reads confined to one 9.2 MiB
++// expert reach 9850 MB/s at depth 8, byte for byte the same as reads scattered
++// over the whole 46 GiB file - so adjacency costs nothing and the drive really
++// does serve the parts of one expert in parallel.
++//
++// `parts_left` lives on the layer, not here: every part of one slot has to
++// decrement the same counter, and the slot only becomes RESIDENT at zero. A
++// slot published before its last tensor lands would be read as valid weights
++// while part of it is still garbage.
 +struct llama_moe_stream_work {
 +    llama_moe_stream_layer * sl = nullptr;
 +
 +    int32_t  expert = -1;
 +    int32_t  slot   = -1;
 +    uint64_t gen    = 0; // stale unless it matches slot_gen[slot]
++    int32_t  weight = -1; // index into sl->weights; -1 means "every tensor" (legacy/whole expert)
 +};
 +
 +// The smallest expert cache the multi-pass path can work with.
@@ -2863,6 +2929,23 @@ index 0000000..fe1fb02
 +    std::condition_variable cv_work; // queued work or shutdown
 +    std::condition_variable cv_done; // a load committed or failed
 +
++    // Serialises ggml_backend_tensor_set ONLY - never the read.
++    //
++    // Measured 2026-08-07: splitting an expert into one work item per weight
++    // tensor raised queue depth 1.60 -> 4.31 and decode 9.89 -> 12.76 tok/s,
++    // but binary-search stopped being reproducible - byte-identical in 4 of 4
++    // runs on the old path, two different outputs across two runs on the new
++    // one. Four other deterministic tasks still matched the reference exactly,
++    // so the slot counter was not publishing early; what changed is that
++    // several workers now call ggml_backend_tensor_set concurrently, which the
++    // old one-worker-per-expert loop never did.
++    //
++    // Kept separate from mtx on purpose: mtx guards residency state and is held
++    // while workers sleep on the condition variables. Uploading under it would
++    // put the whole pool back in single file and give up the gain. This lock is
++    // held only for the copy itself, which is short next to the disk read.
++    std::mutex              upload_mtx;
++
 +    std::deque<llama_moe_stream_work> q_demand;
 +
 +    std::vector<std::thread> workers;
@@ -2901,6 +2984,9 @@ index 0000000..fe1fb02
 +    void worker_loop(int worker_id);
 +    int32_t pick_victim_locked(llama_moe_stream_layer & sl, const uint8_t * keep) const;
 +    void reserve_slot_locked(llama_moe_stream_layer & sl, int32_t expert, int32_t slot);
++    // queues one read per weight tensor and wakes the pool; see the .cpp for why
++    // the split is what raises queue depth on a single stream
++    void enqueue_slot_locked(llama_moe_stream_layer & sl, int32_t expert, int32_t slot);
 +
 +    // multi-pass prefill helpers (called by llama_moe_stream_wave_ids, all under mtx)
 +    void plan_waves_locked(llama_moe_stream_layer & sl, const int32_t * ids, int64_t n); // wave 0: build the plan

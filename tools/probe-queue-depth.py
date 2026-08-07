@@ -455,8 +455,16 @@ class SweepInvalid(Exception):
 
 
 def random_reads(path, size, block, depth, seconds, direct=False, fail_thread=None,
-                 shared_handle=False, overlapped=False):
+                 shared_handle=False, overlapped=False, window_mb=0):
     """`depth` threads, one file handle each, random offsets, for `seconds`.
+
+    window_mb confines every thread to ONE window of that size instead of
+    letting them roam the whole file. That is the striping question: splitting
+    a single 9.2 MiB expert into N parallel reads produces N ADJACENT offsets,
+    not N scattered ones, and a drive may treat the two very differently -
+    read-ahead or controller-side coalescing could turn the adjacent case back
+    into one sequential stream and take the concurrency away. The sweep over
+    the whole file cannot answer that; this switch is the A/B against it.
 
     shared_handle flips that to ONE handle for all threads - Arm 1. Everything
     else stays identical: same file, same offset sequence, same block size, same
@@ -489,6 +497,19 @@ def random_reads(path, size, block, depth, seconds, direct=False, fail_thread=No
     # Offsets are derived per thread from a fixed stride so runs are reproducible
     # without Math.random-style nondeterminism, and so no two threads walk in step.
     span = size - block
+    base = 0
+    if window_mb > 0:
+        window = int(window_mb * 1024 * 1024)
+        if window <= block:
+            # Every thread would sit on the same block and the sweep would
+            # measure the cache, not the drive.
+            raise ValueError(f"window {window} B must be larger than block {block} B")
+        # Placed in the middle so the window is nowhere near the file header,
+        # and sector-aligned because read_at rounds down and an unaligned base
+        # would silently shift every offset.
+        base = ((size // 2) // SECTOR) * SECTOR
+        base = min(base, size - window)
+        span = window - block
 
     if direct:
         # Opened here, before any thread starts, and closed after they all join.
@@ -500,7 +521,7 @@ def random_reads(path, size, block, depth, seconds, direct=False, fail_thread=No
         def worker_direct(idx):
             n = 0
             stride = 1_000_003 * (idx * 2 + 1)
-            pos = (idx * 7_919_357) % span
+            pos = base + (idx * 7_919_357) % span
             rd = DirectReader(path, block, handle=shared_h)
             # Bound once, outside the loop. An `if overlapped` per iteration would
             # put a branch in the thing being timed; more to the point, binding it
@@ -514,7 +535,7 @@ def random_reads(path, size, block, depth, seconds, direct=False, fail_thread=No
                         raise RuntimeError(f"selftest: thread {idx} failing on purpose")
                     n += do_read(pos)
                     reads += 1
-                    pos = (pos + stride) % span
+                    pos = base + (pos - base + stride) % span
             except BaseException as exc:      # noqa: BLE001 - re-raised via errors[]
                 errors[idx] = exc
             finally:
@@ -545,7 +566,7 @@ def random_reads(path, size, block, depth, seconds, direct=False, fail_thread=No
         n = 0
         # A large odd stride per thread walks the whole file without repeating soon.
         stride = 1_000_003 * (idx * 2 + 1)
-        pos = (idx * 7_919_357) % span
+        pos = base + (idx * 7_919_357) % span
         # One buffer per thread, allocated once. See the note in sequential_control:
         # read() costs 1.92x here, and it costs most exactly where the drive is
         # fastest - at high queue depth - which would flatten the ratio this whole
@@ -561,7 +582,7 @@ def random_reads(path, size, block, depth, seconds, direct=False, fail_thread=No
                     fh.seek(pos)
                     n += fh.readinto(mv)
                     reads += 1
-                    pos = (pos + stride) % span
+                    pos = base + (pos - base + stride) % span
         except BaseException as exc:          # noqa: BLE001 - re-raised via errors[]
             errors[idx] = exc
         finally:
@@ -581,7 +602,7 @@ def random_reads(path, size, block, depth, seconds, direct=False, fail_thread=No
 
 
 def run_sweep(path, size, block, seconds, label, direct=False, fail_thread=None,
-              shared_handle=False, overlapped=False):
+              shared_handle=False, overlapped=False, window_mb=0):
     """The sweep itself. Returns (ratio_at_max_depth, rows) so a caller can compare two.
 
     Raises SweepInvalid if any reader died. It does not return a partial table:
@@ -595,7 +616,7 @@ def run_sweep(path, size, block, seconds, label, direct=False, fail_thread=None,
     for depth in (1, 4, 8, 16, 32, 64):
         try:
             mb, got, dt = random_reads(path, size, block, depth, seconds, direct,
-                                       fail_thread, shared_handle, overlapped)
+                                       fail_thread, shared_handle, overlapped, window_mb)
         except SweepInvalid as exc:
             print(f"  {depth:5}   INVALID - {exc}")
             raise
@@ -887,6 +908,7 @@ def main(argv):
     seconds = 4.0
     block_kb = 68
     neg_path = None
+    window_mb = 0
     direct = False
     fail_thread = None
     shared_handle = False
@@ -902,6 +924,8 @@ def main(argv):
             block_kb = int(argv[i + 1])
         if a == "--negative-control" and i + 1 < len(argv):
             neg_path = argv[i + 1]
+        if a == "--window-mb" and i + 1 < len(argv):
+            window_mb = float(argv[i + 1])
         if a == "--direct":
             direct = True
         # The failing case. A guard that has never fired is indistinguishable
@@ -1050,9 +1074,11 @@ def main(argv):
         return 1
 
     try:
-        disk_label = f"the real file, on disk - {arm_name}, {handles.lower()}"
+        placement = f", offsets inside ONE {window_mb:g} MiB window" if window_mb else ""
+        disk_label = f"the real file, on disk - {arm_name}{placement}, {handles.lower()}"
         disk_ratio, disk_rows = run_sweep(path, size, block, seconds, disk_label,
-                                          direct, None, shared_handle, overlapped)
+                                          direct, None, shared_handle, overlapped,
+                                          window_mb)
     except SweepInvalid as exc:
         print()
         print(f"  VERDICT: FAILED - {exc}")
