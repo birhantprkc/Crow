@@ -4,7 +4,7 @@
 Run:  python cli/test_crow.py
 
 Every group carries at least one case that must FAIL if the behaviour it
-guards regresses — a suite that cannot go red proves nothing.
+guards regresses -- a suite that cannot go red proves nothing.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ class HealthUrlTests(unittest.TestCase):
                 self.assertIn(":8081/", crow.health_url(base))
 
     def test_the_old_formula_really_was_broken(self):
-        """Positive control for the test above — it caught a real bug."""
+        """Positive control for the test above -- it caught a real bug."""
         broken = "http://127.0.0.1:8081/v1"[:-3] + "health"
         self.assertEqual(broken, "http://127.0.0.1:8081health")
         self.assertNotEqual(broken, crow.health_url("http://127.0.0.1:8081/v1"))
@@ -74,7 +74,7 @@ class ConversationTests(unittest.TestCase):
         grown = json.dumps(conversation.payload())
         self.assertTrue(
             grown.startswith(first[:-1]),
-            "the earlier turns changed — the prompt cache would be lost",
+            "the earlier turns changed -- the prompt cache would be lost",
         )
 
     def test_payload_is_a_copy(self):
@@ -132,9 +132,182 @@ class FormatTimingsTests(unittest.TestCase):
         self.assertNotIn("tok/s", line)
 
 
+class StreamReplyTests(unittest.TestCase):
+    """The two-stream contract, measured 2026-08-07.
+
+    The server sends thoughts in delta["reasoning_content"] and the answer in
+    delta["content"]. Reading content alone discarded 88.2 % of every
+    generated character and made ttft include the whole reasoning decode.
+    There was no test over stream_reply at all, which is why it survived.
+    """
+
+    def _run(self, deltas, **kw):
+        """Drive stream_reply against a canned SSE stream. Returns (text, timings, printed)."""
+        chunks = [json.dumps({"choices": [{"delta": d}]}) for d in deltas]
+        chunks.append(json.dumps({"choices": [], "timings": {"predicted_n": 7}}))
+        original = crow._post_stream
+        crow._post_stream = lambda url, body, key, timeout: iter(chunks)
+        sink = io.StringIO()
+        try:
+            text, timings = crow.stream_reply(
+                crow.Conversation("SYS"), base_url="http://x/v1", model="crow",
+                api_key="k", temperature=0.0, timeout=1.0, out=sink, **kw)
+        finally:
+            crow._post_stream = original
+        return text, timings, sink.getvalue()
+
+    def test_reasoning_is_counted_but_not_printed(self):
+        """It is 60-90 % of every answer; printed in full it buries the code."""
+        _, timings, printed = self._run([{"reasoning_content": "let me think"},
+                                         {"content": "ANSWER"}])
+        self.assertNotIn("let me think", printed)
+        self.assertIn("ANSWER", printed)
+        self.assertEqual(timings["_reasoning_chars"], len("let me think"))
+
+    def test_reasoning_never_enters_the_returned_text(self):
+        """It is display-only -- feeding it back would change the cached prefix."""
+        text, _, _ = self._run([{"reasoning_content": "SECRET THOUGHTS"},
+                                {"content": "ANSWER"}])
+        self.assertEqual(text, "ANSWER")
+        self.assertNotIn("SECRET", text)
+
+    def test_ttft_counts_the_first_token_of_any_kind(self):
+        """The defect: ttft used to start at the first CONTENT token, so it
+        silently contained the entire thinking phase."""
+        _, timings, _ = self._run([{"reasoning_content": "x" * 50},
+                                   {"content": "A"}])
+        self.assertIn("_client_ttft_s", timings)
+        self.assertIn("_client_answer_s", timings)
+        self.assertLessEqual(timings["_client_ttft_s"], timings["_client_answer_s"])
+
+    def test_thinking_share_is_reported(self):
+        _, timings, _ = self._run([{"reasoning_content": "1234567890" * 9},
+                                   {"content": "1234567890"}])
+        self.assertEqual(timings["_reasoning_chars"], 90)
+        self.assertEqual(timings["_content_chars"], 10)
+        self.assertIn("thinking 90%", crow.format_timings(timings))
+
+    def test_a_reply_without_reasoning_still_works(self):
+        """Endpoints that do not split the field must behave exactly as before."""
+        text, timings, printed = self._run([{"content": "PLAIN"}])
+        self.assertEqual(text, "PLAIN")
+        self.assertIn("PLAIN", printed)
+        self.assertNotIn("_reasoning_chars", timings)
+        self.assertNotIn("thinking", crow.format_timings(timings))
+
+    def test_server_timings_survive(self):
+        _, timings, _ = self._run([{"content": "A"}])
+        self.assertEqual(timings["predicted_n"], 7)
+
+
+class RendererTests(unittest.TestCase):
+    """Fenced code has to be framed WHILE it streams, not after."""
+
+    def _render(self, text, chunk=1):
+        sink = io.StringIO()
+        r = crow.Renderer(out=sink)
+        for i in range(0, len(text), chunk):
+            r.feed(text[i:i + chunk])
+        r.close()
+        return sink.getvalue()
+
+    def test_prose_passes_through(self):
+        self.assertIn("hello world", self._render("hello world\n"))
+
+    def test_fence_markers_are_consumed(self):
+        out = self._render("```python\nx = 1\n```\n")
+        self.assertNotIn("```", out)
+        self.assertIn("x = 1", out)
+
+    def test_code_gets_a_frame_naming_the_language(self):
+        out = self._render("```python\nx = 1\n```\n")
+        self.assertIn("python", out)
+        self.assertIn("+-", out)
+        self.assertIn("| ", out)
+
+    def test_same_output_regardless_of_chunk_size(self):
+        """The reply arrives token by token; a renderer that only works on
+        whole lines would break on the real stream."""
+        text = "before\n```js\nconst a = 1;\n```\nafter\n"
+        one = self._render(text, chunk=1)
+        big = self._render(text, chunk=999)
+        self.assertEqual(one, big)
+
+    def test_unterminated_fence_is_closed_on_exit(self):
+        """An interrupted answer must not leave the frame hanging open."""
+        out = self._render("```python\nx = 1\n")
+        self.assertIn("x = 1", out)
+        self.assertFalse(crow.Renderer(out=io.StringIO()).in_code)
+        self.assertGreaterEqual(out.count("+"), 2)
+
+    def test_language_is_tracked(self):
+        r = crow.Renderer(out=io.StringIO())
+        r.feed("```python\n")
+        self.assertTrue(r.in_code)
+        self.assertEqual(r.language, "python")
+        r.feed("```\n")
+        self.assertFalse(r.in_code)
+
+
+class HighlightTests(unittest.TestCase):
+    def test_unknown_language_is_untouched(self):
+        """A false colour reads as meaning -- worse than no colour."""
+        self.assertEqual(crow.highlight("def x(): pass", "brainfuck"),
+                         "def x(): pass")
+
+    def test_plain_text_survives_round_trip(self):
+        """Whatever is painted, stripping the codes must give the source back."""
+        import re as _re
+        line = 'def f(x):  # note "quoted" 42'
+        painted = crow.highlight(line, "python")
+        self.assertEqual(_re.sub(r"\033\[[0-9;]*m", "", painted), line)
+
+    def test_keyword_inside_a_string_is_not_a_keyword(self):
+        painted = crow.highlight('s = "def class return"', "python")
+        stripped = __import__("re").sub(r"\033\[[0-9;]*m", "", painted)
+        self.assertEqual(stripped, 's = "def class return"')
+
+
+class PromptTests(unittest.TestCase):
+    """The context counter in the prompt."""
+
+    def test_fresh_session_shows_no_number(self):
+        self.assertEqual(crow.format_prompt(0), "you> ")
+
+    def test_small_context_is_exact(self):
+        """'0k' would be useless at the start of a session."""
+        self.assertEqual(crow.format_prompt(342), "342 | you> ")
+
+    def test_large_context_is_abbreviated(self):
+        self.assertEqual(crow.format_prompt(12345), "12.3k | you> ")
+
+    def test_the_number_is_visible_at_all(self):
+        """Negative control: a prompt that never shows the count is the bug
+        this was added for."""
+        self.assertNotEqual(crow.format_prompt(5000), crow.format_prompt(0))
+
+    def test_bar_appears_only_when_the_limit_is_known(self):
+        """A bar against an invented limit is worse than no bar."""
+        self.assertNotIn("#", crow.format_prompt(5000, 0))
+        self.assertIn("#", crow.format_prompt(5000, 10000))
+
+    def test_bar_fills_with_the_share_used(self):
+        half = crow.format_prompt(5000, 10000)
+        full = crow.format_prompt(9500, 10000)
+        self.assertLess(half.count("#"), full.count("#"))
+        self.assertIn("/10k", half)
+
+
 class RavenTests(unittest.TestCase):
+    def test_label_can_change_while_flapping(self):
+        """The bird is the only progress signal now that reasoning is not
+        printed -- a fixed label could not show the switch to writing."""
+        raven = crow.Raven(stream=io.StringIO())
+        raven.set_label("writing code")
+        self.assertEqual(raven._label, "writing code")
+
     def test_silent_when_not_a_terminal(self):
-        """Piped output must stay clean — no frames in captured transcripts."""
+        """Piped output must stay clean -- no frames in captured transcripts."""
         sink = io.StringIO()  # StringIO has no isatty() returning True
         with crow.Raven(stream=sink):
             pass
@@ -186,6 +359,17 @@ class ParserTests(unittest.TestCase):
         args = crow.build_parser().parse_args([])
         self.assertEqual(args.base_url, "http://127.0.0.1:8081/v1")
         self.assertEqual(args.model, "crow")
+
+    def test_default_temperature_is_not_greedy(self):
+        """Measured 2026-08-07: at 0.0 the model looped inside its reasoning
+        block on a three.js task and never reached the answer. Greedy decoding
+        walks into a repetition attractor and cannot leave it."""
+        self.assertGreater(crow.build_parser().parse_args([]).temperature, 0.0)
+
+    def test_temperature_can_still_be_pinned_to_zero(self):
+        """Measurement runs need byte-identical output and must be able to
+        ask for it explicitly."""
+        args = crow.build_parser().parse_args(["--temperature", "0"])
         self.assertEqual(args.temperature, 0.0)
 
     def test_base_url_override(self):
@@ -222,3 +406,4 @@ class EndpointFailureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
