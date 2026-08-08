@@ -266,8 +266,15 @@ while ($true) {
 }
 Write-Host ("  added $($extra.Count) runtime libraries in $rounds rounds")
 
-# 3 - the client, and the terms it must ship under
+# 3 - the client, and the terms it must ship under.
+#     Copy-Item -Recurse takes __pycache__ with it, which shipped a
+#     crow.cpython-313.pyc into the first package built here -- a compiled
+#     artefact of this machine's Python version, useless to anyone else.
 Copy-Item -LiteralPath (Join-Path $repo 'cli') -Destination (Join-Path $stage 'cli') -Recurse
+Get-ChildItem (Join-Path $stage 'cli') -Recurse -Directory -Filter '__pycache__' |
+    ForEach-Object { Remove-Item $_.FullName -Recurse -Force }
+$stray = Get-ChildItem (Join-Path $stage 'cli') -Recurse -File -Include '*.pyc', '*.pyo'
+if ($stray) { throw ("compiled Python left in the package: " + ($stray.Name -join ', ')) }
 foreach ($f in @('LICENSE', 'NOTICE', 'README.md')) {
     Copy-Item -LiteralPath (Join-Path $repo $f) -Destination $stage
 }
