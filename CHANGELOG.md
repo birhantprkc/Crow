@@ -10,6 +10,13 @@ is in its commit message and on its issue; this is the short version.
 
 ### Fixed
 
+- **The server command the installer prints was missing `--port 8081`.** `llama-server`
+  defaults to 8080 and the client defaults to 8081, so following the instructions
+  exactly produced a server the client could not find — and on Windows 8080 is
+  frequently already held by something else, which is how it surfaced: a bind
+  failure rather than a silent mismatch. The operating-point page in the project's
+  notes carried the flag all along; the shipped command had dropped it.
+
 - **The installer verified nothing, and the word was on the screen anyway.** Step 3
   was called *Verifying*: it printed the archive's SHA256 and compared it with
   nothing, and the `MANIFEST.json` in the package — a hash per file — was never

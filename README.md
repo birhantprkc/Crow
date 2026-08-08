@@ -135,7 +135,7 @@ hf download unsloth/DeepSeek-V4-Flash-GGUF --include "UD-IQ3_XXS/*" --local-dir 
 ```powershell
 %LOCALAPPDATA%\Crow\bin\llama-server.exe `
   -m %LOCALAPPDATA%\Crow\models\UD-IQ3_XXS\DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf `
-  -c 200000 -ngl 99 -np 1 --jinja `
+  --port 8081 -c 200000 -ngl 99 -np 1 --jinja `
   --moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct
 ```
 
@@ -144,6 +144,7 @@ Every flag carries a reason, and none of them is taste:
 | Flag | Why |
 |---|---|
 | `-c 200000` | A coding session holds files and history. 16k or 64k measures a product nobody uses. Measured: 200k loads on one slot at 31,838 of 32,607 MiB |
+| `--port 8081` | Not a preference. `llama-server` defaults to 8080 and the client defaults to 8081, so leaving it out gives a server the client cannot find — and on Windows 8080 is often already taken |
 | `-np 1` | One user, one stream. `-np 4` splits the context into 4 × 50k and is the harness case, not the CLI |
 | `--jinja` | Use the **model's** chat template instead of llama.cpp's built-in one. Without it the client's replayed reasoning is dropped and the prompt cache breaks on every turn: measured 138.8–242.3 s of re-prefill per turn against 1.6–2.2 s |
 | `--moe-stream` | Route expert tensors through the slot cache instead of placing them |

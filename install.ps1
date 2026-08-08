@@ -613,7 +613,7 @@ Write-Host "    $InstallTo\bin\llama-server.exe -m $InstallTo\models\UD-IQ3_XXS\
 # and the prompt cache breaks on every turn -- measured 2026-08-08, 138.8-242.3 s
 # of re-prefill per turn against 1.6-2.2 s. This is the line people copy, so it
 # is the line that has to carry the flag.
-Write-Host "      -c 200000 -ngl 99 -np 1 --jinja ``" -ForegroundColor White
+Write-Host "      --port 8081 -c 200000 -ngl 99 -np 1 --jinja ``" -ForegroundColor White
 Write-Host "      --moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct" -ForegroundColor White
 Write-Host ""
 Write-Host "    python $InstallTo\cli\crow.py" -ForegroundColor White
