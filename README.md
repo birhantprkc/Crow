@@ -213,10 +213,10 @@ the repository is and how to run it — nothing else.
 
 ## Licence
 
-MIT, see `LICENSE`. Four components carry terms this project cannot grant, and
-`THIRD-PARTY-NOTICES.md` says which: the diffs under `patches/` are against `ggml-org/llama.cpp`
-and carry its MIT notice verbatim, the bundled typeface is under the SIL Open Font License 1.1,
-the model is fetched rather than shipped, and the CUDA backend is built against NVIDIA's toolkit.
+MIT, see `LICENSE`. It also carries the terms of the four components this project cannot grant:
+`ggml-org/llama.cpp` (MIT, other copyright holders), `deepseek-ai/DeepSeek-V4-Flash` (MIT, fetched
+rather than shipped), the NVIDIA CUDA Toolkit the CUDA backend is built against, and Google Sans
+Code under the SIL Open Font License 1.1.
 
 ## Credits
 
