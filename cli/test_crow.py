@@ -101,6 +101,30 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(conversation.payload(), [])
         self.assertEqual(len(conversation), 0)
 
+    def test_assistant_reasoning_rides_along(self):
+        conversation = crow.Conversation("SYS")
+        conversation.append("user", "a")
+        conversation.append("assistant", "b", "THOUGHTS")
+        self.assertEqual(conversation.payload()[2],
+                         {"role": "assistant", "content": "b",
+                          "reasoning_content": "THOUGHTS"})
+
+    def test_a_turn_without_reasoning_carries_no_field(self):
+        """An empty field would move the prefix for nothing."""
+        conversation = crow.Conversation("SYS")
+        conversation.append("assistant", "b")
+        conversation.append("assistant", "c", "")
+        self.assertNotIn("reasoning_content", conversation.payload()[1])
+        self.assertNotIn("reasoning_content", conversation.payload()[2])
+
+    def test_the_prefix_still_grows_only_at_the_end_with_reasoning(self):
+        conversation = crow.Conversation("SYS")
+        conversation.append("user", "one")
+        conversation.append("assistant", "two", "THOUGHTS")
+        first = json.dumps(conversation.payload())
+        conversation.append("user", "three")
+        self.assertTrue(json.dumps(conversation.payload()).startswith(first[:-1]))
+
     def test_no_edit_or_delete_api_exists(self):
         """Append-only by construction, not by discipline."""
         for forbidden in ("pop", "insert", "remove", "edit", "replace", "prepend"):
@@ -143,63 +167,114 @@ class StreamReplyTests(unittest.TestCase):
     There was no test over stream_reply at all, which is why it survived.
     """
 
-    def _run(self, deltas, **kw):
-        """Drive stream_reply against a canned SSE stream. Returns (text, timings, printed)."""
+    def _run(self, deltas, conversation=None, **kw):
+        """Drive stream_reply against a canned SSE stream.
+
+        Returns (text, reasoning, timings, printed). The body the caller would
+        have sent is kept in self.sent_body -- what goes on the wire is part of
+        the contract, not an implementation detail.
+        """
         chunks = [json.dumps({"choices": [{"delta": d}]}) for d in deltas]
         chunks.append(json.dumps({"choices": [], "timings": {"predicted_n": 7}}))
         original = crow._post_stream
-        crow._post_stream = lambda url, body, key, timeout: iter(chunks)
+
+        def fake(url, body, key, timeout):
+            self.sent_body = body
+            return iter(chunks)
+
+        crow._post_stream = fake
         sink = io.StringIO()
         try:
-            text, timings = crow.stream_reply(
-                crow.Conversation("SYS"), base_url="http://x/v1", model="crow",
+            text, reasoning, timings = crow.stream_reply(
+                conversation if conversation is not None else crow.Conversation("SYS"),
+                base_url="http://x/v1", model="crow",
                 api_key="k", temperature=0.0, timeout=1.0, out=sink, **kw)
         finally:
             crow._post_stream = original
-        return text, timings, sink.getvalue()
+        return text, reasoning, timings, sink.getvalue()
 
     def test_reasoning_is_counted_but_not_printed(self):
         """It is 60-90 % of every answer; printed in full it buries the code."""
-        _, timings, printed = self._run([{"reasoning_content": "let me think"},
-                                         {"content": "ANSWER"}])
+        _, _, timings, printed = self._run([{"reasoning_content": "let me think"},
+                                            {"content": "ANSWER"}])
         self.assertNotIn("let me think", printed)
         self.assertIn("ANSWER", printed)
         self.assertEqual(timings["_reasoning_chars"], len("let me think"))
 
     def test_reasoning_never_enters_the_returned_text(self):
-        """It is display-only -- feeding it back would change the cached prefix."""
-        text, _, _ = self._run([{"reasoning_content": "SECRET THOUGHTS"},
-                                {"content": "ANSWER"}])
+        """It travels as its own field, never merged into the answer."""
+        text, reasoning, _, _ = self._run([{"reasoning_content": "SECRET THOUGHTS"},
+                                           {"content": "ANSWER"}])
         self.assertEqual(text, "ANSWER")
         self.assertNotIn("SECRET", text)
+        self.assertEqual(reasoning, "SECRET THOUGHTS")
+
+    def test_reasoning_is_returned_whole_across_deltas(self):
+        """It arrives in pieces and has to go back in one piece."""
+        _, reasoning, _, _ = self._run([{"reasoning_content": "one "},
+                                        {"reasoning_content": "two"},
+                                        {"content": "A"}])
+        self.assertEqual(reasoning, "one two")
+
+    def test_the_request_carries_tools(self):
+        """Without them this model's template drops a replayed reasoning field
+        and both variants render byte for byte the same -- measured 2026-08-08
+        via /apply-template, 132 characters either way."""
+        self._run([{"content": "A"}])
+        self.assertTrue(self.sent_body.get("tools"), "no tools -- the replay would be inert")
+        names = [t["function"]["name"] for t in self.sent_body["tools"]]
+        self.assertIn("read_file", names)
 
     def test_ttft_counts_the_first_token_of_any_kind(self):
         """The defect: ttft used to start at the first CONTENT token, so it
         silently contained the entire thinking phase."""
-        _, timings, _ = self._run([{"reasoning_content": "x" * 50},
-                                   {"content": "A"}])
+        _, _, timings, _ = self._run([{"reasoning_content": "x" * 50},
+                                      {"content": "A"}])
         self.assertIn("_client_ttft_s", timings)
         self.assertIn("_client_answer_s", timings)
         self.assertLessEqual(timings["_client_ttft_s"], timings["_client_answer_s"])
 
     def test_thinking_share_is_reported(self):
-        _, timings, _ = self._run([{"reasoning_content": "1234567890" * 9},
-                                   {"content": "1234567890"}])
+        _, _, timings, _ = self._run([{"reasoning_content": "1234567890" * 9},
+                                      {"content": "1234567890"}])
         self.assertEqual(timings["_reasoning_chars"], 90)
         self.assertEqual(timings["_content_chars"], 10)
         self.assertIn("thinking 90%", crow.format_timings(timings))
 
     def test_a_reply_without_reasoning_still_works(self):
         """Endpoints that do not split the field must behave exactly as before."""
-        text, timings, printed = self._run([{"content": "PLAIN"}])
+        text, reasoning, timings, printed = self._run([{"content": "PLAIN"}])
         self.assertEqual(text, "PLAIN")
+        self.assertEqual(reasoning, "")
         self.assertIn("PLAIN", printed)
         self.assertNotIn("_reasoning_chars", timings)
         self.assertNotIn("thinking", crow.format_timings(timings))
 
     def test_server_timings_survive(self):
-        _, timings, _ = self._run([{"content": "A"}])
+        _, _, timings, _ = self._run([{"content": "A"}])
         self.assertEqual(timings["predicted_n"], 7)
+
+    def test_turn_two_sends_turn_ones_thoughts_back(self):
+        """The case #60 asks for: red on the code of 206da71.
+
+        Measured 2026-08-08 over ten-turn sessions: leaving the field out costs
+        the size of the previous turn's output on EVERY turn -- 55.0 s against
+        33.3 s of total prefill on short answers, 242.3 s against 1.6 s on a
+        turn that had generated 2046 tokens.
+        """
+        conversation = crow.Conversation("SYS")
+        conversation.append("user", "one")
+        text, reasoning, _, _ = self._run(
+            [{"reasoning_content": "THOUGHTS OF TURN ONE"}, {"content": "ANSWER ONE"}],
+            conversation=conversation)
+        conversation.append("assistant", text, reasoning)
+        conversation.append("user", "two")
+
+        self._run([{"content": "ANSWER TWO"}], conversation=conversation)
+        assistant = [m for m in self.sent_body["messages"] if m["role"] == "assistant"]
+        self.assertEqual(len(assistant), 1)
+        self.assertEqual(assistant[0]["reasoning_content"], "THOUGHTS OF TURN ONE")
+        self.assertEqual(assistant[0]["content"], "ANSWER ONE")
 
 
 class RendererTests(unittest.TestCase):

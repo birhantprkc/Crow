@@ -44,6 +44,27 @@ DEFAULT_SYSTEM = (
     "Always reply in the same language the user wrote in."
 )
 
+# Sent with every request, and the reason is the prompt cache rather than the
+# tool. The model's chat template keeps a previous turn's thoughts only while
+# `tools` is non-empty; with an empty array it drops them and a replayed
+# `reasoning_content` renders to nothing. Measured 2026-08-08 via the server's
+# own /apply-template: without tools both variants come out at 132 characters,
+# with tools at 1197 against 1215 -- and those 18 characters ARE the thoughts.
+# Executing a call is #58 and is not built here; an arriving tool_call is
+# reported through the finish reason rather than silently swallowed.
+TOOLS = [{
+    "type": "function",
+    "function": {
+        "name": "read_file",
+        "description": "Read a UTF-8 text file from disk and return its contents.",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "Path to the file."}},
+            "required": ["path"],
+        },
+    },
+}]
+
 # ANSI only, and only when stdout is a terminal: a redirected transcript has
 # to stay free of escape sequences, or every later grep over it is wrong.
 # No 256-colour or truecolour codes - the eight basic ones survive every
@@ -515,6 +536,15 @@ class Conversation:
     There is deliberately no method to edit or remove a message. The only
     way to shrink the context is `reset()`, which drops the whole thing and
     is understood to cost a full re-prefill.
+
+    AN ASSISTANT TURN CARRIES ITS REASONING. The model's template renders a
+    kept turn as `<think>...</think>`; omitting the field leaves an EMPTY
+    think block, so the prefix diverges where the thoughts began and the whole
+    tail behind it is re-read. Measured 2026-08-08 at the operating point with
+    --jinja: over ten-turn sessions the omission costs the size of the
+    PREVIOUS turn's output on every single turn -- 55.0 s against 33.3 s of
+    total prefill on short answers, and 242.3 s against 1.6 s on one turn that
+    had generated 2046 tokens. It does not accumulate; it repeats.
     """
 
     def __init__(self, system: str | None = None) -> None:
@@ -523,8 +553,13 @@ class Conversation:
         if system:
             self._messages.append({"role": "system", "content": system})
 
-    def append(self, role: str, content: str) -> None:
-        self._messages.append({"role": role, "content": content})
+    def append(self, role: str, content: str, reasoning: str | None = None) -> None:
+        message = {"role": role, "content": content}
+        # Absent rather than empty: a turn that produced no reasoning has to
+        # serialise exactly as it did before this field existed.
+        if reasoning:
+            message["reasoning_content"] = reasoning
+        self._messages.append(message)
 
     def reset(self) -> None:
         self._messages = []
@@ -640,8 +675,8 @@ def stream_reply(
     timeout: float,
     out=sys.stdout,
     prefix: str = "",
-) -> tuple[str, dict]:
-    """Stream one assistant turn. Returns (text, timings).
+) -> tuple[str, str, dict]:
+    """Stream one assistant turn. Returns (text, reasoning, timings).
 
     The reply is appended to the conversation by the caller, not here -- a
     turn that was interrupted must not silently become part of the prefix.
@@ -654,13 +689,20 @@ def stream_reply(
     generated character sat in it. Reading `content` alone therefore threw
     away most of what the model produced and left the user watching a bird.
 
-    Only `content` is returned for the context. Reasoning is display-only:
-    the chat template does not replay a previous turn's thoughts, so feeding
-    them back would change the prefix for no gain and break the prompt cache.
+    BOTH ARE RETURNED, and until 2026-08-08 this docstring claimed the
+    opposite: that the template does not replay a previous turn's thoughts, so
+    feeding them back would break the cache. Measured that day, it is the
+    other way round -- dropping the field is what breaks the prefix. See
+    `Conversation` for the numbers. `text` still carries content alone; the
+    reasoning travels as its own field and is never merged into the answer.
+
+    `tools` is what makes the replay take effect at all: this model's template
+    keeps a past turn's thoughts only when the request carries tools.
     """
     body = {
         "model": model,
         "messages": conversation.payload(),
+        "tools": TOOLS,
         "temperature": temperature,
         "stream": True,
         # llama.cpp extension: makes the server attach its own timing block
@@ -669,7 +711,7 @@ def stream_reply(
     }
 
     text_parts: list[str] = []
-    reasoning_chars = 0
+    reasoning_parts: list[str] = []
     timings: dict = {}
     started = time.monotonic()
     first_token_at: float | None = None
@@ -709,10 +751,11 @@ def stream_reply(
 
                 thought = delta.get("reasoning_content")
                 if thought:
-                    # Counted, not printed. The reasoning is 60-90 % of every
+                    # Kept, not printed. The reasoning is 60-90 % of every
                     # answer this model gives; printed in full it buries the
-                    # code. The bird carries the state instead.
-                    reasoning_chars += len(thought)
+                    # code. The bird carries the state instead. Kept rather
+                    # than merely counted because the next turn sends it back.
+                    reasoning_parts.append(thought)
                     _mark_first_token(time.monotonic())
 
                 piece = delta.get("content")
@@ -743,12 +786,13 @@ def stream_reply(
     if first_content_at is not None:
         timings.setdefault("_client_answer_s", round(first_content_at - started, 2))
     timings.setdefault("_client_total_s", round(elapsed, 2))
-    if reasoning_chars:
-        timings.setdefault("_reasoning_chars", reasoning_chars)
+    reasoning = "".join(reasoning_parts)
+    if reasoning:
+        timings.setdefault("_reasoning_chars", len(reasoning))
         timings.setdefault("_content_chars", sum(len(p) for p in text_parts))
     if finish_reason:
         timings.setdefault("_finish_reason", finish_reason)
-    return "".join(text_parts), timings
+    return "".join(text_parts), reasoning, timings
 
 
 def format_timings(timings: dict) -> str:
@@ -942,7 +986,7 @@ def repl(args: argparse.Namespace) -> int:
         # the next one before it starts.
         INTERRUPT.clear()
         try:
-            reply, timings = stream_reply(
+            reply, reasoning, timings = stream_reply(
                 conversation,
                 base_url=args.base_url,
                 model=args.model,
@@ -968,7 +1012,7 @@ def repl(args: argparse.Namespace) -> int:
             print("\n[interrupted -- turn discarded, context unchanged]\n")
             continue
 
-        conversation.append("assistant", reply)
+        conversation.append("assistant", reply, reasoning)
         prompt_n = timings.get("prompt_n")
         predicted_n = timings.get("predicted_n")
         if prompt_n is not None and predicted_n is not None:
