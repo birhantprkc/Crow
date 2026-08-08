@@ -40,64 +40,6 @@ def save(fig, name):
     print(f"  rendered {name}.png")
 
 
-def fit_cascade():
-    """The waterfall: what the model would need, against what it actually takes."""
-    steps = [
-        ("every weight\nat bf16",          568.0,  RED,    "a multi-GPU\nserver cluster"),
-        ("the file you\nactually download", 103.0,  ORANGE, "a 1 TB\nNVMe drive"),
-        ("what must stay\nin VRAM",          31.1,  AMBER,  "one RTX 5090"),
-        ("what the host\nRAM ever holds",     1.28, GREEN,  "any desktop"),
-    ]
-    # Each note carries its own height multiple: a single one for all three put the
-    # first note behind the "568 GB" label and the last one on top of a bar.
-    notes = [
-        ("3-bit experts instead of\n16-bit ones",       2.6),
-        ("only 6 of 256 fire, so the\nrest stay on the drive", 5.5),
-        ("the host holds no weights\nat all, reads go direct", 2.4),
-    ]
-
-    fig, ax = plt.subplots(figsize=(10.4, 5.9))
-    ax.set_yscale("log")
-    ax.set_ylabel("memory needed (GB)")
-    ax.set_ylim(0.55, 3000)
-
-    for i, (label, val, colour, machine) in enumerate(steps):
-        bottom = steps[i + 1][1] if i + 1 < len(steps) else 0.7
-        ax.bar(i, val - bottom, bottom=bottom, color=colour, width=0.52, zorder=3)
-        ax.text(i, val * 1.28, f"{val:,.6g} GB".replace(",", ","), ha="center",
-                fontsize=15.5, fontweight="bold", zorder=4)
-        if i + 1 < len(steps):
-            ax.plot([i + 0.26, i + 0.74], [bottom, bottom], ls="--", lw=1.4, color="#9ca3af", zorder=2)
-
-    # Each note sits in the gap BETWEEN two bars, above the dashed carry line it
-    # explains, with the arrow pointing down at that line. Placing them relative
-    # to a bar's own height put them on top of the bar.
-    for i, (note, lift) in enumerate(notes):
-        carry = steps[i + 1][1]
-        ax.annotate(note, xy=(i + 0.5, carry * 1.15), xytext=(i + 0.5, carry * lift),
-                    ha="center", va="bottom", fontsize=10.5, color=MUTED,
-                    arrowprops=dict(arrowstyle="->", color="#9ca3af", lw=1.3))
-
-    ax.set_xticks(range(len(steps)))
-    ax.set_xticklabels([s[0] for s in steps], fontsize=11.5, color=INK)
-    ax.set_xlim(-0.62, len(steps) - 0.38)
-    ax.grid(axis="y", color="#eef1f4", zorder=0)
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-
-    for i, (_, _, colour, machine) in enumerate(steps):
-        ax.annotate(machine, xy=(i, 0), xycoords=("data", "axes fraction"), xytext=(0, -58),
-                    textcoords="offset points", ha="center", fontsize=11, fontweight="bold",
-                    color="white", bbox=dict(boxstyle="round,pad=0.42", fc=colour, ec="none"))
-
-    ax.set_title("A 96 GB model, and the 32 GB card it runs on", fontsize=16, fontweight="bold", pad=18)
-    ax.text(0.5, 0.955, "444x smaller in host memory, and the output is byte-identical",
-            transform=ax.transAxes, ha="center", fontsize=13, fontweight="bold", color=INK)
-    ax.text(0.015, 0.035, "each gridline is 10x the one below, otherwise the last bar would be invisible",
-            transform=ax.transAxes, fontsize=9.5, color=MUTED, va="bottom")
-    save(fig, "fit_cascade")
-
-
 def slot_ladder():
     """What VRAM buys, measured across four cache sizes. Issue #25."""
     slots = [18, 32, 48, 64]
@@ -237,7 +179,6 @@ def batch_curve():
 
 def main() -> int:
     print("rendering plots")
-    fit_cascade()
     slot_ladder()
     quant_ladder()
     against_cpu()

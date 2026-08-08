@@ -70,10 +70,6 @@ def merge_intervals(intervals):
 
 ![Where every byte lives, what crosses between VRAM and the drive, and what it costs per token](docs/images/architecture.svg)
 
-Four decisions take a model that needs a server cluster down to one desktop card, and the answer at the bottom is the same as the answer at the top:
-
-![A 96 GB model and the 32 GB card it runs on](docs/images/fit_cascade.png)
-
 [Part II](#part-ii-how-it-works) builds every box in that diagram from the measurements that produced it.
 
 ---
