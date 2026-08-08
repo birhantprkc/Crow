@@ -341,7 +341,7 @@ function Resolve-InstallAction {
         return @{ Action = 'unknown'; Message = "cannot compare versions ($Installed -> $Target) -- pass -Force to install anyway" }
     }
 
-    if ($b -gt $a) { return @{ Action = 'update';    Message = "updating $Installed -> $Target" } }
+    if ($b -gt $a) { return @{ Action = 'update';    Message = "$Installed -> $Target" } }
     if ($b -eq $a) {
         if ($Force) { return @{ Action = 'install';  Message = "reinstalling $Target because -Force was passed" } }
         return @{ Action = 'uptodate'; Message = "$Target is already installed -- nothing to do" }
