@@ -47,26 +47,15 @@ That is the whole idea. Everything below is what it costs to make it actually ru
 
 ---
 
-```console
-PS> python cli\crow.py
+![The first turn of a session: the model is asked how to count a context window correctly, answers with code and a table of what the approach cannot do, and reports 2622 tokens at 8.69 tok/s with a cold prefill of 402 and a 33.84 s wait for the first token](docs/images/cli_turn_cold.png)
 
-crow at http://127.0.0.1:8081/v1 (health: ok, 200k context)
-/help for commands, /exit to leave.
+The first turn of a session pays for everything: `prefill 402`, `cached 0/402`, and 33.84 seconds before a word appears. Now the follow-up question, with three thousand tokens of conversation behind it:
 
-[----------] 4.7k/200k | you> take variant 2 and write me the finished function
+![The second turn of the same session: prefill 16, cached 3023 of 3039, first token after 1.58 s, and the context bar has moved from 3.0k to 3.9k of 200k](docs/images/cli_turn_warm.png)
 
-crow> Here's the finished function, using the server's own reported usage:
+**`prefill 16`, `cached 3023/3039`, first word after 1.58 seconds.** The server re-read sixteen tokens of a three-thousand-token prompt, because the prefix it had was still the prefix it got. Before 2026-08-08 that number was the size of the previous answer and the wait was minutes — [why](#the-context-is-append-only-and-carries-its-reasoning).
 
-def get_context_usage(server_response: dict, max_ctx: int = 200_000) -> int:
-    ...
-
-[1262 tok @ 8.56 tok/s | prefill 18 @ 10.61 tok/s | ttft 1.73s | answer 63.15s | thinking 44% | total 149.15s]
-```
-
-That `prefill 18` is the second turn of a real session, and it is the whole point of
-the line: the first turn had generated 4,256 tokens, and before 2026-08-08 the second
-turn re-read every one of them — about six and a half minutes before the first word
-appeared. [Why](#the-context-is-append-only-and-carries-its-reasoning).
+And the bar bottom left went **3.0k → 3.9k**. It used to run backwards.
 
 ![Where every byte lives, what crosses between VRAM and the drive, and what it costs per token](docs/images/architecture.svg)
 
@@ -383,7 +372,7 @@ Nothing in that list is waiting on a server change any more. It was, until 2026-
 **Decided by measurement, not by preference**
 
 - [x] **Whether reasoning goes back into the history — it does.** Settled by the prefill number rather than by argument: dropping it re-reads 0.909–0.986 of the previous turn's output every turn, replaying it re-reads 0.008–0.016. Live through the client, turns 2 and 3 prefilled 18 and 19 tokens where they had cost about 4,256 before. [#60](https://github.com/nibor1896/Crow/issues/60)
-- [ ] **The context counter.** The bar counts neither of the two things it could mean — it assigns instead of accumulating, and both of its terms are the wrong quantity. In a live session it ran *backwards* while the conversation grew. The field that settles it is already in the response: `usage.total_tokens`, with `prompt_tokens_details.cached_tokens` beside it as a per-turn cache reading. Second half of [#60](https://github.com/nibor1896/Crow/issues/60).
+- [x] **The context counter — it asks the server now.** It used to add `prompt_n` and `predicted_n`, which is wrong three times over: it assigned rather than accumulated, `prompt_n` counts the tokens the server *processed* rather than the length of the prompt, and `predicted_n` includes the reasoning. In a live session the bar ran *backwards* while the conversation grew. It reads `usage.total_tokens` now — the conversation as the server's own tokeniser counted it — and the timing line carries `cached N/M` beside it, which is the prompt cache working or not working, per turn, reported instead of inferred. Second half of [#60](https://github.com/nibor1896/Crow/issues/60).
 - [ ] **Staying fast and keeping the context as a session grows.** Two acceptance criteria, neither measured beyond ten turns: a turn must not get slower as the session lengthens, and the context that matters must still be there at the end of the window. [#61](https://github.com/nibor1896/Crow/issues/61)
 - [ ] **A release, once the loop stands.** The package builds and verifies today (`tools/pack-release.ps1`, 506 MB, self-contained), and the installer has now been run end to end into an empty directory rather than only self-tested. What it needs is something worth installing. Tracked as [#57](https://github.com/nibor1896/Crow/issues/57).
 - [ ] **A name and a logo.** `Crow` is the project name, not a product name. Tracked as [#56](https://github.com/nibor1896/Crow/issues/56), with one hard constraint already measured: the bundled typeface has 0 of 256 braille glyphs, so a braille logo and this font cannot both ship.
