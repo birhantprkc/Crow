@@ -66,6 +66,37 @@ MAGENTA = _c("\033[35m")
 BLUE = _c("\033[34m")
 RED = _c("\033[31m")
 
+# The two colours the product is recognised by. Truecolour, unlike the palette
+# above: these are brand values, and mapping them onto one of the eight basic
+# slots would hand them to the user's theme, where "blue" is whatever they set.
+# Terminals without truecolour ignore the sequence and fall back to their own
+# foreground - readable either way, just not ours.
+CROW_BG = "#0b0e17"                     # window background, set via OSC 11
+CROW_ACCENT = _c("\033[38;2;126;176;248m")   # #7eb0f8, the blue of the wordmark
+CROW_TEXT = _c("\033[38;2;255;255;255m")     # what the model says stays white
+BANNER_BEVEL = _c("\033[38;2;44;91;172m")    # #2c5bac, the wordmark's shaded edge
+
+
+def set_background(colour: str = CROW_BG) -> None:
+    """Ask the terminal for our window background via OSC 11.
+
+    A terminal that does not know the sequence drops it silently, so this
+    degrades to "the user's own background" rather than to garbage on screen.
+    Every path that leaves the CLI calls reset_background(): a program that
+    repaints the window and exits without restoring it has broken the terminal
+    for whatever runs next.
+    """
+    if _TTY:
+        sys.stdout.write(f"\033]11;{colour}\007")
+        sys.stdout.flush()
+
+
+def reset_background() -> None:
+    """Hand the background back. OSC 111 restores the terminal's own value."""
+    if _TTY:
+        sys.stdout.write("\033]111\007")
+        sys.stdout.flush()
+
 # Keywords worth colouring, kept to the three languages this assistant writes
 # most. A language it does not know renders as plain text rather than wrongly
 # highlighted - a false colour is worse than none, because it reads as meaning.
@@ -97,30 +128,43 @@ _TOKENS = re.compile(
     re.DOTALL,
 )
 
-# ASCII only, deliberately: the Windows console falls back to cp1252 and
-# would mangle box-drawing or emoji mid-animation.
-BANNER = r"""
-        __
-     __( o)>   c r o w
-     \___)     v{version}
+# The wordmark, drawn rather than typed: no terminal lets a program pick a
+# display face, so a banner that should look like anything has to be built out
+# of cells. Block elements, not ASCII - measured 2026-08-07, U+2580-259F is
+# 32 of 32 in both the bundled Google Sans Code and Cascadia Mono. The shade
+# character carries the bevel; painted in a darker blue it reads as depth.
+#
+# BANNER_ACCENT is the shade cell, so the caller can colour the two apart.
+BANNER_SHADE = "▓"
+BANNER = """
+    ██████  ███████   ██████  ██    ██
+   ██▓▓▓▓██ ██▓▓▓▓██ ██▓▓▓▓██ ██▓   ██
+   ██▓    ▓▓███████▓▓██▓   ██▓██▓   ██
+   ██▓      ██▓▓██▓▓ ██▓   ██▓██▓ ████
+   ██▓   ██ ██▓  ██  ██▓   ██▓████████
+    ██████▓▓██▓   ██  ██████▓▓███▓▓███
+   {version}
 """
 
-# One perched raven, four frames: wings, then a blink. Three lines each,
-# same width, so the redraw is a fixed cursor-up.
-RAVEN_FRAMES = (
-    (r"   __   ",
-     r"__( o)> ",
-     r"\___)   "),
-    (r"   __   ",
-     r"__( o)> ",
-     r"\__/)   "),
-    (r"   __   ",
-     r"__( -)> ",
-     r"\___)   "),
-    (r"   __/  ",
-     r"__( o)> ",
-     r"\___)   "),
-)
+
+def paint_banner(text: str) -> str:
+    """Two blues: the face in the wordmark colour, the bevel a few steps down."""
+    if not _TTY:
+        return text
+    shaded = text.replace(BANNER_SHADE, f"{BANNER_BEVEL}{BANNER_SHADE}{CROW_ACCENT}")
+    return f"{CROW_ACCENT}{shaded}{RESET}"
+
+# A quarter block travelling the corners: one cell, four frames, and it reads
+# as motion because only one quadrant is ever lit.
+#
+# NOT braille (⠋⠙⠹⠸), which is the usual choice for terminal spinners: the
+# bundled Google Sans Code carries 0 of 256 braille codepoints - measured
+# 2026-08-07 from its cmap, against Cascadia Mono's 256 of 256 as a control.
+# A braille spinner would fall back to a substitute face mid-animation and the
+# cell width would jump with it. Block elements are 32 of 32 in both.
+SPINNER_FRAMES = ("▘", "▝", "▗", "▖")   # ▘ ▝ ▗ ▖
+
+# BANNER_ACCENT is the shade cell, so the caller can colour the two apart.
 
 
 class CrowError(RuntimeError):
@@ -228,19 +272,23 @@ class Renderer:
 
 
 class Raven:
-    """A perched raven that flaps while the server is still thinking.
+    """One line: a turning quarter block, a word, and the seconds waited.
 
     It earns its place: a cold prefill of a long context takes minutes here,
-    and a blank terminal is indistinguishable from a hung process. The bird
-    stops at the first token and erases itself, so it never mixes into the
-    reply text.
+    and a blank terminal is indistinguishable from a hung process. The label
+    carries the state - `thinking` while the model reasons, `writing` once it
+    starts on the answer - and the whole line erases itself at the end, so it
+    never mixes into the reply text.
+
+    One line, not three: it sits where the prompt sits and does not push the
+    conversation up the screen on every turn.
 
     Silent when stdout is not a terminal (pipes, CI, transcript capture).
     """
 
-    HEIGHT = len(RAVEN_FRAMES[0])
+    HEIGHT = 1
 
-    def __init__(self, stream=None, interval: float = 0.18, label: str = "thinking") -> None:
+    def __init__(self, stream=None, interval: float = 0.12, label: str = "thinking") -> None:
         self._stream = stream or sys.stdout
         self._interval = interval
         self._label = label
@@ -271,19 +319,18 @@ class Raven:
 
     def _run(self) -> None:
         started = time.monotonic()
-        for frame in itertools.cycle(RAVEN_FRAMES):
+        for frame in itertools.cycle(SPINNER_FRAMES):
             if self._stop.is_set():
                 return
             waited = time.monotonic() - started
-            lines = list(frame)
-            lines[1] = f"{lines[1]}  {self._label} {waited:5.1f}s"
+            line = (f"{CROW_ACCENT}{frame}{RESET} {DIM}{self._label} "
+                    f"{waited:.1f}s{RESET}")
             with _DRAW_LOCK:
                 if self._stop.is_set():
                     return
                 if self._drawn:
                     self._stream.write(f"\033[{self.HEIGHT}A")
-                for line in lines:
-                    self._stream.write(f"\033[2K{line}\n")
+                self._stream.write(f"\033[2K{line}\n")
                 self._stream.flush()
                 self._drawn = True
             self._stop.wait(self._interval)
@@ -542,7 +589,7 @@ def stream_reply(
                         first_content_at = now
                         # One frame of the new state before the bird goes, so
                         # the switch from thinking to writing is visible.
-                        raven.set_label("writing code")
+                        raven.set_label("writing")
                         time.sleep(raven._interval)
                         raven.stop()
                         if prefix:
@@ -678,7 +725,7 @@ def format_prompt(context_tokens: int, n_ctx: int = 0) -> str:
     cp1252 fallback mangles.
     """
     if context_tokens <= 0:
-        return f"{BOLD}{CYAN}you>{RESET} "
+        return f"{BOLD}{CROW_ACCENT}you>{RESET} "
 
     if context_tokens < 1000:
         size = str(context_tokens)
@@ -693,27 +740,37 @@ def format_prompt(context_tokens: int, n_ctx: int = 0) -> str:
         colour = GREEN if share < 0.5 else (YELLOW if share < 0.85 else RED)
         bar = colour + "#" * filled + DIM + "-" * (10 - filled) + RESET
         limit = f"{n_ctx / 1000:.0f}k"
-        return f"{DIM}[{RESET}{bar}{DIM}]{RESET} {size}/{limit} {DIM}|{RESET} {BOLD}{CYAN}you>{RESET} "
+        return f"{DIM}[{RESET}{bar}{DIM}]{RESET} {size}/{limit} {DIM}|{RESET} {BOLD}{CROW_ACCENT}you>{RESET} "
 
-    return f"{size} {DIM}|{RESET} {BOLD}{CYAN}you>{RESET} "
+    return f"{size} {DIM}|{RESET} {BOLD}{CROW_ACCENT}you>{RESET} "
 
 
 def repl(args: argparse.Namespace) -> int:
     enable_ansi()
-    print(BANNER.format(version=VERSION))
+    if getattr(args, "background", True):
+        set_background()
+    print(paint_banner(BANNER.format(version=f"v{VERSION}")))
+
+    # Before the endpoint check, not after: the font has nothing to do with the
+    # server. Behind the check it would never install on a machine where the
+    # user starts the CLI before llama-server, which is the normal order.
+    if getattr(args, "font", True):
+        ensure_font()
 
     try:
         status = check_endpoint(args.base_url)
     except CrowError as exc:
         print(f"crow: {exc}", file=sys.stderr)
         print("crow: start llama-server first, then retry.", file=sys.stderr)
+        reset_background()
         return 2
 
     n_ctx = fetch_n_ctx(args.base_url)
     room = f", {n_ctx / 1000:.0f}k context" if n_ctx else ""
     print(f"{BOLD}{args.model}{RESET} at {args.base_url} "
           f"{DIM}(health: {status}{room}){RESET}")
-    print(f"{DIM}/help for commands, /exit to leave.{RESET}\n")
+    print(f"{DIM}/help for commands, /exit to leave.{RESET}")
+    print("")
 
     conversation = Conversation(args.system)
     # Tokens the server actually charged for last turn, not an estimate: it
@@ -754,7 +811,7 @@ def repl(args: argparse.Namespace) -> int:
                 api_key=args.api_key,
                 temperature=args.temperature,
                 timeout=args.timeout,
-                prefix=f"{BOLD}{GREEN}crow>{RESET} ",
+                prefix=f"{BOLD}{CROW_TEXT}crow>{RESET} ",
             )
         except CrowError as exc:
             print(f"\ncrow: {exc}\n", file=sys.stderr)
@@ -772,6 +829,223 @@ def repl(args: argparse.Namespace) -> int:
             context_tokens = int(prompt_n) + int(predicted_n)
         line_out = format_timings(timings)
         print(f"\n\n[{line_out}]\n" if line_out else "\n")
+
+
+FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+
+# The name a terminal has to be given, NOT the typographic family in the file.
+# GoogleSansCode[MONO,wght].ttf is a variable font; Windows resolves it into
+# named instances and registers those. Measured 2026-08-07 after installing:
+# the families on offer are "Google Sans Code Monospace", "... Proportional",
+# "... Medium Monospa" and so on - "Google Sans Code" is not among them, and
+# asking for it gets the "font not found" dialog. Name ID 1 of the file says
+# "Google Sans Code", which is what made the first attempt wrong.
+FONT_FAMILY = "Google Sans Code Monospace"
+
+# Values we wrote ourselves in earlier versions and may correct without asking.
+# Anything else in the user's settings is their choice and stays.
+_OUR_OLD_FACES = frozenset({"Google Sans Code"})
+_OUR_OLD_BACKGROUNDS = frozenset({"#0b0e17"})
+
+# What the family covers, measured 2026-08-07 by reading the cmap of
+# GoogleSansCode[MONO,wght].ttf v7.001 against Cascadia Mono as a control:
+# block elements U+2580-259F 32/32 and box drawing U+2500-257F 128/128 are
+# complete, BRAILLE U+2800-28FF is 0 of 256 (Cascadia has all 256). Any banner
+# built from braille cells would fall back to a substitute face here, the cell
+# advance changes with it, and the drawing comes apart. Block art is safe.
+
+
+def font_files() -> list[str]:
+    if not os.path.isdir(FONT_DIR):
+        return []
+    return sorted(f for f in os.listdir(FONT_DIR) if f.lower().endswith((".ttf", ".otf")))
+
+
+def font_installed() -> list[str]:
+    """Names of our font files already present in the per-user font store."""
+    target = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Fonts")
+    if not os.path.isdir(target):
+        return []
+    return [f for f in font_files() if os.path.isfile(os.path.join(target, f))]
+
+
+def install_font(verbose: bool = False) -> int:
+    """Copy the bundled faces into the PER-USER font store and register them.
+
+    Runs on first start, not behind a flag. A typeface nobody knows to ask for
+    does not get installed, and asking the user to type a setup command for
+    something they never requested is friction with no payoff.
+
+    Per-user on purpose: HKLM and %WINDIR%\\Fonts need elevation, and a chat CLI
+    has no business prompting for admin. Windows has honoured the per-user store
+    since 10 1809, and nothing outside this account is touched.
+
+    What it does NOT do is select the font. No emulator lets a running program
+    set its own typeface - Windows Terminal reads it from settings.json, conhost
+    from the registry. Installing makes it choosable; choosing stays with the
+    user, which is why the one line printed afterwards says how.
+    """
+    if os.name != "nt":
+        if verbose:
+            print("font install is Windows-only; the files are in cli/fonts")
+        return 2
+
+    files = font_files()
+    if not files:
+        if verbose:
+            print(f"no font files in {FONT_DIR}")
+        return 2
+
+    import shutil
+    import winreg
+
+    target = os.path.join(os.environ["LOCALAPPDATA"], "Microsoft", "Windows", "Fonts")
+    os.makedirs(target, exist_ok=True)
+    key = r"Software\Microsoft\Windows NT\CurrentVersion\Fonts"
+
+    done = 0
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as k:
+        for name in files:
+            dst = os.path.join(target, name)
+            if not os.path.isfile(dst):
+                shutil.copyfile(os.path.join(FONT_DIR, name), dst)
+                done += 1
+            # The per-user store wants the FULL PATH as the value; the machine
+            # store takes a bare filename. Writing a bare name here registers a
+            # font Windows then cannot find, and it fails silently.
+            winreg.SetValueEx(k, f"{FONT_FAMILY} ({name})", 0, winreg.REG_SZ, dst)
+    return 0 if done else 1
+
+
+def _terminal_settings_paths() -> list[str]:
+    """Where Windows Terminal keeps settings.json - store build, then unpackaged."""
+    local = os.environ.get("LOCALAPPDATA", "")
+    if not local:
+        return []
+    found = []
+    pkgs = os.path.join(local, "Packages")
+    if os.path.isdir(pkgs):
+        for name in os.listdir(pkgs):
+            if name.startswith("Microsoft.WindowsTerminal"):
+                p = os.path.join(pkgs, name, "LocalState", "settings.json")
+                if os.path.isfile(p):
+                    found.append(p)
+    p = os.path.join(local, "Microsoft", "Windows Terminal", "settings.json")
+    if os.path.isfile(p):
+        found.append(p)
+    return found
+
+
+def _strip_jsonc(text: str) -> str:
+    """Windows Terminal ships settings.json WITH comments; json.loads chokes on
+    them. Stripping is done outside string literals only - a // inside a path
+    like "C:\\\\x" or a URL must survive."""
+    out, i, n = [], 0, len(text)
+    in_str = esc = False
+    while i < n:
+        c = text[i]
+        if in_str:
+            out.append(c)
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            out.append(c)
+            i += 1
+        elif c == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+        elif c == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def set_terminal_look() -> str | None:
+    """Set our face and background as the defaults in Windows Terminal.
+
+    Returns the settings path if anything was written, else None.
+
+    Yes, this edits the user's settings.json. It is the only way either setting
+    reaches the screen: installing a font merely makes it choosable, and OSC 11
+    - the escape sequence that asks a terminal to repaint its background - is
+    not honoured here (measured 2026-08-07: sent at startup, the window stayed
+    black). A .bak of the original is written before anything changes.
+
+    Only profiles.defaults.font.face and profiles.defaults.background are
+    touched. A value that is already ours is left alone; any OTHER value is a
+    decision the user made on purpose and is never overwritten.
+    """
+    for path in _terminal_settings_paths():
+        try:
+            raw = open(path, encoding="utf-8-sig").read()
+            data = json.loads(_strip_jsonc(raw))
+            profiles = data.setdefault("profiles", {})
+            if isinstance(profiles, list):        # very old schema
+                continue
+            defaults = profiles.setdefault("defaults", {})
+            changed = False
+
+            font = defaults.get("font")
+            if not isinstance(font, dict):
+                font = {}
+            face = font.get("face")
+            if face != FONT_FAMILY and (not face or face in _OUR_OLD_FACES):
+                font["face"] = FONT_FAMILY
+                defaults["font"] = font
+                changed = True
+
+            bg = defaults.get("background")
+            if bg != CROW_BG and (not bg or bg.lower() in _OUR_OLD_BACKGROUNDS):
+                defaults["background"] = CROW_BG
+                changed = True
+
+            if not changed:
+                return None
+            with open(path + ".bak", "w", encoding="utf-8") as f:
+                f.write(raw)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+            return path
+        except Exception:
+            continue
+    return None
+
+
+def ensure_font() -> None:
+    """First start: install the font AND select it, then say what happened.
+    Silent on every later start.
+
+    Never raises. A missing font must not keep the CLI from starting - it is a
+    typeface, not a dependency.
+    """
+    try:
+        if os.name != "nt" or not font_files():
+            return
+        # Two separate questions, checked apart. Tying the profile write to the
+        # install meant that a version which registered the WRONG face name
+        # could never correct it: the files were already there, so the whole
+        # block was skipped and the terminal kept asking for a font that does
+        # not exist. Both steps are cheap and idempotent.
+        if not font_installed() and install_font() == 0:
+            print(f"{DIM}installed {FONT_FAMILY} (SIL OFL 1.1, cli/fonts/OFL.txt){RESET}")
+        written = set_terminal_look()
+        if written:
+            print(f"{DIM}set {FONT_FAMILY} and the background as Windows Terminal defaults "
+                  f"(backup: {os.path.basename(written)}.bak) - restart the terminal{RESET}")
+    except Exception:
+        pass
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -799,12 +1073,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temperature", type=float, default=0.6)
     parser.add_argument("--timeout", type=float, default=1800.0,
                         help="socket timeout in seconds (default: 1800)")
+    parser.add_argument("--no-font", dest="font", action="store_false",
+                        help=f"do not install the bundled {FONT_FAMILY} on first start")
+    parser.add_argument("--no-background", dest="background", action="store_false",
+                        help="leave the terminal background alone")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return repl(args)
+    # finally, not a plain call after repl(): an unhandled exception or a
+    # Ctrl+C that escapes the loop must not leave the user's terminal painted
+    # in our background for whatever they run next.
+    try:
+        return repl(args)
+    finally:
+        reset_background()
 
 
 if __name__ == "__main__":

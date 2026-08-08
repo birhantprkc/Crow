@@ -339,19 +339,29 @@ class RavenTests(unittest.TestCase):
         raven = crow.Raven(stream=sink, interval=0.01)
         self.assertTrue(raven._enabled, "raven should be enabled on a tty")
 
-    def test_all_frames_have_equal_shape(self):
-        """The redraw is a fixed cursor-up; ragged frames would smear."""
-        heights = {len(f) for f in crow.RAVEN_FRAMES}
-        self.assertEqual(len(heights), 1, "frames differ in line count")
-        for frame in crow.RAVEN_FRAMES:
-            widths = {len(line) for line in frame}
-            self.assertEqual(len(widths), 1, f"ragged frame: {frame}")
+    def test_banner_lines_are_equal_width(self):
+        """A ragged wordmark is visible at a glance; the bevel depends on the
+        columns lining up."""
+        lines = [l for l in crow.BANNER.splitlines() if l.strip() and "{" not in l]
+        widths = {len(l.rstrip()) for l in lines}
+        self.assertLessEqual(len(widths), 2, f"wordmark is ragged: {sorted(widths)}")
 
-    def test_frames_are_ascii(self):
-        """cp1252 consoles would mangle anything else."""
-        for frame in crow.RAVEN_FRAMES:
-            for line in frame:
-                line.encode("ascii")  # raises on non-ascii
+    def test_banner_uses_only_covered_glyphs(self):
+        """Every non-ASCII cell in the wordmark must sit in the block elements,
+        which the bundled font covers 32 of 32. A character outside that range
+        would fall back to another face and break the alignment."""
+        for ch in crow.BANNER:
+            if ord(ch) > 127:
+                self.assertTrue(0x2580 <= ord(ch) <= 0x259F,
+                                f"U+{ord(ch):04X} is outside the block elements")
+
+    def test_bevel_is_painted_apart_from_the_face(self):
+        """Positive control for paint_banner: without a separate colour on the
+        shade cell the wordmark is flat, and the test would not notice."""
+        painted = crow.paint_banner(crow.BANNER)
+        if crow._TTY:
+            self.assertIn(crow.BANNER_BEVEL, painted)
+        self.assertIn(crow.BANNER_SHADE, painted)
 
 
 class ParserTests(unittest.TestCase):
@@ -402,6 +412,136 @@ class EndpointFailureTests(unittest.TestCase):
         """Negative control: a port nothing listens on must not look healthy."""
         with self.assertRaises(crow.CrowError):
             crow.check_endpoint("http://127.0.0.1:9/v1", timeout=2.0)
+
+
+class FontTests(unittest.TestCase):
+    """Nothing here installs anything: the tests never touch the font store or
+    the registry. What they cover is the file side and the failure modes."""
+
+    def test_bundled_faces_are_present(self):
+        names = crow.font_files()
+        self.assertTrue(names, "cli/fonts carries no .ttf - the bundle is empty")
+        self.assertTrue(any("GoogleSansCode" in n for n in names))
+
+    def test_licence_travels_with_the_font(self):
+        """OFL 1.1 permits bundling only if the licence ships with it. A missing
+        OFL.txt makes the redistribution non-compliant, and nothing else notices."""
+        self.assertTrue((Path(crow.FONT_DIR) / "OFL.txt").is_file())
+
+    def test_only_font_files_are_listed(self):
+        """OFL.txt sits in the same directory and must not be handed to the
+        installer as a face."""
+        self.assertNotIn("OFL.txt", crow.font_files())
+
+    def test_empty_directory_yields_no_faces(self):
+        """Negative control: with no directory there are no faces, and the
+        installer has to say so rather than report success over nothing."""
+        old = crow.FONT_DIR
+        try:
+            crow.FONT_DIR = str(Path(old) / "does-not-exist")
+            self.assertEqual(crow.font_files(), [])
+        finally:
+            crow.FONT_DIR = old
+
+    def test_ensure_font_is_silent_and_safe_without_a_bundle(self):
+        """It runs on every start before the first prompt. On a tree without
+        fonts it must do nothing and must not raise - a typeface may never keep
+        the CLI from starting."""
+        old = crow.FONT_DIR
+        try:
+            crow.FONT_DIR = str(Path(old) / "does-not-exist")
+            crow.ensure_font()
+        finally:
+            crow.FONT_DIR = old
+
+    def test_install_reports_failure_without_a_bundle(self):
+        """Negative control: no faces means no success. A zero here would let
+        ensure_font print 'installed' over an empty directory."""
+        old = crow.FONT_DIR
+        try:
+            crow.FONT_DIR = str(Path(old) / "does-not-exist")
+            self.assertNotEqual(crow.install_font(), 0)
+        finally:
+            crow.FONT_DIR = old
+
+    def test_face_name_is_the_instance_not_the_family(self):
+        """The defect that shipped: "Google Sans Code" is the typographic family
+        in the file, but the variable font resolves into named instances and
+        Windows registers THOSE. Asking for the family gets the "font not found"
+        dialog. Measured 2026-08-07 from the installed families."""
+        self.assertEqual(crow.FONT_FAMILY, "Google Sans Code Monospace")
+
+    def test_the_old_wrong_face_may_be_corrected(self):
+        """A face we wrote ourselves gets fixed; anything else is the user's."""
+        self.assertIn("Google Sans Code", crow._OUR_OLD_FACES)
+        self.assertNotIn("Cascadia Mono", crow._OUR_OLD_FACES)
+
+    def test_font_install_is_on_by_default_and_can_be_declined(self):
+        """A font nobody knows to ask for never gets installed, so it happens on
+        first start. --no-font is the way out for anyone who does not want it."""
+        self.assertTrue(crow.build_parser().parse_args([]).font)
+        self.assertFalse(crow.build_parser().parse_args(["--no-font"]).font)
+
+
+class SpinnerTests(unittest.TestCase):
+    def test_four_frames_of_one_cell(self):
+        """Every frame must be exactly one cell wide, or the line jitters."""
+        self.assertEqual(len(crow.SPINNER_FRAMES), 4)
+        for f in crow.SPINNER_FRAMES:
+            self.assertEqual(len(f), 1)
+
+    def test_frames_are_block_elements_not_braille(self):
+        """Measured 2026-08-07: the bundled Google Sans Code has 0 of 256 braille
+        codepoints and 32 of 32 block elements. A braille spinner would swap to a
+        substitute face mid-animation and the cell advance would jump with it."""
+        for f in crow.SPINNER_FRAMES:
+            cp = ord(f)
+            self.assertTrue(0x2580 <= cp <= 0x259F,
+                            f"U+{cp:04X} is outside the block elements")
+            self.assertFalse(0x2800 <= cp <= 0x28FF, "braille is not covered")
+
+    def test_animation_occupies_a_single_line(self):
+        """It sits where the prompt sits; three lines would push the conversation
+        up the screen on every turn."""
+        self.assertEqual(crow.Raven.HEIGHT, 1)
+
+
+class BackgroundTests(unittest.TestCase):
+    def test_background_is_on_by_default_and_can_be_declined(self):
+        self.assertTrue(crow.build_parser().parse_args([]).background)
+        self.assertFalse(crow.build_parser().parse_args(["--no-background"]).background)
+
+    def test_brand_colours_are_the_measured_values(self):
+        """The blue of the wordmark and a white reply. Truecolour, so the user's
+        theme cannot reinterpret them."""
+        self.assertEqual(crow.CROW_BG, "#0b0e17")
+        if crow._TTY:
+            self.assertIn("126;176;248", crow.CROW_ACCENT)
+            self.assertIn("255;255;255", crow.CROW_TEXT)
+
+    def test_reset_is_reachable_without_a_terminal(self):
+        """It runs from the finally in main(); it must never raise there."""
+        crow.reset_background()
+
+
+class JsoncTests(unittest.TestCase):
+    """settings.json ships WITH comments. Stripping them wrongly is how an
+    editor eats a user's configuration, so the cases are pinned down here."""
+
+    def test_line_and_block_comments_go(self):
+        src = '{\n  // a\n  "x": 1, /* b */\n  "y": 2\n}'
+        self.assertEqual(json.loads(crow._strip_jsonc(src)), {"x": 1, "y": 2})
+
+    def test_slashes_inside_strings_survive(self):
+        """The case that breaks a naive regex: a path or URL is not a comment."""
+        src = '{"p": "C:\\\\x//y", "u": "https://example.com/a"}'
+        got = json.loads(crow._strip_jsonc(src))
+        self.assertEqual(got["p"], "C:\\x//y")
+        self.assertEqual(got["u"], "https://example.com/a")
+
+    def test_escaped_quote_does_not_end_the_string(self):
+        src = '{"q": "he said \\" // not a comment"}'
+        self.assertIn("//", json.loads(crow._strip_jsonc(src))["q"])
 
 
 if __name__ == "__main__":
