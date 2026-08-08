@@ -22,7 +22,7 @@
 <td align="center"><b>200k</b><br><sub>context, one slot</sub></td>
 <td align="center"><b>95.9 GiB</b><br><sub>model on disk</sub></td>
 <td align="center"><b>1.28 GiB</b><br><sub>peak host RAM, measured</sub></td>
-<td align="center"><b>12.08</b><br><sub>tok/s decode</sub></td>
+<td align="center"><b>12.08</b><br><sub>tok/s decode, gate median</sub></td>
 <td align="center"><b>0 EUR</b><br><sub>spent so far</sub></td>
 </tr>
 </table>
@@ -366,6 +366,7 @@ Written out because a page like this is easy to read as more than it says.
 - **Vendor model-card scores are statements about that vendor's harness**, not about the model, and none of them survives 2-bit or 3-bit quantisation. No published quality figure exists for the file this project runs.
 - **Nothing here is compared to another project's number.** The nearest published figures for this class of workload differ from this operating point in at least two free variables each, so a "we are faster" line would be measuring the difference between two machines.
 - **The upstream CUDA fault this project tracks was never reproduced here**, on this quantisation and this card. That is not a claim that it is fixed.
+- **The headline 12.08 tok/s is a gate median, not what a chat turn feels like.** It was measured over the coding gate's short tasks at the operating point — near-empty context, no tools header. Real turns in the client, with 1–5k of conversation behind them, decoded at 8.08–8.56 tok/s on 2026-08-08. Both figures are measured; the reason for the gap is not, and the measurement that would settle it is a decode series against context length.
 
 ---
 
