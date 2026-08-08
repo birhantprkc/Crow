@@ -211,6 +211,15 @@ These rules are the actual product of the repository; the numbers follow from th
 Knowledge lives on the issues and in a separate vault, not in this file. This README describes what
 the repository is and how to run it — nothing else.
 
+## Licence
+
+MIT, see `LICENSE`. Two parts of this repository are not covered by it and say so there: the
+diffs under `patches/` carry `ggml-org/llama.cpp`'s MIT notice verbatim in
+`patches/LICENSE.llama.cpp`, and the bundled typeface is under the SIL Open Font License 1.1,
+whose text ships beside it in `cli/fonts/OFL.txt`.
+
+The model is fetched, not shipped, and carries its own terms.
+
 ## Credits
 
 `Crow.jpg` is a generated render; the prompt that produced it sits beside it in
