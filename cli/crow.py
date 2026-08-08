@@ -188,8 +188,113 @@ SPINNER_FRAMES = ("▘", "▝", "▗", "▖")   # ▘ ▝ ▗ ▖
 # BANNER_ACCENT is the shade cell, so the caller can colour the two apart.
 
 
+# The command that updates an installation. It is the SAME line that installs
+# one: install.ps1 reads the version out of the cli\crow.py it finds in the
+# target and updates when its own is newer. Until 2026-08-08 that line refused a
+# non-empty target outright, so there was no route from one version to the next
+# short of deleting the directory by hand.
+UPDATE_COMMAND = "irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1 | iex"
+
+RELEASES_API = "https://api.github.com/repos/nibor1896/Crow/releases/latest"
+
+
 class CrowError(RuntimeError):
     """Raised when the endpoint cannot be reached or answers with an error."""
+
+
+def parse_version(text: str) -> tuple[int, ...] | None:
+    """"0.0.4" -> (0, 0, 4). None when it is not a plain dotted number.
+
+    None rather than a zero tuple on purpose: an unparseable string read as
+    (0,0,0) would compare as older than everything and announce an update on
+    every start.
+    """
+    parts = (text or "").strip().lstrip("vV").split(".")
+    if not parts or len(parts) > 4:
+        return None
+    out = []
+    for part in parts:
+        if not part.isdigit():
+            return None
+        out.append(int(part))
+    return tuple(out)
+
+
+def is_newer(candidate: str, current: str) -> bool:
+    """Is `candidate` a strictly higher version than `current`?
+
+    False whenever either side does not parse. A version check that cannot read
+    one of its two inputs has nothing to say, and saying it anyway would put a
+    permanent "update available" line in front of a user who is already current.
+    """
+    a, b = parse_version(candidate), parse_version(current)
+    if a is None or b is None:
+        return False
+    width = max(len(a), len(b))
+    return a + (0,) * (width - len(a)) > b + (0,) * (width - len(b))
+
+
+def fetch_latest_version(timeout: float = 4.0) -> str | None:
+    """The newest published release tag, or None if that cannot be learnt.
+
+    Every failure is None: no network, GitHub down, rate limit, a shape we do
+    not recognise. This runs on every start, so it is never allowed to print an
+    error or raise -- a broken update check must not stand between the user and
+    their prompt.
+    """
+    try:
+        req = urllib.request.Request(RELEASES_API, headers={
+            "User-Agent": f"crow/{VERSION}",
+            "Accept": "application/vnd.github+json",
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            tag = (json.loads(resp.read().decode("utf-8")) or {}).get("tag_name")
+        return tag.lstrip("vV") if isinstance(tag, str) and tag.strip() else None
+    except Exception:
+        return None
+
+
+def start_update_check(enabled: bool) -> "queue.Queue | None":
+    """Ask GitHub in the background. Returns the queue the answer will arrive in.
+
+    Started BEFORE the banner is drawn and read after it, so the network call
+    overlaps the work the CLI has to do anyway (banner, font, /health). The
+    thread is a daemon and nothing ever joins it: if the answer is late, the
+    line is skipped rather than the start delayed.
+    """
+    import queue
+
+    if not enabled:
+        return None
+    answers: "queue.Queue" = queue.Queue(maxsize=1)
+
+    def _ask() -> None:
+        try:
+            answers.put(fetch_latest_version(), block=False)
+        except Exception:
+            pass
+
+    threading.Thread(target=_ask, daemon=True).start()
+    return answers
+
+
+def update_notice(answers: "queue.Queue | None", wait: float = 1.5) -> str | None:
+    """The line to print, or None when there is nothing to say.
+
+    `wait` is the entire budget the check may cost a start. It is spent only
+    when the request is still in flight after the banner and the font; on a
+    machine with no network it is spent once and never blocks a turn.
+    """
+    if answers is None:
+        return None
+    try:
+        latest = answers.get(timeout=wait)
+    except Exception:
+        return None
+    if not latest or not is_newer(latest, VERSION):
+        return None
+    return (f"{BOLD}crow {latest} is out{RESET} {DIM}(you have {VERSION}){RESET}\n"
+            f"  {UPDATE_COMMAND}")
 
 
 # Ctrl+C, the belt-and-braces version.
@@ -992,6 +1097,10 @@ def next_context_tokens(current: int, timings: dict) -> int:
 def repl(args: argparse.Namespace) -> int:
     enable_ansi()
     install_interrupt_handler()
+    # First thing, before anything is drawn: the request then runs while the
+    # banner, the font check and /health do their work, and is usually answered
+    # by the time anyone looks at the queue.
+    updates = start_update_check(getattr(args, "update_check", True))
     if getattr(args, "background", True):
         set_background()
     print(paint_banner(BANNER.format(version=f"v{VERSION}")))
@@ -1001,6 +1110,14 @@ def repl(args: argparse.Namespace) -> int:
     # user starts the CLI before llama-server, which is the normal order.
     if getattr(args, "font", True):
         ensure_font()
+
+    # Above the endpoint check, because an out-of-date client that also cannot
+    # reach its server should say both things -- and the version line is the one
+    # that might explain the other.
+    notice = update_notice(updates)
+    if notice:
+        print(notice)
+        print("")
 
     try:
         status = check_endpoint(args.base_url)
@@ -1330,6 +1447,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"do not install the bundled {FONT_FAMILY} on first start")
     parser.add_argument("--no-background", dest="background", action="store_false",
                         help="leave the terminal background alone")
+    parser.add_argument("--version", action="version", version=f"crow {VERSION}",
+                        help="print the version and exit")
+    parser.add_argument("--no-update-check", dest="update_check", action="store_false",
+                        help="do not ask GitHub whether a newer release exists")
     return parser
 
 

@@ -49,6 +49,12 @@ param(
 $ErrorActionPreference = "Stop"
 $TOTAL_STEPS = 5
 
+# Where this script lives when it is piped into iex. Printed back at the user in
+# the one place where the run needs to be repeated with a switch, because
+# `irm <url> | iex` cannot take parameters and telling somebody to "pass -Force"
+# without the invocation that accepts it is advice they cannot act on.
+$INSTALL_URL = "https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1"
+
 # The target profile, measured on issue #25: 32 GB VRAM and 16 GB system RAM at a
 # 200k context window. Below 16 GB VRAM the operating point was never measured, so
 # the script refuses rather than pretending it knows what happens there.
@@ -278,6 +284,95 @@ function Resolve-PackageSource {
 }
 
 # ---------------------------------------------------------------------------
+# Updating an installation that is already there
+# ---------------------------------------------------------------------------
+
+function Get-InstalledVersion {
+    <#
+    The version of the installation sitting in $Dir, or $null.
+
+    Read out of the shipped cli\crow.py with the same pattern pack-release.ps1
+    uses to stamp the package, so the two can never disagree about where the
+    number lives. MANIFEST.json carries hashes, not a version.
+
+    $null means "there is something here but it does not identify itself" --
+    which is NOT the same as "nothing is installed", and the caller has to keep
+    those apart before it overwrites a stranger's directory.
+    #>
+    param([string] $Dir)
+
+    $cli = Join-Path $Dir "cli\crow.py"
+    if (-not (Test-Path -LiteralPath $cli)) { return $null }
+    $m = Select-String -LiteralPath $cli -Pattern '^VERSION\s*=\s*"([^"]+)"' | Select-Object -First 1
+    if (-not $m) { return $null }
+    return $m.Matches[0].Groups[1].Value
+}
+
+function Resolve-InstallAction {
+    <#
+    Returns @{ Action = 'install'|'update'|'uptodate'|'downgrade'|'unknown'; Message = <string> }.
+
+    A pure function on purpose, like Resolve-PackageSource: the selftest drives
+    every branch, including the ones that must refuse, without a filesystem and
+    without a network.
+
+    WHY THIS EXISTS. Until 2026-08-08 the installer refused any non-empty target
+    with "pass -Force to overwrite" and exit 1. The documented one-liner is
+    `irm ... | iex`, and a piped script cannot be given parameters at all -- so
+    the advice it printed could not be followed by the person reading it. There
+    was no way to move from one version to the next short of deleting the
+    directory by hand. An installed base that cannot be updated is worse than
+    one that was never installed.
+
+    'unknown' is deliberately NOT treated as "install anyway": a directory whose
+    contents we cannot identify may be somebody's own files, and overwriting it
+    on a guess is not ours to do.
+    #>
+    param([string] $Installed, [string] $Target, [bool] $Force)
+
+    if (-not $Installed) {
+        if ($Force) { return @{ Action = 'install';  Message = "overwriting an unidentified install because -Force was passed" } }
+        return @{ Action = 'unknown'; Message = "something is already in the target and does not identify itself -- pass -Force to overwrite it" }
+    }
+
+    $a = $null; $b = $null
+    if (-not ([version]::TryParse($Installed, [ref] $a)) -or -not ([version]::TryParse($Target, [ref] $b))) {
+        if ($Force) { return @{ Action = 'install'; Message = "version strings not comparable ($Installed -> $Target), proceeding because -Force was passed" } }
+        return @{ Action = 'unknown'; Message = "cannot compare versions ($Installed -> $Target) -- pass -Force to install anyway" }
+    }
+
+    if ($b -gt $a) { return @{ Action = 'update';    Message = "updating $Installed -> $Target" } }
+    if ($b -eq $a) {
+        if ($Force) { return @{ Action = 'install';  Message = "reinstalling $Target because -Force was passed" } }
+        return @{ Action = 'uptodate'; Message = "$Target is already installed -- nothing to do" }
+    }
+    if ($Force) { return @{ Action = 'install';      Message = "downgrading $Installed -> $Target because -Force was passed" } }
+    return @{ Action = 'downgrade'; Message = "a newer version is installed ($Installed, this installs $Target) -- pass -Force to go back" }
+}
+
+function Resolve-LatestVersion {
+    <#
+    The newest published release tag, or $Fallback when the API cannot be reached.
+
+    The one-liner fetches install.ps1 from main, so whatever number is hard-coded
+    here is only as fresh as the last push to that file. Asking the release API
+    makes the SAME one-liner install the newest version without anyone editing a
+    default -- and the hard-coded value stays as the offline answer rather than
+    the primary one.
+    #>
+    param([string] $Fallback)
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/nibor1896/Crow/releases/latest" `
+                                 -Headers @{ "User-Agent" = "crow-installer" } -TimeoutSec 10
+        $tag = "$($rel.tag_name)".TrimStart("v")
+        if ($tag) { return $tag }
+    } catch { }
+    return $Fallback
+}
+
+# ---------------------------------------------------------------------------
 # Download with a progress line that says what is happening
 # ---------------------------------------------------------------------------
 
@@ -423,6 +518,39 @@ function Invoke-Selftest {
     catch { $missed = $true }
     C "a missing local package is rejected"      $missed
 
+    # Updating. Every branch, because the defect this replaced was a single
+    # refusal that treated "an older Crow is here" the same as "a stranger's
+    # files are here" -- and gave both the same unusable advice.
+    C "an older install updates"                 ((Resolve-InstallAction "0.0.3" "0.0.4" $false).Action -eq 'update')
+    C "a two-step gap updates"                   ((Resolve-InstallAction "0.0.1" "0.0.4" $false).Action -eq 'update')
+    C "the same version does nothing"            ((Resolve-InstallAction "0.0.4" "0.0.4" $false).Action -eq 'uptodate')
+    C "the same version reinstalls with -Force"  ((Resolve-InstallAction "0.0.4" "0.0.4" $true).Action  -eq 'install')
+    C "a newer install is NOT overwritten"       ((Resolve-InstallAction "0.0.5" "0.0.4" $false).Action -eq 'downgrade')
+    C "and goes back only with -Force"           ((Resolve-InstallAction "0.0.5" "0.0.4" $true).Action  -eq 'install')
+
+    # The cases that must refuse. An unidentified directory is somebody's data
+    # until proven otherwise; a version string that will not parse must not be
+    # silently read as 0.0.0, which would make every unknown look like "older".
+    C "an unidentified target refuses"           ((Resolve-InstallAction $null "0.0.4" $false).Action -eq 'unknown')
+    C "and is overwritten only with -Force"      ((Resolve-InstallAction $null "0.0.4" $true).Action  -eq 'install')
+    C "an unparseable version refuses"           ((Resolve-InstallAction "not-a-version" "0.0.4" $false).Action -eq 'unknown')
+    C "an unparseable TARGET refuses too"        ((Resolve-InstallAction "0.0.3" "garbage" $false).Action -eq 'unknown')
+
+    # Reading the version back out of a shipped tree, and the two ways that fails.
+    $vdir = Join-Path $env:TEMP ("crow-selftest-v-" + [guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -ItemType Directory -Force -Path (Join-Path $vdir "cli") | Out-Null
+        Set-Content -LiteralPath (Join-Path $vdir "cli\crow.py") -Encoding utf8 `
+                    -Value @('#!/usr/bin/env python', 'VERSION = "1.2.3"', 'DEFAULT_MODEL = "crow"')
+        C "the installed version is read"        ((Get-InstalledVersion $vdir) -eq "1.2.3")
+
+        Set-Content -LiteralPath (Join-Path $vdir "cli\crow.py") -Encoding utf8 -Value @('no version line here')
+        C "a file without VERSION reads as null" ($null -eq (Get-InstalledVersion $vdir))
+    } finally {
+        Remove-Item -LiteralPath $vdir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    C "an empty directory reads as null"         ($null -eq (Get-InstalledVersion (Join-Path $env:TEMP "crow-selftest-absent")))
+
     # The regression behind the 255: reading the machine must not leave a native
     # command's broken exit code behind, because the script's own exit code is
     # whatever the last native call left there.
@@ -497,6 +625,18 @@ if (-not $pf.Ok) {
 }
 Write-Item "preflight" "passed" "ok"
 
+# Asked AFTER the preflight and only when it can matter: a machine that is about
+# to be refused should not wait on a network call first, and a run pointed at a
+# local package by -SourceUrl has already been told which bytes to install.
+# An explicit -Version wins over the release -- somebody naming a version means it.
+if (-not $PSBoundParameters.ContainsKey('Version') -and -not $SourceUrl) {
+    $latest = Resolve-LatestVersion -Fallback $Version
+    if ($latest -ne $Version) {
+        Write-Item "release" "$latest is the newest published (this file defaults to $Version)" "ok"
+        $Version = $latest
+    }
+}
+
 Write-Step "Downloading the package"
 
 $asset = "crow-$Version-win-x64.zip"
@@ -528,14 +668,42 @@ Write-Item "sha256" $sha
 
 Write-Step "Installing to $InstallTo"
 
-if ((Test-Path $InstallTo) -and -not $Force) {
+if (Test-Path $InstallTo) {
     $existing = @(Get-ChildItem $InstallTo -ErrorAction SilentlyContinue).Count
     if ($existing -gt 0) {
-        Write-Item "exists" "$InstallTo already holds $existing entries -- pass -Force to overwrite" "fail"
-        Exit-Run 1
-    return
+        $decision = Resolve-InstallAction -Installed (Get-InstalledVersion $InstallTo) `
+                                          -Target $Version -Force ([bool] $Force)
+        switch ($decision.Action) {
+            'uptodate' {
+                Write-Item "already current" $decision.Message "ok"
+                Write-Host ""
+                Write-Host "  Nothing was changed. Pass -Force to reinstall the same version." -ForegroundColor DarkGray
+                Exit-Run 0
+                return
+            }
+            'update'   { Write-Item "updating" $decision.Message "ok" }
+            'install'  { Write-Item "overwriting" $decision.Message "ok" }
+            default    {
+                # 'unknown' and 'downgrade': both refuse, and both print a route
+                # that a piped one-liner can actually take. `irm | iex` cannot be
+                # given parameters, so "pass -Force" alone is advice nobody
+                # reading it is able to follow.
+                Write-Item "not installing" $decision.Message "fail"
+                Write-Host ""
+                Write-Host "  The one-liner cannot pass -Force. To force it:" -ForegroundColor DarkGray
+                Write-Host "    &([scriptblock]::Create((irm $INSTALL_URL))) -Force" -ForegroundColor White
+                Exit-Run 1
+                return
+            }
+        }
     }
 }
+# NOTHING IS DELETED HERE, and that is not laziness. The last step of this
+# script tells the user to fetch the model into $InstallTo\models -- 95.9 GiB
+# that is not part of any package. An update that "cleaned" the target first
+# would throw that away and re-download it over the user's connection. Files
+# that a newer package no longer ships are therefore left behind; the manifest
+# check below verifies what SHOULD be there, and says nothing about extras.
 New-Item -ItemType Directory -Force -Path $InstallTo | Out-Null
 $n = Expand-WithProgress -ZipPath $tmp -Destination $InstallTo
 # Only what this script downloaded. A package handed in with -SourceUrl belongs

@@ -786,6 +786,98 @@ class JsoncTests(unittest.TestCase):
         self.assertIn("//", json.loads(crow._strip_jsonc(src))["q"])
 
 
+class VersionCompareTests(unittest.TestCase):
+    """The update notice is only as good as this comparison.
+
+    Its failure mode is not a crash: it is a line that tells every user on the
+    newest build that they are out of date, on every single start. That is worse
+    than no notice at all, because it trains people to ignore the one that matters.
+    """
+
+    def test_a_higher_patch_is_newer(self):
+        self.assertTrue(crow.is_newer("0.0.4", "0.0.3"))
+
+    def test_a_higher_minor_is_newer(self):
+        self.assertTrue(crow.is_newer("0.1.0", "0.0.9"))
+
+    def test_ten_beats_nine(self):
+        """String comparison gets this wrong: "0.0.10" < "0.0.9" as text."""
+        self.assertTrue(crow.is_newer("0.0.10", "0.0.9"))
+
+    def test_a_v_prefix_is_tolerated(self):
+        """Release tags carry it, the VERSION constant does not."""
+        self.assertTrue(crow.is_newer("v0.0.4", "0.0.3"))
+
+    def test_shorter_and_longer_forms_compare(self):
+        self.assertTrue(crow.is_newer("0.1", "0.0.9"))
+        self.assertFalse(crow.is_newer("0.0.3", "0.0.3.0"))
+
+    # The half that must go red. Each of these, answered the other way, puts a
+    # permanent "update available" in front of somebody who is already current.
+    def test_the_same_version_is_not_newer(self):
+        self.assertFalse(crow.is_newer("0.0.3", "0.0.3"))
+
+    def test_an_older_version_is_not_newer(self):
+        self.assertFalse(crow.is_newer("0.0.2", "0.0.3"))
+
+    def test_garbage_is_never_newer(self):
+        for junk in ("", "latest", "0.0.x", "main", "0..1", "1.2.3.4.5", None):
+            with self.subTest(junk=junk):
+                self.assertFalse(crow.is_newer(junk or "", "0.0.3"))
+
+    def test_an_unparseable_current_version_silences_the_check(self):
+        """If we cannot read our OWN version, we have nothing to compare against."""
+        self.assertFalse(crow.is_newer("9.9.9", "not-a-version"))
+
+    def test_parse_returns_none_rather_than_zeroes(self):
+        """(0,0,0) would sort below every release and announce an update always."""
+        self.assertIsNone(crow.parse_version("not-a-version"))
+        self.assertEqual(crow.parse_version("1.2.3"), (1, 2, 3))
+
+
+class UpdateNoticeTests(unittest.TestCase):
+    """What the user actually sees, including when they must see nothing."""
+
+    @staticmethod
+    def _answered(value):
+        import queue
+        q = queue.Queue(maxsize=1)
+        q.put(value)
+        return q
+
+    def test_a_newer_release_names_the_command(self):
+        line = crow.update_notice(self._answered("9.9.9"), wait=0.01)
+        self.assertIsNotNone(line)
+        self.assertIn("9.9.9", line)
+        self.assertIn(crow.UPDATE_COMMAND, line)
+
+    def test_the_current_version_says_nothing(self):
+        self.assertIsNone(crow.update_notice(self._answered(crow.VERSION), wait=0.01))
+
+    def test_a_failed_lookup_says_nothing(self):
+        """fetch_latest_version returns None on every error; None is not a notice."""
+        self.assertIsNone(crow.update_notice(self._answered(None), wait=0.01))
+
+    def test_a_disabled_check_says_nothing(self):
+        self.assertIsNone(crow.update_notice(None, wait=0.01))
+
+    def test_a_slow_answer_does_not_hold_the_start(self):
+        """An empty queue must time out and yield, not block on the network."""
+        import queue
+        import time
+        started = time.monotonic()
+        self.assertIsNone(crow.update_notice(queue.Queue(maxsize=1), wait=0.05))
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_the_check_can_be_switched_off_from_the_command_line(self):
+        args = crow.build_parser().parse_args(["--no-update-check"])
+        self.assertFalse(args.update_check)
+        self.assertIsNone(crow.start_update_check(args.update_check))
+
+    def test_it_is_on_by_default(self):
+        self.assertTrue(crow.build_parser().parse_args([]).update_check)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

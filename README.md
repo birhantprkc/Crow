@@ -65,7 +65,7 @@ And the bar bottom left went **3.0k → 3.9k**. It used to run backwards.
 ## Contents
 
 **[Part I: Getting started](#part-i-getting-started)**
-&nbsp;&nbsp;[Requirements](#requirements) · [Quick start](#quick-start) · [Full setup](#full-setup) · [Using the CLI](#using-the-cli) · [Common questions](#common-questions)
+&nbsp;&nbsp;[Requirements](#requirements) · [Quick start](#quick-start) · [Full setup](#full-setup) · [Using the CLI](#using-the-cli) · [Updating](#updating) · [Common questions](#common-questions)
 
 **[Part II: How it works](#part-ii-how-it-works)**
 &nbsp;&nbsp;[The problem](#the-problem-a-model-that-does-not-fit) · [Sparsity](#1-sparsity-most-of-the-model-is-asleep) · [Quantisation](#2-quantisation-and-where-it-breaks) · [The cache](#3-the-slot-cache-and-what-vram-buys) · [Reading the drive](#4-reading-the-drive-without-the-page-cache) · [Cost per token](#what-it-costs-per-token) · [Against CPU offload](#against-cpu-offload) · [Batching](#batching-and-why-the-cli-does-not) · [What is not claimed](#what-is-not-claimed)
@@ -211,6 +211,27 @@ It is not cumulative, it repeats: every turn pays the previous turn's output, so
 **`--temperature` defaults to 0.6, not 0.** Pure greedy decoding has no way out of a repetition attractor, and this model loops inside the reasoning block and never reaches an answer. `--temperature 0` stays available so measurement runs get byte-identical output.
 
 On first start the client installs its bundled typeface and writes `profiles.defaults.font.face` and `background` into Windows Terminal's `settings.json`, with a `.bak` beside it. It never overwrites a value it did not write itself. Both halves can be switched off.
+
+## Updating
+
+**The client tells you.** On start it asks GitHub whether a newer release exists and, if there is one, prints it above the prompt together with the command that installs it:
+
+```
+crow 0.0.4 is out (you have 0.0.3)
+  irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1 | iex
+```
+
+That is the same one-liner that installs Crow in the first place. It reads the version out of the installation it finds, updates when its own is newer, and does nothing when you are already current. `crow --version` prints what you have.
+
+The check runs in the background while the banner and the health probe do their work, and it is given at most 1.5 seconds of the start. It never blocks a turn, never prints an error, and stays silent on a machine with no network. `--no-update-check` switches it off.
+
+**Your model is not touched.** The 95.9 GiB under `%LOCALAPPDATA%\Crow\models` is not part of any package, so an update never deletes the install directory — it writes the new files over the old ones and leaves everything else alone.
+
+Two things it will not do without being asked. It will not overwrite a directory it cannot identify as a Crow install, and it will not put an older version over a newer one. Both refuse and print the invocation that forces it, because `irm … | iex` cannot be given a `-Force` switch:
+
+```
+&([scriptblock]::Create((irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1))) -Force
+```
 
 ## Common questions
 
