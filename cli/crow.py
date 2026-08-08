@@ -705,6 +705,11 @@ def stream_reply(
         "tools": TOOLS,
         "temperature": temperature,
         "stream": True,
+        # OpenAI's opt-in for a usage block on the final chunk. Without it a
+        # streamed response carries no token counts at all, and the context bar
+        # is left guessing from `prompt_n`, which counts something else entirely
+        # -- see `repl`. Endpoints that do not know the field ignore it.
+        "stream_options": {"include_usage": True},
         # llama.cpp extension: makes the server attach its own timing block
         # to the final chunk. Ignored by endpoints that do not know it.
         "timings_per_token": True,
@@ -713,6 +718,8 @@ def stream_reply(
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
     timings: dict = {}
+    context_tokens: int | None = None
+    cached_tokens: int | None = None
     started = time.monotonic()
     first_token_at: float | None = None
     first_content_at: float | None = None
@@ -743,6 +750,19 @@ def stream_reply(
 
             if isinstance(chunk.get("timings"), dict):
                 timings = chunk["timings"]
+
+            # The absolute size of the conversation, straight from the server's
+            # tokeniser. It arrives on the last chunk only, and only one chunk
+            # carries it, so it is read wherever it turns up rather than assumed
+            # to be on the same object as the timings.
+            usage = chunk.get("usage")
+            if isinstance(usage, dict):
+                total = usage.get("total_tokens")
+                if isinstance(total, int):
+                    context_tokens = total
+                cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+                if isinstance(cached, int):
+                    cached_tokens = cached
 
             for choice in chunk.get("choices") or []:
                 if choice.get("finish_reason"):
@@ -792,6 +812,10 @@ def stream_reply(
         timings.setdefault("_content_chars", sum(len(p) for p in text_parts))
     if finish_reason:
         timings.setdefault("_finish_reason", finish_reason)
+    if context_tokens is not None:
+        timings.setdefault("_context_tokens", context_tokens)
+    if cached_tokens is not None:
+        timings.setdefault("_cached_tokens", cached_tokens)
     return "".join(text_parts), reasoning, timings
 
 
@@ -809,6 +833,13 @@ def format_timings(timings: dict) -> str:
     prompt_rate = timings.get("prompt_per_second")
     if prompt_n is not None and prompt_rate is not None:
         bits.append(f"prefill {prompt_n} @ {prompt_rate:.2f} tok/s")
+
+    # How much of the prompt the server did NOT have to read again. It is the
+    # cache working or not working, per turn, from the server rather than
+    # inferred -- and this project spent a day finding out the difference.
+    cached = timings.get("_cached_tokens")
+    if cached is not None and prompt_n is not None:
+        bits.append(f"cached {cached}/{cached + int(prompt_n)}")
 
     ttft = timings.get("_client_ttft_s")
     if ttft is not None:
@@ -923,6 +954,41 @@ def format_prompt(context_tokens: int, n_ctx: int = 0) -> str:
     return f"{size} {DIM}|{RESET} {BOLD}{CROW_ACCENT}you>{RESET} "
 
 
+def next_context_tokens(current: int, timings: dict) -> int:
+    """How full the window is after this turn.
+
+    THE SERVER IS ASKED, NOT ESTIMATED. Until 2026-08-08 this was
+    `context_tokens = prompt_n + predicted_n`, and both halves were wrong:
+
+      * it ASSIGNED rather than accumulated, so the bar showed the last turn
+        instead of the session -- measured live, it ran 4.7k -> 1.3k -> 792
+        BACKWARDS while the conversation grew;
+      * `prompt_n` is the count of tokens the server actually PROCESSED, i.e.
+        the uncached remainder. On a warm cache it is near zero precisely
+        because things went well: 18 for a prompt that was 4,700 tokens long;
+      * `predicted_n` counts everything generated, reasoning included.
+
+    `usage.total_tokens` is the whole conversation as the server's own
+    tokeniser counted it -- prompt plus completion, absolute, so assignment is
+    now the correct operation. Measured on a two-turn conversation:
+    prompt_tokens 29 = cached_tokens 11 + prompt_n 18.
+
+    The fallback exists for endpoints that send no usage block. It accumulates,
+    which is right only while the prefix holds -- on a break `prompt_n` counts
+    old tokens again and the figure runs high. That is the honest failure
+    direction: a bar that overstates makes someone reset early, one that
+    understates lets them run into the wall.
+    """
+    total = timings.get("_context_tokens")
+    if isinstance(total, int):
+        return total
+    prompt_n = timings.get("prompt_n")
+    predicted_n = timings.get("predicted_n")
+    if prompt_n is None or predicted_n is None:
+        return current
+    return current + int(prompt_n) + int(predicted_n)
+
+
 def repl(args: argparse.Namespace) -> int:
     enable_ansi()
     install_interrupt_handler()
@@ -1013,10 +1079,7 @@ def repl(args: argparse.Namespace) -> int:
             continue
 
         conversation.append("assistant", reply, reasoning)
-        prompt_n = timings.get("prompt_n")
-        predicted_n = timings.get("predicted_n")
-        if prompt_n is not None and predicted_n is not None:
-            context_tokens = int(prompt_n) + int(predicted_n)
+        context_tokens = next_context_tokens(context_tokens, timings)
         line_out = format_timings(timings)
         print(f"\n\n[{line_out}]\n" if line_out else "\n")
 

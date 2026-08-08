@@ -167,7 +167,7 @@ class StreamReplyTests(unittest.TestCase):
     There was no test over stream_reply at all, which is why it survived.
     """
 
-    def _run(self, deltas, conversation=None, **kw):
+    def _run(self, deltas, conversation=None, usage=None, **kw):
         """Drive stream_reply against a canned SSE stream.
 
         Returns (text, reasoning, timings, printed). The body the caller would
@@ -175,7 +175,13 @@ class StreamReplyTests(unittest.TestCase):
         the contract, not an implementation detail.
         """
         chunks = [json.dumps({"choices": [{"delta": d}]}) for d in deltas]
-        chunks.append(json.dumps({"choices": [], "timings": {"predicted_n": 7}}))
+        final = {"choices": [], "timings": {"predicted_n": 7}}
+        # Its own chunk on purpose: the server sends usage on the last one, and
+        # reading it off the same object as the timings would pass a test the
+        # real stream would fail.
+        chunks.append(json.dumps(final))
+        if usage is not None:
+            chunks.append(json.dumps({"choices": [], "usage": usage}))
         original = crow._post_stream
 
         def fake(url, body, key, timeout):
@@ -275,6 +281,101 @@ class StreamReplyTests(unittest.TestCase):
         self.assertEqual(len(assistant), 1)
         self.assertEqual(assistant[0]["reasoning_content"], "THOUGHTS OF TURN ONE")
         self.assertEqual(assistant[0]["content"], "ANSWER ONE")
+
+
+class ContextCounterTests(unittest.TestCase):
+    """The bar has to grow with the conversation. It used to shrink.
+
+    Measured live on 2026-08-08 before this changed: 4.7k -> 1.3k -> 792 across
+    three turns that each added to the context. `context_tokens = prompt_n +
+    predicted_n` assigned rather than accumulated, and on a warm cache prompt_n
+    is small precisely because nothing had to be re-read.
+    """
+
+    USAGE = {"completion_tokens": 20, "prompt_tokens": 29, "total_tokens": 49,
+             "prompt_tokens_details": {"cached_tokens": 11}}
+
+    def test_the_servers_own_total_is_used(self):
+        self.assertEqual(crow.next_context_tokens(999, {"_context_tokens": 49}), 49)
+
+    def test_the_total_wins_over_the_timing_fields(self):
+        """prompt_n is the processed remainder, not the prompt length."""
+        self.assertEqual(
+            crow.next_context_tokens(0, {"_context_tokens": 49, "prompt_n": 18,
+                                         "predicted_n": 20}),
+            49)
+
+    def test_without_usage_it_accumulates_rather_than_assigns(self):
+        """The old line assigned, which is how the bar ran backwards."""
+        first = crow.next_context_tokens(0, {"prompt_n": 300, "predicted_n": 200})
+        second = crow.next_context_tokens(first, {"prompt_n": 18, "predicted_n": 200})
+        self.assertEqual(first, 500)
+        self.assertGreater(second, first)
+
+    def test_nothing_reported_leaves_the_figure_alone(self):
+        """An invented number is worse than a stale one."""
+        self.assertEqual(crow.next_context_tokens(500, {}), 500)
+
+    def test_two_turns_grow_the_counter(self):
+        """The case #60 asks for, red on 206da71 and on 2ee9be0."""
+        after_one = crow.next_context_tokens(0, {"_context_tokens": 4659,
+                                                 "prompt_n": 403, "predicted_n": 4256})
+        after_two = crow.next_context_tokens(after_one, {"_context_tokens": 5939,
+                                                         "prompt_n": 18, "predicted_n": 1262})
+        self.assertGreater(after_two, after_one,
+                           "the bar shrank while the conversation grew")
+
+    def test_the_bar_and_context_read_the_same_number(self):
+        """Whatever it counts, /context and the prompt must not disagree."""
+        tokens = crow.next_context_tokens(0, {"_context_tokens": 4659})
+        self.assertIn("4.7k", crow.format_prompt(tokens, 200000))
+        self.assertEqual(tokens, 4659)
+
+
+class UsageFromTheStreamTests(unittest.TestCase):
+    """Getting the number out of a STREAMED response at all."""
+
+    def _stream(self, usage):
+        chunks = [json.dumps({"choices": [{"delta": {"content": "A"}}]}),
+                  json.dumps({"choices": [], "timings": {"prompt_n": 18, "predicted_n": 20}})]
+        if usage is not None:
+            chunks.append(json.dumps({"choices": [], "usage": usage}))
+        original = crow._post_stream
+        sent = {}
+
+        def fake(url, body, key, timeout):
+            sent.update(body)
+            return iter(chunks)
+
+        crow._post_stream = fake
+        try:
+            _, _, timings = crow.stream_reply(
+                crow.Conversation("SYS"), base_url="http://x/v1", model="crow",
+                api_key="k", temperature=0.0, timeout=1.0, out=io.StringIO())
+        finally:
+            crow._post_stream = original
+        return timings, sent
+
+    def test_the_request_asks_for_usage(self):
+        """A streamed response carries no token counts unless this is set."""
+        _, sent = self._stream(None)
+        self.assertEqual(sent.get("stream_options"), {"include_usage": True})
+
+    def test_total_and_cached_reach_the_caller(self):
+        timings, _ = self._stream({"total_tokens": 49, "prompt_tokens": 29,
+                                   "prompt_tokens_details": {"cached_tokens": 11}})
+        self.assertEqual(timings["_context_tokens"], 49)
+        self.assertEqual(timings["_cached_tokens"], 11)
+
+    def test_an_endpoint_without_usage_still_works(self):
+        timings, _ = self._stream(None)
+        self.assertNotIn("_context_tokens", timings)
+        self.assertEqual(timings["prompt_n"], 18)
+
+    def test_the_cache_reading_is_reported(self):
+        timings, _ = self._stream({"total_tokens": 49, "prompt_tokens": 29,
+                                   "prompt_tokens_details": {"cached_tokens": 11}})
+        self.assertIn("cached 11/29", crow.format_timings(timings))
 
 
 class RendererTests(unittest.TestCase):
