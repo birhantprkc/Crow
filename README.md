@@ -7,12 +7,11 @@
 <p>Frontier mixture-of-experts inference, with the experts streamed off the SSD.<br>No cluster. No 200 GB host. No cloud.</p>
 
 <p>
-<a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
-<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-0.0.1-brightgreen?style=flat-square" alt="Version"></a>
-<a href="#requirements"><img src="https://img.shields.io/badge/platform-Windows%20x64%20%C2%B7%20CUDA-lightgrey?style=flat-square" alt="Platform"></a>
-<a href="cli/crow.py"><img src="https://img.shields.io/badge/client-Python%20stdlib%20only-lightgrey?style=flat-square" alt="Python"></a>
-<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash"><img src="https://img.shields.io/badge/model-DeepSeek--V4--Flash-orange?style=flat-square" alt="Model"></a>
-<a href="https://ko-fi.com/nibor1896"><img src="https://img.shields.io/badge/ko--fi-support-ff5e5b?style=flat-square" alt="Ko-fi"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
+<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-0.0.1-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
+<a href="#requirements"><img src="https://img.shields.io/badge/platform-Windows%20x64%20%C2%B7%20CUDA-555555?style=flat-square&logo=nvidia&logoColor=76b900&labelColor=000000" alt="Platform"></a>
+<a href="cli/crow.py"><img src="https://img.shields.io/badge/client-Python%20stdlib%20only-555555?style=flat-square&logo=python&logoColor=ffd43b&labelColor=000000" alt="Python"></a>
+<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash"><img src="https://img.shields.io/badge/model-DeepSeek--V4--Flash-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
 </p>
 
 <table>
