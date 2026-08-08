@@ -50,12 +50,6 @@ That is the whole idea. Everything below is what it costs to make it actually ru
 ```console
 PS> python cli\crow.py
 
-  ██████  ███████   ██████  ██    ██
- ██▓▓▓▓██ ██▓▓▓▓██ ██▓▓▓▓██ ██▓   ██
- ██▓    ▓▓███████▓▓██▓   ██▓██▓   ██
- ...
- v0.0.1
-
 crow at http://127.0.0.1:8081/v1 (health: ok, 200k context)
 /help for commands, /exit to leave.
 
