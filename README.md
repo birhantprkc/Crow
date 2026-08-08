@@ -50,26 +50,29 @@ That is the whole idea. Everything below is what it costs to make it actually ru
 ```console
 PS> python cli\crow.py
 
-  CROW
-  v0.0.1
+  ██████  ███████   ██████  ██    ██
+ ██▓▓▓▓██ ██▓▓▓▓██ ██▓▓▓▓██ ██▓   ██
+ ██▓    ▓▓███████▓▓██▓   ██▓██▓   ██
+ ...
+ v0.0.1
 
 crow at http://127.0.0.1:8081/v1 (health: ok, 200k context)
 /help for commands, /exit to leave.
 
-you> write me a python function that merges overlapping intervals
+[----------] 4.7k/200k | you> take variant 2 and write me the finished function
 
-crow  thinking     12.4 s
-crow  writing code
+crow> Here's the finished function, using the server's own reported usage:
 
-def merge_intervals(intervals):
-    if not intervals:
-        return []
-    ordered = sorted(intervals, key=lambda pair: pair[0])
-    merged = [list(ordered[0])]
+def get_context_usage(server_response: dict, max_ctx: int = 200_000) -> int:
     ...
 
-      461 tokens - 12.11 tok/s - 4,312 of 200,000 context
+[1262 tok @ 8.56 tok/s | prefill 18 @ 10.61 tok/s | ttft 1.73s | answer 63.15s | thinking 44% | total 149.15s]
 ```
+
+That `prefill 18` is the second turn of a real session, and it is the whole point of
+the line: the first turn had generated 4,256 tokens, and before 2026-08-08 the second
+turn re-read every one of them — about six and a half minutes before the first word
+appeared. [Why](#the-context-is-append-only-and-carries-its-reasoning).
 
 ![Where every byte lives, what crosses between VRAM and the drive, and what it costs per token](docs/images/architecture.svg)
 
@@ -129,8 +132,8 @@ Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
       sha256  A31F...
 
 [4/5] Installing to C:\Users\you\AppData\Local\Crow
-        25/25  README.md                                  10 KB
-      25 files extracted
+        26/26  README.md                                  27 KB
+      26 files extracted
 
 [5/5] What is left to do
 ```
@@ -150,7 +153,7 @@ hf download unsloth/DeepSeek-V4-Flash-GGUF --include "UD-IQ3_XXS/*" --local-dir 
 ```powershell
 %LOCALAPPDATA%\Crow\bin\llama-server.exe `
   -m %LOCALAPPDATA%\Crow\models\UD-IQ3_XXS\DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf `
-  -c 200000 -ngl 99 -np 1 `
+  -c 200000 -ngl 99 -np 1 --jinja `
   --moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct
 ```
 
@@ -160,6 +163,7 @@ Every flag carries a reason, and none of them is taste:
 |---|---|
 | `-c 200000` | A coding session holds files and history. 16k or 64k measures a product nobody uses. Measured: 200k loads on one slot at 31,838 of 32,607 MiB |
 | `-np 1` | One user, one stream. `-np 4` splits the context into 4 × 50k and is the harness case, not the CLI |
+| `--jinja` | Use the **model's** chat template instead of llama.cpp's built-in one. Without it the client's replayed reasoning is dropped and the prompt cache breaks on every turn: measured 138.8–242.3 s of re-prefill per turn against 1.6–2.2 s |
 | `--moe-stream` | Route expert tensors through the slot cache instead of placing them |
 | `--moe-stream-cache 64s` | 64 of 256 experts per layer, ~24 GiB. 121 slots would reach a 95 % hit rate and need 45.5 GiB, which does not fit |
 | `--moe-stream-io-threads 8` | I/O workers, **each with its own file handle**. Windows serialises on the file object, so a shared handle stays at queue depth 1 whatever you do |
@@ -203,9 +207,21 @@ Standard library only, on purpose: it has to run before anything is installed.
 | `--temperature` | default **0.6**, see below |
 | `--no-font`, `--no-background` | leave the terminal profile alone |
 
-Three properties come from measurements rather than taste:
+Four properties come from measurements rather than taste:
 
-**The context is append-only.** Nothing is ever inserted in front of, or edited inside, an existing message. The prompt cache only survives while the prefix stays byte-identical — measured: 967 tokens prefilled at 77.68 tok/s on a context of ~2,400, while the older ~1,400 cost nothing. Break the prefix and you pay the full re-prefill, which at this rate is minutes.
+<a id="the-context-is-append-only-and-carries-its-reasoning"></a>
+**The context is append-only, and every assistant turn carries its reasoning.** Nothing is ever inserted in front of, or edited inside, an existing message, because the prompt cache only survives while the prefix stays byte-identical.
+
+The second half of that was the harder lesson. Until 2026-08-08 the client dropped `reasoning_content` from the history — it is display-only, so why send it back. But this model's template renders a kept turn as `<think>…</think>`, and an omitted field leaves an *empty* think block: the prefix then diverges exactly where the thoughts began, and everything behind that point is re-read. The cost therefore has nothing to do with how much the model thought. **48 tokens of reasoning cost 2,018 tokens of prefill**, because the whole answer sat behind them.
+
+Measured across three task sets, `prompt_n` of turn 2 over what turn 1 generated:
+
+| turn 2 sends | ratio | prefill |
+|---|---|---|
+| history **without** `reasoning_content` | 0.909 – 0.986 | 138.8 – 242.3 s |
+| history **with** `reasoning_content` | 0.008 – 0.016 | 1.6 – 2.2 s |
+
+It is not cumulative, it repeats: every turn pays the previous turn's output, so the penalty scales with answer length rather than session length. This is also why the client sends a one-entry `tools` array with every request — **for the cache, not for the tool.** The template keeps a past turn's thoughts only while tools are present; with an empty array both variants render byte for byte the same.
 
 **The output streams, and the raven shows the state.** 88.2 % of everything this model generates is `reasoning_content` — measured over 30 stored answers, 69,951 reasoning characters against 9,337 of content. A client that renders only `content` shows a blank screen for most of the wait. Crow shows `thinking`, then flips to `writing code` at the first content token.
 
@@ -363,16 +379,18 @@ Crow chats today. It cannot yet *act*: when it produced a working three.js page 
 - [ ] **Read-before-write, blocking rather than warning.** hermes detects a stale write and performs it anyway — two independent code paths that both resolve to last-write-wins. Ours refuses, and a test that writes without a prior read has to be rejected, not logged.
 - [ ] **Local command execution**, with the output limits and the credential blocklist that make it safe to leave running.
 - [ ] **A todo tool.** Cheap, and at ~12 tok/s it is what keeps a long run on track.
-- [ ] **Fix the `ttft` number the CLI reports.** It starts the clock at the first *content* token, so it silently contains the whole reasoning phase — measured at 3.7 s of prefill against 22.4 s of decode on one turn.
+- [x] **Fix the `ttft` number the CLI reports.** It used to start the clock at the first *content* token, so it silently contained the whole reasoning phase. It now counts the first token of any kind, and `answer` is reported beside it — the gap between the two *is* the thinking time. Figures quoted from before 2026-08-07 measure the old definition.
 
 **Buildable, but gated on one server change**
 
-- [ ] **The tool-calling loop itself.** The model's chat template does support it — 13,503 characters carrying `tools` 25 times and `tool_calls` 7 times — but `llama-server` only uses that template with `--jinja`, and the operating point does not set it today. So this needs a restart with `--jinja`, and then a measurement: *a template that can express tool calls is not the same as a model that makes good ones.*
+- [ ] **The tool-calling loop itself.** The model's chat template supports it — `tools` 25 times, `tool_calls` 7 times — and the operating point now runs with `--jinja`, so the template is actually in use. What is still missing is the loop: a returned `tool_call` is reported, not executed. The measurement that follows is its own question, because *a template that can express tool calls is not the same as a model that makes good ones.* [#58](https://github.com/nibor1896/Crow/issues/58)
 
 **Decided by measurement, not by preference**
 
-- [ ] **Whether reasoning goes back into the history.** The loop appends to the same prefix every round, so this decides whether the prompt cache holds or breaks — and at this decode rate a broken cache costs minutes per turn. The check is the prefill number, not a code review.
-- [ ] **A release, once the loop stands.** The package builds and verifies today (`tools/pack-release.ps1`, 506 MB, self-contained); what it needs is something worth installing. Tracked as [#57](https://github.com/nibor1896/Crow/issues/57).
+- [x] **Whether reasoning goes back into the history — it does.** Settled by the prefill number rather than by argument: dropping it re-reads 0.909–0.986 of the previous turn's output every turn, replaying it re-reads 0.008–0.016. Live through the client, turns 2 and 3 prefilled 18 and 19 tokens where they had cost about 4,256 before. [#60](https://github.com/nibor1896/Crow/issues/60)
+- [ ] **The context counter.** The bar counts neither of the two things it could mean — it assigns instead of accumulating, and both of its terms are the wrong quantity. In a live session it ran *backwards* while the conversation grew. The field that settles it is already in the response: `usage.total_tokens`, with `prompt_tokens_details.cached_tokens` beside it as a per-turn cache reading. Second half of [#60](https://github.com/nibor1896/Crow/issues/60).
+- [ ] **Staying fast and keeping the context as a session grows.** Two acceptance criteria, neither measured beyond ten turns: a turn must not get slower as the session lengthens, and the context that matters must still be there at the end of the window. [#61](https://github.com/nibor1896/Crow/issues/61)
+- [ ] **A release, once the loop stands.** The package builds and verifies today (`tools/pack-release.ps1`, 506 MB, self-contained), and the installer has now been run end to end into an empty directory rather than only self-tested. What it needs is something worth installing. Tracked as [#57](https://github.com/nibor1896/Crow/issues/57).
 - [ ] **A name and a logo.** `Crow` is the project name, not a product name. Tracked as [#56](https://github.com/nibor1896/Crow/issues/56), with one hard constraint already measured: the bundled typeface has 0 of 256 braille glyphs, so a braille logo and this font cannot both ship.
 
 **Deliberately not next**
@@ -398,7 +416,7 @@ Every tool in `tools/` answers `-Selftest` (PowerShell) or `selftest` (Python) a
 | | |
 |---|---|
 | `install.ps1` | the one-command installer, with its own suite |
-| `cli/` | the client, standard library only, 75 tests |
+| `cli/` | the client, standard library only, 81 tests |
 | `patches/` | the streaming patch against its pinned upstream tag |
 | `tools/` | measuring, packing and verification tools, each with a selftest |
 | `docs/images/` | the generators behind every figure above |
