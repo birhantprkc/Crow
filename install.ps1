@@ -38,7 +38,7 @@ A local package is never deleted afterwards; a downloaded one is.
 #>
 [CmdletBinding()]
 param(
-    [string] $Version   = "0.0.2",
+    [string] $Version   = "0.0.3",
     [string] $InstallTo = "$env:LOCALAPPDATA\Crow",
     [string] $SourceUrl = "",
     [switch] $Force,
@@ -207,6 +207,32 @@ function Exit-Run {
 
     if (Test-CanExitProcess $PSCommandPath) { exit $Code }
     $global:LASTEXITCODE = $Code
+}
+
+function Compare-Manifest {
+    <#
+    Hold what was installed against what the package says it should be.
+
+    Takes entries that already carry their computed hash, so the decision is a
+    pure function the selftest can drive both ways -- including the case that
+    must fail. Reading files is the caller's job.
+
+    Each entry: Path, Expected, Actual. Actual $null means the file is not there.
+    #>
+    param([object[]] $Entries)
+
+    $missing    = @()
+    $mismatched = @()
+    foreach ($e in $Entries) {
+        if ($null -eq $e.Actual)                          { $missing    += $e.Path; continue }
+        if ($e.Actual.ToUpperInvariant() -ne $e.Expected.ToUpperInvariant()) { $mismatched += $e.Path }
+    }
+    return [pscustomobject]@{
+        Ok         = (($missing.Count + $mismatched.Count) -eq 0)
+        Missing    = $missing
+        Mismatched = $mismatched
+        Checked    = $Entries.Count
+    }
 }
 
 function Test-CanExitProcess {
@@ -409,6 +435,25 @@ function Invoke-Selftest {
     C "a run from a file may exit the process"   (Test-CanExitProcess "C:\x\install.ps1")
     C "a run through iex must not"               (-not (Test-CanExitProcess ""))
 
+    # The check that did not exist until a flipped byte proved Expand-Archive
+    # will not catch one. Both answers driven, because a verifier that cannot
+    # report damage is a decoration.
+    $good = @(
+        [pscustomobject]@{ Path = "a.dll"; Expected = "AABB"; Actual = "aabb" }
+        [pscustomobject]@{ Path = "b.exe"; Expected = "CCDD"; Actual = "CCDD" }
+    )
+    $v = Compare-Manifest $good
+    C "a matching install passes"                 ($v.Ok -and $v.Checked -eq 2)
+    C "and the hash compare ignores case"         ($v.Mismatched.Count -eq 0)
+
+    $corrupt = @([pscustomobject]@{ Path = "a.dll"; Expected = "AABB"; Actual = "BEEF" })
+    $v = Compare-Manifest $corrupt
+    C "one wrong hash fails the install"          ((-not $v.Ok) -and $v.Mismatched -contains "a.dll")
+
+    $gone = @([pscustomobject]@{ Path = "a.dll"; Expected = "AABB"; Actual = $null })
+    $v = Compare-Manifest $gone
+    C "a file that did not land fails too"        ((-not $v.Ok) -and $v.Missing -contains "a.dll")
+
     C "Format-Size: bytes"     ((Format-Size 512) -eq "512 B")
     C "Format-Size: megabytes" ((Format-Size 506400000) -eq "482.9 MB")
     C "Format-Size: gigabytes" ((Format-Size 103000000000) -eq "95.93 GB")
@@ -477,12 +522,9 @@ if ($source.IsLocal) {
     $bytes = Get-FileWithProgress -Uri $source.Uri -OutFile $tmp -Label $asset
 }
 
-Write-Step "Verifying"
-
 $sha = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash
 Write-Item "size"   (Format-Size $bytes) "ok"
-Write-Item "sha256" $sha "ok"
-Write-Item "note"   "MANIFEST.json inside the package carries a hash per file"
+Write-Item "sha256" $sha
 
 Write-Step "Installing to $InstallTo"
 
@@ -500,6 +542,47 @@ $n = Expand-WithProgress -ZipPath $tmp -Destination $InstallTo
 # to the caller, and deleting it would eat the artefact being tested.
 if (-not $source.IsLocal) { Remove-Item $tmp -Force }
 Write-Item "installed" "$n files" "ok"
+
+Write-Step "Verifying what landed"
+
+# This is the only real check in the run, and until 2026-08-08 it did not exist.
+# Measured that day: Expand-Archive extracts a zip with a flipped byte WITHOUT an
+# error and writes the wrong bytes to disk -- three offsets inside the compressed
+# stream, three silent successes. TLS covers the wire and nothing covered the
+# file, so a damaged install would have surfaced later as a DLL that will not
+# load, and been diagnosed as anything but a bad download.
+#
+# The package carries a hash per file. Reading it is the whole fix.
+$manifestPath = Join-Path $InstallTo "MANIFEST.json"
+if (-not (Test-Path -LiteralPath $manifestPath)) {
+    Write-Item "MANIFEST.json" "not in the package -- nothing to verify against" "fail"
+    Exit-Run 1
+    return
+}
+
+$entries = @()
+foreach ($e in (Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json)) {
+    # -LiteralPath throughout: two of the shipped files are named
+    # GoogleSansCode[MONO,wght].ttf, and Test-Path reads [...] as a wildcard.
+    # A check that reports those two as missing on every single install would
+    # have been worse than no check at all.
+    $file = Join-Path $InstallTo $e.path
+    $actual = if (Test-Path -LiteralPath $file) {
+        (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+    } else { $null }
+    $entries += [pscustomobject]@{ Path = $e.path; Expected = $e.sha256; Actual = $actual }
+}
+
+$verdict = Compare-Manifest $entries
+if (-not $verdict.Ok) {
+    foreach ($p in $verdict.Missing)    { Write-Item "missing" $p "fail" }
+    foreach ($p in $verdict.Mismatched) { Write-Item "corrupt" $p "fail" }
+    Write-Host ""
+    Write-Item "the install is damaged" "delete $InstallTo and run this again" "fail"
+    Exit-Run 1
+    return
+}
+Write-Item "sha256 per file" "$($verdict.Checked) of $($verdict.Checked) match" "ok"
 
 Write-Step "What is left to do"
 

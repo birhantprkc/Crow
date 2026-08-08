@@ -8,7 +8,7 @@
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
-<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-0.0.2-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
+<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-0.0.3-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
 <a href="#requirements"><img src="https://img.shields.io/badge/platform-Windows%20x64%20%C2%B7%20CUDA-555555?style=flat-square&logo=nvidia&logoColor=76b900&labelColor=000000" alt="Platform"></a>
 <a href="cli/crow.py"><img src="https://img.shields.io/badge/client-Python%20stdlib%20only-555555?style=flat-square&logo=python&logoColor=ffd43b&labelColor=000000" alt="Python"></a>
 <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash"><img src="https://img.shields.io/badge/model-DeepSeek--V4--Flash-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
@@ -97,7 +97,7 @@ irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1 | iex
 Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
 
 ```console
-  Crow 0.0.2
+  Crow 0.0.3
 
 [1/5] Checking this machine
       GPU  NVIDIA GeForce RTX 5090, 32607 MB
@@ -107,7 +107,7 @@ Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
       preflight  passed
 
 [2/5] Downloading the package
-      crow-0.0.2-win-x64.zip  [####################.....]  84%  424.1 MB / 506.4 MB  18.2 MB/s
+      crow-0.0.3-win-x64.zip  [####################.....]  84%  424.1 MB / 506.4 MB  18.2 MB/s
 
 [3/5] Verifying
       size  506.4 MB

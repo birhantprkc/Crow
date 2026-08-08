@@ -6,6 +6,28 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
+## 0.0.3 — 2026-08-08
+
+### Fixed
+
+- **The installer verified nothing, and the word was on the screen anyway.** Step 3
+  was called *Verifying*: it printed the archive's SHA256 and compared it with
+  nothing, and the `MANIFEST.json` in the package — a hash per file — was never
+  read.
+
+  The assumption underneath was that a damaged archive would fail to extract.
+  Measured 2026-08-08: it does not. A single flipped byte inside the compressed
+  stream, at three different offsets, and `Expand-Archive` extracted all three
+  **without an error** and wrote the wrong bytes to disk. TLS covers the wire;
+  nothing covered the file. A damaged install would have surfaced later as a DLL
+  that will not load and been diagnosed as anything but a bad download.
+
+  Verification now happens after extraction, against the manifest, file by file.
+  A mismatch names the file, says the install is damaged, and exits 1 instead of
+  printing the next steps. Both directions are driven end to end in the suite:
+  an honest package passes, a package whose manifest disagrees with its contents
+  fails.
+
 ## 0.0.2 — 2026-08-08
 
 The first release existed for about an hour before it was installed, and both
