@@ -8,7 +8,7 @@
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
-<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-0.0.3-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
+<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-0.0.4-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
 <a href="#requirements"><img src="https://img.shields.io/badge/platform-Windows%20x64%20%C2%B7%20CUDA-555555?style=flat-square&logo=nvidia&logoColor=76b900&labelColor=000000" alt="Platform"></a>
 <a href="cli/crow.py"><img src="https://img.shields.io/badge/client-Python%20stdlib%20only-555555?style=flat-square&logo=python&logoColor=ffd43b&labelColor=000000" alt="Python"></a>
 <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash"><img src="https://img.shields.io/badge/model-DeepSeek--V4--Flash-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
@@ -39,10 +39,6 @@ A mixture-of-experts model is mostly asleep. Every token wakes only **6 of the 2
 The context window is 200,000 tokens, on a single slot, and it costs about 1.41 GiB of the card — compressed attention makes context the cheap part here. A coding session holds files and history, so a 16k or 64k window would be measuring a product nobody uses.
 
 That is the whole idea. Everything below is what it costs to make it actually run.
-
-<div align="center">
-<p><i>If this is useful to you: <a href="https://ko-fi.com/nibor1896">ko-fi.com/nibor1896</a></i></p>
-</div>
 
 ---
 
@@ -97,7 +93,7 @@ irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1 | iex
 Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
 
 ```console
-  Crow 0.0.3
+  Crow 0.0.4
 
 [1/5] Checking this machine
       GPU  NVIDIA GeForce RTX 5090, 32607 MB
@@ -107,7 +103,7 @@ Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
       preflight  passed
 
 [2/5] Downloading the package
-      crow-0.0.3-win-x64.zip  [####################.....]  84%  424.1 MB / 506.4 MB  18.2 MB/s
+      crow-0.0.4-win-x64.zip  [####################.....]  84%  424.1 MB / 506.4 MB  18.2 MB/s
 
 [3/5] Verifying
       size  506.4 MB
@@ -217,7 +213,7 @@ On first start the client installs its bundled typeface and writes `profiles.def
 **The client tells you.** On start it asks GitHub whether a newer release exists and, if there is one, prints it above the prompt together with the command that installs it:
 
 ```
-crow 0.0.4 is out (you have 0.0.3)
+crow 0.0.5 is out (you have 0.0.4)
   irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1 | iex
 ```
 
@@ -446,8 +442,6 @@ That applies `patches/moe-stream-on-b10269.patch`, configures with CUDA, builds,
 MIT, see [`LICENSE`](LICENSE). Four components carry terms this project cannot grant, and [`NOTICE`](NOTICE) says which: `ggml-org/llama.cpp` (MIT, other copyright holders), `deepseek-ai/DeepSeek-V4-Flash` (MIT, fetched rather than shipped), the NVIDIA CUDA Toolkit the CUDA backend is built against, and Google Sans Code under the SIL Open Font License 1.1.
 
 ## Credits
-
-`Crow.jpg` is a generated render; the prompt that produced it sits beside it in `CrowJPG-Prompt.txt`.
 
 Measured on one machine: RTX 5090 (32,607 MiB), 63.4 GB DDR5, 24 threads, one Phison NVMe. **Spent so far: 0 EUR** — no rented compute, no API calls.
 

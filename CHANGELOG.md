@@ -6,6 +6,61 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
+## 0.0.4 — 2026-08-08
+
+### Fixed
+
+- **There was no way to update.** `install.ps1` refused any non-empty target with
+  `pass -Force to overwrite` and exit 1 — and the documented one-liner is
+  `irm … | iex`, which cannot be given parameters at all. The advice it printed
+  could not be followed by the person reading it. Moving from one version to the
+  next meant deleting `%LOCALAPPDATA%\Crow` by hand, and nothing said so.
+
+  The installer now reads the version out of the `cli\crow.py` it finds in the
+  target — the same pattern `pack-release.ps1` stamps it with, so the two cannot
+  disagree about where the number lives — and decides from it. An older install
+  updates. The same version does nothing and exits **0**, not 1. A newer install
+  is not overwritten, and a directory that does not identify itself as a Crow
+  install is not touched; both refuse and print the `[scriptblock]::Create`
+  invocation that *can* carry `-Force`, because naming a switch the user's command
+  cannot pass is not a route.
+
+  Driven end to end over the real 0.0.1 and 0.0.2 packages, not only in the
+  selftest: install, update, same-version, downgrade-refused, stranger's-directory
+  refused. The refusals left the target untouched.
+
+- **Nothing told anyone a new version existed.** The client asks the release API
+  on start and prints the version together with the command that installs it. The
+  request is fired before the banner is drawn, so it overlaps work that happens
+  anyway, and it is given at most 1.5 s of the start. Every failure — no network,
+  rate limit, an answer we do not recognise — is silence rather than an error
+  between the user and their prompt. `--no-update-check` switches it off.
+
+  **This cannot reach installations that predate it.** 0.0.3 and earlier have no
+  check in them and will never announce 0.0.4; that generation has to be updated
+  by hand, once.
+
+### Added
+
+- **`crow --version`.** The number existed only inside the start banner.
+- **The installer resolves the newest release itself** when no `-Version` is
+  given, so the same one-liner installs the current version without anyone editing
+  a default. The hard-coded number stays as the offline answer.
+- **`Updating` in the README**, which said nothing about it before.
+
+### Tests
+
+Client suite 91 → 108. Installer selftest 24 → 37. The new cases include the ones
+that must refuse: an equal version, a newer install, an unparseable version string.
+A comparison that read garbage as `0.0.0` would announce an update to every user on
+every start, which is worse than no notice at all.
+
+### Not done
+
+Nothing is deleted on update. The 95.9 GiB model lives under the install directory,
+so a "clean" install would throw it away and re-download it over the user's
+connection. Files a newer package no longer ships are therefore left behind.
+
 ## 0.0.3 — 2026-08-08
 
 ### Fixed
