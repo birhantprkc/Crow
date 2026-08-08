@@ -213,12 +213,10 @@ the repository is and how to run it — nothing else.
 
 ## Licence
 
-MIT, see `LICENSE`. Two parts of this repository are not covered by it and say so there: the
-diffs under `patches/` carry `ggml-org/llama.cpp`'s MIT notice verbatim in
-`patches/LICENSE.llama.cpp`, and the bundled typeface is under the SIL Open Font License 1.1,
-whose text ships beside it in `cli/fonts/OFL.txt`.
-
-The model is fetched, not shipped, and carries its own terms.
+MIT, see `LICENSE`. Four components carry terms this project cannot grant, and
+`THIRD-PARTY-NOTICES.md` says which: the diffs under `patches/` are against `ggml-org/llama.cpp`
+and carry its MIT notice verbatim, the bundled typeface is under the SIL Open Font License 1.1,
+the model is fetched rather than shipped, and the CUDA backend is built against NVIDIA's toolkit.
 
 ## Credits
 

@@ -19,32 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-## Third-party components
-
-**`patches/` contains diffs against `ggml-org/llama.cpp`**, which is MIT licensed. Those files
-carry context lines from that project, and applying them produces a modified copy of it. Its
-licence and copyright notice travel with them and are kept verbatim beside them in
-`patches/LICENSE.llama.cpp` — "Copyright (c) 2023-2026 The ggml authors". The MIT terms above and
-theirs are the same terms; they are kept apart because the copyright holders are not.
-
-**`cli/fonts/` contains Google Sans Code**, licensed under the SIL Open Font License 1.1, not MIT.
-Its full licence text ships beside it in `cli/fonts/OFL.txt` and must stay there — under the OFL a
-font may be bundled and redistributed only with that notice. The CLI's own suite asserts the file
-is present, because without it redistribution is a licence violation that nothing else would catch.
-
-**The model is fetched by the user, not shipped here, and carries its own terms.**
-`deepseek-ai/DeepSeek-V4-Flash` is MIT licensed — the GGUF files state it themselves in
-`general.license`. The quantisation actually used, `unsloth/DeepSeek-V4-Flash-GGUF` `UD-IQ3_XXS`,
-is unsloth's own artefact and carries whatever terms that repository states. Neither is
-redistributed by this project; the README points at the source and the user fetches it.
-
-**The CUDA backend is built against NVIDIA's CUDA Toolkit** (13.3 on the development machine).
-The build tree carries no CUDA runtime libraries of its own — `bin/Release` holds eleven files,
-all of them `ggml-*`, `llama-*` or `mtmd`, and `cudart` and `cuBLAS` are not among them.
-Wherever a release does ship NVIDIA redistributable libraries alongside them, those files stay
-under NVIDIA's own licence terms and are not covered by the MIT grant above. Whether the binaries
-above need such a library present at all is **unmeasured** — `dumpbin /dependents` on
-`ggml-cuda.dll` settles it, and it is point 1 of issue #57.
