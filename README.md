@@ -85,7 +85,7 @@ def merge_intervals(intervals):
 **[Part II: How it works](#part-ii-how-it-works)**
 &nbsp;&nbsp;[The problem](#the-problem-a-model-that-does-not-fit) · [Sparsity](#1-sparsity-most-of-the-model-is-asleep) · [Quantisation](#2-quantisation-and-where-it-breaks) · [The cache](#3-the-slot-cache-and-what-vram-buys) · [Reading the drive](#4-reading-the-drive-without-the-page-cache) · [Cost per token](#what-it-costs-per-token) · [Against CPU offload](#against-cpu-offload) · [Batching](#batching-and-why-the-cli-does-not) · [What is not claimed](#what-is-not-claimed)
 
-**[How this project works](#how-this-project-works)** · **[Licence](#licence)**
+**[What's next](#whats-next)** · **[How this project works](#how-this-project-works)** · **[Licence](#licence)**
 
 ---
 
@@ -350,6 +350,34 @@ Written out because a page like this is easy to read as more than it says.
 - **Vendor model-card scores are statements about that vendor's harness**, not about the model, and none of them survives 2-bit or 3-bit quantisation. No published quality figure exists for the file this project runs.
 - **Nothing here is compared to another project's number.** The nearest published figures for this class of workload differ from this operating point in at least two free variables each, so a "we are faster" line would be measuring the difference between two machines.
 - **The upstream CUDA fault this project tracks was never reproduced here**, on this quantisation and this card. That is not a claim that it is fixed.
+
+---
+
+## What's next
+
+Crow chats today. It cannot yet *act*: when it produced a working three.js page on 2026-08-06, the code was printed to the terminal and had to be copied out by hand. Closing that gap is [#55](https://github.com/nibor1896/Crow/issues/55), and these are the pieces, with what each one actually depends on.
+
+**Buildable now — Python, no open questions**
+
+- [ ] **File tools: read, write, patch.** Fuzzy patch matching is worth copying from hermes-agent; everything else is standard library.
+- [ ] **Read-before-write, blocking rather than warning.** hermes detects a stale write and performs it anyway — two independent code paths that both resolve to last-write-wins. Ours refuses, and a test that writes without a prior read has to be rejected, not logged.
+- [ ] **Local command execution**, with the output limits and the credential blocklist that make it safe to leave running.
+- [ ] **A todo tool.** Cheap, and at ~12 tok/s it is what keeps a long run on track.
+- [ ] **Fix the `ttft` number the CLI reports.** It starts the clock at the first *content* token, so it silently contains the whole reasoning phase — measured at 3.7 s of prefill against 22.4 s of decode on one turn.
+
+**Buildable, but gated on one server change**
+
+- [ ] **The tool-calling loop itself.** The model's chat template does support it — 13,503 characters carrying `tools` 25 times and `tool_calls` 7 times — but `llama-server` only uses that template with `--jinja`, and the operating point does not set it today. So this needs a restart with `--jinja`, and then a measurement: *a template that can express tool calls is not the same as a model that makes good ones.*
+
+**Decided by measurement, not by preference**
+
+- [ ] **Whether reasoning goes back into the history.** The loop appends to the same prefix every round, so this decides whether the prompt cache holds or breaks — and at this decode rate a broken cache costs minutes per turn. The check is the prefill number, not a code review.
+- [ ] **A release, once the loop stands.** The package builds and verifies today (`tools/pack-release.ps1`, 506 MB, self-contained); what it needs is something worth installing. Tracked as [#57](https://github.com/nibor1896/Crow/issues/57).
+- [ ] **A name and a logo.** `Crow` is the project name, not a product name. Tracked as [#56](https://github.com/nibor1896/Crow/issues/56), with one hard constraint already measured: the bundled typeface has 0 of 256 braille glyphs, so a braille logo and this font cannot both ship.
+
+**Deliberately not next**
+
+Batching across parallel agents is the lever this whole architecture was built for — one expert load serving many tokens instead of one — and it is measured and waiting ([#31](https://github.com/nibor1896/Crow/issues/31)). It needs agents before it can batch them, so it sits behind the loop above.
 
 ---
 
