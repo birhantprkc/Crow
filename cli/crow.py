@@ -171,6 +171,35 @@ class CrowError(RuntimeError):
     """Raised when the endpoint cannot be reached or answers with an error."""
 
 
+# Ctrl+C, the belt-and-braces version.
+#
+# Relying on KeyboardInterrupt to arrive where it is caught did not hold up in
+# practice: on Windows the signal is delivered by a separate thread that only
+# sets a flag, and the main thread acts on it at the next bytecode boundary -
+# which is fine in a tight loop and useless when it sits in a C-level call.
+# Two earlier attempts (reader thread, then polling instead of a timed get)
+# each fixed one such call and left the next one.
+#
+# So the handler also sets an Event, and every loop that can run long checks
+# it. That works no matter which C call the interrupt landed in, because the
+# loop comes back around either way.
+INTERRUPT = threading.Event()
+
+
+def _on_sigint(signum, frame) -> None:
+    INTERRUPT.set()
+    raise KeyboardInterrupt
+
+
+def install_interrupt_handler() -> None:
+    """Idempotent; a no-op where signals are not available (threads, IDEs)."""
+    try:
+        import signal
+        signal.signal(signal.SIGINT, _on_sigint)
+    except Exception:
+        pass
+
+
 def highlight(line: str, language: str) -> str:
     """Colour one line of source. Unknown languages come back untouched.
 
@@ -200,6 +229,14 @@ def highlight(line: str, language: str) -> str:
     return _TOKENS.sub(paint, line)
 
 
+SPILL_DIR = ".crow"
+SPILL_AFTER = 18        # lines of a block shown before the rest goes to file
+
+_EXT = {"python": "py", "py": "py", "javascript": "js", "js": "js", "ts": "ts",
+        "typescript": "ts", "json": "json", "html": "html", "css": "css",
+        "bash": "sh", "sh": "sh", "powershell": "ps1", "sql": "sql"}
+
+
 class Renderer:
     """Prints a streamed reply, setting fenced code apart from prose.
 
@@ -208,17 +245,30 @@ class Renderer:
     output held back to the end of a line, because a highlighter cannot colour
     half a token. A fence therefore costs at most one line of latency.
 
-    The fence markers themselves are consumed: they are markup, and printing
-    them alongside a drawn frame says the same thing twice.
+    NOTHING IS PRINTED IN FRONT OF A CODE LINE. An earlier version drew a
+    border and prefixed every line with "| ". It looked tidy and made the code
+    unusable: selecting a block in the terminal copies that prefix with it, so
+    every paste had to be cleaned by hand. A rule above and below carries the
+    same information and stays outside the selection.
+
+    LONG BLOCKS ARE NOT POURED INTO THE SCROLLBACK. Past SPILL_AFTER lines the
+    rest goes to a file and the reader is told where. A 300-line answer that
+    pushes the whole conversation off screen is not output, it is noise - and
+    the file is what the user wanted anyway.
     """
 
     WIDTH = 76
 
-    def __init__(self, out=None) -> None:
+    def __init__(self, out=None, spill_dir: str | None = None) -> None:
         self._out = out or sys.stdout
         self._buf = ""
         self.in_code = False
         self.language = ""
+        self._code_lines = 0
+        self._spill_dir = SPILL_DIR if spill_dir is None else spill_dir
+        self._spill_path: str | None = None
+        self._spill_file = None
+        self.blocks = 0
 
     def feed(self, text: str) -> None:
         for ch in text:
@@ -238,37 +288,95 @@ class Renderer:
 
     def close(self) -> None:
         """Flush the tail and shut an unterminated fence, so a cut-off answer
-        cannot leave the frame open."""
+        cannot leave the block half-open."""
         if self._buf:
             self._line(self._buf)
             self._buf = ""
         if self.in_code:
-            self._rule("+" + "-" * (self.WIDTH - 2) + "+")
-            self.in_code = False
+            self._end_block()
 
     def _rule(self, text: str) -> None:
         self._out.write(DIM + text + RESET + "\n")
         self._out.flush()
 
+    def _open_spill(self) -> None:
+        """Open the file the rest of this block goes to. Failure is not fatal:
+        a read-only directory must cost the file, not the answer."""
+        try:
+            os.makedirs(self._spill_dir, exist_ok=True)
+            ext = _EXT.get(self.language.lower(), "txt")
+            self._spill_path = os.path.join(self._spill_dir, f"block-{self.blocks:03d}.{ext}")
+            self._spill_file = open(self._spill_path, "w", encoding="utf-8")
+        except Exception:
+            self._spill_path = None
+            self._spill_file = None
+
+    def _end_block(self) -> None:
+        note = ""
+        # The live counter was written with \r and no newline; close its line
+        # before the rule, or the rule lands on top of it.
+        if _TTY and self._code_lines > SPILL_AFTER:
+            self._out.write("\r\033[2K")
+        if self._spill_file is not None:
+            try:
+                self._spill_file.close()
+            except Exception:
+                pass
+            self._spill_file = None
+        if self._spill_path and self._code_lines > SPILL_AFTER:
+            hidden = self._code_lines - SPILL_AFTER
+            note = f"  {hidden} more lines -> {self._spill_path}"
+        elif self._spill_path:
+            note = f"  {self._spill_path}"
+        self._rule("-" * self.WIDTH + note)
+        self.in_code = False
+        self.language = ""
+        self._code_lines = 0
+        self._spill_path = None
+
     def _line(self, line: str) -> None:
         stripped = line.strip()
         if stripped.startswith("```"):
             if self.in_code:
-                self._rule("+" + "-" * (self.WIDTH - 2) + "+")
-                self.in_code = False
-                self.language = ""
+                self._end_block()
             else:
                 self.language = stripped[3:].strip()
-                label = f" {self.language} " if self.language else " code "
-                bar = "-" * max(0, self.WIDTH - 3 - len(label))
-                self._rule("+-" + label + bar + "+")
+                self.blocks += 1
+                self._code_lines = 0
                 self.in_code = True
+                self._open_spill()
+                label = f" {self.language}" if self.language else " code"
+                self._rule("-" * 3 + label + " " + "-" * max(0, self.WIDTH - 5 - len(label)))
             return
-        if self.in_code:
-            self._out.write(DIM + "| " + RESET + highlight(line, self.language) + "\n")
-        else:
+
+        if not self.in_code:
             self._out.write(line + "\n")
-        self._out.flush()
+            self._out.flush()
+            return
+
+        # Every code line goes to the file, whether it is shown or not, so the
+        # saved block is the WHOLE block and not the visible part of it.
+        if self._spill_file is not None:
+            try:
+                self._spill_file.write(line + "\n")
+            except Exception:
+                pass
+        self._code_lines += 1
+        if self._code_lines <= SPILL_AFTER:
+            self._out.write(highlight(line, self.language) + "\n")
+            self._out.flush()
+            return
+
+        # Past the cut the block still streams, and it can stream for minutes.
+        # Printing nothing at all here looks exactly like a model that stopped
+        # mid-block - which is how this first got reported. So the count is
+        # rewritten in place: one line, no scrollback, but visibly alive.
+        if _TTY:
+            self._out.write(f"\r\033[2K{DIM}... writing, {self._code_lines} lines{RESET}")
+            self._out.flush()
+        elif self._code_lines == SPILL_AFTER + 1:
+            self._out.write(DIM + "..." + RESET + "\n")
+            self._out.flush()
 
 
 class Raven:
@@ -464,6 +572,8 @@ def _post_stream(url: str, body: dict, api_key: str, timeout: float):
 
     try:
         while True:
+            if INTERRUPT.is_set():
+                return
             try:
                 item = lines.get_nowait()
             except queue.Empty:
@@ -476,6 +586,8 @@ def _post_stream(url: str, body: dict, api_key: str, timeout: float):
                 # the signal lands here.
                 time.sleep(0.05)
                 continue
+            if INTERRUPT.is_set():
+                return
             if item is _EOF:
                 return
             if isinstance(item, Exception):
@@ -747,6 +859,7 @@ def format_prompt(context_tokens: int, n_ctx: int = 0) -> str:
 
 def repl(args: argparse.Namespace) -> int:
     enable_ansi()
+    install_interrupt_handler()
     if getattr(args, "background", True):
         set_background()
     print(paint_banner(BANNER.format(version=f"v{VERSION}")))
@@ -803,6 +916,9 @@ def repl(args: argparse.Namespace) -> int:
             continue
         conversation.append("user", line)
         print()
+        # Cleared per turn: an interrupt from the PREVIOUS turn must not kill
+        # the next one before it starts.
+        INTERRUPT.clear()
         try:
             reply, timings = stream_reply(
                 conversation,
@@ -819,6 +935,14 @@ def repl(args: argparse.Namespace) -> int:
         except KeyboardInterrupt:
             # The partial turn is discarded rather than appended: a truncated
             # assistant message would poison the prefix for every later turn.
+            INTERRUPT.clear()
+            print("\n[interrupted -- turn discarded, context unchanged]\n")
+            continue
+
+        # The generator returns quietly on an interrupt rather than raising,
+        # so the flag is what tells a stopped turn from a finished one.
+        if INTERRUPT.is_set():
+            INTERRUPT.clear()
             print("\n[interrupted -- turn discarded, context unchanged]\n")
             continue
 

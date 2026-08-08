@@ -19,3 +19,6 @@ tools/obj/
 # needs beside it. Rebuilt from source, and tied to a build-native tree that the next
 # ninja run replaces.
 tools/build-bench/
+
+# code blocks the CLI writes out of a reply
+.crow/

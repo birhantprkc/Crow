@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -203,9 +205,15 @@ class StreamReplyTests(unittest.TestCase):
 class RendererTests(unittest.TestCase):
     """Fenced code has to be framed WHILE it streams, not after."""
 
+    def setUp(self):
+        """Every render spills into a throwaway directory. A test that writes
+        into the repo leaves .crow/ behind on whoever runs the suite."""
+        self._tmp = tempfile.mkdtemp(prefix="crow-test-")
+        self.addCleanup(shutil.rmtree, self._tmp, True)
+
     def _render(self, text, chunk=1):
         sink = io.StringIO()
-        r = crow.Renderer(out=sink)
+        r = crow.Renderer(out=sink, spill_dir=self._tmp)
         for i in range(0, len(text), chunk):
             r.feed(text[i:i + chunk])
         r.close()
@@ -219,11 +227,51 @@ class RendererTests(unittest.TestCase):
         self.assertNotIn("```", out)
         self.assertIn("x = 1", out)
 
-    def test_code_gets_a_frame_naming_the_language(self):
+    def test_code_is_set_apart_and_named(self):
         out = self._render("```python\nx = 1\n```\n")
         self.assertIn("python", out)
-        self.assertIn("+-", out)
-        self.assertIn("| ", out)
+        self.assertIn("---", out)
+
+    def test_no_prefix_in_front_of_code_lines(self):
+        """The defect that shipped: a "| " on every line looked tidy and made
+        the block unusable, because selecting it in the terminal copies the
+        prefix too. The code line must start with the code."""
+        out = self._render("```python\nx = 1\ny = 2\n```\n")
+        for line in out.splitlines():
+            if "x = 1" in line or "y = 2" in line:
+                bare = __import__("re").sub(r"\033\[[0-9;]*m", "", line)
+                self.assertTrue(bare.startswith(("x = 1", "y = 2")),
+                                f"code line carries a prefix: {bare!r}")
+
+    def test_long_block_is_cut_and_written_to_file(self):
+        """Past the threshold the rest goes to a file instead of the scrollback,
+        and the FILE holds the whole block, not just the hidden part."""
+        body = "\n".join(f"line{i}" for i in range(40))
+        out = self._render(f"```python\n{body}\n```\n")
+        self.assertIn("line0", out)
+        self.assertNotIn("line39", out)
+        self.assertIn("more lines", out)
+        written = Path(self._tmp) / "block-001.py"
+        self.assertTrue(written.is_file())
+        saved = written.read_text(encoding="utf-8")
+        self.assertIn("line0", saved)
+        self.assertIn("line39", saved)
+
+    def test_short_block_is_shown_whole(self):
+        """Positive control for the cut: below the threshold nothing is hidden."""
+        out = self._render("```python\na = 1\nb = 2\n```\n")
+        self.assertIn("a = 1", out)
+        self.assertIn("b = 2", out)
+        self.assertNotIn("more lines", out)
+
+    def test_the_cut_still_shows_something_happening(self):
+        """A block past the cut keeps streaming, sometimes for minutes. Printing
+        nothing there looks exactly like a model that stopped mid-block - which
+        is how this was first reported. Something must reach the screen."""
+        body = "\n".join(f"line{i}" for i in range(40))
+        out = self._render(f"```python\n{body}\n```\n")
+        after_cut = out.split("line17", 1)[1]
+        self.assertTrue(after_cut.strip(), "nothing is printed past the cut")
 
     def test_same_output_regardless_of_chunk_size(self):
         """The reply arrives token by token; a renderer that only works on
@@ -234,11 +282,12 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(one, big)
 
     def test_unterminated_fence_is_closed_on_exit(self):
-        """An interrupted answer must not leave the frame hanging open."""
+        """An interrupted answer must not leave the block half-open."""
         out = self._render("```python\nx = 1\n")
         self.assertIn("x = 1", out)
         self.assertFalse(crow.Renderer(out=io.StringIO()).in_code)
-        self.assertGreaterEqual(out.count("+"), 2)
+        rules = [l for l in out.splitlines() if l.strip().startswith("---")]
+        self.assertGreaterEqual(len(rules), 2, "opening and closing rule expected")
 
     def test_language_is_tracked(self):
         r = crow.Renderer(out=io.StringIO())
