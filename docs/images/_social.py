@@ -1,15 +1,13 @@
 """Render the GitHub social preview card, 1280x640.
 
-The card is a terminal, because the product is a terminal. Everything on it was
-on a real screen: the wordmark is imported from `cli/crow.py` rather than
-retyped, the colours are the ones the client asks the terminal for, the typeface
-is the one that ships in the package, and the two timing lines are copied
-verbatim from the first session run out of an installed copy on 2026-08-08.
+A social card is read at thumbnail size, in a feed, in under a second. That rules
+out what the first two attempts did: one was a generic tech banner, the other a
+wall of 19px monospace that turns to grey mush the moment a feed scales it down.
 
-The version it drew before this was a card ABOUT the software -- big number,
-tagline, whitespace. It looked like every other generated tech banner, and it
-showed nothing that could not have been invented. This one shows the thing
-working, and the interesting part is a number in the second line.
+So this one carries three lines of large type and one contrast, because the
+contrast IS the story -- a 95.9 GiB model held in 1.28 GiB of host memory. The
+wordmark comes from `cli/crow.py` rather than being retyped, and the colours are
+the ones the client asks the terminal for.
 
     python docs/images/_social.py
 """
@@ -29,49 +27,46 @@ OUT = HERE / "social-preview.png"
 FONT = REPO / "cli" / "fonts" / "GoogleSansCode[MONO,wght].ttf"
 
 W, H = 1280, 640
+M = 84                                   # margin, the same on every side
 
-BG     = "#0b0e17"   # the window background the client asks the terminal for
-ACCENT = "#7eb0f8"   # the blue of the wordmark
-BEVEL  = "#2c5bac"   # its shaded edge
-TEXT   = "#e8edf6"
-MUTED  = "#6f7a8b"
-GREEN  = "#89d185"
+BG     = "#0b0e17"
+ACCENT = "#7eb0f8"
+BEVEL  = "#2c5bac"
+TEXT   = "#f2f5fa"
+MUTED  = "#7c8798"
+RULE   = "#1c2536"
 
-# A real coding turn, not a greeting: the card has to show what the thing is
-# for. Taken from the session of 2026-08-08 in which the client was asked how to
-# count its own context window -- the answer it gave is the code that now counts
-# it. The prompt is cut with an ellipsis; nothing else is edited.
-#
-# The last line is the whole point of the picture. Eighteen tokens re-read out
-# of a four-thousand-token conversation: before that day it was all four
-# thousand, and the first word arrived six and a half minutes later.
-SESSION = [
-    (MUTED,  "crow at http://127.0.0.1:8081/v1  (health: ok, 200k context)"),
-    (None,   ""),
-    (ACCENT, "you> take variant 2 and write me the finished function"),
-    (None,   ""),
-    (TEXT,   "crow> Here's the finished function, using the server's own"),
-    (TEXT,   "      reported usage:"),
-    (None,   ""),
-    (TEXT,   "  def get_context_usage("),
-    (TEXT,   "      server_response: dict,"),
-    (TEXT,   "      max_ctx: int = 200_000,"),
-    (TEXT,   "  ) -> int:"),
-    (MUTED,  "  ..."),
-    (None,   ""),
-    (GREEN,  "[1262 tok @ 8.56 tok/s | prefill 18 | ttft 1.73s | thinking 44%]"),
+# Measured on one machine, RTX 5090 at -c 200000 -ngl 99 -np 1. Each of these is
+# in the README with the issue it came from.
+FACTS = [
+    ("200k",     "context, one slot"),
+    ("12.08",    "tok/s, gate median"),
+    ("0 EUR",    "spent so far"),
 ]
 
 
 def load(size, weight=400.0):
     font = ImageFont.truetype(str(FONT), size)
     try:
-        # MONO=1 said out loud: a proportional instance would break the block
-        # art, which is built out of cells that have to line up.
         font.set_variation_by_axes([weight, 1.0])
     except Exception:
         pass
     return font
+
+
+def wordmark(d, x, y, cell):
+    """The block art as filled cells. Glyphs leave seams; rectangles tile."""
+    rows = [ln for ln in crow.BANNER.splitlines() if ln.strip() and "{version}" not in ln]
+    indent = min(len(ln) - len(ln.lstrip()) for ln in rows)
+    rows = [ln[indent:] for ln in rows]
+    for r, line in enumerate(rows):
+        for c, glyph in enumerate(line):
+            if glyph == " ":
+                continue
+            colour = BEVEL if glyph == crow.BANNER_SHADE else ACCENT
+            x0, y0 = x + c * cell, y + r * cell
+            d.rectangle([x0, y0, x0 + cell - 1, y0 + cell - 1], fill=colour)
+    return len(rows[0]) * cell, len(rows) * cell
 
 
 def main() -> int:
@@ -81,39 +76,37 @@ def main() -> int:
 
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
-    left = 64
 
-    # The wordmark as filled cells rather than glyphs: drawing the block
-    # characters as text leaves hairline seams, because a glyph's ink is not
-    # exactly its advance width.
-    lines = [ln for ln in crow.BANNER.splitlines() if ln.strip() and "{version}" not in ln]
-    indent = min(len(ln) - len(ln.lstrip()) for ln in lines)
-    lines = [ln[indent:] for ln in lines]
-    cw = ch = 9
-    top = 44
-    for row, line in enumerate(lines):
-        for col, glyph in enumerate(line):
-            if glyph == " ":
-                continue
-            colour = BEVEL if glyph == crow.BANNER_SHADE else ACCENT
-            x0, y0 = left + col * cw, top + row * ch
-            d.rectangle([x0, y0, x0 + cw - 1, y0 + ch - 1], fill=colour)
+    mark_w, mark_h = wordmark(d, M, M - 12, 8)
+    d.text((M + mark_w + 20, M - 12 + mark_h - 22), f"v{crow.VERSION}",
+           font=load(16), fill=MUTED)
 
-    d.text((left + len(lines[0]) * cw + 22, top + 16), f"v{crow.VERSION}",
-           font=load(17), fill=MUTED)
+    # The headline. Three lines, and the third is the one that makes people
+    # look twice -- a 95.9 GiB model that the host machine never holds.
+    head = load(50, 600.0)
+    y = M + 74
+    d.text((M, y),      "284 billion parameters.", font=head, fill=TEXT)
+    d.text((M, y + 66), "One graphics card.",      font=head, fill=TEXT)
+    d.text((M, y + 132), "1.28 GiB of RAM.",       font=head, fill=ACCENT)
 
-    mono = load(19)
-    y = top + len(lines) * ch + 34
-    for colour, line in SESSION:
-        if line:
-            d.text((left, y), line, font=mono, fill=colour)
-        y += 27
+    body = load(21)
+    d.text((M, y + 216),
+           "A 95.9 GiB mixture-of-experts model, with the experts read", font=body, fill=MUTED)
+    d.text((M, y + 246),
+           "off the SSD while the GPU is still working.", font=body, fill=MUTED)
 
-    # One sentence, and it is the only thing on the card that is not a screen.
-    d.text((left, H - 92), "284 billion parameters on one graphics card.",
-           font=load(25, 500.0), fill=TEXT)
-    d.text((left, H - 56), "The experts stream off the SSD, and the prompt cache holds.",
-           font=load(25), fill=MUTED)
+    d.line([(M, H - 138), (W - M, H - 138)], fill=RULE, width=2)
+
+    big, small = load(30, 600.0), load(16)
+    x = M
+    for value, label in FACTS:
+        d.text((x, H - 112), value, font=big, fill=TEXT)
+        d.text((x, H - 72),  label, font=small, fill=MUTED)
+        x += max(d.textlength(value, font=big), d.textlength(label, font=small)) + 56
+
+    url = load(19)
+    d.text((W - M - d.textlength("github.com/nibor1896/Crow", font=url), H - 106),
+           "github.com/nibor1896/Crow", font=url, fill=ACCENT)
 
     img.save(OUT, optimize=True)
     print(f"wrote {OUT}  {img.size[0]}x{img.size[1]}")
