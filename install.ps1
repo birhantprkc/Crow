@@ -20,11 +20,22 @@ expensive possible failure.
 .PARAMETER Selftest
 Run the checks against synthetic inputs, including ones that must fail, and exit.
 Downloads nothing.
+
+.PARAMETER SourceUrl
+Where to take the package from, instead of the GitHub release. Accepts an
+http(s) URL or a path to a local .zip.
+
+This exists because an installer whose only source is a release can never be
+tried before that release is published -- the first person to run it would be
+the first person to test it. With a local path the whole thing runs end to end
+against dist\crow-<version>-win-x64.zip, and only the download step is skipped.
+A local package is never deleted afterwards; a downloaded one is.
 #>
 [CmdletBinding()]
 param(
     [string] $Version   = "0.0.1",
     [string] $InstallTo = "$env:LOCALAPPDATA\Crow",
+    [string] $SourceUrl = "",
     [switch] $Force,
     [switch] $Selftest
 )
@@ -162,6 +173,38 @@ function Get-MachineFacts {
 }
 
 # ---------------------------------------------------------------------------
+# Where the package comes from
+# ---------------------------------------------------------------------------
+
+function Resolve-PackageSource {
+    <#
+    Returns @{ Uri = <url or full path>; IsLocal = <bool> }.
+
+    Kept apart from the download so it can be exercised by the selftest without
+    a network: everything that decides WHERE the package comes from is here, and
+    everything that moves bytes is in Get-FileWithProgress.
+    #>
+    param([string] $SourceUrl, [string] $Asset, [string] $Version)
+
+    if (-not $SourceUrl) {
+        return @{ Uri = "https://github.com/nibor1896/Crow/releases/download/v$Version/$Asset"; IsLocal = $false }
+    }
+    if ($SourceUrl -match '^https?://') {
+        return @{ Uri = $SourceUrl; IsLocal = $false }
+    }
+
+    $path = $SourceUrl
+    if ($path -match '^file:///') { $path = ([Uri] $SourceUrl).LocalPath }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        # Named, not silently downloaded from the release instead: a typo in a
+        # local path that quietly falls back would install a different package
+        # than the one being tested.
+        throw "no package at $path -- -SourceUrl wants an existing .zip or an http(s) URL"
+    }
+    return @{ Uri = (Resolve-Path -LiteralPath $path).Path; IsLocal = $true }
+}
+
+# ---------------------------------------------------------------------------
 # Download with a progress line that says what is happening
 # ---------------------------------------------------------------------------
 
@@ -283,6 +326,30 @@ function Invoke-Selftest {
     $lowRam = $good.Clone(); $lowRam.RamGb = 8
     C "8 GB RAM warns but does not block"         ((Test-Preflight @lowRam).Ok -and (Test-Preflight @lowRam).Warnings.Count -gt 0)
 
+    # Where the package comes from. No network: the decision is a pure function.
+    $noSrc = Resolve-PackageSource -SourceUrl "" -Asset "crow-9.9.9-win-x64.zip" -Version "9.9.9"
+    C "no -SourceUrl still points at the release" `
+      ((-not $noSrc.IsLocal) -and $noSrc.Uri -eq "https://github.com/nibor1896/Crow/releases/download/v9.9.9/crow-9.9.9-win-x64.zip")
+
+    $httpSrc = Resolve-PackageSource -SourceUrl "https://example.invalid/x.zip" -Asset "a.zip" -Version "9.9.9"
+    C "an http source overrides the release"     ((-not $httpSrc.IsLocal) -and $httpSrc.Uri -eq "https://example.invalid/x.zip")
+
+    $probe = Join-Path $env:TEMP ("crow-selftest-" + [guid]::NewGuid().ToString("N") + ".zip")
+    Set-Content -LiteralPath $probe -Value "not really a zip" -Encoding ascii
+    try {
+        $localSrc = Resolve-PackageSource -SourceUrl $probe -Asset "a.zip" -Version "9.9.9"
+        C "a local package is accepted"          ($localSrc.IsLocal -and $localSrc.Uri -eq $probe)
+    } finally {
+        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+    }
+
+    # The negative half: a path that is not there must stop the run rather than
+    # fall back to the release, which would install something else than asked for.
+    $missed = $false
+    try   { Resolve-PackageSource -SourceUrl (Join-Path $env:TEMP "crow-does-not-exist.zip") -Asset "a.zip" -Version "9.9.9" | Out-Null }
+    catch { $missed = $true }
+    C "a missing local package is rejected"      $missed
+
     C "Format-Size: bytes"     ((Format-Size 512) -eq "512 B")
     C "Format-Size: megabytes" ((Format-Size 506400000) -eq "482.9 MB")
     C "Format-Size: gigabytes" ((Format-Size 103000000000) -eq "95.93 GB")
@@ -327,11 +394,17 @@ Write-Item "preflight" "passed" "ok"
 
 Write-Step "Downloading the package"
 
-$asset = "crow-$Version-win-x64.zip"
-$url   = "https://github.com/nibor1896/Crow/releases/download/v$Version/$asset"
-$tmp   = Join-Path $env:TEMP $asset
-Write-Item "from" $url
-$bytes = Get-FileWithProgress -Uri $url -OutFile $tmp -Label $asset
+$asset  = "crow-$Version-win-x64.zip"
+$source = Resolve-PackageSource -SourceUrl $SourceUrl -Asset $asset -Version $Version
+Write-Item "from" $source.Uri
+if ($source.IsLocal) {
+    $tmp   = $source.Uri
+    $bytes = (Get-Item -LiteralPath $tmp).Length
+    Write-Item "local package" "nothing downloaded" "ok"
+} else {
+    $tmp   = Join-Path $env:TEMP $asset
+    $bytes = Get-FileWithProgress -Uri $source.Uri -OutFile $tmp -Label $asset
+}
 
 Write-Step "Verifying"
 
@@ -351,7 +424,9 @@ if ((Test-Path $InstallTo) -and -not $Force) {
 }
 New-Item -ItemType Directory -Force -Path $InstallTo | Out-Null
 $n = Expand-WithProgress -ZipPath $tmp -Destination $InstallTo
-Remove-Item $tmp -Force
+# Only what this script downloaded. A package handed in with -SourceUrl belongs
+# to the caller, and deleting it would eat the artefact being tested.
+if (-not $source.IsLocal) { Remove-Item $tmp -Force }
 Write-Item "installed" "$n files" "ok"
 
 Write-Step "What is left to do"
