@@ -264,6 +264,23 @@ class RendererTests(unittest.TestCase):
         self.assertIn("b = 2", out)
         self.assertNotIn("more lines", out)
 
+    def test_short_block_writes_no_file(self):
+        """A one-liner like `pip install psutil` must not leave a script behind.
+        The file exists to catch long blocks, not every snippet."""
+        self._render("```bash\npip install psutil\n```\n")
+        self.assertEqual(list(Path(self._tmp).iterdir()), [],
+                         "a short block created a file")
+
+    def test_the_file_starts_at_the_first_line_not_the_cut(self):
+        """It is written only once the block gets long, so the lines seen
+        before that have to be held and handed over - otherwise the saved file
+        begins in the middle."""
+        body = "\n".join(f"line{i}" for i in range(40))
+        self._render(f"```python\n{body}\n```\n")
+        saved = (Path(self._tmp) / "block-001.py").read_text(encoding="utf-8")
+        self.assertTrue(saved.startswith("line0\n"), saved[:40])
+        self.assertEqual(len(saved.splitlines()), 40)
+
     def test_the_cut_still_shows_something_happening(self):
         """A block past the cut keeps streaming, sometimes for minutes. Printing
         nothing there looks exactly like a model that stopped mid-block - which

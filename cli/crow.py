@@ -268,6 +268,7 @@ class Renderer:
         self._spill_dir = SPILL_DIR if spill_dir is None else spill_dir
         self._spill_path: str | None = None
         self._spill_file = None
+        self._pending: list[str] = []
         self.blocks = 0
 
     def feed(self, text: str) -> None:
@@ -300,16 +301,28 @@ class Renderer:
         self._out.flush()
 
     def _open_spill(self) -> None:
-        """Open the file the rest of this block goes to. Failure is not fatal:
-        a read-only directory must cost the file, not the answer."""
+        """Open the file and hand it the lines seen so far.
+
+        Called only once a block passes SPILL_AFTER, not when it opens: a block
+        is not known to be long until it is, and writing a file for every
+        `pip install psutil` litters the working directory with one-line
+        scripts. Nothing is written for short blocks.
+
+        Failure is not fatal - a read-only directory must cost the file, not
+        the answer.
+        """
         try:
             os.makedirs(self._spill_dir, exist_ok=True)
             ext = _EXT.get(self.language.lower(), "txt")
             self._spill_path = os.path.join(self._spill_dir, f"block-{self.blocks:03d}.{ext}")
             self._spill_file = open(self._spill_path, "w", encoding="utf-8")
+            for held in self._pending:
+                self._spill_file.write(held + "\n")
         except Exception:
             self._spill_path = None
             self._spill_file = None
+        finally:
+            self._pending = []
 
     def _end_block(self) -> None:
         note = ""
@@ -323,16 +336,15 @@ class Renderer:
             except Exception:
                 pass
             self._spill_file = None
-        if self._spill_path and self._code_lines > SPILL_AFTER:
+        if self._spill_path:
             hidden = self._code_lines - SPILL_AFTER
             note = f"  {hidden} more lines -> {self._spill_path}"
-        elif self._spill_path:
-            note = f"  {self._spill_path}"
         self._rule("-" * self.WIDTH + note)
         self.in_code = False
         self.language = ""
         self._code_lines = 0
         self._spill_path = None
+        self._pending = []
 
     def _line(self, line: str) -> None:
         stripped = line.strip()
@@ -343,8 +355,8 @@ class Renderer:
                 self.language = stripped[3:].strip()
                 self.blocks += 1
                 self._code_lines = 0
+                self._pending = []
                 self.in_code = True
-                self._open_spill()
                 label = f" {self.language}" if self.language else " code"
                 self._rule("-" * 3 + label + " " + "-" * max(0, self.WIDTH - 5 - len(label)))
             return
@@ -354,14 +366,24 @@ class Renderer:
             self._out.flush()
             return
 
-        # Every code line goes to the file, whether it is shown or not, so the
-        # saved block is the WHOLE block and not the visible part of it.
+        self._code_lines += 1
+        # Every code line ends up in the file, whether shown or not, so the
+        # saved block is the WHOLE block and not the visible part of it. Until
+        # the block is long enough to warrant a file, the lines are held.
         if self._spill_file is not None:
             try:
                 self._spill_file.write(line + "\n")
             except Exception:
                 pass
-        self._code_lines += 1
+        elif self._code_lines == SPILL_AFTER + 1:
+            self._open_spill()
+            if self._spill_file is not None:
+                try:
+                    self._spill_file.write(line + "\n")
+                except Exception:
+                    pass
+        else:
+            self._pending.append(line)
         if self._code_lines <= SPILL_AFTER:
             self._out.write(highlight(line, self.language) + "\n")
             self._out.flush()
