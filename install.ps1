@@ -21,6 +21,11 @@ expensive possible failure.
 Run the checks against synthetic inputs, including ones that must fail, and exit.
 Downloads nothing.
 
+.PARAMETER NoPause
+Do not wait for ENTER at the end. The wait exists so the last screen -- the model
+to fetch and the two commands to run -- is still there to read; a script driving
+this installation does not want it.
+
 .PARAMETER SourceUrl
 Where to take the package from, instead of the GitHub release. Accepts an
 http(s) URL or a path to a local .zip.
@@ -37,6 +42,7 @@ param(
     [string] $InstallTo = "$env:LOCALAPPDATA\Crow",
     [string] $SourceUrl = "",
     [switch] $Force,
+    [switch] $NoPause,
     [switch] $Selftest
 )
 
@@ -176,6 +182,41 @@ function Get-MachineFacts {
         Is64Bit      = [Environment]::Is64BitOperatingSystem
         PsVersion    = $PSVersionTable.PSVersion
     }
+}
+
+# ---------------------------------------------------------------------------
+# Leaving
+# ---------------------------------------------------------------------------
+
+function Exit-Run {
+    <#
+    End the run with a status, without taking the user's shell down with it.
+
+    `exit` inside a script FILE leaves the script. Inside a string executed by
+    `iex` -- which is the documented way to install this, `irm ... | iex` -- it
+    leaves the HOST SHELL. Measured 2026-08-08 on the first public install: the
+    window closed the instant the installer finished, before anyone could read
+    the server command it had just printed. The install had worked; there was
+    simply no way to tell.
+
+    So: exit only when there is a file to exit from. Otherwise set the status
+    and let the caller `return`. $PSCommandPath is the file being run and is
+    empty for a text run through iex, which is exactly the distinction needed.
+    #>
+    param([int] $Code = 0)
+
+    if (Test-CanExitProcess $PSCommandPath) { exit $Code }
+    $global:LASTEXITCODE = $Code
+}
+
+function Test-CanExitProcess {
+    <#
+    The decision Exit-Run rests on, split out so the selftest can drive both
+    answers. Testing it through Exit-Run is impossible by construction: the
+    branch under test ends the process.
+    #>
+    param([string] $CommandPath)
+    return [bool]$CommandPath
 }
 
 # ---------------------------------------------------------------------------
@@ -363,6 +404,11 @@ function Invoke-Selftest {
     $null = Get-MachineFacts
     C "reading the machine leaves a clean exit code" ($LASTEXITCODE -eq 0)
 
+    # The regression that closed the first public install's window: `exit` in a
+    # text run through iex takes the host shell with it.
+    C "a run from a file may exit the process"   (Test-CanExitProcess "C:\x\install.ps1")
+    C "a run through iex must not"               (-not (Test-CanExitProcess ""))
+
     C "Format-Size: bytes"     ((Format-Size 512) -eq "512 B")
     C "Format-Size: megabytes" ((Format-Size 506400000) -eq "482.9 MB")
     C "Format-Size: gigabytes" ((Format-Size 103000000000) -eq "95.93 GB")
@@ -374,7 +420,7 @@ function Invoke-Selftest {
     return 0
 }
 
-if ($Selftest) { exit (Invoke-Selftest) }
+if ($Selftest) { Exit-Run (Invoke-Selftest); return }
 
 # ---------------------------------------------------------------------------
 # Run
@@ -401,7 +447,8 @@ if (-not $pf.Ok) {
     foreach ($p in $pf.Problems) { Write-Item "cannot install:" $p "fail" }
     Write-Host ""
     Write-Host "  Nothing was downloaded." -ForegroundColor DarkGray
-    exit 1
+    Exit-Run 1
+    return
 }
 Write-Item "preflight" "passed" "ok"
 
@@ -417,7 +464,8 @@ try {
     Write-Item "cannot install:" $_.Exception.Message "fail"
     Write-Host ""
     Write-Host "  Nothing was downloaded." -ForegroundColor DarkGray
-    exit 1
+    Exit-Run 1
+    return
 }
 Write-Item "from" $source.Uri
 if ($source.IsLocal) {
@@ -442,7 +490,8 @@ if ((Test-Path $InstallTo) -and -not $Force) {
     $existing = @(Get-ChildItem $InstallTo -ErrorAction SilentlyContinue).Count
     if ($existing -gt 0) {
         Write-Item "exists" "$InstallTo already holds $existing entries -- pass -Force to overwrite" "fail"
-        exit 1
+        Exit-Run 1
+    return
     }
 }
 New-Item -ItemType Directory -Force -Path $InstallTo | Out-Null
@@ -459,11 +508,21 @@ if ($py) { Write-Item "python" "$($py.Source)" "ok" }
 else     { Write-Item "python" "not on the PATH -- the client needs it" "warn" }
 
 Write-Host ""
-Write-Host "  The model is not installed. It is 95.9 GiB and comes from its own source:" -ForegroundColor DarkGray
+Write-Host "  1. The model. It is NOT part of this install: 95.9 GiB, four files, and it" -ForegroundColor DarkGray
+Write-Host "     belongs to somebody else." -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "       DeepSeek-V4-Flash, quantised by unsloth to UD-IQ3_XXS" -ForegroundColor White
+Write-Host "       https://huggingface.co/unsloth/DeepSeek-V4-Flash-GGUF" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "    hf download unsloth/DeepSeek-V4-Flash-GGUF --include 'UD-IQ3_XXS/*' --local-dir $InstallTo\models" -ForegroundColor White
 Write-Host ""
-Write-Host "  Then start the server, and the client in a second terminal:" -ForegroundColor DarkGray
+# Measured 2026-08-07: when hf cannot reach the repository it prints a tick and
+# returns the local directory. Failure that looks like success is worth one line
+# here, because the next thing the user does is start a server against nothing.
+Write-Host "     If that finishes suspiciously fast, check that four files and ~96 GiB" -ForegroundColor DarkGray
+Write-Host "     actually arrived -- hf reports success even when it reached nothing." -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  2. Then start the server, and the client in a second terminal:" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "    $InstallTo\bin\llama-server.exe -m $InstallTo\models\UD-IQ3_XXS\DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf ``" -ForegroundColor White
 # --jinja is not optional here. Without it llama-server uses its own built-in
@@ -477,8 +536,23 @@ Write-Host ""
 Write-Host "    python $InstallTo\cli\crow.py" -ForegroundColor White
 Write-Host ""
 
-# Said out loud rather than inherited. Without this the script exits with
-# whatever the last native call left in $LASTEXITCODE, which is how a finished
-# install came to report 255. Every failure path above exits 1 explicitly, so
-# reaching this line means it worked.
-exit 0
+# The last screen is the only place these three commands appear, and a console
+# that was opened for the install closes with it. So the run ends on a keypress
+# rather than on its own -- measured the hard way on 2026-08-08, when the first
+# public install finished correctly and the window was gone before anyone could
+# read what it had just printed.
+#
+# Skipped when there is nobody to press it: -NoPause for a script driving this,
+# and UserInteractive for a host with no console at all. A wait that cannot be
+# satisfied is not a safety net, it is a hang.
+if (-not $NoPause -and [Environment]::UserInteractive) {
+    Write-Host "  Press ENTER to finish." -ForegroundColor DarkGray
+    try { [void](Read-Host) } catch { }
+    Write-Host ""
+}
+
+# Said out loud rather than inherited. Without this the run ends with whatever
+# the last native call left in $LASTEXITCODE, which is how a finished install
+# came to report 255. Every failure path above sets 1 explicitly, so reaching
+# this line means it worked.
+Exit-Run 0
