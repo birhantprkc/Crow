@@ -84,17 +84,12 @@ The CUDA backend is built against NVIDIA's CUDA Toolkit -- version 13.3 on the
 development machine -- and is subject to the NVIDIA Software License Agreement
 and the CUDA Supplement to it.
 
-The binaries require two NVIDIA libraries at runtime. Measured 2026-08-08 with
-`dumpbin /dependents`: `ggml-cuda.dll` imports `cublas64_13.dll`, which in turn
-imports `cublasLt64_13.dll`. `cudart` appears nowhere -- the CUDA runtime is
-statically linked, only cuBLAS is dynamic.
-
-Neither file is in this repository, and neither is in the build tree:
-`bin/Release` holds eleven files, all of them `ggml-*`, `llama-*` or `mtmd`.
-Wherever a release ships those two libraries alongside the binaries, they stay
-under NVIDIA's own terms and are NOT covered by the MIT grant above. NVIDIA
-permits redistribution of the libraries it designates as redistributable, under
-the conditions stated in that agreement, and both of these are on that list.
+A release ships two NVIDIA libraries alongside the binaries, because they are
+required at runtime and are not in this repository: cublas64_13.dll and
+cublasLt64_13.dll. They stay under NVIDIA's own terms and are NOT covered by
+the MIT grant above. NVIDIA permits redistribution of the libraries it
+designates as redistributable, under the conditions stated in that agreement,
+and both of these are on that list.
 
 
 --------------------------------------------------------------------------------
