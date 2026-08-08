@@ -370,15 +370,15 @@ Crow chats today. It cannot yet *act*: when it produced a working three.js page 
 
 **Buildable now — Python, no open questions**
 
-- [ ] **File tools: read, write, patch.** Fuzzy patch matching is worth copying from hermes-agent; everything else is standard library.
-- [ ] **Read-before-write, blocking rather than warning.** hermes detects a stale write and performs it anyway — two independent code paths that both resolve to last-write-wins. Ours refuses, and a test that writes without a prior read has to be rejected, not logged.
-- [ ] **Local command execution**, with the output limits and the credential blocklist that make it safe to leave running.
-- [ ] **A todo tool.** Cheap, and at ~12 tok/s it is what keeps a long run on track.
+- [ ] **The loop that lets a reply become an action.** The model already answers with a request to call something; nothing yet carries that request out, hands the result back and asks again. Everything below is a passenger on this one. Its own measurement follows, because *a model that can express a tool call is not the same as a model that makes good ones.* [#58](https://github.com/nibor1896/Crow/issues/58)
+- [ ] **Editing a file by describing the change, not by rewriting the file.** A model that has to emit the whole new file pays for every untouched line: at ~8 tok/s a 400-line file is over a minute of typing to change three lines. The alternative is a small text format that says *replace these lines, in this context* — the same one codex and cline speak.
+- [ ] **Edits that survive the file having moved on.** The hard part is not the format, it is that the context a model quotes rarely matches the file byte for byte — indentation drifted, a line above changed, or the edit is already in place from an earlier round. So the match has to be approximate and has to recognise an already-applied change as *done* rather than as a failure. This is the one piece worth taking from hermes-agent rather than writing: 1,837 lines, standard library throughout, MIT, and the failure modes are all in the details.
+- [ ] **Refusing a write that was never read.** A model that writes a file it has not read this session overwrites whatever it does not know about. hermes detects exactly that and performs the write anyway — two independent code paths, both resolving to last-write-wins. Ours refuses, and the case that must go red is a write with no prior read.
+- [ ] **Running a command and reading what it said.** Local only, with an output ceiling and a credential blocklist. hermes carries eight execution backends for containers and remote sandboxes; seven of them describe a product this is not, and the local one is shorter written with the standard library than borrowed.
+- [ ] **A list the model keeps for itself.** At this decode rate a long run drifts, and a visible list of what is done and what is left is what keeps it on course. Small — the value is the habit, not the code.
 - [x] **Fix the `ttft` number the CLI reports.** It used to start the clock at the first *content* token, so it silently contained the whole reasoning phase. It now counts the first token of any kind, and `answer` is reported beside it — the gap between the two *is* the thinking time. Figures quoted from before 2026-08-07 measure the old definition.
 
-**Buildable, but gated on one server change**
-
-- [ ] **The tool-calling loop itself.** The model's chat template supports it — `tools` 25 times, `tool_calls` 7 times — and the operating point now runs with `--jinja`, so the template is actually in use. What is still missing is the loop: a returned `tool_call` is reported, not executed. The measurement that follows is its own question, because *a template that can express tool calls is not the same as a model that makes good ones.* [#58](https://github.com/nibor1896/Crow/issues/58)
+Nothing in that list is waiting on a server change any more. It was, until 2026-08-08: the model's own chat template can express tool calls, but `llama-server` only uses that template with `--jinja`, and the operating point did not set it. It does now — [see the flag table](#step-1--start-the-server), where it turns out to matter for a second reason entirely.
 
 **Decided by measurement, not by preference**
 
