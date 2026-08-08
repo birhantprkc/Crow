@@ -213,7 +213,7 @@ the repository is and how to run it — nothing else.
 
 ## Licence
 
-MIT, see `LICENSE`. It also carries the terms of the four components this project cannot grant:
+MIT, see `LICENSE`. `NOTICE` carries the terms of the four components this project cannot grant:
 `ggml-org/llama.cpp` (MIT, other copyright holders), `deepseek-ai/DeepSeek-V4-Flash` (MIT, fetched
 rather than shipped), the NVIDIA CUDA Toolkit the CUDA backend is built against, and Google Sans
 Code under the SIL Open Font License 1.1.
