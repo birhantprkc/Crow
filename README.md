@@ -2,7 +2,7 @@
 
 <h1>Crow</h1>
 
-<h3>A 284-billion-parameter coding model. One graphics card. 1.28 GB of system RAM.</h3>
+<h3>A 284-billion-parameter coding model, at a 200k context. One graphics card. 1.28 GB of system RAM.</h3>
 
 <p>Frontier mixture-of-experts inference, with the experts streamed off the SSD.<br>No cluster. No 200 GB host. No cloud.</p>
 
@@ -19,6 +19,7 @@
 <tr>
 <td align="center"><b>284B</b><br><sub>parameters</sub></td>
 <td align="center"><b>13B</b><br><sub>active per token</sub></td>
+<td align="center"><b>200k</b><br><sub>context, one slot</sub></td>
 <td align="center"><b>95.9 GiB</b><br><sub>model on disk</sub></td>
 <td align="center"><b>1.28 GiB</b><br><sub>peak host RAM, measured</sub></td>
 <td align="center"><b>12.08</b><br><sub>tok/s decode</sub></td>
@@ -35,6 +36,8 @@
 **Crow runs a frontier-scale coding model on a single consumer graphics card by leaving most of the model on the SSD.**
 
 A mixture-of-experts model is mostly asleep. Every token wakes only **6 of the 256 experts** in each of its 43 layers, so 92.7 % of the file is untouched at any given moment. Crow keeps the parts that *every* token needs in VRAM — attention, norms, shared experts, 6.57 GiB of them — holds the 64 most useful experts per layer beside them in a slot cache, and reads whatever is missing straight off the drive while the GPU is still working. The host machine never holds the model at all: **1.28 GiB of process memory for a 95.9 GiB file.**
+
+The context window is 200,000 tokens, on a single slot, and it costs about 1.41 GiB of the card — compressed attention makes context the cheap part here. A coding session holds files and history, so a 16k or 64k window would be measuring a product nobody uses.
 
 That is the whole idea. Everything below is what it costs to make it actually run.
 
