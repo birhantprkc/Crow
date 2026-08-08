@@ -466,7 +466,13 @@ Write-Host ""
 Write-Host "  Then start the server, and the client in a second terminal:" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "    $InstallTo\bin\llama-server.exe -m $InstallTo\models\UD-IQ3_XXS\DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf ``" -ForegroundColor White
-Write-Host "      -c 200000 -ngl 99 -np 1 --moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct" -ForegroundColor White
+# --jinja is not optional here. Without it llama-server uses its own built-in
+# template instead of the model's, the client's replayed reasoning is dropped,
+# and the prompt cache breaks on every turn -- measured 2026-08-08, 138.8-242.3 s
+# of re-prefill per turn against 1.6-2.2 s. This is the line people copy, so it
+# is the line that has to carry the flag.
+Write-Host "      -c 200000 -ngl 99 -np 1 --jinja ``" -ForegroundColor White
+Write-Host "      --moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct" -ForegroundColor White
 Write-Host ""
 Write-Host "    python $InstallTo\cli\crow.py" -ForegroundColor White
 Write-Host ""
