@@ -149,7 +149,13 @@ function Get-MachineFacts {
     $vram = 0
     $gpu  = "none"
     if ($smi) {
-        $q = & nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>$null | Select-Object -First 1
+        # Collect first, take the first line second. `| Select-Object -First 1`
+        # directly on a native command ends the pipeline early, PowerShell kills
+        # the process, and $LASTEXITCODE lands on -1 -- measured 2026-08-08.
+        # The script then exited 255 after a completely successful install,
+        # which any caller reads as a failure.
+        $lines = @(& nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>$null)
+        $q = if ($lines.Count) { $lines[0] } else { $null }
         if ($q) {
             $parts = $q -split ',\s*'
             $gpu   = $parts[0]
@@ -350,6 +356,13 @@ function Invoke-Selftest {
     catch { $missed = $true }
     C "a missing local package is rejected"      $missed
 
+    # The regression behind the 255: reading the machine must not leave a native
+    # command's broken exit code behind, because the script's own exit code is
+    # whatever the last native call left there.
+    $global:LASTEXITCODE = 0
+    $null = Get-MachineFacts
+    C "reading the machine leaves a clean exit code" ($LASTEXITCODE -eq 0)
+
     C "Format-Size: bytes"     ((Format-Size 512) -eq "512 B")
     C "Format-Size: megabytes" ((Format-Size 506400000) -eq "482.9 MB")
     C "Format-Size: gigabytes" ((Format-Size 103000000000) -eq "95.93 GB")
@@ -394,8 +407,18 @@ Write-Item "preflight" "passed" "ok"
 
 Write-Step "Downloading the package"
 
-$asset  = "crow-$Version-win-x64.zip"
-$source = Resolve-PackageSource -SourceUrl $SourceUrl -Asset $asset -Version $Version
+$asset = "crow-$Version-win-x64.zip"
+# Caught rather than thrown on: every other refusal in this script prints one
+# line and exits 1, and a raw PowerShell error record here would be the only
+# place a user meets a stack trace.
+try {
+    $source = Resolve-PackageSource -SourceUrl $SourceUrl -Asset $asset -Version $Version
+} catch {
+    Write-Item "cannot install:" $_.Exception.Message "fail"
+    Write-Host ""
+    Write-Host "  Nothing was downloaded." -ForegroundColor DarkGray
+    exit 1
+}
 Write-Item "from" $source.Uri
 if ($source.IsLocal) {
     $tmp   = $source.Uri
@@ -447,3 +470,9 @@ Write-Host "      -c 200000 -ngl 99 -np 1 --moe-stream --moe-stream-cache 64s --
 Write-Host ""
 Write-Host "    python $InstallTo\cli\crow.py" -ForegroundColor White
 Write-Host ""
+
+# Said out loud rather than inherited. Without this the script exits with
+# whatever the last native call left in $LASTEXITCODE, which is how a finished
+# install came to report 255. Every failure path above exits 1 explicitly, so
+# reaching this line means it worked.
+exit 0
