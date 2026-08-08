@@ -23,7 +23,9 @@
 
   <!-- ══ header ══════════════════════════════════════════════════════════ -->
   <rect x="34" y="30" width="76" height="76" rx="16" fill="#2c5bac"/>
-  <text x="72" y="84" text-anchor="middle" class="num" font-size="44">C</text>
+  <!-- dominant-baseline rather than a hand-computed baseline: the cap height of
+       one glyph is not something to guess at, and the renderer knows it. -->
+  <text x="72" y="68" text-anchor="middle" dominant-baseline="central" class="num" font-size="42">C</text>
   <text x="130" y="76" class="big">CROW ENGINE</text>
   <text x="132" y="102" class="tag">284B PARAMETERS · 13B ACTIVE PER TOKEN · 43 LAYERS · 256 EXPERTS EACH</text>
 
