@@ -22,3 +22,6 @@ tools/build-bench/
 
 # code blocks the CLI writes out of a reply
 .crow/
+
+# Release packages -- built by tools/pack-release.ps1, never versioned
+dist/
