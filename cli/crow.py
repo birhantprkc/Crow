@@ -436,11 +436,20 @@ class Renderer:
 
         Failure is not fatal - a read-only directory must cost the file, not
         the answer.
+
+        THE NAME IS TAKEN, NOT ASSUMED. `self.blocks` counts within one Renderer
+        and a Renderer is built per turn, so it restarts at 1 every turn: turn 2
+        wrote block-001 over turn 1's. The number now steps until the name is
+        free, which also survives a session started in a directory that already
+        holds blocks from an earlier one.
         """
         try:
             os.makedirs(self._spill_dir, exist_ok=True)
             ext = _EXT.get(self.language.lower(), "txt")
-            self._spill_path = os.path.join(self._spill_dir, f"block-{self.blocks:03d}.{ext}")
+            n = self.blocks
+            while os.path.exists(os.path.join(self._spill_dir, f"block-{n:03d}.{ext}")):
+                n += 1
+            self._spill_path = os.path.join(self._spill_dir, f"block-{n:03d}.{ext}")
             self._spill_file = open(self._spill_path, "w", encoding="utf-8")
             for held in self._pending:
                 self._spill_file.write(held + "\n")

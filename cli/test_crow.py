@@ -457,6 +457,38 @@ class RendererTests(unittest.TestCase):
         self.assertTrue(saved.startswith("line0\n"), saved[:40])
         self.assertEqual(len(saved.splitlines()), 40)
 
+    def test_a_second_turn_does_not_overwrite_the_first(self):
+        """The defect: Renderer is built per turn, so `blocks` restarts at 1 and
+        turn 2 wrote block-001 over turn 1's answer."""
+        for marker in ("first", "second", "third"):
+            body = "\n".join(f"{marker}{i}" for i in range(40))
+            self._render(f"```python\n{body}\n```\n")
+
+        files = sorted(p.name for p in Path(self._tmp).glob("block-*.py"))
+        self.assertEqual(files, ["block-001.py", "block-002.py", "block-003.py"])
+        # Each holds its own turn, in order -- the point of the fix.
+        for name, marker in zip(files, ("first", "second", "third")):
+            with self.subTest(name=name):
+                self.assertIn(f"{marker}0", (Path(self._tmp) / name).read_text(encoding="utf-8"))
+
+    def test_blocks_already_on_disk_are_stepped_over(self):
+        """A session started where an earlier one left files must not eat them."""
+        (Path(self._tmp) / "block-001.py").write_text("from an earlier session", encoding="utf-8")
+        body = "\n".join(f"line{i}" for i in range(40))
+        self._render(f"```python\n{body}\n```\n")
+
+        self.assertEqual((Path(self._tmp) / "block-001.py").read_text(encoding="utf-8"),
+                         "from an earlier session")
+        self.assertTrue((Path(self._tmp) / "block-002.py").is_file())
+
+    def test_a_different_language_gets_its_own_numbering(self):
+        """The extension is part of the name, so .py and .js do not collide."""
+        body = "\n".join(f"line{i}" for i in range(40))
+        self._render(f"```python\n{body}\n```\n")
+        self._render(f"```javascript\n{body}\n```\n")
+        self.assertTrue((Path(self._tmp) / "block-001.py").is_file())
+        self.assertTrue((Path(self._tmp) / "block-001.js").is_file())
+
     def test_the_cut_still_shows_something_happening(self):
         """A block past the cut keeps streaming, sometimes for minutes. Printing
         nothing there looks exactly like a model that stopped mid-block - which
