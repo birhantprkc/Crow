@@ -1,13 +1,13 @@
 {
     "note":  "Fingerprint only. These files are NOT in git - runs/ is ignored (.gitignore:10). This manifest detects deletion and modification; it is not a backup and does not make the protocols recoverable.",
     "day":  "2026-08-09",
-    "pattern":  "^(h2d|pairs|l2-gate-fix|no-l2-baseline|l2-lockprobe)$",
+    "pattern":  "^(h2d|pairs|host-peak|l2-gate-fix|no-l2-baseline|l2-lockprobe)$",
     "root":  "Crow/runs",
-    "written":  "2026-08-09T22:01:03.0294167+02:00",
-    "files":  188,
-    "bytes":  69097428,
+    "written":  "2026-08-10T00:04:24.3136349+02:00",
+    "files":  191,
+    "bytes":  69102292,
     "stages":  {
-                   "unknown":  188
+                   "unknown":  191
                },
     "entries":  [
                     {
@@ -21,6 +21,24 @@
                         "stage":  "unknown",
                         "bytes":  6474,
                         "sha256":  "82E6C2BB907616F56DB510C31BD6BDAE8E29EC09BAD99DC99BE52CCE9AE85E3F"
+                    },
+                    {
+                        "path":  "2026-08-09/host-peak/base.err",
+                        "stage":  "unknown",
+                        "bytes":  2637,
+                        "sha256":  "2F481C8D34FF9D3A7A8CE2EFA188AC71E3D6C127225C481CD73BB7A68AE9785E"
+                    },
+                    {
+                        "path":  "2026-08-09/host-peak/host-peak.csv",
+                        "stage":  "unknown",
+                        "bytes":  175,
+                        "sha256":  "6F32CB9E7C9A08E4C0EB7915FDDA17B05E9B40055198F4C8D3FD181A0C3B6CD4"
+                    },
+                    {
+                        "path":  "2026-08-09/host-peak/l2.err",
+                        "stage":  "unknown",
+                        "bytes":  2052,
+                        "sha256":  "9B2FD9CA4E6A293C78A9B282DED6E444A5525825ECC172862101D8B7D76A4329"
                     },
                     {
                         "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix.err",

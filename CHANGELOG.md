@@ -15,8 +15,9 @@ is in its commit message and on its issue; this is the short version.
   `search_text`, `run_command`. Until now a reply could only be printed and copied out by hand.
 
   Three properties carry a reason rather than a preference. `read_file` takes a line range and
-  caps at 16 KB, because prefill is the cost that matters — at ~38 tok/s a 100 KB file is ~25,000
-  tokens and eleven minutes before the model has read a word of it. `write_file` and `edit_file`
+  caps at 16 KB, because prefill is the cost that matters — a 100 KB file is ~25,000 tokens, and at
+  the 8–50 tok/s prefill measures depending on cache state that is between eight and fifty minutes
+  before the model has read a word of it. `write_file` and `edit_file`
   refuse a file this session has not read, because a model that writes what it has not read
   overwrites whatever it does not know about. And the system prompt deliberately carries no
   working directory: it is byte 0 of the prefix, so a session saved in one folder would be
@@ -31,7 +32,7 @@ is in its commit message and on its issue; this is the short version.
 
   Measured end to end, paired on identical tasks, 32 GiB tier: **15.89 / 14.73 / 14.53 tok/s with
   against 10.81 / 10.54 / 10.09 without — 1.40–1.47x**, and the cost of a miss falls from
-  1.31 ms to 0.73. Within-arm spread was 1.09x and 1.07x, narrower than the difference.
+  1.28-1.35 ms to 0.73-0.75, a factor of 1.79. Within-arm spread was 1.09x and 1.07x, narrower than the difference.
 
   **The arrangement is half the result, and two of them measured nothing.** Repeating the same
   ten gate tasks per run gave 7.65 and 15.77 tok/s at *identical* configuration, because the
@@ -40,9 +41,9 @@ is in its commit message and on its issue; this is the short version.
   solving differently hard problems. What works is both at once: same tasks within a pair, fresh
   tasks across pairs, each arm on its own server.
 
-  **It costs 32 GiB of page-locked memory** — process peak goes from 1.28 GiB to 33.46 GiB, and
-  that memory is unavailable to the rest of the machine until the server exits. Off by default.
-  The installer prints the flag only above 60 GB of detected RAM, because 32 GiB on a ~64 GB host
+  **It costs 32 GiB of page-locked memory** — process peak goes from 1.28 GiB to 33.73 GiB, and
+  that memory is unavailable to the rest of the machine until the server exits. The flag defaults
+  to off; the installer puts it into the command it prints above 60 GB of detected RAM, because 32 GiB on a ~64 GB host
   is the only ratio that has been run.
 
   **Unmeasured:** any other tier size, and whether the factor survives a full 200k window. Every
@@ -50,8 +51,9 @@ is in its commit message and on its issue; this is the short version.
 
 - **`--slot-save-path` is in the printed command, and the installer creates the directory.** The
   server refuses to start against a path that is not an existing directory, so the line it
-  printed could fail on a fresh install. Without the flag a restart re-prefills the whole history:
-  23,400 tokens took about 35 minutes against 22 ms to restore.
+  printed could fail on a fresh install. Without the flag a restart re-prefills the whole history.
+  The 22 ms restore is measured; the ~35 minutes for 23,400 tokens is extrapolated from a run that
+  was aborted at 10 %.
 
 ### Fixed
 

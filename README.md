@@ -2,7 +2,7 @@
 
 <h1>Crow</h1>
 
-<h3>A 284-billion-parameter coding model, at a 200k context. One graphics card. 1.28 GB of system RAM.</h3>
+<h3>A 284-billion-parameter coding model, at a 200k context. One graphics card. 33 GB of system RAM.</h3>
 
 <p>Frontier mixture-of-experts inference, with the experts streamed off the SSD.<br>No cluster. No 200 GB host. No cloud.</p>
 
@@ -20,8 +20,8 @@
 <td align="center"><b>13B</b><br><sub>active per token</sub></td>
 <td align="center"><b>200k</b><br><sub>context, one slot</sub></td>
 <td align="center"><b>95.9 GiB</b><br><sub>model on disk</sub></td>
-<td align="center"><b>1.28 GiB</b><br><sub>peak host RAM, measured</sub></td>
-<td align="center"><b>14.73</b><br><sub>tok/s decode, with the host tier</sub></td>
+<td align="center"><b>33.73 GiB</b><br><sub>peak host RAM, measured</sub></td>
+<td align="center"><b>14.73</b><br><sub>tok/s decode, gate median</sub></td>
 <td align="center"><b>0 EUR</b><br><sub>spent so far</sub></td>
 </tr>
 </table>
@@ -34,15 +34,17 @@
 
 **Crow runs a frontier-scale coding model on a single consumer graphics card by leaving most of the model on the SSD.**
 
-A mixture-of-experts model is mostly asleep. Every token wakes only **6 of the 256 experts** in each of its 43 layers, so 92.7 % of the file is untouched at any given moment. Crow keeps the parts that *every* token needs in VRAM — attention, norms, shared experts, 6.57 GiB of them — holds the 64 most useful experts per layer beside them in a slot cache, and reads whatever is missing straight off the drive while the GPU is still working. The host machine never holds the model at all: **1.28 GiB of process memory for a 95.9 GiB file.**
+A mixture-of-experts model is mostly asleep. Every token wakes only **6 of the 256 experts** in each of its 43 layers, so 92.7 % of the file is untouched at any given moment. Crow keeps the parts that *every* token needs in VRAM — attention, norms, shared experts, 6.88 GiB of them — holds the 64 most useful experts per layer beside them in a slot cache, and reads whatever is missing straight off the drive while the GPU is still working. The host machine never holds the model: **33.73 GiB of process memory for a 95.9 GiB file**, and 32 of those are a cache it does not need — without it the server peaks at 26.99 GiB and runs 4 tok/s slower.
 
-The context window is 200,000 tokens, on a single slot, and it costs about 1.41 GiB of the card — compressed attention makes context the cheap part here. A coding session holds files and history, so a 16k or 64k window would be measuring a product nobody uses.
+The context window is 200,000 tokens, on a single slot, and it costs 1.32 GiB of the card — compressed attention makes context the cheap part here. A coding session holds files and history, so a 16k or 64k window would be measuring a product nobody uses.
 
-**Since 0.0.5 the host's spare RAM can be spent to make that cheaper.** A machine with 64 GB has tens of gigabytes doing nothing while Crow runs on 1.28 GiB of them. `--moe-stream-l2 32` keeps expert weights there between the VRAM slots and the drive: a miss that finds its expert in host memory uploads at 47,357 MB/s instead of fetching it at 10,593, and the measured cost of a miss falls from 1.31 ms to 0.73. It is optional and off by default — [what it buys and what it costs](#5-the-host-ram-tier-optional).
+**Since 0.0.5 the host's spare RAM can be spent to make that cheaper.** A machine with 64 GB has tens of gigabytes doing nothing. `--moe-stream-l2 32` keeps expert weights there between the VRAM slots and the drive: a miss that finds its expert in host memory uploads at 47,357 MB/s instead of fetching it at 10,593, and the measured cost of a miss falls from 1.28–1.35 ms to 0.73–0.75. The flag defaults to off; the installer puts it into the command it prints on any machine that has the RAM — [what it buys and what it costs](#5-the-host-ram-tier-optional).
 
 That is the whole idea. Everything below is what it costs to make it actually run.
 
 ---
+
+> Both screenshots are from **0.0.4, without the host tier** — they are here for the prompt cache, which is what they show. The decode rate in them is not the headline figure above.
 
 ![The first turn of a session: the model is asked how to count a context window correctly, answers with code and a table of what the approach cannot do, and reports 2622 tokens at 8.69 tok/s with a cold prefill of 402 and a 33.84 s wait for the first token](docs/images/cli_turn_cold.png)
 
@@ -79,7 +81,7 @@ And the bar bottom left went **3.0k → 3.9k**. It used to run backwards.
 | | |
 |---|---|
 | **GPU** | NVIDIA, **16 GB VRAM minimum**, 32 GB for the measured operating point. Below 16 GB was never measured and is unsupported |
-| **System RAM** | 16 GB. The model does not live here — 1.28 GiB is the measured process peak. **64 GB unlocks the optional [host tier](#5-the-host-ram-tier-optional)**, which trades 32 GiB of it for ~1.4x throughput |
+| **System RAM** | **64 GB for the operating point**, which spends 32 GiB on the [host tier](#5-the-host-ram-tier-optional). 32 GB runs without it, at a 26.99 GiB peak and ~1.4x less throughput |
 | **Disk** | ~2 GB for Crow, **~96 GB for the model** |
 | **OS** | Windows x64. The streaming path uses `FILE_FLAG_NO_BUFFERING` and a handle pool, both Windows-specific |
 | **Python** | 3.8+, for the client only. Standard library, nothing to install |
@@ -139,22 +141,22 @@ hf download unsloth/DeepSeek-V4-Flash-GGUF --include "UD-IQ3_XXS/*" --local-dir 
   --moe-stream-l2 32
 ```
 
-The installer prints this line filled in for your machine, and leaves `--moe-stream-l2` out below 64 GB of RAM.
+The installer prints this line filled in for your machine. It leaves `--moe-stream-l2` out below 60 GB of detected RAM — Windows reports 63.4 on a 64 GB machine, so a threshold at the nominal size would exclude exactly the configuration this was measured on.
 
 Every flag carries a reason, and none of them is taste:
 
 | Flag | Why |
 |---|---|
-| `-c 200000` | A coding session holds files and history. 16k or 64k measures a product nobody uses. Measured: 200k loads on one slot at 31,838 of 32,607 MiB |
+| `-c 200000` | A coding session holds files and history. 16k or 64k measures a product nobody uses. Measured: 200k loads on one slot at 32,008 of 32,607 MiB |
 | `--port 8081` | Not a preference. `llama-server` defaults to 8080 and the client defaults to 8081, so leaving it out gives a server the client cannot find — and on Windows 8080 is often already taken |
 | `-np 1` | One user, one stream. `-np 4` splits the context into 4 × 50k and is the harness case, not the CLI |
 | `--jinja` | Use the **model's** chat template instead of llama.cpp's built-in one. Without it the client's replayed reasoning is dropped and the prompt cache breaks on every turn: measured 138.8–242.3 s of re-prefill per turn against 1.6–2.2 s |
 | `--moe-stream` | Route expert tensors through the slot cache instead of placing them |
-| `--moe-stream-cache 64s` | 64 of 256 experts per layer, ~24 GiB. 121 slots would reach a 95 % hit rate and need 45.5 GiB, which does not fit |
+| `--moe-stream-cache 64s` | 64 of 256 experts per layer, **22.0 GiB**. 121 slots would cover 95 % of expert *selections* and need 41.6 GiB, which does not fit — coverage is not hit rate, because a first touch can never be cached |
 | `--moe-stream-io-threads 8` | I/O workers, **each with its own file handle**. Windows serialises on the file object, so a shared handle stays at queue depth 1 whatever you do |
 | `--moe-stream-direct` | Unbuffered reads. Without it `read_raw_at` falls back to the shared handle and the pool delivers 1.01x instead of 2.22x |
-| `--slot-save-path` | Where the server writes its KV state so a session survives a restart. Without it the next start re-prefills the whole history: measured 2026-08-08, 23,400 tokens took about 35 minutes against 22 ms to restore. Must be an existing directory or the server refuses to start |
-| `--moe-stream-l2 32` | Optional [host-RAM tier](#5-the-host-ram-tier-optional), in GiB. 1.40–1.47x throughput on this machine, at the price of 32 GiB of page-locked memory. Leave it out and Crow streams exactly as it did before, at 1.28 GiB of host memory |
+| `--slot-save-path` | Where the server writes its KV state so a session survives a restart. Without it the next start re-prefills the whole history: the 22 ms restore is measured; the ~35 minutes for 23,400 tokens is extrapolated from a run aborted at 10 %. Must be an existing directory or the server refuses to start |
+| `--moe-stream-l2 32` | Optional [host-RAM tier](#5-the-host-ram-tier-optional), in GiB. 1.40–1.47x throughput on this machine, at the price of 32 GiB of page-locked memory. Leave it out and Crow streams exactly as it did before, at a 26.99 GiB peak |
 
 `--moe-stream-io-threads` is the number of *workers*, not the queue depth the drive sees. That one is measured, and it is **4.31**.
 
@@ -239,11 +241,11 @@ Two things it will not do without being asked. It will not overwrite a directory
 
 ## Common questions
 
-**Does it need the model in RAM?** No. That is the point. Peak host memory is 1.28 GiB, measured, against 51.79 GiB for llama.cpp's CPU offload on the same binary. Since 0.0.5 you *may* spend host RAM deliberately — see the next question — but nothing requires it.
+**Does it need the model in RAM?** No. The 95.9 GiB file is never held in host memory: the operating point peaks at 33.73 GiB, and 32 of those are the optional tier. Turn it off and the same binary peaks at **26.99 GiB** at this context length — the 1.28 GiB figure below is #24, measured at `-c 4096`, and does not describe the operating point.
 
-**What does `--moe-stream-l2` do?** It keeps expert weights in page-locked host RAM between the VRAM slots and the drive. A miss that finds its expert there costs 56.7 µs instead of 401.5. Measured: **1.40–1.47x decode** over three paired runs, at the price of 32 GiB of memory the rest of the machine cannot use, and a process that peaks at 33.46 GiB instead of 1.28. The installer prints the flag only on machines with 64 GB, because 32 GiB on ~64 GB is the only ratio that has been run. [Details](#5-the-host-ram-tier-optional).
+**What does `--moe-stream-l2` do?** It keeps expert weights in page-locked host RAM between the VRAM slots and the drive. One weight tensor costs 56.7 µs out of the tier instead of 401.5 through the drive; end to end a miss costs 1.79x less. Measured: **1.40–1.47x decode** over three paired runs, at the price of 32 GiB of memory the rest of the machine cannot use, and a process that peaks at 33.73 GiB instead of 1.28. The installer prints the flag above 60 GB of detected RAM, because 32 GiB on ~64 GB is the only ratio that has been run. [Details](#5-the-host-ram-tier-optional).
 
-**Is the output the same as a resident model?** On the deterministic half of the coding gate, yes — six of six tasks byte-identical to the reference after the load-path rework. The other half of the gate produces three different programs across three runs at *identical* configuration, so that half cannot answer the question. See [what is not claimed](#what-is-not-claimed).
+**Is the output the same as a resident model?** On the deterministic half of the coding gate, yes — six of six tasks byte-identical to the reference after the load-path rework, **measured without the host tier**, and not re-taken with it. The other half of the gate produces three different programs across three runs at *identical* configuration, so that half cannot answer the question. See [what is not claimed](#what-is-not-claimed).
 
 **Why Windows only?** The streaming path rests on `FILE_FLAG_NO_BUFFERING`, positional `OVERLAPPED` reads and a per-worker handle pool, because Windows serialises I/O on the file object. The POSIX side of the primitive exists and compiles; it has never been run.
 
@@ -261,7 +263,7 @@ DeepSeek-V4-Flash is 284 billion parameters. Resident at bf16, that is:
 
 ![Every parameter resident at bf16](docs/images/eq_naive_memory.png)
 
-568 GB against 32.6 GB of VRAM and 63.4 GB of system RAM. Nothing about placement or scheduling closes a gap of eighteen times.
+568 GB against 34.2 GB of VRAM and 63.4 GB of system RAM. Nothing about placement or scheduling closes a gap of eighteen times.
 
 Two published paths exist and neither works here. Keeping the experts in host RAM needs a machine with 200 GB or more — ktransformers documents exactly that minimum, and this machine misses it by a factor of 3.2. Memory-mapping the file and letting the OS page it in was measured on 2026-08-02 and is a different operating regime, not a slower one: **1.8 % CPU, 0.3 GB of 63.4 GB free, 0.79 GiB/s effective against a drive that does 5.3 GB/s sequential.** The process was not computing. It was waiting on random 4 KiB faults with eviction pressure.
 
@@ -277,7 +279,7 @@ That leaves a set which *is* needed by every token — attention, norms, embeddi
 
 ![The always-active set](docs/images/eq_resident_set.png)
 
-**6.57 GiB, 7.3 % of the 90.18 GiB of tensors.** It is GPU-resident by construction at `-ngl 99`; nothing had to be built for it. The other 92.7 % is the streaming problem.
+**6.88 GiB, 7.17 % of the 95.93 GiB of tensors** — 89.05 GiB of them routed experts. It is GPU-resident by construction at `-ngl 99`; nothing had to be built for it. The other 92.7 % is the streaming problem.
 
 Routing is concentrated enough for a cache to be worth anything, and that was measured before any of it was built: 80 % of expert selections fall on **25.7 %** of the experts, Gini 0.713. Coding routes *wider* than prose (25.7 % against 21.4 %), and those 4.3 points show up as 5.7 points less hit rate — so the workload this project cares about is the harder one.
 
@@ -301,7 +303,7 @@ Each streamed layer gets a fixed number of expert slots in VRAM. A hit means the
 
 From 18 to 64 slots: **+15.50 GiB of VRAM for +4.67 tok/s.** The gain per GiB does not fall off across the range — 0.216, 0.363 and 0.319 tok/s per GiB — which is why no intermediate size is recommended as optimal. Size the cache to the safe limit of the card.
 
-A second question the cache answers only partly: **cold misses cannot be cached away.** They are the working set every layer must touch once, they stay constant across every cache size, and at 40 slots they were 61 % of all misses. Growing the cache removes evictions, never first touches.
+A second question the cache answers only partly: **cold misses cannot be cached away.** They are the working set every layer must touch once, they stay constant across every cache size. At the operating point they are 5.0 % of misses (10,167 of 203,558) — the share falls as a run gets longer, because evictions accumulate and first touches do not. Growing the cache removes evictions, never first touches.
 
 The cache also has a hard floor that the graph, not the option, imposes:
 
@@ -337,11 +339,12 @@ This work produced a fix that went upstream on its own: `llama_file` on Windows 
 ## 5. The host-RAM tier (optional)
 
 Everything above spends VRAM and drive bandwidth. The third resource on the machine was sitting
-idle: while Crow runs at 1.28 GiB of process memory, a 64 GB box has roughly 48 GB free.
+idle: without the tier the server peaks at 26.99 GiB at 200k context, and a 64 GB box still has room.
 
 `--moe-stream-l2 32` puts a second cache level there, between the VRAM slots and the drive. The
-prices, measured 2026-08-09 at the block sizes the streamer actually moves — 2,686,976 B for
-`ffn_gate_exps`/`ffn_up_exps`, 3,211,264 B for `ffn_down_exps`:
+prices, measured 2026-08-09 at the two block sizes 41 of the 43 layers move — 2,686,976 B for
+`ffn_gate_exps`/`ffn_up_exps`, 3,211,264 B for `ffn_down_exps`. Two layers carry larger experts
+(4,456,448 and 3,604,480 B) and were not in the series:
 
 | | rate | one work item |
 |---|---:|---:|
@@ -349,8 +352,16 @@ prices, measured 2026-08-09 at the block sizes the streamer actually moves — 2
 | host → device, pageable | 18,175.5 MB/s | 147.8 µs |
 | **host → device, pinned** | **47,357.4 MB/s** | **56.7 µs** |
 
-A miss served from the tier costs **56.7 µs** against **401.5 µs** for the drive path — 7.08x.
-Spread over twelve runs was 0.10–4.36 %.
+One **work item** — a single weight tensor — costs **56.7 µs** out of the tier against **401.5 µs**
+through the drive path, 7.08x. Spread over twelve runs was 0.10–4.36 %.
+
+That is the microbenchmark, not the product. An expert is two or three work items and a miss is
+queued behind seven other workers, so end to end **a miss costs 1.28–1.35 ms without the tier and
+0.73–0.75 ms with it: 1.79x**. Both numbers are real and they answer different questions.
+
+**How often it actually pays: 26–36 %.** That is the tier's own hit rate over the three paired
+runs (26.02 / 31.86 / 35.94 %), counted in slabs rather than experts. Roughly two thirds of what a
+token needs still reaches the drive.
 
 At 32 GiB the tier holds **7,695 slots** of 4,464,640 B — one slot takes the largest slab in the
 model plus its alignment slack, so any weight fits any slot and the allocator cannot fragment.
@@ -374,12 +385,12 @@ both sides. Within-arm spread then falls to 1.09x and 1.07x — narrower than th
 is the only reason the difference can be read at all.
 
 **What it costs.** 32 GiB of page-locked memory, held for the life of the process and unavailable
-to everything else. Peak process memory goes from 1.28 GiB to 33.46 GiB — measured on a live
+to everything else. Peak process memory goes from 26.99 GiB to 33.73 GiB at the operating point — measured on a live
 server, not derived. That is why the flag is off by default and why the installer prints it only
-above 64 GB of RAM: 32 GiB on a ~64 GB machine is the only ratio that has been run.
+above 60 GB of detected RAM: 32 GiB on a ~64 GB machine is the only ratio that has been run.
 
 **What it cannot do.** Catch a cold first touch. Those bytes have never been read, so no cache
-holds them; over the ten-task gate they were 10,363 of 301,864 misses. Everything else is an
+holds them; over the tier-era ten-task gate they were 10,167 of 203,558 misses. Everything else is an
 eviction, and only those are addressable here.
 
 **A defect worth recording, because no throughput number would have shown it.** The first version
@@ -401,11 +412,11 @@ And the honest headline about where a request's time actually goes:
 
 ![Wait share](docs/images/eq_wait_share.png)
 
-**79.2 % of a request is the decode thread waiting on the drive**, median over six evaluated requests. The GPU idles roughly three quarters of the time at this operating point — `utilization.gpu` at 28 %, the memory controller at 7 %, no throttling in any sample. This is not a compute-bound system and it is not a bandwidth-bound one. It is a latency-bound one, and every lever above acts on that.
+**56–59 % of decode is the thread waiting on the drive** at the operating point, over three paired runs — and **70–72 %** without the host tier. The tier does not remove the wait, it halves what each miss costs. The GPU idles most of that time — `utilization.gpu` at 28 %, the memory controller at 7 %, no throttling in any sample, measured on #39 before the tier existed and not re-taken since. This is not a compute-bound system and it is not a bandwidth-bound one. It is a latency-bound one, and every lever above acts on that.
 
 Context is nearly free by comparison:
 
-![A 200k context costs 1.41 GiB](docs/images/eq_kv_cost.png)
+![A 200k context costs 1.32 GiB](docs/images/eq_kv_cost.png)
 
 ## Against CPU offload
 
@@ -413,11 +424,11 @@ The comparison that matters is not against another project. It is against what t
 
 ![Streaming against CPU offload](docs/images/against_cpu.png)
 
-Streaming is **1.35x on decode, 2.14x on prefill, and needs 40x less host memory**, at roughly 3.2x the VRAM. The CPU side ran at **256 MiB of available system RAM** — the thrashing regime, now with a number from this operating point.
+Streaming is **1.35x on decode, 2.14x on prefill, and needs 40x less host memory**, at roughly 3.2x the VRAM. The CPU side ran at **256 MiB of available system RAM** — the thrashing regime, measured on #24 at UD-Q2_K_XL and `-c 4096`.
 
 No quality difference between the placements is demonstrable: they are one gate task apart, and the gate's aggregate detection limit is two.
 
-**These figures are for Crow without the host tier**, which is what the comparison is about: CPU offload puts the experts in host RAM and computes against them there, and the point is that streaming beats it while barely touching that memory. Turning the tier on trades some of that advantage back deliberately — 33.46 GiB instead of 1.28, so 1.5x less host memory than CPU offload rather than 40x, and 1.4x more throughput. Two different products from one binary, and the flag says which one is running.
+**These figures are for Crow without the host tier**, which is what the comparison is about: CPU offload puts the experts in host RAM and computes against them there, and the point is that streaming beats it while barely touching that memory. Turning the tier on trades some of that advantage back deliberately — 33.73 GiB instead of 1.28, so 1.5x less host memory than CPU offload rather than 40x, and 1.4x more throughput. Two different products from one binary, and the flag says which one is running.
 
 ## Batching, and why the CLI does not
 
@@ -447,15 +458,7 @@ Written out because a page like this is easy to read as more than it says.
 
 **Crow acts now.** Since 0.0.5 a reply can become an action: the client executes the call, hands the result back and asks again, up to 24 rounds. That was [#55](https://github.com/nibor1896/Crow/issues/55), and it changes what the remaining list is about.
 
-**Built — seven tools, standard library, 122 tests**
-
-- [x] **The loop that lets a reply become an action.** `read_file`, `write_file`, `edit_file`, `list_dir`, `find_files`, `search_text`, `run_command`. Driven live 2026-08-09: `list_dir` → two `read_file` calls → a correct answer, five turns at 11.79–16.72 tok/s.
-- [x] **Reading a part of a file rather than all of it.** `read_file` takes a line range and caps at 16 KB, because prefill is the cost that matters: at ~38 tok/s a 100 KB file is ~25,000 tokens and eleven minutes before the model has read a word of it. `search_text` returns line numbers for exactly this.
-- [x] **Refusing a write that was never read.** `write_file` and `edit_file` refuse a file this session has not read. A model that writes what it has not read overwrites whatever it does not know about.
-- [x] **Running a command and reading what it said.** Local only, output ceiling, 120 s timeout.
-- [x] **Fix the `ttft` number the CLI reports.** It used to start the clock at the first *content* token, so it silently contained the whole reasoning phase. It now counts the first token of any kind, and `answer` is reported beside it — the gap between the two *is* the thinking time. Figures quoted from before 2026-08-07 measure the old definition.
-
-**Still open, and now for sharper reasons**
+**Open**
 
 - [ ] **Edits that survive the file having moved on.** `edit_file` matches exactly and refuses an ambiguous or missing match — it fails loudly instead of guessing, which is the behaviour worth having first. What it does not do is recognise a change that is *already applied*, or an indentation that drifted. That needs approximate matching, and it is the one piece worth taking from hermes-agent rather than writing.
 - [ ] **A list the model keeps for itself.** At this decode rate a long run drifts, and a visible list of what is done and what is left is what keeps it on course. Small — the value is the habit, not the code.
@@ -463,10 +466,7 @@ Written out because a page like this is easy to read as more than it says.
 
 **Decided by measurement, not by preference**
 
-- [x] **Whether reasoning goes back into the history — it does.** Settled by the prefill number rather than by argument: dropping it re-reads 0.909–0.986 of the previous turn's output every turn, replaying it re-reads 0.008–0.016. Live through the client, turns 2 and 3 prefilled 18 and 19 tokens where they had cost about 4,256 before. [#60](https://github.com/nibor1896/Crow/issues/60)
-- [x] **The context counter — it asks the server now.** It used to add `prompt_n` and `predicted_n`, which is wrong three times over: it assigned rather than accumulated, `prompt_n` counts the tokens the server *processed* rather than the length of the prompt, and `predicted_n` includes the reasoning. In a live session the bar ran *backwards* while the conversation grew. It reads `usage.total_tokens` now — the conversation as the server's own tokeniser counted it — and the timing line carries `cached N/M` beside it, which is the prompt cache working or not working, per turn, reported instead of inferred. Second half of [#60](https://github.com/nibor1896/Crow/issues/60).
 - [ ] **Staying fast and keeping the context as a session grows.** Two acceptance criteria, neither measured beyond ten turns: a turn must not get slower as the session lengthens, and the context that matters must still be there at the end of the window. [#61](https://github.com/nibor1896/Crow/issues/61)
-- [x] **A release, once the loop stands.** It stands, and 0.0.5 is it: the tool loop, the host tier, and a session that survives a restart. Tracked as [#57](https://github.com/nibor1896/Crow/issues/57).
 - [ ] **Whether the tier holds up at a full window.** Every paired run stayed under 6k of context. 1.40–1.47x is measured there and nowhere else, and the tier's hit rate in one long session — rather than across short graded tasks — is unknown.
 - [ ] **A name and a logo.** `Crow` is the project name, not a product name. Tracked as [#56](https://github.com/nibor1896/Crow/issues/56), with one hard constraint already measured: the bundled typeface has 0 of 256 braille glyphs, so a braille logo and this font cannot both ship.
 
@@ -475,7 +475,6 @@ Written out because a page like this is easy to read as more than it says.
 Batching across parallel agents is the lever this whole architecture was built for — one expert load serving many tokens instead of one — and it is measured and waiting ([#31](https://github.com/nibor1896/Crow/issues/31)). It needs agents before it can batch them, so it sits behind the loop above.
 
 ---
-
 ## How this project works
 
 These rules are the actual product of the repository; the numbers follow from them.

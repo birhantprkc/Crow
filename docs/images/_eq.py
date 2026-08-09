@@ -37,16 +37,16 @@ EQUATIONS = {
         "Six of 256 experts fire per layer, so 92.7 % of the file can stay on disk",
     ),
     "eq_resident_set": (
-        r"$\mathrm{resident} = \mathrm{attention} + \mathrm{norms} + \mathrm{shared} = 6.57\ \mathrm{GiB}$",
-        "7.3 % of the 90.18 GiB of tensors, and every token touches all of it (#27)",
+        r"$\mathrm{resident} = \mathrm{attention} + \mathrm{norms} + \mathrm{shared} = 6.88\ \mathrm{GiB}$",
+        "7.17 % of UD-IQ3_XXS, and every token touches all of it. 89.05 GiB are routed experts",
     ),
     "eq_bytes_per_token": (
-        r"$83.61\ \mathrm{GiB} \cdot \frac{6}{256} = 1.96\ \mathrm{GiB}\ \mathrm{modelled},\ 376.9\ \mathrm{MiB}\ \mathrm{measured}$",
-        "What the router actually pulls per token, against what the arithmetic predicts (#28)",
+        r"$89.05\ \mathrm{GiB} \cdot \frac{6}{256} = 2.09\ \mathrm{GiB}\ \mathrm{modelled},\ 376.9\ \mathrm{MiB}\ \mathrm{measured}$",
+        "Routed experts of UD-IQ3_XXS against what the router pulls (#28). With the tier ~2/3 of it still reaches the drive",
     ),
     "eq_kv_cost": (
-        r"$200\,000 \cdot 7.05\ \mathrm{KiB} \approx 1.41\ \mathrm{GiB}$",
-        "A 200k context costs less VRAM than one expert cache slot band (#25)",
+        r"$200\,192 \cdot 6.92\ \mathrm{KiB} = 1\,353.5\ \mathrm{MiB} = 1.32\ \mathrm{GiB}$",
+        "Measured at n_ctx = 200192 in every paired run, not extrapolated from 64k",
     ),
     "eq_wave_cap": (
         r"$\mathrm{cap} = \frac{n_{\mathrm{slots}} - n_{\mathrm{used}}}{2} = \frac{64-6}{2} = 29$",
@@ -57,8 +57,8 @@ EQUATIONS = {
         "One work item per weight tensor instead of per expert. Same bytes, same request size",
     ),
     "eq_wait_share": (
-        r"$\frac{20\,291\ \mathrm{ms}}{25\,619\ \mathrm{ms}} = 79.2\%$",
-        "Share of a request spent waiting on the drive, median of six (#39)",
+        r"$\frac{40\,402\ \mathrm{ms}}{68\,282\ \mathrm{ms}} = 59.2\%$",
+        "Share of decode spent waiting on the drive, at the operating point with the host tier. 70 % without it",
     ),
 }
 

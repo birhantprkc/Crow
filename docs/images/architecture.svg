@@ -30,7 +30,7 @@
   <text x="132" y="102" class="tag">284B PARAMETERS · 13B ACTIVE PER TOKEN · 43 LAYERS · 256 EXPERTS EACH</text>
 
   <rect x="34" y="126" width="1132" height="66" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-dasharray="6 5"/>
-  <text x="600" y="153" text-anchor="middle" class="tb" fill="#475569">HOST RAM: 1.28 GiB — the 95.9 GiB model never lives here · 33.46 GiB with the optional tier</text>
+  <text x="600" y="153" text-anchor="middle" class="tb" fill="#475569">HOST RAM: 33.73 GiB peak — 32 of them the expert tier · the 95.9 GiB model never lives here</text>
   <text x="600" y="180" text-anchor="middle" class="sub">llama.cpp's CPU offload needs 51.79 GiB for the same work, on the same binary</text>
 
   <!-- ══ the four decisions ══════════════════════════════════════════════ -->
@@ -48,7 +48,7 @@
     <rect x="34" y="322" width="556" height="92" rx="12" fill="#f2fbf5" stroke="#69c98a" stroke-width="1.6"/>
     <circle cx="76" cy="368" r="21" fill="#2f9e5e"/><text x="76" y="376" text-anchor="middle" class="num">3</text>
     <text x="110" y="361" class="tb">VRAM SLOT CACHE</text>
-    <text x="110" y="389" class="sub">64 of 256 resident — ~70 % hit rate</text>
+    <text x="110" y="389" class="sub">64 of 256 resident — 80–82 % on the gate</text>
 
     <rect x="610" y="322" width="556" height="92" rx="12" fill="#f2fbf5" stroke="#69c98a" stroke-width="1.6"/>
     <circle cx="652" cy="368" r="21" fill="#2f9e5e"/><text x="652" y="376" text-anchor="middle" class="num">4</text>
@@ -59,7 +59,7 @@
   <!-- ══ zone 1: resident in VRAM ════════════════════════════════════════ -->
   <rect x="34" y="446" width="1132" height="676" rx="16" fill="#f5f9ff" stroke="#5b8def" stroke-width="2"/>
   <text x="600" y="486" text-anchor="middle" class="zh" fill="#2c5bac">RESIDENT IN VRAM</text>
-  <text x="600" y="514" text-anchor="middle" class="sub">31,838 of 32,607 MiB, measured at the operating point</text>
+  <text x="600" y="514" text-anchor="middle" class="sub">32,008 of 32,607 MiB, measured at the operating point</text>
 
   <!-- pipeline, two rows -->
   <rect x="66" y="540" width="240" height="86" rx="12" fill="#ffffff" stroke="#8b5cf6" stroke-width="1.8"/>
@@ -72,7 +72,7 @@
 
   <rect x="716" y="540" width="418" height="86" rx="12" fill="#f2fbf5" stroke="#2f9e5e" stroke-width="1.8"/>
   <text x="925" y="573" text-anchor="middle" class="tb" fill="#2f9e5e">14.73 tok/s decode</text>
-  <text x="925" y="600" text-anchor="middle" class="sub">with the tier · 10.54 without · paired</text>
+  <text x="925" y="600" text-anchor="middle" class="sub">median of three paired runs · 1.40–1.47x</text>
 
   <g stroke="#7c8794" stroke-width="2.4" fill="none" marker-end="url(#a)">
     <path d="M306,583 L360,583"/>
@@ -121,7 +121,7 @@
   <text x="876" y="1010" text-anchor="middle" class="sub">88.2 % of what the model writes is</text>
   <text x="876" y="1033" text-anchor="middle" class="sub">reasoning, and the raven shows it</text>
 
-  <text x="600" y="1088" text-anchor="middle" class="sub">The host holds no model weights. What is resident is the 7.3 % every token touches, plus whichever</text>
+  <text x="600" y="1088" text-anchor="middle" class="sub">The GPU holds no whole model. What is resident is the 7.3 % every token touches, plus whichever</text>
   <text x="600" y="1110" text-anchor="middle" class="sub">experts the cache currently holds. Everything else stays on the drive.</text>
 
   <!-- ══ zone 2: the boundary ════════════════════════════════════════════ -->
@@ -154,15 +154,15 @@
   <rect x="66" y="1366" width="1068" height="128" rx="12" fill="#fff0e6" stroke="#e8590c" stroke-width="1.8"/>
   <text x="366" y="1408" text-anchor="middle" class="huge" fill="#e8590c">376.9 MiB</text>
   <text x="366" y="1436" text-anchor="middle" class="sub">moved per token</text>
-  <text x="600" y="1408" text-anchor="middle" class="huge" fill="#e8590c">4.31</text>
-  <text x="600" y="1436" text-anchor="middle" class="sub">reads in flight</text>
-  <text x="834" y="1408" text-anchor="middle" class="huge" fill="#e8590c">79.2 %</text>
-  <text x="834" y="1436" text-anchor="middle" class="sub">of a request is this wait</text>
-  <text x="600" y="1472" text-anchor="middle" class="sub">The GPU idles about three quarters of the time. This is not compute-bound and not bandwidth-bound — it is latency-bound.</text>
+  <text x="600" y="1408" text-anchor="middle" class="huge" fill="#e8590c">4.31*</text>
+  <text x="600" y="1436" text-anchor="middle" class="sub">reads in flight *pre-mutex build</text>
+  <text x="834" y="1408" text-anchor="middle" class="huge" fill="#e8590c">56–59 %</text>
+  <text x="834" y="1436" text-anchor="middle" class="sub">of a request is this wait, with the tier</text>
+  <text x="600" y="1472" text-anchor="middle" class="sub">The GPU idled about three quarters of the time when this was measured on #39, before the tier existed. Latency-bound, not compute- or bandwidth-bound.</text>
 
   <!-- ══ zone 2b: the optional host tier ═════════════════════════════════ -->
   <rect x="34" y="1558" width="1132" height="200" rx="16" fill="#f0fbfa" stroke="#0f766e" stroke-width="2" stroke-dasharray="7 5"/>
-  <text x="600" y="1598" text-anchor="middle" class="zh" fill="#0f766e">HOST RAM TIER — optional, off by default</text>
+  <text x="600" y="1598" text-anchor="middle" class="zh" fill="#0f766e">HOST RAM TIER — 32 GiB of the host, at the operating point</text>
 
   <rect x="66" y="1622" width="520" height="112" rx="12" fill="#ffffff" stroke="#0f766e" stroke-width="1.6"/>
   <text x="326" y="1656" text-anchor="middle" class="tb">--moe-stream-l2 32</text>

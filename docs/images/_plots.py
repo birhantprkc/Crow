@@ -64,8 +64,9 @@ def slot_ladder():
     ax.text(14, 11.6, "below 16 GB:\nnever measured,\nunsupported", ha="center", fontsize=10, color=RED)
 
     ax.set_title("More VRAM keeps buying throughput -- there is no knee", fontsize=15, fontweight="bold", pad=14)
-    ax.text(0.5, -0.19, "One binary, one quantisation, one prompt, four fresh servers. One evaluated request each, "
-                        "so this is a capacity corridor, not a ranking. Measured on #25.",
+    ax.text(0.5, -0.19, "UD-Q2_K_XL at -c 4096, no host tier, four fresh servers, one evaluated request each -- a capacity "
+                        "corridor, not a ranking, and not the operating point: the same 64-slot cache measures "
+                        "14.53-15.89 tok/s there. Measured on #25.",
             transform=ax.transAxes, ha="center", fontsize=9.5, color=MUTED)
     save(fig, "slot_ladder")
 
@@ -103,38 +104,60 @@ def quant_ladder():
 
     fig.suptitle("The harshest quantisation is the fastest, and it is worthless",
                  fontsize=15, fontweight="bold", y=1.0)
-    fig.text(0.5, -0.06, "IQ3 decodes 15 % slower per token than Q2 and needs 15 % fewer tokens -- 4.5 s difference "
-                         "over 29 minutes, and it is right more often. Measured on #28.",
+    fig.text(0.5, -0.06, "IQ3 decodes 15 % slower per token than Q2 and needs 15 % fewer tokens -- 4.5 s difference over "
+                         "29 minutes, and it is right more often. IQ1_S was run at 40 slots, the other two at 64 and "
+                         "-c 65536; all three without the host tier and without --jinja. Measured on #28.",
              ha="center", fontsize=9.5, color=MUTED)
     save(fig, "quant_ladder")
 
 
 def against_cpu():
-    """Streaming against llama.cpp's CPU offload, one binary, placement the only change. #24."""
-    metrics = ["prefill\n(tok/s)", "decode\n(tok/s)", "peak host RAM\n(GiB)"]
-    crow    = [9.47, 11.03, 1.28]
-    cpu     = [4.43, 8.18, 51.79]
+    """Streaming against llama.cpp's CPU offload, and where the operating point sits.
 
-    fig, axes = plt.subplots(1, 3, figsize=(11.6, 4.4))
-    for ax, m, c, p in zip(axes, metrics, crow, cpu):
-        bars = ax.bar(["Crow", "CPU offload"], [c, p], color=[GREEN, GREY], width=0.5, zorder=3)
-        for b, v in zip(bars, [c, p]):
-            ax.text(b.get_x() + b.get_width() / 2, v * 1.04, f"{v:,.2f}".rstrip("0").rstrip("."),
-                    ha="center", fontsize=12.5, fontweight="bold")
+    THREE BARS AND NOT TWO, and the middle one has a hole in it on purpose. The CPU-offload
+    comparison is #24, measured WITHOUT the host tier - one binary, one quantisation, placement the
+    only variable. The operating point ships WITH the tier, and only two of its three figures are
+    measured: decode (paired, 2026-08-09) and peak host memory (live). Nobody has run prefill at
+    the operating point, so that bar is absent rather than carried over from a different
+    configuration. A missing bar is a statement; a borrowed one would be a mistake.
+    """
+    metrics = ["prefill\n(tok/s)", "decode\n(tok/s)", "peak host RAM\n(GiB)"]
+    base    = [9.47, 10.54, 26.99]   # decode paired, host peak measured at the operating point
+    op      = [None, 14.73, 33.73]   # operating point, tier on
+    cpu     = [4.43, 8.18, 51.79]    # #24, experts on the CPU
+
+    labels  = ["Crow\nno tier", "Crow\n+ tier", "CPU\noffload"]
+    fig, axes = plt.subplots(1, 3, figsize=(12.4, 4.6))
+    for ax, m, b, o, p in zip(axes, metrics, base, op, cpu):
+        vals   = [b, o, p]
+        colors = [GREY, GREEN, "#e2e8f0"]
+        for i, (v, col) in enumerate(zip(vals, colors)):
+            if v is None:
+                ax.text(i, max(x for x in vals if x) * 0.10, "not\nmeasured", ha="center",
+                        fontsize=9.5, color=MUTED, style="italic")
+                continue
+            ax.bar(i, v, color=col, width=0.55, zorder=3)
+            ax.text(i, v * 1.04, f"{v:,.2f}".rstrip("0").rstrip("."), ha="center",
+                    fontsize=12, fontweight="bold")
+        ax.set_xticks(range(3)); ax.set_xticklabels(labels, fontsize=9.5)
         ax.set_title(m, fontsize=12, color=MUTED)
-        ax.set_ylim(0, max(c, p) * 1.28)
+        ax.set_ylim(0, max(x for x in vals if x) * 1.3)
         ax.grid(axis="y", color="#eef1f4", zorder=0)
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)
         ax.tick_params(labelsize=10.5)
 
-    axes[2].text(0.5, 0.55, "40x less", transform=axes[2].transAxes, ha="center",
-                 fontsize=13, fontweight="bold", color=GREEN)
+    axes[2].text(0.5, 0.62, "1.5x less than\nCPU offload", transform=axes[2].transAxes,
+                 ha="center", fontsize=11, fontweight="bold", color=GREEN)
 
-    fig.suptitle("Same binary, same model, same prompt -- placement is the only difference",
+    fig.suptitle("Against CPU offload, and what the operating point costs instead",
                  fontsize=14.5, fontweight="bold", y=1.02)
-    fig.text(0.5, -0.05, "The right-hand bar is what the same executable reaches with the experts left on the CPU. "
-                         "Two evaluated requests per side. Measured on #24.",
+    fig.text(0.5, -0.08, "Left and right are #24: the same executable with the experts on the CPU, no host tier on "
+                         "either side, two evaluated requests each. The middle bar is what ships -- decode paired "
+                         "2026-08-09, host memory measured live. It buys throughput by giving back the memory "
+                         "advantage: 1.9x less than CPU offload without the tier, 1.5x with it. Decode and host peak for "
+                         "both Crow bars are 2026-08-09 at the operating point; prefill is #24, at -c 4096, and has "
+                         "not been re-taken.",
              ha="center", fontsize=9.5, color=MUTED)
     save(fig, "against_cpu")
 
@@ -171,8 +194,9 @@ def batch_curve():
 
     ax.set_title("Batching buys aggregate throughput and spends per-request latency",
                  fontsize=15, fontweight="bold", pad=14)
-    ax.text(0.5, -0.19, "The CLI runs -np 1 by construction: one user, one stream. These figures describe the harness "
-                        "case, at -c 8192. Measured on #31.",
+    ax.text(0.5, -0.19, "The CLI runs -np 1 by construction: one user, one stream. Harness case: -c 8192, a 6-token prompt, "
+                        "32 tokens generated, one run per depth, no host tier. The short prompt is why the hit rate "
+                        "reads 68 % where the ten-task gate reads 82 %. Measured on #31.",
             transform=ax.transAxes, ha="center", fontsize=9.5, color=MUTED)
     save(fig, "batch_curve")
 
