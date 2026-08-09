@@ -1589,10 +1589,10 @@ index 6b9e94a..e3c44e5 100644
      virtual ~llama_model_base() = default;
 diff --git a/src/llama-moe-stream.cpp b/src/llama-moe-stream.cpp
 new file mode 100644
-index 0000000..329a200
+index 0000000..8b58818
 --- /dev/null
 +++ b/src/llama-moe-stream.cpp
-@@ -0,0 +1,1073 @@
+@@ -0,0 +1,1331 @@
 +#include "llama-moe-stream.h"
 +
 +#include "llama-impl.h"
@@ -1733,6 +1733,173 @@ index 0000000..329a200
 +
 +// true iff all of the given exps tensors are this layer's cache tensors - guards against a second,
 +// non-streamed expert group on the same layer index (e.g. grovemoe chexps)
++// ---------------------------------------------------------------------------------------------
++// L2: the host-RAM tier. See the header for why it exists and why filling it is free.
++// ---------------------------------------------------------------------------------------------
++
++// Takes the tier's lock and charges the wait to t_lock_us. Every entry point uses it, so the
++// counter has the same denominator as the operations themselves - a partial instrumentation would
++// under-report exactly the contention it exists to find.
++//
++// The clock is read BEFORE the lock and the counter written after, under the lock, so no atomic is
++// needed for the counter itself. ggml_time_us() costs something and that cost lands inside the
++// measurement; at this call rate that is a reason to read the result as an upper bound on cheap
++// waits, not a reason to leave the question open.
++#define L2_LOCK(tier)                                                  \
++    const int64_t _t_before = ggml_time_us();                          \
++    std::unique_lock<std::mutex> lk((tier).mtx);                       \
++    (tier).t_lock_us += ggml_time_us() - _t_before;                    \
++    (tier).n_lock_ops++;
++
++// The pinned allocation belongs to `buf` and frees itself; the fallback came from
++// moe_aligned_alloc and does not.
++llama_moe_stream_l2::~llama_moe_stream_l2() {
++    if (base != nullptr && !buf) {
++        moe_aligned_free(base);
++    }
++}
++
++const uint8_t * llama_moe_stream_l2::find(uint16_t file_idx, size_t offs, size_t len, size_t * out_slot) {
++    if (base == nullptr) {
++        return nullptr;
++    }
++    const uint64_t key = make_key(file_idx, offs);
++
++    L2_LOCK(*this);
++    auto it = index.find(key);
++    if (it == index.end()) {
++        return nullptr;
++    }
++    entry & e = entries[it->second];
++    // A LOADING entry is NOT a hit. Its bytes are not there yet, and handing them out would upload
++    // whatever the slot last held - the one defect this tier could introduce that no throughput
++    // number would ever reveal, because a wrong expert is still a fast expert.
++    if (e.st != RESIDENT || e.len != len) {
++        return nullptr;
++    }
++    // Pin it for the duration of the caller's upload. See the header for what happened without it.
++    e.pins++;
++    n_hit++;
++    *out_slot = it->second;
++    return base + it->second*slot_stride + e.head;
++}
++
++void llama_moe_stream_l2::release(size_t slot) {
++    L2_LOCK(*this);
++    entry & e = entries[slot];
++    if (e.pins > 0) {
++        e.pins--;
++    }
++}
++
++uint8_t * llama_moe_stream_l2::reserve(uint16_t file_idx, size_t offs, size_t len, size_t * out_slot) {
++    if (base == nullptr || len + 2*MOE_STREAM_DIRECT_ALIGN > slot_stride) {
++        return nullptr;
++    }
++    const uint64_t key = make_key(file_idx, offs);
++
++    L2_LOCK(*this);
++    if (index.find(key) != index.end()) {
++        return nullptr; // resident, or another worker is already filling it
++    }
++
++    // FIFO. A recency policy is probably better and is not obviously better ENOUGH to justify the
++    // bookkeeping before anyone has measured the hit rate this tier reaches at all - the first
++    // question is whether it pays, not which eviction order is optimal.
++    const size_t start = next_victim;
++    for (size_t i = 0; i < n_entries; i++) {
++        const size_t s = (start + i) % n_entries;
++        entry & e = entries[s];
++        if (e.st == LOADING || e.pins > 0) {
++            // LOADING: a worker is filling it. pins > 0: a worker is uploading OUT of it. Both are
++            // reads in flight against this memory, and taking it would corrupt one of them.
++            continue;
++        }
++        if (e.st == RESIDENT) {
++            index.erase(e.key);
++            n_evict++;
++        }
++        e.key  = key;
++        e.len  = (uint32_t) len;
++        e.head = 0;
++        e.pins = 0;
++        e.st   = LOADING;
++        index[key]  = s;
++        next_victim = (s + 1) % n_entries;
++        *out_slot   = s;
++        return base + s*slot_stride;
++    }
++    return nullptr; // every slot is in flight
++}
++
++void llama_moe_stream_l2::commit(size_t slot, size_t head) {
++    L2_LOCK(*this);
++    entry & e = entries[slot];
++    e.head = (uint32_t) head;
++    e.st   = RESIDENT;
++    n_fill++;
++}
++
++void llama_moe_stream_l2::abandon(size_t slot) {
++    L2_LOCK(*this);
++    entry & e = entries[slot];
++    index.erase(e.key);
++    e.key = UINT64_MAX;
++    e.st  = FREE;
++}
++
++void llama_moe_stream::alloc_l2(ggml_backend_buffer_type_t host_buft) {
++    if (l2_gib == 0 || max_nb_expert == 0) {
++        return;
++    }
++    // Every slot takes the largest slab plus the direct-I/O head/tail slack, so any weight fits
++    // any slot. Uniform slots waste the difference between the widest and the narrowest weight
++    // (0.5 MiB of 3.06 on the shipped model) and buy an allocator that cannot fragment.
++    const size_t stride = max_nb_expert + 2*MOE_STREAM_DIRECT_ALIGN;
++    const size_t want   = l2_gib * 1024ull * 1024ull * 1024ull;
++    const size_t n_l2   = want / stride;
++    if (n_l2 == 0) {
++        LLAMA_LOG_WARN("%s: L2 of %zu GiB is smaller than one %zu-byte slot - tier not created\n",
++                __func__, l2_gib, stride);
++        return;
++    }
++
++    auto tier = std::make_unique<llama_moe_stream_l2>();
++    tier->slot_stride = stride;
++    tier->n_entries   = n_l2;
++
++    const size_t bytes = n_l2 * stride;
++
++    if (host_buft != nullptr) {
++        ggml_backend_buffer_t b = ggml_backend_buft_alloc_buffer(host_buft, bytes);
++        if (b != nullptr) {
++            tier->buf.reset(b);
++            tier->base   = (uint8_t *) ggml_backend_buffer_get_base(b);
++            tier->pinned = true;
++        }
++    }
++    if (tier->base == nullptr) {
++        // Not a failure: the tier still removes the SSD read, it just uploads at pageable rates.
++        // Which one is in force is printed, because a run that silently fell back would report the
++        // slower number as this tier's.
++        tier->base = (uint8_t *) moe_aligned_alloc(bytes);
++        if (tier->base == nullptr) {
++            LLAMA_LOG_WARN("%s: could not allocate %.2f GiB for the L2 tier - tier not created\n",
++                    __func__, bytes/1024.0/1024.0/1024.0);
++            return;
++        }
++    }
++
++    tier->entries.resize(n_l2);
++    tier->index.reserve(n_l2*2);
++
++    LLAMA_LOG_INFO("%s: MoE L2 host tier = %.2f GiB, %zu slots of %zu bytes, %s\n",
++            __func__, bytes/1024.0/1024.0/1024.0, n_l2, stride,
++            tier->pinned ? "PINNED (page-locked)" : "PAGEABLE (no host buffer type - slower uploads)");
++
++    l2 = std::move(tier);
++}
++
 +bool llama_moe_stream_layer::matches(const ggml_tensor * gate, const ggml_tensor * up,
 +                                     const ggml_tensor * down, const ggml_tensor * gate_up) const {
 +    auto is_cache = [this](const ggml_tensor * t) {
@@ -1770,6 +1937,14 @@ index 0000000..329a200
 +
 +    // Router bias toward resident experts. Read once here rather than per call so a run cannot
 +    // change policy halfway through and leave counters that describe two different experiments.
++    // Host-RAM tier size in whole GiB. Read once here, same reasoning as the bias below: a run
++    // must not change shape halfway through and leave counters describing two experiments. The
++    // tier itself is allocated in alloc_bufs(), where max_nb_expert is finally known.
++    if (const char * s = std::getenv("LLAMA_MOE_STREAM_L2_GIB")) {
++        const long v = std::strtol(s, nullptr, 10);
++        l2_gib = v > 0 ? (size_t) v : 0;
++    }
++
 +    if (const char * s = std::getenv("LLAMA_MOE_STREAM_ROUTE_BIAS")) {
 +        route_bias = std::strtof(s, nullptr);
 +        if (route_bias != 0.0f) {
@@ -1880,6 +2055,24 @@ index 0000000..329a200
 +        LLAMA_LOG_INFO("%s: %12s expert cache size = %8.2f MiB (%u slots per layer)\n",
 +                __func__, ggml_backend_buffer_name(buf), ggml_backend_buffer_get_size(buf) / 1024.0 / 1024.0, n_slots);
 +    }
++
++    // The host tier is allocated here and not in the constructor: max_nb_expert only exists once
++    // every weight has been registered, and the slot size is derived from it.
++    if (!no_alloc && l2_gib > 0) {
++        // Page-locked memory belongs to whichever backend owns the cache tensors, so the device
++        // comes from their own buffer type rather than being assumed to be device 0.
++        ggml_backend_buffer_type_t host_buft = nullptr;
++        for (auto & [buft, ctx_ptr] : ctxs) {
++            ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft);
++            if (dev != nullptr) {
++                host_buft = ggml_backend_dev_host_buffer_type(dev);
++                if (host_buft != nullptr) {
++                    break;
++                }
++            }
++        }
++        alloc_l2(host_buft);
++    }
 +}
 +
 +void llama_moe_stream::open_files(const std::vector<std::string> & paths) {
@@ -1980,15 +2173,61 @@ index 0000000..329a200
 +        bool ok = true;
 +        {
 +            const auto & wt = sl.weights[w.weight];
-+            const uint8_t * data = llama_moe_stream_pread(*files[wt.file_idx], staging, wt.nb_expert, wt.offs + (size_t) w.expert*wt.nb_expert, use_direct_io, worker_id);
++            const size_t offs = wt.offs + (size_t) w.expert*wt.nb_expert;
++
++            // Two ways this slab can reach the upload, and BOTH have to keep their memory alive
++            // until the upload is done. A slot that is an eviction candidate while it is being
++            // read gets a different expert written into it mid-upload, and the model receives
++            // half of each. That is not a hypothetical: it is what this code did on 2026-08-09.
++            size_t pinned_slot = SIZE_MAX; // hit  -> released after the upload
++            size_t filled_slot = SIZE_MAX; // fill -> committed after the upload
++            size_t filled_head = 0;        // payload offset inside that slot
++
++            // 1. host tier. A hit skips the drive entirely and uploads from page-locked memory.
++            const uint8_t * data = l2 ? l2->find(wt.file_idx, offs, wt.nb_expert, &pinned_slot) : nullptr;
++
++            if (data == nullptr) {
++                // 2. drive. The read lands DIRECTLY in an L2 slot when one is free, so the tier
++                //    fills for nothing: same read, same bytes, kept instead of discarded. Falls
++                //    back to this worker's own staging buffer when the tier is off, already owns
++                //    the slab, or has every slot in flight.
++                size_t    slot_l2 = 0;
++                uint8_t * dst     = l2 ? l2->reserve(wt.file_idx, offs, wt.nb_expert, &slot_l2) : nullptr;
++
++                data = llama_moe_stream_pread(*files[wt.file_idx], dst ? dst : staging,
++                        wt.nb_expert, offs, use_direct_io, worker_id);
++
++                if (dst != nullptr) {
++                    if (data == nullptr) {
++                        // A failed read must not leave a slot claiming to hold this slab, or the
++                        // next hit uploads uninitialised memory and nothing ever says so.
++                        l2->abandon(slot_l2);
++                    } else {
++                        // NOT committed yet. The slot stays LOADING - and therefore off the
++                        // eviction list - until its bytes have actually left for the GPU.
++                        filled_slot = slot_l2;
++                        filled_head = (size_t) (data - dst);
++                    }
++                }
++            }
++
 +            if (data == nullptr) {
 +                ok = false;
 +            } else {
 +                // The READ above is the parallel part and stays outside the lock;
 +                // only the upload is serialised. See upload_mtx in the header for
 +                // the measurement that made this necessary.
-+                std::lock_guard<std::mutex> up(upload_mtx);
-+                ggml_backend_tensor_set(wt.cache, data, (size_t) w.slot*wt.nb_expert, wt.nb_expert);
++                {
++                    std::lock_guard<std::mutex> up(upload_mtx);
++                    ggml_backend_tensor_set(wt.cache, data, (size_t) w.slot*wt.nb_expert, wt.nb_expert);
++                }
++                // Only now is the memory free to be reused by someone else.
++                if (filled_slot != SIZE_MAX) {
++                    l2->commit(filled_slot, filled_head);
++                }
++            }
++            if (pinned_slot != SIZE_MAX) {
++                l2->release(pinned_slot);
 +            }
 +        }
 +
@@ -2120,6 +2359,25 @@ index 0000000..329a200
 +    LLAMA_LOG_INFO("%s: %smoe stream: slot wait = %.2f ms total over %" PRId64 " waits (%.1f%% of the two stalls)\n",
 +            __func__, pfx, stats.t_victim_us/1000.0, stats.n_victim_waits,
 +            (stats.t_victim_us + stats.t_stall_us) > 0 ? 100.0*stats.t_victim_us/(stats.t_victim_us + stats.t_stall_us) : 0.0);
++    if (l2) {
++        // Counted in SLABS, not experts: one expert is two or three weight tensors and each is
++        // looked up on its own, so this denominator is NOT stats.n_miss and must not be read as
++        // if it were. An L2 hit is a VRAM-tier miss that never reached the drive.
++        std::lock_guard<std::mutex> l2lock(l2->mtx);
++        const int64_t n_slab = l2->n_hit + l2->n_fill;
++        LLAMA_LOG_INFO("%s: moe stream: L2 host tier = %.2f GiB %s, %zu slots\n",
++                __func__, l2->n_entries*l2->slot_stride/1024.0/1024.0/1024.0,
++                l2->pinned ? "pinned" : "PAGEABLE", l2->n_entries);
++        LLAMA_LOG_INFO("%s: moe stream: L2 slab hits = %" PRId64 ", fills = %" PRId64 ", evictions = %" PRId64 ", hit rate = %.2f%%\n",
++                __func__, l2->n_hit, l2->n_fill, l2->n_evict,
++                n_slab > 0 ? 100.0*l2->n_hit/n_slab : 0.0);
++        // The question this run exists to answer: the tier removed 196 s of drive wait and the
++        // wall clock did not move, so where did the time go? This is the wait at THIS lock. If it
++        // is small, the answer is elsewhere and the mutex theory is wrong.
++        LLAMA_LOG_INFO("%s: moe stream: L2 lock wait = %.2f ms total over %" PRId64 " ops (%.3f us each)\n",
++                __func__, l2->t_lock_us/1000.0, l2->n_lock_ops,
++                l2->n_lock_ops > 0 ? (double) l2->t_lock_us/l2->n_lock_ops : 0.0);
++    }
 +    if (stats.n_wave_calls > 0) {
 +        LLAMA_LOG_INFO("%s: %smoe stream: waves = %" PRId64 " (%" PRId64 " non-empty), preloads issued = %" PRId64 " (ready on arrival = %" PRId64 "), wave stall = %.2f ms\n",
 +                __func__, pfx, stats.n_wave_calls, stats.n_waves_run, stats.n_preload_issued, stats.n_preload_ready, stats.t_stall_wave_us/1000.0);
@@ -2668,10 +2926,10 @@ index 0000000..329a200
 +}
 diff --git a/src/llama-moe-stream.h b/src/llama-moe-stream.h
 new file mode 100644
-index 0000000..c22a7a1
+index 0000000..6391dff
 --- /dev/null
 +++ b/src/llama-moe-stream.h
-@@ -0,0 +1,336 @@
+@@ -0,0 +1,438 @@
 +#pragma once
 +
 +#include "llama-mmap.h"
@@ -2875,6 +3133,99 @@ index 0000000..c22a7a1
 +    return b;
 +}
 +
++// Second cache level in host RAM, below the VRAM slots and above the SSD.
++//
++// WHY IT CAN PAY AT ALL, measured on this machine 2026-08-09 at the shipped block sizes
++// (2,686,976 B for gate/up, 3,211,264 B for down):
++//
++//     SSD pooled read      10,592.7 MB/s      pinned host -> device   47,357.4 MB/s
++//
++// Today a miss costs an SSD read into a staging buffer plus a pageable upload: 401.5 us for a
++// gate/up slab. Out of pinned host memory the same slab uploads in 56.7 us - 7.08x per transfer.
++//
++// WHY IT COSTS NOTHING TO FILL, which is the part that makes it worth building. The worker
++// already reads every missing slab into a staging buffer and throws that buffer away. Here the
++// read goes STRAIGHT INTO an L2 slot and the upload sources from there, so filling the tier is
++// not an extra copy - it is the same copy, kept. A design that memcpy'd into the tier after the
++// read would spend more per fill than a later hit returns, and would be worse than no tier.
++//
++// WHAT IT CANNOT DO: catch a cold first touch. Those bytes have never been read, so no cache of
++// any size holds them. Over the ten-task gate of 2026-08-06, cold misses were 10,363 of 301,864 -
++// the rest are evictions, and only those are addressable here.
++//
++// PINNED, and it asks ggml rather than CUDA: ggml_backend_dev_host_buffer_type() is the backend's
++// own page-locked allocator, so this file stays free of any one backend. If the device has none,
++// the tier falls back to ordinary aligned memory and SAYS SO - it still saves the SSD read, it
++// just uploads at pageable rates, and the difference between those was measured at 2.6x.
++struct llama_moe_stream_l2 {
++    enum state : uint8_t { FREE = 0, LOADING = 1, RESIDENT = 2 };
++
++    struct entry {
++        uint64_t key  = UINT64_MAX; // file index and offset of the slab, unique per weight
++        uint32_t head = 0;          // payload start inside the slot (direct-I/O head padding)
++        uint32_t len  = 0;
++        uint32_t pins = 0;          // readers currently uploading OUT of this slot
++        uint8_t  st   = FREE;
++    };
++
++    uint8_t * base        = nullptr; // n_entries * slot_stride bytes
++    size_t    slot_stride = 0;       // max_nb_expert + 2*align, so any slab fits any slot
++    size_t    n_entries   = 0;
++    bool      pinned      = false;
++
++    std::vector<entry>                   entries;
++    std::unordered_map<uint64_t, size_t> index; // key -> entry; only LOADING/RESIDENT are in it
++    size_t                               next_victim = 0; // FIFO
++
++    ggml_backend_buffer_ptr buf; // holds the pinned allocation when there is one
++
++    mutable std::mutex mtx;
++
++    int64_t n_hit   = 0; // slab served out of host RAM, no SSD read
++    int64_t n_fill  = 0; // slab read from SSD straight into a slot
++    int64_t n_evict = 0;
++
++    // Time spent WAITING to enter this tier's mutex, and the number of entries it is spread over.
++    // Measured 2026-08-09: with the tier on, load stall fell from 346,389 to 150,083 ms - 196
++    // seconds less waiting on the drive - and total wall time did not move. So the saved time is
++    // being spent somewhere else, and this counter exists to say whether "somewhere else" is here.
++    // Every find/reserve/commit/release of eight I/O workers passes through one lock, which is the
++    // same serialisation the handle pool paid 2.22x against 1.01x to remove.
++    //
++    // It is a lower bound on the cost: it counts the wait, not the work done while holding, and
++    // not the cache-line traffic the shared counters cause. If it comes back near zero, the theory
++    // is wrong and the time is somewhere this counter cannot see.
++    int64_t t_lock_us  = 0;
++    int64_t n_lock_ops = 0;
++
++    ~llama_moe_stream_l2();
++
++    static uint64_t make_key(uint16_t file_idx, size_t offs) {
++        return ((uint64_t) file_idx << 48) ^ (uint64_t) offs;
++    }
++
++    // Resident payload for this slab, or nullptr. A LOADING entry returns nullptr on purpose: the
++    // caller then reads it itself rather than waiting, which keeps this tier off the critical path
++    // of a second worker that happens to want the same slab.
++    //
++    // A HIT PINS THE SLOT and hands back its index. The caller MUST release() it once the upload
++    // out of that memory has finished. Without the pin the slot is an ordinary eviction candidate
++    // while it is still being read, a second worker reserves it, reads a different expert into it
++    // from the drive, and the first worker uploads half of each. Measured 2026-08-09: the model
++    // emitted 8,191 characters of "<<<<<<<<" instead of an answer. Nothing about that failure is
++    // visible in a throughput number - it looks like a fast run.
++    const uint8_t * find(uint16_t file_idx, size_t offs, size_t len, size_t * out_slot);
++    void            release(size_t slot);
++
++    // A slot to read INTO, marked LOADING, or nullptr when the tier is off, already owns this
++    // slab, or every slot is in flight. LOADING is itself the protection while the drive read and
++    // the upload run; commit() is what ENDS that protection, so it must be called AFTER the
++    // upload, never before.
++    uint8_t * reserve(uint16_t file_idx, size_t offs, size_t len, size_t * out_slot);
++    void      commit(size_t slot, size_t head);
++    void      abandon(size_t slot);
++};
++
 +struct llama_moe_stream {
 +    uint32_t n_slots      = 0; // expert cache slots per streamed layer
 +    int32_t  n_io_threads = 0;
@@ -2917,6 +3268,15 @@ index 0000000..c22a7a1
 +    float route_bias = 0.0f;
 +
 +    llama_files files; // privately reopened GGUF files, same indices as the loader's
++
++    // Host-RAM tier below the VRAM slots. Off unless LLAMA_MOE_STREAM_L2_GIB is set; sized in
++    // whole GiB because the useful range on a consumer box is tens of gigabytes and a finer knob
++    // would suggest a precision the allocation does not have.
++    std::unique_ptr<llama_moe_stream_l2> l2;
++    size_t l2_gib = 0;
++
++    // allocates the tier once max_nb_expert is known. no-op when l2_gib is 0.
++    void alloc_l2(ggml_backend_buffer_type_t host_buft);
 +
 +    size_t  max_nb_expert      = 0;
 +    int64_t hot_decay_interval = 0; // remap calls between route-hotness halvings (0 = no decay)

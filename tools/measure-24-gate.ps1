@@ -52,6 +52,11 @@ param(
     [int]     $MaxTokens = 4096,
     [int]     $HealthTimeoutSec = 420,
     [int]     $TimeoutSec = 900,
+    # Graded tasks. Empty = all ten, which is only valid for a run that stands alone: two runs
+    # sharing a task also share its cache state and stop being independent measurements.
+    [string[]] $Only     = @(),
+    # Tasks for a throwaway first pass, on a fresh server. Must not overlap $Only.
+    [string[]] $Warm     = @(),
     [string]  $Python    = 'python',
     [string]  $OutRoot   = '',
     [switch]  $Selftest
@@ -215,8 +220,28 @@ if (-not $ok) {
 Say 'endpoint healthy'
 
 $suite = Join-Path $CROW 'tools\probe-suite.py'
+
+# -Warm runs a throwaway pass FIRST, on tasks the graded pass does not use. Without it the first
+# graded task pays the whole cold cost of the run - the model file, the VRAM slots and, since
+# 2026-08-09, a 32 GiB host tier that starts empty. Its output is written to a separate directory
+# and never read.
+if ($Warm.Count -gt 0) {
+    Say ("warm-up (not graded): {0}" -f ($Warm -join ' '))
+    & $Python $suite run --url "http://127.0.0.1:$Port" --out "$outDir-warm" `
+        --max-tokens $MaxTokens --timeout $TimeoutSec --only @Warm | Out-Null
+    Say ("warm-up exit {0}" -f $LASTEXITCODE)
+}
+
 Say ("running {0}" -f $suite)
-& $Python $suite run --url "http://127.0.0.1:$Port" --out $outDir --max-tokens $MaxTokens --timeout $TimeoutSec
+# -Only exists because repeating a task measures the cache, not the configuration. Two runs that
+# share a task share its warmed state, and with a host tier holding 32 GiB of experts that shared
+# state IS the thing under test. Vault: der-betriebspunkt-ist-200k-kontext-auf-einem-slot.
+if ($Only.Count -gt 0) {
+    Say ("graded tasks: {0}" -f ($Only -join ' '))
+    & $Python $suite run --url "http://127.0.0.1:$Port" --out $outDir --max-tokens $MaxTokens --timeout $TimeoutSec --only @Only
+} else {
+    & $Python $suite run --url "http://127.0.0.1:$Port" --out $outDir --max-tokens $MaxTokens --timeout $TimeoutSec
+}
 $gateExit = $LASTEXITCODE
 Say ("probe-suite exit {0}" -f $gateExit)
 

@@ -596,12 +596,26 @@ def check_file(task_name, path):
 
 # ---------------------------------------------------------------- the run
 
-def ask_model(url, prompt, max_tokens, timeout):
+def ask_model(url, prompt, max_tokens, timeout, temperature=0.6):
+    # 0.6 and not 0, changed 2026-08-09 after greedy decoding produced sixteen answers in a row
+    # with finish_reason "length" and an EMPTY content field: 8,192 tokens of reasoning and no
+    # reply, under the model's own chat template (--jinja). The CLI has defaulted to 0.6 since it
+    # was written, for this exact reason, and the README states it. The suite kept 0 only because
+    # the switch did not exist.
+    #
+    # WHY THE OLD DEFAULT IS NOT WORTH KEEPING: a measurement whose subject never answers measures
+    # nothing, however reproducibly it does so. Reproducing an old series is still possible - pass
+    # --temperature 0 - but that is now the deliberate act, not the accident.
+    #
+    # WHAT IT COSTS, and it is real: above 0 the runs are no longer byte-identical, so the
+    # determinism half of this gate (five of ten tasks reproduced exactly at temperature 0) does
+    # not carry over, and a k/N taken here may NOT be compared with one taken at 0. Different
+    # measurement, not a better one.
     payload = {
         "model": "crow",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
-        "temperature": 0,
+        "temperature": temperature,
         "seed": 1234,
     }
     req = urllib.request.Request(
@@ -615,7 +629,7 @@ def ask_model(url, prompt, max_tokens, timeout):
     return body, time.time() - started
 
 
-def run_suite(url, out_dir, max_tokens, timeout, only=None):
+def run_suite(url, out_dir, max_tokens, timeout, only=None, temperature=0.6):
     if not selftest(verbose=True):
         return 3
     print()
@@ -641,7 +655,7 @@ def run_suite(url, out_dir, max_tokens, timeout, only=None):
         outcome = None
         for attempt in range(RERUN_ATTEMPTS + 1):
             try:
-                body, secs = ask_model(url, prompt, budget, timeout)
+                body, secs = ask_model(url, prompt, budget, timeout, temperature)
             except Exception as e:
                 print("  %-22s %s - endpoint: %s" % (task["name"], DEAD, e))
                 outcome = {"task": task["name"], "verdict": DEAD,
@@ -871,6 +885,9 @@ def main():
     p_run.add_argument("--max-tokens", type=int, default=4096,
                        help="must cover reasoning_content AND the answer")
     p_run.add_argument("--timeout", type=int, default=600)
+    p_run.add_argument("--temperature", type=float, default=0.6,
+                       help="sampling temperature; 0.6 is the CLI's operating point. "
+                            "0 is byte-reproducible but loops in the reasoning block under --jinja")
     p_run.add_argument("--only", nargs="*", default=None,
                        help="run only these task names (a rerun, never a replacement)")
 
@@ -886,7 +903,7 @@ def main():
         return check_file(args.task, args.path)
     if args.cmd == "compare":
         return compare_runs(args.dir_a, args.dir_b)
-    return run_suite(args.url, args.out, args.max_tokens, args.timeout, args.only)
+    return run_suite(args.url, args.out, args.max_tokens, args.timeout, args.only, args.temperature)
 
 
 if __name__ == "__main__":

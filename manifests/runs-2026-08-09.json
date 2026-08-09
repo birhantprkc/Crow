@@ -1,13 +1,13 @@
 {
     "note":  "Fingerprint only. These files are NOT in git - runs/ is ignored (.gitignore:10). This manifest detects deletion and modification; it is not a backup and does not make the protocols recoverable.",
     "day":  "2026-08-09",
-    "pattern":  "^h2d$",
+    "pattern":  "^(h2d|pairs|l2-gate-fix|no-l2-baseline|l2-lockprobe)$",
     "root":  "Crow/runs",
-    "written":  "2026-08-09T18:56:10.7532793+02:00",
-    "files":  2,
-    "bytes":  6779,
+    "written":  "2026-08-09T22:01:03.0294167+02:00",
+    "files":  188,
+    "bytes":  69097428,
     "stages":  {
-                   "unknown":  2
+                   "unknown":  188
                },
     "entries":  [
                     {
@@ -21,6 +21,1122 @@
                         "stage":  "unknown",
                         "bytes":  6474,
                         "sha256":  "82E6C2BB907616F56DB510C31BD6BDAE8E29EC09BAD99DC99BE52CCE9AE85E3F"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix.err",
+                        "stage":  "unknown",
+                        "bytes":  12038983,
+                        "sha256":  "A73DC0E77F8FE06BB0F68446638D0366A0E49B3436548FD3DBE3BC57D5D99DA2"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/__pycache__/binary-search.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  601,
+                        "sha256":  "C1B06FA10D9BB80A3DFF91E9663D5DC186AF73A2BA8ACD0B0BDDBBA7B48A0787"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/__pycache__/flatten.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  544,
+                        "sha256":  "E9A2F4A48B6E57A83D96CCD3BA94800136C40744751573BE9DF4F5DCE3BE49BE"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/__pycache__/group-anagrams.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  583,
+                        "sha256":  "039C629EA9AD4B5F9310B8D948CD2A09BB7D9BAF8204E2C3281B085091155640"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  625,
+                        "sha256":  "A44F110B52E59CBE5B8646507B50070AC2A5E33FCD950860997A9FD145B66A14"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/__pycache__/longest-common-prefix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  587,
+                        "sha256":  "6F5F7E55BFC11C58638889C9601C86CAA9D85A3736465CE90D2C48901F604C4A"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/__pycache__/merge-intervals.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  823,
+                        "sha256":  "6A5313A84BA2376361B0E8EC6BDD6641E3EF437F54B667EC97BD55866C938CA5"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/__pycache__/rle-encode.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  597,
+                        "sha256":  "21ECBB84E83E3194CFCABF3E35E48D2ADC59BD5FB790418D84D03599E1E20CA3"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/__pycache__/rotate-matrix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  474,
+                        "sha256":  "304EF8BF30C5CAF1C189E7666A1F81D964672B47A9E8ECF35B0EBF6F6B9FC776"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/__pycache__/top-k-frequent.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  891,
+                        "sha256":  "F7CF08DA0024594F68B8A6E273A0B739319B298645D0A947F23762569B603895"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  488,
+                        "sha256":  "7F174D12F8BF0F3C0CD208C73107857514D861424CE5EBCD13056460278C90B8"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/binary-search.json",
+                        "stage":  "unknown",
+                        "bytes":  2203,
+                        "sha256":  "ED7F673C898A03F0D85F60E23C3B7E0188DCE358B15F0B880BCCB9CF9358AEAE"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/binary-search.py",
+                        "stage":  "unknown",
+                        "bytes":  378,
+                        "sha256":  "0BF1937AC5ACA94A99EB4F2FAFAD1FF4B11CDDB3EBEA18D2EB18717622F04DE2"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/flatten.json",
+                        "stage":  "unknown",
+                        "bytes":  2087,
+                        "sha256":  "0E4B934CA83F945DA194D0605188572138E28FBC40AAC442BA13E12F8D5ACEC7"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/flatten.py",
+                        "stage":  "unknown",
+                        "bytes":  205,
+                        "sha256":  "4BDBD4E7450413EDA7D2A5E1F2F49D2AE48AC509ACD898917F8C76E6B778DEBB"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/group-anagrams.json",
+                        "stage":  "unknown",
+                        "bytes":  3896,
+                        "sha256":  "8B3040731819DC65EBD4E9423F4A1304D5043228FFE19DF1FFD9A8550F304828"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/group-anagrams.py",
+                        "stage":  "unknown",
+                        "bytes":  222,
+                        "sha256":  "5F891B4F6F8989CB5A8E75A55CBF3BA0E2528D2B11C4A61964B1C0B20E5B38E6"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/is-balanced.json",
+                        "stage":  "unknown",
+                        "bytes":  1825,
+                        "sha256":  "BEC730B0C9EEAC14447CC070F22940C619D91DF483CDDE165BE9D5BE654FFE47"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/is-balanced.py",
+                        "stage":  "unknown",
+                        "bytes":  321,
+                        "sha256":  "1DD74DEC7CD464E8128607BF88A583A41E99D6D0235E6D7596B9A48D2AF5FCB9"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/longest-common-prefix.json",
+                        "stage":  "unknown",
+                        "bytes":  1734,
+                        "sha256":  "E39D81CE96E4491EDA9E396305BEEB195B01E31A012F5E7932B51BCCC930C048"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/longest-common-prefix.py",
+                        "stage":  "unknown",
+                        "bytes":  257,
+                        "sha256":  "74B2BCF574C9227C603FB45374AE62A116EB660A9C0C41F30C5FAA4A5130383A"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/merge-intervals.json",
+                        "stage":  "unknown",
+                        "bytes":  2019,
+                        "sha256":  "6C942FEAE895CCA4216168CDBE79A02BF6CDE520B360C812B474DCBDF2F0A7B7"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/merge-intervals.py",
+                        "stage":  "unknown",
+                        "bytes":  413,
+                        "sha256":  "E69D937C53517FA5DDF5D2B904EC49EE984E86EAC57F1EAD2FE94652B0D02BA7"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/rle-encode.json",
+                        "stage":  "unknown",
+                        "bytes":  1743,
+                        "sha256":  "88710955357303770042DB7999EA9F026C37CD6996F5BF99C80F9A6E042CB177"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/rle-encode.py",
+                        "stage":  "unknown",
+                        "bytes":  364,
+                        "sha256":  "754852D1769B11A5FF8A82E12A2DE559CB66155C37BA544516F257194BBC5F5A"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/rotate-matrix.json",
+                        "stage":  "unknown",
+                        "bytes":  3004,
+                        "sha256":  "76DCEA345B2B6431209DA1DCA7542E664642450EE486CD2244965E3AF8E71E5D"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/rotate-matrix.py",
+                        "stage":  "unknown",
+                        "bytes":  123,
+                        "sha256":  "41E20449439B44A2E82924C02A09A759C839EA91397897C32DB53C20B7AD8BE6"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  2656,
+                        "sha256":  "B9EDE61872732BF770116A541C12168A4F8CA83EAF84226CBFB7EFDAF2E6C170"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/top-k-frequent.json",
+                        "stage":  "unknown",
+                        "bytes":  2959,
+                        "sha256":  "D1300FD780EDEA87C107B5433C19AFF6C45BB6D19398BFFDE1677C2C38CE54C8"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/top-k-frequent.py",
+                        "stage":  "unknown",
+                        "bytes":  417,
+                        "sha256":  "4D29902E2293FE9D12FB28512CDE171E27D19BBC7706794360C3DF22E3F3E0BA"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/two-sum.json",
+                        "stage":  "unknown",
+                        "bytes":  5571,
+                        "sha256":  "F96FF41F01DDE7BCCAA053CD90AF1D2E47D7307F034FFB925B88D1BAB96B4336"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix/two-sum.py",
+                        "stage":  "unknown",
+                        "bytes":  257,
+                        "sha256":  "4F7ED73991D6A58CA3106CDA569DF23EF8C4B5AC0C3F9A2F8E31F56CAB643B50"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-gate-fix/l2-32gib-fix-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1563,
+                        "sha256":  "9176AFC27B36B4C715FC9898F93A853078FB3F2C1250AEA36D1FEE66FBA99C8F"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe.err",
+                        "stage":  "unknown",
+                        "bytes":  19342336,
+                        "sha256":  "5D98CFDCDFFD764B15EA916D6255C0C605A5A8ECD1983AA4428CFFFE74D42687"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/__pycache__/binary-search.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  485,
+                        "sha256":  "0C7E66B1D3A4B3D620F98D00F85784E87C250FC52D09FAD4D81A9B9CFD7D80A6"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/__pycache__/flatten.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  545,
+                        "sha256":  "E7D341B2C8C3EA938C68472ECB4861795B44A7CC312DF3E11D743B088A4B0E7D"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/__pycache__/group-anagrams.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  587,
+                        "sha256":  "C9E9E1689359EF5FB3F0A8A48CA4E1B12E047F939CBA0106093649451832A48C"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  623,
+                        "sha256":  "CD1485E2D890A0C8A55B7B7AA9DB776C0D0A7C5ECE19913549DB30150079D931"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/__pycache__/longest-common-prefix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  594,
+                        "sha256":  "B3658DD0B70F74FE6ADE92DA144B9FA95AF2BFD5B95ACFB9628A6794DF8613D0"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/__pycache__/merge-intervals.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  823,
+                        "sha256":  "19F70C1273B2EF9F5D75AEFE25E2F92B186D837675D4383E101B747A267BDB90"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/__pycache__/rle-encode.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  591,
+                        "sha256":  "B3152CF1A9B31B02AAF986613B5EC4CBCEBB80307628E3568AD0FF54690E6EFB"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/__pycache__/rotate-matrix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  441,
+                        "sha256":  "1B5D0B2C47BE30429E862C893EE9BCD9AB1F9A5C930C3C26A23C5222D4F98B5F"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/__pycache__/top-k-frequent.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  936,
+                        "sha256":  "8C4827C49E0DC1DFAF2DFACB9A05F075CA9A726AB24C33C80676DA4DB878A741"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  701,
+                        "sha256":  "805B8BCA027A154910BA2B27A5A0108C1EA3CE74DB5B04D879A4C45C9C374BE8"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/binary-search.json",
+                        "stage":  "unknown",
+                        "bytes":  2517,
+                        "sha256":  "B4A663B0B76A5792A2B9B9C2C71376FE8AC1D74749E1F07A920F113366BB9D7A"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/binary-search.py",
+                        "stage":  "unknown",
+                        "bytes":  199,
+                        "sha256":  "D26CD763DE91075F6AB9653459E879F81BC0F84ED4928ACB63CC07A97DDF7A9E"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/flatten.json",
+                        "stage":  "unknown",
+                        "bytes":  3263,
+                        "sha256":  "D5B460FEDA4C5C926A0496EDC8FE040C8B7FAD38E46F17F410C3BFDFF5CFE9E0"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/flatten.py",
+                        "stage":  "unknown",
+                        "bytes":  205,
+                        "sha256":  "4BDBD4E7450413EDA7D2A5E1F2F49D2AE48AC509ACD898917F8C76E6B778DEBB"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/group-anagrams.json",
+                        "stage":  "unknown",
+                        "bytes":  2227,
+                        "sha256":  "DD7045868738B3731B6441119CCAA0EF9A57E1736C54AB0259EB948FC1FCF550"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/group-anagrams.py",
+                        "stage":  "unknown",
+                        "bytes":  231,
+                        "sha256":  "C756AEB1B0D2C991EB16CFACAC8BF0E4A9783F2CB67DD91EC3C2335B36E45129"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/is-balanced.json",
+                        "stage":  "unknown",
+                        "bytes":  1774,
+                        "sha256":  "38739392BACC1438EE51E702EBDE4AD6A3EE121CD01A3272F28C7760DB9BA2AA"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/is-balanced.py",
+                        "stage":  "unknown",
+                        "bytes":  315,
+                        "sha256":  "D67D80B8DE323E3AC18BFC01F85E7B12840CD8B7F9206684A60C24FFBD83DCE8"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/longest-common-prefix.json",
+                        "stage":  "unknown",
+                        "bytes":  1994,
+                        "sha256":  "B07BDC0D3D19644F9946D34DE964FF5EA378A7B20F0E08D2F7DABD2D4F51EE36"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/longest-common-prefix.py",
+                        "stage":  "unknown",
+                        "bytes":  268,
+                        "sha256":  "918B47E587DAB1720D7316DEB8A2C75140DB2FCB4D4DBC99BF127007B2BE112A"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/merge-intervals.json",
+                        "stage":  "unknown",
+                        "bytes":  2020,
+                        "sha256":  "BCE28BBC27A6D2EB0BDEA8DBD9CCAD2A1F44DB242296775AFC78CF1F655FA17C"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/merge-intervals.py",
+                        "stage":  "unknown",
+                        "bytes":  424,
+                        "sha256":  "BF33612FD54EDCF8CA3CC1E8FC692D9DB40BB0F8A846B5FB6943F27D28E77AAC"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/rle-encode.json",
+                        "stage":  "unknown",
+                        "bytes":  1653,
+                        "sha256":  "2F0ADB9F3540F0CA6E6C773CAE6E4CC21C95101730C811C091ECA9E0AC8FF1F4"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/rle-encode.py",
+                        "stage":  "unknown",
+                        "bytes":  339,
+                        "sha256":  "794BF7B3B13FC8B616E6D3F746C85A85ECD7AB445F5FF6FBE4C2A9914BFB57DB"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/rotate-matrix.json",
+                        "stage":  "unknown",
+                        "bytes":  3095,
+                        "sha256":  "2DC4ECDA74A2D7ED0EAD598422AA710A5535B432ED92911874ED12B310704F56"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/rotate-matrix.py",
+                        "stage":  "unknown",
+                        "bytes":  80,
+                        "sha256":  "D84EFAFB2D93B987CF99CFE06D1DB762A48BDC3BB25D0652918881294881DA0D"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  2638,
+                        "sha256":  "C8B26F3E03315FD078A79839E13AF76DA87426A1275EC9A5A314C47034C11B50"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/top-k-frequent.json",
+                        "stage":  "unknown",
+                        "bytes":  2773,
+                        "sha256":  "73146FBD73CD7791990AFCE5EDC6690F724E157FDB36F567DF790270C8003FB1"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/top-k-frequent.py",
+                        "stage":  "unknown",
+                        "bytes":  397,
+                        "sha256":  "669105A04469ED4D00E47CD918AE851D022D5483EB1C1746A311386FF5FA1F3F"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/two-sum.json",
+                        "stage":  "unknown",
+                        "bytes":  14969,
+                        "sha256":  "B980130B589A9C00A4EFF90F822C71081B58E34DF1C039F79A90B7B103E1A1C3"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe/two-sum.py",
+                        "stage":  "unknown",
+                        "bytes":  515,
+                        "sha256":  "F252B9E4480C9D21707F743499533146B7BE55389CB6245C682F4D5536AFFAC1"
+                    },
+                    {
+                        "path":  "2026-08-09/l2-lockprobe/l2-lockprobe-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1565,
+                        "sha256":  "791F9E3302CA4BA2331CE2261C6637172E3FCFC8BDD747A854D600498968F2C9"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline.err",
+                        "stage":  "unknown",
+                        "bytes":  15386308,
+                        "sha256":  "C5B26B49DB40462353D4B34E58D3E41355D0869EDF34C03D23284C455D7EA605"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/__pycache__/binary-search.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  607,
+                        "sha256":  "364DE43ACD3DBA48D161C6F5BC45B10FBA9C3F667479DDB6593A0AB0431E549A"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/__pycache__/flatten.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  549,
+                        "sha256":  "58C4C703FE5F1A7E4D2D535E390875995AC6AC02E7503652FB2640274E7EE9D1"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/__pycache__/group-anagrams.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  608,
+                        "sha256":  "B3A918FD131A9C6ACEE9B46C85CAD84B3DFADECC61C800B8D7F468482C6F44DE"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  629,
+                        "sha256":  "838C8F54365D5532A86F45B255A6F2C6FCEC0A946DB60FB35671F7A7BA7A70E9"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/__pycache__/longest-common-prefix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  597,
+                        "sha256":  "2F14F72A05B702A67BF385CDC8EBA22FAAAF1CC46B62B86E3BF7B1A6F31F95BD"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/__pycache__/merge-intervals.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  847,
+                        "sha256":  "1B01CB628B98998B8FCD3EA7DF58DEDB5E498BAF6EF5334F4849245BBC388549"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/__pycache__/rle-encode.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  595,
+                        "sha256":  "E9C5013903693B63A89A57EA1B7CDC001FFB8AA5A96AEC1688C4C85A7FC4F831"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/__pycache__/rotate-matrix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  445,
+                        "sha256":  "8123D7309F887B40D9A5DCBD592D2ACEA9BB71585AAAF984D1A4DA57F1F25D54"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/__pycache__/top-k-frequent.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  913,
+                        "sha256":  "63EAFFE34B82E951637434422061333639DFDE428A1BD7C88E61895A1983B8DF"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  654,
+                        "sha256":  "0B2E08FE43E2512B72EC84902EA4524AB3953EF1061762E9DD8447BA0AF820BE"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/binary-search.json",
+                        "stage":  "unknown",
+                        "bytes":  1927,
+                        "sha256":  "E53371CF8FF45BE48D0365DCC961106CD26834B117AFD3D20AAAD525AC7D286C"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/binary-search.py",
+                        "stage":  "unknown",
+                        "bytes":  356,
+                        "sha256":  "33D11613F5EC45A7303F928ED1FC6317777D224EBA36B0614910D3B85C8276B7"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/flatten.json",
+                        "stage":  "unknown",
+                        "bytes":  2049,
+                        "sha256":  "AB2608FAFF9ED6219D223B8169C08428D559F83EA958099F862AF091EB20A523"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/flatten.py",
+                        "stage":  "unknown",
+                        "bytes":  205,
+                        "sha256":  "4BDBD4E7450413EDA7D2A5E1F2F49D2AE48AC509ACD898917F8C76E6B778DEBB"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/group-anagrams.json",
+                        "stage":  "unknown",
+                        "bytes":  2523,
+                        "sha256":  "FEA638B2279F22361FD51D98D16EABCD9FBA1E4E24FDE547B12BBD84E5E080C0"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/group-anagrams.py",
+                        "stage":  "unknown",
+                        "bytes":  233,
+                        "sha256":  "6F308C5408821551B2079E2AA8C007471566187DC4A1A43FFE6449B509340B4D"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/is-balanced.json",
+                        "stage":  "unknown",
+                        "bytes":  2277,
+                        "sha256":  "793DD265A9A713E7A25A10CC7FE1412A5E2A9BA60BEF5914B857EBABA89F9F5E"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/is-balanced.py",
+                        "stage":  "unknown",
+                        "bytes":  325,
+                        "sha256":  "83282831390ABE103DA4D9E8A3C4BB80E026D046E55404DF9D134475AD8EA83B"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/longest-common-prefix.json",
+                        "stage":  "unknown",
+                        "bytes":  2530,
+                        "sha256":  "80A29D70A546C897F143EAF4A05C9D8485DFA7BEC32B3075297B450DDC90470F"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/longest-common-prefix.py",
+                        "stage":  "unknown",
+                        "bytes":  240,
+                        "sha256":  "044BCF1AFD0E7635A5B6B4BC02CD5D8F25F947D90F0DE09FA7BFDC08B52F2B07"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/merge-intervals.json",
+                        "stage":  "unknown",
+                        "bytes":  2603,
+                        "sha256":  "6EBBFA6CC77003F7685E0D1CF7C356EE8D0371D27EF380A3C975995787406C9D"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/merge-intervals.py",
+                        "stage":  "unknown",
+                        "bytes":  407,
+                        "sha256":  "4EF6B3B5E27CF00EF869DD665BE5F817086F0219C9E5C13E58AE08DD6A09D26E"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/rle-encode.json",
+                        "stage":  "unknown",
+                        "bytes":  1811,
+                        "sha256":  "5DD62BC38587880FFE05B3F4CACB197C741B65A10FE9D3222E308E341750269F"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/rle-encode.py",
+                        "stage":  "unknown",
+                        "bytes":  339,
+                        "sha256":  "794BF7B3B13FC8B616E6D3F746C85A85ECD7AB445F5FF6FBE4C2A9914BFB57DB"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/rotate-matrix.json",
+                        "stage":  "unknown",
+                        "bytes":  4127,
+                        "sha256":  "7FC1AB8DC1EC2DC228D531F1BCA417F3485B9C44AA6AA724718B17D4B66C87B1"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/rotate-matrix.py",
+                        "stage":  "unknown",
+                        "bytes":  80,
+                        "sha256":  "D84EFAFB2D93B987CF99CFE06D1DB762A48BDC3BB25D0652918881294881DA0D"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  2641,
+                        "sha256":  "0CA07BF41291A0F79BD4ACA59BCC5F2BBDB629B4185C68BB82EBC943B1F706C9"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/top-k-frequent.json",
+                        "stage":  "unknown",
+                        "bytes":  4610,
+                        "sha256":  "73F65565CE383E4FE96F76109AAF21417E375C2545936625C0B7738D2AD3914E"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/top-k-frequent.py",
+                        "stage":  "unknown",
+                        "bytes":  384,
+                        "sha256":  "702164459609441CFB611BA2AC476DBD888F32F5723AF89ECE7746DC4D8B16B8"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/two-sum.json",
+                        "stage":  "unknown",
+                        "bytes":  6305,
+                        "sha256":  "EB0B5BED613600A95EF4CE624E7FD3F5A15859AF3076C74E156EDB1FF1696C33"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline/two-sum.py",
+                        "stage":  "unknown",
+                        "bytes":  412,
+                        "sha256":  "AA424353A1230061DE79631E35647376D1AEBB4D17BD604ECAFC5A06F8E23E1A"
+                    },
+                    {
+                        "path":  "2026-08-09/no-l2-baseline/no-l2-baseline-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1575,
+                        "sha256":  "92845609962605B81CC5CEF26BA9699FD178B10D4E6B921500C339FE666B9B89"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-base/r1-base.err",
+                        "stage":  "unknown",
+                        "bytes":  3976317,
+                        "sha256":  "11FC26928F76DC9FA6C7BD7FF69B803DBE3D28B50E7011A912D2316EAA55F844"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-base/r1-base.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-base/r1-base/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  624,
+                        "sha256":  "CFA8C88D7D1FFE2931138FBF98F4A14E98DA704435EAE335B9DBDB8B61ECBE09"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-base/r1-base/__pycache__/rotate-matrix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  437,
+                        "sha256":  "A09C7E237470773B77C5075B40DB0818B6D7A20FA43962617C0F7BAEA858A4D7"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-base/r1-base/is-balanced.json",
+                        "stage":  "unknown",
+                        "bytes":  1904,
+                        "sha256":  "7E3FF96B9F8778FC5923A18EC41E80B0C3B36167BB290CA53F846B59FE236691"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-base/r1-base/is-balanced.py",
+                        "stage":  "unknown",
+                        "bytes":  331,
+                        "sha256":  "8B3D42AE4F7A2029C31BDB22CF54F85C21FECC6F9FF2583E2F8EAC971905830D"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-base/r1-base/rotate-matrix.json",
+                        "stage":  "unknown",
+                        "bytes":  3570,
+                        "sha256":  "45A16A19602031956DACDD0E17A586FCFA8C0EEE023454783DEB9A4CB45625C6"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-base/r1-base/rotate-matrix.py",
+                        "stage":  "unknown",
+                        "bytes":  80,
+                        "sha256":  "D84EFAFB2D93B987CF99CFE06D1DB762A48BDC3BB25D0652918881294881DA0D"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-base/r1-base/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  678,
+                        "sha256":  "59B072F2330143E07954B71221D83A6C751BB90E5022D131DF5E8D3858B0C022"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-base/r1-base-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1554,
+                        "sha256":  "639CBC4E08679593D70EEC460747C7E9C0AA77A01F0980E62E79B175B7FF6E63"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-base/r1-base-warm/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  527,
+                        "sha256":  "1A428055AE21E00A0E6DF8C0B6FD0AB050533ACE823246C635B30F4CCFCF007D"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-base/r1-base-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  430,
+                        "sha256":  "D1280A73CF2236311208E72408555CEE9339B676B0C54525DE59353FB98BB354"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-base/r1-base-warm/two-sum.json",
+                        "stage":  "unknown",
+                        "bytes":  1919,
+                        "sha256":  "F829F5EE0D3651AD1D88DFCCE9E1C513046DBE0601A989FA45ABACD01A334EFE"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-base/r1-base-warm/two-sum.py",
+                        "stage":  "unknown",
+                        "bytes":  195,
+                        "sha256":  "940665A91572F3B372FFA7DB16DCA05E7250B94488C749AF936D9ACCBC4E9ED7"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-l2/r1-l2.err",
+                        "stage":  "unknown",
+                        "bytes":  4453408,
+                        "sha256":  "491BB0940C1EEA75B22D67CFCC51A321D69CBADF9855AD1C42CA9542E1F50578"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-l2/r1-l2.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-l2/r1-l2/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  618,
+                        "sha256":  "EB19558D96B79B7608EC93DC7D06485C95E007C2A12F755544A6E3D3B5F3185F"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-l2/r1-l2/__pycache__/rotate-matrix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  655,
+                        "sha256":  "D8150AF044DBDACD53ED657147B32638387DB0EFD058A286EAFF2EEE1CD79278"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-l2/r1-l2/is-balanced.json",
+                        "stage":  "unknown",
+                        "bytes":  1844,
+                        "sha256":  "88E88D70BE092010C7DDDD83CCE9F861109B958E89A04CBEB6BF73491B5ADBDA"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-l2/r1-l2/is-balanced.py",
+                        "stage":  "unknown",
+                        "bytes":  321,
+                        "sha256":  "1DD74DEC7CD464E8128607BF88A583A41E99D6D0235E6D7596B9A48D2AF5FCB9"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-l2/r1-l2/rotate-matrix.json",
+                        "stage":  "unknown",
+                        "bytes":  3914,
+                        "sha256":  "B77AB338EF283DFA1F6A393E935ADC44A05210F595A1ABCF339A82FA4D81A894"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-l2/r1-l2/rotate-matrix.py",
+                        "stage":  "unknown",
+                        "bytes":  179,
+                        "sha256":  "1912EE5D4FD56E6BD82BDF22CB8D1CBEEFF8BCEC8C409C713BC87EC0D203CF52"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-l2/r1-l2/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  679,
+                        "sha256":  "F7BD5CE087977BBD2FF36D88AF8330A521A66571A3FAA7841BEE2ECBAC0DB061"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-l2/r1-l2-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1544,
+                        "sha256":  "6466030EBB93D431F2CC61C6A27B5465E975E5346A094B82CE11E89D7C849E2A"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-l2/r1-l2-warm/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  523,
+                        "sha256":  "B79A0135BA728E5F6422ACDF167CEEC314AD98407CB89C8474C5836D28886FC4"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-l2/r1-l2-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  429,
+                        "sha256":  "1175374882297C5FD6E95EBE4908D9FD8261EBCEA896E1721788CFBE1928967A"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-l2/r1-l2-warm/two-sum.json",
+                        "stage":  "unknown",
+                        "bytes":  1919,
+                        "sha256":  "2C25F691FF29940CB3E58963B1707DB440CD77908C75EDEA8552489BB420EFF6"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r1-l2/r1-l2-warm/two-sum.py",
+                        "stage":  "unknown",
+                        "bytes":  195,
+                        "sha256":  "940665A91572F3B372FFA7DB16DCA05E7250B94488C749AF936D9ACCBC4E9ED7"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-base/r2-base.err",
+                        "stage":  "unknown",
+                        "bytes":  3060778,
+                        "sha256":  "31943F0A6283B6E66E0603C7B5D3460E8C463DFE2996648E2418325415EB7B09"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-base/r2-base.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-base/r2-base/__pycache__/group-anagrams.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  654,
+                        "sha256":  "06EB45F48FD5D121757C3347F7AE8202C67E4DA90FF89C4962DA01D604B55C3A"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-base/r2-base/__pycache__/longest-common-prefix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  608,
+                        "sha256":  "A239586BBAF7CC87C343156656CF66FCF705B4882E73FE0D92844C6DD811A041"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-base/r2-base/group-anagrams.json",
+                        "stage":  "unknown",
+                        "bytes":  3155,
+                        "sha256":  "CA41BF63066B695724015B11A14D3B41EF9B4F1D66E93C77E323B49FBFA4171B"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-base/r2-base/group-anagrams.py",
+                        "stage":  "unknown",
+                        "bytes":  273,
+                        "sha256":  "88AE50D43BCBDBD56D598C27290AB0F97A50B0CBA98975B266070EF60B518CF8"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-base/r2-base/longest-common-prefix.json",
+                        "stage":  "unknown",
+                        "bytes":  1653,
+                        "sha256":  "0CF1CE3CB3DCC6B922600B4A4962DE9BF9789AE40BF3FF3E003719E03BD5EB7F"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-base/r2-base/longest-common-prefix.py",
+                        "stage":  "unknown",
+                        "bytes":  231,
+                        "sha256":  "021C15DB8DF8374547C8B3423D18690FFB0CB9ECF48E44F8E9B0D826C55BAE9E"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-base/r2-base/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  719,
+                        "sha256":  "774B91D76CC120BA7CEE84854ECDF1DECFC8D4B4A2C66A72922E6F6FA8CAE9FD"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-base/r2-base-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1553,
+                        "sha256":  "16B3F7BEE269B57188CBB9CB121DB9A3982B2C7AB6E4D041A10F4F643C873058"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-base/r2-base-warm/__pycache__/merge-intervals.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  824,
+                        "sha256":  "AFD10E00FB11ED4492870AEEA8C7D879BDD5796DAE6312AB6B15297C9378C5C8"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-base/r2-base-warm/merge-intervals.json",
+                        "stage":  "unknown",
+                        "bytes":  2029,
+                        "sha256":  "AB5DADD79D20A756236EA28AEB7D012DFF8DE085DDC554EAEBBC24C6D9C2B5CE"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-base/r2-base-warm/merge-intervals.py",
+                        "stage":  "unknown",
+                        "bytes":  424,
+                        "sha256":  "BF33612FD54EDCF8CA3CC1E8FC692D9DB40BB0F8A846B5FB6943F27D28E77AAC"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-base/r2-base-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  438,
+                        "sha256":  "AF2CDE1E0CE828363CB60137DC6EF3073428B2143DF2CE85B231ED977B433629"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-l2/r2-l2.err",
+                        "stage":  "unknown",
+                        "bytes":  3421361,
+                        "sha256":  "418EE6F54BCFD12193BB0BE60A58A7CFDF0B440F70FB3B1964222818CF544E78"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-l2/r2-l2.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-l2/r2-l2/__pycache__/group-anagrams.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  647,
+                        "sha256":  "E9FD736CF44DB0BA6E0CE4B15C5915BEC42B9E67D746345C1C8E91AB99D50093"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-l2/r2-l2/__pycache__/longest-common-prefix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  589,
+                        "sha256":  "F31E5256FEF9D894403B7296B26C33C0FF8520D81FE7FD9CBF76C90969F9D4F0"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-l2/r2-l2/group-anagrams.json",
+                        "stage":  "unknown",
+                        "bytes":  3098,
+                        "sha256":  "DBE11E51DF6DFACEAFC261A4FC54EBA448A6DC458CD1859AA61C268D03F222A6"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-l2/r2-l2/group-anagrams.py",
+                        "stage":  "unknown",
+                        "bytes":  274,
+                        "sha256":  "C77317B5EE883ACA50F3B09E7AEB998DCA7BED2BBDEE02D94BB3AF66C1558D5C"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-l2/r2-l2/longest-common-prefix.json",
+                        "stage":  "unknown",
+                        "bytes":  2314,
+                        "sha256":  "78A8A203FB2AB9F362847E52BD789535C528403DCE2672A514B3E4FD648AE41F"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-l2/r2-l2/longest-common-prefix.py",
+                        "stage":  "unknown",
+                        "bytes":  277,
+                        "sha256":  "13D13B4554DCF917693B2F900B61F2AB7162B409369D64FF2F0900E88A039503"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-l2/r2-l2/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  690,
+                        "sha256":  "677A19471681335D921D4C85A9BE76581F98288FF199C4C3FD4BAE7D01BB3637"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-l2/r2-l2-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1544,
+                        "sha256":  "D928D281B93F2F158D99857B591E2C16E458CD4DABDC2F371E7CA82E907B4BDA"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-l2/r2-l2-warm/__pycache__/merge-intervals.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  820,
+                        "sha256":  "72DCF24B6BC6438B908D6AC7AAD3C5B90F86F665C53AF5D1262C13C01A2AE5B5"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-l2/r2-l2-warm/merge-intervals.json",
+                        "stage":  "unknown",
+                        "bytes":  2029,
+                        "sha256":  "2806F9B29945D6C0CEC17F16DB209ABF1D21104AA1ACF584D007C4995926A5A9"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-l2/r2-l2-warm/merge-intervals.py",
+                        "stage":  "unknown",
+                        "bytes":  424,
+                        "sha256":  "BF33612FD54EDCF8CA3CC1E8FC692D9DB40BB0F8A846B5FB6943F27D28E77AAC"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r2-l2/r2-l2-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  437,
+                        "sha256":  "7B277A37D4E3632FA309B147CBF9945F67BEC5C45A742D5B5F9BD63D39D67782"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-base/r3-base.err",
+                        "stage":  "unknown",
+                        "bytes":  4419508,
+                        "sha256":  "887AFE189E4286DB1A0318F3644C085638D865C96EA659EA42C31B01000667C6"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-base/r3-base.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-base/r3-base/__pycache__/binary-search.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  600,
+                        "sha256":  "2F19D524B9DFF1618D82701920451FFFFBFAAC0E671D3978115B4B4CB6F9CBA6"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-base/r3-base/__pycache__/rle-encode.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  594,
+                        "sha256":  "B12118B41A76B694A9692287524083402924C668800E456FA4B23ED4C7C05E18"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-base/r3-base/binary-search.json",
+                        "stage":  "unknown",
+                        "bytes":  5028,
+                        "sha256":  "96B27C28333263A81BC81EDD4A4C936D0469035406B1DC5E03979F95E7BA1429"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-base/r3-base/binary-search.py",
+                        "stage":  "unknown",
+                        "bytes":  387,
+                        "sha256":  "AD86177D465436776A65374A19661417BE561016B303BC62575A4D54131102E9"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-base/r3-base/rle-encode.json",
+                        "stage":  "unknown",
+                        "bytes":  1711,
+                        "sha256":  "29C185BD9DACA3AA039EB78E0EBE97DFC7E14EDD53EDD3CBF7CF91CA255D5207"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-base/r3-base/rle-encode.py",
+                        "stage":  "unknown",
+                        "bytes":  364,
+                        "sha256":  "754852D1769B11A5FF8A82E12A2DE559CB66155C37BA544516F257194BBC5F5A"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-base/r3-base/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  678,
+                        "sha256":  "DB272DE8AF540A34734DBF8ED17C15AC0AFAC64A2E1A2B41A1DB6A2AB94FCBFA"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-base/r3-base-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1554,
+                        "sha256":  "38EE160502BC2D5ADD0821CB06B9158A5BAF6F81FB546B57BA5255A3979CB722"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-base/r3-base-warm/__pycache__/flatten.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  546,
+                        "sha256":  "7DE57FC8BD4F5BE7A1F9C5273D21766E941B5833D3E9832CF2295D9D5784AC73"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-base/r3-base-warm/flatten.json",
+                        "stage":  "unknown",
+                        "bytes":  2196,
+                        "sha256":  "333A30EC1CA27158E420173D3658C984E3AC776CADAB32958B39786C99128022"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-base/r3-base-warm/flatten.py",
+                        "stage":  "unknown",
+                        "bytes":  205,
+                        "sha256":  "4BDBD4E7450413EDA7D2A5E1F2F49D2AE48AC509ACD898917F8C76E6B778DEBB"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-base/r3-base-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  430,
+                        "sha256":  "3B11046479878677FE6B30FE15F189C9B806BE1F64FB57EE67E07C420A41207B"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-l2/r3-l2.err",
+                        "stage":  "unknown",
+                        "bytes":  2780450,
+                        "sha256":  "23AF826CFBCFE8A2CF083DB07BF92C726E272EE4AB0ACC7277037904A900FF2A"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-l2/r3-l2.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-l2/r3-l2/__pycache__/binary-search.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  596,
+                        "sha256":  "CF28292A47422F63EA78FD3080B70105009C3CBED1BC85374B9512AE6D614279"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-l2/r3-l2/__pycache__/rle-encode.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  583,
+                        "sha256":  "37520A95E5DCB52D2ACFC7732926DA86A5B9F0A4844B1CD14A0FD3C5DE2BE0AC"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-l2/r3-l2/binary-search.json",
+                        "stage":  "unknown",
+                        "bytes":  2324,
+                        "sha256":  "E3F4B997AFC1715ABE7AEF7DB9E6C547750B9760E5CAF2DFC8AD48141F19FAB1"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-l2/r3-l2/binary-search.py",
+                        "stage":  "unknown",
+                        "bytes":  387,
+                        "sha256":  "AD86177D465436776A65374A19661417BE561016B303BC62575A4D54131102E9"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-l2/r3-l2/rle-encode.json",
+                        "stage":  "unknown",
+                        "bytes":  1798,
+                        "sha256":  "C2EB8FF386A777EA61D9C9212945F6CBCD2B0A6FC1CBF68E90BBAB1A1708BC2A"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-l2/r3-l2/rle-encode.py",
+                        "stage":  "unknown",
+                        "bytes":  339,
+                        "sha256":  "794BF7B3B13FC8B616E6D3F746C85A85ECD7AB445F5FF6FBE4C2A9914BFB57DB"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-l2/r3-l2/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  678,
+                        "sha256":  "9B0129C6638E2FA48E6507BA13CC5484D7E9F0867615A85771051E23023F57FD"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-l2/r3-l2-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1543,
+                        "sha256":  "0AAC258297CBB2DE6BCCDD0AB0A8CEDE0C85D53636DE8835B7448775F93FE076"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-l2/r3-l2-warm/__pycache__/flatten.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  542,
+                        "sha256":  "0AC023838D1DF4B8CA147593217DCCCD3ACE40496C2C8C42D88FC7F9A6D17C88"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-l2/r3-l2-warm/flatten.json",
+                        "stage":  "unknown",
+                        "bytes":  2089,
+                        "sha256":  "3E6EA3C39EDC8810C9D8EC71414811B9A5964C8DFB377E6DEBDB1F6FE36E0989"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-l2/r3-l2-warm/flatten.py",
+                        "stage":  "unknown",
+                        "bytes":  205,
+                        "sha256":  "4BDBD4E7450413EDA7D2A5E1F2F49D2AE48AC509ACD898917F8C76E6B778DEBB"
+                    },
+                    {
+                        "path":  "2026-08-09/pairs/r3-l2/r3-l2-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  430,
+                        "sha256":  "66EECFBC81A83972703C648203C99B9A10B9EBD7D430845201383B072CAA8ADF"
                     }
                 ]
 }
