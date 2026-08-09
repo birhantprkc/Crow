@@ -8,7 +8,7 @@
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
-<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-0.0.4-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
+<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-0.0.5-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
 <a href="#requirements"><img src="https://img.shields.io/badge/platform-Windows%20x64%20%C2%B7%20CUDA-555555?style=flat-square&logo=nvidia&logoColor=76b900&labelColor=000000" alt="Platform"></a>
 <a href="cli/crow.py"><img src="https://img.shields.io/badge/client-Python%20stdlib%20only-555555?style=flat-square&logo=python&logoColor=ffd43b&labelColor=000000" alt="Python"></a>
 <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash"><img src="https://img.shields.io/badge/model-DeepSeek--V4--Flash-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
@@ -21,7 +21,7 @@
 <td align="center"><b>200k</b><br><sub>context, one slot</sub></td>
 <td align="center"><b>95.9 GiB</b><br><sub>model on disk</sub></td>
 <td align="center"><b>1.28 GiB</b><br><sub>peak host RAM, measured</sub></td>
-<td align="center"><b>12.08</b><br><sub>tok/s decode, gate median</sub></td>
+<td align="center"><b>14.73</b><br><sub>tok/s decode, with the host tier</sub></td>
 <td align="center"><b>0 EUR</b><br><sub>spent so far</sub></td>
 </tr>
 </table>
@@ -37,6 +37,8 @@
 A mixture-of-experts model is mostly asleep. Every token wakes only **6 of the 256 experts** in each of its 43 layers, so 92.7 % of the file is untouched at any given moment. Crow keeps the parts that *every* token needs in VRAM — attention, norms, shared experts, 6.57 GiB of them — holds the 64 most useful experts per layer beside them in a slot cache, and reads whatever is missing straight off the drive while the GPU is still working. The host machine never holds the model at all: **1.28 GiB of process memory for a 95.9 GiB file.**
 
 The context window is 200,000 tokens, on a single slot, and it costs about 1.41 GiB of the card — compressed attention makes context the cheap part here. A coding session holds files and history, so a 16k or 64k window would be measuring a product nobody uses.
+
+**Since 0.0.5 the host's spare RAM can be spent to make that cheaper.** A machine with 64 GB has tens of gigabytes doing nothing while Crow runs on 1.28 GiB of them. `--moe-stream-l2 32` keeps expert weights there between the VRAM slots and the drive: a miss that finds its expert in host memory uploads at 47,357 MB/s instead of fetching it at 10,593, and the measured cost of a miss falls from 1.31 ms to 0.73. It is optional and off by default — [what it buys and what it costs](#5-the-host-ram-tier-optional).
 
 That is the whole idea. Everything below is what it costs to make it actually run.
 
@@ -64,7 +66,7 @@ And the bar bottom left went **3.0k → 3.9k**. It used to run backwards.
 &nbsp;&nbsp;[Requirements](#requirements) · [Quick start](#quick-start) · [Full setup](#full-setup) · [Using the CLI](#using-the-cli) · [Updating](#updating) · [Common questions](#common-questions)
 
 **[Part II: How it works](#part-ii-how-it-works)**
-&nbsp;&nbsp;[The problem](#the-problem-a-model-that-does-not-fit) · [Sparsity](#1-sparsity-most-of-the-model-is-asleep) · [Quantisation](#2-quantisation-and-where-it-breaks) · [The cache](#3-the-slot-cache-and-what-vram-buys) · [Reading the drive](#4-reading-the-drive-without-the-page-cache) · [Cost per token](#what-it-costs-per-token) · [Against CPU offload](#against-cpu-offload) · [Batching](#batching-and-why-the-cli-does-not) · [What is not claimed](#what-is-not-claimed)
+&nbsp;&nbsp;[The problem](#the-problem-a-model-that-does-not-fit) · [Sparsity](#1-sparsity-most-of-the-model-is-asleep) · [Quantisation](#2-quantisation-and-where-it-breaks) · [The cache](#3-the-slot-cache-and-what-vram-buys) · [Reading the drive](#4-reading-the-drive-without-the-page-cache) · [The host tier](#5-the-host-ram-tier-optional) · [Cost per token](#what-it-costs-per-token) · [Against CPU offload](#against-cpu-offload) · [Batching](#batching-and-why-the-cli-does-not) · [What is not claimed](#what-is-not-claimed)
 
 **[What's next](#whats-next)** · **[How this project works](#how-this-project-works)** · **[Licence](#licence)**
 
@@ -77,7 +79,7 @@ And the bar bottom left went **3.0k → 3.9k**. It used to run backwards.
 | | |
 |---|---|
 | **GPU** | NVIDIA, **16 GB VRAM minimum**, 32 GB for the measured operating point. Below 16 GB was never measured and is unsupported |
-| **System RAM** | 16 GB. The model does not live here — 1.28 GiB is the measured process peak |
+| **System RAM** | 16 GB. The model does not live here — 1.28 GiB is the measured process peak. **64 GB unlocks the optional [host tier](#5-the-host-ram-tier-optional)**, which trades 32 GiB of it for ~1.4x throughput |
 | **Disk** | ~2 GB for Crow, **~96 GB for the model** |
 | **OS** | Windows x64. The streaming path uses `FILE_FLAG_NO_BUFFERING` and a handle pool, both Windows-specific |
 | **Python** | 3.8+, for the client only. Standard library, nothing to install |
@@ -93,7 +95,7 @@ irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1 | iex
 Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
 
 ```console
-  Crow 0.0.4
+  Crow 0.0.5
 
 [1/5] Checking this machine
       GPU  NVIDIA GeForce RTX 5090, 32607 MB
@@ -103,7 +105,7 @@ Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
       preflight  passed
 
 [2/5] Downloading the package
-      crow-0.0.4-win-x64.zip  [####################.....]  84%  424.1 MB / 506.4 MB  18.2 MB/s
+      crow-0.0.5-win-x64.zip  [####################.....]  84%  424.1 MB / 506.4 MB  18.2 MB/s
 
 [3/5] Verifying
       size  506.4 MB
@@ -132,8 +134,12 @@ hf download unsloth/DeepSeek-V4-Flash-GGUF --include "UD-IQ3_XXS/*" --local-dir 
 %LOCALAPPDATA%\Crow\bin\llama-server.exe `
   -m %LOCALAPPDATA%\Crow\models\UD-IQ3_XXS\DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf `
   --port 8081 -c 200000 -ngl 99 -np 1 --jinja `
-  --moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct
+  --slot-save-path %LOCALAPPDATA%\Crow\session `
+  --moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct `
+  --moe-stream-l2 32
 ```
+
+The installer prints this line filled in for your machine, and leaves `--moe-stream-l2` out below 64 GB of RAM.
 
 Every flag carries a reason, and none of them is taste:
 
@@ -147,6 +153,8 @@ Every flag carries a reason, and none of them is taste:
 | `--moe-stream-cache 64s` | 64 of 256 experts per layer, ~24 GiB. 121 slots would reach a 95 % hit rate and need 45.5 GiB, which does not fit |
 | `--moe-stream-io-threads 8` | I/O workers, **each with its own file handle**. Windows serialises on the file object, so a shared handle stays at queue depth 1 whatever you do |
 | `--moe-stream-direct` | Unbuffered reads. Without it `read_raw_at` falls back to the shared handle and the pool delivers 1.01x instead of 2.22x |
+| `--slot-save-path` | Where the server writes its KV state so a session survives a restart. Without it the next start re-prefills the whole history: measured 2026-08-08, 23,400 tokens took about 35 minutes against 22 ms to restore. Must be an existing directory or the server refuses to start |
+| `--moe-stream-l2 32` | Optional [host-RAM tier](#5-the-host-ram-tier-optional), in GiB. 1.40–1.47x throughput on this machine, at the price of 32 GiB of page-locked memory. Leave it out and Crow streams exactly as it did before, at 1.28 GiB of host memory |
 
 `--moe-stream-io-threads` is the number of *workers*, not the queue depth the drive sees. That one is measured, and it is **4.31**.
 
@@ -213,7 +221,7 @@ On first start the client installs its bundled typeface and writes `profiles.def
 **The client tells you.** On start it asks GitHub whether a newer release exists and, if there is one, prints it above the prompt together with the command that installs it:
 
 ```
-crow 0.0.5 is out (you have 0.0.4)
+crow 0.0.6 is out (you have 0.0.5)
   irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1 | iex
 ```
 
@@ -231,7 +239,9 @@ Two things it will not do without being asked. It will not overwrite a directory
 
 ## Common questions
 
-**Does it need the model in RAM?** No. That is the point. Peak host memory is 1.28 GiB, measured, against 51.79 GiB for llama.cpp's CPU offload on the same binary.
+**Does it need the model in RAM?** No. That is the point. Peak host memory is 1.28 GiB, measured, against 51.79 GiB for llama.cpp's CPU offload on the same binary. Since 0.0.5 you *may* spend host RAM deliberately — see the next question — but nothing requires it.
+
+**What does `--moe-stream-l2` do?** It keeps expert weights in page-locked host RAM between the VRAM slots and the drive. A miss that finds its expert there costs 56.7 µs instead of 401.5. Measured: **1.40–1.47x decode** over three paired runs, at the price of 32 GiB of memory the rest of the machine cannot use, and a process that peaks at 33.46 GiB instead of 1.28. The installer prints the flag only on machines with 64 GB, because 32 GiB on ~64 GB is the only ratio that has been run. [Details](#5-the-host-ram-tier-optional).
 
 **Is the output the same as a resident model?** On the deterministic half of the coding gate, yes — six of six tasks byte-identical to the reference after the load-path rework. The other half of the gate produces three different programs across three runs at *identical* configuration, so that half cannot answer the question. See [what is not claimed](#what-is-not-claimed).
 
@@ -324,6 +334,65 @@ Same bytes, same request size, 29 % more decode throughput. That change alone br
 
 This work produced a fix that went upstream on its own: `llama_file` on Windows had no positional unbuffered read at all, and `has_direct_io()` returned a hard `true` on a path that had never opened anything unbuffered — so external code logged "O_DIRECT, page cache bypassed" while reading through the page cache. Submitted as [ggml-org/llama.cpp#26541](https://github.com/ggml-org/llama.cpp/issues/26541) and [#26542](https://github.com/ggml-org/llama.cpp/pull/26542).
 
+## 5. The host-RAM tier (optional)
+
+Everything above spends VRAM and drive bandwidth. The third resource on the machine was sitting
+idle: while Crow runs at 1.28 GiB of process memory, a 64 GB box has roughly 48 GB free.
+
+`--moe-stream-l2 32` puts a second cache level there, between the VRAM slots and the drive. The
+prices, measured 2026-08-09 at the block sizes the streamer actually moves — 2,686,976 B for
+`ffn_gate_exps`/`ffn_up_exps`, 3,211,264 B for `ffn_down_exps`:
+
+| | rate | one work item |
+|---|---:|---:|
+| SSD, pooled read | 10,592.7 MB/s | 253.7 µs |
+| host → device, pageable | 18,175.5 MB/s | 147.8 µs |
+| **host → device, pinned** | **47,357.4 MB/s** | **56.7 µs** |
+
+A miss served from the tier costs **56.7 µs** against **401.5 µs** for the drive path — 7.08x.
+Spread over twelve runs was 0.10–4.36 %.
+
+At 32 GiB the tier holds **7,695 slots** of 4,464,640 B — one slot takes the largest slab in the
+model plus its alignment slack, so any weight fits any slot and the allocator cannot fragment.
+That is 7,695 of the 33,024 slabs in the file: **23.3 %** of the model resident in host RAM.
+
+**Filling it is free, and that is what makes it worth building.** The worker already read every
+missing slab into a staging buffer and threw the buffer away. Now the read lands directly in a tier
+slot and the upload sources from there: the same read, the same bytes, kept instead of discarded. A
+design that copied into the tier afterwards would spend more per fill than a later hit returns.
+
+![The host tier against no tier, paired on identical tasks](docs/images/host_tier.png)
+
+**14.73 against 10.54 tok/s at the median, 1.40–1.47x per pair — and the arrangement is half the
+result.** Two earlier attempts produced nothing. All
+ten gate tasks repeated per run gave 7.65 and 15.77 tok/s at *identical* configuration — a 2.06x
+spread, because the second run meets the cache the first warmed, and with 32 GiB of experts held
+that shared state is the subject. Giving each arm different tasks removed the carry-over and
+replaced it with arms solving differently hard problems. What works is both at once: the same tasks
+within a pair, fresh tasks across pairs, each arm on its own server so the tier starts empty on
+both sides. Within-arm spread then falls to 1.09x and 1.07x — narrower than the difference, which
+is the only reason the difference can be read at all.
+
+**What it costs.** 32 GiB of page-locked memory, held for the life of the process and unavailable
+to everything else. Peak process memory goes from 1.28 GiB to 33.46 GiB — measured on a live
+server, not derived. That is why the flag is off by default and why the installer prints it only
+above 64 GB of RAM: 32 GiB on a ~64 GB machine is the only ratio that has been run.
+
+**What it cannot do.** Catch a cold first touch. Those bytes have never been read, so no cache
+holds them; over the ten-task gate they were 10,363 of 301,864 misses. Everything else is an
+eviction, and only those are addressable here.
+
+**A defect worth recording, because no throughput number would have shown it.** The first version
+handed out a resident slot and released its lock; another worker took the same slot as an eviction
+victim and read a different expert into it mid-upload. The model emitted 8,191 characters of
+`<<<<<<<<` instead of an answer — at 31–35 tok/s, a fast run by every counter that existed. A cache
+race is invisible in throughput. The fix pins a slot while it is being read and commits a filled
+one only after its bytes have left for the GPU.
+
+The obvious suspect for the slowdown that followed was measured before anything was rebuilt: the
+tier's global mutex costs 0.553 µs per operation, 1,469 ms over 2,655,285 operations, 0.16 % of
+wall time. Sharding it would have been wasted work.
+
 ## What it costs per token
 
 ![Bytes per token](docs/images/eq_bytes_per_token.png)
@@ -348,6 +417,8 @@ Streaming is **1.35x on decode, 2.14x on prefill, and needs 40x less host memory
 
 No quality difference between the placements is demonstrable: they are one gate task apart, and the gate's aggregate detection limit is two.
 
+**These figures are for Crow without the host tier**, which is what the comparison is about: CPU offload puts the experts in host RAM and computes against them there, and the point is that streaming beats it while barely touching that memory. Turning the tier on trades some of that advantage back deliberately — 33.46 GiB instead of 1.28, so 1.5x less host memory than CPU offload rather than 40x, and 1.4x more throughput. Two different products from one binary, and the flag says which one is running.
+
 ## Batching, and why the CLI does not
 
 ![Aggregate throughput against batch depth](docs/images/batch_curve.png)
@@ -366,32 +437,37 @@ Written out because a page like this is easy to read as more than it says.
 - **Vendor model-card scores are statements about that vendor's harness**, not about the model, and none of them survives 2-bit or 3-bit quantisation. No published quality figure exists for the file this project runs.
 - **Nothing here is compared to another project's number.** The nearest published figures for this class of workload differ from this operating point in at least two free variables each, so a "we are faster" line would be measuring the difference between two machines.
 - **The upstream CUDA fault this project tracks was never reproduced here**, on this quantisation and this card. That is not a claim that it is fixed.
-- **The headline 12.08 tok/s is a gate median, not what a chat turn feels like.** It was measured over the coding gate's short tasks at the operating point — near-empty context, no tools header. Real turns in the client, with 1–5k of conversation behind them, decoded at 8.08–8.56 tok/s on 2026-08-08. Both figures are measured; the reason for the gap is not, and the measurement that would settle it is a decode series against context length.
+- **The headline 14.73 tok/s is the median of three paired runs with the host tier, not what every chat turn feels like.** It was measured over two graded coding tasks per pair at the operating point — near-empty context. Live turns in the client on 2026-08-09, with 1–5k of conversation behind them, decoded at 11.79–16.72 tok/s; before the tier, comparable turns ran at 8.08–8.56. All of these are measured; the relationship between them is not, and the measurement that would settle it is a decode series against context length.
+- **The tier's 1.40–1.47x is measured at one size, on one machine, under 6k of context.** 32 GiB on a 63.4 GB host. No other tier size has been run, and nothing says the factor survives a full 200k window — the working set grows and the tier does not.
+- **The gate resolves two tasks in aggregate, and the tier comparison rests on two graded tasks per pair.** 6 of 6 correct with the tier against 5 of 6 without is *no difference found*, not *no difference* — and certainly not evidence that the tier improves quality.
 
 ---
 
 ## What's next
 
-Crow chats today. It cannot yet *act*: when it produced a working three.js page on 2026-08-06, the code was printed to the terminal and had to be copied out by hand. Closing that gap is [#55](https://github.com/nibor1896/Crow/issues/55), and these are the pieces, with what each one actually depends on.
+**Crow acts now.** Since 0.0.5 a reply can become an action: the client executes the call, hands the result back and asks again, up to 24 rounds. That was [#55](https://github.com/nibor1896/Crow/issues/55), and it changes what the remaining list is about.
 
-**Buildable now — Python, no open questions**
+**Built — seven tools, standard library, 122 tests**
 
-- [ ] **The loop that lets a reply become an action.** The model already answers with a request to call something; nothing yet carries that request out, hands the result back and asks again. Everything below is a passenger on this one. Its own measurement follows, because *a model that can express a tool call is not the same as a model that makes good ones.* [#58](https://github.com/nibor1896/Crow/issues/58)
-- [ ] **Editing a file by describing the change, not by rewriting the file.** A model that has to emit the whole new file pays for every untouched line: at ~8 tok/s a 400-line file is over a minute of typing to change three lines. The alternative is a small text format that says *replace these lines, in this context* — the same one codex and cline speak.
-- [ ] **Edits that survive the file having moved on.** The hard part is not the format, it is that the context a model quotes rarely matches the file byte for byte — indentation drifted, a line above changed, or the edit is already in place from an earlier round. So the match has to be approximate and has to recognise an already-applied change as *done* rather than as a failure. This is the one piece worth taking from hermes-agent rather than writing: 1,837 lines, standard library throughout, MIT, and the failure modes are all in the details.
-- [ ] **Refusing a write that was never read.** A model that writes a file it has not read this session overwrites whatever it does not know about. hermes detects exactly that and performs the write anyway — two independent code paths, both resolving to last-write-wins. Ours refuses, and the case that must go red is a write with no prior read.
-- [ ] **Running a command and reading what it said.** Local only, with an output ceiling and a credential blocklist. hermes carries eight execution backends for containers and remote sandboxes; seven of them describe a product this is not, and the local one is shorter written with the standard library than borrowed.
-- [ ] **A list the model keeps for itself.** At this decode rate a long run drifts, and a visible list of what is done and what is left is what keeps it on course. Small — the value is the habit, not the code.
+- [x] **The loop that lets a reply become an action.** `read_file`, `write_file`, `edit_file`, `list_dir`, `find_files`, `search_text`, `run_command`. Driven live 2026-08-09: `list_dir` → two `read_file` calls → a correct answer, five turns at 11.79–16.72 tok/s.
+- [x] **Reading a part of a file rather than all of it.** `read_file` takes a line range and caps at 16 KB, because prefill is the cost that matters: at ~38 tok/s a 100 KB file is ~25,000 tokens and eleven minutes before the model has read a word of it. `search_text` returns line numbers for exactly this.
+- [x] **Refusing a write that was never read.** `write_file` and `edit_file` refuse a file this session has not read. A model that writes what it has not read overwrites whatever it does not know about.
+- [x] **Running a command and reading what it said.** Local only, output ceiling, 120 s timeout.
 - [x] **Fix the `ttft` number the CLI reports.** It used to start the clock at the first *content* token, so it silently contained the whole reasoning phase. It now counts the first token of any kind, and `answer` is reported beside it — the gap between the two *is* the thinking time. Figures quoted from before 2026-08-07 measure the old definition.
 
-Nothing in that list is waiting on a server change any more. It was, until 2026-08-08: the model's own chat template can express tool calls, but `llama-server` only uses that template with `--jinja`, and the operating point did not set it. It does now — [see the flag table](#step-1--start-the-server), where it turns out to matter for a second reason entirely.
+**Still open, and now for sharper reasons**
+
+- [ ] **Edits that survive the file having moved on.** `edit_file` matches exactly and refuses an ambiguous or missing match — it fails loudly instead of guessing, which is the behaviour worth having first. What it does not do is recognise a change that is *already applied*, or an indentation that drifted. That needs approximate matching, and it is the one piece worth taking from hermes-agent rather than writing.
+- [ ] **A list the model keeps for itself.** At this decode rate a long run drifts, and a visible list of what is done and what is left is what keeps it on course. Small — the value is the habit, not the code.
+- [ ] **Measuring the loop rather than demonstrating it.** *A model that can express a tool call is not the same as a model that makes good ones.* One live session is not a figure. [#58](https://github.com/nibor1896/Crow/issues/58)
 
 **Decided by measurement, not by preference**
 
 - [x] **Whether reasoning goes back into the history — it does.** Settled by the prefill number rather than by argument: dropping it re-reads 0.909–0.986 of the previous turn's output every turn, replaying it re-reads 0.008–0.016. Live through the client, turns 2 and 3 prefilled 18 and 19 tokens where they had cost about 4,256 before. [#60](https://github.com/nibor1896/Crow/issues/60)
 - [x] **The context counter — it asks the server now.** It used to add `prompt_n` and `predicted_n`, which is wrong three times over: it assigned rather than accumulated, `prompt_n` counts the tokens the server *processed* rather than the length of the prompt, and `predicted_n` includes the reasoning. In a live session the bar ran *backwards* while the conversation grew. It reads `usage.total_tokens` now — the conversation as the server's own tokeniser counted it — and the timing line carries `cached N/M` beside it, which is the prompt cache working or not working, per turn, reported instead of inferred. Second half of [#60](https://github.com/nibor1896/Crow/issues/60).
 - [ ] **Staying fast and keeping the context as a session grows.** Two acceptance criteria, neither measured beyond ten turns: a turn must not get slower as the session lengthens, and the context that matters must still be there at the end of the window. [#61](https://github.com/nibor1896/Crow/issues/61)
-- [ ] **A release, once the loop stands.** The package builds and verifies today (`tools/pack-release.ps1`, 506 MB, self-contained), and the installer has now been run end to end into an empty directory rather than only self-tested. What it needs is something worth installing. Tracked as [#57](https://github.com/nibor1896/Crow/issues/57).
+- [x] **A release, once the loop stands.** It stands, and 0.0.5 is it: the tool loop, the host tier, and a session that survives a restart. Tracked as [#57](https://github.com/nibor1896/Crow/issues/57).
+- [ ] **Whether the tier holds up at a full window.** Every paired run stayed under 6k of context. 1.40–1.47x is measured there and nowhere else, and the tier's hit rate in one long session — rather than across short graded tasks — is unknown.
 - [ ] **A name and a logo.** `Crow` is the project name, not a product name. Tracked as [#56](https://github.com/nibor1896/Crow/issues/56), with one hard constraint already measured: the bundled typeface has 0 of 256 braille glyphs, so a braille logo and this font cannot both ship.
 
 **Deliberately not next**
@@ -417,7 +493,7 @@ Every tool in `tools/` answers `-Selftest` (PowerShell) or `selftest` (Python) a
 | | |
 |---|---|
 | `install.ps1` | the one-command installer, with its own suite |
-| `cli/` | the client, standard library only, 81 tests |
+| `cli/` | the client and its seven tools, standard library only, 122 tests |
 | `patches/` | the streaming patch against its pinned upstream tag |
 | `tools/` | measuring, packing and verification tools, each with a selftest |
 | `docs/images/` | the generators behind every figure above |

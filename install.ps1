@@ -38,7 +38,7 @@ A local package is never deleted afterwards; a downloaded one is.
 #>
 [CmdletBinding()]
 param(
-    [string] $Version   = "0.0.4",
+    [string] $Version   = "0.0.5",
     [string] $InstallTo = "$env:LOCALAPPDATA\Crow",
     [string] $SourceUrl = "",
     [switch] $Force,
@@ -556,19 +556,19 @@ function Invoke-Selftest {
     # Updating. Every branch, because the defect this replaced was a single
     # refusal that treated "an older Crow is here" the same as "a stranger's
     # files are here" -- and gave both the same unusable advice.
-    C "an older install updates"                 ((Resolve-InstallAction "0.0.3" "0.0.4" $false).Action -eq 'update')
-    C "a two-step gap updates"                   ((Resolve-InstallAction "0.0.1" "0.0.4" $false).Action -eq 'update')
-    C "the same version does nothing"            ((Resolve-InstallAction "0.0.4" "0.0.4" $false).Action -eq 'uptodate')
-    C "the same version reinstalls with -Force"  ((Resolve-InstallAction "0.0.4" "0.0.4" $true).Action  -eq 'install')
-    C "a newer install is NOT overwritten"       ((Resolve-InstallAction "0.0.5" "0.0.4" $false).Action -eq 'downgrade')
-    C "and goes back only with -Force"           ((Resolve-InstallAction "0.0.5" "0.0.4" $true).Action  -eq 'install')
+    C "an older install updates"                 ((Resolve-InstallAction "0.0.4" "0.0.5" $false).Action -eq 'update')
+    C "a two-step gap updates"                   ((Resolve-InstallAction "0.0.1" "0.0.5" $false).Action -eq 'update')
+    C "the same version does nothing"            ((Resolve-InstallAction "0.0.5" "0.0.5" $false).Action -eq 'uptodate')
+    C "the same version reinstalls with -Force"  ((Resolve-InstallAction "0.0.5" "0.0.5" $true).Action  -eq 'install')
+    C "a newer install is NOT overwritten"       ((Resolve-InstallAction "0.0.6" "0.0.5" $false).Action -eq 'downgrade')
+    C "and goes back only with -Force"           ((Resolve-InstallAction "0.0.6" "0.0.5" $true).Action  -eq 'install')
 
     # The cases that must refuse. An unidentified directory is somebody's data
     # until proven otherwise; a version string that will not parse must not be
     # silently read as 0.0.0, which would make every unknown look like "older".
-    C "an unidentified target refuses"           ((Resolve-InstallAction $null "0.0.4" $false).Action -eq 'unknown')
-    C "and is overwritten only with -Force"      ((Resolve-InstallAction $null "0.0.4" $true).Action  -eq 'install')
-    C "an unparseable version refuses"           ((Resolve-InstallAction "not-a-version" "0.0.4" $false).Action -eq 'unknown')
+    C "an unidentified target refuses"           ((Resolve-InstallAction $null "0.0.5" $false).Action -eq 'unknown')
+    C "and is overwritten only with -Force"      ((Resolve-InstallAction $null "0.0.5" $true).Action  -eq 'install')
+    C "an unparseable version refuses"           ((Resolve-InstallAction "not-a-version" "0.0.5" $false).Action -eq 'unknown')
     C "an unparseable TARGET refuses too"        ((Resolve-InstallAction "0.0.3" "garbage" $false).Action -eq 'unknown')
 
     # Reading the version back out of a shipped tree, and the two ways that fails.

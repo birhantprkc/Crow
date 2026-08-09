@@ -177,12 +177,71 @@ def batch_curve():
     save(fig, "batch_curve")
 
 
+def host_tier():
+    """The host-RAM tier against no tier, paired on identical tasks. 2026-08-09.
+
+    Paired and not averaged, because the arrangement is half the result: two earlier attempts
+    produced a 2.06x spread at identical configuration, once by repeating tasks across runs (which
+    measures the cache the previous run warmed) and once by giving each arm different tasks (which
+    measures how hard the tasks were). Same tasks within a pair, fresh tasks across pairs.
+    """
+    pairs = ["is-balanced\nrotate-matrix", "longest-common-prefix\ngroup-anagrams",
+             "binary-search\nrle-encode"]
+    tier  = [15.89, 14.73, 14.53]
+    base  = [10.81, 10.54, 10.09]
+    stall_tier = [0.728, 0.745, 0.752]
+    stall_base = [1.307, 1.282, 1.345]
+
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(11.8, 5.0))
+    x = range(len(pairs))
+    w = 0.36
+
+    for i, (t, b) in enumerate(zip(tier, base)):
+        a1.bar(i - w / 2, b, width=w, color=GREY,  zorder=3)
+        a1.bar(i + w / 2, t, width=w, color=GREEN, zorder=3)
+        a1.text(i - w / 2, b + 0.25, f"{b:.2f}", ha="center", fontsize=11)
+        a1.text(i + w / 2, t + 0.25, f"{t:.2f}", ha="center", fontsize=11, fontweight="bold")
+        a1.text(i, max(t, b) + 1.4, f"{t / b:.2f}x", ha="center", fontsize=12,
+                fontweight="bold", color=GREEN)
+    a1.set_xticks(list(x)); a1.set_xticklabels(pairs, fontsize=9)
+    a1.set_ylabel("decode (tok/s)"); a1.set_ylim(0, 19)
+    a1.set_title("throughput", fontsize=13, color=MUTED)
+
+    for i, (t, b) in enumerate(zip(stall_tier, stall_base)):
+        a2.bar(i - w / 2, b, width=w, color=GREY,  zorder=3)
+        a2.bar(i + w / 2, t, width=w, color=GREEN, zorder=3)
+        a2.text(i - w / 2, b + 0.03, f"{b:.3f}", ha="center", fontsize=11)
+        a2.text(i + w / 2, t + 0.03, f"{t:.3f}", ha="center", fontsize=11, fontweight="bold")
+    a2.set_xticks(list(x)); a2.set_xticklabels(pairs, fontsize=9)
+    a2.set_ylabel("load stall per miss (ms)"); a2.set_ylim(0, 1.75)
+    a2.set_title("what a miss costs", fontsize=13, color=MUTED)
+
+    for ax in (a1, a2):
+        ax.grid(axis="y", color="#eef1f4", zorder=0)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        ax.tick_params(labelsize=10)
+
+    a1.bar(0, 0, color=GREY,  label="no tier")
+    a1.bar(0, 0, color=GREEN, label="32 GiB host tier")
+    a1.legend(frameon=False, fontsize=10.5, loc="upper right")
+
+    fig.suptitle("A host-RAM tier below the VRAM slots, paired on identical tasks",
+                 fontsize=15, fontweight="bold", y=1.02)
+    fig.text(0.5, -0.07, "Both arms solve the same two tasks within a pair and no task repeats across pairs; each arm "
+                         "starts its own server, so the tier begins empty on both sides. Within-arm spread is 1.09x "
+                         "(tier) and 1.07x (base) -- narrower than the difference, which is what makes it readable.",
+             ha="center", fontsize=9.5, color=MUTED)
+    save(fig, "host_tier")
+
+
 def main() -> int:
     print("rendering plots")
     slot_ladder()
     quant_ladder()
     against_cpu()
     batch_curve()
+    host_tier()
     print("done")
     return 0
 

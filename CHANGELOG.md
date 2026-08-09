@@ -6,6 +6,88 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
+## 0.0.5 — 2026-08-09
+
+### Added
+
+- **Crow acts.** The client executes the model's tool calls, hands the results back and asks
+  again, up to 24 rounds: `read_file`, `write_file`, `edit_file`, `list_dir`, `find_files`,
+  `search_text`, `run_command`. Until now a reply could only be printed and copied out by hand.
+
+  Three properties carry a reason rather than a preference. `read_file` takes a line range and
+  caps at 16 KB, because prefill is the cost that matters — at ~38 tok/s a 100 KB file is ~25,000
+  tokens and eleven minutes before the model has read a word of it. `write_file` and `edit_file`
+  refuse a file this session has not read, because a model that writes what it has not read
+  overwrites whatever it does not know about. And the system prompt deliberately carries no
+  working directory: it is byte 0 of the prefix, so a session saved in one folder would be
+  worthless resumed from another.
+
+  Driven live on 2026-08-09 — `list_dir` → two `read_file` calls → a correct answer, five turns
+  at 11.79–16.72 tok/s with the prompt cache holding (`cached 4140/4722` by the last turn).
+
+- **`--moe-stream-l2 <GiB>`: an optional host-RAM tier below the VRAM slots.** A miss that finds
+  its expert in page-locked host memory uploads at 47,357 MB/s instead of fetching it off the
+  drive at 10,593 — **56.7 µs against 401.5 µs per work item, 7.08x.**
+
+  Measured end to end, paired on identical tasks, 32 GiB tier: **15.89 / 14.73 / 14.53 tok/s with
+  against 10.81 / 10.54 / 10.09 without — 1.40–1.47x**, and the cost of a miss falls from
+  1.31 ms to 0.73. Within-arm spread was 1.09x and 1.07x, narrower than the difference.
+
+  **The arrangement is half the result, and two of them measured nothing.** Repeating the same
+  ten gate tasks per run gave 7.65 and 15.77 tok/s at *identical* configuration, because the
+  second run meets the cache the first warmed — with 32 GiB of experts held, that shared state is
+  the subject. Giving each arm different tasks removed the carry-over and replaced it with arms
+  solving differently hard problems. What works is both at once: same tasks within a pair, fresh
+  tasks across pairs, each arm on its own server.
+
+  **It costs 32 GiB of page-locked memory** — process peak goes from 1.28 GiB to 33.46 GiB, and
+  that memory is unavailable to the rest of the machine until the server exits. Off by default.
+  The installer prints the flag only above 60 GB of detected RAM, because 32 GiB on a ~64 GB host
+  is the only ratio that has been run.
+
+  **Unmeasured:** any other tier size, and whether the factor survives a full 200k window. Every
+  paired run stayed under 6k of context.
+
+- **`--slot-save-path` is in the printed command, and the installer creates the directory.** The
+  server refuses to start against a path that is not an existing directory, so the line it
+  printed could fail on a fresh install. Without the flag a restart re-prefills the whole history:
+  23,400 tokens took about 35 minutes against 22 ms to restore.
+
+### Fixed
+
+- **A cache race that no throughput number could show.** The tier's first version handed out a
+  resident slot and released its lock; another worker took the same slot as an eviction victim
+  and read a different expert into it mid-upload. The model emitted 8,191 characters of
+  `<<<<<<<<` instead of an answer — at 31–35 tok/s, a fast run by every counter that existed.
+  A slot is now pinned while it is read, and a filled one is published only after its bytes have
+  left for the GPU.
+
+- **A failed session restore repeated forever.** Point the server at a different
+  `--slot-save-path` than the one a session was written to and the client asked for a KV state
+  that was not there, on every start, printing two server errors each time. The claim is now
+  withdrawn when it is disproved. The first failure still prints — the client cannot know whether
+  the file exists, because the path belongs to the server.
+
+- **The tool call line showed half its JSON.** A raw cut at 80 characters lands mid-string often
+  enough to be the normal case, and `read_file({"path":"…","start_line":1,"` reads as a malformed
+  call rather than a shortened one. Values are shown now, paths cut from the front.
+
+- **The tier's allocation line was invisible.** At the default verbosity `llama-server` prints no
+  INFO from `llama.dll` at all, so a user who passed the flag saw no confirmation anywhere. It is
+  printed at WARN — a deliberate misuse of the level, because what it reports is that GiB-scale
+  memory has been page-locked away from the rest of the machine.
+
+### Changed
+
+- **`probe-suite.py` defaults to temperature 0.6, matching the CLI.** At 0, under the model's own
+  chat template, greedy decoding never leaves the reasoning block: sixteen answers in a row came
+  back `finish_reason=length` with an empty content field. `--temperature 0` remains available for
+  reproducing the older series and is now a deliberate act.
+
+- **`measure-24-gate.ps1` gained `-Only` and `-Warm`.** Repeating a task measures the cache, not
+  the configuration; a warm-up pass on tasks the graded pass does not use keeps the first graded
+  task from paying for the cold model, cold slots and empty tier at once.
+
 ## 0.0.4 — 2026-08-08
 
 ### Fixed
