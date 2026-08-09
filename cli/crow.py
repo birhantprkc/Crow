@@ -39,8 +39,14 @@ VERSION = "0.0.4"
 # came back in Chinese. Kept to one short line on purpose: it sits at the head
 # of every context, so it is paid for in prefill exactly once and then cached,
 # but only while it stays byte-identical.
+# NO WORKING DIRECTORY IN HERE, deliberately. It would make the system prompt
+# differ between two starts in different folders, and a system prompt is byte 0
+# of the prefix: a session saved in one directory would then be worthless when
+# resumed from another. `list_dir` with no argument answers the same question
+# and costs one round only when the model actually needs it.
 DEFAULT_SYSTEM = (
-    "You are Crow, a local coding assistant. "
+    "You are Crow, a local coding assistant. You have tools to read, write, "
+    "search and run commands -- look instead of guessing paths. "
     "Always reply in the same language the user wrote in."
 )
 
@@ -50,20 +56,66 @@ DEFAULT_SYSTEM = (
 # `reasoning_content` renders to nothing. Measured 2026-08-08 via the server's
 # own /apply-template: without tools both variants come out at 132 characters,
 # with tools at 1197 against 1215 -- and those 18 characters ARE the thoughts.
-# Executing a call is #58 and is not built here; an arriving tool_call is
-# reported through the finish reason rather than silently swallowed.
-TOOLS = [{
-    "type": "function",
-    "function": {
-        "name": "read_file",
-        "description": "Read a UTF-8 text file from disk and return its contents.",
-        "parameters": {
-            "type": "object",
-            "properties": {"path": {"type": "string", "description": "Path to the file."}},
-            "required": ["path"],
-        },
-    },
-}]
+# 100 KB was the first value and it was chosen against context growth alone.
+# Prefill is the cost that matters here: at ~38 tok/s a 100 KB file is ~25,000
+# tokens and eleven minutes before the model has read a word of it. 16 KB is
+# roughly 4,000 tokens, under two minutes, and a file larger than that is meant
+# to be reached through search_text plus a line range.
+MAX_TOOL_BYTES = 16_000
+MAX_TOOL_ROUNDS = 24
+MAX_HITS = 200
+COMMAND_TIMEOUT = 120
+
+# The calls are executed -- see run_tool and the loop in repl().
+#
+# WHY LIST_DIR, FIND_FILES AND SEARCH_TEXT ARE NOT OPTIONAL. With read_file
+# alone the model has to guess paths, and it does: asked about llama.cpp it
+# tried "llama.cpp/server.cpp", which does not exist here. Every guess costs a
+# full round at ~10 tok/s. Tools that let it look are cheaper than tools that
+# let it read.
+def _fn(name, description, properties, required):
+    return {"type": "function",
+            "function": {"name": name, "description": description,
+                         "parameters": {"type": "object", "properties": properties,
+                                        "required": required}}}
+
+
+_STR = {"type": "string"}
+
+TOOLS = [
+    _fn("read_file",
+        "Read a UTF-8 text file. Give start_line and end_line for a range -- everything "
+        "read costs prefill time, so read the part you need, not the whole file. "
+        "search_text returns line numbers for exactly this.",
+        {"path": dict(_STR, description="Path to the file."),
+         "start_line": {"type": "integer", "description": "First line, 1-based."},
+         "end_line": {"type": "integer", "description": "Last line, inclusive."}}, ["path"]),
+    _fn("write_file",
+        "Write a file, creating directories as needed. An existing file must have been "
+        "read first in this session; otherwise the call is refused.",
+        {"path": dict(_STR, description="Path to write."),
+         "content": dict(_STR, description="Full new contents.")}, ["path", "content"]),
+    _fn("edit_file",
+        "Replace one exact occurrence of 'old' with 'new'. The file must have been read "
+        "first. Fails if 'old' is absent or appears more than once.",
+        {"path": dict(_STR, description="File to edit."),
+         "old": dict(_STR, description="Exact text to replace, unique in the file."),
+         "new": dict(_STR, description="Replacement text.")}, ["path", "old", "new"]),
+    _fn("list_dir", "List the entries of a directory.",
+        {"path": dict(_STR, description="Directory, default the working directory.")}, []),
+    _fn("find_files", "Find files by name pattern, recursively.",
+        {"root": dict(_STR, description="Where to start."),
+         "pattern": dict(_STR, description="Glob on the filename, e.g. *.cpp")}, ["pattern"]),
+    _fn("search_text", "Search file contents by regular expression, recursively.",
+        {"root": dict(_STR, description="Where to start."),
+         "pattern": dict(_STR, description="Regular expression."),
+         "glob": dict(_STR, description="Only files matching this glob, e.g. *.py")}, ["pattern"]),
+    _fn("run_command",
+        f"Run a shell command locally and return its exit code and output. "
+        f"Killed after {COMMAND_TIMEOUT}s.",
+        {"command": dict(_STR, description="The command line."),
+         "cwd": dict(_STR, description="Working directory.")}, ["command"]),
+]
 
 # ANSI only, and only when stdout is a terminal: a redirected transcript has
 # to stay free of escape sequences, or every later grep over it is wrong.
@@ -200,6 +252,113 @@ RELEASES_API = "https://api.github.com/repos/nibor1896/Crow/releases/latest"
 
 class CrowError(RuntimeError):
     """Raised when the endpoint cannot be reached or answers with an error."""
+
+
+# Where a session is kept between runs. The messages live here; the KV state
+# lives wherever the server's --slot-save-path points, because only the server
+# can write it.
+SESSION_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+                           "Crow", "session")
+SESSION_FILE = os.path.join(SESSION_DIR, "session.json")
+SLOT_FILE = "crow-session.bin"
+
+
+def prefix_fingerprint(system: str | None) -> str:
+    """What the saved KV state is only valid for.
+
+    The chat template renders the tool declarations and the system prompt at the
+    HEAD of the prompt. Change either and byte 0 differs, so a restored KV cache
+    matches nothing and the server re-reads the whole conversation -- measured
+    2026-08-09, adding two parameters to read_file turned a resumed 73k session
+    into a full re-prefill.
+
+    Cheaper to detect than to suffer: if this does not match, the messages are
+    still restored and only the KV is dropped.
+    """
+    import hashlib
+
+    material = json.dumps(TOOLS, sort_keys=True) + "\x00" + (system or "")
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def save_session(conversation: "Conversation", base_url: str, context_tokens: int) -> str | None:
+    """Write the session so the next start does not pay for it again.
+
+    TWO HALVES, AND NEITHER IS ENOUGH ALONE. The server holds the KV cache; the
+    client holds the messages that produced it. Restoring only the KV would have
+    the client send an empty history against a full cache -- the prefix would not
+    match and the whole thing would be re-read anyway. Restoring only the
+    messages costs a full prefill. Both, or nothing.
+
+    ON EXIT, NOT PER TURN, on robin's call 2026-08-08: a save is ~17 MiB plus
+    ~6.9 KiB per token -- about 1.3 GiB at a full 200k window -- and this is the
+    one place Crow writes to the SSD rather than reading it. Per turn that
+    accumulates; once per session it does not.
+
+    Returns a one-line report, or None when there was nothing worth saving.
+    """
+    if len(conversation) <= (1 if conversation.has_system else 0):
+        return None
+
+    os.makedirs(SESSION_DIR, exist_ok=True)
+    saved_kv = False
+    try:
+        post_json(f"{base_url.rstrip('/').removesuffix('/v1')}/slots/0?action=save",
+                  {"filename": SLOT_FILE}, timeout=600.0)
+        saved_kv = True
+    except Exception:
+        # A server without --slot-save-path refuses this. The messages are still
+        # worth keeping; the next start just pays a prefill for them.
+        pass
+
+    with open(SESSION_FILE, "w", encoding="utf-8") as fh:
+        json.dump({"version": VERSION, "kv": saved_kv, "context_tokens": context_tokens,
+                   "prefix": prefix_fingerprint(conversation.system),
+                   "messages": conversation.payload()}, fh)
+
+    return (f"session saved -- {len(conversation)} messages"
+            + (" and the server's cache" if saved_kv else " (messages only: the server runs"
+               " without --slot-save-path, so the next start pays a prefill)"))
+
+
+def load_session(base_url: str, system: str | None = None) -> tuple[list[dict], int, bool] | None:
+    """The other half. Returns (messages, context_tokens, kv_restored) or None.
+
+    The KV restore is attempted first and its success is carried out, because a
+    caller that believes the cache is warm when it is not will report a prefill
+    as a surprise rather than as the expected cost.
+    """
+    if not os.path.exists(SESSION_FILE):
+        return None
+    try:
+        with open(SESSION_FILE, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        messages = saved.get("messages") or []
+    except Exception:
+        return None
+    if not messages:
+        return None
+
+    # The KV is only restored when the head of the prompt is byte-identical to
+    # what produced it. Restoring it against changed tools would not fail -- it
+    # would succeed and then re-read everything, which costs minutes and looks
+    # like the server misbehaving.
+    kv = False
+    if saved.get("kv") and saved.get("prefix") == prefix_fingerprint(system):
+        try:
+            post_json(f"{base_url.rstrip('/').removesuffix('/v1')}/slots/0?action=restore",
+                      {"filename": SLOT_FILE}, timeout=600.0)
+            kv = True
+        except Exception:
+            kv = False
+    return messages, int(saved.get("context_tokens") or 0), kv
+
+
+def post_json(url: str, body: dict, timeout: float = 30.0) -> dict:
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8") or "{}")
 
 
 def parse_version(text: str) -> tuple[int, ...] | None:
@@ -667,12 +826,43 @@ class Conversation:
         if system:
             self._messages.append({"role": "system", "content": system})
 
-    def append(self, role: str, content: str, reasoning: str | None = None) -> None:
+    @property
+    def has_system(self) -> bool:
+        return bool(self._system)
+
+    @property
+    def system(self) -> str | None:
+        return self._system
+
+    def restore(self, messages: list[dict]) -> None:
+        """Adopt a saved history wholesale, at construction time only.
+
+        This is not an exception to append-only: it happens before the first
+        request of a session, so no prefix exists yet to break. Calling it
+        mid-session would be exactly the edit this class refuses to allow.
+        """
+        # A fresh Conversation already holds the system prompt, so "empty" is one
+        # message, not zero. Checking for zero rejected every real resume.
+        if len(self._messages) > (1 if self._system else 0):
+            raise RuntimeError("restore() is for a fresh conversation, not a running one")
+        self._messages = [dict(m) for m in messages]
+
+    def append(self, role: str, content: str, reasoning: str | None = None,
+               tool_calls: list[dict] | None = None,
+               tool_call_id: str | None = None) -> None:
         message = {"role": role, "content": content}
         # Absent rather than empty: a turn that produced no reasoning has to
         # serialise exactly as it did before this field existed.
         if reasoning:
             message["reasoning_content"] = reasoning
+        if tool_calls:
+            message["tool_calls"] = [
+                {"id": c["id"], "type": "function",
+                 "function": {"name": c["name"], "arguments": c["arguments"]}}
+                for c in tool_calls
+            ]
+        if tool_call_id:
+            message["tool_call_id"] = tool_call_id
         self._messages.append(message)
 
     def reset(self) -> None:
@@ -831,6 +1021,7 @@ def stream_reply(
 
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
+    tool_calls: dict[int, dict] = {}
     timings: dict = {}
     context_tokens: int | None = None
     cached_tokens: int | None = None
@@ -892,6 +1083,22 @@ def stream_reply(
                     reasoning_parts.append(thought)
                     _mark_first_token(time.monotonic())
 
+                # Arguments arrive in fragments across chunks and have to be
+                # concatenated per index before the JSON is parseable. `id` and
+                # `name` usually come on the first fragment only, so neither may
+                # be overwritten with the empty string that follows.
+                for call in delta.get("tool_calls") or []:
+                    idx = call.get("index", 0)
+                    slot = tool_calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                    if call.get("id"):
+                        slot["id"] = call["id"]
+                    fn = call.get("function") or {}
+                    if fn.get("name"):
+                        slot["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        slot["arguments"] += fn["arguments"]
+                    _mark_first_token(time.monotonic())
+
                 piece = delta.get("content")
                 if piece:
                     now = time.monotonic()
@@ -930,6 +1137,8 @@ def stream_reply(
         timings.setdefault("_context_tokens", context_tokens)
     if cached_tokens is not None:
         timings.setdefault("_cached_tokens", cached_tokens)
+    if tool_calls:
+        timings["_tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
     return "".join(text_parts), reasoning, timings
 
 
@@ -976,6 +1185,313 @@ def format_timings(timings: dict) -> str:
     if timings.get("_finish_reason") == "length":
         bits.append("CUT OFF at the token budget -- raise --max-tokens")
     return " | ".join(bits)
+
+
+# Read-before-write, and it BLOCKS rather than warns. #10 measured hermes-agent
+# resolving this to last-write-wins in two independent code paths: file_state.py
+# returns a warning string and file_tools.py performs the write anyway. A model
+# that overwrites a file it never read destroys work it cannot see, and at this
+# decode rate nobody is watching closely enough to catch it.
+_READ: set[str] = set()
+
+
+def _key(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _clip(text: str, limit: int = MAX_TOOL_BYTES) -> str:
+    """EVERY tool result goes through here. No exceptions, and that is the point.
+
+    Each one was capped separately at first -- read_file by bytes, the searches
+    by hit count -- and a hit count is not a size: `search_text` for "LRU" over a
+    source tree returned 200 hits and ~20,000 tokens, which is eight minutes of
+    prefill at 38 tok/s. Same defect as the 100 KB read cap, different tool.
+
+    One ceiling, measured in what it actually costs: bytes that become prefill.
+    """
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n\n[cut at {limit} bytes -- narrow the query and ask again]"
+
+
+def tool_read_file(path: str, start_line: int | None = None, end_line: int | None = None,
+                   **_) -> str:
+    """Read a file, or a range of its lines.
+
+    THE RANGE IS THE POINT, NOT A CONVENIENCE. Everything read has to be
+    prefilled, and prefill runs at ~38 tok/s here: a 200 KB source file is
+    ~50,000 tokens and costs over twenty minutes before the model has had a
+    single thought about it. Measured 2026-08-09, one such call took 654 s.
+    `search_text` already returns line numbers, so reading 60 lines around a hit
+    turns that into seconds.
+    """
+    if start_line is not None or end_line is not None:
+        lo = max(1, int(start_line or 1))
+        hi = int(end_line) if end_line is not None else lo + 200
+        if hi < lo:
+            return f"error: end_line {hi} is before start_line {lo}"
+        try:
+            out, total = [], 0
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for n, line in enumerate(fh, 1):
+                    total = n
+                    if lo <= n <= hi:
+                        out.append(f"{n}: {line.rstrip()}")
+                    elif n > hi:
+                        total = None  # not counted to the end; do not claim a length
+                        break
+        except FileNotFoundError:
+            return f"error: no such file: {path}"
+        except OSError as exc:
+            return f"error: could not read {path}: {exc}"
+        if not out:
+            return f"error: {path} has no lines in {lo}-{hi}" + (
+                f" (the file has {total})" if total else "")
+        _READ.add(_key(path))
+        return _clip("\n".join(out))
+
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            data = fh.read(MAX_TOOL_BYTES + 1)
+    except FileNotFoundError:
+        # Near-misses only, not the whole directory. Forty names came back on
+        # every failed attempt and were prefilled every time -- the model then
+        # tried the same wrong path again, so the "help" paid for the loop.
+        # A wrong extension is the common case (server-context.c for .cpp), so
+        # what is offered is the same stem, and at most three of them.
+        parent = os.path.dirname(os.path.abspath(path)) or "."
+        stem = os.path.splitext(os.path.basename(path))[0].lower()
+        try:
+            near = [n for n in sorted(os.listdir(parent))
+                    if os.path.splitext(n)[0].lower() == stem][:3]
+        except OSError:
+            near = []
+        if near:
+            return f"error: no such file: {path}\ndid you mean: {', '.join(near)}"
+        return f"error: no such file: {path} (use find_files or list_dir to locate it)"
+    except IsADirectoryError:
+        return f"error: {path} is a directory -- use list_dir"
+    except PermissionError:
+        return f"error: permission denied: {path}"
+    except OSError as exc:
+        return f"error: could not read {path}: {exc}"
+    _READ.add(_key(path))
+    return _clip(data)
+
+
+def tool_write_file(path: str, content: str = "", **_) -> str:
+    if os.path.exists(path) and _key(path) not in _READ:
+        return (f"error: refusing to overwrite {path} without reading it first. "
+                f"Call read_file on it, then write.")
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(content)
+    except OSError as exc:
+        return f"error: could not write {path}: {exc}"
+    _READ.add(_key(path))
+    return f"wrote {len(content)} bytes to {path}"
+
+
+def tool_edit_file(path: str, old: str = "", new: str = "", **_) -> str:
+    """Exact-match replacement, and it refuses an ambiguous one.
+
+    A patch format would be more expressive and needs fuzzy matching to survive
+    a model that mis-remembers whitespace. Exact match plus a uniqueness check
+    fails loudly instead of guessing, which is the behaviour worth having first.
+    """
+    if _key(path) not in _READ:
+        return f"error: read {path} before editing it"
+    if not old:
+        return "error: edit_file needs 'old' -- to create a file use write_file"
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = fh.read()
+    except OSError as exc:
+        return f"error: could not read {path}: {exc}"
+    hits = data.count(old)
+    if hits == 0:
+        return f"error: 'old' does not appear in {path}"
+    if hits > 1:
+        return f"error: 'old' appears {hits} times in {path} -- include more context to make it unique"
+    try:
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(data.replace(old, new, 1))
+    except OSError as exc:
+        return f"error: could not write {path}: {exc}"
+    return f"replaced 1 occurrence in {path}"
+
+
+def tool_list_dir(path: str = ".", **_) -> str:
+    try:
+        entries = sorted(os.listdir(path))
+    except FileNotFoundError:
+        return f"error: no such directory: {path}"
+    except NotADirectoryError:
+        return f"error: {path} is a file -- use read_file"
+    except OSError as exc:
+        return f"error: could not list {path}: {exc}"
+    lines = []
+    for name in entries[:MAX_HITS]:
+        full = os.path.join(path, name)
+        if os.path.isdir(full):
+            lines.append(f"{name}/")
+        else:
+            try:
+                lines.append(f"{name}  ({os.path.getsize(full)} bytes)")
+            except OSError:
+                lines.append(name)
+    if len(entries) > MAX_HITS:
+        lines.append(f"[{len(entries) - MAX_HITS} more entries]")
+    return _clip("\n".join(lines) or "(empty)")
+
+
+def tool_find_files(root: str = ".", pattern: str = "*", **_) -> str:
+    import fnmatch
+
+    hits, size = [], 0
+    for base, dirs, files in os.walk(root):
+        # Directories nobody means when they say "find the source file", and
+        # walking them turns a search into minutes.
+        dirs[:] = [d for d in dirs if d not in
+                   {".git", "node_modules", "__pycache__", ".venv", "venv", "build", "dist"}]
+        for name in files:
+            if fnmatch.fnmatch(name, pattern):
+                hit = os.path.join(base, name)
+                hits.append(hit)
+                size += len(hit) + 1
+                # Both ceilings, because either one alone lets the other through:
+                # few hits can still be long paths, many short ones still add up.
+                if len(hits) >= MAX_HITS or size >= MAX_TOOL_BYTES:
+                    return "\n".join(hits) + "\n[stopped -- narrow the pattern or the root]"
+    return "\n".join(hits) or f"no file matching {pattern} under {root}"
+
+
+def tool_search_text(root: str = ".", pattern: str = "", glob: str = "*", **_) -> str:
+    import fnmatch
+    import re as _re
+
+    if not pattern:
+        return "error: search_text needs a 'pattern'"
+    try:
+        rx = _re.compile(pattern)
+    except _re.error as exc:
+        return f"error: bad regular expression: {exc}"
+    hits, size = [], 0
+    for base, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in
+                   {".git", "node_modules", "__pycache__", ".venv", "venv", "build", "dist"}]
+        for name in files:
+            if not fnmatch.fnmatch(name, glob):
+                continue
+            full = os.path.join(base, name)
+            try:
+                with open(full, encoding="utf-8", errors="replace") as fh:
+                    for n, line in enumerate(fh, 1):
+                        if rx.search(line):
+                            hit = f"{full}:{n}: {line.rstrip()[:200]}"
+                            hits.append(hit)
+                            size += len(hit) + 1
+                            # The one that cost eight minutes: 200 hits of a
+                            # common word are ~20,000 tokens of prefill. A hit
+                            # count does not bound a size.
+                            if len(hits) >= MAX_HITS or size >= MAX_TOOL_BYTES:
+                                return ("\n".join(hits)
+                                        + "\n[stopped -- narrow the pattern, or pass a glob]")
+            except OSError:
+                continue
+    return "\n".join(hits) or f"no match for {pattern}"
+
+
+def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
+    """Local execution only, with a timeout and a capped result.
+
+    Seven of hermes-agent's eight execution backends are out of scope here --
+    the model is local and 96 GB, so a remote sandbox cannot reach it. A command
+    that hangs would otherwise hold the turn until the socket timeout, which is
+    30 minutes.
+    """
+    import subprocess
+
+    if not command:
+        return "error: run_command needs a 'command'"
+    # The child does not inherit anything that looks like a secret. It is a
+    # blocklist, so it is not airtight -- it stops the accident, not an attacker.
+    env = {k: v for k, v in os.environ.items()
+           if not any(s in k.upper() for s in ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"))}
+    try:
+        done = subprocess.run(command, shell=True, cwd=cwd, env=env, timeout=COMMAND_TIMEOUT,
+                              capture_output=True, text=True, errors="replace")
+    except subprocess.TimeoutExpired:
+        return f"error: command exceeded {COMMAND_TIMEOUT}s and was killed: {command}"
+    except OSError as exc:
+        return f"error: could not run: {exc}"
+    out = (done.stdout or "") + (("\n[stderr]\n" + done.stderr) if done.stderr else "")
+    return _clip(f"[exit {done.returncode}]\n{out}".rstrip())
+
+
+TOOL_IMPL = {
+    "read_file": tool_read_file,
+    "write_file": tool_write_file,
+    "edit_file": tool_edit_file,
+    "list_dir": tool_list_dir,
+    "find_files": tool_find_files,
+    "search_text": tool_search_text,
+    "run_command": tool_run_command,
+}
+
+
+# What has already been asked this turn, and what came back. Cleared per user
+# turn, not per round.
+_SEEN: dict[tuple[str, str], str] = {}
+
+
+def run_tool_cached(name: str, arguments: str) -> tuple[str, bool]:
+    """Run a tool, unless this exact call was already made. Returns (result, repeated).
+
+    THE LOOP THIS PREVENTS, observed 2026-08-09: the model asked for
+    `server-context.c` -- a file that does not exist, the real one ends in .cpp --
+    got an error, and asked for the same path again. Eight times, twice within a
+    single round. Each attempt cost a prefill of the error text, so the run spent
+    minutes going nowhere and would have hit the round limit rather than an answer.
+
+    Re-running would produce the identical failure, so the second call is answered
+    from the first and told plainly that it is a repeat. That turns a loop into a
+    fact the model has to react to.
+    """
+    key = (name, arguments)
+    if key in _SEEN:
+        return (f"[you already called {name} with these exact arguments this turn. "
+                f"The result was, and still is:]\n{_SEEN[key]}"), True
+    out = run_tool(name, arguments)
+    _SEEN[key] = out
+    return out, False
+
+
+def run_tool(name: str, arguments: str) -> str:
+    """Execute one tool call and return what the model gets back.
+
+    EVERY FAILURE IS A RESULT, NOT AN EXCEPTION. A tool that raises kills the
+    turn and costs the whole prefix; a tool that returns "no such file" lets the
+    model correct itself in the next round. At ~10 tok/s a lost turn is minutes,
+    so the difference is not cosmetic.
+    """
+    try:
+        args = json.loads(arguments or "{}")
+    except json.JSONDecodeError:
+        return f"error: arguments were not valid JSON: {arguments[:200]}"
+    if not isinstance(args, dict):
+        return f"error: arguments must be a JSON object, got {type(args).__name__}"
+
+    impl = TOOL_IMPL.get(name)
+    if impl is None:
+        return f"error: no tool named {name!r}. Available: {', '.join(sorted(TOOL_IMPL))}"
+    try:
+        return impl(**args)
+    except TypeError as exc:
+        return f"error: wrong arguments for {name}: {exc}"
+    except Exception as exc:  # a tool must never take the turn down with it
+        return f"error: {name} failed: {exc!r}"
 
 
 def health_url(base_url: str) -> str:
@@ -1150,17 +1666,34 @@ def repl(args: argparse.Namespace) -> int:
     # instead would drift from the tokeniser and quietly mislead.
     context_tokens = 0
 
+    # Before the first turn, so no prefix exists yet to break.
+    if getattr(args, "session", True):
+        restored = load_session(args.base_url, args.system)
+        if restored:
+            messages, context_tokens, kv = restored
+            conversation.restore(messages)
+            how = ("cache warm" if kv else
+                   "messages only -- the first turn pays a prefill")
+            print(f"{DIM}resumed: {len(messages)} messages, {how}{RESET}\n")
+
+    def leave() -> int:
+        if getattr(args, "session", True):
+            note = save_session(conversation, args.base_url, context_tokens)
+            if note:
+                print(f"{DIM}{note}{RESET}")
+        return 0
+
     while True:
         try:
             line = input(format_prompt(context_tokens, n_ctx)).strip()
         except (EOFError, KeyboardInterrupt):
             print()
-            return 0
+            return leave()
 
         if not line:
             continue
         if line in ("/exit", "/quit"):
-            return 0
+            return leave()
         if line == "/help":
             print(HELP)
             continue
@@ -1177,37 +1710,72 @@ def repl(args: argparse.Namespace) -> int:
         # Cleared per turn: an interrupt from the PREVIOUS turn must not kill
         # the next one before it starts.
         INTERRUPT.clear()
-        try:
-            reply, reasoning, timings = stream_reply(
-                conversation,
-                base_url=args.base_url,
-                model=args.model,
-                api_key=args.api_key,
-                temperature=args.temperature,
-                timeout=args.timeout,
-                prefix=f"{BOLD}{CROW_TEXT}crow>{RESET} ",
-            )
-        except CrowError as exc:
-            print(f"\ncrow: {exc}\n", file=sys.stderr)
-            continue
-        except KeyboardInterrupt:
-            # The partial turn is discarded rather than appended: a truncated
-            # assistant message would poison the prefix for every later turn.
-            INTERRUPT.clear()
-            print("\n[interrupted -- turn discarded, context unchanged]\n")
-            continue
 
-        # The generator returns quietly on an interrupt rather than raising,
-        # so the flag is what tells a stopped turn from a finished one.
-        if INTERRUPT.is_set():
-            INTERRUPT.clear()
-            print("\n[interrupted -- turn discarded, context unchanged]\n")
-            continue
+        # THE TOOL LOOP. Everything is appended, never inserted: the assistant
+        # turn with its calls, then one `tool` message per call, then the next
+        # request. The prefix only grows, so the cache holds across rounds --
+        # and this template keeps every reasoning block while tools are present,
+        # which is why the loop is affordable at all.
+        _SEEN.clear()
+        stopped = False
+        for round_no in range(MAX_TOOL_ROUNDS + 1):
+            try:
+                reply, reasoning, timings = stream_reply(
+                    conversation,
+                    base_url=args.base_url,
+                    model=args.model,
+                    api_key=args.api_key,
+                    temperature=args.temperature,
+                    timeout=args.timeout,
+                    prefix=f"{BOLD}{CROW_TEXT}crow>{RESET} ",
+                )
+            except CrowError as exc:
+                print(f"\ncrow: {exc}\n", file=sys.stderr)
+                stopped = True
+                break
+            except KeyboardInterrupt:
+                # The partial turn is discarded rather than appended: a truncated
+                # assistant message would poison the prefix for every later turn.
+                INTERRUPT.clear()
+                print("\n[interrupted -- turn discarded, context unchanged]\n")
+                stopped = True
+                break
 
-        conversation.append("assistant", reply, reasoning)
-        context_tokens = next_context_tokens(context_tokens, timings)
-        line_out = format_timings(timings)
-        print(f"\n\n[{line_out}]\n" if line_out else "\n")
+            # The generator returns quietly on an interrupt rather than raising,
+            # so the flag is what tells a stopped turn from a finished one.
+            if INTERRUPT.is_set():
+                INTERRUPT.clear()
+                print("\n[interrupted -- turn discarded, context unchanged]\n")
+                stopped = True
+                break
+
+            calls = timings.get("_tool_calls") or []
+            conversation.append("assistant", reply, reasoning, tool_calls=calls)
+            context_tokens = next_context_tokens(context_tokens, timings)
+            line_out = format_timings(timings)
+            print(f"\n\n[{line_out}]\n" if line_out else "\n")
+
+            if not calls:
+                break
+
+            # Named rather than silent. A tool that runs invisibly makes the
+            # wait look like the model being slow, and at ~10 tok/s the user is
+            # staring at that wait for minutes.
+            if round_no == MAX_TOOL_ROUNDS:
+                print(f"{DIM}[stopped after {MAX_TOOL_ROUNDS} tool rounds]{RESET}\n")
+                break
+            for call in calls:
+                arg_note = (call["arguments"] or "")[:80]
+                result, repeated = run_tool_cached(call["name"], call["arguments"])
+                mark = " (repeat)" if repeated else ""
+                print(f"{DIM}  ⚒ {call['name']}({arg_note}){mark}{RESET}")
+                if result.startswith("error: "):
+                    print(f"{DIM}    {result.splitlines()[0]}{RESET}")
+                conversation.append("tool", result, tool_call_id=call["id"])
+            print("")
+
+        if stopped:
+            continue
 
 
 FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
@@ -1460,6 +2028,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="print the version and exit")
     parser.add_argument("--no-update-check", dest="update_check", action="store_false",
                         help="do not ask GitHub whether a newer release exists")
+    parser.add_argument("--no-session", dest="session", action="store_false",
+                        help="do not resume the last session, and do not save this one")
     return parser
 
 

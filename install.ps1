@@ -752,6 +752,11 @@ if (-not $verdict.Ok) {
 }
 Write-Item "sha256 per file" "$($verdict.Checked) of $($verdict.Checked) match" "ok"
 
+# --slot-save-path refuses to start against a path that is not an existing
+# directory, so the server would fail on the very command this script prints.
+# Created here rather than by the client, because the server needs it first.
+New-Item -ItemType Directory -Force -Path (Join-Path $InstallTo "session") | Out-Null
+
 Write-Step "What is left to do"
 
 $py = Get-Command python -ErrorAction SilentlyContinue
@@ -782,6 +787,11 @@ Write-Host "    $InstallTo\bin\llama-server.exe -m $InstallTo\models\UD-IQ3_XXS\
 # of re-prefill per turn against 1.6-2.2 s. This is the line people copy, so it
 # is the line that has to carry the flag.
 Write-Host "      --port 8081 -c 200000 -ngl 99 -np 1 --jinja ``" -ForegroundColor White
+# --slot-save-path is what lets a session survive at all. Without it the client
+# can keep its messages but not the server's KV cache, and the next start pays a
+# full prefill for the whole history -- measured 2026-08-08: 23,400 tokens took
+# about 35 minutes, while restoring the same state took 22 ms.
+Write-Host "      --slot-save-path $InstallTo\session ``" -ForegroundColor White
 Write-Host "      --moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct" -ForegroundColor White
 Write-Host ""
 Write-Host "    python $InstallTo\cli\crow.py" -ForegroundColor White
