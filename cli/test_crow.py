@@ -911,6 +911,48 @@ class UpdateNoticeTests(unittest.TestCase):
         self.assertTrue(crow.build_parser().parse_args([]).update_check)
 
 
+class ToolArgLineTests(unittest.TestCase):
+    """The one line that says what a tool call is doing.
+
+    It replaced a raw JSON cut at 80 characters, which landed mid-string in the common case and
+    read as a malformed call rather than a shortened one.
+    """
+
+    def test_a_path_keeps_its_file_name(self):
+        line = crow.format_tool_args(json.dumps(
+            {"path": r"C:\Users\robin\dev\Crow\tools\manifest-runs.ps1", "start_line": 1, "end_line": 60}))
+        self.assertIn("manifest-runs.ps1", line)
+        self.assertIn("start_line=1", line)
+        self.assertIn("end_line=60", line)
+
+    def test_no_dangling_json(self):
+        """The actual defect: the old output ended in `,"` and looked broken."""
+        line = crow.format_tool_args(json.dumps(
+            {"path": r"C:\Users\robin\dev\Crow\tools\manifest-runs.ps1", "start_line": 1}))
+        self.assertFalse(line.rstrip().endswith(',"'))
+        self.assertNotIn('{"', line)
+
+    def test_a_long_text_argument_is_summarised_not_shown(self):
+        line = crow.format_tool_args(json.dumps({"path": "a.txt", "content": "x" * 500}))
+        self.assertIn("path=a.txt", line)
+        self.assertIn("<500 chars>", line)
+        self.assertNotIn("xxxxxxxxxx", line)
+
+    def test_broken_json_still_produces_something(self):
+        """Arguments arrive over a stream and may be cut off. A half-object must not raise."""
+        line = crow.format_tool_args('{"path":"C:\\\\tmp\\\\a.txt","start')
+        self.assertTrue(line)
+        self.assertTrue(line.endswith("...") or len(line) <= 78)
+
+    def test_empty_and_none(self):
+        self.assertEqual(crow.format_tool_args(None), "")
+        self.assertEqual(crow.format_tool_args(""), "")
+
+    def test_the_line_stays_within_its_width(self):
+        line = crow.format_tool_args(json.dumps({f"k{i}": f"value{i}" for i in range(40)}), width=78)
+        self.assertLessEqual(len(line), 81)  # 78 plus the ellipsis
+
+
 class SessionRestoreTests(unittest.TestCase):
     """What load_session does when the server cannot produce the KV state.
 
