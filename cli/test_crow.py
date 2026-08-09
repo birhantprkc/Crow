@@ -9,6 +9,7 @@ guards regresses -- a suite that cannot go red proves nothing.
 
 from __future__ import annotations
 
+import builtins
 import io
 import json
 import shutil
@@ -908,6 +909,109 @@ class UpdateNoticeTests(unittest.TestCase):
 
     def test_it_is_on_by_default(self):
         self.assertTrue(crow.build_parser().parse_args([]).update_check)
+
+
+class SessionRestoreTests(unittest.TestCase):
+    """What load_session does when the server cannot produce the KV state.
+
+    The case is real rather than theoretical: point llama-server at a different --slot-save-path
+    than the one a session was written to, and every start prints two red error lines. Nothing was
+    broken by it - the messages still load - but it repeated forever, because the file kept
+    claiming a cache that was gone.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self._real_dir, self._real_file = crow.SESSION_DIR, crow.SESSION_FILE
+        crow.SESSION_DIR = self.dir
+        crow.SESSION_FILE = str(Path(self.dir) / "session.json")
+
+    def tearDown(self):
+        crow.SESSION_DIR, crow.SESSION_FILE = self._real_dir, self._real_file
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _write(self, kv: bool, system=None):
+        with open(crow.SESSION_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"version": crow.VERSION, "kv": kv, "context_tokens": 42,
+                       "prefix": crow.prefix_fingerprint(system),
+                       "messages": [{"role": "user", "content": "hi"}]}, fh)
+
+    def _stored_kv(self):
+        with open(crow.SESSION_FILE, encoding="utf-8") as fh:
+            return json.load(fh)["kv"]
+
+    # self.fail() inside the fake post_json CANNOT work here, and finding that out is the reason
+    # this comment exists: load_session wraps the call in `except Exception`, which swallows the
+    # AssertionError that fail() raises. The test then passes while the thing it forbids happened.
+    # Counting the calls puts the assertion outside that except, where it can be seen.
+    def _counting_post(self, raises=None):
+        calls = []
+
+        def fake(*a, **k):
+            calls.append(a[0] if a else None)
+            if raises:
+                raise raises
+            return {}
+
+        crow.post_json = fake
+        return calls
+
+    def test_no_session_file_means_no_request_at_all(self):
+        """The first start after an install must not talk to /slots. That is why a new user
+        never sees the error in the first place."""
+        calls = self._counting_post()
+        self.assertIsNone(crow.load_session("http://127.0.0.1:8081"))
+        self.assertEqual(calls, [], "no session file must mean no request")
+
+    def test_a_failed_restore_withdraws_the_claim(self):
+        self._write(kv=True)
+        crow.post_json = lambda *a, **k: (_ for _ in ()).throw(OSError("no such file"))
+        result = crow.load_session("http://127.0.0.1:8081")
+        self.assertIsNotNone(result)
+        messages, tokens, kv = result
+        self.assertEqual(len(messages), 1, "the messages survive - they are still worth a prefill")
+        self.assertEqual(tokens, 42)
+        self.assertFalse(kv)
+        self.assertFalse(self._stored_kv(), "the file must no longer claim a warm cache")
+
+    def test_the_second_start_sends_nothing(self):
+        """The point of the whole change: the error happens once, not on every start."""
+        self._write(kv=True)
+        first = self._counting_post(raises=OSError("no such file"))
+        crow.load_session("http://127.0.0.1:8081")
+        self.assertEqual(len(first), 1, "the first start must try once")
+
+        second = self._counting_post(raises=OSError("no such file"))
+        self.assertIsNotNone(crow.load_session("http://127.0.0.1:8081"))
+        self.assertEqual(second, [], "the second start must not try again")
+
+    def test_a_working_restore_keeps_the_claim(self):
+        """The negative control. If this passed while the code always cleared the flag, the
+        test above would prove nothing."""
+        self._write(kv=True)
+        crow.post_json = lambda *a, **k: {}
+        _, _, kv = crow.load_session("http://127.0.0.1:8081")
+        self.assertTrue(kv)
+        self.assertTrue(self._stored_kv())
+
+    def test_an_unwritable_session_file_does_not_break_the_start(self):
+        """Correcting a cache hint is not worth refusing to start over."""
+        self._write(kv=True)
+        crow.post_json = lambda *a, **k: (_ for _ in ()).throw(OSError("no such file"))
+        real_open = builtins.open
+
+        def deny(path, mode="r", *a, **k):
+            if str(path) == crow.SESSION_FILE and "w" in mode:
+                raise PermissionError("read-only")
+            return real_open(path, mode, *a, **k)
+
+        builtins.open = deny
+        try:
+            result = crow.load_session("http://127.0.0.1:8081")
+        finally:
+            builtins.open = real_open
+        self.assertIsNotNone(result)
+        self.assertFalse(result[2])
 
 
 if __name__ == "__main__":

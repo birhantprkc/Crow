@@ -351,6 +351,23 @@ def load_session(base_url: str, system: str | None = None) -> tuple[list[dict], 
             kv = True
         except Exception:
             kv = False
+            # The claim is now known to be false, so it is withdrawn. Without this the same
+            # request goes out on every start and the server prints the same two red lines every
+            # time -- measured 2026-08-09 after the server was pointed at a different
+            # --slot-save-path than the one the state was written to.
+            #
+            # The messages are NOT dropped: they are still worth a prefill. Only the promise of a
+            # warm cache goes.
+            #
+            # A failure to rewrite is swallowed on purpose. This runs on the path that resumes a
+            # session; refusing to start because a cache hint could not be corrected would turn a
+            # cosmetic defect into a broken client.
+            try:
+                saved["kv"] = False
+                with open(SESSION_FILE, "w", encoding="utf-8") as fh:
+                    json.dump(saved, fh)
+            except Exception:
+                pass
     return messages, int(saved.get("context_tokens") or 0), kv
 
 
