@@ -64,8 +64,50 @@
 //   Giving each thread a contiguous chunk instead would measure N sequential streams,
 //   which is neither the Python baseline nor the sequential arm above, and a ratio
 //   across two different load shapes is not a ratio.
+//
+// THE FOURTH ARM: --h2d
+//   Host-to-device copy rate, pinned against pageable, at the same block size the other
+//   arms read with. It answers one question and no other: what would a second cache
+//   level in host RAM cost per expert, against fetching that expert off the SSD.
+//
+//   Why it is needed even though the RAM placement is already measured: -ncmoe 999 moves
+//   the WHOLE cache into host memory and lets the GPU compute against it there. That is a
+//   different operation from holding a copy in RAM and blitting it into a VRAM slot on a
+//   miss. The measured +7.9 to +16.2 % decode surcharge (ISSUE-30, 2026-08-04) describes
+//   the first and says nothing about the second, so the tier question is open on the
+//   numbers even though the placement question is closed.
+//
+//   WHY cudaMemcpy AND NOT cudaMemcpyAsync
+//   The decode path has no prefetch - the router of layer N+1 reads what N produced, so
+//   there is nothing to overlap a transfer with. A tier-2 hit would sit on the critical
+//   path and the compute thread would wait for it. The synchronous call is the honest
+//   model of that; an async copy on a stream would measure a pipeline this system does
+//   not have.
+//
+//   WHY AN ARENA AND NOT ONE BUFFER
+//   Copying the same 2.5 MiB buffer in a loop measures the CPU's last-level cache, not
+//   DRAM. A real tier-2 would hold tens of GB and every hit would come in cold. So the
+//   source is an arena far larger than any L3 and each copy starts at a different offset
+//   in it, walked with the same odd stride the read arm uses. This is the same failure
+//   shape that made a warm 4 GB control file read FASTER than the drive's sequential
+//   ceiling on 2026-08-02, and it cost a run then.
+//
+//   THE CONTROL IS A PROPERTY, NOT A THRESHOLD
+//   pinned and pageable must be two different things, and the check for that asks the
+//   driver rather than the clock: cudaHostGetFlags succeeds on host-registered memory and
+//   returns cudaErrorInvalidValue on ordinary memory. Both are asserted. A threshold on
+//   the measured ratio would be a criterion invented after seeing the number, and it
+//   could not tell "the flag did nothing" from "the flag did nothing measurable here".
+//
+//   The second control is byte identity: a pattern is written into the source block,
+//   copied up, copied back into a third buffer and compared. Without it a copy that moved
+//   fewer bytes than asked - or none - would report as speed. This project has already
+//   paid for that exact shape once, with a HANDLE truncated to 32 bits that made every
+//   ReadFile return 0 bytes and look successful.
 
 #include "llama-mmap.h"
+
+#include <cuda_runtime.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -79,10 +121,18 @@
 #include <windows.h>
 #include <malloc.h>
 
-// 12.75 MiB - the bytes of one expert in one layer, from the tensor table. This is the
-// request size the whole plan is about; llama.cpp today faults 65.8 KB at a time.
-// 13369344 = 12.75 * 1024 * 1024, and a multiple of 4096, so it is sector-aligned on
-// this drive. That is checked at runtime rather than assumed.
+// 12.75 MiB - one expert of one layer in DeepSeek-V4-Flash-MXFP4, from the tensor table.
+// llama.cpp today faults 65.8 KB at a time, which is what makes this the request size the
+// plan is about. 13369344 = 12.75 * 1024 * 1024, a multiple of 4096, so it is
+// sector-aligned on this drive. That is checked at runtime rather than assumed.
+//
+// IT IS THE DEFAULT AND NOT THE OPERATING POINT, corrected 2026-08-09. The shipped model
+// is UD-IQ3_XXS, where one expert is 8.188 MiB across three tensors and the streamer
+// moves ONE TENSOR per work item: ffn_gate_exps and ffn_up_exps are 2,686,976 B each,
+// ffn_down_exps is 3,211,264 B (read from blk.0 of shard 2 with tools/gguf_header.py).
+// Both divide by 4096. Every figure this tool has published so far stands on 12.75 MiB
+// blocks, so --block-bytes exists to ask the same questions at the size the product
+// actually uses - and the default is left alone so those figures keep their shape.
 static const size_t BLOCK_SIZE = 13369344;
 
 struct aligned_buffer {
@@ -116,7 +166,7 @@ struct worker_result {
 // like a crash in the read path rather than a failure in one worker.
 static void bench_worker(llama_file & file, worker_result & out,
                          int idx, int worker_id,
-                         size_t span, size_t alignment, LONGLONG stop_ticks) {
+                         size_t span, size_t alignment, size_t block, LONGLONG stop_ticks) {
     // probe-queue-depth.py:365-366, digit for digit. A large odd stride per thread walks
     // the whole file without repeating soon and keeps no two threads in step.
     const size_t stride = size_t(1000003) * (size_t(idx) * 2 + 1);
@@ -126,14 +176,14 @@ static void bench_worker(llama_file & file, worker_result & out,
     // One aligned buffer PER worker. The sequential arm's single buffer would be a data
     // race here, and a race inside the instrument is the one defect that cannot show up
     // in the instrument's own output.
-    aligned_buffer buf(BLOCK_SIZE, alignment > 1 ? alignment : 4096);
+    aligned_buffer buf(block, alignment > 1 ? alignment : 4096);
     if (buf.p == nullptr) {
         out.failed = true;
         out.error  = "_aligned_malloc failed";
         return;
     }
     // Touched once outside the timed window, same reason as the sequential arm.
-    std::memset(buf.p, 0, BLOCK_SIZE);
+    std::memset(buf.p, 0, block);
 
     LARGE_INTEGER now;
     for (;;) {
@@ -146,8 +196,8 @@ static void bench_worker(llama_file & file, worker_result & out,
         // probe-queue-depth.py:212 does before every read.
         const size_t at = pos - (pos % align);
         try {
-            const size_t got = file.read_raw_at(buf.p, BLOCK_SIZE, at, worker_id);
-            if (got != BLOCK_SIZE) {
+            const size_t got = file.read_raw_at(buf.p, block, at, worker_id);
+            if (got != block) {
                 // span keeps every read wholly inside the file, so a short count here is
                 // not the tail. It is a defect, and adding it to the total would average
                 // it away into a number that still looks like a measurement.
@@ -167,6 +217,182 @@ static void bench_worker(llama_file & file, worker_result & out,
     }
 }
 
+// Every CUDA call is checked. An unchecked failure leaves the destination untouched and
+// the loop then times an operation that did not happen - the fastest possible transfer
+// rate, and a false one.
+#define CU_OK(call, what)                                                              \
+    do {                                                                               \
+        const cudaError_t _e = (call);                                                 \
+        if (_e != cudaSuccess) {                                                       \
+            fprintf(stderr, "\nABORT: %s failed: %s\n", (what), cudaGetErrorString(_e));\
+            return 1;                                                                  \
+        }                                                                              \
+    } while (0)
+
+// One timed sweep of host-to-device copies out of `src_arena`, each one starting at a
+// different offset. Returns the rate in bytes/s/1e6, or a negative value on failure.
+static double h2d_sweep(void * dst, const unsigned char * src_arena, size_t arena,
+                        size_t block, double seconds, size_t * out_copies) {
+    // Same stride construction as bench_worker, so the source is walked the way the file
+    // is walked and neither arm gets a friendlier access pattern than the other.
+    const size_t span   = arena - block;
+    const size_t stride = size_t(1000003);
+    size_t       pos    = 0;
+    size_t       copies = 0;
+
+    LARGE_INTEGER freq, t0, t1, now;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
+    const LONGLONG stop_ticks = t0.QuadPart + LONGLONG(seconds * double(freq.QuadPart));
+
+    for (;;) {
+        QueryPerformanceCounter(&now);
+        if (now.QuadPart >= stop_ticks) {
+            break;
+        }
+        const size_t at = (pos % span) & ~size_t(4095);
+        const cudaError_t e = cudaMemcpy(dst, src_arena + at, block, cudaMemcpyHostToDevice);
+        if (e != cudaSuccess) {
+            fprintf(stderr, "\nABORT: cudaMemcpy H2D failed: %s\n", cudaGetErrorString(e));
+            return -1.0;
+        }
+        copies++;
+        pos += stride;
+    }
+    // Nothing may still be in flight when the clock stops, or the last copies land
+    // outside the window and the rate comes out high by however much is queued.
+    if (cudaDeviceSynchronize() != cudaSuccess) {
+        fprintf(stderr, "\nABORT: cudaDeviceSynchronize failed after the sweep\n");
+        return -1.0;
+    }
+    QueryPerformanceCounter(&t1);
+
+    const double dt = double(t1.QuadPart - t0.QuadPart) / double(freq.QuadPart);
+    if (dt <= 0.0 || copies == 0) {
+        return -1.0;
+    }
+    *out_copies = copies;
+    return double(copies) * double(block) / dt / 1e6;
+}
+
+// The fourth arm. See the header block for why it exists and what it does not answer.
+static int run_h2d_arm(size_t block, double seconds, size_t arena) {
+    int devices = 0;
+    CU_OK(cudaGetDeviceCount(&devices), "cudaGetDeviceCount");
+    if (devices < 1) {
+        fprintf(stderr, "\nABORT: no CUDA device. No figure.\n");
+        return 1;
+    }
+    CU_OK(cudaSetDevice(0), "cudaSetDevice");
+
+    cudaDeviceProp prop;
+    CU_OK(cudaGetDeviceProperties(&prop, 0), "cudaGetDeviceProperties");
+
+    // The PCIe generation and width are NOT read here. There is no cudaDevAttr for the
+    // negotiated link, and the nearest-looking ones describe the VRAM bus instead - a
+    // number that would print in the right place and mean the wrong thing. nvidia-smi
+    // reports the link; this tool reports the rate.
+    printf("arm         H2D (host to device copy)\n");
+    printf("device      %s\n", prop.name);
+    printf("block       %zu bytes (%.3f MiB)\n", block, double(block) / (1024.0 * 1024.0));
+    printf("arena       %zu bytes (%.0f MiB)\n", arena, double(arena) / (1024.0 * 1024.0));
+    printf("seconds     %.1f per sweep\n", seconds);
+
+    if (arena <= block) {
+        fprintf(stderr, "\nABORT: arena is not larger than one block. No figure.\n");
+        return 1;
+    }
+
+    void * dst = nullptr;
+    CU_OK(cudaMalloc(&dst, block), "cudaMalloc");
+
+    // Pageable source: ordinary aligned host memory, the shape a staging buffer has today.
+    aligned_buffer pageable(arena, 4096);
+    if (pageable.p == nullptr) {
+        fprintf(stderr, "\nABORT: _aligned_malloc of %zu bytes failed. No figure.\n", arena);
+        cudaFree(dst);
+        return 1;
+    }
+    // Pinned source: what a tier-2 cache would have to be to reach DMA rates at all.
+    void * pinned = nullptr;
+    const cudaError_t pe = cudaHostAlloc(&pinned, arena, cudaHostAllocDefault);
+    if (pe != cudaSuccess) {
+        fprintf(stderr, "\nABORT: cudaHostAlloc of %zu bytes failed: %s\n",
+                arena, cudaGetErrorString(pe));
+        fprintf(stderr, "       This is itself a finding - the tier needs pinned memory -\n");
+        fprintf(stderr, "       but it is not a rate. No figure.\n");
+        cudaFree(dst);
+        return 1;
+    }
+
+    // CONTROL 1 - the two sources must be two different kinds of memory, asked of the
+    // driver and not of the clock.
+    unsigned int flags = 0;
+    if (cudaHostGetFlags(&flags, pinned) != cudaSuccess) {
+        fprintf(stderr, "\nABORT: cudaHostGetFlags failed on the PINNED buffer, so it is\n");
+        fprintf(stderr, "       not page-locked and both arms would be the same memory.\n");
+        cudaFreeHost(pinned); cudaFree(dst);
+        return 1;
+    }
+    const cudaError_t should_fail = cudaHostGetFlags(&flags, pageable.p);
+    if (should_fail == cudaSuccess) {
+        fprintf(stderr, "\nABORT: cudaHostGetFlags SUCCEEDED on the pageable buffer, so it\n");
+        fprintf(stderr, "       is registered after all and the comparison is void.\n");
+        cudaFreeHost(pinned); cudaFree(dst);
+        return 1;
+    }
+    cudaGetLastError();   // clear the error the deliberate failure just set
+    printf("control 1   pinned is page-locked, pageable is not  PASS\n");
+
+    // CONTROL 2 - byte identity. A copy that moves nothing is the fastest copy there is.
+    {
+        unsigned char * src = (unsigned char *) pageable.p;
+        for (size_t i = 0; i < block; i++) {
+            src[i] = (unsigned char) ((i * 31u + 7u) & 0xFF);
+        }
+        aligned_buffer back(block, 4096);
+        if (back.p == nullptr) {
+            fprintf(stderr, "\nABORT: could not allocate the readback buffer. No figure.\n");
+            cudaFreeHost(pinned); cudaFree(dst);
+            return 1;
+        }
+        std::memset(back.p, 0, block);
+        CU_OK(cudaMemcpy(dst, src, block, cudaMemcpyHostToDevice), "control cudaMemcpy H2D");
+        CU_OK(cudaMemcpy(back.p, dst, block, cudaMemcpyDeviceToHost), "control cudaMemcpy D2H");
+        if (std::memcmp(src, back.p, block) != 0) {
+            fprintf(stderr, "\nABORT: the round trip did not preserve the block. Whatever the\n");
+            fprintf(stderr, "       loop below would time, it is not this transfer. No figure.\n");
+            cudaFreeHost(pinned); cudaFree(dst);
+            return 1;
+        }
+        printf("control 2   %zu bytes survive H2D then D2H unchanged  PASS\n", block);
+    }
+
+    // Fill both arenas outside the timed windows so first-touch faults do not land in a
+    // rate, and so neither arm is timed against untouched pages the other already has.
+    std::memset(pageable.p, 0xA5, arena);
+    std::memset(pinned,     0xA5, arena);
+
+    size_t copies_pageable = 0, copies_pinned = 0;
+    const double rate_pageable = h2d_sweep(dst, (const unsigned char *) pageable.p, arena,
+                                           block, seconds, &copies_pageable);
+    const double rate_pinned   = h2d_sweep(dst, (const unsigned char *) pinned, arena,
+                                           block, seconds, &copies_pinned);
+
+    cudaFreeHost(pinned);
+    cudaFree(dst);
+
+    if (rate_pageable < 0.0 || rate_pinned < 0.0) {
+        return 1;
+    }
+
+    printf("\ncopies      %zu pageable, %zu pinned\n", copies_pageable, copies_pinned);
+    printf("\nRESULT      pageable  %.1f MB/s   (bytes/s/1e6)\n", rate_pageable);
+    printf("RESULT      pinned    %.1f MB/s   (bytes/s/1e6)\n", rate_pinned);
+    printf("RESULT      ratio     %.3fx  pinned over pageable\n", rate_pinned / rate_pageable);
+    return 0;
+}
+
 int main(int argc, char ** argv) {
     // Unbuffered, and not for cosmetics: when the stage 4 test crashed, buffered stdout
     // was never flushed and the failure looked like it happened before main() started.
@@ -181,6 +407,14 @@ int main(int argc, char ** argv) {
     bool   shared  = false;
     double seconds = 4.0;   // the dwell probe-queue-depth.py uses per depth level
 
+    bool   h2d      = false;
+    size_t block    = BLOCK_SIZE;
+    // 1 GiB. It has to clear the largest last-level cache in the machine by a wide margin,
+    // or the copy loop reports SRAM. 24 threads of consumer Zen is well under 128 MiB of
+    // L3, so a gigabyte is not a close call - which is the point of picking it here rather
+    // than tuning it later against a number somebody already saw.
+    size_t arena_mb = 1024;
+
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
         if (a == "--buffered") {
@@ -191,6 +425,12 @@ int main(int argc, char ** argv) {
             shared = true;
         } else if (a == "--seconds" && i + 1 < argc) {
             seconds = atof(argv[++i]);
+        } else if (a == "--h2d") {
+            h2d = true;
+        } else if (a == "--block-bytes" && i + 1 < argc) {
+            block = (size_t) _strtoui64(argv[++i], nullptr, 10);
+        } else if (a == "--arena-mb" && i + 1 < argc) {
+            arena_mb = (size_t) _strtoui64(argv[++i], nullptr, 10);
         } else if (path == nullptr) {
             path = argv[i];
         } else {
@@ -199,16 +439,49 @@ int main(int argc, char ** argv) {
         }
     }
 
-    if (path == nullptr) {
+    if (path == nullptr && !h2d) {
         fprintf(stderr, "usage: bench-loader.exe <file> [--buffered]\n");
         fprintf(stderr, "                              [--threads N [--shared]] [--seconds S]\n");
-        fprintf(stderr, "  default     unbuffered direct I/O, one sequential pass - the measurement\n");
-        fprintf(stderr, "  --buffered  buffered - the control, must be FASTER on a warm file\n");
-        fprintf(stderr, "  --threads N N workers, random offsets, time-boxed; each gets its own\n");
-        fprintf(stderr, "              handle out of the pool\n");
-        fprintf(stderr, "  --shared    the control for --threads: same workers, same offsets,\n");
-        fprintf(stderr, "              every one of them forced onto the SHARED handle\n");
+        fprintf(stderr, "                              [--block-bytes N]\n");
+        fprintf(stderr, "       bench-loader.exe --h2d [--block-bytes N] [--arena-mb N] [--seconds S]\n");
+        fprintf(stderr, "  default       unbuffered direct I/O, one sequential pass - the measurement\n");
+        fprintf(stderr, "  --buffered    buffered - the control, must be FASTER on a warm file\n");
+        fprintf(stderr, "  --threads N   N workers, random offsets, time-boxed; each gets its own\n");
+        fprintf(stderr, "                handle out of the pool\n");
+        fprintf(stderr, "  --shared      the control for --threads: same workers, same offsets,\n");
+        fprintf(stderr, "                every one of them forced onto the SHARED handle\n");
+        fprintf(stderr, "  --block-bytes request size, default 13369344 (12.75 MiB). The operating\n");
+        fprintf(stderr, "                point moves 2686976 or 3211264 per work item\n");
+        fprintf(stderr, "  --h2d         host-to-device copy rate, pinned against pageable. Takes no\n");
+        fprintf(stderr, "                file: it measures the link, not the drive\n");
         return 2;
+    }
+
+    // The arms answer different questions and share no output line. Running two at once
+    // would print one verdict for two measurements, and nobody could say afterwards which
+    // one produced it - the rule probe-queue-depth.py already enforces for its four.
+    if (h2d && (path != nullptr || threads > 0 || buffered)) {
+        fprintf(stderr, "SETUP ERROR: --h2d is its own arm. It takes no file, no --threads\n");
+        fprintf(stderr, "             and no --buffered - it never touches the drive.\n");
+        return 2;
+    }
+    if (block == 0 || (block % 4096) != 0) {
+        fprintf(stderr, "SETUP ERROR: --block-bytes must be a positive multiple of 4096.\n");
+        fprintf(stderr, "             Direct I/O rejects an unaligned length outright, and the\n");
+        fprintf(stderr, "             two arms have to move the same bytes to be comparable.\n");
+        return 2;
+    }
+
+    if (h2d) {
+        if (seconds <= 0.0) {
+            fprintf(stderr, "SETUP ERROR: --seconds must be positive\n");
+            return 2;
+        }
+        if (arena_mb == 0) {
+            fprintf(stderr, "SETUP ERROR: --arena-mb must be positive\n");
+            return 2;
+        }
+        return run_h2d_arm(block, seconds, arena_mb * 1024 * 1024);
     }
 
     if (shared && threads == 0) {
@@ -227,7 +500,9 @@ int main(int argc, char ** argv) {
 
     printf("arm         %s\n", buffered ? "BUFFERED (control)" : "DIRECT I/O (measurement)");
     printf("file        %s\n", path);
-    printf("block       %zu bytes (12.75 MiB)\n", BLOCK_SIZE);
+    printf("block       %zu bytes (%.3f MiB)%s\n", block,
+           double(block) / (1024.0 * 1024.0),
+           block == BLOCK_SIZE ? "  (default)" : "  (--block-bytes)");
 
     try {
         llama_file file(path, "rb", !buffered);
@@ -259,9 +534,9 @@ int main(int argc, char ** argv) {
         // The block size is fixed, so the only thing that can go wrong is a device whose
         // sector size does not divide it - which is a reason to stop, not to round.
         const size_t buf_align = (alignment > 1) ? alignment : 4096;
-        if (direct && (BLOCK_SIZE % alignment) != 0) {
+        if (direct && (block % alignment) != 0) {
             fprintf(stderr, "\nABORT: block size %zu is not a multiple of the device's %zu.\n",
-                    BLOCK_SIZE, alignment);
+                    block, alignment);
             return 1;
         }
 
@@ -289,13 +564,13 @@ int main(int argc, char ** argv) {
                 fprintf(stderr, "       mix both arms. No figure is printed.\n");
                 return 1;
             }
-            if (file_size <= BLOCK_SIZE) {
+            if (file_size <= block) {
                 fprintf(stderr, "\nABORT: file is not larger than one block. No figure.\n");
                 return 1;
             }
             // span, exactly as the Python sweep defines it: every read lands wholly
             // inside the file, so no short count can enter the numerator.
-            const size_t span = file_size - BLOCK_SIZE;
+            const size_t span = file_size - block;
 
             std::vector<worker_result> results((size_t) threads);
             std::vector<std::thread>   ts;
@@ -310,7 +585,7 @@ int main(int argc, char ** argv) {
                 const int wid = shared ? -1 : i;
                 ts.emplace_back(bench_worker, std::ref(file),
                                 std::ref(results[(size_t) i]),
-                                i, wid, span, alignment, stop_ticks);
+                                i, wid, span, alignment, block, stop_ticks);
             }
             for (std::thread & t : ts) {
                 t.join();
@@ -359,14 +634,14 @@ int main(int argc, char ** argv) {
             return 0;
         }
 
-        aligned_buffer buf(BLOCK_SIZE, buf_align);
+        aligned_buffer buf(block, buf_align);
         if (buf.p == nullptr) {
-            fprintf(stderr, "\nABORT: _aligned_malloc of %zu bytes failed\n", BLOCK_SIZE);
+            fprintf(stderr, "\nABORT: _aligned_malloc of %zu bytes failed\n", block);
             return 1;
         }
         // Touch the pages once, outside the timed window, so first-touch faults do not
         // land in the measurement.
-        std::memset(buf.p, 0, BLOCK_SIZE);
+        std::memset(buf.p, 0, block);
 
         size_t offset = 0;
         size_t total  = 0;
@@ -382,11 +657,11 @@ int main(int argc, char ** argv) {
             // multiple - measured on all four model files here, ReadFile returns TRUE
             // and reports exactly the bytes up to the logical EOF. Clamping to the
             // unaligned remainder instead would hand the kernel a length it rejects.
-            const size_t got = file.read_raw_at(buf.p, BLOCK_SIZE, offset);
+            const size_t got = file.read_raw_at(buf.p, block, offset);
             if (got == 0) {
                 break;
             }
-            if (got < BLOCK_SIZE && offset + got < file_size) {
+            if (got < block && offset + got < file_size) {
                 // A short count anywhere but at the end leaves the next offset unaligned
                 // and the run half-done. Stop, and print no figure.
                 short_before_eof = true;

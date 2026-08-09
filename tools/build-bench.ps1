@@ -24,6 +24,16 @@ WHY /std:c++17
 MSVC defaults to C++14. llama.cpp requires 17; without the switch the compile fails in
 headers rather than in our code, which points the search at the wrong place.
 
+WHY cudart AND NOT nvcc
+The --h2d arm added 2026-08-09 calls cudaMalloc, cudaHostAlloc and cudaMemcpy. All three
+are host-side runtime API - there is no kernel and no device code in this tool - so
+cl.exe compiles it with one include path and one import library. Pulling in nvcc would
+add a second toolchain and a second set of failure modes for nothing.
+
+CUDA is REQUIRED, not optional. A build that quietly dropped the arm when the toolkit is
+missing would leave a binary that answers --h2d with "unexpected argument", which reads
+like a typo rather than like a missing dependency.
+
 -MmapDir is the counterproof switch. Point it at a directory holding the ORIGINAL
 b10223 llama-mmap.h and llama-mmap.cpp and the build must FAIL: read_raw_at does not
 exist there. A build that succeeds against b10223 would mean this tool never touched
@@ -65,6 +75,22 @@ $OutExe = Join-Path $OutDir $OutName
 $GgmlLib = Join-Path $Root 'build-native\ggml\src\Release\ggml-base.lib'
 $GgmlDll = Join-Path $Root 'build-native\bin\Release\ggml-base.dll'
 
+# CUDA, for the --h2d arm. CUDA_PATH is set by the toolkit installer; the glob is the
+# fallback for a shell that never got it. The newest version wins, and if none of it is
+# there the build stops here rather than at a header error inside cuda_runtime.h.
+$CudaRoot = $env:CUDA_PATH
+if ([string]::IsNullOrEmpty($CudaRoot) -or -not (Test-Path $CudaRoot)) {
+    $CudaRoot = Get-ChildItem 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*' -Directory -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName
+}
+if ([string]::IsNullOrEmpty($CudaRoot)) {
+    Write-Output "CUDA NOT FOUND: set CUDA_PATH or install the toolkit."
+    Write-Output "  The --h2d arm needs cudart. This is a hard requirement, not a feature switch."
+    exit 1
+}
+$CudaInc = Join-Path $CudaRoot 'include'
+$CudaLib = Join-Path $CudaRoot 'lib\x64\cudart.lib'
+
 $needed = @(
     (Join-Path $ToolsDir 'bench-loader.cpp'),
     (Join-Path $MmapDir  'llama-mmap.h'),
@@ -72,6 +98,8 @@ $needed = @(
     (Join-Path $Src      'llama-impl.cpp'),
     (Join-Path $Root     'include\llama.h'),
     (Join-Path $Root     'ggml\include\ggml.h'),
+    (Join-Path $CudaInc  'cuda_runtime.h'),
+    $CudaLib,
     $GgmlLib
 )
 $missing = @()
@@ -86,6 +114,7 @@ if ($missing.Count -gt 0) {
 
 Write-Output "root      $Root"
 Write-Output "mmap from $MmapDir"
+Write-Output "cuda      $CudaRoot"
 Write-Output "output    $OutExe"
 
 # Remove the previous binary FIRST. Otherwise a failed build leaves the old exe in place
@@ -123,10 +152,11 @@ Push-Location $OutDir
 # rather than the patched one sitting next to it.
 & cl.exe /nologo /O2 /EHsc /MD /std:c++17 `
     /I $MmapDir /I $Src /I (Join-Path $Root 'include') /I (Join-Path $Root 'ggml\include') `
+    /I $CudaInc `
     (Join-Path $ToolsDir 'bench-loader.cpp') `
     (Join-Path $MmapDir 'llama-mmap.cpp') `
     (Join-Path $Src 'llama-impl.cpp') `
-    /link /OUT:$OutExe $GgmlLib
+    /link /OUT:$OutExe $GgmlLib $CudaLib
 $code = $LASTEXITCODE
 Pop-Location
 
