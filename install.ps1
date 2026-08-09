@@ -61,6 +61,17 @@ $INSTALL_URL = "https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps
 $VRAM_SUPPORTED_MB = 16000
 $VRAM_TARGET_MB    = 32000
 $RAM_MIN_GB        = 16
+
+# The host-RAM expert tier. 32 GiB is the ONLY size measured (2026-08-09, on a 63.4 GB machine:
+# 1.40-1.47x throughput over three paired runs), and page-locked memory is taken away from the
+# rest of the machine for the life of the process. So the installer offers it at exactly the
+# ratio it was measured at and stays silent below that, rather than scaling a number nobody has
+# run. A user with 48 GB can pass --moe-stream-l2 themselves; that is their measurement to make.
+$L2_GIB            = 32
+# 60 and not 64: Windows reports 63.4 GB on the 64 GB machine this was measured on, because
+# firmware and hardware reservations come off the top before the OS ever sees the memory. A
+# threshold at the nominal size excludes exactly the configuration that produced the figure.
+$L2_RAM_REQUIRED_GB = 60
 $DISK_INSTALL_GB   = 2      # the package, unpacked
 $DISK_MODEL_GB     = 96     # what the model will need later, reported not enforced
 
@@ -110,6 +121,20 @@ function Format-Size {
 # ---------------------------------------------------------------------------
 # Preflight -- everything that can say no, before anything is downloaded
 # ---------------------------------------------------------------------------
+
+<#
+    How many GiB of host-RAM expert tier this machine gets, or 0 for none.
+
+    Deliberately NOT a formula. Half the RAM, or RAM minus a constant, would produce a number for
+    every machine and a measurement for none - and this one is page-locked, so a wrong guess does
+    not degrade gracefully, it takes memory away from everything else until the process exits.
+    Only the ratio that was actually run is offered.
+#>
+function Get-L2Gib {
+    param([double] $RamGb)
+    if ($RamGb -ge $L2_RAM_REQUIRED_GB) { return $L2_GIB }
+    return 0
+}
 
 <#
     Returns a verdict object rather than writing output, so the selftest can feed
@@ -494,6 +519,16 @@ function Invoke-Selftest {
     $lowRam = $good.Clone(); $lowRam.RamGb = 8
     C "8 GB RAM warns but does not block"         ((Test-Preflight @lowRam).Ok -and (Test-Preflight @lowRam).Warnings.Count -gt 0)
 
+    # The host tier is offered at exactly one ratio. Both directions are checked, because a rule
+    # that only ever says yes is not a rule - and the 63.4 GB case is the development machine,
+    # which must NOT get it: 63.4 is below 64, and rounding it up would hand out page-locked
+    # memory on a machine the measurement did not cover.
+    C "63.4 GB - the measured machine - gets 32"  ((Get-L2Gib -RamGb 63.4) -eq 32)
+    C "128 GB RAM gets the same 32, not more"     ((Get-L2Gib -RamGb 128) -eq 32)
+    C "48 GB gets no tier - never measured"       ((Get-L2Gib -RamGb 48) -eq 0)
+    C "32 GB gets no tier"                        ((Get-L2Gib -RamGb 32) -eq 0)
+    C "16 GB gets no tier"                        ((Get-L2Gib -RamGb 16) -eq 0)
+
     # Where the package comes from. No network: the decision is a pure function.
     $noSrc = Resolve-PackageSource -SourceUrl "" -Asset "crow-9.9.9-win-x64.zip" -Version "9.9.9"
     C "no -SourceUrl still points at the release" `
@@ -792,7 +827,17 @@ Write-Host "      --port 8081 -c 200000 -ngl 99 -np 1 --jinja ``" -ForegroundCol
 # full prefill for the whole history -- measured 2026-08-08: 23,400 tokens took
 # about 35 minutes, while restoring the same state took 22 ms.
 Write-Host "      --slot-save-path $InstallTo\session ``" -ForegroundColor White
-Write-Host "      --moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct" -ForegroundColor White
+# The host-RAM tier is printed only on a machine with the RAM it was measured on. On anything
+# smaller the line is left out entirely rather than carrying a smaller, unmeasured number - a flag
+# in the command people copy is a recommendation, and this project does not recommend figures it
+# has not run.
+$l2 = Get-L2Gib -RamGb $facts.RamGb
+if ($l2 -gt 0) {
+    Write-Host "      --moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct ``" -ForegroundColor White
+    Write-Host "      --moe-stream-l2 $l2" -ForegroundColor White
+} else {
+    Write-Host "      --moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct" -ForegroundColor White
+}
 Write-Host ""
 Write-Host "    python $InstallTo\cli\crow.py" -ForegroundColor White
 Write-Host ""
