@@ -1056,6 +1056,178 @@ class SessionRestoreTests(unittest.TestCase):
         self.assertFalse(result[2])
 
 
+def _keys(text: str):
+    """A keystroke source for read_coloured, ending in Enter."""
+    seq = list(text)
+
+    def getch() -> str:
+        return seq.pop(0) if seq else "\r"
+
+    return getch
+
+
+class ToolsListingTests(unittest.TestCase):
+    """/tools is derived from TOOLS, so the two cannot drift apart."""
+
+    def test_every_registered_tool_is_listed(self):
+        listing = crow.format_tools()
+        for entry in crow.TOOLS:
+            self.assertIn(entry["function"]["name"], listing)
+
+    def test_the_count_matches_the_registry(self):
+        self.assertIn(f"{len(crow.TOOLS)} tools", crow.format_tools())
+
+    def test_a_tool_added_to_the_registry_appears(self):
+        """The listing reads the schema; it is not a second list kept by hand."""
+        extra = crow._fn("zzz_probe", "A probe tool.", {}, [])
+        self.assertIn("zzz_probe", crow.format_tools(crow.TOOLS + [extra]))
+
+    def test_a_tool_that_is_not_registered_does_not_appear(self):
+        """The case that must fail: a hand-written listing would not care."""
+        self.assertNotIn("zzz_probe", crow.format_tools())
+
+    def test_required_arguments_are_bare_and_optional_ones_bracketed(self):
+        listing = crow.format_tools()
+        for line in listing.splitlines():
+            if line.strip().startswith("read_file"):
+                self.assertIn("path", line)
+                self.assertIn("[start_line]", line)
+                self.assertNotIn("[path]", line)
+                return
+        self.fail("read_file was not listed at all")
+
+    def test_only_the_first_sentence_of_a_description_is_shown(self):
+        listing = crow.format_tools()
+        self.assertIn("Read a UTF-8 text file.", listing)
+        self.assertNotIn("search_text returns line numbers", listing)
+
+    def test_an_empty_registry_says_so_instead_of_crashing(self):
+        self.assertIn("no tools", crow.format_tools([]))
+
+
+class CommandSurfaceTests(unittest.TestCase):
+    """What the header and /help promise has to exist."""
+
+    def test_tools_is_offered_in_help(self):
+        self.assertIn("/tools", crow.HELP)
+
+    def test_help_does_not_promise_a_command_that_was_never_built(self):
+        """The case that must fail if someone documents ahead of the code."""
+        self.assertNotIn("/models", crow.HELP)
+
+    def test_the_repository_is_spelled_once(self):
+        """A rename has to move one literal, not three."""
+        self.assertIn(crow.REPO, crow.REPO_URL)
+        self.assertIn(crow.REPO, crow.UPDATE_COMMAND)
+        self.assertIn(crow.REPO, crow.RELEASES_API)
+
+    def test_the_repo_url_is_a_github_page_not_an_api_endpoint(self):
+        self.assertTrue(crow.REPO_URL.startswith("https://github.com/"))
+        self.assertNotIn("api.github.com", crow.REPO_URL)
+
+
+class ColouredInputTests(unittest.TestCase):
+    """A slash command turns yellow while it is typed, a message does not."""
+
+    def setUp(self):
+        self._saved = (crow.YELLOW, crow.CROW_TEXT, crow.RESET)
+        # Sentinels rather than real escapes: this guards WHEN a colour is
+        # emitted, which is the part that broke, not which byte it is.
+        crow.YELLOW, crow.CROW_TEXT, crow.RESET = "<Y>", "<W>", "<R>"
+
+    def tearDown(self):
+        crow.YELLOW, crow.CROW_TEXT, crow.RESET = self._saved
+
+    def _typed(self, text):
+        out = io.StringIO()
+        line = crow.read_coloured("you> ", _keys(text), out)
+        return line, out.getvalue()
+
+    def test_a_slash_command_is_returned_unchanged(self):
+        line, _ = self._typed("/tools")
+        self.assertEqual(line, "/tools")
+
+    def test_the_colour_is_emitted_before_the_slash_is_echoed(self):
+        _, painted = self._typed("/tools")
+        self.assertLess(painted.index("<Y>"), painted.index("/"))
+
+    def test_a_plain_message_is_never_painted_yellow(self):
+        """The case that must fail if the trigger is ever widened."""
+        line, painted = self._typed("hello there")
+        self.assertEqual(line, "hello there")
+        self.assertNotIn("<Y>", painted)
+
+    def test_a_slash_that_is_not_first_does_not_paint(self):
+        _, painted = self._typed("read a/b")
+        self.assertNotIn("<Y>", painted)
+
+    def test_deleting_the_slash_leaves_yellow_again(self):
+        line, painted = self._typed("/\x08x")
+        self.assertEqual(line, "x")
+        self.assertLess(painted.index("<Y>"), painted.index("<W>"))
+
+    def test_backspace_on_an_empty_line_is_harmless(self):
+        line, _ = self._typed("\x08\x08hi")
+        self.assertEqual(line, "hi")
+
+    def test_the_line_always_ends_with_a_reset(self):
+        _, painted = self._typed("/tools")
+        self.assertIn("<R>", painted)
+
+    def test_ctrl_c_raises_so_the_caller_can_leave(self):
+        with self.assertRaises(KeyboardInterrupt):
+            self._typed("/too\x03ls")
+
+    def test_ctrl_d_on_an_empty_line_is_end_of_file(self):
+        with self.assertRaises(EOFError):
+            self._typed("\x04")
+
+    def test_ctrl_d_with_text_typed_is_ignored(self):
+        """Otherwise a stray Ctrl+D would end a session mid-sentence."""
+        line, _ = self._typed("hi\x04there")
+        self.assertEqual(line, "hithere")
+
+    def test_a_key_without_a_character_is_ignored(self):
+        """Arrow keys reach the reader as "" and must not land in the buffer."""
+        out = io.StringIO()
+        seq = ["/", "", "t", ""]
+
+        def getch():
+            return seq.pop(0) if seq else "\r"
+
+        self.assertEqual(crow.read_coloured("you> ", getch, out), "/t")
+
+    def test_control_characters_do_not_reach_the_buffer(self):
+        line, _ = self._typed("a\tb")
+        self.assertEqual(line, "ab")
+
+    def test_the_prompt_is_written_before_anything_is_read(self):
+        _, painted = self._typed("hi")
+        self.assertTrue(painted.startswith("you> "))
+
+
+class RawKeyFallbackTests(unittest.TestCase):
+    """Without a terminal there is no raw mode, and input() has to take over."""
+
+    def test_a_non_tty_yields_no_reader(self):
+        saved = crow._TTY
+        crow._TTY = False
+        try:
+            with crow._raw_keys() as getch:
+                self.assertIsNone(getch)
+        finally:
+            crow._TTY = saved
+
+    def test_read_line_falls_back_to_input_when_there_is_no_reader(self):
+        saved_tty, saved_input = crow._TTY, builtins.input
+        crow._TTY = False
+        builtins.input = lambda prompt="": "typed by input()"
+        try:
+            self.assertEqual(crow.read_line("you> "), "typed by input()")
+        finally:
+            crow._TTY, builtins.input = saved_tty, saved_input
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

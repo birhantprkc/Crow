@@ -20,6 +20,7 @@ installed.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import itertools
 import json
 import os
@@ -240,14 +241,22 @@ SPINNER_FRAMES = ("▘", "▝", "▗", "▖")   # ▘ ▝ ▗ ▖
 # BANNER_ACCENT is the shade cell, so the caller can colour the two apart.
 
 
+# The repository, spelled once. Three hosts quote the same slug -- raw content
+# for the installer, the API for the release check, and the page a human opens
+# from the header. Three literals are three chances for one of them to go stale
+# after a rename, and the one that breaks is the one nobody runs in a test.
+REPO = "nibor1896/Crow"
+REPO_URL = f"https://github.com/{REPO}"
+
+
 # The command that updates an installation. It is the SAME line that installs
 # one: install.ps1 reads the version out of the cli\crow.py it finds in the
 # target and updates when its own is newer. Until 2026-08-08 that line refused a
 # non-empty target outright, so there was no route from one version to the next
 # short of deleting the directory by hand.
-UPDATE_COMMAND = "irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1 | iex"
+UPDATE_COMMAND = f"irm https://raw.githubusercontent.com/{REPO}/main/install.ps1 | iex"
 
-RELEASES_API = "https://api.github.com/repos/nibor1896/Crow/releases/latest"
+RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 
 
 class CrowError(RuntimeError):
@@ -1604,10 +1613,60 @@ def fetch_n_ctx(base_url: str, timeout: float = 5.0) -> int:
 
 HELP = """commands:
   /help          this list
+  /tools         the tools the model can call
   /reset         drop the context (costs a full re-prefill)
   /context       message count in the current context
   /exit, /quit   leave
 """
+
+
+def _first_sentence(text: str) -> str:
+    """The opening sentence of a tool description, for the one-line listing.
+
+    The full descriptions are written for the model and carry the reasoning it
+    needs -- when to prefer a range over a whole file, why a write is refused.
+    That is the right length in a request and the wrong length in a list.
+    """
+    head = text.split(". ")[0].strip()
+    if not head:
+        return ""
+    return head if head.endswith(".") else head + "."
+
+
+def format_tools(tools: list | None = None) -> str:
+    """The /tools listing, derived from TOOLS instead of written beside it.
+
+    A hand-maintained list drifts from the schema the model is actually sent,
+    and the drift surfaces as a user calling for a tool that was renamed two
+    versions ago. Everything below is read out of the same structure that goes
+    into the request, so the two cannot disagree.
+
+    Required arguments are bare, optional ones in brackets -- the same shape a
+    usage line has everywhere else.
+    """
+    tools = TOOLS if tools is None else tools
+    rows = []
+    for entry in tools:
+        fn = entry["function"]
+        params = fn.get("parameters", {})
+        required = list(params.get("required", []))
+        optional = [p for p in params.get("properties", {}) if p not in required]
+        signature = " ".join(required + [f"[{p}]" for p in optional])
+        rows.append((fn["name"], signature, _first_sentence(fn.get("description", ""))))
+
+    if not rows:
+        return "no tools are registered.\n"
+
+    name_w = max(len(name) for name, _, _ in rows)
+    sig_w = max(len(sig) for _, sig, _ in rows)
+    plural = "tool" if len(rows) == 1 else "tools"
+    lines = [f"{len(rows)} {plural}, called by the model itself -- "
+             f"there is nothing here to switch on:", ""]
+    for name, signature, summary in rows:
+        lines.append(f"  {BOLD}{name.ljust(name_w)}{RESET} "
+                     f"{DIM}{signature.ljust(sig_w)}{RESET}  {summary}")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def format_prompt(context_tokens: int, n_ctx: int = 0) -> str:
@@ -1640,6 +1699,139 @@ def format_prompt(context_tokens: int, n_ctx: int = 0) -> str:
         return f"{DIM}[{RESET}{bar}{DIM}]{RESET} {size}/{limit} {DIM}|{RESET} {BOLD}{CROW_ACCENT}you>{RESET} "
 
     return f"{size} {DIM}|{RESET} {BOLD}{CROW_ACCENT}you>{RESET} "
+
+
+# READING A LINE ONE KEY AT A TIME.
+#
+# input() cannot colour a line while it is being typed: the console stays in
+# cooked mode, the terminal does the echo, and nothing reaches this process
+# until Enter. Turning that around is the entire cost of the feature -- the
+# echo, backspace, Ctrl+C and Ctrl+D all become this file's job.
+#
+# It is a fallback, not a requirement. Piped input, a dumb terminal, a platform
+# without msvcrt or termios: every one of those drops back to input(), where
+# the colours are off anyway because _TTY is false.
+@contextlib.contextmanager
+def _raw_keys():
+    """Yield a reader for single keystrokes, or None when raw mode is not available.
+
+    The reader returns "" for a key that carries no character -- arrows and
+    function keys. Swallowing their second half here keeps the caller from
+    seeing a stray 'H' when someone presses Up.
+    """
+    if not _TTY:
+        yield None
+        return
+
+    try:
+        import msvcrt
+    except ImportError:
+        pass
+    else:
+        def read_windows() -> str:
+            ch = msvcrt.getwch()
+            if ch in ("\x00", "\xe0"):
+                msvcrt.getwch()
+                return ""
+            return ch
+
+        yield read_windows
+        return
+
+    try:
+        import select
+        import termios
+        import tty
+    except ImportError:
+        yield None
+        return
+
+    try:
+        fd = sys.stdin.fileno()
+        saved = termios.tcgetattr(fd)
+    except Exception:
+        yield None
+        return
+
+    def read_posix() -> str:
+        ch = sys.stdin.read(1)
+        if ch == "\x1b":
+            # Drain the rest of the sequence without blocking: a bare Esc has
+            # nothing after it, and read(2) would hang waiting for a key.
+            while select.select([sys.stdin], [], [], 0)[0]:
+                sys.stdin.read(1)
+            return ""
+        return ch
+
+    try:
+        tty.setraw(fd)
+        yield read_posix
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
+def read_coloured(prompt: str, getch, out=None) -> str:
+    """Echo what is typed, in yellow once the line starts with '/'.
+
+    The colour is emitted at the transition -- before the '/' is echoed, not
+    after -- so the slash itself is yellow and nothing already on screen has to
+    be repainted. That is deliberate: repainting means rewriting the line, and
+    a line long enough to wrap cannot be rewritten with a carriage return.
+
+    Raises KeyboardInterrupt on Ctrl+C and EOFError on Ctrl+D at an empty line,
+    because in raw mode the console no longer raises them for us and the caller
+    above already knows what to do with both.
+    """
+    out = sys.stdout if out is None else out
+    out.write(prompt)
+    out.flush()
+    buffer = ""
+    yellow = False
+    try:
+        while True:
+            ch = getch()
+            if ch == "":
+                continue
+            if ch in ("\r", "\n"):
+                break
+            if ch == "\x03":
+                raise KeyboardInterrupt
+            if ch == "\x04":
+                if not buffer:
+                    raise EOFError
+                continue
+            if ch in ("\x08", "\x7f"):
+                if buffer:
+                    buffer = buffer[:-1]
+                    out.write("\b \b")
+                    if yellow and not buffer.startswith("/"):
+                        out.write(CROW_TEXT)
+                        yellow = False
+                out.flush()
+                continue
+            if ch < " ":
+                continue
+
+            if (buffer + ch).startswith("/") != yellow:
+                yellow = not yellow
+                out.write(YELLOW if yellow else CROW_TEXT)
+            buffer += ch
+            out.write(ch)
+            out.flush()
+    finally:
+        out.write(RESET)
+        out.flush()
+    out.write("\r\n")
+    out.flush()
+    return buffer
+
+
+def read_line(prompt: str) -> str:
+    """input(), except that a slash command turns yellow as it is typed."""
+    with _raw_keys() as getch:
+        if getch is None:
+            return input(prompt)
+        return read_coloured(prompt, getch)
 
 
 def next_context_tokens(current: int, timings: dict) -> int:
@@ -1714,7 +1906,11 @@ def repl(args: argparse.Namespace) -> int:
     room = f", {n_ctx / 1000:.0f}k context" if n_ctx else ""
     print(f"{BOLD}{args.model}{RESET} at {args.base_url} "
           f"{DIM}(health: {status}{room}){RESET}")
-    print(f"{DIM}/help for commands, /exit to leave.{RESET}")
+    print(f"{DIM}/help for commands, /tools for what the model can call, "
+          f"/exit to leave.{RESET}")
+    # Its own line rather than appended to the one above: together they run past
+    # 80 columns, and a wrapped header is the first thing a new user sees.
+    print(f"{DIM}{REPO_URL}{RESET}")
     print("")
 
     conversation = Conversation(args.system)
@@ -1743,7 +1939,7 @@ def repl(args: argparse.Namespace) -> int:
 
     while True:
         try:
-            line = input(format_prompt(context_tokens, n_ctx)).strip()
+            line = read_line(format_prompt(context_tokens, n_ctx)).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return leave()
@@ -1754,6 +1950,9 @@ def repl(args: argparse.Namespace) -> int:
             return leave()
         if line == "/help":
             print(HELP)
+            continue
+        if line == "/tools":
+            print(format_tools())
             continue
         if line == "/reset":
             conversation.reset()

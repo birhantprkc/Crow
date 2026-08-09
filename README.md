@@ -184,9 +184,15 @@ Standard library only, on purpose: it has to run before anything is installed.
 | Command | |
 |---|---|
 | `/help` | the commands |
+| `/tools` | the tools the model can call, read out of the schema it is sent |
 | `/reset` | drop the conversation and start a new one |
 | `/context` | how much of the window is used |
 | `/exit` | leave |
+
+A line that starts with `/` turns yellow as you type it, so a command is
+distinguishable from a message before you commit to it. That needs the terminal
+in raw mode; piped input and terminals that do not support it fall back to a
+plain read, where colour is off anyway.
 
 | Option | |
 |---|---|
