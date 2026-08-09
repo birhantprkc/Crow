@@ -154,11 +154,12 @@
   <rect x="66" y="1366" width="1068" height="128" rx="12" fill="#fff0e6" stroke="#e8590c" stroke-width="1.8"/>
   <text x="366" y="1408" text-anchor="middle" class="huge" fill="#e8590c">376.9 MiB</text>
   <text x="366" y="1436" text-anchor="middle" class="sub">moved per token</text>
-  <text x="600" y="1408" text-anchor="middle" class="huge" fill="#e8590c">4.31*</text>
-  <text x="600" y="1436" text-anchor="middle" class="sub">reads in flight *pre-mutex build</text>
+  <text x="600" y="1408" text-anchor="middle" class="huge" fill="#e8590c">4.31</text>
+  <text x="600" y="1436" text-anchor="middle" class="sub">reads in flight (pre-mutex)</text>
   <text x="834" y="1408" text-anchor="middle" class="huge" fill="#e8590c">56–59 %</text>
-  <text x="834" y="1436" text-anchor="middle" class="sub">of a request is this wait, with the tier</text>
-  <text x="600" y="1472" text-anchor="middle" class="sub">The GPU idled about three quarters of the time when this was measured on #39, before the tier existed. Latency-bound, not compute- or bandwidth-bound.</text>
+  <text x="834" y="1436" text-anchor="middle" class="sub">of decode is this wait</text>
+  <text x="600" y="1462" text-anchor="middle" class="sub">The GPU idled three quarters of the time when this was measured, before the tier existed.</text>
+  <text x="600" y="1486" text-anchor="middle" class="sub">Latency-bound, not compute-bound and not bandwidth-bound.</text>
 
   <!-- ══ zone 2b: the optional host tier ═════════════════════════════════ -->
   <rect x="34" y="1558" width="1132" height="200" rx="16" fill="#f0fbfa" stroke="#0f766e" stroke-width="2" stroke-dasharray="7 5"/>
