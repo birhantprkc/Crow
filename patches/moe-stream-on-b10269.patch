@@ -1613,10 +1613,10 @@ index 6b9e94a..e3c44e5 100644
      virtual ~llama_model_base() = default;
 diff --git a/src/llama-moe-stream.cpp b/src/llama-moe-stream.cpp
 new file mode 100644
-index 0000000..8b58818
+index 0000000..4365eab
 --- /dev/null
 +++ b/src/llama-moe-stream.cpp
-@@ -0,0 +1,1331 @@
+@@ -0,0 +1,1339 @@
 +#include "llama-moe-stream.h"
 +
 +#include "llama-impl.h"
@@ -1917,9 +1917,17 @@ index 0000000..8b58818
 +    tier->entries.resize(n_l2);
 +    tier->index.reserve(n_l2*2);
 +
-+    LLAMA_LOG_INFO("%s: MoE L2 host tier = %.2f GiB, %zu slots of %zu bytes, %s\n",
-+            __func__, bytes/1024.0/1024.0/1024.0, n_l2, stride,
-+            tier->pinned ? "PINNED (page-locked)" : "PAGEABLE (no host buffer type - slower uploads)");
++    // WARN and not INFO, and that is a deliberate misuse of the level. At the default verbosity
++    // llama-server prints no INFO from this library at all - measured 2026-08-09, the whole load
++    // block is absent while WARN lines come through. This message reports that GiB-scale memory
++    // has been PAGE-LOCKED and is gone from the rest of the machine until the process exits.
++    // A user who passes --moe-stream-l2 and sees nothing cannot tell it took effect from a typo,
++    // and silently holding 32 GiB is not something to find out from the task manager.
++    LLAMA_LOG_WARN("%s: MoE L2 host tier = %.2f GiB %s, %zu slots of %zu bytes\n",
++            __func__, bytes/1024.0/1024.0/1024.0,
++            tier->pinned ? "PINNED (page-locked, unavailable to the rest of the system)"
++                         : "PAGEABLE (no host buffer type - uploads stay at pageable rates)",
++            n_l2, stride);
 +
 +    l2 = std::move(tier);
 +}
