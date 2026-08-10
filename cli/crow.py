@@ -34,7 +34,7 @@ import urllib.request
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8081/v1"
 DEFAULT_MODEL = "crow"
-VERSION = "0.0.5"
+VERSION = "0.0.6"
 
 # Without a system prompt the model picks its own language -- measured: "yo"
 # came back in Chinese. Kept to one short line on purpose: it sits at the head

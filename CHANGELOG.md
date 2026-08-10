@@ -6,6 +6,84 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
+## 0.0.6 — 2026-08-10
+
+### Added
+
+- **The window rolls over instead of hitting the wall.** The server's limit is not a slope: a
+  request that arrives at or past `n_ctx` is refused outright and the turn is lost with it. At 90 %
+  of the window (`--rollover-at`, `0` switches it off) Crow writes the conversation to
+  `rollover-<stamp>.json` and `rollover-<stamp>.md`, empties it, and opens the next one with a note
+  naming the transcript, its line count, and the paths the work had reached. `--resume FILE` picks
+  an archive back up.
+
+  Two properties came from watching it fail, driven live on 2026-08-10. The check also runs **inside
+  the tool loop**, because one round was measured adding 5,253 tokens and a full-budget turn grew a
+  single turn by 28,900 — more than the 20,000 that 0.9 leaves between the threshold and the wall.
+  And the archive is written **without** the KV cache: the server's slot file has one fixed name, so
+  saving it would put the archive's cache over the live one.
+
+  The note points at the `.md` because the JSON is unreachable: `json.dump` writes one line, a real
+  archive measured 104,618 bytes on it, and `read_file` caps at 16 KB. Pointed at the JSON, the
+  model guessed a directory that does not exist, scanned a user profile twice, and spent **402 s
+  across seven tool rounds** before it read anything.
+
+- **`/tools`.** The seven tools were only ever visible in a request nobody reads. The listing is
+  derived from `TOOLS` rather than written beside it. The header carries it, and the repository URL.
+
+- **A slash command turns yellow as it is typed.** `input()` cannot do this — the console stays in
+  cooked mode and hands nothing over until Enter — so the line is read one key at a time. Piped
+  input and any platform without `msvcrt` or `termios` fall back to `input()`. Known cost: the
+  console's own line editing goes with it. Backspace, Ctrl+C and Ctrl+D are handled; arrow keys and
+  history are not.
+
+- **`--max-tool-rounds`.** The limit that decides how long a turn runs was a constant with no flag,
+  and the message it printed sent the reader looking for a knob that did not exist.
+
+### Fixed
+
+- **A spent tool budget ended in a bracket.** Driven live with `--max-tool-rounds 0`: the model
+  produced 102 tokens, `thinking 100%`, and the user was shown nothing at all. One more round now
+  goes out — tools still declared, or the template drops the replayed reasoning and the cache breaks
+  (#60, 242.3 s against 1.6 s) — carrying a turn that says the budget is spent and asks for what was
+  found, what was missed, and what comes next.
+
+  Its first live run reported reading a line it had never read and described one that is blank, so
+  the request names the case: if you ran nothing, say you ran nothing. Measured after the change on
+  the same question: *"Ich habe nichts gelesen."*
+
+- **Calls that will never run are no longer appended.** An assistant turn whose `tool_calls` have no
+  `tool` message behind them is a broken prefix for every later turn, and the old bare `break` left
+  one behind every time a budget ran out.
+
+- **`cache warm` was a promise nobody checked.** Measured 2026-08-10: a start printed
+  `resumed: 36 messages, cache warm` and the next turn came back `cached 0/21004` after **469.51 s**
+  of prefill. A 200 from `action=restore` says the file was read, not that the slot holds the prefix
+  about to be sent. The save now records the server's `n_saved`, the restore compares `n_restored`,
+  and the first turn settles it: a warm claim followed by `cached 0` says so in one line. A server
+  that reports neither figure is still believed — silence is not a contradiction.
+
+- **An update can run while the server is up.** Windows locks a running binary, and the moment the
+  client says a new version exists is the moment `llama-server` is up in the other terminal. The
+  files in `bin\` are renamed to `.old` first — renaming a running executable is permitted, deleting
+  it is not, both measured. What cannot be moved is named and the install stops there. The `.old`
+  files that stay are reported as staying, not counted as removed.
+
+### Tests
+
+- `install.ps1 -Selftest`: 51 checks, up from 42, nine of them reaching the new code — two against a
+  real lock rather than a simulation. The first version of that fix sat below the selftest's exit
+  and reported 42 of 42 green without executing a line of itself.
+- `cli/test_crow.py`: 201, up from 122.
+- `tools/probe-rollover.py`: new. Drives the real CLI through a fake OpenAI endpoint at `n_ctx=100`
+  — 35 checks in about a second, no model loaded.
+
+### Not done
+
+- The installer's rename path has never been driven end to end against a live server. The functions
+  are tested against real locked files; a full download-rename-extract-verify-sweep run needs an
+  actual release.
+
 ## 0.0.5 — 2026-08-09
 
 ### Added
