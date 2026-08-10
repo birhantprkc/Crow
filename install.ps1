@@ -266,69 +266,66 @@ function Compare-Manifest {
     }
 }
 
-function Find-Extraneous {
+function Find-DroppedFiles {
     <#
-    Which installed files does the package no longer name?
+    Which files did the PREVIOUS package install that this one no longer ships?
 
-    The update path knew "unchanged", "changed" and "new", and had no case for
-    "removed". A file dropped from a later package stayed on disk forever, and
-    the verification above cannot see it: it walks the MANIFEST and asks the
-    disk, never the other way round.
+    The update path knew "unchanged", "changed" and "new" and had no case for
+    "removed", so a file dropped from a later package stayed on a machine
+    forever. The verification above cannot see it: it walks the manifest and asks
+    the disk, never the other way round.
 
-    Pure on purpose, like Compare-Manifest: it takes two lists of relative paths
-    and returns a verdict. Reading directories is the caller's job, so the
-    selftest can drive every branch -- including the ones that must NOT fire.
+    THE DIRECTION OF THIS QUESTION IS THE WHOLE DESIGN, and the first version got
+    it backwards. It asked "what is on disk that the new manifest does not name?"
+    and protected a hand-written list of exceptions -- session/, MANIFEST.json,
+    *.old. Measured 2026-08-10 on a real install: that deleted
+    %LOCALAPPDATA%\Crow\session-backup\, three files and 473 MB, made by the user
+    minutes earlier on our own advice. It did not match `session/*`, so it was
+    treated as rubbish. Every exception list has this failure in it, because it
+    has to enumerate what a user might put in a directory, and nobody can.
 
-    WHAT MUST NOT BE TOUCHED, and why each one is here rather than assumed:
-      session/*      the server's own data. Measured 2026-08-10 on this machine:
-                     472,757,804 B of KV cache, a rollover note and session.json.
-                     A removal pass without this line deletes a live session on
-                     its first real run. This is the reason the function takes a
-                     protected list at all.
-      MANIFEST.json  written by the installer itself, never listed in itself.
-      *.old          belongs to Remove-StaleOld, which knows that a file the
-                     running server still maps cannot be deleted. Removing that
-                     knowledge by deleting them here would report failures as
-                     successes.
+    Asked in this direction the answer is exact and needs no exceptions: a file
+    is removed only if a Crow package put it there and the new one does not. User
+    data was never in a manifest, so it can never be selected. MANIFEST.json is
+    not listed in itself, and *.old files are created by the rename step -- both
+    fall out for free rather than by being remembered.
 
-    Comparison is case-insensitive because NTFS is, and the manifest is written
-    by a different tool than the one reading it back.
+    Pure, like Compare-Manifest: two lists in, a verdict out. Whether the file is
+    still on disk is the caller's question.
+
+    Comparison is case-insensitive and separator-agnostic: NTFS does not care
+    about case, and the manifest is written by one tool and read back by another.
     #>
     param(
-        [string[]] $ManifestPaths,
-        [string[]] $DiskPaths
+        [string[]] $PreviousPaths,
+        [string[]] $CurrentPaths
     )
 
-    $named = @{}
-    foreach ($p in $ManifestPaths) {
-        if ($null -ne $p) { $named[($p -replace '\\', '/').ToLowerInvariant()] = $true }
+    $current = @{}
+    foreach ($p in $CurrentPaths) {
+        if ($null -ne $p) { $current[($p -replace '\\', '/').ToLowerInvariant()] = $true }
     }
 
-    $extraneous = @()
-    $protected  = @()
-    foreach ($raw in $DiskPaths) {
+    $dropped = @()
+    $seen    = @{}
+    foreach ($raw in $PreviousPaths) {
         if ($null -eq $raw) { continue }
         $rel = $raw -replace '\\', '/'
         $key = $rel.ToLowerInvariant()
-        if ($named.ContainsKey($key)) { continue }
-        if ($key -eq 'manifest.json' -or $key -like 'session/*' -or $key -like '*.old') {
-            $protected += $rel
-            continue
-        }
-        $extraneous += $rel
+        if ($current.ContainsKey($key) -or $seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $dropped += $rel
     }
 
     return [pscustomobject]@{
-        # @() around both on purpose: PowerShell hands back a bare String when a
-        # list holds exactly one item, and one dropped file is the ordinary case.
-        # A caller indexing [0] would then get a single character. Measured in
-        # pack-release.ps1 the same day, where the comma operator fixes the same
-        # thing on a plain return.
-        Extraneous = @($extraneous)
-        Protected  = @($protected)
+        # @() on purpose: PowerShell hands back a bare String when a list holds
+        # exactly one item, and one dropped file is the ordinary case. A caller
+        # indexing [0] would then get a single character -- measured the same day
+        # in pack-release.ps1, where the comma operator fixes the same thing.
+        Dropped = @($dropped)
         # The denominator. "0 removed" out of nothing examined reads exactly like
-        # "0 removed" out of a clean install, and one of those is a broken run.
-        Checked    = @($DiskPaths).Count
+        # "0 removed" out of a clean update, and one of those is a broken run.
+        Checked = @($PreviousPaths).Count
     }
 }
 
@@ -778,38 +775,46 @@ function Invoke-Selftest {
     C "a file that did not land fails too"        ((-not $v.Ok) -and $v.Missing -contains "a.dll")
 
     # The case the update path did not have until now: a file the package USED to
-    # ship. Compare-Manifest above cannot see it -- it walks the manifest, and a
-    # dropped file is not in the manifest by definition.
-    $shipped = @("bin/llama.dll", "cli/crow.py")
-    $e = Find-Extraneous -ManifestPaths $shipped -DiskPaths @("bin/llama.dll", "cli/crow.py", "cli/test_crow.py")
-    C "a file the package dropped is found"       ($e.Extraneous -contains "cli/test_crow.py" -and $e.Extraneous.Count -eq 1)
-    C "and the count carries its denominator"     ($e.Checked -eq 3)
+    # ship. Compare-Manifest above cannot see it -- it walks the current manifest,
+    # and a dropped file is not in it by definition.
+    $was = @("bin/llama.dll", "cli/crow.py", "cli/test_crow.py")
+    $now = @("bin/llama.dll", "cli/crow.py")
+    $d = Find-DroppedFiles -PreviousPaths $was -CurrentPaths $now
+    C "a file the package dropped is found"       ($d.Dropped -contains "cli/test_crow.py" -and $d.Dropped.Count -eq 1)
+    C "and the count carries its denominator"     ($d.Checked -eq 3)
 
-    # The half that must NOT fire, and it is the expensive half: on this machine
-    # session/ held 472 MB of live KV cache when this was written. A removal pass
-    # that treats it as extraneous deletes a running session the first time it
-    # meets a real install, and no test above would have said a word.
-    $e = Find-Extraneous -ManifestPaths $shipped -DiskPaths @(
-        "bin/llama.dll", "session/crow-session.bin", "session/session.json",
-        "MANIFEST.json", "bin/ggml-cuda.dll.old")
-    C "session data is never extraneous"          ($e.Extraneous.Count -eq 0)
-    C "and it is reported as left alone, not lost" ($e.Protected.Count -eq 4)
+    # THE REGRESSION, and it is not hypothetical. The first version of this asked
+    # "what is on disk that the manifest does not name?" and kept an exception
+    # list. On 2026-08-10 it deleted %LOCALAPPDATA%\Crow\session-backup\ -- three
+    # files, 473 MB, created by the user minutes earlier on our own instructions.
+    # It was not session/, so it was not on the list, so it was rubbish.
+    # Asked in this direction the folder cannot be selected: no Crow package ever
+    # installed it, so it is in neither manifest.
+    $d = Find-DroppedFiles -PreviousPaths $was -CurrentPaths $now
+    C "a folder no package installed is untouchable" (
+        ($d.Dropped -notcontains "session-backup/session.json") -and
+        ($d.Dropped -notcontains "session/crow-session.bin") -and
+        ($d.Dropped -notcontains "notes.txt"))
 
-    # A protected list that swallows everything is the same failure wearing the
-    # opposite coat: it would report a clean install forever.
-    $e = Find-Extraneous -ManifestPaths $shipped -DiskPaths @("session/x.bin", "bin/stray.dll")
-    C "protection does not swallow a real stray"  ($e.Extraneous -contains "bin/stray.dll")
+    # Nothing dropped is a real answer and must not be confused with "nothing
+    # examined" -- hence the denominator on the quiet path too.
+    $d = Find-DroppedFiles -PreviousPaths $was -CurrentPaths $was
+    C "an unchanged package drops nothing"        ($d.Dropped.Count -eq 0 -and $d.Checked -eq 3)
 
-    # The manifest is written by PowerShell and read back by this, and the two
-    # do not agree on separators; NTFS does not agree on case with anyone.
-    $e = Find-Extraneous -ManifestPaths @("bin\llama.dll") -DiskPaths @("bin/LLAMA.dll")
-    C "separator and case do not invent a stray"  ($e.Extraneous.Count -eq 0)
+    # First install: no previous manifest exists, so there is nothing to remove.
+    # The dangerous reading of an empty list is "everything is dropped".
+    $d = Find-DroppedFiles -PreviousPaths @() -CurrentPaths $now
+    C "a first install drops nothing"             ($d.Dropped.Count -eq 0 -and $d.Checked -eq 0)
 
-    # Nothing in, nothing out -- but Checked must still be 0 rather than absent,
-    # because that zero is what tells a clean install from a run that looked in
-    # the wrong directory.
-    $e = Find-Extraneous -ManifestPaths $shipped -DiskPaths @()
-    C "an empty disk list checks zero, not null"  ($e.Extraneous.Count -eq 0 -and $e.Checked -eq 0)
+    # The manifest is written by one tool and read back by another, and the two
+    # do not agree on separators; NTFS does not agree on case with anyone. A
+    # mismatch here would delete a file that is still shipped.
+    $d = Find-DroppedFiles -PreviousPaths @("bin\llama.dll") -CurrentPaths @("bin/LLAMA.dll")
+    C "separator and case do not drop a kept file" ($d.Dropped.Count -eq 0)
+
+    # A path listed twice must be removed once, or the count reports work twice.
+    $d = Find-DroppedFiles -PreviousPaths @("a.dll", "a.dll") -CurrentPaths @()
+    C "a duplicate entry is dropped once"         ($d.Dropped.Count -eq 1)
 
     # Whose server is it. Both directions, because a rule that only ever says
     # yes renames a directory nothing is holding.
@@ -995,6 +1000,24 @@ if ($holder) {
     }
 }
 
+# Read BEFORE extraction: the archive overwrites MANIFEST.json, and after that
+# there is no record left of what the previous package put here. Without this the
+# removal step below has to guess from the directory contents, which is how it
+# deleted a user's own backup folder on 2026-08-10.
+$previousManifest = @()
+$prevPath = Join-Path $InstallTo "MANIFEST.json"
+if (Test-Path -LiteralPath $prevPath) {
+    try {
+        $previousManifest = @((Get-Content -LiteralPath $prevPath -Raw | ConvertFrom-Json) |
+                              ForEach-Object { $_.path })
+    } catch {
+        # A manifest we cannot read means we do not know what the last package
+        # left. Saying so and removing nothing is the only safe answer.
+        Write-Item "previous MANIFEST.json unreadable" "nothing will be removed this run" "warn"
+        $previousManifest = @()
+    }
+}
+
 try {
     $n = Expand-WithProgress -ZipPath $tmp -Destination $InstallTo
 } catch [System.IO.IOException] {
@@ -1059,28 +1082,31 @@ Write-Item "sha256 per file" "$($verdict.Checked) of $($verdict.Checked) match" 
 # file the package USED to ship and no longer does is invisible to it and stays
 # forever. Order matters and is the same as everywhere else here: the files were
 # written and read back first, and only a verified install gets anything deleted.
-$installed = @(Get-ChildItem -LiteralPath $InstallTo -Recurse -File -ErrorAction SilentlyContinue |
-               ForEach-Object { $_.FullName.Substring($InstallTo.Length).TrimStart('\', '/') })
-$dropped = Find-Extraneous -ManifestPaths $entries.Path -DiskPaths $installed
-foreach ($rel in $dropped.Extraneous) {
+#
+# Both lists are manifests, never a directory listing. A file this installer did
+# not put here is not in either one and cannot be selected -- which is the entire
+# difference to the version that deleted a user's backup folder.
+$drop = Find-DroppedFiles -PreviousPaths $previousManifest -CurrentPaths $entries.Path
+$targets = @($drop.Dropped | Where-Object { Test-Path -LiteralPath (Join-Path $InstallTo $_) })
+foreach ($rel in $targets) {
     Remove-Item -LiteralPath (Join-Path $InstallTo $rel) -Force -ErrorAction SilentlyContinue
 }
 # Counted by looking afterwards, not by counting what was found -- the same
 # lesson as Remove-StaleOld below: a locked or read-only file survives the call
 # without raising, and reporting it as removed prints a green line for work that
 # did not happen.
-$stillThere = @($dropped.Extraneous | Where-Object { Test-Path -LiteralPath (Join-Path $InstallTo $_) })
-$gone = $dropped.Extraneous.Count - $stillThere.Count
+$stillThere = @($targets | Where-Object { Test-Path -LiteralPath (Join-Path $InstallTo $_) })
+$gone = $targets.Count - $stillThere.Count
 if ($gone -gt 0) {
-    Write-Item "removed" "$gone files the package no longer ships, of $($dropped.Checked) checked" "ok"
+    Write-Item "removed" "$gone files the previous package left, of $($drop.Checked) it had installed" "ok"
 }
 if ($stillThere.Count -gt 0) {
-    Write-Item "could not remove" "$($stillThere.Count) of $($dropped.Extraneous.Count): $($stillThere -join ', ')" "warn"
+    Write-Item "could not remove" "$($stillThere.Count) of $($targets.Count): $($stillThere -join ', ')" "warn"
 }
-if ($dropped.Extraneous.Count -eq 0) {
+if ($targets.Count -eq 0) {
     # With the denominator, always. Without it this line is indistinguishable
-    # from a run that looked in the wrong directory and found nothing there.
-    Write-Item "nothing to remove" "$($dropped.Checked) files checked, $($dropped.Protected.Count) left alone" "ok"
+    # from a run that had no previous manifest to compare against at all.
+    Write-Item "nothing to remove" "$($drop.Checked) files the previous package installed are all still shipped" "ok"
 }
 
 # The .old files from the rename above. The ones the running server still has
