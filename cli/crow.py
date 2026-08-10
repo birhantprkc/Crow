@@ -217,19 +217,21 @@ _TOKENS = re.compile(
 
 # The wordmark, drawn rather than typed: no terminal lets a program pick a
 # display face, so a banner that should look like anything has to be built out
-# of cells. Block elements, not ASCII - measured 2026-08-07, U+2580-259F is
-# 32 of 32 in both the bundled Google Sans Code and Cascadia Mono. The shade
-# character carries the bevel; painted in a darker blue it reads as depth.
+# of cells. Block elements and box drawing, not ASCII - measured 2026-08-10 from
+# the bundled Google Sans Code's cmap, U+2580-259F is 32 of 32 and U+2500-257F
+# is 128 of 128, against Cascadia Mono's 32 of 32 and 128 of 128 as a control.
+# The face is the full block; the shadow outline carries the bevel, and painted
+# in a darker blue it reads as depth.
 #
-# BANNER_ACCENT is the shade cell, so the caller can colour the two apart.
-BANNER_SHADE = "▓"
+# BANNER_SHADE holds every shadow cell, so the caller can colour the two apart.
+BANNER_SHADE = "═║╔╗╚╝"
 BANNER = """
-    ██████  ███████   ██████  ██    ██
-   ██▓▓▓▓██ ██▓▓▓▓██ ██▓▓▓▓██ ██▓   ██
-   ██▓    ▓▓███████▓▓██▓   ██▓██▓   ██
-   ██▓      ██▓▓██▓▓ ██▓   ██▓██▓ ████
-   ██▓   ██ ██▓  ██  ██▓   ██▓████████
-    ██████▓▓██▓   ██  ██████▓▓███▓▓███
+    ██████╗██████╗  ██████╗ ██╗    ██╗
+   ██╔════╝██╔══██╗██╔═══██╗██║    ██║
+   ██║     ██████╔╝██║   ██║██║ █╗ ██║
+   ██║     ██╔══██╗██║   ██║██║███╗██║
+   ╚██████╗██║  ██║╚██████╔╝╚███╔███╔╝
+    ╚═════╝╚═╝  ╚═╝ ╚═════╝  ╚══╝╚══╝
    {version}
 """
 
@@ -238,7 +240,10 @@ def paint_banner(text: str) -> str:
     """Two blues: the face in the wordmark colour, the bevel a few steps down."""
     if not _TTY:
         return text
-    shaded = text.replace(BANNER_SHADE, f"{BANNER_BEVEL}{BANNER_SHADE}{CROW_ACCENT}")
+    shaded = "".join(
+        f"{BANNER_BEVEL}{ch}{CROW_ACCENT}" if ch in BANNER_SHADE else ch
+        for ch in text
+    )
     return f"{CROW_ACCENT}{shaded}{RESET}"
 
 # A quarter block travelling the corners: one cell, four frames, and it reads

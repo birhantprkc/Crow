@@ -653,21 +653,25 @@ class RavenTests(unittest.TestCase):
         self.assertLessEqual(len(widths), 2, f"wordmark is ragged: {sorted(widths)}")
 
     def test_banner_uses_only_covered_glyphs(self):
-        """Every non-ASCII cell in the wordmark must sit in the block elements,
-        which the bundled font covers 32 of 32. A character outside that range
-        would fall back to another face and break the alignment."""
+        """Every non-ASCII cell in the wordmark must sit in the box drawing or
+        the block elements, which the bundled font covers 128 of 128 and 32 of
+        32 - measured 2026-08-10 from its cmap, against Cascadia Mono as a
+        control. A character outside that range would fall back to another face
+        and break the alignment."""
         for ch in crow.BANNER:
             if ord(ch) > 127:
-                self.assertTrue(0x2580 <= ord(ch) <= 0x259F,
-                                f"U+{ord(ch):04X} is outside the block elements")
+                self.assertTrue(0x2500 <= ord(ch) <= 0x259F,
+                                f"U+{ord(ch):04X} is outside the covered range")
 
     def test_bevel_is_painted_apart_from_the_face(self):
         """Positive control for paint_banner: without a separate colour on the
-        shade cell the wordmark is flat, and the test would not notice."""
+        shadow cells the wordmark is flat, and the test would not notice."""
         painted = crow.paint_banner(crow.BANNER)
         if crow._TTY:
             self.assertIn(crow.BANNER_BEVEL, painted)
-        self.assertIn(crow.BANNER_SHADE, painted)
+        for ch in crow.BANNER_SHADE:
+            self.assertIn(f"{crow.BANNER_BEVEL}{ch}" if crow._TTY else ch, painted,
+                          f"shadow cell {ch!r} is not painted apart from the face")
 
 
 class ParserTests(unittest.TestCase):

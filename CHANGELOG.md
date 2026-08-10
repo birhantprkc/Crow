@@ -28,6 +28,12 @@ against the baseline's 1.09x — the band is indicative, the direction clears th
 
 ### Changed
 
+- **New wordmark.** The banner is drawn in full blocks with a box-drawing shadow instead of
+  the shaded bevel. Both ranges are covered by the bundled Google Sans Code — measured
+  2026-08-10 from its cmap: U+2500–257F is 128 of 128 and U+2580–259F is 32 of 32, against
+  Cascadia Mono at the same counts as a control. A glyph outside them falls back to another
+  face and the columns stop lining up, which is why the covered range is a test and not a
+  comment.
 - **Model: `unsloth/DeepSeek-V4-Flash-0731-GGUF`, UD-IQ3_XXS, 97.1 GiB.** Identical
   architecture (43 layers, 256 experts, top-6). 378,208,256 B per expert — 288 MiB more
   than the preview at 64 slots, inside the measured 599 MiB of headroom (311 MiB left).
