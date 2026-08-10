@@ -255,16 +255,46 @@ def main() -> int:
         os.makedirs(app_budget)
         _turn[0] = 0
         TOOL_DIR[0] = app_budget
-        TOOL_ROUNDS[0] = 5
+        TOOL_ROUNDS[0] = 2          # round 0 calls, round 1 calls, round 2 answers
         try:
             capped = run_cli(port, app_budget, ["keep calling tools"],
                              "--rollover-at", "0", "--max-tool-rounds", "1").stdout
         finally:
             TOOL_ROUNDS[0] = 0
-        check("stopped after 1 tool rounds" in capped,
+        check("budget spent after 1 rounds" in capped,
               "--max-tool-rounds is what decides, not the constant")
         check("--max-tool-rounds" in capped,
               "and the message names the flag that raises it")
+        # The point of the forced round: a spent budget ends in an answer, not
+        # in a bracket. Driven live with 0 rounds it produced 102 tokens of
+        # reasoning and nothing the user could read.
+        check("reply 2" in capped,
+              "a spent budget still ends in an answer, not a bare bracket")
+
+        # --- and the forced round must not leave a dangling call ---------------
+        app_dangle = os.path.join(root, "f")
+        os.makedirs(app_dangle)
+        _turn[0] = 0
+        TOOL_DIR[0] = app_dangle
+        TOOL_ROUNDS[0] = 3          # the forced round ALSO asks for a tool
+        try:
+            run_cli(port, app_dangle, ["keep calling tools"],
+                    "--rollover-at", "0", "--max-tool-rounds", "1")
+        finally:
+            TOOL_ROUNDS[0] = 0
+        live = sessions(app_dangle) / "session.json"
+        if live.exists():
+            msgs = json.loads(live.read_text(encoding="utf-8"))["messages"]
+            check(not (msgs[-1].get("role") == "assistant" and msgs[-1].get("tool_calls")),
+                  "the forced round's tool calls are dropped, not appended")
+            # THE INVARIANT. An assistant turn carrying tool_calls must be
+            # followed by a tool message, or the history is broken for every
+            # later turn of the session.
+            dangling = [i for i, m in enumerate(msgs)
+                        if m.get("role") == "assistant" and m.get("tool_calls")
+                        and (i + 1 >= len(msgs) or msgs[i + 1].get("role") != "tool")]
+            check(not dangling,
+                  f"no assistant turn is left with unanswered calls (found {len(dangling)})")
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)

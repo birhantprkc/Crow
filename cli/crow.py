@@ -544,6 +544,16 @@ def resume_path(name: str) -> str:
 # said nothing about where the work had got to, so the model guessed two
 # directories that do not exist and scanned a user profile before it read
 # anything at all.
+# What the turn is told when its tool budget runs out. A user turn rather than a
+# system one: the system prompt is byte 0 of the prefix, and editing it mid-turn
+# would re-read the whole conversation to say one sentence.
+BUDGET_SPENT = (
+    "[The tool budget for this turn is spent -- no further calls will be run. "
+    "Answer now from what you already have: what you found, what you did not get "
+    "to, and what the next step would be. Do not ask for another tool.]"
+)
+
+
 ROLLOVER_NOTE = (
     "[The conversation up to this point reached {tokens} tokens and was archived.\n"
     "Transcript: {transcript} -- {lines} lines, oldest first, so read the END of it "
@@ -2222,7 +2232,11 @@ def repl(args: argparse.Namespace) -> int:
         _SEEN.clear()
         stopped = False
         budget = args.max_tool_rounds
-        for round_no in range(budget + 1):
+        # One iteration past the budget, for the forced answer. It is not a tool
+        # round -- its calls are discarded -- so it does not quietly hand out a
+        # round more than was asked for.
+        forced = False
+        for round_no in range(budget + 2):
             try:
                 reply, reasoning, timings = stream_reply(
                     conversation,
@@ -2254,7 +2268,18 @@ def repl(args: argparse.Namespace) -> int:
                 break
 
             calls = timings.get("_tool_calls") or []
-            conversation.append("assistant", reply, reasoning, tool_calls=calls)
+            # CALLS THAT WILL NEVER RUN ARE NOT APPENDED, and that is not
+            # tidiness. An assistant turn whose tool_calls have no `tool` message
+            # behind them is a broken prefix for every later turn of the session.
+            #
+            # Two rounds are in that position, and missing the first one is a
+            # mistake the probe caught: the round that SPENDS the budget, whose
+            # calls are refused, and the forced round after it, whose calls are
+            # discarded. Keeping the text and losing the calls is the only shape
+            # that stays valid.
+            unanswerable = forced or (bool(calls) and round_no >= budget)
+            conversation.append("assistant", reply, reasoning,
+                                tool_calls=None if unanswerable else calls)
             context_tokens = next_context_tokens(context_tokens, timings)
             line_out = format_timings(timings)
             print(f"\n\n[{line_out}]\n" if line_out else "\n")
@@ -2271,19 +2296,22 @@ def repl(args: argparse.Namespace) -> int:
                     print(f"{DIM}[the restored cache did not hold -- that prefill was the whole "
                           f"conversation, not a resume]{RESET}\n")
 
-            if not calls:
+            if forced or not calls:
                 break
 
-            # Named rather than silent. A tool that runs invisibly makes the
-            # wait look like the model being slow, and at ~10 tok/s the user is
-            # staring at that wait for minutes.
-            if round_no == budget:
-                # Named with the flag that changes it. "[stopped after 24 tool
-                # rounds]" leaves the reader looking for a knob that was not
-                # mentioned -- and until 2026-08-10 there was none to find.
-                print(f"{DIM}[stopped after {budget} tool rounds -- "
-                      f"--max-tool-rounds raises it]{RESET}\n")
-                break
+            # THE BUDGET BUYS TOOL ROUNDS, NOT THE TURN. Until 2026-08-10 this
+            # was a bare `break`, and a turn that ran out ended on a bracket:
+            # driven live with --max-tool-rounds 0 the model produced 102 tokens,
+            # `thinking 100%`, and the user was shown nothing at all -- the reply
+            # was a tool request that would never run. One more round, with the
+            # tools still declared so the prompt cache holds (#60), spends what
+            # is left on saying where things stood.
+            if round_no >= budget:
+                print(f"{DIM}[tool budget spent after {budget} rounds -- answering from what it "
+                      f"has; --max-tool-rounds raises it]{RESET}\n")
+                conversation.append("user", BUDGET_SPENT)
+                forced = True
+                continue
             for call in calls:
                 arg_note = format_tool_args(call["arguments"])
                 result, repeated = run_tool_cached(call["name"], call["arguments"])

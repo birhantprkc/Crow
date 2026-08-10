@@ -189,7 +189,7 @@ plain read, where colour is off anyway.
 | `--system` | replace the system prompt, `--no-system` removes it |
 | `--temperature` | default **0.6**, see below |
 | `--rollover-at` | archive and start fresh at this share of the window, `0` switches it off (default **0.9**) |
-| `--max-tool-rounds` | how many tool rounds one turn may take before it stops (default **24**) |
+| `--max-tool-rounds` | how many tool rounds one turn may take before it answers from what it has (default **24**) |
 | `--resume FILE` | resume a named session file — an archive left by a rollover; a bare name is looked for among the session files |
 | `--no-font`, `--no-background` | leave the terminal profile alone |
 
