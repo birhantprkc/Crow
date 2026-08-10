@@ -57,6 +57,12 @@ param(
     [string[]] $Only     = @(),
     # Tasks for a throwaway first pass, on a fresh server. Must not overlap $Only.
     [string[]] $Warm     = @(),
+    # Passed through to probe-suite when set. Empty inherits probe-suite's default,
+    # which since 2026-08-10 is the MANIFEST's value -- 1.0, the 0731 operating
+    # point. A before-side run against the old model must pin 0.6 explicitly, or
+    # the comparison measures the sampling change and the model change in one
+    # number (manifests/operating-point.json, _measurement_note).
+    [string]  $Temperature = '',
     [string]  $Python    = 'python',
     [string]  $OutRoot   = '',
     [switch]  $Selftest
@@ -228,10 +234,13 @@ $suite = Join-Path $CROW 'tools\probe-suite.py'
 # graded task pays the whole cold cost of the run - the model file, the VRAM slots and, since
 # 2026-08-09, a 32 GiB host tier that starts empty. Its output is written to a separate directory
 # and never read.
+$tempArgs = @()
+if ($Temperature -ne '') { $tempArgs = @('--temperature', $Temperature); Say ("temperature pinned to {0}" -f $Temperature) }
+
 if ($Warm.Count -gt 0) {
     Say ("warm-up (not graded): {0}" -f ($Warm -join ' '))
     & $Python $suite run --url "http://127.0.0.1:$Port" --out "$outDir-warm" `
-        --max-tokens $MaxTokens --timeout $TimeoutSec --only @Warm | Out-Null
+        --max-tokens $MaxTokens --timeout $TimeoutSec @tempArgs --only @Warm | Out-Null
     Say ("warm-up exit {0}" -f $LASTEXITCODE)
 }
 
@@ -241,9 +250,9 @@ Say ("running {0}" -f $suite)
 # state IS the thing under test. Vault: der-betriebspunkt-ist-200k-kontext-auf-einem-slot.
 if ($Only.Count -gt 0) {
     Say ("graded tasks: {0}" -f ($Only -join ' '))
-    & $Python $suite run --url "http://127.0.0.1:$Port" --out $outDir --max-tokens $MaxTokens --timeout $TimeoutSec --only @Only
+    & $Python $suite run --url "http://127.0.0.1:$Port" --out $outDir --max-tokens $MaxTokens --timeout $TimeoutSec @tempArgs --only @Only
 } else {
-    & $Python $suite run --url "http://127.0.0.1:$Port" --out $outDir --max-tokens $MaxTokens --timeout $TimeoutSec
+    & $Python $suite run --url "http://127.0.0.1:$Port" --out $outDir --max-tokens $MaxTokens --timeout $TimeoutSec @tempArgs
 }
 $gateExit = $LASTEXITCODE
 Say ("probe-suite exit {0}" -f $gateExit)
@@ -265,6 +274,9 @@ Say ("  server error lines           {0}" -f $pl.error_lines)
 
 $summary = [pscustomobject]@{
     label = $Label; flags = $Flags; cmd = ('"{0}" {1}' -f $Exe, ($srvArgs -join ' '))
+    # '' means probe-suite's manifest default was inherited. A summary that does
+    # not say which temperature graded the run cannot be compared to anything.
+    temperature = $Temperature
     exe = $Exe; sha_exe = (Get-FileHash $Exe -Algorithm SHA256).Hash
     model = $Model; ctx = $Ctx; ngl = $Ngl; max_tokens = $MaxTokens
     gate_exit = $gateExit; out_dir = $outDir; log = $logPath
