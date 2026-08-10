@@ -247,6 +247,24 @@ def main() -> int:
               "a turn that fills the window twice stops instead of looping")
         check(len(list(sessions(app_twice).glob("rollover-*.json"))) == 1,
               "and it leaves ONE archive behind, not one per pass")
+
+        # --- the tool budget is a knob, not a constant --------------------------
+        # Rollover switched off here so the two limits cannot be confused for
+        # each other: this checks the round budget and nothing else.
+        app_budget = os.path.join(root, "e")
+        os.makedirs(app_budget)
+        _turn[0] = 0
+        TOOL_DIR[0] = app_budget
+        TOOL_ROUNDS[0] = 5
+        try:
+            capped = run_cli(port, app_budget, ["keep calling tools"],
+                             "--rollover-at", "0", "--max-tool-rounds", "1").stdout
+        finally:
+            TOOL_ROUNDS[0] = 0
+        check("stopped after 1 tool rounds" in capped,
+              "--max-tool-rounds is what decides, not the constant")
+        check("--max-tool-rounds" in capped,
+              "and the message names the flag that raises it")
     finally:
         server.shutdown()
         shutil.rmtree(root, ignore_errors=True)

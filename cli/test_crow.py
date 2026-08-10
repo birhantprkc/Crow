@@ -1602,6 +1602,20 @@ class RolloverWiringTests(unittest.TestCase):
         args = crow.build_parser().parse_args(["--resume", "rollover-1.json"])
         self.assertEqual(args.resume, "rollover-1.json")
 
+    def test_max_tool_rounds_defaults_to_the_constant(self):
+        self.assertEqual(crow.build_parser().parse_args([]).max_tool_rounds,
+                         crow.MAX_TOOL_ROUNDS)
+
+    def test_max_tool_rounds_can_be_raised(self):
+        self.assertEqual(
+            crow.build_parser().parse_args(["--max-tool-rounds", "60"]).max_tool_rounds, 60)
+
+    def test_max_tool_rounds_is_a_number_not_a_string(self):
+        """range() takes an int. A string default would fail at the first turn,
+        which is the worst place to find out."""
+        self.assertIsInstance(
+            crow.build_parser().parse_args(["--max-tool-rounds", "3"]).max_tool_rounds, int)
+
     def test_no_session_did_not_become_a_path(self):
         """--no-session stays a switch; --resume is the one that takes a name."""
         args = crow.build_parser().parse_args(["--no-session"])

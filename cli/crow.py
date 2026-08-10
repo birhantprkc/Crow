@@ -2221,7 +2221,8 @@ def repl(args: argparse.Namespace) -> int:
         # which is why the loop is affordable at all.
         _SEEN.clear()
         stopped = False
-        for round_no in range(MAX_TOOL_ROUNDS + 1):
+        budget = args.max_tool_rounds
+        for round_no in range(budget + 1):
             try:
                 reply, reasoning, timings = stream_reply(
                     conversation,
@@ -2276,8 +2277,12 @@ def repl(args: argparse.Namespace) -> int:
             # Named rather than silent. A tool that runs invisibly makes the
             # wait look like the model being slow, and at ~10 tok/s the user is
             # staring at that wait for minutes.
-            if round_no == MAX_TOOL_ROUNDS:
-                print(f"{DIM}[stopped after {MAX_TOOL_ROUNDS} tool rounds]{RESET}\n")
+            if round_no == budget:
+                # Named with the flag that changes it. "[stopped after 24 tool
+                # rounds]" leaves the reader looking for a knob that was not
+                # mentioned -- and until 2026-08-10 there was none to find.
+                print(f"{DIM}[stopped after {budget} tool rounds -- "
+                      f"--max-tool-rounds raises it]{RESET}\n")
                 break
             for call in calls:
                 arg_note = format_tool_args(call["arguments"])
@@ -2580,6 +2585,14 @@ def build_parser() -> argparse.ArgumentParser:
                         metavar="SHARE",
                         help="archive the conversation and start a fresh one at this share of"
                              f" the window, 0 to switch it off (default: {ROLLOVER_AT})")
+    # Raising this raises what ONE turn can add to the window: 24 rounds were
+    # measured on 2026-08-10 growing a turn by 28,900 tokens, which is more than
+    # the 20,000 that --rollover-at 0.9 leaves between the threshold and the
+    # wall. The two settings are one setting with two names.
+    parser.add_argument("--max-tool-rounds", dest="max_tool_rounds", type=int,
+                        default=MAX_TOOL_ROUNDS, metavar="N",
+                        help="how many tool rounds one turn may take before it stops"
+                             f" (default: {MAX_TOOL_ROUNDS}, 0 answers without running any)")
     return parser
 
 
