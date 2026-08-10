@@ -1354,6 +1354,41 @@ class RolloverTests(unittest.TestCase):
         self.assertIn(self._archive(), note)
         self.assertIn("180000", note)
 
+    def test_a_readable_transcript_is_written_beside_the_json(self):
+        c = self._conversation()
+        crow.roll_over(c, "http://x/v1", 180_000, path=self._archive())
+        self.assertTrue(os.path.exists(self._archive()[:-5] + ".md"))
+
+    def test_the_note_points_at_the_transcript_with_its_line_count(self):
+        """The JSON is unreachable through read_file's cap; the note has to send
+        the reader somewhere that is not."""
+        c = self._conversation()
+        crow.roll_over(c, "http://x/v1", 180_000, path=self._archive())
+        note = c.payload()[1]["content"]
+        self.assertIn(self._archive()[:-5] + ".md", note)
+        self.assertIn("lines", note)
+
+    def test_the_note_says_where_the_work_had_got_to(self):
+        c = crow.Conversation("system prompt")
+        c.append("user", "look at the installer")
+        c.append("assistant", "", tool_calls=[
+            {"id": "1", "name": "read_file", "arguments": '{"path": "C:/Crow/install.ps1"}'}])
+        c.append("tool", "...", tool_call_id="1")
+        crow.roll_over(c, "http://x/v1", 180_000, path=self._archive())
+        self.assertIn("C:/Crow/install.ps1", c.payload()[1]["content"])
+
+    def test_a_conversation_without_tools_gets_no_empty_where_line(self):
+        """The case that must fail if the line is printed unconditionally."""
+        c = self._conversation()
+        crow.roll_over(c, "http://x/v1", 180_000, path=self._archive())
+        self.assertNotIn("Last worked on:", c.payload()[1]["content"])
+
+    def test_the_archive_json_is_no_longer_one_line(self):
+        c = self._conversation()
+        crow.roll_over(c, "http://x/v1", 180_000, path=self._archive())
+        text = Path(self._archive()).read_text(encoding="utf-8")
+        self.assertGreater(text.count("\n"), 4)
+
     def test_the_carried_turn_shares_one_message_with_the_note(self):
         """Two user messages in a row are merged or refused depending on the
         template, and 180k tokens in is the wrong place to discover which."""
@@ -1382,6 +1417,155 @@ class RolloverTests(unittest.TestCase):
     def test_two_rollovers_do_not_share_a_file(self):
         self.assertNotEqual(crow.rollover_path("20260810-074500"),
                             crow.rollover_path("20260810-074501"))
+
+
+class TranscriptTests(unittest.TestCase):
+    """The archive a model pointed at it can actually read."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = str(Path(self.dir) / "t.md")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _conversation(self):
+        c = crow.Conversation("system prompt")
+        c.append("user", "where is the installer")
+        c.append("assistant", "looking", reasoning="a long private deliberation",
+                 tool_calls=[{"id": "1", "name": "list_dir",
+                              "arguments": '{"path": "C:/x"}'}])
+        c.append("tool", "install.ps1", tool_call_id="1")
+        return c
+
+    def test_it_has_lines_which_is_the_entire_point(self):
+        """THE DEFECT THIS EXISTS FOR: json.dump writes ONE line. A 104,618-byte
+        archive on one line is unreachable through read_file's byte cap."""
+        lines = crow.write_transcript(self._conversation(), self.path)
+        self.assertGreater(lines, 4)
+        self.assertGreater(Path(self.path).read_text(encoding="utf-8").count("\n"), 4)
+
+    def test_the_reported_line_count_matches_the_file(self):
+        lines = crow.write_transcript(self._conversation(), self.path)
+        text = Path(self.path).read_text(encoding="utf-8")
+        self.assertEqual(lines, text.count("\n") + 1)
+
+    def test_reasoning_is_left_out(self):
+        """The case that must fail if the transcript ever just dumps messages:
+        reasoning is the bulk of the bytes and none of the recall."""
+        crow.write_transcript(self._conversation(), self.path)
+        self.assertNotIn("a long private deliberation",
+                         Path(self.path).read_text(encoding="utf-8"))
+
+    def test_tool_calls_are_visible(self):
+        crow.write_transcript(self._conversation(), self.path)
+        text = Path(self.path).read_text(encoding="utf-8")
+        self.assertIn("list_dir", text)
+        self.assertIn("install.ps1", text)
+
+
+class RecentPathsTests(unittest.TestCase):
+    """Where the archived conversation had got to."""
+
+    def _with(self, *calls):
+        c = crow.Conversation("s")
+        for i, args in enumerate(calls):
+            c.append("assistant", "", tool_calls=[
+                {"id": str(i), "name": "read_file", "arguments": args}])
+        return c
+
+    def test_paths_and_roots_are_both_collected(self):
+        c = self._with('{"path": "C:/a"}', '{"root": "C:/b"}')
+        self.assertEqual(crow.recent_paths(c), ["C:/a", "C:/b"])
+
+    def test_the_newest_wins_and_nothing_repeats(self):
+        c = self._with('{"path": "C:/a"}', '{"path": "C:/b"}', '{"path": "C:/a"}')
+        self.assertEqual(crow.recent_paths(c), ["C:/b", "C:/a"])
+
+    def test_only_the_last_few_are_kept(self):
+        c = self._with(*[f'{{"path": "C:/{i}"}}' for i in range(9)])
+        self.assertEqual(crow.recent_paths(c, limit=3), ["C:/6", "C:/7", "C:/8"])
+
+    def test_a_conversation_without_tools_yields_nothing(self):
+        """The case that must fail if this ever starts inventing paths."""
+        c = crow.Conversation("s")
+        c.append("user", "hello")
+        self.assertEqual(crow.recent_paths(c), [])
+
+    def test_unparseable_arguments_are_skipped_rather_than_fatal(self):
+        c = self._with("not json at all", '{"path": "C:/ok"}')
+        self.assertEqual(crow.recent_paths(c), ["C:/ok"])
+
+
+class WarmCacheClaimTests(unittest.TestCase):
+    """A 200 says the file was read. It does not say the cache is ours."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self._real_dir, self._real_file = crow.SESSION_DIR, crow.SESSION_FILE
+        self._real_post = crow.post_json
+        crow.SESSION_DIR = self.dir
+        crow.SESSION_FILE = str(Path(self.dir) / "session.json")
+
+    def tearDown(self):
+        crow.SESSION_DIR, crow.SESSION_FILE = self._real_dir, self._real_file
+        crow.post_json = self._real_post
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _write(self, kv_tokens):
+        with open(crow.SESSION_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"version": crow.VERSION, "kv": True, "kv_tokens": kv_tokens,
+                       "context_tokens": 21004,
+                       "prefix": crow.prefix_fingerprint(None),
+                       "messages": [{"role": "user", "content": "hi"}]}, fh)
+
+    def _stored_kv(self):
+        with open(crow.SESSION_FILE, encoding="utf-8") as fh:
+            return json.load(fh)["kv"]
+
+    def test_a_save_records_what_the_server_wrote(self):
+        crow.post_json = lambda *a, **k: {"n_saved": 4242}
+        c = crow.Conversation("s")
+        c.append("user", "hi")
+        crow.save_session(c, "http://x/v1", 99)
+        with open(crow.SESSION_FILE, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["kv_tokens"], 4242)
+
+    def test_a_matching_restore_keeps_the_claim(self):
+        self._write(kv_tokens=21004)
+        crow.post_json = lambda *a, **k: {"n_restored": 21004}
+        self.assertTrue(crow.load_session("http://x/v1")[2])
+
+    def test_a_restore_of_the_wrong_size_withdraws_it(self):
+        """THE MEASURED CASE, 2026-08-10: 'cache warm' followed by cached 0/21004."""
+        self._write(kv_tokens=21004)
+        crow.post_json = lambda *a, **k: {"n_restored": 7}
+        self.assertFalse(crow.load_session("http://x/v1")[2])
+
+    def test_a_restore_of_nothing_withdraws_it(self):
+        self._write(kv_tokens=21004)
+        crow.post_json = lambda *a, **k: {"n_restored": 0}
+        self.assertFalse(crow.load_session("http://x/v1")[2])
+
+    def test_a_withdrawn_claim_is_written_back(self):
+        """Otherwise the same false promise is made on every start."""
+        self._write(kv_tokens=21004)
+        crow.post_json = lambda *a, **k: {"n_restored": 7}
+        crow.load_session("http://x/v1")
+        self.assertFalse(self._stored_kv())
+
+    def test_a_server_that_says_nothing_is_still_believed(self):
+        """Silence is not a contradiction -- refusing here would reject a good
+        cache on every endpoint that does not report the field."""
+        self._write(kv_tokens=21004)
+        crow.post_json = lambda *a, **k: {}
+        self.assertTrue(crow.load_session("http://x/v1")[2])
+
+    def test_an_old_session_without_the_field_is_still_believed(self):
+        """Sessions written before kv_tokens existed carry no expectation."""
+        self._write(kv_tokens=0)
+        crow.post_json = lambda *a, **k: {"n_restored": 21004}
+        self.assertTrue(crow.load_session("http://x/v1")[2])
 
 
 class ResumePathTests(unittest.TestCase):

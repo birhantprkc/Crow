@@ -196,8 +196,18 @@ plain read, where colour is off anyway.
 **The window rolls over instead of hitting the wall.** The server's limit is not
 a slope: a request that arrives at or past `n_ctx` is refused outright, and the
 turn is lost with it. At 90 % of the window Crow writes the conversation out to
-`rollover-<stamp>.json`, empties it, and opens the next one with a note naming
-that file. The model has `read_file`, so the pointer is one it can follow.
+`rollover-<stamp>.json` **and `rollover-<stamp>.md`**, empties it, and opens the
+next one with a note naming the transcript, its line count, and the paths the
+work had reached. The model has `read_file`, so the pointer is one it can follow.
+
+Each of those three came from watching it fail. Driven live on 2026-08-10 at the
+operating point, the first version pointed only at the JSON — which `json.dump`
+writes as **one 104,618-byte line**, so `read_file`'s 16 KB cap could only ever
+show the first 15 % of it, cut mid-field, from the oldest end. And it said
+nothing about where the work had got to. The model guessed a directory that does
+not exist, scanned a whole user profile twice, and spent **402 s across seven
+tool rounds** before it read the archive at all. Hence the transcript, the line
+count, and `Last worked on:`.
 
 This does not break append-only. Nothing is edited inside a prefix that is still
 in use — the old context is written out whole and dropped whole, and what
@@ -215,6 +225,22 @@ its messages and pays a prefill, which is the honest price.
 
 If the server will not say how large the window is, `n_ctx` is 0 and the
 rollover stays off — `0.9 × 0` would otherwise be a threshold every turn crosses.
+
+<a id="a-resumed-cache-is-checked-not-announced"></a>
+**A resumed cache is checked, not announced.** `POST /slots/0?action=restore`
+returning 200 means the file was read, not that the slot now holds the prefix
+about to be sent. Measured 2026-08-10: a start that printed `cache warm` was
+followed by `cached 0/21004` and **469.51 s to the first token** — a full
+re-prefill of a conversation the client had just promised was cached, with
+nothing in between admitting it.
+
+Two checks now stand between that promise and the user. The save records the
+server's own `n_saved`; the restore compares it against `n_restored` and
+withdraws the claim when the numbers disagree. And because a number can agree
+while the cache still does not match, the first turn settles it for good: if the
+start said `cache warm` and that turn comes back with `cached 0`, Crow says so
+in one line instead of leaving eight minutes unexplained. A server that reports
+neither figure is believed — silence is not a contradiction.
 
 Four properties come from measurements rather than taste:
 

@@ -303,8 +303,70 @@ def prefix_fingerprint(system: str | None) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
+def write_transcript(conversation: "Conversation", path: str) -> int:
+    """The archive as plain text, for whoever has to read it back.
+
+    THE JSON BESIDE THIS CANNOT BE READ BY THE MODEL THAT IS POINTED AT IT.
+    json.dump writes one line; a rollover archive measured 104,618 bytes on that
+    single line, and read_file caps at MAX_TOOL_BYTES. So the model sees the
+    first 15 % of it, cut mid-field into invalid JSON, from the OLDEST end --
+    the part that helps least when the question is "where was I".
+
+    This file has lines, so a range works, and it leaves `reasoning_content`
+    out: that is the bulk of the bytes and none of the recall.
+
+    Returns the line count, which goes into the note so the reader can jump to
+    the end rather than start at the beginning.
+    """
+    out = []
+    for message in conversation.payload():
+        role = message.get("role", "?")
+        body = (message.get("content") or "").strip()
+        out.append(f"## {role}")
+        if body:
+            out.append(body)
+        for call in message.get("tool_calls") or []:
+            fn = call.get("function") or {}
+            out.append(f"[tool call] {fn.get('name')}({fn.get('arguments')})")
+        out.append("")
+    text = "\n".join(out)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return text.count("\n") + 1
+
+
+def recent_paths(conversation: "Conversation", limit: int = 4) -> list[str]:
+    """The files and directories the archived conversation had reached.
+
+    A pointer tells the model where the past IS. It does not tell it where the
+    past had got TO, and that is the part it needs first. Measured 2026-08-10 on
+    a live rollover: the model guessed two directories that do not exist and
+    scanned a whole user profile before it read the archive at all.
+
+    Newest last, deduplicated, because the last few are the ones in play.
+    """
+    seen: list[str] = []
+    for message in conversation.payload():
+        for call in message.get("tool_calls") or []:
+            raw = (call.get("function") or {}).get("arguments") or "{}"
+            try:
+                args = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(args, dict):
+                continue
+            for key in ("path", "root"):
+                value = args.get(key)
+                if isinstance(value, str) and value:
+                    if value in seen:
+                        seen.remove(value)
+                    seen.append(value)
+    return seen[-limit:]
+
+
 def save_session(conversation: "Conversation", base_url: str, context_tokens: int,
-                 path: str | None = None, with_kv: bool = True) -> str | None:
+                 path: str | None = None, with_kv: bool = True,
+                 pretty: bool = False) -> str | None:
     """Write the session so the next start does not pay for it again.
 
     TWO HALVES, AND NEITHER IS ENOUGH ALONE. The server holds the KV cache; the
@@ -333,20 +395,26 @@ def save_session(conversation: "Conversation", base_url: str, context_tokens: in
     path = path or SESSION_FILE
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     saved_kv = False
+    kv_tokens = 0
     if with_kv:
         try:
-            post_json(f"{base_url.rstrip('/').removesuffix('/v1')}/slots/0?action=save",
-                      {"filename": SLOT_FILE}, timeout=600.0)
+            reply = post_json(f"{base_url.rstrip('/').removesuffix('/v1')}/slots/0?action=save",
+                              {"filename": SLOT_FILE}, timeout=600.0)
             saved_kv = True
+            # The server says how many tokens it wrote. Kept so the restore has
+            # something to check itself against -- see load_session.
+            kv_tokens = int((reply or {}).get("n_saved") or 0)
         except Exception:
             # A server without --slot-save-path refuses this. The messages are still
             # worth keeping; the next start just pays a prefill for them.
             pass
 
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump({"version": VERSION, "kv": saved_kv, "context_tokens": context_tokens,
+        json.dump({"version": VERSION, "kv": saved_kv, "kv_tokens": kv_tokens,
+                   "context_tokens": context_tokens,
                    "prefix": prefix_fingerprint(conversation.system),
-                   "messages": conversation.payload()}, fh)
+                   "messages": conversation.payload()},
+                  fh, indent=1 if pretty else None)
 
     if saved_kv:
         return f"session saved -- {len(conversation)} messages and the server's cache"
@@ -390,22 +458,45 @@ def load_session(base_url: str, system: str | None = None,
     kv = False
     if saved.get("kv") and saved.get("prefix") == prefix_fingerprint(system):
         try:
-            post_json(f"{base_url.rstrip('/').removesuffix('/v1')}/slots/0?action=restore",
-                      {"filename": SLOT_FILE}, timeout=600.0)
-            kv = True
+            reply = post_json(f"{base_url.rstrip('/').removesuffix('/v1')}/slots/0?action=restore",
+                              {"filename": SLOT_FILE}, timeout=600.0)
+            # A 200 SAYS THE FILE WAS READ, NOT THAT THE CACHE IS THE ONE WE
+            # SAVED. The server reports how many tokens went back into the slot;
+            # if that is not the number that came out, the slot holds something
+            # else and the promise of a warm cache is already false here.
+            # Measured 2026-08-10: "resumed: 36 messages, cache warm" was
+            # followed by `cached 0/21004` and 469.51 s to the first token.
+            #
+            # SILENCE IS NOT A CONTRADICTION. An endpoint that does not report
+            # n_restored has told us nothing, and treating that as a failure
+            # would refuse a perfectly good cache on every server but this one.
+            # The claim is only withdrawn when the server states a number and
+            # the number disagrees.
+            restored = (reply or {}).get("n_restored")
+            expected = int(saved.get("kv_tokens") or 0)
+            if restored is None:
+                kv = True
+            else:
+                kv = int(restored) > 0 and (expected == 0 or int(restored) == expected)
         except Exception:
             kv = False
-            # The claim is now known to be false, so it is withdrawn. Without this the same
-            # request goes out on every start and the server prints the same two red lines every
-            # time -- measured 2026-08-09 after the server was pointed at a different
-            # --slot-save-path than the one the state was written to.
-            #
-            # The messages are NOT dropped: they are still worth a prefill. Only the promise of a
-            # warm cache goes.
-            #
-            # A failure to rewrite is swallowed on purpose. This runs on the path that resumes a
-            # session; refusing to start because a cache hint could not be corrected would turn a
-            # cosmetic defect into a broken client.
+
+        # Outside the except on purpose. The claim is now known to be false, so it is withdrawn --
+        # and a restore that came back with the WRONG token count is just as false as one that
+        # raised, while raising no exception at all. Until 2026-08-10 only the raising half was
+        # withdrawn, which is how a file kept promising a cache the server did not have.
+        #
+        # Without this the same request goes out on every start and the server prints the same two
+        # red lines every time -- measured 2026-08-09 after the server was pointed at a different
+        # --slot-save-path than the one the state was written to.
+        #
+        # The messages are NOT dropped: they are still worth a prefill. Only the promise of a
+        # warm cache goes.
+        #
+        # A failure to rewrite is swallowed on purpose. This runs on the path that resumes a
+        # session; refusing to start because a cache hint could not be corrected would turn a
+        # cosmetic defect into a broken client.
+        if not kv:
             try:
                 saved["kv"] = False
                 with open(path, "w", encoding="utf-8") as fh:
@@ -445,10 +536,21 @@ def resume_path(name: str) -> str:
 # What the fresh conversation opens with. It names the archive rather than
 # summarising it: a summary is a guess about what mattered, and the model has
 # read_file. A pointer it can follow beats a précis it cannot check.
+#
+# THREE THINGS THE FIRST VERSION GOT WRONG, all measured on a live rollover on
+# 2026-08-10. It pointed at the JSON, which is one 104,618-byte line that
+# read_file can only ever show the first 15 % of. It gave no line count, so
+# there was no way to ask for the END, which is the part that matters. And it
+# said nothing about where the work had got to, so the model guessed two
+# directories that do not exist and scanned a user profile before it read
+# anything at all.
 ROLLOVER_NOTE = (
-    "[The conversation up to this point reached {tokens} tokens and was archived to "
-    "{path} -- a JSON file whose `messages` array holds it verbatim. Read it if you "
-    "need what was said. This conversation starts here.]"
+    "[The conversation up to this point reached {tokens} tokens and was archived.\n"
+    "Transcript: {transcript} -- {lines} lines, oldest first, so read the END of it "
+    "for where things stood.\n"
+    "{where}"
+    "Full record, for `crow --resume`: {path}\n"
+    "This conversation starts here.]"
 )
 
 
@@ -470,11 +572,19 @@ def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
     Returns the archive path, or None when there was nothing worth archiving.
     """
     path = path or rollover_path()
-    if save_session(conversation, base_url, context_tokens, path=path, with_kv=False) is None:
+    if save_session(conversation, base_url, context_tokens, path=path,
+                    with_kv=False, pretty=True) is None:
         return None
 
+    # Both before the reset: afterwards there is nothing left to read them from.
+    transcript = path[:-5] + ".md" if path.endswith(".json") else path + ".md"
+    lines = write_transcript(conversation, transcript)
+    where = recent_paths(conversation)
+
     conversation.reset()
-    note = ROLLOVER_NOTE.format(tokens=context_tokens, path=path)
+    note = ROLLOVER_NOTE.format(
+        tokens=context_tokens, path=path, transcript=transcript, lines=lines,
+        where=f"Last worked on: {', '.join(where)}\n" if where else "")
     # ONE message, not two. Consecutive turns of the same role are merged or
     # rejected depending on the chat template, and neither is a thing to find
     # out at 180k tokens.
@@ -2021,6 +2131,9 @@ def repl(args: argparse.Namespace) -> int:
     # Their sum is what the NEXT turn starts from. Counting characters here
     # instead would drift from the tokeniser and quietly mislead.
     context_tokens = 0
+    # Set when the start line CLAIMED a warm cache. The claim is only settled by
+    # the first turn, and it is cleared there whichever way it goes.
+    promised_warm = False
 
     # Before the first turn, so no prefix exists yet to break.
     wanted = getattr(args, "resume", None)
@@ -2030,6 +2143,7 @@ def repl(args: argparse.Namespace) -> int:
         if restored:
             messages, context_tokens, kv = restored
             conversation.restore(messages)
+            promised_warm = kv
             how = ("cache warm" if kv else
                    "messages only -- the first turn pays a prefill")
             where = f" from {os.path.basename(source)}" if source else ""
@@ -2143,6 +2257,18 @@ def repl(args: argparse.Namespace) -> int:
             context_tokens = next_context_tokens(context_tokens, timings)
             line_out = format_timings(timings)
             print(f"\n\n[{line_out}]\n" if line_out else "\n")
+
+            # THE PROMISE IS SETTLED HERE, BECAUSE HERE IS WHERE IT IS PAID.
+            # Everything before this is the server saying it read a file. Only
+            # `cached` says whether the prefix it holds is the one being sent,
+            # and it is the number the user is charged against: on 2026-08-10 a
+            # start that said "cache warm" was followed by `cached 0/21004` and
+            # 469.51 s to the first token, with nothing in between admitting it.
+            if promised_warm:
+                promised_warm = False
+                if timings.get("_cached_tokens") == 0:
+                    print(f"{DIM}[the restored cache did not hold -- that prefill was the whole "
+                          f"conversation, not a resume]{RESET}\n")
 
             if not calls:
                 break

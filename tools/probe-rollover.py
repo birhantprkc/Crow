@@ -212,6 +212,23 @@ def main() -> int:
                      if m["role"] != "system"]
             check(after and "ask something that needs a tool" in after[0]["content"],
                   "the question survives a mid-turn rollover instead of being archived away")
+            note = after[0]["content"] if after else ""
+            check(".md" in note, "the note points at the transcript, not only the JSON")
+            check(app_loop in note, "the note says where the work had got to")
+
+        if loop_archives:
+            md = loop_archives[0].with_suffix(".md")
+            check(md.exists(), "a readable transcript is written beside the archive")
+            if md.exists():
+                # The whole reason it exists: json.dump writes ONE line, and
+                # read_file caps at MAX_TOOL_BYTES, so a single-line archive is
+                # unreachable past the first few kilobytes.
+                check(md.read_text(encoding="utf-8").count("\n") > 4,
+                      "the transcript has lines, so a range can reach its end")
+                check("reasoning" not in md.read_text(encoding="utf-8").lower(),
+                      "and it leaves the reasoning out")
+            check(loop_archives[0].read_text(encoding="utf-8").count("\n") > 4,
+                  "the archive JSON is no longer a single line either")
 
         # --- and the branch that has to GIVE UP ---------------------------------
         # The same turn fills the window a second time. Rolling again would
