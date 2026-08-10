@@ -279,6 +279,17 @@ The check runs in the background while the banner and the health probe do their 
 
 **Your model is not touched.** The 95.9 GiB under `%LOCALAPPDATA%\Crow\models` is not part of any package, so an update never deletes the install directory — it writes the new files over the old ones and leaves everything else alone.
 
+**The server may keep running.** Windows locks a running binary, and the moment
+the client tells you a new version exists is exactly the moment `llama-server`
+is up in the other terminal. The installer renames the files in `bin\` to `.old`
+first — Windows permits renaming a running executable, the process keeps its
+handle, and the path is freed for the new file. Your session carries on with the
+old binary; the new one takes over the next time you start the server. What
+cannot be moved is named and the install stops there rather than failing halfway
+through an extraction. The `.old` files are swept up afterwards, and the ones
+still held are reported as still held — a running server's file cannot be
+deleted, only renamed.
+
 Two things it will not do without being asked. It will not overwrite a directory it cannot identify as a Crow install, and it will not put an older version over a newer one. Both refuse and print the invocation that forces it, because `irm … | iex` cannot be given a `-Force` switch:
 
 ```

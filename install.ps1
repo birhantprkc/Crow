@@ -477,6 +477,100 @@ function Expand-WithProgress {
 }
 
 # ---------------------------------------------------------------------------
+# A running server holds its own files
+# ---------------------------------------------------------------------------
+#
+# These are functions rather than inline script for one reason: everything below
+# the selftest's exit is unreachable to it. The first version of this fix sat at
+# line 744, the selftest returns at 631, and it reported 42 of 42 green without
+# executing a single line of it.
+
+function Test-RunsFromDir {
+    <#
+    .SYNOPSIS
+        Is this executable inside that directory?
+    .DESCRIPTION
+        The process NAME is not enough, and the difference is not academic: a
+        development build of llama-server.exe running from somewhere else has the
+        same name and holds nothing here. Matching on the name alone renames a
+        bin\ directory that nothing is locking.
+    #>
+    param([string] $ExePath, [string] $Dir)
+    if (-not $ExePath -or -not $Dir) { return $false }
+    $prefix = $Dir.TrimEnd('\', '/') + '\'
+    return $ExePath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-LockingServer {
+    <# The llama-server running out of $BinDir, or $null when none is. #>
+    param([string] $BinDir)
+    foreach ($p in @(Get-Process -Name "llama-server" -ErrorAction SilentlyContinue)) {
+        # .Path throws for a process this user cannot open. Not being able to
+        # look is not the same as nothing being there, but it is all we have.
+        $exe = $null
+        try { $exe = $p.Path } catch { $exe = $null }
+        if (Test-RunsFromDir -ExePath $exe -Dir $BinDir) { return $p }
+    }
+    return $null
+}
+
+function Move-LockedAside {
+    <#
+    .SYNOPSIS
+        Rename every file in a directory to *.old so an extraction can write over it.
+    .DESCRIPTION
+        Windows locks a running binary against WRITING, not against renaming: the
+        process keeps its handle to the file it opened, and the path is freed for
+        the new one. Measured 2026-08-10 against a running executable -- the
+        rename succeeded.
+
+        Moved is counted by asking the filesystem afterwards, and Failed names
+        what is still sitting there. A rename that quietly fails would hand the
+        original IOException to the extraction with a layer of misdirection in
+        front of it, which is worse than the bug it was meant to fix.
+    #>
+    param([string] $BinDir)
+    $moved  = 0
+    $failed = @()
+    foreach ($f in @(Get-ChildItem -LiteralPath $BinDir -File -ErrorAction SilentlyContinue)) {
+        if ($f.Name -like "*.old") { continue }
+        $oldPath = $f.FullName + ".old"
+        # An interrupted update may have left one behind; it is in the way now.
+        if (Test-Path -LiteralPath $oldPath) {
+            Remove-Item -LiteralPath $oldPath -Force -ErrorAction SilentlyContinue
+        }
+        Rename-Item -LiteralPath $f.FullName -NewName ($f.Name + ".old") -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $f.FullName) { $failed += $f.Name } else { $moved++ }
+    }
+    return [pscustomobject]@{ Moved = $moved; Failed = $failed }
+}
+
+function Remove-StaleOld {
+    <#
+    .SYNOPSIS
+        Delete the *.old files left behind, and report what actually went.
+    .DESCRIPTION
+        A file the running server still has mapped CANNOT be deleted. Measured
+        2026-08-10: the rename succeeds, the delete is denied, the file stays.
+        And that is the NORMAL case here, because the reason it was renamed is
+        that the server is still running.
+
+        So Removed is the difference between before and after, taken by looking.
+        Counting what was found and calling it "removed" prints a green line in
+        exactly the situation where nothing was removed.
+    #>
+    param([string] $BinDir)
+    $before = @(Get-ChildItem -LiteralPath $BinDir -Filter "*.old" -File -ErrorAction SilentlyContinue)
+    foreach ($f in $before) {
+        Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+    }
+    $kept = @(Get-ChildItem -LiteralPath $BinDir -Filter "*.old" -File -ErrorAction SilentlyContinue |
+              ForEach-Object { $_.Name })
+    return [pscustomobject]@{ Removed = ($before.Count - $kept.Count); Kept = $kept }
+}
+
+
+# ---------------------------------------------------------------------------
 # Selftest
 # ---------------------------------------------------------------------------
 
@@ -617,6 +711,41 @@ function Invoke-Selftest {
     $v = Compare-Manifest $gone
     C "a file that did not land fails too"        ((-not $v.Ok) -and $v.Missing -contains "a.dll")
 
+    # Whose server is it. Both directions, because a rule that only ever says
+    # yes renames a directory nothing is holding.
+    C "an exe inside the install dir is ours"     (Test-RunsFromDir -ExePath "C:\Crow\bin\llama-server.exe" -Dir "C:\Crow\bin")
+    C "case does not decide it"                   (Test-RunsFromDir -ExePath "c:\crow\BIN\llama-server.exe" -Dir "C:\Crow\bin")
+    C "a dev build elsewhere is NOT ours"         (-not (Test-RunsFromDir -ExePath "C:\dev\wt-25\bin\llama-server.exe" -Dir "C:\Crow\bin"))
+    C "a sibling directory is not inside it"      (-not (Test-RunsFromDir -ExePath "C:\Crow\bin-old\llama-server.exe" -Dir "C:\Crow\bin"))
+    C "a process we cannot read is not a match"   (-not (Test-RunsFromDir -ExePath $null -Dir "C:\Crow\bin"))
+
+    # Against real files with a real lock, because the entire question is what
+    # Windows does with one. FileShare::None is the strict case: it cannot even
+    # be renamed, which is the failure path that must not stay silent.
+    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("crow-selftest-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+    $held = $null
+    try {
+        Set-Content -LiteralPath (Join-Path $tmpDir "free.dll") -Value "x" -Encoding Ascii
+        Set-Content -LiteralPath (Join-Path $tmpDir "held.dll") -Value "x" -Encoding Ascii
+        $held = [System.IO.File]::Open((Join-Path $tmpDir "held.dll"), 'Open', 'Read', 'None')
+
+        $aside = Move-LockedAside -BinDir $tmpDir
+        C "an unheld file is moved aside"          ($aside.Moved -eq 1)
+        C "a held file is REPORTED, not swallowed" ($aside.Failed -contains "held.dll")
+
+        $held.Close(); $held = $null
+        Set-Content -LiteralPath (Join-Path $tmpDir "stuck.dll.old") -Value "x" -Encoding Ascii
+        $held = [System.IO.File]::Open((Join-Path $tmpDir "stuck.dll.old"), 'Open', 'Read', 'None')
+
+        $swept = Remove-StaleOld -BinDir $tmpDir
+        C "a free .old file is really removed"     ($swept.Removed -eq 1)
+        C "and one still held is NOT called gone"  ($swept.Kept -contains "stuck.dll.old")
+    } finally {
+        if ($held) { $held.Close() }
+        Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
     C "Format-Size: bytes"     ((Format-Size 512) -eq "512 B")
     C "Format-Size: megabytes" ((Format-Size 506400000) -eq "482.9 MB")
     C "Format-Size: gigabytes" ((Format-Size 103000000000) -eq "95.93 GB")
@@ -740,7 +869,46 @@ if (Test-Path $InstallTo) {
 # that a newer package no longer ships are therefore left behind; the manifest
 # check below verifies what SHOULD be there, and says nothing about extras.
 New-Item -ItemType Directory -Force -Path $InstallTo | Out-Null
-$n = Expand-WithProgress -ZipPath $tmp -Destination $InstallTo
+
+# Windows locks a running executable and its loaded DLLs. An update started
+# while the server is up -- which is exactly the state the user is in when the
+# client prints the one-liner -- hits a locked file and fails with an
+# IOException that nothing catches. The fix: rename locked files before
+# extraction. Windows allows renaming a running binary; the process keeps its
+# handle to the old name and the path is freed for the new file.
+$binDir = Join-Path $InstallTo "bin"
+$holder = if (Test-Path -LiteralPath $binDir) { Get-LockingServer -BinDir $binDir } else { $null }
+if ($holder) {
+    Write-Item "server running" "llama-server.exe (pid $($holder.Id)) is holding $binDir" "warn"
+    $aside = Move-LockedAside -BinDir $binDir
+    if ($aside.Moved -gt 0) {
+        Write-Item "moved aside" "$($aside.Moved) files renamed -- the running server keeps the old ones" "ok"
+    }
+    # Stopping here rather than letting the extraction discover it: below, the
+    # same condition arrives as an IOException with a filename in it and no idea
+    # why, and the user has already waited for a download by then.
+    if ($aside.Failed.Count -gt 0) {
+        Write-Item "could not move" "$($aside.Failed -join ', ')" "fail"
+        Write-Item "stop llama-server and run this again" "those files cannot be overwritten while they are held" "fail"
+        Exit-Run 1
+        return
+    }
+}
+
+try {
+    $n = Expand-WithProgress -ZipPath $tmp -Destination $InstallTo
+} catch [System.IO.IOException] {
+    $lockedFile = $_.Exception.Message
+    Write-Item "extraction failed" "a file is still locked: $lockedFile" "fail"
+    Write-Host ""
+    Write-Item "try again after stopping llama-server" "or restart your machine to release all file handles" "fail"
+    Exit-Run 1
+    return
+} catch {
+    Write-Item "extraction failed" "$($_.Exception.Message)" "fail"
+    Exit-Run 1
+    return
+}
 # Only what this script downloaded. A package handed in with -SourceUrl belongs
 # to the caller, and deleting it would eat the artefact being tested.
 if (-not $source.IsLocal) { Remove-Item $tmp -Force }
@@ -786,6 +954,20 @@ if (-not $verdict.Ok) {
     return
 }
 Write-Item "sha256 per file" "$($verdict.Checked) of $($verdict.Checked) match" "ok"
+
+# The .old files from the rename above. The ones the running server still has
+# mapped cannot be deleted -- and that is the normal case, because the reason
+# they were renamed is that it is still running. So the counts come from looking
+# afterwards, and what stays is said out loud rather than counted as removed.
+if (Test-Path -LiteralPath $binDir) {
+    $swept = Remove-StaleOld -BinDir $binDir
+    if ($swept.Removed -gt 0) {
+        Write-Item "cleaned" "$($swept.Removed) stale .old files removed" "ok"
+    }
+    if ($swept.Kept.Count -gt 0) {
+        Write-Item "still held" "$($swept.Kept.Count) .old files stay until llama-server stops" "warn"
+    }
+}
 
 # --slot-save-path refuses to start against a path that is not an existing
 # directory, so the server would fail on the very command this script prints.
