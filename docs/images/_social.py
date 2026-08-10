@@ -4,10 +4,18 @@ A social card is read at thumbnail size, in a feed, in under a second. That rule
 out what the first two attempts did: one was a generic tech banner, the other a
 wall of 19px monospace that turns to grey mush the moment a feed scales it down.
 
-So this one carries three lines of large type and one contrast, because the
-contrast IS the story -- a 95.9 GiB model held in 1.28 GiB of host memory. The
-wordmark comes from `cli/crow.py` rather than being retyped, and the colours are
-the ones the client asks the terminal for.
+So this one carries three lines of large type, and beside them the one picture
+that IS the idea: 256 experts per layer, six of them awake. At full size it is a
+count; at thumbnail size it is a dark field with a few lit cells, which is what
+the product does. The wordmark comes from `cli/crow.py` rather than being
+retyped, and the colours are the ones the client asks the terminal for.
+
+EVERY NUMBER HERE IS THE README'S. The headline is its H3 verbatim and the
+figures are its stat table, because a card that drifts from the page it links to
+is worse than no card. The version is read from crow.VERSION for the same
+reason: the previous card shipped v0.0.3 into the 0.0.5 era, and it also still
+claimed "1.28 GiB of RAM" -- a figure that had since been retired and the number
+reused for the cost of a cache miss in milliseconds.
 
     python docs/images/_social.py
 """
@@ -35,14 +43,27 @@ BEVEL  = "#2c5bac"
 TEXT   = "#f2f5fa"
 MUTED  = "#7c8798"
 RULE   = "#1c2536"
+SLEEP  = "#161d2c"                       # an expert that is not awake this token
 
-# Measured on one machine, RTX 5090 at -c 200000 -ngl 99 -np 1. Each of these is
-# in the README with the issue it came from.
-FACTS = [
-    ("200k",     "context, one slot"),
-    ("12.08",    "tok/s, gate median"),
-    ("0 EUR",    "spent so far"),
-]
+# README H3, verbatim. Three lines because a feed gives you one glance.
+HEAD = [("284 billion parameters.", TEXT),
+        ("One graphics card.",      TEXT),
+        ("33 GB of system RAM.",    ACCENT)]
+
+SUB = ["A 95.9 GiB mixture-of-experts model,",
+       "read off the SSD while the GPU works."]
+
+# README stat table. Each is in the README with the issue it came from.
+FACTS = [("200k",  "context, one slot"),
+         ("14.73", "tok/s decode, gate median"),
+         ("0 EUR", "spent so far")]
+
+# 6 of 256, the README's own figure. Fixed rather than random so the card is
+# byte-reproducible -- a picture that changes on every run cannot be reviewed.
+# None of them sits on the outer ring: a lit cell carries a one-pixel halo, and
+# on the edge that halo is what pokes past the margin every other element keeps.
+AWAKE = (35, 75, 118, 157, 194, 217)
+GRID = 16                                # 16 x 16 = the 256 experts of a layer
 
 
 def load(size, weight=400.0):
@@ -69,6 +90,22 @@ def wordmark(d, x, y, cell):
     return len(rows[0]) * cell, len(rows) * cell
 
 
+def expert_grid(d, x, y, cell=13, gap=4):
+    """256 cells, six lit. The same blocky vocabulary as the wordmark."""
+    for i in range(GRID * GRID):
+        r, c = divmod(i, GRID)
+        x0, y0 = x + c * (cell + gap), y + r * (cell + gap)
+        awake = i in AWAKE
+        d.rectangle([x0, y0, x0 + cell - 1, y0 + cell - 1],
+                    fill=ACCENT if awake else SLEEP)
+        if awake:
+            # A one-cell halo, so six dots survive a feed's downscale.
+            d.rectangle([x0 - 2, y0 - 2, x0 + cell + 1, y0 + cell + 1],
+                        outline=BEVEL, width=1)
+    span = GRID * (cell + gap) - gap
+    return span, span
+
+
 def main() -> int:
     if not FONT.exists():
         print(f"missing typeface: {FONT}", file=sys.stderr)
@@ -81,19 +118,24 @@ def main() -> int:
     d.text((M + mark_w + 20, M - 12 + mark_h - 22), f"v{crow.VERSION}",
            font=load(16), fill=MUTED)
 
-    # The headline. Three lines, and the third is the one that makes people
-    # look twice -- a 95.9 GiB model that the host machine never holds.
     head = load(50, 600.0)
     y = M + 74
-    d.text((M, y),      "284 billion parameters.", font=head, fill=TEXT)
-    d.text((M, y + 66), "One graphics card.",      font=head, fill=TEXT)
-    d.text((M, y + 132), "1.28 GiB of RAM.",       font=head, fill=ACCENT)
+    for i, (line, colour) in enumerate(HEAD):
+        d.text((M, y + i * 66), line, font=head, fill=colour)
 
     body = load(21)
-    d.text((M, y + 216),
-           "A 95.9 GiB mixture-of-experts model, with the experts read", font=body, fill=MUTED)
-    d.text((M, y + 246),
-           "off the SSD while the GPU is still working.", font=body, fill=MUTED)
+    for i, line in enumerate(SUB):
+        d.text((M, y + 216 + i * 30), line, font=body, fill=MUTED)
+
+    # The picture, right of the type and clear of it: the longest headline line
+    # ends near x=780 and the longest sub-line near x=540. Right-aligned to the
+    # same margin as the rule below, so the block has an edge to sit against.
+    span = GRID * (13 + 4) - 4
+    gx, gy = W - M - span, y
+    expert_grid(d, gx, gy)
+    caption = load(15)
+    for i, line in enumerate(("6 of 256 experts wake", "per layer, per token")):
+        d.text((gx, gy + span + 16 + i * 21), line, font=caption, fill=MUTED)
 
     d.line([(M, H - 138), (W - M, H - 138)], fill=RULE, width=2)
 
