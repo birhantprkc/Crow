@@ -64,7 +64,7 @@ param(
     [string[]] $Types   = @('none','ngram-simple','ngram-map-k','ngram-map-k4v','ngram-mod','ngram-cache'),
     [int]      $Repeats = 4,
     [int]      $Tokens  = 128,
-    [string]   $Model   = 'models/UD-Q2_K_XL/DeepSeek-V4-Flash-UD-Q2_K_XL-00001-of-00003.gguf',
+    [string]   $Model   = $null,
     [string]   $OutRoot = '',
     # WHICH BUILD IS UNDER TEST. Until E9 this path was hard-wired to
     # crow-lab/src/build-native, so measuring a different tree meant rebuilding the
@@ -81,6 +81,9 @@ param(
     [switch]   $StartOnly,
     [switch]   $StopOnly
 )
+
+. "$PSScriptRoot\model-paths.ps1"
+if (-not $Model) { $Model = Get-ModelPath 'q2-k-xl' }
 
 $ErrorActionPreference = 'Stop'
 

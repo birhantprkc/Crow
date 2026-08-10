@@ -17,11 +17,13 @@
 # exactly the operating point of the handbook page plus that flag.
 #
 #   powershell -File tools\measure-slot-restart.ps1
+
+. "$PSScriptRoot\model-paths.ps1"
 $ErrorActionPreference = 'Stop'
 $U   = 'http://127.0.0.1:8081'
 $SP  = 'C:\Users\robin\dev\crow-lab\slotsave'
 $EXE = 'C:\Users\robin\AppData\Local\Crow\bin\llama-server.exe'
-$MDL = 'C:\Users\robin\dev\crow-lab\models\UD-IQ3_XXS\DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf'
+$MDL = (Get-ModelPath 'operating-point')
 $FILE = 'restart-test-2.bin'
 $ARGS = @('-m',$MDL,'--port','8081','-c','200000','-ngl','99','-np','1','--jinja',
           '--moe-stream','--moe-stream-cache','64s','--moe-stream-io-threads','8',

@@ -80,6 +80,8 @@ param(
     [string]$EvictWith = ''
 )
 
+. "$PSScriptRoot\model-paths.ps1"
+
 $ErrorActionPreference = 'Continue'
 
 # Numbers printed here get quoted into issues. On a German Windows the default culture
@@ -92,8 +94,8 @@ $ToolsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BenchExe = Join-Path $ToolsDir 'build-bench\bench-loader.exe'
 $GgmlDll  = Join-Path $ToolsDir 'build-bench\ggml-base.dll'
 
-$ModelLarge = 'C:\Users\robin\dev\crow-lab\models\DeepSeek-V4-Flash-MXFP4.gguf'
-$ModelSmall = 'C:\Users\robin\dev\crow-lab\models\UD-IQ1_S\DeepSeek-V4-Flash-UD-IQ1_S-00002-of-00003.gguf'
+$ModelLarge = (Get-ModelPath 'mxfp4')
+$ModelSmall = (Get-ModelPath 'iq1-s')
 if ($ControlModel -ne '') { $ModelSmall = $ControlModel }
 
 if ($LogDir -eq '') {

@@ -34,7 +34,7 @@ the effective answer is content, else reasoning_content, and both empty is red.
 param(
     [string]$Exe     = 'C:\Users\robin\dev\crow-lab\wt-35\build-53\bin\Release\llama-server.exe',
     [string]$Lab     = 'C:\Users\robin\dev\crow-lab',
-    [string]$Model   = 'models/UD-Q2_K_XL/DeepSeek-V4-Flash-UD-Q2_K_XL-00001-of-00003.gguf',
+    [string]$Model   = $null,
     [int]   $Port    = 8081,
     [int]   $Ctx     = 4096,
     [int]   $Ngl     = 99,
@@ -49,6 +49,9 @@ param(
     [ValidateSet('', 'gpu-cuda0-cache', 'cpu-ncmoe999')][string]$Only = '',
     [switch]$Selftest
 )
+
+. "$PSScriptRoot\model-paths.ps1"
+if (-not $Model) { $Model = Get-ModelPath 'q2-k-xl' }
 
 $ErrorActionPreference = 'Continue'
 function Say([string]$m) { Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $m) }

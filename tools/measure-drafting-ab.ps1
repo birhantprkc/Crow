@@ -78,8 +78,8 @@ param(
     [string]$Bin     = 'build-e12\bin\Release',
     [string]$Lab     = 'C:\Users\robin\dev\crow-lab',
     [string]$CROW    = 'C:\Users\robin\dev\Crow',
-    [string]$Model   = 'models/UD-Q2_K_XL/DeepSeek-V4-Flash-UD-Q2_K_XL-00001-of-00003.gguf',
-    [string]$Drafter = 'models/DSV4-Flash-DSpark-draft-bf16.gguf',
+    [string]$Model   = $null,
+    [string]$Drafter = $null,
     [string]$SpecType = 'draft-dspark',
     # Fixed before the start. Two evaluable runs per side for the cause probe.
     #
@@ -119,6 +119,10 @@ param(
     [string]$OutRoot = '',
     [switch]$Selftest
 )
+
+. "$PSScriptRoot\model-paths.ps1"
+if (-not $Model) { $Model = Get-ModelPath 'q2-k-xl' }
+if (-not $Drafter) { $Drafter = Get-ModelPath 'drafter-bf16' }
 
 $ErrorActionPreference = 'Continue'
 $INV = [Globalization.CultureInfo]::InvariantCulture

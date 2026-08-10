@@ -58,10 +58,13 @@ param(
     # Point at part 1 of a split GGUF; llama.cpp finds the rest. A different
     # quantisation needs its OWN baseline - the correct output is not the same
     # text across quants, which the upstream reports show directly.
-    [string]$Model = 'C:\Users\robin\dev\crow-lab\models\DeepSeek-V4-Flash-MXFP4.gguf',
+    [string]$Model = $null,
     # Directory holding llama-completion.exe. See the header on why builds stay apart.
     [string]$Bin = 'C:\Users\robin\dev\crow-lab\bin'
 )
+
+. "$PSScriptRoot\model-paths.ps1"
+if (-not $Model) { $Model = Get-ModelPath 'mxfp4' }
 
 $ErrorActionPreference = 'Continue'
 

@@ -50,7 +50,7 @@ param(
     [string]$Exe   = 'C:\Users\robin\dev\crow-lab\src\build-native\bin\Release\llama-server.exe',
     [string]$Lab   = 'C:\Users\robin\dev\crow-lab',
     [string]$CROW  = 'C:\Users\robin\dev\Crow',
-    [string]$Model = 'models/UD-Q2_K_XL/DeepSeek-V4-Flash-UD-Q2_K_XL-00001-of-00003.gguf',
+    [string]$Model = $null,
     [ValidateSet('before', 'after')][string]$Mode = 'before',
     # Cases: label -> the --moe-stream-cache value, or '' for "no flag at all".
     [string]$Cases = ',16s,18s,64s',
@@ -61,6 +61,9 @@ param(
     [int]   $HealthTimeoutSec = 420,
     [string]$OutRoot = ''
 )
+
+. "$PSScriptRoot\model-paths.ps1"
+if (-not $Model) { $Model = Get-ModelPath 'q2-k-xl' }
 
 $ErrorActionPreference = 'Continue'
 $INV = [Globalization.CultureInfo]::InvariantCulture

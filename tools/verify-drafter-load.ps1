@@ -76,8 +76,8 @@ param(
     [string]$Lab     = 'C:\Users\robin\dev\crow-lab',
     [string]$CROW    = 'C:\Users\robin\dev\Crow',
     # relative to -Lab, exactly as the operating point states it
-    [string]$Model   = 'models/UD-Q2_K_XL/DeepSeek-V4-Flash-UD-Q2_K_XL-00001-of-00003.gguf',
-    [string]$Drafter = 'models/DSV4-Flash-DSpark-draft-bf16.gguf',
+    [string]$Model   = $null,
+    [string]$Drafter = $null,
     [int]   $Port    = 8081,
     [int]   $Ctx     = 4096,
     [int]   $Ngl     = 99,
@@ -93,6 +93,10 @@ param(
     [ValidateSet('both','positive','negative')][string]$Only = 'both',
     [string]$OutRoot = ''
 )
+
+. "$PSScriptRoot\model-paths.ps1"
+if (-not $Model) { $Model = Get-ModelPath 'q2-k-xl' }
+if (-not $Drafter) { $Drafter = Get-ModelPath 'drafter-bf16' }
 
 $ErrorActionPreference = 'Continue'
 

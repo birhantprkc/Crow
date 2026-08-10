@@ -37,7 +37,7 @@ param(
     [string]$Prompt = 'probe-d-long-france.txt',
     [int]$Predict = 32,
     # Point at part 1 of a split GGUF; llama.cpp finds the rest.
-    [string]$Model = 'C:\Users\robin\dev\crow-lab\models\DeepSeek-V4-Flash-MXFP4.gguf',
+    [string]$Model = $null,
     # Names the log files. Without it two runs of the same load mode overwrite each
     # other. Same parameter name as run-probes.ps1 and measure-vram.ps1 on purpose:
     # these three answer nearly the same question and their switches should not
@@ -67,6 +67,9 @@ param(
     # script drops a stop file, or because the llama process is gone.
     [int]$SampleMaxSeconds = 1800
 )
+
+. "$PSScriptRoot\model-paths.ps1"
+if (-not $Model) { $Model = Get-ModelPath 'mxfp4' }
 
 $ErrorActionPreference = 'Continue'
 

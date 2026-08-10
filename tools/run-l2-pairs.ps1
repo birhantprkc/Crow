@@ -37,12 +37,15 @@ Usage:
 param(
     [int]    $L2Gib   = 32,
     [string] $Exe     = 'C:\Users\robin\dev\crow-lab\wt-25\build-25\bin\Release\llama-server.exe',
-    [string] $Model   = 'models/UD-IQ3_XXS/DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf',
+    [string] $Model   = $null,
     [int]    $Ctx     = 200000,
     [string] $OutRoot = 'C:\Users\robin\dev\Crow\runs\2026-08-09\pairs',
     [string] $CROW    = 'C:\Users\robin\dev\Crow',
     [switch] $Selftest
 )
+
+. "$PSScriptRoot\model-paths.ps1"
+if (-not $Model) { $Model = Get-ModelPath 'operating-point' }
 
 $ErrorActionPreference = 'Continue'
 

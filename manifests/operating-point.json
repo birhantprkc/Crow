@@ -1,4 +1,4 @@
-{
+﻿{
   "_what": "The operating point: the one server command line every measurement and every instruction has to agree with.",
   "_why": "It was spelled out in three places that disagreed. On 2026-08-10 the vault page was missing --slot-save-path and --moe-stream-l2 32, while README.md and install.ps1 carried them. Nobody had changed anything wrongly; the copies simply drifted, and a measurement taken against the older line is not comparable to one taken against the newer.",
   "_how_this_is_checked": "tools/check_operating_point.py reads the RAW text of README.md and install.ps1 and extracts the flags from it. It must never read a second copy of this file - a checker that compares a manifest against itself is green forever.",
@@ -13,6 +13,50 @@
     "shards": 4,
     "repo": "unsloth/DeepSeek-V4-Flash-GGUF",
     "_note": "Not part of the install: 95.9 GiB and somebody else's artefact."
+  },
+
+  "models": {
+    "_what": "Every GGUF a measurement script may point at, by key. tools/model-paths.ps1 reads this; nothing else spells a model path out.",
+    "_why": "Measured 2026-08-10: 26 lines across 18 files carried a model path, and 22 of those 26 pointed at files that no longer exist. Not one script was broken by it -- they all take -Model as a parameter, so the dead path is a default nobody notices until a run silently measures the wrong thing, or a model switch has to find 18 files.",
+    "_root": "C:/Users/robin/dev/crow-lab/models",
+    "_present_checked": "2026-08-10",
+    "entries": {
+      "operating-point": {
+        "path": "UD-IQ3_XXS/DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+        "present": true,
+        "role": "the operating point, and the only model still on disk"
+      },
+      "iq3-xxs": {
+        "path": "UD-IQ3_XXS/DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+        "present": true,
+        "role": "alias of operating-point, for scripts that name the quantisation"
+      },
+      "q2-k-xl": {
+        "path": "UD-Q2_K_XL/DeepSeek-V4-Flash-UD-Q2_K_XL-00001-of-00003.gguf",
+        "present": false,
+        "role": "the earlier correctness series; deleted 2026-08-10 to make room for 0731"
+      },
+      "iq1-s": {
+        "path": "UD-IQ1_S/DeepSeek-V4-Flash-UD-IQ1_S-00002-of-00003.gguf",
+        "present": false,
+        "role": "the rung below; measured worthless (emits no function block). Deleted 2026-08-10"
+      },
+      "mxfp4": {
+        "path": "DeepSeek-V4-Flash-MXFP4.gguf",
+        "present": false,
+        "role": "the 155 GB reference; deleted 2026-08-10. Its chat template survives in manifests/gguf-meta-0.0.6/"
+      },
+      "drafter-bf16": {
+        "path": "DSV4-Flash-DSpark-draft-bf16.gguf",
+        "present": false,
+        "role": "the separate DSpark drafter; deleted 2026-08-10. 0731 carries its draft module inside the checkpoint"
+      },
+      "drafter-0731": {
+        "path": "DeepseekV4-Flash-20260731-DSpark.gguf",
+        "present": false,
+        "role": "the 0731 lab drafter; deleted 2026-08-10"
+      }
+    }
   },
 
   "server": {

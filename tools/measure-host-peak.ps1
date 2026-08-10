@@ -22,13 +22,16 @@ Usage:
 #>
 param(
     [string] $Exe   = 'C:\Users\robin\dev\crow-lab\wt-25\build-25\bin\Release\llama-server.exe',
-    [string] $Model = 'models/UD-IQ3_XXS/DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf',
+    [string] $Model = $null,
     [string] $Lab   = 'C:\Users\robin\dev\crow-lab',
     [int]    $Ctx   = 200000,
     [int]    $Port  = 8081,
     [string] $Out   = '',
     [switch] $Selftest
 )
+
+. "$PSScriptRoot\model-paths.ps1"
+if (-not $Model) { $Model = Get-ModelPath 'operating-point' }
 $ErrorActionPreference = 'Continue'
 
 # Value function: turns one process plus one nvidia-smi line into the row this tool reports.

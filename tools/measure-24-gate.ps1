@@ -43,7 +43,7 @@ param(
     [string]  $Exe       = 'C:\Users\robin\dev\crow-lab\wt-24\build-24\bin\Release\llama-server.exe',
     [string]  $Lab       = 'C:\Users\robin\dev\crow-lab',
     [string]  $CROW      = 'C:\Users\robin\dev\Crow',
-    [string]  $Model     = 'models/UD-Q2_K_XL/DeepSeek-V4-Flash-UD-Q2_K_XL-00001-of-00003.gguf',
+    [string]  $Model     = $null,
     [string]  $Label     = '',
     [string[]]$Flags     = @(),
     [int]     $Port      = 8081,
@@ -61,6 +61,9 @@ param(
     [string]  $OutRoot   = '',
     [switch]  $Selftest
 )
+
+. "$PSScriptRoot\model-paths.ps1"
+if (-not $Model) { $Model = Get-ModelPath 'q2-k-xl' }
 
 $ErrorActionPreference = 'Continue'
 

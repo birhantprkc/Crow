@@ -56,7 +56,7 @@ param(
     [string]$OutDir = '',
     [int]$Predict = 32,
     [string]$Prompt = 'C:\Users\robin\dev\Crow\tools\prompts\probe-b-completion.txt',
-    [string]$Model  = 'C:\Users\robin\dev\crow-lab\models\DeepSeek-V4-Flash-MXFP4.gguf',
+    [string]$Model  = $null,
     [string]$Bin    = 'C:\Users\robin\dev\crow-lab\src\build-native\bin\Release',
     [string]$Ncmoe  = '-ncmoe 999',
     # The context size, and it is a switch rather than a constant because of what it did
@@ -81,6 +81,9 @@ param(
     # a printed line would have measured the machine again instead of the change.
     [string]$Reanalyse = ''
 )
+
+. "$PSScriptRoot\model-paths.ps1"
+if (-not $Model) { $Model = Get-ModelPath 'mxfp4' }
 
 $inv = [System.Globalization.CultureInfo]::InvariantCulture
 

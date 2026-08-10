@@ -44,9 +44,12 @@ param(
     # run-probes.ps1 and measure-loadmode.ps1 on purpose. Until 2026-08-02 this path
     # was hard-coded to MXFP4, which meant the one quant that actually fits this
     # machine - UD-IQ1_S at 76.87 GiB - could not be measured by this tool at all.
-    [string]$Model = 'C:\Users\robin\dev\crow-lab\models\DeepSeek-V4-Flash-MXFP4.gguf',
+    [string]$Model = $null,
     [string]$Label = ''
 )
+
+. "$PSScriptRoot\model-paths.ps1"
+if (-not $Model) { $Model = Get-ModelPath 'mxfp4' }
 
 $ErrorActionPreference = 'Continue'
 
