@@ -44,18 +44,6 @@ That is the whole idea. Everything below is what it costs to make it actually ru
 
 ---
 
-> Both screenshots are from **0.0.4, without the host tier** — they are here for the prompt cache, which is what they show. The decode rate in them is not the headline figure above.
-
-![The first turn of a session: the model is asked how to count a context window correctly, answers with code and a table of what the approach cannot do, and reports 2622 tokens at 8.69 tok/s with a cold prefill of 402 and a 33.84 s wait for the first token](docs/images/cli_turn_cold.png)
-
-The first turn of a session pays for everything: `prefill 402`, `cached 0/402`, and 33.84 seconds before a word appears. Now the follow-up question, with three thousand tokens of conversation behind it:
-
-![The second turn of the same session: prefill 16, cached 3023 of 3039, first token after 1.58 s, and the context bar has moved from 3.0k to 3.9k of 200k](docs/images/cli_turn_warm.png)
-
-**`prefill 16`, `cached 3023/3039`, first word after 1.58 seconds.** The server re-read sixteen tokens of a three-thousand-token prompt, because the prefix it had was still the prefix it got. Before 2026-08-08 that number was the size of the previous answer and the wait was minutes — [why](#the-context-is-append-only-and-carries-its-reasoning).
-
-And the bar bottom left went **3.0k → 3.9k**. It used to run backwards.
-
 ![Where every byte lives, what crosses between VRAM and the drive, and what it costs per token](docs/images/architecture.svg)
 
 [Part II](#part-ii-how-it-works) builds every box in that diagram from the measurements that produced it.
