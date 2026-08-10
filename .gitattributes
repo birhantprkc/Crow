@@ -17,3 +17,11 @@
 # so a fresh clone would have contradicted the commit that carries the number.
 # -text, same reason as the patches: never rewrite either direction.
 *.jinja -text
+
+# 0731's golden vectors. Stage E10 renders a hand-written chat template and holds
+# the result against these files BYTE FOR BYTE -- that is the whole test. A CRLF
+# rewrite would add one byte per line to the expectation and to nothing else, so
+# every vector would fail and the template would look wrong. The .py alongside
+# them is the reference implementation the template is derived from; it is
+# evidence too, not source we edit.
+manifests/0731-encoding/** -text
