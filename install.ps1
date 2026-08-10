@@ -266,6 +266,72 @@ function Compare-Manifest {
     }
 }
 
+function Find-Extraneous {
+    <#
+    Which installed files does the package no longer name?
+
+    The update path knew "unchanged", "changed" and "new", and had no case for
+    "removed". A file dropped from a later package stayed on disk forever, and
+    the verification above cannot see it: it walks the MANIFEST and asks the
+    disk, never the other way round.
+
+    Pure on purpose, like Compare-Manifest: it takes two lists of relative paths
+    and returns a verdict. Reading directories is the caller's job, so the
+    selftest can drive every branch -- including the ones that must NOT fire.
+
+    WHAT MUST NOT BE TOUCHED, and why each one is here rather than assumed:
+      session/*      the server's own data. Measured 2026-08-10 on this machine:
+                     472,757,804 B of KV cache, a rollover note and session.json.
+                     A removal pass without this line deletes a live session on
+                     its first real run. This is the reason the function takes a
+                     protected list at all.
+      MANIFEST.json  written by the installer itself, never listed in itself.
+      *.old          belongs to Remove-StaleOld, which knows that a file the
+                     running server still maps cannot be deleted. Removing that
+                     knowledge by deleting them here would report failures as
+                     successes.
+
+    Comparison is case-insensitive because NTFS is, and the manifest is written
+    by a different tool than the one reading it back.
+    #>
+    param(
+        [string[]] $ManifestPaths,
+        [string[]] $DiskPaths
+    )
+
+    $named = @{}
+    foreach ($p in $ManifestPaths) {
+        if ($null -ne $p) { $named[($p -replace '\\', '/').ToLowerInvariant()] = $true }
+    }
+
+    $extraneous = @()
+    $protected  = @()
+    foreach ($raw in $DiskPaths) {
+        if ($null -eq $raw) { continue }
+        $rel = $raw -replace '\\', '/'
+        $key = $rel.ToLowerInvariant()
+        if ($named.ContainsKey($key)) { continue }
+        if ($key -eq 'manifest.json' -or $key -like 'session/*' -or $key -like '*.old') {
+            $protected += $rel
+            continue
+        }
+        $extraneous += $rel
+    }
+
+    return [pscustomobject]@{
+        # @() around both on purpose: PowerShell hands back a bare String when a
+        # list holds exactly one item, and one dropped file is the ordinary case.
+        # A caller indexing [0] would then get a single character. Measured in
+        # pack-release.ps1 the same day, where the comma operator fixes the same
+        # thing on a plain return.
+        Extraneous = @($extraneous)
+        Protected  = @($protected)
+        # The denominator. "0 removed" out of nothing examined reads exactly like
+        # "0 removed" out of a clean install, and one of those is a broken run.
+        Checked    = @($DiskPaths).Count
+    }
+}
+
 function Test-CanExitProcess {
     <#
     The decision Exit-Run rests on, split out so the selftest can drive both
@@ -711,6 +777,40 @@ function Invoke-Selftest {
     $v = Compare-Manifest $gone
     C "a file that did not land fails too"        ((-not $v.Ok) -and $v.Missing -contains "a.dll")
 
+    # The case the update path did not have until now: a file the package USED to
+    # ship. Compare-Manifest above cannot see it -- it walks the manifest, and a
+    # dropped file is not in the manifest by definition.
+    $shipped = @("bin/llama.dll", "cli/crow.py")
+    $e = Find-Extraneous -ManifestPaths $shipped -DiskPaths @("bin/llama.dll", "cli/crow.py", "cli/test_crow.py")
+    C "a file the package dropped is found"       ($e.Extraneous -contains "cli/test_crow.py" -and $e.Extraneous.Count -eq 1)
+    C "and the count carries its denominator"     ($e.Checked -eq 3)
+
+    # The half that must NOT fire, and it is the expensive half: on this machine
+    # session/ held 472 MB of live KV cache when this was written. A removal pass
+    # that treats it as extraneous deletes a running session the first time it
+    # meets a real install, and no test above would have said a word.
+    $e = Find-Extraneous -ManifestPaths $shipped -DiskPaths @(
+        "bin/llama.dll", "session/crow-session.bin", "session/session.json",
+        "MANIFEST.json", "bin/ggml-cuda.dll.old")
+    C "session data is never extraneous"          ($e.Extraneous.Count -eq 0)
+    C "and it is reported as left alone, not lost" ($e.Protected.Count -eq 4)
+
+    # A protected list that swallows everything is the same failure wearing the
+    # opposite coat: it would report a clean install forever.
+    $e = Find-Extraneous -ManifestPaths $shipped -DiskPaths @("session/x.bin", "bin/stray.dll")
+    C "protection does not swallow a real stray"  ($e.Extraneous -contains "bin/stray.dll")
+
+    # The manifest is written by PowerShell and read back by this, and the two
+    # do not agree on separators; NTFS does not agree on case with anyone.
+    $e = Find-Extraneous -ManifestPaths @("bin\llama.dll") -DiskPaths @("bin/LLAMA.dll")
+    C "separator and case do not invent a stray"  ($e.Extraneous.Count -eq 0)
+
+    # Nothing in, nothing out -- but Checked must still be 0 rather than absent,
+    # because that zero is what tells a clean install from a run that looked in
+    # the wrong directory.
+    $e = Find-Extraneous -ManifestPaths $shipped -DiskPaths @()
+    C "an empty disk list checks zero, not null"  ($e.Extraneous.Count -eq 0 -and $e.Checked -eq 0)
+
     # Whose server is it. Both directions, because a rule that only ever says
     # yes renames a directory nothing is holding.
     C "an exe inside the install dir is ours"     (Test-RunsFromDir -ExePath "C:\Crow\bin\llama-server.exe" -Dir "C:\Crow\bin")
@@ -954,6 +1054,34 @@ if (-not $verdict.Ok) {
     return
 }
 Write-Item "sha256 per file" "$($verdict.Checked) of $($verdict.Checked) match" "ok"
+
+# The other direction. Everything above walks the manifest and asks the disk; a
+# file the package USED to ship and no longer does is invisible to it and stays
+# forever. Order matters and is the same as everywhere else here: the files were
+# written and read back first, and only a verified install gets anything deleted.
+$installed = @(Get-ChildItem -LiteralPath $InstallTo -Recurse -File -ErrorAction SilentlyContinue |
+               ForEach-Object { $_.FullName.Substring($InstallTo.Length).TrimStart('\', '/') })
+$dropped = Find-Extraneous -ManifestPaths $entries.Path -DiskPaths $installed
+foreach ($rel in $dropped.Extraneous) {
+    Remove-Item -LiteralPath (Join-Path $InstallTo $rel) -Force -ErrorAction SilentlyContinue
+}
+# Counted by looking afterwards, not by counting what was found -- the same
+# lesson as Remove-StaleOld below: a locked or read-only file survives the call
+# without raising, and reporting it as removed prints a green line for work that
+# did not happen.
+$stillThere = @($dropped.Extraneous | Where-Object { Test-Path -LiteralPath (Join-Path $InstallTo $_) })
+$gone = $dropped.Extraneous.Count - $stillThere.Count
+if ($gone -gt 0) {
+    Write-Item "removed" "$gone files the package no longer ships, of $($dropped.Checked) checked" "ok"
+}
+if ($stillThere.Count -gt 0) {
+    Write-Item "could not remove" "$($stillThere.Count) of $($dropped.Extraneous.Count): $($stillThere -join ', ')" "warn"
+}
+if ($dropped.Extraneous.Count -eq 0) {
+    # With the denominator, always. Without it this line is indistinguishable
+    # from a run that looked in the wrong directory and found nothing there.
+    Write-Item "nothing to remove" "$($dropped.Checked) files checked, $($dropped.Protected.Count) left alone" "ok"
+}
 
 # The .old files from the rename above. The ones the running server still has
 # mapped cannot be deleted -- and that is the normal case, because the reason

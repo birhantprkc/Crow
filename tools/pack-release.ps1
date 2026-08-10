@@ -134,6 +134,31 @@ function Check {
     else         { Write-Host "  FAIL $Name" -ForegroundColor Red;     $script:selftestRed++ }
 }
 
+function Get-DevOnlyFiles {
+    <#
+    Which of these files are developer equipment that must not ship?
+
+    A predicate rather than a literal list at the copy site, and it lives ABOVE
+    the selftest exit on purpose. The version this replaces would have made the
+    decision below `if ($Selftest) { exit }`, where no check can reach it -- the
+    same shape that let install.ps1 report "42 checks pass" on 2026-08-10 while
+    the code those checks were written for sat 113 lines further down.
+
+    Matching is on the file NAME, so a path separator or a parent directory
+    cannot smuggle one through.
+
+    RETURNS `,@(...)` AND NOT `@(...)`. PowerShell unwraps a one-element array on
+    return, and one element is the normal case here -- exactly one suite ships in
+    cli/. Without the comma the caller gets a String, `.Count` still answers 1,
+    and `[0]` hands back the letter "C" of "C:\...". Caught by the check below on
+    2026-08-10, which is the only reason this line reads the way it does.
+    #>
+    param([string[]] $Paths)
+    return ,@($Paths | Where-Object {
+        $null -ne $_ -and [System.IO.Path]::GetFileName($_) -like 'test_*.py'
+    })
+}
+
 function Invoke-Selftest {
 
     Write-Host "pack-release selftest"
@@ -146,6 +171,18 @@ function Invoke-Selftest {
     Check "cublas64_13.dll does NOT count"          (-not (Test-SystemDll 'cublas64_13.dll'))
     Check "MSVCP140.dll does NOT count"             (-not (Test-SystemDll 'MSVCP140.dll'))
     Check "ggml-base.dll does NOT count"            (-not (Test-SystemDll 'ggml-base.dll'))
+
+    # What ships and what does not. Both directions again, because a predicate
+    # that says no to everything would quietly put the suite back in the package
+    # and this check would still be green.
+    $cli = @('C:\r\cli\crow.py', 'C:\r\cli\test_crow.py', 'C:\r\cli\fonts\OFL.txt')
+    $dev = Get-DevOnlyFiles -Paths $cli
+    Check "the unit suite is developer-only"        ($dev.Count -eq 1 -and $dev[0] -like '*test_crow.py')
+    Check "the client itself is NOT"                ($dev -notcontains 'C:\r\cli\crow.py')
+    Check "and neither is the font licence"         ($dev -notcontains 'C:\r\cli\fonts\OFL.txt')
+    # A nested copy must not slip past on its parent directory.
+    Check "a suite in a subdirectory is caught too" ((Get-DevOnlyFiles -Paths @('C:\r\cli\sub\test_x.py')).Count -eq 1)
+    Check "an empty list is not an error"           ((Get-DevOnlyFiles -Paths @()).Count -eq 0)
 
     $dumpbin = Find-Dumpbin
     Check "dumpbin located" ([bool]$dumpbin)
@@ -275,6 +312,20 @@ Get-ChildItem (Join-Path $stage 'cli') -Recurse -Directory -Filter '__pycache__'
     ForEach-Object { Remove-Item $_.FullName -Recurse -Force }
 $stray = Get-ChildItem (Join-Path $stage 'cli') -Recurse -File -Include '*.pyc', '*.pyo'
 if ($stray) { throw ("compiled Python left in the package: " + ($stray.Name -join ', ')) }
+
+# The unit suite is developer equipment, and -Recurse above takes it along: 73,792
+# bytes shipped to every user, in a package whose own installer never runs it and
+# whose README never mentions it. Nothing outside this repository refers to it.
+# It is also the first file the removal path in install.ps1 has to deal with --
+# every install from 0.0.1 on has a copy sitting in cli/.
+$cliFiles = @(Get-ChildItem (Join-Path $stage 'cli') -Recurse -File | ForEach-Object { $_.FullName })
+$devFiles = Get-DevOnlyFiles -Paths $cliFiles
+foreach ($p in $devFiles) { Remove-Item -LiteralPath $p -Force }
+Write-Host ("  dropped $($devFiles.Count) developer files of $($cliFiles.Count) under cli/")
+# Looked at again rather than trusted: a file that failed to delete leaves the
+# count above saying it went.
+$devLeft = Get-DevOnlyFiles -Paths @(Get-ChildItem (Join-Path $stage 'cli') -Recurse -File | ForEach-Object { $_.FullName })
+if ($devLeft.Count -gt 0) { throw ("test code left in the package: " + (($devLeft | Split-Path -Leaf) -join ', ')) }
 foreach ($f in @('LICENSE', 'NOTICE', 'README.md')) {
     Copy-Item -LiteralPath (Join-Path $repo $f) -Destination $stage
 }
