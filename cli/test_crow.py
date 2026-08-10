@@ -12,6 +12,7 @@ from __future__ import annotations
 import builtins
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -1226,6 +1227,201 @@ class RawKeyFallbackTests(unittest.TestCase):
             self.assertEqual(crow.read_line("you> "), "typed by input()")
         finally:
             crow._TTY, builtins.input = saved_tty, saved_input
+
+
+class ShouldRollTests(unittest.TestCase):
+    """The threshold, and the two ways it must refuse to fire."""
+
+    def test_it_rolls_once_the_share_is_reached(self):
+        self.assertTrue(crow.should_roll(180_000, 200_000, 0.9))
+
+    def test_the_boundary_itself_rolls(self):
+        """>= not >: at exactly the mark there is no reason to wait a turn."""
+        self.assertTrue(crow.should_roll(180_000, 200_000, 0.9))
+        self.assertFalse(crow.should_roll(179_999, 200_000, 0.9))
+
+    def test_a_half_empty_window_does_not_roll(self):
+        self.assertFalse(crow.should_roll(21_000, 200_000, 0.9))
+
+    def test_an_unknown_window_never_rolls(self):
+        """THE BUG THIS GUARD EXISTS FOR.
+
+        fetch_n_ctx returns 0 when the server will not say. Without the guard
+        `context_tokens >= 0 * 0.9` is true on every turn, including the very
+        first, and the client archives and resets forever.
+        """
+        self.assertFalse(crow.should_roll(0, 0, 0.9))
+        self.assertFalse(crow.should_roll(1, 0, 0.9))
+        self.assertFalse(crow.should_roll(500_000, 0, 0.9))
+
+    def test_a_threshold_of_zero_means_off_not_always(self):
+        self.assertFalse(crow.should_roll(199_999, 200_000, 0.0))
+
+    def test_a_negative_threshold_is_also_off(self):
+        self.assertFalse(crow.should_roll(199_999, 200_000, -1.0))
+
+
+class RolloverTests(unittest.TestCase):
+    """Archiving, and what an archive is deliberately NOT allowed to do."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self._real_dir, self._real_file = crow.SESSION_DIR, crow.SESSION_FILE
+        self._real_post = crow.post_json
+        crow.SESSION_DIR = self.dir
+        crow.SESSION_FILE = str(Path(self.dir) / "session.json")
+        self.posted = []
+        crow.post_json = lambda url, body, timeout=30.0: self.posted.append(url) or {}
+
+    def tearDown(self):
+        crow.SESSION_DIR, crow.SESSION_FILE = self._real_dir, self._real_file
+        crow.post_json = self._real_post
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _conversation(self):
+        c = crow.Conversation("system prompt")
+        c.append("user", "what is in this repo")
+        c.append("assistant", "a lot")
+        return c
+
+    def _archive(self):
+        return str(Path(self.dir) / "rollover-test.json")
+
+    def test_a_named_path_is_written_instead_of_the_live_file(self):
+        crow.save_session(self._conversation(), "http://x/v1", 99,
+                          path=self._archive(), with_kv=False)
+        self.assertTrue(os.path.exists(self._archive()))
+        self.assertFalse(os.path.exists(crow.SESSION_FILE))
+
+    def test_an_archive_never_writes_the_servers_slot(self):
+        """SLOT_FILE is one fixed name: a second save would overwrite the cache
+        the live session is still going to resume from."""
+        crow.save_session(self._conversation(), "http://x/v1", 99,
+                          path=self._archive(), with_kv=False)
+        self.assertEqual(self.posted, [])
+
+    def test_a_rollover_does_not_write_the_servers_slot_either(self):
+        """The call SITE, not just the function.
+
+        Added because a mutation that flipped roll_over's with_kv to True was
+        caught by nothing: the test above calls save_session directly, so it
+        proved the parameter works and said nothing about who passes it.
+        """
+        crow.roll_over(self._conversation(), "http://x/v1", 180_000, path=self._archive())
+        self.assertEqual(self.posted, [])
+
+    def test_the_live_session_still_saves_its_slot(self):
+        """The case that must fail if with_kv is ever defaulted the wrong way."""
+        crow.save_session(self._conversation(), "http://x/v1", 99)
+        self.assertTrue(any("action=save" in url for url in self.posted))
+
+    def test_an_archive_records_that_it_has_no_cache(self):
+        crow.save_session(self._conversation(), "http://x/v1", 99,
+                          path=self._archive(), with_kv=False)
+        with open(self._archive(), encoding="utf-8") as fh:
+            self.assertFalse(json.load(fh)["kv"])
+
+    def test_the_archive_holds_the_messages_verbatim(self):
+        crow.save_session(self._conversation(), "http://x/v1", 99,
+                          path=self._archive(), with_kv=False)
+        with open(self._archive(), encoding="utf-8") as fh:
+            saved = json.load(fh)["messages"]
+        self.assertEqual([m["content"] for m in saved],
+                         ["system prompt", "what is in this repo", "a lot"])
+
+    def test_load_session_reads_the_named_path(self):
+        crow.save_session(self._conversation(), "http://x/v1", 99,
+                          path=self._archive(), with_kv=False)
+        restored = crow.load_session("http://x/v1", "system prompt", path=self._archive())
+        self.assertIsNotNone(restored)
+        self.assertEqual(len(restored[0]), 3)
+        self.assertFalse(restored[2])
+
+    def test_a_missing_archive_is_none_rather_than_a_crash(self):
+        self.assertIsNone(crow.load_session("http://x/v1", None,
+                                            path=str(Path(self.dir) / "gone.json")))
+
+    def test_roll_over_empties_the_conversation_and_keeps_the_system_prompt(self):
+        c = self._conversation()
+        crow.roll_over(c, "http://x/v1", 180_000, path=self._archive())
+        self.assertEqual(len(c), 2)
+        self.assertEqual(c.payload()[0]["role"], "system")
+
+    def test_the_note_names_the_archive_and_the_size(self):
+        c = self._conversation()
+        crow.roll_over(c, "http://x/v1", 180_000, path=self._archive())
+        note = c.payload()[1]["content"]
+        self.assertIn(self._archive(), note)
+        self.assertIn("180000", note)
+
+    def test_the_carried_turn_shares_one_message_with_the_note(self):
+        """Two user messages in a row are merged or refused depending on the
+        template, and 180k tokens in is the wrong place to discover which."""
+        c = self._conversation()
+        crow.roll_over(c, "http://x/v1", 180_000, carry="and now?", path=self._archive())
+        payload = c.payload()
+        self.assertEqual([m["role"] for m in payload], ["system", "user"])
+        self.assertIn("and now?", payload[1]["content"])
+
+    def test_without_a_carry_the_note_stands_alone(self):
+        c = self._conversation()
+        crow.roll_over(c, "http://x/v1", 180_000, path=self._archive())
+        self.assertNotIn("and now?", c.payload()[1]["content"])
+
+    def test_an_empty_conversation_is_not_archived(self):
+        """Otherwise a rollover on a fresh start writes a file holding nothing
+        and resets a conversation that had not begun."""
+        empty = crow.Conversation("system prompt")
+        self.assertIsNone(crow.roll_over(empty, "http://x/v1", 0, path=self._archive()))
+        self.assertFalse(os.path.exists(self._archive()))
+
+    def test_rollover_paths_carry_a_stamp(self):
+        self.assertIn("rollover-", crow.rollover_path("20260810-074500"))
+        self.assertTrue(crow.rollover_path("20260810-074500").endswith(".json"))
+
+    def test_two_rollovers_do_not_share_a_file(self):
+        self.assertNotEqual(crow.rollover_path("20260810-074500"),
+                            crow.rollover_path("20260810-074501"))
+
+
+class ResumePathTests(unittest.TestCase):
+    """--resume takes a bare name or a path, and must not confuse the two."""
+
+    def test_a_bare_name_is_looked_for_among_the_archives(self):
+        self.assertEqual(crow.resume_path("rollover-1.json"),
+                         os.path.join(crow.SESSION_DIR, "rollover-1.json"))
+
+    def test_a_path_with_a_separator_is_left_alone(self):
+        self.assertEqual(crow.resume_path(os.path.join("sub", "s.json")),
+                         os.path.join("sub", "s.json"))
+
+    def test_an_absolute_path_is_left_alone(self):
+        absolute = os.path.abspath(os.path.join("tmp", "s.json"))
+        self.assertEqual(crow.resume_path(absolute), absolute)
+
+
+class RolloverWiringTests(unittest.TestCase):
+    """The flags exist and default the way the code above assumes."""
+
+    def test_rollover_at_defaults_to_the_constant(self):
+        args = crow.build_parser().parse_args([])
+        self.assertEqual(args.rollover_at, crow.ROLLOVER_AT)
+
+    def test_rollover_can_be_switched_off_from_the_command_line(self):
+        args = crow.build_parser().parse_args(["--rollover-at", "0"])
+        self.assertFalse(crow.should_roll(199_999, 200_000, args.rollover_at))
+
+    def test_resume_is_absent_unless_asked_for(self):
+        self.assertIsNone(crow.build_parser().parse_args([]).resume)
+
+    def test_resume_takes_a_file(self):
+        args = crow.build_parser().parse_args(["--resume", "rollover-1.json"])
+        self.assertEqual(args.resume, "rollover-1.json")
+
+    def test_no_session_did_not_become_a_path(self):
+        """--no-session stays a switch; --resume is the one that takes a name."""
+        args = crow.build_parser().parse_args(["--no-session"])
+        self.assertFalse(args.session)
 
 
 if __name__ == "__main__":

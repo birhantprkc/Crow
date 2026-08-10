@@ -200,7 +200,33 @@ plain read, where colour is off anyway.
 | `-m` | model name sent to the endpoint |
 | `--system` | replace the system prompt, `--no-system` removes it |
 | `--temperature` | default **0.6**, see below |
+| `--rollover-at` | archive and start fresh at this share of the window, `0` switches it off (default **0.9**) |
+| `--resume FILE` | resume a named session file — an archive left by a rollover; a bare name is looked for among the session files |
 | `--no-font`, `--no-background` | leave the terminal profile alone |
+
+<a id="the-window-rolls-over-instead-of-hitting-the-wall"></a>
+**The window rolls over instead of hitting the wall.** The server's limit is not
+a slope: a request that arrives at or past `n_ctx` is refused outright, and the
+turn is lost with it. At 90 % of the window Crow writes the conversation out to
+`rollover-<stamp>.json`, empties it, and opens the next one with a note naming
+that file. The model has `read_file`, so the pointer is one it can follow.
+
+This does not break append-only. Nothing is edited inside a prefix that is still
+in use — the old context is written out whole and dropped whole, and what
+follows is a new prefix that has never been sent. An edit would leave the
+server's cache matching a conversation that no longer exists.
+
+Two details are load-bearing. The check also runs **inside** the tool loop, not
+only between turns: one tool round has been measured adding 5,253 tokens and up
+to 24 of them run without the user typing anything, so a turn that starts under
+the threshold can still walk into the wall on its own. And an archive is written
+**without** the KV cache — the server's slot file has one fixed name, so saving
+it would put the archive's cache over the live one, and a save is ~1.3 GiB at a
+full window onto the same drive the experts stream from. An archive resumes from
+its messages and pays a prefill, which is the honest price.
+
+If the server will not say how large the window is, `n_ctx` is 0 and the
+rollover stays off — `0.9 × 0` would otherwise be a threshold every turn crosses.
 
 Four properties come from measurements rather than taste:
 

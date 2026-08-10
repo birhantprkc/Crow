@@ -67,6 +67,19 @@ MAX_TOOL_ROUNDS = 24
 MAX_HITS = 200
 COMMAND_TIMEOUT = 120
 
+# Archive the conversation and start a fresh one at this share of the window.
+#
+# The server's limit is a wall, not a slope: a request that arrives already at
+# or past n_ctx is refused outright with ERROR_TYPE_EXCEED_CONTEXT_SIZE, and
+# the turn is lost with it. Rolling over before that is the difference between
+# an archive on disk and a message the user has to retype.
+#
+# 0.9 leaves ~20k of a 200k window. That is head-room for ONE more turn, not a
+# guarantee: a single tool round has been measured adding 5,253 tokens, and the
+# loop runs up to MAX_TOOL_ROUNDS of them. Which is why the check also runs
+# inside the loop and not only between turns.
+ROLLOVER_AT = 0.9
+
 # The calls are executed -- see run_tool and the loop in repl().
 #
 # WHY LIST_DIR, FIND_FILES AND SEARCH_TEXT ARE NOT OPTIONAL. With read_file
@@ -290,7 +303,8 @@ def prefix_fingerprint(system: str | None) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
-def save_session(conversation: "Conversation", base_url: str, context_tokens: int) -> str | None:
+def save_session(conversation: "Conversation", base_url: str, context_tokens: int,
+                 path: str | None = None, with_kv: bool = True) -> str | None:
     """Write the session so the next start does not pay for it again.
 
     TWO HALVES, AND NEITHER IS ENOUGH ALONE. The server holds the KV cache; the
@@ -304,43 +318,64 @@ def save_session(conversation: "Conversation", base_url: str, context_tokens: in
     one place Crow writes to the SSD rather than reading it. Per turn that
     accumulates; once per session it does not.
 
+    WITH_KV=FALSE IS FOR ARCHIVES, AND IT IS NOT AN OPTIMISATION. SLOT_FILE is
+    a fixed name on the server: a second save would write the archive's cache
+    over the live one, so the session the user is still in would resume against
+    a stranger's prefix. On top of that a save is the ~1.3 GiB figure above, to
+    the same SSD the experts are being streamed from. An archive is resumable
+    from its messages; it pays a prefill and nothing else is at risk.
+
     Returns a one-line report, or None when there was nothing worth saving.
     """
     if len(conversation) <= (1 if conversation.has_system else 0):
         return None
 
-    os.makedirs(SESSION_DIR, exist_ok=True)
+    path = path or SESSION_FILE
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     saved_kv = False
-    try:
-        post_json(f"{base_url.rstrip('/').removesuffix('/v1')}/slots/0?action=save",
-                  {"filename": SLOT_FILE}, timeout=600.0)
-        saved_kv = True
-    except Exception:
-        # A server without --slot-save-path refuses this. The messages are still
-        # worth keeping; the next start just pays a prefill for them.
-        pass
+    if with_kv:
+        try:
+            post_json(f"{base_url.rstrip('/').removesuffix('/v1')}/slots/0?action=save",
+                      {"filename": SLOT_FILE}, timeout=600.0)
+            saved_kv = True
+        except Exception:
+            # A server without --slot-save-path refuses this. The messages are still
+            # worth keeping; the next start just pays a prefill for them.
+            pass
 
-    with open(SESSION_FILE, "w", encoding="utf-8") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         json.dump({"version": VERSION, "kv": saved_kv, "context_tokens": context_tokens,
                    "prefix": prefix_fingerprint(conversation.system),
                    "messages": conversation.payload()}, fh)
 
-    return (f"session saved -- {len(conversation)} messages"
-            + (" and the server's cache" if saved_kv else " (messages only: the server runs"
-               " without --slot-save-path, so the next start pays a prefill)"))
+    if saved_kv:
+        return f"session saved -- {len(conversation)} messages and the server's cache"
+    # Two different reasons for the same shape, and saying the wrong one sends
+    # the reader to the wrong fix: an archive skipped the cache on purpose, a
+    # live session only ever skips it because the server refused.
+    why = ("archive: messages only, so the live cache is left alone" if not with_kv else
+           "messages only: the server runs without --slot-save-path, so the next"
+           " start pays a prefill")
+    return f"session saved -- {len(conversation)} messages ({why})"
 
 
-def load_session(base_url: str, system: str | None = None) -> tuple[list[dict], int, bool] | None:
+def load_session(base_url: str, system: str | None = None,
+                 path: str | None = None) -> tuple[list[dict], int, bool] | None:
     """The other half. Returns (messages, context_tokens, kv_restored) or None.
 
     The KV restore is attempted first and its success is carried out, because a
     caller that believes the cache is warm when it is not will report a prefill
     as a surprise rather than as the expected cost.
+
+    A path names an archive written by a rollover. Those carry `kv: false` by
+    construction, so this resumes their messages and pays a prefill for them --
+    which is the honest price of picking up a conversation that was put down.
     """
-    if not os.path.exists(SESSION_FILE):
+    path = path or SESSION_FILE
+    if not os.path.exists(path):
         return None
     try:
-        with open(SESSION_FILE, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             saved = json.load(fh)
         messages = saved.get("messages") or []
     except Exception:
@@ -373,11 +408,78 @@ def load_session(base_url: str, system: str | None = None) -> tuple[list[dict], 
             # cosmetic defect into a broken client.
             try:
                 saved["kv"] = False
-                with open(SESSION_FILE, "w", encoding="utf-8") as fh:
+                with open(path, "w", encoding="utf-8") as fh:
                     json.dump(saved, fh)
             except Exception:
                 pass
     return messages, int(saved.get("context_tokens") or 0), kv
+
+
+def should_roll(context_tokens: int, n_ctx: int, at: float = ROLLOVER_AT) -> bool:
+    """Whether the window is full enough to archive and start fresh.
+
+    n_ctx OF ZERO MEANS "THE SERVER WOULD NOT SAY", NOT "NO ROOM LEFT".
+    fetch_n_ctx returns 0 on any failure, and `context_tokens >= 0 * at` is
+    true on every turn including the first -- without this guard the client
+    would archive and reset continuously, on exactly the path where something
+    is already wrong. A threshold of zero is how the feature is switched off,
+    and it has to mean off rather than always.
+    """
+    if n_ctx <= 0 or at <= 0:
+        return False
+    return context_tokens >= n_ctx * at
+
+
+def rollover_path(stamp: str | None = None) -> str:
+    """Where an archive goes. Named by time, because there will be several."""
+    return os.path.join(SESSION_DIR, f"rollover-{stamp or time.strftime('%Y%m%d-%H%M%S')}.json")
+
+
+def resume_path(name: str) -> str:
+    """Resolve --resume: a bare name is looked for among the archives."""
+    if os.path.isabs(name) or os.sep in name or (os.altsep and os.altsep in name):
+        return name
+    return os.path.join(SESSION_DIR, name)
+
+
+# What the fresh conversation opens with. It names the archive rather than
+# summarising it: a summary is a guess about what mattered, and the model has
+# read_file. A pointer it can follow beats a précis it cannot check.
+ROLLOVER_NOTE = (
+    "[The conversation up to this point reached {tokens} tokens and was archived to "
+    "{path} -- a JSON file whose `messages` array holds it verbatim. Read it if you "
+    "need what was said. This conversation starts here.]"
+)
+
+
+def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
+              carry: str | None = None, path: str | None = None) -> str | None:
+    """Archive the conversation, empty it, and open the fresh one.
+
+    Append-only is not broken here and this is the reason it is allowed: nothing
+    is edited or removed from a prefix that is still in use. The old context is
+    written out whole and then dropped whole, and what follows is a new prefix
+    that has never been sent. An edit would leave the server's cache matching a
+    conversation that no longer exists; a reset leaves it matching nothing,
+    which the next request pays for once and honestly.
+
+    `carry` is the turn the user had just typed. Without it a rollover in the
+    middle of a turn would archive the question along with everything else and
+    leave the model answering a note about a file.
+
+    Returns the archive path, or None when there was nothing worth archiving.
+    """
+    path = path or rollover_path()
+    if save_session(conversation, base_url, context_tokens, path=path, with_kv=False) is None:
+        return None
+
+    conversation.reset()
+    note = ROLLOVER_NOTE.format(tokens=context_tokens, path=path)
+    # ONE message, not two. Consecutive turns of the same role are merged or
+    # rejected depending on the chat template, and neither is a thing to find
+    # out at 180k tokens.
+    conversation.append("user", f"{note}\n\n{carry}" if carry else note)
+    return path
 
 
 def post_json(url: str, body: dict, timeout: float = 30.0) -> dict:
@@ -1921,14 +2023,24 @@ def repl(args: argparse.Namespace) -> int:
     context_tokens = 0
 
     # Before the first turn, so no prefix exists yet to break.
-    if getattr(args, "session", True):
-        restored = load_session(args.base_url, args.system)
+    wanted = getattr(args, "resume", None)
+    if getattr(args, "session", True) or wanted:
+        source = resume_path(wanted) if wanted else None
+        restored = load_session(args.base_url, args.system, path=source)
         if restored:
             messages, context_tokens, kv = restored
             conversation.restore(messages)
             how = ("cache warm" if kv else
                    "messages only -- the first turn pays a prefill")
-            print(f"{DIM}resumed: {len(messages)} messages, {how}{RESET}\n")
+            where = f" from {os.path.basename(source)}" if source else ""
+            print(f"{DIM}resumed{where}: {len(messages)} messages, {how}{RESET}\n")
+        elif wanted:
+            # Named explicitly and not there: silence would look like an empty
+            # archive rather than a wrong name, and the user would go looking in
+            # the wrong place.
+            print(f"crow: no session at {source}", file=sys.stderr)
+            reset_background()
+            return 2
 
     def leave() -> int:
         if getattr(args, "session", True):
@@ -1960,9 +2072,29 @@ def repl(args: argparse.Namespace) -> int:
             print("context dropped -- the next turn pays a full prefill.\n")
             continue
         if line == "/context":
-            print(f"{len(conversation)} messages, {context_tokens} tokens\n")
+            # The rollover point is shown here or nowhere: it is the number that
+            # decides when the conversation ends, and a user who cannot see it
+            # cannot plan around it.
+            enabled = n_ctx > 0 and args.rollover_at > 0
+            room = f", rolls over at {int(n_ctx * args.rollover_at)}" if enabled else ""
+            print(f"{len(conversation)} messages, {context_tokens} tokens{room}\n")
             continue
-        conversation.append("user", line)
+        # BEFORE the turn is appended, not after: the archive is then a complete
+        # conversation, and the question the user just typed opens the new one
+        # instead of being the last thing in a file nobody reads.
+        rolled = False
+        if should_roll(context_tokens, n_ctx, args.rollover_at):
+            archived = roll_over(conversation, args.base_url, context_tokens, carry=line)
+            if archived:
+                # Printed while context_tokens still HOLDS the number. Zeroing
+                # first and interpolating after is how this reads "archived at
+                # 0 tokens" forever.
+                print(f"{DIM}context rolled over at {context_tokens} tokens -- archived to "
+                      f"{archived}{RESET}\n")
+                context_tokens = 0
+                rolled = True
+        if not rolled:
+            conversation.append("user", line)
         print()
         # Cleared per turn: an interrupt from the PREVIOUS turn must not kill
         # the next one before it starts.
@@ -2030,6 +2162,31 @@ def repl(args: argparse.Namespace) -> int:
                     print(f"{DIM}    {result.splitlines()[0]}{RESET}")
                 conversation.append("tool", result, tool_call_id=call["id"])
             print("")
+
+            # THE CHECK BELONGS HERE TOO, NOT ONLY BETWEEN TURNS. One tool round
+            # has been measured adding 5,253 tokens, and up to MAX_TOOL_ROUNDS of
+            # them run without the user typing anything. A turn that starts under
+            # the threshold can still walk into the server's wall inside itself,
+            # and the wall costs the whole turn.
+            #
+            # At the end of a round, never in the middle of one: the assistant
+            # message and its tool results are both in by now, so what gets
+            # archived is a conversation and not half of one.
+            if should_roll(context_tokens, n_ctx, args.rollover_at):
+                if rolled:
+                    # Twice in one turn means the question itself does not fit.
+                    # Rolling again would archive the note and ask the same
+                    # thing again, forever.
+                    print(f"{DIM}[the window filled again inside this turn -- stopping here."
+                          f" Ask for a narrower slice, or /reset]{RESET}\n")
+                    stopped = True
+                    break
+                archived = roll_over(conversation, args.base_url, context_tokens, carry=line)
+                if archived:
+                    print(f"{DIM}context rolled over at {context_tokens} tokens mid-turn -- "
+                          f"archived to {archived}{RESET}\n")
+                    context_tokens = 0
+                    rolled = True
 
         if stopped:
             continue
@@ -2287,6 +2444,16 @@ def build_parser() -> argparse.ArgumentParser:
                         help="do not ask GitHub whether a newer release exists")
     parser.add_argument("--no-session", dest="session", action="store_false",
                         help="do not resume the last session, and do not save this one")
+    # --resume, not --session <file>: --no-session already owns dest="session"
+    # as a flag, and one name that is both a switch and a path is how a parser
+    # starts lying about what it accepts.
+    parser.add_argument("--resume", metavar="FILE",
+                        help="resume this session file instead of the last one; a bare name is"
+                             f" looked for in {SESSION_DIR}")
+    parser.add_argument("--rollover-at", dest="rollover_at", type=float, default=ROLLOVER_AT,
+                        metavar="SHARE",
+                        help="archive the conversation and start a fresh one at this share of"
+                             f" the window, 0 to switch it off (default: {ROLLOVER_AT})")
     return parser
 
 
