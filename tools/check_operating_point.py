@@ -44,6 +44,9 @@ FLAG_SPECS = [
     ("moe_stream_direct", r"(--moe-stream-direct)\b", "flag"),
     # Value deliberately not compared - see the module docstring.
     ("moe_stream_l2", r"(--moe-stream-l2)\s+\S+", "flag"),
+    # Same treatment: the flag must be there, the path differs per install.
+    # 0731 ships no template and its GGUF embeds one that fails golden vector 4.
+    ("chat_template_file", r"(--chat-template-file)\s+\S+", "flag"),
     # The capture demands something path-shaped: a separator or a variable marker.
     # Measured on the first run of this tool: a plain \S+ matched the PROSE at
     # install.ps1:1126 -- "# --slot-save-path refuses to start against a path
@@ -113,13 +116,17 @@ def extract(text):
 
 
 def expected(server):
-    want = dict(server)
+    # Keys starting with _ are documentation riding inside the manifest, the
+    # same convention as everywhere else in the file. Treating one as a flag
+    # made every copy red the moment a note moved into the server block.
+    want = {k: v for k, v in server.items() if not k.startswith("_")}
     want["slot_save_path"] = want["slot_save_path"].replace("\\", "/").split("/")[-1]
     # The manifest records 32 because that is what this machine gets. install.ps1
     # computes it from the detected RAM, so a copy is correct as long as the flag
     # is there at all. Comparing the number would make the check fail on every
     # machine except one, which is a checker nobody can keep green.
     want["moe_stream_l2"] = True
+    want["chat_template_file"] = True
     return want
 
 

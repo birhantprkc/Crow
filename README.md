@@ -8,10 +8,10 @@
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
-<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-0.0.6-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
+<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-0.1.0-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
 <a href="#requirements"><img src="https://img.shields.io/badge/platform-Windows%20x64%20%C2%B7%20CUDA-555555?style=flat-square&logo=nvidia&logoColor=76b900&labelColor=000000" alt="Platform"></a>
 <a href="cli/crow.py"><img src="https://img.shields.io/badge/client-Python%20stdlib%20only-555555?style=flat-square&logo=python&logoColor=ffd43b&labelColor=000000" alt="Python"></a>
-<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash"><img src="https://img.shields.io/badge/model-DeepSeek--V4--Flash-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
+<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731"><img src="https://img.shields.io/badge/model-DeepSeek--V4--Flash--0731-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
 </p>
 
 <table>
@@ -19,9 +19,9 @@
 <td align="center"><b>284B</b><br><sub>parameters</sub></td>
 <td align="center"><b>13B</b><br><sub>active per token</sub></td>
 <td align="center"><b>200k</b><br><sub>context, one slot</sub></td>
-<td align="center"><b>95.9 GiB</b><br><sub>model on disk</sub></td>
+<td align="center"><b>97.1 GiB</b><br><sub>model on disk</sub></td>
 <td align="center"><b>33.73 GiB</b><br><sub>peak host RAM, measured</sub></td>
-<td align="center"><b>14.73</b><br><sub>tok/s decode, gate median</sub></td>
+<td align="center"><b>19.13</b><br><sub>tok/s decode, gate median</sub></td>
 <td align="center"><b>0 EUR</b><br><sub>spent so far</sub></td>
 </tr>
 </table>
@@ -34,7 +34,7 @@
 
 **Crow runs a frontier-scale coding model on a single consumer graphics card by leaving most of the model on the SSD.**
 
-A mixture-of-experts model is mostly asleep. Every token wakes only **6 of the 256 experts** in each of its 43 layers, so 92.7 % of the file is untouched at any given moment. Crow keeps the parts that *every* token needs in VRAM — attention, norms, shared experts, 6.88 GiB of them — holds the 64 most useful experts per layer beside them in a slot cache, and reads whatever is missing straight off the drive while the GPU is still working. The host machine never holds the model: **33.73 GiB of process memory for a 95.9 GiB file**, and 32 of those are a cache it does not need — without it the server peaks at 26.99 GiB and runs 4 tok/s slower.
+A mixture-of-experts model is mostly asleep. Every token wakes only **6 of the 256 experts** in each of its 43 layers, so 92.7 % of the file is untouched at any given moment. Crow keeps the parts that *every* token needs in VRAM — attention, norms, shared experts, 6.88 GiB of them — holds the 64 most useful experts per layer beside them in a slot cache, and reads whatever is missing straight off the drive while the GPU is still working. The host machine never holds the model: **33.73 GiB of process memory for a 95.9 GiB file**, and 32 of those are a cache it does not need — without it the server peaks at 26.99 GiB and runs 4 tok/s slower. *(The host-memory figures in this paragraph and the FAQ are from the preview-model series -- a 95.9 GiB file. 0731 is 97.1 GiB with the identical architecture; its host peak has not been re-run and is not claimed.)*
 
 The context window is 200,000 tokens, on a single slot, and it costs 1.32 GiB of the card — compressed attention makes context the cheap part here. A coding session holds files and history, so a 16k or 64k window would be measuring a product nobody uses.
 
@@ -108,10 +108,10 @@ Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
 [5/5] What is left to do
 ```
 
-The model is **not** part of that download. It is 95.9 GiB, it belongs to somebody else, and an installer that spends hours on it before you have seen anything work is the wrong shape. The last step prints the one command that fetches it:
+The model is **not** part of that download. It is 97.1 GiB, it belongs to somebody else, and an installer that spends hours on it before you have seen anything work is the wrong shape. The last step prints the one command that fetches it:
 
 ```powershell
-hf download unsloth/DeepSeek-V4-Flash-GGUF --include "UD-IQ3_XXS/*" --local-dir %LOCALAPPDATA%\Crow\models
+hf download unsloth/DeepSeek-V4-Flash-0731-GGUF --include "UD-IQ3_XXS/*" --local-dir %LOCALAPPDATA%\Crow\models
 ```
 
 > **A trap worth knowing about.** Measured here on 2026-08-07: when `hf` cannot reach the repository it prints `✓ Downloaded` and returns the local directory — failure that looks exactly like success. Check that four files totalling ~96 GiB actually arrived.
@@ -122,9 +122,10 @@ hf download unsloth/DeepSeek-V4-Flash-GGUF --include "UD-IQ3_XXS/*" --local-dir 
 
 ```powershell
 %LOCALAPPDATA%\Crow\bin\llama-server.exe `
-  -m %LOCALAPPDATA%\Crow\models\UD-IQ3_XXS\DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf `
+  -m %LOCALAPPDATA%\Crow\models\UD-IQ3_XXS\DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf `
   --port 8081 -c 200000 -ngl 99 -np 1 --jinja `
   --slot-save-path %LOCALAPPDATA%\Crow\session `
+  --chat-template-file %LOCALAPPDATA%\Crow\templates\0731-chat-template.jinja `
   --moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct `
   --moe-stream-l2 32
 ```
@@ -135,7 +136,7 @@ Every flag carries a reason, and none of them is taste:
 
 | Flag | Why |
 |---|---|
-| `-c 200000` | A coding session holds files and history. 16k or 64k measures a product nobody uses. Measured: 200k loads on one slot at 32,008 of 32,607 MiB |
+| `-c 200000` | A coding session holds files and history. 16k or 64k measures a product nobody uses. Measured 2026-08-10: 200k loads on one slot at 31,899 MiB, 31,997 under a filled context, of 32,607 |
 | `--port 8081` | Not a preference. `llama-server` defaults to 8080 and the client defaults to 8081, so leaving it out gives a server the client cannot find — and on Windows 8080 is often already taken |
 | `-np 1` | One user, one stream. `-np 4` splits the context into 4 × 50k and is the harness case, not the CLI |
 | `--jinja` | Use the **model's** chat template instead of llama.cpp's built-in one. Without it the client's replayed reasoning is dropped and the prompt cache breaks on every turn: measured 138.8–242.3 s of re-prefill per turn against 1.6–2.2 s |
@@ -144,6 +145,7 @@ Every flag carries a reason, and none of them is taste:
 | `--moe-stream-io-threads 8` | I/O workers, **each with its own file handle**. Windows serialises on the file object, so a shared handle stays at queue depth 1 whatever you do |
 | `--moe-stream-direct` | Unbuffered reads. Without it `read_raw_at` falls back to the shared handle and the pool delivers 1.01x instead of 2.22x |
 | `--slot-save-path` | Where the server writes its KV state so a session survives a restart. Without it the next start re-prefills the whole history: the 22 ms restore is measured; the ~35 minutes for 23,400 tokens is extrapolated from a run aborted at 10 %. Must be an existing directory or the server refuses to start |
+| `--chat-template-file` | 0731 ships no Jinja template, and the one embedded in the GGUF fails the model's own golden vector 4 (an action turn opens a think block it never closes). The shipped file renders all four vectors byte-identically; verified in jinja2 and against a live server |
 | `--moe-stream-l2 32` | Optional [host-RAM tier](#5-the-host-ram-tier-optional), in GiB. 1.40–1.47x throughput on this machine, at the price of 32 GiB of page-locked memory. Leave it out and Crow streams exactly as it did before, at a 26.99 GiB peak |
 
 `--moe-stream-io-threads` is the number of *workers*, not the queue depth the drive sees. That one is measured, and it is **4.31**.
@@ -278,7 +280,7 @@ That is the same one-liner that installs Crow in the first place. It reads the v
 
 The check runs in the background while the banner and the health probe do their work, and it is given at most 1.5 seconds of the start. It never blocks a turn, never prints an error, and stays silent on a machine with no network. `--no-update-check` switches it off.
 
-**Your model is not touched.** The 95.9 GiB under `%LOCALAPPDATA%\Crow\models` is not part of any package, so an update never deletes the install directory — it writes the new files over the old ones and leaves everything else alone.
+**Your model is not touched.** The ~97 GiB under `%LOCALAPPDATA%\Crow\models` is not part of any package, so an update never deletes the install directory — it writes the new files over the old ones and leaves everything else alone.
 
 **The server may keep running.** Windows locks a running binary, and the moment
 the client tells you a new version exists is exactly the moment `llama-server`
@@ -431,6 +433,8 @@ slot and the upload sources from there: the same read, the same bytes, kept inst
 design that copied into the tier afterwards would spend more per fill than a later hit returns.
 
 ![The host tier against no tier, paired on identical tasks](docs/images/host_tier.png)
+
+**0.1.0 measures, on DeepSeek-V4-Flash-0731 (2026-08-10):** decode **19.13 tok/s**, median of three pairs with the tier (arms 16.17 / 19.13 / 19.25) against **12.84** without it -- same driver, same graded tasks as the series below. Stall per miss 0.717-0.741 ms. Prefill at filled context, server-counted denominators: 96.13 tok/s at 1,374 tokens, 85.32 at 10,824, 83.80 at 43,224, **76.54 at 172,824**. Bytes per expert 378,208,256 across 43 layers -- 288 MiB more than the preview at 64 slots, inside the measured 599 MiB of headroom. Everything below this line is the preview-model series that established the arrangement.
 
 **14.73 against 10.54 tok/s at the median, 1.40–1.47x per pair — and the arrangement is half the
 result.** Two earlier attempts produced nothing. All

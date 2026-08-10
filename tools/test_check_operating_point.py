@@ -28,6 +28,7 @@ GOOD_LINE = (
     "llama-server.exe -m %LOCALAPPDATA%\\Crow\\models\\UD-IQ3_XXS\\x.gguf "
     "--port 8081 -c 200000 -ngl 99 -np 1 --jinja "
     "--slot-save-path %LOCALAPPDATA%\\Crow\\session "
+    "--chat-template-file %LOCALAPPDATA%\\Crow\\templates\\0731-chat-template.jinja "
     "--moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct "
     "--moe-stream-l2 32\n"
 )
@@ -131,8 +132,14 @@ def main():
 
         root = fixture(tmp)
         inst = open(os.path.join(root, "install.ps1"), encoding="utf-8").read()
+        # The manifest's version, read rather than spelled: this line carried a
+        # hard-coded "0.0.6" and went quietly vacuous the day the version moved
+        # to 0.1.0 -- the replace missed, both copies stayed equal, and the case
+        # that exists to catch a stale literal was itself the stale literal.
+        current = json.load(open(os.path.join(root, "manifests", "operating-point.json"),
+                                 encoding="utf-8-sig"))["version"]
         open(os.path.join(root, "install.ps1"), "w", encoding="utf-8").write(
-            inst.replace('$Version = "0.0.6"', '$Version = "0.0.5"'))
+            inst.replace('$Version = "%s"' % current, '$Version = "0.0.5"'))
         code, out = run(root)
         check("9 one stale version literal goes red",
               code == 1 and "0.0.5" in out and "differs" in out, out.strip()[-260:])

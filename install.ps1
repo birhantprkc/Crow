@@ -38,7 +38,7 @@ A local package is never deleted afterwards; a downloaded one is.
 #>
 [CmdletBinding()]
 param(
-    [string] $Version   = "0.0.6",
+    [string] $Version   = "0.1.0",
     [string] $InstallTo = "$env:LOCALAPPDATA\Crow",
     [string] $SourceUrl = "",
     [switch] $Force,
@@ -1135,23 +1135,23 @@ if ($py) { Write-Item "python" "$($py.Source)" "ok" }
 else     { Write-Item "python" "not on the PATH -- the client needs it" "warn" }
 
 Write-Host ""
-Write-Host "  1. The model. It is NOT part of this install: 95.9 GiB, four files, and it" -ForegroundColor DarkGray
+Write-Host "  1. The model. It is NOT part of this install: 97.1 GiB, four files, and it" -ForegroundColor DarkGray
 Write-Host "     belongs to somebody else." -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "       DeepSeek-V4-Flash, quantised by unsloth to UD-IQ3_XXS" -ForegroundColor White
-Write-Host "       https://huggingface.co/unsloth/DeepSeek-V4-Flash-GGUF" -ForegroundColor DarkGray
+Write-Host "       DeepSeek-V4-Flash-0731, quantised by unsloth to UD-IQ3_XXS" -ForegroundColor White
+Write-Host "       https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "    hf download unsloth/DeepSeek-V4-Flash-GGUF --include 'UD-IQ3_XXS/*' --local-dir $InstallTo\models" -ForegroundColor White
+Write-Host "    hf download unsloth/DeepSeek-V4-Flash-0731-GGUF --include 'UD-IQ3_XXS/*' --local-dir $InstallTo\models" -ForegroundColor White
 Write-Host ""
 # Measured 2026-08-07: when hf cannot reach the repository it prints a tick and
 # returns the local directory. Failure that looks like success is worth one line
 # here, because the next thing the user does is start a server against nothing.
-Write-Host "     If that finishes suspiciously fast, check that four files and ~96 GiB" -ForegroundColor DarkGray
+Write-Host "     If that finishes suspiciously fast, check that four files and ~97 GiB" -ForegroundColor DarkGray
 Write-Host "     actually arrived -- hf reports success even when it reached nothing." -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  2. Then start the server, and the client in a second terminal:" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "    $InstallTo\bin\llama-server.exe -m $InstallTo\models\UD-IQ3_XXS\DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf ``" -ForegroundColor White
+Write-Host "    $InstallTo\bin\llama-server.exe -m $InstallTo\models\UD-IQ3_XXS\DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf ``" -ForegroundColor White
 # --jinja is not optional here. Without it llama-server uses its own built-in
 # template instead of the model's, the client's replayed reasoning is dropped,
 # and the prompt cache breaks on every turn -- measured 2026-08-08, 138.8-242.3 s
@@ -1163,6 +1163,11 @@ Write-Host "      --port 8081 -c 200000 -ngl 99 -np 1 --jinja ``" -ForegroundCol
 # full prefill for the whole history -- measured 2026-08-08: 23,400 tokens took
 # about 35 minutes, while restoring the same state took 22 ms.
 Write-Host "      --slot-save-path $InstallTo\session ``" -ForegroundColor White
+# 0731 ships no Jinja chat template, and the one embedded in the GGUF fails the
+# model's own golden vector 4 (an action turn opens a think block it never
+# closes). The verified template ships with this package; without the flag the
+# server silently uses the embedded one and nothing looks wrong.
+Write-Host "      --chat-template-file $InstallTo\templates\0731-chat-template.jinja ``" -ForegroundColor White
 # The host-RAM tier is printed only on a machine with the RAM it was measured on. On anything
 # smaller the line is left out entirely rather than carrying a smaller, unmeasured number - a flag
 # in the command people copy is a recommendation, and this project does not recommend figures it

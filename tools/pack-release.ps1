@@ -330,6 +330,18 @@ foreach ($f in @('LICENSE', 'NOTICE', 'README.md')) {
     Copy-Item -LiteralPath (Join-Path $repo $f) -Destination $stage
 }
 
+# The chat template is part of the product since 0.1.0: the installer's printed
+# server line points at it, and without the file that line fails on start. It
+# ships byte-exact -- the golden-vector proof is a byte comparison, and the
+# repo's .gitattributes carries -text for the same reason.
+New-Item -ItemType Directory -Force -Path (Join-Path $stage 'templates') | Out-Null
+Copy-Item -LiteralPath (Join-Path $repo 'manifests\0731-chat-template.jinja') `
+          -Destination (Join-Path $stage 'templates\0731-chat-template.jinja')
+if ((Get-Item (Join-Path $stage 'templates\0731-chat-template.jinja')).Length -ne
+    (Get-Item (Join-Path $repo 'manifests\0731-chat-template.jinja')).Length) {
+    throw "template changed size on the way into the package -- a byte-checked file may not do that"
+}
+
 # The OFL is not a formality: without it, redistributing the typeface is a licence
 # violation. Refuse rather than ship a package that breaks it.
 if (-not (Test-Path (Join-Path $stage 'cli\fonts\OFL.txt'))) {

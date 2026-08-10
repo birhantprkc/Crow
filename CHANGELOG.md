@@ -6,6 +6,82 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
+## 0.1.0 — 2026-08-10
+
+The model switch: DeepSeek-V4-Flash (preview) is replaced by **DeepSeek-V4-Flash-0731**,
+and the release keeps the one promise it made — not slower than 0.0.6.
+
+### The promise, measured
+
+Same driver, same six graded tasks, fresh server per arm, both arms with the shipped
+chat template. Raw runs `runs/2026-08-10/0731-pairs`, fingerprinted in
+`manifests/runs-2026-08-10.json`.
+
+| | 0.0.6 (preview, 2026-08-09) | 0.1.0 (0731, 2026-08-10) |
+|---|---|---|
+| decode, tier, median of 3 pairs | 14.73 tok/s | **19.13 tok/s** (+29.9 %) |
+| decode, no tier, median | 10.54 | 12.84 |
+| stall per miss, tier arms | 0.745 ms | 0.717–0.741 ms |
+
+Even the worst 0731 tier arm (16.17) beats the old median. Within-arm spread 1.19x
+against the baseline's 1.09x — the band is indicative, the direction clears the noise.
+
+### Changed
+
+- **Model: `unsloth/DeepSeek-V4-Flash-0731-GGUF`, UD-IQ3_XXS, 97.1 GiB.** Identical
+  architecture (43 layers, 256 experts, top-6). 378,208,256 B per expert — 288 MiB more
+  than the preview at 64 slots, inside the measured 599 MiB of headroom (311 MiB left).
+  Measured twice: HTTP range requests over the tensor table before downloading, and the
+  finished files. Ready-made quantisation on purpose: third-party conversions that do not
+  preserve the native MXFP4 experts deviate from the official weights, and the abandoned
+  in-house conversion path additionally cost 66 CPU-minutes and 52 GB of RAM for a dry run.
+- **The chat template ships as a file** (`templates/0731-chat-template.jinja`) and the
+  printed server line carries `--chat-template-file`. 0731 publishes no Jinja template; the
+  one embedded in the GGUF fails the model's own golden vector 4 — an action turn opens a
+  think block it never closes. The shipped template renders **all four golden vectors
+  byte-identically** (jinja2), and the Crow-shaped conversation renders byte-identically
+  under the server's own minja too; vectors with roles Crow never sends fail in llama.cpp's
+  message canonicalisation before any template runs, which is recorded as the boundary.
+- **Sampling follows the model it ships:** `temperature 1.0` (was 0.6 — the preview
+  family's value), `top_p 0.95` and `min_p 0.01` sent explicitly for the first time —
+  omitting them meant inheriting server defaults nobody chose. The card-vs-
+  `generation_config.json` disagreement on `top_p` is recorded next to the value.
+  `--reasoning-effort low|high|max` rides in `chat_template_kwargs`, only when set;
+  low against max provably changes the rendered prompt at the effort marker.
+- **An update removes what the package dropped**, and the first dropped file is the unit
+  suite (73,792 B of developer equipment that shipped since 0.0.1). Removal is decided by
+  the PREVIOUS package's manifest, never by a directory listing — the exception-list
+  design before it deleted a user's own backup folder on its first real run, restored only
+  because the deleted folder was itself a copy.
+- **The operating point has one source**, `manifests/operating-point.json`:
+  version, model, server flags, sampling, and the measured baselines. `README.md`,
+  `install.ps1` and the vault page are held against it as raw text by
+  `tools/check_operating_point.py`; model paths and sampling defaults are read from it by
+  the measurement tools.
+
+### Measured for the first time
+
+- **Prefill at filled context** (server-counted denominators, fresh server):
+  96.13 tok/s at 1,374 tokens · 85.32 at 10,824 · 83.80 at 43,224 · **76.54 at 172,824**.
+  The old "8–50 tok/s" came from 86–103-token prompts and does not describe filled
+  context — large batches amortise expert fetches.
+- **VRAM at 200k on one slot:** 31,899 MiB after load, 31,997 under a filled context, of
+  32,607. The two previously documented values (31,838 / 32,008) were taken at different
+  phases of the same thing; neither said which.
+- Preview quality before side, taken before the model left the disk: two gates, all ten
+  probe-suite tasks exactly once, temperature pinned 0.6, 8 of 8 graded correct
+  (`runs/2026-08-10/before-0731`).
+
+### Not measured, said out loud
+
+- Quality of 0731 beyond the six graded pair tasks and the probe bundle — no like-for-like
+  quality comparison against the preview exists, by robin's decision: the preview is
+  replaced, not competed with.
+- The host-RAM peak (33.73 GiB) and hit-rate figures in the README are preview-series
+  measurements; 0731 has not re-run them. Marked as such where they appear.
+- What `min_p 0.01` against 0.05 changes in output quality — the value is the
+  quantiser's recommendation, not an in-house measurement.
+
 ## 0.0.6 — 2026-08-10
 
 ### Added
