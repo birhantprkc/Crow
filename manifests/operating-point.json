@@ -1,0 +1,56 @@
+{
+  "_what": "The operating point: the one server command line every measurement and every instruction has to agree with.",
+  "_why": "It was spelled out in three places that disagreed. On 2026-08-10 the vault page was missing --slot-save-path and --moe-stream-l2 32, while README.md and install.ps1 carried them. Nobody had changed anything wrongly; the copies simply drifted, and a measurement taken against the older line is not comparable to one taken against the newer.",
+  "_how_this_is_checked": "tools/check_operating_point.py reads the RAW text of README.md and install.ps1 and extracts the flags from it. It must never read a second copy of this file - a checker that compares a manifest against itself is green forever.",
+  "_source_of_truth": "This file. README.md and install.ps1 are renderings of it for humans; the measurement scripts take their defaults from it.",
+  "measured_on": "2026-08-10",
+
+  "version": "0.0.6",
+
+  "model": {
+    "quant": "UD-IQ3_XXS",
+    "first_shard": "DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+    "shards": 4,
+    "repo": "unsloth/DeepSeek-V4-Flash-GGUF",
+    "_note": "Not part of the install: 95.9 GiB and somebody else's artefact."
+  },
+
+  "server": {
+    "port": 8081,
+    "ctx": 200000,
+    "ngl": 99,
+    "parallel": 1,
+    "jinja": true,
+    "slot_save_path": "<install>/session",
+    "moe_stream": true,
+    "moe_stream_cache": "64s",
+    "moe_stream_io_threads": 8,
+    "moe_stream_direct": true,
+    "moe_stream_l2": 32
+  },
+
+  "conditional": {
+    "moe_stream_l2": {
+      "printed_when": "detected RAM >= 60 GB",
+      "_note": "Windows reports 63.4 on a 64 GB machine, so a threshold at the nominal size would exclude exactly the configuration this was measured on. install.ps1 prints the flag with a machine-dependent value, so the checker accepts any integer there and only requires the flag itself."
+    }
+  },
+
+  "decode_baseline": {
+    "tok_per_s": 14.73,
+    "without_l2_tier": 10.54,
+    "requests": 3,
+    "tokens": 1006,
+    "tokens_without_l2_tier": 876,
+    "method": "median of three pairs",
+    "run": "runs/2026-08-09/pairs/r2-l2/r2-l2.err",
+    "_note": "The promise 0.1 has to keep. Length-dependent, so it travels with stall_per_miss_ms below."
+  },
+  "stall_per_miss_ms": 0.745,
+
+  "not_measured_at_this_operating_point": [
+    "prefill - every figure on record comes from prompts of 86-103 tokens",
+    "quality - the reference series ran at -c 65536 without --jinja",
+    "VRAM - documented twice with two different numbers and no run behind either"
+  ]
+}
