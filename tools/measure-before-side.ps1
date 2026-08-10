@@ -379,9 +379,14 @@ if ($parts -contains 'vram') {
 
 $manifestTool = Join-Path $CROW 'tools\manifest-runs.ps1'
 if ((Test-Path $manifestTool) -and -not $CounterProbe -and $failures -eq 0) {
-    # (d) of the abort criterion: the runs manifest covers the folder. Pattern
-    # explicitly, because the default only knows eNN directories.
-    & $manifestTool -RunsDir (Split-Path $OutRoot -Parent) -Pattern 'before-0731'
+    # (d) of the abort criterion: the runs manifest covers the folder. -Day and
+    # -Pattern explicitly: the tool joins RunsDir/Day itself, and its defaults
+    # know only eNN directories and 2026-08-05. The first version of this call
+    # passed the day directory AS RunsDir and the tool went looking for
+    # runs/<today>/2026-08-05 -- a SETUP ERROR that this driver then did not
+    # count as a failure, so (d) read as filed and was not.
+    & $manifestTool -Day (Split-Path (Split-Path $OutRoot -Parent) -Leaf) -Pattern 'before-0731'
+    if ($LASTEXITCODE -ne 0) { $failures++ }
 }
 
 Write-Output ''

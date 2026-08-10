@@ -1,0 +1,278 @@
+{
+    "note":  "Fingerprint only. These files are NOT in git - runs/ is ignored (.gitignore:10). This manifest detects deletion and modification; it is not a backup and does not make the protocols recoverable.",
+    "day":  "2026-08-10",
+    "pattern":  "before-0731",
+    "root":  "Crow/runs",
+    "written":  "2026-08-10T20:19:05.0421360+02:00",
+    "files":  44,
+    "bytes":  22994615,
+    "stages":  {
+                   "unknown":  44
+               },
+    "entries":  [
+                    {
+                        "path":  "2026-08-10/before-0731/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  10668548,
+                        "sha256":  "9A981BE3808B95578F188CD646F1708FD491F7CCC8DFDED2F22A26B249C6DDA0"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1646,
+                        "sha256":  "3B6DDD5B6E6089ABECF1D552C5263CA26629921C8A0D18FE12F05F7555BE1213"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a.err",
+                        "stage":  "unknown",
+                        "bytes":  7082433,
+                        "sha256":  "2CFE6028B37ACCAB9FF0497DA26E1688338075D30D0A3A9FC693A74629FD1B96"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a/__pycache__/group-anagrams.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  618,
+                        "sha256":  "4770D258B443929674534727BB5B66DA15934B8FE3AA4C41D65D46EA14DCC2D6"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  640,
+                        "sha256":  "102C0286D530CD2BA6ABF22AB5BC871D5EC2C482552B879D9D31F6D47AA933AA"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a/__pycache__/longest-common-prefix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  611,
+                        "sha256":  "55400932E02A76DF78DCB642BA15BF90D3EC880AAC1392165EC572361EA8891A"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a/__pycache__/rotate-matrix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  455,
+                        "sha256":  "F59B0FD85BE3C6E2514DA15A416213A788C8880D23CB8A84B8FD4226323BA35D"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a/group-anagrams.json",
+                        "stage":  "unknown",
+                        "bytes":  3606,
+                        "sha256":  "91C74DD19345E784ACEAC9AD84FD4D5F773B852A3A967B1F5A166D60AB326C09"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a/group-anagrams.py",
+                        "stage":  "unknown",
+                        "bytes":  176,
+                        "sha256":  "B71813130DD8769199A1A22849EA42E8E763D38B3DB188152D7F15E67B5CD1D3"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a/is-balanced.json",
+                        "stage":  "unknown",
+                        "bytes":  1880,
+                        "sha256":  "CBAB893916C834A21F29D75CA9A57FB9874C08633B759BF2274132EDBFFDD472"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a/is-balanced.py",
+                        "stage":  "unknown",
+                        "bytes":  321,
+                        "sha256":  "1DD74DEC7CD464E8128607BF88A583A41E99D6D0235E6D7596B9A48D2AF5FCB9"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a/longest-common-prefix.json",
+                        "stage":  "unknown",
+                        "bytes":  5463,
+                        "sha256":  "B437A44DF1C083336DC44B7123C1568B66FDABA931D03FFA803FED4F6AE20266"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a/longest-common-prefix.py",
+                        "stage":  "unknown",
+                        "bytes":  215,
+                        "sha256":  "E13B23F393DC3BBD25FE803A0821B7E8B08F9246F5EA14FE817665C9BEE6CB1D"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a/rotate-matrix.json",
+                        "stage":  "unknown",
+                        "bytes":  2064,
+                        "sha256":  "4105CC9F738D4DB1ADF68B010C2CD5C2036E3ED01488965CFA3DB03006F9D469"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a/rotate-matrix.py",
+                        "stage":  "unknown",
+                        "bytes":  80,
+                        "sha256":  "D84EFAFB2D93B987CF99CFE06D1DB762A48BDC3BB25D0652918881294881DA0D"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1180,
+                        "sha256":  "5116A3A7A2FC52DDBE34457223941188FAE77572671A607EDDEB9D1E74DD6A88"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1774,
+                        "sha256":  "0FDF9721E23C5546312843B07EF80451D6E25FFDB569EC3649F126E7747FD413"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a-warm/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  545,
+                        "sha256":  "4FC04596ED80877AB5DCEBADA8DCE4B5C385CA5AD11C5614CF3DA802D2F7A8F4"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  430,
+                        "sha256":  "977248F78BAA91F2E3046C20B0B182BA4E874B7F558428C9AFD8C8A17EF41D23"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a-warm/two-sum.json",
+                        "stage":  "unknown",
+                        "bytes":  1964,
+                        "sha256":  "FE0FE5093D1FB912A6BD918ABB9DC8F857019A139EAB02B1BF62BF55A6793F9C"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-a/quality-a-warm/two-sum.py",
+                        "stage":  "unknown",
+                        "bytes":  195,
+                        "sha256":  "940665A91572F3B372FFA7DB16DCA05E7250B94488C749AF936D9ACCBC4E9ED7"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b.err",
+                        "stage":  "unknown",
+                        "bytes":  5198816,
+                        "sha256":  "FAF4F6768295C734F655189215A1D350B2AFAE7E87DD1E8075DCC37C88E1EC91"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b/__pycache__/binary-search.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  618,
+                        "sha256":  "498B270AB84B9905C021D37DCAF9A3EBF3002939AB1786D1DBE089C6E37106CF"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b/__pycache__/merge-intervals.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  837,
+                        "sha256":  "69B24F3128348AEF07D1F4BEB332BAC235EA4079686DBCC7ED2F474273529CF1"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b/__pycache__/rle-encode.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  612,
+                        "sha256":  "43A1961A3229D635E0A2B43AB04852791E4A97BED28A5CB0C7D7A6941EC5B4D7"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b/__pycache__/top-k-frequent.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  997,
+                        "sha256":  "DBD7C082048B2D5F059D3CABE0B4EE8C2CF7FC9857C6B4A0F661F90793084C1F"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b/binary-search.json",
+                        "stage":  "unknown",
+                        "bytes":  2238,
+                        "sha256":  "0A6108F1EA622ABA6ABEF89155806FB60FE24E7FBDAB77C1BEE4FA2D3F7DCEE1"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b/binary-search.py",
+                        "stage":  "unknown",
+                        "bytes":  387,
+                        "sha256":  "AD86177D465436776A65374A19661417BE561016B303BC62575A4D54131102E9"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b/merge-intervals.json",
+                        "stage":  "unknown",
+                        "bytes":  2020,
+                        "sha256":  "76BFFC10E66297FD5D2ED00AAA9E56FBC1960A7FE0C5C2710187EFAC4B3D12DF"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b/merge-intervals.py",
+                        "stage":  "unknown",
+                        "bytes":  424,
+                        "sha256":  "BF33612FD54EDCF8CA3CC1E8FC692D9DB40BB0F8A846B5FB6943F27D28E77AAC"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b/rle-encode.json",
+                        "stage":  "unknown",
+                        "bytes":  1922,
+                        "sha256":  "AC20BC62F1F493FE7AF018B80136325E7EB7CBE26A82E6FE44449170F1CF7303"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b/rle-encode.py",
+                        "stage":  "unknown",
+                        "bytes":  364,
+                        "sha256":  "754852D1769B11A5FF8A82E12A2DE559CB66155C37BA544516F257194BBC5F5A"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1171,
+                        "sha256":  "6CE386D4AADA54A27096FD841EEDE8E131E88978DDB24F51ECE66FCD0EA046F4"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b/top-k-frequent.json",
+                        "stage":  "unknown",
+                        "bytes":  3591,
+                        "sha256":  "B0D3B68C3BC76590041BBF2506D62312234187DA1D9D0588CF7ECE84296416C8"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b/top-k-frequent.py",
+                        "stage":  "unknown",
+                        "bytes":  398,
+                        "sha256":  "F3EB057847E29C68290610F404097C3E3BDA463CAB4581ABFF655B8569A94DFE"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1774,
+                        "sha256":  "9EDCDA9CFCF15E368EA00791B0285F732DDA8086343243DA98C21701B0290E92"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b-warm/__pycache__/flatten.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  564,
+                        "sha256":  "A8F011AA1D9F57AF47466A3C995E23767E00F745555BD640B6C149FBB0E2D07C"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b-warm/flatten.json",
+                        "stage":  "unknown",
+                        "bytes":  2231,
+                        "sha256":  "8A1DF77AAF0F43A784F8447E9A906ADF123C8F3DF38C84BE32A078A1F0750490"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b-warm/flatten.py",
+                        "stage":  "unknown",
+                        "bytes":  205,
+                        "sha256":  "4BDBD4E7450413EDA7D2A5E1F2F49D2AE48AC509ACD898917F8C76E6B778DEBB"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/quality/quality-b/quality-b-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  430,
+                        "sha256":  "3EF4183076D347F635658BE08E7F3E2A94D83A90B37B6C6B7964C780D568280B"
+                    },
+                    {
+                        "path":  "2026-08-10/before-0731/vram/verdict.json",
+                        "stage":  "unknown",
+                        "bytes":  172,
+                        "sha256":  "13D718D57DF4010501B55C618998F7D99F3F545A78DDDB3C0170B9CB9685F9EE"
+                    }
+                ]
+}
