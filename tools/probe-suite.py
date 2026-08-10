@@ -74,6 +74,11 @@ import subprocess
 import sys
 import tempfile
 import time
+
+# The sampling default lives in manifests/operating-point.json, with the
+# measurement that chose it. Repeating 0.6 here is how six files ended up
+# carrying the number and only one of them the reason.
+import crow_manifest
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -596,7 +601,12 @@ def check_file(task_name, path):
 
 # ---------------------------------------------------------------- the run
 
-def ask_model(url, prompt, max_tokens, timeout, temperature=0.6):
+def ask_model(url, prompt, max_tokens, timeout, temperature=None):
+    # None, not a literal: the value lives in manifests/operating-point.json. A
+    # second copy here would win on any direct call and quietly measure something
+    # the client never sends.
+    if temperature is None:
+        temperature = crow_manifest.sampling("temperature")
     # 0.6 and not 0, changed 2026-08-09 after greedy decoding produced sixteen answers in a row
     # with finish_reason "length" and an EMPTY content field: 8,192 tokens of reasoning and no
     # reply, under the model's own chat template (--jinja). The CLI has defaulted to 0.6 since it
@@ -629,7 +639,9 @@ def ask_model(url, prompt, max_tokens, timeout, temperature=0.6):
     return body, time.time() - started
 
 
-def run_suite(url, out_dir, max_tokens, timeout, only=None, temperature=0.6):
+def run_suite(url, out_dir, max_tokens, timeout, only=None, temperature=None):
+    if temperature is None:
+        temperature = crow_manifest.sampling("temperature")
     if not selftest(verbose=True):
         return 3
     print()
@@ -885,9 +897,10 @@ def main():
     p_run.add_argument("--max-tokens", type=int, default=4096,
                        help="must cover reasoning_content AND the answer")
     p_run.add_argument("--timeout", type=int, default=600)
-    p_run.add_argument("--temperature", type=float, default=0.6,
-                       help="sampling temperature; 0.6 is the CLI's operating point. "
-                            "0 is byte-reproducible but loops in the reasoning block under --jinja")
+    p_run.add_argument("--temperature", type=float, default=crow_manifest.sampling("temperature"),
+                       help="sampling temperature; the manifest's value is the CLI's operating "
+                            "point. 0 is byte-reproducible but loops in the reasoning block "
+                            "under --jinja")
     p_run.add_argument("--only", nargs="*", default=None,
                        help="run only these task names (a rerun, never a replacement)")
 

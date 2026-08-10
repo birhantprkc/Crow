@@ -41,7 +41,11 @@ if hasattr(sys.stdout, "reconfigure"):
 SYSTEM = ("You are Crow, a local coding assistant. "
           "Always reply in the same language the user wrote in.")
 
-TEMPERATURE = 0.6
+# From the manifest, not repeated here: manifests/operating-point.json carries the
+# value and the measurement that chose it.
+import crow_manifest
+
+TEMPERATURE = crow_manifest.sampling("temperature")
 
 TOOLS = [{
     "type": "function",

@@ -73,6 +73,16 @@
     "moe_stream_l2": 32
   },
 
+  "sampling": {
+    "_what": "What the client and every probe send when nobody says otherwise.",
+    "_why": "0.0 is greedy decoding, and greedy is where reasoning models loop: measured 2026-08-07 on a three.js task, the model repeated 'Actually, let me...' inside its reasoning block and never reached the answer. Always taking the single most likely token walks into that attractor and cannot walk back out. DeepSeek specifies 0.6 for this model family. Measurement runs that need byte-identical output pass --temperature 0 explicitly; the interactive default has to be able to finish a turn.",
+    "temperature": 0.6,
+    "top_p": null,
+    "_top_p_note": "Not sent at all today, by omission rather than decision -- grep finds no top_p anywhere in tools/ or cli/. The 0731 card recommends temperature 1.0 with top_p 0.95 for agentic use, so this is E11's business, not this stage's.",
+    "_measurement_temperature": 0,
+    "_measurement_note": "temperature 0 in a probe is a MEASUREMENT decision, not a model default: it buys byte-reproducible output. Those literals stay where they are. Only the 0.6 that means 'what we run at' belongs here."
+  },
+
   "conditional": {
     "moe_stream_l2": {
       "printed_when": "detected RAM >= 60 GB",

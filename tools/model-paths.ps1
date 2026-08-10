@@ -99,6 +99,40 @@ function Get-ModelPath {
     return $full
 }
 
+function Get-SamplingDefault {
+    <#
+    .SYNOPSIS
+        One sampling default from the manifest.
+    .DESCRIPTION
+        The temperature stood in six files. Five had it because somebody copied a
+        working probe, and none of the five carried the reason -- that lived in a
+        comment in cli/crow.py which had not been copied along. When 0731 moves
+        the value, six edits would have to agree or the probes measure something
+        the client never does.
+
+        An unknown key throws rather than returning nothing: a request built
+        without the field is answered by the server with ITS default, and the run
+        then looks like it measured what was asked for.
+    #>
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string] $Key,
+        [string] $ManifestPath = $script:ModelManifest
+    )
+
+    if (-not (Test-Path -LiteralPath $ManifestPath)) {
+        throw "operating point manifest not found: $ManifestPath"
+    }
+    $json = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+    if (-not $json.sampling) { throw "manifest has no 'sampling' block: $ManifestPath" }
+    $prop = $json.sampling.PSObject.Properties | Where-Object { $_.Name -eq $Key }
+    if (-not $prop) {
+        $known = ($json.sampling.PSObject.Properties.Name | Where-Object { $_ -notlike '_*' } | Sort-Object) -join ', '
+        throw "unknown sampling key '$Key'. The manifest has: $known"
+    }
+    return $prop.Value
+}
+
 # ---------------------------------------------------------------------------
 # Selftest
 # ---------------------------------------------------------------------------
@@ -150,6 +184,18 @@ function Invoke-ModelPathSelftest {
     try { Get-ModelPath operating-point -ManifestPath (Join-Path $env:TEMP 'crow-no-such-manifest.json') | Out-Null }
     catch { $threw = $true }
     C "a missing table throws"                   $threw
+
+    # Sampling, same shape and the same reason.
+    C "the temperature comes from the manifest"  ((Get-SamplingDefault temperature) -eq 0.6)
+    $threw = $false; $msg = ''
+    try { Get-SamplingDefault 'no-such-knob' | Out-Null } catch { $threw = $true; $msg = $_.Exception.Message }
+    C "an unknown sampling key throws"           $threw
+    C "and names the keys that exist"            ($msg -like '*temperature*')
+    # top_p is deliberately null today: Crow sends none. Null must read as null,
+    # not throw -- "we decided not to send it" is an answer, "no such key" is not.
+    $nullOk = $true
+    try { $tp = Get-SamplingDefault top_p; $nullOk = ($null -eq $tp) } catch { $nullOk = $false }
+    C "top_p reads as null, not as an error"     $nullOk
 
     Write-Host ""
     if ($script:mRed -eq 0) {

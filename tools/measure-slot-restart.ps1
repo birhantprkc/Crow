@@ -39,7 +39,8 @@ $TOOLS = @(@{
 })
 
 function Ask($messages, $maxTok) {
-  $body = @{ model='crow'; messages=$messages; tools=$TOOLS; temperature=0.6; stream=$false; max_tokens=$maxTok } | ConvertTo-Json -Depth 8
+  $body = @{ model='crow'; messages=$messages; tools=$TOOLS
+             temperature=(Get-SamplingDefault temperature); stream=$false; max_tokens=$maxTok } | ConvertTo-Json -Depth 8
   $t0 = Get-Date
   $r = Invoke-RestMethod -Uri "$U/v1/chat/completions" -Method Post -Body $body -ContentType 'application/json' -TimeoutSec 1800
   [pscustomobject]@{

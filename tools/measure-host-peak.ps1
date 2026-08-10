@@ -93,7 +93,10 @@ foreach ($arm in @('l2','base')) {
     try {
         Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/chat/completions" -Method Post -TimeoutSec 600 `
             -ContentType 'application/json' `
-            -Body '{"model":"crow","messages":[{"role":"user","content":"Reply with the single word: ok"}],"max_tokens":64,"temperature":0.6}' | Out-Null
+            -Body (@{ model = 'crow'
+                      messages = @(@{ role = 'user'; content = 'Reply with the single word: ok' })
+                      max_tokens = 64
+                      temperature = (Get-SamplingDefault temperature) } | ConvertTo-Json -Depth 5) | Out-Null
     } catch { Write-Output "    warn: warm-up request failed, peak may be low" }
 
     $proc = Get-Process -Id $p.Id -ErrorAction SilentlyContinue

@@ -42,10 +42,15 @@ if hasattr(sys.stdout, "reconfigure"):
 SYSTEM = ("You are Crow, a local coding assistant. "
           "Always reply in the same language the user wrote in.")
 
-# The CLI's default. 0.0 is the greedy attractor that made the model loop
-# inside its reasoning block on 2026-08-07; a probe at 0.0 would measure that
-# instead of the cache.
-TEMPERATURE = 0.6
+# The CLI's default, read from the manifest rather than repeated here. 0.0 is the
+# greedy attractor that made the model loop inside its reasoning block on
+# 2026-08-07; a probe at 0.0 would measure that instead of the cache. The reason
+# travels with the value in manifests/operating-point.json -- this comment used to
+# be the only copy of it outside cli/crow.py, and the other four probes had the
+# number without it.
+import crow_manifest
+
+TEMPERATURE = crow_manifest.sampling("temperature")
 
 TOOLS = [{
     "type": "function",
