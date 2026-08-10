@@ -271,6 +271,19 @@ def main() -> int:
         check("reply 2" in capped,
               "a spent budget still ends in an answer, not a bare bracket")
 
+        # The nudge has to REACH the model, which is the only half of it a test
+        # can settle. Whether it stops a model from inventing what it did not
+        # read is a question for a live run.
+        spent_live = sessions(app_budget) / "session.json"
+        if spent_live.exists():
+            said = json.loads(spent_live.read_text(encoding="utf-8"))["messages"]
+            nudges = [m for m in said
+                      if m.get("role") == "user" and "tool budget for this turn is spent" in
+                      (m.get("content") or "")]
+            check(len(nudges) == 1, "the nudge reaches the conversation, exactly once")
+            check(nudges and "ran nothing" in nudges[0]["content"],
+                  "and it names the case where there is nothing to report")
+
         # --- and the forced round must not leave a dangling call ---------------
         app_dangle = os.path.join(root, "f")
         os.makedirs(app_dangle)

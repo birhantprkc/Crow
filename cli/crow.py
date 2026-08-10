@@ -549,9 +549,20 @@ def resume_path(name: str) -> str:
 # would re-read the whole conversation to say one sentence.
 BUDGET_SPENT = (
     "[The tool budget for this turn is spent -- no further calls will be run. "
-    "Answer now from what you already have: what you found, what you did not get "
-    "to, and what the next step would be. Do not ask for another tool.]"
+    "Answer now, and report ONLY what is actually present in this conversation as "
+    "a tool result. If you ran nothing, say you ran nothing -- do not describe "
+    "what a file probably contains. Then name what you did not get to, and what "
+    "the next step would be. Do not ask for another tool.]"
 )
+# The middle two sentences were added after the first live run, on 2026-08-10.
+# Asked to summarise with an empty tool budget, the model reported having read a
+# line it had never read and described the contents of one that is blank. Asking
+# for "what you found" invites a model with nothing to find to invent something;
+# naming the failure is cheaper than hoping.
+#
+# Whether it works is UNMEASURED, and no test here can settle it: this is a
+# prompt, and only a live run against a real model shows whether it holds. What
+# the suite checks is that it reaches the conversation at all.
 
 
 ROLLOVER_NOTE = (
