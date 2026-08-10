@@ -234,6 +234,13 @@ class StreamReplyTests(unittest.TestCase):
         self._run([{"content": "hi"}], top_p=0.95)
         self.assertEqual(self.sent_body.get("top_p"), 0.95)
 
+    def test_min_p_rides_explicitly(self):
+        """min_p goes on the wire too. unsloth recommends 0.01, llama.cpp
+        defaults to 0.05, the card is silent -- whichever is right, a request
+        that omits the field inherits a value nobody chose."""
+        self._run([{"content": "hi"}], min_p=0.01)
+        self.assertEqual(self.sent_body.get("min_p"), 0.01)
+
     def test_reasoning_effort_rides_as_template_kwargs(self):
         """The effort level lands in the template, and ONLY when asked for.
 

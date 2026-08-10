@@ -84,6 +84,8 @@
     "_why_not_zero": "0.0 is greedy decoding, and greedy is where reasoning models loop: measured 2026-08-07 on a three.js task, the model repeated 'Actually, let me...' inside its reasoning block and never reached the answer. That holds for 0731 as much as for the preview.",
     "temperature": 1.0,
     "top_p": 0.95,
+    "min_p": 0.01,
+    "_min_p_note": "unsloth's docs recommend 0.01 for this model; DeepSeek's own card is silent on it. Sent explicitly because llama.cpp's server default is 0.05 -- not sending it means inheriting a THIRD value nobody chose, the same omission top_p was until #83. robin approved shipping it 2026-08-10.",
     "_measurement_temperature": 0,
     "_measurement_note": "temperature 0 in a probe is a MEASUREMENT decision, not a model default: it buys byte-reproducible output. Those literals stay where they are. And any A/B across the model switch must pin --temperature explicitly on BOTH sides -- the default changed with 0731, and a comparison that inherits it measures the sampling change and the model change in one number."
   },

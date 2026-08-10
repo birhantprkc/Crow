@@ -189,6 +189,7 @@ function Invoke-ModelPathSelftest {
     # the manifest's _why carries the card-vs-generation_config disagreement.
     C "the temperature comes from the manifest"  ((Get-SamplingDefault temperature) -eq 1.0)
     C "and so does top_p"                        ((Get-SamplingDefault top_p) -eq 0.95)
+    C "and so does min_p"                        ((Get-SamplingDefault min_p) -eq 0.01)
     $threw = $false; $msg = ''
     try { Get-SamplingDefault 'no-such-knob' | Out-Null } catch { $threw = $true; $msg = $_.Exception.Message }
     C "an unknown sampling key throws"           $threw

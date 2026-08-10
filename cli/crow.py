@@ -1236,6 +1236,7 @@ def stream_reply(
     api_key: str,
     temperature: float,
     top_p: float = 0.95,
+    min_p: float = 0.01,
     reasoning_effort: str | None = None,
     timeout: float,
     out=sys.stdout,
@@ -1274,6 +1275,9 @@ def stream_reply(
         # says 1.0, and llama.cpp's own default is a third value. Whichever is
         # right, a measurement must know which one it got.
         "top_p": top_p,
+        # Same reason: unsloth recommends 0.01 for this model, llama.cpp defaults
+        # to 0.05, and not sending the field means inheriting a value nobody chose.
+        "min_p": min_p,
         "stream": True,
         # OpenAI's opt-in for a usage block on the final chunk. Without it a
         # streamed response carries no token counts at all, and the context bar
@@ -2271,6 +2275,7 @@ def repl(args: argparse.Namespace) -> int:
                     api_key=args.api_key,
                     temperature=args.temperature,
                     top_p=args.top_p,
+                    min_p=args.min_p,
                     reasoning_effort=args.reasoning_effort,
                     timeout=args.timeout,
                     prefix=f"{BOLD}{CROW_TEXT}crow>{RESET} ",
@@ -2626,6 +2631,10 @@ def build_parser() -> argparse.ArgumentParser:
     # agentic figure wins -- but the disagreement is real and belongs next to
     # the number rather than in anyone's memory.
     parser.add_argument("--top-p", dest="top_p", type=float, default=0.95)
+    # unsloth's docs recommend 0.01 for this model; DeepSeek's own card is
+    # silent; llama.cpp's server default is 0.05. Sent explicitly, because not
+    # sending it means inheriting a third value nobody chose.
+    parser.add_argument("--min-p", dest="min_p", type=float, default=0.01)
     # Lands in the chat template, not the sampler. None sends nothing and the
     # template falls back to "low" on its own; the flag exists so E12 can
     # measure what the levels actually cost.
