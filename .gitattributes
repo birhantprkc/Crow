@@ -10,3 +10,10 @@
 # the described content is fine and expected (crow-lab/src is checked out CRLF);
 # it is the framing that has to stay LF. -text so git never rewrites either side.
 *.patch -text
+
+# Rescued chat templates are evidence, and their size IS the evidence: stage E10
+# tells the two variants apart by 5,754 against 13,098 bytes. Measured 2026-08-10:
+# a plain checkout of the 5,754-byte template produced 5,874 -- one CR per line --
+# so a fresh clone would have contradicted the commit that carries the number.
+# -text, same reason as the patches: never rewrite either direction.
+*.jinja -text
