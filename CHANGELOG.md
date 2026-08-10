@@ -69,6 +69,12 @@ is in its commit message and on its issue; this is the short version.
   it is not, both measured. What cannot be moved is named and the install stops there. The `.old`
   files that stay are reported as staying, not counted as removed.
 
+  Driven end to end on 2026-08-10, **0.0.4 → 0.0.6 with the server serving throughout**: 17 files
+  renamed, 26 extracted, 25 of 25 hashes matched, **2 `.old` removed and 15 reported as still held**
+  — and 15 were still on disk afterwards, held by the process that was named. The version this
+  replaces would have printed "17 stale .old files removed", which is false for 15 of them. The
+  running server kept answering; the new binary took over on its next start.
+
 ### Tests
 
 - `install.ps1 -Selftest`: 51 checks, up from 42, nine of them reaching the new code — two against a
@@ -80,9 +86,10 @@ is in its commit message and on its issue; this is the short version.
 
 ### Not done
 
-- The installer's rename path has never been driven end to end against a live server. The functions
-  are tested against real locked files; a full download-rename-extract-verify-sweep run needs an
-  actual release.
+- Nobody has watched the 15 `.old` files leave. They are swept on the next install that finds them
+  unheld, and `Move-LockedAside` clears a stale one before it renames over the same name — both
+  covered by the selftest against real locked files, neither seen on a live machine after the server
+  finally stopped.
 
 ## 0.0.5 — 2026-08-09
 
