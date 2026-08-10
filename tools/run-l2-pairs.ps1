@@ -41,6 +41,11 @@ param(
     [int]    $Ctx     = 200000,
     [string] $OutRoot = 'C:\Users\robin\dev\Crow\runs\2026-08-09\pairs',
     [string] $CROW    = 'C:\Users\robin\dev\Crow',
+    # Appended to the server flags of BOTH arms. What 0731 needs here is
+    # '--chat-template-file <path>' -- its GGUF embeds a template that fails
+    # golden vector 4 (the action turn), so the verified file must ride along.
+    # Both arms get it, or the pair compares templates instead of tiers.
+    [string[]]$ExtraFlags = @(),
     [switch] $Selftest
 )
 
@@ -132,7 +137,13 @@ $gate = Join-Path $CROW 'tools\measure-24-gate.ps1'
 if (-not (Test-Path $gate)) { Write-Output "MISSING: $gate"; exit 2 }
 if (-not (Test-Path $Exe))  { Write-Output "MISSING: $Exe";  exit 2 }
 
-$flags = @('--moe-stream','--moe-stream-cache','64s','--moe-stream-io-threads','8','--moe-stream-direct','--jinja')
+# These flags reached the 2026-08-09 servers -- every pair summary records them
+# -- but this variable never travelled: the gate call below passed no -Flags at
+# all, and the gate refuses an empty set (exit 2). The committed script would
+# have failed every arm on its next use; the variable is the fossil of a
+# refactor made AFTER the successful runs. Found 2026-08-10 while preparing the
+# 0731 series, fixed by passing it, which restores exactly the recorded config.
+$flags = @('--moe-stream','--moe-stream-cache','64s','--moe-stream-io-threads','8','--moe-stream-direct','--jinja') + $ExtraFlags
 $rows  = @()
 
 foreach ($p in $PLAN) {
@@ -142,7 +153,7 @@ foreach ($p in $PLAN) {
         else               { Remove-Item Env:\LLAMA_MOE_STREAM_L2_GIB -ErrorAction SilentlyContinue }
 
         Write-Output ("[{0}] {1}  graded: {2}" -f (Get-Date -Format 'HH:mm:ss'), $label, ($p.graded -join ' '))
-        & $gate -Label $label -Exe $Exe -Model $Model -Ctx $Ctx `
+        & $gate -Label $label -Exe $Exe -Model $Model -Ctx $Ctx -Flags $flags `
                 -HealthTimeoutSec 900 -TimeoutSec 3600 -Only $p.graded -Warm $p.warm `
                 -OutRoot (Join-Path $OutRoot $label) | Out-Null
 

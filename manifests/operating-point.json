@@ -26,6 +26,11 @@
         "present": true,
         "role": "the operating point, and the only model still on disk"
       },
+      "0731-iq3-xxs": {
+        "path": "0731-gguf/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+        "present": true,
+        "role": "the 0.1 candidate: unsloth's ready-made 0731 quantisation, downloaded and header-verified 2026-08-10. 378,208,256 B per expert, +288 MiB of the 599 MiB headroom at 64 slots. Needs --chat-template-file manifests/0731-chat-template.jinja: its embedded template fails golden vector 4"
+      },
       "iq3-xxs": {
         "path": "UD-IQ3_XXS/DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
         "present": true,
