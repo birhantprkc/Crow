@@ -224,6 +224,29 @@ class StreamReplyTests(unittest.TestCase):
                                         {"content": "A"}])
         self.assertEqual(reasoning, "one two")
 
+    def test_the_request_carries_0731_sampling(self):
+        """top_p goes on the wire, not into the server's default.
+
+        0731's card runs agentic work at top_p 0.95 while its own
+        generation_config.json says 1.0 -- and llama.cpp has a third default.
+        Whichever is right, a measurement must know which one it got, so the
+        body carries the value explicitly."""
+        self._run([{"content": "hi"}], top_p=0.95)
+        self.assertEqual(self.sent_body.get("top_p"), 0.95)
+
+    def test_reasoning_effort_rides_as_template_kwargs(self):
+        """The effort level lands in the template, and ONLY when asked for.
+
+        Sent: chat_template_kwargs carries exactly the key. Not sent: the field
+        is absent entirely -- the template treats missing as "low", and an
+        empty dict would still change the request against every client that
+        predates the switch."""
+        self._run([{"content": "hi"}], reasoning_effort="max")
+        self.assertEqual(self.sent_body.get("chat_template_kwargs"),
+                         {"reasoning_effort": "max"})
+        self._run([{"content": "hi"}])
+        self.assertNotIn("chat_template_kwargs", self.sent_body)
+
     def test_the_request_carries_tools(self):
         """Without them this model's template drops a replayed reasoning field
         and both variants render byte for byte the same -- measured 2026-08-08

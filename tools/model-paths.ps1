@@ -185,17 +185,14 @@ function Invoke-ModelPathSelftest {
     catch { $threw = $true }
     C "a missing table throws"                   $threw
 
-    # Sampling, same shape and the same reason.
-    C "the temperature comes from the manifest"  ((Get-SamplingDefault temperature) -eq 0.6)
+    # Sampling, same shape and the same reason. 1.0/0.95 are 0731's values --
+    # the manifest's _why carries the card-vs-generation_config disagreement.
+    C "the temperature comes from the manifest"  ((Get-SamplingDefault temperature) -eq 1.0)
+    C "and so does top_p"                        ((Get-SamplingDefault top_p) -eq 0.95)
     $threw = $false; $msg = ''
     try { Get-SamplingDefault 'no-such-knob' | Out-Null } catch { $threw = $true; $msg = $_.Exception.Message }
     C "an unknown sampling key throws"           $threw
     C "and names the keys that exist"            ($msg -like '*temperature*')
-    # top_p is deliberately null today: Crow sends none. Null must read as null,
-    # not throw -- "we decided not to send it" is an answer, "no such key" is not.
-    $nullOk = $true
-    try { $tp = Get-SamplingDefault top_p; $nullOk = ($null -eq $tp) } catch { $nullOk = $false }
-    C "top_p reads as null, not as an error"     $nullOk
 
     Write-Host ""
     if ($script:mRed -eq 0) {

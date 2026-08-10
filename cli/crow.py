@@ -1235,6 +1235,8 @@ def stream_reply(
     model: str,
     api_key: str,
     temperature: float,
+    top_p: float = 0.95,
+    reasoning_effort: str | None = None,
     timeout: float,
     out=sys.stdout,
     prefix: str = "",
@@ -1267,6 +1269,11 @@ def stream_reply(
         "messages": conversation.payload(),
         "tools": TOOLS,
         "temperature": temperature,
+        # Sent explicitly rather than trusted to the server default: 0731's card
+        # runs its agentic benchmarks at top_p 0.95, its generation_config.json
+        # says 1.0, and llama.cpp's own default is a third value. Whichever is
+        # right, a measurement must know which one it got.
+        "top_p": top_p,
         "stream": True,
         # OpenAI's opt-in for a usage block on the final chunk. Without it a
         # streamed response carries no token counts at all, and the context bar
@@ -1277,6 +1284,14 @@ def stream_reply(
         # to the final chunk. Ignored by endpoints that do not know it.
         "timings_per_token": True,
     }
+    if reasoning_effort is not None:
+        # Only when asked for. 0731's template reads the key and treats an absent
+        # one as "low"; sending nothing keeps the prompt byte-identical to a
+        # client that predates the switch, which is what the prompt cache wants.
+        # The value lands in the TEMPLATE, not the sampler -- whether it took
+        # effect is visible only in the rendered prompt, which is why E11's
+        # counter-probe compares /apply-template output and not this body.
+        body["chat_template_kwargs"] = {"reasoning_effort": reasoning_effort}
 
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
@@ -2255,6 +2270,8 @@ def repl(args: argparse.Namespace) -> int:
                     model=args.model,
                     api_key=args.api_key,
                     temperature=args.temperature,
+                    top_p=args.top_p,
+                    reasoning_effort=args.reasoning_effort,
                     timeout=args.timeout,
                     prefix=f"{BOLD}{CROW_TEXT}crow>{RESET} ",
                 )
@@ -2594,14 +2611,26 @@ def build_parser() -> argparse.ArgumentParser:
                         help="system prompt; stays byte-identical for the whole session")
     parser.add_argument("--no-system", dest="system", action="store_const", const=None,
                         help="send no system prompt at all (the model then picks its own language)")
-    # 0.0 is greedy decoding, and greedy is where reasoning models loop:
+    # 1.0 is what DeepSeek-V4-Flash-0731 specifies: the model card runs its
+    # agentic benchmarks at temperature 1.0 / top_p 0.95, and its
+    # generation_config.json says temperature 1.0 too. (0.6 was the PREVIEW
+    # family's value; it shipped in every release up to 0.0.6.)
+    # 0.0 stays dangerous either way: greedy is where reasoning models loop --
     # measured 2026-08-07 on a three.js task, the model repeated "Actually,
     # let me..." inside its reasoning block and never reached the answer.
-    # Always taking the single most likely token walks into that attractor and
-    # cannot walk back out. DeepSeek specifies 0.6 for this model family.
     # Measurement runs that need byte-identical output pass --temperature 0
     # explicitly; the interactive default has to be able to finish a turn.
-    parser.add_argument("--temperature", type=float, default=0.6)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    # The card and the generation_config disagree here: the card's agentic runs
+    # use 0.95, generation_config.json says 1.0. Crow is an agent, so the
+    # agentic figure wins -- but the disagreement is real and belongs next to
+    # the number rather than in anyone's memory.
+    parser.add_argument("--top-p", dest="top_p", type=float, default=0.95)
+    # Lands in the chat template, not the sampler. None sends nothing and the
+    # template falls back to "low" on its own; the flag exists so E12 can
+    # measure what the levels actually cost.
+    parser.add_argument("--reasoning-effort", dest="reasoning_effort",
+                        choices=("low", "high", "max"), default=None)
     parser.add_argument("--timeout", type=float, default=1800.0,
                         help="socket timeout in seconds (default: 1800)")
     parser.add_argument("--no-font", dest="font", action="store_false",
