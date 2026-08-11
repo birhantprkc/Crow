@@ -164,14 +164,15 @@ Every flag carries a reason, and none of them is taste:
 | *no `-lv 5`* | Not a flag but the absence of one, and it is worth as much as any flag here. See below |
 
 <a id="a-diagnostic-flag-costs-a-factor-of-fourteen"></a>
-**Turning the verbosity up on a console costs a factor of 14 to 16.** The debug log is about 40
-lines per token, and the gap between two consecutive lines is **2.05 ms into a redirected file
-against 20.3 ms onto a console**. Every CUDA graph launch pays it, prefill and decode alike; the
-card sits at full clock and a fraction of its power limit throughout, which is what a GPU waiting
-on its host looks like. So a diagnostic run redirects stderr into a file — the six gate runs behind
-every figure on this page do, which is why they carry `-lv 5` and still measure the operating
-point. Append `2> server.err` to the start line above and the flag costs nothing worth measuring;
-leave the log on the console and the number you take is the console's, not the model's.
+**Verbosity into a file is free; verbosity onto a console is not.** The debug log is about 40 lines
+per token and every CUDA graph launch waits for them to be written, prefill and decode alike, with
+the card at full clock and a fraction of its power limit — which is what a GPU waiting on its host
+looks like. So a diagnostic run redirects stderr into a file: the six gate runs behind every figure
+on this page do, which is why they carry `-lv 5` and still measure the operating point. Append
+`2> server.err` to the start line above and the flag costs nothing worth measuring; leave the log
+on the console and the number you take is the console's, not the model's. *(The size of that
+penalty is a single observation with no run written under `runs/`, so no factor is claimed here —
+only the direction, and the redirect that removes it.)*
 
 ### Step 2 — check that the right server is running
 
@@ -405,7 +406,7 @@ That leaves a set which *is* needed by every token — attention, norms, embeddi
 
 **6,625.00 MiB on CUDA0 plus 414.26 MiB of CUDA_Host buffers = 6.88 GiB, 7.08 % of the 97.05 GiB file.** The routed experts are the other **90.17 GiB** — 378,208,256 B per expert across all 43 layers, times 256 experts. It is GPU-resident by construction at `-ngl 99`; nothing had to be built for it. The remaining 92.9 % is the streaming problem.
 
-Routing is concentrated enough for a cache to be worth anything, and the server prints it itself. Across the three cumulative blocks of the `r1-l2` arm, **50 % of selections fall on 8.7 % of the experts, 80 % on 25.7 %, 95 % on 48.4 %**, at Gini **0.744 → 0.725 → 0.711**. The distribution flattens as a run gets longer and more experts have been touched at all; it does not flatten enough to make the cache pointless.
+Routing is concentrated enough for a cache to be worth anything, and the server prints it itself — per layer, then averaged over the 43. Across the three cumulative blocks of the `r1-l2` arm, the share of experts needed to cover 80 % of selections reads **23.0 %, then 24.6 %, then 25.7 %**; for 50 % it is 7.7 → 8.5 → 8.7 %, and for 95 % it is 43.0 → 45.4 → 48.4 %, at Gini **0.744 → 0.725 → 0.711**. Every one of those widens with run length: the distribution flattens as more experts have been touched at all. It does not flatten enough to make the cache pointless, and a single block quoted alone understates it.
 
 ## 2. The slot cache, and what VRAM buys
 
@@ -450,10 +451,12 @@ nothing in the streaming path to blame — which is exactly what a silent host-m
 like.
 
 A second question the cache answers only partly: **cold misses cannot be cached away.** They are the
-working set every layer must touch once, and no cache size removes them. In the first graded task of
-the `r1-l2` arm they are **7,988 of 25,678 misses, 31.1 %**; by the end of the arm **9,435 of 98,769,
-9.6 %** — the share falls as a run gets longer, because evictions accumulate and first touches do
-not. Growing the cache removes evictions, never first touches.
+working set every layer must touch once, and no cache size removes them. On the `r1-l2` arm's
+**warm-up** task, against an empty cache, they are **7,988 of 25,678 misses, 31.1 %**. The first
+graded task behind it — the difference of two cumulative blocks, which is the only honest way to
+read one — takes **487 cold of 7,517, 6.5 %**, and by the end of the arm the running figure is
+**9,435 of 98,769, 9.6 %**. The share collapses once the cache is warm, because evictions accumulate
+and first touches do not. Growing the cache removes evictions, never first touches.
 
 The cache also has a hard floor that the graph, not the option, imposes:
 
