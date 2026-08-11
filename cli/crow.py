@@ -1559,8 +1559,14 @@ def format_timings(timings: dict) -> str:
     # Named, not swallowed: a turn cut off at the budget looks exactly like a
     # finished one once the text stops scrolling, and the user needs to know
     # which of the two happened before trusting the answer.
+    #
+    # NO ADVICE ATTACHED, deliberately. This line used to end in "raise
+    # --max-tokens". There is no such flag: build_parser never had one and the
+    # request body carries no max_tokens, so the server runs on its own default.
+    # Telling someone to turn a knob that does not exist is worse than saying
+    # nothing -- they go looking for it. If a knob is added, name it here again.
     if timings.get("_finish_reason") == "length":
-        bits.append("CUT OFF at the token budget -- raise --max-tokens")
+        bits.append("CUT OFF at the token budget")
     return " | ".join(bits)
 
 
