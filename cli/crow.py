@@ -1570,6 +1570,92 @@ def format_timings(timings: dict) -> str:
     return " | ".join(bits)
 
 
+def format_clock(seconds: float) -> str:
+    """A duration a person can read at a glance. 4531.29 -> 1h15m31s."""
+    # The boundary is tested against the UNROUNDED value. Rounding first turned 59.9 into 60 and
+    # printed it as "1m00s" -- a minute that had not passed yet.
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    total = int(round(seconds))
+    h, rest = divmod(total, 3600)
+    m, s = divmod(rest, 60)
+    return f"{h}h{m:02d}m{s:02d}s" if h else f"{m}m{s:02d}s"
+
+
+class TurnCost:
+    """What one USER turn cost, across however many tool rounds it took.
+
+    WHY THIS EXISTS (#70). The per-round timing line was right while the tool loop was being built
+    -- it is what showed the prefix holding, `cached` climbing 3,624/9,048 -> 43,643/43,686. For
+    using the thing it is noise: one question on 2026-08-09 produced 12 of those lines and a
+    24-round turn on 2026-08-10 produced 24, with the answer somewhere in between and the rollover
+    and budget notices scrolling past among them. The lines that matter were getting rarer among
+    the lines that do not.
+
+    THE TOTAL IS WALL CLOCK, NOT THE SUM OF THE ROUNDS, and that is the whole point of measuring it
+    here rather than adding up `_client_total_s`. The rounds only count time the model was
+    generating; the tools run between them and the user waits through those too. A turn that spent
+    24 s in `find_files` waited 24 s, and a total that omits them describes a turn nobody had.
+    Both parts are printed, so the gap between them stays visible instead of being smoothed away.
+    """
+
+    def __init__(self) -> None:
+        self.started = time.monotonic()
+        self.rounds = 0
+        self.decoded = 0
+        self.prefilled = 0
+        self.model_s = 0.0
+        self.tool_s = 0.0
+        self.tool_calls = 0
+        self.tool_errors = 0
+        # The LAST round's cache figures, not a sum: `cached` is a statement about the prefix as it
+        # stands now, and adding those up would produce a number that means nothing.
+        self.cached: int | None = None
+        self.cached_of: int | None = None
+        self.finish: str | None = None
+
+    def add_round(self, timings: dict) -> None:
+        self.rounds += 1
+        for key, attr in (("predicted_n", "decoded"), ("prompt_n", "prefilled")):
+            value = timings.get(key)
+            if value is not None:
+                setattr(self, attr, getattr(self, attr) + int(value))
+        total = timings.get("_client_total_s")
+        if total is not None:
+            self.model_s += float(total)
+        cached = timings.get("_cached_tokens")
+        prompt_n = timings.get("prompt_n")
+        if cached is not None and prompt_n is not None:
+            self.cached, self.cached_of = int(cached), int(cached) + int(prompt_n)
+        self.finish = timings.get("_finish_reason")
+
+    def add_tool(self, seconds: float, failed: bool) -> None:
+        self.tool_s += seconds
+        self.tool_calls += 1
+        self.tool_errors += int(failed)
+
+    def line(self) -> str:
+        waited = time.monotonic() - self.started
+        bits = [f"{self.rounds} round" + ("s" if self.rounds != 1 else "")]
+        if self.decoded:
+            rate = self.decoded / self.model_s if self.model_s > 0 else None
+            bits.append(f"{self.decoded:,} tok" + (f" @ {rate:.2f} tok/s" if rate else ""))
+        if self.prefilled:
+            bits.append(f"prefill {self.prefilled:,}")
+        if self.cached is not None:
+            bits.append(f"cached {self.cached:,}/{self.cached_of:,}")
+        if self.tool_calls:
+            failed = f", {self.tool_errors} failed" if self.tool_errors else ""
+            bits.append(f"{self.tool_calls} tool call"
+                        + ("s" if self.tool_calls != 1 else "") + failed)
+        split = f" (model {format_clock(self.model_s)}, tools {format_clock(self.tool_s)})" \
+            if self.tool_s >= 0.5 else ""
+        bits.append(f"waited {format_clock(waited)}{split}")
+        if self.finish == "length":
+            bits.append("CUT OFF at the token budget")
+        return " | ".join(bits)
+
+
 # Read-before-write, and it BLOCKS rather than warns. #10 measured hermes-agent
 # resolving this to last-write-wins in two independent code paths: file_state.py
 # returns a warning string and file_tools.py performs the write anyway. A model
@@ -2371,6 +2457,7 @@ def repl(args: argparse.Namespace) -> int:
         # which is why the loop is affordable at all.
         _SEEN.clear()
         stopped = False
+        cost = TurnCost()
         budget = args.max_tool_rounds
         # One iteration past the budget, for the forced answer. It is not a tool
         # round -- its calls are discarded -- so it does not quietly hand out a
@@ -2424,7 +2511,8 @@ def repl(args: argparse.Namespace) -> int:
             conversation.append("assistant", reply, reasoning,
                                 tool_calls=None if unanswerable else calls)
             context_tokens = next_context_tokens(context_tokens, timings)
-            line_out = format_timings(timings)
+            cost.add_round(timings)
+            line_out = format_timings(timings) if args.rounds else ""
             print(f"\n\n[{line_out}]\n" if line_out else "\n")
 
             # THE PROMISE IS SETTLED HERE, BECAUSE HERE IS WHERE IT IS PAID.
@@ -2457,10 +2545,31 @@ def repl(args: argparse.Namespace) -> int:
                 continue
             for call in calls:
                 arg_note = format_tool_args(call["arguments"])
+                # PRINTED BEFORE THE CALL RUNS, and that is the fix rather than a detail (#70).
+                # Until here the order on screen was: run the tool, then say what was run. A slow
+                # call left the terminal silent for its whole duration with nothing naming what it
+                # was waiting on -- and the previous round's six figures as the last thing visible.
+                # No newline, so the outcome lands on the same line when it comes back.
+                print(f"{DIM}  ⚒ {call['name']}({arg_note})", end="", flush=True)
+                started = time.monotonic()
                 result, repeated = run_tool_cached(call["name"], call["arguments"])
-                mark = " (repeat)" if repeated else ""
-                print(f"{DIM}  ⚒ {call['name']}({arg_note}){mark}{RESET}")
-                if result.startswith("error: "):
+                took = time.monotonic() - started
+                failed = result.startswith("error: ")
+                cost.add_tool(took, failed)
+                marks = []
+                if repeated:
+                    marks.append("repeat")
+                # Sub-second calls are the cache answering; printing 0.0s for those adds a number
+                # per line and says nothing.
+                if took >= 0.05:
+                    marks.append(format_clock(took))
+                note = (" -- " + ", ".join(marks)) if marks else ""
+                print(f"{note}{RESET}")
+                # A FAILED CALL STAYS ON SCREEN even once the model has recovered from it (#70).
+                # It is not the user's problem to solve, but it is the reason the turn took longer
+                # than it looks like it should have, and a turn that hides its retries reads as
+                # slower for no reason.
+                if failed:
                     print(f"{DIM}    {result.splitlines()[0]}{RESET}")
                 conversation.append("tool", result, tool_call_id=call["id"])
             print("")
@@ -2489,6 +2598,12 @@ def repl(args: argparse.Namespace) -> int:
                           f"archived to {archived}{RESET}\n")
                     context_tokens = 0
                     rolled = True
+
+        # ONE LINE PER USER TURN, where twelve to twenty-four used to be (#70). Not printed for a
+        # turn that was interrupted or died on an error: those already say what happened, and a
+        # cost line under them would read like a completed turn.
+        if not stopped and cost.rounds:
+            print(f"{DIM}[{cost.line()}]{RESET}\n")
 
         if stopped:
             continue
@@ -2772,6 +2887,13 @@ def build_parser() -> argparse.ArgumentParser:
                         metavar="SHARE",
                         help="archive the conversation and start a fresh one at this share of"
                              f" the window, 0 to switch it off (default: {ROLLOVER_AT})")
+    # NOT REMOVED, MOVED BEHIND A SWITCH (#70). The per-round line is the instrument this loop was
+    # built with -- it is what showed the prefix holding round by round. Deleting it would cost the
+    # next person debugging the cache the only view they had; leaving it on cost every user twelve
+    # lines per question. So it stays, off by default.
+    parser.add_argument("--rounds", dest="rounds", action="store_true",
+                        help="print the full timing line after every tool round, not just the"
+                             " one-line summary at the end of the turn")
     # Raising this raises what ONE turn can add to the window: 24 rounds were
     # measured on 2026-08-10 growing a turn by 28,900 tokens, which is more than
     # the 20,000 that --rollover-at 0.9 leaves between the threshold and the

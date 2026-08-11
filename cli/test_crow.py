@@ -160,6 +160,98 @@ class FormatTimingsTests(unittest.TestCase):
         self.assertNotIn("tok/s", line)
 
 
+class FormatClockTests(unittest.TestCase):
+    def test_seconds_keep_a_decimal(self):
+        self.assertEqual(crow.format_clock(4.27), "4.3s")
+
+    def test_minutes(self):
+        self.assertEqual(crow.format_clock(252.0), "4m12s")
+
+    def test_hours(self):
+        """4531.29 s is the real total of the 2026-08-08 run in #71."""
+        self.assertEqual(crow.format_clock(4531.29), "1h15m31s")
+
+    def test_the_boundary_is_not_off_by_one(self):
+        self.assertEqual(crow.format_clock(59.9), "59.9s")
+        self.assertEqual(crow.format_clock(60.0), "1m00s")
+
+
+class TurnCostTests(unittest.TestCase):
+    """The per-turn summary that replaced the per-round timing lines (#70)."""
+
+    def _cost(self, rounds=2):
+        cost = crow.TurnCost()
+        for _ in range(rounds):
+            cost.add_round({
+                "predicted_n": 100, "prompt_n": 50,
+                "_client_total_s": 10.0, "_cached_tokens": 900,
+            })
+        return cost
+
+    def test_tokens_and_rounds_accumulate(self):
+        line = self._cost().line()
+        self.assertIn("2 rounds", line)
+        self.assertIn("200 tok", line)
+        self.assertIn("prefill 100", line)
+
+    def test_cached_is_the_last_state_not_a_sum(self):
+        """`cached` describes the prefix as it stands. Adding two rounds of it produces a number
+        that means nothing -- and would silently look like a healthier cache than there is."""
+        line = self._cost(rounds=3).line()
+        self.assertIn("cached 900/950", line)
+        self.assertNotIn("2,700", line)
+
+    def test_the_total_is_wall_clock_not_the_sum_of_rounds(self):
+        """THE POINT OF THE WHOLE CLASS. Tool time runs between the rounds and the user waits
+        through it, so a total built from `_client_total_s` describes a turn nobody had.
+
+        The negative control is in the same assertion: the model figure is printed too, so if
+        someone ever wires `waited` to the round sum, these two collapse onto each other and this
+        test goes red. Without the second half it would pass on the broken version."""
+        cost = crow.TurnCost()
+        cost.started -= 300.0                      # the turn began five minutes ago
+        cost.add_round({"predicted_n": 10, "_client_total_s": 20.0})
+        cost.add_tool(40.0, failed=False)
+        line = cost.line()
+        self.assertIn("waited 5m00s", line)        # wall clock, not 20 s and not 60 s
+        self.assertIn("model 20.0s", line)
+        self.assertIn("tools 40.0s", line)
+
+    def test_failed_tool_calls_are_counted_not_hidden(self):
+        cost = crow.TurnCost()
+        cost.add_round({"predicted_n": 1})
+        cost.add_tool(1.0, failed=True)
+        cost.add_tool(1.0, failed=False)
+        self.assertIn("2 tool calls, 1 failed", cost.line())
+
+    def test_a_clean_turn_says_nothing_about_failures(self):
+        """Counterpart to the one above: the words must not appear when nothing failed, or
+        'failed' stops carrying information."""
+        cost = crow.TurnCost()
+        cost.add_round({"predicted_n": 1})
+        cost.add_tool(1.0, failed=False)
+        line = cost.line()
+        self.assertIn("1 tool call", line)
+        self.assertNotIn("failed", line)
+
+    def test_a_turn_without_tools_omits_the_split(self):
+        line = self._cost(rounds=1).line()
+        self.assertNotIn("tools", line)
+        self.assertNotIn("tool call", line)
+
+    def test_the_cut_off_survives_into_the_turn_line(self):
+        """It used to ride on the per-round line. With that line off by default it would have
+        disappeared from a normal session entirely."""
+        cost = crow.TurnCost()
+        cost.add_round({"predicted_n": 5, "_finish_reason": "length"})
+        self.assertIn("CUT OFF at the token budget", cost.line())
+
+    def test_a_finished_turn_does_not_claim_a_cut_off(self):
+        cost = crow.TurnCost()
+        cost.add_round({"predicted_n": 5, "_finish_reason": "stop"})
+        self.assertNotIn("CUT OFF", cost.line())
+
+
 class StreamReplyTests(unittest.TestCase):
     """The two-stream contract, measured 2026-08-07.
 
