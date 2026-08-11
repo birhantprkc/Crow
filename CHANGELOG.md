@@ -6,6 +6,64 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
+## 0.1.1 — 2026-08-11
+
+**The operating point asked for more VRAM than the card has.** `--moe-stream-cache` goes from
+**64s to 58s**. Nothing else about the product changed; the binary is the same one 0.1.0 shipped.
+
+### What was wrong
+
+A slot costs 360.69 MiB, so 64 slots need 32,062 MiB of a 32,607 MiB card and leave **545 MiB** for
+everything the display does. This machine's desktop was read at **342, 543, 622 and 978 MiB within
+one day**. Above the gap Windows moves the difference into host memory without printing anything,
+and the affected request runs at half rate.
+
+That is why it looked like a lottery rather than a fault: it depends on what is on the screen when a
+request runs, so it hit some turns and not others, and never the short runs of the measurement
+harness.
+
+**No counter in the server can see it.** The halved request executed the same 195 graphs, took
+comparable misses, and had the **lowest** load stall of its run — 7,807 ms against 7,872 / 8,651 /
+9,041. Identical work, double the wall clock, and nothing in the streaming path to charge it to.
+
+### Measured, 2026-08-11
+
+Cold prefill of 1,374 tokens (3 runs) and decode of 200 tokens (8 runs), fresh server per run,
+`runs/2026-08-11/`:
+
+| cache | prefill | decode | VRAM used | free |
+|---|---:|---:|---:|---:|
+| 64 (0.1.0) | 15.28, spread **8.69x** | unusable | 32,014 | 545 |
+| 62 | 114.92 | **7.07 among 15s** | 31,899 | 708 |
+| 60 | 113.53 | 17.40 | 31,285 | 1,322 |
+| **58 (0.1.1)** | **112.69** | **17.32** | **30,548** | **2,059** |
+| 56 | 110.30 | 17.00 | 29,842 | 2,765 |
+
+Throughput rises with the cache right up to the edge, so the fastest value is not the shippable one.
+62 wins on paper and still halved one request in four. 58 costs 0.7 % of prefill and 0.5 % of decode
+against 60 and triples the margin over the highest desktop reading.
+
+**Driven by hand through the client**, the same cold 1,094-token prompt prefills at **60.44 tok/s**
+against 15.09 at 64 slots, and four consecutive rounds of one turn decode at 14.97 / 14.97 / 17.00 /
+14.61 — the halving is gone. The harness figures above use a repeated word list, which routes to
+fewer distinct experts than real text; both are measured, only the second is what a user waits for.
+
+### Also ruled out, so it is not tried again
+
+`-ub` in both directions (8 → 74.73 … 512 → 98.76 … 2048 → 13.42, and 2048 falls off the same cliff
+with the same fingerprint), a larger host tier, cache capacity (`slot wait` is 0.00 ms over 0 waits
+in every block of a 13-round run), cold misses, context length, and server uptime.
+
+### Not measured
+
+- **The graded gate has not been run at 58 slots.** The 19.81 tok/s on record is 62's. The 17.32 here
+  is a probe of eight requests, not the gate, and `README.md` says so.
+- 58 is derived from **this** card's 32,607 MiB and a desktop that peaks near 1 GiB. A smaller card
+  or a busier display needs a different value, and the failure is silent. Open as
+  [#87](https://github.com/nibor1896/Crow/issues/87).
+- Whether the two-hour decode collapse of [#71](https://github.com/nibor1896/Crow/issues/71) is the
+  same mechanism at a larger scale. Nothing measured for this release ran that long.
+
 ## 0.1.0 — 2026-08-10
 
 The model switch: DeepSeek-V4-Flash (preview) is replaced by **DeepSeek-V4-Flash-0731**,

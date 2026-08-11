@@ -24,12 +24,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 TOOL = os.path.join(HERE, "check_operating_point.py")
 
+# The fixture below builds its README and install.ps1 out of this line and holds them against the
+# REAL manifest, so every literal here has to track manifests/operating-point.json. When the
+# operating point moves, this line moves with it -- --moe-stream-cache went 64s -> 62s -> 58s on
+# 2026-08-11 (#87) and tests 1, 4, 6 and 8 went red both times until it did.
 GOOD_LINE = (
     "llama-server.exe -m %LOCALAPPDATA%\\Crow\\models\\UD-IQ3_XXS\\x.gguf "
     "--port 8081 -c 200000 -ngl 99 -np 1 --jinja "
     "--slot-save-path %LOCALAPPDATA%\\Crow\\session "
     "--chat-template-file %LOCALAPPDATA%\\Crow\\templates\\0731-chat-template.jinja "
-    "--moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct "
+    "--moe-stream --moe-stream-cache 58s --moe-stream-io-threads 8 --moe-stream-direct "
     "--moe-stream-l2 32\n"
 )
 
@@ -81,7 +85,7 @@ def main():
         shutil.rmtree(os.path.join(tmp, "repo"))
 
         # 2 - a changed value must be named, not just counted.
-        bad = GOOD_LINE.replace("--moe-stream-cache 64s", "--moe-stream-cache 48s")
+        bad = GOOD_LINE.replace("--moe-stream-cache 58s", "--moe-stream-cache 48s")
         code, out = run(fixture(tmp, readme=bad))
         check("2 a changed cache size goes red and is named",
               code == 1 and "moe_stream_cache" in out and "48s" in out, out.strip()[-200:])

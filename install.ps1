@@ -38,7 +38,7 @@ A local package is never deleted afterwards; a downloaded one is.
 #>
 [CmdletBinding()]
 param(
-    [string] $Version   = "0.1.0",
+    [string] $Version   = "0.1.1",
     [string] $InstallTo = "$env:LOCALAPPDATA\Crow",
     [string] $SourceUrl = "",
     [switch] $Force,
@@ -1151,6 +1151,31 @@ Write-Host ""
 Write-Host "     If that finishes suspiciously fast, check that four files and ~97 GiB" -ForegroundColor DarkGray
 Write-Host "     actually arrived -- hf reports success even when it reached nothing." -ForegroundColor DarkGray
 Write-Host ""
+# WHY --moe-stream-cache SAYS 62 AND NOT 64, and this note sits HERE rather than beside the flag on
+# purpose: check_operating_point.py reads a 2000-character region starting at "llama-server.exe" to
+# find the command line, and a long comment inside that window pushes the last flags out of it and
+# reports this installer as broken. Measured the hard way on 2026-08-11, which is also when the
+# number itself changed.
+#
+# A slot costs 360.69 MiB on 0731, so 64 slots ask for 32,062 MiB of a 32,607 MiB card and leave
+# 545 MiB for everything else the display is doing. This machine's desktop was read at 342, 543, 622
+# and 978 MiB on ONE day. Above the gap the allocation no longer fits, the driver moves the
+# difference into host memory without printing anything, and the cost is not a constant slowdown but
+# an unpredictable one: single requests halve at random, with identical graph executions, identical
+# misses and the LOWEST load stall of the run.
+#
+# Measured 2026-08-11, prefill of 1,374 tokens over 3 runs / decode of 200 tokens over 8 / free VRAM:
+#   64 -> 15.28 median of 8, spread 8.69x / unusable          /   545 MiB
+#   62 -> 114.92                          / 7.07 among 15s    /   708 MiB
+#   60 -> 113.53                          / 17.40             / 1,322 MiB
+#   58 -> 112.69                          / 17.32             / 2,059 MiB   <- shipped
+#   56 -> 110.30                          / 17.00             / 2,765 MiB
+# 58 costs 0.7 % of prefill and 0.5 % of decode against 60 and triples the margin over the highest
+# desktop reading.
+#
+# THIS NUMBER IS DERIVED FROM 32,607 MiB OF VRAM AND A DESKTOP THAT PEAKS NEAR 1 GiB. A smaller card,
+# or a busier display, needs a smaller value. Deriving it from the machine the way --moe-stream-l2 is
+# derived is tracked as #87 rather than guessed at here.
 Write-Host "  2. Then start the server, and the client in a second terminal:" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "    $InstallTo\bin\llama-server.exe -m $InstallTo\models\UD-IQ3_XXS\DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf ``" -ForegroundColor White
@@ -1170,16 +1195,18 @@ Write-Host "      --slot-save-path $InstallTo\session ``" -ForegroundColor White
 # closes). The verified template ships with this package; without the flag the
 # server silently uses the embedded one and nothing looks wrong.
 Write-Host "      --chat-template-file $InstallTo\templates\0731-chat-template.jinja ``" -ForegroundColor White
+# 62 and not 64 -- the reason is above the block, outside the region the checker reads.
+#
 # The host-RAM tier is printed only on a machine with the RAM it was measured on. On anything
 # smaller the line is left out entirely rather than carrying a smaller, unmeasured number - a flag
 # in the command people copy is a recommendation, and this project does not recommend figures it
 # has not run.
 $l2 = Get-L2Gib -RamGb $facts.RamGb
 if ($l2 -gt 0) {
-    Write-Host "      --moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct ``" -ForegroundColor White
+    Write-Host "      --moe-stream --moe-stream-cache 58s --moe-stream-io-threads 8 --moe-stream-direct ``" -ForegroundColor White
     Write-Host "      --moe-stream-l2 $l2" -ForegroundColor White
 } else {
-    Write-Host "      --moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct" -ForegroundColor White
+    Write-Host "      --moe-stream --moe-stream-cache 58s --moe-stream-io-threads 8 --moe-stream-direct" -ForegroundColor White
 }
 Write-Host ""
 Write-Host "    python $InstallTo\cli\crow.py" -ForegroundColor White

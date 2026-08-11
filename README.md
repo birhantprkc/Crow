@@ -8,7 +8,7 @@
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
-<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-0.1.0-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
+<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-0.1.1-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
 <a href="#requirements"><img src="https://img.shields.io/badge/platform-Windows%20x64%20%C2%B7%20CUDA-555555?style=flat-square&logo=nvidia&logoColor=76b900&labelColor=000000" alt="Platform"></a>
 <a href="cli/crow.py"><img src="https://img.shields.io/badge/client-Python%20stdlib%20only-555555?style=flat-square&logo=python&logoColor=ffd43b&labelColor=000000" alt="Python"></a>
 <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731"><img src="https://img.shields.io/badge/model-DeepSeek--V4--Flash--0731-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
@@ -21,7 +21,8 @@
 <td align="center"><b>200k</b><br><sub>context, one slot</sub></td>
 <td align="center"><b>97.1 GiB</b><br><sub>model on disk</sub></td>
 <td align="center"><b>33.73 GiB</b><br><sub>peak host RAM, preview model</sub></td>
-<td align="center"><b>19.13</b><br><sub>tok/s decode, median of 3 arms</sub></td>
+<td align="center"><b>19.81</b><br><sub>tok/s decode, median of 3 arms</sub></td>
+<td align="center"><b>112.69</b><br><sub>tok/s cold prefill</sub></td>
 <td align="center"><b>0 EUR</b><br><sub>spent so far</sub></td>
 </tr>
 </table>
@@ -34,11 +35,11 @@
 
 **Crow runs a frontier-scale coding model on a single consumer graphics card by leaving most of the model on the SSD.**
 
-A mixture-of-experts model is mostly asleep. Every token wakes only **6 of the 256 experts** in each of its 43 layers, and the routed experts that can be asleep are 90.17 of the file's 97.05 GiB — 92.9 %. Crow keeps the parts that *every* token needs in VRAM — attention, norms, shared experts, 6.88 GiB of them on 0731 — holds the 64 most useful experts per layer beside them in a slot cache, and reads whatever is missing straight off the drive while the GPU is still working. The host machine never holds the model: the shipped file is **97.1 GiB** and the server's process memory peaked at **33.73 GiB**, of which 32 are a cache it does not need — without it the same binary peaked at 26.99 GiB. *(Both host-memory peaks were measured on the preview model at this context length and have not been re-run on 0731; the architecture is identical, the file is 1.1 GiB larger, and no 0731 host peak is claimed here.)*
+A mixture-of-experts model is mostly asleep. Every token wakes only **6 of the 256 experts** in each of its 43 layers, and the routed experts that can be asleep are 90.17 of the file's 97.05 GiB — 92.9 %. Crow keeps the parts that *every* token needs in VRAM — attention, norms, shared experts, 6.88 GiB of them on 0731 — holds the 62 most useful experts per layer beside them in a slot cache, and reads whatever is missing straight off the drive while the GPU is still working. The host machine never holds the model: the shipped file is **97.1 GiB** and the server's process memory peaked at **33.73 GiB**, of which 32 are a cache it does not need — without it the same binary peaked at 26.99 GiB. *(Both host-memory peaks were measured on the preview model at this context length and have not been re-run on 0731; the architecture is identical, the file is 1.1 GiB larger, and no 0731 host peak is claimed here.)*
 
 The context window is 200,000 tokens, on a single slot, and it costs **1,353.50 MiB = 1.32 GiB** of the card — 32.25 + 1029.00 + 35.00 + 257.25 MiB of KV buffers at `n_ctx = 200192`, so 6.92 KiB per token, measured on 0731 (`runs/2026-08-10/0731-pairs/r1-l2`). Compressed attention makes context the cheap part here. A coding session holds files and history, so a 16k or 64k window would be measuring a product nobody uses.
 
-**Since 0.0.5 the host's spare RAM can be spent to make that cheaper.** A machine with 64 GB has tens of gigabytes doing nothing. `--moe-stream-l2 32` keeps expert weights there between the VRAM slots and the drive, so a miss that finds its expert in host memory never reaches the drive at all. On 0731, over three paired runs on 2026-08-10, the measured cost of a miss falls from **1.280–1.320 ms without the tier to 0.717–0.741 ms with it**, and decode goes from 12.84 to 19.13 tok/s at the median arm. The flag defaults to off; the installer puts it into the command it prints on any machine that has the RAM — [what it buys and what it costs](#5-the-host-ram-tier-optional).
+**Since 0.0.5 the host's spare RAM can be spent to make that cheaper.** A machine with 64 GB has tens of gigabytes doing nothing. `--moe-stream-l2 32` keeps expert weights there between the VRAM slots and the drive, so a miss that finds its expert in host memory never reaches the drive at all. On 0731, over three paired runs on 2026-08-10, the measured cost of a miss falls from **1.280–1.320 ms without the tier to 0.717–0.741 ms with it**, and decode goes from 12.84 to 19.13 tok/s at the median arm. (That pair was taken at 64 cache slots, the value this page no longer ships; the shipped decode is now **19.81** at 62 slots — the tier's effect is what this paragraph is about, and it was not re-paired.) The flag defaults to off; the installer puts it into the command it prints on any machine that has the RAM — [what it buys and what it costs](#5-the-host-ram-tier-optional).
 
 That is the whole idea. Everything below is what it costs to make it actually run.
 
@@ -85,7 +86,7 @@ irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1 | iex
 Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
 
 ```console
-  Crow 0.1.0
+  Crow 0.1.1
 
 [1/5] Checking this machine
       GPU  NVIDIA GeForce RTX 5090, 32607 MB
@@ -95,7 +96,7 @@ Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
       preflight  passed
 
 [2/5] Downloading the package
-      crow-0.1.0-win-x64.zip  [####################.....]  84%  424.1 MB / 506.4 MB  18.2 MB/s
+      crow-0.1.1-win-x64.zip  [####################.....]  84%  424.1 MB / 506.4 MB  18.2 MB/s
 
 [3/5] Verifying
       size  506.4 MB
@@ -108,7 +109,7 @@ Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
 [5/5] What is left to do
 ```
 
-**26 files, about 506 MB zipped** — `dist/crow-0.1.0-win-x64.zip`. The hash is shown as a
+**26 files, about 506 MB zipped** — `dist/crow-0.1.1-win-x64.zip`. The hash is shown as a
 placeholder rather than a value, and that is not laziness: this file is inside the archive it would
 be quoting, so printing the real digest here changes the archive and invalidates the digest. The
 one on your screen is compared against the release's manifest by the installer, which is where a
@@ -134,7 +135,7 @@ $env:LOCALAPPDATA\Crow\bin\llama-server.exe `
   --port 8081 -c 200000 -ngl 99 -np 1 --jinja `
   --slot-save-path $env:LOCALAPPDATA\Crow\session `
   --chat-template-file $env:LOCALAPPDATA\Crow\templates\0731-chat-template.jinja `
-  --moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct `
+  --moe-stream --moe-stream-cache 58s --moe-stream-io-threads 8 --moe-stream-direct `
   --moe-stream-l2 32
 ```
 
@@ -144,12 +145,12 @@ Every flag carries a reason, and none of them is taste:
 
 | Flag | Why |
 |---|---|
-| `-c 200000` | A coding session holds files and history. 16k or 64k measures a product nobody uses. 200k fits on one slot: measured 2026-08-11 on 0731, **32,038 MiB of 32,607 after load** — 978 MiB of that is the desktop, read before the server started. Under a filled context the only pair on record is the preview model's (31,899 / 31,997); 0731 has not been read there |
+| `-c 200000` | A coding session holds files and history. 16k or 64k measures a product nobody uses. 200k fits on one slot: measured 2026-08-11 on 0731 at 62 slots, **31,683 MiB of 32,607 after load** — 342 MiB of that is the desktop, read before the server started. Under a filled context the only pair on record is the preview model's (31,899 / 31,997); 0731 has not been read there |
 | `--port 8081` | Not a preference. `llama-server` defaults to 8080 and the client defaults to 8081, so leaving it out gives a server the client cannot find — and on Windows 8080 is often already taken |
 | `-np 1` | One user, one stream. `-np 4` splits the context into 4 × 50k and is the harness case, not the CLI |
 | `--jinja` | Use the **model's** chat template instead of llama.cpp's built-in one. Without it the client's replayed reasoning is dropped and the prompt cache breaks on every turn: measured 138.8–242.3 s of re-prefill per turn against 1.6–2.2 s |
 | `--moe-stream` | Route expert tensors through the slot cache instead of placing them |
-| `--moe-stream-cache 64s` | 64 of 256 experts per layer. On 0731 that is **23,084 MiB = 22.54 GiB**, printed at load (`runs/2026-08-10/0731-pairs/r1-l2/r1-l2.err:7301`). 121 slots would cover 95 % of expert *selections* and need 41.6 GiB, which does not fit — coverage is not hit rate, because a first touch can never be cached |
+| `--moe-stream-cache 58s` | 58 of 256 experts per layer, **20,920 MiB = 20.43 GiB**. Not 64: six slots fewer is the difference between a stable machine and one where single requests halve at random — see [the ceiling](#the-cache-has-a-ceiling-and-it-is-the-card) below. 121 slots would cover 95 % of expert *selections* and need 41.6 GiB, which does not fit — coverage is not hit rate, because a first touch can never be cached |
 | `--moe-stream-io-threads 8` | I/O workers. **With `--moe-stream-direct` each of them reads through its own file handle**; without it there is no handle pool and every worker goes through the one shared handle, which Windows serialises (`src/llama-mmap.cpp:266-277`, fallback at `:457`). The two flags are one setting with two names |
 | `--moe-stream-direct` | Unbuffered reads, and the thing that opens the handle pool at all. Without it `read_raw_at` falls back to the shared handle and the pool delivers 1.01x instead of 2.22x |
 | `--slot-save-path` | Where the server writes its KV state so a session survives a restart. Without it the next start re-prefills the whole history: the 22 ms restore is measured; the ~35 minutes for 23,400 tokens is extrapolated from a run aborted at 10 %. Must be an existing directory or the server refuses to start |
@@ -181,13 +182,20 @@ Two read-only queries, both in seconds:
 nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader
 ```
 
-Expect `n_ctx = 200192` (llama.cpp rounds up) and about **32,038 of 32,607 MiB** — measured
-2026-08-11 on 0731, five seconds after `/health` first answered, with 978 MiB of desktop already on
-the card. Your own reading moves with whatever else is drawing on the GPU, which is the point of
-looking: a second consumer is the difference between 14 and 5 tok/s on a cold prefill, and nothing
-in the server's own log says so. Under a filled context the only pair on record is the preview
-model's (31,899 / 31,997); 0731 has not been read there. (The previously documented 31,838 and
-32,008 were two phases of that same preview measurement and neither said which; they are withdrawn.)
+Expect `n_ctx = 200192` (llama.cpp rounds up) and about **30,548 of 32,607 MiB** — measured
+2026-08-11 on 0731 at 58 slots.
+
+**This second reading is not a formality, it is the one that decides your throughput.** What is left
+of the card has to cover everything your display does, and on this machine that was measured at 342,
+543, 622 and 978 MiB within a single day. If your reading is much higher than 30,548, something else
+is holding VRAM; if the remaining headroom goes to nothing, the driver starts moving the expert cache
+into host memory and single requests halve at random —
+see [the ceiling](#the-cache-has-a-ceiling-and-it-is-the-card). A second `llama-server` on the same
+card is the same failure in its loudest form, and nothing in the server's own log says so.
+
+Under a filled context the only pair on record is the preview model's (31,899 / 31,997); 0731 has not
+been read there. (The previously documented 31,838 and 32,008 were two phases of that same preview
+measurement and neither said which; they are withdrawn.)
 If `n_ctx` says 65536 or 16384, a measurement server is running and not the operating point.
 
 ### Step 3 — start the client
@@ -206,7 +214,7 @@ endpoint and the model the server actually has open:
    ██║     ██╔══██╗██║   ██║██║███╗██║
    ╚██████╗██║  ██║╚██████╔╝╚███╔███╔╝    https://github.com/nibor1896/Crow
     ╚═════╝╚═╝  ╚═╝ ╚═════╝  ╚══╝╚══╝
-   v0.1.0
+   v0.1.1
 
 
 crow at http://127.0.0.1:8081/v1 (health: ok, 200k context)
@@ -339,7 +347,7 @@ On first start the client installs its bundled typeface and writes `profiles.def
 **The client tells you.** On start it asks GitHub whether a newer release exists and, if there is one, prints it above the prompt together with the command that installs it:
 
 ```
-crow 0.1.1 is out (you have 0.1.0)
+crow 0.1.2 is out (you have 0.1.1)
   irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1 | iex
 ```
 
@@ -436,7 +444,44 @@ Each streamed layer gets a fixed number of expert slots in VRAM. A hit means the
 
 ![What VRAM buys across four cache sizes](docs/images/slot_ladder.png)
 
-From 18 to 64 slots: **+15.50 GiB of VRAM for +4.67 tok/s** — measured on the **preview** model, and the slot sizes on the axis are that model's. A slot costs more on 0731: 23,084 MiB / 64 = **360.69 MiB per slot**, against 356.19 on the preview — the same 64-slot cache was 288 MiB smaller there — so the same ladder would be about 1.3 % wider in GiB. The shape is what this figure is for. The gain per GiB does not fall off across the range — 0.216, 0.363 and 0.319 tok/s per GiB — which is why no intermediate size is recommended as optimal. Size the cache to the safe limit of the card.
+From 18 to 64 slots: **+15.50 GiB of VRAM for +4.67 tok/s** — measured on the **preview** model, and the slot sizes on the axis are that model's. A slot costs more on 0731: 22,362.62 MiB / 62 = **360.69 MiB per slot**, against 356.19 on the preview — the same cache is 288 MiB larger there at 64 slots — so the same ladder would be about 1.3 % wider in GiB. The shape is what this figure is for. The gain per GiB does not fall off across the range — 0.216, 0.363 and 0.319 tok/s per GiB — which is why no intermediate size is recommended as optimal.
+
+<a id="the-cache-has-a-ceiling-and-it-is-the-card"></a>
+**And the ladder has a ceiling that is not in the figure: the card itself.** Until 2026-08-11 this
+section ended with *"size the cache to the safe limit of the card"*, and on 0731 that advice is what
+broke the operating point. A slot costs 360.69 MiB, so **64 slots ask for 32,062 MiB of a 32,607 MiB
+card and leave 545 MiB** for everything else the display is doing. This machine's desktop was read
+at **342, 543, 622 and 978 MiB on one day**. Above 545 the allocation no longer fits, the driver
+moves the difference into host memory without printing anything, and the cost is not a constant
+slowdown but an unpredictable one:
+
+| cache | prefill, 1,374 tok (3 runs) | decode, 200 tok (8 runs) | VRAM used | **free** |
+|---|---:|---:|---:|---:|
+| 64 slots | **15.28** median of 8, spread **8.69x** | unusable | 32,014 | 545 |
+| 62 slots | 114.92 | **7.07 among 15s** | 31,899 | 708 |
+| 60 slots | 113.53 | 17.40 | 31,285 | 1,322 |
+| **58 slots** | **112.69** | **17.32** | **30,548** | **2,059** |
+| 56 slots | 110.30 | 17.00 | 29,842 | 2,765 |
+
+Measured 2026-08-11, fresh server per run. Throughput rises with the cache right up to the edge and
+then falls apart — **the fastest value is not the shippable one.** 62 looked best on prefill and
+still produced a decode at half rate in one request out of four, at random, because 708 MiB does not
+cover a desktop that has been read at 978. 58 costs 0.7 % of prefill and 0.5 % of decode against 60
+and triples the margin.
+
+**The failure leaves no trace in any counter.** The halved request executed the same 195 graphs, took
+the same misses, and had the **lowest** load stall of its run. Identical work, double the wall clock,
+nothing in the streaming path to blame — which is exactly what a silent host-memory migration looks
+like.
+
+The arithmetic closes everywhere except at 64. 62 slots read 31,899 MiB after load and 60 read
+31,285 — 614 MiB for two slots. 64 must therefore read ~32,620, and it reads **32,014**. The missing
+MiB are the ones the driver moved out.
+
+**58 is this card's number, not a constant.** It comes from 32,607 MiB of VRAM and a desktop that
+peaks near 1 GiB. A smaller card, or a busier display, needs a smaller value; deriving it from the
+machine the way `--moe-stream-l2` already is, is tracked as
+[#87](https://github.com/nibor1896/Crow/issues/87) rather than guessed at.
 
 A second question the cache answers only partly: **cold misses cannot be cached away.** They are the working set every layer must touch once, and they stay constant across every cache size. On the preview's ten-task gate they were 5.0 % of misses (10,167 of 203,558). On **0731** the same counter reads **9,257 cold of 76,509 misses, 12.1 %**, at the end of the `r1-l2` arm — a larger share, because that arm is a shorter run and the share falls as a run gets longer: evictions accumulate and first touches do not. Growing the cache removes evictions, never first touches.
 
@@ -447,7 +492,7 @@ The cache also has a hard floor that the graph, not the option, imposes:
 Multi-pass expert GEMMs need at least `3 x n_expert_used` slots. Upstream's default computed `2 x n_expert_used` clamped to 16, which is smaller than the 18 the graph requires. That did not fail at load: the `GGML_ABORT` sat inside `build_moe_ffn` and fired on the **first batch that touched more experts than the cache holds** — model loaded, request running, and far from the option that caused it (`src/llama-model.cpp:1338-1343`; measured 2026-08-03, `"have 16, need 18"`). Crow refuses at the option instead, at load time, with the number named.
 
 **What a wave is.** A single token touches at most 6 experts per layer, so it always fits. A
-*batch* does not: a ubatch of 512 tokens can select more experts in one layer than the 64 slots
+*batch* does not: a ubatch of 512 tokens can select more experts in one layer than the 58 slots
 hold, and there is no ordering of the loads that makes them all resident at once. So the graph
 splits the touched experts of that layer into **waves** — passes of at most `plan_capacity`
 experts each, run one at a time, with the experts of the wave that is not running masked out
@@ -535,22 +580,32 @@ tokens · 85.32 at 10,824 · 83.80 at 43,224 · **76.54 at 172,824**. These four
 replace an older "8–50 tok/s", which came from 86–103-token prompts and did not describe filled
 context — large batches amortise expert fetches.
 
-**Cold against warm prefill, on the same server.** The four figures above are all *warm*. Measured
-2026-08-10: **953 tokens at 12.79 tok/s with the expert cache empty, 984 at 62.68 tok/s once it is
-not.** Inside the cold run the rate climbs from 9.93 tok/s over the first 437 tokens to 17.1 over
-the remaining 512. Nothing else on this page describes a first start.
+**Cold prefill on 0731, at the shipped 58 slots: 112.69 tok/s** over three runs at 1,374 tokens,
+spread 1.013x, fresh server each (`runs/2026-08-11/slot58-prefill/`). The four figures above are
+*warm* and belong to the preview model; this one is a first start on an empty expert cache, which is
+the case a user actually meets. It is the number that moved most in this release, and
+[why](#the-cache-has-a-ceiling-and-it-is-the-card) is the whole of it: at 64 slots the same prompt
+ran between 3.83 and 33.29 tok/s.
 
-**What 0731 costs in VRAM.** 378,208,256 B per expert across the 43 layers, so a 64-slot cache is
-23,084 MiB — **288 MiB more than the preview** at the same slot count. Measured 2026-08-11 on 0731
-at 200k on one slot: **32,038 MiB of 32,607 after load**, leaving **569 MiB**. That reading includes
-978 MiB of desktop, taken on the same card before the server started — the server's own share is
-about 31,060 MiB, and a machine with nothing else drawing has correspondingly more room.
+**These are harness prompts.** The generator repeats a short word list, which routes to far fewer
+distinct experts than real text. Driven by hand through the client against a fresh server, the same
+1,094-token cold prompt prefilled at **60.44 tok/s** — still four times what 64 slots managed, and
+the honest figure for what a user waits for.
 
-Under a **filled** context 0731 has not been read. The only pair on record there is the preview
-model's (`runs/2026-08-10/before-0731/`): 31,899 after load and 31,997 filled, a 98 MiB rise for
-200k of KV. Carrying that rise across predicts roughly 32,136 on 0731 — arithmetic, not a reading.
-The "599 MiB of headroom" quoted before was 32,607 − 32,008, and 32,008 is one of the two values
-this release withdraws.
+The preview's own cold/warm pair, for the record: **953 tokens at 12.79 tok/s with the cache empty,
+984 at 62.68 once it is not**, measured 2026-08-10 — and no protocol for it is findable under
+`runs/`, so it is quoted here as history rather than as evidence.
+
+**What 0731 costs in VRAM.** 378,208,256 B per expert across the 43 layers, so the 58-slot cache is
+**20,920 MiB**. Measured 2026-08-11 on 0731 at 200k on one slot: **30,548 MiB of 32,607 after load**,
+leaving **2,059 MiB**. Everything your display does has to fit in that remainder — on this machine
+the desktop alone was read at 342, 543, 622 and 978 MiB within one day, which is exactly what the
+section above is about.
+
+Under a **filled** context 0731 has still not been read. The only pair on record is the preview
+model's (`runs/2026-08-10/before-0731/`): 31,899 after load and 31,997 filled, a 98 MiB rise for 200k
+of KV. Carrying that rise across predicts roughly 31,781 on 0731 — arithmetic, not a reading, and the
+one number in this section that nobody has measured.
 
 ### The arrangement, and the preview series that established it
 
@@ -702,8 +757,9 @@ Written out because a page like this is easy to read as more than it says.
 - **Nothing here is compared to another project's number.** The nearest published figures for this class of workload differ from this operating point in at least two free variables each, so a "we are faster" line would be measuring the difference between two machines.
 - **The upstream CUDA fault this project tracks was never reproduced here**, on this quantisation and this card. That is not a claim that it is fixed.
 - **The headline 19.13 tok/s is the median of three arms with the host tier, not what every chat turn feels like.** One arm, three answers, 1,428 decoded tokens over 74,644.72 ms, at near-empty context, and the three answers include the arm's ungraded warm-up. Within-arm spread on 0731 is 1.19x against an effect of 1.49x, so the band is indicative rather than tight. Live turns in the client on 2026-08-09 — **preview model** — with 1–5k of conversation behind them, decoded at 11.79–16.72 tok/s; before the tier, comparable turns ran at 8.08–8.56. No live-turn series has been taken on 0731. The relationship between a gate arm and a chat turn is not measured, and the measurement that would settle it is a decode series against context length.
-- **No VRAM figure has been read on 0731.** The 31,899 / 31,997 MiB pair at 200k is a preview-model measurement; the ~32,200 quoted for the operating point adds the cache's known +288 MiB to it and is arithmetic, not a reading. The measurement that would settle it is one `nvidia-smi` call against a loaded 0731 server.
-- **A cold start is not on this page except where it says so.** Prefill at filled context, and every decode figure here, is the warm case. Cold against warm on the same server was 12.79 against 62.68 tok/s.
+- **VRAM on 0731 is read only after load, and only at ~6k of context.** 30,548 MiB of 32,607 at 58 slots, 2026-08-11. Under a *filled* 200k window nobody has read it on 0731; the 31,899 / 31,997 pair is the preview model's, and carrying its 98 MiB rise across is arithmetic.
+- **The slot count is this card's.** 58 slots leave 2,059 MiB for the display against a desktop measured between 342 and 978 MiB here. Nothing says it holds on a different card, a fourth monitor, or a workload that puts more on the screen — and the failure mode is silent. That is [#87](https://github.com/nibor1896/Crow/issues/87), and it is open.
+- **The decode figures at 58 slots come from a probe, not the graded gate.** Eight requests of 200 tokens on one server, 16.64–18.06 tok/s. The gate has been run at 62 slots (19.81, three paired arms, 6 of 6 correct) and not at 58; the two numbers are not comparable and the gate should be re-run before either is quoted as the release figure.
 - **The tier's factor is measured at one size, on one machine, under 6k of context.** 32 GiB on a 63.4 GB host: 1.49x on 0731, 1.40–1.47x on the preview. No other tier size has been run, and nothing says the factor survives a full 200k window — the working set grows and the tier does not.
 - **The gate resolves two tasks in aggregate, and the tier comparison rests on two graded tasks per arm.** On 0731 it is 6 of 6 correct with the tier against 6 of 6 without: *no difference found*, which at this resolution is what the design can produce and is not evidence about quality either way.
 - **Decode falls over the server's uptime, and this page does not describe that.** Every figure here comes from a fresh server. On a server up 121 minutes the same operating point decoded at 0.97–1.19 tok/s, while a freshly started server at a resumed 63.9k context ran at 14.97 — so it is uptime and not context. Open as [#71](https://github.com/nibor1896/Crow/issues/71); the workaround is a restart, and there is no fix to claim.

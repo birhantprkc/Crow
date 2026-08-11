@@ -78,6 +78,17 @@ param(
     # ~40 debug lines per token cost more than the work they describe. A number
     # taken at -lv 5 does not describe what a user gets.
     [int]    $Verbosity  = 5,
+    # The prompt sizes of the prefill series, in tokens. The default is the four
+    # points the before-side ran and stays the default, so that series stays
+    # reproducible by calling this driver with nothing.
+    # It is a PARAMETER because the series is not affordable at every rate: at
+    # the cold 0731 prefill rates measured 2026-08-11 (3.8-14.5 tok/s) the four
+    # points take hours, and a run stopped part-way writes NO summary.json -- the
+    # phase only files one after its last point (see the prefill block below).
+    # That is exactly what left runs/2026-08-11/0731-prefill-clean/ with a log
+    # and no record of the flags it ran under, which is the defect issue #86 is
+    # currently stuck on.
+    [int[]]  $Points     = @(1000, 8000, 32000, 128000),
     [switch] $CounterProbe,
     [switch] $Selftest
 )
@@ -150,6 +161,17 @@ function Read-VramCsv {
     return $null
 }
 
+function Get-PrefillPoints {
+    param([int[]]$All, [bool]$IsCounter)
+    # The counter-probe runs at -c 65536, where a 128k prompt does not fit, so it
+    # drops everything above 32k -- by value and not by position, because -Points
+    # can now be any list and "the last one" would silently drop the wrong entry.
+    # ,@() for the same reason Read-PrefillLines has it: a one-element list must
+    # stay a list or .Count disappears.
+    if ($IsCounter) { return ,@($All | Where-Object { $_ -le 32000 }) }
+    return ,@($All)
+}
+
 function New-SaltedPrompt {
     param([int]$TargetTokens, [string]$Salt)
     # ~1 token per short word for this tokenizer family; the SERVER's count is
@@ -202,6 +224,13 @@ if ($Selftest) {
     $v = Read-VramCsv -Csv ' 31838, 32607 '
     Check 'vram csv parses'         31838 $v.used_mib
     Check 'garbage vram -> null'    $null (Read-VramCsv -Csv 'N/A, N/A')
+
+    # -Points, including the case that must go red if the counter-probe filter is
+    # ever dropped: 128k in a -c 65536 server is the failure this filter exists for.
+    Check 'points: default series intact'  '1000 8000 32000 128000' ((Get-PrefillPoints -All @(1000,8000,32000,128000) -IsCounter $false) -join ' ')
+    Check 'points: counter-probe drops 128k' '1000 8000 32000'      ((Get-PrefillPoints -All @(1000,8000,32000,128000) -IsCounter $true) -join ' ')
+    Check 'points: a custom list is passed through' '1000'          ((Get-PrefillPoints -All @(1000) -IsCounter $false) -join ' ')
+    Check 'points: one point stays an array'  1                     ((Get-PrefillPoints -All @(1000) -IsCounter $false).Count)
 
     $p1 = New-SaltedPrompt -TargetTokens 1000 -Salt 'a'
     $p2 = New-SaltedPrompt -TargetTokens 1000 -Salt 'b'
@@ -322,8 +351,7 @@ foreach ($mode in @('prefill','prefill-counter')) {
         $vramCold = Get-VramRow
         Say ("{0}: vram after load {1} MiB" -f $mode, $vramCold.used_mib)
 
-        $points = @(1000, 8000, 32000, 128000)
-        if ($isCounter) { $points = @(1000, 8000, 32000) }   # 128k does not fit -c 65536
+        $points = Get-PrefillPoints -All $Points -IsCounter $isCounter
         foreach ($target in $points) {
             $prompt = New-SaltedPrompt -TargetTokens $target -Salt ("{0}-{1}" -f $mode, $target)
             $body = @{ model = 'x'

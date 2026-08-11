@@ -5,7 +5,7 @@
   "_source_of_truth": "This file. README.md and install.ps1 are renderings of it for humans; the measurement scripts take their defaults from it.",
   "measured_on": "2026-08-10",
 
-  "version": "0.1.0",
+  "version": "0.1.1",
 
   "model": {
     "quant": "UD-IQ3_XXS",
@@ -30,7 +30,7 @@
       "0731-iq3-xxs": {
         "path": "0731-gguf/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
         "present": true,
-        "role": "alias of operating-point, for scripts that name the model generation. Downloaded and header-verified 2026-08-10. 378,208,256 B per expert, +288 MiB of the 599 MiB headroom at 64 slots"
+        "role": "alias of operating-point, for scripts that name the model generation. Downloaded and header-verified 2026-08-10. 378,208,256 B per expert. That is 288 MiB more per 64-slot cache than the preview, and it is what pushed 64 slots over the card: see server._moe_stream_cache_note"
       },
       "preview-iq3-xxs": {
         "path": "UD-IQ3_XXS/DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
@@ -78,7 +78,8 @@
     "jinja": true,
     "slot_save_path": "<install>/session",
     "moe_stream": true,
-    "moe_stream_cache": "64s",
+    "moe_stream_cache": "58s",
+    "_moe_stream_cache_note": "58 and not 64, measured 2026-08-11 (#87, evidence on #86). A slot costs 360.69 MiB, so 64 slots need 32,062 MiB of the card's 32,607 and leave 545 MiB for everything the display does. This machine's desktop was read at 342, 543, 622 and 978 MiB on ONE day. Above the gap the driver migrates the difference to host memory silently and the affected request halves - identical graph executions, identical misses, and the LOWEST load stall of the run, so nothing in the streaming path accounts for it. The full ladder, cold prefill of 1,374 tokens over 3 runs and decode of 200 tokens over 8 runs: 64 -> 15.28 prefill, decode unusable, 545 MiB free; 62 -> 114.92, decode outlier at 7.07 among 15s, 708 free; 60 -> 113.53 / 17.40, 1,322 free; 58 -> 112.69 / 17.32, 2,059 free; 56 -> 110.30 / 17.00, 2,765 free. 58 costs nothing measurable against 60 (0.7 % prefill, 0.5 % decode) and triples the margin over the highest desktop reading. THE VALUE IS THIS CARD'S, NOT A CONSTANT: derived from 32,607 MiB of VRAM and a desktop that peaks near 1 GiB.",
     "moe_stream_io_threads": 8,
     "moe_stream_direct": true,
     "moe_stream_l2": 32,
@@ -124,12 +125,59 @@
     "tier_arms": [16.17, 19.13, 19.25],
     "stall_per_miss_ms": 0.73,
     "run": "runs/2026-08-10/0731-pairs",
-    "_note": "The promise held: +29.9 % over the baseline median, and even the worst tier arm (16.17) beats the old median. Within-arm spread 1.19x, wider than the baseline's 1.09x -- the band is indicative, the direction clears the noise."
+    "slots": 64,
+    "_note": "The promise held: +29.9 % over the baseline median, and even the worst tier arm (16.17) beats the old median. Within-arm spread 1.19x, wider than the baseline's 1.09x -- the band is indicative, the direction clears the noise. TAKEN AT 64 SLOTS, i.e. at the configuration #87 replaces: it is a single sitting on a setup now known to scatter, so it is the bar the new value had to clear rather than a figure that still describes the product."
+  },
+
+  "decode_measured_0731_62s": {
+    "tok_per_s": 19.81,
+    "method": "median of three paired arms, one warm-up plus two graded tasks each, fresh server per arm, temperature unpinned - the same arrangement as the 19.13 above",
+    "arms": [19.81, 18.31, 19.94],
+    "stall_per_miss_ms": 0.712,
+    "stall_per_miss_arms": [0.712, 0.720, 0.707],
+    "graded_correct": "6 of 6, 0 undecided",
+    "slots": 62,
+    "run": "runs/2026-08-11/slot62-gate",
+    "_note": "The criterion was fixed before the run: the median had to reach the 19.13 above. Stall per miss is the more robust of the two figures (run-l2-pairs.ps1 says why) and comes out at 0.707-0.720 against 0.717-0.741 at 64 slots - a smaller cache produces more misses and the individual miss still does not cost more. No fresh 64-slot arm was taken alongside; the comparison is against the recorded bar."
+  },
+
+  "prefill_measured_0731": {
+    "tok_per_s": 112.69,
+    "prompt_tokens": 1374,
+    "runs": 3,
+    "spread": 1.013,
+    "slots": 58,
+    "condition": "COLD expert cache, fresh server, machine idle, stderr to a file",
+    "at_64_slots": 15.28,
+    "at_64_slots_runs": 8,
+    "at_64_slots_spread": 8.69,
+    "run": "runs/2026-08-11/0731-slotladder",
+    "_note": "The 64-slot figures are the median and spread of eight runs of one configuration - the value is not reproducible there, which is the defect #87 fixes. Warm prefill is not this number; nothing here describes a warm cache."
+  },
+
+  "vram_measured_0731": {
+    "used_mib_after_load": 30548,
+    "total_mib": 32607,
+    "free_mib": 2059,
+    "slots": 58,
+    "run": "runs/2026-08-11/slot58-prefill",
+    "_note": "Free is 32,607 minus the reading, and it has to cover everything the display does. This machine's desktop has been read at 342, 543, 622 and 978 MiB on one day, so 2,059 leaves about 1,081 MiB of margin over the worst of those. At 62 slots the same margin was NEGATIVE and single requests halved at random."
+  },
+
+  "decode_measured_0731_58s": {
+    "tok_per_s": 17.32,
+    "runs": 8,
+    "tokens_per_run": 200,
+    "range": [16.64, 18.06],
+    "spread": 1.09,
+    "slots": 58,
+    "run": "runs/2026-08-11/slot58-decode",
+    "_note": "Eight consecutive requests on one server at four prompt sizes, temperature 0. The point of the series is the SPREAD: at 62 slots the same probe produced 7.07 among 15s, at 58 the widest gap is 1.09x. This is a probe, not the graded gate - the gate figure at 62 slots was 19.81 on three paired arms with warm-up tasks, and no gate has been run at 58."
   },
 
   "not_measured_at_this_operating_point": [
-    "prefill - every figure on record comes from prompts of 86-103 tokens",
     "quality - the reference series ran at -c 65536 without --jinja",
-    "VRAM - documented twice with two different numbers and no run behind either"
+    "prefill and decode at a FILLED 200k window - every figure here is taken under ~6k of context",
+    "any card other than this one - the slot count is derived from 32,607 MiB and a desktop under ~1.2 GiB"
   ]
 }

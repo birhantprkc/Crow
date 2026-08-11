@@ -53,7 +53,7 @@
     <rect x="34" y="322" width="556" height="92" rx="12" fill="#f2fbf5" stroke="#69c98a" stroke-width="1.6"/>
     <circle cx="76" cy="368" r="21" fill="#2f9e5e"/><text x="76" y="376" text-anchor="middle" class="num">3</text>
     <text x="110" y="361" class="tb">VRAM SLOT CACHE</text>
-    <text x="110" y="389" class="sub">64 of 256 resident — 80–82 % on the gate</text>
+    <text x="110" y="389" class="sub">58 of 256 resident — 80–82 % on the gate</text>
 
     <rect x="610" y="322" width="556" height="92" rx="12" fill="#f2fbf5" stroke="#69c98a" stroke-width="1.6"/>
     <circle cx="652" cy="368" r="21" fill="#2f9e5e"/><text x="652" y="376" text-anchor="middle" class="num">4</text>
@@ -64,7 +64,7 @@
   <!-- ══ zone 1: resident in VRAM ════════════════════════════════════════ -->
   <rect x="34" y="446" width="1132" height="676" rx="16" fill="#f5f9ff" stroke="#5b8def" stroke-width="2"/>
   <text x="600" y="486" text-anchor="middle" class="zh" fill="#2c5bac">RESIDENT IN VRAM</text>
-  <text x="600" y="514" text-anchor="middle" class="sub">31,899 MiB after load, 31,997 under a filled context, of 32,607 — preview series, the 0731 load has not been re-measured</text>
+  <text x="600" y="514" text-anchor="middle" class="sub">30,548 MiB after load of 32,607, measured on 0731 at 58 slots — 64 slots ask for 32,062 and do not fit beside a desktop that peaks near 1 GiB</text>
 
   <!-- pipeline, two rows -->
   <rect x="66" y="540" width="240" height="86" rx="12" fill="#ffffff" stroke="#8b5cf6" stroke-width="1.8"/>
@@ -104,7 +104,7 @@
   <text x="898" y="798" text-anchor="middle" class="sub">that currently holds that expert</text>
 
   <rect x="94" y="836" width="1012" height="72" rx="11" fill="#faf7ff" stroke="#8b5cf6" stroke-width="1.6"/>
-  <text x="600" y="868" text-anchor="middle" class="tb">EXPERT SLOT CACHE — 64 slots per layer, 23,084 MiB measured</text>
+  <text x="600" y="868" text-anchor="middle" class="tb">EXPERT SLOT CACHE — 58 slots per layer, 20,920 MiB</text>
   <text x="600" y="894" text-anchor="middle" class="sub">hit: the weights are already here · miss: fetch them, and the compute thread waits</text>
 
   <g stroke="#7c8794" stroke-width="2.4" fill="none" marker-end="url(#a)">
@@ -242,5 +242,5 @@
        hyphen inside an XML comment is a parse error, and a browser stops rendering at it.) -->
   <text x="600" y="2192" text-anchor="middle" class="sub" fill="#94a3b8">measured 2026-08-07/10 · one RTX 5090, 63.4 GB RAM, one NVMe · DeepSeek-V4-Flash-0731 UD-IQ3_XXS, four files</text>
   <text x="600" y="2216" text-anchor="middle" class="sub" fill="#94a3b8">llama-server -c 200000 -ngl 99 -np 1 --jinja --slot-save-path DIR --chat-template-file 0731-chat-template.jinja</text>
-  <text x="600" y="2240" text-anchor="middle" class="sub" fill="#94a3b8">--moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct --moe-stream-l2 32</text>
+  <text x="600" y="2240" text-anchor="middle" class="sub" fill="#94a3b8">--moe-stream --moe-stream-cache 58s --moe-stream-io-threads 8 --moe-stream-direct --moe-stream-l2 32</text>
 </svg>
