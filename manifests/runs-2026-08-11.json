@@ -1,0 +1,2336 @@
+{
+    "note":  "Fingerprint only. These files are NOT in git - runs/ is ignored (.gitignore:10). This manifest detects deletion and modification; it is not a backup and does not make the protocols recoverable.",
+    "day":  "2026-08-11",
+    "pattern":  ".",
+    "root":  "Crow/runs",
+    "written":  "2026-08-11T16:33:12.1830597+02:00",
+    "files":  387,
+    "bytes":  93262177,
+    "stages":  {
+                   "unknown":  387
+               },
+    "entries":  [
+                    {
+                        "path":  "2026-08-11/0731-cache48/c1/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644325,
+                        "sha256":  "2BEC63DD3B2B656BBB1C6FA9C0FE2AE4BAE958C34EB2FD2D76EFE01C95F21DF0"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-cache48/c1/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-cache48/c1/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "856FDC24E941D19D36194719E9FB317FFC82EE68578263638D2CDA812A8D155F"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-cache48/c2/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644325,
+                        "sha256":  "750B7E2A23B5156B338FB7B32A4BFBCCC3231CBC73D145AA9B95F05F173FB5F3"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-cache48/c2/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-cache48/c2/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "57855867E7D6E4D2F09EA24B900C780F71E8907D55095F7133EC279EEA2A127B"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-cache48/c3/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644324,
+                        "sha256":  "38DD72ACFE51A9B60E3D0D32DA1E582B9813EA07071E447E90B5820F84CD089B"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-cache48/c3/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-cache48/c3/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "23F236A1929FCA0A14FD90E5C2E800103B1B8C1E9F6C77A0278C1AB09A87AB0F"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-cache48/c4/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644325,
+                        "sha256":  "0E664B819BB75FFE9847306CD5C0F771AC5CB5821573D03BFBEA686F1832D66F"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-cache48/c4/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-cache48/c4/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "DA824EBE0FF765AA687C53C53A720110CFCA185A4BDD0630262E2D3A009AF806"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-cache48/c5/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644325,
+                        "sha256":  "DCE7D9ECB00CD08320C2B49F36F05E59DC48C99A0EA88D9014AC9B2675178D43"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-cache48/c5/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-cache48/c5/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "022163BD55E4C253209ECDAE7A849631071D26151D96349EF7EC11437D27BAB7"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-clean/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  5333,
+                        "sha256":  "64567DF66A9751B3E011F646E6CFBE66804D92301EC6F9B9C774AD8349C45B0F"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-clean/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv4/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  28939,
+                        "sha256":  "31D15C1CA8607F88EC0093A5FF6499461F174892BBB55A5E62A8CC6898C743A0"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv4/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv4/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1253,
+                        "sha256":  "D71E8279126907E1D1D896E8429EC37627E4A3179058D51E97D4CEAD34FFDDCD"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644171,
+                        "sha256":  "2C8F0DD029C19D9F43C8D9095B237BC5F292ACE45342F81D7BF55C41FC1B73EB"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1254,
+                        "sha256":  "289A4A4FA84D69848A4EBC606D04A6ADF914EC4C053F505813A0738EE2418B21"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-bracket/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644173,
+                        "sha256":  "A95BE56F06C2D27ECEEDFD04C8B015C1947ADC01BFBF7E40FDE3FD8754B686A8"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-bracket/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-bracket/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1251,
+                        "sha256":  "BD5ADC9339D414567D62BE2D537BF713D82260BA303C7314031AE28D50900867"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-r2/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644173,
+                        "sha256":  "C1C5BF48C23F4CAC7CBAC6E5343AC5F5A23D8DA1FCF067E4F84664604E69A6B8"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-r2/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-r2/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1253,
+                        "sha256":  "C73566C2D0A995D23E06172C909FE0CDFCE16799182F2BCFF629F9C4307B7230"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-r3/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644174,
+                        "sha256":  "E7DF48A49F88321FA05629DAE49EF8481D26C78499FB4EAAEFECC8E8C0B19A31"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-r3/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-r3/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1253,
+                        "sha256":  "0376540211B84F67EA8EEFD7DEE68A54744D7AB9BE93446EB836C3DA342E737E"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-r4/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644176,
+                        "sha256":  "A2230C90216FA1C08CCBD8247C6C8E9C3F665D678C01DDA637795F78DBE59686"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-r4/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-r4/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1253,
+                        "sha256":  "469BA69A4B669FB9816EAB53C7A525385807469AD5A581828A1E5F308F5D050B"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-r5/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644173,
+                        "sha256":  "7534CE022929E2C518F9911C4B90F34FB9E8A613ECB206790EF2816CDD969CB1"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-r5/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-r5/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1252,
+                        "sha256":  "500B3EA569B821851BE9ECE51459D7301B70206B44BA388946C260D6F1A40330"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-repeat/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644174,
+                        "sha256":  "B99C9A38D78B83D851E60EFA0FE0F9F1710201EF7CA8A22D74E8A53EA71DE2D9"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-repeat/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-prefill-counters/lv5-repeat/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1252,
+                        "sha256":  "89A3B4238760D6CBE421207259CA4A214742D8E1A034E2C7220E197D9D22DD81"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s60-1/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644325,
+                        "sha256":  "839A12E4196B9C275783A1A1214D7BF73D2F119005635827101E5994921423C2"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s60-1/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s60-1/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "B3A28EB7091E40273ACB30F70671B0196B371FF301B8EBCD4085F48C99D36C97"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s60-2/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644325,
+                        "sha256":  "ACDF71495F42B0EFEA847F4EA7EF31E00B9AC5F27F02901FDBC896BB4D15AD23"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s60-2/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s60-2/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "BC642833E88C4F2B509139D2B2300C94E90AAAABA8CB8FA169C37DA7ADEBD128"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s60-3/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644325,
+                        "sha256":  "985D963968B27099080E925DC80944D961C7F52BFC9A989525444FF2AB45CF94"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s60-3/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s60-3/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "C2E4B24288116CF90E5F4420D846B7C33262D09286636EB17C6A2ADBE5AA6AE7"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s60-4/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644325,
+                        "sha256":  "73F654E5A2258EE9DFCDDC728490AF825618DEBBBF4F4CC7E183A42ED38CCFEF"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s60-4/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s60-4/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "97E604365364E1DE20629CC55256AB82AC0CB33907E67A2CC759A9D96A541340"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s60-5/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644325,
+                        "sha256":  "6681E8302453D73CAC3175325F485E53606F0C25A423BE48C2041DB2BBA41B73"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s60-5/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s60-5/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "D835DE69C26F3E97BB7CE6B6DF61E73B4F0BEF90388E2111D9568AFF07B27B64"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s62-1/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644325,
+                        "sha256":  "9920AEF5E39F52A1EB600B71E11B081B0884392963A55B8DA6011778C33490C3"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s62-1/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s62-1/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "3769121931133C882B25DB603EE3430822AFDDDAAB14BA8FF97A29C453F3D72B"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s62-2/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644325,
+                        "sha256":  "89A345F8A337786A1836AC31387530E0A34D7DD214F129A54DB381221A13B610"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s62-2/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s62-2/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "7578F95E70977AE5C6CFD5C1D1C5CF38AA6FE0E0C6D0CCE0A059BCEEFD4FEEC4"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s62-3/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644325,
+                        "sha256":  "CF1C09854F7A32C743CB5B61050366403E4E0A8BDC3AF08BA3D272E8B4CCD65A"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s62-3/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s62-3/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1318,
+                        "sha256":  "164AFBB49E13F43BCF4641B1EF20AEFF629E55039FCB43A13FB62000A8FA8CCF"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s62-4/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644325,
+                        "sha256":  "CCB00BF4BF5964025EE6B00F9F7B5096C30326EF273DC3CE25395C4A61121702"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s62-4/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s62-4/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "0DC9A2408B578D65941382F8F78C584B78B539FE86BA000A6932B5B03034B436"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s62-5/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  644325,
+                        "sha256":  "5FC873A80539D4D079163FF7706FBDAB911A64B8C735A7B3B6A60F5589E43A2B"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s62-5/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-slotladder/s62-5/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "180AD27BEA29E9B4E3BA533C8B44485355AB9392B726174408001902ED434B4F"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-vram/server.err",
+                        "stage":  "unknown",
+                        "bytes":  8833,
+                        "sha256":  "F36C690D8BF5A914597CE51517B3F163DBDAD0699DAB3E1E58DC82B8B06613D0"
+                    },
+                    {
+                        "path":  "2026-08-11/0731-vram/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/decode-counters/server.err",
+                        "stage":  "unknown",
+                        "bytes":  106093,
+                        "sha256":  "83A938C48BE72EEAF752807E8A080FB5646BCB277FB83AD1ED74B62E46636A34"
+                    },
+                    {
+                        "path":  "2026-08-11/decode-counters/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/l2-decode/l232-is-balanced/l232-is-balanced.err",
+                        "stage":  "unknown",
+                        "bytes":  2213155,
+                        "sha256":  "BF97C0112F44099379B4DE0C7E08CA3DE8BEBD8424EBB2559EC317402E43699A"
+                    },
+                    {
+                        "path":  "2026-08-11/l2-decode/l232-is-balanced/l232-is-balanced.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/l2-decode/l232-is-balanced/l232-is-balanced/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  690,
+                        "sha256":  "B8874D443C8E3504DF611B0B9F14982D998DB30E4232FEE9F7A7CE1387A80FE1"
+                    },
+                    {
+                        "path":  "2026-08-11/l2-decode/l232-is-balanced/l232-is-balanced/is-balanced.json",
+                        "stage":  "unknown",
+                        "bytes":  1921,
+                        "sha256":  "8BAF33FCC0DB19ABF9EF438B3150075D9BE7732F8A549B6D3BE553BEBE099AD9"
+                    },
+                    {
+                        "path":  "2026-08-11/l2-decode/l232-is-balanced/l232-is-balanced/is-balanced.py",
+                        "stage":  "unknown",
+                        "bytes":  326,
+                        "sha256":  "CD4433CAF95C273D9B5A09560A15125A04E91B62C1D78F8E50325A74DE71ECBC"
+                    },
+                    {
+                        "path":  "2026-08-11/l2-decode/l232-is-balanced/l232-is-balanced/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  433,
+                        "sha256":  "17481E0B65158A9BD78A3818CEEC19AA68C588CFD60526CD59B27B9661B59DA7"
+                    },
+                    {
+                        "path":  "2026-08-11/l2-decode/l232-is-balanced/l232-is-balanced-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  2032,
+                        "sha256":  "0EE0CE29B71995AF200DDA661B06A4E6A1FAE12CBEDF741FCD7F0E85886042F7"
+                    },
+                    {
+                        "path":  "2026-08-11/l2-decode/l232-is-balanced/l232-is-balanced-warm/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  549,
+                        "sha256":  "847719A01086B31C834DA85349DB1BEE146FE6D1650779AF24FFA169BAB1107F"
+                    },
+                    {
+                        "path":  "2026-08-11/l2-decode/l232-is-balanced/l232-is-balanced-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  430,
+                        "sha256":  "C2859330ED0E18FCDFFB37300E12F38512BC1DE70E7065BCC269A3E85ACE6250"
+                    },
+                    {
+                        "path":  "2026-08-11/l2-decode/l232-is-balanced/l232-is-balanced-warm/two-sum.json",
+                        "stage":  "unknown",
+                        "bytes":  2366,
+                        "sha256":  "8BC6D5FD926475AD422AB6A2E548F942046B13FED8FD6E23FBCF48AEA20873EE"
+                    },
+                    {
+                        "path":  "2026-08-11/l2-decode/l232-is-balanced/l232-is-balanced-warm/two-sum.py",
+                        "stage":  "unknown",
+                        "bytes":  195,
+                        "sha256":  "940665A91572F3B372FFA7DB16DCA05E7250B94488C749AF936D9ACCBC4E9ED7"
+                    },
+                    {
+                        "path":  "2026-08-11/l2-decode/l248-is-balanced/l248-is-balanced.err",
+                        "stage":  "unknown",
+                        "bytes":  3314711,
+                        "sha256":  "43DA0FC2FDC01EC468DF5427C7B36779E6E1D634687BFF03048E4603D5D903D9"
+                    },
+                    {
+                        "path":  "2026-08-11/l2-decode/l248-is-balanced/l248-is-balanced.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/preview-prefill-spread/p1/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  643560,
+                        "sha256":  "ACEA75F4290EAB3682603686B1440241E342639ED49969A1ABB44F1848B5278E"
+                    },
+                    {
+                        "path":  "2026-08-11/preview-prefill-spread/p1/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/preview-prefill-spread/p1/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1107,
+                        "sha256":  "0FDD374768654856ADD1EF4E8D4E326F79D9D7D1A8EFDFED590A8403BA7F818A"
+                    },
+                    {
+                        "path":  "2026-08-11/preview-prefill-spread/p2/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  643561,
+                        "sha256":  "2204210C8F8A1A91130B87CBB7BB9BFC03DA9D431DA1CE5B87048B42083A6186"
+                    },
+                    {
+                        "path":  "2026-08-11/preview-prefill-spread/p2/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/preview-prefill-spread/p2/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1107,
+                        "sha256":  "6B6688A6B73C6C25AF5100752BABE0B5E7D25E114FD102CF6B44C466A4822193"
+                    },
+                    {
+                        "path":  "2026-08-11/preview-prefill-spread/p3/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  643561,
+                        "sha256":  "ABF5ADB7EF0107040FD33005145370EF1657D6FCE7E2A8E169B3A7CDD6B60B8C"
+                    },
+                    {
+                        "path":  "2026-08-11/preview-prefill-spread/p3/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/preview-prefill-spread/p3/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1107,
+                        "sha256":  "B4770B9A7FBCFA62F88821CD89B80BABAF2475DF77517382C8B56A19FB6ED14D"
+                    },
+                    {
+                        "path":  "2026-08-11/preview-prefill-spread/p4/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  643560,
+                        "sha256":  "39C0C2A504878B8801FC85716221333ADE79F9D1FB2D977DE7AEDB9A26E102DB"
+                    },
+                    {
+                        "path":  "2026-08-11/preview-prefill-spread/p4/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/preview-prefill-spread/p4/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1103,
+                        "sha256":  "2ECA24E179E54FF1029B1861BD93AAE9DB7769047857AE03DCDDE45B1CE25D9B"
+                    },
+                    {
+                        "path":  "2026-08-11/preview-prefill-spread/p5/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  643561,
+                        "sha256":  "A8C035753022CAC8E6335BD8B58A4987D890355C5207C45AA5093F6523960307"
+                    },
+                    {
+                        "path":  "2026-08-11/preview-prefill-spread/p5/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/preview-prefill-spread/p5/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1107,
+                        "sha256":  "1248C3D34AB85FB765940A2DA500AC4D8F9FC2C0B190F82EA441A9AF9D8F0B45"
+                    },
+                    {
+                        "path":  "2026-08-11/slot56-prefill/r1/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29090,
+                        "sha256":  "0A85D25DEDFF36966F59332DF22187F8E7FD83F07371A9194A7EF5F148862346"
+                    },
+                    {
+                        "path":  "2026-08-11/slot56-prefill/r1/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot56-prefill/r1/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1319,
+                        "sha256":  "3C47A2F9452F33DE32CFF6B91E5E338C7376A39CCFF977E2AE780C3D42EC9DFB"
+                    },
+                    {
+                        "path":  "2026-08-11/slot56-prefill/r2/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29090,
+                        "sha256":  "946B8B1EF008A8B509F746B690A503C297695FC5B64FEC13C06BB657E83CB093"
+                    },
+                    {
+                        "path":  "2026-08-11/slot56-prefill/r2/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot56-prefill/r2/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "9230B2DF723026FBA98BCB5C8A93B3725A4E281EF5EF25EB0EA5E8384C2EDAC5"
+                    },
+                    {
+                        "path":  "2026-08-11/slot56-prefill/r3/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29090,
+                        "sha256":  "C12200049FBFF0D98226E31E426BE9498414679FD19A30E909794DC83332586C"
+                    },
+                    {
+                        "path":  "2026-08-11/slot56-prefill/r3/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot56-prefill/r3/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "DD6C053E27BD2E46DA83E3EC5AE96F8BD9FA6BC4C8A267A0570CFA90CFC221C0"
+                    },
+                    {
+                        "path":  "2026-08-11/slot56-probe/server.err",
+                        "stage":  "unknown",
+                        "bytes":  75478,
+                        "sha256":  "990D84ADD9C7BE156FADA2AD82722418718E555E5A3E5F29B847C57FA3F180F9"
+                    },
+                    {
+                        "path":  "2026-08-11/slot56-probe/server.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-decode/server.err",
+                        "stage":  "unknown",
+                        "bytes":  75476,
+                        "sha256":  "FD6765ADC551955155C3C80F5A61D7406B51DB71BEDCE75F0C5CA2C2916230BD"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-decode/server.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/l2-pairs.csv",
+                        "stage":  "unknown",
+                        "bytes":  745,
+                        "sha256":  "48199DFE93DEB02EF07CDF3BC268F489B1800443E9095594019F9961CF784C1B"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-base/r1-base.err",
+                        "stage":  "unknown",
+                        "bytes":  6538082,
+                        "sha256":  "9BB078B34141891264BC8E181280FDAAE50BA24235761994713DBB8AEC8844D2"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-base/r1-base.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-base/r1-base/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  686,
+                        "sha256":  "DBFB969B9CE8FFA06A4F95D8461D867E8A6EEF9A3C31FF18CC9DD14A6E2D3139"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-base/r1-base/__pycache__/rotate-matrix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  444,
+                        "sha256":  "B6CEAED6D13C82B04154270DB2CFC61B8B0210EF68DD7A263A7B500D6631BB6D"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-base/r1-base/is-balanced.json",
+                        "stage":  "unknown",
+                        "bytes":  1564,
+                        "sha256":  "57CD597BA292A2CC8D7D5B432A43F9E66CABB9DAFB14E9959FE6AA29A37A538E"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-base/r1-base/is-balanced.py",
+                        "stage":  "unknown",
+                        "bytes":  353,
+                        "sha256":  "4E2728AE68993BB02A45E72C8488830BBCE5B8E4C55C4F39D98E7307BA4B03DC"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-base/r1-base/rotate-matrix.json",
+                        "stage":  "unknown",
+                        "bytes":  5777,
+                        "sha256":  "12C4D6E0E8B62D6CA1BC8D9251A1DE6F19BC63EFFE51E92B312E0287240DA5A5"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-base/r1-base/rotate-matrix.py",
+                        "stage":  "unknown",
+                        "bytes":  80,
+                        "sha256":  "D84EFAFB2D93B987CF99CFE06D1DB762A48BDC3BB25D0652918881294881DA0D"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-base/r1-base/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  681,
+                        "sha256":  "3D8CB6BD3890F82E663EE8D149B3CEE57833451F7403CCAF907505C43E952989"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-base/r1-base-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1911,
+                        "sha256":  "300F087418231290FA856E664F54D5B3EFACD0179089A7478A322997360D382A"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-base/r1-base-warm/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  544,
+                        "sha256":  "15F94382EA8FC8B91A82A3D6DFFA27A3D861058D801AC83D0339701A1613EF98"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-base/r1-base-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  430,
+                        "sha256":  "BFE8DCC8C5FC28DBEBC1DCD2B66C0BB2ABAED1C54A55D9A2FF20D1FB2B470E58"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-base/r1-base-warm/two-sum.json",
+                        "stage":  "unknown",
+                        "bytes":  3781,
+                        "sha256":  "A51A4433E26008E3BE06B296ED7FFF4192B76F667A0E25F651C35AD308B62DD7"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-base/r1-base-warm/two-sum.py",
+                        "stage":  "unknown",
+                        "bytes":  199,
+                        "sha256":  "EDFAAB09BBE2F211C279544FF38F97D38DCE4D82B18E793039003D44D2208C37"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-l2/r1-l2.err",
+                        "stage":  "unknown",
+                        "bytes":  6286596,
+                        "sha256":  "24DF5C25507E877380C927DBA7F5067C1F0A014E0FBF80D575A865D290100748"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-l2/r1-l2.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-l2/r1-l2/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  600,
+                        "sha256":  "BF80116694F96DFC1F9F9A2AA84366E5D8CAE20170CC4F9712050A4A2CA10EB9"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-l2/r1-l2/__pycache__/rotate-matrix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  440,
+                        "sha256":  "CC7B9438FB76D6F744F6BD0224622D1A298529CE681FB729AECC9BB6C73AACE2"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-l2/r1-l2/is-balanced.json",
+                        "stage":  "unknown",
+                        "bytes":  1506,
+                        "sha256":  "3947AC8BE93177362553F2F6175B9712FE650468A52A73D0747CF255C5673B03"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-l2/r1-l2/is-balanced.py",
+                        "stage":  "unknown",
+                        "bytes":  292,
+                        "sha256":  "5DDB5C16C344739D259E714B0C52285F4F6ED9F7B464AD2D04B743E434EBC4D9"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-l2/r1-l2/rotate-matrix.json",
+                        "stage":  "unknown",
+                        "bytes":  6055,
+                        "sha256":  "D19657AD544519D841FF9C6C2F365B2DD34949AA20EBB30C6DBEE02CB759FB6C"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-l2/r1-l2/rotate-matrix.py",
+                        "stage":  "unknown",
+                        "bytes":  80,
+                        "sha256":  "D84EFAFB2D93B987CF99CFE06D1DB762A48BDC3BB25D0652918881294881DA0D"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-l2/r1-l2/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  680,
+                        "sha256":  "271AF503FEE5848178C763084FEB107ECC1645060D168BFD163FD96273FA319E"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-l2/r1-l2-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1901,
+                        "sha256":  "3C5F7472693587A1CD535FBF1960FCEE2A03C3CB1BE8C050C5C059493DA8D88E"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-l2/r1-l2-warm/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  530,
+                        "sha256":  "C8E16311E6EBFE25AE43F3198AE87E7ECFF9FCE1349BCEABC6E7E8F97A098FC0"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-l2/r1-l2-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  430,
+                        "sha256":  "D4F7D89D229AB23DDEB914D01886170CC914FA21BE06AA04C0628F8AA8CDDCEE"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-l2/r1-l2-warm/two-sum.json",
+                        "stage":  "unknown",
+                        "bytes":  2759,
+                        "sha256":  "1FC964A03CBB25D4FD9FED7B1E629EEAE54657D278944D09958B5C353AF695FB"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r1-l2/r1-l2-warm/two-sum.py",
+                        "stage":  "unknown",
+                        "bytes":  195,
+                        "sha256":  "940665A91572F3B372FFA7DB16DCA05E7250B94488C749AF936D9ACCBC4E9ED7"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-base/r2-base.err",
+                        "stage":  "unknown",
+                        "bytes":  4066834,
+                        "sha256":  "7525DBFE1D58B8A54A9F1FEB3414B09E7F375A9AF8E1AF1180097137CD3654DE"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-base/r2-base.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-base/r2-base/__pycache__/group-anagrams.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  656,
+                        "sha256":  "1E2026CE57E3E782378B0DFAC963F26177D3C9EF6F5AABF2E78DDEA1DA882638"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-base/r2-base/__pycache__/longest-common-prefix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  594,
+                        "sha256":  "7F7412916E98451A1765116BEC638F43A2EC54D70C4C21E918B0FD2DC0368399"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-base/r2-base/group-anagrams.json",
+                        "stage":  "unknown",
+                        "bytes":  3401,
+                        "sha256":  "004418D7DD7E349D0CD5A2F807EFFDA4B39D18D2EEC02CDC562809A087DCC696"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-base/r2-base/group-anagrams.py",
+                        "stage":  "unknown",
+                        "bytes":  287,
+                        "sha256":  "566779C2AD0B32C78F9860B14002FED05B42A4D53398F80449BA070EE62D7736"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-base/r2-base/longest-common-prefix.json",
+                        "stage":  "unknown",
+                        "bytes":  1850,
+                        "sha256":  "8043FA23346D653ED28506258B7508A2060C5F6B36FE97EC30916CD84CD11100"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-base/r2-base/longest-common-prefix.py",
+                        "stage":  "unknown",
+                        "bytes":  300,
+                        "sha256":  "4383966EAD7177052C7EA6C917EC5030A4E9ABF7558909424E05A5A9177EEB9F"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-base/r2-base/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  690,
+                        "sha256":  "3D9491AC6F91F969D80097D51296195EFB57A8223189761F40BFA3D953F760F0"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-base/r2-base-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1911,
+                        "sha256":  "40CD24FE2DBA5E5E89C459FEE189A48D67F84672D69BEF55F5AEF2D8F254AC26"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-base/r2-base-warm/__pycache__/merge-intervals.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  837,
+                        "sha256":  "4A74CCB3C06E9B9E62318618EF3024196C22DC5C3D85618CD194B49E6AADF24B"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-base/r2-base-warm/merge-intervals.json",
+                        "stage":  "unknown",
+                        "bytes":  3341,
+                        "sha256":  "7B034F7E9330D97E72075D7F0EED7D34309DBD27F6634622272E78339462C24B"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-base/r2-base-warm/merge-intervals.py",
+                        "stage":  "unknown",
+                        "bytes":  437,
+                        "sha256":  "C4D6866E3B3C8564302C38EE1498BC51DE5509272EF0FE2B695F2076F2CFC200"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-base/r2-base-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  438,
+                        "sha256":  "C9E6E85D5D499FE56CEF865326EC3CE0C0F3A29FCC65B75A0896A659523A0E86"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-l2/r2-l2.err",
+                        "stage":  "unknown",
+                        "bytes":  3989995,
+                        "sha256":  "365D185FCEFDB6A55BC932C0A6A6747F6FE62D2895ED19EAA6CFC82822BF7978"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-l2/r2-l2.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-l2/r2-l2/__pycache__/group-anagrams.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  639,
+                        "sha256":  "2ABC68344440F94789144520030F0C4AD3D072B2A6980F9CE5870CE723FA399F"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-l2/r2-l2/__pycache__/longest-common-prefix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  606,
+                        "sha256":  "25BD961ECED92912A27467736CAC0B897963909DAB90654F34A3BBEE57777041"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-l2/r2-l2/group-anagrams.json",
+                        "stage":  "unknown",
+                        "bytes":  3187,
+                        "sha256":  "F2CCEB6EC8FD8337023B14D0D23812A85AAB7A8BB4A64263E1339BE96E1DE76B"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-l2/r2-l2/group-anagrams.py",
+                        "stage":  "unknown",
+                        "bytes":  298,
+                        "sha256":  "30BFF928280149EA980F1CEE0C0DEB9498FE10A707B58EED65F642B255F5C05E"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-l2/r2-l2/longest-common-prefix.json",
+                        "stage":  "unknown",
+                        "bytes":  1954,
+                        "sha256":  "1C039275A16778F415F4F67C06679A5849D19F60A1F8426D9B8982D120498197"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-l2/r2-l2/longest-common-prefix.py",
+                        "stage":  "unknown",
+                        "bytes":  274,
+                        "sha256":  "AC3C210282C6BAD0A70663EA4888FDAC55D95B1AB072FD7D3B5836533D689DC2"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-l2/r2-l2/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  690,
+                        "sha256":  "2974AF0C38F37453CC03790D26DAD16D546F25A9EE02BA4CEB444433BA54BDAC"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-l2/r2-l2-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1901,
+                        "sha256":  "36BE3BCDE08CFE88FED6E41090B678E355299CFE8B2AF1CCC59F02926F577D70"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-l2/r2-l2-warm/__pycache__/merge-intervals.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  833,
+                        "sha256":  "F4825670566DEED89E49B68158BC512AED8A7FDEE53D3DBF3469D5428BB59EDC"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-l2/r2-l2-warm/merge-intervals.json",
+                        "stage":  "unknown",
+                        "bytes":  3340,
+                        "sha256":  "1EDB07391A03AE3A967989AF324A3A54D9513831D6C6BC63ACEA0591E3CDF4B7"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-l2/r2-l2-warm/merge-intervals.py",
+                        "stage":  "unknown",
+                        "bytes":  437,
+                        "sha256":  "C4D6866E3B3C8564302C38EE1498BC51DE5509272EF0FE2B695F2076F2CFC200"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r2-l2/r2-l2-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  437,
+                        "sha256":  "8940AE71B9294E64F37066C7CC6F80B81C9331E555C0EFB8D7EE4BECBA7576B6"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-base/r3-base.err",
+                        "stage":  "unknown",
+                        "bytes":  3778136,
+                        "sha256":  "A5CA502EF97E2C651FCB1DAEAB2660A945F10F3EA7171989EC5DBC2C0635DC7C"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-base/r3-base.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-base/r3-base/__pycache__/binary-search.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  605,
+                        "sha256":  "EC6C5EB105BF2C16AE855F3A4BF0BF1783444D8FB36FBB8A0775A0B7A123C9C5"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-base/r3-base/__pycache__/rle-encode.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  599,
+                        "sha256":  "425C48D3E9514741D9C6300E8A0AD2EC6F8B31C59899489DBFD8AE7E141A5FDC"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-base/r3-base/binary-search.json",
+                        "stage":  "unknown",
+                        "bytes":  3825,
+                        "sha256":  "3C01C8B8C69F84EF2D7E8E4AF94507E20BA6578A14030B9E860C75247052C542"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-base/r3-base/binary-search.py",
+                        "stage":  "unknown",
+                        "bytes":  378,
+                        "sha256":  "0BF1937AC5ACA94A99EB4F2FAFAD1FF4B11CDDB3EBEA18D2EB18717622F04DE2"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-base/r3-base/rle-encode.json",
+                        "stage":  "unknown",
+                        "bytes":  1686,
+                        "sha256":  "C928C7126E01A002D3417C8419049B3D3B5CDE5D0134A0DBF717BD4E9BAAE474"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-base/r3-base/rle-encode.py",
+                        "stage":  "unknown",
+                        "bytes":  354,
+                        "sha256":  "7C0194C61B3B1799919A23EDC4ED9E29015242FB7BBB6993FEC271FB80C010BB"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-base/r3-base/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  678,
+                        "sha256":  "CB3B58F56EE37F12DCAED39739DA2D6AA75D04044E3EB65BF986C4FA7F847B2D"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-base/r3-base-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1911,
+                        "sha256":  "E2D8020641946E4B0ED52F6C3F2016723F2426EC80569D9689578A2B82B0815F"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-base/r3-base-warm/__pycache__/flatten.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  553,
+                        "sha256":  "DC0440BAC1CC4F66127D45E403AFF038C8FCF784929AEA19BAF76A50E0FFE390"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-base/r3-base-warm/flatten.json",
+                        "stage":  "unknown",
+                        "bytes":  2383,
+                        "sha256":  "745CDD1EEB5A8F20C3A821FE6AB891F304A55CB08F0AD1B1567F9B3D25B860A0"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-base/r3-base-warm/flatten.py",
+                        "stage":  "unknown",
+                        "bytes":  205,
+                        "sha256":  "4BDBD4E7450413EDA7D2A5E1F2F49D2AE48AC509ACD898917F8C76E6B778DEBB"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-base/r3-base-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  430,
+                        "sha256":  "B6C5FDEBB9D54C8C30C02B83CDFCE8D65813B74F755A33B2BF07A2080CAFC7FC"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-l2/r3-l2.err",
+                        "stage":  "unknown",
+                        "bytes":  2967914,
+                        "sha256":  "5401E844535B84C7651910C22876232D3F11DFD433B2B876B046867D7CC49E9D"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-l2/r3-l2.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-l2/r3-l2/__pycache__/binary-search.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  572,
+                        "sha256":  "9F7E52FE0C79BA616DF770A6728BCBA77E6E94C3B1B3DC4D535A65E4476CC661"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-l2/r3-l2/__pycache__/rle-encode.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  594,
+                        "sha256":  "7174D7BEE173BDA99347AF0310080656C6FE61172078616F478704D5D1ACFF3A"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-l2/r3-l2/binary-search.json",
+                        "stage":  "unknown",
+                        "bytes":  2493,
+                        "sha256":  "57C4335382BCBF15DB731740569D101959FCD4E30864329444990044ED588FBD"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-l2/r3-l2/binary-search.py",
+                        "stage":  "unknown",
+                        "bytes":  407,
+                        "sha256":  "343FD71843257D79E1F951C3B762C6F90EF4ADAE57C1D3191F729306A3929669"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-l2/r3-l2/rle-encode.json",
+                        "stage":  "unknown",
+                        "bytes":  2020,
+                        "sha256":  "0C92480FE472C9BC6392B40A33BADC6D74D2018EB3B90C303DA32DF35D97B18B"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-l2/r3-l2/rle-encode.py",
+                        "stage":  "unknown",
+                        "bytes":  351,
+                        "sha256":  "D2CE1FE87FF31DD57983B6739FE9145FD7393AF6DAD4720C99290057AF1ACCD2"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-l2/r3-l2/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  678,
+                        "sha256":  "7C811A8E16FBF4DF1A61C20BCE68C114D91C09CD337F6B0C12E648B2D5E84AA8"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-l2/r3-l2-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1900,
+                        "sha256":  "5A6CE66DB6A894FCD47A59F56D6E84BDBBEE858D4616AA7EAC74595EFE917DC7"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-l2/r3-l2-warm/__pycache__/flatten.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  549,
+                        "sha256":  "6243D8655D42018A8AE20E3167BC061AEF30AC273C357FD5AE7A7AD307E3C86E"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-l2/r3-l2-warm/flatten.json",
+                        "stage":  "unknown",
+                        "bytes":  2306,
+                        "sha256":  "0841D6C6E8029FFF3122569476E31B6FB0F229B52D8E24CE381B9F035C630799"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-l2/r3-l2-warm/flatten.py",
+                        "stage":  "unknown",
+                        "bytes":  205,
+                        "sha256":  "4BDBD4E7450413EDA7D2A5E1F2F49D2AE48AC509ACD898917F8C76E6B778DEBB"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-pairs/r3-l2/r3-l2-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  430,
+                        "sha256":  "3163FCC4003562C6C123381BB159819433E9BC4BC99CC174FEB69D42CF3A4831"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-prefill/r1/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29090,
+                        "sha256":  "80931DE150FCD26675AC138B750EBB44BA6994031D3BEEBB186D9C4C7344CB71"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-prefill/r1/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-prefill/r1/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "150AE1329CA773A3175148A9E192A99B721C1C7BCB11026DF6B439003D6A3345"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-prefill/r2/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29090,
+                        "sha256":  "F0B1AD3D4723255259AB3D3B62319F4CC37BEC5556DFA05FE78C66A1B73A79BA"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-prefill/r2/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-prefill/r2/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "FCFCA69FB64F48F0B792291FA115B498168E4ACDBA98F954DFBFCE3486C738BD"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-prefill/r3/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29090,
+                        "sha256":  "7F5538A08BC8D56315320BFC55A012392D77B41BD843A073B1737409062BC4E3"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-prefill/r3/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot58-prefill/r3/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1320,
+                        "sha256":  "E9DA72EE908678463B40ED182EB8D2493775E8031C0C0918FD17734C04A2EC07"
+                    },
+                    {
+                        "path":  "2026-08-11/slot60-decode/server.err",
+                        "stage":  "unknown",
+                        "bytes":  75476,
+                        "sha256":  "EADE56568FD66530C33212F3C2E8A62265A60C439C90D453BB3B146359B05E94"
+                    },
+                    {
+                        "path":  "2026-08-11/slot60-decode/server.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r1-62s/r1-62s.err",
+                        "stage":  "unknown",
+                        "bytes":  10131213,
+                        "sha256":  "33687225DBCF70858BAB54FB864FC461A79B8AF51D4EBFC0A4735C621A2A41C7"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r1-62s/r1-62s.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r1-62s/r1-62s/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  630,
+                        "sha256":  "EF37A1ECDEC0615896C36F5F17B52F7C293B783021EE48C879BBDEA8D2160153"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r1-62s/r1-62s/__pycache__/rotate-matrix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  467,
+                        "sha256":  "3B73A233129893FD1B4E2414A426FB71AF5B2B7A4DFB4106929442F7D4080D3B"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r1-62s/r1-62s/is-balanced.json",
+                        "stage":  "unknown",
+                        "bytes":  1930,
+                        "sha256":  "DDB9BDB541444A6FF09BD687AF8CD44DEB2FFD6D4EEBB265CACD3B3FA781832D"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r1-62s/r1-62s/is-balanced.py",
+                        "stage":  "unknown",
+                        "bytes":  341,
+                        "sha256":  "5961D1BDA2E9415A858E06261709FDDF12AF2308B45348DDCDDB9914432CC200"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r1-62s/r1-62s/rotate-matrix.json",
+                        "stage":  "unknown",
+                        "bytes":  2655,
+                        "sha256":  "22CE612A162F6FC665B2CA5C3B8B9281B7753CB2E89BEDB09567BC0CA7C9ED71"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r1-62s/r1-62s/rotate-matrix.py",
+                        "stage":  "unknown",
+                        "bytes":  119,
+                        "sha256":  "AB2D1869100647D0A6BF51FDE197CF60B787C34DDBCD42BADCA5B6E8E8594FA7"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r1-62s/r1-62s/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  679,
+                        "sha256":  "3AEB0911B8B9FC0B363AA4FA52E9E740E424CDB6AE305C731272986EF861416A"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r1-62s/r1-62s-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1986,
+                        "sha256":  "5812C1B40E105ED909829A2922075E7CCA2EAE64029293193CDC2BED7E640BD1"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r1-62s/r1-62s-warm/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  869,
+                        "sha256":  "C5A48CBEB0A73659449B01009857508C33A1BC8DAD858046D7562FAC35BC0658"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r1-62s/r1-62s-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  432,
+                        "sha256":  "441D44F9F34716734B60881B64B06E0575D3B664EAC800CAEF1DDA22103B927F"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r1-62s/r1-62s-warm/two-sum.json",
+                        "stage":  "unknown",
+                        "bytes":  12284,
+                        "sha256":  "B55B70C0FBB9D8BDC56CC93B9180F5C7AAB5BFCC451C4811FE19FE7940DACAA5"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r1-62s/r1-62s-warm/two-sum.py",
+                        "stage":  "unknown",
+                        "bytes":  450,
+                        "sha256":  "A163A5B6E784553CCDF33B4B4049F65BE07942880E12E82286BD268E6BE38900"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r2-62s/r2-62s.err",
+                        "stage":  "unknown",
+                        "bytes":  4087091,
+                        "sha256":  "84C83CF0C2E6604EAE73B5DB87AEEA6B0B6480B0CA88006F16BAE0A47A8965ED"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r2-62s/r2-62s.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r2-62s/r2-62s/__pycache__/group-anagrams.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  624,
+                        "sha256":  "EDDC245121CFB8D6BE4EDF9886D6E7C7E7F70AB954FD40DED312EF5137D7EFC0"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r2-62s/r2-62s/__pycache__/longest-common-prefix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  594,
+                        "sha256":  "52D556E7EBC0DDB9A30867A4E79EADD710828714161D82966B45F09EB487A5B0"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r2-62s/r2-62s/group-anagrams.json",
+                        "stage":  "unknown",
+                        "bytes":  2085,
+                        "sha256":  "335FBE1718CDB26E7FD7008843472182B3573793E8D1F20F71DD307AD023ADF5"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r2-62s/r2-62s/group-anagrams.py",
+                        "stage":  "unknown",
+                        "bytes":  187,
+                        "sha256":  "A21C3AB1D0B8523D351023CF414191549ED4C056D660F9558D3152FA4A61CE37"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r2-62s/r2-62s/longest-common-prefix.json",
+                        "stage":  "unknown",
+                        "bytes":  2965,
+                        "sha256":  "3CFB0B63F6DFACD855182003720294B886A00E711671CA2017D526AFF3FED905"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r2-62s/r2-62s/longest-common-prefix.py",
+                        "stage":  "unknown",
+                        "bytes":  266,
+                        "sha256":  "FEF960069B07A09BC3DE64693659F622CF34881E28709217349385F6A26B05B1"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r2-62s/r2-62s/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  689,
+                        "sha256":  "980B745DBFB31E429D5E3F7984FAF808A20E534ED5A1866D441ECC5902F17604"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r2-62s/r2-62s-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1986,
+                        "sha256":  "18C865D4E61B1963BE6E3176DE58D6A19666EFD5AFC25F194BBD05B695E6B1FC"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r2-62s/r2-62s-warm/__pycache__/merge-intervals.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  834,
+                        "sha256":  "C5CD7A07E74E263D422730C3A07D3265D3CE643D81D28540C41C24D9529423F9"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r2-62s/r2-62s-warm/merge-intervals.json",
+                        "stage":  "unknown",
+                        "bytes":  3351,
+                        "sha256":  "D98CE552753649838A599096F1E5D959F41649EF9815BE106D8E2CC30009C672"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r2-62s/r2-62s-warm/merge-intervals.py",
+                        "stage":  "unknown",
+                        "bytes":  437,
+                        "sha256":  "C4D6866E3B3C8564302C38EE1498BC51DE5509272EF0FE2B695F2076F2CFC200"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r2-62s/r2-62s-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  438,
+                        "sha256":  "0EE2EFA99429B5335726A39B0B55D676EBAA0701F334E20F03A200CD35213158"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r3-62s/r3-62s.err",
+                        "stage":  "unknown",
+                        "bytes":  4732718,
+                        "sha256":  "A91B73F3C27D871FBE64BD977125344BC23EA4681E185EBBB50E5A85E7AAA133"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r3-62s/r3-62s.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r3-62s/r3-62s/__pycache__/binary-search.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  604,
+                        "sha256":  "7F1924ECBC197833A17DAEA32E0B4E6F80733F9A4BA43754AB156A604EAD65E5"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r3-62s/r3-62s/__pycache__/rle-encode.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  655,
+                        "sha256":  "4E8EE37503E20BC813CB5519E8983656213F677AF4CF9A209435CDDC9EFBD49F"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r3-62s/r3-62s/binary-search.json",
+                        "stage":  "unknown",
+                        "bytes":  2372,
+                        "sha256":  "4EB7DF6D56E23A41E2E8F64A9F3BA22AA894F72ECBBA4D6639827F35D5F33534"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r3-62s/r3-62s/binary-search.py",
+                        "stage":  "unknown",
+                        "bytes":  387,
+                        "sha256":  "AD86177D465436776A65374A19661417BE561016B303BC62575A4D54131102E9"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r3-62s/r3-62s/rle-encode.json",
+                        "stage":  "unknown",
+                        "bytes":  1697,
+                        "sha256":  "AB5322BDE0B889587A7DDE23A13F49588F3A84EEB0382C74E0A8674ECF00A042"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r3-62s/r3-62s/rle-encode.py",
+                        "stage":  "unknown",
+                        "bytes":  359,
+                        "sha256":  "A68379CC2D67479139EB5E17907E7F03AA99BC36CD27EE652E41C6507791F29C"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r3-62s/r3-62s/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  677,
+                        "sha256":  "A2A4E2C55BD4364D485F1FE0D3E7D5115C071B6486586EC5EC79E879BDD3C129"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r3-62s/r3-62s-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1986,
+                        "sha256":  "C3CC4C06155AAD9443E1B9F2892B4C4E99644C71F43ED64A28803DBC07F1313F"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r3-62s/r3-62s-warm/__pycache__/flatten.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  550,
+                        "sha256":  "ED07C26C778A421888D7D2667A28FE927A880289A9CB8BC8A7FCEA2B67E52152"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r3-62s/r3-62s-warm/flatten.json",
+                        "stage":  "unknown",
+                        "bytes":  5373,
+                        "sha256":  "465AA1AE9CC8BC1B8E591BEA24B9520B78B4259A271A66B9FFCD9C4684C2A502"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r3-62s/r3-62s-warm/flatten.py",
+                        "stage":  "unknown",
+                        "bytes":  205,
+                        "sha256":  "4BDBD4E7450413EDA7D2A5E1F2F49D2AE48AC509ACD898917F8C76E6B778DEBB"
+                    },
+                    {
+                        "path":  "2026-08-11/slot62-gate/r3-62s/r3-62s-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  430,
+                        "sha256":  "065307E180D9AFB5664A5CEC2E0DB20B5E3CB8900838117341C4CBDD3452154C"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-48s/p1-48s.err",
+                        "stage":  "unknown",
+                        "bytes":  2187299,
+                        "sha256":  "F85144FE9BB945D692F38C7C8C896A3D528C92BABFB5EA0C961AC1C6B00CC4FD"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-48s/p1-48s.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-48s/p1-48s/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  675,
+                        "sha256":  "A3D1CE0E5839274E3DE8FE9F1CB34A4982C89FD2DAD9CD35D628D0CBC4CBB074"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-48s/p1-48s/is-balanced.json",
+                        "stage":  "unknown",
+                        "bytes":  1920,
+                        "sha256":  "9D76D0D5DD9AD881A771107F891083B3E6B65BC53F7008C9725818A81715BB32"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-48s/p1-48s/is-balanced.py",
+                        "stage":  "unknown",
+                        "bytes":  326,
+                        "sha256":  "CD4433CAF95C273D9B5A09560A15125A04E91B62C1D78F8E50325A74DE71ECBC"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-48s/p1-48s/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  434,
+                        "sha256":  "A7FD57999D7D35CE68E291880B1D839238B3BF6BC166E73DE915D924C297DA16"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-48s/p1-48s-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1992,
+                        "sha256":  "73ABA152EC9F0ED2094011B3C8D13EBD26CCD4F2CC029AFA0F6F89CC6585E1EF"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-48s/p1-48s-warm/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  534,
+                        "sha256":  "A114343782D8753E0834F7474406A67AA591D454A637CEC700DC53040CB64005"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-48s/p1-48s-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  430,
+                        "sha256":  "DF5C14FF893069A5390152918797433C0D86CD6F7F07B42B6C98875E161F5AB4"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-48s/p1-48s-warm/two-sum.json",
+                        "stage":  "unknown",
+                        "bytes":  2334,
+                        "sha256":  "EBDF0C054F4E458A9244D5937521D987F47A5AE9635FB446E01677B13C5EA2D4"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-48s/p1-48s-warm/two-sum.py",
+                        "stage":  "unknown",
+                        "bytes":  195,
+                        "sha256":  "940665A91572F3B372FFA7DB16DCA05E7250B94488C749AF936D9ACCBC4E9ED7"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-64s/p1-64s.err",
+                        "stage":  "unknown",
+                        "bytes":  3510851,
+                        "sha256":  "AC4EE604681EF7CE30DB30011364466716F0F1CEEF9496E64A0C4FC947467E50"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-64s/p1-64s.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-64s/p1-64s/__pycache__/is-balanced.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  604,
+                        "sha256":  "F94DA9BA7AB6543B29726BE6C268EA6C014FE6A97CC417AD909C75BD5A295701"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-64s/p1-64s/is-balanced.json",
+                        "stage":  "unknown",
+                        "bytes":  1748,
+                        "sha256":  "926FDDA59F5C2573283905E6DC7C8F7F508231F2459E77A97E043DC03A9AB4B4"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-64s/p1-64s/is-balanced.py",
+                        "stage":  "unknown",
+                        "bytes":  292,
+                        "sha256":  "5DDB5C16C344739D259E714B0C52285F4F6ED9F7B464AD2D04B743E434EBC4D9"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-64s/p1-64s/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  434,
+                        "sha256":  "F18FF54B00EC358553658739F903CF90318332EFE01D6639D8EE7ABA81109308"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-64s/p1-64s-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1993,
+                        "sha256":  "ECE23E975EC3CED92A3E847D2DC39163946D8F14B974C19EC806C387029A4335"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-64s/p1-64s-warm/__pycache__/two-sum.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  534,
+                        "sha256":  "38C2FFCDDDD766B56A2439D21696E32D06355D9376BAA351AEB52BFD0E53C1C9"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-64s/p1-64s-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  430,
+                        "sha256":  "B276F4591BF0522241BC6DCE657CD68619D94C5C7C189773124D0C2E2ECA8481"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-64s/p1-64s-warm/two-sum.json",
+                        "stage":  "unknown",
+                        "bytes":  4419,
+                        "sha256":  "E1EFDFA57923E0656ACB8056391319CD4AD7CCA0DF913A9B03163175A6802C56"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p1-64s/p1-64s-warm/two-sum.py",
+                        "stage":  "unknown",
+                        "bytes":  193,
+                        "sha256":  "3CCBB7F1803787A019E5A36C1C0FA241B40A5D7EAE21FCFF34D93DA2B00278BE"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-48s/p2-48s.err",
+                        "stage":  "unknown",
+                        "bytes":  2024556,
+                        "sha256":  "02404AC1723470C86015F060356480D1FAF4C9A20C72B232C487CFD91903F171"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-48s/p2-48s.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-48s/p2-48s/__pycache__/binary-search.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  610,
+                        "sha256":  "06755E520AB7709BC6EE2ED870C7142EE097FCC52B815C4785E1D0AE56E79F0D"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-48s/p2-48s/binary-search.json",
+                        "stage":  "unknown",
+                        "bytes":  2141,
+                        "sha256":  "C5B259EE504E05AF3AF4B9073B43CDB07D54F8DB8E008783B4F955DB63CCBC75"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-48s/p2-48s/binary-search.py",
+                        "stage":  "unknown",
+                        "bytes":  383,
+                        "sha256":  "C1C97F9ED49F9186B3188F61E6D88DA6CFD1D057BA18C1ED6C9A5AECD40A5936"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-48s/p2-48s/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  436,
+                        "sha256":  "802C9ADDFBAB229D8B481C9AA9AC9E2FAF502E041BD5B0B3B2A7F86F958E9846"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-48s/p2-48s-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1992,
+                        "sha256":  "6E944C035AFF7EF349947C905C0FE3FE7B5EC89680D813BE3E11387CD2BFCD7C"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-48s/p2-48s-warm/__pycache__/flatten.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  553,
+                        "sha256":  "D40588EA11673F7E3ED8E2F03ABA95D3F443DCB79A8429B0D70773975553DC92"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-48s/p2-48s-warm/flatten.json",
+                        "stage":  "unknown",
+                        "bytes":  2022,
+                        "sha256":  "C285F93650DD757756B4E0E5ABA6A2C8813631868736E7C61EA6F74D751F5761"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-48s/p2-48s-warm/flatten.py",
+                        "stage":  "unknown",
+                        "bytes":  205,
+                        "sha256":  "4BDBD4E7450413EDA7D2A5E1F2F49D2AE48AC509ACD898917F8C76E6B778DEBB"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-48s/p2-48s-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  430,
+                        "sha256":  "FABB848523E3D9BE95B2DCB2D40CEE3BAB121C04A4C92A8BC4CDEDFB020FD3B7"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-64s/p2-64s.err",
+                        "stage":  "unknown",
+                        "bytes":  2462855,
+                        "sha256":  "A949BC72F9C9B78167903748B0745592F24B04B9BB51F8B658DBF030D50BC195"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-64s/p2-64s.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-64s/p2-64s/__pycache__/binary-search.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  610,
+                        "sha256":  "A69B1FCEB8ECF89CB0D56EC4DC52855B6F699003F4EFC97351888FC398E46DF9"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-64s/p2-64s/binary-search.json",
+                        "stage":  "unknown",
+                        "bytes":  2101,
+                        "sha256":  "358DE841ADC4218BC3EC64DA5FE2C499056992C70D8BEFE97393B1E97C1ED1B3"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-64s/p2-64s/binary-search.py",
+                        "stage":  "unknown",
+                        "bytes":  383,
+                        "sha256":  "C1C97F9ED49F9186B3188F61E6D88DA6CFD1D057BA18C1ED6C9A5AECD40A5936"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-64s/p2-64s/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  436,
+                        "sha256":  "E5CE808C6F8355C5F547B276812ABCCBB30A35DE783028B41AC62129A55259B1"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-64s/p2-64s-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1992,
+                        "sha256":  "354DF35E17830269E411523E8C4BAEE9E88F2C5FFBA0056F73D28E49667F688D"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-64s/p2-64s-warm/__pycache__/flatten.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  553,
+                        "sha256":  "92E0D0D43C1887743E660A994E78F812B161C34ACE5E8FA02DD7AB39DABC4318"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-64s/p2-64s-warm/flatten.json",
+                        "stage":  "unknown",
+                        "bytes":  2727,
+                        "sha256":  "7723312151F6FC0D491B8938164EF45370A462FE3EF26C24C149B1BDDCD843D5"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-64s/p2-64s-warm/flatten.py",
+                        "stage":  "unknown",
+                        "bytes":  205,
+                        "sha256":  "4BDBD4E7450413EDA7D2A5E1F2F49D2AE48AC509ACD898917F8C76E6B778DEBB"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p2-64s/p2-64s-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  430,
+                        "sha256":  "D4BB606832BB5A8CF24CB035DDF272D7980C86CA5707AD879DEFC28B3FFEA1CC"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-48s/p3-48s.err",
+                        "stage":  "unknown",
+                        "bytes":  4963075,
+                        "sha256":  "652F94A629944389DB9BA2BD6113D0FC4DE8EE13A3BBAAF7DB2E9BDA0955B144"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-48s/p3-48s.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-48s/p3-48s/__pycache__/rle-encode.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  594,
+                        "sha256":  "FFB0494143F6DB30EB49E5BCB6A83CD6D2EEFC65CE4813A6209FA357960E4EEC"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-48s/p3-48s/rle-encode.json",
+                        "stage":  "unknown",
+                        "bytes":  1787,
+                        "sha256":  "FF60D785518A5F0E6FF54FD6DFD0585D1F3A03F1EE91744F004CB68BAE3450CD"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-48s/p3-48s/rle-encode.py",
+                        "stage":  "unknown",
+                        "bytes":  339,
+                        "sha256":  "794BF7B3B13FC8B616E6D3F746C85A85ECD7AB445F5FF6FBE4C2A9914BFB57DB"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-48s/p3-48s/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  433,
+                        "sha256":  "8803714CA1F2FB5F62C17D4CA36E854347E0D78B30F147AD862A3E215F944CFB"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-48s/p3-48s-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1993,
+                        "sha256":  "8A22B4AD085933D0925E5EDBD47260147CD845AF11904BAC33BF832ADD37BF84"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-48s/p3-48s-warm/__pycache__/rotate-matrix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  449,
+                        "sha256":  "25838FF7067FCC2E03BFBCA7D402644B2A1F3D561CF04D4302A886A77986A11F"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-48s/p3-48s-warm/rotate-matrix.json",
+                        "stage":  "unknown",
+                        "bytes":  5669,
+                        "sha256":  "282AF9840951E8F1B76888B39F4228E82A2C5283F78EC3D17B07E09F6E31F893"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-48s/p3-48s-warm/rotate-matrix.py",
+                        "stage":  "unknown",
+                        "bytes":  80,
+                        "sha256":  "D84EFAFB2D93B987CF99CFE06D1DB762A48BDC3BB25D0652918881294881DA0D"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-48s/p3-48s-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  437,
+                        "sha256":  "5B3F331319A655A616F024C59515112ABA50BCBBBFA5E6B63984A7690491199C"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-64s/p3-64s.err",
+                        "stage":  "unknown",
+                        "bytes":  4307663,
+                        "sha256":  "FFEBF322A3010D400210BA8A8865EBDE1AD7A901E5639F9FF2FBE503240ACB65"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-64s/p3-64s.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-64s/p3-64s/__pycache__/rle-encode.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  594,
+                        "sha256":  "2148382BBE3FDC25EA8CAE2D485D01F9E3FCA12B763CDD8DCAC081E8E4674059"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-64s/p3-64s/rle-encode.json",
+                        "stage":  "unknown",
+                        "bytes":  2026,
+                        "sha256":  "8705D2903545158610E38266BC06ABDC12BA77CCBBDE8C428AF672AB13160975"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-64s/p3-64s/rle-encode.py",
+                        "stage":  "unknown",
+                        "bytes":  339,
+                        "sha256":  "794BF7B3B13FC8B616E6D3F746C85A85ECD7AB445F5FF6FBE4C2A9914BFB57DB"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-64s/p3-64s/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  433,
+                        "sha256":  "72D6D712A4970A8E5387D15EF07EC5B94ECE41C39177F838932312E7D22F0D38"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-64s/p3-64s-summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1993,
+                        "sha256":  "E216102F4D24D98C85504A06856C0AB3A2BF6ECB966CA0527C5F6B51B857AD2A"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-64s/p3-64s-warm/__pycache__/rotate-matrix.cpython-313.pyc",
+                        "stage":  "unknown",
+                        "bytes":  725,
+                        "sha256":  "9ABE699B019C7889450B635C631DDDA39B87955282280D88332E7A6483264AFC"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-64s/p3-64s-warm/rotate-matrix.json",
+                        "stage":  "unknown",
+                        "bytes":  4792,
+                        "sha256":  "C4A4F9773A67F29B3ACE6ADD12590425D4CD1A47273DA18984FF4D18B4093D5E"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-64s/p3-64s-warm/rotate-matrix.py",
+                        "stage":  "unknown",
+                        "bytes":  275,
+                        "sha256":  "F1FD8A16F9423E4E32DC64AFB865570B828684D21A0A75910E4C0140DE320D30"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-ab-decode/p3-64s/p3-64s-warm/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  438,
+                        "sha256":  "43B3D81801D5FDFBB9F33E389F5E9ABB808BDDECF427718D032AFF7AAEEB96EE"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-gate/g1-64s/g1-64s.err",
+                        "stage":  "unknown",
+                        "bytes":  2816865,
+                        "sha256":  "0DD92CFBD786828A38C89FB96CB045040E458620A91139A0BABE146838D1283F"
+                    },
+                    {
+                        "path":  "2026-08-11/slot-gate/g1-64s/g1-64s.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/topk-step/server.err",
+                        "stage":  "unknown",
+                        "bytes":  48247,
+                        "sha256":  "ABA13E0CAB2FCE74229952370589551DD3A0C8C5F0B32AFB7C1BB0433D59D306"
+                    },
+                    {
+                        "path":  "2026-08-11/topk-step/server.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub1024-1/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29091,
+                        "sha256":  "A7EC2431321A224400201BD2611C4B5F869FC06AA2C22E0895B9E5EA1146003E"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub1024-1/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub1024-1/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1424,
+                        "sha256":  "B027E5AFC4948687971C4D360E2B2C5B318949E101CA4C02F16D73E91D8A2FCD"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub1024-2/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29091,
+                        "sha256":  "5F530BECAD0E0535E2270833C92721FA0A7935FB0287640FF4EC042289A109C9"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub1024-2/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub1024-2/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1425,
+                        "sha256":  "C66A70C1C1BCF7035026668F51291A9DFBBA4104CE70E1C73A21351B5D8275D9"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub1024-3/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29090,
+                        "sha256":  "0545FE13DE4AC978B3D6FFF2E0590CB8D4DBE18F98F24355402C4A6B2FA3A117"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub1024-3/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub1024-3/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1425,
+                        "sha256":  "FD69E43AF6F32BE999133763FDA4743D68C0A465AC6AC61FD24F2E28D18B31A4"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub16-1/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29102,
+                        "sha256":  "992C4A10D00628F01736D17AEC7766BE45367C04D4E4CCE9A0FD3358FE606654"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub16-1/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub16-1/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1371,
+                        "sha256":  "D43A46F4153849DA0FBD972E60BF815888157C1769E13F5AA6424B732E3CD5B9"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub16-2/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29102,
+                        "sha256":  "82353FFFDA0E1A2E171E94DAF4D8CA1C257C94385ACF1B261DD9E17777A15BF7"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub16-2/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub16-2/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1370,
+                        "sha256":  "81F52710DE29A4F914E0F37DE164731F18CC497695655595D58DA191E6554390"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub16-3/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29102,
+                        "sha256":  "5960F9CECD6433C11976AEFEE075D59BAF19B84536894D40562FA108A342EEB0"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub16-3/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub16-3/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1371,
+                        "sha256":  "B706BAB6EA218E91C20038327886AE59F0731353D9362B687A62690989C63425"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub2048-1/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  28690,
+                        "sha256":  "45A5E4E1C1191DA75D632B25E54FE88F12DBC8E446267AD0805E0914976A26D5"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub2048-1/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub2048-1/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1424,
+                        "sha256":  "91194EC3F3C6D7DB8527F2BC326CB99E1777457EB5CB512F336E769091ED7665"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub2048-2/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  28690,
+                        "sha256":  "D0F0540599FE4D6E5D6856642A4930E56C616E9219B0660C3E97B0C7DC159ACA"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub2048-2/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub2048-2/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1426,
+                        "sha256":  "E6323B315FDCF55FA7FA30EB80C63B15102912B63697E42522007E4D692C9E2F"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub2048-3/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  28691,
+                        "sha256":  "8DD2A01A936395C04FBC86BBCFA4BB4A42A3D55350A8E19CCEF55A1DB8624247"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub2048-3/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub2048-3/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1426,
+                        "sha256":  "572CDF7FAD4AB3F52E1462A673498861EA52889F4420F0B04C4C4EAF3C0E5338"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub32-1/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29099,
+                        "sha256":  "CC3CF0EEA760A6B481FA4D1B6E0821687EA010081A2352A79887D575AFE5B410"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub32-1/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub32-1/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1371,
+                        "sha256":  "31E63CEC04F9624091F463E042966EAB260C2E61CA683C74A19008A676442378"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub32-2/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29099,
+                        "sha256":  "C41DF7C8E957D8BB8BF317F23D56559374A381B20DD38F3EC2FB3E8854B0B47D"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub32-2/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub32-2/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1371,
+                        "sha256":  "70B82117645431E36EA7442F427FBA57E179ADDE4F9B854678310D149C0A8883"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub32-3/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29099,
+                        "sha256":  "8F184B69D511A0FDD461DEAD9B319634B3D133C1E2473DB36129EC58812F9B1D"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub32-3/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub32-3/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1371,
+                        "sha256":  "8706E8B83A07CBA9F0C5C2947578382071326414D4D463D976100D289C47E995"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub512-1/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29089,
+                        "sha256":  "4A041F81268BC4E99B9F85CF1E2E9EC19557FFEBFBD5A3E5D79430AAD43BE6C0"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub512-1/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub512-1/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1372,
+                        "sha256":  "EDA71C58A2149005F8842978E2D2E725D78DE4068BE07611E2350D57E168928F"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub512-2/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29089,
+                        "sha256":  "1D969144A723D517C1E7559BF2A2C4DBF7C1C386165B207DAE85108DEE749C61"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub512-2/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub512-2/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1370,
+                        "sha256":  "7051C4275D151E19D4916F6DD9CDC65A740B06BD7F48BE20DFB6DD153A6DD5AE"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub512-3/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29090,
+                        "sha256":  "A91BCDB914087509524EEA92E4392A22FB86C9681AB8250CFFB800E303B58920"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub512-3/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub512-3/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1372,
+                        "sha256":  "E519DC3964CA6D7D0D925206BDC00487D0A7F10BC337B817E434ADC44A2D013A"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub64-1/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29097,
+                        "sha256":  "128EC92F602505CEC74B475F1854F6D41ED3D074F3C8A0964868627F25B71295"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub64-1/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub64-1/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1370,
+                        "sha256":  "07401F067F15EE0326F01F9B7391837D92DD2FFB536699BD09CE1B541E36B8F5"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub64-2/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29097,
+                        "sha256":  "EFAADA61F8563197B51DEF7B13756CF30F86C2A564AF20BB4DFB9EF7DA56C940"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub64-2/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub64-2/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1369,
+                        "sha256":  "16F98BDEC0BAA94F454B43250F7B3852CF0AD766C9851AEC85B1C8861023DA27"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub64-3/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  29097,
+                        "sha256":  "1B3F78B6A1A9C0EC15DDD1552673FF06DD6BDF2B4F7FD5EEBCD67ACCE209400D"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub64-3/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub64-3/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1369,
+                        "sha256":  "016355962FDA149444881B39BE7B7C7BDAC864F8BC4B558FF06D463377354E0F"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub8-1/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  28881,
+                        "sha256":  "A9F72AC1283534F1594E1993029AABF1E29C9A4C0DEE58F5E4B067F8653CD151"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub8-1/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub8-1/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1369,
+                        "sha256":  "DE0CB62A7342351394BD709A4B53E34E41A2F07594552EA38DDFDB597D40545F"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub8-2/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  28881,
+                        "sha256":  "078591F52B7AAF6F2DD327A376DD60C1189EC02A25863A23AA61375462FBA710"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub8-2/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub8-2/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1370,
+                        "sha256":  "2FE8A32FFC0EEAA0B97FF5A514F7500332A59CDE1B8C0DA2F005F3DDB7A3C8BD"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub8-3/prefill/server.err",
+                        "stage":  "unknown",
+                        "bytes":  28881,
+                        "sha256":  "A4F95D71D3FBB5348FF0227666F5291FBCD07543ADD2A8AD45C3EE1A6B1B6F5E"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub8-3/prefill/server.err.out",
+                        "stage":  "unknown",
+                        "bytes":  0,
+                        "sha256":  "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+                    },
+                    {
+                        "path":  "2026-08-11/ub-ladder/ub8-3/prefill/summary.json",
+                        "stage":  "unknown",
+                        "bytes":  1369,
+                        "sha256":  "23913151A435F3CBF0D09C6D7C656992468B933D54EFC957072C6CF140C8356E"
+                    }
+                ]
+}

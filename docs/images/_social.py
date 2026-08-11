@@ -47,21 +47,21 @@ SLEEP  = "#161d2c"                       # an expert that is not awake this toke
 
 # README H3, verbatim, only re-wrapped. Four lines and not three since the H3 grew
 # its context clause: at a size a feed can still read, a monospaced face does not
-# fit "A 284-billion-parameter coding model, at a 200k context." on one line, and
+# fit "A 304-billion-parameter coding model, at a 200k context." on one line, and
 # the alternative -- paraphrasing the headline -- is how a card starts drifting
 # from the page it links to.
 HEAD_SIZE, HEAD_STEP = 42, 56
-HEAD = [("A 284-billion-parameter",          TEXT),
+HEAD = [("A 304-billion-parameter",          TEXT),
         ("coding model, at a 200k context.", TEXT),
         ("One graphics card.",               TEXT),
-        ("33 GB of system RAM.",             ACCENT)]
+        ("64 GB of system RAM.",             ACCENT)]
 
 SUB = ["A 97.1 GiB mixture-of-experts model,",
        "read off the SSD while the GPU works."]
 
 # README stat table. Each is in the README with the issue it came from.
 FACTS = [("200k",  "context, one slot"),
-         ("19.13", "tok/s decode, gate median"),
+         ("18.03", "tok/s decode, gate median"),
          ("0 EUR", "spent so far")]
 
 # 6 of 256, the README's own figure. Fixed rather than random so the card is

@@ -29,7 +29,7 @@ def render(name: str, formula: str, caption: str) -> None:
 
 EQUATIONS = {
     "eq_naive_memory": (
-        r"$\mathrm{bytes} = P \cdot b = 284\times10^{9} \cdot 2 = 568\ \mathrm{GB}$",
+        r"$\mathrm{bytes} = P \cdot b = 304.18\times10^{9} \cdot 2 = 608\ \mathrm{GB}$",
         "Every parameter resident at bf16 -- eighteen times what the card holds",
     ),
     "eq_sparsity": (
@@ -38,10 +38,10 @@ EQUATIONS = {
     ),
     "eq_resident_set": (
         r"$\mathrm{resident} = \mathrm{attention} + \mathrm{norms} + \mathrm{shared} = 6.88\ \mathrm{GiB}$",
-        "7.09 % of the 97.05 GiB 0731 file, and every token touches all of it. 90.18 GiB are routed experts",
+        "7.08 % of the 97.05 GiB 0731 file, and every token touches all of it. 90.17 GiB are routed experts",
     ),
     "eq_bytes_per_token": (
-        r"$90.18\ \mathrm{GiB} \cdot \frac{6}{256} = 2.11\ \mathrm{GiB}\ \mathrm{per\ token}$",
+        r"$90.17\ \mathrm{GiB} \cdot \frac{6}{256} = 2.11\ \mathrm{GiB}\ \mathrm{per\ token}$",
         "Routed experts of 0731 UD-IQ3_XXS; 6 x 378,208,256 B agrees. The 376.9 MiB the router pulled is preview-only (#28)",
     ),
     "eq_kv_cost": (
@@ -49,7 +49,7 @@ EQUATIONS = {
         "Measured at n_ctx = 200192 in every paired run, not extrapolated from 64k",
     ),
     "eq_wave_cap": (
-        r"$\mathrm{cap} = \frac{n_{\mathrm{slots}} - n_{\mathrm{used}}}{2} = \frac{64-6}{2} = 29$",
+        r"$\mathrm{cap} = \frac{n_{\mathrm{slots}} - n_{\mathrm{used}}}{2} = \frac{58-6}{2} = 26$",
         "Experts one pass may hold. Batch 4 asks 19.8 and fits; batch 8 asks 31.2 and splits (#31)",
     ),
     "eq_queue_depth": (
@@ -57,8 +57,8 @@ EQUATIONS = {
         "One work item per weight tensor instead of per expert. Same bytes, same request size",
     ),
     "eq_wait_share": (
-        r"$\frac{51\,602.91\ \mathrm{ms}}{74\,644.72\ \mathrm{ms}} = 69.1\%$",
-        "Decode spent waiting on the drive, with the host tier (0731 pairs, arm r2-l2). 78.2-80.7 % without it",
+        r"$\frac{32\,500.31\ \mathrm{ms}}{46\,434.23\ \mathrm{ms}} = 70.0\%$",
+        "Decode spent waiting on the drive, with the host tier (58 slots, median arm r3-l2). 78.6-81.0 % without it",
     ),
 }
 

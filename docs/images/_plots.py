@@ -202,7 +202,7 @@ def batch_curve():
     ax2.spines["top"].set_visible(False)
 
     ax.axvline(8, color=RED, ls="--", lw=1.4, zorder=1)
-    ax.text(7.86, 19.4, "cap = (64-6)/2 = 29 experts.\nbatch 8 asks 31.2 and splits\ninto two waves",
+    ax.text(7.86, 19.4, "cap = (58-6)/2 = 26 experts.\nbatch 8 asks 31.2 and splits\ninto two waves",
             ha="right", fontsize=10, color=RED)
 
     ax.set_title("Batching buys aggregate throughput and spends per-request latency",
@@ -228,10 +228,10 @@ def host_tier():
     """
     pairs = ["is-balanced\nrotate-matrix", "longest-common-prefix\ngroup-anagrams",
              "binary-search\nrle-encode"]
-    tier  = [16.17, 19.13, 19.25]
-    base  = [13.07, 12.33, 12.84]
-    stall_tier = [0.741, 0.730, 0.717]
-    stall_base = [1.320, 1.280, 1.303]
+    tier  = [18.93, 17.33, 18.03]
+    base  = [11.44, 10.63, 11.04]
+    stall_tier = [0.713, 0.722, 0.713]
+    stall_base = [1.363, 1.383, 1.331]
 
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(11.8, 5.0))
     x = range(len(pairs))
@@ -271,11 +271,11 @@ def host_tier():
 
     fig.suptitle("A host-RAM tier below the VRAM slots, paired on identical tasks",
                  fontsize=15, fontweight="bold", y=1.02)
-    fig.text(0.5, -0.13, "DeepSeek-V4-Flash-0731, 2026-08-10. Both arms solve the same two tasks within a pair and no "
-                         "task repeats across pairs;\neach arm starts its own server, so the tier begins empty on both "
-                         "sides. Medians: 19.13 tok/s with the tier\nagainst 12.84 without. Within-arm spread is 1.19x "
-                         "(tier) and 1.06x (base) -- wider than the preview series it\nreplaces, so read the band as "
-                         "indicative and the direction as the result.",
+    fig.text(0.5, -0.13, "DeepSeek-V4-Flash-0731 at 58 cache slots, 2026-08-11. Both arms solve the same two tasks "
+                         "within a pair and no\ntask repeats across pairs; each arm starts its own server, so the tier "
+                         "begins empty on both sides.\nMedians: 18.03 tok/s with the tier against 11.04 without. "
+                         "Within-arm spread is 1.09x (tier) and\n1.08x (base) -- narrower than the 1.63x difference, "
+                         "which is what makes the difference readable.",
              ha="center", fontsize=9.5, color=MUTED, linespacing=1.5)
     save(fig, "host_tier")
 

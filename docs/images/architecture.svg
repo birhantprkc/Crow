@@ -32,18 +32,18 @@
        one glyph is not something to guess at, and the renderer knows it. -->
   <text x="72" y="68" text-anchor="middle" dominant-baseline="central" class="num" font-size="42">C</text>
   <text x="130" y="76" class="big">CROW ENGINE</text>
-  <text x="132" y="102" class="tag">DEEPSEEK-V4-FLASH-0731 · 284B PARAMETERS · 13B ACTIVE PER TOKEN · 43 LAYERS · 256 EXPERTS EACH</text>
+  <text x="132" y="102" class="tag">DEEPSEEK-V4-FLASH-0731 · 304B PARAMETERS · 13B ACTIVE PER TOKEN · 43 LAYERS · 256 EXPERTS EACH</text>
 
   <rect x="34" y="126" width="1132" height="66" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-dasharray="6 5"/>
-  <text x="600" y="153" text-anchor="middle" class="tb" fill="#475569">HOST RAM: 33.73 GiB peak — 32 of them the expert tier · the 97.05 GiB model never lives here</text>
-  <text x="600" y="180" text-anchor="middle" class="sub">llama.cpp's CPU offload needs 51.79 GiB for the same work, on the same binary — both host figures are preview-series, not re-taken on 0731</text>
+  <text x="600" y="153" text-anchor="middle" class="tb" fill="#475569">HOST RAM: 32 GiB, page-locked, the optional expert tier · the 97.05 GiB model never lives here</text>
+  <text x="600" y="180" text-anchor="middle" class="sub">Turn the tier off and the host holds nothing at all — the same binary streams every miss straight off the drive</text>
 
   <!-- ══ the four decisions ══════════════════════════════════════════════ -->
   <g>
     <rect x="34" y="216" width="556" height="92" rx="12" fill="#f2fbf5" stroke="#69c98a" stroke-width="1.6"/>
     <circle cx="76" cy="262" r="21" fill="#2f9e5e"/><text x="76" y="270" text-anchor="middle" class="num">1</text>
     <text x="110" y="255" class="tb">QUANTISATION</text>
-    <text x="110" y="283" class="sub">UD-IQ3_XXS — 376.9 MiB per token, preview measurement</text>
+    <text x="110" y="283" class="sub">UD-IQ3_XXS — 2.11 GiB of experts per token at most</text>
 
     <rect x="610" y="216" width="556" height="92" rx="12" fill="#f2fbf5" stroke="#69c98a" stroke-width="1.6"/>
     <circle cx="652" cy="262" r="21" fill="#2f9e5e"/><text x="652" y="270" text-anchor="middle" class="num">2</text>
@@ -64,7 +64,7 @@
   <!-- ══ zone 1: resident in VRAM ════════════════════════════════════════ -->
   <rect x="34" y="446" width="1132" height="676" rx="16" fill="#f5f9ff" stroke="#5b8def" stroke-width="2"/>
   <text x="600" y="486" text-anchor="middle" class="zh" fill="#2c5bac">RESIDENT IN VRAM</text>
-  <text x="600" y="514" text-anchor="middle" class="sub">30,548 MiB after load of 32,607, measured on 0731 at 58 slots — 64 slots ask for 32,062 and do not fit beside a desktop that peaks near 1 GiB</text>
+  <text x="600" y="514" text-anchor="middle" class="sub">30,548 MiB after load of 32,607, measured at 58 slots — 64 slots should read 32,404 and read 32,014: 390 MiB the driver moved out</text>
 
   <!-- pipeline, two rows -->
   <rect x="66" y="540" width="240" height="86" rx="12" fill="#ffffff" stroke="#8b5cf6" stroke-width="1.8"/>
@@ -76,8 +76,8 @@
   <text x="511" y="600" text-anchor="middle" class="sub">/v1/chat/completions</text>
 
   <rect x="716" y="540" width="418" height="86" rx="12" fill="#f2fbf5" stroke="#2f9e5e" stroke-width="1.8"/>
-  <text x="925" y="573" text-anchor="middle" class="tb" fill="#2f9e5e">19.13 tok/s decode</text>
-  <text x="925" y="600" text-anchor="middle" class="sub">median of three paired runs · 1.24–1.55x</text>
+  <text x="925" y="573" text-anchor="middle" class="tb" fill="#2f9e5e">18.03 tok/s decode</text>
+  <text x="925" y="600" text-anchor="middle" class="sub">median of three paired runs · 1.63–1.65x</text>
 
   <g stroke="#7c8794" stroke-width="2.4" fill="none" marker-end="url(#a)">
     <path d="M306,583 L360,583"/>
@@ -91,7 +91,7 @@
   <rect x="94" y="712" width="292" height="98" rx="11" fill="#ffffff" stroke="#5b8def" stroke-width="1.6"/>
   <text x="240" y="748" text-anchor="middle" class="tb">ATTENTION + NORMS</text>
   <text x="240" y="775" text-anchor="middle" class="sub">6.88 GiB, always resident</text>
-  <text x="240" y="798" text-anchor="middle" class="sub">7.09 % of the file</text>
+  <text x="240" y="798" text-anchor="middle" class="sub">7.08 % of the file</text>
 
   <rect x="418" y="712" width="240" height="98" rx="11" fill="#ffffff" stroke="#f0a72a" stroke-width="1.6"/>
   <text x="538" y="748" text-anchor="middle" class="tb">ROUTER</text>
@@ -123,10 +123,10 @@
 
   <rect x="618" y="950" width="516" height="94" rx="12" fill="#ffffff" stroke="#5b8def" stroke-width="1.6"/>
   <text x="876" y="984" text-anchor="middle" class="tb">STREAM OUT</text>
-  <text x="876" y="1010" text-anchor="middle" class="sub">88.2 % of what the model writes is</text>
+  <text x="876" y="1010" text-anchor="middle" class="sub">most of what the model writes is</text>
   <text x="876" y="1033" text-anchor="middle" class="sub">reasoning, and the raven shows it</text>
 
-  <text x="600" y="1088" text-anchor="middle" class="sub">The GPU holds no whole model. What is resident is the 7.09 % every token touches, plus whichever</text>
+  <text x="600" y="1088" text-anchor="middle" class="sub">The GPU holds no whole model. What is resident is the 7.08 % every token touches, plus whichever</text>
   <text x="600" y="1110" text-anchor="middle" class="sub">experts the cache currently holds. Everything else stays on the drive.</text>
 
   <!-- ══ zone 2: the boundary ════════════════════════════════════════════ -->
@@ -159,13 +159,13 @@
   <rect x="66" y="1366" width="1068" height="128" rx="12" fill="#fff0e6" stroke="#e8590c" stroke-width="1.8"/>
   <!-- Centres at 340/600/860, not 366/600/834: the captions grew when the wait share picked up its
        range and its condition, and at the old spacing the middle and right ones touched. -->
-  <text x="340" y="1408" text-anchor="middle" class="huge" fill="#e8590c">376.9 MiB</text>
-  <text x="340" y="1436" text-anchor="middle" class="sub">moved per token (preview)</text>
-  <text x="600" y="1408" text-anchor="middle" class="huge" fill="#e8590c">4.31</text>
-  <text x="600" y="1436" text-anchor="middle" class="sub">reads in flight (pre-mutex)</text>
-  <text x="860" y="1408" text-anchor="middle" class="huge" fill="#e8590c">57.6–70.5 %</text>
+  <text x="340" y="1408" text-anchor="middle" class="huge" fill="#e8590c">2.11 GiB</text>
+  <text x="340" y="1436" text-anchor="middle" class="sub">of experts per token at most</text>
+  <text x="600" y="1408" text-anchor="middle" class="huge" fill="#e8590c">80–82 %</text>
+  <text x="600" y="1436" text-anchor="middle" class="sub">expert cache hit rate on the gate</text>
+  <text x="860" y="1408" text-anchor="middle" class="huge" fill="#e8590c">65.2–70.0 %</text>
   <text x="860" y="1436" text-anchor="middle" class="sub">of decode is this wait, tier on</text>
-  <text x="600" y="1462" text-anchor="middle" class="sub">The wait is the three 0731 pairs of 2026-08-10; without the tier the same runs spend 78.2–80.7 % of decode there.</text>
+  <text x="600" y="1462" text-anchor="middle" class="sub">The wait is the three pairs of 2026-08-11 at 58 slots; without the tier the same runs spend 78.6–81.0 % of decode there.</text>
   <text x="600" y="1486" text-anchor="middle" class="sub">Latency-bound, not compute-bound and not bandwidth-bound. The bytes-per-token figure is a preview run (#28).</text>
 
   <!-- ══ zone 2b: the optional host tier ═════════════════════════════════ -->
@@ -179,10 +179,10 @@
   <text x="326" y="1730" text-anchor="middle" class="sub">filling it costs nothing extra</text>
 
   <rect x="614" y="1622" width="520" height="112" rx="12" fill="#ffffff" stroke="#0f766e" stroke-width="1.6"/>
-  <text x="874" y="1652" text-anchor="middle" class="huge" fill="#2f9e5e">56.7 µs</text>
-  <text x="874" y="1680" text-anchor="middle" class="sub">a miss served from here, against</text>
-  <text x="874" y="1703" text-anchor="middle" class="sub">401.5 µs from the drive — 7.08x</text>
-  <text x="874" y="1730" text-anchor="middle" class="sub" fill="#2f9e5e">1.24–1.55x decode, three paired runs</text>
+  <text x="874" y="1652" text-anchor="middle" class="huge" fill="#2f9e5e">0.713 ms</text>
+  <text x="874" y="1680" text-anchor="middle" class="sub">a miss costs this with the tier,</text>
+  <text x="874" y="1703" text-anchor="middle" class="sub">1.331–1.383 ms without it</text>
+  <text x="874" y="1730" text-anchor="middle" class="sub" fill="#2f9e5e">1.63–1.65x decode, three paired runs</text>
 
   <g stroke="#0f766e" stroke-width="2.4" fill="none" marker-end="url(#ao)">
     <path d="M590,1678 L608,1678"/>
@@ -216,7 +216,7 @@
     <rect x="706" y="2012" width="10" height="10" rx="2"/>
   </g>
   <text x="802" y="2044" text-anchor="middle" class="sub">red: the 6 this token woke · grey: the 250 it did not</text>
-  <text x="802" y="2068" text-anchor="middle" class="sub">the cache holds 64 of them, and a first touch can never be cached away</text>
+  <text x="802" y="2068" text-anchor="middle" class="sub">the cache holds 58 of them, and a first touch can never be cached away</text>
 
   <!-- ══ legend ══════════════════════════════════════════════════════════ -->
   <rect x="34" y="2112" width="1132" height="60" rx="12" fill="#ffffff" stroke="#e2e8f0"/>
@@ -240,7 +240,7 @@
        correctly without.
        (Flag names are written without their leading dashes in this comment on purpose: a double
        hyphen inside an XML comment is a parse error, and a browser stops rendering at it.) -->
-  <text x="600" y="2192" text-anchor="middle" class="sub" fill="#94a3b8">measured 2026-08-07/10 · one RTX 5090, 63.4 GB RAM, one NVMe · DeepSeek-V4-Flash-0731 UD-IQ3_XXS, four files</text>
+  <text x="600" y="2192" text-anchor="middle" class="sub" fill="#94a3b8">measured 2026-08-11 · one RTX 5090, 63.4 GB RAM, one NVMe · DeepSeek-V4-Flash-0731 UD-IQ3_XXS, four files</text>
   <text x="600" y="2216" text-anchor="middle" class="sub" fill="#94a3b8">llama-server -c 200000 -ngl 99 -np 1 --jinja --slot-save-path DIR --chat-template-file 0731-chat-template.jinja</text>
   <text x="600" y="2240" text-anchor="middle" class="sub" fill="#94a3b8">--moe-stream --moe-stream-cache 58s --moe-stream-io-threads 8 --moe-stream-direct --moe-stream-l2 32</text>
 </svg>

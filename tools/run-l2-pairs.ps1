@@ -41,6 +41,11 @@ param(
     [int]    $Ctx     = 200000,
     [string] $OutRoot = 'C:\Users\robin\dev\Crow\runs\2026-08-09\pairs',
     [string] $CROW    = 'C:\Users\robin\dev\Crow',
+    # The expert cache of BOTH arms, spelled the way llama-server takes it: 58s = 58 slots per
+    # layer. The DEFAULT STAYS 64s on purpose. The 2026-08-09 and 2026-08-10 series ran at 64s and
+    # their recorded numbers mean that; moving the default would rewrite retroactively what they
+    # measured. The 58s series passes it explicitly.
+    [string] $CacheSlots = '64s',
     # Appended to the server flags of BOTH arms. What 0731 needs here is
     # '--chat-template-file <path>' -- its GGUF embeds a template that fails
     # golden vector 4 (the action turn), so the verified file must ride along.
@@ -88,6 +93,22 @@ function Read-ArmLog {
     }
 }
 
+# Value function. The server flags of one arm, out of the cache size and whatever the caller adds.
+# It REFUSES a second --moe-stream-cache rather than appending one: llama.cpp takes the last
+# occurrence, so a duplicate would run a cache size that no summary in the series names, and the
+# arms would be labelled with a value they did not use.
+function Get-ArmFlags {
+    param([string]$CacheSlots, [string[]]$Extra = @())
+    if ($CacheSlots -notmatch '^\d+s?$') {
+        throw "CacheSlots must be a slot count like '58s', got '$CacheSlots'"
+    }
+    if ($Extra -contains '--moe-stream-cache') {
+        throw "--moe-stream-cache belongs in -CacheSlots, not -ExtraFlags: a second one silently wins"
+    }
+    return @('--moe-stream','--moe-stream-cache',$CacheSlots,
+             '--moe-stream-io-threads','8','--moe-stream-direct','--jinja') + $Extra
+}
+
 if ($Selftest) {
     $pass = 0; $fail = 0
     function Check($Name, $Want, $Got) {
@@ -122,6 +143,24 @@ print_stats: moe stream: load stall = 400.00 ms total (0.040 ms per remap call)
     Check 'baseline parses'  100   ([math]::Round($b.tok_s,2))
     Check 'baseline no tier' $false $b.tier
 
+    # The flag set, both colours. The cache size is the ONLY thing this series varies between
+    # 2026-08-10 and 2026-08-11, so a wrong value here relabels every arm without changing a single
+    # number in the output - the one defect no reading of the result would catch.
+    $f58 = Get-ArmFlags -CacheSlots '58s' -Extra @('--chat-template-file','X')
+    Check 'cache size reaches the flags'   '58s' $f58[2]
+    Check 'exactly one cache flag'         1     (@($f58 | Where-Object { $_ -eq '--moe-stream-cache' }).Count)
+    Check 'extra flags ride along'         'X'   $f58[-1]
+    Check 'default is still 64s'           '64s' ((Get-ArmFlags -CacheSlots '64s')[2])
+
+    # The half that must refuse. Both of these produced a server that ran a cache size nobody asked
+    # for, and neither shows up anywhere in a result file.
+    $threw = $false
+    try { Get-ArmFlags -CacheSlots '58s' -Extra @('--moe-stream-cache','64s') | Out-Null } catch { $threw = $true }
+    Check 'a second cache flag is refused'    $true $threw
+    $threw = $false
+    try { Get-ArmFlags -CacheSlots 'fifty-eight' | Out-Null } catch { $threw = $true }
+    Check 'a malformed slot count is refused' $true $threw
+
     Check 'no eval lines -> null' $null (Read-ArmLog -Text 'print_stats: moe stream: load stall = 1.0 ms total')
     Check 'no stall -> null'      $null (Read-ArmLog -Text ($log -split "`n")[1])
     Check 'zero misses -> null'   $null (Read-ArmLog -Text ($log -replace 'misses = 200','misses = 0'))
@@ -143,8 +182,16 @@ if (-not (Test-Path $Exe))  { Write-Output "MISSING: $Exe";  exit 2 }
 # have failed every arm on its next use; the variable is the fossil of a
 # refactor made AFTER the successful runs. Found 2026-08-10 while preparing the
 # 0731 series, fixed by passing it, which restores exactly the recorded config.
-$flags = @('--moe-stream','--moe-stream-cache','64s','--moe-stream-io-threads','8','--moe-stream-direct','--jinja') + $ExtraFlags
+$flags = Get-ArmFlags -CacheSlots $CacheSlots -Extra $ExtraFlags
 $rows  = @()
+
+# A second llama-server on this card is the loudest form of the failure #86 was about, and nothing
+# in either server's log says the other one is there. Counted once here rather than trusted.
+$others = @(Get-Process -Name 'llama-server' -ErrorAction SilentlyContinue)
+if ($others.Count -gt 0) {
+    Write-Output ("REFUSING: {0} llama-server process(es) already running - a pair measured beside another server measures the pair" -f $others.Count)
+    exit 2
+}
 
 foreach ($p in $PLAN) {
     foreach ($arm in @('l2','base')) {

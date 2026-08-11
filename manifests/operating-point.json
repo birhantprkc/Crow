@@ -79,7 +79,7 @@
     "slot_save_path": "<install>/session",
     "moe_stream": true,
     "moe_stream_cache": "58s",
-    "_moe_stream_cache_note": "58 and not 64, measured 2026-08-11 (#87, evidence on #86). A slot costs 360.69 MiB, so 64 slots need 32,062 MiB of the card's 32,607 and leave 545 MiB for everything the display does. This machine's desktop was read at 342, 543, 622 and 978 MiB on ONE day. Above the gap the driver migrates the difference to host memory silently and the affected request halves - identical graph executions, identical misses, and the LOWEST load stall of the run, so nothing in the streaming path accounts for it. The full ladder, cold prefill of 1,374 tokens over 3 runs and decode of 200 tokens over 8 runs: 64 -> 15.28 prefill, decode unusable, 545 MiB free; 62 -> 114.92, decode outlier at 7.07 among 15s, 708 free; 60 -> 113.53 / 17.40, 1,322 free; 58 -> 112.69 / 17.32, 2,059 free; 56 -> 110.30 / 17.00, 2,765 free. 58 costs nothing measurable against 60 (0.7 % prefill, 0.5 % decode) and triples the margin over the highest desktop reading. THE VALUE IS THIS CARD'S, NOT A CONSTANT: derived from 32,607 MiB of VRAM and a desktop that peaks near 1 GiB.",
+    "_moe_stream_cache_note": "58 and not 64, measured 2026-08-11 (#87, evidence on #86). A slot costs 360.69 MiB - the server prints the cache size at every step and the figure is constant to five digits. The ladder, with the number of runs behind each cell, VRAM read after load out of 32,607 MiB: 64 -> prefill 15.28 median of 8 with spread 8.69x, no 200-token decode series taken, 32,014 used / 593 free; 62 -> prefill 114.92 median of 5, decode 14.62 median of 4 with one request at 7.07, 31,683 / 924; 60 -> 113.53 median of 5, 17.43 median of 8, 30,954 / 1,653; 58 -> 112.69 median of 3, 17.32 median of 8, 30,548 / 2,059; 56 -> 110.30 median of 3, 17.09 median of 8, 29,842 / 2,765. THE ARITHMETIC IS THE EVIDENCE: 62 reads 31,683 and 60 reads 30,954, i.e. 729 MiB for two slots against the 721 the printed slot size predicts, so 64 must read about 32,404 - and it reads 32,014. Those 390 MiB are what the driver moved to host memory without printing anything, and the affected request then halves with identical graph executions, identical misses and the LOWEST load stall of its run. 58 against 60 is NOT a throughput difference (112.69 vs 113.53, 17.32 vs 17.43, while repeating one configuration eight times spans 1.09x) - what separates them is the margin. CAUTION ON READING THE LADDER AS ONE SERIES: 58 and 56 were taken in one session and 62 and 60 in another, and a VRAM reading always contains whatever else was on the card at that moment. THE VALUE IS THIS CARD'S, NOT A CONSTANT: derived from 32,607 MiB of VRAM and whatever the display holds beside it.",
     "moe_stream_io_threads": 8,
     "moe_stream_direct": true,
     "moe_stream_l2": 32,
@@ -151,8 +151,9 @@
     "at_64_slots": 15.28,
     "at_64_slots_runs": 8,
     "at_64_slots_spread": 8.69,
-    "run": "runs/2026-08-11/0731-slotladder",
-    "_note": "The 64-slot figures are the median and spread of eight runs of one configuration - the value is not reproducible there, which is the defect #87 fixes. Warm prefill is not this number; nothing here describes a warm cache."
+    "run": "runs/2026-08-11/slot58-prefill",
+    "run_at_64_slots": "runs/2026-08-11/0731-prefill-counters",
+    "_note": "The 64-slot figures are the median and spread of eight runs of one configuration - the value is not reproducible there, which is the defect #87 fixes. Warm prefill is not this number; nothing here describes a warm cache. The prompt is a repeated word list from the harness, which routes to fewer distinct experts than real text, so it is the upper end of a cold start rather than the middle."
   },
 
   "vram_measured_0731": {
@@ -161,7 +162,7 @@
     "free_mib": 2059,
     "slots": 58,
     "run": "runs/2026-08-11/slot58-prefill",
-    "_note": "Free is 32,607 minus the reading, and it has to cover everything the display does. This machine's desktop has been read at 342, 543, 622 and 978 MiB on one day, so 2,059 leaves about 1,081 MiB of margin over the worst of those. At 62 slots the same margin was NEGATIVE and single requests halved at random."
+    "_note": "Free is 32,607 minus the reading, and it has to cover everything the display does. Read identically in all three runs of the series. At 62 slots the margin is 924 MiB and single requests halved at random; at 64 the allocation no longer fits at all and 390 MiB are missing from the reading."
   },
 
   "decode_measured_0731_58s": {
@@ -172,7 +173,30 @@
     "spread": 1.09,
     "slots": 58,
     "run": "runs/2026-08-11/slot58-decode",
-    "_note": "Eight consecutive requests on one server at four prompt sizes, temperature 0. The point of the series is the SPREAD: at 62 slots the same probe produced 7.07 among 15s, at 58 the widest gap is 1.09x. This is a probe, not the graded gate - the gate figure at 62 slots was 19.81 on three paired arms with warm-up tasks, and no gate has been run at 58."
+    "_note": "Eight consecutive requests on one server at four prompt sizes, temperature 0. The point of the series is the SPREAD: at 62 slots the same probe produced 7.07 among 15s, at 58 the widest gap is 1.09x. This is a probe, not the graded gate - for the gate at 58 slots see gate_measured_0731_58s below."
+  },
+
+  "gate_measured_0731_58s": {
+    "tok_per_s": 18.03,
+    "without_l2_tier": 11.04,
+    "factor": 1.63,
+    "method": "median of three paired arms at --moe-stream-cache 58s, one warm-up plus two graded tasks each, fresh server per arm, temperature unpinned - the same arrangement as the 19.81 at 62 slots and the 19.13 at 64",
+    "tier_arms": [18.93, 17.33, 18.03],
+    "base_arms": [11.44, 10.63, 11.04],
+    "per_pair_factor": [1.65, 1.63, 1.63],
+    "stall_per_miss_ms": [0.713, 0.722, 0.713],
+    "stall_per_miss_ms_base": [1.363, 1.383, 1.331],
+    "wait_share_pct": [65.2, 67.4, 70.0],
+    "wait_share_pct_base": [78.6, 79.3, 81.0],
+    "expert_hit_rate_pct": [81.81, 80.10, 80.33],
+    "tier_hit_rate_pct": [39.96, 36.14, 33.33],
+    "within_arm_spread": 1.09,
+    "within_arm_spread_base": 1.08,
+    "graded_correct": "6 of 6 with the tier, 6 of 6 without",
+    "median_arm": "r3-l2: 3 answers, 837 tokens, 46,434.23 ms; base r3-base: 3 answers, 1,139 tokens, 103,196.15 ms",
+    "slots": 58,
+    "run": "runs/2026-08-11/slot58-pairs",
+    "_note": "The gate at the SHIPPED operating point, run 2026-08-11 after 0.1.1 went out. This is the figure the README quotes; the 19.13 at 64 slots and the 19.81 at 62 belong to configurations this release replaced and are kept here as the bar it had to clear, not as product figures. Within-arm spread 1.09x (tier) and 1.08x (base) is NARROWER than the 1.63x effect, which is what makes the difference readable - at 64 slots the same spread was 1.19x. 6 of 6 against 6 of 6 is no difference found at a resolution of about two tasks, not a proof of equivalence."
   },
 
   "not_measured_at_this_operating_point": [

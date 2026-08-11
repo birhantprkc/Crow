@@ -1157,25 +1157,28 @@ Write-Host ""
 # reports this installer as broken. Measured the hard way on 2026-08-11, which is also when the
 # number itself changed.
 #
-# A slot costs 360.69 MiB on 0731, so 64 slots ask for 32,062 MiB of a 32,607 MiB card and leave
-# 545 MiB for everything else the display is doing. This machine's desktop was read at 342, 543, 622
-# and 978 MiB on ONE day. Above the gap the allocation no longer fits, the driver moves the
-# difference into host memory without printing anything, and the cost is not a constant slowdown but
-# an unpredictable one: single requests halve at random, with identical graph executions, identical
-# misses and the LOWEST load stall of the run.
+# A slot costs 360.69 MiB on 0731 -- the server prints the cache size at every step and the figure is
+# constant to five digits. Past a point the allocation no longer fits beside what the display holds,
+# the driver moves the difference into host memory without printing anything, and the cost is not a
+# constant slowdown but an unpredictable one: single requests halve at random, with identical graph
+# executions, identical misses and the LOWEST load stall of the run.
 #
-# Measured 2026-08-11, prefill of 1,374 tokens over 3 runs / decode of 200 tokens over 8 / free VRAM:
-#   64 -> 15.28 median of 8, spread 8.69x / unusable          /   545 MiB
-#   62 -> 114.92                          / 7.07 among 15s    /   708 MiB
-#   60 -> 113.53                          / 17.40             / 1,322 MiB
-#   58 -> 112.69                          / 17.32             / 2,059 MiB   <- shipped
-#   56 -> 110.30                          / 17.00             / 2,765 MiB
-# 58 costs 0.7 % of prefill and 0.5 % of decode against 60 and triples the margin over the highest
-# desktop reading.
+# Measured 2026-08-11, with the number of runs behind each cell, VRAM read after load of 32,607 MiB:
+#   64 -> prefill 15.28 median of 8, spread 8.69x / no decode series / 32,014 used /   593 free
+#   62 -> 114.92 median of 5 / 14.62 median of 4, one request at 7.07 / 31,683      /   924
+#   60 -> 113.53 median of 5 / 17.43 median of 8                     / 30,954      / 1,653
+#   58 -> 112.69 median of 3 / 17.32 median of 8                     / 30,548      / 2,059  <- shipped
+#   56 -> 110.30 median of 3 / 17.09 median of 8                     / 29,842      / 2,765
 #
-# THIS NUMBER IS DERIVED FROM 32,607 MiB OF VRAM AND A DESKTOP THAT PEAKS NEAR 1 GiB. A smaller card,
-# or a busier display, needs a smaller value. Deriving it from the machine the way --moe-stream-l2 is
-# derived is tracked as #87 rather than guessed at here.
+# THE ARITHMETIC IS THE EVIDENCE. 62 reads 31,683 and 60 reads 30,954 -- 729 MiB for two slots,
+# against the 721 the printed slot size predicts. So 64 must read about 32,404, and it reads 32,014.
+# Those 390 MiB are the ones the driver moved out. 58 against 60 is NOT a throughput difference
+# (112.69 vs 113.53, 17.32 vs 17.43, while repeating one configuration eight times spans 1.09x);
+# what separates them is the margin.
+#
+# THIS NUMBER IS DERIVED FROM 32,607 MiB OF VRAM AND WHATEVER THE DISPLAY HOLDS BESIDE IT. A smaller
+# card, or a busier display, needs a smaller value. Deriving it from the machine the way
+# --moe-stream-l2 is derived is tracked as #87 rather than guessed at here.
 Write-Host "  2. Then start the server, and the client in a second terminal:" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "    $InstallTo\bin\llama-server.exe -m $InstallTo\models\UD-IQ3_XXS\DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf ``" -ForegroundColor White
@@ -1195,7 +1198,7 @@ Write-Host "      --slot-save-path $InstallTo\session ``" -ForegroundColor White
 # closes). The verified template ships with this package; without the flag the
 # server silently uses the embedded one and nothing looks wrong.
 Write-Host "      --chat-template-file $InstallTo\templates\0731-chat-template.jinja ``" -ForegroundColor White
-# 62 and not 64 -- the reason is above the block, outside the region the checker reads.
+# 58 and not 64 -- the reason is above the block, outside the region the checker reads.
 #
 # The host-RAM tier is printed only on a machine with the RAM it was measured on. On anything
 # smaller the line is left out entirely rather than carrying a smaller, unmeasured number - a flag
