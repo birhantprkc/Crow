@@ -99,18 +99,20 @@ Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
 
 [3/5] Verifying
       size  506.4 MB
-      sha256  C51BF9B8...
+      sha256  <the release's, compared against the manifest>
 
 [4/5] Installing to C:\Users\you\AppData\Local\Crow
-        26/26  README.md                                  64 KB
+        26/26  README.md                                  65 KB
       26 files extracted
 
 [5/5] What is left to do
 ```
 
-The archive figures are `dist/crow-0.1.0-win-x64.zip` as built: **531,013,143 B zipped, 26 files
-unpacked, SHA-256 `c51bf9b8…`**. The line for `README.md` is this file's current size, so a repack
-moves it and nothing else on the screen.
+**26 files, about 506 MB zipped** — `dist/crow-0.1.0-win-x64.zip`. The hash is shown as a
+placeholder rather than a value, and that is not laziness: this file is inside the archive it would
+be quoting, so printing the real digest here changes the archive and invalidates the digest. The
+one on your screen is compared against the release's manifest by the installer, which is where a
+hash belongs. The `README.md` line moves with this file's size for the same reason.
 
 The model is **not** part of that download. It is 97.1 GiB, it belongs to somebody else, and an installer that spends hours on it before you have seen anything work is the wrong shape. The last step prints the one command that fetches it:
 
