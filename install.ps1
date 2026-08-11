@@ -1151,7 +1151,7 @@ Write-Host ""
 Write-Host "     If that finishes suspiciously fast, check that four files and ~97 GiB" -ForegroundColor DarkGray
 Write-Host "     actually arrived -- hf reports success even when it reached nothing." -ForegroundColor DarkGray
 Write-Host ""
-# WHY --moe-stream-cache SAYS 62 AND NOT 64, and this note sits HERE rather than beside the flag on
+# WHY --moe-stream-cache SAYS 58 AND NOT 64, and this note sits HERE rather than beside the flag on
 # purpose: check_operating_point.py reads a 2000-character region starting at "llama-server.exe" to
 # find the command line, and a long comment inside that window pushes the last flags out of it and
 # reports this installer as broken. Measured the hard way on 2026-08-11, which is also when the
