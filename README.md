@@ -2,7 +2,7 @@
 
 <h1>CROW</h1>
 
-<h3>A 304-billion-parameter coding model, at a 200k context. One graphics card. 64 GB of system RAM.</h3>
+<h3>A 304-billion-parameter coding model, at a 200k context. One graphics card, from 16 GB VRAM. Measured on 64 GB of system RAM.</h3>
 
 <p>Frontier mixture-of-experts inference, with the experts streamed off the SSD.<br>No cluster. No 200 GB host. No cloud.</p>
 
@@ -32,9 +32,14 @@
 <br>
 
 > **Every number on this page was measured on 2026-08-11, on DeepSeek-V4-Flash-0731, at the
-> operating point this release ships — `--moe-stream-cache 58s`.** Raw protocols are under
-> `runs/2026-08-11/`. Figures from earlier models and from cache sizes this release no longer
-> ships have been removed rather than carried forward.
+> operating point this release ships — `--moe-stream-cache 58s`, on an RTX 5090 (32,607 MiB)
+> with 63.4 GB of DDR5.** 16 GB of VRAM is the installer's floor, not a second measured point:
+> below 32 GB expect fewer cache slots, and at 200k about 1.4 GiB of that budget goes to KV
+> instead — a trade that was never run (#25). Nothing below 63.4 GB of system RAM has been run
+> either; the **1.63x** the [host tier](#4-the-host-ram-tier-optional) buys was measured with the
+> flag off on this machine, not on a smaller one. Raw protocols are under `runs/2026-08-11/`.
+> Figures from earlier models and from cache sizes this release no longer ships have been removed
+> rather than carried forward.
 
 ## What this is, in one paragraph
 

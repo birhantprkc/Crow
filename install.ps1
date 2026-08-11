@@ -55,12 +55,16 @@ $TOTAL_STEPS = 5
 # without the invocation that accepts it is advice they cannot act on.
 $INSTALL_URL = "https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1"
 
-# The target profile, measured on issue #25: 32 GB VRAM and 16 GB system RAM at a
-# 200k context window. Below 16 GB VRAM the operating point was never measured, so
-# the script refuses rather than pretending it knows what happens there.
+# The target profile, decided on issue #25: 32 GB VRAM at a 200k context window. Below
+# 16 GB VRAM the operating point was never measured, so the script refuses rather than
+# pretending it knows what happens there.
+# $RAM_MIN_GB is a warning threshold, not a measurement. Nothing below the 63.4 GB of the
+# machine every figure was taken on has been run. 32 is what the README names as the
+# configuration that runs without the host tier, at 1.63x less throughput -- the 16 that
+# stood here came from #25's assumption about what a 16 GB-VRAM machine ships with.
 $VRAM_SUPPORTED_MB = 16000
 $VRAM_TARGET_MB    = 32000
-$RAM_MIN_GB        = 16
+$RAM_MIN_GB        = 32
 
 # The host-RAM expert tier. 32 GiB is the ONLY size measured (2026-08-09, on a 63.4 GB machine:
 # 1.40-1.47x throughput over three paired runs), and page-locked memory is taken away from the
@@ -167,7 +171,7 @@ function Test-Preflight {
     }
 
     if ($RamGb -gt 0 -and $RamGb -lt $RAM_MIN_GB) {
-        $warnings += ((Format-Num $RamGb 0) + " GB of system RAM, below the $RAM_MIN_GB GB in the target profile")
+        $warnings += ((Format-Num $RamGb 0) + " GB of system RAM, below the $RAM_MIN_GB GB the README names. Every figure was taken on 63.4 GB; below that nothing has been run")
     }
     if ($FreeDiskGb -gt 0 -and $FreeDiskGb -lt $DISK_INSTALL_GB) {
         $problems += ((Format-Num $FreeDiskGb) + " GB free on the install drive, $DISK_INSTALL_GB GB needed for the package")
