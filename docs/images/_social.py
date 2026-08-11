@@ -4,7 +4,7 @@ A social card is read at thumbnail size, in a feed, in under a second. That rule
 out what the first two attempts did: one was a generic tech banner, the other a
 wall of 19px monospace that turns to grey mush the moment a feed scales it down.
 
-So this one carries three lines of large type, and beside them the one picture
+So this one carries four lines of large type, and beside them the one picture
 that IS the idea: 256 experts per layer, six of them awake. At full size it is a
 count; at thumbnail size it is a dark field with a few lit cells, which is what
 the product does. The wordmark comes from `cli/crow.py` rather than being
@@ -45,17 +45,23 @@ MUTED  = "#7c8798"
 RULE   = "#1c2536"
 SLEEP  = "#161d2c"                       # an expert that is not awake this token
 
-# README H3, verbatim. Three lines because a feed gives you one glance.
-HEAD = [("284 billion parameters.", TEXT),
-        ("One graphics card.",      TEXT),
-        ("33 GB of system RAM.",    ACCENT)]
+# README H3, verbatim, only re-wrapped. Four lines and not three since the H3 grew
+# its context clause: at a size a feed can still read, a monospaced face does not
+# fit "A 284-billion-parameter coding model, at a 200k context." on one line, and
+# the alternative -- paraphrasing the headline -- is how a card starts drifting
+# from the page it links to.
+HEAD_SIZE, HEAD_STEP = 42, 56
+HEAD = [("A 284-billion-parameter",          TEXT),
+        ("coding model, at a 200k context.", TEXT),
+        ("One graphics card.",               TEXT),
+        ("33 GB of system RAM.",             ACCENT)]
 
-SUB = ["A 95.9 GiB mixture-of-experts model,",
+SUB = ["A 97.1 GiB mixture-of-experts model,",
        "read off the SSD while the GPU works."]
 
 # README stat table. Each is in the README with the issue it came from.
 FACTS = [("200k",  "context, one slot"),
-         ("14.73", "tok/s decode, gate median"),
+         ("19.13", "tok/s decode, gate median"),
          ("0 EUR", "spent so far")]
 
 # 6 of 256, the README's own figure. Fixed rather than random so the card is
@@ -118,17 +124,17 @@ def main() -> int:
     d.text((M + mark_w + 20, M - 12 + mark_h - 22), f"v{crow.VERSION}",
            font=load(16), fill=MUTED)
 
-    head = load(50, 600.0)
+    head = load(HEAD_SIZE, 600.0)
     y = M + 74
     for i, (line, colour) in enumerate(HEAD):
-        d.text((M, y + i * 66), line, font=head, fill=colour)
+        d.text((M, y + i * HEAD_STEP), line, font=head, fill=colour)
 
     body = load(21)
     for i, line in enumerate(SUB):
-        d.text((M, y + 216 + i * 30), line, font=body, fill=MUTED)
+        d.text((M, y + 246 + i * 30), line, font=body, fill=MUTED)
 
     # The picture, right of the type and clear of it: the longest headline line
-    # ends near x=780 and the longest sub-line near x=540. Right-aligned to the
+    # ends near x=888 and the longest sub-line near x=550. Right-aligned to the
     # same margin as the rule below, so the block has an edge to sit against.
     span = GRID * (13 + 4) - 4
     gx, gy = W - M - span, y

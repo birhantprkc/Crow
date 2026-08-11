@@ -22,19 +22,25 @@
     "_present_checked": "2026-08-10",
     "entries": {
       "operating-point": {
-        "path": "UD-IQ3_XXS/DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+        "path": "0731-gguf/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
         "present": true,
-        "role": "the operating point, and the only model still on disk"
+        "role": "the operating point 0.1.0 ships. Moved here from the preview GGUF on 2026-08-11: this file said DeepSeek-V4-Flash-0731 at the top and pointed this key at the preview, so every script calling Get-ModelPath operating-point without -Model measured the model the release had already replaced. That is how the prefill series in runs/2026-08-10/before-0731/ ended up published under a 0731 heading",
+        "_needs": "--chat-template-file manifests/0731-chat-template.jinja -- the embedded template fails the model's own golden vector 4"
       },
       "0731-iq3-xxs": {
         "path": "0731-gguf/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
         "present": true,
-        "role": "the 0.1 candidate: unsloth's ready-made 0731 quantisation, downloaded and header-verified 2026-08-10. 378,208,256 B per expert, +288 MiB of the 599 MiB headroom at 64 slots. Needs --chat-template-file manifests/0731-chat-template.jinja: its embedded template fails golden vector 4"
+        "role": "alias of operating-point, for scripts that name the model generation. Downloaded and header-verified 2026-08-10. 378,208,256 B per expert, +288 MiB of the 599 MiB headroom at 64 slots"
+      },
+      "preview-iq3-xxs": {
+        "path": "UD-IQ3_XXS/DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
+        "present": true,
+        "role": "the model 0.0.6 shipped, kept for the before-side comparison in runs/2026-08-10/before-0731/. NOT the operating point since 0.1.0"
       },
       "iq3-xxs": {
         "path": "UD-IQ3_XXS/DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
         "present": true,
-        "role": "alias of operating-point, for scripts that name the quantisation"
+        "role": "alias of preview-iq3-xxs. Names a quantisation, not a generation -- 0731 ships the same quantisation, so this key is ambiguous by construction and kept only for scripts written before the switch"
       },
       "q2-k-xl": {
         "path": "UD-Q2_K_XL/DeepSeek-V4-Flash-UD-Q2_K_XL-00001-of-00003.gguf",

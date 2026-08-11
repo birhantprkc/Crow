@@ -34,15 +34,15 @@ EQUATIONS = {
     ),
     "eq_sparsity": (
         r"$\frac{\mathrm{active}}{\mathrm{total}} = \frac{6}{256} = 2.34\%\ \mathrm{per\ layer}$",
-        "Six of 256 experts fire per layer, so 92.7 % of the file can stay on disk",
+        "Six of 256 experts fire per layer, so 92.9 % of the file can stay on disk",
     ),
     "eq_resident_set": (
         r"$\mathrm{resident} = \mathrm{attention} + \mathrm{norms} + \mathrm{shared} = 6.88\ \mathrm{GiB}$",
-        "7.17 % of UD-IQ3_XXS, and every token touches all of it. 89.05 GiB are routed experts",
+        "7.09 % of the 97.05 GiB 0731 file, and every token touches all of it. 90.18 GiB are routed experts",
     ),
     "eq_bytes_per_token": (
-        r"$89.05\ \mathrm{GiB} \cdot \frac{6}{256} = 2.09\ \mathrm{GiB}\ \mathrm{modelled},\ 376.9\ \mathrm{MiB}\ \mathrm{measured}$",
-        "Routed experts of UD-IQ3_XXS against what the router pulls (#28). With the tier ~2/3 of it still reaches the drive",
+        r"$90.18\ \mathrm{GiB} \cdot \frac{6}{256} = 2.11\ \mathrm{GiB}\ \mathrm{per\ token}$",
+        "Routed experts of 0731 UD-IQ3_XXS; 6 x 378,208,256 B agrees. The 376.9 MiB the router pulled is preview-only (#28)",
     ),
     "eq_kv_cost": (
         r"$200\,192 \cdot 6.92\ \mathrm{KiB} = 1\,353.5\ \mathrm{MiB} = 1.32\ \mathrm{GiB}$",
@@ -57,8 +57,8 @@ EQUATIONS = {
         "One work item per weight tensor instead of per expert. Same bytes, same request size",
     ),
     "eq_wait_share": (
-        r"$\frac{40\,402\ \mathrm{ms}}{68\,282\ \mathrm{ms}} = 59.2\%$",
-        "Share of decode spent waiting on the drive, at the operating point with the host tier. 70 % without it",
+        r"$\frac{51\,602.91\ \mathrm{ms}}{74\,644.72\ \mathrm{ms}} = 69.1\%$",
+        "Decode spent waiting on the drive, with the host tier (0731 pairs, arm r2-l2). 78.2-80.7 % without it",
     ),
 }
 

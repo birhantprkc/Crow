@@ -65,6 +65,19 @@ param(
     [ValidateSet('', 'quality', 'prefill', 'vram')]
     [string] $OnlyPart   = '',
     [int]    $Port       = 8081,
+    # Appended to the operating-point flag set, empty by default so the
+    # before-side this driver was written for measures exactly what it measured.
+    # It exists for the AFTER side: 0731 ships no Jinja template and its embedded
+    # one fails the model's own golden vector 4, so a 0731 run needs
+    # --chat-template-file or it prefills a prompt the product never sends.
+    [string[]] $ExtraFlags = @(),
+    # Server log level. 5 is what the before-side ran and stays the default so
+    # that series is reproducible. It is a PARAMETER because it is not free:
+    # measured 2026-08-10, the same operating point prefilled 1,374 tokens at
+    # 5.05 tok/s under -lv 5 and the product's own start line answers at 62.68 --
+    # ~40 debug lines per token cost more than the work they describe. A number
+    # taken at -lv 5 does not describe what a user gets.
+    [int]    $Verbosity  = 5,
     [switch] $CounterProbe,
     [switch] $Selftest
 )
@@ -82,7 +95,7 @@ function Say([string]$m) { Write-Output ("[{0}] {1}" -f (Get-Date -Format 'HH:mm
 # tier as a FLAG, which doubles as the still-open #74 check: the server log must
 # print "L2 host tier" from the flag path.
 $OP_FLAGS = @('--moe-stream','--moe-stream-cache','64s','--moe-stream-io-threads','8',
-              '--moe-stream-direct','--jinja','--moe-stream-l2','32')
+              '--moe-stream-direct','--jinja','--moe-stream-l2','32') + $ExtraFlags
 $OP_CTX   = 200000
 $WANT_NCTX = 200192   # what /props answers for -c 200000; the 2026-08-07 guard
 
@@ -208,7 +221,7 @@ if (-not (Test-Path $Model)) { Write-Output "SETUP ERROR: model not on disk: $Mo
 
 function Start-MeasuredServer {
     param([string]$Label, [int]$Ctx, [string[]]$Flags, [string]$ErrFile)
-    $srvArgs = @('-m', $Model, '--host','127.0.0.1','--port',"$Port",'-c',"$Ctx",'-ngl','99','-np','1','-lv','5') + $Flags
+    $srvArgs = @('-m', $Model, '--host','127.0.0.1','--port',"$Port",'-c',"$Ctx",'-ngl','99','-np','1','-lv',"$Verbosity") + $Flags
     Say ("[{0}] cmd `"{1}`" {2}" -f $Label, $Exe, ($srvArgs -join ' '))
     $p = Start-Process -FilePath $Exe -ArgumentList $srvArgs -WorkingDirectory $Lab `
                        -RedirectStandardError $ErrFile -RedirectStandardOutput "$ErrFile.out" -PassThru -NoNewWindow

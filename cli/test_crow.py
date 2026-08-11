@@ -663,6 +663,60 @@ class RavenTests(unittest.TestCase):
                 self.assertTrue(0x2500 <= ord(ch) <= 0x259F,
                                 f"U+{ord(ch):04X} is outside the covered range")
 
+    def test_the_gguf_path_reduces_to_the_model_name(self):
+        self.assertEqual(
+            crow.model_display_name(
+                r"C:\models\0731-gguf\UD-IQ3_XXS"
+                r"\DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf"),
+            "DeepSeek-V4-Flash-0731")
+
+    def test_a_name_the_patterns_do_not_know_is_left_whole(self):
+        """THE NEGATIVE PROBE. A greedy strip would eat part of a name it does
+        not recognise, and a header that quietly shortens the model is worse
+        than one that shows a suffix -- only one of the two says so."""
+        self.assertEqual(crow.model_display_name("Some-Other-Model-v3.gguf"),
+                         "Some-Other-Model-v3")
+        self.assertEqual(crow.model_display_name(""), "")
+
+    def test_the_header_names_the_loaded_model_not_the_sent_label(self):
+        """`--model` is a label in the request body. Printing it would confirm
+        the client's own argument while the server ran something else."""
+        real = crow.urllib.request.urlopen
+        try:
+            crow.urllib.request.urlopen = lambda *a, **k: (_ for _ in ()).throw(
+                OSError("no server"))
+            self.assertEqual(crow.fetch_model_name("http://127.0.0.1:8081/v1"), "")
+        finally:
+            crow.urllib.request.urlopen = real
+
+    def test_every_command_sits_beside_the_wordmark(self):
+        lines = crow.header_lines("v9.9.9")
+        for name, what in crow.HEADER_COMMANDS:
+            carrier = [l for l in lines if name in l]
+            self.assertEqual(len(carrier), 1, f"{name} is not on exactly one line")
+            self.assertIn(what, carrier[0])
+            self.assertIn("█", carrier[0], f"{name} is not beside the wordmark")
+
+    def test_the_commands_start_in_one_column(self):
+        """A ragged right block is the same defect as a ragged wordmark, and it
+        is invisible in a diff. The column is measured off the widest banner row,
+        so this fails the moment the mark changes width without the padding
+        following it."""
+        import re as _re
+        bare = _re.compile(r"\033\[[0-9;]*m")
+        plain = [bare.sub("", l) for l in crow.header_lines("v9.9.9")]
+        starts = {l.index(name) for l in plain
+                  for name, _ in crow.HEADER_COMMANDS if name in l}
+        self.assertEqual(len(starts), 1, f"commands do not line up: {sorted(starts)}")
+
+    def test_the_version_line_carries_no_command(self):
+        """Centred against the wordmark, not against the block -- otherwise the
+        third command lands next to the version and reads as part of it."""
+        carrier = [l for l in crow.header_lines("v9.9.9") if "v9.9.9" in l]
+        self.assertEqual(len(carrier), 1)
+        for name, _ in crow.HEADER_COMMANDS:
+            self.assertNotIn(name, carrier[0])
+
     def test_bevel_is_painted_apart_from_the_face(self):
         """Positive control for paint_banner: without a separate colour on the
         shadow cells the wordmark is flat, and the test would not notice."""

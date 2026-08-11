@@ -28,12 +28,15 @@ against the baseline's 1.09x — the band is indicative, the direction clears th
 
 ### Changed
 
-- **New wordmark.** The banner is drawn in full blocks with a box-drawing shadow instead of
-  the shaded bevel. Both ranges are covered by the bundled Google Sans Code — measured
-  2026-08-10 from its cmap: U+2500–257F is 128 of 128 and U+2580–259F is 32 of 32, against
-  Cascadia Mono at the same counts as a control. A glyph outside them falls back to another
-  face and the columns stop lining up, which is why the covered range is a test and not a
-  comment.
+- **New wordmark, and the commands moved beside it.** The banner is drawn in full blocks
+  with a box-drawing shadow instead of the shaded bevel. Both ranges are covered by the
+  bundled Google Sans Code — measured 2026-08-10 from its cmap: U+2500–257F is 128 of 128
+  and U+2580–259F is 32 of 32, against Cascadia Mono at the same counts as a control. A
+  glyph outside them falls back to another face and the columns stop lining up, which is
+  why the covered range is a test and not a comment. `/help`, `/tools` and `/exit` now sit
+  to the right of the mark, one per line, the name in the same yellow a slash command turns
+  while it is typed. The column is computed from the widest banner row, so it follows the
+  mark instead of being written down beside it.
 - **Model: `unsloth/DeepSeek-V4-Flash-0731-GGUF`, UD-IQ3_XXS, 97.1 GiB.** Identical
   architecture (43 layers, 256 experts, top-6). 378,208,256 B per expert — 288 MiB more
   than the preview at 64 slots, inside the measured 599 MiB of headroom (311 MiB left).
@@ -67,10 +70,35 @@ against the baseline's 1.09x — the band is indicative, the direction clears th
 
 ### Measured for the first time
 
+- **A diagnostic flag, not the documented line, produced the 1 tok/s.** Decode from the
+  README line on a fresh server: **16.05 tok/s** over **one** answer of 108 tokens. That is
+  *below* the weakest measured arm (16.17 / 19.13 / 19.25), by 0.7 %, and it is a single
+  observation with no run written under `runs/` — it settles the direction, not the number,
+  and nothing here is claimed against it. The same line with `-lv 5` writing to an
+  interactive console: **0.98 / 1.01 / 1.13 tok/s** over three runs — a factor of 14 to 16.
+  The debug
+  log is ~40 lines per token; between two consecutive lines the gap is **2.05 ms** into a
+  redirected file and **20.3 ms** onto a console, and every CUDA graph launch pays it,
+  prefill and decode alike. The card sat at 2895 MHz and 155 W of 575 throughout, which is
+  what a GPU waiting on its host looks like. The six gate runs redirect their log to a file
+  (`measure-24-gate.ps1`); a hand-started server does not, and nothing said so.
+- **Cold against warm prefill on the same server:** 953 tokens at **12.79 tok/s** with the
+  expert cache empty, 984 at **62.68 tok/s** once it is not. Within the cold run itself the
+  rate climbs from 9.93 tok/s over the first 437 tokens to 17.1 over the remaining 512. The
+  filled-context figures below are the warm case and do not describe a first start.
+- **What a fresh turn actually sends:** 953 tokens, of which 5 are the message and 39 the
+  system prompt. The other **909 — 95.4 %** are the seven tool declarations, measured
+  through the server's own `/apply-template` and `/tokenize`. They are unchanged since
+  0.0.1 and ride on every request by design: the model's template drops a replayed
+  `reasoning_content` when `tools` is empty.
 - **Prefill at filled context** (server-counted denominators, fresh server):
   96.13 tok/s at 1,374 tokens · 85.32 at 10,824 · 83.80 at 43,224 · **76.54 at 172,824**.
   The old "8–50 tok/s" came from 86–103-token prompts and does not describe filled
-  context — large batches amortise expert fetches.
+  context — large batches amortise expert fetches. **Measured on the PREVIEW model**, in
+  the before-side run that had to happen before the weights left the disk
+  (`runs/2026-08-10/before-0731/prefill/`, temperature 0.6, no `--chat-template-file`).
+  0731 has not re-run it. The series was published under the 0731 heading until
+  2026-08-10 and the attribution is corrected here rather than quietly dropped.
 - **VRAM at 200k on one slot:** 31,899 MiB after load, 31,997 under a filled context, of
   32,607. The two previously documented values (31,838 / 32,008) were taken at different
   phases of the same thing; neither said which.

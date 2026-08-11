@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 2216" width="1200" height="2216" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 2260" width="1200" height="2260" font-family="Segoe UI, Helvetica, Arial, sans-serif">
   <defs>
     <style>
       .t    { font-size:21px; fill:#1f2933; }
@@ -17,9 +17,14 @@
     <marker id="ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#e8590c"/>
     </marker>
+    <!-- One expert cell, tiled: the pool below is 32 x 8 = 256 of these, and 444 x 108 at a
+         14px pitch is exactly that many with the last column flush against the edge. -->
+    <pattern id="pool" x="0" y="0" width="14" height="14" patternUnits="userSpaceOnUse">
+      <rect x="0" y="0" width="10" height="10" rx="2" fill="#d5dbe3"/>
+    </pattern>
   </defs>
 
-  <rect width="1200" height="2216" fill="#ffffff"/>
+  <rect width="1200" height="2260" fill="#ffffff"/>
 
   <!-- ══ header ══════════════════════════════════════════════════════════ -->
   <rect x="34" y="30" width="76" height="76" rx="16" fill="#2c5bac"/>
@@ -27,18 +32,18 @@
        one glyph is not something to guess at, and the renderer knows it. -->
   <text x="72" y="68" text-anchor="middle" dominant-baseline="central" class="num" font-size="42">C</text>
   <text x="130" y="76" class="big">CROW ENGINE</text>
-  <text x="132" y="102" class="tag">284B PARAMETERS · 13B ACTIVE PER TOKEN · 43 LAYERS · 256 EXPERTS EACH</text>
+  <text x="132" y="102" class="tag">DEEPSEEK-V4-FLASH-0731 · 284B PARAMETERS · 13B ACTIVE PER TOKEN · 43 LAYERS · 256 EXPERTS EACH</text>
 
   <rect x="34" y="126" width="1132" height="66" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-dasharray="6 5"/>
-  <text x="600" y="153" text-anchor="middle" class="tb" fill="#475569">HOST RAM: 33.73 GiB peak — 32 of them the expert tier · the 95.9 GiB model never lives here</text>
-  <text x="600" y="180" text-anchor="middle" class="sub">llama.cpp's CPU offload needs 51.79 GiB for the same work, on the same binary</text>
+  <text x="600" y="153" text-anchor="middle" class="tb" fill="#475569">HOST RAM: 33.73 GiB peak — 32 of them the expert tier · the 97.05 GiB model never lives here</text>
+  <text x="600" y="180" text-anchor="middle" class="sub">llama.cpp's CPU offload needs 51.79 GiB for the same work, on the same binary — both host figures are preview-series, not re-taken on 0731</text>
 
   <!-- ══ the four decisions ══════════════════════════════════════════════ -->
   <g>
     <rect x="34" y="216" width="556" height="92" rx="12" fill="#f2fbf5" stroke="#69c98a" stroke-width="1.6"/>
     <circle cx="76" cy="262" r="21" fill="#2f9e5e"/><text x="76" y="270" text-anchor="middle" class="num">1</text>
     <text x="110" y="255" class="tb">QUANTISATION</text>
-    <text x="110" y="283" class="sub">UD-IQ3_XXS — 376.9 MiB moved per token</text>
+    <text x="110" y="283" class="sub">UD-IQ3_XXS — 376.9 MiB per token, preview measurement</text>
 
     <rect x="610" y="216" width="556" height="92" rx="12" fill="#f2fbf5" stroke="#69c98a" stroke-width="1.6"/>
     <circle cx="652" cy="262" r="21" fill="#2f9e5e"/><text x="652" y="270" text-anchor="middle" class="num">2</text>
@@ -59,7 +64,7 @@
   <!-- ══ zone 1: resident in VRAM ════════════════════════════════════════ -->
   <rect x="34" y="446" width="1132" height="676" rx="16" fill="#f5f9ff" stroke="#5b8def" stroke-width="2"/>
   <text x="600" y="486" text-anchor="middle" class="zh" fill="#2c5bac">RESIDENT IN VRAM</text>
-  <text x="600" y="514" text-anchor="middle" class="sub">32,008 of 32,607 MiB, measured at the operating point</text>
+  <text x="600" y="514" text-anchor="middle" class="sub">31,899 MiB after load, 31,997 under a filled context, of 32,607 — preview series, the 0731 load has not been re-measured</text>
 
   <!-- pipeline, two rows -->
   <rect x="66" y="540" width="240" height="86" rx="12" fill="#ffffff" stroke="#8b5cf6" stroke-width="1.8"/>
@@ -71,8 +76,8 @@
   <text x="511" y="600" text-anchor="middle" class="sub">/v1/chat/completions</text>
 
   <rect x="716" y="540" width="418" height="86" rx="12" fill="#f2fbf5" stroke="#2f9e5e" stroke-width="1.8"/>
-  <text x="925" y="573" text-anchor="middle" class="tb" fill="#2f9e5e">14.73 tok/s decode</text>
-  <text x="925" y="600" text-anchor="middle" class="sub">median of three paired runs · 1.40–1.47x</text>
+  <text x="925" y="573" text-anchor="middle" class="tb" fill="#2f9e5e">19.13 tok/s decode</text>
+  <text x="925" y="600" text-anchor="middle" class="sub">median of three paired runs · 1.24–1.55x</text>
 
   <g stroke="#7c8794" stroke-width="2.4" fill="none" marker-end="url(#a)">
     <path d="M306,583 L360,583"/>
@@ -85,8 +90,8 @@
 
   <rect x="94" y="712" width="292" height="98" rx="11" fill="#ffffff" stroke="#5b8def" stroke-width="1.6"/>
   <text x="240" y="748" text-anchor="middle" class="tb">ATTENTION + NORMS</text>
-  <text x="240" y="775" text-anchor="middle" class="sub">6.57 GiB, always resident</text>
-  <text x="240" y="798" text-anchor="middle" class="sub">7.3 % of the file</text>
+  <text x="240" y="775" text-anchor="middle" class="sub">6.88 GiB, always resident</text>
+  <text x="240" y="798" text-anchor="middle" class="sub">7.09 % of the file</text>
 
   <rect x="418" y="712" width="240" height="98" rx="11" fill="#ffffff" stroke="#f0a72a" stroke-width="1.6"/>
   <text x="538" y="748" text-anchor="middle" class="tb">ROUTER</text>
@@ -99,7 +104,7 @@
   <text x="898" y="798" text-anchor="middle" class="sub">that currently holds that expert</text>
 
   <rect x="94" y="836" width="1012" height="72" rx="11" fill="#faf7ff" stroke="#8b5cf6" stroke-width="1.6"/>
-  <text x="600" y="868" text-anchor="middle" class="tb">EXPERT SLOT CACHE — 64 slots per layer, ~24 GiB</text>
+  <text x="600" y="868" text-anchor="middle" class="tb">EXPERT SLOT CACHE — 64 slots per layer, 23,084 MiB measured</text>
   <text x="600" y="894" text-anchor="middle" class="sub">hit: the weights are already here · miss: fetch them, and the compute thread waits</text>
 
   <g stroke="#7c8794" stroke-width="2.4" fill="none" marker-end="url(#a)">
@@ -113,7 +118,7 @@
   <!-- KV + resident -->
   <rect x="66" y="950" width="528" height="94" rx="12" fill="#faf7ff" stroke="#8b5cf6" stroke-width="1.6"/>
   <text x="330" y="984" text-anchor="middle" class="tb">KV CACHE — 200k context, ONE slot</text>
-  <text x="330" y="1010" text-anchor="middle" class="sub">~1.41 GiB · 7.05 KiB per token</text>
+  <text x="330" y="1010" text-anchor="middle" class="sub">1.32 GiB · 6.92 KiB per token</text>
   <text x="330" y="1033" text-anchor="middle" class="sub">compressed attention makes context cheap</text>
 
   <rect x="618" y="950" width="516" height="94" rx="12" fill="#ffffff" stroke="#5b8def" stroke-width="1.6"/>
@@ -121,7 +126,7 @@
   <text x="876" y="1010" text-anchor="middle" class="sub">88.2 % of what the model writes is</text>
   <text x="876" y="1033" text-anchor="middle" class="sub">reasoning, and the raven shows it</text>
 
-  <text x="600" y="1088" text-anchor="middle" class="sub">The GPU holds no whole model. What is resident is the 7.3 % every token touches, plus whichever</text>
+  <text x="600" y="1088" text-anchor="middle" class="sub">The GPU holds no whole model. What is resident is the 7.09 % every token touches, plus whichever</text>
   <text x="600" y="1110" text-anchor="middle" class="sub">experts the cache currently holds. Everything else stays on the drive.</text>
 
   <!-- ══ zone 2: the boundary ════════════════════════════════════════════ -->
@@ -152,14 +157,16 @@
   </g>
 
   <rect x="66" y="1366" width="1068" height="128" rx="12" fill="#fff0e6" stroke="#e8590c" stroke-width="1.8"/>
-  <text x="366" y="1408" text-anchor="middle" class="huge" fill="#e8590c">376.9 MiB</text>
-  <text x="366" y="1436" text-anchor="middle" class="sub">moved per token</text>
+  <!-- Centres at 340/600/860, not 366/600/834: the captions grew when the wait share picked up its
+       range and its condition, and at the old spacing the middle and right ones touched. -->
+  <text x="340" y="1408" text-anchor="middle" class="huge" fill="#e8590c">376.9 MiB</text>
+  <text x="340" y="1436" text-anchor="middle" class="sub">moved per token (preview)</text>
   <text x="600" y="1408" text-anchor="middle" class="huge" fill="#e8590c">4.31</text>
   <text x="600" y="1436" text-anchor="middle" class="sub">reads in flight (pre-mutex)</text>
-  <text x="834" y="1408" text-anchor="middle" class="huge" fill="#e8590c">56–59 %</text>
-  <text x="834" y="1436" text-anchor="middle" class="sub">of decode is this wait</text>
-  <text x="600" y="1462" text-anchor="middle" class="sub">The GPU idled three quarters of the time when this was measured, before the tier existed.</text>
-  <text x="600" y="1486" text-anchor="middle" class="sub">Latency-bound, not compute-bound and not bandwidth-bound.</text>
+  <text x="860" y="1408" text-anchor="middle" class="huge" fill="#e8590c">57.6–70.5 %</text>
+  <text x="860" y="1436" text-anchor="middle" class="sub">of decode is this wait, tier on</text>
+  <text x="600" y="1462" text-anchor="middle" class="sub">The wait is the three 0731 pairs of 2026-08-10; without the tier the same runs spend 78.2–80.7 % of decode there.</text>
+  <text x="600" y="1486" text-anchor="middle" class="sub">Latency-bound, not compute-bound and not bandwidth-bound. The bytes-per-token figure is a preview run (#28).</text>
 
   <!-- ══ zone 2b: the optional host tier ═════════════════════════════════ -->
   <rect x="34" y="1558" width="1132" height="200" rx="16" fill="#f0fbfa" stroke="#0f766e" stroke-width="2" stroke-dasharray="7 5"/>
@@ -175,7 +182,7 @@
   <text x="874" y="1652" text-anchor="middle" class="huge" fill="#2f9e5e">56.7 µs</text>
   <text x="874" y="1680" text-anchor="middle" class="sub">a miss served from here, against</text>
   <text x="874" y="1703" text-anchor="middle" class="sub">401.5 µs from the drive — 7.08x</text>
-  <text x="874" y="1730" text-anchor="middle" class="sub" fill="#2f9e5e">1.40–1.47x decode, three paired runs</text>
+  <text x="874" y="1730" text-anchor="middle" class="sub" fill="#2f9e5e">1.24–1.55x decode, three paired runs</text>
 
   <g stroke="#0f766e" stroke-width="2.4" fill="none" marker-end="url(#ao)">
     <path d="M590,1678 L608,1678"/>
@@ -185,44 +192,55 @@
   <rect x="34" y="1794" width="1132" height="286" rx="16" fill="#f8fafc" stroke="#94a3b8" stroke-width="2"/>
   <text x="600" y="1834" text-anchor="middle" class="zh" fill="#475569">ON NVMe — NOT RESIDENT</text>
 
-  <rect x="66" y="1860" width="380" height="188" rx="12" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
+  <rect x="66" y="1860" width="380" height="216" rx="12" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
   <text x="256" y="1896" text-anchor="middle" class="tb">THE MODEL FILE</text>
-  <text x="256" y="1928" text-anchor="middle" class="sub">DeepSeek-V4-Flash, UD-IQ3_XXS</text>
-  <text x="256" y="1954" text-anchor="middle" class="sub">95.9 GiB across four files</text>
-  <text x="256" y="1980" text-anchor="middle" class="sub">92.7 % of it is routed experts</text>
-  <text x="256" y="2018" text-anchor="middle" class="sub" fill="#94a3b8">fetched by the user, never shipped</text>
+  <text x="256" y="1934" text-anchor="middle" class="sub">DeepSeek-V4-Flash-0731, UD-IQ3_XXS</text>
+  <text x="256" y="1962" text-anchor="middle" class="sub">97.05 GiB across four files</text>
+  <text x="256" y="1990" text-anchor="middle" class="sub">92.9 % of it is routed experts</text>
+  <text x="256" y="2038" text-anchor="middle" class="sub" fill="#94a3b8">fetched by the user, never shipped</text>
 
-  <rect x="470" y="1860" width="664" height="188" rx="12" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
-  <text x="802" y="1896" text-anchor="middle" class="tb">ONE LAYER'S EXPERT POOL — 256 of them</text>
-  <g fill="#d5dbe3">
-    <rect x="510" y="1922" width="30" height="30" rx="6"/><rect x="552" y="1922" width="30" height="30" rx="6"/>
-    <rect x="594" y="1922" width="30" height="30" rx="6"/><rect x="636" y="1922" width="30" height="30" rx="6"/>
-    <rect x="678" y="1922" width="30" height="30" rx="6"/><rect x="720" y="1922" width="30" height="30" rx="6"/>
-    <rect x="762" y="1922" width="30" height="30" rx="6"/><rect x="804" y="1922" width="30" height="30" rx="6"/>
-    <rect x="846" y="1922" width="30" height="30" rx="6"/><rect x="888" y="1922" width="30" height="30" rx="6"/>
-    <rect x="930" y="1922" width="30" height="30" rx="6"/><rect x="972" y="1922" width="30" height="30" rx="6"/>
-    <rect x="1014" y="1922" width="30" height="30" rx="6"/><rect x="1056" y="1922" width="30" height="30" rx="6"/>
-  </g>
+  <!-- ALL 256 ARE DRAWN, and exactly six are lit. The earlier version drew a row of fourteen with
+       four of them red while the diagram claimed six of 256 twice over (decision 2, and the router
+       box) - a picture that argues with its own caption teaches the wrong ratio, and 4/14 is 29 %
+       where the real one is 2.3 %. The grey field is a tiled pattern rather than 250 rectangles:
+       same picture, a fraction of the file. -->
+  <rect x="470" y="1860" width="664" height="216" rx="12" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
+  <text x="802" y="1896" text-anchor="middle" class="tb">ONE LAYER'S EXPERT POOL — ALL 256 DRAWN</text>
+  <rect x="580" y="1914" width="444" height="108" fill="url(#pool)"/>
   <g fill="#e5484d">
-    <rect x="594" y="1922" width="30" height="30" rx="6"/><rect x="720" y="1922" width="30" height="30" rx="6"/>
-    <rect x="846" y="1922" width="30" height="30" rx="6"/><rect x="972" y="1922" width="30" height="30" rx="6"/>
+    <rect x="650" y="1914" width="10" height="10" rx="2"/>
+    <rect x="734" y="1928" width="10" height="10" rx="2"/>
+    <rect x="916" y="1942" width="10" height="10" rx="2"/>
+    <rect x="622" y="1970" width="10" height="10" rx="2"/>
+    <rect x="832" y="1984" width="10" height="10" rx="2"/>
+    <rect x="706" y="2012" width="10" height="10" rx="2"/>
   </g>
-  <text x="1098" y="1944" class="sub" fill="#94a3b8">…</text>
-  <text x="802" y="1986" text-anchor="middle" class="sub">red: the ones this token woke · grey: the ones it did not</text>
-  <text x="802" y="2018" text-anchor="middle" class="sub">the cache holds 64 of them, and a first touch can never be cached away</text>
+  <text x="802" y="2044" text-anchor="middle" class="sub">red: the 6 this token woke · grey: the 250 it did not</text>
+  <text x="802" y="2068" text-anchor="middle" class="sub">the cache holds 64 of them, and a first touch can never be cached away</text>
 
   <!-- ══ legend ══════════════════════════════════════════════════════════ -->
   <rect x="34" y="2112" width="1132" height="60" rx="12" fill="#ffffff" stroke="#e2e8f0"/>
+  <!-- Spaced by the measured width of each label and not by eye: at the old positions "crossing the
+       boundary" is 170px wide in a 180px stride and ran straight into the dot for "optional". -->
   <g class="lg">
-    <circle cx="76"  cy="2142" r="8" fill="#8b5cf6"/><text x="94"  y="2148">client / state</text>
-    <circle cx="250" cy="2142" r="8" fill="#5b8def"/><text x="268" y="2148">pipeline</text>
-    <circle cx="386" cy="2142" r="8" fill="#f0a72a"/><text x="404" y="2148">layer internals</text>
-    <circle cx="562" cy="2142" r="8" fill="#e5484d"/><text x="580" y="2148">experts</text>
-    <circle cx="686" cy="2142" r="8" fill="#e8590c"/><text x="704" y="2148">crossing the boundary</text>
-    <circle cx="866" cy="2142" r="8" fill="#0f766e"/><text x="884" y="2148">optional</text>
-    <circle cx="978" cy="2142" r="8" fill="#94a3b8"/><text x="996" y="2148">storage</text>
-    <circle cx="1084" cy="2142" r="8" fill="#2f9e5e"/><text x="1102" y="2148">measured</text>
+    <circle cx="72"   cy="2142" r="8" fill="#8b5cf6"/><text x="90"   y="2148">client / state</text>
+    <circle cx="220"  cy="2142" r="8" fill="#5b8def"/><text x="238"  y="2148">pipeline</text>
+    <circle cx="334"  cy="2142" r="8" fill="#f0a72a"/><text x="352"  y="2148">layer internals</text>
+    <circle cx="493"  cy="2142" r="8" fill="#e5484d"/><text x="511"  y="2148">experts</text>
+    <circle cx="601"  cy="2142" r="8" fill="#e8590c"/><text x="619"  y="2148">crossing the boundary</text>
+    <circle cx="824"  cy="2142" r="8" fill="#0f766e"/><text x="842"  y="2148">optional</text>
+    <circle cx="941"  cy="2142" r="8" fill="#94a3b8"/><text x="959"  y="2148">storage</text>
+    <circle cx="1051" cy="2142" r="8" fill="#2f9e5e"/><text x="1069" y="2148">measured</text>
   </g>
 
-  <text x="600" y="2198" text-anchor="middle" class="sub" fill="#94a3b8">measured 2026-08-07/09 · one RTX 5090, 63.4 GB RAM, one NVMe · -c 200000 -ngl 99 -np 1 --moe-stream --moe-stream-cache 64s --moe-stream-l2 32</text>
+  <!-- THE WHOLE SERVER LINE, on three lines rather than an abridged one. This footer sits outside
+       tools/check_operating_point.py: that checker reads README.md and install.ps1 as raw text and
+       has never seen this file, so an abbreviation here is a copy that drifts unwatched. Five flags
+       were missing from it, among them chat-template-file, which is the one 0731 cannot start
+       correctly without.
+       (Flag names are written without their leading dashes in this comment on purpose: a double
+       hyphen inside an XML comment is a parse error, and a browser stops rendering at it.) -->
+  <text x="600" y="2192" text-anchor="middle" class="sub" fill="#94a3b8">measured 2026-08-07/10 · one RTX 5090, 63.4 GB RAM, one NVMe · DeepSeek-V4-Flash-0731 UD-IQ3_XXS, four files</text>
+  <text x="600" y="2216" text-anchor="middle" class="sub" fill="#94a3b8">llama-server -c 200000 -ngl 99 -np 1 --jinja --slot-save-path DIR --chat-template-file 0731-chat-template.jinja</text>
+  <text x="600" y="2240" text-anchor="middle" class="sub" fill="#94a3b8">--moe-stream --moe-stream-cache 64s --moe-stream-io-threads 8 --moe-stream-direct --moe-stream-l2 32</text>
 </svg>

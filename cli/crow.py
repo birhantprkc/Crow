@@ -246,6 +246,59 @@ def paint_banner(text: str) -> str:
     )
     return f"{CROW_ACCENT}{shaded}{RESET}"
 
+
+# The three commands sit BESIDE the wordmark, one per line. Stacked underneath
+# they cost three lines of a header that is already four, and the mark is 38
+# columns of a terminal that has at least 80 -- the space was there the whole
+# time.
+#
+# The name is painted in the same yellow a slash command turns while it is being
+# typed (see read_line). One colour for one thing: the header is where the user
+# learns what the prompt will do, so it has to look like the prompt.
+HEADER_COMMANDS = (
+    ("/help", "for commands"),
+    ("/tools", "for what the model can call"),
+    ("/exit", "to leave"),
+)
+BANNER_GAP = 4
+
+
+def header_lines(version: str) -> list[str]:
+    """The wordmark and the commands as one block, already painted.
+
+    The column is measured off the widest banner row rather than written down,
+    so the commands do not drift when the mark changes -- which it just did.
+
+    Painted per line, not once around the whole block: wrapping the join would
+    leave every line but the first without its opening colour.
+    """
+    raw = BANNER.format(version=version).splitlines()
+    width = max((len(line.rstrip()) for line in raw), default=0)
+
+    # The right column in order: the three commands, a blank, the repository.
+    # The blank is a REAL entry rather than an offset, so the gap survives a
+    # command being added or taken away.
+    column = [f"{YELLOW}{name}{RESET}{DIM} {what}{RESET}"
+              for name, what in HEADER_COMMANDS]
+    column += ["", f"{CROW_ACCENT}{REPO_URL}{RESET}"]
+
+    # Centred against the WORDMARK, not against the whole block, so nothing ever
+    # lands beside the version line.
+    marks = [i for i, line in enumerate(raw) if "█" in line]
+    start = marks[0] + max(0, (len(marks) - len(column) + 1) // 2) if marks else 0
+
+    out = []
+    for i, line in enumerate(raw):
+        painted = paint_banner(line)
+        slot = i - start
+        if 0 <= slot < len(column) and column[slot]:
+            pad = " " * (width - len(line.rstrip()) + BANNER_GAP)
+            painted += pad + column[slot]
+        out.append(painted)
+    # Two blank lines under the version: the header is a block, and the endpoint
+    # below it is a different statement.
+    return out + ["", ""]
+
 # A quarter block travelling the corners: one cell, four frames, and it reads
 # as motion because only one quadrant is ever lit.
 #
@@ -1868,6 +1921,50 @@ def fetch_n_ctx(base_url: str, timeout: float = 5.0) -> int:
     return 0
 
 
+# A GGUF path carries two tails that are not the model's name: the shard counter
+# and the quantisation tag. Both come off. Anything the patterns do not
+# recognise is left standing rather than guessed at -- a name cut short is worse
+# than a name with a suffix, because only one of the two is silent about it.
+_GGUF_SHARD = re.compile(r"-\d{4,6}-of-\d{4,6}$")
+_GGUF_QUANT = re.compile(r"-(?:UD-)?(?:I?Q\d[A-Z0-9_]*|BF16|F16|F32|MXFP4)$", re.IGNORECASE)
+
+
+def model_display_name(path: str) -> str:
+    """`…\\DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf` → `DeepSeek-V4-Flash-0731`."""
+    name = os.path.basename((path or "").replace("\\", "/").rstrip("/"))
+    if name.lower().endswith(".gguf"):
+        name = name[: -len(".gguf")]
+    name = _GGUF_SHARD.sub("", name)
+    return _GGUF_QUANT.sub("", name) or name
+
+
+def fetch_model_name(base_url: str, timeout: float = 5.0) -> str:
+    """What the server actually has OPEN, or "" if it will not say.
+
+    Not `--model`. That one is a label in the request body — `crow` by default —
+    and a header that printed it would confirm the client's own argument while
+    the server ran something else entirely. Step 2 of the README exists because
+    that mix-up costs a measurement, and this line is the cheap half of it.
+
+    Its own request rather than a second return value from fetch_n_ctx: both are
+    milliseconds against a local socket, and threading a tuple through would
+    change a function three tests already pin.
+    """
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[: -len("/v1")]
+    try:
+        with urllib.request.urlopen(root + "/props", timeout=timeout) as resp:
+            doc = json.loads(resp.read().decode("utf-8")) or {}
+    except Exception:
+        return ""
+    settings = doc.get("default_generation_settings") or {}
+    for value in (doc.get("model_path"), doc.get("model"), settings.get("model")):
+        if isinstance(value, str) and value.strip():
+            return model_display_name(value)
+    return ""
+
+
 HELP = """commands:
   /help          this list
   /tools         the tools the model can call
@@ -2135,7 +2232,8 @@ def repl(args: argparse.Namespace) -> int:
     updates = start_update_check(getattr(args, "update_check", True))
     if getattr(args, "background", True):
         set_background()
-    print(paint_banner(BANNER.format(version=f"v{VERSION}")))
+    for line in header_lines(f"v{VERSION}"):
+        print(line)
 
     # Before the endpoint check, not after: the font has nothing to do with the
     # server. Behind the check it would never install on a machine where the
@@ -2163,11 +2261,12 @@ def repl(args: argparse.Namespace) -> int:
     room = f", {n_ctx / 1000:.0f}k context" if n_ctx else ""
     print(f"{BOLD}{args.model}{RESET} at {args.base_url} "
           f"{DIM}(health: {status}{room}){RESET}")
-    print(f"{DIM}/help for commands, /tools for what the model can call, "
-          f"/exit to leave.{RESET}")
-    # Its own line rather than appended to the one above: together they run past
-    # 80 columns, and a wrapped header is the first thing a new user sees.
-    print(f"{DIM}{REPO_URL}{RESET}")
+    # Under the address, because that is the pair: this endpoint, that model.
+    loaded = fetch_model_name(args.base_url)
+    if loaded:
+        print(f"{CROW_ACCENT}{loaded}{RESET}")
+    # The repository used to be printed here. It sits beside the wordmark now,
+    # under the commands, so the endpoint block is the endpoint and the model.
     print("")
 
     conversation = Conversation(args.system)

@@ -73,7 +73,9 @@ $L2_GIB            = 32
 # threshold at the nominal size excludes exactly the configuration that produced the figure.
 $L2_RAM_REQUIRED_GB = 60
 $DISK_INSTALL_GB   = 2      # the package, unpacked
-$DISK_MODEL_GB     = 96     # what the model will need later, reported not enforced
+# 97 and not 96: the 0731 GGUF is 97.05 GiB across four shards (print_info: file size, measured
+# 2026-08-11). The line this feeds and the download hint below it disagreed by a gigabyte until then.
+$DISK_MODEL_GB     = 97     # what the model will need later, reported not enforced
 
 # ---------------------------------------------------------------------------
 # Output
