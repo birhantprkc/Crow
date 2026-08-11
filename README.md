@@ -1,6 +1,5 @@
 <div align="center">
 
-![](docs/images/Crow_social_new.jpg)
 <h1>CROW</h1>
 
 <h3>A 304-billion-parameter coding model, at a 200k context. One graphics card. 64 GB of system RAM.</h3>
