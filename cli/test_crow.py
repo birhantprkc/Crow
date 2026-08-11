@@ -194,6 +194,39 @@ class TurnCostTests(unittest.TestCase):
         self.assertIn("200 tok", line)
         self.assertIn("prefill 100", line)
 
+    def test_the_rate_is_decode_speed_not_tokens_over_the_whole_round(self):
+        """The numbers are the live run of 2026-08-11, server log in the issue thread.
+
+        Round 1: 9,967 prompt tokens in 150.2 s, 136 decoded in 9.21 s -> 14.77 tok/s.
+        Round 2: 53 prompt tokens in 2.00 s, 116 decoded in 7.05 s -> 16.46 tok/s.
+
+        The first version divided 252 tokens by the 169 s the two rounds took in total and printed
+        **1.49 tok/s** for a turn the server had just measured at 14.8 and 16.5. Prefill is not
+        decode, and a rate that mixes them describes neither. The assertion pins both figures, so
+        collapsing them back into one round total goes red here."""
+        cost = crow.TurnCost()
+        cost.add_round({"predicted_n": 136, "predicted_ms": 9209.80,
+                        "prompt_n": 9967, "prompt_ms": 150196.81, "_client_total_s": 159.4})
+        cost.add_round({"predicted_n": 116, "predicted_ms": 7046.93,
+                        "prompt_n": 53, "prompt_ms": 2003.40, "_client_total_s": 9.05})
+        line = cost.line()
+        # 252 / (9.2098 + 7.04693) s = 15.50, which sits between the server's own 14.77 and 16.46
+        # for the two rounds. Prefill: 10,020 / (150.19681 + 2.0034) s = 65.83, against 66.36 and
+        # 26.46 per round -- the first round dominates because it carries 9,967 of the tokens.
+        self.assertIn("252 tok @ 15.50 tok/s", line)
+        self.assertIn("prefill 10,020 @ 65.83 tok/s", line)
+        self.assertNotIn("1.49", line)
+
+    def test_a_server_that_sends_only_rates_still_produces_one(self):
+        """`*_ms` is llama.cpp's field. A server that reports the rate and not the duration must
+        not silently drop to no rate at all -- that reads as 'not measured'."""
+        cost = crow.TurnCost()
+        cost.add_round({"predicted_n": 100, "predicted_per_second": 20.0,
+                        "prompt_n": 400, "prompt_per_second": 80.0})
+        line = cost.line()
+        self.assertIn("100 tok @ 20.00 tok/s", line)
+        self.assertIn("prefill 400 @ 80.00 tok/s", line)
+
     def test_cached_is_the_last_state_not_a_sum(self):
         """`cached` describes the prefix as it stands. Adding two rounds of it produces a number
         that means nothing -- and would silently look like a healthier cache than there is."""

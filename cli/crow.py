@@ -1605,6 +1605,12 @@ class TurnCost:
         self.decoded = 0
         self.prefilled = 0
         self.model_s = 0.0
+        # DECODE AND PREFILL TIME SEPARATELY, and not `model_s`, because tok/s is a decode figure.
+        # The first version divided tokens by the whole round and printed 1.49 tok/s for a turn the
+        # server had just measured at 14.77 and 16.46 -- 252 tokens against 169 s, of which 150 s
+        # were prefill. Caught by robin on the first live run, 2026-08-11.
+        self.decode_s = 0.0
+        self.prefill_s = 0.0
         self.tool_s = 0.0
         self.tool_calls = 0
         self.tool_errors = 0
@@ -1623,6 +1629,19 @@ class TurnCost:
         total = timings.get("_client_total_s")
         if total is not None:
             self.model_s += float(total)
+        # `*_ms` is what llama.cpp reports for each phase. The fallback derives the same seconds
+        # from the rate when only that is present, so a server that sends one and not the other
+        # still produces a rate rather than none.
+        for ms_key, n_key, rate_key, attr in (
+                ("predicted_ms", "predicted_n", "predicted_per_second", "decode_s"),
+                ("prompt_ms", "prompt_n", "prompt_per_second", "prefill_s")):
+            ms = timings.get(ms_key)
+            if ms is not None:
+                setattr(self, attr, getattr(self, attr) + float(ms) / 1000.0)
+                continue
+            n, rate = timings.get(n_key), timings.get(rate_key)
+            if n is not None and rate:
+                setattr(self, attr, getattr(self, attr) + float(n) / float(rate))
         cached = timings.get("_cached_tokens")
         prompt_n = timings.get("prompt_n")
         if cached is not None and prompt_n is not None:
@@ -1638,10 +1657,11 @@ class TurnCost:
         waited = time.monotonic() - self.started
         bits = [f"{self.rounds} round" + ("s" if self.rounds != 1 else "")]
         if self.decoded:
-            rate = self.decoded / self.model_s if self.model_s > 0 else None
+            rate = self.decoded / self.decode_s if self.decode_s > 0 else None
             bits.append(f"{self.decoded:,} tok" + (f" @ {rate:.2f} tok/s" if rate else ""))
         if self.prefilled:
-            bits.append(f"prefill {self.prefilled:,}")
+            rate = self.prefilled / self.prefill_s if self.prefill_s > 0 else None
+            bits.append(f"prefill {self.prefilled:,}" + (f" @ {rate:.2f} tok/s" if rate else ""))
         if self.cached is not None:
             bits.append(f"cached {self.cached:,}/{self.cached_of:,}")
         if self.tool_calls:
