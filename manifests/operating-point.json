@@ -5,7 +5,7 @@
   "_source_of_truth": "This file. README.md and install.ps1 are renderings of it for humans; the measurement scripts take their defaults from it.",
   "measured_on": "2026-08-10",
 
-  "version": "0.1.1",
+  "version": "0.2.0",
 
   "model": {
     "quant": "UD-IQ2_XXS",
@@ -24,9 +24,9 @@
     "_present_checked": "2026-08-10",
     "entries": {
       "operating-point": {
-        "path": "0731-gguf/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+        "path": "0731-gguf/UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00001-of-00003.gguf",
         "present": true,
-        "role": "the operating point 0.1.0 ships. Moved here from the preview GGUF on 2026-08-11: this file said DeepSeek-V4-Flash-0731 at the top and pointed this key at the preview, so every script calling Get-ModelPath operating-point without -Model measured the model the release had already replaced. That is how the prefill series in runs/2026-08-10/before-0731/ ended up published under a 0731 heading",
+        "role": "the operating point 0.2.0 ships. Moved here from UD-IQ3_XXS on 2026-08-12 (#89). This key has been wrong once before: on 2026-08-11 it still named the preview GGUF while the file above said 0731, so every script calling Get-ModelPath operating-point without -Model measured the model the release had already replaced -- that is how the prefill series in runs/2026-08-10/before-0731/ ended up published under a 0731 heading. A rung change therefore moves THIS key, not only model.quant",
         "_needs": "--chat-template-file manifests/0731-chat-template.jinja -- the embedded template fails the model's own golden vector 4"
       },
       "0731-iq3-xxs": {
@@ -37,7 +37,7 @@
       "0731-iq2-xxs": {
         "path": "0731-gguf/UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00001-of-00003.gguf",
         "present": true,
-        "role": "MEASUREMENT ONLY, #89 -- not a candidate for the operating point and not a rung anything ships. Downloaded and header-verified 2026-08-12: three shards, 5,257,664 + 49,890,588,800 + 40,964,890,464 B, 0 + 728 + 600 tensors, difference 0 on each. NOTE that this key names shard 1, which carries 0 tensors and 5 MB of metadata -- Get-ModelPath -MustExist is satisfied by it while the 90 GiB of weights beside it may be absent, which is exactly the state this file was in for six hours on 2026-08-12. The server's own expert cache line is the check that cannot be fooled: 18,121.52 MiB / 58 = 312.44 MiB per slot against 360.69 for iq3, i.e. 13.38 % smaller. Measured on it (#89): decode +4.8 %, ms per miss -8.8 %, hit rate -0.11 points, gate 9/9 -- two thirds of a byte reduction converts to stall on this drive, the rest is latency"
+        "role": "alias of operating-point since 0.2.0, for scripts that name the quantisation. Downloaded and header-verified 2026-08-12: three shards, 5,257,664 + 49,890,588,800 + 40,964,890,464 B, 0 + 728 + 600 tensors, difference 0 on each. NOTE that this key names shard 1, which carries 0 tensors and 5 MB of metadata -- Get-ModelPath -MustExist is satisfied by it while the 90 GiB of weights beside it may be absent, which is exactly the state this file was in for six hours on 2026-08-12. The server's own expert cache line is the check that cannot be fooled: 18,121.38 MiB / 58 = 312.44 MiB per slot against 360.69 for iq3, i.e. 13.38 % smaller. Measured on it (#89): decode +4.8 %, ms per miss -8.8 %, hit rate -0.11 points, gate 30/30 -- two thirds of a byte reduction converts to stall on this drive, the rest is latency"
       },
       "preview-iq3-xxs": {
         "path": "UD-IQ3_XXS/DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf",

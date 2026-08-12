@@ -6,6 +6,52 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
+## 0.2.0 — 2026-08-12
+
+**The operating point moves to `UD-IQ2_XXS`.** Same verdicts on the gate, cheaper misses, and
+3 GB more of the card left over. The binary is the one 0.1.0 shipped; what changed is which file
+it opens.
+
+### What was measured, #89
+
+Three graded runs of the ten-task gate per rung, own server per run, one variable changed:
+
+| | UD-IQ3_XXS | UD-IQ2_XXS |
+|---|---:|---:|
+| gate, three runs | 10/10 · 10/10 · 10/10 | 10/10 · **9/10** · 10/10 |
+| decode, median | 18.63 tok/s | **19.53** |
+| prefill, 1,884-token prompt | 118.26 tok/s | **133.10** |
+| ms per miss | 0.7097 | **0.6470** |
+| hit rate | 80.24 % | 80.13 % |
+| VRAM after load | 31,074 MiB | **27,994 MiB** |
+
+**The one 9/10 is the extractor, not the model.** `two-sum` in run 2 answered completely and
+correctly and put `from bisect import bisect_right` above the function; the extractor takes only a
+definition in column 0, so the call died on a `NameError`. Replayed against the extracted file to
+confirm. `merge-intervals` — the task that failed 3 of 3 byte-identically on `UD-Q2_K_XL` in #28 —
+is correct 3 of 3 here.
+
+**The mechanism is bytes per miss, not cache slots.** The hit rate moved 0.11 points across a
+13.38 % smaller slab. That is what a saturated cache looks like: 0731 covers 95 % of its selections
+in 9.0 % of the experts, and 58 slots is 22.7 % resident.
+
+### The file
+
+84.62 GiB across three shards — 90,860,736,928 B. Routed experts 78.11 GiB of that, 92.3 %.
+Resident tensors 6,378.40 MiB on CUDA0 plus 284.06 MiB of host buffers = 6.51 GiB. A slot costs
+327,614,463 B per expert across 43 layers, so 58 slots is 18,121.38 MiB — the server's own line.
+
+### Unmeasured on this rung, and marked wherever it appears
+
+The slot ladder (56/58/60/62/64) and the host-tier pairing that produces the **1.63x** were taken
+on `UD-IQ3_XXS` and are **not** repeated here. They describe a mechanism that did not change and
+carry numbers that did. 58 slots is carried over unchanged for the reason it was chosen — the cache
+is already past saturation, so the 4.6 GB the smaller slab frees would buy nothing.
+
+Also unmeasured: the vendor KLD gap (0.30789 → 0.48487, top-1 81.93 % → 76.60 %) against anything
+but ten algorithmic tasks. #46 puts the gate's own resolution at two tasks, so what is established
+is the **absence of a detectable loss**, not the absence of a loss.
+
 ## 0.1.1 — 2026-08-11
 
 **The operating point asked for more VRAM than the card has.** `--moe-stream-cache` goes from

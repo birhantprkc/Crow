@@ -8,7 +8,7 @@
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
-<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-0.1.1-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
+<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-0.2.0-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
 <a href="#requirements"><img src="https://img.shields.io/badge/platform-Windows%20x64%20%C2%B7%20CUDA-555555?style=flat-square&logo=nvidia&logoColor=76b900&labelColor=000000" alt="Platform"></a>
 <a href="cli/crow.py"><img src="https://img.shields.io/badge/client-Python%20stdlib%20only-555555?style=flat-square&logo=python&logoColor=ffd43b&labelColor=000000" alt="Python"></a>
 <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731"><img src="https://img.shields.io/badge/model-DeepSeek--V4--Flash--0731-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
@@ -105,7 +105,7 @@ irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1 | iex
 Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
 
 ```console
-  Crow 0.1.1
+  Crow 0.2.0
 
 [1/5] Checking this machine
       GPU  NVIDIA GeForce RTX 5090, 32607 MB
@@ -115,7 +115,7 @@ Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
       preflight  passed
 
 [2/5] Downloading the package
-      crow-0.1.1-win-x64.zip  [####################.....]  84%  424.1 MB / 506.4 MB  18.2 MB/s
+      crow-0.2.0-win-x64.zip  [####################.....]  84%  424.1 MB / 506.4 MB  18.2 MB/s
 
 [3/5] Verifying
       size  506.4 MB
@@ -128,7 +128,7 @@ Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
 [5/5] What is left to do
 ```
 
-**26 files, about 506 MB zipped** — `dist/crow-0.1.1-win-x64.zip`. The hash is shown as a
+**26 files, about 506 MB zipped** — `dist/crow-0.2.0-win-x64.zip`. The hash is shown as a
 placeholder rather than a value, and that is not laziness: this file is inside the archive it would
 be quoting, so printing the real digest here changes the archive and invalidates the digest. The
 one on your screen is compared against the release's manifest by the installer, which is where a
@@ -230,7 +230,7 @@ endpoint and the model the server actually has open:
    ██║     ██╔══██╗██║   ██║██║███╗██║
    ╚██████╗██║  ██║╚██████╔╝╚███╔███╔╝    https://github.com/nibor1896/Crow
     ╚═════╝╚═╝  ╚═╝ ╚═════╝  ╚══╝╚══╝
-   v0.1.1
+   v0.2.0
 
 
 crow at http://127.0.0.1:8081/v1 (health: ok, 200k context)
@@ -354,7 +354,7 @@ On first start the client installs its bundled typeface and writes `profiles.def
 **The client tells you.** On start it asks GitHub whether a newer release exists and, if there is one, prints it above the prompt together with the command that installs it:
 
 ```
-crow 0.1.2 is out (you have 0.1.1)
+crow 0.2.1 is out (you have 0.2.0)
   irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1 | iex
 ```
 
@@ -522,7 +522,7 @@ Everything above spends VRAM and drive bandwidth. The third resource on the mach
 idle, and a 64 GB box has room. `--moe-stream-l2 32` puts a second cache level there, between the
 VRAM slots and the drive.
 
-### What 0.1.1 measures
+### What 0.2.0 measures
 
 **Measured on `UD-IQ3_XXS`, the rung before this one, and not repeated on `UD-IQ2_XXS`.** With the
 tier on, the shipped rung measures 0.6470 ms per miss (#89); what the pairing looks like there is

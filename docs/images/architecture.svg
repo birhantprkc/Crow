@@ -35,7 +35,7 @@
   <text x="132" y="102" class="tag">DEEPSEEK-V4-FLASH-0731 · 304B PARAMETERS · 13B ACTIVE PER TOKEN · 43 LAYERS · 256 EXPERTS EACH</text>
 
   <rect x="34" y="126" width="1132" height="66" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-dasharray="6 5"/>
-  <text x="600" y="153" text-anchor="middle" class="tb" fill="#475569">HOST RAM: 32 GiB, page-locked, the optional expert tier · the 97.05 GiB model never lives here</text>
+  <text x="600" y="153" text-anchor="middle" class="tb" fill="#475569">HOST RAM: 32 GiB, page-locked, the optional expert tier · the 84.62 GiB model never lives here</text>
   <text x="600" y="180" text-anchor="middle" class="sub">Turn the tier off and the host holds nothing at all — the same binary streams every miss straight off the drive</text>
 
   <!-- ══ the four decisions ══════════════════════════════════════════════ -->
@@ -43,7 +43,7 @@
     <rect x="34" y="216" width="556" height="92" rx="12" fill="#f2fbf5" stroke="#69c98a" stroke-width="1.6"/>
     <circle cx="76" cy="262" r="21" fill="#2f9e5e"/><text x="76" y="270" text-anchor="middle" class="num">1</text>
     <text x="110" y="255" class="tb">QUANTISATION</text>
-    <text x="110" y="283" class="sub">UD-IQ3_XXS — 2.11 GiB of experts per token at most</text>
+    <text x="110" y="283" class="sub">UD-IQ2_XXS — 1.83 GiB of experts per token at most</text>
 
     <rect x="610" y="216" width="556" height="92" rx="12" fill="#f2fbf5" stroke="#69c98a" stroke-width="1.6"/>
     <circle cx="652" cy="262" r="21" fill="#2f9e5e"/><text x="652" y="270" text-anchor="middle" class="num">2</text>
@@ -64,7 +64,7 @@
   <!-- ══ zone 1: resident in VRAM ════════════════════════════════════════ -->
   <rect x="34" y="446" width="1132" height="676" rx="16" fill="#f5f9ff" stroke="#5b8def" stroke-width="2"/>
   <text x="600" y="486" text-anchor="middle" class="zh" fill="#2c5bac">RESIDENT IN VRAM</text>
-  <text x="600" y="514" text-anchor="middle" class="sub">30,548 MiB after load of 32,607, measured at 58 slots — 64 slots should read 32,404 and read 32,014: 390 MiB the driver moved out</text>
+  <text x="600" y="514" text-anchor="middle" class="sub">27,994 MiB after load of 32,607, measured at 58 slots. The 64-slot cliff — 32,404 expected, 32,014 read, 390 MiB the driver moved out — was measured on UD-IQ3_XXS and not repeated here</text>
 
   <!-- pipeline, two rows -->
   <rect x="66" y="540" width="240" height="86" rx="12" fill="#ffffff" stroke="#8b5cf6" stroke-width="1.8"/>
@@ -76,7 +76,7 @@
   <text x="511" y="600" text-anchor="middle" class="sub">/v1/chat/completions</text>
 
   <rect x="716" y="540" width="418" height="86" rx="12" fill="#f2fbf5" stroke="#2f9e5e" stroke-width="1.8"/>
-  <text x="925" y="573" text-anchor="middle" class="tb" fill="#2f9e5e">18.03 tok/s decode</text>
+  <text x="925" y="573" text-anchor="middle" class="tb" fill="#2f9e5e">19.53 tok/s decode</text>
   <text x="925" y="600" text-anchor="middle" class="sub">median of three paired runs · 1.63–1.65x</text>
 
   <g stroke="#7c8794" stroke-width="2.4" fill="none" marker-end="url(#a)">
@@ -90,7 +90,7 @@
 
   <rect x="94" y="712" width="292" height="98" rx="11" fill="#ffffff" stroke="#5b8def" stroke-width="1.6"/>
   <text x="240" y="748" text-anchor="middle" class="tb">ATTENTION + NORMS</text>
-  <text x="240" y="775" text-anchor="middle" class="sub">6.88 GiB, always resident</text>
+  <text x="240" y="775" text-anchor="middle" class="sub">6.51 GiB, always resident</text>
   <text x="240" y="798" text-anchor="middle" class="sub">7.08 % of the file</text>
 
   <rect x="418" y="712" width="240" height="98" rx="11" fill="#ffffff" stroke="#f0a72a" stroke-width="1.6"/>
@@ -104,7 +104,7 @@
   <text x="898" y="798" text-anchor="middle" class="sub">that currently holds that expert</text>
 
   <rect x="94" y="836" width="1012" height="72" rx="11" fill="#faf7ff" stroke="#8b5cf6" stroke-width="1.6"/>
-  <text x="600" y="868" text-anchor="middle" class="tb">EXPERT SLOT CACHE — 58 slots per layer, 20,920 MiB</text>
+  <text x="600" y="868" text-anchor="middle" class="tb">EXPERT SLOT CACHE — 58 slots per layer, 18,121 MiB</text>
   <text x="600" y="894" text-anchor="middle" class="sub">hit: the weights are already here · miss: fetch them, and the compute thread waits</text>
 
   <g stroke="#7c8794" stroke-width="2.4" fill="none" marker-end="url(#a)">
@@ -159,7 +159,7 @@
   <rect x="66" y="1366" width="1068" height="128" rx="12" fill="#fff0e6" stroke="#e8590c" stroke-width="1.8"/>
   <!-- Centres at 340/600/860, not 366/600/834: the captions grew when the wait share picked up its
        range and its condition, and at the old spacing the middle and right ones touched. -->
-  <text x="340" y="1408" text-anchor="middle" class="huge" fill="#e8590c">2.11 GiB</text>
+  <text x="340" y="1408" text-anchor="middle" class="huge" fill="#e8590c">1.83 GiB</text>
   <text x="340" y="1436" text-anchor="middle" class="sub">of experts per token at most</text>
   <text x="600" y="1408" text-anchor="middle" class="huge" fill="#e8590c">80–82 %</text>
   <text x="600" y="1436" text-anchor="middle" class="sub">expert cache hit rate on the gate</text>
@@ -194,8 +194,8 @@
 
   <rect x="66" y="1860" width="380" height="216" rx="12" fill="#ffffff" stroke="#94a3b8" stroke-width="1.6"/>
   <text x="256" y="1896" text-anchor="middle" class="tb">THE MODEL FILE</text>
-  <text x="256" y="1934" text-anchor="middle" class="sub">DeepSeek-V4-Flash-0731, UD-IQ3_XXS</text>
-  <text x="256" y="1962" text-anchor="middle" class="sub">97.05 GiB across four files</text>
+  <text x="256" y="1934" text-anchor="middle" class="sub">DeepSeek-V4-Flash-0731, UD-IQ2_XXS</text>
+  <text x="256" y="1962" text-anchor="middle" class="sub">84.62 GiB across three files</text>
   <text x="256" y="1990" text-anchor="middle" class="sub">92.9 % of it is routed experts</text>
   <text x="256" y="2038" text-anchor="middle" class="sub" fill="#94a3b8">fetched by the user, never shipped</text>
 
@@ -240,7 +240,7 @@
        correctly without.
        (Flag names are written without their leading dashes in this comment on purpose: a double
        hyphen inside an XML comment is a parse error, and a browser stops rendering at it.) -->
-  <text x="600" y="2192" text-anchor="middle" class="sub" fill="#94a3b8">measured 2026-08-11 · one RTX 5090, 63.4 GB RAM, one NVMe · DeepSeek-V4-Flash-0731 UD-IQ3_XXS, four files</text>
+  <text x="600" y="2192" text-anchor="middle" class="sub" fill="#94a3b8">measured 2026-08-12 · one RTX 5090, 63.4 GB RAM, one NVMe · DeepSeek-V4-Flash-0731 UD-IQ2_XXS, three files</text>
   <text x="600" y="2216" text-anchor="middle" class="sub" fill="#94a3b8">llama-server -c 200000 -ngl 99 -np 1 --jinja --slot-save-path DIR --chat-template-file 0731-chat-template.jinja</text>
   <text x="600" y="2240" text-anchor="middle" class="sub" fill="#94a3b8">--moe-stream --moe-stream-cache 58s --moe-stream-io-threads 8 --moe-stream-direct --moe-stream-l2 32</text>
 </svg>
