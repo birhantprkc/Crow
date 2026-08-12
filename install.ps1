@@ -472,13 +472,48 @@ function Resolve-LatestVersion {
 # ---------------------------------------------------------------------------
 
 function Get-FileWithProgress {
-    param([string] $Uri, [string] $OutFile, [string] $Label)
+    <#
+    Downloads $Uri to $OutFile, and RETRIES, because a single attempt is not enough.
+
+    Measured 2026-08-12 on this machine: GitHub's release-asset host answered a HEAD
+    with 200 and Content-Length 531,018,248, and the very next GET died with an empty
+    reply. A curl with --retry pulled the same range at 9.5 MB/s on its second try.
+    Two installs in a row failed here with "Fehler beim Senden der Anforderung" thrown
+    out of GetAsync -- after the preflight had already told the user everything was
+    fine, which is the worst place to give up.
+
+    So the whole attempt, connect and body, sits in a retry loop. A partial file is
+    deleted before the next try rather than resumed: Range support on that host is not
+    something this installer has measured, and a silently half-written archive would
+    fail the size and hash check two steps later with a misleading message.
+    #>
+    param([string] $Uri, [string] $OutFile, [string] $Label,
+          [int] $Attempts = 5, [int] $DelaySec = 3)
 
     # Windows PowerShell 5.1 does not load System.Net.Http by default, and the
     # failure is a TypeNotFound at the moment the download starts -- i.e. after
     # the preflight has already told the user everything is fine.
     Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+    for ($try = 1; $try -le $Attempts; $try++) {
+        try {
+            return Get-FileOnce -Uri $Uri -OutFile $OutFile -Label $Label
+        } catch {
+            if (Test-Path $OutFile) { Remove-Item $OutFile -Force -ErrorAction SilentlyContinue }
+            if ($try -ge $Attempts) {
+                Write-Host ""
+                throw ("download failed after {0} attempts: {1}" -f $Attempts, $_.Exception.Message)
+            }
+            Write-Host ("`r      {0}  attempt {1} of {2} failed ({3}), retrying in {4}s{5}" -f `
+                $Label, $try, $Attempts, $_.Exception.Message, $DelaySec, (" " * 20))
+            Start-Sleep -Seconds $DelaySec
+        }
+    }
+}
+
+function Get-FileOnce {
+    param([string] $Uri, [string] $OutFile, [string] $Label)
 
     $client = [System.Net.Http.HttpClient]::new()
     $client.Timeout = [TimeSpan]::FromHours(2)
