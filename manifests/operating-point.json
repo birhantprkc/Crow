@@ -32,6 +32,11 @@
         "present": true,
         "role": "alias of operating-point, for scripts that name the model generation. Downloaded and header-verified 2026-08-10. 378,208,256 B per expert. That is 288 MiB more per 64-slot cache than the preview, and it is what pushed 64 slots over the card: see server._moe_stream_cache_note"
       },
+      "0731-iq2-xxs": {
+        "path": "0731-gguf/UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00001-of-00003.gguf",
+        "present": true,
+        "role": "MEASUREMENT ONLY, #89 -- not a candidate for the operating point and not a rung anything ships. Downloaded and header-verified 2026-08-12: three shards, 5,257,664 + 49,890,588,800 + 40,964,890,464 B, 0 + 728 + 600 tensors, difference 0 on each. NOTE that this key names shard 1, which carries 0 tensors and 5 MB of metadata -- Get-ModelPath -MustExist is satisfied by it while the 90 GiB of weights beside it may be absent, which is exactly the state this file was in for six hours on 2026-08-12. The server's own expert cache line is the check that cannot be fooled: 18,121.52 MiB / 58 = 312.44 MiB per slot against 360.69 for iq3, i.e. 13.38 % smaller. Measured on it (#89): decode +4.8 %, ms per miss -8.8 %, hit rate -0.11 points, gate 9/9 -- two thirds of a byte reduction converts to stall on this drive, the rest is latency"
+      },
       "preview-iq3-xxs": {
         "path": "UD-IQ3_XXS/DeepSeek-V4-Flash-UD-IQ3_XXS-00001-of-00004.gguf",
         "present": true,
