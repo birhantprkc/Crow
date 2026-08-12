@@ -19,10 +19,10 @@
 <td align="center"><b>304B</b><br><sub>parameters</sub></td>
 <td align="center"><b>13.3B</b><br><sub>active per token</sub></td>
 <td align="center"><b>200k</b><br><sub>context, one slot</sub></td>
-<td align="center"><b>97.1 GiB</b><br><sub>model on disk</sub></td>
-<td align="center"><b>20.43 GiB</b><br><sub>expert cache in VRAM</sub></td>
-<td align="center"><b>18.03</b><br><sub>tok/s decode, gate median of 3 arms</sub></td>
-<td align="center"><b>112.69</b><br><sub>tok/s cold prefill, harness prompt</sub></td>
+<td align="center"><b>84.6 GiB</b><br><sub>model on disk</sub></td>
+<td align="center"><b>17.70 GiB</b><br><sub>expert cache in VRAM</sub></td>
+<td align="center"><b>19.53</b><br><sub>tok/s decode, gate median of 3 runs</sub></td>
+<td align="center"><b>133.10</b><br><sub>tok/s cold prefill, 1,884-token prompt</sub></td>
 <td align="center"><b>0 EUR</b><br><sub>spent so far</sub></td>
 </tr>
 </table>
@@ -31,25 +31,34 @@
 
 <br>
 
-> **Every number on this page was measured on 2026-08-11, on DeepSeek-V4-Flash-0731, at the
-> operating point this release ships — `--moe-stream-cache 58s`, on an RTX 5090 (32,607 MiB)
-> with 63.4 GB of DDR5.** 16 GB of VRAM is the installer's floor, not a second measured point:
-> below 32 GB expect fewer cache slots, and at 200k about 1.4 GiB of that budget goes to KV
-> instead — a trade that was never run (#25). Nothing below 63.4 GB of system RAM has been run
-> either; the **1.63x** the [host tier](#4-the-host-ram-tier-optional) buys was measured with the
-> flag off on this machine, not on a smaller one. Raw protocols are under `runs/2026-08-11/`.
-> Figures from earlier models and from cache sizes this release no longer ships have been removed
-> rather than carried forward.
+> **The operating point this release ships is `DeepSeek-V4-Flash-0731` at `UD-IQ2_XXS`,
+> `--moe-stream-cache 58s`, on an RTX 5090 (32,607 MiB) with 63.4 GB of DDR5.** Everything about
+> the model itself — file size, expert share, slab and cache size, resident tensors — is read from
+> the tensor tables of all three shards and confirmed against the server's own printed line. The
+> throughput and quality figures on this page were measured on 2026-08-12 (#89): three graded runs
+> of the ten-task gate per rung, own server per run, one variable changed.
+>
+> **Two sets of figures on this page were measured on the previous rung, `UD-IQ3_XXS`, and have NOT
+> been repeated here — they are marked where they appear:** the slot ladder (56/58/60/62/64) and the
+> host-tier pairing that produces the **1.63x**. They describe the mechanism, not this file, and the
+> mechanism did not change; the numbers would. 58 slots is carried over unchanged for the same
+> reason it was chosen: 0731 covers 95 % of selections in 9.0 % of its experts, so at 22.7 % resident
+> the cache is already saturated and more slots buy nothing measurable.
+>
+> 16 GB of VRAM is the installer's floor, not a second measured point: below 32 GB expect fewer
+> cache slots, and at 200k about 1.4 GiB of that budget goes to KV instead — a trade that was never
+> run (#25). Nothing below 63.4 GB of system RAM has been run either. Raw protocols are under
+> `runs/2026-08-12/` and `runs/2026-08-11/`.
 
 ## What this is, in one paragraph
 
 **Crow runs a frontier-scale coding model on a single consumer graphics card by leaving most of the model on the SSD.**
 
-A mixture-of-experts model is mostly asleep. Every token wakes only **6 of the 256 experts** in each of its 43 layers, and the routed experts that can be asleep are 90.17 of the file's 97.05 GiB — 92.9 %. Crow keeps the parts that *every* token needs in VRAM — attention, norms, shared experts, **6,625.00 MiB on CUDA0 plus 414.26 MiB of host buffers = 6.88 GiB, 7.08 % of the file** — holds the **58** most useful experts per layer beside them in a slot cache of **20,919.88 MiB = 20.43 GiB**, and reads whatever is missing straight off the drive while the GPU is still working.
+A mixture-of-experts model is mostly asleep. Every token wakes only **6 of the 256 experts** in each of its 43 layers, and the routed experts that can be asleep are 78.11 of the file's 84.62 GiB — 92.3 %. Crow keeps the parts that *every* token needs in VRAM — attention, norms, shared experts, **6,378.40 MiB on CUDA0 plus 284.06 MiB of host buffers = 6.51 GiB, 7.69 % of the file** — holds the **58** most useful experts per layer beside them in a slot cache of **18,121.38 MiB = 17.70 GiB**, and reads whatever is missing straight off the drive while the GPU is still working.
 
 The context window is 200,000 tokens, on a single slot, and it costs **1,353.50 MiB = 1.32 GiB** of the card — 32.25 + 1029.00 + 35.00 + 257.25 MiB of KV buffers at `n_ctx = 200192`, so 6.92 KiB per token. Compressed attention makes context the cheap part here. A coding session holds files and history, so a 16k or 64k window would be measuring a product nobody uses.
 
-**The host's spare RAM can be spent to make the misses cheaper.** A machine with 64 GB has tens of gigabytes doing nothing. `--moe-stream-l2 32` keeps expert weights there between the VRAM slots and the drive, so a miss that finds its expert in host memory never reaches the drive at all. Over three paired runs, the measured cost of a miss falls from **1.331–1.383 ms without the tier to 0.713–0.722 ms with it**, and decode goes from **11.04 to 18.03 tok/s** at the median arm — a factor of **1.63**. The price is 32 GiB of page-locked memory. The flag defaults to off; the installer puts it into the command it prints on any machine that has the RAM — [what it buys and what it costs](#4-the-host-ram-tier-optional).
+**The host's spare RAM can be spent to make the misses cheaper.** A machine with 64 GB has tens of gigabytes doing nothing. `--moe-stream-l2 32` keeps expert weights there between the VRAM slots and the drive, so a miss that finds its expert in host memory never reaches the drive at all. Over three paired runs the measured cost of a miss falls from **1.331–1.383 ms without the tier to 0.713–0.722 ms with it**, and decode goes from **11.04 to 18.03 tok/s** at the median arm — a factor of **1.63** *(measured on the previous rung, `UD-IQ3_XXS`, not repeated on this one)*. With the tier on, this rung measures **0.6470 ms per miss** (2026-08-12). The price is 32 GiB of page-locked memory. The flag defaults to off; the installer puts it into the command it prints on any machine that has the RAM — [what it buys and what it costs](#4-the-host-ram-tier-optional).
 
 That is the whole idea. Everything below is what it costs to make it actually run.
 
@@ -80,8 +89,8 @@ That is the whole idea. Everything below is what it costs to make it actually ru
 | | |
 |---|---|
 | **GPU** | NVIDIA, **16 GB VRAM minimum**, 32 GB for the measured operating point. Below 16 GB was never measured and is unsupported |
-| **System RAM** | **64 GB for the operating point**, which spends 32 GiB on the [host tier](#4-the-host-ram-tier-optional). 32 GB runs without it, at **1.63x less throughput** |
-| **Disk** | ~2 GB for Crow, **97.1 GiB for the model** — 104,207,848,032 B across four files, measured on the finished download |
+| **System RAM** | **64 GB for the operating point**, which spends 32 GiB on the [host tier](#4-the-host-ram-tier-optional). 32 GB runs without it, at **1.63x less throughput** *(measured on the previous rung, `UD-IQ3_XXS`, not repeated on this one)* |
+| **Disk** | ~2 GB for Crow, **84.6 GiB for the model** — 90,860,736,928 B across three files, measured on the finished download |
 | **OS** | Windows x64. The streaming path uses `FILE_FLAG_NO_BUFFERING` and a handle pool, both Windows-specific |
 | **Python** | 3.8+, for the client only. Standard library, nothing to install |
 
@@ -125,10 +134,10 @@ be quoting, so printing the real digest here changes the archive and invalidates
 one on your screen is compared against the release's manifest by the installer, which is where a
 hash belongs. The `README.md` line moves with this file's size for the same reason.
 
-The model is **not** part of that download. It is 97.1 GiB, it belongs to somebody else, and an installer that spends hours on it before you have seen anything work is the wrong shape. The last step prints the one command that fetches it:
+The model is **not** part of that download. It is 84.6 GiB, it belongs to somebody else, and an installer that spends hours on it before you have seen anything work is the wrong shape. The last step prints the one command that fetches it:
 
 ```powershell
-hf download unsloth/DeepSeek-V4-Flash-0731-GGUF --include "UD-IQ3_XXS/*" --local-dir $env:LOCALAPPDATA\Crow\models
+hf download unsloth/DeepSeek-V4-Flash-0731-GGUF --include "UD-IQ2_XXS/*" --local-dir $env:LOCALAPPDATA\Crow\models
 ```
 
 > **A trap worth knowing about.** When `hf` cannot reach the repository it prints `✓ Downloaded` and returns the local directory — failure that looks exactly like success. Check that four files totalling ~97 GiB actually arrived.
@@ -141,7 +150,7 @@ hf download unsloth/DeepSeek-V4-Flash-0731-GGUF --include "UD-IQ3_XXS/*" --local
 
 ```powershell
 $env:LOCALAPPDATA\Crow\bin\llama-server.exe `
-  -m $env:LOCALAPPDATA\Crow\models\UD-IQ3_XXS\DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf `
+  -m $env:LOCALAPPDATA\Crow\models\UD-IQ2_XXS\DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00001-of-00003.gguf `
   --port 8081 -c 200000 -ngl 99 -np 1 --jinja `
   --slot-save-path $env:LOCALAPPDATA\Crow\session `
   --chat-template-file $env:LOCALAPPDATA\Crow\templates\0731-chat-template.jinja `
@@ -160,7 +169,7 @@ Every flag carries a reason, and none of them is taste:
 | `-np 1` | One user, one stream. `-np 4` splits the context into 4 × 50k and is the harness case, not the CLI |
 | `--jinja` | Use the **model's** chat template instead of llama.cpp's built-in one. Without it the client's replayed reasoning is dropped and the prompt cache breaks on every turn |
 | `--moe-stream` | Route expert tensors through the slot cache instead of placing them |
-| `--moe-stream-cache 58s` | 58 of 256 experts per layer, **20,919.88 MiB = 20.43 GiB**. Not 64: six slots fewer is the difference between a stable machine and one where single requests halve at random — see [the ceiling](#the-cache-has-a-ceiling-and-it-is-the-card) below |
+| `--moe-stream-cache 58s` | 58 of 256 experts per layer, **18,121.38 MiB = 17.70 GiB**. Not 64: six slots fewer is the difference between a stable machine and one where single requests halve at random — see [the ceiling](#the-cache-has-a-ceiling-and-it-is-the-card) below |
 | `--moe-stream-io-threads 8` | I/O workers. **With `--moe-stream-direct` each of them reads through its own file handle**; without it there is no handle pool and every worker goes through the one shared handle, which Windows serialises (`src/llama-mmap.cpp:266-277`, fallback at `:457`). The two flags are one setting with two names |
 | `--moe-stream-direct` | Unbuffered reads, and the thing that opens the handle pool at all. Without it `read_raw_at` falls back to the shared handle and the pool is gone |
 | `--slot-save-path` | Where the server writes its KV state so a session survives a restart. Without it the next start re-prefills the whole history. Must be an existing directory or the server refuses to start |
@@ -374,7 +383,7 @@ Two things it will not do without being asked. It will not overwrite a directory
 
 ## Common questions
 
-**Does it need the model in RAM?** No. The 97.1 GiB file is never held in host memory. What the host holds is the optional tier — 32 GiB of page-locked memory when `--moe-stream-l2 32` is on, and nothing when it is off.
+**Does it need the model in RAM?** No. The 84.6 GiB file is never held in host memory. What the host holds is the optional tier — 32 GiB of page-locked memory when `--moe-stream-l2 32` is on, and nothing when it is off.
 
 **What does `--moe-stream-l2` do?** It keeps expert weights in page-locked host RAM between the VRAM slots and the drive. Three pairs on 2026-08-11: decode **18.03 against 11.04 tok/s** at the median arm, 1.65x / 1.63x / 1.63x per pair, and the stall per miss falls from 1.331–1.383 ms to 0.713–0.722 ms. The price is 32 GiB of memory the rest of the machine cannot use. The installer prints the flag above 60 GB of detected RAM, because 32 GiB on ~64 GB is the only ratio that has been run. [Details](#4-the-host-ram-tier-optional).
 
@@ -382,7 +391,7 @@ Two things it will not do without being asked. It will not overwrite a directory
 
 **Why Windows only?** The streaming path rests on `FILE_FLAG_NO_BUFFERING`, positional `OVERLAPPED` reads and a per-worker handle pool, because Windows serialises I/O on the file object. The POSIX side of the primitive exists and compiles; it has never been run.
 
-**Why not just buy more VRAM?** The model is 97.1 GiB and no consumer card holds it, so streaming is not a workaround for a small card — it is the only shape that runs at all. And more cache is not free either: past a point it stops fitting beside what the display needs, which is [the ceiling](#the-cache-has-a-ceiling-and-it-is-the-card).
+**Why not just buy more VRAM?** The model is 84.6 GiB and no consumer card holds it, so streaming is not a workaround for a small card — it is the only shape that runs at all. And more cache is not free either: past a point it stops fitting beside what the display needs, which is [the ceiling](#the-cache-has-a-ceiling-and-it-is-the-card).
 
 ---
 
@@ -409,7 +418,7 @@ That leaves a set which *is* needed by every token — attention, norms, embeddi
 
 ![The always-active set](docs/images/eq_resident_set.png)
 
-**6,625.00 MiB on CUDA0 plus 414.26 MiB of CUDA_Host buffers = 6.88 GiB, 7.08 % of the 97.05 GiB file.** The routed experts are the other **90.17 GiB** — 378,208,256 B per expert across all 43 layers, times 256 experts. It is GPU-resident by construction at `-ngl 99`; nothing had to be built for it. The remaining 92.9 % is the streaming problem.
+**6,378.40 MiB on CUDA0 plus 284.06 MiB of CUDA_Host buffers = 6.51 GiB, 7.69 % of the 84.62 GiB file.** The routed experts are the other **90.17 GiB** — 378,208,256 B per expert across all 43 layers, times 256 experts. It is GPU-resident by construction at `-ngl 99`; nothing had to be built for it. The remaining 92.9 % is the streaming problem.
 
 Routing is concentrated enough for a cache to be worth anything, and the server prints it itself — per layer, then averaged over the 43. Across the three cumulative blocks of the `r1-l2` arm, the share of experts needed to cover 80 % of selections reads **23.0 %, then 24.6 %, then 25.7 %**; for 50 % it is 7.7 → 8.5 → 8.7 %, and for 95 % it is 43.0 → 45.4 → 48.4 %, at Gini **0.744 → 0.725 → 0.711**. Every one of those widens with run length: the distribution flattens as more experts have been touched at all. It does not flatten enough to make the cache pointless, and a single block quoted alone understates it.
 
@@ -418,11 +427,18 @@ Routing is concentrated enough for a cache to be worth anything, and the server 
 Each streamed layer gets a fixed number of expert slots in VRAM. A hit means the weights are already there; a miss means fetching them while the compute thread waits. At the shipped 58 slots the cache is **20,919.88 MiB = 20.43 GiB**, and the server's own hit rate over a graded arm is **80.10 – 81.81 %**.
 
 <a id="the-cache-has-a-ceiling-and-it-is-the-card"></a>
-**The cache has a ceiling, and it is the card itself.** A slot costs **360.69 MiB** — the server
+**The cache has a ceiling, and it is the card itself.** A slot costs **312.44 MiB** — the server
 prints the cache size at every step and the figure is constant to five digits across all of them.
 More slots is more throughput right up to the edge, and then the allocation stops fitting beside
 what the display needs, the driver moves the difference into host memory without printing anything,
 and the cost is not a constant slowdown but an unpredictable one:
+
+
+> **These figures were measured on `UD-IQ3_XXS`, the rung before this one, and have not been
+> repeated on `UD-IQ2_XXS`.** The mechanism they describe is unchanged; the numbers are not this
+> file's. On the shipped rung a slot costs 312.44 MiB rather than 360.69, so every cache size in
+> the table below is about 13.4 % smaller and the VRAM column correspondingly lower — how the
+> ladder's shape moves with that has not been run (#89).
 
 | cache | cache size | prefill, 1,374 tok | decode, 200 tok | VRAM used | **free** |
 |---|---:|---:|---:|---:|---:|
@@ -508,6 +524,10 @@ VRAM slots and the drive.
 
 ### What 0.1.1 measures
 
+**Measured on `UD-IQ3_XXS`, the rung before this one, and not repeated on `UD-IQ2_XXS`.** With the
+tier on, the shipped rung measures 0.6470 ms per miss (#89); what the pairing looks like there is
+unrun.
+
 Three pairs on 2026-08-11, `runs/2026-08-11/slot58-pairs`. Each arm is a fresh server at
 `--moe-stream-cache 58s`; both arms of a pair solve the same tasks; the pairs solve different ones.
 
@@ -534,14 +554,16 @@ in the log, which is the honest reading of "what this server did", not "what it 
 the reason the difference can be read at all: the band each arm occupies is narrower than the gap
 between the arms. It is still three arms a side.
 
-**Cold prefill at the shipped 58 slots: 112.69 tok/s** over three runs at 1,374 tokens, spread
+**Cold prefill on `UD-IQ3_XXS` at 58 slots: 112.69 tok/s** — the rung before this one, kept because
+the method is the point. On `UD-IQ2_XXS` the same cold start measures **133.10 tok/s**, on a
+1,884-token prompt rather than 1,374, so the two are not one series (#89). Over three runs at 1,374 tokens, spread
 1.013x, fresh server each (`runs/2026-08-11/slot58-prefill/`). This is a first start on an empty
 expert cache, which is the case a user actually meets. **It is a harness prompt** — the generator
 repeats a short word list, which routes to far fewer distinct experts than real text, so it is the
 upper end of what a cold start does, not the middle.
 
-**What it costs in VRAM.** 378,208,256 B per expert across the 43 layers, so the 58-slot cache is
-20,919.88 MiB. Measured at 200k on one slot: **30,548 MiB of 32,607 after load**, leaving
+**What it costs in VRAM.** 327,614,463 B per expert across the 43 layers, so the 58-slot cache is
+18,121.38 MiB. Measured at 200k on one slot: **30,548 MiB of 32,607 after load**, leaving
 **2,059 MiB**. Everything your display does has to fit in that remainder, which is what the section
 above is about.
 
@@ -564,7 +586,7 @@ number:
   the tier's **capacity**, not how full it is — at a 33–40 % hit rate most of what a token wants is
   still elsewhere.
 - **The payload that capacity can hold is about 21.0 GiB, in a 32.00 GiB allocation.** The average
-  slab in this model is 378,208,256 B / 129 slabs per expert = 2,931,847 B, while every slot is
+  slab in this model is 327,614,463 B / 129 slabs per expert = 2,539,647 B, while every slot is
   4,464,640 B wide. 7,695 × 2,931,847 B = 22,560,562,665 B = **21.0 GiB of weights** inside an
   allocation of 7,695 × 4,464,640 B = 32.00 GiB; the remaining **~11.0 GiB is stride slack**, the
   price of an allocator that cannot fragment. "32 GiB" is what the flag takes from the machine, not

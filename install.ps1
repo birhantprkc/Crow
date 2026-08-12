@@ -77,9 +77,10 @@ $L2_GIB            = 32
 # threshold at the nominal size excludes exactly the configuration that produced the figure.
 $L2_RAM_REQUIRED_GB = 60
 $DISK_INSTALL_GB   = 2      # the package, unpacked
-# 97 and not 96: the 0731 GGUF is 97.05 GiB across four shards (print_info: file size, measured
-# 2026-08-11). The line this feeds and the download hint below it disagreed by a gigabyte until then.
-$DISK_MODEL_GB     = 97     # what the model will need later, reported not enforced
+# 85 and not 84: the 0731 UD-IQ2_XXS GGUF is 84.62 GiB across three shards (90,860,736,928 B,
+# read from the tensor tables of all three, 2026-08-12). The line this feeds and the download hint
+# below it disagreed by a gigabyte on the previous rung until that was fixed; keep them in step.
+$DISK_MODEL_GB     = 85     # what the model will need later, reported not enforced
 
 # ---------------------------------------------------------------------------
 # Output
@@ -1141,13 +1142,13 @@ if ($py) { Write-Item "python" "$($py.Source)" "ok" }
 else     { Write-Item "python" "not on the PATH -- the client needs it" "warn" }
 
 Write-Host ""
-Write-Host "  1. The model. It is NOT part of this install: 97.1 GiB, four files, and it" -ForegroundColor DarkGray
+Write-Host "  1. The model. It is NOT part of this install: 84.6 GiB, three files, and it" -ForegroundColor DarkGray
 Write-Host "     belongs to somebody else." -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "       DeepSeek-V4-Flash-0731, quantised by unsloth to UD-IQ3_XXS" -ForegroundColor White
+Write-Host "       DeepSeek-V4-Flash-0731, quantised by unsloth to UD-IQ2_XXS" -ForegroundColor White
 Write-Host "       https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "    hf download unsloth/DeepSeek-V4-Flash-0731-GGUF --include 'UD-IQ3_XXS/*' --local-dir $InstallTo\models" -ForegroundColor White
+Write-Host "    hf download unsloth/DeepSeek-V4-Flash-0731-GGUF --include 'UD-IQ2_XXS/*' --local-dir $InstallTo\models" -ForegroundColor White
 Write-Host ""
 # Measured 2026-08-07: when hf cannot reach the repository it prints a tick and
 # returns the local directory. Failure that looks like success is worth one line
@@ -1185,7 +1186,7 @@ Write-Host ""
 # --moe-stream-l2 is derived is tracked as #87 rather than guessed at here.
 Write-Host "  2. Then start the server, and the client in a second terminal:" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "    $InstallTo\bin\llama-server.exe -m $InstallTo\models\UD-IQ3_XXS\DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf ``" -ForegroundColor White
+Write-Host "    $InstallTo\bin\llama-server.exe -m $InstallTo\models\UD-IQ2_XXS\DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00001-of-00003.gguf ``" -ForegroundColor White
 # --jinja is not optional here. Without it llama-server uses its own built-in
 # template instead of the model's, the client's replayed reasoning is dropped,
 # and the prompt cache breaks on every turn -- measured 2026-08-08, 138.8-242.3 s
