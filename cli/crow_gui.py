@@ -1146,7 +1146,31 @@ class Api:
         self.push({"k": "up", "model": None, "n_ctx": self._n_ctx,
                    "tokens": self._context_tokens})
 
+    @staticmethod
+    def tools_listing() -> str:
+        """What the model can call, derived from TOOLS rather than written here.
+
+        THE SAME SOURCE THE TERMINAL USES. `crow.py`'s `format_tools` builds its
+        listing out of the same list; a second one typed by hand would drift the
+        first time a tool is added, and the window would name something the
+        model does not have.
+        """
+        lines = []
+        for entry in TOOLS:
+            spec = entry.get("function") or {}
+            head = (spec.get("description") or "").strip().split(". ")[0].rstrip(".")
+            lines.append("  %-14s %s" % (spec.get("name", "?"), head))
+        return "the model can call:\n" + "\n".join(lines)
+
     def send(self, text: str) -> None:
+        # SLASH COMMANDS ARE ANSWERED HERE, NOT BY THE MODEL. Typed into the
+        # window they used to travel to the server as an ordinary question --
+        # the input's own placeholder offers /tools, so the one it names is
+        # answered where it is typed.
+        if text.strip().lower() == "/tools":
+            self.push({"k": "user", "t": text})
+            self.push({"k": "note", "t": self.tools_listing()})
+            return
         if self._worker and self._worker.is_alive():
             return
         INTERRUPT.clear()

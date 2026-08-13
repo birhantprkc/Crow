@@ -6,6 +6,58 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
+## 0.3.0 — 2026-08-13
+
+**Crow gets a second client: a window, over the same core.** `cli/crow_gui.py` is a pywebview window
+on the same conversation, the same session file and the same server as `cli/crow.py`. Neither wraps
+the other, neither is needed to use the other, and both ship in the same package.
+
+### New
+
+- **The window.** Streaming with a live counter, foldable thought blocks, code blocks with a copy
+  button, a chat list with rename / archive / delete, `/tools`, and a chip that says whether tools
+  run or are only shown. Tools are **shown** by default — #55 and #88 are open, and a window that
+  ran shell commands without saying so would answer that question silently.
+- **`cli/crow_core.py`** now carries what both clients share: conversation, request body, SSE read,
+  tool loop, cost line, where a thought block begins. `cli/crow.py` went from 2,942 to 1,701 lines.
+- **The installer installs `pywebview`** into the interpreter it found. A failed pip does not fail
+  the install — the terminal client is complete without it, and the exact command to finish the
+  window by hand is printed with that interpreter's real path.
+- **The preflight asks for the WebView2 runtime instead of Tk**, before the download, out of the
+  registry — all three views, because on the development machine only the 32-bit one answers.
+
+### Fixed
+
+- **The chat list lost chats.** A chat was given its file when it was *restored* rather than when it
+  was *left*, so every launch wrote another copy and deleting them brought one straight back. A chat
+  with no file of its own was written into `session.json` when the user switched away — a file
+  nothing lists and the next turn overwrites. A renamed chat lost its name because `save_session`
+  writes six keys and the file whole.
+- **A warm session was never saved.** The warm-cache flag was passed as the fourth argument of
+  `save_session`, which is `path`; the call then died inside `os.path.dirname` and was swallowed.
+- **Every cost line reported no thinking share** — it travelled as a message the page has no case for.
+- **The taskbar button did nothing.** A frameless window is created without `WS_MINIMIZEBOX`, that
+  bit is ignored without `WS_SYSMENU`, and the shell reads the style once, when it registers the button.
+
+### Known, and not fixed here
+
+- **One aborted read in 50 outlived its grace** (`race_runs 50`, `race_leaked 1`, one run). The
+  normal path holds: the next question was answered 8.04 s after the abort, under the 30 s threshold.
+- **`READ_TIMEOUT_S` is 20 s in the window**, while the worst prefill measured on a resumed 21k
+  session is 469.51 s — a resumed session whose cache does not hold can be cut off mid-prefill.
+- **Slash commands other than `/tools` do not exist in the window**; they go to the model as text.
+- **`timings` arrives on almost every chunk**: 12 of 14 at `predicted_n 13`, one run.
+
+### Measured
+
+`cli/test_crow.py` 327/327 · `cli/test_crow_core.py` 96/96 · `cli/test_crow_gui.py` 47/47 ·
+`tools/test_run_server_block.py` 24/24 · `check_shared_core` 44/44 · `check_operating_point` 4/4 ·
+`install.ps1 -Selftest` 74 checks.
+
+The operating point is unchanged from 0.2.0. E14 ran the window against it: 7 of 7 capabilities
+held; two checks that live only in the page — folding a thought block, typing during a turn — are
+reported as **not measured** rather than green.
+
 ## 0.2.0 — 2026-08-12
 
 **The operating point moves to `UD-IQ2_XXS`.** Same verdicts on the gate, cheaper misses, and

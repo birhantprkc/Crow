@@ -50,7 +50,7 @@ A local package is never deleted afterwards; a downloaded one is.
 #>
 [CmdletBinding()]
 param(
-    [string] $Version   = "0.2.0",
+    [string] $Version   = "0.3.0",
     [string] $InstallTo = "$env:LOCALAPPDATA\Crow",
     [string] $SourceUrl = "",
     [switch] $Force,
@@ -224,7 +224,7 @@ function Test-TkFloor {
     it synthetic values. A check that can only be exercised by owning the hardware
     it checks for is a check nobody ever tests.
 
-    PythonPath and TkPatchlevel are empty strings when the probe found nothing.
+    PythonPath and WebView2Version are empty strings when the probe found nothing.
     They live HERE, in the preflight, and not in the last step where the Python
     line used to sit: this function is the only thing in this script that runs
     before the download, and a warning is worth what it costs the person reading
@@ -240,7 +240,7 @@ function Test-Preflight {
         [bool]   $Is64Bit,
         [version] $PsVersion,
         [string] $PythonPath = "",
-        [string] $TkPatchlevel = ""
+        [string] $WebView2Version = ""
     )
 
     $problems = @()
@@ -266,18 +266,23 @@ function Test-Preflight {
         $warnings += ((Format-Num $FreeDiskGb 0) + " GB free. The package fits, but the model needs about $DISK_MODEL_GB GB more")
     }
 
-    # ONE CAUSE, ONE LINE, which is why this is a chain and not three independent
-    # ifs: without an interpreter there is nothing to ask about Tk, and an
-    # installer that prints "no python" and "no tkinter" for one missing download
-    # has told the user about two problems they do not have.
+    # ONE CAUSE, ONE LINE, which is why this is a chain and not two independent
+    # ifs: without an interpreter there is nothing to ask about the window, and
+    # an installer that prints "no python" and "no runtime" for one missing
+    # download has told the user about two problems they do not have.
+    #
+    # THE WINDOW'S PROMISE HAS TWO HALVES AND ONLY ONE IS ASKED HERE. The
+    # WebView2 runtime is readable from the registry before anything is
+    # downloaded; whether `pip install pywebview` may write into the Python it
+    # found is not knowable until it is tried, and that happens after the
+    # download. Claiming both here would put a green line in front of a
+    # condition that fails later -- the same shape as the Python row before
+    # 0.2.0, which charged half a gigabyte for its warning.
     if (-not $PythonPath) {
-        $warnings += "python is not on the PATH. BOTH clients need it -- the terminal one and the window. Python 3.8 or newer, standard library only"
+        $warnings += "python is not on the PATH. BOTH clients need it -- the terminal one and the window. Python 3.8 or newer; the terminal client needs nothing beyond the standard library"
     }
-    elseif (-not $TkPatchlevel) {
-        $warnings += "this python has no working tkinter. cli\crow.py runs in a terminal without it; cli\crow_gui.py is the window and does not"
-    }
-    elseif (-not (Test-TkFloor -Patchlevel $TkPatchlevel -Floor $TK_MIN)) {
-        $warnings += "Tk $TkPatchlevel, below the $TK_MIN the window is written against (measured against 8.6.15). The terminal client does not care"
+    elseif (-not $WebView2Version) {
+        $warnings += "no WebView2 runtime found. cli\crow.py runs in a terminal without it; cli\crow_gui.py is the window and renders in it. It ships with Windows 11 and with Edge"
     }
 
     return [pscustomobject]@{
@@ -313,55 +318,40 @@ function Get-MachineFacts {
     # The two client prerequisites, asked here so the preflight can report them
     # before anything is downloaded rather than after.
     #
-    # THE PROBE OPENS A REAL Tk ROOT AND WITHDRAWS IT, which is more than reading
-    # tkinter.TkVersion would cost and is the only thing that answers the question
-    # asked. TkVersion is a constant compiled into the _tkinter extension: it says
-    # 8.6 on a machine whose tcl/tk directory was never shipped, where `import
-    # tkinter` still succeeds and the window still cannot open. withdraw() runs
-    # before anything is mapped, so nothing paints; tools/check_gui_prereqs.py
-    # probes exactly this way and for exactly this reason.
+    # THE RUNTIME IS READ OUT OF THE REGISTRY, and all three views are asked.
+    # Measured 2026-08-13 on the development machine: the version sits under
+    # HKLM\SOFTWARE\WOW6432Node -- the 32-bit view -- and BOTH the 64-bit view
+    # and HKCU come back empty. A probe that asks only one of the three reports
+    # "no runtime" on a machine that has one, and it reports it in the safe
+    # direction, which is the direction nobody notices.
+    #
+    # No version floor. Crow has no measured one: the window renders in whatever
+    # WebView2 the machine has, and the only question the preflight can answer
+    # honestly before the download is whether there is one at all.
     $py     = Get-Command python -ErrorAction SilentlyContinue
-    $pyPath = ""
-    $tk     = ""
-    if ($py) {
-        $pyPath = $py.Source
-        # SINGLE QUOTES INSIDE THE PYTHON, and this is not a style choice. PowerShell
-        # 5.1 strips the double quotes out of an argument on its way to a native
-        # executable, so a probe written with "info" reaches python as
-        # r.tk.call(info, patchlevel) and dies of NameError -- measured while
-        # writing this, and it looks exactly like a machine without Tk.
-        $probe  = "import tkinter; r = tkinter.Tk(); r.withdraw(); print(r.tk.call('info', 'patchlevel')); r.destroy()"
-        # A PYTHON WITHOUT TKINTER PRINTS A TRACEBACK, and this script runs under
-        # $ErrorActionPreference = "Stop", where a native command's stderr is an
-        # ErrorRecord and an ErrorRecord is fatal. Left alone, the very machine
-        # this check exists for would have the installer die at step 1 with a
-        # Python traceback on screen instead of one warning line.
-        $prevEap = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
+    $pyPath = if ($py) { $py.Source } else { "" }
+    $wv     = ""
+    $guid   = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+    foreach ($key in @(
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$guid",
+        "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$guid",
+        "HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$guid")) {
         try {
-            $lines = @(& $py.Source -c $probe 2>$null)
-            $rc    = $LASTEXITCODE
-        } finally {
-            $ErrorActionPreference = $prevEap
-        }
-        # The 255 lesson, in the one place this script grew a second native call:
-        # a python that cannot import tkinter exits 1, and the script's own exit
-        # code is whatever the last native call left behind. A failed PROBE must
-        # not turn a completed install into a failure any caller can see.
-        $global:LASTEXITCODE = 0
-        if ($rc -eq 0 -and $lines.Count) { $tk = ([string]$lines[0]).Trim() }
+            $pv = (Get-ItemProperty -LiteralPath $key -Name pv -ErrorAction Stop).pv
+            if ($pv) { $wv = [string]$pv; break }
+        } catch { }
     }
 
     return [pscustomobject]@{
-        Gpu          = $gpu
-        VramMb       = $vram
-        RamGb        = $ramGb
-        FreeDiskGb   = $freeGb
-        HasNvidiaSmi = [bool]$smi
-        Is64Bit      = [Environment]::Is64BitOperatingSystem
-        PsVersion    = $PSVersionTable.PSVersion
-        PythonPath   = $pyPath
-        TkPatchlevel = $tk
+        Gpu             = $gpu
+        VramMb          = $vram
+        RamGb           = $ramGb
+        FreeDiskGb      = $freeGb
+        HasNvidiaSmi    = [bool]$smi
+        Is64Bit         = [Environment]::Is64BitOperatingSystem
+        PsVersion       = $PSVersionTable.PSVersion
+        PythonPath      = $pyPath
+        WebView2Version = $wv
     }
 }
 
@@ -831,7 +821,7 @@ function Invoke-Selftest {
     Write-Host "install.ps1 selftest"
 
     $good = @{ VramMb=32607; RamGb=63.4; FreeDiskGb=450; HasNvidiaSmi=$true; Is64Bit=$true; PsVersion=[version]"5.1"
-               PythonPath="C:\Python313\python.exe"; TkPatchlevel="8.6.15" }
+               PythonPath="C:\Python313\python.exe"; WebView2Version="151.0.4129.78" }
 
     C "the development machine passes"            ((Test-Preflight @good).Ok)
     C "and passes without warnings"               ((Test-Preflight @good).Warnings.Count -eq 0)
@@ -867,32 +857,34 @@ function Invoke-Selftest {
     # they are asked in THIS function, which is the only thing in this script that
     # runs before the download. A copy of these checks in the last step would pass
     # nothing here and would still be too late.
-    $noPy = $good.Clone(); $noPy.PythonPath = ""; $noPy.TkPatchlevel = ""
+    $noPy = $good.Clone(); $noPy.PythonPath = ""; $noPy.WebView2Version = ""
     C "no python warns and does NOT block"        ((Test-Preflight @noPy).Ok -and (Test-Preflight @noPy).Warnings.Count -gt 0)
     # One missing download, one line. Two warnings for one cause is the installer
     # describing a problem the user does not have.
     C "a missing python is one warning, not two"  ((Test-Preflight @noPy).Warnings.Count -eq 1)
 
-    $noTk = $good.Clone(); $noTk.TkPatchlevel = ""
-    C "python without tkinter warns"              ((Test-Preflight @noTk).Ok -and (Test-Preflight @noTk).Warnings.Count -gt 0)
-    C "and says which client that costs"          ((((Test-Preflight @noTk).Warnings) -match 'crow_gui').Count -gt 0)
+    $noWv = $good.Clone(); $noWv.WebView2Version = ""
+    C "no WebView2 runtime warns"                 ((Test-Preflight @noWv).Ok -and (Test-Preflight @noWv).Warnings.Count -gt 0)
+    C "and does NOT block the install"            ((Test-Preflight @noWv).Ok)
+    C "and says which client that costs"          ((((Test-Preflight @noWv).Warnings) -match 'crow_gui').Count -gt 0)
+    C "a runtime that is there warns about none"  ((Test-Preflight @good).Warnings.Count -eq 0)
 
-    $oldTk = $good.Clone(); $oldTk.TkPatchlevel = "8.5.19"
-    C "Tk below the floor warns"                  ((Test-Preflight @oldTk).Ok -and (Test-Preflight @oldTk).Warnings.Count -gt 0)
+    # THE PROMISE THE PREFLIGHT MAY NOT MAKE. pywebview is installed after the
+    # download, so nothing before it may claim the window will run -- a green
+    # line in front of a condition that fails later is the shape 0.2.0 removed
+    # from the Python row, and putting it back for the window would undo it.
+    C "the preflight says nothing about pywebview" (
+        (((Test-Preflight @good).Warnings + (Test-Preflight @noWv).Warnings +
+          (Test-Preflight @noPy).Warnings) -match 'pywebview').Count -eq 0)
 
-    # The floor itself, both directions, because a comparison that only ever says
-    # yes would pass every case above while shipping a window onto a Tk that
-    # cannot draw it. 8.6.15 is the measured reference value, 8.6 the shipped
-    # bound -- the same pair tools/check_gui_prereqs.py is written against.
-    C "Tk 8.6.15 clears the 8.6 floor"            (Test-TkFloor "8.6.15" "8.6")
-    C "Tk 8.6 clears its own floor"               (Test-TkFloor "8.6" "8.6")
-    C "Tk 9.0 clears it"                          (Test-TkFloor "9.0" "8.6")
-    C "Tk 8.5.19 does not"                        (-not (Test-TkFloor "8.5.19" "8.6"))
-    C "Tk 8 alone does not - silence is not 8.6"  (-not (Test-TkFloor "8" "8.6"))
-    C "a version with a letter still reads"       (Test-TkFloor "8.7a2" "8.6")
-    C "an unreadable version does not pass"       (-not (Test-TkFloor "not-a-version" "8.6"))
-    C "and neither does an empty one"             (-not (Test-TkFloor "" "8.6"))
-    C "the shipped floor is 8.6"                  ($TK_MIN -eq "8.6")
+    # THE PIP STEP, held against the source rather than run: running it would
+    # write into this machine's Python, and a selftest that installs packages is
+    # a selftest nobody dares run twice.
+    $pipSrc = Get-Content -LiteralPath $PSCommandPath -Raw
+    C "pip is called on the interpreter found"    ($pipSrc -match '\$facts\.PythonPath -m pip install')
+    C "a failed pip prints the manual command"    ($pipSrc -match '-m pip install pywebview" -ForegroundColor White')
+    C "and does not become the exit code"         ($pipSrc -match '(?s)pipRc = \$LASTEXITCODE.*?global:LASTEXITCODE = 0')
+    C "a failed pip says the CLI is unaffected"   ($pipSrc -match 'terminal client is unaffected')
 
     # BOTH START LINES, IN ORDER, AND THE SECOND ONE OUT OF THE CHECKER'S WINDOW.
     # This is the half state this stage was written against, and it cannot be
@@ -1166,12 +1158,12 @@ Write-Item "Python"   $(if ($facts.PythonPath) { $facts.PythonPath } else { "not
 # Reported even when it is missing, because the two clients differ in exactly this
 # one prerequisite and a line that only appears on machines that have it would
 # leave the other half wondering which client the install is short of.
-Write-Item "Tk"       $(if ($facts.TkPatchlevel) { "$($facts.TkPatchlevel), the window needs $TK_MIN" } else { "not available -- the terminal client does not need it" }) `
-                      $(if ($facts.TkPatchlevel -and (Test-TkFloor -Patchlevel $facts.TkPatchlevel -Floor $TK_MIN)) { "ok" } else { "warn" })
+Write-Item "WebView2" $(if ($facts.WebView2Version) { "$($facts.WebView2Version), the window renders in it" } else { "not found -- the terminal client does not need it" }) `
+                      $(if ($facts.WebView2Version) { "ok" } else { "warn" })
 
 $pf = Test-Preflight -VramMb $facts.VramMb -RamGb $facts.RamGb -FreeDiskGb $facts.FreeDiskGb `
                      -HasNvidiaSmi $facts.HasNvidiaSmi -Is64Bit $facts.Is64Bit -PsVersion $facts.PsVersion `
-                     -PythonPath $facts.PythonPath -TkPatchlevel $facts.TkPatchlevel
+                     -PythonPath $facts.PythonPath -WebView2Version $facts.WebView2Version
 
 foreach ($w in $pf.Warnings) { Write-Item "warning:" $w "warn" }
 if (-not $pf.Ok) {
@@ -1418,6 +1410,41 @@ if (Test-Path -LiteralPath $binDir) {
 # Created here rather than by the client, because the server needs it first.
 New-Item -ItemType Directory -Force -Path (Join-Path $InstallTo "session") | Out-Null
 
+# THE WINDOW'S ONE DEPENDENCY, and the only thing this installer puts anywhere
+# outside its own directory. It runs HERE and not in the preflight because it
+# cannot be answered earlier: whether pip may write into the interpreter this
+# machine happens to have is knowable only by trying.
+#
+# A FAILURE DOES NOT END THE INSTALL. The terminal client is complete without
+# it, everything downloaded is already on disk and verified, and the one thing
+# the user needs in that case is the command that finishes the job by hand --
+# printed with the interpreter's real path, because `pip` alone on the PATH can
+# be a different Python than the one Crow will run.
+if ($facts.PythonPath) {
+    Write-Host ""
+    Write-Host "  pywebview  the window needs it; installing into $($facts.PythonPath)" -ForegroundColor DarkGray
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $facts.PythonPath -m pip install --disable-pip-version-check --quiet pywebview 2>&1 |
+            ForEach-Object { }
+        $pipRc = $LASTEXITCODE
+    } catch {
+        $pipRc = 1
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    # The 255 lesson, third time: a failed pip must not become this script's
+    # exit code on an install that otherwise landed.
+    $global:LASTEXITCODE = 0
+    if ($pipRc -eq 0) {
+        Write-Item "pywebview" "installed" "ok"
+    } else {
+        Write-Item "pywebview" "could not be installed -- the terminal client is unaffected" "warn"
+        Write-Host "             $($facts.PythonPath) -m pip install pywebview" -ForegroundColor White
+    }
+}
+
 Write-Step "What is left to do"
 
 # The python line that used to stand here has MOVED, it was not dropped: it is
@@ -1521,7 +1548,7 @@ Write-Host ""
 #
 # The selftest holds the margin at "the last printed flag is inside the checker's
 # window", three characters stricter than the checker for the reason given there.
-Write-Host "     Or the same conversation in a window, if step 1 found Tk:" -ForegroundColor DarkGray
+Write-Host "     Or the same conversation in a window, if pywebview installed above:" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "    python $InstallTo\cli\crow_gui.py" -ForegroundColor White
 Write-Host ""

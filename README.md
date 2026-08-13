@@ -8,7 +8,7 @@
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
-<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-0.2.0-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
+<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-0.3.0-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
 <a href="#requirements"><img src="https://img.shields.io/badge/platform-Windows%20x64%20%C2%B7%20CUDA-555555?style=flat-square&logo=nvidia&logoColor=76b900&labelColor=000000" alt="Platform"></a>
 <a href="cli/crow.py"><img src="https://img.shields.io/badge/client-Python%20stdlib%20only-555555?style=flat-square&logo=python&logoColor=ffd43b&labelColor=000000" alt="Python"></a>
 <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731"><img src="https://img.shields.io/badge/model-DeepSeek--V4--Flash--0731-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
@@ -26,6 +26,12 @@
 <td align="center"><b>0 EUR</b><br><sub>spent so far</sub></td>
 </tr>
 </table>
+
+<br>
+
+<img src="docs/images/window.png" alt="Crow's window: the chat list on the left, a folded thought block, a code block with a copy button, and the context meter under the input" width="920">
+
+<sub><b>The window.</b> <code>cli/crow_gui.py</code> — same core, same session file, same server as the terminal client. Both ship in the same package.</sub>
 
 </div>
 
@@ -92,10 +98,11 @@ That is the whole idea. Everything below is what it costs to make it actually ru
 | **System RAM** | **64 GB for the operating point**, which spends 32 GiB on the [host tier](#4-the-host-ram-tier-optional). 32 GB runs without it, at **1.63x less throughput** *(measured on the previous rung, `UD-IQ3_XXS`, not repeated on this one)* |
 | **Disk** | ~2 GB for Crow, **84.6 GiB for the model** — 90,860,736,928 B across three files, measured on the finished download |
 | **OS** | Windows x64. The streaming path uses `FILE_FLAG_NO_BUFFERING` and a handle pool, both Windows-specific |
-| **Python** | 3.8+, for the clients. Standard library, nothing to install |
-| **Tk** | **8.6 or newer**, for the window (`cli/crow_gui.py`) only. It ships with the standard Windows Python; measured against 8.6.15 under Python 3.13.3. The terminal client never touches it |
+| **Python** | 3.8+, for the clients. **The terminal client needs the standard library and nothing else** |
+| **WebView2** | For the window (`cli/crow_gui.py`) only. Ships with Windows 11 and with every Edge install; measured here as `151.0.4129.78`. The terminal client never touches it |
+| **pywebview** | For the window only, ~2 MB. **The installer runs `pip install pywebview` for you** — this is the one dependency Crow does not carry itself, and it is the price of a window that renders the design instead of approximating it |
 
-The installer looks at all of this **before** it downloads anything, but only two of the rows can stop it: fewer than 16,000 MB of VRAM, and less than 2 GB free on the install drive. System RAM, room for the model, a missing Python and a missing or too-old Tk are **reported as warnings and the install continues** (`install.ps1:249-281`) — the table is the measured profile, not a gate.
+The installer looks at all of this **before** it downloads anything, but only two of the rows can stop it: fewer than 16,000 MB of VRAM, and less than 2 GB free on the install drive. System RAM, room for the model, a missing Python and a missing WebView2 runtime are **reported as warnings and the install continues** — the table is the measured profile, not a gate.
 
 All five of those warnings are raised in the preflight, which is the step before the download. That was not always true of the Python row: until 0.2.0 it was asked in the last step, so a machine without Python heard *"the client needs it"* after fetching 506 MB. It is the same sentence either way and only one of the two placings charges half a gigabyte for it.
 
@@ -116,7 +123,7 @@ Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
       Disk  364.3 GB free on C:
       Windows  64-bit, PowerShell 5.1.26100.8875
       Python  C:\Users\you\AppData\Local\Programs\Python\Python313\python.exe
-      Tk  8.6.15, the window needs 8.6
+      WebView2  151.0.4129.78, the window renders in it
       preflight  passed
 
 [2/5] Downloading the package
@@ -143,9 +150,9 @@ would be quoting, so printing the real digest here changes the archive and inval
 The count and the size became placeholders for a duller reason — nothing in this repository checks
 them. They were true of 0.2.0 as it shipped (26 files, 506.4 MB in `dist/crow-0.2.0-win-x64.zip`,
 measured on the package) and the next one that ships a file more makes them quietly false, in the
-one document a reviewer reads. That next one is already here rather than hypothetical: the tree now
-builds a 0.2.0 carrying two clients, so the same version number packs 28 files — which is the
-argument above happening to its own example. A number that no check can defend either moves into `tools/check_operating_point.py`
+one document a reviewer reads. That next one is this one: 0.3.0 carries two clients and a shared
+core, so the same archive packs more files than the sentence above ever named — which is the
+argument happening to its own example. A number that no check can defend either moves into `tools/check_operating_point.py`
 beside the flags and the version literal, or it comes out of the README; letting it go stale is the
 one option that is not available. This one came out. What is on your screen is compared against the
 release's own manifest by the installer, file by file and hash by hash, which is where those numbers
@@ -263,7 +270,7 @@ endpoint and the model the server actually has open:
    ██║     ██╔══██╗██║   ██║██║███╗██║
    ╚██████╗██║  ██║╚██████╔╝╚███╔███╔╝    https://github.com/nibor1896/Crow
     ╚═════╝╚═╝  ╚═╝ ╚═════╝  ╚══╝╚══╝
-   v0.2.0
+   v0.3.0
 
 
 crow at http://127.0.0.1:8081/v1 (health: ok, 200k context)
@@ -274,8 +281,8 @@ The last line is not the `-m` you passed — that is `crow`, at the front of the
 model name is read back out of the server's `/props`, so an endpoint serving something else says so
 directly under its own address.
 
-Or the window, which needs Tk as well — what it shows and where it differs is
-[its own section](#using-the-window):
+Or the window, which needs `pywebview` as well — the installer puts it there, and what the window
+shows and where it differs is [its own section](#using-the-window):
 
 ```powershell
 python $env:LOCALAPPDATA\Crow\cli\crow_gui.py
@@ -452,7 +459,7 @@ the terminal-profile writing, which belongs to the client that lives in a termin
 **The client tells you.** On start it asks GitHub whether a newer release exists and, if there is one, prints it above the prompt together with the command that installs it:
 
 ```
-crow 0.2.1 is out (you have 0.2.0)
+crow 0.3.1 is out (you have 0.3.0)
   irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1 | iex
 ```
 
@@ -620,7 +627,7 @@ Everything above spends VRAM and drive bandwidth. The third resource on the mach
 idle, and a 64 GB box has room. `--moe-stream-l2 32` puts a second cache level there, between the
 VRAM slots and the drive.
 
-### What 0.2.0 measures
+### What 0.3.0 measures
 
 **Measured on `UD-IQ3_XXS`, the rung before this one, and not repeated on `UD-IQ2_XXS`.** With the
 tier on, the shipped rung measures 0.6470 ms per miss (#89); what the pairing looks like there is
