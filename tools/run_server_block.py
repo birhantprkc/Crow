@@ -318,8 +318,24 @@ def props_gate(props: dict, manifest: dict) -> list[str]:
                 break
         except (TypeError, ValueError):
             continue
-    if want_ctx and got_ctx and got_ctx != int(want_ctx):
-        problems.append("n_ctx is %d, the manifest says %d" % (got_ctx, int(want_ctx)))
+    if want_ctx and got_ctx:
+        want = int(want_ctx)
+        # LLAMA.CPP ROUNDS THE WINDOW UP, and the shipped point is a number it
+        # rounds: `-c 200000` comes back from /props as 200192. README.md tells
+        # the reader to expect exactly that. An equality check therefore called
+        # every correctly started server wrong -- measured 2026-08-13, on the
+        # first run of this block against a real server.
+        #
+        # AND THE FIXTURE COULD NOT SEE IT: shipped_props() answers with the
+        # manifest's own number, which is the one value no server returns. That
+        # is the shape of a suite measuring itself.
+        #
+        # WHAT THE GATE IS FOR is a MEASUREMENT server on the same machine --
+        # 65536 or 16384, the windows the harness runs -- and a rounding of
+        # under half a thousand tokens is not one. Anything below the manifest,
+        # or more than one rounding above it, is still red.
+        if not want <= got_ctx < want + 512:
+            problems.append("n_ctx is %d, the manifest says %d" % (got_ctx, want))
     return problems
 
 
@@ -1038,6 +1054,24 @@ def probe_ii(block: Block) -> Finding:
     finding = Finding("ii", PROBE_ONELINE["ii"])
     started = time.monotonic()
 
+    # BEFORE ANY SERVER TIME IS SPENT ON IT. Both doors have to open the same
+    # file, and when they cannot this probe has nothing to measure -- saying so
+    # costs nothing, while four turns against two different files cost the run
+    # and look like an answer.
+    env, problem = cli_environment()
+    if problem:
+        finding.say(problem)
+        finding.seconds = time.monotonic() - started
+        # A REFUSAL LEAVES A FILE TOO. The report links a run for every probe,
+        # and the one that explains why nothing was measured is the one a reader
+        # will look for -- an empty link there reads as a tool that fell over.
+        finding.run = block.write("ii-roundtrip.json", json.dumps(
+            {"measured": False, "why": problem,
+             "session_dir": crow_core.SESSION_DIR,
+             "default_session_dir": default_session_dir()}, indent=1))
+        return finding.invalid("the two clients cannot be pointed at one session"
+                               " file, so the round trip has no subject")
+
     # -- forward: two turns in the window, then the CLI reads the file -------
     win = Window(block.base_url)
     try:
@@ -1050,7 +1084,7 @@ def probe_ii(block: Block) -> Finding:
     finally:
         win.close()
 
-    forward = _cli(block, ["/exit"], block.args.turn_limit)
+    forward = _cli(block, ["/exit"], block.args.turn_limit, env)
     said = resumed_count(forward["stdout"] + forward["stderr"])
     finding.say("the CLI reported: %s"
                 % ("resumed: %d messages" % said if said is not None
@@ -1059,7 +1093,7 @@ def probe_ii(block: Block) -> Finding:
 
     # -- backward: two turns in the CLI, then the window has to SHOW them ----
     backward = _cli(block, [QUESTIONS["word"], QUESTIONS["prefix"], "/exit"],
-                    block.args.turn_limit * 2)
+                    block.args.turn_limit * 2, env)
     restored = crow_core.load_session(block.base_url, crow_core.DEFAULT_SYSTEM)
     in_file = len(restored[0]) if restored else 0
     finding.say("after two CLI turns the session file holds %d messages" % in_file)
@@ -1104,19 +1138,60 @@ def probe_ii(block: Block) -> Finding:
                         % " and ".join(which), **numbers)
 
 
-def _cli(block: Block, lines: list[str], limit: float) -> dict:
+def default_session_dir() -> str:
+    """Where crow_core puts the session when nobody has moved it."""
+    return os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+                        "Crow", "session")
+
+
+def cli_environment() -> tuple[dict | None, str | None]:
+    """The environment cli/crow.py has to run in to see the SAME session file.
+
+    THE CLI IS ANOTHER PROCESS, AND `--session-dir` NEVER REACHED IT. The flag
+    rebinds a module global inside THIS process; crow_core derives SESSION_DIR
+    from LOCALAPPDATA at import, so a second process reads the operator's real
+    directory whatever this one was told.
+
+    MEASURED 2026-08-13, and it did not look like a failure: probe (ii) reported
+    "the window saved 5 messages, the CLI reported: resumed: 3". Two different
+    files, compared as though they were one -- the 3 were the operator's own
+    chat. The block's SessionBackup had been pointed at the given directory too,
+    so the guard that exists for exactly this ran over the wrong files while the
+    CLI wrote into the real ones.
+
+    LOCALAPPDATA IS THE ONLY DOOR, and it only fits a directory that ends in
+    `Crow/session`. Anything else comes back as a problem, because a round trip
+    measured across two files is worse than one not measured at all.
+    """
+    session = os.path.normpath(crow_core.SESSION_DIR)
+    if session == os.path.normpath(default_session_dir()):
+        return os.environ.copy(), None
+    head, tail = os.path.split(session)
+    if tail.lower() == "session" and os.path.basename(head).lower() == "crow":
+        env = os.environ.copy()
+        env["LOCALAPPDATA"] = os.path.dirname(head)
+        return env, None
+    return None, ("--session-dir %s cannot be handed to cli/crow.py: crow_core"
+                  " derives the path from LOCALAPPDATA, so the directory has to"
+                  " end in Crow%sSession for both doors to open the same file"
+                  % (crow_core.SESSION_DIR, os.sep))
+
+
+def _cli(block: Block, lines: list[str], limit: float,
+         env: dict | None = None) -> dict:
     """cli/crow.py as a user runs it, with its answers typed in from a pipe.
 
     --no-update-check and --no-font keep the run to the one thing it is for; the
     session, the endpoint and the resume line are untouched, because those are
-    what is being measured.
+    what is being measured. `env` carries the session directory -- see
+    `cli_environment`, and why passing it is not optional.
     """
     argv = [sys.executable, os.path.join(REPO, "cli", "crow.py"),
             "--base-url", block.base_url, "--no-update-check", "--no-font",
             "--no-background"]
     proc = subprocess.run(argv, input="\n".join(lines) + "\n",
                           capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", timeout=limit)
+                          errors="replace", timeout=limit, env=env)
     return {"code": proc.returncode, "stdout": proc.stdout, "stderr": proc.stderr}
 
 

@@ -201,11 +201,13 @@ def main() -> int:
 
     def case(num, what, ok, detail=""):
         nonlocal fail
+        # %s RATHER THAN %d so a case can carry a letter: 8b belongs beside 8,
+        # not at the end under a number that says nothing about what it checks.
         if ok:
-            print("  OK       case %-2d %s" % (num, what))
+            print("  OK       case %-3s %s" % (num, what))
         else:
             fail += 1
-            print("  FAILED   case %-2d %s" % (num, what))
+            print("  FAILED   case %-3s %s" % (num, what))
             for line in str(detail).strip().splitlines():
                 print("             %s" % line)
 
@@ -279,6 +281,49 @@ def main() -> int:
              and any("names no model" in p for p in silent),
              "green=%r rung=%r ctx=%r silent=%r"
              % (green, wrong_rung, wrong_ctx, silent))
+
+        # 8c -- THE SECOND PROCESS. `--session-dir` rebinds a module global in
+        # the tool's own process; cli/crow.py is a subprocess and derives the
+        # path from LOCALAPPDATA, so probe (ii) compared the file the window had
+        # written against the one the operator's CLI read -- and reported the
+        # difference as an open round trip. Measured 2026-08-13. The three cases
+        # are the three states: untouched, redirectable, and not.
+        keep_session = crow_core.SESSION_DIR
+        try:
+            crow_core.SESSION_DIR = tool.default_session_dir()
+            plain_env, plain_problem = tool.cli_environment()
+            crow_core.SESSION_DIR = os.path.join(tmp, "elsewhere", "Crow", "session")
+            moved_env, moved_problem = tool.cli_environment()
+            crow_core.SESSION_DIR = os.path.join(tmp, "not-a-crow-dir")
+            bad_env, bad_problem = tool.cli_environment()
+        finally:
+            crow_core.SESSION_DIR = keep_session
+        case("8c", "the CLI is handed the session directory, or the probe refuses",
+             plain_problem is None and plain_env is not None
+             and moved_problem is None
+             and moved_env.get("LOCALAPPDATA") == os.path.join(tmp, "elsewhere")
+             and bad_env is None and bad_problem is not None,
+             "plain=%r moved=%r bad=%r"
+             % (plain_problem, moved_env.get("LOCALAPPDATA") if moved_env else None,
+                bad_problem))
+
+        # 8b -- THE NUMBER A REAL SERVER ANSWERS WITH. `-c 200000` comes back
+        # from /props as n_ctx 200192, because llama.cpp rounds the window up,
+        # and README.md tells the reader to expect exactly that. The case above
+        # cannot see it: shipped_props() answers with the manifest's own value,
+        # which is the one number no server returns -- so the gate rejected
+        # every correctly started server while this suite stayed green about it.
+        # Measured 2026-08-13 against pid 31104, on the first run of the block
+        # against a server rather than against a fixture.
+        rounded = shipped_props()
+        rounded["default_generation_settings"] = {"n_ctx": 200192}
+        rounded_out = tool.props_gate(rounded, MANIFEST)
+        far = shipped_props()
+        far["default_generation_settings"] = {"n_ctx": 262144}
+        far_out = tool.props_gate(far, MANIFEST)
+        case("8b", "/props: a rounded-up window passes, a different one does not",
+             not rounded_out and any("n_ctx is 262144" in p for p in far_out),
+             "rounded=%r far=%r" % (rounded_out, far_out))
 
         # -- the verdicts ----------------------------------------------------
 
