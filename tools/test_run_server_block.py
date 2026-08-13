@@ -450,13 +450,15 @@ def main() -> int:
              and "The return path:" in text and "#55 and #88" in text,
              text)
 
-        # 22 -- the three probes that open a window, walked the same way. Tk is
-        # required and a machine without it SKIPS rather than passes: a green
-        # line here on a headless box would be the claim this case exists to
-        # avoid making.
+        # 22 -- the three probes that drive the client, walked the same way.
+        # THEY NO LONGER NEED A DISPLAY: E12 made the window a webview, and what
+        # these probes drive is `Api` -- plain Python that runs anywhere. The
+        # skip is kept for the one thing that can still stop them, a crow_gui
+        # that does not import, because a walk that cannot start must not read
+        # as a walk that passed.
         toolkit = tool.toolkit_problem()
         if toolkit:
-            print("  SKIPPED  case 22 the window probes need Tk: %s" % toolkit)
+            print("  SKIPPED  case 22 the client path cannot be driven: %s" % toolkit)
             skipped.append(22)
         else:
             block, restore = fixture_block(tmp)

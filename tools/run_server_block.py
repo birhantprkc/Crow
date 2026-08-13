@@ -44,22 +44,27 @@ started by hand with -np 4 or a different cache passes "one process is running"
 and fails here, which is exactly the difference between the shipped point and a
 point that looks like it.
 
-WHAT THIS TOOL FOUND WHILE IT WAS BEING WRITTEN, and it belongs at the top
-because probe (i) can fail on it rather than on P1:
+WHAT PROBE (i) CAN FAIL ON THAT IS NOT P1, and it belongs at the top because the
+two look identical in the number that comes out:
 
-  * `CrowWindow._send` clears INTERRUPT at the start of every turn (cli/crow_gui.py
-    :955, "an interrupt from the PREVIOUS turn must not kill the next one before
-    it starts"). The abort sets that same flag, and the reader polls it every
-    50 ms (cli/crow_core.py:1036-1048). A user who aborts and types the next
-    question inside that window clears the flag before the aborted reader ever
-    sees it -- the old turn then runs to completion holding slot 0, which is F4
-    failing for a reason that is NOT the blocked readline of P1. Probe (i)
-    therefore records what it saw, not only how long it took.
-  * the aborted turn's `turn_done` arrives while the NEXT turn is running, and
-    `_finish_turn` ends in `_release_turn()` (cli/crow_gui.py:1014) -- worker
-    None, running False, the button back to "senden" over a turn that is still
-    streaming. Probe (i) watches for it and writes it down. Neither is fixed
-    here: E14 measures the shipped window, it does not change it.
+  * `Api.send` RETURNS SILENTLY while a worker is alive (cli/crow_gui.py). So
+    the second question -- the one whose answer is the whole proof -- may never
+    be sent at all, and the seconds tick by on a question the server never
+    heard. Probe (i) records whether the send was refused, because "no answer
+    for 60 s" and "no question for 60 s" are the same measurement otherwise.
+    (The order in `send` is the good one: refused BEFORE `INTERRUPT.clear()`, so
+    a user typing straight after an abort cannot clear the flag out from under
+    the reader that has not seen it yet. The Tk build cleared it first.)
+  * the aborted turn's `{"k": "idle"}` reaches the page while the NEXT turn is
+    streaming -- the send button reads "send" over an answer still arriving.
+    Probe (i) watches for it and writes it down. It is not fixed here: E14
+    measures the shipped window, it does not change it.
+
+WHAT THIS BLOCK NO LONGER SEES. E12 made the window a webview, so `Window` below
+drives `Api` and reads the message queue -- the whole shipped client path, minus
+the page's own JavaScript. Two checks the Tk build made have no subject here and
+are reported as NOT MEASURED rather than as held: folding a thought block open
+again, and typing into the input while a turn runs.
 
 Usage:
   run_server_block.py                     the plan, the gate, and why nothing ran
@@ -543,12 +548,22 @@ def as_client(system: str | None, messages: list[dict]) -> crow_core.Conversatio
 # ---------------------------------------------------------------- the window --
 
 class Window:
-    """The shipped window, driven by hand and never modified.
+    """The shipped client path, driven the way the page drives it.
 
-    THE TICK IS LEFT RUNNING, unlike in cli/test_crow_gui.py. The suite cancels it
-    because a fixture case must not race a timer; this block measures what a user
-    gets, and what a user gets is the `after()` loop at TICK_MS. `update()` is
-    what lets it fire on a window nobody is looking at.
+    THERE IS NO PAGE HERE, AND THAT IS THE EDGE OF WHAT THIS BLOCK ANSWERS. E12
+    replaced the Tk window with a webview: `Api` holds the conversation, the
+    turn and the session, and pushes ONE JSON message per event onto a queue
+    that pywebview hands to the page. Everything up to that queue is shipped
+    code and is measured here. What the page's JavaScript then draws is not --
+    so two things the Tk build could check are reported as NOT MEASURED rather
+    than as held: folding a thought block open again, and typing into the input
+    while a turn runs. Both live entirely in the page. A block that ticked them
+    off from Python would be reporting on code it never ran.
+
+    WHAT REPLACED `update()`. The Tk version pumped an event loop; here the
+    queue is drained on this thread, which is what `Api.pump` does in the
+    product. The messages are kept as they come, because they ARE what the
+    window was told to show.
     """
 
     def __init__(self, base_url: str, *argv: str) -> None:
@@ -556,76 +571,198 @@ class Window:
 
         self.gui = crow_gui
         args = crow_gui.build_parser().parse_args(["--base-url", base_url, *argv])
-        self.window = crow_gui.CrowWindow(args)
-        self.window.withdraw()
-        if self.window.prober is not None:
-            self.window.prober.join(30.0)
+        self.api = crow_gui.Api(args)
+        self.messages: list = []
+        # What the page calls once it has loaded: the meta line, and the probe
+        # that asks /health, /props and restores the session.
+        self.api.ready()
+        self.until(lambda: any(m.get("k") in ("up", "down") for m in self.messages),
+                   30.0)
         self.pump(0.3)
 
     # -- driving it ----------------------------------------------------------
 
+    def drain(self) -> int:
+        """Take everything waiting, the way `pump` hands it to the page."""
+        taken = 0
+        while True:
+            try:
+                self.messages.append(self.api._out.get_nowait())
+                taken += 1
+            except Exception:                    # noqa: BLE001 - an empty queue
+                return taken
+
     def pump(self, seconds: float) -> None:
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
-            self.window.update()
+            self.drain()
             time.sleep(0.005)
 
     def until(self, predicate, limit: float) -> tuple[bool, float]:
-        """Pump until the predicate holds. (whether it did, seconds it took)"""
+        """Drain until the predicate holds. (whether it did, seconds it took)"""
         started = time.monotonic()
         deadline = started + limit
         while time.monotonic() < deadline:
-            self.window.update()
+            self.drain()
             if predicate():
                 return True, time.monotonic() - started
             time.sleep(0.005)
         return False, time.monotonic() - started
 
     def ask(self, text: str) -> None:
-        self.window.entry.delete("1.0", "end")
-        self.window.entry.insert("1.0", text)
-        self.window._send()
+        """Exactly what the page's `go()` calls when the user presses send."""
+        self.api.send(text)
 
-    def stop(self) -> float:
-        """The abort, and how long the INTERFACE took to come back. Seconds."""
+    def stop(self, wait: bool = True) -> float:
+        """The abort, and how long the PAGE waited to be told the turn ended.
+
+        NOT THE SAME NUMBER THE TK BUILD REPORTED, and it is not comparable to
+        it. There the button was put back synchronously by the same click, so
+        "the interface came back" was a few milliseconds by construction. The
+        page cannot do that: it stays in its running state until `{"k": "idle"}`
+        arrives, so the honest measurement is how long that took -- which is the
+        core noticing the flag (it polls at 50 ms) and the turn ending.
+        """
         started = time.monotonic()
-        self.window._stop()
-        self.window.update()
+        seen = len(self.messages)
+        self.api.stop()
+        if wait:
+            self.until(lambda: any(m.get("k") == "idle"
+                                   for m in self.messages[seen:]), ABORT_STUCK_S)
         return time.monotonic() - started
 
-    def answer(self) -> str:
-        return self.window.transcript.visible_answer()
+    # -- reading what the page was told ---------------------------------------
+
+    def mark(self) -> int:
+        """Where the current turn starts in the record, for the counts below.
+
+        A COUNT SINCE A MARK, not since the window opened: F1 asks whether ONE
+        answer arrived in pieces, and a total carried over from the turn before
+        it would clear the floor on its own.
+        """
+        return len(self.messages)
+
+    def answer(self, since: int = 0) -> str:
+        """Every character the page was told to draw as answer text."""
+        return "".join(m.get("t", "") for m in self.messages[since:]
+                       if m.get("k") == "text")
+
+    def draws(self, since: int = 0) -> int:
+        """How many separate times the page was told to add answer text.
+
+        THE WEBVIEW'S ANSWER TO F1. There is no widget state to count: each of
+        these is one message across the boundary and one insert on the page. A
+        window that filled once at the end has exactly one.
+        """
+        return sum(1 for m in self.messages[since:] if m.get("k") == "text")
+
+    def thoughts(self, since: int = 0) -> int:
+        return sum(1 for m in self.messages[since:] if m.get("k") == "think_open")
+
+    def thought_chars(self, since: int = 0) -> int:
+        return sum(len(m.get("t", "")) for m in self.messages[since:]
+                   if m.get("k") == "think")
+
+    def code_blocks(self, since: int = 0) -> list:
+        """The code the page was told to frame, one string per block."""
+        out, current = [], None
+        for message in self.messages[since:]:
+            kind = message.get("k")
+            if kind == "code_open":
+                current = []
+            elif kind == "text" and current is not None:
+                current.append(message.get("t", ""))
+            elif kind == "code_close" and current is not None:
+                out.append("".join(current))
+                current = None
+        return out
+
+    def cost_line(self) -> str:
+        """The last cost line the page was handed, as it stands."""
+        for message in reversed(self.messages):
+            if message.get("k") == "cost" and message.get("line"):
+                return message["line"]
+        return ""
+
+    def model_chip(self) -> str:
+        for message in reversed(self.messages):
+            if message.get("k") == "up" and message.get("model"):
+                return message["model"]
+        return ""
+
+    def shown(self, text: str) -> bool:
+        """Whether the page was told to draw this, as a question or an answer."""
+        return any(text in str(message.get("t", "")) for message in self.messages
+                   if message.get("k") in ("user", "text"))
+
+    # -- the objects the probes reach into ------------------------------------
+
+    @property
+    def conversation(self):
+        return self.api._conversation
+
+    @property
+    def worker(self):
+        return self.api._worker
+
+    def running(self) -> bool:
+        return self.worker is not None and self.worker.is_alive()
 
     def idle(self) -> bool:
-        return self.window.worker is None and not self.window.running
+        return not self.running()
+
+    def save(self) -> str:
+        """Write the session the way the window writes it, and say what landed."""
+        self.api._persist_live(with_kv=True)
+        held = len(self.conversation)
+        return ("session saved -- %d messages" % held
+                if os.path.exists(crow_core.SESSION_FILE) else "nothing was written")
 
     def close(self) -> None:
-        try:
-            if self.window.prober is not None:
-                self.window.prober.join(5.0)
-            self.window._release()
-            self.window.destroy()
-        except Exception:                        # noqa: BLE001 - giving it back
-            pass
-        # `_release` sets the interrupt flag, which is right for a window that is
-        # going away and wrong for the next probe in this process.
+        crow_core.INTERRUPT.set()
+        worker = self.worker
+        if worker is not None:
+            worker.join(5.0)
+        self.drain()
+        # The flag is right for a client that is going away and wrong for the
+        # next probe in this process: `run_turn` would see it and report an
+        # interrupted turn before its first round.
         crow_core.INTERRUPT.clear()
-        import gc
 
-        gc.collect()
+
+def clipboard_text() -> str:
+    """What is on the system clipboard, read back OUTSIDE the client.
+
+    `Api.copy` shells out to `clip`, so reading it back through the same door
+    would prove only that the string survived a round trip inside this process.
+    PowerShell is a second door onto the real clipboard.
+    """
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=20)
+    except Exception:                            # noqa: BLE001 - reported as empty
+        return ""
+    return (proc.stdout or "").replace("\r\n", "\n")
 
 
 def toolkit_problem() -> str | None:
-    """Whether a window can be opened at all. Asked BEFORE anything is sent."""
+    """Whether the client path can be driven at all. Asked BEFORE anything is sent.
+
+    IT NO LONGER ASKS ABOUT TK, and that is E12: the window is a webview, and
+    the part of it this block drives is plain Python that needs no display. What
+    is left to check is that the module imports and still offers the door the
+    probes go through -- a rename of `Api` would otherwise surface as a probe
+    dying in the middle of a paid run.
+    """
     try:
-        import tkinter as tk
+        import crow_gui
     except Exception as exc:                     # noqa: BLE001
-        return "tkinter does not import: %s" % exc
-    try:
-        probe = tk.Tk()
-        probe.destroy()
-    except Exception as exc:                     # noqa: BLE001
-        return "no Tk display: %s" % exc
+        return "cli/crow_gui.py does not import: %s" % exc
+    for name in ("Api", "build_parser"):
+        if not hasattr(crow_gui, name):
+            return "cli/crow_gui.py has no %s" % name
     return None
 
 
@@ -797,21 +934,31 @@ def probe_i(block: Block) -> Finding:
         # -- the long turn, aborted after 3 s --------------------------------
         win.ask(QUESTIONS["long"])
         win.pump(3.0)
+        aborted_worker = win.worker
         freed = win.stop()
-        finding.say("the interface came back %.3f s after the abort was pressed"
-                    % freed)
-        aborted_worker = win.window.worker
+        finding.say("the page was told the turn had ended %.3f s after the abort"
+                    " -- NOT the Tk build's 'interface came back', which the same"
+                    " click did synchronously and which no page can do" % freed)
 
         # -- the one-word question, immediately, as a user would type it -----
         before = len(win.answer())
         win.ask(QUESTIONS["word"])
-        asked_worker = win.window.worker
+        asked_worker = win.worker
+        refused = asked_worker is aborted_worker
+        if refused:
+            finding.say("THE SECOND QUESTION WAS NEVER SENT: `Api.send` returns"
+                        " silently while a worker is alive, and the aborted one"
+                        " still was -- which is P1 seen from the other end")
+        mark = len(win.messages)
         released_early = {"seen": False}
 
         def answered() -> bool:
-            if win.window.worker is not asked_worker or not win.window.running:
-                # The aborted turn's `turn_done` releasing the running one --
-                # see the module docstring. Recorded, not fixed.
+            if win.running() and any(m.get("k") == "idle"
+                                     for m in win.messages[mark:]):
+                # The aborted turn's `idle` reaching the page while the next turn
+                # is streaming: the send button goes back to "send" over a
+                # running answer. Recorded, not fixed -- E14 measures the
+                # shipped window, it does not change it.
                 released_early["seen"] = True
             return len(win.answer()) > before
 
@@ -821,10 +968,10 @@ def probe_i(block: Block) -> Finding:
         finding.say("the reference this band is derived from: ttft 7.15 s against a"
                     " fresh server, n = 1, #90's measuring head")
         if released_early["seen"]:
-            finding.say("AND THE WINDOW LET GO OF THE RUNNING TURN: the aborted"
-                        " turn's turn_done reached _finish_turn while the next"
-                        " turn was streaming, and _release_turn cleared worker and"
-                        " running (cli/crow_gui.py:1014)")
+            finding.say("AND THE PAGE WAS TOLD THE TURN WAS OVER WHILE ONE WAS"
+                        " RUNNING: the aborted turn's `idle` arrived while the"
+                        " next answer was streaming, so the button reads 'send'"
+                        " over a turn in flight")
         if aborted_worker is not None and aborted_worker.is_alive():
             finding.say("the aborted reader was still alive when the next answer"
                         " arrived -- P1, and the read timeout is what bounds it")
@@ -833,15 +980,20 @@ def probe_i(block: Block) -> Finding:
         runs = hits = leaked = 0
         race_started = time.monotonic()
         for _ in range(RACE_FLOOR):
-            win.window.conversation.reset()
+            win.conversation.reset()
             win.ask(QUESTIONS["word"])
-            worker = win.window.worker
+            worker = win.worker
             had_text = len(win.answer())
-            win.stop()
+            # NOT WAITED OUT HERE. `stop()` normally waits for the page to be
+            # told the turn ended; fifty of those at up to ABORT_STUCK_S each is
+            # an hour of server time for a question this loop does not ask. What
+            # it asks is whether the reader is gone within the grace, and that
+            # is the `until` two lines down.
+            win.stop(wait=False)
             runs += 1
             if len(win.answer()) == had_text:
                 hits += 1
-            gone, _ = win.until(lambda w=worker: not w.is_alive(),
+            gone, _ = win.until(lambda w=worker: w is None or not w.is_alive(),
                                 block.args.grace)
             if not gone:
                 leaked += 1
@@ -855,12 +1007,16 @@ def probe_i(block: Block) -> Finding:
         finding.seconds = time.monotonic() - started
 
     finding.run = block.write("i-abort.json", json.dumps(
+        # `page_told_idle_s` RATHER THAN `interface_freed_s`: the Tk build's
+        # number was the button being put back by the same click and is not
+        # comparable to this one. A key that kept its old name would invite the
+        # comparison the two numbers cannot carry.
         {"seconds_to_next_answer": round(seconds, 2), "verdict": verdict,
-         "interface_freed_s": round(freed, 3), "race_runs": runs,
-         "race_hits": hits, "race_leaked": leaked,
+         "page_told_idle_s": round(freed, 3), "second_question_refused": refused,
+         "race_runs": runs, "race_hits": hits, "race_leaked": leaked,
          "released_early": released_early["seen"]}, indent=1))
-    numbers = dict(seconds=round(seconds, 2), freed=round(freed, 3),
-                   runs=runs, hits=hits, leaked=leaked)
+    numbers = dict(seconds=round(seconds, 2), idle_after=round(freed, 3),
+                   refused=refused, runs=runs, hits=hits, leaked=leaked)
     if verdict == INVALID or race == INVALID:
         return finding.invalid("F4 undecided: %s" % sentence, **numbers)
     if verdict == OPEN or race == OPEN:
@@ -888,8 +1044,8 @@ def probe_ii(block: Block) -> Finding:
         for question in (QUESTIONS["word"], QUESTIONS["prefix"]):
             win.ask(question)
             win.until(win.idle, block.args.turn_limit)
-        wrote = win.window._save()
-        in_window = len(win.window.conversation)
+        wrote = win.save()
+        in_window = len(win.conversation)
         finding.say("the window saved %d messages: %s" % (in_window, wrote))
     finally:
         win.close()
@@ -910,12 +1066,15 @@ def probe_ii(block: Block) -> Finding:
 
     win = Window(block.base_url)
     try:
-        win.until(lambda: len(win.window.conversation) >= in_file, 30.0)
-        drawn = win.window.transcript.widget.get("1.0", "end-1c")
-        in_second_window = len(win.window.conversation)
+        win.until(lambda: len(win.conversation) >= in_file, 30.0)
+        # WHAT THE PAGE WAS TOLD TO DRAW, not what the client is holding: a
+        # window that restored the messages and drew none of them is the exact
+        # failure this direction is here to catch, and holding them is not
+        # showing them.
+        shown = win.shown(QUESTIONS["word"]) and win.shown(QUESTIONS["prefix"])
+        in_second_window = len(win.conversation)
     finally:
         win.close()
-    shown = QUESTIONS["word"] in drawn and QUESTIONS["prefix"] in drawn
     backward_ok = in_second_window == in_file and shown and in_file > 0
     finding.say("the window resumed %d messages and %s both CLI questions"
                 % (in_second_window, "shows" if shown else "DOES NOT show"))
@@ -973,100 +1132,112 @@ def probe_v(block: Block) -> Finding:
     finding = Finding("v", PROBE_ONELINE["v"])
     started = time.monotonic()
     results: dict[str, bool] = {}
+    # WHAT THIS PASS CANNOT SEE, carried to the report rather than dropped. The
+    # webview's page is not running here, so two of the checks the Tk build made
+    # have no subject. Silence would read as "held".
+    not_measured: list[str] = []
     payloads: list = []
 
     win = Window(block.base_url)
     try:
         # F3 -- the chip against /props, character for character.
-        chip = win.window.model_chip.cget("text")
-        open_model = crow_core.fetch_model_name(block.base_url)
+        chip = win.model_chip()
+        try:
+            open_model = crow_core.fetch_model_name(block.base_url)
+        except Exception as exc:                 # noqa: BLE001 - recorded, not raised
+            open_model = ""
+            finding.say("F3  /props did not answer: %s" % exc)
         results["F3 connection"] = bool(chip) and chip == open_model
         finding.say("F3  chip %r against /props %r" % (chip, open_model))
 
         # F1, F2, F7 -- one recorded turn, three predicates.
-        win.window.transcript.states = []
+        mark = win.mark()
         with recording(payloads):
             win.ask(QUESTIONS["prefix"])
             win.until(win.idle, block.args.turn_limit)
-        states = len(win.window.transcript.states)
+        draws = win.draws(mark)
         content, reasoning_chars, predicted_n, prompt_n = _from_stream(payloads)
-        visible = win.answer()
-        results["F1 streaming"] = states >= STATE_FLOOR
-        finding.say("F1  %d intermediate widget states against a floor of %d"
-                    % (states, STATE_FLOOR))
+        visible = win.answer(mark)
+        results["F1 streaming"] = draws >= STATE_FLOOR
+        finding.say("F1  the page was handed the answer in %d pieces, against a"
+                    " floor of %d" % (draws, STATE_FLOOR))
         results["F2 reasoning"] = (len(visible) == len(content)
                                    and (reasoning_chars == 0
-                                        or win.window.transcript._thoughts > 0))
+                                        or win.thoughts(mark) > 0))
         finding.say("F2  %d visible answer characters against %d content-delta"
                     " characters, %d thought characters in %d block(s)"
                     % (len(visible), len(content), reasoning_chars,
-                       win.window.transcript._thoughts))
-        if win.window.transcript._thoughts:
-            opened = win.window.transcript.toggle_thought("think1", "thinkhead1")
-            after = win.window.transcript.visible_chars()
-            win.window.transcript.toggle_thought("think1", "thinkhead1")
-            folded = win.window.transcript.visible_chars()
-            results["F2 reasoning"] = results["F2 reasoning"] and after != folded
-            finding.say("F2  unfolding the block moved the visible count %d -> %d"
-                        " (opened=%s)" % (folded, after, opened))
-        cost = _cost_line(win.window)
+                       win.thoughts(mark)))
+        # THE FOLD IS NOT MEASURED, and saying so is the point. In the Tk build
+        # the block was a widget this tool could open and count; in the webview
+        # it is a `<details>` on a page that is not running here. The thoughts
+        # ARRIVING is measured above -- whether a click folds them open is not,
+        # and a green line for it would be a claim about code nobody ran.
+        not_measured.append("F2  folding a thought block open again -- page only")
+        cost = win.cost_line()
         results["F7 cost line"] = bool(cost) and _cost_matches(cost, predicted_n)
         finding.say("F7  %r against predicted_n %d, prompt_n %d"
                     % (cost, predicted_n, prompt_n))
 
         # F6 -- a code block and its copy button.
+        mark = win.mark()
         win.ask(QUESTIONS["code"])
         win.until(win.idle, block.args.turn_limit)
-        blocks = win.window.transcript.code_blocks
+        blocks = win.code_blocks(mark)
         copied = ""
         if blocks:
-            ok = win.window.transcript.copy_block(0)
-            win.window.update()
-            copied = win.window.clipboard_get() if ok else ""
-        results["F6 code block"] = (bool(blocks) and bool(copied)
-                                    and copied == blocks[0][0])
+            # THE BUTTON'S OWN PATH: the page calls `pywebview.api.copy`, which
+            # shells out to `clip`, because `navigator.clipboard` refuses
+            # silently outside a secure context. Read back through PowerShell,
+            # which is a different door onto the same clipboard.
+            if win.api.copy(blocks[0]):
+                copied = clipboard_text()
+        held_equal = bool(blocks) and copied.strip() == blocks[0].strip()
+        results["F6 code block"] = bool(blocks) and bool(copied) and held_equal
         finding.say("F6  %d block(s), %d characters on the clipboard, equal: %s"
-                    % (len(blocks), len(copied),
-                       bool(blocks) and copied == blocks[0][0]))
+                    % (len(blocks), len(copied), held_equal))
 
-        # F4 -- the interface, in this pass. The slot half is probe (i).
+        # F4 -- the abort as the page sees it. The slot half is probe (i), and
+        # it is the half that decides F4; this one only says the page was told.
         win.ask(QUESTIONS["long"])
         win.pump(2.0)
         freed = win.stop()
-        typed = win.window.entry.get("1.0", "end-1c")
-        win.window.entry.insert("1.0", "x")
-        results["F4 abort"] = freed < 1.0 and not win.window.running
-        finding.say("F4  the interface came back in %.3f s and took input again"
-                    " (entry was %r)" % (freed, typed))
-        win.window.entry.delete("1.0", "end")
+        results["F4 abort"] = freed < ABORT_GRIP_S and win.idle()
+        finding.say("F4  the page was told the turn had ended %.3f s after the"
+                    " abort, and no worker was left running" % freed)
+        not_measured.append("F4  typing into the input while a turn runs -- page only")
         win.until(win.idle, block.args.turn_limit)
 
         # F5 -- the session, through a restart of the window.
-        saved = win.window._save()
-        held = len(win.window.conversation)
+        saved = win.save()
+        held = len(win.conversation)
         finding.say("F5  %s" % saved)
     finally:
         win.close()
 
     again = Window(block.base_url)
     try:
-        again.until(lambda: len(again.window.conversation) >= held, 30.0)
-        drawn = again.window.transcript.widget.get("1.0", "end-1c")
-        results["F5 history"] = (len(again.window.conversation) == held
-                                 and QUESTIONS["prefix"] in drawn)
-        finding.say("F5  a second window resumed %d of %d messages and draws the"
-                    " first question again"
-                    % (len(again.window.conversation), held))
+        again.until(lambda: len(again.conversation) >= held, 30.0)
+        results["F5 history"] = (len(again.conversation) == held
+                                 and again.shown(QUESTIONS["prefix"]))
+        finding.say("F5  a second window resumed %d of %d messages and was told to"
+                    " draw the first question again"
+                    % (len(again.conversation), held))
     finally:
         again.close()
 
+    for line in not_measured:
+        finding.say("NOT MEASURED  %s" % line)
+
     finding.seconds = time.monotonic() - started
-    finding.run = block.write("v-capabilities.json", json.dumps(results, indent=1))
+    finding.run = block.write("v-capabilities.json", json.dumps(
+        {"held": results, "not_measured": not_measured}, indent=1))
     block.write("v-stream.sse", "\n".join(payloads) + "\n")
     held_count = sum(1 for ok in results.values() if ok)
     for name in sorted(results):
         finding.say("%-16s %s" % (name, "held" if results[name] else "DID NOT HOLD"))
-    numbers = dict(held=held_count, of=len(results), results=results)
+    numbers = dict(held=held_count, of=len(results), results=results,
+                   not_measured=len(not_measured))
     if held_count == len(results):
         return finding.answer("%d of %d capabilities held against this server"
                               % (held_count, len(results)), **numbers)
@@ -1096,21 +1267,6 @@ def _from_stream(payloads: list[str]) -> tuple[str, int, int, int]:
             if delta.get("reasoning_content"):
                 reasoning += len(delta["reasoning_content"])
     return "".join(content), reasoning, predicted_n, prompt_n
-
-
-def _cost_line(window) -> str:
-    """The last line the window drew with the `cost` tag, as it stands."""
-    out: list[str] = []
-    active: set = set()
-    for kind, value, _index in window.transcript.widget.dump("1.0", "end-1c",
-                                                             text=True, tag=True):
-        if kind == "tagon":
-            active.add(value)
-        elif kind == "tagoff":
-            active.discard(value)
-        elif kind == "text" and "cost" in active:
-            out.append(value)
-    return "".join(out).strip().splitlines()[-1].strip() if out else ""
 
 
 def _cost_matches(cost: str, predicted_n: int) -> bool:
@@ -1325,9 +1481,9 @@ def main(argv: list[str]) -> int:
         if toolkit:
             print("  FAILED   toolkit             %s" % toolkit)
             print()
-            print("RESULT: probes i, ii and v open a window. Nothing was sent.")
+            print("RESULT: probes i, ii and v drive the client. Nothing was sent.")
             return 2
-        print("  OK       toolkit             a window can be opened")
+        print("  OK       toolkit             the client path can be driven")
 
     # -- the return path, before the first byte ------------------------------
     backup = SessionBackup(crow_core.SESSION_DIR,
