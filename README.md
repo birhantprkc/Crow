@@ -29,10 +29,6 @@
 
 <br>
 
-<img src="docs/images/window.png" alt="Crow's window: the chat list on the left, a folded thought block, a code block with a copy button, and the context meter under the input" width="920">
-
-<sub><b>The window.</b> <code>cli/crow_gui.py</code> — same core, same session file, same server as the terminal client. Both ship in the same package.</sub>
-
 </div>
 
 <br>
