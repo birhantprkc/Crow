@@ -738,24 +738,72 @@ def shell_buttons(title: str) -> bool:
     WS_MAXIMIZEBOX goes in with it for the same reason one step further out:
     Aero Snap and Win+Up both ask the same question of the same style.
 
-    Fails quietly. On anything that is not Windows, or if the window cannot be
-    found by its caption, the window keeps working exactly as it did.
+    FOUR THINGS HAD TO BE RIGHT AT ONCE, measured 2026-08-13:
+
+      * `FindWindowW(None, title)` never found this window -- twenty seconds of
+        searching for the caption the process reports as its own returned
+        nothing. The window is found through its PROCESS instead.
+      * Without `argtypes` ctypes truncates a 64-bit HWND to 32 bits, so every
+        call named a window that does not exist and reported success.
+      * The first visible window of a pywebview process is a HELPER; only the
+        one with a caption is the window the user sees.
+      * WS_MINIMIZEBOX IS IGNORED WITHOUT WS_SYSMENU, and a frameless window is
+        created without either.
+
+    AND THE SHELL HAD ALREADY MADE UP ITS MIND. It reads the style when it
+    registers the taskbar button; a style changed afterwards is not looked at
+    again. Hiding and re-showing the window forces the button to be registered
+    once more, which is what finally made the click fold the window away.
+
+    NOT `SetWindowPos(SWP_FRAMECHANGED)`: it recalculates the non-client area,
+    and a frameless window loses the region `pywebview-drag-region` hangs on --
+    that cost the drag and the maximise on the first attempt.
     """
     if sys.platform != "win32":
         return False
     try:
         import ctypes
+        from ctypes import wintypes
 
         GWL_STYLE = -16
-        WS_MINIMIZEBOX, WS_MAXIMIZEBOX = 0x00020000, 0x00010000
+        WS_MINIMIZEBOX, WS_SYSMENU = 0x00020000, 0x00080000
+        SW_HIDE, SW_SHOW = 0, 5
         user32 = ctypes.windll.user32
-        hwnd = user32.FindWindowW(None, title)
-        if not hwnd:
-            return False
-        style = user32.GetWindowLongW(hwnd, GWL_STYLE)
-        user32.SetWindowLongW(hwnd, GWL_STYLE,
-                              style | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)
-        return True
+        get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+        set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+        get_long.argtypes = [wintypes.HWND, ctypes.c_int]
+        get_long.restype = ctypes.c_ssize_t
+        set_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+        set_long.restype = ctypes.c_ssize_t
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
+                                                    ctypes.POINTER(wintypes.DWORD)]
+        callback = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        user32.EnumWindows.argtypes = [callback, wintypes.LPARAM]
+
+        mine = ctypes.windll.kernel32.GetCurrentProcessId()
+        windows: list = []
+
+        def visit(hwnd, _lparam) -> bool:
+            owner = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            if (owner.value == mine and user32.IsWindowVisible(hwnd)
+                    and user32.GetWindowTextLengthW(hwnd) > 0):
+                windows.append(hwnd)
+            return True
+
+        user32.EnumWindows(callback(visit), 0)
+        for hwnd in windows:
+            style = get_long(hwnd, GWL_STYLE)
+            set_long(hwnd, GWL_STYLE, style | WS_SYSMENU | WS_MINIMIZEBOX)
+            if not get_long(hwnd, GWL_STYLE) & WS_MINIMIZEBOX:
+                continue
+            user32.ShowWindow(hwnd, SW_HIDE)
+            user32.ShowWindow(hwnd, SW_SHOW)
+            return True
+        return False
     except Exception:                      # noqa: BLE001 - cosmetic, never fatal
         return False
 
@@ -1727,7 +1775,17 @@ def main(argv: list[str] | None = None) -> int:
     threading.Thread(target=api.pump, daemon=True).start()
     # The styles can only be set once the window exists, so this runs as the
     # start-up callback rather than beside create_window.
-    webview.start(lambda *_: shell_buttons(title), window)
+    def styles(*_) -> None:
+        # RETRIED, because one attempt is too early: at the moment this callback
+        # first runs the window has no caption yet, so the search below skips it
+        # and sets nothing. The loop stops the moment the style is in.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if shell_buttons(title):
+                return
+            time.sleep(0.2)
+
+    webview.start(styles, window)
     return 0
 
 
