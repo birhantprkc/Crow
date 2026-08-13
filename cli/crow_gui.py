@@ -653,8 +653,10 @@ const crow = {
       case "tools": this.tools(e.on); break;
       case "rail": this.rail(e.title,e.meta,e.rollovers,e.foot);
         this.archive(e.archived||[]); break;
-      case "history": e.items.forEach(m=>{ if(m.role==="user") this.user(m.content);
-          else { this.start(); this.answer(m.content); this.cost("",null); } }); break;
+      // THE PAGE CLEARS ITSELF ON "new", because the click is here. A DELETE of
+      // the chat being read starts on the page too but is decided in Python --
+      // it may fail -- so the emptying has to come back from there.
+      case "clear": flow.innerHTML=""; this.cost("",null); break;
       case "user": this.user(e.t); break;
       case "start": this.start(); break;
       case "think_open": this.thinkOpen(); break;
@@ -862,6 +864,13 @@ class Turn(TurnEvents):
     def __init__(self, put) -> None:
         self._put = put
         self._sink = Sink(put)
+        # THE REASONING'S SHARE OF THE ROUND, KEPT RATHER THAN PUSHED. It used
+        # to leave here as `{"k": "_round"}` -- a message the page has no case
+        # for, so it fell through the switch and was gone, while the cost line
+        # was drawn from a variable nothing had written: every turn reported a
+        # share of null. A number that only this window computes belongs to the
+        # turn object, and the turn object is read when the turn ends.
+        self.share: float | None = None
 
     def reply_events(self) -> ReplyEvents:
         return self._sink
@@ -875,10 +884,8 @@ class Turn(TurnEvents):
 
     def round_finished(self, timings: dict) -> None:
         rc, cc = timings.get("_reasoning_chars"), timings.get("_content_chars")
-        share = None
         if isinstance(rc, int) and isinstance(cc, int) and rc + cc > 0:
-            share = 100.0 * rc / (rc + cc)
-        self._put({"k": "_round", "share": share})
+            self.share = 100.0 * rc / (rc + cc)
 
     def cache_promise_broken(self) -> None:
         self._put({"k": "note",
@@ -917,12 +924,21 @@ class Api:
         self._rolled = False
         self._worker: threading.Thread | None = None
         self._restore: tuple | None = None
-        # WHICH FILE THE OPEN CHAT CAME FROM. None means the live session,
-        # which belongs in session.json. Anything else is an archive the user
-        # opened, and putting it aside again has to UPDATE that file rather
-        # than write a new one -- without this, every click on a previous chat
-        # left another copy of the current one in the rail.
+        # WHICH FILE THE OPEN CHAT ALREADY HAS, or None while it has none.
+        #
+        # A CHAT GETS ITS FILE WHEN IT IS LEFT, NOT WHEN IT IS OPENED. Writing
+        # one eagerly is what put a copy of the restored session in the rail on
+        # every single launch: five starts, five identical entries under
+        # "Earlier", and deleting them only meant the next launch wrote another.
+        # When the value IS set, the chat came out of that file and leaving it
+        # UPDATES the file rather than writing a second one.
         self._current_path: str | None = None
+        # THE NAME LIVES HERE, NOT ONLY IN A FILE. `save_session` serialises six
+        # keys and drops the rest, so a `crow_title` written into a file lasted
+        # exactly until the core wrote that file again -- the renamed chat then
+        # turned up under "Earlier" labelled with its first line. Held in the
+        # object, the name survives every file the chat is written to.
+        self._current_title: str | None = None
 
     # -- outward -----------------------------------------------------------
 
@@ -981,48 +997,70 @@ class Api:
             if self._current_path and os.path.abspath(path) == os.path.abspath(
                     self._current_path):
                 continue
-            out.append({"path": path, "title": self._title_of(path, name),
-                        "meta": self._meta_of(path, name)})
+            out.append(self._entry_of(path, name))
             if len(out) >= 12:
                 break
         return out
 
-    @staticmethod
-    def _title_of(path: str, name: str) -> str:
+    TITLE_MAX = 52
+
+    @classmethod
+    def _first_line(cls, messages: list | None) -> str | None:
         """The first thing the user said, which is what they will recognise.
 
         A file name is a timestamp, and nobody remembers which conversation
-        happened at 07:29. The opening line is the only label the archive
-        already carries; the name is the fallback when it cannot be read.
+        happened at 07:29. The opening line is the only label a chat carries
+        before anyone names it -- and it is read the same way whether the
+        conversation is on disk or still in the window.
+        """
+        for message in messages or []:
+            if message.get("role") == "user":
+                first = (message.get("content") or "").strip().splitlines()
+                if first and first[0]:
+                    return first[0][:cls.TITLE_MAX]
+        return None
+
+    @classmethod
+    def _stored_title(cls, path: str) -> str | None:
+        """The name the USER gave a chat, or None when they never gave one.
+
+        SEPARATE FROM THE LABEL ON PURPOSE. `_entry_of` always returns
+        something to draw, falling back to the opening line; that guess must
+        never be stamped back into the file as though it had been chosen,
+        because from then on it would outrank the real opening line forever.
         """
         try:
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
-        except Exception:                  # noqa: BLE001 - the name still works
-            return name
-        # A NAME THE USER TYPED WINS OVER THE ONE WE GUESSED. `crow_title` is
-        # written by `rename` and read by nothing else; the core ignores unknown
-        # keys, so the file stays a session file that both clients can open.
-        given = (data.get("crow_title") or "").strip()
-        if given:
-            return given[:52]
-        for message in data.get("messages") or []:
-            if message.get("role") == "user":
-                first = (message.get("content") or "").strip().splitlines()
-                if first and first[0]:
-                    return first[0][:52]
-        return name
+        except Exception:                  # noqa: BLE001 - no name, not an error
+            return None
+        return (data.get("crow_title") or "").strip()[:cls.TITLE_MAX] or None
 
-    @staticmethod
-    def _meta_of(path: str, name: str) -> str:
+    @classmethod
+    def _entry_of(cls, path: str, name: str) -> dict:
+        """One rail entry, from ONE read of the file.
+
+        The title and the meta line used to open the file separately, so a rail
+        of twelve chats cost twenty-four reads to draw -- and drew its two
+        halves from two different snapshots, which a write landing in between
+        could pull apart.
+
+        A NAME THE USER TYPED WINS OVER THE ONE WE GUESSED. `crow_title` is
+        Crow's own key; the core ignores what it does not know, so the file
+        stays a session file that both clients can open.
+        """
         try:
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
-            count = len(data.get("messages") or [])
-        except Exception:                  # noqa: BLE001
-            count = 0
+        except Exception:                  # noqa: BLE001 - the file name still works
+            return {"path": path, "title": name, "meta": ""}
+        messages = data.get("messages") or []
+        given = (data.get("crow_title") or "").strip()[:cls.TITLE_MAX]
         kind = "rolled over" if name.startswith("rollover-") else "put aside"
-        return "%d messages · %s" % (count, kind) if count else kind
+        return {"path": path,
+                "title": given or cls._first_line(messages) or name,
+                "meta": ("%d messages · %s" % (len(messages), kind)
+                         if messages else kind)}
 
     def _probe(self) -> None:
         try:
@@ -1042,28 +1080,21 @@ class Api:
             self.push({"k": "note", "t": "session not readable: %s" % exc})
             return
         if not restored:
-            self.push({"k": "rail", "title": "new chat",
-                       "meta": "no turn yet", "rollovers": self._archives(),
-                   "archived": self._archived(),
-                       "foot": ""})
+            self._reload_rail()
             return
         messages, tokens, kv = restored
         self._conversation.restore(messages)
         self._context_tokens, self._promised_warm = tokens, kv
-        # EVERY CHAT HAS A FILE FROM ITS FIRST MOMENT, and the one restored at
-        # start-up is the one that kept forgetting it. Living only in
-        # session.json, it had no identity to switch away from: putting it aside
-        # made a copy, and opening the chat it was a copy OF made another. Given
-        # its own file here, the rest of the window has one rule instead of two.
-        self._current_path = self._archive(new_file=True)
+        # THE IDENTITY IS READ BACK, NOT MINTED. This line used to archive the
+        # restored session, which handed it a file it did not need -- and handed
+        # it another one on the next launch, and the one after that, until the
+        # same conversation stood in the rail as many times as the window had
+        # been opened. session.json is where the two things worth remembering
+        # about the open chat are kept: which archive file it belongs to, if it
+        # has one yet, and what the user named it.
+        self._current_path, self._current_title = self._pointer()
         self._replay(messages)
-        self.push({"k": "rail", "title": "%d messages" % len(messages),
-                   "meta": "cache warm" if kv else "messages only",
-                   "rollovers": self._archives(),
-                   "archived": self._archived(),
-                   "foot": os.path.join(
-                       os.path.basename(os.path.dirname(SESSION_FILE)) or ".",
-                       os.path.basename(SESSION_FILE))})
+        self._reload_rail()
         self.push({"k": "up", "model": None, "n_ctx": self._n_ctx,
                    "tokens": self._context_tokens})
 
@@ -1104,48 +1135,50 @@ class Api:
         """
         if self._worker and self._worker.is_alive():
             return
-        if len(self._conversation) > (1 if self._conversation.has_system else 0):
-            kept = self._archive(new_file=True)
-            if kept:
-                self.push({"k": "note", "t": "put aside as %s"
-                                             % os.path.basename(kept)})
-            else:
-                self.push({"k": "fail",
-                           "t": "the chat could not be put aside -- nothing changed"})
-                return
+        ok, kept = self._leave()
+        if not ok:
+            self.push({"k": "fail",
+                       "t": "the chat could not be put aside -- nothing changed"})
+            return
+        if kept:
+            self.push({"k": "note", "t": "put aside as %s"
+                                         % os.path.basename(kept)})
         self._conversation.reset()
         self._current_path = None
+        self._current_title = None
         self._context_tokens = 0
         self._promised_warm = False
-        self.push({"k": "rail", "title": "new chat", "meta": "no turn yet",
-                   "rollovers": self._archives(),
-                   "archived": self._archived(), "foot": ""})
+        # SESSION.JSON GOES WITH IT, and only after the chat has been read back
+        # off disk above. It still holds the conversation just put aside; left
+        # there, the next launch would restore it as the open chat AND list the
+        # archive file next to it -- the same chat twice, from one click.
+        self._forget_live()
+        self._reload_rail()
         self.push({"k": "cost", "line": "", "share": None, "tokens": 0,
                    "n_ctx": self._n_ctx})
 
-    def _archive(self, new_file: bool = False) -> str | None:
-        """Put the open conversation on disk. Its path, or None on failure.
+    def _archive(self) -> str | None:
+        """Write the open conversation to its own file. Its path, or None.
 
-        TWO CALLERS, TWO INTENTS, and conflating them is what put a twin of the
-        open chat in the rail:
+        WHERE IT GOES FOLLOWS FROM WHETHER IT ALREADY HAS A FILE, and from
+        nothing else. That is the entire rule, and it used to be a flag the
+        callers set: "neu" always asked for a NEW file, so a chat opened from
+        the archive was written a second time next to itself, and switching
+        always asked for the EXISTING one, so a chat that had none was written
+        into session.json.
 
-          * SWITCHING to another chat only has to SAVE this one, wherever it
-            already lives -- its archive file, or session.json for the one the
-            window restored at start-up. `new_file=False`.
-          * "neu" has to PUT IT ASIDE, which means a file of its own that
-            survives the empty session about to overwrite session.json.
-            `new_file=True`.
+        NEVER session.json, and that half was the data loss. Nothing in the
+        rail lists the live session file, so a chat put there had vanished from
+        the window; the first turn of the chat being opened then wrote over it.
+        A chat leaving the window either has a file of its own or is given one
+        here, at the moment it is left -- not before, or the archive fills up
+        with copies of a conversation nobody has finished yet.
 
-        The first version always made a new file. Opening a chat therefore
-        copied the current one next to itself, and because the copy had no name
-        yet it was labelled with its first line -- which read as a rename and a
-        duplicate at the same time.
+        The user's name for it is added afterwards -- see `_stamp`.
         """
         folder = os.path.dirname(SESSION_FILE) or "."
-        if self._current_path and not new_file:
+        if self._current_path:
             path = self._current_path
-        elif not new_file:
-            path = SESSION_FILE            # the live session already has a home
         else:
             # A SECOND IS NOT UNIQUE ENOUGH. Two chats put aside inside the same
             # second landed on the same name and the second overwrote the first --
@@ -1168,7 +1201,109 @@ class Api:
                 json.load(fh)
         except Exception:                  # noqa: BLE001 - reported as None
             return None
+        self._stamp(path)
         return path
+
+    def _leave(self) -> tuple[bool, str | None]:
+        """Get the open chat onto disk before the window lets go of it.
+
+        `(True, path)` when it was written, `(True, None)` when there was
+        nothing worth writing, `(False, None)` when the write failed -- and on
+        a failure the caller must change NOTHING, which is why it is reported
+        rather than swallowed. Every exit from a chat goes through here, so
+        there is one answer to "does this chat have a file yet" instead of one
+        per caller.
+        """
+        if len(self._conversation) <= (1 if self._conversation.has_system else 0):
+            return (True, None)
+        path = self._archive()
+        if not path:
+            return (False, None)
+        self._current_path = path
+        return (True, path)
+
+    def _stamp(self, path: str, pointer: bool = False) -> None:
+        """Put back what the core drops: the name, and on session.json the file.
+
+        `save_session` serialises six keys and writes the file whole, so
+        anything Crow's window keeps about a chat survives exactly until the
+        next save. Re-stamped after every write, from the copy in this object,
+        which is the only one that cannot be overwritten by the core.
+
+        `pointer` marks the live session file: it also records WHICH archive
+        file the open chat belongs to, so the next launch picks that chat up
+        instead of minting a fresh copy of it.
+        """
+        if not path or not os.path.isfile(path):
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if self._current_title:
+                data["crow_title"] = self._current_title
+            else:
+                data.pop("crow_title", None)
+            if pointer:
+                if self._current_path:
+                    data["crow_path"] = self._current_path
+                else:
+                    data.pop("crow_path", None)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception:                  # noqa: BLE001 - cosmetic, never fatal
+            pass
+
+    def _pointer(self) -> tuple[str | None, str | None]:
+        """What session.json remembers about the chat it holds: file, name.
+
+        A path that no longer exists comes back as None -- the user deleted
+        that archive file, and a chat pointing at a hole would be written to it
+        on the next switch and then not be listed anywhere.
+        """
+        try:
+            with open(SESSION_FILE, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:                  # noqa: BLE001 - no pointer, no harm
+            return (None, None)
+        path = (data.get("crow_path") or "").strip() or None
+        if path and not os.path.isfile(path):
+            path = None
+        return (path, (data.get("crow_title") or "").strip() or None)
+
+    def _persist_live(self, with_kv: bool = False) -> None:
+        """session.json holds the open chat -- after every turn, not only at exit.
+
+        WITHOUT THE CACHE PER TURN, WITH IT ON THE WAY OUT. A slot save is one
+        fixed filename on the server and ~1.3 GiB at the operating point; per
+        turn it would write the same cache over itself onto the disk the
+        experts are streamed from. Per turn it is the messages that have to
+        survive a crash. The cache is saved once, when the window closes, which
+        is what the CLI does too.
+        """
+        if not self._args.session:
+            return
+        try:
+            save_session(self._conversation, self._args.base_url,
+                         self._context_tokens, with_kv=with_kv)
+        except Exception:                  # noqa: BLE001 - a turn survives it
+            return
+        self._stamp(SESSION_FILE, pointer=True)
+
+    @staticmethod
+    def _forget_live() -> None:
+        """Drop session.json, once its chat is safe somewhere else.
+
+        Only ever called after a successful `_leave()` or a delete the user
+        asked for twice: an empty conversation writes no file at all, so
+        without this the abandoned chat would still be sitting there at the
+        next launch.
+        """
+        try:
+            os.remove(SESSION_FILE)
+        except OSError:
+            pass
 
     def open(self, path: str) -> None:
         """Load an archived conversation back into the window."""
@@ -1177,11 +1312,9 @@ class Api:
         if self._current_path and os.path.abspath(path) == os.path.abspath(
                 self._current_path):
             return
-        if len(self._conversation) > (1 if self._conversation.has_system else 0):
-            if not self._archive():
-                self.push({"k": "fail", "t": "the open chat could not be "
-                                             "put aside -- nothing changed"})
-                return
+        # THE OTHER CHAT IS READ FIRST, and only then is this one let go of. The
+        # order used to be the other way round, so an archive that turned out to
+        # be unreadable had already cost the open chat a write.
         try:
             restored = load_session(self._args.base_url, self._args.system, path)
         except Exception as exc:           # noqa: BLE001
@@ -1190,17 +1323,24 @@ class Api:
         if not restored:
             self.push({"k": "fail", "t": "empty: %s" % os.path.basename(path)})
             return
+        ok, _ = self._leave()
+        if not ok:
+            self.push({"k": "fail", "t": "the open chat could not be "
+                                         "put aside -- nothing changed"})
+            return
         messages, tokens, kv = restored
         self._conversation = Conversation(self._args.system)
         self._conversation.restore(messages)
         self._current_path = path
+        self._current_title = self._stored_title(path)
         self._context_tokens, self._promised_warm = tokens, kv
         self._replay(messages)
-        self.push({"k": "rail", "title": self._title_of(path, os.path.basename(path)),
-                   "meta": "%d messages" % len(messages),
-                   "rollovers": self._archives(),
-                   "archived": self._archived(),
-                   "foot": os.path.basename(path)})
+        # SESSION.JSON FOLLOWS THE SWITCH AT ONCE. Still pointing at the chat
+        # just closed, a window shut before the next turn would come back up
+        # holding it -- and list the chat the user was actually reading as a
+        # second entry beside it.
+        self._persist_live()
+        self._reload_rail()
         self.push({"k": "cost", "line": "", "share": None,
                    "tokens": self._context_tokens, "n_ctx": self._n_ctx})
 
@@ -1255,16 +1395,33 @@ class Api:
             path = os.path.join(folder, name)
             if not name.endswith(".json") or not os.path.isfile(path):
                 continue
-            out.append({"path": path, "title": self._title_of(path, name),
-                        "meta": self._meta_of(path, name)})
+            out.append(self._entry_of(path, name))
         return out
 
+    def _live_title(self) -> str:
+        """What the open chat is called: the user's name for it, else its
+        opening line, else the label a chat with no turn in it deserves."""
+        return (self._current_title
+                or self._first_line(self._conversation.payload())
+                or "new chat")
+
     def _reload_rail(self) -> None:
+        """THE ONE PLACE THE RAIL IS DRAWN.
+
+        Four callers used to assemble this message themselves, each out of
+        whatever it happened to be holding: start-up counted the restored
+        messages, a switch read the file's title, "neu" hard-coded "new chat".
+        The same chat therefore had a different name depending on which event
+        had drawn it last. They all come through here now, so the rail cannot
+        contradict itself.
+        """
+        spare = 1 if self._conversation.has_system else 0
+        turns = len(self._conversation) - spare
         self.push({"k": "rail",
-                   "title": self._title_of(self._current_path,
-                                           os.path.basename(self._current_path))
-                   if self._current_path else "current chat",
-                   "meta": "%d messages" % len(self._conversation),
+                   "title": self._live_title(),
+                   "meta": ("no turn yet" if turns <= 0 else
+                            "%d messages%s" % (turns, " · cache warm"
+                                               if self._promised_warm else "")),
                    "rollovers": self._archives(),
                    "archived": self._archived(),
                    "foot": os.path.basename(self._current_path)
@@ -1278,20 +1435,27 @@ class Api:
         path the rail is holding, for a label. One key, added to the JSON the
         core wrote, ignored by everything that does not look for it.
         """
-        title = (title or "").strip()[:52]
+        title = (title or "").strip()[:self.TITLE_MAX]
         if not title:
             return False
         if not path:
-            # THE OPEN CHAT HAS NO FILE UNTIL IT IS PUT ASIDE, so naming it makes
-            # one. Anything else would keep the name in memory and lose it at the
-            # next switch -- a rename that does not survive is not a rename.
-            path = self._archive() or ""
-            if not path:
-                self.push({"k": "fail", "t": "rename failed -- could not be put aside"})
-                return False
-            self._current_path = path
+            # THE OPEN CHAT IS NAMED IN MEMORY, NOT BY BEING FILED AWAY. Naming
+            # it used to archive it -- a chat the user had merely labelled was
+            # moved in among the ones they were finished with -- and the name
+            # did not survive even that, because the next write through the core
+            # dropped the key again. It is stamped on session.json here, on the
+            # chat's own file if it has one yet, and on every file `_archive`
+            # writes for it from now on.
+            self._current_title = title
+            self._persist_live()
+            self._stamp(self._current_path or "")
+            self._reload_rail()
+            return True
         if not os.path.isfile(path):
             return False
+        if self._current_path and os.path.abspath(path) == os.path.abspath(
+                self._current_path):
+            self._current_title = title
         try:
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -1314,11 +1478,13 @@ class Api:
         -- it only changes the label on the menu item.
         """
         if not path:
-            path = self._archive() or ""
-            if not path:
+            ok, path = self._leave()
+            if not ok:
                 self.push({"k": "fail", "t": "the open chat could not be put aside"})
                 return False
-            self._current_path = path
+            if not path:
+                self.push({"k": "note", "t": "nothing to archive yet"})
+                return False
         if not os.path.isfile(path):
             return False
         here = os.path.dirname(path)
@@ -1335,7 +1501,12 @@ class Api:
             return False
         if self._current_path and os.path.abspath(path) == os.path.abspath(
                 self._current_path):
+            # THE POINTER MOVES WITH THE FILE. session.json records which
+            # archive file the open chat belongs to; left naming the old
+            # location, that pointer reads as "this chat has no file yet" on the
+            # next launch, and a second one is written beside the moved original.
             self._current_path = target
+            self._stamp(SESSION_FILE, pointer=True)
         back = os.path.basename(os.path.dirname(target)) != self.ARCHIVE_DIR
         self.push({"k": "note",
                    "t": ("restored: %s" if back else "archived: %s")
@@ -1355,9 +1526,19 @@ class Api:
             return False
         if self._current_path and os.path.abspath(path) == os.path.abspath(
                 self._current_path):
-            # The open chat was the one deleted: it is no longer anywhere, so it
-            # must not be written back on the next switch.
+            # THE OPEN CHAT WAS THE ONE DELETED, so it is dropped rather than
+            # merely unhooked from its file. Kept in memory it came straight
+            # back: the next "new" wrote it out under a fresh name, and the
+            # chat the user had deleted twice over was in the rail again a
+            # click later. session.json goes with it for the same reason -- it
+            # still held the whole conversation.
             self._current_path = None
+            self._current_title = None
+            self._conversation.reset()
+            self._context_tokens = 0
+            self._promised_warm = False
+            self._forget_live()
+            self.push({"k": "clear"})
         self.push({"k": "note", "t": "deleted: %s" % os.path.basename(path)})
         self._reload_rail()
         return True
@@ -1435,11 +1616,25 @@ class Api:
             return False
 
     def close(self) -> None:
+        """Both copies of the open chat, then the window.
+
+        `self._promised_warm` USED TO BE PASSED AS THE FOURTH ARGUMENT, and the
+        fourth argument of `save_session` is `path`, not `with_kv`. So a warm
+        cache made the call `save_session(..., path=True)`, which died inside
+        `os.path.dirname(True)` and was swallowed by the `except` right below
+        it: the better a session had been going, the more certainly it was
+        never written down. A cold one silently took the other branch and wrote
+        the server's KV slot on every single turn -- the one thing the core
+        says to do once, on the way out.
+        """
         INTERRUPT.set()
         try:
-            if self._args.session:
-                save_session(self._conversation, self._args.base_url,
-                             self._context_tokens, self._promised_warm)
+            if self._current_path:
+                self._archive()            # the rail's copy, else a turn behind
+        except Exception:                  # noqa: BLE001 - closing anyway
+            pass
+        try:
+            self._persist_live(with_kv=True)
         except Exception:                  # noqa: BLE001 - closing anyway
             pass
         self._window.destroy()
@@ -1449,13 +1644,6 @@ class Api:
     def _run(self, text: str) -> None:
         self._conversation.append("user", text)
         events = Turn(self.push)
-        share = [None]
-        original = events.round_finished
-
-        def round_finished(timings: dict) -> None:
-            original(timings)
-        events.round_finished = round_finished
-
         try:
             result = run_turn(
                 self._conversation, base_url=self._args.base_url,
@@ -1480,14 +1668,13 @@ class Api:
         cost = getattr(result, "cost", None)
         line = cost.line() if cost is not None and getattr(cost, "rounds", 0) else ""
         self.push({"k": "cost", "line": "[" + line + "]" if line else "",
-                   "share": share[0], "tokens": self._context_tokens,
+                   "share": events.share, "tokens": self._context_tokens,
                    "n_ctx": self._n_ctx})
-        try:
-            if self._args.session:
-                save_session(self._conversation, self._args.base_url,
-                             self._context_tokens, self._promised_warm)
-        except Exception:                  # noqa: BLE001
-            pass
+        self._persist_live()
+        # THE RAIL FOLLOWS THE TURN. A chat that had just been given its first
+        # message went on calling itself "new chat" until something else
+        # happened to redraw the list.
+        self._reload_rail()
         self.push({"k": "idle"})
 
 
