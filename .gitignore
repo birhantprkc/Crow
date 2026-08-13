@@ -25,3 +25,11 @@ tools/build-bench/
 
 # Release packages -- built by tools/pack-release.ps1, never versioned
 dist/
+
+# Worktrees the workflow orchestrator opens for one stage at a time.
+.claude/worktrees/
+
+# The server's slot-save-path when the client is run from a checkout. The
+# installed layout keeps it under %LOCALAPPDATA%\Crow; a checkout would
+# otherwise carry a session into the repository.
+.session/

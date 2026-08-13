@@ -9,6 +9,13 @@ the PROSE at install.ps1:1126 explaining what the flag does. A checker that read
 the comment about a flag instead of the flag is exactly the failure the stage was
 written to prevent, so it gets a permanent case.
 
+Case 12 is the one the SAMPLING rule exists for, and it is the case a comparing
+checker gets wrong: two clients that BOTH hard-write the manifest's top_p. Every
+copy agrees with the manifest, so "compare each copy" reports green - and the
+damage (one of them edited, the same prompt drawing from a different
+distribution) is then one edit away with nothing watching. It has to be red for
+the count, not for the value.
+
 Usage:  test_check_operating_point.py
 Exit 0 = all cases behaved as required.
 """
@@ -46,7 +53,54 @@ def run(repo, extra=None):
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
-def fixture(tmp, readme=None, install=None, manifest_patch=None):
+def manifest_sampling():
+    """The real manifest's sampling block, read rather than spelled."""
+    src = json.load(open(os.path.join(REPO, "manifests", "operating-point.json"),
+                         encoding="utf-8-sig"))
+    return src["sampling"]
+
+
+def client_source(sampling, keys=None, body_keys=None, prose=False):
+    """A client that writes the sampling defaults the way cli/crow.py does.
+
+    EVERY NUMBER COMES OUT OF THE MANIFEST the fixture just wrote, and that is
+    not tidiness. Case 9 went quietly vacuous once because it carried a typed
+    "0.0.6" that stopped matching the day the version moved: the replace missed,
+    both copies stayed equal, and the case that exists to catch a stale literal
+    was itself the stale literal. A fixture that types 0.95 stops testing this
+    rule the day the operating point picks a different value, and says nothing.
+
+    `keys` are the defaults the client writes, `body_keys` the fields it puts on
+    the wire - the two are separate because the GUI draft's failure was exactly
+    that split: min_p had a default and the request body left it out.
+    """
+    values = [(k, v) for k, v in sampling.items() if not k.startswith("_")]
+    names = [k for k, _ in values]
+    keys = names if keys is None else keys
+    body_keys = names if body_keys is None else body_keys
+    seen = dict(values)
+    out = []
+    if prose:
+        # Both shapes of prose in one client: the comment and the docstring. A
+        # rule that counts either of them counts a sentence as a second copy.
+        out.append('"""The card runs its agentic benchmarks at top_p = %s.\n\n'
+                   'llama.cpp defaults min_p = %s elsewhere.\n"""\n'
+                   % (seen["top_p"], seen["min_p"]))
+        out.append("# the disagreement is real: top_p = %s in the card, 1.0 in the config\n"
+                   % seen["top_p"])
+    for key in keys:
+        out.append('parser.add_argument("--%s", dest="%s", type=float, default=%r)\n'
+                   % (key.replace("_", "-"), key, seen[key]))
+    out.append("body = {\n")
+    out.append('    "messages": messages,\n')
+    for key in body_keys:
+        out.append('    "%s": %s,\n' % (key, key))
+    out.append('    "stream": True,\n')
+    out.append("}\n")
+    return "".join(out)
+
+
+def fixture(tmp, readme=None, install=None, manifest_patch=None, client=None, gui=None):
     """A minimal repo the checker can be pointed at."""
     root = os.path.join(tmp, "repo")
     os.makedirs(os.path.join(root, "manifests"), exist_ok=True)
@@ -63,6 +117,11 @@ def fixture(tmp, readme=None, install=None, manifest_patch=None):
         fh.write('param([string] $Version = "%s")\n%s' % (ver, install if install is not None else GOOD_LINE))
     with open(os.path.join(root, "cli", "crow.py"), "w", encoding="utf-8") as fh:
         fh.write('VERSION = "%s"\n' % ver)
+        fh.write(client_source(src["sampling"]) if client is None else client)
+    if gui is not None:
+        os.makedirs(os.path.join(root, "gui"), exist_ok=True)
+        with open(os.path.join(root, "gui", "crow_gui.py"), "w", encoding="utf-8") as fh:
+            fh.write(gui)
     return root
 
 
@@ -81,7 +140,7 @@ def main():
         # 1 - positive control on a fixture, so a red real repo cannot mask a
         #     checker that says no to everything.
         code, out = run(fixture(tmp, ))
-        check("1 a repo that agrees passes", code == 0 and "3 of 3" in out, out.strip()[-200:])
+        check("1 a repo that agrees passes", code == 0 and "4 of 4" in out, out.strip()[-200:])
         shutil.rmtree(os.path.join(tmp, "repo"))
 
         # 2 - a changed value must be named, not just counted.
@@ -154,6 +213,73 @@ def main():
         code, out = run(fixture(tmp), extra=[os.path.join(tmp, "nope.md")])
         check("10 a missing --extra file is an error, not a skip",
               code == 1 and "does not exist" in out, out.strip()[-200:])
+        shutil.rmtree(os.path.join(tmp, "repo"))
+
+        # ------------------------------------------------------------------
+        # The sampling triple. Cases 11-16 hold the rule that COUNTS.
+        # ------------------------------------------------------------------
+
+        # 11 - the manifest moves and the client does not. The break is DERIVED
+        #      from the manifest, never typed: a hard-coded 0.9 here stops
+        #      breaking anything the day the operating point picks 0.9, and the
+        #      case would go on reporting OK for a checker that no longer looks.
+        root = fixture(tmp)
+        mpath = os.path.join(root, "manifests", "operating-point.json")
+        man = json.load(open(mpath, encoding="utf-8-sig"))
+        current = man["sampling"]["top_p"]
+        moved = round(current / 2, 6) if current else 0.5
+        man["sampling"]["top_p"] = moved
+        with open(mpath, "w", encoding="utf-8") as fh:
+            json.dump(man, fh, indent=1)
+        code, out = run(root)
+        check("11 a moved top_p in the manifest goes red and names the value",
+              moved != current and code == 1 and "top_p" in out and repr(moved) in out,
+              out.strip()[-260:])
+        shutil.rmtree(root)
+
+        # 12 - THE case, and the one a comparing checker gets wrong. A second
+        #      client writes the manifest's OWN value. Every copy agrees; the
+        #      count does not. If this passes, the rule is a compare() and the
+        #      next edit to either client goes unnoticed.
+        code, out = run(fixture(tmp, gui=client_source(manifest_sampling())))
+        check("12 a second client that also agrees with the manifest is still red",
+              code == 1 and "written 2 times" in out and "gui/crow_gui.py" in out,
+              out.strip()[-300:])
+        shutil.rmtree(os.path.join(tmp, "repo"))
+
+        # 13 - the GUI draft's actual defect: the default exists, the request
+        #      body leaves the field out. An omitted min_p is not the manifest's
+        #      0.01, it is llama.cpp's 0.05 - a third value nobody chose.
+        samp = manifest_sampling()
+        keys = [k for k in samp if not k.startswith("_")]
+        code, out = run(fixture(tmp, client=client_source(samp, body_keys=[k for k in keys if k != "min_p"])))
+        check("13 a request body that omits min_p goes red and names it",
+              code == 1 and "without min_p" in out, out.strip()[-300:])
+        shutil.rmtree(os.path.join(tmp, "repo"))
+
+        # 14 - and the half that must NOT fire, in both shapes prose takes: a
+        #      comment and a docstring that quote the value. Case 4's lesson,
+        #      applied to the rule that counts - a sentence is not a copy.
+        code, out = run(fixture(tmp, client=client_source(samp, prose=True)))
+        check("14 prose quoting the value is not a second copy",
+              code == 0 and "4 of 4" in out, out.strip()[-300:])
+        shutil.rmtree(os.path.join(tmp, "repo"))
+
+        # 15 - written exactly once, but in the wrong file. "Exactly one" alone
+        #      would be green here, and the surface would own the default the
+        #      core is supposed to hold.
+        code, out = run(fixture(tmp, client="", gui=client_source(samp)))
+        check("15 the one copy has to sit in the core",
+              code == 1 and "not in the core" in out and "cli/crow.py" in out,
+              out.strip()[-300:])
+        shutil.rmtree(os.path.join(tmp, "repo"))
+
+        # 16 - nobody writes it at all. That is not "nothing to check", it is
+        #      every client inheriting the server's own defaults, which is the
+        #      state top_p was in until #83.
+        code, out = run(fixture(tmp, client=""))
+        check("16 a value written nowhere is an error, not a skip",
+              code == 1 and "written nowhere" in out, out.strip()[-300:])
 
     print()
     print("RESULT: PASS - the drift checker can go red, and does not go red at prose"

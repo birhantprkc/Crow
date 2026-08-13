@@ -73,7 +73,7 @@ That is the whole idea. Everything below is what it costs to make it actually ru
 ## Contents
 
 **[Part I: Getting started](#part-i-getting-started)**
-&nbsp;&nbsp;[Requirements](#requirements) · [Quick start](#quick-start) · [Full setup](#full-setup) · [Using the CLI](#using-the-cli) · [Updating](#updating) · [Common questions](#common-questions)
+&nbsp;&nbsp;[Requirements](#requirements) · [Quick start](#quick-start) · [Full setup](#full-setup) · [Using the CLI](#using-the-cli) · [Using the window](#using-the-window) · [Updating](#updating) · [Common questions](#common-questions)
 
 **[Part II: How it works](#part-ii-how-it-works)**
 &nbsp;&nbsp;[The problem](#the-problem-a-model-that-does-not-fit) · [Sparsity](#1-sparsity-most-of-the-model-is-asleep) · [The cache](#2-the-slot-cache-and-what-vram-buys) · [Reading the drive](#3-reading-the-drive-without-the-page-cache) · [The host tier](#4-the-host-ram-tier-optional) · [Cost per token](#what-it-costs-per-token)
@@ -92,9 +92,12 @@ That is the whole idea. Everything below is what it costs to make it actually ru
 | **System RAM** | **64 GB for the operating point**, which spends 32 GiB on the [host tier](#4-the-host-ram-tier-optional). 32 GB runs without it, at **1.63x less throughput** *(measured on the previous rung, `UD-IQ3_XXS`, not repeated on this one)* |
 | **Disk** | ~2 GB for Crow, **84.6 GiB for the model** — 90,860,736,928 B across three files, measured on the finished download |
 | **OS** | Windows x64. The streaming path uses `FILE_FLAG_NO_BUFFERING` and a handle pool, both Windows-specific |
-| **Python** | 3.8+, for the client only. Standard library, nothing to install |
+| **Python** | 3.8+, for the clients. Standard library, nothing to install |
+| **Tk** | **8.6 or newer**, for the window (`cli/crow_gui.py`) only. It ships with the standard Windows Python; measured against 8.6.15 under Python 3.13.3. The terminal client never touches it |
 
-The installer looks at all of this **before** it downloads anything, but only two of the rows can stop it: fewer than 16,000 MB of VRAM, and less than 2 GB free on the install drive. System RAM, room for the model and a missing Python are **reported as warnings and the install continues** (`install.ps1:154-181`) — the table is the measured profile, not a gate.
+The installer looks at all of this **before** it downloads anything, but only two of the rows can stop it: fewer than 16,000 MB of VRAM, and less than 2 GB free on the install drive. System RAM, room for the model, a missing Python and a missing or too-old Tk are **reported as warnings and the install continues** (`install.ps1:249-281`) — the table is the measured profile, not a gate.
+
+All five of those warnings are raised in the preflight, which is the step before the download. That was not always true of the Python row: until 0.2.0 it was asked in the last step, so a machine without Python heard *"the client needs it"* after fetching 506 MB. It is the same sentence either way and only one of the two placings charges half a gigabyte for it.
 
 ## Quick start
 
@@ -112,27 +115,46 @@ Five steps, no elevation, everything under `%LOCALAPPDATA%\Crow`:
       RAM  63.4 GB
       Disk  364.3 GB free on C:
       Windows  64-bit, PowerShell 5.1.26100.8875
+      Python  C:\Users\you\AppData\Local\Programs\Python\Python313\python.exe
+      Tk  8.6.15, the window needs 8.6
       preflight  passed
 
 [2/5] Downloading the package
-      crow-0.2.0-win-x64.zip  [####################.....]  84%  424.1 MB / 506.4 MB  18.2 MB/s
-
-[3/5] Verifying
-      size  506.4 MB
+      from  https://github.com/nibor1896/Crow/releases/download/v0.2.0/crow-0.2.0-win-x64.zip
+      crow-0.2.0-win-x64.zip  [####################.....]  84%  <done> / <total>  18.2 MB/s
+      size  <the release's, compared against the manifest>
       sha256  <the release's, compared against the manifest>
 
-[4/5] Installing to C:\Users\you\AppData\Local\Crow
-        26/26  README.md                                  65 KB
-      26 files extracted
+[3/5] Installing to C:\Users\you\AppData\Local\Crow
+        <n>/<n>  README.md
+      <n> files extracted
+      installed  <n> files
+
+[4/5] Verifying what landed
+      sha256 per file  <n> of <n> match
+      nothing to remove  <n> files the previous package installed are all still shipped
 
 [5/5] What is left to do
 ```
 
-**26 files, about 506 MB zipped** — `dist/crow-0.2.0-win-x64.zip`. The hash is shown as a
-placeholder rather than a value, and that is not laziness: this file is inside the archive it would
-be quoting, so printing the real digest here changes the archive and invalidates the digest. The
-one on your screen is compared against the release's manifest by the installer, which is where a
-hash belongs. The `README.md` line moves with this file's size for the same reason.
+**The count, the size and the hash are all placeholders above, and each is one for its own reason.**
+The hash has always been one, and that reason is circular: this file sits inside the archive it
+would be quoting, so printing the real digest here changes the archive and invalidates the digest.
+The count and the size became placeholders for a duller reason — nothing in this repository checks
+them. They were true of 0.2.0 as it shipped (26 files, 506.4 MB in `dist/crow-0.2.0-win-x64.zip`,
+measured on the package) and the next one that ships a file more makes them quietly false, in the
+one document a reviewer reads. That next one is already here rather than hypothetical: the tree now
+builds a 0.2.0 carrying two clients, so the same version number packs 28 files — which is the
+argument above happening to its own example. A number that no check can defend either moves into `tools/check_operating_point.py`
+beside the flags and the version literal, or it comes out of the README; letting it go stale is the
+one option that is not available. This one came out. What is on your screen is compared against the
+release's own manifest by the installer, file by file and hash by hash, which is where those numbers
+belong.
+
+*Steps 3 and 4 used to be printed here the other way round — "Verifying" before "Installing". The
+installer has always unpacked first and hashed what landed afterwards, which is the only order in
+which the hashes mean anything; the sample above was simply wrong about it. Read off a real run,
+2026-08-13.*
 
 The model is **not** part of that download. It is 84.6 GiB, it belongs to somebody else, and an installer that spends hours on it before you have seen anything work is the wrong shape. The last step prints the one command that fetches it:
 
@@ -142,7 +164,7 @@ hf download unsloth/DeepSeek-V4-Flash-0731-GGUF --include "UD-IQ2_XXS/*" --local
 
 > **A trap worth knowing about.** When `hf` cannot reach the repository it prints `✓ Downloaded` and returns the local directory — failure that looks exactly like success. Check that four files totalling ~97 GiB actually arrived.
 
-> **`%LOCALAPPDATA%` is a `cmd.exe` form and PowerShell does not expand it.** Every block on this page is PowerShell, so it writes `$env:LOCALAPPDATA`. The installer prints both paths already resolved (`install.ps1:1144` and `:1154`), which is the copy to prefer.
+> **`%LOCALAPPDATA%` is a `cmd.exe` form and PowerShell does not expand it.** Every block on this page is PowerShell, so it writes `$env:LOCALAPPDATA`. The installer prints every one of these commands with the paths already resolved for your machine — `install.ps1:1474` for the server, `:1505` and `:1526` for the two clients — and that is the copy to prefer.
 
 ## Full setup
 
@@ -214,7 +236,18 @@ fresh server at a resumed 63.9k window ran at 14.97. That report has never been 
 shipped 58 slots. Open as [#71](https://github.com/nibor1896/Crow/issues/71); the remedy is a
 restart, and there is no fix to claim.
 
-### Step 3 — start the client
+### Step 3 — start a client, and there are two of them
+
+**Crow ships two clients.** `cli/crow.py` is the terminal client and the one this README documents
+end to end; `cli/crow_gui.py` is a window over the same core, the same session file and the same
+server. Neither is a wrapper around the other, and neither is required to use the other.
+
+The installer puts **both** on disk and starts neither. There is no opt-in switch and no "GUI
+edition": `tools/pack-release.ps1` copies `cli/` into the package whole, so both files are in the
+download either way, and a switch could only have decided whether the installer mentions the second
+one. What it does instead is print both start lines on its last screen, the terminal one first.
+
+The terminal client, which needs nothing but Python:
 
 ```powershell
 python $env:LOCALAPPDATA\Crow\cli\crow.py
@@ -241,14 +274,31 @@ The last line is not the `-m` you passed — that is `crow`, at the front of the
 model name is read back out of the server's `/props`, so an endpoint serving something else says so
 directly under its own address.
 
+Or the window, which needs Tk as well — what it shows and where it differs is
+[its own section](#using-the-window):
+
+```powershell
+python $env:LOCALAPPDATA\Crow\cli\crow_gui.py
+```
+
+**One thing is worth knowing before you open both at once.** The server runs at `-np 1`: one slot,
+one stream. Two clients against one server is fine and the session file is shared between them, but
+a turn started in one holds slot 0 until it finishes, and a question asked in the other queues
+behind it. Closing the window mid-turn does not release it either — the server keeps computing —
+and `crow_gui.py` says so on the way out rather than leaving you to wonder why the terminal is
+suddenly slow.
+
 ## Using the CLI
 
-Standard library only, on purpose: it has to run before anything is installed.
+Standard library only, on purpose: it has to run before anything is installed. Everything in this
+section is `cli/crow.py`; the window is [below](#using-the-window) and shares this client's flags
+where they mean the same thing.
 
 | Command | |
 |---|---|
 | `/help` | the commands |
 | `/tools` | the tools the model can call, read out of the schema it is sent |
+| `/thoughts` | show the model's reasoning as it arrives, or hide it again — the same switch as `--show-reasoning`, mid-session |
 | `/reset` | drop the conversation and start a new one |
 | `/context` | how much of the window is used |
 | `/exit`, `/quit` | leave — both spellings, because half the world types the other one |
@@ -268,9 +318,11 @@ plain read, where colour is off anyway.
 | `--top-p` | default **0.95** — the model card's agentic figure. Its own `generation_config.json` says 1.0; the disagreement is real and is recorded at `cli/crow.py:2733` rather than resolved silently |
 | `--min-p` | default **0.01**, unsloth's recommendation for this quantisation. Sent explicitly because llama.cpp's server default is 0.05, and not sending it means inheriting a third value nobody chose |
 | `--reasoning-effort` | `low`, `high` or `max`. Rides in `chat_template_kwargs` and only when set; unset, the template picks `low` itself |
+| `--show-reasoning` | print the reasoning as it streams, in its own dim block. Off by default: it is 60–90 % of every answer this model gives — 88.2 % of every generated character over the 2026-08-07 reference run — and shown by default it buries the code you asked for. The block closes when the answer starts and **opens again** if the model thinks a second time mid-answer, which it does |
 | `--timeout` | socket timeout in seconds (default **1800**) |
 | `--rollover-at` | archive and start fresh at this share of the window, `0` switches it off (default **0.9**) |
 | `--max-tool-rounds` | how many tool rounds one turn may take before it answers from what it has (default **24**) |
+| `--no-run-tools` | report the tool calls the model asks for instead of running them; the turn ends after one round. Not the same as `--max-tool-rounds 0`, which still spends the budget and buys a forced round to say where things stood. The declarations stay in the request either way — emptying them is what makes the model's template drop the previous turn's thoughts |
 | `--resume FILE` | resume a named session file — an archive left by a rollover; a bare name is looked for among the session files |
 | `--no-session` | do not resume the last session, and do not save this one |
 | `--no-update-check` | do not ask GitHub whether a newer release exists |
@@ -348,6 +400,52 @@ This is also why the client sends its `tools` array with **every** request — f
 **`--temperature` defaults to 1.0, not 0.** 1.0 is what DeepSeek-V4-Flash-0731 specifies — its model card runs its agentic benchmarks there and its `generation_config.json` agrees. 0 stays dangerous: pure greedy decoding has no way out of a repetition attractor, and a model that repeats *"Actually, let me…"* inside its reasoning block never reaches an answer. `--temperature 0` stays available so measurement runs get byte-identical output.
 
 On first start the client installs its bundled typeface and writes `profiles.defaults.font.face` and `background` into Windows Terminal's `settings.json`, with a `.bak` beside it. It never overwrites a value it did not write itself. Both halves can be switched off.
+
+## Using the window
+
+```powershell
+python $env:LOCALAPPDATA\Crow\cli\crow_gui.py
+```
+
+`cli/crow_gui.py` is the second surface, and the rule it is written to is narrow: **every decision
+is the core's, every pixel is the window's.** Where a thought block begins, what counts as a code
+fence, what one turn cost, how a session is saved and resumed — all of that is `cli/crow_core.py`,
+the same module `cli/crow.py` calls. The window draws it and decides none of it, which is why
+switching clients cannot change an answer. `tools/check_shared_core.py` holds that against
+`manifests/shared-core.json` and now has two surfaces to hold it against instead of one.
+
+What is on the screen, and each of these is the same behaviour the terminal has:
+
+| | |
+|---|---|
+| **the status bar** | the connection, the model read back out of `/props`, and how much of the window is used. The model chip starts **empty** and stays empty until `/props` answers — never a default, never the last known name |
+| **the transcript** | reasoning in its own dim block that closes when the answer starts and opens again if the model thinks a second time mid-answer, then the answer, then the turn's cost line |
+| **code blocks** | drawn in a frame with a copy button. An unclosed block is still framed and still copyable — the model does not always finish its fence |
+| **the composer** | ENTER sends, SHIFT+ENTER makes a new line. The read timeout is printed beside the send button, read off the running configuration rather than typed in |
+| **the sessions rail** | one entry, because there is one `session.json`. It is the same file `cli/crow.py` writes, so a conversation started in the terminal opens in the window and back again |
+
+**The abort is a button that tells the truth, which is rarer than a button that works.** ESCAPE or
+the same button that sent the turn stops it, and there are three paths under it: the interrupt flag
+the core polls every 50 ms, the socket its `finally` closes, and the socket timeout. The third one is
+the reason the window ships **600 s** where the terminal ships 1800: measured 2026-08-13 by
+`tools/measure_gui_stream.py`, *nothing this process does wakes a `recv` that is already blocked* —
+`settimeout`, `shutdown` and closing the socket each came back only when the server itself hung up.
+The only bound on such a reader is the timeout **as it stood when the read started**, so it has to be
+chosen in front of the turn. 600 s clears the worst prefill on record (469.51 s to the first token on
+a resumed 21k session) with room, and is a bound where 1800 is effectively none. If the reader is
+still alive two seconds after an abort, the window writes that into the transcript instead of
+pretending the turn ended — during a prefill silence that will happen, and it is true when it does.
+
+**The drawing is batched per frame, not per token.** One `after()` tick at 30 fps takes up to 512
+events off the queue and writes them with one insert per tag run. Measured over 4,000 deltas: per
+event, 4,000 ticks and 332.9 ms of inserts; per tick, 1 tick and 4.8 ms. The milliseconds are not the
+point — the ticks are, because a tick costs wall clock whether it drew one character or a thousand.
+
+The flags are the terminal client's wherever they mean the same thing (`--base-url`, `-m`,
+`--system`, `--temperature`, `--top-p`, `--min-p`, `--reasoning-effort`, `--rollover-at`,
+`--max-tool-rounds`, `--no-run-tools`, `--no-session`), and `--timeout` is the one that differs, for
+the reason above. What the window does **not** have: the `/` commands — it has buttons instead — and
+the terminal-profile writing, which belongs to the client that lives in a terminal.
 
 ## Updating
 

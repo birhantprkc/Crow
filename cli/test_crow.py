@@ -10,6 +10,8 @@ guards regresses -- a suite that cannot go red proves nothing.
 from __future__ import annotations
 
 import builtins
+import contextlib
+import inspect
 import io
 import json
 import os
@@ -318,10 +320,12 @@ class StreamReplyTests(unittest.TestCase):
         crow._post_stream = fake
         sink = io.StringIO()
         try:
+            show = kw.pop("show_reasoning", False)
             text, reasoning, timings = crow.stream_reply(
                 conversation if conversation is not None else crow.Conversation("SYS"),
                 base_url="http://x/v1", model="crow",
-                api_key="k", temperature=0.0, timeout=1.0, out=sink, **kw)
+                api_key="k", temperature=0.0, timeout=1.0,
+                events=crow.TerminalEvents(out=sink, show_reasoning=show), **kw)
         finally:
             crow._post_stream = original
         return text, reasoning, timings, sink.getvalue()
@@ -440,6 +444,192 @@ class StreamReplyTests(unittest.TestCase):
         self.assertEqual(assistant[0]["content"], "ANSWER ONE")
 
 
+class ShowReasoningTests(unittest.TestCase):
+    """E10: the CLI can show the thinking, and by default it still does not.
+
+    UNTIL THIS STAGE THE REASONING WAS SHOWN NOWHERE. It was read, counted and
+    sent back, and 60-90 % of everything the model produced never reached the
+    user -- 88.2 % of every generated character over the 2026-08-07 reference
+    run. That is tolerable while nothing else can display it either; it stops
+    being tolerable the moment a window can, because then the terminal is the
+    second-class client of the same core, which is the one thing #90's
+    acceptance criterion refuses.
+
+    THE DEFAULT DOES NOT MOVE. Off, this file's other 300-odd cases print what
+    they always printed, and the first case below is the promise in one line.
+    """
+
+    # The same shape as the core's RE_ENTRY fixture, and for the same reason:
+    # think, answer, think AGAIN, answer again. A fixture that only thinks first
+    # cannot tell the two implementations apart.
+    RE_ENTRY = [
+        {"reasoning_content": "first I "},
+        {"reasoning_content": "consider it"},
+        {"content": "ANSWER ONE\n"},
+        {"reasoning_content": "wait -- I should check"},
+        {"content": "ANSWER TWO\n"},
+    ]
+    ANSWER = "ANSWER ONE\nANSWER TWO\n"
+
+    def _run(self, deltas, **kw):
+        """Drive `crow.stream_reply` -- the wrapper with the terminal on it.
+
+        `prefix=""` on purpose: the prompt is the CLI's, not the stream's, and
+        leaving it out makes the screen comparable to the deltas character for
+        character, which is what the predicate below needs.
+        """
+        chunks = [json.dumps({"choices": [{"delta": d}]}) for d in deltas]
+        chunks.append(json.dumps({"choices": [], "timings": {"predicted_n": 7}}))
+        original = crow._post_stream
+        crow._post_stream = lambda url, body, key, timeout: iter(chunks)
+        sink = io.StringIO()
+        try:
+            show = kw.pop("show_reasoning", False)
+            text, reasoning, timings = crow.stream_reply(
+                crow.Conversation("SYS"), base_url="http://x/v1", model="crow",
+                api_key="k", temperature=0.0, timeout=1.0,
+                events=crow.TerminalEvents(out=sink, prefix="", show_reasoning=show), **kw)
+        finally:
+            crow._post_stream = original
+        return text, reasoning, timings, sink.getvalue()
+
+    @staticmethod
+    def _plain(screen: str) -> str:
+        import re as _re
+        return _re.sub(r"\033\[[0-9;]*m", "", screen)
+
+    def _split(self, screen: str) -> tuple[str, list[str]]:
+        """The screen cut into (everything outside a block, the block bodies).
+
+        A block runs from its `--- thinking` rule to the next full rule of
+        dashes, both included. Cutting it out is how "the answer is not inside a
+        block" becomes something a test can state about the SCREEN rather than
+        about an event log.
+        """
+        outside, bodies, current = [], [], None
+        for line in self._plain(screen).splitlines(keepends=True):
+            bare = line.rstrip("\n")
+            if current is None and bare.startswith("--- thinking"):
+                current = []
+                continue
+            if current is not None:
+                if bare and set(bare) == {"-"}:
+                    bodies.append("".join(current))
+                    current = None
+                else:
+                    current.append(line)
+                continue
+            outside.append(line)
+        if current is not None:                      # an unclosed block, which is a defect
+            bodies.append("".join(current))
+        return "".join(outside), bodies
+
+    def test_without_the_flag_the_terminal_prints_what_it_always_printed(self):
+        """IDEMPOTENCE, and it is the whole promise of the stage. The same
+        stream through the same wrapper: not one character more than before
+        E10. The byte-level half of this ran as a file `diff` against the
+        pre-change client over the same fixture."""
+        _, _, _, printed = self._run(self.RE_ENTRY)
+        self.assertEqual(printed, self.ANSWER)
+
+    def test_the_visible_answer_is_the_sum_of_the_content_deltas(self):
+        """THE PREDICATE, and it is not open to interpretation: with the
+        reasoning hidden, the length of the visible answer EQUALS the sum of the
+        content deltas. A block that leaked one character, a rule drawn for a
+        turn that showed nothing, a swallowed newline -- all of them are this
+        one number."""
+        _, _, _, printed = self._run(self.RE_ENTRY)
+        self.assertEqual(len(printed),
+                         sum(len(d["content"]) for d in self.RE_ENTRY if "content" in d))
+
+    def test_the_flag_puts_the_thoughts_on_the_screen(self):
+        _, _, _, printed = self._run(self.RE_ENTRY, show_reasoning=True)
+        self.assertIn("first I consider it", printed)
+        self.assertIn("wait -- I should check", printed)
+
+    def test_two_thoughts_are_two_blocks_on_the_screen(self):
+        """The re-entry case as the reader sees it. The second block is
+        labelled, because a reader who sees one `thinking` and then more
+        thinking below the answer has to be told it is a NEW thought and not the
+        old one continuing."""
+        _, _, _, printed = self._run(self.RE_ENTRY, show_reasoning=True)
+        plain = self._plain(printed)
+        # "--- thinking ---" and not "--- thinking ": the second block's label
+        # starts with the first one's, and a count on the shorter string finds
+        # both and says nothing.
+        self.assertEqual(plain.count("--- thinking ---"), 1)
+        self.assertEqual(plain.count("--- thinking again (2) ---"), 1)
+        order = [plain.index(token) for token in
+                 ("--- thinking ---", "first I consider it", "ANSWER ONE",
+                  "--- thinking again (2) ---", "wait -- I should check", "ANSWER TWO")]
+        self.assertEqual(order, sorted(order), "the screen is out of stream order")
+
+    def test_the_answer_is_not_inside_a_block_on_the_screen(self):
+        """P3 on the screen itself: cut both blocks out, rules included, and
+        what is left has to be the answer WHOLE. A version that never closes the
+        first block leaves both answers inside it, and this comparison is what
+        notices."""
+        _, _, _, printed = self._run(self.RE_ENTRY, show_reasoning=True)
+        outside, bodies = self._split(printed)
+        self.assertEqual(outside, self.ANSWER)
+        self.assertEqual([b.rstrip("\n") for b in bodies],
+                         ["first I consider it", "wait -- I should check"])
+
+    def test_a_stream_without_reasoning_gets_no_block_at_all(self):
+        """COUNTER-PROBE (b), against false green: the flag ON and nothing to
+        show must print an empty screen's worth of block -- that is, none. An
+        implementation that opens a block per turn draws an empty container on
+        every endpoint that does not split the field."""
+        _, _, _, printed = self._run([{"content": "PLAIN\n"}], show_reasoning=True)
+        self.assertEqual(printed, "PLAIN\n")
+        self.assertNotIn("thinking", printed)
+
+    def test_the_shown_characters_and_the_counted_ones_are_one_number(self):
+        """THE SECOND HALF-STATE: the flag shows the reasoning while
+        `thinking NN%` goes on counting its own way, and the display and the
+        percentage describe the same turn differently.
+
+        The fixture's thoughts carry no newline of their own, so the single
+        newline the closing rule needs is the only one stripped here."""
+        _, _, timings, printed = self._run(self.RE_ENTRY, show_reasoning=True)
+        _, bodies = self._split(printed)
+        self.assertEqual(sum(len(b.rstrip("\n")) for b in bodies),
+                         timings["_reasoning_chars"])
+        self.assertIn("thinking ", crow.format_timings(timings))
+
+    def test_the_flag_is_off_by_default(self):
+        self.assertFalse(crow.build_parser().parse_args([]).show_reasoning)
+
+    def test_the_flag_turns_it_on(self):
+        self.assertTrue(crow.build_parser().parse_args(["--show-reasoning"]).show_reasoning)
+
+    def test_the_turn_sink_hands_the_switch_down_to_the_stream(self):
+        """THE HALF-STATE THE PLAN NAMES FIRST: the state machine in the core
+        and the CLI not wiring it, which moves the defect instead of fixing it.
+        The switch has to survive both seams -- turn sink, then reply sink."""
+        out = io.StringIO()
+        events = crow.TerminalTurnEvents(out=out, show_reasoning=True)
+        self.assertTrue(events.reply_events()._show)
+        self.assertFalse(crow.TerminalTurnEvents(out=out).reply_events()._show)
+
+    def test_repl_carries_the_switch_into_every_turn(self):
+        """`/thoughts` flips it BETWEEN turns, so it may not be read once at
+        start and remembered inside the sink."""
+        source = inspect.getsource(crow.repl)
+        self.assertIn("show_reasoning=show_reasoning", source)
+        self.assertIn('"/thoughts"', source)
+
+    def test_every_command_help_promises_is_handled_in_the_loop(self):
+        """The general form of "documented ahead of the code", and the case that
+        made it worth writing: /thoughts is offered in two places -- the flag
+        and the list -- and neither of them runs it."""
+        import re as _re
+        source = inspect.getsource(crow.repl)
+        for command in sorted(set(_re.findall(r"/\w+", crow.HELP))):
+            self.assertIn(f'"{command}"', source,
+                          f"{command} is in /help and nothing in repl() handles it")
+
+
 class ContextCounterTests(unittest.TestCase):
     """The bar has to grow with the conversation. It used to shrink.
 
@@ -508,7 +698,8 @@ class UsageFromTheStreamTests(unittest.TestCase):
         try:
             _, _, timings = crow.stream_reply(
                 crow.Conversation("SYS"), base_url="http://x/v1", model="crow",
-                api_key="k", temperature=0.0, timeout=1.0, out=io.StringIO())
+                api_key="k", temperature=0.0, timeout=1.0,
+                events=crow.TerminalEvents(out=io.StringIO()))
         finally:
             crow._post_stream = original
         return timings, sent
@@ -1632,6 +1823,301 @@ class RolloverTests(unittest.TestCase):
                             crow.rollover_path("20260810-074501"))
 
 
+class SessionFormatGateTests(unittest.TestCase):
+    """The gate on the shared session file, before a second writer exists.
+
+    WHY IT COULD NOT WAIT FOR THE SECOND WRITER. session.json and the server's
+    one fixed crow-session.bin are written by whoever runs; the moment a window
+    runs beside the terminal, "the format changed" is a silent data change
+    rather than an error. The gate has to be in the file BEFORE that, because
+    the files it has to be gentle with are the ones already on disk.
+
+    FOUR CASES, and the third and fourth are the way back rather than the way
+    forward:
+
+      (a) an unknown stamp is refused, visibly, WITHOUT the file being touched;
+      (b) a known stamp loads;
+      (c) a file with no stamp -- every session file every installation is
+          holding today -- is accepted and stamped by the next save. Refusing
+          those would take the history off every existing user on the day they
+          update;
+      (d) a file this build stamped is still readable by an older one. The
+          claim is that the five `saved.get(...)` reads of 0.2.0 ignore a key
+          they do not know; it is written down here as a case rather than left
+          as an assumption, because a gate nobody can come back through is a
+          one-way door.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self._real_dir, self._real_file = crow.SESSION_DIR, crow.SESSION_FILE
+        self._real_post = crow.post_json
+        crow.SESSION_DIR = self.dir
+        crow.SESSION_FILE = str(Path(self.dir) / "session.json")
+        self.posted = []
+        crow.post_json = lambda url, body, timeout=30.0: self.posted.append(url) or {}
+
+    def tearDown(self):
+        crow.SESSION_DIR, crow.SESSION_FILE = self._real_dir, self._real_file
+        crow.post_json = self._real_post
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _conversation(self):
+        c = crow.Conversation("system prompt")
+        c.append("user", "what is in this repo")
+        c.append("assistant", "a lot")
+        return c
+
+    def _body(self, **extra):
+        """A session file as the shipped client writes one, minus the stamp."""
+        body = {"version": "0.2.0", "kv": False, "kv_tokens": 0,
+                "context_tokens": 42,
+                "prefix": crow.prefix_fingerprint("system prompt"),
+                "messages": [{"role": "user", "content": "hi"}]}
+        body.update(extra)
+        return body
+
+    def _write(self, saved):
+        with open(crow.SESSION_FILE, "w", encoding="utf-8") as fh:
+            json.dump(saved, fh)
+        return crow.SESSION_FILE
+
+    def _bytes(self):
+        with open(crow.SESSION_FILE, "rb") as fh:
+            return fh.read()
+
+    @staticmethod
+    def _read_like_0_2_0(path):
+        """The five reads the shipped 0.2.0 load_session does, and no others.
+
+        Copied out of cli/crow.py at f7b2765 rather than called: the point of
+        case (d) is what a build WITHOUT this gate does with a file that has
+        been through it, and that build is not importable from here.
+        """
+        with open(path, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        return (saved.get("messages") or [],
+                saved.get("kv"),
+                saved.get("prefix"),
+                int(saved.get("kv_tokens") or 0),
+                int(saved.get("context_tokens") or 0))
+
+    # --- (a) an unknown stamp ------------------------------------------------
+
+    def test_an_unknown_stamp_is_refused_on_the_read_path(self):
+        self._write(self._body(**{crow.SESSION_FORMAT_KEY: "99"}))
+        before = self._bytes()
+        with self.assertRaises(crow.SessionFormatError):
+            crow.load_session("http://x/v1", "system prompt")
+        self.assertEqual(self._bytes(), before, "a refused file is left alone")
+        self.assertEqual(self.posted, [], "and the server was not asked either")
+
+    def test_the_refusal_names_the_file_and_both_formats(self):
+        """Visibly refused, not quietly. `None` out of load_session already
+        means 'no session here', so the refusal has to arrive as something the
+        surface can tell apart from that."""
+        path = self._write(self._body(**{crow.SESSION_FORMAT_KEY: "99"}))
+        with self.assertRaises(crow.SessionFormatError) as caught:
+            crow.load_session("http://x/v1", "system prompt")
+        text = str(caught.exception)
+        self.assertIn(path, text)
+        self.assertIn("99", text)
+        self.assertIn(crow.SESSION_FORMAT, text)
+        self.assertEqual(caught.exception.path, path)
+
+    def test_the_gate_sits_before_the_write_on_the_read_path(self):
+        """load_session WRITES while reading: a promised cache that turns out
+        to be gone is withdrawn by rewriting the file. A gate placed after that
+        has already changed the stranger's file before refusing it."""
+        self._write(self._body(kv=True, **{crow.SESSION_FORMAT_KEY: "99"}))
+        before = self._bytes()
+        crow.post_json = lambda *a, **k: (_ for _ in ()).throw(OSError("no such file"))
+        with self.assertRaises(crow.SessionFormatError):
+            crow.load_session("http://x/v1", "system prompt")
+        self.assertEqual(self._bytes(), before,
+                         "the withdrawal rewrite ran on a file the gate refuses")
+
+    def test_an_unknown_stamp_is_refused_before_anything_is_saved(self):
+        """The other half of the same promise. A gate only on the read path
+        refuses to READ a stranger's file and then flattens it on exit."""
+        self._write(self._body(**{crow.SESSION_FORMAT_KEY: "99"}))
+        before = self._bytes()
+        with self.assertRaises(crow.SessionFormatError):
+            crow.save_session(self._conversation(), "http://x/v1", 99)
+        self.assertEqual(self._bytes(), before)
+        self.assertEqual(self.posted, [],
+                         "the slot save is a write too, and SLOT_FILE is one fixed name")
+
+    def test_a_refused_file_survives_a_second_attempt_unchanged(self):
+        """Idempotence, and it is the file that has to be idempotent here."""
+        self._write(self._body(**{crow.SESSION_FORMAT_KEY: "99"}))
+        before = self._bytes()
+        for _ in range(2):
+            with self.assertRaises(crow.SessionFormatError):
+                crow.load_session("http://x/v1", "system prompt")
+            with self.assertRaises(crow.SessionFormatError):
+                crow.save_session(self._conversation(), "http://x/v1", 99)
+        self.assertEqual(self._bytes(), before)
+
+    # --- (b) a known stamp ---------------------------------------------------
+
+    def test_a_known_stamp_loads(self):
+        self._write(self._body(**{crow.SESSION_FORMAT_KEY: crow.SESSION_FORMAT}))
+        restored = crow.load_session("http://x/v1", "system prompt")
+        self.assertIsNotNone(restored)
+        self.assertEqual(len(restored[0]), 1)
+        self.assertEqual(restored[1], 42)
+
+    def test_what_this_build_writes_is_what_this_build_reads(self):
+        crow.save_session(self._conversation(), "http://x/v1", 99)
+        restored = crow.load_session("http://x/v1", "system prompt")
+        self.assertIsNotNone(restored)
+        self.assertEqual(len(restored[0]), 3)
+
+    # --- (c) no stamp: the file every installation is holding today ----------
+
+    def test_a_file_without_the_stamp_is_accepted(self):
+        saved = self._body()
+        del saved["version"]
+        self._write(saved)
+        restored = crow.load_session("http://x/v1", "system prompt")
+        self.assertIsNotNone(restored, "an unstamped file is today's format, not a foreign one")
+        self.assertEqual(len(restored[0]), 1)
+
+    def test_a_file_as_0_2_0_actually_wrote_it_is_accepted(self):
+        """THE PREMISE THIS CASE WAS PLANNED ON IS NOT WHAT IS ON DISK. The
+        stage says a 0.2.0 session file has no `version` key. It has one:
+        cli/crow.py at f7b2765 writes `"version": VERSION` into every save, so
+        every file out there carries "0.2.0" -- read by nobody, but there. A
+        gate that had taken THAT field as its format number would have refused
+        every existing session on the first start after an update, which is the
+        exact harm this case forbids. Hence a key of its own, and hence this
+        case beside the keyless one."""
+        self._write(self._body())
+        restored = crow.load_session("http://x/v1", "system prompt")
+        self.assertIsNotNone(restored)
+        self.assertEqual(len(restored[0]), 1)
+
+    def test_the_next_save_stamps_an_unstamped_file(self):
+        self._write(self._body())
+        crow.save_session(self._conversation(), "http://x/v1", 99)
+        with open(crow.SESSION_FILE, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        self.assertEqual(saved[crow.SESSION_FORMAT_KEY], crow.SESSION_FORMAT)
+        self.assertEqual(saved["version"], crow.VERSION,
+                         "`version` keeps meaning the client that wrote the file")
+
+    def test_the_stamped_file_then_loads_without_a_word(self):
+        """The round trip of (c): accepted, stamped, and still ours next time."""
+        self._write(self._body())
+        crow.save_session(self._conversation(), "http://x/v1", 99)
+        self.assertIsNotNone(crow.load_session("http://x/v1", "system prompt"))
+
+    # --- (d) the way back ----------------------------------------------------
+
+    def test_a_stamped_file_is_still_readable_by_an_older_build(self):
+        crow.save_session(self._conversation(), "http://x/v1", 4242)
+        messages, kv, prefix, kv_tokens, context = self._read_like_0_2_0(crow.SESSION_FILE)
+        self.assertEqual([m["content"] for m in messages],
+                         ["system prompt", "what is in this repo", "a lot"])
+        self.assertEqual(context, 4242)
+        self.assertEqual(prefix, crow.prefix_fingerprint("system prompt"))
+        self.assertTrue(kv)
+        self.assertEqual(kv_tokens, 0)
+
+    def test_the_stamp_is_an_added_key_and_not_a_renamed_one(self):
+        """Why (d) holds at all: the older build reads five keys and ignores
+        the rest. It only goes on holding while every one of those five is
+        still there under its own name."""
+        crow.save_session(self._conversation(), "http://x/v1", 99)
+        with open(crow.SESSION_FILE, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        was = {"version", "kv", "kv_tokens", "context_tokens", "prefix", "messages"}
+        self.assertEqual(was - set(saved), set(), "a key an older build reads went missing")
+        self.assertIn(crow.SESSION_FORMAT_KEY, saved)
+
+    def test_a_file_an_older_build_wrote_back_is_taken_again(self):
+        """The full round trip down and up: this build stamps, 0.2.0 saves over
+        it and drops the stamp it never knew about, this build reads it again."""
+        crow.save_session(self._conversation(), "http://x/v1", 99)
+        with open(crow.SESSION_FILE, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        del saved[crow.SESSION_FORMAT_KEY]
+        self._write(saved)
+        self.assertIsNotNone(crow.load_session("http://x/v1", "system prompt"))
+
+    # --- the rule on its own -------------------------------------------------
+
+    def test_the_rule_itself(self):
+        self.assertIsNone(crow.session_format_problem({}))
+        self.assertIsNone(crow.session_format_problem(
+            {crow.SESSION_FORMAT_KEY: crow.SESSION_FORMAT}))
+        self.assertIsNotNone(crow.session_format_problem({crow.SESSION_FORMAT_KEY: "99"}))
+
+    def test_the_stamp_is_a_string_because_one_equals_true(self):
+        """`1 == True` in Python. An integer stamp would take a JSON `true` for
+        this build's own work."""
+        self.assertIsNotNone(crow.session_format_problem({crow.SESSION_FORMAT_KEY: True}))
+        self.assertIsNotNone(crow.session_format_problem({crow.SESSION_FORMAT_KEY: 1}))
+
+    def test_a_file_that_is_not_there_is_not_a_problem(self):
+        self.assertIsNone(crow.session_file_problem(str(Path(self.dir) / "gone.json")))
+
+    def test_a_corrupt_file_is_not_a_foreign_format(self):
+        """Unreadable is not a stranger's format. Refusing to overwrite garbage
+        would strand a user with a broken file and no way to start over."""
+        with open(crow.SESSION_FILE, "w", encoding="utf-8") as fh:
+            fh.write("{not json at all")
+        self.assertIsNone(crow.session_file_problem(crow.SESSION_FILE))
+        self.assertIsNone(crow.load_session("http://x/v1", "system prompt"))
+        self.assertIsNotNone(crow.save_session(self._conversation(), "http://x/v1", 99))
+
+    def test_an_archive_gets_the_same_gate(self):
+        """A rollover archive is the same format in a different file, and
+        --resume reads it with the same function."""
+        archive = str(Path(self.dir) / "rollover-test.json")
+        with open(archive, "w", encoding="utf-8") as fh:
+            json.dump(self._body(**{crow.SESSION_FORMAT_KEY: "99"}), fh)
+        with self.assertRaises(crow.SessionFormatError):
+            crow.load_session("http://x/v1", "system prompt", path=archive)
+
+    # --- the surface, where "visibly" is either true or it is not ------------
+
+    def test_the_cli_says_it_and_stops_rather_than_starting_over_the_file(self):
+        """The core refuses; the surface has to TELL somebody. An uncaught
+        raise would hold the file just as well and reach the user as a
+        traceback, and starting anyway would build a session that leave() then
+        refuses to write -- the same loss, one hour later.
+
+        Driven through repl() rather than read off its source: what is being
+        checked is the exit code and the sentence, and neither is in the text.
+        """
+        self._write(self._body(**{crow.SESSION_FORMAT_KEY: "99"}))
+        before = self._bytes()
+        args = crow.build_parser().parse_args([])
+        args.font = False
+        args.background = False
+        args.update_check = False
+        saved = {name: getattr(crow, name) for name in
+                 ("check_endpoint", "fetch_n_ctx", "fetch_model_name", "read_line")}
+        crow.check_endpoint = lambda *a, **k: "ok"
+        crow.fetch_n_ctx = lambda *a, **k: 0
+        crow.fetch_model_name = lambda *a, **k: ""
+        crow.read_line = lambda prompt: "/exit"
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = crow.repl(args)
+        finally:
+            for name, value in saved.items():
+                setattr(crow, name, value)
+        self.assertEqual(code, 2, "a session it will not touch is not a start")
+        self.assertIn("99", err.getvalue())
+        self.assertIn("--no-session", err.getvalue(),
+                      "the way out has to be in the sentence")
+        self.assertEqual(self._bytes(), before)
+
+
 class TranscriptTests(unittest.TestCase):
     """The archive a model pointed at it can actually read."""
 
@@ -1833,6 +2319,800 @@ class RolloverWiringTests(unittest.TestCase):
         """--no-session stays a switch; --resume is the one that takes a name."""
         args = crow.build_parser().parse_args(["--no-session"])
         self.assertFalse(args.session)
+
+
+class ToolLayerCase(unittest.TestCase):
+    """Base for every tool case: a temp directory, and a reset that is not optional.
+
+    THE HALF-STATE THAT MATTERS HERE IS NOT THE TEMP DIRECTORY, IT IS `_READ`.
+    It is module-global (crow.py:1684), has six occurrences (:1684, 1739, 1767,
+    1772, 1781, 1792) and nothing ever empties it -- no clear(), no del. A case
+    that reads a file and leaves the key behind makes the NEXT case green where
+    it has to be red, so the suite would pollute itself and the damage would look
+    like success. `_SEEN` (:1935) has the same shape: the one place that clears
+    it is repl() (:2478), and repl() does not run here.
+
+    Both are emptied IN PLACE and put back the way they were, never rebound.
+    `crow._READ = set()` works today and stops working the moment the tool layer
+    moves to crow_core.py and crow.py re-exports the name: the tools would go on
+    consulting the object the core holds, and the reset would silently stop
+    resetting -- green, and meaningless. Same reason TOOL_IMPL is mutated in
+    place below instead of being swapped out.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-tools-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._read_before = set(crow._READ)
+        self._seen_before = dict(crow._SEEN)
+        self.addCleanup(self._restore_tool_state)
+        crow._READ.clear()
+        crow._SEEN.clear()
+
+    def _restore_tool_state(self):
+        crow._READ.clear()
+        crow._READ.update(self._read_before)
+        crow._SEEN.clear()
+        crow._SEEN.update(self._seen_before)
+
+    def _path(self, name):
+        return os.path.join(self.dir, name)
+
+    def _make(self, name, text):
+        """A file that exists WITHOUT going through the tools -- so it is unread.
+
+        Writing it with tool_write_file would register the key and hand every
+        read-before-write case the answer it is supposed to earn.
+        """
+        path = self._path(name)
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        return path
+
+    def _text(self, path):
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def _install(self, name, impl):
+        """Add an implementation to TOOL_IMPL and take it out again afterwards."""
+        crow.TOOL_IMPL[name] = impl
+        self.addCleanup(crow.TOOL_IMPL.pop, name, None)
+
+
+class ReadBeforeWriteTests(ToolLayerCase):
+    """write_file BLOCKS an unread existing file rather than warning about it.
+
+    The damage is data loss: #10 measured hermes-agent resolving the same
+    situation to last-write-wins in two independent code paths, one of which
+    returns a warning string while the other performs the write anyway
+    (crow.py:1679-1683). A rebuild that warns has the defect, not the rule.
+    """
+
+    def test_an_existing_unread_file_is_refused(self):
+        path = self._make("notes.txt", "the work that must survive")
+        self.assertIn("refusing to overwrite", crow.tool_write_file(path, "overwritten"))
+
+    def test_the_refusal_leaves_the_bytes_alone(self):
+        """A refusal that has already written is not a refusal."""
+        path = self._make("notes.txt", "the work that must survive")
+        crow.tool_write_file(path, "overwritten")
+        self.assertEqual(self._text(path), "the work that must survive")
+
+    def test_the_refusal_says_what_to_do_next(self):
+        path = self._make("notes.txt", "x")
+        self.assertIn("read_file", crow.tool_write_file(path, "y"))
+
+    def test_a_file_that_does_not_exist_is_written_without_reading_it(self):
+        """Deliberate, and the detail a second implementation gets wrong: the rule
+        is read-before-OVERWRITE. A file that does not exist has nothing to
+        destroy, and demanding a read of it would make the model read an error.
+        """
+        path = self._path("new.txt")
+        self.assertIn("wrote 5 bytes", crow.tool_write_file(path, "fresh"))
+        self.assertEqual(self._text(path), "fresh")
+
+    def test_a_read_unlocks_the_overwrite(self):
+        path = self._make("notes.txt", "old")
+        crow.tool_read_file(path)
+        self.assertIn("wrote", crow.tool_write_file(path, "new"))
+        self.assertEqual(self._text(path), "new")
+
+    def test_reading_a_range_also_counts_as_reading(self):
+        """Two branches register the key -- the range one at crow.py:1739, the
+        whole-file one at :1767. One rule, and both halves have to hold it."""
+        path = self._make("notes.txt", "one\ntwo\nthree\n")
+        crow.tool_read_file(path, start_line=1, end_line=2)
+        self.assertIn("wrote", crow.tool_write_file(path, "new"))
+
+    def test_a_read_that_returned_nothing_unlocks_nothing(self):
+        """The empty-range error returns BEFORE _READ.add (crow.py:1736-1739).
+        A read that showed the model nothing must not count as having seen it."""
+        path = self._make("notes.txt", "one\n")
+        self.assertIn("error", crow.tool_read_file(path, start_line=50, end_line=60))
+        self.assertIn("refusing to overwrite", crow.tool_write_file(path, "new"))
+
+    def test_a_missing_file_read_unlocks_nothing_either(self):
+        gone = self._path("gone.txt")
+        self.assertIn("no such file", crow.tool_read_file(gone))
+        self.assertNotIn(crow._key(gone), crow._READ)
+
+    def test_a_write_counts_as_a_read_afterwards(self):
+        """crow.py:1781. The process wrote the bytes, so it knows them."""
+        path = self._path("new.txt")
+        crow.tool_write_file(path, "first")
+        self.assertIn("wrote", crow.tool_write_file(path, "second"))
+        self.assertEqual(self._text(path), "second")
+
+    def test_the_key_is_what_the_rule_hangs_on(self):
+        path = self._make("notes.txt", "x")
+        self.assertNotIn(crow._key(path), crow._READ)
+        crow.tool_read_file(path)
+        self.assertIn(crow._key(path), crow._READ)
+
+    def test_reading_one_file_does_not_unlock_another(self):
+        first = self._make("a.txt", "alpha")
+        second = self._make("b.txt", "beta")
+        crow.tool_read_file(first)
+        self.assertIn("refusing to overwrite", crow.tool_write_file(second, "x"))
+
+
+class EditFileHitCountTests(ToolLayerCase):
+    """Exact match, exactly one hit, and a refusal that changes nothing.
+
+    A patch format would be more expressive and needs fuzzy matching to survive a
+    model that mis-remembers whitespace; exact match plus a uniqueness check fails
+    loudly instead of guessing (crow.py:1786-1790).
+    """
+
+    def test_an_unread_file_is_refused(self):
+        path = self._make("code.py", "alpha\n")
+        self.assertIn("before editing it", crow.tool_edit_file(path, old="alpha", new="beta"))
+
+    def test_the_unread_refusal_leaves_the_bytes_alone(self):
+        path = self._make("code.py", "alpha\n")
+        crow.tool_edit_file(path, old="alpha", new="beta")
+        self.assertEqual(self._text(path), "alpha\n")
+
+    def test_zero_hits_is_refused(self):
+        path = self._make("code.py", "alpha\n")
+        crow.tool_read_file(path)
+        self.assertIn("does not appear", crow.tool_edit_file(path, old="gamma", new="beta"))
+
+    def test_the_zero_hit_refusal_leaves_the_bytes_alone(self):
+        path = self._make("code.py", "alpha\n")
+        crow.tool_read_file(path)
+        crow.tool_edit_file(path, old="gamma", new="beta")
+        self.assertEqual(self._text(path), "alpha\n")
+
+    def test_two_hits_are_refused(self):
+        path = self._make("code.py", "alpha\nalpha\n")
+        crow.tool_read_file(path)
+        result = crow.tool_edit_file(path, old="alpha", new="beta")
+        self.assertIn("appears 2 times", result)
+        self.assertIn("make it unique", result)
+
+    def test_the_ambiguous_edit_writes_nothing(self):
+        """The one that costs work: replacing the first of two matches silently
+        edits the wrong line, and the model is told it succeeded."""
+        path = self._make("code.py", "alpha\nalpha\n")
+        crow.tool_read_file(path)
+        crow.tool_edit_file(path, old="alpha", new="beta")
+        self.assertEqual(self._text(path), "alpha\nalpha\n")
+
+    def test_exactly_one_hit_is_written(self):
+        path = self._make("code.py", "alpha\nbeta\n")
+        crow.tool_read_file(path)
+        self.assertIn("replaced 1 occurrence",
+                      crow.tool_edit_file(path, old="alpha", new="gamma"))
+        self.assertEqual(self._text(path), "gamma\nbeta\n")
+
+    def test_one_hit_across_several_lines_is_still_one_hit(self):
+        path = self._make("code.py", "a\nb\nc\n")
+        crow.tool_read_file(path)
+        self.assertIn("replaced 1 occurrence",
+                      crow.tool_edit_file(path, old="a\nb\n", new="a\nB\n"))
+        self.assertEqual(self._text(path), "a\nB\nc\n")
+
+    def test_an_empty_old_is_sent_to_write_file(self):
+        path = self._make("code.py", "alpha\n")
+        crow.tool_read_file(path)
+        self.assertIn("use write_file", crow.tool_edit_file(path, old="", new="x"))
+
+    def test_the_count_is_on_raw_text_with_no_whitespace_tolerance(self):
+        """MEASURED BEHAVIOUR, and the first thing a fuzzy rebuild changes:
+        'call(a,  b)' with two spaces does not match 'call(a, b)'."""
+        path = self._make("code.py", "call(a,  b)\n")
+        crow.tool_read_file(path)
+        self.assertIn("does not appear",
+                      crow.tool_edit_file(path, old="call(a, b)", new="x"))
+
+    def test_the_gate_does_not_ask_whether_the_file_exists(self):
+        """The _READ check comes first (crow.py:1792) and carries no
+        os.path.exists: an unread MISSING file is refused with 'read it first',
+        not with 'no such file'. Pinned because the two answers send a model in
+        different directions -- one says read, the other says look elsewhere."""
+        self.assertIn("before editing it",
+                      crow.tool_edit_file(self._path("gone.py"), old="a", new="b"))
+
+    def test_reading_one_file_does_not_unlock_editing_another(self):
+        first = self._make("a.py", "alpha\n")
+        second = self._make("b.py", "alpha\n")
+        crow.tool_read_file(first)
+        self.assertIn("before editing it",
+                      crow.tool_edit_file(second, old="alpha", new="beta"))
+
+
+class ReadKeyTests(ToolLayerCase):
+    """_key is normcase+abspath (crow.py:1687), so what counts as "the same file"
+    is decided by the platform and not by the string the model happened to send.
+    """
+
+    def test_a_detour_through_a_parent_is_the_same_file(self):
+        path = self._make("a.py", "alpha\n")
+        crow.tool_read_file(path)
+        detour = os.path.join(self.dir, "sub", "..", "a.py")
+        self.assertIn("wrote", crow.tool_write_file(detour, "new"))
+
+    def test_a_relative_path_is_the_same_file(self):
+        """abspath, so a read as 'a.py' and a write as the full path are one key.
+        Without it the model has to spell the path the same way twice."""
+        self._make("a.py", "alpha\n")
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(self.dir)
+        crow.tool_read_file("a.py")
+        self.assertIn("wrote", crow.tool_write_file(self._path("a.py"), "new"))
+
+    def test_two_different_files_are_two_keys(self):
+        """Positive control for the folding cases below: the key still separates
+        files that really are different."""
+        self.assertNotEqual(crow._key(self._path("a.py")), crow._key(self._path("b.py")))
+
+    @unittest.skipUnless(os.name == "nt", "normcase folds case on Windows only")
+    def test_the_key_folds_case_on_windows(self):
+        self.assertEqual(crow._key(self._path("a.py")), crow._key(self._path("A.PY")))
+
+    @unittest.skipUnless(os.name == "nt", "normcase folds case on Windows only")
+    def test_a_shouted_path_after_a_lowercase_read_counts_as_read(self):
+        """THE WINDOWS CASE: read C:\\x\\a.py, then write C:\\x\\A.PY. It is one
+        file on this filesystem, os.path.exists says so for both spellings, and
+        normcase folds the key -- so the write goes through instead of refusing a
+        file the model demonstrably read. A rebuild keyed on the raw string
+        refuses here, and the model has no way to see why.
+        """
+        path = self._make("a.py", "alpha\n")
+        crow.tool_read_file(path)
+        self.assertIn("wrote", crow.tool_write_file(self._path("A.PY"), "new"))
+        self.assertEqual(self._text(path), "new")
+
+    @unittest.skipUnless(os.name == "nt", "normcase folds case on Windows only")
+    def test_the_shouted_path_edits_the_same_file_too(self):
+        path = self._make("a.py", "alpha\n")
+        crow.tool_read_file(path)
+        self.assertIn("replaced 1 occurrence",
+                      crow.tool_edit_file(self._path("A.PY"), old="alpha", new="beta"))
+        self.assertEqual(self._text(path), "beta\n")
+
+
+class RunToolResultTests(ToolLayerCase):
+    """EVERY FAILURE IS A RESULT, NOT AN EXCEPTION (crow.py:1960-1983).
+
+    A tool that raises kills the turn and costs the whole prefix; a tool that
+    returns "no such file" lets the model correct itself in the next round. At
+    ~10 tok/s a lost turn is minutes, so the difference is not cosmetic.
+    """
+
+    def test_a_raised_exception_becomes_result_text(self):
+        def boom(**_):
+            raise RuntimeError("the disk went away")
+
+        self._install("boom", boom)
+        result = crow.run_tool("boom", "{}")
+        self.assertIn("boom failed", result)
+        self.assertIn("the disk went away", result)
+
+    def test_an_exception_type_nobody_anticipated_is_still_a_result(self):
+        class Odd(Exception):
+            pass
+
+        def boom(**_):
+            raise Odd("something new")
+
+        self._install("odd", boom)
+        self.assertIn("odd failed", crow.run_tool("odd", "{}"))
+
+    def test_an_oserror_from_a_real_tool_is_a_result(self):
+        """Not an injected tool: read_file on a directory comes back as text."""
+        self.assertIn("error", crow.run_tool("read_file", json.dumps({"path": self.dir})))
+
+    def test_arguments_that_are_not_json_are_a_result(self):
+        self.assertIn("not valid JSON", crow.run_tool("read_file", "{not json"))
+
+    def test_a_json_array_is_a_result(self):
+        self.assertIn("must be a JSON object", crow.run_tool("read_file", "[1, 2]"))
+
+    def test_an_unknown_tool_names_the_ones_that_exist(self):
+        result = crow.run_tool("delete_everything", "{}")
+        self.assertIn("no tool named", result)
+        self.assertIn("read_file", result)
+
+    def test_a_missing_required_argument_is_a_result(self):
+        self.assertIn("wrong arguments for read_file", crow.run_tool("read_file", "{}"))
+
+    def test_no_arguments_at_all_mean_an_empty_object(self):
+        seen = {}
+
+        def spy(**kwargs):
+            seen.update(kwargs)
+            return "ok"
+
+        self._install("spy", spy)
+        self.assertEqual(crow.run_tool("spy", ""), "ok")
+        self.assertEqual(seen, {})
+
+    def test_an_invented_argument_is_swallowed_by_the_tool(self):
+        """Every signature ends in **_ . A model that adds a plausible argument
+        gets its answer instead of losing the turn to a TypeError."""
+        result = crow.run_tool("list_dir", json.dumps({"path": self.dir, "colour": "blue"}))
+        self.assertNotIn("error", result)
+
+    def test_a_typeerror_from_inside_a_tool_is_reported_as_wrong_arguments(self):
+        """MEASURED BEHAVIOUR, not a wish: the TypeError branch (crow.py:1980) sits
+        in front of the general one and cannot tell a bad call signature from a
+        TypeError raised deep inside the implementation. A tool that trips over
+        its own types therefore tells the model to fix arguments that were fine.
+        Pinned so the move to crow_core.py cannot change it by accident -- and if
+        it is ever changed on purpose, that is a CLI change with its own measurement.
+        """
+        def confused(**_):
+            return 1 + "one"
+
+        self._install("confused", confused)
+        result = crow.run_tool("confused", "{}")
+        self.assertIn("wrong arguments for confused", result)
+        self.assertNotIn("confused failed", result)
+
+    def test_the_dispatcher_covers_every_name_in_the_tools_list(self):
+        """TOOLS is what the model is offered and TOOL_IMPL is what runs. A name
+        in one and not the other is a tool the model will call and never reach."""
+        offered = {t["function"]["name"] for t in crow.TOOLS}
+        self.assertEqual(offered, set(crow.TOOL_IMPL))
+
+
+class ToolResultCeilingTests(ToolLayerCase):
+    """Every tool result is bounded -- and NOT every one of them is bounded by _clip.
+
+    _clip's docstring says "EVERY tool result goes through here. No exceptions,
+    and that is the point." Measured against the code that holds for read_file
+    (:1740, :1768), list_dir (:1835) and run_command (:1919). find_files (:1854)
+    and search_text (:1887) do NOT call _clip: they enforce the same two ceilings
+    inline -- MAX_HITS and MAX_TOOL_BYTES -- and return their own "[stopped ...]"
+    marker; write_file and edit_file return one short fixed line. So the invariant
+    that actually holds is "bounded", not "clipped", and that is what is pinned
+    here. The reason the ceiling exists at all is prefill: 200 hits of a common
+    word are ~20,000 tokens, which was eight minutes at 38 tok/s.
+    """
+
+    # Room for the marker _clip appends, which is 55 characters today.
+    SLACK = 100
+
+    def _crowd(self, count=160, width=116):
+        """A directory that overruns the byte ceiling before the hit ceiling."""
+        for i in range(count):
+            with open(self._path(f"{'n' * width}{i:03d}.txt"), "w", encoding="utf-8") as fh:
+                fh.write("needle here\n")
+
+    def test_short_text_comes_back_unchanged(self):
+        self.assertEqual(crow._clip("hello"), "hello")
+
+    def test_text_exactly_at_the_limit_is_not_touched(self):
+        self.assertEqual(crow._clip("x" * 10, limit=10), "x" * 10)
+
+    def test_one_byte_over_the_limit_is_cut(self):
+        result = crow._clip("x" * 11, limit=10)
+        self.assertTrue(result.startswith("x" * 10))
+        self.assertIn("[cut at 10 bytes", result)
+
+    def test_the_cut_says_what_to_do_about_it(self):
+        self.assertIn("narrow the query", crow._clip("x" * 11, limit=10))
+
+    def test_the_default_ceiling_is_the_constant_not_a_typed_number(self):
+        result = crow._clip("x" * (crow.MAX_TOOL_BYTES + 1))
+        self.assertIn(f"[cut at {crow.MAX_TOOL_BYTES} bytes", result)
+
+    def test_read_file_is_clipped(self):
+        path = self._make("big.txt", "x" * (crow.MAX_TOOL_BYTES + 5_000))
+        result = crow.tool_read_file(path)
+        self.assertIn(f"[cut at {crow.MAX_TOOL_BYTES} bytes", result)
+        self.assertLessEqual(len(result), crow.MAX_TOOL_BYTES + self.SLACK)
+
+    def test_a_line_range_is_clipped_too(self):
+        """The range is the point, not a convenience -- but a range of 400 long
+        lines is still 50,000 tokens, so it meets the same ceiling."""
+        path = self._make("big.txt", "".join(f"{'y' * 120}\n" for _ in range(400)))
+        result = crow.tool_read_file(path, start_line=1, end_line=400)
+        self.assertIn(f"[cut at {crow.MAX_TOOL_BYTES} bytes", result)
+        self.assertLessEqual(len(result), crow.MAX_TOOL_BYTES + self.SLACK)
+
+    def test_list_dir_is_clipped(self):
+        self._crowd()
+        result = crow.tool_list_dir(self.dir)
+        self.assertIn(f"[cut at {crow.MAX_TOOL_BYTES} bytes", result)
+        self.assertLessEqual(len(result), crow.MAX_TOOL_BYTES + self.SLACK)
+
+    def test_run_command_is_clipped(self):
+        command = f'"{sys.executable}" -c "print(\'x\' * {crow.MAX_TOOL_BYTES + 5_000})"'
+        result = crow.tool_run_command(command, cwd=self.dir)
+        self.assertIn(f"[cut at {crow.MAX_TOOL_BYTES} bytes", result)
+        self.assertLessEqual(len(result), crow.MAX_TOOL_BYTES + self.SLACK)
+
+    def test_find_files_stops_on_bytes_and_says_so(self):
+        """Its own marker, not _clip's: it stops walking rather than walking to
+        the end and throwing the tail away."""
+        self._crowd()
+        result = crow.tool_find_files(self.dir, "*.txt")
+        self.assertIn("[stopped", result)
+        self.assertNotIn("[cut at", result)
+        self.assertLess(len(result), crow.MAX_TOOL_BYTES * 2)
+
+    def test_search_text_stops_on_bytes_and_says_so(self):
+        self._crowd()
+        result = crow.tool_search_text(self.dir, "needle")
+        self.assertIn("[stopped", result)
+        self.assertNotIn("[cut at", result)
+        self.assertLess(len(result), crow.MAX_TOOL_BYTES * 2)
+
+    def test_a_hit_count_alone_would_not_have_bounded_the_size(self):
+        """The measured defect behind both ceilings: 160 hits is well under
+        MAX_HITS and still overruns the byte budget, so the byte one is the one
+        that fires here."""
+        self._crowd()
+        self.assertLess(160, crow.MAX_HITS)
+        self.assertIn("[stopped", crow.tool_find_files(self.dir, "*.txt"))
+
+    def test_the_short_results_need_no_ceiling(self):
+        """write_file and edit_file return one fixed line, so they are bounded by
+        construction and not by a call to _clip."""
+        path = self._path("new.txt")
+        self.assertLess(len(crow.tool_write_file(path, "x" * 50_000)), 200)
+        crow.tool_read_file(path)
+        self.assertLess(len(crow.tool_edit_file(path, old="x" * 50_000, new="y")), 200)
+
+
+class RunToolCachedTests(ToolLayerCase):
+    """The loop this prevents, observed 2026-08-09 (crow.py:1938-1950): the model
+    asked for a file that does not exist, got an error, and asked for the same
+    path again -- eight times, twice within a single round.
+    """
+
+    def _counter(self, name):
+        calls = []
+
+        def impl(**kwargs):
+            calls.append(kwargs)
+            return f"ran {len(calls)}"
+
+        self._install(name, impl)
+        return calls
+
+    def test_the_first_call_runs_and_is_not_a_repeat(self):
+        self._counter("count")
+        result, repeated = crow.run_tool_cached("count", "{}")
+        self.assertEqual(result, "ran 1")
+        self.assertFalse(repeated)
+
+    def test_the_second_identical_call_is_marked_as_a_repeat(self):
+        self._counter("count")
+        crow.run_tool_cached("count", "{}")
+        result, repeated = crow.run_tool_cached("count", "{}")
+        self.assertTrue(repeated)
+        self.assertIn("you already called count", result)
+
+    def test_the_repeat_carries_the_first_result_back(self):
+        self._counter("count")
+        crow.run_tool_cached("count", "{}")
+        self.assertIn("ran 1", crow.run_tool_cached("count", "{}")[0])
+
+    def test_the_tool_does_not_run_a_second_time(self):
+        """The whole point: re-running produces the identical failure and pays a
+        second prefill for it."""
+        calls = self._counter("count")
+        crow.run_tool_cached("count", "{}")
+        crow.run_tool_cached("count", "{}")
+        self.assertEqual(len(calls), 1)
+
+    def test_different_arguments_are_not_a_repeat(self):
+        calls = self._counter("count")
+        crow.run_tool_cached("count", '{"path": "a"}')
+        _, repeated = crow.run_tool_cached("count", '{"path": "b"}')
+        self.assertFalse(repeated)
+        self.assertEqual(len(calls), 2)
+
+    def test_the_same_arguments_to_another_tool_are_not_a_repeat(self):
+        self._counter("count")
+        self._counter("other")
+        crow.run_tool_cached("count", "{}")
+        self.assertFalse(crow.run_tool_cached("other", "{}")[1])
+
+    def test_the_measured_case_a_missing_file_asked_for_twice(self):
+        args = json.dumps({"path": self._path("server-context.c")})
+        first, repeated_first = crow.run_tool_cached("read_file", args)
+        second, repeated_second = crow.run_tool_cached("read_file", args)
+        self.assertFalse(repeated_first)
+        self.assertIn("no such file", first)
+        self.assertTrue(repeated_second)
+        self.assertIn("no such file", second)
+
+
+class ToolStateLifetimeTests(ToolLayerCase):
+    """What "already read" means today, pinned before anything gives it a scope.
+
+    Today it means "read in this PROCESS". _READ is module-global with six
+    occurrences and no clear() and no del anywhere (crow.py:1684); _SEEN is
+    emptied in exactly one place and that place is repl() (:2478), which neither
+    a tool nor the dispatcher touches. Whether "read" should mean the process,
+    the session or the turn is a change in what the CLI does, not a move -- so
+    these three cases go red the moment the lifetime changes, which is the whole
+    reason they are here rather than left implicit.
+    """
+
+    def test_no_tool_empties_the_read_set(self):
+        first = self._make("a.txt", "alpha")
+        second = self._make("b.txt", "beta")
+        crow.tool_read_file(first)
+        crow.tool_read_file(second)
+        crow.tool_write_file(self._path("c.txt"), "gamma")
+        crow.tool_list_dir(self.dir)
+        crow.tool_find_files(self.dir, "*.txt")
+        self.assertEqual(len(crow._READ), 3)
+
+    def test_the_dispatcher_does_not_empty_it_either(self):
+        path = self._make("a.txt", "alpha")
+        crow.run_tool("read_file", json.dumps({"path": path}))
+        crow.run_tool("list_dir", json.dumps({"path": self.dir}))
+        self.assertIn(crow._key(path), crow._READ)
+
+    def test_nothing_in_the_tool_layer_empties_the_seen_map(self):
+        crow.run_tool_cached("list_dir", json.dumps({"path": self.dir}))
+        crow.run_tool_cached("find_files", json.dumps({"root": self.dir}))
+        crow.run_tool("list_dir", json.dumps({"path": self.dir}))
+        self.assertEqual(len(crow._SEEN), 2)
+
+
+def _tool_call_delta(name, arguments, index=0, cid=None):
+    """One streamed `tool_calls` delta, in the shape the server sends."""
+    return {"tool_calls": [{"index": index, "id": cid or f"c{index}",
+                            "function": {"name": name, "arguments": arguments}}]}
+
+
+class ReadScopeIsOneTurnTests(ToolLayerCase):
+    """E6: how long "already read" lasts, and it is checked in BOTH directions.
+
+    A ONE-DIRECTION CASE HERE WOULD CHECK NOTHING. "The write is refused after
+    the boundary" is satisfied by a rule that refuses always, and "the write goes
+    through before it" is satisfied by a rule that never refuses. Only the pair
+    pins a SCOPE rather than a rule, which is why every boundary below is spelled
+    out twice -- once from each side.
+
+    THE SCOPE IS ONE USER TURN, and it was chosen by a measurement whose
+    threshold was written down first: null cases of a write landing on a file
+    last read in an earlier turn makes the turn scope free, one or more and the
+    scope is the session. Counted 2026-08-12 over 3 distinct rollover/session
+    files, 25 user turns, 31 read_file calls and 4 write_file/edit_file calls:
+    RESULT 0. The numbers are kept beside `_READ` in cli/crow_core.py, because a
+    measurement that lives only in a chat is gone by the next reading.
+
+    THESE RUN THROUGH `run_turn`, NOT THROUGH THE TOOLS. That is the whole
+    difference between this class and `ToolStateLifetimeTests` above, and both
+    are true at once: nothing in the TOOL LAYER empties the set -- no tool, no
+    dispatcher -- and the TURN LOOP one level up empties it on the way in. A case
+    that called `tool_read_file` and `tool_write_file` directly would never cross
+    a turn boundary and would stay green whatever the scope became.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Patched on `crow_core`, never on `crow`: `run_turn` and `stream_reply`
+        # both live there and look the transport up as a module global at call
+        # time. Rebinding `crow._post_stream` would leave the real one in place
+        # and the test would reach for a socket.
+        self._post_stream_before = crow.crow_core._post_stream
+        self.addCleanup(self._restore_transport)
+        crow.crow_core._post_stream = self._serve
+        self.script = []
+
+    def _restore_transport(self):
+        crow.crow_core._post_stream = self._post_stream_before
+
+    def _serve(self, url, body, api_key, timeout):
+        if not self.script:
+            raise AssertionError("the loop asked for a round that was not scripted")
+        deltas = self.script.pop(0)
+        for delta in deltas:
+            yield json.dumps({"choices": [{"delta": delta}]})
+        yield json.dumps({"choices": [], "timings": {"predicted_n": 1}})
+
+    def serve(self, deltas):
+        """Add one scripted round, as the list of deltas it streams."""
+        self.script.append(list(deltas))
+        return self
+
+    def turn(self, talk, line="go"):
+        """One USER turn, the way `repl()` runs one: append the line, then loop."""
+        talk.append("user", line)
+        return crow.run_turn(
+            talk, base_url="http://x/v1", model="crow", api_key="k",
+            temperature=0.0, top_p=1.0, min_p=0.0, timeout=1.0)
+
+    def _results(self, talk):
+        return [m["content"] for m in talk.payload() if m["role"] == "tool"]
+
+    def _reads(self, path):
+        return _tool_call_delta("read_file", json.dumps({"path": path}))
+
+    def _writes(self, path, content):
+        return _tool_call_delta("write_file", json.dumps({"path": path,
+                                                          "content": content}))
+
+    # ---- the boundary, from the side where the write must still go through ----
+
+    def test_a_read_and_a_write_in_the_same_turn_go_through(self):
+        """The half that stops "refuse everything" from passing as a scope.
+
+        This is the ordinary working case and it must not have been broken by
+        giving the set a lifetime: within ONE turn the rule behaves exactly as
+        it did when nothing ever emptied it.
+        """
+        path = self._make("notes.txt", "old")
+        talk = crow.Conversation("SYS")
+        self.serve([self._reads(path)])
+        self.serve([self._writes(path, "new")])
+        self.serve([{"content": "done"}])
+        self.turn(talk)
+        self.assertIn("wrote", self._results(talk)[-1])
+        self.assertEqual(self._text(path), "new")
+
+    def test_a_second_read_in_the_new_turn_wins_the_write_back(self):
+        """E6 point 4: the way out, and it is the grip the rule already asks for.
+
+        Without this the new refusal would be a dead end, and a dead end is what
+        would have forced a force-overwrite flag onto a rule whose failure mode
+        is losing someone's work. Reading the file again is enough.
+        """
+        path = self._make("notes.txt", "old")
+        talk = crow.Conversation("SYS")
+        self.serve([self._reads(path)])
+        self.serve([{"content": "read it"}])
+        self.turn(talk)
+
+        self.serve([self._reads(path)])
+        self.serve([self._writes(path, "new")])
+        self.serve([{"content": "done"}])
+        self.turn(talk, "now write it")
+        self.assertIn("wrote", self._results(talk)[-1])
+        self.assertEqual(self._text(path), "new")
+
+    # ---- and from the side where it must now be refused --------------------
+
+    def test_a_write_in_the_next_turn_is_refused(self):
+        """THE ADDED REFUSAL, where there was none before E6.
+
+        The file was read -- in the turn before. Under the process scope this
+        write went through; under the turn scope it does not, and this case is
+        the one that goes red if the clear is taken back out.
+        """
+        path = self._make("notes.txt", "the work that must survive")
+        talk = crow.Conversation("SYS")
+        self.serve([self._reads(path)])
+        self.serve([{"content": "read it"}])
+        self.turn(talk)
+
+        self.serve([self._writes(path, "overwritten")])
+        self.serve([{"content": "I could not"}])
+        self.turn(talk, "now write it")
+        self.assertIn("refusing to overwrite", self._results(talk)[-1])
+        self.assertEqual(self._text(path), "the work that must survive")
+
+    def test_the_refusal_names_the_turn_it_means(self):
+        """A refusal that says "without reading it first" to someone who DID read
+        it reads as a bug. The message has to name the scope it is enforcing."""
+        path = self._make("notes.txt", "x")
+        talk = crow.Conversation("SYS")
+        self.serve([self._reads(path)])
+        self.serve([{"content": "read it"}])
+        self.turn(talk)
+
+        self.serve([self._writes(path, "y")])
+        self.serve([{"content": "I could not"}])
+        self.turn(talk, "now write it")
+        said = self._results(talk)[-1]
+        self.assertIn("in this turn", said)
+        self.assertIn("read_file", said)
+
+    def test_an_edit_in_the_next_turn_is_refused_too(self):
+        """`edit_file` consults the same set through a different door
+        (crow_core.py, the `_key(path) not in _READ` check). One scope, and both
+        callers have to be under it."""
+        path = self._make("code.py", "alpha\n")
+        talk = crow.Conversation("SYS")
+        self.serve([self._reads(path)])
+        self.serve([{"content": "read it"}])
+        self.turn(talk)
+
+        self.serve([_tool_call_delta("edit_file", json.dumps(
+            {"path": path, "old": "alpha", "new": "beta"}))])
+        self.serve([{"content": "I could not"}])
+        self.turn(talk, "now edit it")
+        self.assertIn("before editing it", self._results(talk)[-1])
+        self.assertEqual(self._text(path), "alpha\n")
+
+    def test_a_new_session_refuses_what_the_old_one_had_read(self):
+        """THE CASE THE STAGE WAS NAMED FOR, and under the turn scope it is a
+        superset rather than a separate rule: a new session's first turn is a new
+        turn, so the boundary has already been crossed.
+
+        A session is modelled here as what `repl()` actually holds one of -- a
+        `Conversation`. The point of the case is not the object: it is that
+        "read" must not survive into a window that a second surface can open
+        without the process ever ending.
+        """
+        path = self._make("notes.txt", "the work that must survive")
+        first = crow.Conversation("SYS")
+        self.serve([self._reads(path)])
+        self.serve([{"content": "read it"}])
+        self.turn(first)
+        self.assertIn(crow._key(path), crow._READ)
+
+        second = crow.Conversation("SYS")
+        self.serve([self._writes(path, "overwritten")])
+        self.serve([{"content": "I could not"}])
+        self.turn(second, "write it")
+        self.assertIn("refusing to overwrite", self._results(second)[-1])
+        self.assertEqual(self._text(path), "the work that must survive")
+
+    # ---- the two names share one lifetime, which is the half-state ----------
+
+    def test_the_result_cache_is_emptied_on_the_same_boundary(self):
+        """THE HALF-STATE, CHECKED RATHER THAN TRUSTED. `_READ` emptied without
+        `_SEEN` refuses the write correctly while still handing back a tool
+        result produced in the turn before. Same boundary, both names, one pair
+        of statements in the core."""
+        talk = crow.Conversation("SYS")
+        args = json.dumps({"path": self.dir})
+        self.serve([_tool_call_delta("list_dir", args)])
+        self.serve([{"content": "looked"}])
+        self.turn(talk)
+
+        self.serve([_tool_call_delta("list_dir", args)])
+        self.serve([{"content": "looked again"}])
+        self.turn(talk, "again")
+        self.assertNotIn("you already called", self._results(talk)[-1])
+
+    def test_both_names_are_empty_once_the_turn_has_started(self):
+        """The direct reading of the same fact, so a failure says WHICH name.
+
+        The tools run inside the turn, so the state is sampled from one of them
+        rather than from outside: after the turn, both have been filled again.
+        """
+        seen = {}
+
+        def probe(**kw):
+            seen["read"] = set(crow._READ)
+            seen["cached"] = dict(crow._SEEN)
+            return "probed"
+
+        self._install("probe", probe)
+        path = self._make("notes.txt", "old")
+        talk = crow.Conversation("SYS")
+        self.serve([self._reads(path)])
+        self.serve([{"content": "read it"}])
+        self.turn(talk)
+        self.assertIn(crow._key(path), crow._READ)
+
+        self.serve([_tool_call_delta("probe", "{}")])
+        self.serve([{"content": "done"}])
+        self.turn(talk, "probe")
+        self.assertEqual(seen["read"], set())
+        self.assertEqual(seen["cached"], {})
 
 
 if __name__ == "__main__":

@@ -17,6 +17,18 @@ Order matters: every check that can reject this machine runs BEFORE the 506 MB
 download starts. Finding out afterwards that the card is too small is the most
 expensive possible failure.
 
+That order now covers the two checks that only WARN as well. Python and Tk cannot
+refuse a machine -- a missing interpreter is a five-minute fix and the rest of the
+install is still worth having -- but until this version they were asked in the
+LAST step, after the 506 MB had already been fetched. "Your client will not start"
+is the same sentence before the download and after it, and only one of the two
+costs the user half a gigabyte to hear.
+
+Crow ships TWO clients and this script installs both, with no opt-in switch: the
+package contains cli\crow.py and cli\crow_gui.py either way, so a switch would
+only decide whether this script mentions the second one. The last step prints both
+start lines, the terminal client first. Neither is started here.
+
 .PARAMETER Selftest
 Run the checks against synthetic inputs, including ones that must fail, and exit.
 Downloads nothing.
@@ -82,6 +94,19 @@ $DISK_INSTALL_GB   = 2      # the package, unpacked
 # below it disagreed by a gigabyte on the previous rung until that was fixed; keep them in step.
 $DISK_MODEL_GB     = 85     # what the model will need later, reported not enforced
 
+# The Tk floor the window is written against. DECIDED, not left open: 8.6. The
+# reference value on the machine every figure on this page was taken on is 8.6.15
+# under Python 3.13.3 [measured 2026-08-12]. tools/check_gui_prereqs.py carries
+# the same number as MIN_TK and holds it against the machine the window is WRITTEN
+# on; this one holds it against the machine it is INSTALLED on.
+#
+# That those are two copies of one number in two languages is said out loud rather
+# than hidden: neither file can read the other at the moment its check runs -- this
+# script is piped into iex with no repository behind it -- and the only alternative
+# on offer was a preflight that prints a version without a threshold, which is a
+# check with nothing to fail against.
+$TK_MIN            = "8.6"
+
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
@@ -144,9 +169,67 @@ function Get-L2Gib {
 }
 
 <#
+    Is this Tk at or above the floor, comparing only as many components as the
+    floor names?
+
+    "8.6.15" against a floor of "8.6" compares (8, 6) with (8, 6) and holds; a
+    floor of "8.6.16" would compare all three and would not. Anything that is not
+    a dotted number is $false rather than an error -- an unreadable version is not
+    a version that passed, and a preflight that threw here would take a machine
+    down over a string.
+
+    [version] would have been one line, and it is the wrong one: it accepts at most
+    four components and refuses anything with a letter in it, so a Tk that reports
+    "8.6.15" is fine and one that reports "8.7a2" is an exception rather than an
+    answer. This is the same comparison tools/check_gui_prereqs.py makes in
+    version_at_least, and the two are held to the same reference value.
+#>
+function Test-TkFloor {
+    param(
+        [string] $Patchlevel,
+        [string] $Floor = $TK_MIN
+    )
+
+    function Split-Parts {
+        param([string] $Text)
+        if (-not $Text) { return $null }
+        $out = @()
+        foreach ($piece in ($Text -split '\.')) {
+            # Leading digits only, so "8.7a2" reads as (8, 7) rather than as
+            # nothing at all. A piece with no digit at its front is not a version
+            # component and ends the whole reading.
+            $m = [regex]::Match($piece, '^\d+')
+            if (-not $m.Success) { return $null }
+            $out += [int] $m.Value
+        }
+        if ($out.Count -eq 0) { return $null }
+        return ,$out
+    }
+
+    $got  = Split-Parts $Patchlevel
+    $want = Split-Parts $Floor
+    if ($null -eq $got -or $null -eq $want) { return $false }
+    for ($i = 0; $i -lt $want.Count; $i++) {
+        # A version SHORTER than the floor loses: "8" against "8.6" says nothing
+        # about the minor, and silence is not agreement.
+        if ($i -ge $got.Count) { return $false }
+        if ($got[$i] -gt $want[$i]) { return $true }
+        if ($got[$i] -lt $want[$i]) { return $false }
+    }
+    return $true
+}
+
+<#
     Returns a verdict object rather than writing output, so the selftest can feed
     it synthetic values. A check that can only be exercised by owning the hardware
     it checks for is a check nobody ever tests.
+
+    PythonPath and TkPatchlevel are empty strings when the probe found nothing.
+    They live HERE, in the preflight, and not in the last step where the Python
+    line used to sit: this function is the only thing in this script that runs
+    before the download, and a warning is worth what it costs the person reading
+    it. Neither can set Problems -- the install is still worth having on a machine
+    with no interpreter, and the README says so in the same words.
 #>
 function Test-Preflight {
     param(
@@ -155,7 +238,9 @@ function Test-Preflight {
         [double] $FreeDiskGb,
         [bool]   $HasNvidiaSmi,
         [bool]   $Is64Bit,
-        [version] $PsVersion
+        [version] $PsVersion,
+        [string] $PythonPath = "",
+        [string] $TkPatchlevel = ""
     )
 
     $problems = @()
@@ -179,6 +264,20 @@ function Test-Preflight {
     }
     elseif ($FreeDiskGb -gt 0 -and $FreeDiskGb -lt ($DISK_INSTALL_GB + $DISK_MODEL_GB)) {
         $warnings += ((Format-Num $FreeDiskGb 0) + " GB free. The package fits, but the model needs about $DISK_MODEL_GB GB more")
+    }
+
+    # ONE CAUSE, ONE LINE, which is why this is a chain and not three independent
+    # ifs: without an interpreter there is nothing to ask about Tk, and an
+    # installer that prints "no python" and "no tkinter" for one missing download
+    # has told the user about two problems they do not have.
+    if (-not $PythonPath) {
+        $warnings += "python is not on the PATH. BOTH clients need it -- the terminal one and the window. Python 3.8 or newer, standard library only"
+    }
+    elseif (-not $TkPatchlevel) {
+        $warnings += "this python has no working tkinter. cli\crow.py runs in a terminal without it; cli\crow_gui.py is the window and does not"
+    }
+    elseif (-not (Test-TkFloor -Patchlevel $TkPatchlevel -Floor $TK_MIN)) {
+        $warnings += "Tk $TkPatchlevel, below the $TK_MIN the window is written against (measured against 8.6.15). The terminal client does not care"
     }
 
     return [pscustomobject]@{
@@ -211,6 +310,48 @@ function Get-MachineFacts {
     $free  = (Get-PSDrive ($drive -replace ':','') -ErrorAction SilentlyContinue).Free
     $freeGb = if ($free) { [math]::Round($free / 1GB, 1) } else { 0 }
 
+    # The two client prerequisites, asked here so the preflight can report them
+    # before anything is downloaded rather than after.
+    #
+    # THE PROBE OPENS A REAL Tk ROOT AND WITHDRAWS IT, which is more than reading
+    # tkinter.TkVersion would cost and is the only thing that answers the question
+    # asked. TkVersion is a constant compiled into the _tkinter extension: it says
+    # 8.6 on a machine whose tcl/tk directory was never shipped, where `import
+    # tkinter` still succeeds and the window still cannot open. withdraw() runs
+    # before anything is mapped, so nothing paints; tools/check_gui_prereqs.py
+    # probes exactly this way and for exactly this reason.
+    $py     = Get-Command python -ErrorAction SilentlyContinue
+    $pyPath = ""
+    $tk     = ""
+    if ($py) {
+        $pyPath = $py.Source
+        # SINGLE QUOTES INSIDE THE PYTHON, and this is not a style choice. PowerShell
+        # 5.1 strips the double quotes out of an argument on its way to a native
+        # executable, so a probe written with "info" reaches python as
+        # r.tk.call(info, patchlevel) and dies of NameError -- measured while
+        # writing this, and it looks exactly like a machine without Tk.
+        $probe  = "import tkinter; r = tkinter.Tk(); r.withdraw(); print(r.tk.call('info', 'patchlevel')); r.destroy()"
+        # A PYTHON WITHOUT TKINTER PRINTS A TRACEBACK, and this script runs under
+        # $ErrorActionPreference = "Stop", where a native command's stderr is an
+        # ErrorRecord and an ErrorRecord is fatal. Left alone, the very machine
+        # this check exists for would have the installer die at step 1 with a
+        # Python traceback on screen instead of one warning line.
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $lines = @(& $py.Source -c $probe 2>$null)
+            $rc    = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $prevEap
+        }
+        # The 255 lesson, in the one place this script grew a second native call:
+        # a python that cannot import tkinter exits 1, and the script's own exit
+        # code is whatever the last native call left behind. A failed PROBE must
+        # not turn a completed install into a failure any caller can see.
+        $global:LASTEXITCODE = 0
+        if ($rc -eq 0 -and $lines.Count) { $tk = ([string]$lines[0]).Trim() }
+    }
+
     return [pscustomobject]@{
         Gpu          = $gpu
         VramMb       = $vram
@@ -219,6 +360,8 @@ function Get-MachineFacts {
         HasNvidiaSmi = [bool]$smi
         Is64Bit      = [Environment]::Is64BitOperatingSystem
         PsVersion    = $PSVersionTable.PSVersion
+        PythonPath   = $pyPath
+        TkPatchlevel = $tk
     }
 }
 
@@ -687,7 +830,8 @@ function Invoke-Selftest {
 
     Write-Host "install.ps1 selftest"
 
-    $good = @{ VramMb=32607; RamGb=63.4; FreeDiskGb=450; HasNvidiaSmi=$true; Is64Bit=$true; PsVersion=[version]"5.1" }
+    $good = @{ VramMb=32607; RamGb=63.4; FreeDiskGb=450; HasNvidiaSmi=$true; Is64Bit=$true; PsVersion=[version]"5.1"
+               PythonPath="C:\Python313\python.exe"; TkPatchlevel="8.6.15" }
 
     C "the development machine passes"            ((Test-Preflight @good).Ok)
     C "and passes without warnings"               ((Test-Preflight @good).Warnings.Count -eq 0)
@@ -717,6 +861,102 @@ function Invoke-Selftest {
 
     $lowRam = $good.Clone(); $lowRam.RamGb = 8
     C "8 GB RAM warns but does not block"         ((Test-Preflight @lowRam).Ok -and (Test-Preflight @lowRam).Warnings.Count -gt 0)
+
+    # The two client prerequisites. What is being asserted here is not that they
+    # refuse -- they must not, the install is worth having without them -- but that
+    # they are asked in THIS function, which is the only thing in this script that
+    # runs before the download. A copy of these checks in the last step would pass
+    # nothing here and would still be too late.
+    $noPy = $good.Clone(); $noPy.PythonPath = ""; $noPy.TkPatchlevel = ""
+    C "no python warns and does NOT block"        ((Test-Preflight @noPy).Ok -and (Test-Preflight @noPy).Warnings.Count -gt 0)
+    # One missing download, one line. Two warnings for one cause is the installer
+    # describing a problem the user does not have.
+    C "a missing python is one warning, not two"  ((Test-Preflight @noPy).Warnings.Count -eq 1)
+
+    $noTk = $good.Clone(); $noTk.TkPatchlevel = ""
+    C "python without tkinter warns"              ((Test-Preflight @noTk).Ok -and (Test-Preflight @noTk).Warnings.Count -gt 0)
+    C "and says which client that costs"          ((((Test-Preflight @noTk).Warnings) -match 'crow_gui').Count -gt 0)
+
+    $oldTk = $good.Clone(); $oldTk.TkPatchlevel = "8.5.19"
+    C "Tk below the floor warns"                  ((Test-Preflight @oldTk).Ok -and (Test-Preflight @oldTk).Warnings.Count -gt 0)
+
+    # The floor itself, both directions, because a comparison that only ever says
+    # yes would pass every case above while shipping a window onto a Tk that
+    # cannot draw it. 8.6.15 is the measured reference value, 8.6 the shipped
+    # bound -- the same pair tools/check_gui_prereqs.py is written against.
+    C "Tk 8.6.15 clears the 8.6 floor"            (Test-TkFloor "8.6.15" "8.6")
+    C "Tk 8.6 clears its own floor"               (Test-TkFloor "8.6" "8.6")
+    C "Tk 9.0 clears it"                          (Test-TkFloor "9.0" "8.6")
+    C "Tk 8.5.19 does not"                        (-not (Test-TkFloor "8.5.19" "8.6"))
+    C "Tk 8 alone does not - silence is not 8.6"  (-not (Test-TkFloor "8" "8.6"))
+    C "a version with a letter still reads"       (Test-TkFloor "8.7a2" "8.6")
+    C "an unreadable version does not pass"       (-not (Test-TkFloor "not-a-version" "8.6"))
+    C "and neither does an empty one"             (-not (Test-TkFloor "" "8.6"))
+    C "the shipped floor is 8.6"                  ($TK_MIN -eq "8.6")
+
+    # BOTH START LINES, IN ORDER, AND THE SECOND ONE OUT OF THE CHECKER'S WINDOW.
+    # This is the half state this stage was written against, and it cannot be
+    # caught by reading the script: tools/check_operating_point.py finds the
+    # printed server command by taking a 2000-character region from the
+    # "llama-server" that precedes it, so a hint added ABOVE the start lines
+    # pushes --moe-stream-l2 out of that region and reports this installer as
+    # broken at the next release. Measured on this version, by padding the file
+    # at the real path and running the checker: 179 characters inserted above the
+    # --port line stay green, 180 go red ("1 of 12 flags differ").
+    #
+    # 179 and not the 176 the end of the last match suggests, and the three
+    # characters are worth a sentence: the manifest pattern is
+    # `(--moe-stream-l2)\s+\S+` and \S+ shortens as the region's edge arrives, so
+    # the flag is still found after its printed value has been half cut off. The
+    # margin is therefore measured by running the checker, never by counting to
+    # the end of the match.
+    #
+    # Asserted here rather than remembered, because that margin moves with every
+    # edit made above these lines. The file is normalised to LF first: the
+    # checker reads through Python's universal newlines, and on a CRLF checkout a
+    # raw byte offset would be larger than the one it actually sees -- which
+    # would make this check pass while the checker fails, the one direction a
+    # guard may not fail in.
+    if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
+        $src = (Get-Content -LiteralPath $PSCommandPath -Raw) -replace "`r`n", "`n"
+        # EVERY NEEDLE IS ASSEMBLED, NEVER WRITTEN WHOLE, and the first version of
+        # this block is why. A check that reads its own script finds ITS OWN
+        # literal first -- these lines sit some six hundred lines above the ones
+        # they are looking for -- so it measured the distance from a comment to
+        # the selftest and reported the start lines as inside the window. It went
+        # red on a file that is correct, which is the failure that gets a check
+        # deleted rather than read.
+        $mark   = '" -ForegroundColor White'
+        $cliAt  = $src.IndexOf('cli\crow.py' + $mark)
+        $guiAt  = $src.IndexOf('cli\crow_gui.py' + $mark)
+        C "the terminal client's start line is printed" ($cliAt -ge 0)
+        C "the window's start line is printed as well"  ($guiAt -ge 0)
+        C "and the terminal one comes first"            ($cliAt -ge 0 -and $guiAt -gt $cliAt)
+
+        # The anchor the checker actually lands on: the last "llama-server" at or
+        # before the printed --moe-stream-l2, which is the region that has to hold
+        # all twelve flags.
+        $l2At   = $src.IndexOf('--moe-stream-l2 ' + '$l2"')
+        $anchor = if ($l2At -ge 0) { $src.LastIndexOf('llama-server', $l2At) } else { -1 }
+        C "the printed server line still has an anchor" ($anchor -ge 0)
+
+        # THE MARGIN, AND THIS IS THE CASE THAT EARNS ITS PLACE. The first version
+        # of this block asserted that the two start lines sit PAST the 2000
+        # characters, which is the wrong direction and would have stayed green
+        # through the exact failure it was written for: text inserted between the
+        # server block and the start lines pushes those lines FURTHER away while
+        # pushing --moe-stream-l2 out of the region. What has to be inside the
+        # window is the last flag, so that is what is measured.
+        #
+        # DELIBERATELY THREE CHARACTERS STRICTER THAN THE CHECKER. This takes the
+        # end of the whole match; the manifest pattern ends in \S+, which shortens
+        # as the region's edge arrives, so the checker survives to 179 inserted
+        # characters where this goes red at 177. Early is the only direction a
+        # margin guard is allowed to be wrong in.
+        $l2End = if ($l2At -ge 0) { $l2At + ('--moe-stream-l2 ' + '$l2"').Length } else { -1 }
+        C "the last printed flag is inside the checker's window" `
+          ($anchor -ge 0 -and $l2End -gt 0 -and $l2End -le ($anchor + 2000))
+    }
 
     # The host tier is offered at exactly one ratio. Both directions are checked, because a rule
     # that only ever says yes is not a rule - and the 63.4 GB case is the development machine,
@@ -921,9 +1161,17 @@ Write-Item "GPU"      $(if ($facts.HasNvidiaSmi) { "$($facts.Gpu), $($facts.Vram
 Write-Item "RAM"      ((Format-Num $facts.RamGb) + " GB")
 Write-Item "Disk"     ((Format-Num $facts.FreeDiskGb) + " GB free on " + (Split-Path $InstallTo -Qualifier))
 Write-Item "Windows"  $(if ($facts.Is64Bit) { "64-bit, PowerShell $($facts.PsVersion)" } else { "32-bit" })
+Write-Item "Python"   $(if ($facts.PythonPath) { $facts.PythonPath } else { "not on the PATH" }) `
+                      $(if ($facts.PythonPath) { "ok" } else { "warn" })
+# Reported even when it is missing, because the two clients differ in exactly this
+# one prerequisite and a line that only appears on machines that have it would
+# leave the other half wondering which client the install is short of.
+Write-Item "Tk"       $(if ($facts.TkPatchlevel) { "$($facts.TkPatchlevel), the window needs $TK_MIN" } else { "not available -- the terminal client does not need it" }) `
+                      $(if ($facts.TkPatchlevel -and (Test-TkFloor -Patchlevel $facts.TkPatchlevel -Floor $TK_MIN)) { "ok" } else { "warn" })
 
 $pf = Test-Preflight -VramMb $facts.VramMb -RamGb $facts.RamGb -FreeDiskGb $facts.FreeDiskGb `
-                     -HasNvidiaSmi $facts.HasNvidiaSmi -Is64Bit $facts.Is64Bit -PsVersion $facts.PsVersion
+                     -HasNvidiaSmi $facts.HasNvidiaSmi -Is64Bit $facts.Is64Bit -PsVersion $facts.PsVersion `
+                     -PythonPath $facts.PythonPath -TkPatchlevel $facts.TkPatchlevel
 
 foreach ($w in $pf.Warnings) { Write-Item "warning:" $w "warn" }
 if (-not $pf.Ok) {
@@ -1172,9 +1420,11 @@ New-Item -ItemType Directory -Force -Path (Join-Path $InstallTo "session") | Out
 
 Write-Step "What is left to do"
 
-$py = Get-Command python -ErrorAction SilentlyContinue
-if ($py) { Write-Item "python" "$($py.Source)" "ok" }
-else     { Write-Item "python" "not on the PATH -- the client needs it" "warn" }
+# The python line that used to stand here has MOVED, it was not dropped: it is
+# a Write-Item in step 1 now, beside the Tk line it belongs with, because a
+# prerequisite reported after the 506 MB download is a prerequisite reported at
+# the most expensive possible moment. See the two Write-Item calls under
+# "Checking this machine" and the warnings Test-Preflight raises for them.
 
 Write-Host ""
 Write-Host "  1. The model. It is NOT part of this install: 84.6 GiB, three files, and it" -ForegroundColor DarkGray
@@ -1254,12 +1504,37 @@ if ($l2 -gt 0) {
 Write-Host ""
 Write-Host "    python $InstallTo\cli\crow.py" -ForegroundColor White
 Write-Host ""
+# BOTH CLIENTS ARE INSTALLED AND NEITHER IS THE DEFAULT. The terminal one is
+# printed first because it is the one the README documents end to end and the one
+# that needs nothing but python; the window is printed second because it needs Tk
+# as well, and step 1 has already said whether this machine has it.
+#
+# THIS BLOCK SITS BELOW THE python LINE ON PURPOSE, and the reason is measured
+# rather than stylistic. check_operating_point.py reads a 2000-character region
+# from the "llama-server" that precedes the printed command line, and on this
+# version that region has room for 179 more characters before it stops finding
+# --moe-stream-l2 -- measured by padding this file at the real path and running
+# the checker: 179 green, 180 red with "1 of 12 flags differ". The python line
+# above starts one character past the region's edge, so everything from here down
+# is free. Anything added ABOVE it is not, and it is the same trap the note above
+# the server block was moved out of the window to avoid.
+#
+# The selftest holds the margin at "the last printed flag is inside the checker's
+# window", three characters stricter than the checker for the reason given there.
+Write-Host "     Or the same conversation in a window, if step 1 found Tk:" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "    python $InstallTo\cli\crow_gui.py" -ForegroundColor White
+Write-Host ""
+Write-Host "     Same core, same session file, same server. Neither client wraps the other," -ForegroundColor DarkGray
+Write-Host "     and neither is needed to use the other." -ForegroundColor DarkGray
+Write-Host ""
 
-# The last screen is the only place these three commands appear, and a console
-# that was opened for the install closes with it. So the run ends on a keypress
-# rather than on its own -- measured the hard way on 2026-08-08, when the first
-# public install finished correctly and the window was gone before anyone could
-# read what it had just printed.
+# The last screen is the only place these four commands appear -- the model, the
+# server, and one start line per client -- and a console that was opened for the
+# install closes with it. So the run ends on a keypress rather than on its own --
+# measured the hard way on 2026-08-08, when the first public install finished
+# correctly and the window was gone before anyone could read what it had just
+# printed.
 #
 # Skipped when there is nobody to press it: -NoPause for a script driving this,
 # and UserInteractive for a host with no console at all. A wait that cannot be

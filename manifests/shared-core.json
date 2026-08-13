@@ -1,0 +1,256 @@
+{
+ "_what": "The shared behaviour of Crow's clients, declared by hand. tools/check_shared_core.py holds every surface against this file.",
+ "_why_written_by_hand": "A list generated from cli/crow_core.py shrinks with its input: the day a behaviour LEAVES the core, the expected list loses it too and the checker stays green. This list is the promise, the core is the evidence, and they are allowed to disagree. Keys starting with _ are documentation, the same convention manifests/operating-point.json uses.",
+ "_two_classes": "names/ carries things with a def, a class or a module binding behind them - four predicates apply. wordings/ carries user-visible sentences and literal values, which have no def name at all - the counting predicate from #90's E2 applies: written once, and that once in the core. The split exists because the first draft of this manifest listed the three refusal sentences under the def predicates, where nothing could ever check them while the tool printed 'all'.",
+ "_not_listed_and_why": {
+  "sampling triple": "temperature 1.0 / top_p 0.95 / min_p 0.01 belongs to manifests/operating-point.json, and tools/check_operating_point.py already counts it across every client source. Typing 0.95 in here would create a THIRD written copy of the number - the exact drift both checkers exist to prevent - and this one would be the copy no measurement reads.",
+  "next_context_tokens as a user entry": "the counting is wired transitively: run_turn returns the number in TurnResult.context_tokens and the surface only draws it. Demanding a direct call site in every surface would be red at a correctly wired client.",
+  "the three thought events themselves": "reasoning_started/reasoning_text/reasoning_finished are methods of ReplyEvents, not module-level names, and the four predicates anchor at column 0 or at an indented def of the DECLARED name. ReasoningBlocks below is the entry that carries them: it is the only thing that fires them, and a surface that does not implement them fails its user_entry evidence."
+ },
+
+ "core": "cli/crow_core.py",
+ "core_module": "crow_core",
+
+ "surfaces": [
+  {
+   "path": "cli/crow.py",
+   "label": "cli",
+   "why": "The terminal client. It owns the screen, the slash commands, VERSION and nothing else; every behaviour a second client would need sits behind the import block at the top of it."
+  },
+  {
+   "path": "cli/crow_gui.py",
+   "label": "gui",
+   "why": "The window, and the reason this checker can say anything at all. Until it landed the core had ONE consumer, every predicate below held by construction, and a green result here was the tool measuring itself - which is why the honesty rule refuses to report on fewer than two surfaces. It owns widgets, the tick and the German surface language; it owns no decision. It lives in cli/ and not gui/ because tools/pack-release.ps1:431 copies cli/ as a whole and nothing else, so a gui/ would be absent from the package with nothing saying so."
+  }
+ ],
+
+ "names": [
+  {
+   "name": "tool_read_file",
+   "kind": "def",
+   "why": "The read half of the read-before-write rule. A second implementation would populate a different _READ and the refusal would stop matching the reads that earned it."
+  },
+  {
+   "name": "tool_write_file",
+   "kind": "def",
+   "why": "The one tool whose drift costs data: #10 measured hermes-agent resolving read-before-write to last-write-wins in two independent code paths, one warning and one writing anyway. Two implementations here is that same defect with a different name."
+  },
+  {
+   "name": "tool_edit_file",
+   "kind": "def",
+   "why": "Exact match plus a uniqueness check. A copy that fuzzy-matches instead would silently edit the wrong occurrence in whichever surface carries it."
+  },
+  {
+   "name": "tool_list_dir",
+   "kind": "def",
+   "why": "One of the seven. Its result goes through _clip, and a copy that forgot that ceiling would put an unbounded directory listing into the prefill."
+  },
+  {
+   "name": "tool_find_files",
+   "kind": "def",
+   "why": "Carries both ceilings - hit count AND bytes - because either alone lets the other through. A second copy is where one of the two gets dropped."
+  },
+  {
+   "name": "tool_search_text",
+   "kind": "def",
+   "why": "The tool that cost eight minutes of prefill when only the hit count was capped. The measurement behind the byte ceiling lives with this function, not with its callers."
+  },
+  {
+   "name": "tool_run_command",
+   "kind": "def",
+   "why": "Local execution with a timeout and a secret-stripped environment. A surface that ships its own would be shipping its own idea of what a child process may see."
+  },
+  {
+   "name": "TOOL_IMPL",
+   "kind": "binding",
+   "why": "The name-to-function table. It is a dict rather than a def, which is why the manifest needs a kind at all: hanging a def predicate on it would declare it and check nothing. A second table is how one surface ends up offering six tools and the other seven."
+  },
+  {
+   "name": "run_tool",
+   "kind": "def",
+   "why": "EVERY FAILURE IS A RESULT, NOT AN EXCEPTION. A tool that raises kills the turn and costs the whole prefix; at ~10 tok/s that is minutes. A second dispatcher is where the try/except gets lost."
+  },
+  {
+   "name": "run_tool_cached",
+   "kind": "def",
+   "why": "The repeat cache that turned an eight-attempt loop on a non-existent path into a fact the model has to react to. A surface without it loops; a surface with its own copy loops differently."
+  },
+  {
+   "name": "_clip",
+   "kind": "def",
+   "why": "Every tool result goes through here, no exceptions - one ceiling measured in the thing it actually costs, bytes that become prefill."
+  },
+  {
+   "name": "_post_stream",
+   "kind": "def",
+   "why": "The SSE reader. Two of them means two ideas about what a delta is, and the reasoning/content split rides on that."
+  },
+  {
+   "name": "stream_reply",
+   "kind": "def",
+   "why": "One request, one stream, one reasoning/content state machine. This is the name a GUI is most likely to re-implement, because a terminal-shaped signature looks like a terminal's business."
+  },
+  {
+   "name": "ReasoningBlocks",
+   "kind": "class",
+   "user_entry": true,
+   "evidence": ["reasoning_started("],
+   "why": "#90's capability 2, and its failure point P3: THE MODEL CAN RE-ENTER REASONING MID-ANSWER, so where a thought block begins, ends and begins again is a decision, not an order. The terminal shows and hides a block, the window folds and unfolds one - two presentations of ONE decision, and a second copy of it puts answer text inside a collapsed block where nobody reads it. The evidence is the event, because a surface that never draws a block is the second half of #90's failure: the CLI could not show reasoning at all until E10, and a window that could would have made it second-class on the day it shipped.",
+   "_evidence_note": "reasoning_started( rather than the class name: no surface CALLS ReasoningBlocks - stream_reply builds it - so a surface's wiring shows up as the block events it implements, not as a construction."
+  },
+  {
+   "name": "CodeFences",
+   "kind": "class",
+   "user_entry": true,
+   "evidence": ["CodeFences("],
+   "only": {
+    "surface": "cli/crow_gui.py",
+    "because": "#90's capability 6 splits into two halves - WHERE a code block begins and ends, which is a decision, and how it is drawn with a copy button, which is a surface. This is the first half, and today only the window is wired to it. The terminal still carries its own fence handling inside cli/crow.py's Renderer, which also owns the spill file, the highlighter and the live line counter; moving that onto this class changes what every CLI answer prints and is not E12's stage. The 'only' line is here so that debt is a declaration somebody can act on rather than a duplication nobody noticed."
+   },
+   "why": "Two clients with two ideas of what a fence is means one frames what the other reads as prose. The rule this class carries and the Renderer does not: a fence is a WHOLE line, so 'call it with ```json' mid-sentence opens nothing, and what follows the backticks has to be a bare language tag."
+  },
+  {
+   "name": "run_turn",
+   "kind": "def",
+   "user_entry": true,
+   "evidence": ["run_turn("],
+   "why": "The tool loop and its four rules. Every surface runs turns, so every surface has to run THIS one: the rule about appending an assistant turn without its tool_calls has no visible effect inside the turn that breaks it, only in every later turn against the same prefix."
+  },
+  {
+   "name": "save_session",
+   "kind": "def",
+   "user_entry": true,
+   "evidence": ["save_session("],
+   "why": "#90's capability 5, 'conversation history that survives a restart'. Both halves - the server's KV and the client's messages - or neither, and a surface that writes its own half writes a session the other cannot read."
+  },
+  {
+   "name": "load_session",
+   "kind": "def",
+   "user_entry": true,
+   "evidence": ["load_session("],
+   "why": "The other end of the same file. A surface that does not wire it starts cold every time and nothing on screen says why."
+  },
+  {
+   "name": "Conversation",
+   "kind": "class",
+   "user_entry": true,
+   "evidence": ["Conversation("],
+   "why": "The append-only context. Nothing is ever inserted in front of, or edited inside, an existing message - the prompt cache only survives while the prefix stays byte-identical, and a re-prefill of 12k tokens costs minutes here."
+  },
+  {
+   "name": "next_context_tokens",
+   "kind": "def",
+   "why": "How full the window is after a turn, asked of the server rather than estimated. The version that added prompt_n to predicted_n ran the bar BACKWARDS, 4.7k -> 1.3k -> 792, while the conversation grew."
+  },
+  {
+   "name": "TurnCost",
+   "kind": "class",
+   "user_entry": true,
+   "evidence": ["cost.line()"],
+   "why": "#90's capability 7, tok/s and tokens per turn. Its FIELDS AND THEIR ORDER are the shared part: two surfaces that assemble the same six numbers into two different sentences are two products. The surface picks the colour and nothing else."
+  },
+  {
+   "name": "TurnResult",
+   "kind": "class",
+   "why": "What one turn leaves behind - context_tokens, promised_warm, rolled. Those were local variables of repl() that the loop wrote through; a surface that carries them itself resumes against numbers that stopped being true."
+  }
+ ],
+
+ "wordings": [
+  {
+   "id": "write_file refuses an unread file",
+   "text": "without reading it first in",
+   "why": "The first of the three refusals with teeth. Its failure mode is losing work the model cannot see, so a second surface writing its own wording is a second surface deciding its own rule."
+  },
+  {
+   "id": "edit_file demands a read first",
+   "text": "before editing it, in this turn",
+   "why": "The second refusal. The words 'in this turn' are the scope E6 decided; a copy that says 'first' describes a rule nobody implemented."
+  },
+  {
+   "id": "edit_file refuses an ambiguous match",
+   "text": "include more context to make it unique",
+   "why": "The third refusal. It fails loudly instead of guessing, and the sentence is what tells the model how to fix its own call."
+  },
+  {
+   "id": "every result goes through _clip",
+   "text": "narrow the query and ask again",
+   "why": "The ceiling notice. If a surface writes its own, the two clients disagree about what a truncated result looks like to the model."
+  },
+  {
+   "id": "a repeat is answered from the first call",
+   "text": "you already called",
+   "why": "The sentence that turns a loop into a fact. Observed 2026-08-09: eight attempts at the same missing path, twice inside one round."
+  },
+  {
+   "id": "bad arguments are a result",
+   "text": "error: arguments were not valid JSON",
+   "why": "Half of run_tool's contract, in the shape the model actually sees it. A raise here costs the whole prefix."
+  },
+  {
+   "id": "an unknown tool is a result",
+   "text": "error: no tool named",
+   "why": "The other half, and the one that lists what IS available - a surface with its own list would advertise its own tool table."
+  },
+  {
+   "id": "loop rule: unanswerable calls are not appended",
+   "text": "None if unanswerable else calls",
+   "why": "The rule with no visible effect inside the turn that breaks it. An assistant turn whose tool_calls have no tool message behind them is a broken prefix for every LATER turn of the session, and a probe is what found the first missing half of it."
+  },
+  {
+   "id": "loop rule: the budget buys rounds, not the turn",
+   "text": "The tool budget for this turn is spent",
+   "why": "Driven live with --max-tool-rounds 0 the model produced 102 tokens, 'thinking 100%', and the user was shown nothing. The extra round is what spends the rest on saying where things stood."
+  },
+  {
+   "id": "loop rule: the rollover note",
+   "text": "This conversation starts here.",
+   "why": "What the fresh conversation opens with after a mid-turn archive. Two wordings would be two answers to 'where did my context go'."
+  },
+  {
+   "id": "loop rule: a second rollover stops the turn",
+   "text": "events.rollover_refused()",
+   "why": "Twice in one turn means the question itself does not fit. Rolling again would archive the note and ask the same thing again, forever."
+  },
+  {
+   "id": "session format: the kv token count",
+   "text": "\"kv_tokens\": kv_tokens,",
+   "why": "The field the restore checks itself against. A second writer of session.json is a second schema, and the file is shared between surfaces by design."
+  },
+  {
+   "id": "session format: the prefix fingerprint",
+   "text": "prefix_fingerprint(conversation.system)",
+   "why": "What decides whether a restored KV cache belongs to the conversation being resumed. Computed differently in two places, it decides differently."
+  },
+  {
+   "id": "cost line: the cache field",
+   "text": "cached {self.cached:,}/{self.cached_of:,}",
+   "why": "One field of the cost line, in the exact shape it is printed. cached is a statement about the prefix as it stands now, which is why it is the LAST round's figures and not a sum."
+  },
+  {
+   "id": "cost line: the cut-off field",
+   "text": "CUT OFF at the token budget",
+   "why": "A turn cut off at the budget looks exactly like a finished one once the text stops scrolling. This is the only thing that says which of the two happened."
+  },
+  {
+   "id": "the abort line",
+   "text": "[interrupted -- turn discarded, context unchanged]",
+   "why": "What Ctrl+C says. The partial turn is discarded rather than appended, and this sentence is the only place the user is told the context is untouched."
+  },
+  {
+   "id": "the resume line",
+   "text": "messages only -- the first turn pays a prefill",
+   "why": "The difference between a warm cache and a restored transcript, in the one line the user reads at start. Measured 2026-08-10: a start that said 'cache warm' was followed by cached 0/21004 and 469.51 s to the first token."
+  },
+  {
+   "id": "brand: the window background",
+   "text": "#0b0e17",
+   "why": "The wordmark's ground. Written once means one product; written twice means the day one of them is corrected."
+  },
+  {
+   "id": "brand: the accent",
+   "text": "38;2;126;176;248",
+   "why": "#7eb0f8, the blue of the wordmark - listed in the form it is actually WRITTEN, as the truecolor escape. The hex spelling exists only in the comment beside it, and a manifest that pinned the comment would be checking prose."
+  }
+ ]
+}

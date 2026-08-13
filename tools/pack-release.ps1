@@ -159,6 +159,72 @@ function Get-DevOnlyFiles {
     })
 }
 
+<#
+    The interpreter the repository checkers run under.
+
+    Resolved rather than assumed, and a miss is an ERROR at the call site rather
+    than a skip: a gate that quietly passes when it cannot find Python is a gate
+    that passes on exactly the machine where nobody would notice.
+#>
+function Find-PythonCommand {
+    foreach ($c in @('python', 'python3')) {
+        $hit = Get-Command $c -ErrorAction SilentlyContinue
+        if ($hit) { return ,@($hit.Source) }
+    }
+    # The launcher needs the version argument; without it a machine with only
+    # Python 2 registered would answer.
+    $py = Get-Command 'py' -ErrorAction SilentlyContinue
+    if ($py) { return ,@($py.Source, '-3') }
+    return ,@()
+}
+
+<#
+    THE GATE, AND IT IS THE REASON check_shared_core.py IS NOT A SECOND OPINION.
+
+    Measured 2026-08-12 while planning #90's E7: check_operating_point.py runs in
+    no .github/workflows, no git hook and no call from this script -- it runs only
+    when a human thinks of it. A second checker of the same build would inherit
+    that defect on the day it was written.
+
+    So both run HERE, before anything is staged. This is the cheapest place there
+    is, because every release goes through this script anyway, and it is the only
+    path somebody MUST take. A checker that does not run when a package is cut is
+    an opinion.
+
+    BEFORE THE STAGE DIRECTORY IS TOUCHED, not after: the caller's demand is that
+    a red checker leaves NO stage behind, and a gate that fires after
+    `Remove-Item $stage` has already destroyed the previous one.
+
+    Returns the checkers that came back non-zero. -Names and -Root are parameters
+    so the selftest can point it at a deliberately red script -- a gate whose own
+    failure path is never exercised is the next thing to rot.
+#>
+function Invoke-RepoCheckers {
+    param(
+        [string[]] $Names = @('check_shared_core.py', 'check_operating_point.py'),
+        [string]   $Root  = $PSScriptRoot
+    )
+
+    $prefix = Find-PythonCommand
+    if ($prefix.Count -eq 0) {
+        throw "no Python interpreter found (tried python, python3, py -3) -- the release checkers cannot run, and a release that skips them is not checked"
+    }
+    $exe  = $prefix[0]
+    $rest = @()
+    if ($prefix.Count -gt 1) { $rest = $prefix[1..($prefix.Count - 1)] }
+
+    $red = @()
+    foreach ($name in $Names) {
+        $tool = Join-Path $Root $name
+        if (-not (Test-Path $tool)) { throw "release checker missing: $tool" }
+        Write-Host "  $name"
+        $argv = $rest + @($tool)
+        & $exe @argv | ForEach-Object { Write-Host "    $_" }
+        if ($LASTEXITCODE -ne 0) { $red += "$name (exit $LASTEXITCODE)" }
+    }
+    return ,@($red)
+}
+
 function Invoke-Selftest {
 
     Write-Host "pack-release selftest"
@@ -183,6 +249,39 @@ function Invoke-Selftest {
     # A nested copy must not slip past on its parent directory.
     Check "a suite in a subdirectory is caught too" ((Get-DevOnlyFiles -Paths @('C:\r\cli\sub\test_x.py')).Count -eq 1)
     Check "an empty list is not an error"           ((Get-DevOnlyFiles -Paths @()).Count -eq 0)
+
+    # The release gate, both directions. A gate that has only ever been seen
+    # green is a gate nobody has watched refuse, and refusing is its whole job.
+    $python = Find-PythonCommand
+    Check "a Python interpreter is available for the checkers" ($python.Count -gt 0)
+    if ($python.Count -gt 0) {
+        $gateDir = Join-Path ([IO.Path]::GetTempPath()) ("crow-gate-" + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $gateDir | Out-Null
+        try {
+            Set-Content -LiteralPath (Join-Path $gateDir 'green.py') -Encoding utf8 `
+                -Value 'import sys; print("RESULT: fixture agrees"); sys.exit(0)'
+            Set-Content -LiteralPath (Join-Path $gateDir 'red.py') -Encoding utf8 `
+                -Value 'import sys; print("RESULT: fixture disagrees"); sys.exit(1)'
+            $ok  = Invoke-RepoCheckers -Names @('green.py') -Root $gateDir
+            Check "a checker that exits 0 does not stop the pack" ($ok.Count -eq 0)
+            $bad = Invoke-RepoCheckers -Names @('red.py', 'green.py') -Root $gateDir
+            Check "a checker that exits 1 is collected and named" ($bad.Count -eq 1 -and $bad[0] -like 'red.py*')
+            # Both checkers run even when the first is red: a gate that stops at
+            # the first failure hides the second, and the person fixing this
+            # would then cut a package to find out.
+            $both = Invoke-RepoCheckers -Names @('red.py', 'red.py') -Root $gateDir
+            Check "a red checker does not short-circuit the rest" ($both.Count -eq 2)
+        } finally {
+            Remove-Item $gateDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    # Named rather than assumed: this is the list the packing path below runs,
+    # and #90's E7 exists because check_operating_point.py was in no such list.
+    # Read off the function itself, so dropping one from the default list is
+    # caught here rather than at the next release nobody checked.
+    $gateBody = ${function:Invoke-RepoCheckers}.ToString()
+    Check "the gate's default list names check_shared_core.py"     ($gateBody -match 'check_shared_core\.py')
+    Check "the gate's default list names check_operating_point.py" ($gateBody -match 'check_operating_point\.py')
 
     $dumpbin = Find-Dumpbin
     Check "dumpbin located" ([bool]$dumpbin)
@@ -244,6 +343,28 @@ function Invoke-Selftest {
 }
 
 if ($Selftest) { exit (Invoke-Selftest) }
+
+# ---------------------------------------------------------------------------
+# 0 - the repository checkers, before one byte is staged
+# ---------------------------------------------------------------------------
+#
+# #90's third done criterion is "shared behaviour lives in exactly one place, and
+# there is a check that says so". A check that says so only when a human
+# remembers to type it does not say so. This is where it gets said, because a
+# release cannot be cut without coming through here.
+#
+# THE PRICE IS PAID ON PURPOSE, and it is not small: a red checker blocks a
+# release, and manifests/shared-core.json is hand-written, so that file now
+# stands between robin and a package. The alternative is a criterion that is met
+# on paper.
+Write-Host "checking the repository before packing"
+$redCheckers = Invoke-RepoCheckers
+if ($redCheckers.Count -gt 0) {
+    throw ("release checkers failed, nothing was staged: " + ($redCheckers -join ', ') +
+           " -- fix the finding, or say in the issue why the package ships against it")
+}
+Write-Host "  checkers: OK"
+Write-Host ""
 
 # ---------------------------------------------------------------------------
 # Packing
@@ -372,6 +493,11 @@ Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Compression
 
 $total = ($manifest | Measure-Object bytes -Sum).Sum
 Write-Host ""
-Write-Host ("RESULT: {0} files, {1:N1} MB staged, {2:N1} MB zipped" -f $manifest.Count, ($total/1MB), ((Get-Item $zip).Length/1MB)) -ForegroundColor Green
+# {0} IS THE MANIFEST COUNT, NOT THE DIRECTORY COUNT, and the wording says so
+# because the two differ by exactly one and that one is not an error: MANIFEST.json
+# cannot list and hash itself, so a package of N manifest entries always holds N+1
+# files. Read as "N files staged" the line disagrees with `dir` every single time,
+# and someone eventually goes looking for the missing file.
+Write-Host ("RESULT: {0} files in the manifest (+ MANIFEST.json = {1} in the package), {2:N1} MB staged, {3:N1} MB zipped" -f $manifest.Count, ($manifest.Count + 1), ($total/1MB), ((Get-Item $zip).Length/1MB)) -ForegroundColor Green
 Write-Host "  $zip"
 exit 0

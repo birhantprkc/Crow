@@ -17,6 +17,13 @@ a value computed from the machine's RAM. The flag must be there; the number is
 whatever that machine got. Requiring 32 would make the check fail on every
 machine other than this one.
 
+THE SAMPLING TRIPLE IS CHECKED DIFFERENTLY, and the difference is the point:
+temperature / top_p / min_p are not flags on a command line, they are written
+into the client. There "agrees with the manifest" is NOT "written down once" -
+two clients that both hard-write 0.95 agree with the manifest and with each
+other, and a comparing check reports them green right up to the day one of them
+is edited. So that side is COUNTED (check_sampling below), not compared.
+
 Usage:  check_operating_point.py [--repo <dir>] [--extra <file> ...]
         --extra takes further files to check, e.g. a vault page. They are held to
         the same standard, and a file that does not exist is an error rather than
@@ -26,10 +33,12 @@ Exit 0 = every copy agrees.  1 = at least one differs.  2 = setup error.
 """
 
 import argparse
+import io
 import json
 import os
 import re
 import sys
+import tokenize
 
 FLAG_SPECS = [
     # key in manifest.server,  regex against the raw text,             how to read it
@@ -184,6 +193,235 @@ def check_versions(repo, manifest_version):
     return out, bad
 
 
+# ---------------------------------------------------------------------------
+# The sampling triple: temperature 1.0 / top_p 0.95 / min_p 0.01.
+#
+# WHY THIS RULE COUNTS AND DOES NOT COMPARE. The triple is not a flag in a
+# command line a human copies; it is written into the client. On 2026-08-12 it
+# stood in three places: cli/crow.py's stream_reply signature, cli/crow.py's
+# argparse defaults, and the manifest. A second client would make it five.
+# A comparing predicate - "every copy equals the manifest" - reports two clients
+# that BOTH hard-write 0.95 as green, because both do equal the manifest. It
+# only goes red after one of them has been edited, i.e. after the damage: the
+# same prompt drawing from a different distribution in the two clients, with
+# nothing on screen saying so. So the code side is COUNTED: a sampling default
+# may be written EXACTLY ONCE across all client sources, and that once has to
+# sit in the core. For README.md and install.ps1 repetition is the purpose; for
+# shared code it is the defect.
+#
+# THE SECOND HALF IS THE OMISSION, and it is the failure the GUI draft already
+# had: a request body that leaves min_p out does not fall back to the manifest,
+# it falls back to llama.cpp's server default of 0.05 - a third value nobody in
+# this repo chose. Silence is not agreement, so a file that assembles a request
+# body has to name every sampling field the manifest declares.
+
+# Where a client lives. DISCOVERED, not listed by hand: a hand-kept list is
+# green about exactly the file nobody remembered to add to it, and that file -
+# the second client - is what this rule exists for. A directory that does not
+# exist yet (gui/) is not an error; a client that carries the value is caught
+# the moment it lands in one of these directories.
+CLIENT_DIRS = ("cli", "gui")
+
+# The one file the single copy has to sit in. First entry that exists wins, so
+# this survives the core extraction without an edit: while cli/crow_core.py does
+# not exist the core IS cli/crow.py, and the day it appears, a value left behind
+# in cli/crow.py stops being "the one copy, in the core" and goes red.
+CORE_FILES = ("cli/crow_core.py", "cli/crow.py")
+
+# Signed, because a sampling value may legitimately be 0 and a future one may
+# not be a float at all.
+NUM = r"(-?\d+(?:\.\d+)?)"
+
+
+def client_sources(repo):
+    """Every client source file, test files excluded.
+
+    A test that asserts what goes on the wire HAS to spell the value out - that
+    is the test doing its job, and it announces itself by going red when the
+    value moves. Counting it as a place that writes the default would make the
+    rule permanently red at the one file whose duplication is intentional.
+    """
+    out = []
+    for d in CLIENT_DIRS:
+        dpath = os.path.join(repo, d)
+        if not os.path.isdir(dpath):
+            continue
+        for name in sorted(os.listdir(dpath)):
+            if not name.endswith(".py"):
+                continue
+            if name.startswith("test_") or name.endswith("_test.py"):
+                continue
+            out.append(("%s/%s" % (d, name), os.path.join(dpath, name)))
+    return out
+
+
+def core_source(repo):
+    for rel in CORE_FILES:
+        if os.path.exists(os.path.join(repo, *rel.split("/"))):
+            return rel
+    return None
+
+
+def code_only(text):
+    """The file with its prose blanked out, offsets and line numbers intact.
+
+    Case 4 of the self-test is why this exists at all: the checker once read the
+    COMMENT explaining --slot-save-path as the flag itself. The same failure
+    here would be a comment saying "the card runs agentic work at top_p 0.95"
+    counted as a place that WRITES 0.95 - the rule would report a duplicate that
+    is a sentence, and a rule that is red at prose gets ignored.
+
+    Comments and triple-quoted strings are replaced by spaces of the same
+    length, so every offset and line number reported afterwards still points at
+    the real file. Ordinary quoted strings are LEFT ALONE on purpose: `"top_p":
+    0.95` in a request body is a place that writes the value and has to count.
+    """
+    lines = text.splitlines(keepends=True)
+    starts, off = [], 0
+    for ln in lines:
+        starts.append(off)
+        off += len(ln)
+    buf = list(text)
+
+    def blank(start, end):
+        a = starts[start[0] - 1] + start[1]
+        b = starts[end[0] - 1] + end[1]
+        for i in range(max(a, 0), min(b, len(buf))):
+            if buf[i] != "\n":
+                buf[i] = " "
+
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type == tokenize.COMMENT:
+                blank(tok.start, tok.end)
+            elif tok.type == tokenize.STRING and tok.string[:3] in ('"""', "'''"):
+                blank(tok.start, tok.end)
+        return "".join(buf)
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        # A file the tokenizer cannot finish still gets the cheap half. A line
+        # whose first non-space character is # is a comment in every Python that
+        # ever parsed, and losing the docstring half here can only produce a
+        # false RED, which someone reads, and not a false green, which nobody
+        # does.
+        out = []
+        for ln in lines:
+            # Space for space, so the line numbers reported afterwards still
+            # count the same newlines.
+            out.append(re.sub(r"[^\n]", " ", ln) if ln.lstrip().startswith("#") else ln)
+        return "".join(out)
+
+
+def sampling_sites(text, key):
+    """Every place in one file that WRITES a value for `key`.
+
+    Five shapes, because the value has been written in the first three already
+    and the other two are one keystroke away:
+      top_p: float = 0.95                     a default in a signature
+      "top_p": 0.95                           a literal in a request body
+      add_argument("--top-p", …, default=…)   a default on the command line
+      body["top_p"] = 0.95                    the same, assembled field by field
+      cfg.get("top_p", 0.95)                  a fallback for a missing setting
+    Case-insensitive so a module constant (TOP_P = 0.95) counts as well - that
+    is the shape a de-duplicated core will use, and it must not be able to hide
+    a second copy from the count.
+
+    A pass-through (`"top_p": top_p`) is deliberately NOT a site: it writes no
+    value, it forwards one.
+    """
+    flag = "--" + key.replace("_", "-")
+    patterns = [
+        r"\b%s\s*(?::\s*[A-Za-z_][\w\.\[\]]*\s*)?=\s*%s" % (re.escape(key), NUM),
+        r"[\"']%s[\"']\s*:\s*%s" % (re.escape(key), NUM),
+        r"[\"']%s[\"'][^)]*?\bdefault\s*=\s*%s" % (re.escape(flag), NUM),
+        r"\[\s*[\"']%s[\"']\s*\]\s*=\s*%s" % (re.escape(key), NUM),
+        r"[\"']%s[\"']\s*,\s*%s\s*\)" % (re.escape(key), NUM),
+    ]
+    hits = []
+    for pattern in patterns:
+        for m in re.finditer(pattern, text, re.IGNORECASE):
+            hits.append((m.start(), m.end(), float(m.group(1))))
+    hits.sort()
+    out = []
+    for start, end, value in hits:
+        # Two patterns can cover the same stretch of text; that is one site
+        # written once, not two copies.
+        if out and start < out[-1][1]:
+            continue
+        out.append((start, end, value))
+    return [(start, text[:start].count("\n") + 1, value) for start, _, value in out]
+
+
+def builds_a_body(text):
+    """Does this file assemble a chat request itself?
+
+    Anchored on the two fields every such body has and no prose about one does.
+    A client that calls the core instead of building its own body is not asked
+    for the sampling fields - it cannot omit them.
+    """
+    return (re.search(r"[\"']messages[\"']\s*:", text) is not None
+            and re.search(r"[\"']stream[\"']\s*:", text) is not None)
+
+
+def check_sampling(repo, sampling):
+    """Count the sampling defaults across the client sources.
+
+    Keys starting with _ are documentation riding inside the manifest, the same
+    convention as `expected`. The manifest's own _measurement_temperature is one
+    of them: temperature 0 in a probe is a measurement decision, not a client
+    default, and those literals stay where they are.
+    """
+    want = [(k, v) for k, v in sampling.items() if not k.startswith("_")]
+    sources = client_sources(repo)
+    core = core_source(repo)
+    problems = []
+    if not want:
+        problems.append("the manifest declares no sampling defaults to check")
+        return sources, core, problems
+    if not sources:
+        problems.append("no client source found in %s - nothing was checked"
+                        % ", ".join(d + "/" for d in CLIENT_DIRS))
+        return sources, core, problems
+    if core is None:
+        problems.append("no core source: none of %s exists" % ", ".join(CORE_FILES))
+
+    texts = {}
+    for rel, path in sources:
+        texts[rel] = code_only(read(path))
+
+    for key, value in want:
+        sites = []
+        for rel, _ in sources:
+            for _, line, got in sampling_sites(texts[rel], key):
+                sites.append((rel, line, got))
+        if not sites:
+            problems.append("%s: written nowhere - every client would inherit the "
+                            "server's own default, manifest says %r" % (key, value))
+            continue
+        if len(sites) > 1:
+            problems.append("%s: written %d times (%s) - exactly once, and in %s"
+                            % (key, len(sites),
+                               ", ".join("%s:%d" % (r, l) for r, l, _ in sites),
+                               core or "the core"))
+        for rel, line, got in sites:
+            if got != value:
+                problems.append("%s: %s:%d says %r, manifest says %r"
+                                % (key, rel, line, got, value))
+        if len(sites) == 1 and core is not None and sites[0][0] != core:
+            problems.append("%s: the one copy sits in %s, not in the core %s"
+                            % (key, sites[0][0], core))
+
+    for rel, _ in sources:
+        if not builds_a_body(texts[rel]):
+            continue
+        missing = [k for k, _ in want
+                   if not re.search(r"[\"']%s[\"']\s*:" % re.escape(k), texts[rel])]
+        if missing:
+            problems.append("%s builds a request body without %s - an omitted field "
+                            "is the server's default, not the manifest's"
+                            % (rel, ", ".join(missing)))
+    return sources, core, problems
+
+
 def main(argv):
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--repo", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -229,8 +467,25 @@ def main(argv):
     else:
         print("  OK       %-34s %s in all %d places" % ("version literal", manifest["version"], len(versions)))
 
+    sources, core, sprob = check_sampling(args.repo, manifest.get("sampling", {}))
+    if sprob:
+        # Counted into `failed` in the same breath as it is printed. A rule class
+        # that reports its finding and leaves the exit code alone is the half
+        # state this one was written to avoid: four rules on screen and EXIT 0,
+        # which every caller reads as agreement.
+        failed += 1
+        print("  FAILED   %-34s %d problem(s) across %d client file(s)"
+              % ("sampling defaults", len(sprob), len(sources)))
+        for p in sprob:
+            print("             %s" % p)
+    else:
+        triple = " / ".join("%s %s" % (k, v) for k, v in manifest["sampling"].items()
+                            if not k.startswith("_"))
+        print("  OK       %-34s %s, once each in %s"
+              % ("sampling defaults", triple, core))
+
     print()
-    total = len(copies) + 1
+    total = len(copies) + 2
     print("RESULT: %d of %d sources agree with manifests/operating-point.json"
           % (total - failed, total))
     return 1 if failed else 0
