@@ -21,12 +21,17 @@ speaks through `TurnEvents`/`ReplyEvents`; each callback becomes one JSON messag
 handed to the page. tools/check_shared_core.py holds that split against
 manifests/shared-core.json.
 
-TOOL CALLS ARE SHOWN UNTIL SOMEONE SAYS OTHERWISE. The window starts with
-`execute_tools=False` and carries the switch as the tools chip: one click, and
-the same loop the terminal runs starts running here. It is a chip rather than a
-default because #55 and #88 are open -- `run_command` starts a shell, and behind
-a window nobody sees it scroll past. The chip names the mode in both states, so
-the answer is never silent.
+TOOL CALLS RUN, AS THEY DO IN THE TERMINAL. The window starts with
+`execute_tools=True` and carries the switch as the tools chip: one click, and it
+only shows them instead. It matches `cli/crow.py`, which runs them unless given
+`--no-run-tools`; a window that showed them instead would answer the same
+question differently from the terminal, and that difference is what #90 exists
+to exclude. Shown-only remains one click away, and the chip names the mode in
+both states, so the answer is never silent.
+
+The permission question is NOT answered here: #88 (`/mode manual, allowedit,
+auto`) is what binds intent to permission, and it binds both clients or neither.
+`run_command` still starts a shell in either one.
 
     python cli/crow_gui.py
 
@@ -230,7 +235,11 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--mono);
 
 #flow{overflow-y:auto;padding:22px 0 26px;flex:1;min-height:0;
   scroll-behavior:smooth;user-select:text}
-.turn{padding:0 30px;max-width:960px}
+/* CENTRED, NOT LEFT-HUGGING. max-width alone pins the column to the left edge
+   and leaves the rest of a wide window empty; the auto margins are what put it
+   in the middle. 960 includes the 30px padding, so the text runs 900 wide --
+   the same 900 #box is held to, which is what makes the two flush. */
+.turn{padding:0 30px;max-width:960px;margin-inline:auto}
 .turn+.turn{margin-top:26px}
 .you{display:grid;grid-template-columns:38px 1fr;gap:2px}
 .you .m{color:var(--accent);font-weight:700;font-size:12.5px;padding-top:1px}
@@ -288,7 +297,11 @@ details.think[open] .caret{transform:rotate(90deg)}
   background:rgba(11,14,23,.9)}
 #box{border:1px solid var(--bevel);border-radius:8px;background:var(--panel);
   padding:9px 11px 8px;box-shadow:0 0 0 3px rgba(126,176,248,.06);
-  transition:border-color .15s ease,box-shadow .15s ease}
+  transition:border-color .15s ease,box-shadow .15s ease;
+  /* 900, not 960: .turn spends 30px of its 960 on padding either side, so its
+     text starts at 900 wide. Matching that here puts this box's border on the
+     same edge as the text above it. The composer's top rule stays full width. */
+  max-width:900px;margin-inline:auto}
 #box.focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(126,176,248,.13)}
 #line{display:flex;align-items:flex-start;gap:8px}
 #p{color:var(--accent);font-weight:700;font-size:12.5px;padding-top:1px}
@@ -1758,15 +1771,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--system", default=DEFAULT_SYSTEM)
     parser.add_argument("--no-session", dest="session", action="store_false",
                         default=True)
-    # OFF BY DEFAULT, and the default is the decision rather than caution.
-    # In the terminal a tool call scrolls past in the same stream as everything
-    # else, so the user sees `run_command` start a shell. Behind a window nobody
-    # sees it, and the release levels that would make that answerable are #88,
-    # still open. A flag leaves the question open where a default would answer it
-    # silently -- and the window says on its face which of the two it is running.
+    # ON BY DEFAULT SINCE 2026-08-13, and the reason is the other client.
+    # cli/crow.py runs tool calls unless told otherwise (--no-run-tools), so a
+    # window that shows them instead answers the same question differently --
+    # which is the failure mode #90 exists to exclude, not a safety margin. The
+    # earlier default was off because behind a window nobody sees `run_command`
+    # start a shell; driven live on 2026-08-13 that argument turned out to cut
+    # the other way. A user who asks for a file gets a tool call and no answer,
+    # every turn, with nothing on screen saying why -- and the chip that would
+    # have said so is one nobody thinks to click.
+    #
+    # WHAT THIS DOES NOT CHANGE: there are still no permission levels. #88
+    # (/mode manual, allowedit, auto) is what binds intent to permission, and it
+    # binds BOTH clients or neither. Until it lands, the window runs what the
+    # terminal runs and names the mode on its face in either state.
     parser.add_argument("--tools", dest="execute_tools", action="store_true",
-                        default=False,
-                        help="run tool calls instead of only showing them")
+                        default=True,
+                        help="run tool calls (the default)")
+    parser.add_argument("--no-tools", dest="execute_tools", action="store_false",
+                        help="show tool calls instead of running them")
     return parser
 
 
