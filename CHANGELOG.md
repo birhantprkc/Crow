@@ -8,6 +8,34 @@ is in its commit message and on its issue; this is the short version.
 
 ## Unreleased
 
+**The window answers every slash command now, and mostly by pointing (#94).** It handled `/tools`;
+the other six travelled to the server as ordinary questions and came back as an answer about the
+word. `/reset`, `/context`, `/thoughts`, `/mode`, `/exit`, `/quit` — six of seven.
+
+**It does not run them, and that is the decision rather than a shortcut.** Four already have a
+control here, so those name it: `/reset` → the new button, `/context` → the bar under the input,
+`/mode` → the coloured dropdown beside send, `/thoughts` → the Thought block folded into every
+answer, `/exit` → the × in the title bar. Only `/help` and `/tools`, which have no widget, are
+executed. A window that grows the whole command line has two ways to do everything, and
+`check_shared_core.py` cannot tell them apart because both go through the same core.
+
+**What is shared is the list, not the answer.** `crow_core.SLASH_COMMANDS` holds the names both
+surfaces must cover; `crow.py` keeps the prose of `HELP` and is pinned against it. A command added to
+one and not the other is now a red test rather than a command the window has never heard of.
+
+**A message that merely starts with a slash still reaches the model** — `/usr/bin/env is what?` is a
+question, not a command. Only names on the shared list are intercepted, and that is a case rather
+than a comment.
+
+10 new cases in `cli/test_crow_gui.py` (57) and one in `cli/test_crow.py` (340), held against four
+breakages: only `/tools` answered again → 3 red; everything with a slash swallowed → 2 red, exactly
+the negative controls; the new button renamed while the pointer still names it → 1 red; a command
+added to `HELP` alone → 3 red.
+
+That third one is the one worth having. **A pointer that lies stays green forever** — "that is the
+new button" survives the button being renamed, and the user is the one who finds out. Each pointer is
+now tied to the markup it promises.
+
 **The tool cache was keyed on less than its inputs (#93).** `run_tool_cached` answered a repeated
 call from the first one, on the stated grounds that *"re-running would produce the identical
 failure"*. True for five of the seven tools and false for two, measured 2026-08-14 in the first real

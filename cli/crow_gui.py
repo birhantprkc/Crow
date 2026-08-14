@@ -1307,14 +1307,76 @@ class Api:
             lines.append("  %-14s %s" % (spec.get("name", "?"), head))
         return "the model can call:\n" + "\n".join(lines)
 
+    # #94. WHERE THE WINDOW ALREADY DOES THE JOB, IT SAYS SO INSTEAD OF GROWING
+    # A SECOND WAY TO DO IT. Decision by robin, 2026-08-14: four of the seven
+    # commands the terminal offers have a widget here -- a button, a chip, a
+    # dropdown, a title-bar control -- so those point at it, and only the ones
+    # with no widget are executed. A window that runs the whole command line
+    # ends up with two ways to do everything, and no checker can tell them
+    # apart because both go through the same core.
+    POINTS_AT = {
+        "/mode": "the release level is the coloured dropdown beside send —"
+                 " white manual, green allowedit, yellow auto.",
+        "/reset": "that is the new button, top left of the chat rail.",
+        "/context": "the bar under the input carries it, and the chip in the"
+                    " status row names the window the server gave us.",
+        "/thoughts": "the window always keeps the reasoning — open the Thought"
+                     " block folded into any answer.",
+        "/exit": "close the window with the × in the title bar. The session is"
+                 " kept either way.",
+    }
+    POINTS_AT["/quit"] = POINTS_AT["/exit"]
+
+    def help_listing(self) -> str:
+        """The window's own list. NOT crow.py's HELP, which promises a terminal.
+
+        Built from `crow_core.SLASH_COMMANDS` rather than from this class's own
+        keys, so a command added to the shared list and forgotten here shows up
+        as a gap in the help the user is reading rather than as silence.
+        """
+        answers = {"/help": "this list.",
+                   "/tools": "what the model can call."}
+        answers.update(self.POINTS_AT)
+        width = max(len(c) for c in crow_core.SLASH_COMMANDS)
+        return "\n".join(
+            "  %-*s %s" % (width, command,
+                           answers.get(command, "— nothing here answers this yet."))
+            for command in crow_core.SLASH_COMMANDS)
+
+    def slash_answer(self, text: str) -> str | None:
+        """What the window says to a slash command, or None to send it onward.
+
+        NONE IS A REAL ANSWER AND THE REASON THIS IS NOT A PREFIX TEST. A user
+        asking the model about `/usr/bin/env` opens their message with a slash,
+        and a window that swallows everything shaped like a command has taken a
+        question away from the thing that could answer it. Only the names on the
+        shared list are ours.
+
+        The first word decides, so `/mode manual` is answered like `/mode`
+        rather than travelling to the model because it had an argument.
+        """
+        stripped = text.strip()
+        if not stripped:
+            return None
+        word = stripped.split()[0].lower()
+        if word not in crow_core.SLASH_COMMANDS:
+            return None
+        if word == "/tools":
+            return self.tools_listing()
+        if word == "/help":
+            return self.help_listing()
+        return self.POINTS_AT.get(word)
+
     def send(self, text: str) -> None:
         # SLASH COMMANDS ARE ANSWERED HERE, NOT BY THE MODEL. Typed into the
         # window they used to travel to the server as an ordinary question --
         # the input's own placeholder offers /tools, so the one it names is
-        # answered where it is typed.
-        if text.strip().lower() == "/tools":
+        # answered where it is typed. #94 widened that from the one command to
+        # all of them.
+        answer = self.slash_answer(text)
+        if answer is not None:
             self.push({"k": "user", "t": text})
-            self.push({"k": "note", "t": self.tools_listing()})
+            self.push({"k": "note", "t": answer})
             return
         if self._worker and self._worker.is_alive():
             return

@@ -636,6 +636,20 @@ class ShowReasoningTests(unittest.TestCase):
             self.assertIn(f'"{command}"', source,
                           f"{command} is in /help and nothing handles it")
 
+    def test_help_and_the_shared_list_name_the_same_commands(self):
+        """#94 put the LIST in the core so the window could cover it, and this
+        is what stops the two drifting.
+
+        The window builds its answers from `SLASH_COMMANDS`. A command added to
+        HELP alone would be documented, handled in the terminal, and unknown to
+        the window -- which is exactly the state #94 was filed for. A command
+        added to the tuple alone would show up in the window's help and in no
+        terminal listing.
+        """
+        import re as _re
+        self.assertEqual(sorted(set(_re.findall(r"/\w+", crow.HELP))),
+                         sorted(crow.SLASH_COMMANDS))
+
 
 class ContextCounterTests(unittest.TestCase):
     """The bar has to grow with the conversation. It used to shrink.

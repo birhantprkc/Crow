@@ -2087,6 +2087,27 @@ DEFAULT_MODE = "auto"
 DECLINED = "error: declined by the user"
 
 
+# #94. THE LIST IS SHARED, THE ANSWERS ARE NOT.
+#
+# Every surface must have an answer for every one of these; what the answer IS
+# belongs to the surface. The terminal runs them. The window mostly points --
+# four of the seven already have a widget doing the job there, and a window that
+# grows a second way to do everything is the divergence #90 exists to prevent,
+# in the shape that `check_shared_core.py` cannot see because both sides call
+# the same core.
+#
+# WHAT GOES WRONG WITHOUT IT is not a crash: a command the terminal offers and
+# the window has never heard of travels to the model as a question about the
+# word, and comes back as an answer about slashes. That is what `/reset`,
+# `/context`, `/thoughts`, `/mode`, `/exit` and `/quit` did in the window until
+# now -- six of the seven.
+#
+# `crow.py` keeps the prose of `HELP` and is pinned against this tuple; the
+# window reads the tuple directly. Neither owns the other.
+SLASH_COMMANDS = ("/help", "/tools", "/mode", "/thoughts",
+                  "/reset", "/context", "/exit", "/quit")
+
+
 def needs_approval(name: str, mode: str) -> bool:
     """Does this tool stop and ask at this level?
 

@@ -970,6 +970,97 @@ def _drawn_kinds(source: str) -> set:
     return set(re.findall(r'case\s+"([a-z_]+)":', _code_only(source)))
 
 
+class SlashCommandsReachTheWindowTests(ApiCase):
+    """#94. The window handled `/tools` and nothing else.
+
+    The other six travelled to the server as ordinary questions and came back as
+    an answer about the word -- `/reset`, `/context`, `/thoughts`, `/mode`,
+    `/exit`, `/quit`. That is the divergence #90 exists to prevent, in the shape
+    no checker sees: both surfaces call the same core, and the difference is in
+    what never reaches it.
+
+    THE DECISION (robin, 2026-08-14) IS NOT "PORT THE COMMANDS". Four of the
+    seven already have a widget here, so those point at it and only the ones
+    without are executed. What is shared is the LIST, not the answer.
+    """
+
+    def test_every_shared_command_gets_an_answer(self):
+        api = self.api()
+        for command in crow_core.SLASH_COMMANDS:
+            self.assertIsNotNone(api.slash_answer(command),
+                                 f"{command} still travels to the model")
+
+    def test_the_help_listing_covers_every_one_of_them(self):
+        listing = self.api().help_listing()
+        for command in crow_core.SLASH_COMMANDS:
+            self.assertIn(command, listing)
+        self.assertNotIn("nothing here answers this yet", listing)
+
+    def test_an_argument_does_not_send_it_to_the_model(self):
+        """`/mode manual` is the form the terminal documents, so it is the form
+        a user brings over."""
+        self.assertIsNotNone(self.api().slash_answer("/mode manual"))
+
+    def test_tools_still_answers_with_the_schema(self):
+        """The one command that already worked has to keep working -- it is the
+        one the input's own placeholder advertises."""
+        self.assertIn("the model can call", self.api().slash_answer("/tools"))
+
+    # -- the negative half --------------------------------------------------
+
+    def test_an_unknown_slash_word_still_reaches_the_model(self):
+        """NEGATIVE CONTROL. A window that swallows everything starting with a
+        slash has taken a question away from the thing that could answer it --
+        and it would pass every case above."""
+        self.assertIsNone(self.api().slash_answer("/nonsense"))
+
+    def test_a_question_about_a_path_still_reaches_the_model(self):
+        """The case that makes the one above concrete rather than theoretical."""
+        api = self.api()
+        self.assertIsNone(api.slash_answer("/usr/bin/env is what?"))
+        self.assertIsNone(api.slash_answer("/etc/hosts"))
+
+    def test_an_empty_message_is_not_a_command(self):
+        self.assertIsNone(self.api().slash_answer("   "))
+
+    # -- the pointers have to point at something that exists ----------------
+
+    def test_every_pointer_names_a_control_the_page_actually_has(self):
+        """THE FAILURE THIS CATCHES IS A LIE, NOT A CRASH. "That is the new
+        button" stays green forever after the button is renamed, and the user is
+        the one who finds out. Each pointer is tied to the markup it promises.
+        """
+        anchors = {
+            "/reset": 'id="new"',
+            "/context": 'id="ctx"',
+            "/mode": 'id="modemenu"',
+            "/thoughts": "Thought",
+            "/exit": "wb close",
+            "/quit": "wb close",
+        }
+        self.assertEqual(sorted(anchors), sorted(crow_gui.Api.POINTS_AT),
+                         "a pointer exists with no anchor pinned, or the reverse")
+        for command, anchor in anchors.items():
+            self.assertIn(anchor, crow_gui.PAGE,
+                          f"{command} points at {anchor!r}, which the page does not have")
+
+    def test_the_two_that_are_executed_are_the_two_without_a_widget(self):
+        """The decision itself, written where a later change has to argue with
+        it: /help and /tools are the commands this window has no control for."""
+        executed = set(crow_core.SLASH_COMMANDS) - set(crow_gui.Api.POINTS_AT)
+        self.assertEqual(executed, {"/help", "/tools"})
+
+    def test_a_command_is_shown_as_asked_before_it_is_answered(self):
+        """The transcript has to show what was typed, or the answer arrives with
+        no question above it and reads as the model volunteering it."""
+        api = self.api()
+        api.send("/reset")
+        kinds = [(m.get("k"), m.get("t")) for m in self.drained(api)]
+        self.assertEqual(kinds[0][0], "user")
+        self.assertEqual(kinds[0][1], "/reset")
+        self.assertEqual(kinds[1][0], "note")
+
+
 class TheSeamToThePageTests(unittest.TestCase):
     """Python speaks, the page listens, and nothing checks that they agree.
 
