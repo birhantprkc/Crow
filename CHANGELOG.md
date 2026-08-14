@@ -6,6 +6,72 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
+## 0.3.1 — 2026-08-14
+
+**The window shipped in 0.3.0 was usable for one turn at a time.** Driving it for an afternoon found
+four defects, three of which only appear once a turn is allowed to run longer than a single round.
+Two of them were listed in 0.3.0's own *Known* section and are closed here.
+
+### Changed
+
+- **Tool calls now RUN in the window**, as they always have in the terminal. 0.3.0 shipped them as
+  shown-only behind a chip, on the argument that behind a window nobody sees `run_command` start a
+  shell. Driven live, that argument cut the other way: a user who asks for a file gets a tool call
+  and no answer at all, every turn, with nothing on screen saying why. `--no-tools` is the new flag
+  for the old behaviour, and the chip still names the mode in both states.
+  **This does not add permission levels.** #88 (`/mode manual, allowedit, auto`) binds intent to
+  permission, and it binds both clients or neither. `run_command` starts a shell in either one.
+
+### Fixed
+
+- **`READ_TIMEOUT_S` was 20 s** — listed as known in 0.3.0 and reached within minutes of tools being
+  switched on. It is a **per-read** bound, so it only ever expires on a wait with no bytes in it: a
+  prefill. A live turn died at `prefill 2,222 @ 51.21 tok/s`, about 43 s of silence, losing 12 rounds
+  and 13 tool calls to `stream broke: timed out`. Now 600 s, which is what `README.md` and
+  `tools/measure_gui_stream.py:106` had already been saying and what its own probe at `:636` requires
+  (`> 469.51`, the worst prefill on record).
+- **Maximising on a second monitor moved the window to the primary one.** `SPI_GETWORKAREA` returns
+  the primary monitor's work area and nothing else; the window was being sent to coordinates that
+  only exist over there. Now `MonitorFromWindow` + `GetMonitorInfoW`, which answer for the monitor
+  the window is actually on. Verified by driving the real functions against a window placed on each
+  of three screens, including one at scale 1.5, with the old path as the negative control.
+- **The chat column hugged the left edge.** `max-width` without auto margins pins a column to the
+  left and leaves the rest of a wide window empty. Text and composer now share one centred 900 px
+  measure.
+- **The download check named the wrong file count.** `README.md` told the reader to expect "four
+  files totalling ~97 GiB" — that is `UD-IQ3_XXS`, replaced on 2026-08-12. `UD-IQ2_XXS` is three
+  shards and 84.62 GiB (90,860,736,928 B). The line exists because `hf` prints `Downloaded` and
+  returns the local directory when it could not reach the repository; the one check meant to catch a
+  silent failure was producing one.
+- **The architecture diagram's VRAM caption ran off both edges** — one 184-character line in a
+  1132-wide box, and SVG does not wrap.
+
+### Also
+
+- **`README.md` is half its length**: 9,128 words to 4,686. Every measured figure, command block,
+  table and citation stayed; the prose around them went.
+
+### Known, and not fixed here
+
+- **One aborted read in 50 outlived its grace** (`race_runs 50`, `race_leaked 1`, one run) —
+  unchanged from 0.3.0.
+- **Slash commands other than `/tools` do not exist in the window**; they go to the model as text.
+- **`tools/measure_gui_stream.py` is red** and measures the tkinter build that 0.3.0 removed
+  (`SETUP ERROR: crow_gui.py does not carry TICK_MS`). It owns the read-timeout probe, so the 600 s
+  above clears a recorded floor rather than a re-run one.
+- **`tools/check_gui_prereqs.py` still checks Tk 8.6.15** and reports 3 of 3 green. It is not in the
+  release gate — that list names `check_shared_core.py` and `check_operating_point.py` — so it blocks
+  nothing, but it is a checker that cannot go red for the toolkit this package actually ships.
+
+### Measured
+
+`cli/test_crow.py` 327/327 · `cli/test_crow_core.py` 96/96 · `cli/test_crow_gui.py` 47/47 ·
+`check_shared_core` 44/44 · `check_operating_point` 4/4.
+
+The operating point is unchanged from 0.2.0. Nothing in this release was measured against a live
+server beyond the turns that produced the two defects above; the window itself was accepted by
+driving it, not by a probe.
+
 ## 0.3.0 — 2026-08-13
 
 **Crow gets a second client: a window, over the same core.** `cli/crow_gui.py` is a pywebview window
