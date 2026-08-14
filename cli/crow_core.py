@@ -501,6 +501,39 @@ def recent_paths(conversation: "Conversation", limit: int = 4) -> list[str]:
     return seen[-limit:]
 
 
+def forget_session(path: str | None = None) -> bool:
+    """Remove the persisted session. True if a file was actually there.
+
+    WHY THIS IS NOT save_session's JOB. Its first line refuses to write a
+    conversation with nothing in it, and for the case it was written for --
+    a client that started and was closed without a word -- that is right: an
+    empty file is worse than none. But the guard cannot tell "nothing was ever
+    said" from "the user just emptied it on purpose", and `/reset` is the second
+    one. So the emptying reaches the disk from here instead.
+
+    MEASURED 2026-08-14, and it had been true since `/reset` existed: robin
+    dropped the context in the window and closed it. `save_session` saw one
+    message (the system prompt), returned None, wrote nothing -- and
+    `session.json` still held the three messages the last turn had put there,
+    timestamped before the reset. The next start restored the conversation he
+    had just dropped. Both surfaces, because the guard is in the core.
+
+    NOT THE SERVER'S SLOT. `SLOT_FILE` is a fixed name and the next save writes
+    over it; a restore only ever happens through the file removed here, so a
+    stale cache on the server is unreachable rather than dangerous.
+    """
+    path = path or SESSION_FILE
+    try:
+        os.remove(path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # A file that will not go is not worth losing the reset over -- the next
+        # save overwrites it anyway, and this is the way out of a turn.
+        return False
+
+
 def save_session(conversation: "Conversation", base_url: str, context_tokens: int,
                  path: str | None = None, with_kv: bool = True,
                  pretty: bool = False) -> str | None:

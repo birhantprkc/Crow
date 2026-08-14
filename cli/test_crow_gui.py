@@ -1040,6 +1040,40 @@ class SlashCommandsReachTheWindowTests(ApiCase):
         self.assertNotIn("put aside", note)
         self.assertIn("prefill", note)
 
+    def test_reset_survives_closing_the_window(self):
+        """ROBIN'S REPORT, 2026-08-14: "/reset wird scheinbar nicht gespeichert
+        wenn man crow schließt".
+
+        He was right, and it was not the window's fault: `save_session` will not
+        write an empty conversation, so the file from before the reset stayed
+        and the next start restored it. The whole chain is driven here -- write a
+        session, drop it, close, and ask what a restart would find -- because
+        every link of it was individually green while the chain was broken.
+        """
+        api = self.windowed()
+        api._conversation.append("user", "Lies aufgabe.txt")
+        api._conversation.append("assistant", "ok")
+        api._context_tokens = 1100
+        crow_core.save_session(api._conversation, api._args.base_url, 1100,
+                               with_kv=False)
+        self.assertTrue(os.path.exists(self.session), "nothing was there to lose")
+
+        api.slash_answer("/reset")
+        api.close()
+        self.assertIsNone(crow_core.load_session(api._args.base_url),
+                          "the dropped conversation came back")
+
+    def test_no_session_leaves_the_file_alone(self):
+        """NEGATIVE HALF. `--no-session` means this client does not own that
+        file, and a reset is not a licence to delete somebody else's."""
+        api = self.windowed("--no-session")
+        api._args.session = False
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "not ours to drop")
+        crow_core.save_session(talk, api._args.base_url, 10, with_kv=False)
+        api.slash_answer("/reset")
+        self.assertTrue(os.path.exists(self.session))
+
     def test_reset_clears_the_page_too(self):
         """The conversation and what is on screen are two things, and only one
         of them is Python's. `new` clears the flow from the page side before it

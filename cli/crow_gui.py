@@ -1429,6 +1429,12 @@ class Api:
         crow_core.forget_approvals()   # #88: the chat goes, its releases go
         self._context_tokens = 0
         self._promised_warm = False
+        # AND IT HAS TO REACH THE DISK HERE. `save_session` will not write an
+        # empty conversation, so leaving it to the way out means the file from
+        # before the reset survives and the next start restores what the user
+        # just dropped. Measured 2026-08-14 -- see `forget_session`.
+        if self._args.session:
+            crow_core.forget_session()
         self.push({"k": "clear"})
         self.push({"k": "up", "model": None, "n_ctx": self._n_ctx, "tokens": 0})
         return "context dropped -- the next turn pays a full prefill."

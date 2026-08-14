@@ -8,6 +8,19 @@ is in its commit message and on its issue; this is the short version.
 
 ## Unreleased
 
+**`/reset` now survives closing the client, on both surfaces.** It never had. `save_session` refuses
+a conversation with nothing in it — right for the case it guards, a client started and closed without
+a word, since an empty file is worse than none — but the guard cannot tell that from *the user just
+emptied it on purpose*. So a `/reset` followed by an exit wrote nothing, the file from before the
+reset stayed, and the next start restored the conversation that had just been dropped.
+
+Found by robin in the window on 2026-08-14 and confirmed against the live file: `session.json` still
+held three messages, timestamped **before** the reset — the last turn's write, not the reset's.
+
+The fix is not a change to the guard, which would delete archives on the same reasoning.
+`forget_session()` in the core removes the file, and both `/reset` paths call it. `--no-session`
+leaves it alone: a client that does not own that file has no business deleting it.
+
 **The window runs every slash command now (#94).** It handled `/tools`; the other six travelled to
 the server as ordinary questions and came back as an answer about the word — `/reset`, `/context`,
 `/thoughts`, `/mode`, `/exit`, `/quit`.

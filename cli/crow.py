@@ -73,6 +73,7 @@ from crow_core import (  # noqa: F401 -- re-exported for the CLI and its suite
     FONT_FAMILY,
     font_files,
     font_installed,
+    forget_session,
     format_clock,
     _GGUF_QUANT,
     _GGUF_SHARD,
@@ -1011,7 +1012,8 @@ class SlashResult(NamedTuple):
 
 
 def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
-              context_tokens: int, n_ctx: int, rollover_at: float) -> SlashResult:
+              context_tokens: int, n_ctx: int, rollover_at: float,
+              session: bool = True) -> SlashResult:
     """Every slash command except the two that leave. Prints its own output.
 
     OUT OF repl() BECAUSE THE SUITE ASKED, and it asked for a reason worth
@@ -1053,6 +1055,13 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
     if line == "/reset":
         conversation.reset()
         crow_core.forget_approvals()   # #88: the chat goes, its releases go
+        # AND THE DISK, NOT ONLY THE OBJECT. `save_session` refuses to write an
+        # empty conversation, so a `/reset` followed by `/exit` used to leave
+        # the file from before the reset in place and the next start restored
+        # it. Measured 2026-08-14 in the window; the guard is in the core, so it
+        # was true here too and had been since `/reset` existed.
+        if session:
+            crow_core.forget_session()
         print("context dropped -- the next turn pays a full prefill.\n")
         return SlashResult(True, mode, show_reasoning, 0)
 
@@ -1483,7 +1492,7 @@ def repl(args: argparse.Namespace) -> int:
         slash = run_slash(line, conversation=conversation, mode=mode,
                           show_reasoning=show_reasoning,
                           context_tokens=context_tokens, n_ctx=n_ctx,
-                          rollover_at=args.rollover_at)
+                          rollover_at=args.rollover_at, session=args.session)
         mode, show_reasoning = slash.mode, slash.show_reasoning
         context_tokens = slash.context_tokens
         if slash.handled:

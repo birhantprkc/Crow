@@ -1413,6 +1413,97 @@ class ToolArgLineTests(unittest.TestCase):
         self.assertLessEqual(len(line), 81)  # 78 plus the ellipsis
 
 
+class ForgettingASessionTests(unittest.TestCase):
+    """`/reset` has to reach the disk, and `save_session` will not take it there.
+
+    MEASURED 2026-08-14, and true since `/reset` existed: robin dropped the
+    context in the window and closed it. `save_session` refuses a conversation
+    with nothing in it -- right for the case it was written for, a client closed
+    without a word -- so it wrote nothing, `session.json` still held the three
+    messages the last turn had put there, and the next start restored the
+    conversation he had just dropped. Both surfaces, because the guard is in the
+    core.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-forget-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, "session.json")
+
+    def _write_one(self):
+        talk = crow.Conversation("SYS")
+        talk.append("user", "something worth keeping")
+        talk.append("assistant", "kept")
+        crow.save_session(talk, "http://127.0.0.1:1/v1", 1100,
+                          path=self.path, with_kv=False)
+        return talk
+
+    def test_a_written_session_is_removed_and_reported(self):
+        self._write_one()
+        self.assertTrue(os.path.exists(self.path))
+        self.assertTrue(crow.forget_session(self.path))
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_a_session_that_was_never_there_is_not_an_error(self):
+        """`/reset` on a first run reaches this, and it is not a failure."""
+        self.assertFalse(crow.forget_session(self.path))
+
+    def test_the_defect_it_exists_for(self):
+        """THE MEASUREMENT, kept as a case so the reason cannot be argued away.
+
+        Emptying the conversation and saving does NOT clear the file: the guard
+        returns None and the old messages stay. That is correct for its own
+        purpose and wrong for a reset, which is why the removal is a separate
+        call rather than a change to the guard.
+        """
+        talk = self._write_one()
+        talk.reset()
+        self.assertIsNone(crow.save_session(talk, "http://127.0.0.1:1/v1", 0,
+                                            path=self.path, with_kv=False))
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(len(json.load(fh)["messages"]), 3,
+                             "the guard changed; the reset no longer needs help")
+
+    def test_a_conversation_with_something_in_it_still_writes(self):
+        """NEGATIVE HALF. A fix that made every save a removal would pass the
+        cases above and lose every session anyone ever had."""
+        self._write_one()
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertEqual(len(json.load(fh)["messages"]), 3)
+
+    def _at_the_default_path(self):
+        """`forget_session()` with no argument reads crow_core's OWN binding.
+
+        `crow.SESSION_FILE` is a second name for the same string, and rebinding
+        it leaves the core resolving the original -- the trap ToolLayerCase
+        writes out at length for `_READ`. So the core's is what moves here.
+        """
+        import crow_core     # this suite drives `crow`; the binding is the core's
+        before = crow_core.SESSION_FILE
+        crow_core.SESSION_FILE = self.path
+        self.addCleanup(setattr, crow_core, "SESSION_FILE", before)
+
+    def test_the_terminal_reset_forgets_it_too(self):
+        """The guard is in the core, so the CLI had the same defect and the same
+        fix. Driven through `run_slash` rather than asserted about its source."""
+        self._at_the_default_path()
+        talk = self._write_one()
+        crow.run_slash("/reset", conversation=talk, mode="auto",
+                       show_reasoning=False, context_tokens=1100,
+                       n_ctx=200000, rollover_at=0.9)
+        self.assertFalse(os.path.exists(self.path))
+
+    def test_the_terminal_leaves_it_alone_without_sessions(self):
+        """NEGATIVE HALF of the line above: `--no-session` means the file is not
+        this client's to delete."""
+        self._at_the_default_path()
+        talk = self._write_one()
+        crow.run_slash("/reset", conversation=talk, mode="auto",
+                       show_reasoning=False, context_tokens=1100,
+                       n_ctx=200000, rollover_at=0.9, session=False)
+        self.assertTrue(os.path.exists(self.path))
+
+
 class SessionRestoreTests(unittest.TestCase):
     """What load_session does when the server cannot produce the KV state.
 
