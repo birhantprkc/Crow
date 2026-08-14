@@ -236,9 +236,9 @@ value it did not write itself.
 
 ## Using the window
 
-Every decision is `cli/crow_core.py`'s, every pixel is the window's — where a thought block begins,
-what counts as a code fence, what a turn cost, how a session is saved. `tools/check_shared_core.py`
-holds that against `manifests/shared-core.json`.
+Logic lives in `cli/crow_core.py`, rendering in the window: thought-block boundaries, code-fence
+detection, turn cost and session format are shared. `tools/check_shared_core.py` verifies this
+against `manifests/shared-core.json` (44 rules).
 
 | | |
 |---|---|
@@ -249,19 +249,19 @@ holds that against `manifests/shared-core.json`.
 | **sessions rail** | one entry, because there is one `session.json` — the same file `cli/crow.py` writes |
 | **release level** | a dropdown beside `send`, coloured by level: **manual** white, **allowedit** green, **auto** yellow. The same three levels `/mode` switches in the terminal, decided by the same table in `cli/crow_core.py` |
 
-**A held-back call becomes a card in the transcript**, with the tool's name and the arguments the
-model sent — a prompt that only said `run_command?` would be a keystroke, not a decision. Three
-answers: run it, decline, or allow it from now on for that directory or that program. The card stays
-afterwards with the answer on it, because a question that vanishes leaves no record of what was
-released. A declined call comes back to the model as `error: declined by the user` and the turn
-continues; it is a tool result, not an abort, or the prefix would break for every later turn.
+**Held-back calls.** A call the level holds back is drawn as a card with the tool name and the
+arguments as sent. Three answers: run, decline, or allow from now on for that directory or program.
+The card stays with the answer on it. A declined call returns `error: declined by the user` as a tool
+result and the turn continues.
 
-**Abort.** ESCAPE or the send button stops the turn: an interrupt flag polled every 50 ms, the socket
-closed in `finally`, and the socket timeout. The third is why the window ships **600 s** where the
-terminal ships 1800 — measured 2026-08-13, nothing this process does wakes a `recv` that is already
-blocked (`settimeout`, `shutdown` and close each returned only when the server hung up), so the bound
-is the timeout as it stood when the read started. 600 s clears the worst prefill on record (469.51 s).
-If the reader is still alive two seconds after an abort, the window writes that into the transcript.
+**Abort.** ESCAPE or the send button stops the turn: interrupt flag polled every 50 ms, socket closed
+in `finally`, socket timeout.
+
+The timeout is **600 s** in the window against 1800 in the terminal. Measured 2026-08-13: nothing in
+this process wakes an already-blocked `recv` — `settimeout`, `shutdown` and close each returned only
+when the server hung up — so the bound is the timeout as it stood when the read started. 600 s clears
+the worst prefill on record (469.51 s). If the reader is still alive two seconds after an abort, the
+window writes that into the transcript.
 
 **Drawing is batched per frame.** One `after()` tick at 30 fps takes up to 512 events off the queue,
 one insert per tag run. Over 4,000 deltas: per event 4,000 ticks and 332.9 ms of inserts; per tick
@@ -303,8 +303,8 @@ difference found*, not equivalence.
 **Why Windows only?** The streaming path rests on `FILE_FLAG_NO_BUFFERING`, positional `OVERLAPPED`
 reads and a per-worker handle pool. The POSIX side compiles but has never been run.
 
-**Why not more VRAM?** No consumer card holds 84.6 GiB. And more cache is not free — past a point it
-stops fitting beside what the display needs.
+**Why not more VRAM?** No consumer card holds 84.6 GiB. Above the card's limit the allocation no
+longer fits beside the display and per-slot cost stops being constant.
 
 ---
 
@@ -328,10 +328,16 @@ The always-active set — attention, norms, embeddings, shared expert — is **6
 construction at `-ngl 99`. The routed experts are the other **90.17 GiB**: 378,208,256 B per expert
 across 43 layers, times 256.
 
-Routing is concentrated enough for a cache to pay. Across the three cumulative blocks of the `r1-l2`
-arm, the share of experts covering 80 % of selections reads **23.0 %, 24.6 %, 25.7 %**; for 50 % it is
-7.7 → 8.5 → 8.7 %, for 95 % it is 43.0 → 45.4 → 48.4 %, at Gini **0.744 → 0.725 → 0.711**. Every
-figure widens with run length as more experts are touched at all.
+Routing concentration, three cumulative blocks of the `r1-l2` arm — share of experts covering:
+
+| coverage | block 1 | block 2 | block 3 |
+|---|---:|---:|---:|
+| 50 % of selections | 7.7 % | 8.5 % | 8.7 % |
+| 80 % | 23.0 % | 24.6 % | 25.7 % |
+| 95 % | 43.0 % | 45.4 % | 48.4 % |
+| Gini | 0.744 | 0.725 | 0.711 |
+
+Every figure widens with run length as more experts are touched at all.
 
 ## 2. The slot cache
 
@@ -340,10 +346,9 @@ the cache is **20,919.88 MiB = 20.43 GiB** and the server's hit rate over a grad
 **80.10–81.81 %**.
 
 <a id="the-cache-has-a-ceiling"></a>
-**The ceiling is the card.** A slot costs **312.44 MiB**, constant to five digits across every step.
-More slots is more throughput up to the edge; then the allocation stops fitting beside what the
-display needs, the driver moves the difference into host memory without printing anything, and the
-cost is unpredictable rather than constant.
+**Ceiling: VRAM.** A slot costs **312.44 MiB**, constant to five digits across every step. Above the
+card's limit the driver silently moves the excess into host memory and per-slot cost stops being
+constant.
 
 > **Measured on `UD-IQ3_XXS`, not repeated on `UD-IQ2_XXS`.** On the shipped rung a slot costs
 > 312.44 MiB rather than 360.69, so every cache size below is ~13.4 % smaller (#89).
@@ -362,16 +367,17 @@ predicts. **64 must therefore read ~32,404 and reads 32,014; the 390 missing MiB
 moved out.** At 64 slots the same prompt ran between 3.83 and 33.29 tok/s across eight runs; at 58 the
 three runs span 111.38 to 112.82.
 
-Two cautions: prefill and decode are not one series (58/56 in one session, 62/60 in another, and a
-VRAM reading contains whatever else was on the card). And **58 against 60 is not a throughput
-difference** — 112.69 against 113.53, 17.32 against 17.43, while repeating the same configuration
-eight times spans 1.09x. What separates them is margin.
+Prefill and decode are not one series: 58/56 in one session, 62/60 in another, and a VRAM reading
+includes whatever else was on the card.
 
-**58 is this card's number**, from 32,607 MiB and whatever the display does beside it. Deriving it
-from the machine is [#87](https://github.com/nibor1896/Crow/issues/87).
+58 against 60 is within noise — 112.69 vs 113.53, 17.32 vs 17.43, against a 1.09x spread over eight
+repeats of one configuration. The difference is free VRAM: 2,059 MiB vs 1,653.
 
-**The failure leaves no trace in any counter.** A halved request executes the same graphs, takes the
-same misses, and can have the lowest load stall of its run.
+**58 applies to 32,607 MiB.** Deriving it per machine is
+[#87](https://github.com/nibor1896/Crow/issues/87).
+
+An over-allocated cache is invisible to every counter: same graphs, same misses, and possibly the
+lowest load stall of the run.
 
 **Cold misses cannot be cached away.** On the `r1-l2` arm's warm-up task against an empty cache they
 are **7,988 of 25,678 misses (31.1 %)**; the first graded task takes **487 of 7,517 (6.5 %)**, and by
@@ -382,16 +388,16 @@ The cache has a hard floor the graph imposes:
 
 ![The wave cap](docs/images/eq_wave_cap.png)
 
-Multi-pass expert GEMMs need at least `3 x n_expert_used` slots. Upstream's default computed
-`2 x n_expert_used` clamped to 16, below the 18 the graph requires — and it did not fail at load: the
-`GGML_ABORT` sat inside `build_moe_ffn` and fired on the first batch touching more experts than the
-cache holds (`src/llama-model.cpp:1338-1343`). Crow refuses at the option, at load time.
+Multi-pass expert GEMMs need at least `3 × n_expert_used` slots. Upstream's default computed
+`2 × n_expert_used` clamped to 16, below the required 18, and did not fail at load — the `GGML_ABORT`
+sits in `build_moe_ffn` and fires on the first batch touching more experts than the cache holds
+(`src/llama-model.cpp:1338-1343`). Crow rejects the option at load time.
 
-**Waves.** One token touches at most 6 experts per layer and always fits; a ubatch of 512 can select
-more in one layer than the 58 slots hold. The graph splits them into passes of at most
-`plan_capacity` experts, the non-running wave masked out (`src/llama-moe-stream.h:102-111`). Prefill
-only — decode at `-np 1` is one wave. While wave *w* computes, wave *w+1* is fetched
-(`stage_wave_locked`, `:420-422`), and the server counts whether it paid:
+**Waves.** One token touches at most 6 experts per layer. A ubatch of 512 can select more in one
+layer than 58 slots hold, so the graph splits them into passes of at most `plan_capacity` experts
+with the non-running wave masked out (`src/llama-moe-stream.h:102-111`). Prefill only — decode at
+`-np 1` is one wave. Wave *w+1* is fetched while wave *w* computes (`stage_wave_locked`,
+`:420-422`):
 
 ```
 moe stream: waves = 430 (228 non-empty), preloads issued = 4303 (ready on arrival = 474), wave stall = 4032.35 ms
@@ -402,21 +408,20 @@ see [below](#cumulative-counters).
 
 ## 3. Reading the drive without the page cache
 
-**Page faults are the wrong instrument.** A fault is synchronous and per-thread, leaving the drive at
-queue depth ~1 on hardware that needs many concurrent reads.
+**Not page faults.** A fault is synchronous and per-thread, leaving the drive at queue depth ~1.
 
 **Windows serialises on the file object.** One handle across threads keeps depth at 1 regardless of
-worker count; the read mechanism (`SetFilePointerEx` against positional `OVERLAPPED`) makes no
-measurable difference, sharing the handle makes all of it. `llama_file` opens **18 private handles**.
-At the operating point only 8 are used — `--moe-stream-io-threads 8` is where the drive saturates —
-and a worker whose id is past the pool falls back to the shared handle
-(`src/llama-mmap.cpp:95-107`).
+worker count. The read mechanism (`SetFilePointerEx` vs positional `OVERLAPPED`) makes no measurable
+difference; sharing the handle does. `llama_file` opens **18 private handles**; at the operating
+point 8 are used (`--moe-stream-io-threads 8`, where the drive saturates). A worker past the pool
+falls back to the shared handle (`src/llama-mmap.cpp:95-107`).
 
 **One work item per weight tensor, not per expert.** An expert carries 2–3 weight tensors — a
-**slab**, the unit everything here is counted in: 43 × 256 × 3 = 33,024 in the file. Reading an
-expert's slabs in a loop keeps one request in flight; issuing them independently keeps the drive
-busy. That change also made several workers call `ggml_backend_tensor_set` concurrently and broke
-reproducibility; a mutex around the upload alone restores it, with the disk read outside the lock.
+**slab**, the unit counted throughout: 43 × 256 × 3 = 33,024 in the file. Looping over an expert's
+slabs keeps one request in flight; issuing them independently keeps the drive busy.
+
+Side effect: concurrent `ggml_backend_tensor_set` calls broke reproducibility. A mutex around the
+upload restores it, with the disk read outside the lock.
 
 Upstream fix from this work: `llama_file` on Windows had no positional unbuffered read, and
 `has_direct_io()` returned a hard `true` on a path that had never opened anything unbuffered —
@@ -456,10 +461,8 @@ measures **133.10 tok/s** on a 1,884-token prompt, so the two are not one series
 harness prompts — a repeated word list routes to fewer distinct experts than real text, so this is
 the upper end of a cold start.
 
-**Arrangement.** Repeating all ten gate tasks per run lets the second run meet the cache the first
-warmed; giving each arm different tasks replaces carry-over with arms solving differently hard
-problems. Same tasks within a pair, fresh tasks across pairs, own server per arm. A warm-up task on
-an unused prompt precedes each graded pass.
+**Arrangement.** Same tasks within a pair, different tasks across pairs, fresh server per arm, one
+ungraded warm-up task before each graded pass.
 
 At 32 GiB the tier holds **7,695 slots of 4,464,640 B** — one slot takes the largest slab plus its
 direct-I/O alignment slack, so any slab fits any slot and the allocator cannot fragment
@@ -471,8 +474,8 @@ direct-I/O alignment slack, so any slab fits any slot and the allocator cannot f
   2,539,647 B against a 4,464,640 B slot. 7,695 × 2,931,847 B = 22,560,562,665 B against
   7,695 × 4,464,640 B = 32.00 GiB; the remaining **~11.0 GiB is stride slack**.
 
-**Filling it is free.** The worker already read every missing slab into a staging buffer and discarded
-it; now the read lands in a tier slot and the upload sources from there.
+**No extra read to fill it.** The worker already read every missing slab into a staging buffer; the
+read now lands in a tier slot and the upload sources from there.
 
 ![The host tier against no tier, paired on identical tasks](docs/images/host_tier.png)
 
@@ -481,12 +484,11 @@ prints it above 60 GB of detected RAM, because 32 GiB on ~64 GB is the only rati
 
 **What it cannot do:** catch a cold first touch — 9,435 of the `r1-l2` arm's 98,769 misses.
 
-**A defect no throughput number would have shown.** The first version handed out a resident slot and
-released its lock; another worker took the same slot as an eviction victim and read a different
-expert into it mid-upload. The model emitted 8,191 characters of `<<<<<<<<` at a fast rate by every
-counter. The fix pins a slot while it is read and commits a filled one only after its bytes leave for
-the GPU. The obvious suspect for the slowdown that followed was measured before anything was rebuilt:
-the tier's global mutex costs **0.539 µs per operation, 457.20 ms over 848,297 operations**.
+**Fixed during this work:** the first version released a resident slot's lock before the upload, so
+another worker could evict and overwrite it mid-read. Symptom: 8,191 characters of `<<<<<<<<`, with
+normal throughput counters. A slot is now pinned while read and committed only after upload.
+
+Tier mutex cost, measured: **0.539 µs per operation, 457.20 ms over 848,297 operations**.
 
 ## What it costs per token
 
@@ -494,17 +496,18 @@ the tier's global mutex costs **0.539 µs per operation, 457.20 ms over 848,297 
 
 ![Wait share](docs/images/eq_wait_share.png)
 
-**65.2, 67.4 and 70.0 % of decode is the thread waiting on a miss** — the three tier arms — against
-**78.6, 79.3 and 81.0 %** on the same tasks without it (`runs/2026-08-11/slot58-pairs/l2-pairs.csv`,
-`load stall` over summed `eval time`). The tier does not remove the wait, it halves what each miss
-costs. This is a latency-bound system, and every lever above acts on that.
+Decode time spent waiting on a miss: **65.2 / 67.4 / 70.0 %** with the tier, **78.6 / 79.3 / 81.0 %**
+without, same tasks (`runs/2026-08-11/slot58-pairs/l2-pairs.csv`, `load stall` over summed
+`eval time`). Per-miss stall: 0.713 ms vs 1.363 ms.
 
 <a id="cumulative-counters"></a>
-**Every statistics line the server prints is cumulative and nothing resets them.** `load stall`,
-`slot wait`, `wave stall`, `L2 lock wait` and the hit, miss and cold-miss counts run over the life of
-the model instance (`src/llama-moe-stream.cpp:746-751`,
-`tools/server/server-context.cpp:686-690`). A request-local figure is the difference between two
-consecutive blocks: cold misses in the `r1-l2` arm read 7,988, then 8,475, then 9,435 across one run.
+**Server statistics are cumulative — nothing resets them.** `load stall`, `slot wait`, `wave stall`,
+`L2 lock wait` and the hit / miss / cold-miss counts run over the life of the model instance
+(`src/llama-moe-stream.cpp:746-751`, `tools/server/server-context.cpp:686-690`).
+
+A per-request figure is the difference between two consecutive blocks. Example, cold misses in the
+`r1-l2` arm across one run: 7,988 → 8,475 → 9,435.
+
 Every stall and hit-rate figure on this page that names an arm is that arm's last block, warm-up
 included.
 
