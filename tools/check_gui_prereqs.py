@@ -146,10 +146,18 @@ RECORDED_RANGES = (
 # one: an entry no surface writes any more, or one the font has since gained, is
 # RED. A list of exemptions that only ever grows is a rug; check_shared_core
 # carries the same symmetric rule against its manifest, for the same reason.
-KNOWN_UNCOVERED = (
-    (0x2692, "the tool-call marker in cli/crow.py - found by this stage, not "
-             "fixed by it; it wants its own CLI issue under #90"),
-)
+# EMPTY SINCE 2026-08-14, and the entry that was here is why this tuple exists.
+# U+2692 was the CLI's tool-call marker and neither shipped face had the glyph:
+# Windows drew it from a substitute face, the exact fallback cli/crow.py keeps
+# its spinner away from braille to avoid. E9 measured it, declared it here
+# rather than swallowing it, and left the fix to a later stage. The marker is
+# now U+25CF -- the same one the window already draws for a tool call, so both
+# surfaces mark a call the same way and the glyph is in both faces.
+#
+# The declaration was not simply deleted alongside the edit: this checker went
+# red at it first ("no surface writes it any more - drop the declaration"),
+# which is the half of point (ii) that makes the other half worth reading.
+KNOWN_UNCOVERED = ()
 
 
 def sfnt_tables(data):

@@ -8,6 +8,18 @@ is in its commit message and on its issue; this is the short version.
 
 ## Unreleased
 
+**The CLI's tool-call marker is a glyph the shipped font actually has.** It was U+2692 `⚒`, and
+neither shipped face covers it — Windows drew it from a substitute face, which is the exact fallback
+`cli/crow.py` keeps its spinner away from braille to avoid. Found by E9 on 2026-08-13, declared in
+`KNOWN_UNCOVERED` rather than swallowed, fixed here. It is now **U+25CF `●`** — the same marker the
+window already draws for a tool call, so both surfaces mark a call the same way. Two call sites,
+`cli/crow.py:935` and `:963`; nothing else used it.
+
+The declaration was not deleted alongside the edit: `check_gui_prereqs.py` went red at it first
+("U+2692 is declared in KNOWN_UNCOVERED and no surface writes it any more — drop the declaration"),
+which is the half of point (ii) that makes the other half worth reading. `KNOWN_UNCOVERED` is now
+empty.
+
 **Release levels for tool calls (#88).** The seven tools ran unasked in both clients. They now run
 under a level, and the level is visible in both surfaces.
 

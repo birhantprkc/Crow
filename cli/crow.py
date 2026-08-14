@@ -932,7 +932,7 @@ class TerminalTurnEvents(TurnEvents):
         # call left the terminal silent for its whole duration with nothing naming what it
         # was waiting on -- and the previous round's six figures as the last thing visible.
         # No newline, so the outcome lands on the same line when it comes back.
-        print(f"{DIM}  ⚒ {name}({arg_note})", end="", flush=True, file=self._out)
+        print(f"{DIM}  ● {name}({arg_note})", end="", flush=True, file=self._out)
 
     def tool_finished(self, name: str, seconds: float, repeated: bool) -> None:
         marks = []
@@ -960,7 +960,7 @@ class TerminalTurnEvents(TurnEvents):
         """
         for call in calls:
             arg_note = format_tool_args(call["arguments"])
-            print(f"{DIM}  ⚒ {call['name']}({arg_note}) -- reported, not run{RESET}",
+            print(f"{DIM}  ● {call['name']}({arg_note}) -- reported, not run{RESET}",
                   file=self._out)
         print("", file=self._out)
 
