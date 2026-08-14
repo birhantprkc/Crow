@@ -1375,8 +1375,20 @@ class Api:
         # all of them.
         answer = self.slash_answer(text)
         if answer is not None:
-            self.push({"k": "user", "t": text})
+            # NO `user` ECHO HERE. The page already drew the line before it
+            # called us -- `go()` does `this.user(text); this.busy();` and only
+            # then `api.send(text)`. Pushing one from this side put the typed
+            # command on screen TWICE. It was wrong for `/tools` before #94 made
+            # it wrong for all seven; found by robin in the window, not by the
+            # 57 cases that drive this Api without a page.
+            #
+            # AND THE `idle` IS NOT OPTIONAL: `go()` set the composer to "Stop"
+            # with a read-timeout hint on the way in, and a turn is what
+            # normally takes it back. A command answered here starts no turn, so
+            # without this the window sits on "Stop" forever with nothing
+            # running behind it.
             self.push({"k": "note", "t": answer})
+            self.push({"k": "idle"})
             return
         if self._worker and self._worker.is_alive():
             return

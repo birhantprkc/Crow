@@ -1050,15 +1050,41 @@ class SlashCommandsReachTheWindowTests(ApiCase):
         executed = set(crow_core.SLASH_COMMANDS) - set(crow_gui.Api.POINTS_AT)
         self.assertEqual(executed, {"/help", "/tools"})
 
-    def test_a_command_is_shown_as_asked_before_it_is_answered(self):
-        """The transcript has to show what was typed, or the answer arrives with
-        no question above it and reads as the model volunteering it."""
+    # -- the seam to the page, which the cases above could not see -------------
+    #
+    # THESE THREE REPLACE A CASE THAT PINNED THE DEFECT. It asserted the Api
+    # pushes a `user` echo before the note, which is what the code did and what
+    # robin's window showed to be wrong: the typed command appeared TWICE, and
+    # the composer stayed on "Stop". Every case above passed throughout, because
+    # they drive the Api with no page on the other side -- one half of a seam
+    # measuring itself.
+
+    def test_the_command_is_not_echoed_from_this_side(self):
+        """The page draws the line before it calls us. A second echo here is the
+        same command on screen twice -- wrong for `/tools` before #94, and wrong
+        for all seven after it."""
         api = self.api()
         api.send("/reset")
-        kinds = [(m.get("k"), m.get("t")) for m in self.drained(api)]
-        self.assertEqual(kinds[0][0], "user")
-        self.assertEqual(kinds[0][1], "/reset")
-        self.assertEqual(kinds[1][0], "note")
+        kinds = [m.get("k") for m in self.drained(api)]
+        self.assertNotIn("user", kinds)
+        self.assertEqual(kinds[0], "note")
+
+    def test_the_composer_is_handed_back(self):
+        """`go()` sets "Stop" and a read-timeout hint on the way in, and a turn
+        is what normally takes it back. A command answered here starts no turn,
+        so it has to release the composer itself or the window sits on "Stop"
+        with nothing behind it."""
+        api = self.api()
+        api.send("/help")
+        self.assertIn("idle", [m.get("k") for m in self.drained(api)])
+
+    def test_the_page_still_does_the_two_things_this_relies_on(self):
+        """THE ANCHOR FOR BOTH CASES ABOVE. They are only correct while `go()`
+        echoes and sets busy; if that ever changes, the Api has to start doing
+        one or both, and this is where a reader finds that out instead of
+        rediscovering it in a screenshot."""
+        self.assertIn("this.user(text)", crow_gui.PAGE)
+        self.assertIn("this.busy()", crow_gui.PAGE)
 
 
 class TheSeamToThePageTests(unittest.TestCase):
