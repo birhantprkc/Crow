@@ -8,33 +8,48 @@ is in its commit message and on its issue; this is the short version.
 
 ## Unreleased
 
-**The window answers every slash command now, and mostly by pointing (#94).** It handled `/tools`;
-the other six travelled to the server as ordinary questions and came back as an answer about the
-word. `/reset`, `/context`, `/thoughts`, `/mode`, `/exit`, `/quit` — six of seven.
+**The window runs every slash command now (#94).** It handled `/tools`; the other six travelled to
+the server as ordinary questions and came back as an answer about the word — `/reset`, `/context`,
+`/thoughts`, `/mode`, `/exit`, `/quit`.
 
-**It does not run them, and that is the decision rather than a shortcut.** Four already have a
-control here, so those name it: `/reset` → the new button, `/context` → the bar under the input,
-`/mode` → the coloured dropdown beside send, `/thoughts` → the Thought block folded into every
-answer, `/exit` → the × in the title bar. Only `/help` and `/tools`, which have no widget, are
-executed. A window that grows the whole command line has two ways to do everything, and
-`check_shared_core.py` cannot tell them apart because both go through the same core.
+| typed | does |
+|---|---|
+| `/reset` | drops the context and the standing approvals. **The chat stays where it is** |
+| `/context` | messages, tokens, and the rollover point the bar never names |
+| `/mode`, `/mode <name>` | reports the release level, or switches it through `set_mode` |
+| `/thoughts` | folds every reasoning block open, or closed again |
+| `/exit`, `/quit` | closes the window |
+| `/help`, `/tools` | the window's own list, and the tool schema |
+
+**The first attempt answered them with a sentence naming the control that does the same job, and
+that was wrong twice over.** *"/reset: that is the new button, top left of the chat rail"* — the
+button is on the **right**, because `margin-left:auto` puts it there; and `new` **archives the
+conversation into the rail and opens an empty one**, which is not what `/reset` does in the terminal
+at all. A user who followed that instruction would file away a chat they meant to keep.
+
+**A pointer is prose about pixels, and prose about pixels cannot be tested.** The case written to
+catch a lying pointer only asserted that `id="new"` appears somewhere in the page, so it could never
+have caught either error — green, and worthless, in the exact shape its own docstring warned about.
+Running the command has neither failure mode: no prose to be wrong about, and no mapping to get
+wrong. A case now forbids the words *button*, *top left*, *beside*, *dropdown* and *click* from every
+answer the window gives.
 
 **What is shared is the list, not the answer.** `crow_core.SLASH_COMMANDS` holds the names both
 surfaces must cover; `crow.py` keeps the prose of `HELP` and is pinned against it. A command added to
-one and not the other is now a red test rather than a command the window has never heard of.
+one and not the other is a red test rather than a command the window has never heard of.
 
 **A message that merely starts with a slash still reaches the model** — `/usr/bin/env is what?` is a
-question, not a command. Only names on the shared list are intercepted, and that is a case rather
-than a comment.
+question, not a command.
 
-10 new cases in `cli/test_crow_gui.py` (57) and one in `cli/test_crow.py` (340), held against four
-breakages: only `/tools` answered again → 3 red; everything with a slash swallowed → 2 red, exactly
-the negative controls; the new button renamed while the pointer still names it → 1 red; a command
-added to `HELP` alone → 3 red.
+Two more found in the window after that, both older than this change: **`/help` and `/tools` arrived
+as one run-on paragraph**, because `.note` had no `white-space` and their columns were collapsed —
+true of `/tools` since the day it was answered here; and **`/mode <name>` answered twice**, because
+`set_mode` pushes its own note and the command returned a second one. An empty answer now means
+*handled, and already said*, which is a third thing next to a note and a `None`.
 
-That third one is the one worth having. **A pointer that lies stays green forever** — "that is the
-new button" survives the button being renamed, and the user is the one who finds out. Each pointer is
-now tied to the markup it promises.
+24 cases in `cli/test_crow_gui.py` (74) and one in `cli/test_crow.py` (340). The one that matters
+counts the files in the session directory before and after `/reset`: if it writes one, it has become
+`new` again.
 
 **Two defects came with it, both older than the change and both found in the window rather than by
 the suite.** The Api pushed a `user` echo before its answer — but `go()` already draws that line

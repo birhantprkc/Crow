@@ -301,7 +301,13 @@ details.think[open] .caret{transform:rotate(90deg)}
   border-top:1px dashed var(--line);padding-top:7px;overflow-x:auto;
   white-space:nowrap}
 .fail{color:var(--bad);font-size:11.5px;margin-top:8px}
-.note{color:var(--dimmer);font-size:11.5px}
+/* PRE-WRAP, NOT NORMAL. A note is not always one sentence: /help and /tools
+   build a column with their own line breaks and their own padding, and the
+   default collapsed all of it into a paragraph -- one run-on line of eight
+   commands. True of /tools since the day the window answered it. `pre-wrap`
+   rather than `pre` so a long single-line note still wraps at the column
+   instead of running off the side. */
+.note{color:var(--dimmer);font-size:11.5px;white-space:pre-wrap}
 .cursor{display:inline-block;width:7px;height:14px;background:var(--accent);
   vertical-align:-2px;margin-left:2px;animation:bl 1s steps(1,end) infinite}
 @keyframes bl{50%{opacity:0}}
@@ -806,6 +812,12 @@ const crow = {
       // the chat being read starts on the page too but is decided in Python --
       // it may fail -- so the emptying has to come back from there.
       case "clear": flow.innerHTML=""; this.cost("",null); break;
+      // #94. /thoughts in the terminal shows or hides the reasoning; here it is
+      // always rendered and folded, so the same question is open-or-closed.
+      // EVERY block, not just the ones on screen -- a fold that only reached
+      // the last answer would read as broken on the one above it.
+      case "thoughts": document.querySelectorAll("details.think")
+        .forEach(d=>{ d.open=e.open; }); break;
       case "user": this.user(e.t); break;
       case "start": this.start(); break;
       case "think_open": this.thinkOpen(); break;
@@ -1321,25 +1333,37 @@ class Api:
             lines.append("  %-14s %s" % (spec.get("name", "?"), head))
         return "the model can call:\n" + "\n".join(lines)
 
-    # #94. WHERE THE WINDOW ALREADY DOES THE JOB, IT SAYS SO INSTEAD OF GROWING
-    # A SECOND WAY TO DO IT. Decision by robin, 2026-08-14: four of the seven
-    # commands the terminal offers have a widget here -- a button, a chip, a
-    # dropdown, a title-bar control -- so those point at it, and only the ones
-    # with no widget are executed. A window that runs the whole command line
-    # ends up with two ways to do everything, and no checker can tell them
-    # apart because both go through the same core.
-    POINTS_AT = {
-        "/mode": "the release level is the coloured dropdown beside send —"
-                 " white manual, green allowedit, yellow auto.",
-        "/reset": "that is the new button, top left of the chat rail.",
-        "/context": "the bar under the input carries it, and the chip in the"
-                    " status row names the window the server gave us.",
-        "/thoughts": "the window always keeps the reasoning — open the Thought"
-                     " block folded into any answer.",
-        "/exit": "close the window with the × in the title bar. The session is"
-                 " kept either way.",
+    # #94. THE WINDOW RUNS THE COMMAND. The first attempt did not, and both
+    # ways it failed were found by robin in the window inside a minute.
+    #
+    # It answered each one with a sentence naming the control that does the same
+    # job -- "/reset: that is the new button, top left of the chat rail".
+    #
+    #   1. A POINTER IS PROSE ABOUT PIXELS, AND PROSE ABOUT PIXELS CANNOT BE
+    #      TESTED. That one was wrong: `margin-left:auto` puts the button on the
+    #      RIGHT. The case meant to catch a lying pointer only asserted that
+    #      `id="new"` appears somewhere in the page, so it could never have
+    #      caught it -- green, and worthless, in the exact shape its own
+    #      docstring warned about.
+    #   2. WORSE, IT NAMED THE WRONG CONTROL. `/reset` in the terminal drops the
+    #      context and keeps the chat where it is. The `new` button ARCHIVES the
+    #      conversation into the rail and opens an empty one. Two different
+    #      operations, and the answer asserted they were one.
+    #
+    # Running the command has neither failure mode: no prose to be wrong about,
+    # and no mapping to get wrong. What each one does here is what the same word
+    # does in `crow.py`'s `run_slash`, which is the only definition either
+    # surface gets to have.
+    WHAT_THEY_DO = {
+        "/help": "this list.",
+        "/tools": "what the model can call.",
+        "/mode": "the release level; /mode manual|allowedit|auto to switch.",
+        "/thoughts": "fold the reasoning blocks open, or closed again.",
+        "/reset": "drop the context. The chat stays where it is.",
+        "/context": "how much of the window the conversation is using.",
+        "/exit": "close the window.",
+        "/quit": "close the window.",
     }
-    POINTS_AT["/quit"] = POINTS_AT["/exit"]
 
     def help_listing(self) -> str:
         """The window's own list. NOT crow.py's HELP, which promises a terminal.
@@ -1348,17 +1372,15 @@ class Api:
         keys, so a command added to the shared list and forgotten here shows up
         as a gap in the help the user is reading rather than as silence.
         """
-        answers = {"/help": "this list.",
-                   "/tools": "what the model can call."}
-        answers.update(self.POINTS_AT)
         width = max(len(c) for c in crow_core.SLASH_COMMANDS)
         return "\n".join(
             "  %-*s %s" % (width, command,
-                           answers.get(command, "— nothing here answers this yet."))
+                           self.WHAT_THEY_DO.get(
+                               command, "— nothing here answers this yet."))
             for command in crow_core.SLASH_COMMANDS)
 
     def slash_answer(self, text: str) -> str | None:
-        """What the window says to a slash command, or None to send it onward.
+        """Run a slash command and return the line to show, or None to send on.
 
         NONE IS A REAL ANSWER AND THE REASON THIS IS NOT A PREFIX TEST. A user
         asking the model about `/usr/bin/env` opens their message with a slash,
@@ -1366,20 +1388,96 @@ class Api:
         question away from the thing that could answer it. Only the names on the
         shared list are ours.
 
-        The first word decides, so `/mode manual` is answered like `/mode`
-        rather than travelling to the model because it had an argument.
+        The first word decides, so `/mode manual` is one command with an
+        argument rather than a sentence for the model.
         """
         stripped = text.strip()
         if not stripped:
             return None
-        word = stripped.split()[0].lower()
+        parts = stripped.split()
+        word = parts[0].lower()
         if word not in crow_core.SLASH_COMMANDS:
             return None
         if word == "/tools":
             return self.tools_listing()
         if word == "/help":
             return self.help_listing()
-        return self.POINTS_AT.get(word)
+        if word == "/reset":
+            return self._drop_context()
+        if word == "/context":
+            return self._context_line()
+        if word == "/mode":
+            return self._mode_command(parts[1:])
+        if word == "/thoughts":
+            return self._fold_thoughts()
+        self.close()          # /exit, /quit
+        return "closing."
+
+    # -- what each one actually does ----------------------------------------
+
+    def _drop_context(self) -> str:
+        """`/reset`: the TERMINAL's meaning, which is not the `new` button's.
+
+        `run_slash` does `conversation.reset()` and `forget_approvals()` and
+        says the next turn pays a full prefill. The chat is NOT archived and
+        does NOT leave the rail -- that is what `new` is for, and conflating the
+        two is the defect this method exists to correct.
+        """
+        if self._worker and self._worker.is_alive():
+            return "the context does not change mid-turn"
+        self._conversation.reset()
+        crow_core.forget_approvals()   # #88: the chat goes, its releases go
+        self._context_tokens = 0
+        self._promised_warm = False
+        self.push({"k": "clear"})
+        self.push({"k": "up", "model": None, "n_ctx": self._n_ctx, "tokens": 0})
+        return "context dropped -- the next turn pays a full prefill."
+
+    def _context_line(self) -> str:
+        """`/context`: the same three figures the terminal prints.
+
+        The rollover point is shown here or nowhere -- it is the number that
+        decides when the conversation ends, and the window's bar shows the
+        fraction without ever naming the threshold.
+        """
+        room = ""
+        if self._n_ctx > 0 and crow_core.ROLLOVER_AT > 0:
+            room = ", rolls over at %d" % int(self._n_ctx * crow_core.ROLLOVER_AT)
+        return "%d messages, %d tokens%s" % (
+            len(self._conversation), self._context_tokens, room)
+
+    def _mode_command(self, rest: list) -> str:
+        """`/mode` reports, `/mode <name>` switches -- through `set_mode`.
+
+        NOT a second implementation: `set_mode` owns the refusal mid-turn and
+        the dropping of standing approvals, and a copy of either here would be
+        the divergence #90 is about.
+        """
+        if not rest:
+            return "release level: %s" % self._args.mode
+        name = rest[0].lower()
+        if name not in crow_core.MODES:
+            return "no level called %r. There is %s." % (
+                rest[0], ", ".join(crow_core.MODES))
+        # EMPTY, NOT A SENTENCE. `set_mode` pushes its own note -- the new level
+        # and what it holds back -- and it also owns the refusal mid-turn. A
+        # line from here as well put both on screen, which is the same defect as
+        # the doubled echo one commit ago: a half that speaks without asking
+        # what the other half already said.
+        self.set_mode(name)
+        return ""
+
+    def _fold_thoughts(self) -> str:
+        """`/thoughts`: the window renders reasoning always, folded.
+
+        So the terminal's show-or-hide becomes open-or-closed here. It is the
+        same question -- do I want to read this -- answered in the idiom the
+        surface has, rather than a second switch bolted on beside the fold.
+        """
+        self._thoughts_open = not getattr(self, "_thoughts_open", False)
+        self.push({"k": "thoughts", "open": self._thoughts_open})
+        return "reasoning blocks %s" % (
+            "opened" if self._thoughts_open else "closed")
 
     def send(self, text: str) -> bool:
         """Take a line from the composer. True if a TURN was started.
@@ -1401,7 +1499,13 @@ class Api:
         # answered where it is typed. #94 widened that to all of them.
         answer = self.slash_answer(text)
         if answer is not None:
-            self.push({"k": "note", "t": answer})
+            # AN EMPTY ANSWER IS "HANDLED, AND ALREADY SAID". `/mode <name>`
+            # goes through `set_mode`, which pushes its own note; a second one
+            # from here would put the switch on screen twice. None still means
+            # "not ours, send it on" -- the two are different answers and the
+            # empty string is the one that must not be confused with either.
+            if answer:
+                self.push({"k": "note", "t": answer})
             return False
         # A LINE ARRIVING MID-TURN IS ALSO NOT A NEW TURN. The page keeps a
         # second one out on its own, but saying so here is what lets it unlock

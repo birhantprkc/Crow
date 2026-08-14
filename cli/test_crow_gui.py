@@ -984,11 +984,146 @@ class SlashCommandsReachTheWindowTests(ApiCase):
     without are executed. What is shared is the LIST, not the answer.
     """
 
+    class _StubWindow:
+        """`/exit` reaches `window.destroy()`, which a test has no window for."""
+
+        def __init__(self):
+            self.destroyed = False
+
+        def destroy(self):
+            self.destroyed = True
+
+    def windowed(self, *argv):
+        api = self.api(*argv)
+        api._window = self._StubWindow()
+        return api
+
     def test_every_shared_command_gets_an_answer(self):
-        api = self.api()
         for command in crow_core.SLASH_COMMANDS:
+            api = self.windowed()
             self.assertIsNotNone(api.slash_answer(command),
                                  f"{command} still travels to the model")
+
+    # -- what /reset means, which is the whole reason this was rebuilt --------
+
+    def test_reset_drops_the_context(self):
+        """The TERMINAL's meaning: `conversation.reset()` and the releases go."""
+        api = self.windowed()
+        # THE BASELINE IS NOT ZERO: a Conversation carries its system message,
+        # and `reset()` keeps it. Comparing against 0 would fail on a correct
+        # reset and pass on one that threw the system prompt away.
+        empty = len(api._conversation)
+        api._conversation.append("user", "something")
+        api._context_tokens = 4321
+        crow_core.remember("write_file", json.dumps({"path": "x"}))
+        api.slash_answer("/reset")
+        self.assertEqual(len(api._conversation), empty)
+        self.assertEqual(api._context_tokens, 0)
+        self.assertFalse(crow_core.remembered("write_file",
+                                              json.dumps({"path": "x"})))
+
+    def test_reset_does_NOT_archive_the_chat(self):
+        """THE CASE THIS WHOLE REBUILD IS FOR.
+
+        The first version answered `/reset` with "that is the new button" -- and
+        `new` archives the conversation into the rail and opens an empty one.
+        `/reset` keeps the chat where it is. Two operations, and pointing one at
+        the other is worse than not handling it at all: the user follows the
+        instruction and files away a chat they meant to keep.
+        """
+        api = self.windowed()
+        api._conversation.append("user", "something")
+        before = sorted(os.listdir(self.dir))
+        note = api.slash_answer("/reset")
+        self.assertEqual(sorted(os.listdir(self.dir)), before,
+                         "/reset wrote a file; that is what `new` does")
+        self.assertNotIn("put aside", note)
+        self.assertIn("prefill", note)
+
+    def test_reset_clears_the_page_too(self):
+        """The conversation and what is on screen are two things, and only one
+        of them is Python's. `new` clears the flow from the page side before it
+        calls in; a command answered here has to say so on the queue."""
+        api = self.windowed()
+        api.slash_answer("/reset")
+        self.assertIn("clear", [m.get("k") for m in self.drained(api)])
+
+    def test_reset_is_refused_mid_turn(self):
+        """`set_mode` and `set_tools` both refuse; dropping the context under a
+        running turn is the same class and a louder failure."""
+        api = self.windowed()
+
+        class _Busy:
+            def is_alive(self):
+                return True
+
+        api._worker = _Busy()
+        api._conversation.append("user", "something")
+        held = len(api._conversation)
+        self.assertIn("mid-turn", api.slash_answer("/reset"))
+        self.assertEqual(len(api._conversation), held)
+
+    # -- the other four ------------------------------------------------------
+
+    def test_context_reports_the_three_figures(self):
+        api = self.windowed()
+        api._conversation.append("user", "something")
+        api._context_tokens = 1234
+        api._n_ctx = 200000
+        line = api.slash_answer("/context")
+        self.assertIn("1234 tokens", line)
+        self.assertIn("messages", line)
+        self.assertIn("rolls over at", line)
+
+    def test_mode_reports_and_switches(self):
+        api = self.windowed()
+        self.assertIn(api._args.mode, api.slash_answer("/mode"))
+        api.slash_answer("/mode manual")
+        self.assertEqual(api._args.mode, "manual")
+
+    def test_a_switch_is_announced_once_and_not_twice(self):
+        """`set_mode` pushes its own note. A second from the command put the
+        switch on screen twice -- the same defect as the doubled echo, in a
+        different half. Found by robin in the window, again."""
+        api = self.windowed()
+        api.send("/mode manual")
+        notes = [m for m in self.drained(api) if m.get("k") == "note"]
+        self.assertEqual(len(notes), 1, [n.get("t") for n in notes])
+        self.assertIn("manual", notes[0]["t"])
+
+    def test_an_empty_answer_is_handled_but_not_shown(self):
+        """NEGATIVE HALF of the line above: "" means handled-and-already-said,
+        None means not-ours. Confusing them sends `/mode manual` to the model."""
+        api = self.windowed()
+        self.assertEqual(api.slash_answer("/mode manual"), "")
+        self.assertIs(api.send("/mode auto"), False)
+
+    def test_an_unknown_level_is_named_rather_than_ignored(self):
+        """NEGATIVE HALF of the switch: a typo that silently does nothing is a
+        level the user believes they are on."""
+        api = self.windowed()
+        answer = api.slash_answer("/mode careful")
+        self.assertIn("careful", answer)
+        self.assertNotEqual(api._args.mode, "careful")
+
+    def test_thoughts_folds_and_unfolds(self):
+        api = self.windowed()
+        first = api.slash_answer("/thoughts")
+        second = api.slash_answer("/thoughts")
+        folds = [m for m in self.drained(api) if m.get("k") == "thoughts"]
+        self.assertEqual([m["open"] for m in folds], [True, False])
+        self.assertIn("opened", first)
+        self.assertIn("closed", second)
+
+    def test_exit_closes_the_window(self):
+        api = self.windowed()
+        api.slash_answer("/exit")
+        self.assertTrue(api._window.destroyed)
+
+    def test_quit_does_the_same(self):
+        api = self.windowed()
+        api.slash_answer("/quit")
+        self.assertTrue(api._window.destroyed)
 
     def test_the_help_listing_covers_every_one_of_them(self):
         listing = self.api().help_listing()
@@ -1025,30 +1160,50 @@ class SlashCommandsReachTheWindowTests(ApiCase):
 
     # -- the pointers have to point at something that exists ----------------
 
-    def test_every_pointer_names_a_control_the_page_actually_has(self):
-        """THE FAILURE THIS CATCHES IS A LIE, NOT A CRASH. "That is the new
-        button" stays green forever after the button is renamed, and the user is
-        the one who finds out. Each pointer is tied to the markup it promises.
-        """
-        anchors = {
-            "/reset": 'id="new"',
-            "/context": 'id="ctx"',
-            "/mode": 'id="modemenu"',
-            "/thoughts": "Thought",
-            "/exit": "wb close",
-            "/quit": "wb close",
-        }
-        self.assertEqual(sorted(anchors), sorted(crow_gui.Api.POINTS_AT),
-                         "a pointer exists with no anchor pinned, or the reverse")
-        for command, anchor in anchors.items():
-            self.assertIn(anchor, crow_gui.PAGE,
-                          f"{command} points at {anchor!r}, which the page does not have")
+    def test_no_answer_describes_where_a_control_is(self):
+        """THE RULE THAT REPLACED THE POINTERS, and it is the one a later change
+        will be tempted to break.
 
-    def test_the_two_that_are_executed_are_the_two_without_a_widget(self):
-        """The decision itself, written where a later change has to argue with
-        it: /help and /tools are the commands this window has no control for."""
-        executed = set(crow_core.SLASH_COMMANDS) - set(crow_gui.Api.POINTS_AT)
-        self.assertEqual(executed, {"/help", "/tools"})
+        The first version answered each command with a sentence naming the
+        widget that does the same job. One of those sentences was wrong about
+        which side of the rail a button sits on, and the case meant to catch
+        that only asserted the button's id appears in the page -- so it could
+        not have. Prose about pixels cannot be tested, which is the argument
+        against writing any.
+        """
+        api = self.windowed()
+        answers = [api.slash_answer(c) or "" for c in crow_core.SLASH_COMMANDS]
+        answers.append(api.help_listing())
+        for said in answers:
+            for word in ("button", "top left", "top right", "beside", "dropdown",
+                         "title bar", "click"):
+                self.assertNotIn(word, said.lower(),
+                                 f"an answer describes a control: {said!r}")
+
+    def test_a_multi_line_answer_survives_the_page(self):
+        """`/help` and `/tools` build a column with their own line breaks. The
+        default `white-space` collapsed all of it into one run-on paragraph --
+        eight commands on a single line, true of `/tools` since the day the
+        window answered it, and found by robin in the window rather than here.
+
+        BOTH HALVES, because either alone is green and useless: the answer has
+        to carry newlines, and the page has to keep them.
+        """
+        self.assertIn("\n", self.windowed().help_listing())
+        # THE SELECTOR HAS TO BE ANCHORED. There are two `.note` rules and the
+        # other one is `.tool .note{…white-space:nowrap}`, for the timing on a
+        # tool row -- searching for ".note{" finds that one first and reads a
+        # rule that is correctly the opposite of what this pins.
+        rule = crow_gui.PAGE.split("\n.note{")[1].split("}")[0]
+        self.assertIn("white-space:pre-wrap", rule,
+                      "the page collapses a multi-line note again")
+
+    def test_every_command_on_the_shared_list_is_described(self):
+        """The help a user reads is built from the shared list, so a command
+        added there and forgotten here shows up as a gap rather than silence."""
+        for command in crow_core.SLASH_COMMANDS:
+            self.assertIn(command, crow_gui.Api.WHAT_THEY_DO,
+                          f"{command} has no line in the window's help")
 
     # -- the seam to the page, which the cases above could not see -------------
     #
@@ -1063,11 +1218,11 @@ class SlashCommandsReachTheWindowTests(ApiCase):
         """The page draws the line before it calls us. A second echo here is the
         same command on screen twice -- wrong for `/tools` before #94, and wrong
         for all seven after it."""
-        api = self.api()
+        api = self.windowed()
         api.send("/reset")
         kinds = [m.get("k") for m in self.drained(api)]
         self.assertNotIn("user", kinds)
-        self.assertEqual(kinds[0], "note")
+        self.assertIn("note", kinds)
 
     def test_a_command_reports_that_no_turn_started(self):
         """WHAT THE PAGE WAITS ON. `pywebview.api.*` resolves a promise when
