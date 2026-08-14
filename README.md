@@ -93,7 +93,7 @@ hf download unsloth/DeepSeek-V4-Flash-0731-GGUF --include "UD-IQ2_XXS/*" --local
 ```
 
 > When `hf` cannot reach the repository it prints `✓ Downloaded` and returns the local directory.
-> Check that four files totalling ~97 GiB arrived.
+> Check that three files totalling 84.6 GiB (90,860,736,928 B) arrived.
 
 > Every block on this page is PowerShell, so it writes `$env:LOCALAPPDATA`, not the `cmd.exe` form
 > `%LOCALAPPDATA%`. The installer prints these commands with paths resolved — `install.ps1:1474` for
@@ -268,7 +268,7 @@ On start the client asks GitHub for a newer release and prints it with the insta
 runs in the background, is given at most 1.5 s, never blocks a turn and stays silent without network.
 `--no-update-check` switches it off; `crow --version` prints what you have.
 
-The ~97 GiB under `%LOCALAPPDATA%\Crow\models` is not part of any package and is never deleted. A
+The 84.6 GiB under `%LOCALAPPDATA%\Crow\models` is not part of any package and is never deleted. A
 running `llama-server` is not a blocker: the installer renames `bin\*` to `.old` first, the process
 keeps its handle, and the new binary takes over at the next server start. Files that cannot be moved
 are named and the install stops there.
