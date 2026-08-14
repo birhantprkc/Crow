@@ -21,6 +21,13 @@ The fix is not a change to the guard, which would delete archives on the same re
 `forget_session()` in the core removes the file, and both `/reset` paths call it. `--no-session`
 leaves it alone: a client that does not own that file has no business deleting it.
 
+**And in the window it lets go of the chat it came from.** Removing `session.json` fixed the live
+case and left the other half: a conversation opened out of the rail keeps `_current_path`, and
+closing archives the open conversation *there* — where the same guard refused it, so the file kept
+its old messages and the next start found them again. **Detached, not deleted:** `/reset` drops the
+context, it is not *throw my saved chat away*, and the chat stays in the rail with everything in it.
+Both halves are cases, and neither "stay bound" nor "delete the file" passes both.
+
 **The window runs every slash command now (#94).** It handled `/tools`; the other six travelled to
 the server as ordinary questions and came back as an answer about the word — `/reset`, `/context`,
 `/thoughts`, `/mode`, `/exit`, `/quit`.

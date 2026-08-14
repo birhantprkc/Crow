@@ -1429,14 +1429,28 @@ class Api:
         crow_core.forget_approvals()   # #88: the chat goes, its releases go
         self._context_tokens = 0
         self._promised_warm = False
-        # AND IT HAS TO REACH THE DISK HERE. `save_session` will not write an
-        # empty conversation, so leaving it to the way out means the file from
-        # before the reset survives and the next start restores what the user
-        # just dropped. Measured 2026-08-14 -- see `forget_session`.
+        # AND IT LETS GO OF THE FILE THE CHAT CAME FROM. A conversation opened
+        # out of the rail keeps `_current_path`, and on the way out `_archive()`
+        # writes the open conversation THERE -- except `save_session` refuses an
+        # empty one, so the file kept its old messages and the next start found
+        # them again. robin, 2026-08-14: "/reset in einem EARLIER Fenster geht
+        # erst, aber nach Neustart ist der Text samt cache und context wieder
+        # da." Reproduced before this line existed.
+        #
+        # DETACHED, NOT DELETED. `/reset` drops the context; it is not "throw my
+        # saved chat away", and a command that quietly did would be the worst
+        # kind of surprise. The chat stays in the rail with everything in it --
+        # this window simply stops being it.
+        self._current_path = None
+        self._current_title = None
+        # AND THE LIVE FILE GOES, because `save_session` will not write an empty
+        # conversation over it: leaving that to the way out means the file from
+        # before the reset survives. See `forget_session`.
         if self._args.session:
             crow_core.forget_session()
         self.push({"k": "clear"})
         self.push({"k": "up", "model": None, "n_ctx": self._n_ctx, "tokens": 0})
+        self._reload_rail()
         return "context dropped -- the next turn pays a full prefill."
 
     def _context_line(self) -> str:

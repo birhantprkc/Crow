@@ -1063,6 +1063,48 @@ class SlashCommandsReachTheWindowTests(ApiCase):
         self.assertIsNone(crow_core.load_session(api._args.base_url),
                           "the dropped conversation came back")
 
+    def _opened_from_the_rail(self):
+        """An Api holding a chat that came out of the rail, as `open()` leaves it."""
+        api = self.windowed()
+        path = os.path.join(self.dir, "chat-20260814-120000.json")
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "hey my friend")
+        talk.append("assistant", "hi")
+        crow_core.save_session(talk, api._args.base_url, 900,
+                               path=path, with_kv=False)
+        api._conversation = talk
+        api._current_path = path
+        api._context_tokens = 900
+        return api, path
+
+    def test_a_reset_lets_go_of_the_chat_it_came_from(self):
+        """ROBIN, 2026-08-14: "/reset in einem EARLIER Fenster geht erst, aber
+        nach Neustart ist der Text samt cache und context wieder da."
+
+        A chat opened out of the rail keeps `_current_path`, and `close()`
+        archives the open conversation THERE -- except `save_session` refuses an
+        empty one, so the file kept its old messages and the next start found
+        them. Removing `session.json` alone fixed the live case and left this
+        one, which is one half of the same seam again.
+        """
+        api, path = self._opened_from_the_rail()
+        api.slash_answer("/reset")
+        self.assertIsNone(api._current_path, "still bound to the chat it dropped")
+        api.close()
+        self.assertIsNone(crow_core.load_session(api._args.base_url),
+                          "the dropped conversation came back")
+
+    def test_but_it_does_NOT_throw_the_saved_chat_away(self):
+        """NEGATIVE HALF, and the more important one. `/reset` drops the
+        context; it is not "delete my saved chat". A fix that removed the file
+        would pass the case above and quietly destroy work."""
+        api, path = self._opened_from_the_rail()
+        api.slash_answer("/reset")
+        api.close()
+        self.assertTrue(os.path.exists(path), "/reset deleted a saved chat")
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(len(json.load(fh)["messages"]), 3)
+
     def test_no_session_leaves_the_file_alone(self):
         """NEGATIVE HALF. `--no-session` means this client does not own that
         file, and a reset is not a licence to delete somebody else's."""
