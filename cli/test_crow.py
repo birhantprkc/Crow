@@ -2415,9 +2415,27 @@ class ToolLayerCase(unittest.TestCase):
             return fh.read()
 
     def _install(self, name, impl):
-        """Add an implementation to TOOL_IMPL and take it out again afterwards."""
+        """Add an implementation to TOOL_IMPL and put the old one back afterwards.
+
+        IT USED TO pop() ON CLEANUP, which is right for a name that did not
+        exist and destructive for one that did: installing a double over a REAL
+        tool deleted it from TOOL_IMPL for the rest of the process, and the next
+        case to ask "is every offered tool implemented" went red with no
+        connection to what broke it. Found 2026-08-14 the first time a case
+        needed a double under a shipped name (`run_command`, #93). Restoring is
+        the same shape as `_READ` and `_SEEN` above, and for the same reason.
+        """
+        missing = object()
+        before = crow.TOOL_IMPL.get(name, missing)
         crow.TOOL_IMPL[name] = impl
-        self.addCleanup(crow.TOOL_IMPL.pop, name, None)
+
+        def restore():
+            if before is missing:
+                crow.TOOL_IMPL.pop(name, None)
+            else:
+                crow.TOOL_IMPL[name] = before
+
+        self.addCleanup(restore)
 
 
 class ReadBeforeWriteTests(ToolLayerCase):
@@ -2882,6 +2900,140 @@ class RunToolCachedTests(ToolLayerCase):
         self.assertIn("no such file", first)
         self.assertTrue(repeated_second)
         self.assertIn("no such file", second)
+
+
+class CacheKeyIsTheRealInputTests(ToolLayerCase):
+    """#93. The cache keyed on (name, arguments); two tools depend on more.
+
+    MEASURED 2026-08-14, in the run that closed #55 -- the first real agent run
+    written down. `write_file` was refused for want of a read, `read_file`
+    supplied it, and the identical `write_file` came back as a repeat carrying
+    the OLD REFUSAL. Three times, until the model said "the write tool is being
+    stubborn about the read-before-write ordering" and reached for `edit_file`.
+    In the same turn a `run_command` after an `edit_file` replayed the output
+    from before the edit; the model appended `2>&1` to change the key rather
+    than the command. 4 of that turn's 12 calls were replays of a state that had
+    moved, and two of its 13 rounds existed only to get around them.
+
+    None of it was visible to 487 green tests, because every one of them
+    repeated a call with nothing happening in between.
+    """
+
+    def _args(self, path, **rest):
+        return json.dumps(dict(path=path, **rest))
+
+    # -- the two measured cases ---------------------------------------------
+
+    def test_a_read_between_two_writes_lets_the_second_one_run(self):
+        """THE CASE FROM THE RUN. The refusal names the way out; taking it has
+        to work, or the refusal is a dead end wearing instructions."""
+        path = self._make("target.txt", "old")
+        args = self._args(path, content="new")
+
+        first, repeated = crow.run_tool_cached("write_file", args)
+        self.assertIn("refusing to overwrite", first)
+        self.assertFalse(repeated)
+
+        crow.run_tool_cached("read_file", self._args(path))
+
+        second, repeated = crow.run_tool_cached("write_file", args)
+        self.assertFalse(repeated, "the refusal was replayed after the read lifted it")
+        self.assertIn("wrote", second)
+
+    def test_and_the_file_on_disk_actually_changes(self):
+        """The result text is not the point -- the byte on disk is. A fix that
+        returns a fresh success while writing nothing passes the case above."""
+        path = self._make("target.txt", "old")
+        args = self._args(path, content="new")
+        crow.run_tool_cached("write_file", args)
+        crow.run_tool_cached("read_file", self._args(path))
+        crow.run_tool_cached("write_file", args)
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "new")
+
+    def test_edit_file_follows_the_same_rule(self):
+        path = self._make("target.txt", "alpha")
+        args = json.dumps({"path": path, "old": "alpha", "new": "beta"})
+        self.assertIn("before editing it", crow.run_tool_cached("edit_file", args)[0])
+        crow.run_tool_cached("read_file", self._args(path))
+        result, repeated = crow.run_tool_cached("edit_file", args)
+        self.assertFalse(repeated)
+        self.assertNotIn("before editing it", result)
+
+    def test_run_command_is_never_answered_from_the_cache(self):
+        """Its result is a function of the whole filesystem, so the arguments
+        were never the whole key."""
+        calls = []
+
+        def impl(**kwargs):
+            calls.append(kwargs)
+            return f"ran {len(calls)}"
+
+        self._install("run_command", impl)
+        self.assertEqual(crow.run_tool_cached("run_command", "{}")[0], "ran 1")
+        result, repeated = crow.run_tool_cached("run_command", "{}")
+        self.assertEqual(result, "ran 2")
+        self.assertFalse(repeated)
+        self.assertEqual(len(calls), 2)
+
+    def test_run_command_leaves_nothing_behind_to_answer_from(self):
+        """"Do not cache" has to mean the write-back too. Storing the result
+        while refusing to read it is a key that becomes live the moment somebody
+        simplifies the read side."""
+        self._install("run_command", lambda **k: "out")
+        crow.run_tool_cached("run_command", "{}")
+        self.assertEqual([k for k in crow._SEEN if k[0] == "run_command"], [])
+
+    # -- the negative half: what MUST still be cached ------------------------
+
+    def test_the_2026_08_09_loop_stays_closed(self):
+        """NEGATIVE CONTROL, and the reason this ticket is not "delete the cache".
+
+        The loop that built the cache happened on `read_file` for a path that
+        does not exist -- and a path does not start existing because it was
+        asked for twice. A fix that stops caching goes green on everything above
+        and red here.
+        """
+        missing = self._path("server-context.c")
+        first, repeated = crow.run_tool_cached("read_file", self._args(missing))
+        self.assertIn("no such file", first)
+        self.assertFalse(repeated)
+        second, repeated = crow.run_tool_cached("read_file", self._args(missing))
+        self.assertTrue(repeated, "the 2026-08-09 loop is open again")
+        self.assertIn("you already called read_file", second)
+
+    def test_a_write_repeated_with_nothing_in_between_is_still_a_repeat(self):
+        """The loop prevention still covers the write tools. Only a CHANGE of
+        the state they depend on reopens them, not the mere fact of being one."""
+        path = self._make("target.txt", "old")
+        args = self._args(path, content="new")
+        crow.run_tool_cached("write_file", args)
+        result, repeated = crow.run_tool_cached("write_file", args)
+        self.assertTrue(repeated)
+        self.assertIn("refusing to overwrite", result)
+
+    def test_a_read_of_a_DIFFERENT_file_does_not_reopen_the_write(self):
+        """The key carries whether THIS path was read, not whether any read
+        happened. Otherwise one read unlocks every pending refusal at once."""
+        target = self._make("target.txt", "old")
+        other = self._make("other.txt", "x")
+        args = self._args(target, content="new")
+        crow.run_tool_cached("write_file", args)
+        crow.run_tool_cached("read_file", self._args(other))
+        self.assertTrue(crow.run_tool_cached("write_file", args)[1])
+
+    def test_a_call_with_no_usable_path_is_still_cached(self):
+        """Its failure IS a function of its arguments -- bad arguments stay bad
+        -- so it belongs in the cache like any other argument error."""
+        crow.run_tool_cached("write_file", "{not json")
+        self.assertTrue(crow.run_tool_cached("write_file", "{not json")[1])
+
+    def test_every_name_in_the_rules_is_a_tool_that_exists(self):
+        """A rule naming a tool nobody ships is a rule that never fires, and it
+        would read as protection. Catches a rename that misses these sets."""
+        known = set(crow.TOOL_IMPL)
+        self.assertLessEqual(crow.NEVER_CACHED, known)
+        self.assertLessEqual(crow.READ_GATED, known)
 
 
 class ToolStateLifetimeTests(ToolLayerCase):

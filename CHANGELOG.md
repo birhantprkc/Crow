@@ -8,6 +8,46 @@ is in its commit message and on its issue; this is the short version.
 
 ## Unreleased
 
+**The tool cache was keyed on less than its inputs (#93).** `run_tool_cached` answered a repeated
+call from the first one, on the stated grounds that *"re-running would produce the identical
+failure"*. True for five of the seven tools and false for two, measured 2026-08-14 in the first real
+agent run: a `write_file` refused for want of a read was replayed **after the read that lifted it**,
+three times, until the model gave up and reached for `edit_file`; and a `run_command` after an
+`edit_file` on the same file replayed the output from before the edit, until the model appended
+`2>&1` to change the key rather than the command. 4 of that turn's 12 calls were replays of a state
+that had already moved, and 2 of its 13 rounds existed only to get around them.
+
+The fix is not to recognise refusal text — a cache keyed on less than its inputs is wrong whatever
+the text says. The inputs now go into the key: `run_command` is never cached, `write_file` and
+`edit_file` carry whether that path has been read this turn, and everything else is keyed as before.
+That last part is what keeps the loop the cache was built for closed — it happened on `read_file`
+for a path that does not exist, and a path does not start existing because it was asked for twice.
+
+**A declined tool call is no longer counted as a failure (#95).** `DECLINED` begins with `error: ` on
+purpose, because that prefix is what makes the model treat a refusal as recoverable rather than
+terminal. The cost line decided what to call a malfunction with the same prefix, so a user's own
+decision arrived as `1 failed` — seen in the run above, where the one "failure" was the
+read-before-write rule holding. Counted and named separately now (`1 declined`). The prefix is
+unchanged, and the screen still prints a declined call: only the count was split.
+
+17 new cases (`cli/test_crow.py` 339, `cli/test_crow_core.py` 118), and they bracket the behaviour
+rather than confirm it — held against four deliberate breakages, each red in a different place:
+
+| breakage | red |
+|---|---|
+| the key ignores state again | 5 |
+| the cache is removed altogether | 9, incl. the four cases that predate this change |
+| a decline counts as a failure again | 3 |
+| `DECLINED` loses its `error: ` prefix | 2 |
+
+Neither "always cache" nor "never cache" passes both halves, which is the point: the second breakage
+is the cheap fix that looks like success.
+
+One test-harness defect fell out of it: `ToolLayerCase._install` **deleted** the entry it replaced
+instead of restoring it, so a double installed over a shipped tool name removed that tool from
+`TOOL_IMPL` for the rest of the process. Harmless until a case needed a double under a real name;
+then an unrelated case went red with no visible connection to what broke it.
+
 **`/mode` is in the header.** 0.3.2 shipped three release levels and advertised none of them: the
 block beside the wordmark listed `/help`, `/tools` and `/exit`, so the only way to find `/mode` was
 to already know it existed and type `/help`. A level nobody can find is the same as no level. It now

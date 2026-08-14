@@ -1410,6 +1410,90 @@ class ReleaseLevelTests(TurnLoopCase):
                                               json.dumps({"command": "git log"})))
 
 
+class DeclineIsNotAFailureTests(TurnLoopCase):
+    """#95. The cost line called a user's own decision a malfunction.
+
+    `DECLINED` begins with "error: " ON PURPOSE -- that prefix is what makes the
+    model treat a refusal as recoverable rather than terminal, and
+    `ReleaseLevelTests` pins it. The counter decided what to call a failure with
+    the same prefix, so the two could not be told apart.
+
+    MEASURED 2026-08-14 in the run that closed #55: `12 tool calls, 1 failed`,
+    where the one "failure" was the read-before-write rule holding exactly as
+    designed.
+    """
+
+    def _declining_turn(self, tool="write_file", answer="no"):
+        self.serve([{"content": "on it"},
+                    _call_delta(tool, json.dumps({"path": "x", "content": "y"}))])
+        self.serve([{"content": "done"}])
+        talk = self.conversation()
+        return self.turn(talk, mode="manual", approve=lambda n, a: answer)
+
+    def test_a_declined_call_is_not_counted_as_a_failure(self):
+        cost = self._declining_turn().cost
+        self.assertEqual(cost.tool_calls, 1)
+        self.assertEqual(cost.tool_errors, 0)
+        self.assertEqual(cost.tool_declined, 1)
+
+    def test_the_cost_line_names_it_rather_than_hiding_it(self):
+        """"No failures" was not the only option -- silence was. A call the user
+        stopped is part of why the turn went the way it did."""
+        line = self._declining_turn().cost.line()
+        self.assertIn("1 declined", line)
+        self.assertNotIn("failed", line)
+
+    def test_a_real_failure_is_still_counted_as_one(self):
+        """NEGATIVE CONTROL. A fix that stops counting anything passes every
+        case above and cannot be told apart from one that works."""
+        missing = os.path.join(self.work, "nothing-here.txt")
+        self.serve([_call_delta("read_file", json.dumps({"path": missing}))])
+        self.serve([{"content": "not there"}])
+        cost = self.turn(self.conversation(), max_tool_rounds=4).cost
+        self.assertEqual(cost.tool_errors, 1)
+        self.assertEqual(cost.tool_declined, 0)
+        line = cost.line()
+        self.assertIn("1 failed", line)
+        self.assertNotIn("declined", line)
+
+    def test_a_turn_with_both_reports_both_separately(self):
+        missing = os.path.join(self.work, "nothing-here.txt")
+        self.serve([_call_delta("read_file", json.dumps({"path": missing}))])
+        self.serve([_call_delta("write_file", json.dumps({"path": "x", "content": "y"}))])
+        self.serve([{"content": "done"}])
+        cost = self.turn(self.conversation(), mode="manual",
+                         approve=lambda n, a: "no", max_tool_rounds=4).cost
+        self.assertEqual((cost.tool_errors, cost.tool_declined), (1, 1))
+        line = cost.line()
+        self.assertIn("1 failed", line)
+        self.assertIn("1 declined", line)
+
+    def test_the_decline_still_reaches_the_screen(self):
+        """DELIBERATE, and the narrower half of the change: only the COUNT was
+        split. A declined call is still printed, because the reason the turn
+        took as long as it did is not less relevant for having been the user's
+        own choice. If this is ever changed it is its own decision."""
+        self._declining_turn()
+        self.assertIn("tool_failed", self.events.names)
+
+    def test_declined_keeps_the_prefix_88_depends_on(self):
+        """The whole defect came from that prefix, and removing it is the fix
+        that must NOT be made: it is what stops the model treating a refusal as
+        an abort."""
+        self.assertTrue(crow_core.DECLINED.startswith("error: "))
+
+    def test_a_declined_call_still_answers_its_tool_call(self):
+        """The invariant underneath all of this: an assistant turn whose
+        tool_calls have no tool message behind them is a broken prefix for every
+        later turn. Counting differently must not change what is appended."""
+        self.serve([{"content": "on it"},
+                    _call_delta("write_file", json.dumps({"path": "x", "content": "y"}))])
+        self.serve([{"content": "done"}])
+        talk = self.conversation()
+        self.turn(talk, mode="manual", approve=lambda n, a: "no")
+        self.assertPrefixIsWhole(talk)
+
+
 class TurnStateTests(TurnLoopCase):
     """What the loop carries across rounds, and what it must not carry across
     turns."""

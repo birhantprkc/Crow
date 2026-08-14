@@ -111,6 +111,8 @@ from crow_core import (  # noqa: F401 -- re-exported for the CLI and its suite
     ROLLOVER_AT,
     ROLLOVER_NOTE,
     rollover_path,
+    NEVER_CACHED,
+    READ_GATED,
     run_tool,
     run_tool_cached,
     run_turn,

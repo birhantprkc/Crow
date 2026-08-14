@@ -1693,6 +1693,15 @@ class TurnCost:
         self.tool_s = 0.0
         self.tool_calls = 0
         self.tool_errors = 0
+        # SEPARATE FROM tool_errors, and #95 is why. `DECLINED` begins with
+        # "error: " ON PURPOSE -- that prefix is what makes the model treat a
+        # refusal as something to work around rather than as an abort, and #88's
+        # cases pin it. The counter used the same prefix to decide what to call a
+        # malfunction, so a user's own decision arrived in the cost line as
+        # `1 failed`. Measured 2026-08-14 in the run that closed #55:
+        # `12 tool calls, 1 failed`, where the one "failure" was the
+        # read-before-write rule holding.
+        self.tool_declined = 0
         # The LAST round's cache figures, not a sum: `cached` is a statement about the prefix as it
         # stands now, and adding those up would produce a number that means nothing.
         self.cached: int | None = None
@@ -1727,10 +1736,11 @@ class TurnCost:
             self.cached, self.cached_of = int(cached), int(cached) + int(prompt_n)
         self.finish = timings.get("_finish_reason")
 
-    def add_tool(self, seconds: float, failed: bool) -> None:
+    def add_tool(self, seconds: float, failed: bool, declined: bool = False) -> None:
         self.tool_s += seconds
         self.tool_calls += 1
         self.tool_errors += int(failed)
+        self.tool_declined += int(declined)
 
     def line(self) -> str:
         waited = time.monotonic() - self.started
@@ -1745,8 +1755,13 @@ class TurnCost:
             bits.append(f"cached {self.cached:,}/{self.cached_of:,}")
         if self.tool_calls:
             failed = f", {self.tool_errors} failed" if self.tool_errors else ""
+            # NAMED RATHER THAN HIDDEN. The alternative to `1 declined` was to
+            # count a refusal as nothing at all -- but a call the user stopped is
+            # part of why the turn went the way it did, and a turn that drops it
+            # reads as one where nothing happened.
+            declined = f", {self.tool_declined} declined" if self.tool_declined else ""
             bits.append(f"{self.tool_calls} tool call"
-                        + ("s" if self.tool_calls != 1 else "") + failed)
+                        + ("s" if self.tool_calls != 1 else "") + failed + declined)
         split = f" (model {format_clock(self.model_s)}, tools {format_clock(self.tool_s)})" \
             if self.tool_s >= 0.5 else ""
         bits.append(f"waited {format_clock(waited)}{split}")
@@ -2154,7 +2169,60 @@ def forget_approvals() -> None:
 
 # What has already been asked this turn, and what came back. Cleared per user
 # turn, not per round.
-_SEEN: dict[tuple[str, str], str] = {}
+#
+# THE KEY IS NOT (name, arguments) FOR EVERY TOOL -- see `_cache_key`. That pair
+# is the whole input only where the answer is a function of the arguments, and
+# #93 is the run where it was not.
+_SEEN: dict[tuple, str] = {}
+
+
+# #93. The two tools whose result is NOT a function of their arguments alone.
+#
+# MEASURED 2026-08-14, in the run that closed #55: `write_file` was refused for
+# want of a read, `read_file` supplied it, and the identical `write_file` came
+# back as a repeat carrying the OLD REFUSAL -- three times, until the model gave
+# up and reached for `edit_file` instead. In the same turn a `run_command` after
+# an `edit_file` on the same file replayed the output from before the edit, and
+# the model escaped by appending `2>&1` to change the key rather than the
+# command. 4 of that turn's 12 calls were replays of a state that had moved.
+#
+# THE FIX IS NOT TO RECOGNISE REFUSAL TEXT. A cache keyed on less than its
+# inputs is wrong whatever the text says, so the inputs go into the key:
+#
+#   run_command           depends on everything a shell can reach -> never cached
+#   write_file/edit_file  depend on `_READ` -> the key carries whether this
+#                         path has been read in this turn, so a read between two
+#                         identical calls IS a different call
+#   everything else       is a function of its arguments -> keyed as before
+#
+# That last line is what keeps the 2026-08-09 loop closed: it happened on
+# `read_file` for a path that did not exist, and a path does not start existing
+# because it was asked for twice.
+NEVER_CACHED = frozenset({"run_command"})
+READ_GATED = frozenset({"write_file", "edit_file"})
+
+
+def _cache_key(name: str, arguments: str) -> tuple | None:
+    """What this call's result depends on, or None when it depends on too much.
+
+    None means "do not cache", NOT "cache miss": the caller must not write the
+    result back either, or the next identical call is answered from a key that
+    was never a promise about anything.
+    """
+    if name in NEVER_CACHED:
+        return None
+    if name not in READ_GATED:
+        return (name, arguments)
+    try:
+        args = json.loads(arguments or "{}")
+    except json.JSONDecodeError:
+        args = None
+    path = args.get("path") if isinstance(args, dict) else None
+    # A call whose path is missing or not a string cannot have been read, and it
+    # is about to fail on its arguments -- which IS a function of its arguments,
+    # so caching it under `seen=False` is correct rather than a fallback.
+    seen = _key(path) in _READ if isinstance(path, str) else False
+    return (name, arguments, seen)
 
 
 def run_tool_cached(name: str, arguments: str) -> tuple[str, bool]:
@@ -2169,13 +2237,18 @@ def run_tool_cached(name: str, arguments: str) -> tuple[str, bool]:
     Re-running would produce the identical failure, so the second call is answered
     from the first and told plainly that it is a repeat. That turns a loop into a
     fact the model has to react to.
+
+    THAT SENTENCE IS TRUE ONLY WHERE THE RESULT IS A FUNCTION OF THE ARGUMENTS,
+    and for two of the seven tools it is not. `_cache_key` is where that is
+    decided and why; #93 carries the turn in which it was measured.
     """
-    key = (name, arguments)
-    if key in _SEEN:
+    key = _cache_key(name, arguments)
+    if key is not None and key in _SEEN:
         return (f"[you already called {name} with these exact arguments this turn. "
                 f"The result was, and still is:]\n{_SEEN[key]}"), True
     out = run_tool(name, arguments)
-    _SEEN[key] = out
+    if key is not None:
+        _SEEN[key] = out
     return out, False
 
 
@@ -2528,14 +2601,26 @@ def run_turn(
             else:
                 result, repeated = run_tool_cached(call["name"], call["arguments"])
             took = time.monotonic() - started
-            failed = result.startswith("error: ")
-            cost.add_tool(took, failed)
+            # TWO NAMES FOR WHAT WAS ONE LINE, and #95 is the reason. `errored`
+            # is what the MODEL sees: the "error: " prefix that makes a result
+            # recoverable instead of terminal, which `DECLINED` carries on
+            # purpose. `failed` is what the COUNTER means: a tool that
+            # malfunctioned. A refusal the user made is the first and not the
+            # second, and one predicate could not say so.
+            errored = result.startswith("error: ")
+            failed = errored and not declined
+            cost.add_tool(took, failed, declined)
             events.tool_finished(call["name"], took, repeated)
             # A FAILED CALL STAYS ON SCREEN even once the model has recovered from it (#70).
             # It is not the user's problem to solve, but it is the reason the turn took longer
             # than it looks like it should have, and a turn that hides its retries reads as
             # slower for no reason.
-            if failed:
+            #
+            # THE SCREEN KEEPS THE WIDER OF THE TWO. A declined call is still
+            # printed: that the delay was the user's own choice does not make it
+            # less of a reason the turn went the way it did. Only the count
+            # separates them, which is all #95 asked for.
+            if errored:
                 events.tool_failed(call["name"], result)
             conversation.append("tool", result, tool_call_id=call["id"])
         events.tools_finished()
