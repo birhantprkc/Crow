@@ -6,6 +6,62 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
+## Unreleased
+
+**Web research: `web_search` and `fetch_url`, and nothing to configure (#96).** The model searches,
+reads what it found, and continues the task. Six official keyless APIs are queried in parallel —
+PyPI, crates.io, HuggingFace, Stack Overflow, GitHub, Wikipedia, plus DuckDuckGo's *documented*
+instant-answer endpoint. No key, no account, no service. `CROW_TAVILY_KEY` or `CROW_SEARXNG_URL`
+switch to a general index for whoever wants one.
+
+**The obvious implementation does not work, and fails silently.** Measured 2026-08-14:
+`duckduckgo.com/html/?q=` — the endpoint every model writes for this, Crow's own local model
+included — answers **HTTP 202 with zero `result__a` matches** to both `Mozilla/5.0` and
+`Crow/0.3.3`. 202 is a success status, `urlopen` does not raise, so a tool built on it reports
+`no results` forever with nothing in any log. `lite.duckduckgo.com` still answers **200 with 10
+results** to a browser user-agent and **202 to Crow's own**, one URL and one second apart: the only
+working scrape requires misrepresenting the client. Six public SearXNG instances were probed the
+same day (searx.be, search.inetol.net, priv.au, searxng.site, search.bus-hit.me, baresearch.org);
+none served `format=json`.
+
+**Three defects the live run found and the unit tests could not.** Three results came to **16,056
+bytes** because one repository description was 15 KB — `_clip` then cut the tail, so the model paid
+full prefill for one project's marketing and never saw results two and three; every snippet is now
+capped at 240 bytes. Concatenating the sources put GitHub first unconditionally, so "requests
+library current version" answered with a stranger's library-management project while PyPI's exact
+`requests 2.34.2` sat further down; the merge is now round-robin in authority order. And the package
+lookup fired on any identifier-looking word, so "llama.cpp moe stream flag" led with `pypi Moe
+2.5.0`, a music library manager — a coincidental name match in the top slot is worse than noise
+because it looks authoritative.
+
+**HuggingFace carries the weight, not just the name.** `Qwen/Qwen3.5-27B` reports 2,734,049
+downloads against 1,028 likes; `Qwen/Qwen3.8-27B` reports **2 downloads against 8,457 likes**, which
+is the signature of a release published hours earlier. The same string from an official org path and
+from a 0-download re-upload is not the same evidence, so the counts are printed. Its search takes the
+model name and not the sentence: "Qwen3.5-27B model" returned nothing until the gate words were
+stripped from the query they let through.
+
+**Cost, measured through `/apply-template` and `/tokenize` on 2026-08-14.** The same five-token
+message that sent 953 tokens with seven tools now sends **1,269**, of which **1,222 (96.3 %)** are
+the nine declarations. The two web tools cost **313 tokens of prefix in every request**.
+
+`network` is a fourth class in `TOOL_CLASS` and asks at **no** release level, `manual` included: the
+search happens because a task was given, and giving the task is the release. `fetch_url` takes http
+and https only — `file:` and `data:` would make it a disk read around #92's boundary rather than
+through it. Extraction runs before the 16 KB clip, because clipping first keeps the markup and drops
+the answer. 152 in `cli/test_crow_core.py`, 13 breakages each count-checked to a single site.
+
+**The window's live tok/s divided by wall clock.** Observed 2026-08-14: **9.5 tok/s** on screen
+beside a server logging **17.99–19.29 t/s** for the same turn. The denominator ran from
+`reply_started`, so it contained the wait for the first token, every tool call and the prefill of
+every tool result — and #96 made the gap worse, because a web search is exactly that kind of pause.
+`crow_core.TurnCost` already carries this lesson from 2026-08-11 ("printed 1.49 tok/s for a turn the
+server had just measured at 14.77 and 16.46"); the window has its own counter and never got the fix.
+It now sums only the gaps **between** deltas and drops anything over 2 s — at the shipped operating
+point deltas arrive ~55 ms apart, so nothing thirty-six times slower is the model writing. 99 in
+`cli/test_crow_gui.py`, with a slow-but-real stream as the negative control: one delta a second must
+still report 1 tok/s, or a rule that drops every pause would report a fast rate for a slow turn.
+
 ## 0.3.3 — 2026-08-14
 
 **A working directory the model may not write outside of (#92).** `write_file` and `edit_file` took
