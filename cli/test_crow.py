@@ -615,19 +615,26 @@ class ShowReasoningTests(unittest.TestCase):
     def test_repl_carries_the_switch_into_every_turn(self):
         """`/thoughts` flips it BETWEEN turns, so it may not be read once at
         start and remembered inside the sink."""
-        source = inspect.getsource(crow.repl)
-        self.assertIn("show_reasoning=show_reasoning", source)
-        self.assertIn('"/thoughts"', source)
+        self.assertIn("show_reasoning=show_reasoning", inspect.getsource(crow.repl))
+        self.assertIn('"/thoughts"', inspect.getsource(crow.run_slash))
 
     def test_every_command_help_promises_is_handled_in_the_loop(self):
         """The general form of "documented ahead of the code", and the case that
         made it worth writing: /thoughts is offered in two places -- the flag
-        and the list -- and neither of them runs it."""
+        and the list -- and neither of them runs it.
+
+        BOTH FUNCTIONS ARE READ, because the commands moved out of repl() on
+        2026-08-14 and this test would otherwise have gone red at a refactor
+        that changed no behaviour -- while still passing, later, for a command
+        that really was unhandled. What it checks is "somewhere in the loop's
+        code", and the loop is now two functions: repl() reads the line and
+        owns the two that leave, run_slash() owns the rest.
+        """
         import re as _re
-        source = inspect.getsource(crow.repl)
+        source = inspect.getsource(crow.repl) + inspect.getsource(crow.run_slash)
         for command in sorted(set(_re.findall(r"/\w+", crow.HELP))):
             self.assertIn(f'"{command}"', source,
-                          f"{command} is in /help and nothing in repl() handles it")
+                          f"{command} is in /help and nothing handles it")
 
 
 class ContextCounterTests(unittest.TestCase):

@@ -66,6 +66,7 @@ from crow_core import (  # noqa: E402
     CROW_TEXT_HEX,
     CrowError,
     DEFAULT_BASE_URL,
+    DEFAULT_MODE,
     DEFAULT_MODEL,
     DEFAULT_SYSTEM,
     check_endpoint,
@@ -336,6 +337,56 @@ details.think[open] .caret{transform:rotate(90deg)}
 #go.stop{color:#ffd9d4;background:rgba(240,101,90,.10);
   border-color:rgba(240,101,90,.45)}
 #go.stop:hover{background:rgba(240,101,90,.18)}
+
+/* -- #88: one held-back call, put to the user -------------------------- */
+.askcard{border:1px solid rgba(229,192,75,.40);border-radius:10px;
+  background:rgba(229,192,75,.05);padding:11px 13px}
+.asktop{display:flex;gap:9px;align-items:baseline;flex-wrap:wrap}
+.asktop b{color:#e5c04b;font-weight:600}
+.asktop code{color:var(--dim);font-size:11.5px;word-break:break-all}
+.askrow{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.askrow button{font:inherit;font-size:11.5px;cursor:pointer;border-radius:6px;
+  padding:4px 12px;background:transparent;border:1px solid var(--line);
+  color:var(--dim)}
+.askrow button.yes{color:#4ec98f;border-color:rgba(78,201,143,.45)}
+.askrow button.yes:hover{background:rgba(78,201,143,.12)}
+.askrow button.no{color:#ffd9d4;border-color:rgba(240,101,90,.45)}
+.askrow button.no:hover{background:rgba(240,101,90,.12)}
+.askrow button.always em{font-style:normal;color:var(--accent)}
+.askrow button:hover{border-color:var(--bevel)}
+.askdone{color:var(--dimmer);font-size:11px}
+
+/* -- #88: the release level, beside send ------------------------------- */
+/* THE COLOUR IS THE STATE. robin's three: manual white, allowedit green,
+   auto yellow -- brightest where the least is held back, because the level
+   that runs a shell unasked is the one worth noticing across the room. */
+#modewrap{position:relative}
+#mode{font:inherit;font-size:11.5px;cursor:pointer;border-radius:6px;
+  padding:3px 11px;background:transparent;border:1px solid var(--line);
+  color:var(--dim);display:flex;align-items:center;gap:6px}
+#mode:hover{border-color:var(--bevel)}
+#mode .dot{width:7px;height:7px;border-radius:50%;background:currentColor;
+  flex:none}
+#mode[data-mode="manual"]{color:#e8eef8;border-color:rgba(232,238,248,.40)}
+#mode[data-mode="allowedit"]{color:#4ec98f;border-color:rgba(78,201,143,.45)}
+#mode[data-mode="auto"]{color:#e5c04b;border-color:rgba(229,192,75,.45)}
+
+/* UPWARDS, because the composer sits at the bottom of the window: a menu
+   that opened downwards would be drawn outside it. */
+#modemenu{position:absolute;bottom:calc(100% + 6px);right:0;min-width:266px;
+  background:var(--panel);border:1px solid var(--bevel);border-radius:8px;
+  padding:5px;box-shadow:0 8px 26px rgba(0,0,0,.45);z-index:40}
+#modemenu[hidden]{display:none}
+#modemenu button{display:block;width:100%;text-align:left;font:inherit;
+  font-size:11.5px;cursor:pointer;background:transparent;border:0;
+  border-radius:6px;padding:7px 9px;color:var(--dim)}
+#modemenu button:hover{background:rgba(126,176,248,.10)}
+#modemenu button b{display:block;font-weight:600;font-size:12px}
+#modemenu button .what{color:var(--dimmer);font-size:10.5px}
+#modemenu button[data-mode="manual"] b{color:#e8eef8}
+#modemenu button[data-mode="allowedit"] b{color:#4ec98f}
+#modemenu button[data-mode="auto"] b{color:#e5c04b}
+#modemenu button .tick{float:right;color:var(--accent)}
 </style></head><body>
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
@@ -386,6 +437,12 @@ details.think[open] .caret{transform:rotate(90deg)}
         <div id="foot">
           <span id="ctx"></span><span id="turnstate"></span>
           <div id="acts"><span id="hint"></span>
+            <div id="modewrap">
+              <button id="mode" data-mode="auto" onclick="crow.modeMenu()"
+                      title="release level for tool calls">
+                <span class="dot"></span><span id="modename">auto</span></button>
+              <div id="modemenu" hidden></div>
+            </div>
             <button id="go" onclick="crow.go()">send</button></div>
         </div>
       </div>
@@ -539,6 +596,56 @@ const crow = {
     input.value=""; input.style.height="auto";
     this.user(text); this.busy(); pywebview.api.send(text); },
 
+  // #88: THE RELEASE LEVEL, and the menu is built from what the CORE says the
+  // levels are -- never from a list written out here. A second copy of the
+  // three names in the page is a second place to forget one.
+  modeMenu(){ const m=$("#modemenu");
+    if(!m.hidden){ m.hidden=true; return; }
+    m.innerHTML = (this.modes||[]).map(x =>
+      '<button data-mode="'+x.name+'" onclick="crow.setMode(\''+x.name+'\')">'
+      + (x.name===this.mode ? '<span class="tick">&#10003;</span>' : '')
+      + '<b>'+x.name+'</b><span class="what">'+x.what+'</span></button>').join("");
+    m.hidden=false; },
+
+  setMode(name){ $("#modemenu").hidden=true; pywebview.api.set_mode(name); },
+
+  // #88 point 2: THE PROMPT SHOWS WHAT IT RELEASES. A card that only said
+  // "run_command?" would be a keystroke, not a decision, so the arguments are
+  // drawn as the model sent them. Rendered as text, never as HTML -- the
+  // arguments come from the model and a path with a tag in it must not become
+  // one. It lands in the flow rather than over it: the turn it belongs to is
+  // above it, and a modal would hide the very context the answer needs.
+  ask(name, args, scope){
+    const d=document.createElement("div");
+    d.className="turn ask";
+    d.innerHTML='<div class="askcard"><div class="asktop"><b></b><code></code></div>'
+      + '<div class="askrow">'
+      + '<button class="yes" onclick="crow.answered(this,\'yes\')">run it</button>'
+      + '<button class="no" onclick="crow.answered(this,\'no\')">decline</button>'
+      + (scope ? '<button class="always" onclick="crow.answered(this,\'always\')">'
+                 + 'always for <em></em></button>' : '')
+      + '</div></div>';
+    d.querySelector("b").textContent=name;
+    d.querySelector("code").textContent=args||"";
+    if(scope) d.querySelector(".always em").textContent=scope;
+    flow.appendChild(d); this.bottom(); },
+
+  // The card stays, with the answer on it: a question that vanishes leaves no
+  // record of what was released, and the transcript is where that belongs.
+  answered(btn, what){
+    const card=btn.closest(".askcard");
+    card.querySelector(".askrow").innerHTML=
+      '<span class="askdone">'
+      + (what==="no" ? "declined" : what==="always" ? "allowed, and from now on"
+                                                    : "allowed")
+      + '</span>';
+    pywebview.api.answer(what); },
+
+  // Called back by the core's answer, never set optimistically: the button
+  // shows what the client IS running, not what was clicked.
+  modeIs(name, modes){ this.mode=name; if(modes) this.modes=modes;
+    $("#mode").dataset.mode=name; $("#modename").textContent=name; },
+
   // "neu" ARCHIVES, it does not discard. The old conversation is written to its
   // own file and appears in the rail; clicking it loads it back. Without that a
   // click on "neu" is an unlabelled delete button.
@@ -677,6 +784,8 @@ const crow = {
         $("#tools").onclick=()=>crow.toggleTools();
         this.tools(e.execute); break;
       case "tools": this.tools(e.on); break;
+      case "mode": this.modeIs(e.name, e.modes); break;
+      case "ask": this.ask(e.name, e.args, e.scope); break;
       case "rail": this.rail(e.title,e.meta,e.rollovers,e.foot);
         this.archive(e.archived||[]); break;
       // THE PAGE CLEARS ITSELF ON "new", because the click is here. A DELETE of
@@ -997,6 +1106,11 @@ class Api:
         self._promised_warm = False
         self._rolled = False
         self._worker: threading.Thread | None = None
+        # #88: one open question at a time. The worker waits on the Event, the
+        # page's click sets it. Not a Queue -- there is never a second question
+        # in flight, because the loop that asks is the one that blocks.
+        self._asked = threading.Event()
+        self._answer = "no"
         self._restore: tuple | None = None
         # WHICH FILE THE OPEN CHAT ALREADY HAS, or None while it has none.
         #
@@ -1037,6 +1151,11 @@ class Api:
         self.push({"k": "meta", "version": client_version() or "",
                    "url": self._args.base_url, "tools": len(TOOLS),
                    "execute": bool(self._args.execute_tools)})
+        # #88: the level and its menu, in the same breath as the rest of the
+        # header. The button has to show what is live before the first turn --
+        # a release level nobody can see is one nobody can trust.
+        self.push({"k": "mode", "name": getattr(self._args, "mode", DEFAULT_MODE),
+                   "modes": self.mode_menu()})
         threading.Thread(target=self._probe, daemon=True).start()
 
     ARCHIVE_PREFIX = "chat-"
@@ -1222,6 +1341,76 @@ class Api:
         self.push({"k": "note", "t": "tools now run"
                    if self._args.execute_tools else
                    "tools are now only shown"})
+
+    def _ask_page(self, name: str, arguments: str) -> str:
+        """#88: put one held-back call to the page and WAIT for the answer.
+
+        THE WORKER THREAD BLOCKS HERE, and that is correct rather than a
+        compromise: the tool loop cannot go on without the answer, and the page
+        is not blocked -- it is drawing, and its click comes back through
+        `answer()` on the pywebview thread. An Event is the whole apparatus.
+
+        NO TIMEOUT THAT SAYS YES. If the window is closed while a question is
+        open, the wait ends and the answer is "no": a call that runs because
+        nobody was there to refuse it is the failure this ticket exists to
+        prevent. The turn then carries a declined result, which is a shape the
+        loop already handles.
+        """
+        self._answer = "no"
+        self._asked.clear()
+        scope = crow_core.approval_scope(name, arguments)
+        self.push({"k": "ask", "name": name, "args": arguments,
+                   "scope": scope[1] if scope else ""})
+        # Woken by answer(); the flag is also set when the window goes away, so
+        # a closed window is a refusal rather than a hang.
+        self._asked.wait()
+        return self._answer
+
+    def answer(self, what: str) -> None:
+        """The page's click on an open question. Anything unknown is "no"."""
+        self._answer = what if what in ("yes", "always") else "no"
+        self._asked.set()
+
+    def mode_menu(self) -> list:
+        """#88's levels, for the dropdown. Built from the core, not from a list.
+
+        The page renders whatever this returns, so `manual` and `allowedit` are
+        described by what they actually hold back -- read out of the same table
+        `run_turn` decides with. A menu that spelled the three names out in the
+        HTML would be a second copy of the levels, and the one that goes stale
+        is the one the user reads.
+        """
+        out = []
+        for name in crow_core.MODES:
+            asks = [t for t in sorted(crow_core.TOOL_IMPL)
+                    if crow_core.needs_approval(t, name)]
+            out.append({"name": name,
+                        "what": ("asks before " + ", ".join(asks)) if asks
+                                else "every tool runs unasked"})
+        return out
+
+    def set_mode(self, name: str) -> None:
+        """Switch the release level, from the dropdown. Never mid-turn.
+
+        Refused while a turn runs, for the same reason `set_tools` is:
+        `run_turn` reads the level once at the top of the turn, and changing it
+        underneath would leave the screen and the loop with two different
+        opinions about what was released.
+
+        SWITCHING DROPS STANDING APPROVALS. Going to `manual` while keeping the
+        directories released under `allowedit` would hand back a level that asks
+        less than its name says.
+        """
+        if name not in crow_core.MODES:
+            return
+        if self._worker and self._worker.is_alive():
+            self.push({"k": "note", "t": "the level does not change mid-turn"})
+            return
+        self._args.mode = name
+        crow_core.forget_approvals()
+        self.push({"k": "mode", "name": name, "modes": self.mode_menu()})
+        self.push({"k": "note", "t": "mode %s -- %s" % (
+            name, next(m["what"] for m in self.mode_menu() if m["name"] == name))})
 
     def reset(self) -> None:
         """Put the current conversation aside and start an empty one.
@@ -1813,6 +2002,8 @@ class Api:
                 timeout=READ_TIMEOUT_S, context_tokens=self._context_tokens,
                 n_ctx=self._n_ctx, promised_warm=self._promised_warm,
                 rolled=self._rolled, execute_tools=self._args.execute_tools,
+                mode=getattr(self._args, "mode", DEFAULT_MODE),
+                approve=self._ask_page,
                 events=events)
         except CrowError as exc:
             self.push({"k": "fail", "t": str(exc)})
@@ -1866,6 +2057,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="run tool calls (the default)")
     parser.add_argument("--no-tools", dest="execute_tools", action="store_false",
                         help="show tool calls instead of running them")
+    # #88, the same flag the terminal client takes: the START level, with the
+    # dropdown beside `send` as the same switch during a session.
+    parser.add_argument("--mode", choices=crow_core.MODES, default=DEFAULT_MODE,
+                        help="release level for tool calls: manual asks before writing"
+                             " and executing, allowedit asks before executing, auto asks"
+                             " for nothing (default)")
     return parser
 
 

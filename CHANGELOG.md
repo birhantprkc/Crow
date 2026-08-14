@@ -8,6 +8,48 @@ is in its commit message and on its issue; this is the short version.
 
 ## Unreleased
 
+**Release levels for tool calls (#88).** The seven tools ran unasked in both clients. They now run
+under a level, and the level is visible in both surfaces.
+
+| class | tools | manual | allowedit | auto |
+|---|---|---|---|---|
+| reading | `read_file`, `list_dir`, `find_files`, `search_text` | runs | runs | runs |
+| writing | `write_file`, `edit_file` | **asks** | runs | runs |
+| executing | `run_command` | **asks** | **asks** | runs |
+
+- **Reading never asks, at any level.** A level that asks before `list_dir` is one nobody keeps
+  switched on.
+- **`auto` is the default**, because it is what every release up to 0.3.1 did. Making `manual` the
+  default would change the behaviour of every existing session in a commit that adds a choice.
+- **A declined call is a tool RESULT, not an abort** — `error: declined by the user`, and the turn
+  continues. An assistant turn whose `tool_calls` have no `tool` message behind them is a broken
+  prefix for every later turn, so this is a fourth trigger for the rule `run_turn` already keeps
+  three times over, not a fourth implementation of it.
+- **The terminal:** `/mode` reports the level, `/mode manual|allowedit|auto` switches it, `--mode` is
+  the start value. The prompt prints the tool and its arguments, and offers "always for this
+  directory / this program".
+- **The window:** a dropdown beside `send`, coloured by level — manual white, allowedit green, auto
+  yellow. A held-back call becomes a card in the transcript with three buttons; the card stays
+  afterwards with the answer on it.
+- **Standing approvals are per session and never written to disk.** Their scope is one directory for
+  writes and one program for commands, so `git status` and `git log` share a key while `git` and `rm`
+  do not. Dropped by `/reset`, by the window's new-chat button and by any level change — but **not**
+  by a rollover, which resets the conversation while the user carries on with the same work.
+- **The slash commands left `repl()`** into `run_slash()`. `test_repl_is_one_job_again` caps the loop
+  at 220 lines so the five-job block the 0.3.0 split took apart cannot grow back; `/mode` pushed it
+  to 227. Moved rather than rewritten. The command-coverage test now reads both functions — it was
+  looking for the command names in `repl()`'s source alone and would have gone red at a refactor that
+  changed no behaviour.
+
+15 new cases in `cli/test_crow_core.py` (111 total), including the two #88 asks for by name — a
+`write_file` refused under `manual`, a `run_command` refused under `allowedit` while the write in the
+same turn runs — and the memory's negative half: a second directory and a second program must ask
+again. Held against three deliberate breakages: a `needs_approval` that never asks goes red in 8
+cases, a refusal that aborts the turn in 2, a memory with no scope in 1.
+
+**Not in this change:** a working-directory boundary. #88 says why — a level asks a human, a boundary
+refuses without asking, and mixing them into one ticket is how neither gets built.
+
 **Both checkers that still measured tkinter now measure the window.** Neither was in the release
 gate, so neither blocked anything — which is exactly why they could sit green and wrong.
 

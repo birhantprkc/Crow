@@ -32,6 +32,7 @@ import types
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import NamedTuple
 
 # EVERYTHING BELOW THIS LINE THAT IS NOT A TERMINAL LIVES IN crow_core.
 #
@@ -975,11 +976,158 @@ class TerminalTurnEvents(TurnEvents):
 HELP = """commands:
   /help          this list
   /tools         the tools the model can call
+  /mode          the release level, /mode manual|allowedit|auto to switch
   /thoughts      show the model's reasoning as it arrives, or hide it again
   /reset         drop the context (costs a full re-prefill)
   /context       message count in the current context
   /exit, /quit   leave
 """
+
+
+class SlashResult(NamedTuple):
+    """What a slash command did: whether it ran, and the switches it moved.
+
+    A TUPLE RATHER THAN A STATE OBJECT, deliberately. repl() reads
+    context_tokens in eleven places and hands it to run_turn; wrapping it in an
+    object to satisfy one command would rewrite all eleven for the benefit of
+    none of them. Four names in, four names out, and the caller keeps its own
+    variables.
+    """
+    handled: bool
+    mode: str
+    show_reasoning: bool
+    context_tokens: int
+
+
+def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
+              context_tokens: int, n_ctx: int, rollover_at: float) -> SlashResult:
+    """Every slash command except the two that leave. Prints its own output.
+
+    OUT OF repl() BECAUSE THE SUITE ASKED, and it asked for a reason worth
+    keeping: `test_repl_is_one_job_again` caps repl() at 220 lines, so that the
+    five-job block the 0.3.0 split took apart cannot quietly grow back. Reading
+    a key, deciding a turn and formatting seven commands is three jobs; this is
+    the third one, moved rather than rewritten -- every branch below is the one
+    that stood in the loop, character for character where it prints.
+
+    /exit and /quit STAY in repl(): they call leave(), which closes over the
+    session file and the arguments, and dragging that out here would move the
+    session's whole lifetime with it.
+    """
+    if line == "/help":
+        print(HELP)
+        return SlashResult(True, mode, show_reasoning, context_tokens)
+
+    if line == "/tools":
+        print(format_tools())
+        return SlashResult(True, mode, show_reasoning, context_tokens)
+
+    if line == "/thoughts":
+        # A TOGGLE AND NOT TWO COMMANDS: whoever wants to see the thoughts
+        # wants to stop seeing them again two questions later, and a pair
+        # of names would be two things to remember for one decision. The
+        # answer says which way it went, because a switch that flips in
+        # silence is indistinguishable from one that did not take.
+        show_reasoning = not show_reasoning
+        print("the model's reasoning is shown as it arrives.\n" if show_reasoning
+              else "the model's reasoning is hidden again -- "
+                   "the bird carries the state.\n")
+        return SlashResult(True, mode, show_reasoning, context_tokens)
+
+    if line == "/mode" or line.startswith("/mode "):
+        mode, said = switch_mode(line, mode)
+        print(said)
+        return SlashResult(True, mode, show_reasoning, context_tokens)
+
+    if line == "/reset":
+        conversation.reset()
+        crow_core.forget_approvals()   # #88: the chat goes, its releases go
+        print("context dropped -- the next turn pays a full prefill.\n")
+        return SlashResult(True, mode, show_reasoning, 0)
+
+    if line == "/context":
+        # The rollover point is shown here or nowhere: it is the number that
+        # decides when the conversation ends, and a user who cannot see it
+        # cannot plan around it.
+        enabled = n_ctx > 0 and rollover_at > 0
+        room = f", rolls over at {int(n_ctx * rollover_at)}" if enabled else ""
+        print(f"{len(conversation)} messages, {context_tokens} tokens{room}\n")
+        return SlashResult(True, mode, show_reasoning, context_tokens)
+
+    return SlashResult(False, mode, show_reasoning, context_tokens)
+
+
+def switch_mode(line: str, mode: str) -> tuple[str, str]:
+    """#88's `/mode`: report the level, or switch it. Returns (mode, what to say).
+
+    OUT HERE RATHER THAN IN repl(), and the suite is what said so: repl() has a
+    220-line ceiling (`test_repl_is_one_job_again`) precisely so it does not
+    grow back into the five-job block the split took apart. A command that
+    formats output and holds a rule belongs beside format_tools(), not inside
+    the loop that reads a key.
+
+    BOTH FORMS PRINT WHAT IS LIVE. "A release level nobody can see is one nobody
+    can trust" -- so `/mode` alone reports rather than staying silent, and a
+    switch names what it now holds back rather than only its own name.
+    """
+    wanted = line[len("/mode"):].strip().lower()
+    if wanted and wanted not in crow_core.MODES:
+        return mode, (f"{DIM}no mode named {wanted!r}. "
+                      f"one of: {', '.join(crow_core.MODES)}{RESET}\n")
+
+    dropped = ""
+    if wanted:
+        mode = wanted
+        # A LEVEL CHANGE DROPS STANDING APPROVALS. Switching to `manual` while
+        # keeping the directories released under `allowedit` would hand back a
+        # level that asks less than its name says.
+        crow_core.forget_approvals()
+        dropped = f"\n{DIM}standing approvals dropped{RESET}"
+
+    asks = [t for t in sorted(crow_core.TOOL_IMPL)
+            if crow_core.needs_approval(t, mode)]
+    what = f"asks before {', '.join(asks)}" if asks else "every tool runs unasked"
+    return mode, f"mode {mode} -- {what}{dropped}\n"
+
+
+def ask_approval(name: str, arguments: str) -> str:
+    """#88: put one held-back call to the user. "yes", "no" or "always".
+
+    ASKED BETWEEN ROUNDS, NOT DURING ONE, and that is why this is a plain read
+    rather than a second reader fighting the raw-mode line editor. The ticket
+    budgets its estimate for "asking mid-turn", but the tool loop only reaches a
+    call once `stream_reply` has returned: the answer is complete, nothing is
+    arriving, and the terminal is idle. Measured against the loop's own order in
+    cli/crow_core.py, not assumed.
+
+    THE PROMPT SHOWS WHAT IT RELEASES -- #88 point 2. A prompt that only says
+    `run_command?` is a keystroke, not a decision, so the arguments are printed
+    the way the model sent them, cut at a length that still fits a line.
+
+    Anything that is not y/a is no. A misread key must not release a shell.
+    """
+    try:
+        args = json.loads(arguments or "{}")
+        detail = ", ".join(f"{k}={v!r}" for k, v in args.items())
+    except (json.JSONDecodeError, AttributeError):
+        detail = arguments or ""
+    if len(detail) > 300:
+        detail = detail[:297] + "..."
+
+    scope = crow_core.approval_scope(name, arguments)
+    always = f", {YELLOW}a{RESET}{DIM}lways for {scope[1]}{RESET}" if scope else ""
+    print(f"\n{YELLOW}  {name}{RESET}{DIM}({detail}){RESET}")
+    try:
+        answer = input(f"  run it? {YELLOW}y{RESET}es / {YELLOW}n{RESET}o"
+                       f"{always}{DIM} [n]{RESET} ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return "no"
+    if answer in ("y", "yes"):
+        return "yes"
+    if answer in ("a", "always") and scope:
+        return "always"
+    return "no"
 
 
 def _first_sentence(text: str) -> str:
@@ -1257,6 +1405,8 @@ def repl(args: argparse.Namespace) -> int:
     # turn's sink and decides display, never what is sent, kept or counted.
     show_reasoning = bool(getattr(args, "show_reasoning", False))
 
+    mode = getattr(args, "mode", crow_core.DEFAULT_MODE)   # #88, see switch_mode()
+
     # Before the first turn, so no prefix exists yet to break.
     wanted = getattr(args, "resume", None)
     if getattr(args, "session", True) or wanted:
@@ -1319,35 +1469,13 @@ def repl(args: argparse.Namespace) -> int:
             continue
         if line in ("/exit", "/quit"):
             return leave()
-        if line == "/help":
-            print(HELP)
-            continue
-        if line == "/tools":
-            print(format_tools())
-            continue
-        if line == "/thoughts":
-            # A TOGGLE AND NOT TWO COMMANDS: whoever wants to see the thoughts
-            # wants to stop seeing them again two questions later, and a pair
-            # of names would be two things to remember for one decision. The
-            # answer says which way it went, because a switch that flips in
-            # silence is indistinguishable from one that did not take.
-            show_reasoning = not show_reasoning
-            print("the model's reasoning is shown as it arrives.\n" if show_reasoning
-                  else "the model's reasoning is hidden again -- "
-                       "the bird carries the state.\n")
-            continue
-        if line == "/reset":
-            conversation.reset()
-            context_tokens = 0
-            print("context dropped -- the next turn pays a full prefill.\n")
-            continue
-        if line == "/context":
-            # The rollover point is shown here or nowhere: it is the number that
-            # decides when the conversation ends, and a user who cannot see it
-            # cannot plan around it.
-            enabled = n_ctx > 0 and args.rollover_at > 0
-            room = f", rolls over at {int(n_ctx * args.rollover_at)}" if enabled else ""
-            print(f"{len(conversation)} messages, {context_tokens} tokens{room}\n")
+        slash = run_slash(line, conversation=conversation, mode=mode,
+                          show_reasoning=show_reasoning,
+                          context_tokens=context_tokens, n_ctx=n_ctx,
+                          rollover_at=args.rollover_at)
+        mode, show_reasoning = slash.mode, slash.show_reasoning
+        context_tokens = slash.context_tokens
+        if slash.handled:
             continue
         # BEFORE the turn is appended, not after: the archive is then a complete
         # conversation, and the question the user just typed opens the new one
@@ -1395,6 +1523,8 @@ def repl(args: argparse.Namespace) -> int:
             promised_warm=promised_warm,
             rolled=rolled,
             execute_tools=getattr(args, "run_tools", True),
+            mode=mode,
+            approve=ask_approval,
             events=TerminalTurnEvents(rounds=args.rounds, show_reasoning=show_reasoning),
         )
         # The three the loop wrote through while it was a block of this
@@ -1646,6 +1776,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-run-tools", dest="run_tools", action="store_false",
                         help="report the tool calls the model asks for instead of running"
                              " them; the turn then ends after one round")
+    # #88. The START value; /mode is the same switch during a session. `auto`
+    # is what every release up to 0.3.1 did, so the default changes nothing for
+    # anyone who does not ask for a level.
+    parser.add_argument("--mode", choices=crow_core.MODES,
+                        default=crow_core.DEFAULT_MODE,
+                        help="release level for tool calls: manual asks before writing"
+                             " and executing, allowedit asks before executing, auto asks"
+                             " for nothing (default)")
     return parser
 
 

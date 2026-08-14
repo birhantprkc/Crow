@@ -1210,6 +1210,206 @@ class ReportedNotRunTests(TurnLoopCase):
         self.assertIn("tool", [m["role"] for m in talk.payload()])
 
 
+class ReleaseLevelTests(TurnLoopCase):
+    """#88's three levels, and the four cases its "Done when" asks for.
+
+    THE LEVELS ARE NOT THE HARD PART -- the refusal is. A declined call has to
+    come back as a tool RESULT, because an assistant turn whose `tool_calls`
+    have no `tool` message behind it is a broken prefix for every later turn of
+    the session. That is the same invariant `run_turn` already keeps for a spent
+    budget and for reported-not-run, and #88 adds a fourth trigger to it rather
+    than a fourth implementation.
+    """
+
+    def _asks_for(self, tool, arguments, mode, answer="no"):
+        """One round that calls `tool`, run at `mode` with a scripted answer."""
+        self.asked = []
+
+        def approve(name, args):
+            self.asked.append((name, args))
+            return answer
+
+        self.serve([{"content": "on it"}, _call_delta(tool, arguments)])
+        self.serve([{"content": "done"}])
+        talk = self.conversation()
+        return talk, self.turn(talk, mode=mode, approve=approve)
+
+    # -- the table itself ---------------------------------------------------
+
+    def test_reading_never_asks_at_any_level(self):
+        """"A level that asks before list_dir is a level nobody keeps switched
+        on, and a protection everyone turns off protects nothing.\""""
+        for mode in crow_core.MODES:
+            for tool in ("read_file", "list_dir", "find_files", "search_text"):
+                self.assertFalse(crow_core.needs_approval(tool, mode),
+                                 f"{tool} asks at {mode}")
+
+    def test_the_table_matches_the_ticket(self):
+        asks = {m: sorted(t for t in crow_core.TOOL_IMPL
+                          if crow_core.needs_approval(t, m))
+                for m in crow_core.MODES}
+        self.assertEqual(asks["manual"], ["edit_file", "run_command", "write_file"])
+        self.assertEqual(asks["allowedit"], ["run_command"])
+        self.assertEqual(asks["auto"], [])
+
+    def test_an_unknown_tool_is_treated_as_the_strictest_class(self):
+        """A tool nobody has classified is one nobody has thought about, and
+        guessing "safe" for it is the one guess with a cost."""
+        self.assertTrue(crow_core.needs_approval("some_new_tool", "manual"))
+        self.assertTrue(crow_core.needs_approval("some_new_tool", "allowedit"))
+
+    # -- the two cases that must be refused ---------------------------------
+
+    def test_a_write_under_manual_is_refused(self):
+        target = os.path.join(self.work, "no.txt")
+        talk, _ = self._asks_for("write_file",
+                                 json.dumps({"path": target, "content": "x"}),
+                                 "manual")
+        self.assertEqual([n for n, _ in self.asked], ["write_file"])
+        self.assertFalse(os.path.exists(target), "the file was written anyway")
+
+    def test_a_command_under_allowedit_is_refused_while_a_write_runs(self):
+        """The level's whole shape in one case: allowedit releases the disk and
+        holds the shell."""
+        target = os.path.join(self.work, "yes.txt")
+        self.serve([{"content": "writing"},
+                    _call_delta("write_file",
+                                json.dumps({"path": target, "content": "hello"}))])
+        self.serve([{"content": "now the shell"},
+                    _call_delta("run_command", json.dumps({"command": "echo hi"}))])
+        self.serve([{"content": "done"}])
+        asked = []
+        talk = self.conversation()
+        self.turn(talk, mode="allowedit",
+                  approve=lambda n, a: asked.append(n) or "no")
+        self.assertEqual(asked, ["run_command"], "the wrong call was put to the user")
+        self.assertTrue(os.path.exists(target), "allowedit did not release the write")
+
+    # -- the refusal is a result, not an abort ------------------------------
+
+    def test_a_declined_call_comes_back_as_a_tool_result(self):
+        talk, _ = self._asks_for("run_command", json.dumps({"command": "rm -rf /"}),
+                                 "manual")
+        tools = [m for m in talk.payload() if m["role"] == "tool"]
+        self.assertEqual([m["content"] for m in tools], [crow_core.DECLINED])
+
+    def test_the_turn_continues_after_a_refusal(self):
+        """Not "the turn ends": the model gets the refusal and answers around
+        it. A refusal that ended the turn would cost the session, not the call."""
+        talk, _ = self._asks_for("run_command", json.dumps({"command": "ls"}),
+                                 "manual")
+        said = [m["content"] for m in talk.payload() if m["role"] == "assistant"]
+        self.assertEqual(said, ["on it", "done"])
+
+    def test_the_prefix_survives_a_refusal(self):
+        """#88's own test for this: a SECOND turn after the refusal. Every
+        assistant turn carrying tool_calls has a tool message behind it, or the
+        server re-reads the whole conversation from the divergence on."""
+        talk, _ = self._asks_for("write_file",
+                                 json.dumps({"path": os.path.join(self.work, "a"),
+                                             "content": "x"}), "manual")
+        self.serve([{"content": "second turn"}])
+        talk.append("user", "and now?")
+        self.turn(talk, mode="manual", approve=lambda n, a: "no")
+        for message in talk.payload():
+            if message.get("tool_calls"):
+                behind = [m for m in talk.payload()
+                          if m["role"] == "tool"
+                          and m.get("tool_call_id") in
+                          [c["id"] for c in message["tool_calls"]]]
+                self.assertTrue(behind, "an assistant turn has calls with no result")
+
+    def test_no_approver_declines_rather_than_runs(self):
+        """A half-wired surface refuses. The other half of that choice -- run it
+        because nobody could be asked -- is the failure this ticket exists for."""
+        target = os.path.join(self.work, "nobody.txt")
+        self.serve([{"content": "x"},
+                    _call_delta("write_file", json.dumps({"path": target,
+                                                          "content": "x"}))])
+        self.serve([{"content": "done"}])
+        talk = self.conversation()
+        self.turn(talk, mode="manual", approve=None)
+        self.assertFalse(os.path.exists(target))
+
+    def test_auto_runs_without_an_approver(self):
+        """The negative half of the case above: at `auto` nothing is held back,
+        so a missing approver changes nothing. Without this, "declined" could be
+        the only behaviour there is and every case above would still pass."""
+        target = os.path.join(self.work, "auto.txt")
+        self.serve([{"content": "x"},
+                    _call_delta("write_file", json.dumps({"path": target,
+                                                          "content": "x"}))])
+        self.serve([{"content": "done"}])
+        talk = self.conversation()
+        self.turn(talk, mode="auto", approve=None)
+        self.assertTrue(os.path.exists(target), "auto held a write back")
+
+    # -- the memory, and what it must NOT cover -----------------------------
+
+    def test_always_stops_the_second_question_in_the_same_directory(self):
+        first = os.path.join(self.work, "one.txt")
+        second = os.path.join(self.work, "two.txt")
+        self.serve([{"content": "a"},
+                    _call_delta("write_file", json.dumps({"path": first,
+                                                          "content": "1"}))])
+        self.serve([{"content": "b"},
+                    _call_delta("write_file", json.dumps({"path": second,
+                                                          "content": "2"}))])
+        self.serve([{"content": "done"}])
+        asked = []
+        talk = self.conversation()
+        self.addCleanup(crow_core.forget_approvals)
+        self.turn(talk, mode="manual",
+                  approve=lambda n, a: asked.append(a) or "always")
+        self.assertEqual(len(asked), 1, "the same directory was asked about twice")
+        self.assertTrue(os.path.exists(second))
+
+    def test_always_does_not_widen_to_another_directory(self):
+        """#88: "or the memory silently widens into auto"."""
+        other = os.path.join(self.dir, "elsewhere")
+        os.makedirs(other)
+        self.serve([{"content": "a"},
+                    _call_delta("write_file",
+                                json.dumps({"path": os.path.join(self.work, "x"),
+                                            "content": "1"}))])
+        self.serve([{"content": "b"},
+                    _call_delta("write_file",
+                                json.dumps({"path": os.path.join(other, "y"),
+                                            "content": "2"}))])
+        self.serve([{"content": "done"}])
+        asked = []
+        talk = self.conversation()
+        self.addCleanup(crow_core.forget_approvals)
+        self.turn(talk, mode="manual",
+                  approve=lambda n, a: asked.append(a) or "always")
+        self.assertEqual(len(asked), 2, "a second directory rode in on the first")
+
+    def test_always_does_not_widen_to_another_program(self):
+        self.assertNotEqual(
+            crow_core.approval_scope("run_command", json.dumps({"command": "git status"})),
+            crow_core.approval_scope("run_command", json.dumps({"command": "rm -rf /"})))
+        self.assertEqual(
+            crow_core.approval_scope("run_command", json.dumps({"command": "git status"})),
+            crow_core.approval_scope("run_command", json.dumps({"command": "git log"})),
+            "two git calls should share one key")
+
+    def test_a_call_with_no_scope_can_never_be_remembered(self):
+        """Unparseable or empty arguments: every occurrence asks again, which is
+        the safe direction for a case nobody has thought about."""
+        self.assertIsNone(crow_core.approval_scope("run_command", "{not json"))
+        self.assertIsNone(crow_core.approval_scope("run_command", json.dumps({})))
+        self.assertIsNone(crow_core.approval_scope("read_file",
+                                                   json.dumps({"path": "x"})))
+
+    def test_forget_approvals_empties_the_memory(self):
+        crow_core.remember("run_command", json.dumps({"command": "git status"}))
+        self.assertTrue(crow_core.remembered("run_command",
+                                             json.dumps({"command": "git log"})))
+        crow_core.forget_approvals()
+        self.assertFalse(crow_core.remembered("run_command",
+                                              json.dumps({"command": "git log"})))
+
+
 class TurnStateTests(TurnLoopCase):
     """What the loop carries across rounds, and what it must not carry across
     turns."""

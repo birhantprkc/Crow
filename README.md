@@ -175,6 +175,7 @@ mid-turn does not release it — the server keeps computing.
 | `/help` | the commands |
 | `/tools` | the tools the model can call, read out of the schema it is sent |
 | `/thoughts` | show or hide the reasoning as it arrives — the `--show-reasoning` switch, mid-session |
+| `/mode` | the release level, `/mode manual\|allowedit\|auto` to switch. Switching drops standing approvals |
 | `/reset` | drop the conversation and start a new one |
 | `/context` | how much of the window is used |
 | `/exit`, `/quit` | leave |
@@ -197,6 +198,7 @@ a plain read.
 | `--rollover-at` | archive and start fresh at this share of the window, `0` switches it off (default **0.9**) |
 | `--max-tool-rounds` | tool rounds per turn before it answers from what it has (default **24**) |
 | `--no-run-tools` | report tool calls instead of running them; the turn ends after one round. The declarations stay in the request either way |
+| `--mode` | release level: **`manual`** asks before writing and executing, **`allowedit`** asks before executing, **`auto`** asks for nothing (default). Reading never asks at any level |
 | `--resume FILE` | resume a named session file |
 | `--no-session` | do not resume the last session, and do not save this one |
 | `--no-update-check` | do not ask GitHub for a newer release |
@@ -245,6 +247,14 @@ holds that against `manifests/shared-core.json`.
 | **code blocks** | framed with a copy button. An unclosed block is still framed and copyable |
 | **composer** | ENTER sends, SHIFT+ENTER newline. The read timeout is printed beside the send button, read off the running configuration |
 | **sessions rail** | one entry, because there is one `session.json` — the same file `cli/crow.py` writes |
+| **release level** | a dropdown beside `send`, coloured by level: **manual** white, **allowedit** green, **auto** yellow. The same three levels `/mode` switches in the terminal, decided by the same table in `cli/crow_core.py` |
+
+**A held-back call becomes a card in the transcript**, with the tool's name and the arguments the
+model sent — a prompt that only said `run_command?` would be a keystroke, not a decision. Three
+answers: run it, decline, or allow it from now on for that directory or that program. The card stays
+afterwards with the answer on it, because a question that vanishes leaves no record of what was
+released. A declined call comes back to the model as `error: declined by the user` and the turn
+continues; it is a tool result, not an abort, or the prefix would break for every later turn.
 
 **Abort.** ESCAPE or the send button stops the turn: an interrupt flag polled every 50 ms, the socket
 closed in `finally`, and the socket timeout. The third is why the window ships **600 s** where the
@@ -259,7 +269,7 @@ one insert per tag run. Over 4,000 deltas: per event 4,000 ticks and 332.9 ms of
 
 Flags are the terminal client's where they mean the same thing (`--base-url`, `-m`, `--system`,
 `--temperature`, `--top-p`, `--min-p`, `--reasoning-effort`, `--rollover-at`, `--max-tool-rounds`,
-`--no-run-tools`, `--no-session`); `--timeout` differs. The window has no `/` commands — buttons
+`--no-run-tools`, `--mode`, `--no-session`); `--timeout` differs. The window has no `/` commands — buttons
 instead — and does not write the terminal profile.
 
 ## Updating

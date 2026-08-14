@@ -59,6 +59,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from typing import Callable
 
 # The client's version, handed over by whoever owns the literal.
 #
@@ -2030,6 +2031,127 @@ TOOL_IMPL = {
 }
 
 
+# ---------------------------------------------------------------- #88 ------
+# RELEASE LEVELS. The classes come from the tools themselves, not from taste:
+# reading is safe at every level, writing touches the disk, executing starts a
+# shell. #88's table, one row per class.
+#
+# READING NEVER ASKS, at any level, and that is a decision rather than an
+# oversight: "a level that asks before list_dir is a level nobody keeps switched
+# on, and a protection everyone turns off protects nothing".
+TOOL_CLASS = {
+    "read_file": "reading",
+    "list_dir": "reading",
+    "find_files": "reading",
+    "search_text": "reading",
+    "write_file": "writing",
+    "edit_file": "writing",
+    "run_command": "executing",
+}
+
+# Which classes stop and ask, per level. A class not named here runs.
+MODE_ASKS = {
+    "manual": ("writing", "executing"),
+    "allowedit": ("executing",),
+    "auto": (),
+}
+MODES = tuple(MODE_ASKS)
+
+# AUTO IS THE DEFAULT BECAUSE IT IS WHAT THIS CLIENT ALREADY DID. Every release
+# up to here ran all seven tools unasked; making `manual` the default would
+# change the behaviour of every existing session in a commit that is supposed to
+# add a choice. The level is one word away in either surface, and both show
+# which one is live.
+DEFAULT_MODE = "auto"
+
+# What a declined call comes back as. IT IS A TOOL RESULT, NOT AN ABORT --
+# #88 point 1, and the same invariant `run_turn` already keeps three times over:
+# an assistant turn whose tool_calls have no `tool` message behind them is a
+# broken prefix for every later turn of the session. The model can read this
+# line and try something else; it cannot read a turn that ended.
+DECLINED = "error: declined by the user"
+
+
+def needs_approval(name: str, mode: str) -> bool:
+    """Does this tool stop and ask at this level?
+
+    An unknown tool is treated as `executing`: the strictest class, because a
+    tool this table has not heard of is one nobody has classified yet, and
+    guessing "safe" for it is the one guess with a cost.
+    """
+    return TOOL_CLASS.get(name, "executing") in MODE_ASKS.get(mode, ())
+
+
+# STANDING APPROVALS, per session and never written to disk. #88 point 3:
+# "without a memory, manual is unusable -- a 24-round turn asks 24 times, and
+# everyone switches to auto within two minutes". Cleared by new_session().
+_ALLOWED: set[tuple[str, str]] = set()
+
+
+def approval_scope(name: str, arguments: str) -> tuple[str, str] | None:
+    """What one "always" covers -- and, more importantly, what it does NOT.
+
+    A DIRECTORY FOR WRITES, A PROGRAM FOR COMMANDS. "Yes, and from now on"
+    against `write_file C:/x/a.py` releases writes under `C:/x`, not writes
+    everywhere; against `run_command git status` it releases `git`, not every
+    command. The narrower the key, the less an "always" can widen into `auto`
+    by accident -- which is the failure #88 asks for a test against.
+
+    None means this call cannot be remembered at all: unparseable arguments, a
+    missing path, an empty command. Then every occurrence asks again, which is
+    the safe direction for a case nobody has thought about.
+    """
+    try:
+        args = json.loads(arguments or "{}")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(args, dict):
+        return None
+
+    if name in ("write_file", "edit_file"):
+        path = args.get("path")
+        if not isinstance(path, str) or not path.strip():
+            return None
+        return ("writing", os.path.dirname(os.path.abspath(path)).lower())
+
+    if name == "run_command":
+        command = args.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return None
+        # The program, not the line: `git status` and `git log` share a key,
+        # `git` and `rm` do not.
+        return ("executing", command.split()[0].lower())
+
+    return None
+
+
+def remembered(name: str, arguments: str) -> bool:
+    """Has this session already said "always" for something covering this call?"""
+    scope = approval_scope(name, arguments)
+    return scope is not None and scope in _ALLOWED
+
+
+def remember(name: str, arguments: str) -> tuple[str, str] | None:
+    """Record an "always" for this call's scope. Returns what was recorded."""
+    scope = approval_scope(name, arguments)
+    if scope is not None:
+        _ALLOWED.add(scope)
+    return scope
+
+
+def forget_approvals() -> None:
+    """Drop every standing approval. Called when the user drops the chat.
+
+    NOT FROM Conversation.reset(), and the difference is the point. reset() also
+    runs inside roll_over(): the context is archived and started again while the
+    user carries on with the same work. Clearing there would ask again for the
+    directory they released four rounds ago, mid-turn, for a reason invisible
+    from where they sit. `/reset` and the window's new-chat button are the
+    places a session actually ends, and they are what call this.
+    """
+    _ALLOWED.clear()
+
+
 # What has already been asked this turn, and what came back. Cleared per user
 # turn, not per round.
 _SEEN: dict[tuple[str, str], str] = {}
@@ -2214,6 +2336,13 @@ def run_turn(
     promised_warm: bool = False,
     rolled: bool = False,
     execute_tools: bool = True,
+    # #88. `mode` picks which classes stop and ask; `approve` is how they ask.
+    # A surface that passes neither keeps the behaviour every release up to
+    # 0.3.1 had: everything runs. A surface that passes a mode but no `approve`
+    # gets refusals rather than silent execution -- the safe half of a
+    # half-wired client.
+    mode: str = DEFAULT_MODE,
+    approve: "Callable[[str, str], str] | None" = None,
     events: "TurnEvents | None" = None,
 ) -> TurnResult:
     """Run one USER turn to its end: however many tool rounds it takes.
@@ -2373,7 +2502,31 @@ def run_turn(
             # was waiting on -- and the previous round's six figures as the last thing visible.
             events.tool_started(call["name"], call["arguments"])
             started = time.monotonic()
-            result, repeated = run_tool_cached(call["name"], call["arguments"])
+
+            # #88: THE LEVEL DECIDES, THE SURFACE ASKS. This loop knows which
+            # class a tool is in and whether the level releases it; it does not
+            # know how to put a question on a screen, and a core that did would
+            # have one implementation per surface. `approve` is that seam --
+            # None means nobody can be asked, which is the same answer as "no"
+            # for anything the level holds back.
+            declined = False
+            if (needs_approval(call["name"], mode)
+                    and not remembered(call["name"], call["arguments"])):
+                answer = "no"
+                if approve is not None:
+                    answer = approve(call["name"], call["arguments"]) or "no"
+                if answer == "always":
+                    remember(call["name"], call["arguments"])
+                elif answer != "yes":
+                    declined = True
+
+            if declined:
+                # A REFUSAL IS A RESULT. Same shape as a failed call: the text
+                # goes back as the tool message, the round continues, and the
+                # prefix stays valid for every later turn. #88 point 1.
+                result, repeated = DECLINED, False
+            else:
+                result, repeated = run_tool_cached(call["name"], call["arguments"])
             took = time.monotonic() - started
             failed = result.startswith("error: ")
             cost.add_tool(took, failed)
