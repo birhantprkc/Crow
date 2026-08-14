@@ -669,8 +669,13 @@ const crow = {
   // "neu" ARCHIVES, it does not discard. The old conversation is written to its
   // own file and appears in the rail; clicking it loads it back. Without that a
   // click on "neu" is an unlabelled delete button.
-  reset(){ if(this.running) return; flow.innerHTML=""; pywebview.api.reset(); },
-  open(path){ if(this.running) return; flow.innerHTML=""; pywebview.api.open(path); },
+  // NEITHER CLEARS THE FLOW HERE. The page cannot know whether Python will
+  // refill it: `open` bails out when the chat is already the open one, and the
+  // clear had already happened -- so clicking the chat you are reading emptied
+  // the window. The side that knows whether it will replay is the side that
+  // clears, and it does, on the queue, in order.
+  reset(){ if(this.running) return; pywebview.api.reset(); },
+  open(path){ if(this.running) return; pywebview.api.open(path); },
 
   // RIGHT-CLICK ON A CHAT. Three things a list of saved conversations has to
   // offer, and none of them is reachable from a left click: rename it, put it
@@ -735,31 +740,57 @@ const crow = {
       (limit/1000).toFixed(0)+'k</span>';
   },
 
-  // ONE ENTRY, because there is one session.json. A rail that listed more would
-  // promise a switch this build cannot make.
-  rail(title,meta,rollovers,foot){
-    $("#sessions").innerHTML =
-      '<button class="sess on"><span class="t"></span><span class="s"></span></button>';
-    $("#sessions .t").textContent=title;
-    $("#sessions .s").textContent=meta;
-    // THE OPEN CHAT GETS THE SAME MENU. It was the one entry without one, which
-    // meant the chat you are actually looking at was the only one you could not
-    // rename -- the exact opposite of what a name is for.
-    const live=$("#sessions .sess.on");
-    live.title="right-click for more";
-    live.oncontextmenu=e=>crow.menu(e,{path:null,title:title},live);
+  // A CHAT KEEPS ITS PLACE WHEN YOU OPEN IT. The open one was drawn in a slot of
+  // its own AND filtered out of the list, so a click moved it. Now the list holds
+  // every chat with a file and the open one is marked `on` where it sits; the top
+  // slot is only for a chat with no file yet, which is what `unsaved` says.
+  rail(title,meta,rollovers,unsaved){
+    const box=$("#sessions");
+    // SAME CHATS, SAME ORDER -> MOVE THE MARK, DO NOT REBUILD. Every update used
+    // to throw the list away and remake it, so a click exchanged every node under
+    // the cursor.
+    const shape=(rollovers||[]).map(r=>r.path||"").join("\n")+"|"+(unsaved?"live":"");
+    if(box.dataset.shape===shape){
+      (rollovers||[]).forEach(r=>{ if(!r.path) return;
+        const b=box.querySelector('[data-path="'+CSS.escape(r.path)+'"]');
+        if(!b) return;
+        b.classList.toggle("on", !!r.active);
+        // THE HANDLER MOVES WITH THE MARK. Toggling the class alone left the
+        // entry that was active at the first draw without one, forever -- and
+        // that is a chat you cannot click.
+        b.onclick=()=>crow.open(r.path);
+        b.title="open · right-click for more"; });
+      return;
+    }
+    box.dataset.shape=shape;
+    box.innerHTML="";
+    if(unsaved){
+      const live=document.createElement("button");
+      live.className="sess on";
+      live.innerHTML='<span class="t"></span><span class="s"></span>';
+      live.querySelector(".t").textContent=title;
+      live.querySelector(".s").textContent=meta;
+      live.title="right-click for more";
+      live.oncontextmenu=e=>crow.menu(e,{path:null,title:title},live);
+      box.appendChild(live);
+    }
     if(rollovers && rollovers.length){
-      const h=document.createElement("div"); h.id="railsep";
-      h.textContent="Earlier"; $("#sessions").appendChild(h);
+      // "Earlier" only means anything while something is on top.
+      if(unsaved){ const h=document.createElement("div"); h.id="railsep";
+        h.textContent="Earlier"; box.appendChild(h); }
       rollovers.forEach(r=>{ const b=document.createElement("button");
-        b.className="sess";
+        b.className=r.active ? "sess on" : "sess";
+        if(r.path) b.dataset.path=r.path;   // what the mark is moved by, above
         b.innerHTML='<span class="t"></span><span class="s"></span>';
         b.querySelector(".t").textContent=r.title || r;
         b.querySelector(".s").textContent=r.meta || "";
         b.title="open · right-click for more";
+        // EVERY ENTRY IS CLICKABLE, the open one included. Clicking it is a
+        // no-op in Python -- and that is where the decision belongs, not in
+        // whether a handler exists.
         if(r.path){ b.onclick=()=>crow.open(r.path);
           b.oncontextmenu=e=>crow.menu(e,r,b); }
-        $("#sessions").appendChild(b); });
+        box.appendChild(b); });
     }
   },
 
@@ -806,7 +837,7 @@ const crow = {
       case "tools": this.tools(e.on); break;
       case "mode": this.modeIs(e.name, e.modes); break;
       case "ask": this.ask(e.name, e.args, e.scope); break;
-      case "rail": this.rail(e.title,e.meta,e.rollovers,e.foot);
+      case "rail": this.rail(e.title,e.meta,e.rollovers,e.unsaved);
         this.archive(e.archived||[]); break;
       // THE PAGE CLEARS ITSELF ON "new", because the click is here. A DELETE of
       // the chat being read starts on the page too but is decided in Python --
@@ -1209,14 +1240,15 @@ class Api:
             path = os.path.join(folder, name)
             if not os.path.isfile(path):   # the archiv/ folder, and anything like it
                 continue
-            # NOT THE ONE THAT IS OPEN. Naming the current chat gives it a file,
-            # and without this line that file came straight back as a second
-            # entry under "earlier" -- the same conversation listed twice, once
-            # as itself and once as its own history.
-            if self._current_path and os.path.abspath(path) == os.path.abspath(
-                    self._current_path):
-                continue
-            out.append(self._entry_of(path, name))
+            # THE OPEN ONE STAYS IN THE LIST, MARKED WHERE IT IS. Filtering it
+            # out here made a click MOVE the chat out of the list and into the
+            # live slot. The duplicate that filter guarded against cannot happen
+            # now: the page draws the live slot only for a chat with no file.
+            entry = self._entry_of(path, name)
+            entry["active"] = bool(
+                self._current_path and os.path.abspath(path) == os.path.abspath(
+                    self._current_path))
+            out.append(entry)
             if len(out) >= 12:
                 break
         return out
@@ -1650,6 +1682,7 @@ class Api:
         self._current_title = None
         self._context_tokens = 0
         self._promised_warm = False
+        self.push({"k": "clear"})     # the page no longer guesses; see crow.reset
         # SESSION.JSON GOES WITH IT, and only after the chat has been read back
         # off disk above. It still holds the conversation just put aside; left
         # there, the next launch would restore it as the open chat AND list the
@@ -1836,6 +1869,7 @@ class Api:
         self._current_path = path
         self._current_title = self._stored_title(path)
         self._context_tokens, self._promised_warm = tokens, kv
+        self.push({"k": "clear"})     # the page no longer guesses; see crow.open
         self._replay(messages)
         # SESSION.JSON FOLLOWS THE SWITCH AT ONCE. Still pointing at the chat
         # just closed, a window shut before the next turn would come back up
@@ -1924,6 +1958,9 @@ class Api:
                    "meta": ("no turn yet" if turns <= 0 else
                             "%d messages%s" % (turns, " · cache warm"
                                                if self._promised_warm else "")),
+                   # With a file the live chat is already in the list below,
+                   # marked; without one the page draws it on top. Never two.
+                   "unsaved": self._current_path is None,
                    "rollovers": self._archives(),
                    "archived": self._archived(),
                    "foot": os.path.basename(self._current_path)
@@ -2208,6 +2245,11 @@ class Api:
 
     def _run(self, text: str) -> None:
         self._conversation.append("user", text)
+        # THE RAIL LEARNS THE CHAT EXISTS NOW, NOT AFTER THE TURN. Every other
+        # caller of `_reload_rail` ends something, so an entry kept "new chat ·
+        # no turn yet" beside a running turn. The title is the first user line,
+        # knowable exactly here.
+        self._reload_rail()
         events = Turn(self.push)
         try:
             result = run_turn(

@@ -761,17 +761,35 @@ class RailTests(ApiCase):
 
     # -- the rules the rail is drawn by --------------------------------------
 
-    def test_the_open_chat_is_not_listed_under_earlier(self):
-        """It is drawn at the top, as itself. Listed again below, the same
-        conversation stands twice: once as itself, once as its own history."""
+    def test_the_open_chat_is_listed_once_and_marked(self):
+        """It used to be drawn at the top AND filtered out of the list, so a
+        click MOVED it -- out of where it was and into the live slot. It stays
+        in the list now, marked where it sits.
+
+        REPLACES `test_the_open_chat_is_not_listed_under_earlier`, which pinned
+        the filter. The duplicate that one guarded against is what `unsaved`
+        prevents: the top slot exists only for a chat with no file.
+        """
         api = self.api()
         self.a_chat(api, "the open one")
         ok, path = api._leave()
         self.assertTrue(ok)
         api._reload_rail()
         entry = self.rail(api)
-        self.assertEqual([r["path"] for r in entry["rollovers"]], [])
-        self.assertEqual(os.path.basename(path), entry["foot"])
+        listed = [r for r in entry["rollovers"] if r["path"] == path]
+        self.assertEqual(len(listed), 1, "the open chat is listed once")
+        self.assertTrue(listed[0]["active"])
+        self.assertFalse(entry["unsaved"], "it has a file; no second slot on top")
+
+    def test_a_chat_with_no_file_is_the_only_thing_on_top(self):
+        """NEGATIVE HALF, and the case the old filter existed for: without this
+        the live slot could be drawn beside the same chat's list entry."""
+        api = self.api()
+        self.a_chat(api, "never left")
+        api._reload_rail()
+        entry = self.rail(api)
+        self.assertTrue(entry["unsaved"])
+        self.assertEqual([r for r in entry["rollovers"] if r.get("active")], [])
 
     def test_a_chat_with_no_turn_in_it_gets_no_file(self):
         """Files are for conversations. A window opened and closed again must not
