@@ -275,6 +275,7 @@ def paint_banner(text: str) -> str:
 HEADER_COMMANDS = (
     ("/help", "for commands"),
     ("/tools", "for what the model can call"),
+    ("/mode", "manual, allowedit or auto"),
     ("/exit", "to leave"),
 )
 BANNER_GAP = 4
@@ -292,9 +293,16 @@ def header_lines(version: str) -> list[str]:
     raw = BANNER.format(version=version).splitlines()
     width = max((len(line.rstrip()) for line in raw), default=0)
 
-    # The right column in order: the three commands, a blank, the repository.
+    # The right column in order: the commands, a blank, the repository.
     # The blank is a REAL entry rather than an offset, so the gap survives a
     # command being added or taken away.
+    #
+    # THE BUDGET IS THE WORDMARK'S HEIGHT, and it is nearly spent. Five rows
+    # carry the mark, so four commands + blank + URL is six slots: the commands
+    # still land on the mark, and the URL moves down onto the bevel row. A FIFTH
+    # command pushes the URL onto the version line, which is the one thing the
+    # centring below exists to prevent. Adding one means shortening the list or
+    # growing the mark, not editing this tuple alone.
     column = [f"{YELLOW}{name}{RESET}{DIM} {what}{RESET}"
               for name, what in HEADER_COMMANDS]
     column += ["", f"{CROW_ACCENT}{REPO_URL}{RESET}"]

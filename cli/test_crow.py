@@ -1040,6 +1040,40 @@ class RavenTests(unittest.TestCase):
         for name, _ in crow.HEADER_COMMANDS:
             self.assertNotIn(name, carrier[0])
 
+    def _version_line(self):
+        lines = crow.header_lines("v9.9.9")
+        carrier = [l for l in lines if "v9.9.9" in l]
+        self.assertEqual(len(carrier), 1)
+        return carrier[0]
+
+    def test_the_version_line_carries_nothing_from_the_column(self):
+        """The command check above is not the whole invariant.
+
+        The right column is commands + a blank + the repository URL, and the
+        centring is budgeted against the wordmark's five rows. The URL is the
+        LAST entry, so it is the one that falls off the bottom first -- and
+        `test_the_version_line_carries_no_command` iterates commands only, so it
+        stays green while the URL sits beside the version. Found on 2026-08-14
+        when /mode became the fourth command: four fit, five do not, and nothing
+        said so.
+        """
+        self.assertNotIn(crow.REPO_URL, self._version_line())
+
+    def test_a_fifth_command_pushes_the_url_onto_the_version(self):
+        """NEGATIVE CONTROL for the test above, and the reason it is worth having.
+
+        Without this, the assertion is one that has never been seen red, so it
+        cannot be told apart from one that cannot go red. Five commands is the
+        case the comment at HEADER_COMMANDS warns about; if this ever stops
+        failing, the wordmark grew and the budget in that comment is stale.
+        """
+        was = crow.HEADER_COMMANDS
+        try:
+            crow.HEADER_COMMANDS = was + (("/spare", "one too many"),)
+            self.assertIn(crow.REPO_URL, self._version_line())
+        finally:
+            crow.HEADER_COMMANDS = was
+
     def test_bevel_is_painted_apart_from_the_face(self):
         """Positive control for paint_banner: without a separate colour on the
         shadow cells the wordmark is flat, and the test would not notice."""

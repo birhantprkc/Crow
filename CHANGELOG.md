@@ -6,6 +6,24 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
+## Unreleased
+
+**`/mode` is in the header.** 0.3.2 shipped three release levels and advertised none of them: the
+block beside the wordmark listed `/help`, `/tools` and `/exit`, so the only way to find `/mode` was
+to already know it existed and type `/help`. A level nobody can find is the same as no level. It now
+reads `/mode manual, allowedit or auto` — the modes on the line, because the header is where the
+user learns what the prompt will do.
+
+The column is budgeted against the wordmark's **five rows**: four commands plus a blank plus the
+repository URL is six slots, the commands still land on the mark, and the URL moves down onto the
+bevel row. A **fifth** command pushes the URL onto the version line — which is the one thing
+`header_lines`' centring exists to prevent, and **no test noticed**:
+`test_the_version_line_carries_no_command` iterates commands only, and the URL is the last entry, so
+it is the one that falls off first. Now pinned by
+`test_the_version_line_carries_nothing_from_the_column`, with
+`test_a_fifth_command_pushes_the_url_onto_the_version` as its negative control — an assertion never
+seen red cannot be told apart from one that cannot go red. 329 in `cli/test_crow.py`.
+
 ## 0.3.2 — 2026-08-14
 
 **The CLI's tool-call marker is a glyph the shipped font actually has.** It was U+2692 `⚒`, and
