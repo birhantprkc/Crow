@@ -91,7 +91,20 @@ _VERSION_LITERAL = re.compile(r'^VERSION\s*=\s*"([^"]+)"', re.M)
 # The window ships a read timeout where the terminal runs without one. Measured
 # 2026-08-13: a recv that is ALREADY blocked is not woken by closing the socket
 # from another thread, so the only bound on it is the timeout it started with.
-READ_TIMEOUT_S = 20.0
+#
+# 600, AND IT WAS 20 UNTIL 2026-08-14. This is a per-read bound, not a per-turn
+# one: it starts again on every chunk, so it only ever expires on a wait with no
+# bytes in it -- a prefill. 20 s was therefore under the prefill of any turn
+# whose history had grown, and a live turn hit it: 12 rounds, 13 tool calls,
+# prefill 2,222 tokens at 51.21 tok/s (about 43 s of silence) -> `stream broke:
+# timed out`, with the answer and the round lost.
+#
+# The floor this has to clear is the worst prefill on record, 469.51 s to the
+# first token on a resumed 21k session (2026-08-10). tools/measure_gui_stream.py
+# encodes that floor at :636 as `> 469.51`, README.md has said 600 since 0.3.0,
+# and the docstring at measure_gui_stream.py:106 says 600 -- the shipped 20 was
+# the only place that disagreed, and no check reads this constant.
+READ_TIMEOUT_S = 600.0
 
 
 def client_version(path: str | None = None) -> str:
