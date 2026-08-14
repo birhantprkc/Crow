@@ -58,7 +58,9 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from html.parser import HTMLParser
 from typing import Callable
 
 # The client's version, handed over by whoever owns the literal.
@@ -110,6 +112,69 @@ MAX_TOOL_BYTES = 16_000
 MAX_TOOL_ROUNDS = 24
 MAX_HITS = 200
 COMMAND_TIMEOUT = 120
+
+# ---- #96, web research ----------------------------------------------------
+# THE BUDGET HERE IS ROUND TRIPS, NOT REQUESTS. A fetched page is clipped to
+# MAX_TOOL_BYTES, which the comment above prices at ~4,000 tokens and ~two
+# minutes of prefill. MAX_TOOL_ROUNDS is 24 for the whole turn. Fetching five
+# results one after another is ten minutes and a fifth of the turn spent before
+# an answer begins -- so the search result has to carry snippets worth reading on
+# their own, and the number of pages one question may open has to be bounded
+# rather than left to the model's enthusiasm.
+WEB_TIMEOUT = 20
+WEB_MAX_DOWNLOAD = 2_000_000   # bytes taken off the socket before extraction
+MAX_FETCHES = 4                # pages one question may open; see the note above
+SEARCH_RESULTS = 6
+
+# WHERE THE SEARCH RUNS, AND WHY IT IS NOT A SELF-HOSTED SERVICE BY DEFAULT.
+#
+# There is no free, keyless, reliable, general web search endpoint. Every route
+# costs exactly one of four things: money, an account, a service you run, or
+# scraping an engine that does not offer an API. Measured 2026-08-14, and the
+# first draft of this file got it wrong by choosing the third:
+#
+# * self-hosted SearXNG is free and keyless, and it is NOT SHIPPABLE as the
+#   default. Crow installs with one line of PowerShell onto plain Windows. A
+#   default that requires the user to install Docker or WSL and keep a second
+#   service running is a capability for whoever built it, not for whoever
+#   installed it.
+# * public SearXNG instances do not fill the gap: six were probed on
+#   2026-08-14 (searx.be, search.inetol.net, priv.au, searxng.site,
+#   search.bus-hit.me, baresearch.org) and not one answered `format=json` --
+#   200 with HTML, 429, or 403. Their own docs say as much.
+# * scraping duckduckgo is against its terms and returns 202/403 as the normal
+#   case, which in a 24-round loop is a tool that fails at random.
+#
+# What is left is the cheapest real cost: THE USER BRINGS A KEY. Tavily's free
+# tier is 1,000 searches a month and takes no credit card, so nothing is paid
+# for and nothing has to run. The key is the whole setup, and if it is missing
+# the tool says so in the one sentence that fixes it.
+#
+# SearXNG stays as the second provider -- unlimited and account-free for anyone
+# who already runs one. Setting CROW_SEARXNG_URL picks it. Its JSON is off until
+# turned on: searxng ships `formats: [html]`
+# (docs/admin/settings/settings_search.rst), so `format=json` answers with a
+# page until `json` joins that list, which is the common first failure and gets
+# its own sentence rather than a JSONDecodeError.
+TAVILY_URL = "https://api.tavily.com/search"
+TAVILY_KEY = os.environ.get("CROW_TAVILY_KEY", "")
+SEARXNG_URL = os.environ.get("CROW_SEARXNG_URL", "")
+
+# Per keyless source. Shorter than WEB_TIMEOUT because several run at once and
+# the slowest one sets the pace: a source that has not answered in 8 s has cost
+# more than its results are worth.
+KEYLESS_TIMEOUT = 8
+
+# WHAT AN EMPTY KEYLESS SEARCH SAYS, and it is a hint rather than an error: the
+# federation covers repositories, issues, answered questions, packages and
+# encyclopaedia entries, which is most of what a coding assistant needs and not
+# the open web. A question outside that is a reason to offer the upgrade, not to
+# report a fault.
+NO_GENERAL_INDEX = (
+    "\n[these sources cover code, packages and reference, not the open web. "
+    "For a general index set CROW_TAVILY_KEY (free, no credit card, "
+    "https://tavily.com) or CROW_SEARXNG_URL to your own instance.]"
+)
 
 # Archive the conversation and start a fresh one at this share of the window.
 #
@@ -209,6 +274,36 @@ TOOLS = [
         f"Killed after {COMMAND_TIMEOUT}s.",
         {"command": dict(_STR, description="The command line."),
          "cwd": dict(_STR, description="Working directory.")}, ["command"]),
+    # #96. THE WORDING IS THE INSTRUCTION -- this is the only place the model is
+    # told that finding a link is not the job. A description that merely says
+    # "search the web" produces a turn that hands the user three URLs, which is
+    # the failure this ticket names.
+    #
+    # AND THE EXCEPTION IS PART OF THE RULE. "Never give a link" is the wrong
+    # rule: someone who asks for the URL, the docs page or the source wants
+    # exactly that, and a model forbidden to answer them is broken in the
+    # opposite direction. What is banned is substituting links FOR an answer.
+    _fn("web_search",
+        "Search the web when the answer is not on this machine -- a library "
+        "version, a flag added recently, anything past your training. Read the "
+        "snippets first: they usually settle it. Answer from what you read and "
+        "name the sources you used. A list of links is not an answer, unless the "
+        "user asked for the link itself. Weigh what you found: a registry or an "
+        "official page settles a fact, one forum post or one pull request in "
+        "somebody else's project does not -- say plainly that something is "
+        "unconfirmed rather than presenting it as a specification. If the thing "
+        "you were asked about does not appear in any source, say it was not "
+        f"found. Fetch at most {MAX_FETCHES} pages per question -- each one "
+        "costs about two minutes.",
+        {"query": dict(_STR, description="What to search for."),
+         "count": {"type": "integer", "description":
+                   f"How many results, default {SEARCH_RESULTS}, at most 10."}},
+        ["query"]),
+    _fn("fetch_url",
+        "Fetch one http(s) page and return its readable text, markup removed. "
+        "Use it on a result from web_search that the snippet did not settle, or "
+        "on a URL the user gave you.",
+        {"url": dict(_STR, description="An http or https URL.")}, ["url"]),
 ]
 
 
@@ -2368,6 +2463,540 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
     return _clip(f"[exit {done.returncode}]\n{out}".rstrip())
 
 
+# ---------------------------------------------------------------- #96 ------
+# WEB RESEARCH: THE MODEL SEARCHES AND READS, THE USER GETS AN ANSWER.
+#
+# A turn that ends in a list of links has not done this job -- it has handed the
+# reading back to the person a local assistant exists to do it for. The unit is
+# the chain, and it runs inside one turn: search -> read the snippets -> fetch
+# what they did not settle -> keep working. `tool_web_search` is the entry point
+# and `tool_fetch_url` serves it.
+
+# Tags whose text is never the page. `script` and `style` would otherwise
+# dominate a modern page's character count outright; the rest is furniture that
+# repeats on every page of a site, and it would fill the 16 KB with navigation
+# instead of with the answer.
+_SKIP_TAGS = frozenset({"script", "style", "noscript", "template", "svg",
+                        "nav", "header", "footer", "aside", "form", "iframe"})
+
+# Tags that end a line, or the extracted text runs together into one paragraph
+# and the model cannot tell a heading from the middle of a sentence.
+_BREAK_TAGS = frozenset({"p", "div", "br", "li", "tr", "section", "article",
+                         "h1", "h2", "h3", "h4", "h5", "h6", "pre", "blockquote"})
+
+
+class _TextExtractor(HTMLParser):
+    """HTML in, readable text out, with nothing that is not in the standard library.
+
+    A DEPTH COUNTER AND NOT A TAG TEST, because of what this parser is: its own
+    docstring says it finds tags and calls handlers, with "no notion of building
+    a parse tree, tracking open elements, or checking tag nesting". So a
+    `<script>` inside a `<nav>` closes one level, not both, and the counter is
+    what keeps the text after it from leaking back in. It is clamped at zero:
+    a stray closing tag on a malformed page would otherwise drive it negative and
+    turn every later skip into a no-op -- and malformed pages are the normal
+    case, which the same docs demonstrate on `<p><a class=link href=#main>tag
+    soup</p ></a>`.
+
+    `convert_charrefs` is left at its default of True, which is what turns
+    `&amp;` into text before it reaches handle_data -- and, per the docs, also
+    what stops handle_data being split into arbitrary chunks.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+        self.title = ""
+        self._skip = 0
+        self._in_title = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag in _SKIP_TAGS:
+            self._skip += 1
+        elif tag == "title":
+            self._in_title = True
+        elif tag in _BREAK_TAGS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in _SKIP_TAGS:
+            self._skip = max(0, self._skip - 1)
+        elif tag == "title":
+            self._in_title = False
+        elif tag in _BREAK_TAGS:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if self._skip:
+            return
+        if self._in_title:
+            self.title += data.strip()
+        elif data.strip():
+            self.parts.append(data)
+
+
+def _extract_text(html: str) -> tuple[str, str]:
+    """(title, text), whitespace collapsed.
+
+    EXTRACTION RUNS BEFORE `_clip`, NEVER AFTER, and that order is the whole
+    point of having it. A raw page is mostly head, script and navigation, so
+    clipping first keeps the furniture and throws away the paragraph the model
+    was sent for: in bytes, the answer is usually below the fold even when it is
+    at the top of the screen.
+    """
+    parser = _TextExtractor()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception:
+        # A parser that raises on one page must not take the turn with it. The
+        # tag-stripped source is a worse answer than a parse and a better one
+        # than the exception, which is what would otherwise reach run_turn.
+        return "", re.sub(r"<[^>]+>", " ", html)
+    text = re.sub(r"[ \t\r\f\v]+", " ", "".join(parser.parts))
+    return parser.title.strip(), re.sub(r"\n\s*\n\s*", "\n\n", text).strip()
+
+
+def _http_text(url: str, timeout: int = WEB_TIMEOUT, data: bytes | None = None,
+               extra_headers: dict | None = None) -> tuple[str, str] | str:
+    """One GET. Returns (content_type, body) or an error STRING -- never raises.
+
+    NEVER RAISES IS THE CONTRACT, not a courtesy: an assistant turn whose
+    `tool_calls` have no `tool` message behind them is a broken prefix for every
+    later turn of the session -- the same invariant `DECLINED` keeps. And on this
+    machine "no network" is a normal state rather than a fault, so it has to come
+    back as something the model can read and act on.
+
+    `HTTPError` is caught before `URLError` because it is a subclass of it; the
+    other way round, an HTTP 404 would report as an unreachable host.
+    """
+    headers = {
+        # Identifying, not disguised. A tool that lies about who it is cannot be
+        # rate-limited fairly, and a site that would rather not answer Crow is
+        # entitled to that.
+        "User-Agent": f"Crow/{CLIENT_VERSION or 'dev'} (+{REPO_URL})",
+        "Accept": "text/html,application/xhtml+xml,text/plain,application/json",
+    }
+    headers.update(extra_headers or {})
+    req = urllib.request.Request(url, data=data, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            charset = resp.headers.get_content_charset() or "utf-8"
+            # A bounded read, so a multi-gigabyte body cannot hold the turn until
+            # the socket gives up. Everything past this is clipped anyway.
+            raw = resp.read(WEB_MAX_DOWNLOAD)
+    except urllib.error.HTTPError as exc:
+        return f"error: {url} answered HTTP {exc.code} {exc.reason}"
+    except urllib.error.URLError as exc:
+        return (f"error: could not reach {url}: {exc.reason} -- this machine may "
+                f"be offline, or the address may be wrong")
+    except (TimeoutError, OSError, ValueError) as exc:
+        return f"error: {url} did not answer within {timeout}s ({exc})"
+    return ctype, raw.decode(charset, errors="replace")
+
+
+def tool_fetch_url(url: str = "", **_) -> str:
+    """One page, as text. It serves the search; it is not the capability alone."""
+    if not url:
+        return "error: fetch_url needs a 'url'"
+    scheme = urllib.parse.urlparse(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        # urlopen also speaks file: and data:. Left open, this tool would become
+        # an unbounded read of the disk that goes AROUND #92's boundary rather
+        # than through it -- and reads are not bounded there by design.
+        return f"error: fetch_url takes http or https, not {scheme or 'a bare path'}"
+    got = _http_text(url)
+    if isinstance(got, str):
+        return got
+    ctype, body = got
+    if ctype in ("text/html", "application/xhtml+xml", ""):
+        title, text = _extract_text(body)
+        if not text:
+            return f"error: {url} has no readable text (it may be built by scripts)"
+        return _clip((f"{title}\n{url}\n\n" if title else f"{url}\n\n") + text)
+    if ctype.startswith("text/") or ctype in ("application/json", "application/xml"):
+        return _clip(f"{url}\n\n{body}")
+    return f"error: {url} is {ctype}, which has no text to read"
+
+
+def _json_get(url: str, timeout: int = KEYLESS_TIMEOUT):
+    """A keyless GET that answers None instead of raising or returning a message.
+
+    The federation below runs several of these at once and merges what came
+    back. One source being down, rate-limited or slow is the normal case there,
+    not an error worth a sentence -- the sentence belongs to the merge, once,
+    when NOTHING came back.
+    """
+    got = _http_text(url, timeout=timeout)
+    if isinstance(got, str):
+        return None
+    try:
+        return json.loads(got[1])
+    except json.JSONDecodeError:
+        return None
+
+
+def _src_github(query: str, want: int) -> list[dict]:
+    """Repositories and issues. Unauthenticated search is 10 requests a minute,
+    which is far above what one question costs."""
+    # EVERY FIELD THROUGH .get(). One unexpected item would otherwise raise, and
+    # the federation's own guard turns that into "this source returned nothing"
+    # -- so a single odd record silently costs the whole source, which is the
+    # kind of failure that never shows up as one.
+    out = []
+    q = urllib.parse.quote(query)
+    data = _json_get(f"https://api.github.com/search/repositories?q={q}&per_page={want}")
+    for r in (data or {}).get("items", [])[:want]:
+        if r.get("html_url"):
+            out.append({"title": f"{r.get('full_name') or r['html_url']} "
+                                 f"({r.get('stargazers_count', 0)}*)",
+                        "url": r["html_url"], "content": r.get("description") or "",
+                        "source": "github"})
+    data = _json_get(f"https://api.github.com/search/issues?q={q}&per_page={want}")
+    for r in (data or {}).get("items", [])[:want]:
+        if not r.get("html_url") or r.get("number") is None:
+            continue
+        body = " ".join((r.get("body") or "").split())[:300]
+        out.append({"title": f"#{r['number']} {r.get('title') or ''} "
+                             f"[{r.get('state') or '?'}]",
+                    "url": r["html_url"], "content": body, "source": "github issue"})
+    return out
+
+
+def _src_stackoverflow(query: str, want: int) -> list[dict]:
+    """Answered questions only -- an unanswered one costs the same tokens and
+    settles nothing."""
+    data = _json_get("https://api.stackexchange.com/2.3/search/advanced?order=desc"
+                     f"&sort=relevance&accepted=True&q={urllib.parse.quote(query)}"
+                     f"&site=stackoverflow&pagesize={want}")
+    return [{"title": r["title"], "url": r["link"],
+             "content": f"score {r.get('score', 0)}, {r.get('answer_count', 0)} answers",
+             "source": "stackoverflow"}
+            for r in (data or {}).get("items", [])[:want]]
+
+
+def _src_wikipedia(query: str, want: int) -> list[dict]:
+    data = _json_get("https://en.wikipedia.org/w/api.php?action=query&list=search"
+                     f"&srsearch={urllib.parse.quote(query)}&format=json&srlimit={want}")
+    out = []
+    for r in ((data or {}).get("query") or {}).get("search", [])[:want]:
+        title = r["title"]
+        out.append({"title": title,
+                    "url": "https://en.wikipedia.org/wiki/" + urllib.parse.quote(
+                        title.replace(" ", "_")),
+                    "content": re.sub(r"<[^>]+>", "", r.get("snippet") or ""),
+                    "source": "wikipedia"})
+    return out
+
+
+# What makes a query a package question. Deliberately narrow: this source ranks
+# first, so a false positive costs the top slot, while a false negative costs
+# one line the other sources usually cover anyway.
+_PACKAGE_QUESTION = re.compile(
+    r"\b(version|versions|release|released|latest|current|install|installed|"
+    r"package|packages|pypi|pip|crate|crates|cargo|npm|changelog|upgrade)\b",
+    re.I)
+
+
+def _src_packages(query: str, want: int) -> list[dict]:
+    """Exact-name lookups, and they answer the question this tool exists for.
+
+    "which version of X is current" is the single most common thing a model
+    trained months ago gets wrong, and it is the one question with an
+    authoritative one-request answer. PyPI has no search endpoint any more, so
+    the query's identifier-looking words are tried as names -- a miss costs one
+    404 and prints nothing.
+
+    IT ONLY FIRES WHEN THE QUESTION IS ABOUT A PACKAGE, and that gate was added
+    after a live run on 2026-08-14: "llama.cpp moe stream flag" matched a music
+    library manager on PyPI and, because this source ranks first, `Moe 2.5.0`
+    led the results. A coincidental name match in the top slot is worse than
+    noise -- it looks authoritative, and it is the answer the model reads first.
+    """
+    if not _PACKAGE_QUESTION.search(query):
+        return []
+    out = []
+    for word in re.findall(r"[A-Za-z][A-Za-z0-9_.-]{2,}", query)[:3]:
+        data = _json_get(f"https://pypi.org/pypi/{urllib.parse.quote(word)}/json")
+        info = (data or {}).get("info")
+        if info:
+            out.append({"title": f"pypi {info['name']} {info['version']}",
+                        "url": info.get("project_url") or
+                        f"https://pypi.org/project/{info['name']}/",
+                        "content": info.get("summary") or "", "source": "pypi"})
+        data = _json_get(f"https://crates.io/api/v1/crates/{urllib.parse.quote(word)}")
+        crate = (data or {}).get("crate")
+        if crate:
+            out.append({"title": f"crate {crate['name']} {crate.get('max_stable_version')}",
+                        "url": f"https://crates.io/crates/{crate['name']}",
+                        "content": crate.get("description") or "", "source": "crates.io"})
+    return out
+
+
+# What makes a query a model question. Same shape and the same reason as the
+# package gate: this source is authoritative for "does this model exist", and
+# noise for anything else.
+_MODEL_QUESTION = re.compile(
+    r"\b(model|models|gguf|quant|quantis|weights|checkpoint|huggingface|"
+    r"\d{1,3}b|moe|llm|instruct|qwen|llama|mistral|deepseek|gemma|phi)\b", re.I)
+
+
+def _src_huggingface(query: str, want: int) -> list[dict]:
+    """Does this model exist, what is it, and how much traction does it have.
+
+    ADDED BECAUSE OF WHAT THE FIRST LIVE RUN LACKED, 2026-08-14. Asked in the
+    window about "Qwen3.8-27B" -- a release that postdates the model's training
+    -- the search returned three third-party pull requests and the model wrote a
+    specification from them. It turned out to be broadly right, which is the
+    point: nothing in those results could have told it so. This registry can.
+    `Qwen/Qwen3.8-27B` reports 2 downloads against 8,457 likes, which is the
+    signature of a release published hours ago, and `pipeline_tag`
+    image-text-to-text confirms the vision half without reading a single page.
+
+    THE COUNTS ARE THE WEIGHT, and they are printed for that reason: an official
+    org path with millions of downloads and a 0-download re-upload of the same
+    name are the same string and not the same evidence.
+    """
+    if not _MODEL_QUESTION.search(query):
+        return []
+    # THE NAME, NOT THE SENTENCE. Measured 2026-08-14: "Qwen3.5-27B model" --
+    # a model that exists -- returned nothing, because the word "model" is part
+    # of the search string and the registry matches names. The gate words are
+    # exactly the ones that must not travel into the query they let through.
+    name = " ".join(w for w in query.split() if not _MODEL_QUESTION.fullmatch(w))
+    if not name.strip():
+        return []
+    data = _json_get("https://huggingface.co/api/models?limit=%d&sort=downloads"
+                     "&direction=-1&search=%s" % (want, urllib.parse.quote(name)))
+    out = []
+    for m in (data or [])[:want] if isinstance(data, list) else []:
+        mid = m.get("modelId") or m.get("id")
+        if not mid:
+            continue
+        out.append({"title": f"HF {mid}",
+                    "url": f"https://huggingface.co/{mid}",
+                    "content": f"{m.get('downloads', 0):,} downloads, "
+                               f"{m.get('likes', 0)} likes, "
+                               f"{m.get('pipeline_tag') or 'no pipeline tag'}",
+                    "source": "huggingface"})
+    if not out and isinstance(data, list):
+        # AN ABSENCE THE MODEL CAN READ. This is the half the first live run was
+        # missing: the registry had no entry, the registry said so by returning
+        # nothing, and nothing is invisible in a result list -- so the model saw
+        # only three third-party pull requests and wrote a specification from
+        # them. A silent absence teaches nothing; this line is the evidence.
+        return [{"note": f"huggingface: no model matching {query!r} exists"}]
+    return out
+
+
+def _src_ddg_answer(query: str, want: int) -> list[dict]:
+    """DuckDuckGo's OFFICIAL instant-answer API -- keyless, documented, and not
+    the html endpoint. It answers a minority of queries, and when it does the
+    answer costs no fetch at all."""
+    data = _json_get("https://api.duckduckgo.com/?format=json&no_html=1&q="
+                     + urllib.parse.quote(query))
+    text = (data or {}).get("AbstractText") or (data or {}).get("Answer") or ""
+    if not text:
+        return []
+    return [{"answer": text, "url": (data or {}).get("AbstractURL") or "",
+             "source": "duckduckgo"}]
+
+
+# THE KEYLESS FEDERATION, and why it is the default rather than a fallback.
+#
+# A general web index costs money, an account, a service, or a lie. The last one
+# is not a trade-off, it is the mechanism: measured 2026-08-14, ONE URL and one
+# second apart, lite.duckduckgo.com answered HTTP 200 with 10 results to a
+# browser user-agent and HTTP 202 with none to `Crow/0.3.3 (+github...)`. A
+# search that only works while Crow misrepresents what it is would break in
+# every installation at once the day that check tightens, and nobody would be
+# able to tell the user why.
+#
+# These six sources are the opposite trade: official, documented, keyless, and
+# they answer the questions a CODING assistant actually has -- which version is
+# current, does this repo exist, has someone hit this error, what is this thing.
+# Measured the same day with an honest user-agent: all six answered HTTP 200,
+# github reported 7,356 repositories and 245 issues, wikipedia 10 articles,
+# pypi `requests 2.34.2`, stackexchange quota_remaining 298 of 300.
+#
+# For general web search beyond these, CROW_TAVILY_KEY or CROW_SEARXNG_URL take
+# over -- an upgrade the user may choose, not a setup step they must complete.
+# THE ORDER IS AUTHORITY, AND IT IS LOAD-BEARING. Measured live on 2026-08-14:
+# concatenating the sources put github first unconditionally, so "requests
+# library current version" answered with a stranger's library-management project
+# while pypi's exact `requests 2.34.2` sat further down. The merge below is
+# round-robin in this order, so the first three lines are the three best
+# ANSWERS rather than the first source's first three guesses.
+KEYLESS_SOURCES = (_src_packages, _src_huggingface, _src_ddg_answer,
+                   _src_stackoverflow, _src_github, _src_wikipedia)
+
+# EVERY SNIPPET, NOT JUST THE LONG ONES. The same live run returned 16,056 bytes
+# for three results, because one repository description was 15 KB on its own --
+# `_clip` then cut the tail, so the model paid full prefill for one project's
+# marketing and never saw results two and three. `_clip`'s own lesson, one level
+# down: a result count is not a size.
+MAX_SNIPPET = 240
+
+
+def _search_keyless(query: str, want: int) -> dict:
+    """Every source at once, because the slowest one would otherwise set the pace.
+
+    Sequentially this is five to eight requests -- at KEYLESS_TIMEOUT each, a
+    single dead source would cost more wall clock than the whole search is worth.
+    """
+    collected: list[list[dict]] = [[] for _ in KEYLESS_SOURCES]
+
+    def run(i, src):
+        try:
+            collected[i] = src(query, want)
+        except Exception:
+            collected[i] = []          # one source may never sink the search
+
+    threads = [threading.Thread(target=run, args=(i, s), daemon=True)
+               for i, s in enumerate(KEYLESS_SOURCES)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=KEYLESS_TIMEOUT + 2)
+
+    answers = [h["answer"] for g in collected for h in g if "answer" in h]
+    notes = [h["note"] for g in collected for h in g if "note" in h]
+    queues = [[h for h in g if h.get("url")] for g in collected]
+    results, seen = [], set()
+    for rank in range(max((len(q) for q in queues), default=0)):
+        for queue in queues:                      # round-robin: one each, in turn
+            if rank >= len(queue):
+                continue
+            hit = queue[rank]
+            if hit["url"] in seen:
+                continue
+            seen.add(hit["url"])
+            hit["content"] = " ".join((hit.get("content") or "").split())[:MAX_SNIPPET]
+            results.append(hit)
+    return {"results": results, "answers": answers, "notes": notes}
+
+
+def _search_tavily(query: str, want: int) -> dict | str:
+    """The shipping default: a free key, no card, nothing to install or run.
+
+    `include_answer` is on because it is the cheapest thing in this whole file --
+    a finished answer costs no fetch, and a fetch costs two minutes.
+    """
+    body = json.dumps({"query": query, "max_results": want,
+                       "include_answer": True}).encode("utf-8")
+    got = _http_text(TAVILY_URL, data=body, extra_headers={
+        "Authorization": f"Bearer {TAVILY_KEY}",
+        "Content-Type": "application/json",
+    })
+    if isinstance(got, str):
+        # A rejected key is an HTTP 401, and "unauthorized" alone would leave the
+        # user guessing which of their env vars is wrong.
+        if "401" in got or "403" in got:
+            return (f"{got}\nCROW_TAVILY_KEY was refused. Check it at "
+                    f"https://tavily.com, or unset it and set CROW_SEARXNG_URL "
+                    f"to your own instance.")
+        return got
+    _, text = got
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return f"error: {TAVILY_URL} did not answer with JSON"
+
+
+def _search_searxng(query: str) -> dict | str:
+    """The second provider: unlimited and account-free, for a machine already running one."""
+    url = (SEARXNG_URL.rstrip("/") + "/search?"
+           + urllib.parse.urlencode({"q": query, "format": "json"}))
+    got = _http_text(url)
+    if isinstance(got, str):
+        return (f"{got}\n(Crow is set to search through a SearXNG at "
+                f"{SEARXNG_URL}. Change CROW_SEARXNG_URL, or unset it and set "
+                f"CROW_TAVILY_KEY instead.)")
+    _, body = got
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        # The instance answered, but with a page. That is its DEFAULT state --
+        # settings_search.rst ships `formats: [html]` -- so it gets a sentence
+        # that says what to change, not a parser error that says what broke.
+        return (f"error: {SEARXNG_URL} did not answer with JSON. Add 'json' under "
+                f"search.formats in its settings.yml and restart it -- only 'html' "
+                f"is enabled by default.")
+
+
+def tool_web_search(query: str = "", count: int = SEARCH_RESULTS, **_) -> str:
+    """Search, and return results worth using without opening any of them.
+
+    THE SNIPPET IS THE PRODUCT. Every fetch that follows costs about two minutes
+    of prefill, so a result list that settles the common question on its own is
+    the difference between a capability and a way to spend a turn. searxng's
+    `answers` field is the best case of that -- a direct answer, zero fetches --
+    which is why it is printed first and not folded in with the results.
+    """
+    if not query:
+        return "error: web_search needs a 'query'"
+    try:
+        want = max(1, min(int(count or SEARCH_RESULTS), 10))
+    except (TypeError, ValueError):
+        want = SEARCH_RESULTS
+
+    # NOTHING HAS TO BE CONFIGURED, and that is the whole point: Crow arrives
+    # through one line of PowerShell, and a capability that starts with "first
+    # create an account" is a capability nobody switches on. The keyless
+    # federation is therefore the default; a key or an instance is an upgrade
+    # for whoever wants a general index, not a setup step.
+    if SEARXNG_URL:
+        data = _search_searxng(query)
+    elif TAVILY_KEY:
+        data = _search_tavily(query, want)
+    else:
+        data = _search_keyless(query, want)
+    if isinstance(data, str):
+        return data
+
+    results = data.get("results") or []
+    lines = []
+    # Both providers can hand back a finished answer -- searxng under `answers`,
+    # tavily under `answer`. It is the best case there is here: zero fetches,
+    # zero further rounds, and it is printed first rather than folded in with
+    # the results, where the model would have to notice it.
+    answers = data.get("answers") or ([data["answer"]] if data.get("answer") else [])
+    for answer in answers[:2]:
+        text = answer.get("answer") if isinstance(answer, dict) else answer
+        if text:
+            lines.append(f"answer: {text}")
+    # Before the results, because a registry saying "this does not exist" outranks
+    # every keyword match underneath it -- and underneath is where it would be
+    # read last, if at all.
+    for note in (data.get("notes") or []):
+        lines.append(f"note: {note}")
+    for n, hit in enumerate(results[:want], 1):
+        snippet = " ".join((hit.get("content") or "").split())
+        # The source is named because these are not interchangeable. An accepted
+        # stackoverflow answer, an open issue and an encyclopaedia paragraph
+        # carry different weight, and a list that hides which is which invites
+        # the model to weigh them the same.
+        tag = f" [{hit['source']}]" if hit.get("source") else ""
+        lines.append(f"{n}. {(hit.get('title') or '').strip()}{tag}\n"
+                     f"   {(hit.get('url') or '').strip()}\n   {snippet}")
+    if not lines:
+        # AN EMPTY RESULT AND A BROKEN BACKEND LOOK IDENTICAL from here, and they
+        # are not the same answer: searxng reports the engines that failed
+        # separately, so a query that found nothing because every engine was
+        # rate-limited says so instead of reading as "the web does not know".
+        dead = data.get("unresponsive_engines") or []
+        if dead:
+            return (f"no result for {query} -- and {len(dead)} engine(s) did not "
+                    f"answer: {dead}. This may be the instance, not the query.")
+        if not (SEARXNG_URL or TAVILY_KEY):
+            return f"no result for {query}" + NO_GENERAL_INDEX
+        return f"no result for {query}"
+    lines.append(f"\n[the snippets answer most questions; fetch_url at most "
+                 f"{MAX_FETCHES} of these, each costs ~2 min]")
+    return _clip("\n".join(lines))
+
+
 TOOL_IMPL = {
     "read_file": tool_read_file,
     "write_file": tool_write_file,
@@ -2376,6 +3005,8 @@ TOOL_IMPL = {
     "find_files": tool_find_files,
     "search_text": tool_search_text,
     "run_command": tool_run_command,
+    "web_search": tool_web_search,
+    "fetch_url": tool_fetch_url,
 }
 
 
@@ -2395,9 +3026,26 @@ TOOL_CLASS = {
     "write_file": "writing",
     "edit_file": "writing",
     "run_command": "executing",
+    # #96. A FOURTH CLASS, because neither of the three fits. Fetching destroys
+    # nothing, so it is not `writing`; it starts no shell, so it is not
+    # `executing`. But it is not `reading` either, and calling it that would be
+    # the mistake this entry exists to avoid: a local read stays on the machine,
+    # while these two send the query off it and bring a stranger's text back in.
+    # Both halves matter -- what leaves, and what arrives.
+    "web_search": "network",
+    "fetch_url": "network",
 }
 
 # Which classes stop and ask, per level. A class not named here runs.
+#
+# `network` IS ABSENT FROM EVERY LEVEL, DELIBERATELY (robin, #96, 2026-08-14):
+# a search happens because a task was given, and giving the task is the release.
+# Asking "may I look this up?" of the person who just asked the question is the
+# same protection-nobody-keeps-on that the reading rule already names -- it would
+# arrive mid-turn, at round 9 of 24, about a step the user implicitly ordered.
+# The class still exists above, because the classification is true even when no
+# level acts on it, and because a later level that DOES want to gate the network
+# needs the name to already mean something.
 MODE_ASKS = {
     "manual": ("writing", "executing"),
     "allowedit": ("executing",),

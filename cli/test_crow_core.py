@@ -1766,5 +1766,442 @@ class ReportedNotRunIsAlsoTheCLIsTests(unittest.TestCase):
         self.assertIn("execute_tools=", inspect.getsource(crow.repl))
 
 
+class _FakeResponse:
+    """What urlopen returns, reduced to the four things _http_text touches."""
+
+    def __init__(self, body: bytes, ctype: str = "text/html", charset: str = "utf-8"):
+        self._body, self._ctype, self._charset = body, ctype, charset
+
+    class _Headers:
+        def __init__(self, ctype, charset):
+            self._ctype, self._charset = ctype, charset
+
+        def get(self, name, default=None):
+            return self._ctype if name == "Content-Type" else default
+
+        def get_content_charset(self):
+            return self._charset
+
+    @property
+    def headers(self):
+        return self._Headers(self._ctype, self._charset)
+
+    def read(self, limit=None):
+        return self._body[:limit] if limit else self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _Urlopen:
+    """Swaps crow_core's urlopen for the length of a `with`, and records the URL."""
+
+    def __init__(self, outcome):
+        self._outcome = outcome
+        self.seen: list[str] = []
+        self.reqs: list = []
+
+    def __enter__(self):
+        self._real = crow_core.urllib.request.urlopen
+
+        def fake(req, timeout=None):
+            self.reqs.append(req)
+            url = req.full_url if hasattr(req, "full_url") else req
+            self.seen.append(url)
+            # A callable outcome lets one test answer several hosts differently,
+            # which the keyless federation needs: it asks five at once.
+            out = self._outcome(url) if callable(self._outcome) else self._outcome
+            if isinstance(out, Exception):
+                raise out
+            return out
+
+        crow_core.urllib.request.urlopen = fake
+        return self
+
+    def __exit__(self, *exc):
+        crow_core.urllib.request.urlopen = self._real
+        return False
+
+
+class WebExtractionTests(unittest.TestCase):
+    """#96. What comes back from a page, and what must not."""
+
+    def test_the_answer_survives_and_the_furniture_does_not(self):
+        title, text = crow_core._extract_text(
+            "<html><head><title>llama.cpp flags</title>"
+            "<style>body{" + "x" * 500 + "}</style>"
+            "<script>var a=" + "1" * 500 + ";</script></head>"
+            "<body><nav>Home About Contact</nav><header>junk</header>"
+            "<h1>--moe-stream</h1><p>Streams expert tensors from disk.</p>"
+            "<footer>(c) nobody</footer></body></html>")
+        self.assertEqual(title, "llama.cpp flags")
+        self.assertIn("--moe-stream", text)
+        self.assertIn("Streams expert tensors", text)
+        for gone in ("var a", "Home About", "(c) nobody", "body{"):
+            self.assertNotIn(gone, text)
+
+    def test_an_extractor_that_returns_nothing_must_not_pass(self):
+        """THE NEGATIVE HALF. Every case above is satisfied by returning "" --
+        no script, no nav, no footer. Without this assertion the suite would
+        certify an extractor that deletes the page."""
+        _, text = crow_core._extract_text("<p>Streams expert tensors from disk.</p>")
+        self.assertGreater(len(text), 20)
+
+    def test_extraction_runs_before_the_clip_and_not_after(self):
+        """The one that decides whether the tool works at all. 40 KB of script
+        ahead of the answer: clip first and the model receives markup and no
+        answer, because in BYTES the answer is below the fold even when it sits
+        at the top of the screen."""
+        page = ("<html><head><script>" + "z" * (crow_core.MAX_TOOL_BYTES * 3)
+                + "</script></head><body><p>The flag is --moe-stream.</p></body></html>")
+        self.assertGreater(len(page), crow_core.MAX_TOOL_BYTES)
+        with _Urlopen(_FakeResponse(page.encode())):
+            out = crow_core.tool_fetch_url("https://example.org/doc")
+        self.assertIn("--moe-stream", out)
+        self.assertLessEqual(len(out), crow_core.MAX_TOOL_BYTES + 200)
+
+    def test_a_stray_closing_tag_does_not_disable_the_skip(self):
+        """HTMLParser tracks no nesting -- its own docs say so -- so the depth
+        counter is ours to keep. Unclamped it would go negative here and every
+        later skip would be a no-op."""
+        _, text = crow_core._extract_text(
+            "</script></nav><p>visible</p><script>hidden</script>")
+        self.assertIn("visible", text)
+        self.assertNotIn("hidden", text)
+
+    def test_character_references_arrive_as_characters(self):
+        _, text = crow_core._extract_text("<p>b4321 &amp; later</p>")
+        self.assertIn("b4321 & later", text)
+
+
+class WebFetchTests(unittest.TestCase):
+    """#96. Every way out of tool_fetch_url is a string the model can read."""
+
+    def test_a_non_http_scheme_is_refused(self):
+        """file:// would make this an unbounded read of the disk that goes
+        AROUND #92's boundary rather than through it -- reads are unbounded
+        there by design, so the refusal has to happen here."""
+        for url in ("file:///C:/Windows/win.ini", "data:text/html,<p>x", "ftp://h/f"):
+            self.assertTrue(crow_core.tool_fetch_url(url).startswith("error:"), url)
+
+    def test_an_unreachable_host_is_a_tool_result_and_not_an_exception(self):
+        """The invariant DECLINED already keeps: an assistant turn whose
+        tool_calls have no tool message behind them is a broken prefix for every
+        later turn. Offline is a normal state on this machine."""
+        with _Urlopen(crow_core.urllib.error.URLError("getaddrinfo failed")):
+            out = crow_core.tool_fetch_url("https://example.org/")
+        self.assertTrue(out.startswith("error:"))
+        self.assertIn("offline", out)
+
+    def test_an_http_error_names_its_code_rather_than_the_host(self):
+        """HTTPError is a SUBCLASS of URLError. Caught in the other order, a 404
+        would report as an unreachable host."""
+        exc = crow_core.urllib.error.HTTPError("https://example.org/", 404,
+                                               "Not Found", None, None)
+        with _Urlopen(exc):
+            out = crow_core.tool_fetch_url("https://example.org/")
+        self.assertIn("404", out)
+        self.assertNotIn("offline", out)
+
+    def test_a_page_with_no_readable_text_says_so(self):
+        with _Urlopen(_FakeResponse(b"<html><body><script>app()</script></body></html>")):
+            self.assertIn("no readable text", crow_core.tool_fetch_url("https://e.org/"))
+
+    def test_a_plain_text_body_is_passed_through(self):
+        with _Urlopen(_FakeResponse(b"--moe-stream: stream experts",
+                                    ctype="text/plain")):
+            self.assertIn("--moe-stream", crow_core.tool_fetch_url("https://e.org/f.txt"))
+
+
+class _Backend:
+    """Points crow_core at one provider for the length of a `with`."""
+
+    def __init__(self, *, tavily="", searxng=""):
+        self._want = (tavily, searxng)
+
+    def __enter__(self):
+        self._had = (crow_core.TAVILY_KEY, crow_core.SEARXNG_URL)
+        crow_core.TAVILY_KEY, crow_core.SEARXNG_URL = self._want
+        return self
+
+    def __exit__(self, *exc):
+        crow_core.TAVILY_KEY, crow_core.SEARXNG_URL = self._had
+        return False
+
+
+class WebSearchTests(unittest.TestCase):
+    """#96. The search is the capability; the snippets are the product."""
+
+    def _json(self, payload):
+        return _FakeResponse(json.dumps(payload).encode(), ctype="application/json")
+
+    # -- no backend, which is what a fresh installation has --------------------
+
+    # -- the keyless federation, which is what a fresh install runs -----------
+
+    def _federation(self, **by_host):
+        """Answers each keyless host from `by_host`, everything else empty."""
+        def pick(url):
+            for host, payload in by_host.items():
+                if host in url:
+                    return self._json(payload)
+            return self._json({})
+        return pick
+
+    def test_a_fresh_install_searches_without_being_configured_first(self):
+        """THE CASE THIS DESIGN EXISTS FOR. Crow arrives through one line of
+        PowerShell; a capability that begins with "first create an account" is
+        one nobody switches on. So with nothing set, the search still runs."""
+        with _Backend(), _Urlopen(self._federation(
+                **{"api.github.com/search/repositories": {"items": [
+                    {"full_name": "ggml-org/llama.cpp", "html_url": "https://gh/l",
+                     "description": "LLM inference in C/C++", "stargazers_count": 7}]}})) as spy:
+            out = crow_core.tool_web_search("llama.cpp")
+        self.assertIn("ggml-org/llama.cpp", out)
+        self.assertIn("[github]", out)
+        self.assertTrue(any("api.github.com" in u for u in spy.seen))
+        self.assertTrue(any("wikipedia.org" in u for u in spy.seen))
+
+    def test_no_source_is_asked_to_identify_as_a_browser(self):
+        """MEASURED 2026-08-14, and the reason the open web is not among these
+        sources: lite.duckduckgo.com answered 200 with 10 results to a browser
+        user-agent and 202 with none to Crow's own, one URL and one second
+        apart. A search that works only while Crow misrepresents itself breaks
+        everywhere at once the day that check tightens."""
+        with _Backend(), _Urlopen(self._federation()) as spy:
+            crow_core.tool_web_search("anything")
+        self.assertTrue(spy.reqs)
+        for req in spy.reqs:
+            agent = req.get_header("User-agent") or ""
+            self.assertIn("Crow/", agent)
+            self.assertNotIn("Mozilla", agent)
+            self.assertNotIn("Chrome", agent)
+
+    def test_one_dead_source_does_not_sink_the_search(self):
+        """Five hosts are asked at once; one being down, slow or rate-limited is
+        the normal case and must cost nothing but its own results."""
+        def pick(url):
+            if "stackexchange" in url:
+                return crow_core.urllib.error.HTTPError(url, 429, "Too Many", None, None)
+            if "wikipedia.org" in url:
+                return self._json({"query": {"search": [{"title": "Llama.cpp",
+                                                         "snippet": "a <b>C++</b> port"}]}})
+            return self._json({})
+        with _Backend(), _Urlopen(pick):
+            out = crow_core.tool_web_search("llama.cpp")
+        self.assertIn("Llama.cpp", out)
+        self.assertIn("[wikipedia]", out)
+
+    def test_the_same_url_from_two_sources_is_listed_once(self):
+        """The payload parses as BOTH a repository and an issue, so two sources
+        really do produce the same URL -- which is what the deduplication is
+        for. Without the second parse this test passes with no duplicate to
+        remove, and certifies nothing."""
+        both = {"items": [{"full_name": "a/b", "html_url": "https://same",
+                           "description": "", "stargazers_count": 0,
+                           "number": 7, "title": "t", "state": "open"}]}
+        with _Backend(), _Urlopen(self._federation(**{"api.github.com": both})):
+            out = crow_core.tool_web_search("x")
+        self.assertIn("https://same", out)
+        self.assertEqual(out.count("https://same"), 1, out)
+
+    def test_the_exact_answer_outranks_the_keyword_match(self):
+        """MEASURED 2026-08-14: concatenating the sources put github first
+        unconditionally, so "requests library current version" answered with a
+        stranger's library-management project while pypi's exact `requests
+        2.34.2` sat further down. The merge is round-robin in authority order,
+        so line 1 is the best ANSWER and not the first source's first guess."""
+        with _Backend(), _Urlopen(self._federation(**{
+                "pypi.org": {"info": {"name": "requests", "version": "2.34.2",
+                                      "summary": "Python HTTP for Humans."}},
+                "api.github.com/search/repositories": {"items": [
+                    {"full_name": "someone/library-manager", "html_url": "https://gh/x",
+                     "description": "unrelated", "stargazers_count": 14}]}})):
+            out = crow_core.tool_web_search("requests library current version")
+        self.assertLess(out.index("pypi requests 2.34.2"),
+                        out.index("someone/library-manager"), out)
+
+    def test_an_empty_keyless_search_offers_the_upgrade_instead_of_a_fault(self):
+        """These sources are code, packages and reference -- not the open web.
+        A question outside them is a reason to offer more, not to report a
+        breakage."""
+        with _Backend(), _Urlopen(self._federation()):
+            out = crow_core.tool_web_search("who won the 1974 world cup")
+        self.assertIn("CROW_TAVILY_KEY", out)
+        self.assertIn("not the open web", out)
+
+    def test_a_version_question_reaches_the_package_registries(self):
+        with _Backend(), _Urlopen(self._federation(**{"pypi.org": {"info": {
+                "name": "requests", "version": "2.34.2",
+                "summary": "Python HTTP for Humans."}}})) as spy:
+            out = crow_core.tool_web_search("requests library current version")
+        self.assertIn("pypi requests 2.34.2", out)
+        self.assertTrue(any("pypi.org/pypi/requests" in u for u in spy.seen))
+
+    def test_a_query_that_is_not_about_a_package_never_asks_a_registry(self):
+        """MEASURED 2026-08-14, and the reason the gate exists: "llama.cpp moe
+        stream flag" matched a music library manager on PyPI, and because this
+        source ranks first, `Moe 2.5.0` led the results. A coincidental name
+        match in the top slot is worse than noise -- it looks authoritative."""
+        with _Backend(), _Urlopen(self._federation()) as spy:
+            crow_core.tool_web_search("llama.cpp moe stream flag")
+        self.assertFalse([u for u in spy.seen if "pypi.org" in u or "crates.io" in u],
+                         "asked a package registry about a query with no package question")
+
+    def test_one_long_description_cannot_eat_the_whole_result(self):
+        """MEASURED the same day: three results came to 16,056 bytes because a
+        single repository description was 15 KB. _clip then cut the tail, so the
+        model paid full prefill for one project's marketing and never saw
+        results two and three. A result count is not a size."""
+        with _Backend(), _Urlopen(self._federation(
+                **{"api.github.com/search/repositories": {"items": [
+                    {"full_name": "a/b", "html_url": "https://gh/1",
+                     "description": "x" * 20_000, "stargazers_count": 1}]}})):
+            out = crow_core.tool_web_search("anything")
+        self.assertLess(len(out), 2_000, "one snippet filled the budget")
+        self.assertIn("a/b", out)
+
+    def test_a_configured_backend_does_not_get_that_hint(self):
+        """NEGATIVE HALF: the hint is for someone who has not upgraded. Printed
+        to someone who has, it is noise that reads as a failure."""
+        with _Backend(tavily="k"), _Urlopen(self._json({"results": []})):
+            self.assertNotIn("CROW_TAVILY_KEY", crow_core.tool_web_search("x"))
+
+    # -- tavily, the shipping default ----------------------------------------
+
+    def test_the_key_goes_in_the_header_and_never_in_the_url(self):
+        with _Backend(tavily="tvly-secret"), _Urlopen(self._json({"results": []})) as spy:
+            crow_core.tool_web_search("moe stream")
+        self.assertEqual(len(spy.reqs), 1)
+        req = spy.reqs[0]
+        self.assertEqual(req.full_url, crow_core.TAVILY_URL)
+        self.assertEqual(req.get_header("Authorization"), "Bearer tvly-secret")
+        self.assertNotIn("tvly-secret", req.full_url)
+        self.assertIn(b"moe stream", req.data)
+
+    def test_a_refused_key_says_which_variable_to_fix(self):
+        exc = crow_core.urllib.error.HTTPError(crow_core.TAVILY_URL, 401,
+                                               "Unauthorized", None, None)
+        with _Backend(tavily="tvly-wrong"), _Urlopen(exc):
+            out = crow_core.tool_web_search("x")
+        self.assertIn("CROW_TAVILY_KEY", out)
+        self.assertIn("401", out)
+
+    def test_tavilys_finished_answer_is_printed_first(self):
+        with _Backend(tavily="k"), _Urlopen(self._json(
+                {"answer": "b4321", "results": [{"title": "t", "url": "u",
+                                                 "content": "c"}]})):
+            out = crow_core.tool_web_search("when was it added")
+        self.assertTrue(out.startswith("answer: b4321"), out[:40])
+
+    # -- searxng, for a machine that already runs one -------------------------
+
+    def test_a_set_instance_url_wins_over_a_key(self):
+        """Whoever set the URL meant it, and their instance has no ceiling."""
+        with _Backend(tavily="k", searxng="http://127.0.0.1:8888"), \
+                _Urlopen(self._json({"results": []})) as spy:
+            crow_core.tool_web_search("moe stream")
+        self.assertIn("format=json", spy.seen[0])
+        self.assertTrue(spy.seen[0].startswith("http://127.0.0.1:8888"))
+
+    def test_results_carry_snippets_so_a_fetch_is_not_needed(self):
+        with _Backend(searxng="http://s"), _Urlopen(self._json({"results": [
+                {"title": "moe-stream", "url": "https://ex.org/a",
+                 "content": "Streams expert tensors from disk."}]})):
+            out = crow_core.tool_web_search("moe stream")
+        self.assertIn("https://ex.org/a", out)
+        self.assertIn("Streams expert tensors", out)
+
+    def test_an_instance_answering_html_says_what_to_change(self):
+        """Its DEFAULT state: searxng ships `formats: [html]`, so format=json
+        returns a page. Measured 2026-08-14: six public instances were probed
+        and not one served JSON. A JSONDecodeError here would report a parser
+        fault for a configuration nobody has made yet."""
+        with _Backend(searxng="http://s"), \
+                _Urlopen(_FakeResponse(b"<html><body>results</body></html>")):
+            out = crow_core.tool_web_search("anything")
+        self.assertIn("search.formats", out)
+        self.assertIn("settings.yml", out)
+
+    def test_a_dead_backend_does_not_read_as_the_web_knowing_nothing(self):
+        """Zero results and every engine rate-limited look identical from here,
+        and they are not the same answer."""
+        with _Backend(searxng="http://s"), _Urlopen(self._json(
+                {"results": [], "unresponsive_engines": [["google", "429"]]})):
+            out = crow_core.tool_web_search("moe stream")
+        self.assertIn("did not answer", out)
+        with _Backend(searxng="http://s"), _Urlopen(self._json(
+                {"results": [], "unresponsive_engines": []})):
+            plain = crow_core.tool_web_search("moe stream")
+        self.assertNotIn("did not answer", plain)
+
+    def test_an_unreachable_instance_names_the_address_it_tried(self):
+        with _Backend(searxng="http://127.0.0.1:8888"), \
+                _Urlopen(crow_core.urllib.error.URLError("refused")):
+            out = crow_core.tool_web_search("x")
+        self.assertIn("127.0.0.1:8888", out)
+        self.assertIn("CROW_TAVILY_KEY", out)
+
+
+class WebToolsAreDeclaredTests(unittest.TestCase):
+    """#96. The wiring, and the one entry whose absence is silent."""
+
+    def test_both_tools_are_offered_and_implemented(self):
+        offered = [t["function"]["name"] for t in crow_core.TOOLS]
+        for name in ("web_search", "fetch_url"):
+            self.assertIn(name, offered)
+            self.assertIn(name, crow_core.TOOL_IMPL)
+
+    def test_a_missing_class_entry_would_be_silent_at_auto(self):
+        """needs_approval treats an unknown tool as `executing`, so a forgotten
+        TOOL_CLASS entry is survivable at manual and wrong at auto -- the
+        default. This asserts the entry itself, not the behaviour it produces."""
+        for name in ("web_search", "fetch_url"):
+            self.assertIn(name, crow_core.TOOL_CLASS)
+            self.assertEqual(crow_core.TOOL_CLASS[name], "network")
+
+    def test_the_network_class_asks_at_no_level(self):
+        """robin, 2026-08-14: a search happens because a task was given, and
+        giving the task is the release."""
+        for mode in crow_core.MODES:
+            for name in ("web_search", "fetch_url"):
+                self.assertFalse(crow_core.needs_approval(name, mode), f"{name}/{mode}")
+
+    def _search_description(self):
+        return next(t["function"]["description"] for t in crow_core.TOOLS
+                    if t["function"]["name"] == "web_search")
+
+    def test_the_search_tool_says_a_list_of_links_is_not_an_answer(self):
+        """The description is the only place the model learns that finding a
+        URL is not the job. A wording that drops it produces exactly the turn
+        #96 was opened against."""
+        desc = self._search_description()
+        self.assertIn("not an answer", desc)
+        self.assertIn("name the sources", desc)
+
+    def test_the_wording_makes_the_model_weigh_its_sources(self):
+        """OBSERVED IN THE WINDOW, 2026-08-14. Asked about "Qwen3.8-27B" the
+        model found three third-party pull requests and wrote a specification
+        from them -- release date, licence, context window, vision projector.
+        It was broadly right, and that is the uncomfortable part: the same
+        procedure over the same class of source produces a confident answer
+        whether or not it happens to be true. The instruction has to separate
+        what a source establishes from what it merely mentions, because the
+        model cannot tell the two apart from the result list alone."""
+        desc = self._search_description()
+        self.assertIn("unconfirmed", desc)
+        self.assertIn("was not found", desc)
+
+    def test_the_rule_carries_its_exception_for_a_user_who_asked(self):
+        """THE OTHER FAILURE, and the reason "never give a link" is the wrong
+        rule: someone who asks for the URL, the docs page or the source wants
+        exactly that. A description that bans links outright is broken in the
+        opposite direction and passes the test above."""
+        self.assertIn("unless the user asked", self._search_description())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

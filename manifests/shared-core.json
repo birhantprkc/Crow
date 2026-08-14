@@ -61,6 +61,16 @@
    "why": "Local execution with a timeout and a secret-stripped environment. A surface that ships its own would be shipping its own idea of what a child process may see."
   },
   {
+   "name": "tool_web_search",
+   "kind": "def",
+   "why": "#96. The entry point of web research, and the only place the wording that stops a turn ending in a list of links is written. A surface with its own copy would be a surface with its own idea of what counts as an answer -- and of how many pages one question may cost."
+  },
+  {
+   "name": "tool_fetch_url",
+   "kind": "def",
+   "why": "#96. One page, as text, with extraction ahead of the clip. It is here rather than in a surface because the two rules it carries are core rules: http(s) only, so it cannot become a disk read around #92's boundary, and every failure comes back as a tool result rather than an exception."
+  },
+  {
    "name": "TOOL_IMPL",
    "kind": "binding",
    "why": "The name-to-function table. It is a dict rather than a def, which is why the manifest needs a kind at all: hanging a def predicate on it would declare it and check nothing. A second table is how one surface ends up offering six tools and the other seven."

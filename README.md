@@ -229,10 +229,51 @@ prefix diverges where the thoughts began, and everything behind it is re-read. F
 the client sends its `tools` array with every request — with an empty array both variants render byte
 for byte the same. Measured 2026-08-10 through `/apply-template` and `/tokenize`: a first turn with a
 five-token message sends **953 tokens**, of which **909 (95.4 %) are the seven tool declarations**.
+Re-measured the same way on 2026-08-14 with `web_search` and `fetch_url` added: **1,269 tokens**, of
+which **1,222 (96.3 %) are the nine declarations**. The two web tools cost **313 tokens of prefix in
+every request**, cached after the first.
 
 On first start the client installs its bundled typeface and writes `profiles.defaults.font.face` and
 `background` into Windows Terminal's `settings.json`, with a `.bak` beside it. It never overwrites a
 value it did not write itself.
+
+## Web research
+
+`web_search` and `fetch_url` need no key, no account and no service. Six official, keyless APIs are
+queried in parallel; results merge round-robin by authority and every snippet is capped at 240 bytes.
+
+| Source | Fires on |
+|---|---|
+| PyPI, crates.io | a query naming a version, release, install, package, crate or changelog |
+| HuggingFace | a query naming a model, gguf, quant, weights, checkpoint, or a known model family |
+| DuckDuckGo instant answers | every query — the *documented* API, not the html endpoint |
+| Stack Overflow | every query, accepted answers only |
+| GitHub repositories and issues | every query |
+| Wikipedia | every query |
+
+| Variable | |
+|---|---|
+| `CROW_TAVILY_KEY` | optional. Switches to Tavily for a general web index. Free tier is 1,000 searches a month and takes no credit card |
+| `CROW_SEARXNG_URL` | optional, wins over the key. Needs `json` under `search.formats` in the instance's `settings.yml` — only `html` is enabled by default |
+
+`fetch_url` takes http and https only; `file:` and `data:` are refused, so it cannot become a disk
+read around the #92 boundary. Extraction runs before the 16 KB clip — clipping first keeps the
+markup and drops the answer. Every failure returns as a tool result, never an exception.
+
+**Why no general web index by default.** Measured 2026-08-14: `duckduckgo.com/html/?q=` answers
+**HTTP 202 with zero results** to both a browser user-agent and Crow's own — the snippet every model
+writes for this is dead, and it fails silently because 202 does not raise. `lite.duckduckgo.com`
+still answers 200 with 10 results to `Mozilla/5.0` and **202 to `Crow/0.3.3`**, so the only working
+scrape requires misrepresenting the client. Six public SearXNG instances were probed the same day;
+none served `format=json`.
+
+**Cost.** Each fetched page is up to 16 KB ≈ 4,000 tokens ≈ two minutes of prefill at ~38 tok/s, and
+`MAX_TOOL_ROUNDS` is 24 for the whole turn. The tool caps fetches at 4 per question and tells the
+model so. The declarations themselves cost 313 tokens of prefix per request (measured above).
+
+`web_search` and `fetch_url` are class `network` in `TOOL_CLASS`. **They ask at no release level,
+including `manual`**: the search happens because a task was given, and giving the task is the
+release.
 
 ## Using the window
 
