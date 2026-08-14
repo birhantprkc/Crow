@@ -1232,8 +1232,7 @@ class Turn(TurnEvents):
 
     def tool_started(self, name: str, arguments: str) -> None:
         self._put({"k": "tool", "name": name,
-                   "args": crow_core.format_tool_args(arguments)
-                   if hasattr(crow_core, "format_tool_args") else (arguments or "")})
+                   "args": crow_core.format_tool_args(arguments)})
 
     def tools_reported(self, calls: list) -> None:
         for call in calls or []:
@@ -2130,7 +2129,12 @@ class Api:
             if role != "assistant":
                 continue
             thought = (message.get("reasoning_content") or "")
-            if not body.strip() and not thought.strip():
+            # #99. THE TOOL ROWS ARE PART OF THE TURN, and a turn that only
+            # called a tool has no `content` at all -- so the emptiness test has
+            # to know about them, or the whole message is skipped and the
+            # reopened chat shows two thoughts with nothing between them.
+            calls = message.get("tool_calls") or []
+            if not body.strip() and not thought.strip() and not calls:
                 continue
             sink = Sink(self.push, live=False)
             sink.reply_started()
@@ -2140,6 +2144,16 @@ class Api:
                 sink.reasoning_finished()
             if body:
                 sink.answer_text(body)
+            # After the answer, because that is the live order: the model says
+            # what it is about to do, then the calls run. Through `Turn`, which
+            # is where `tool_started` lives and where the live path draws these
+            # rows -- a second `{"k": "tool"}` written here is exactly the drift
+            # this method exists to prevent.
+            rows = Turn(self.push)
+            for call in calls:
+                function = call.get("function") or {}
+                rows.tool_started(function.get("name") or "?",
+                                  function.get("arguments") or "")
             sink.reply_finished()
             self.push({"k": "cost", "line": "", "share": None,
                        "tokens": self._context_tokens, "n_ctx": self._n_ctx})

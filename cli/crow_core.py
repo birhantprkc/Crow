@@ -2221,6 +2221,52 @@ def _outside_root(path: str) -> str | None:
             f"Write inside the root, or start crow in the directory you mean.")
 
 
+# IN THE CORE BECAUSE BOTH SURFACES DRAW THIS LINE (#99). It sat in
+# cli/crow.py, and cli/crow_gui.py reached for `crow_core.format_tool_args`
+# behind a `hasattr` guard that has been False since the split -- so the
+# window has always shown raw JSON where the terminal shows this. An
+# expression written to make two surfaces agree is what kept them apart.
+def format_tool_args(arguments: str | None, width: int = 78) -> str:
+    """What a tool call is about, in one line.
+
+    The first version printed the raw JSON cut at 80 characters, which lands mid-string often
+    enough to be the normal case: `read_file({"path":"C:\\...\\manifest-runs.ps1","start_line":1,"`.
+    That is not a shortened argument list, it is a broken one - the reader cannot tell whether the
+    call itself was malformed.
+
+    So the values are shown and the syntax is dropped. Paths are cut from the FRONT, because the
+    file name is what identifies the call and the drive letter never does.
+    """
+    raw = arguments or ""
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        # Not JSON, or not yet complete. Shortening is still better than a hard cut, and the
+        # ellipsis says which one happened.
+        return raw[:width] + ("..." if len(raw) > width else "")
+    if not isinstance(parsed, dict):
+        return str(parsed)[:width]
+
+    parts = []
+    for key, value in parsed.items():
+        if isinstance(value, str):
+            # Long text arguments (write_file content, a search pattern) are summarised by length
+            # rather than shown: the line is a label, not a transcript.
+            if len(value) > 42:
+                if "\\" in value or "/" in value:
+                    shown = "..." + value[-39:]
+                else:
+                    shown = f"<{len(value)} chars>"
+            else:
+                shown = value
+        else:
+            shown = str(value)
+        parts.append(f"{key}={shown}")
+
+    line = ", ".join(parts)
+    return line[:width] + ("..." if len(line) > width else "")
+
+
 def _clip(text: str, limit: int = MAX_TOOL_BYTES) -> str:
     """EVERY tool result goes through here. No exceptions, and that is the point.
 

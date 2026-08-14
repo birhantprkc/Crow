@@ -86,6 +86,11 @@
    "why": "The repeat cache that turned an eight-attempt loop on a non-existent path into a fact the model has to react to. A surface without it loops; a surface with its own copy loops differently."
   },
   {
+   "name": "format_tool_args",
+   "kind": "def",
+   "why": "#99. The one line a tool call is rendered as, on both surfaces. It lived in cli/crow.py while cli/crow_gui.py reached for crow_core.format_tool_args behind a hasattr guard that had been False since the split -- so the window showed raw JSON where the terminal showed values, and nothing could detect it because the name was not declared here."
+  },
+  {
    "name": "_clip",
    "kind": "def",
    "why": "Every tool result goes through here, no exceptions - one ceiling measured in the thing it actually costs, bytes that become prefill."

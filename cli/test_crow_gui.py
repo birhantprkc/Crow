@@ -1657,6 +1657,86 @@ class _RefusingWindow:
         raise RuntimeError("no dialog here")
 
 
+class AReopenedChatKeepsItsToolRowsTests(unittest.TestCase):
+    """#99. Switching chats redrew the thoughts and dropped every tool row."""
+
+    def _drawn(self, messages):
+        """The real `_replay`, bound to a stand-in that only records."""
+        out = []
+
+        class Recorder:
+            def __init__(self):
+                self._context_tokens = 0
+                self._n_ctx = 0
+
+            def push(self, message):
+                out.append(message)
+
+        crow_gui.Api._replay(Recorder(), messages)
+        return out
+
+    def test_a_turn_that_only_called_a_tool_is_not_skipped(self):
+        """The message has no `content` at all -- the emptiness test used to
+        drop it whole, which is why the reopened chat showed two thoughts with
+        nothing between them."""
+        drawn = self._drawn([{"role": "assistant", "content": "",
+                              "reasoning_content": "let me look",
+                              "tool_calls": [{"function": {
+                                  "name": "web_search",
+                                  "arguments": '{"query":"llama.cpp"}'}}]}])
+        tools = [m for m in drawn if m["k"] == "tool"]
+        self.assertEqual([t["name"] for t in tools], ["web_search"])
+        self.assertIn("llama.cpp", tools[0]["args"])
+
+    def test_two_calls_in_one_turn_keep_their_order(self):
+        drawn = self._drawn([{"role": "assistant", "content": "",
+                              "tool_calls": [
+                                  {"function": {"name": "read_file",
+                                                "arguments": '{"path":"a.py"}'}},
+                                  {"function": {"name": "write_file",
+                                                "arguments": '{"path":"b.py"}'}}]}])
+        self.assertEqual([m["name"] for m in drawn if m["k"] == "tool"],
+                         ["read_file", "write_file"])
+
+    def test_written_code_is_what_the_row_carries(self):
+        """The reason the rows matter: the code Crow wrote lives in a write_file
+        argument and nowhere else in the transcript."""
+        drawn = self._drawn([{"role": "assistant", "content": "",
+                              "tool_calls": [{"function": {
+                                  "name": "write_file",
+                                  "arguments": '{"path":"C:/x/y.py","content":"def f(): pass"}'
+                              }}]}])
+        row = [m for m in drawn if m["k"] == "tool"][0]
+        self.assertIn("y.py", row["args"])
+        self.assertIn("def f(): pass", row["args"])
+
+    def test_a_tool_result_is_not_drawn_as_an_answer(self):
+        """NEGATIVE HALF. The `role: tool` payload is 16 KB of text the model
+        already has. Drawing it would make a reopened chat longer than the live
+        one it is supposed to reproduce."""
+        drawn = self._drawn([{"role": "tool", "content": "x" * 5000}])
+        self.assertEqual(drawn, [])
+
+    def test_a_chat_without_tools_draws_what_it_always_did(self):
+        """NEGATIVE HALF the other way: no tool call, no tool row, and the
+        answer still comes through the fence renderer."""
+        drawn = self._drawn([{"role": "user", "content": "hi"},
+                             {"role": "assistant", "content": "```py\nx=1\n```"}])
+        self.assertEqual([m for m in drawn if m["k"] == "tool"], [])
+        self.assertTrue([m for m in drawn if m["k"] == "code_open"])
+
+    def test_the_window_formats_arguments_instead_of_dumping_json(self):
+        """The `hasattr` guard was never True: format_tool_args lived in
+        cli/crow.py, so the window always took the raw-JSON fallback."""
+        self.assertTrue(hasattr(crow_core, "format_tool_args"))
+        out = []
+        crow_gui.Turn(out.append).tool_started(
+            "read_file", '{"path":"C:/very/long/path/to/a/file.py"}')
+        row = [m for m in out if m["k"] == "tool"][0]
+        self.assertNotIn('{"path"', row["args"])
+        self.assertIn("path=", row["args"])
+
+
 class TheLiveRateIsWallClockOnPurposeTests(unittest.TestCase):
     """The window's live tok/s counts the pauses, and that is the decision.
 

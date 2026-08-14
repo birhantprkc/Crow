@@ -6,6 +6,20 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
+## Unreleased
+
+**A reopened chat kept its thoughts and lost every tool row (#99).** `_replay` read `content` and
+`reasoning_content` and never `tool_calls`, so an assistant turn that only called a tool was skipped
+whole — a restored chat showed two thoughts with nothing between them and an answer referring to a
+file it never visibly wrote. The rows now draw through `Turn.tool_started`, the same renderer the
+live path uses.
+
+**`format_tool_args` moved into the core.** `cli/crow_gui.py` reached for
+`crow_core.format_tool_args` behind a `hasattr` guard that had been False since the split, so the
+window always took the raw-JSON fallback while the terminal showed values. An expression written to
+make two surfaces agree is what kept them apart; `check_shared_core` could not see it because the
+name was not declared. 47 of 47 now.
+
 ## 0.4.0 — 2026-08-14
 
 **Web research: `web_search` and `fetch_url`, and nothing to configure (#96).** The model searches,
