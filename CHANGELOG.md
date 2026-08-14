@@ -6,7 +6,7 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
-## Unreleased
+## 0.4.0 — 2026-08-14
 
 **Web research: `web_search` and `fetch_url`, and nothing to configure (#96).** The model searches,
 reads what it found, and continues the task. Six official keyless APIs are queried in parallel —
