@@ -1659,12 +1659,28 @@ class Api:
         """This window's HWND, or None.
 
         `native` is a System.Windows.Forms.Form and exists only after
-        before_show; `.Handle` is the documented way to the HWND on Windows.
-        int() takes it out of .NET's IntPtr, because ctypes will not.
+        before_show; `.Handle` is pywebview's documented route to the HWND.
+
+        `.ToInt64()`, NOT `int()`. Measured 2026-08-14: `int()` on that value
+        raises `TypeError: int() argument must be a string, a bytes-like object
+        or a real number, not 'IntPtr'`. The first version of this method caught
+        that and returned None, so every caller silently took the no-handle
+        path -- the monitor lookup below never ran once, and the bug it was
+        written to fix looked unchanged. An except that swallows the one error
+        worth seeing is worse than no except: it turns a defect into a feature
+        nobody can find.
         """
+        handle = None
         try:
-            return int(self._window.native.Handle)
-        except Exception:                  # noqa: BLE001 - cosmetic
+            handle = self._window.native.Handle
+            return handle.ToInt64()
+        except AttributeError:
+            pass                           # not an IntPtr -- try the plain way
+        except Exception:                  # noqa: BLE001 - native not up yet
+            return None
+        try:
+            return int(handle)
+        except Exception:                  # noqa: BLE001
             return None
 
     @staticmethod
