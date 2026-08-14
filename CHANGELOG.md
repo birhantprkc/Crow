@@ -6,7 +6,43 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
-## Unreleased
+## 0.3.3 — 2026-08-14
+
+**A working directory the model may not write outside of (#92).** `write_file` and `edit_file` took
+any path; at `auto` — the default — nothing stood between the model and the disk. A release level
+(#88) asks an attentive user at round 14 of 24; a boundary refuses without asking, which is the half
+that protects the turn nobody was watching. The refusal names the root, so a user can see what the
+boundary thought it was instead of guessing.
+
+**The root is the nearest ancestor holding `.crow/root.json` — not `.crow/` itself.** That directory
+is a by-product: `SPILL_DIR` creates it wherever crow runs. Measured on 2026-08-14,
+`C:\Users\robin\.crow` already existed, dated 2026-08-08, from a single session started in the home
+directory — treating it as the marker would have made the entire user profile a root and the
+boundary decoration. A directory becomes a root when someone picks it, never by accident.
+
+**Writes only, and both halves are recorded decisions.** `read_file` stays unbounded: a read boundary
+blinds the model to its own installation, which is a real use, and a read destroys nothing.
+`run_command` is not covered either — a `cwd` inside the root says nothing about what the command
+does, `cd /d C:\ && del …` being one shell line — so it stands on #88's `executing` class instead. At
+`auto` that gap is real, and it is named here rather than left to be discovered.
+
+Three traps, all measured that day on Python 3.13.3: `os.path.ALLOW_MISSING` is in the 3.13
+documentation and does not exist in this release; `commonpath` and `relpath` raise `ValueError`
+across drive letters instead of answering "no"; and `"C:\root2\x".startswith("C:\root")` is `True`,
+so a bare prefix check lets a sibling directory through.
+
+The window has a folder picker with a recently-used list; the terminal has `--root`, which states a
+root **and** creates it. The window does not walk up from its cwd — a shortcut decides that
+directory, so a stray marker under it would outrank what the user picked.
+
+**What this does not do: the choice does not survive closing the client.** A persistence path through
+the session file was built and removed again — it never worked in the running window, and half of it
+would read as "the boundary holds" when it does not. Nothing in the window has exercised the refusal
+in a live turn either.
+
+Held against thirteen deliberate breakages. The two that matter are complementary: with the boundary
+switched off 9 cases go red, with it refusing everything 3 go red — the negative halves. Neither
+"always refuse" nor "never refuse" passes both.
 
 **`/reset` now survives closing the client, on both surfaces.** It never had. `save_session` refuses
 a conversation with nothing in it — right for the case it guards, a client started and closed without
