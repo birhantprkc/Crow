@@ -81,8 +81,8 @@ gate, so neither blocked anything — which is exactly why they could sit green 
   views are read, because on this machine only `HKLM\WOW6432Node` answers; the GUID and the keys are
   `install.ps1:334-338`'s rather than a second set. **No floor is claimed for WebView2** — none has
   been measured, and an invented number is worse than none. `--min-webview2` exists for the negative
-  control. Points (i) and (ii) are untouched; (ii) still reports the uncovered U+2692 in
-  `cli/crow.py:934` and `:962`.
+  control. Points (i) and (ii) are untouched — (ii) is what found the uncovered U+2692 marker fixed
+  above, and its declaration list is empty again.
 - **`tools/test_check_gui_prereqs.py` case 4 follows it** — it drove `--min-tk 99.0` and went green
   off the old point. Now `--min-webview2 999.0`: `2 of 3`, exit 1, with (i) and (ii) still green.
   8 of 8.
