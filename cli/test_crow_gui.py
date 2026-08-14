@@ -1069,22 +1069,47 @@ class SlashCommandsReachTheWindowTests(ApiCase):
         self.assertNotIn("user", kinds)
         self.assertEqual(kinds[0], "note")
 
-    def test_the_composer_is_handed_back(self):
-        """`go()` sets "Stop" and a read-timeout hint on the way in, and a turn
-        is what normally takes it back. A command answered here starts no turn,
-        so it has to release the composer itself or the window sits on "Stop"
-        with nothing behind it."""
-        api = self.api()
-        api.send("/help")
-        self.assertIn("idle", [m.get("k") for m in self.drained(api)])
+    def test_a_command_reports_that_no_turn_started(self):
+        """WHAT THE PAGE WAITS ON. `pywebview.api.*` resolves a promise when
+        this returns, so the composer can be painted from the one fact only this
+        side has -- whether there is anything to stop. It used to paint "Stop"
+        on the way in and hope, which is how `/reset` left the window sitting on
+        Stop with nothing behind it."""
+        self.assertIs(self.api().send("/help"), False)
 
-    def test_the_page_still_does_the_two_things_this_relies_on(self):
-        """THE ANCHOR FOR BOTH CASES ABOVE. They are only correct while `go()`
-        echoes and sets busy; if that ever changes, the Api has to start doing
-        one or both, and this is where a reader finds that out instead of
-        rediscovering it in a screenshot."""
+    def test_a_line_mid_turn_reports_no_turn_either(self):
+        """The other way to start nothing. The page keeps a second line out on
+        its own, but this is what lets it unlock if it ever gets that wrong."""
+        api = self.api()
+
+        class _Busy:
+            def is_alive(self):
+                return True
+
+        api._worker = _Busy()
+        self.assertIs(api.send("hello"), False)
+
+    def test_an_ordinary_message_reports_that_one_did(self):
+        """POSITIVE CONTROL. Without it the rule could be "always return False",
+        which passes both cases above and leaves the button dead for real turns.
+        """
+        api = self.api()
+        self.addCleanup(lambda: crow_core.INTERRUPT.set())
+        self.assertIs(api.send("what is here?"), True)
+
+    def test_the_page_paints_from_the_answer_and_not_before(self):
+        """THE ANCHOR FOR ALL THREE ABOVE, and the half a python case cannot
+        reach. They are only correct while `go()` draws the line itself, locks
+        synchronously, and leaves the button to the promise. If that changes,
+        the Api has to take one of those jobs back -- and a reader finds it here
+        rather than in a screenshot, which is where it was found last time.
+        """
         self.assertIn("this.user(text)", crow_gui.PAGE)
-        self.assertIn("this.busy()", crow_gui.PAGE)
+        self.assertIn("this.running=true", crow_gui.PAGE)
+        self.assertIn("started => started ? this.busy() : this.idle()",
+                      crow_gui.PAGE)
+        # busy() may no longer be called on the way in -- that IS the defect.
+        self.assertNotIn("this.user(text); this.busy()", crow_gui.PAGE)
 
 
 class TheSeamToThePageTests(unittest.TestCase):

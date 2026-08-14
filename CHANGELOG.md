@@ -37,17 +37,30 @@ new button" survives the button being renamed, and the user is the one who finds
 now tied to the markup it promises.
 
 **Two defects came with it, both older than the change and both found in the window rather than by
-the suite.** The Api pushed a `user` echo before its answer — but `go()` in the page already draws
-that line before it calls in (`this.user(text); this.busy(); api.send(text)`), so the typed command
-appeared **twice**. And `go()` sets the composer to "Stop" with a read-timeout hint on the way in,
-which a turn normally takes back; a command answered in Python starts no turn, so the window **sat on
-"Stop" with nothing running behind it**. Both were true of `/tools` before this change and became
-true of all seven with it.
+the suite.** The Api pushed a `user` echo before its answer — but `go()` already draws that line
+before it calls in, so the typed command appeared **twice**. And `go()` painted the composer "Stop"
+with a read-timeout hint on the way in, which a turn normally takes back; a command answered in
+Python starts no turn, so the window **sat on "Stop" with nothing running behind it**. Both were true
+of `/tools` before this change and became true of all seven with it.
 
-**Every one of the 57 cases passed through both.** They drive the Api with no page on the other side
-— one half of a seam measuring itself. Three cases now pin the seam instead: no echo from this side,
-an `idle` on the way out, and the two lines in `go()` that make those correct, so a change to the
-page's half surfaces here rather than in a screenshot.
+**`send` now answers the question the page was guessing at.** Every `pywebview.api.*` call resolves a
+promise once the Python side returns — so `send` returns whether a **turn** started, and `go()` locks
+synchronously but paints from the answer:
+
+```js
+this.user(text); this.running=true;
+pywebview.api.send(text).then(started => started ? this.busy() : this.idle(),
+                              () => this.idle());
+```
+
+One mechanism instead of two: no "Stop" flicker on a slash command, no correcting message pushed
+after the fact, and a rejected call unlocks as well. The lock stays synchronous because the round
+trip is a real window for a second click; only the **button** waits.
+
+**Every one of the 57 cases passed through both defects.** They drive the Api with no page on the
+other side — one half of a seam measuring itself, and every assertion was about what this half
+pushed. Four cases pin the seam now, including the two lines of `go()` the Python half depends on, so
+the next change to the page's side turns a test red instead of shipping.
 
 **The tool cache was keyed on less than its inputs (#93).** `run_tool_cached` answered a repeated
 call from the first one, on the stated grounds that *"re-running would produce the identical

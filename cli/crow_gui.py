@@ -591,10 +591,24 @@ const crow = {
     $("#turnstate").textContent="…";
     $("#hint").textContent="read timeout __TIMEOUT__ s"; },
 
+  // THE LOCK IS SYNCHRONOUS, THE PAINT IS NOT, and that split is what the
+  // bridge is for. Every pywebview.api.* call resolves a promise once the
+  // Python side returns, and only that side knows whether a turn started or the
+  // line was a slash command answered on the spot. This used to paint "Stop"
+  // on the way in unconditionally -- so /reset left the window sitting on Stop
+  // with nothing behind it, which is what robin found.
+  //
+  // `running` is still set here rather than in the callback: it is what keeps a
+  // second click out during the round trip, and that window is real even when
+  // it is short. The BUTTON only becomes Stop if there is something to stop.
+  // A rejected call unlocks too -- an api that threw leaves no turn running.
   go(){ if(this.running){ pywebview.api.stop(); return; }
     const text=input.value.trim(); if(!text) return;
     input.value=""; input.style.height="auto";
-    this.user(text); this.busy(); pywebview.api.send(text); },
+    this.user(text); this.running=true;
+    pywebview.api.send(text).then(
+      started => started ? this.busy() : this.idle(),
+      () => this.idle()); },
 
   // #88: THE RELEASE LEVEL, and the menu is built from what the CORE says the
   // levels are -- never from a list written out here. A second copy of the
@@ -1367,34 +1381,37 @@ class Api:
             return self.help_listing()
         return self.POINTS_AT.get(word)
 
-    def send(self, text: str) -> None:
+    def send(self, text: str) -> bool:
+        """Take a line from the composer. True if a TURN was started.
+
+        THE RETURN VALUE IS THE POINT, and it is what pywebview's bridge is for:
+        every `pywebview.api.*` call resolves a promise once this returns, so
+        the page can wait for the one fact only this side knows -- whether there
+        is anything to stop. It used to paint "Stop" on the way in and hope.
+
+        NO `user` ECHO FROM HERE. `go()` draws the typed line before it calls
+        in. Pushing one from this side put the command on screen TWICE -- wrong
+        for `/tools` since the day it was handled here, and wrong for all seven
+        after #94. Found by robin in the window, not by the cases that drive
+        this Api with no page on the other side.
+        """
         # SLASH COMMANDS ARE ANSWERED HERE, NOT BY THE MODEL. Typed into the
         # window they used to travel to the server as an ordinary question --
         # the input's own placeholder offers /tools, so the one it names is
-        # answered where it is typed. #94 widened that from the one command to
-        # all of them.
+        # answered where it is typed. #94 widened that to all of them.
         answer = self.slash_answer(text)
         if answer is not None:
-            # NO `user` ECHO HERE. The page already drew the line before it
-            # called us -- `go()` does `this.user(text); this.busy();` and only
-            # then `api.send(text)`. Pushing one from this side put the typed
-            # command on screen TWICE. It was wrong for `/tools` before #94 made
-            # it wrong for all seven; found by robin in the window, not by the
-            # 57 cases that drive this Api without a page.
-            #
-            # AND THE `idle` IS NOT OPTIONAL: `go()` set the composer to "Stop"
-            # with a read-timeout hint on the way in, and a turn is what
-            # normally takes it back. A command answered here starts no turn, so
-            # without this the window sits on "Stop" forever with nothing
-            # running behind it.
             self.push({"k": "note", "t": answer})
-            self.push({"k": "idle"})
-            return
+            return False
+        # A LINE ARRIVING MID-TURN IS ALSO NOT A NEW TURN. The page keeps a
+        # second one out on its own, but saying so here is what lets it unlock
+        # if it ever gets that wrong -- the guard belongs to the half that knows.
         if self._worker and self._worker.is_alive():
-            return
+            return False
         INTERRUPT.clear()
         self._worker = threading.Thread(target=self._run, args=(text,), daemon=True)
         self._worker.start()
+        return True
 
     def stop(self) -> None:
         INTERRUPT.set()
