@@ -11,6 +11,19 @@ is in its commit message and on its issue; this is the short version.
 Shipped because the 0.4.0 package predates the fix below: the tag sits on `1a50f6d`, the fix
 landed as `8adee6a`. Whoever installed 0.4.0 got a reopened chat without its tool rows.
 
+**This package also carries a change to `llama.dll` that is not in the Crow repository at all.**
+The host-RAM tier's eviction policy went from FIFO to CLOCK (second chance) in the patched
+llama.cpp tree the package is built from. Measured the same evening, one paired arm, same prompt:
+L2 hit rate **18.23 % → 20.97 %**, load stall per remap 0.905 → 0.851 ms, decode 17.57 → 18.26
+tok/s, lock wait unchanged at 0.24 us per operation.
+
+**That is one pair, and the operating point is a median of three.** The throughput delta sits inside
+the 1.09x spread the manifest records for repeating one configuration, so it proves nothing on its
+own; the hit rate is the figure that moved. It ships because it costs one byte per entry and no lock
+time, and because holding it back would mean rebuilding the DLL to ship less than what was tested.
+The reasoning and the raw numbers are in the vault note *CLOCK schlägt FIFO im L2-Tier um 2,7 Punkte
+und kostet ein Byte*.
+
 **A reopened chat kept its thoughts and lost every tool row (#99).** `_replay` read `content` and
 `reasoning_content` and never `tool_calls`, so an assistant turn that only called a tool was skipped
 whole — a restored chat showed two thoughts with nothing between them and an answer referring to a
