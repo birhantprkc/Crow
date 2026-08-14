@@ -115,9 +115,15 @@ def main():
 
     # 4 -- point (iii), and it must be the ONLY point that falls: a floor above
     # what is installed says nothing about the font.
-    code, out = run("--min-tk", "99.0")
-    case(4, "(iii) a floor above the installed Tk goes red, alone",
-         code == 1 and "below the floor 99.0" in out
+    #
+    # WAS --min-tk UNTIL 2026-08-14. Point (iii) read Tk's patchlevel while the
+    # package shipped a webview, so it reported 3 of 3 green for a toolkit that
+    # is no longer in the product -- and this case went green with it, because a
+    # Tk floor of 99.0 still made the old point red. Both were measuring
+    # something real and neither was measuring the window.
+    code, out = run("--min-webview2", "999.0")
+    case(4, "(iii) a floor above the installed WebView2 goes red, alone",
+         code == 1 and "below the floor 999.0" in out
          and "OK       (i)" in out and "OK       (ii)" in out, out[-800:])
 
     # 5 -- point (ii), written as an escape so a token scan would miss it.

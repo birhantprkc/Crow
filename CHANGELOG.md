@@ -6,6 +6,33 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
+## Unreleased
+
+**Both checkers that still measured tkinter now measure the window.** Neither was in the release
+gate, so neither blocked anything — which is exactly why they could sit green and wrong.
+
+- **`tools/measure_gui_stream.py` runs again.** Its point 1 measured Tk queue saturation against
+  `TICK_MS` and `DRAIN_PER_TICK`, constants the webview does not carry, so it raised
+  `SETUP ERROR: crow_gui.py does not carry TICK_MS` — and because that error returned from `main`,
+  it took the two points **below** it down with it. Twenty lines of dead apparatus made 633 lines of
+  live measurement unreachable, including the read-timeout probe that decides `READ_TIMEOUT_S`.
+  Point 1 removed (99 lines, 3 functions); its result is kept in the docstring because
+  `cli/crow_gui.py` quotes it. Points (2) and (3) keep their numbers — they refer to each other by
+  number in their own output.
+  **`READ_TIMEOUT_S = 600` now stands on a run rather than a note:** `3 of 3 numbers hold`, and the
+  check is two-sided (`469.51 < bound < 1800`), so the previous 20 s would have gone red here.
+- **`tools/check_gui_prereqs.py` point (iii) checks the window runtime**, not Tk 8.6.15. Both halves,
+  because they fail separately: pywebview importable (6.2.1, read from package metadata — the module
+  carries no `__version__`) **and** a WebView2 runtime in the registry (151.0.4129.78). All three
+  views are read, because on this machine only `HKLM\WOW6432Node` answers; the GUID and the keys are
+  `install.ps1:334-338`'s rather than a second set. **No floor is claimed for WebView2** — none has
+  been measured, and an invented number is worse than none. `--min-webview2` exists for the negative
+  control. Points (i) and (ii) are untouched; (ii) still reports the uncovered U+2692 in
+  `cli/crow.py:934` and `:962`.
+- **`tools/test_check_gui_prereqs.py` case 4 follows it** — it drove `--min-tk 99.0` and went green
+  off the old point. Now `--min-webview2 999.0`: `2 of 3`, exit 1, with (i) and (ii) still green.
+  8 of 8.
+
 ## 0.3.1 — 2026-08-14
 
 **The window shipped in 0.3.0 was usable for one turn at a time.** Driving it for an afternoon found

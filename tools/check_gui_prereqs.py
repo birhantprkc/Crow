@@ -45,8 +45,13 @@ THE THREE POINTS, all of them free:
         still measure what those comments say. This point went red on its first
         run and the finding is real: cli/crow.py prints U+2692 as its tool-call
         marker and neither shipped face has that glyph. See KNOWN_UNCOVERED.
-  (iii) TK VERSION. The patchlevel Tk reports, held against the lower bound E13
-        ships (Tk 8.6).
+  (iii) WINDOW RUNTIME. pywebview is importable AND a WebView2 runtime is
+        registered. Both, because they fail separately: the import says the
+        Python package is there, the registry says a window can actually open.
+        Changed 2026-08-14 -- it read Tk's patchlevel against a floor of 8.6
+        until then, which is the toolkit 0.3.0 removed. A point that reports
+        3 of 3 green for something the package no longer ships is a point that
+        cannot go red for what it is supposed to guard.
 
 WHY THE GLYPH RUN READS THE FILE AND NOT THE FONT SYSTEM. Windows would answer
 "can you draw U+2801" with a substitute face - it always has one - so asking it
@@ -97,6 +102,17 @@ from check_shared_core import SURFACE_DIRS  # noqa: E402
 # the installer is the place that enforces it against a user's machine; this
 # tool checks the machine the GUI is being written on.
 MIN_TK = "8.6"
+
+# WebView2's update GUID and the three registry views it can answer from. Both
+# are install.ps1:334-338's, quoted rather than re-derived: two sets of keys for
+# one question is how they drift apart.
+WEBVIEW2_GUID = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+
+# NO MEASURED FLOOR. 151.0.4129.78 is what this machine has and what the window
+# was driven on; nothing has established the oldest runtime that still works, so
+# claiming a number here would invent one. Empty means "any runtime the registry
+# reports". --min-webview2 is what the self-test raises to prove this can go red.
+MIN_WEBVIEW2 = ""
 
 # Windows hands Tk its face names through LOGFONT.lfFaceName, 32 wide characters
 # INCLUDING the terminating NUL, so 31 usable. See the module docstring for the
@@ -349,6 +365,65 @@ def family_problems(family, families):
     return problems
 
 
+def webview2_probe():
+    """Point (iii): what the WINDOW needs -- pywebview, and a runtime under it.
+
+    TWO ANSWERS, NOT ONE, and the second is the one that costs nothing to get
+    wrong. `import webview` succeeding says the Python package is installed; it
+    says nothing about whether Edge's WebView2 runtime exists on this machine,
+    and a window with no runtime does not open. install.ps1:316-322 records the
+    same trap for `tkinter.TkVersion`. A checker that only imports is a checker
+    that cannot go red for the thing that actually breaks.
+
+    ALL THREE REGISTRY VIEWS, because on this machine only one of them answers:
+    `pv 151.0.4129.78` under HKLM\\WOW6432Node, with the 64-bit view and HKCU
+    empty. Reading one view and concluding "no runtime" reports false, and it
+    reports false in the safe direction -- unnoticed. The GUID and the three
+    keys are install.ps1:334-338's, not a second set invented here.
+
+    Returns (pywebview_version, runtime_version, which_view) with None for
+    whatever is not there.
+    """
+    package = None
+    try:
+        import webview                              # noqa: F401
+    except Exception:                               # noqa: BLE001 - reported
+        package = None
+    else:
+        # THE VERSION COMES FROM THE METADATA, not from the module. pywebview
+        # 6.2.1 carries no `__version__` attribute [measured 2026-08-14]; asking
+        # the module for one yields "unknown" and hides which release is
+        # installed, which is the one thing this line exists to report.
+        try:
+            import importlib.metadata as _md
+            package = _md.version("pywebview")
+        except Exception:                           # noqa: BLE001
+            package = "installed, version unknown"
+
+    runtime, view = None, None
+    try:
+        import winreg
+    except ImportError:
+        return package, None, None
+
+    for hive, hive_name, path in (
+            (winreg.HKEY_LOCAL_MACHINE, "HKLM",
+             r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\%s" % WEBVIEW2_GUID),
+            (winreg.HKEY_LOCAL_MACHINE, "HKLM",
+             r"SOFTWARE\Microsoft\EdgeUpdate\Clients\%s" % WEBVIEW2_GUID),
+            (winreg.HKEY_CURRENT_USER, "HKCU",
+             r"SOFTWARE\Microsoft\EdgeUpdate\Clients\%s" % WEBVIEW2_GUID)):
+        try:
+            with winreg.OpenKey(hive, path) as key:
+                value = str(winreg.QueryValueEx(key, "pv")[0])
+        except OSError:
+            continue
+        if value:
+            runtime, view = value, "%s\\%s" % (hive_name, path)
+            break
+    return package, runtime, view
+
+
 def tk_probe():
     """Ask Tk itself, in a root that is never mapped.
 
@@ -467,6 +542,7 @@ def main(argv):
                          "FONT_FAMILY. Point it at something not installed to "
                          "run the negative control.")
     ap.add_argument("--min-tk", default=MIN_TK)
+    ap.add_argument("--min-webview2", default=MIN_WEBVIEW2)
     args = ap.parse_args(argv[1:])
 
     # The family and the shipped faces come from the client, not from a second
@@ -552,16 +628,28 @@ def main(argv):
         print("             %s" % n)
 
     # (iii) ---------------------------------------------------------------
-    if tk_error is not None:
+    package, runtime, view = webview2_probe()
+    if package is None:
         failed += 1
-        print("  FAILED   %-30s no Tk to ask" % "(iii) Tk version")
-    elif not version_at_least(patchlevel, args.min_tk):
+        print("  FAILED   %-30s pywebview is not importable -- the window "
+              "cannot start" % "(iii) window runtime")
+        print("             the installer runs `pip install pywebview`; the "
+              "terminal client does not need it")
+    elif runtime is None:
         failed += 1
-        print("  FAILED   %-30s Tk %s is below the floor %s"
-              % ("(iii) Tk version", patchlevel, args.min_tk))
+        print("  FAILED   %-30s pywebview %s, but NO WebView2 runtime in any "
+              "of the three registry views" % ("(iii) window runtime", package))
+        print("             the import alone does not open a window -- Edge or "
+              "Windows 11 ships the runtime")
+    elif args.min_webview2 and not version_at_least(runtime, args.min_webview2):
+        failed += 1
+        print("  FAILED   %-30s WebView2 %s is below the floor %s"
+              % ("(iii) window runtime", runtime, args.min_webview2))
     else:
-        print("  OK       %-30s Tk %s, floor %s"
-              % ("(iii) Tk version", patchlevel, args.min_tk))
+        floor = args.min_webview2 or "none measured"
+        print("  OK       %-30s pywebview %s, WebView2 %s, floor %s"
+              % ("(iii) window runtime", package, runtime, floor))
+        print("             answered by %s" % view)
 
     print()
     print("RESULT: %d of 3 prerequisites hold" % (3 - failed))

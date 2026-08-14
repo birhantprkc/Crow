@@ -1,48 +1,40 @@
 #!/usr/bin/env python3
-"""The two numbers cli/crow_gui.py stands on, measured before it was written.
+"""The number cli/crow_gui.py's reader stands on, and what decides it.
 
-WHY THIS EXISTS. #90's E12 carries two build rules with a number in each of
-them, and the plan says both numbers are measured BEFORE the window is built:
+WHY THIS EXISTS. #90's E12 carries a build rule against P1 ("`cancel()` against
+a blocked `readline()` on Windows ... the abort button silently does nothing"):
+whether a read timeout that fires MID-LINE costs bytes, and, once that answer
+came back, WHAT WAKES A BLOCKED READ AT ALL. Together they decide where the
+timeout may be armed and how short it may be.
 
-  * against P2 ("queue saturation on long answers ... the fix is batching per
-    tick, not rendering per event") -- how many events one `after()` tick may
-    swallow before the drain itself is what makes the interface stutter;
-  * against P1 ("`cancel()` against a blocked `readline()` on Windows ... the
-    abort button silently does nothing") -- whether a read timeout that fires
-    MID-LINE costs bytes, and, once that answer came back, WHAT WAKES A BLOCKED
-    READ AT ALL. The two together decide where the timeout may be armed and how
-    short it may be.
-
-Both are 0 EUR: neither needs a model, a server or a network. Point 1 needs a Tk
-display, point 2 needs a loopback socket, and that is the whole apparatus.
+0 EUR and no apparatus beyond a loopback socket: no model, no server, no
+network.
 
 AND IT IS A CHECKER, NOT A NOTEBOOK. Every point holds the measurement against
 the constant the shipped code actually carries, read out of cli/crow_gui.py and
 cli/crow_core.py as text. A measurement whose result lives only in a chat log is
-the shape E9 was cut to avoid -- "a comment cannot go red". So the numbers below
-have a line that can, and a window that raises its batch past what this machine
-draws in a frame goes red HERE rather than in front of a user.
+the shape E9 was cut to avoid -- "a comment cannot go red".
 
-------------------------------------------------------------------- point 1 --
+WHAT POINT 1 WAS, AND WHY IT IS GONE (2026-08-14). It measured Tk queue
+saturation: 4,000 deltas already queued when the first tick arrives, per-event
+against per-tick drawing, held against TICK_MS and DRAIN_PER_TICK in the window.
+Its result stands and is quoted where it is used --
 
-MEASURED 2026-08-13, 4,000 deltas already in the queue when the first tick
-arrives (a producer that sleeps between deltas measures the sleep):
+    per event   4000 ticks | worst tick 9.046 ms | total 332.9 ms
+    per tick       1 tick  | worst tick 4.841 ms | total   4.8 ms
+    2,048 events fit one 16 ms half-frame on this machine
 
-    per event   4000 ticks | max queue 4000 | worst tick 9.046 ms | total 332.9 ms
-    per tick       1 tick  | max queue 4000 | worst tick 4.841 ms | total   4.8 ms
+-- but 0.3.0 replaced the Tk window with a webview, which batches in the page and
+carries neither constant. The point could no longer read its subject: it raised
+`SETUP ERROR: crow_gui.py does not carry TICK_MS` and, because that error
+returned from main, it took the two points BELOW it down with it. Twenty lines of
+dead apparatus made 633 lines of live measurement unreachable for a day, and the
+read-timeout probe -- the one that decides READ_TIMEOUT_S -- was among them.
 
-THE STUTTER IS NOT IN THE WORST TICK, and that is the part worth writing down.
-One insert per event costs single-digit milliseconds -- looked at through the
-worst tick alone, rendering per event is fine. What it costs is a TICK, and a
-tick is TICK_MS of wall clock whether it drew one character or a thousand. At
-TICK_MS = 33 the per-event arm needs 132 s of catching up for a burst the
-batched arm finishes in one frame: the answer is long done and the window is
-still writing it out. That is P2, and it is why the rule is `append("".join(
-chunks))` rather than one call per event.
-
-The cap: 2,048 events fit in one 16 ms half-frame on this machine. DRAIN_PER_TICK
-is set well under it -- the cap exists so that ONE tick cannot freeze the window
-for an unbounded time, not to squeeze the machine.
+THE POINTS KEEP THEIR NUMBERS. (2) and (3) are not renumbered to (1) and (2),
+because they refer to each other by number in their own output and in
+cli/crow_gui.py's comments. Renumbering would make every one of those references
+quietly point at the wrong thing.
 
 ------------------------------------------------------------------- point 2 --
 
@@ -106,12 +98,11 @@ cli/crow_core.py:581]. 20 s and 1 s are both far under it. cli/crow_gui.py ships
 READ_TIMEOUT_S = 600 s: clear of the worst measured prefill, and a bound where
 the CLI's 1800 s is effectively none.
 
-Usage:  measure_gui_stream.py [--repo <dir>] [--events N] [--budget-ms MS]
-        [--only queue|bytes]
+Usage:  measure_gui_stream.py [--repo <dir>]
 
-Exit 0 = both numbers measured and both constants hold.
+Exit 0 = every number measured and every constant holds.
      1 = a constant does not hold what this machine can do.
-     2 = setup error (no Tk display, no loopback socket, missing source).
+     2 = setup error (no loopback socket, missing source).
 """
 
 from __future__ import annotations
@@ -119,7 +110,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import queue
 import re
 import socket
 import sys
@@ -131,18 +121,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from check_operating_point import read  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-# One frame at 30 fps. The tick the window runs at is TICK_MS in cli/crow_gui.py;
-# the drain has to fit inside it with room for the redraw Tk does afterwards, so
-# the budget a batch is held against is HALF a tick and not a whole one. A drain
-# that uses the whole frame leaves nothing for the drawing it exists to feed.
-DEFAULT_BUDGET_MS = 16.0
-
-# How many deltas the replay pushes. 4,000 is far past a real answer -- the
-# longest turn measured here decoded 10,565 tokens over minutes, this arrives in
-# one burst -- and that is the point: a rate that cannot saturate the queue
-# cannot measure what saturation costs.
-DEFAULT_EVENTS = 4000
 
 # What the probe's fake server sends. Long enough that one SSE line does not fit
 # in a single TCP segment when it is deliberately cut up.
@@ -171,105 +149,6 @@ def constant(path: str, name: str) -> float:
     if not found:
         raise SetupError("%s does not carry %s" % (os.path.basename(path), name))
     return float(found.group(1))
-
-
-# --------------------------------------------------------------- point 1 ----
-
-def replay_into_queue(events: int) -> "queue.Queue":
-    """A recorded stream, all of it, already in the queue before the first tick.
-
-    THE RATE IS THE MEASUREMENT. A producer that sleeps between deltas measures
-    the sleep; one that fills the queue first measures the drain, which is the
-    only half a `root.after()` tick controls. The plan asks for a stream "played
-    back at a high rate that visibly HAS to stutter", and nothing stutters a Tk
-    text widget like a queue that is already full when the tick arrives.
-    """
-    q: "queue.Queue" = queue.Queue()
-    for i in range(events):
-        q.put("tok%04d " % (i % 10000))
-    return q
-
-
-def drain_arm(widget, q: "queue.Queue", per_tick: int, batched: bool) -> list[tuple]:
-    """One drain, run to the end of the queue. Returns a row per tick.
-
-    Each row is the three numbers the plan names: the queue length BEFORE the
-    drain, how many events came out, and the wall clock the drain took. They are
-    taken here rather than reported by the window, because the window is what is
-    being measured.
-
-    `batched` is the whole question. False is one insert per event, which is what
-    P2 says stutters; True is `append("".join(chunks))`, which is the rule.
-    """
-    rows: list[tuple] = []
-    while True:
-        before = q.qsize()
-        if not before:
-            return rows
-        started = time.perf_counter()
-        chunks: list[str] = []
-        for _ in range(min(per_tick, before)):
-            try:
-                chunks.append(q.get_nowait())
-            except queue.Empty:
-                break
-        if batched:
-            widget.insert("end", "".join(chunks))
-        else:
-            for piece in chunks:
-                widget.insert("end", piece)
-        widget.update_idletasks()
-        rows.append((before, len(chunks), (time.perf_counter() - started) * 1000.0))
-
-
-def measure_queue(events: int, budget_ms: float) -> dict:
-    """How big a batch this machine can draw inside one frame, both arms."""
-    try:
-        import tkinter as tk
-    except Exception as exc:                     # noqa: BLE001 - reported, not raised
-        raise SetupError("tkinter is not importable: %s" % exc)
-    try:
-        root = tk.Tk()
-    except Exception as exc:                     # noqa: BLE001
-        raise SetupError("no Tk display: %s" % exc)
-    root.withdraw()
-    out: dict = {"events": events, "budget_ms": budget_ms, "arms": {}}
-    try:
-        for label, batched, per_tick in (("per event", False, 1),
-                                         ("per tick", True, events)):
-            widget = tk.Text(root, width=80, height=24)
-            widget.pack()
-            rows = drain_arm(widget, replay_into_queue(events), per_tick, batched)
-            widget.destroy()
-            out["arms"][label] = {
-                "ticks": len(rows),
-                "max_qlen": max(r[0] for r in rows),
-                "max_drained": max(r[1] for r in rows),
-                "worst_tick_ms": round(max(r[2] for r in rows), 3),
-                "total_ms": round(sum(r[2] for r in rows), 1),
-            }
-        # THE NUMBER THE WINDOW HAS TO HOLD. Doubling until the batch no longer
-        # fits the frame, then taking the last size that DID fit -- so the cap is
-        # a size this machine has actually drawn in time rather than one derived
-        # from a rate.
-        widget = tk.Text(root, width=80, height=24)
-        widget.pack()
-        size, fits = 32, 32
-        while size <= events:
-            q = replay_into_queue(size)
-            started = time.perf_counter()
-            widget.insert("end", "".join(q.get_nowait() for _ in range(size)))
-            widget.update_idletasks()
-            took = (time.perf_counter() - started) * 1000.0
-            if took > budget_ms:
-                break
-            fits = size
-            size *= 2
-        widget.destroy()
-        out["fits_in_budget"] = fits
-    finally:
-        root.destroy()
-    return out
 
 
 # --------------------------------------------------------------- point 2 ----
@@ -517,131 +396,87 @@ def probe_wake(how: str, timeout: float, quiet_for: float) -> dict:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--repo", default=REPO)
-    ap.add_argument("--events", type=int, default=DEFAULT_EVENTS)
-    ap.add_argument("--budget-ms", dest="budget_ms", type=float,
-                    default=DEFAULT_BUDGET_MS)
-    ap.add_argument("--only", choices=("queue", "bytes"), default=None)
     args = ap.parse_args(argv[1:])
 
     gui = os.path.join(args.repo, "cli", "crow_gui.py")
     failed, total = 0, 0
 
-    if args.only in (None, "queue"):
-        print("(1) QUEUE SATURATION -- P2, one event per token against one tick")
-        try:
-            result = measure_queue(args.events, args.budget_ms)
-            tick_ms = constant(gui, "TICK_MS")
-            promised = int(constant(gui, "DRAIN_PER_TICK"))
-        except SetupError as exc:
-            print("    SETUP ERROR: %s" % exc)
-            return 2
-        for label, arm in result["arms"].items():
-            print("    %-10s %5d ticks | max queue %5d | max drained %5d | "
-                  "worst tick %8.3f ms | total %8.1f ms"
-                  % (label, arm["ticks"], arm["max_qlen"], arm["max_drained"],
-                     arm["worst_tick_ms"], arm["total_ms"]))
-        per_event = result["arms"]["per event"]
-        per_tick = result["arms"]["per tick"]
-        print("    batching is %.1fx cheaper over %d events, and it is the same "
-              "text on the screen"
-              % (per_event["total_ms"] / max(per_tick["total_ms"], 1e-9), result["events"]))
-        # WHERE THE STUTTER ACTUALLY SITS, and it is not in the worst tick. A
-        # tick costs TICK_MS of wall clock whether it drew one character or a
-        # thousand, so the per-event arm's price is its TICK COUNT.
-        print("    at TICK_MS %.0f that is %.1f s of catching up per event, "
-              "against %.1f s batched -- THAT is the stutter, not the tick itself"
-              % (tick_ms, per_event["ticks"] * tick_ms / 1000.0,
-                 per_tick["ticks"] * tick_ms / 1000.0))
-        print("    largest batch drawn inside %.0f ms on this machine: %d events"
-              % (result["budget_ms"], result["fits_in_budget"]))
-        total += 1
-        if promised <= result["fits_in_budget"]:
-            print("    OK       DRAIN_PER_TICK %d is inside the %d this machine "
-                  "draws in time" % (promised, result["fits_in_budget"]))
-        else:
-            failed += 1
-            print("    FAILED   DRAIN_PER_TICK %d is more than the %d this machine "
-                  "draws inside %.0f ms -- the drain itself is now the stutter"
-                  % (promised, result["fits_in_budget"], result["budget_ms"]))
-        print("")
+    print("(2) BYTE LOSS UNDER A MID-LINE READ TIMEOUT -- P1, what decides "
+          "where the timeout may be armed")
+    try:
+        arms = [
+            ("A readline, identity", probe_readline(0.05, 0.12, 6)),
+            ("B assembled, identity", probe_assembled(0.05, 0.12, 6, False)),
+            ("C assembled, chunked", probe_assembled(0.05, 0.12, 6, True)),
+        ]
+    except SetupError as exc:
+        print("    SETUP ERROR: %s" % exc)
+        return 2
+    for label, row in arms:
+        print("    %-22s %4d timeouts | %2d/%2d payloads | %d decode errors | "
+              "%2d missing%s"
+              % (label, row["timeouts"], row["payloads"], row["of"],
+                 row["decode_errors"], row["missing"],
+                 " | " + row["broke"] if row["broke"] else ""))
+    torn = sum(row["decode_errors"] for _, row in arms)
+    lost = sum(row["missing"] for _, row in arms)
+    print("    %d decode errors and %d LOST payloads: the count the plan's "
+          "rule reads is zero, and the loss is total anyway -- a discarded "
+          "line is never handed to a decoder" % (torn, lost))
+    total += 1
+    if lost > 0:
+        print("    OK       a read timeout on this transport is a one-way "
+              "door -- so it may never sit under a healthy turn's longest "
+              "silence; point 3 decides where it can sit at all")
+    else:
+        failed += 1
+        print("    FAILED   no arm lost a payload -- the probe never fired "
+              "mid-line and this run decided nothing")
+    print("")
+    print("(3) WHAT WAKES A READ THAT IS ALREADY BLOCKED -- P1, and the "
+          "reason the timeout cannot sit at the abort")
+    quiet = 6.0
+    try:
+        wakes = [probe_wake(how, 30.0, quiet)
+                 for how in ("settimeout", "shutdown", "close")]
+    except SetupError as exc:
+        print("    SETUP ERROR: %s" % exc)
+        return 2
+    for row in wakes:
+        print("    %-12s woke the read after %5.2f s of a %.1f s silence%s"
+              % (row["how"], row["woke_after"], row["quiet_for"],
+                 " | " + row["raised"] if row.get("raised") else ""))
+    useless = [r for r in wakes if r["woke_after"] >= quiet - 1.0]
+    total += 1
+    if len(useless) == len(wakes):
+        print("    OK       none of the three woke it -- every one came back "
+              "when the SERVER hung up, so the only bound is the socket "
+              "timeout as it stood when the read started")
+    else:
+        failed += 1
+        woke = ", ".join(r["how"] for r in wakes if r not in useless)
+        print("    FAILED   %s woke a blocked read on this platform -- the "
+              "abort could be armed at the abort after all, and "
+              "cli/crow_gui.py's READ_TIMEOUT_S can be tightened" % woke)
 
-    if args.only in (None, "bytes"):
-        print("(2) BYTE LOSS UNDER A MID-LINE READ TIMEOUT -- P1, what decides "
-              "where the timeout may be armed")
-        try:
-            arms = [
-                ("A readline, identity", probe_readline(0.05, 0.12, 6)),
-                ("B assembled, identity", probe_assembled(0.05, 0.12, 6, False)),
-                ("C assembled, chunked", probe_assembled(0.05, 0.12, 6, True)),
-            ]
-        except SetupError as exc:
-            print("    SETUP ERROR: %s" % exc)
-            return 2
-        for label, row in arms:
-            print("    %-22s %4d timeouts | %2d/%2d payloads | %d decode errors | "
-                  "%2d missing%s"
-                  % (label, row["timeouts"], row["payloads"], row["of"],
-                     row["decode_errors"], row["missing"],
-                     " | " + row["broke"] if row["broke"] else ""))
-        torn = sum(row["decode_errors"] for _, row in arms)
-        lost = sum(row["missing"] for _, row in arms)
-        print("    %d decode errors and %d LOST payloads: the count the plan's "
-              "rule reads is zero, and the loss is total anyway -- a discarded "
-              "line is never handed to a decoder" % (torn, lost))
-        total += 1
-        if lost > 0:
-            print("    OK       a read timeout on this transport is a one-way "
-                  "door -- so it may never sit under a healthy turn's longest "
-                  "silence; point 3 decides where it can sit at all")
-        else:
-            failed += 1
-            print("    FAILED   no arm lost a payload -- the probe never fired "
-                  "mid-line and this run decided nothing")
-        print("")
-        print("(3) WHAT WAKES A READ THAT IS ALREADY BLOCKED -- P1, and the "
-              "reason the timeout cannot sit at the abort")
-        quiet = 6.0
-        try:
-            wakes = [probe_wake(how, 30.0, quiet)
-                     for how in ("settimeout", "shutdown", "close")]
-        except SetupError as exc:
-            print("    SETUP ERROR: %s" % exc)
-            return 2
-        for row in wakes:
-            print("    %-12s woke the read after %5.2f s of a %.1f s silence%s"
-                  % (row["how"], row["woke_after"], row["quiet_for"],
-                     " | " + row["raised"] if row.get("raised") else ""))
-        useless = [r for r in wakes if r["woke_after"] >= quiet - 1.0]
-        total += 1
-        if len(useless) == len(wakes):
-            print("    OK       none of the three woke it -- every one came back "
-                  "when the SERVER hung up, so the only bound is the socket "
-                  "timeout as it stood when the read started")
-        else:
-            failed += 1
-            woke = ", ".join(r["how"] for r in wakes if r not in useless)
-            print("    FAILED   %s woke a blocked read on this platform -- the "
-                  "abort could be armed at the abort after all, and "
-                  "cli/crow_gui.py's READ_TIMEOUT_S can be tightened" % woke)
-
-        total += 1
-        try:
-            bound = constant(gui, "READ_TIMEOUT_S")
-        except SetupError as exc:
-            print("    SETUP ERROR: %s" % exc)
-            return 2
-        # Two-sided, because both sides have cost a measurement. Under 469.51 s
-        # it cuts a healthy resumed prefill [measured 2026-08-10]; at the CLI's
-        # 1800 s it is not a bound at all.
-        if 469.51 < bound < 1800.0:
-            print("    OK       READ_TIMEOUT_S %.0f s clears the worst measured "
-                  "prefill (469.51 s) and still bounds a leaked reader" % bound)
-        else:
-            failed += 1
-            print("    FAILED   READ_TIMEOUT_S %.0f s is either under the worst "
-                  "measured prefill of 469.51 s -- which cuts good answers -- or "
-                  "at the CLI's 1800 s, which bounds nothing" % bound)
-        print("")
+    total += 1
+    try:
+        bound = constant(gui, "READ_TIMEOUT_S")
+    except SetupError as exc:
+        print("    SETUP ERROR: %s" % exc)
+        return 2
+    # Two-sided, because both sides have cost a measurement. Under 469.51 s
+    # it cuts a healthy resumed prefill [measured 2026-08-10]; at the CLI's
+    # 1800 s it is not a bound at all.
+    if 469.51 < bound < 1800.0:
+        print("    OK       READ_TIMEOUT_S %.0f s clears the worst measured "
+              "prefill (469.51 s) and still bounds a leaked reader" % bound)
+    else:
+        failed += 1
+        print("    FAILED   READ_TIMEOUT_S %.0f s is either under the worst "
+              "measured prefill of 469.51 s -- which cuts good answers -- or "
+              "at the CLI's 1800 s, which bounds nothing" % bound)
+    print("")
 
     print("RESULT: %d of %d numbers hold" % (total - failed, total))
     return 1 if failed else 0
