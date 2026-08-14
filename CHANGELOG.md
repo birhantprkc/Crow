@@ -51,16 +51,23 @@ and https only — `file:` and `data:` would make it a disk read around #92's bo
 through it. Extraction runs before the 16 KB clip, because clipping first keeps the markup and drops
 the answer. 152 in `cli/test_crow_core.py`, 13 breakages each count-checked to a single site.
 
-**The window's live tok/s divided by wall clock.** Observed 2026-08-14: **9.5 tok/s** on screen
-beside a server logging **17.99–19.29 t/s** for the same turn. The denominator ran from
-`reply_started`, so it contained the wait for the first token, every tool call and the prefill of
-every tool result — and #96 made the gap worse, because a web search is exactly that kind of pause.
-`crow_core.TurnCost` already carries this lesson from 2026-08-11 ("printed 1.49 tok/s for a turn the
-server had just measured at 14.77 and 16.46"); the window has its own counter and never got the fix.
-It now sums only the gaps **between** deltas and drops anything over 2 s — at the shipped operating
-point deltas arrive ~55 ms apart, so nothing thirty-six times slower is the model writing. 99 in
-`cli/test_crow_gui.py`, with a slow-but-real stream as the negative control: one delta a second must
-still report 1 tok/s, or a rule that drops every pause would report a fast rate for a slow turn.
+**The window's live tok/s counts the pauses, and that is now written down (#97).** Observed
+2026-08-14: **9.5 tok/s** on screen beside a server logging **17.99–19.29 t/s** for the same turn.
+The denominator runs from `reply_started`, so it contains the wait for the first token, every tool
+call and the prefill of every tool result — and the web tools widened the gap, because a search is
+exactly that kind of pause.
+
+It reads like the defect `crow_core.TurnCost` fixed on 2026-08-11 ("printed 1.49 tok/s for a turn the
+server had just measured at 14.77 and 16.46"). It was changed to sum only the gaps between deltas,
+and changed straight back: **what the user waits through is wall clock.** A decode rate that ignores
+the pauses answers a question the server already answers, and the server's own figure is the line
+that lands underneath at the end of the turn — two figures, two meanings, both on screen.
+
+The reason it looks like a bug is the reason it now has a guard.
+`TheLiveRateIsWallClockOnPurposeTests` fails if the pauses ever stop counting, with the well-meant
+repair as its negative control: summing only the inter-delta gaps lands back at the decode rate, and
+a case that goes green there means the decision was reverted without anyone deciding to. 98 in
+`cli/test_crow_gui.py`.
 
 ## 0.3.3 — 2026-08-14
 

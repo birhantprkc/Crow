@@ -89,12 +89,6 @@ from crow_core import (  # noqa: E402
 
 _VERSION_LITERAL = re.compile(r'^VERSION\s*=\s*"([^"]+)"', re.M)
 
-# The longest pause the live counter still counts as generating. Deltas arrive
-# about 55 ms apart at the shipped operating point; anything thirty-six times
-# slower is a tool call, a prefill or the wait for the first token, and counting
-# it is what made the window print half the server's rate. See TerminalTick._tick.
-MAX_GEN_GAP = 2.0
-
 # The window ships a read timeout where the terminal runs without one. Measured
 # 2026-08-13: a recv that is ALREADY blocked is not woken by closing the socket
 # from another thread, so the only bound on it is the timeout it started with.
@@ -1105,17 +1099,14 @@ class Sink(ReplyEvents, FenceEvents):
         self._live = live
         self._fences: CodeFences | None = None
         self._deltas = 0
-        self._gen_s = 0.0
-        self._prev = 0.0
+        self._started = 0.0
         self._last = 0.0
 
     def reply_started(self) -> None:
         self._put({"k": "start"})
         self._fences = CodeFences(self)
         self._deltas = 0
-        self._gen_s = 0.0
-        self._prev = 0.0
-        self._last = time.monotonic()
+        self._started = self._last = time.monotonic()
 
     def _tick(self) -> None:
         """A live count while the answer is being written.
@@ -1131,34 +1122,34 @@ class Sink(ReplyEvents, FenceEvents):
         FIVE UPDATES A SECOND AT MOST. The point of batching per tick is not to
         hand the same work back through a different queue.
 
-        THE DENOMINATOR IS TIME SPENT GENERATING, NOT WALL CLOCK, and this is the
-        second time that distinction has been paid for. `crow_core.TurnCost`
-        carries the first: "the first version divided tokens by the whole round
-        and printed 1.49 tok/s for a turn the server had just measured at 14.77
-        and 16.46". This counter is the window's own and never got that fix -- it
-        divided by `now - reply_started`, which also contains the wait for the
-        first token, every tool call, and the prefill of every tool result. On
-        2026-08-14 it showed 9.5 tok/s beside a server logging 17.99-19.29 t/s,
-        and the gap grew with #96 because a web search adds exactly that kind of
-        pause. Summing only the gaps BETWEEN deltas leaves the pauses out.
+        THE DENOMINATOR IS WALL CLOCK, AND THAT IS A DECISION -- NOT THE BUG IT
+        LOOKS LIKE (robin, #97, 2026-08-14). Divided this way the figure is
+        always LOWER than the server's `tg`, because `elapsed` also holds the
+        wait for the first token, every tool call and the prefill of every tool
+        result: 9.5 tok/s on screen beside a server logging 17.99-19.29 t/s for
+        the same turn, and web research widened the gap because a search is
+        exactly that kind of pause.
 
-        A gap longer than MAX_GEN_GAP is not generation. At the shipped
-        operating point deltas arrive about 55 ms apart; two seconds is thirty-six
-        times that, so nothing that slow is the model writing.
+        It was changed to sum only the gaps between deltas and changed straight
+        back. What the user waits through is the wall clock; a decode rate that
+        ignores the pauses answers a question the server already answers, and the
+        line underneath at the end IS the server's. Two figures, two meanings,
+        both on screen -- which is what the paragraph above already says.
+
+        SO DO NOT "FIX" THIS. `TheLiveRateIsWallClockOnPurposeTests` fails if the
+        pauses stop counting, and `crow_core.TurnCost` is where the decode figure
+        lives if that is what is wanted.
         """
         if not self._live:
             return
-        now = time.monotonic()
         self._deltas += 1
-        gap = now - self._prev if self._prev else 0.0
-        if 0.0 < gap <= MAX_GEN_GAP:
-            self._gen_s += gap
-        self._prev = now                      # every delta, not only every tick
+        now = time.monotonic()
         if now - self._last < 0.2:
             return
         self._last = now
+        elapsed = now - self._started
         self._put({"k": "live", "n": self._deltas,
-                   "rate": (self._deltas / self._gen_s) if self._gen_s > 0.05 else 0.0})
+                   "rate": (self._deltas / elapsed) if elapsed > 0.05 else 0.0})
 
     def answer_text(self, piece: str) -> None:
         if self._fences is None:

@@ -1657,18 +1657,22 @@ class _RefusingWindow:
         raise RuntimeError("no dialog here")
 
 
-class TheLiveRateMeasuresGenerationTests(unittest.TestCase):
-    """The window's own tok/s, and the pauses it must not count.
+class TheLiveRateIsWallClockOnPurposeTests(unittest.TestCase):
+    """The window's live tok/s counts the pauses, and that is the decision.
 
-    `crow_core.TurnCost` already carries this lesson once -- "the first version
-    divided tokens by the whole round and printed 1.49 tok/s for a turn the
-    server had just measured at 14.77 and 16.46". The window has its own live
-    counter and never got that fix: observed 2026-08-14 showing 9.5 tok/s beside
-    a server logging 17.99-19.29 t/s.
+    It looks like the defect `crow_core.TurnCost` already fixed once -- "the
+    first version divided tokens by the whole round and printed 1.49 tok/s for a
+    turn the server had just measured at 14.77 and 16.46" -- and on 2026-08-14 it
+    was changed to sum only the gaps between deltas, then changed straight back
+    (robin, #97). What the user waits through is wall clock. The decode figure is
+    the server's and lands underneath at the end of the turn; two figures with
+    two meanings, both on screen.
+
+    These cases exist so the next reading of that docstring does not turn into a
+    second fix. They fail if the pauses ever stop counting.
     """
 
-    def _run(self, gaps):
-        """Feed one delta per gap through a real Sink on a controlled clock."""
+    def _rate(self, gaps):
         clock = [1000.0]
         real = crow_gui.time.monotonic
         crow_gui.time.monotonic = lambda: clock[0]
@@ -1679,41 +1683,32 @@ class TheLiveRateMeasuresGenerationTests(unittest.TestCase):
             for gap in gaps:
                 clock[0] += gap
                 sink.reasoning_text_counted()
-            clock[0] += 10.0                      # force the last throttled tick
-            sink.reasoning_text_counted()
             live = [m for m in out if m["k"] == "live"]
             self.assertTrue(live, "no live message was ever sent")
-            return live[-1]
+            return live[-1]["rate"]
         finally:
             crow_gui.time.monotonic = real
 
-    def test_a_steady_stream_reports_its_actual_rate(self):
-        """POSITIVE. Fifty deltas 50 ms apart is 20 per second, and the counter
-        has to say so before any claim about pauses means anything."""
-        last = self._run([0.05] * 50)
-        self.assertAlmostEqual(last["rate"], 20.0, delta=1.0)
+    def test_a_steady_stream_reports_its_throughput(self):
+        """POSITIVE, and it has to hold before any claim about pauses means
+        anything: fifty deltas 50 ms apart with nothing in between is 20 a
+        second either way of measuring."""
+        self.assertAlmostEqual(self._rate([0.05] * 50), 20.0, delta=1.0)
 
-    def test_a_tool_call_in_the_middle_does_not_halve_the_rate(self):
-        """THE DEFECT. The same fifty deltas with a fifteen-second web search
-        between them: wall clock says 6 tok/s, the model still generated at 20.
-        Dividing by wall clock is what printed half the server's figure."""
-        last = self._run([0.05] * 25 + [15.0] + [0.05] * 25)
-        self.assertAlmostEqual(last["rate"], 20.0, delta=1.5)
+    def test_a_tool_call_lowers_the_figure_because_the_user_waited(self):
+        """THE DECISION. The same fifty deltas with a fifteen-second web search
+        between them: the model still generated at 20, and the user still waited
+        32 s for 50 tokens. The window reports what was waited through."""
+        self.assertLess(self._rate([0.05] * 25 + [15.0] + [0.05] * 25), 5.0)
 
-    def test_the_pause_is_excluded_and_not_merely_shrunk(self):
-        """NEGATIVE HALF. Clamping a long gap to MAX_GEN_GAP instead of dropping
-        it also beats the old number, and is still wrong -- it would land near
-        18 here. Only excluding the pause outright reaches the real rate."""
-        with_pause = self._run([0.05] * 25 + [15.0] + [0.05] * 25)["rate"]
-        without = self._run([0.05] * 50)["rate"]
-        self.assertAlmostEqual(with_pause, without, delta=0.6)
-
-    def test_a_slow_but_real_stream_is_still_counted(self):
-        """The other negative half: a gap under MAX_GEN_GAP is generation, and
-        a rule that dropped every pause would report a fast rate for a slow
-        turn. One delta a second is one token a second."""
-        last = self._run([1.0] * 12)
-        self.assertAlmostEqual(last["rate"], 1.0, delta=0.2)
+    def test_the_pause_is_not_quietly_excluded(self):
+        """NEGATIVE HALF, and the one that catches a well-meant repair: summing
+        only the gaps between deltas lands back near 20 here. If this ever
+        passes at 20, the decision was reverted without anyone deciding to."""
+        with_pause = self._rate([0.05] * 25 + [15.0] + [0.05] * 25)
+        without = self._rate([0.05] * 50)
+        self.assertGreater(without - with_pause, 10.0,
+                           "the pause stopped counting -- see #97 before changing this")
 
 
 if __name__ == "__main__":
