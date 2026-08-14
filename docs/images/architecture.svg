@@ -63,8 +63,9 @@
 
   <!-- ══ zone 1: resident in VRAM ════════════════════════════════════════ -->
   <rect x="34" y="446" width="1132" height="676" rx="16" fill="#f5f9ff" stroke="#5b8def" stroke-width="2"/>
-  <text x="600" y="486" text-anchor="middle" class="zh" fill="#2c5bac">RESIDENT IN VRAM</text>
-  <text x="600" y="514" text-anchor="middle" class="sub">27,994 MiB after load of 32,607, measured at 58 slots. The 64-slot cliff — 32,404 expected, 32,014 read, 390 MiB the driver moved out — was measured on UD-IQ3_XXS and not repeated here</text>
+  <text x="600" y="478" text-anchor="middle" class="zh" fill="#2c5bac">RESIDENT IN VRAM</text>
+  <text x="600" y="502" text-anchor="middle" class="sub">27,994 MiB after load of 32,607, measured at 58 slots.</text>
+  <text x="600" y="524" text-anchor="middle" class="sub">The 64-slot cliff — 32,404 expected, 32,014 read, 390 MiB moved out — was measured on UD-IQ3_XXS, not repeated</text>
 
   <!-- pipeline, two rows -->
   <rect x="66" y="540" width="240" height="86" rx="12" fill="#ffffff" stroke="#8b5cf6" stroke-width="1.8"/>
