@@ -6,7 +6,10 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
-## Unreleased
+## 0.4.1 — 2026-08-14
+
+Shipped because the 0.4.0 package predates the fix below: the tag sits on `1a50f6d`, the fix
+landed as `8adee6a`. Whoever installed 0.4.0 got a reopened chat without its tool rows.
 
 **A reopened chat kept its thoughts and lost every tool row (#99).** `_replay` read `content` and
 `reasoning_content` and never `tool_calls`, so an assistant turn that only called a tool was skipped
