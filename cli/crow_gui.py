@@ -393,6 +393,40 @@ details.think[open] .caret{transform:rotate(90deg)}
 #modemenu button[data-mode="allowedit"] b{color:#4ec98f}
 #modemenu button[data-mode="auto"] b{color:#e5c04b}
 #modemenu button .tick{float:right;color:var(--accent)}
+
+/* #92: the working directory, beside the level and deliberately quieter than
+   it. The level is the loud control -- it decides whether a shell runs unasked;
+   the boundary decides where, and only ever refuses. Same shape so the two read
+   as one row of controls, no colour of its own so it does not compete. */
+#rootwrap{position:relative}
+#root{font:inherit;font-size:11.5px;cursor:pointer;border-radius:6px;
+  padding:3px 11px;background:transparent;border:1px solid var(--line);
+  color:var(--dimmer);max-width:150px;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+#root:hover{border-color:var(--bevel)}
+/* UNBOUND IS THE STATE THAT MUST BE VISIBLE, so it is the dashed one: a solid
+   quiet button reads as "set and fine", and "no folder" is neither. */
+#root[data-bound="0"]{border-style:dashed}
+#root[data-bound="1"]{color:var(--dim)}
+
+#rootmenu{position:absolute;bottom:calc(100% + 6px);right:0;min-width:300px;
+  max-width:420px;background:var(--panel);border:1px solid var(--bevel);
+  border-radius:8px;padding:5px;box-shadow:0 8px 26px rgba(0,0,0,.45);z-index:40}
+#rootmenu[hidden]{display:none}
+#rootmenu .head{color:var(--dimmer);font-size:10px;text-transform:uppercase;
+  letter-spacing:.06em;padding:5px 9px 3px}
+#rootmenu .none{color:var(--dimmer);font-size:11px;padding:2px 9px 7px}
+#rootmenu .sep{height:1px;background:var(--line);margin:4px 6px}
+#rootmenu button{display:block;width:100%;text-align:left;font:inherit;
+  font-size:11.5px;cursor:pointer;background:transparent;border:0;
+  border-radius:6px;padding:7px 9px;color:var(--dim)}
+#rootmenu button:hover{background:rgba(126,176,248,.10)}
+#rootmenu button b{display:block;font-weight:600;font-size:12px;color:var(--text)}
+/* The full path wraps rather than truncates: a path with the middle cut out is
+   one the reader cannot check, and checking it is the entire purpose here. */
+#rootmenu button .what{color:var(--dimmer);font-size:10.5px;
+  word-break:break-all;line-height:1.35}
+#rootmenu button .tick{float:right;color:var(--accent)}
 </style></head><body>
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
@@ -443,6 +477,10 @@ details.think[open] .caret{transform:rotate(90deg)}
         <div id="foot">
           <span id="ctx"></span><span id="turnstate"></span>
           <div id="acts"><span id="hint"></span>
+            <div id="rootwrap">
+              <button id="root" data-bound="0" onclick="crow.rootMenu()">no folder</button>
+              <div id="rootmenu" hidden></div>
+            </div>
             <div id="modewrap">
               <button id="mode" data-mode="auto" onclick="crow.modeMenu()"
                       title="release level for tool calls">
@@ -628,6 +666,47 @@ const crow = {
     m.hidden=false; },
 
   setMode(name){ $("#modemenu").hidden=true; pywebview.api.set_mode(name); },
+
+  // #92: THE WORKING DIRECTORY. The button shows the folder's NAME and carries
+  // the full path as its tooltip -- a rail-width button cannot hold
+  // C:\Users\...\project and a truncated path is a path nobody can check.
+  //
+  // "none" IS DRAWN, not left blank. An empty button reads as "no boundary
+  // needed"; the state that has to be legible is exactly the one where writes
+  // are unbounded.
+  rootIs(path, name, roots){
+    this.root = path || ""; this.roots = roots || [];
+    const b = $("#root");
+    b.textContent = name || "no folder";
+    b.title = path || "writes are not restricted -- pick a folder to bound them";
+    b.dataset.bound = path ? "1" : "0"; },
+
+  rootMenu(){ const m=$("#rootmenu");
+    if(!m.hidden){ m.hidden=true; return; }
+    const rows = (this.roots||[]).map(x =>
+      '<button class="rootrow" onclick="crow.chooseRoot(this.dataset.p)">'
+      + (x.path===this.root ? '<span class="tick">&#10003;</span>' : '')
+      + '<b></b><span class="what"></span></button>');
+    m.innerHTML = '<div class="head">recently used</div>'
+      + (rows.length ? rows.join("") : '<div class="what none">none yet</div>')
+      + '<div class="sep"></div>'
+      + '<button onclick="crow.pickRoot()"><b>open folder&#8230;</b></button>'
+      + (this.root ? '<button onclick="crow.clearRoot()"><b>no folder</b>'
+                     + '<span class="what">writes go anywhere again</span></button>' : "");
+    // TEXT AND dataset, NEVER AN HTML STRING, for anything that came off the
+    // disk: a directory may be named `<img onerror=...>` or hold a quote, and
+    // the page has to draw it rather than run it. Nothing here is interpolated.
+    const els = m.querySelectorAll("button.rootrow");
+    (this.roots||[]).forEach((x,i) => { const el = els[i];
+      if(!el) return;
+      el.dataset.p = x.path;
+      el.querySelector("b").textContent = x.name;
+      el.querySelector(".what").textContent = x.path; });
+    m.hidden=false; },
+
+  chooseRoot(p){ $("#rootmenu").hidden=true; pywebview.api.choose_root(p); },
+  pickRoot(){ $("#rootmenu").hidden=true; pywebview.api.pick_root(); },
+  clearRoot(){ $("#rootmenu").hidden=true; pywebview.api.clear_root(); },
 
   // #88 point 2: THE PROMPT SHOWS WHAT IT RELEASES. A card that only said
   // "run_command?" would be a keystroke, not a decision, so the arguments are
@@ -836,6 +915,7 @@ const crow = {
         this.tools(e.execute); break;
       case "tools": this.tools(e.on); break;
       case "mode": this.modeIs(e.name, e.modes); break;
+      case "root": this.rootIs(e.path, e.name, e.roots); break;
       case "ask": this.ask(e.name, e.args, e.scope); break;
       case "rail": this.rail(e.title,e.meta,e.rollovers,e.unsaved);
         this.archive(e.archived||[]); break;
@@ -1151,6 +1231,16 @@ class Api:
 
     def __init__(self, args: argparse.Namespace) -> None:
         self._args = args
+        # #92: `--mode` parses to None when nobody typed it, because that is the
+        # only way to tell a silence from a typed `auto`. NOTHING ELSE MAY SEE
+        # THE None: `_mode_command` prints it, `run_turn` decides with it, and a
+        # None reaching either is a crash rather than a default. So the silence
+        # is recorded here as a flag and the field is filled immediately;
+        # `ready()` passes the flag on to `adopt_root`, which is the one place
+        # allowed to let a directory answer for a silent user.
+        self._mode_stated = getattr(args, "mode", None) is not None
+        if not self._mode_stated:
+            args.mode = DEFAULT_MODE
         # UNDERSCORED ON PURPOSE. pywebview walks the public attributes of the
         # js_api object to expose them to the page; a window object among them
         # is walked too, and `window.native.AccessibilityObject.Bounds.Empty…`
@@ -1213,7 +1303,118 @@ class Api:
         # a release level nobody can see is one nobody can trust.
         self.push({"k": "mode", "name": getattr(self._args, "mode", DEFAULT_MODE),
                    "modes": self.mode_menu()})
+        # #92: which directory this window may write in, before the first turn
+        # for the same reason the level is -- a boundary nobody can see is one
+        # nobody can trust, and its ABSENCE is the state that has to be visible.
+        #
+        # BOUND HERE, NOT ONLY DRAWN. The window has no `--root` and its cwd is
+        # whatever the shortcut handed it, so without this call it started
+        # unbounded every single time and the folder picked yesterday was gone.
+        # `adopt_root` is the same rule the terminal uses; the window simply has
+        # nothing to state, so it takes the remembered one.
+        _, mode, problem = crow_core.adopt_root(
+            getattr(self._args, "root", None),
+            self._args.mode if self._mode_stated else None,
+            walk_up=False)
+        if problem:
+            self.push({"k": "fail", "t": problem})
+        self._args.mode = mode
+        self.push({"k": "mode", "name": mode, "modes": self.mode_menu()})
+        self.push_root()
         threading.Thread(target=self._probe, daemon=True).start()
+
+    # ---- #92: the working directory ------------------------------------
+
+    def push_root(self) -> None:
+        root = crow_core.get_root()
+        self.push({"k": "root",
+                   "path": root or "",
+                   "name": os.path.basename(root) if root else "",
+                   "roots": [{"path": p, "name": os.path.basename(p) or p}
+                             for p in crow_core.known_roots()]})
+
+    def _bind_root(self, path: str, mode: str | None = None) -> None:
+        """Declare `path` a root, remember it, and adopt the level stored there.
+
+        THE LEVEL FOLLOWS THE ROOT (robin, #92): opening a directory restores
+        what it was last allowed to do. `_args.mode` is the same field
+        `set_mode` writes, so the two ways of changing the level end in one
+        place rather than two -- the divergence #90 exists to prevent.
+        """
+        stored = crow_core.read_root_mode(path)
+        wanted = mode or stored or getattr(self._args, "mode", DEFAULT_MODE)
+        crow_core.write_root_mode(path, wanted)
+        crow_core.set_root(path)
+        crow_core.remember_root(path)
+        if wanted != getattr(self._args, "mode", DEFAULT_MODE):
+            self._args.mode = wanted
+            crow_core.forget_approvals()
+            self.push({"k": "mode", "name": wanted, "modes": self.mode_menu()})
+        self.push_root()
+        self.push({"k": "note", "t": "working directory: %s (%s)" % (path, wanted)})
+
+    def choose_root(self, path: str) -> None:
+        """Switch to a root already on the list. Never mid-turn.
+
+        Refused while a turn runs for the same reason `set_mode` is: `run_turn`
+        reads the boundary through the tools as it goes, and moving it underneath
+        a running turn would let the first half of a turn write where the second
+        half may not.
+        """
+        if self._worker and self._worker.is_alive():
+            self.push({"k": "note", "t": "the working directory does not change mid-turn"})
+            return
+        if not path or not os.path.isdir(path):
+            self.push({"k": "fail", "t": "that directory is gone"})
+            self.push_root()
+            return
+        self._bind_root(path)
+
+    def pick_root(self) -> None:
+        """The native folder dialog, and the ONLY thing that creates a root.
+
+        `.crow/` appears wherever crow runs -- measured 2026-08-14, the home
+        directory had one from a single session in August -- so a root is never
+        inferred from the disk. Someone picks it here, and that pick writes
+        `root.json`.
+
+        Called from the bridge thread, which is where pywebview expects a dialog
+        to be raised. NOT `evaluate_js` from a worker: that one blocks its caller
+        and deadlocks on some backends, which is why the queue plus `pump()`
+        exists in the first place.
+        """
+        if self._worker and self._worker.is_alive():
+            self.push({"k": "note", "t": "the working directory does not change mid-turn"})
+            return
+        # IMPORTED HERE, not at module level, and that is the house rule rather
+        # than a shortcut: `main()` imports webview the same way, so `crow_gui`
+        # can be imported -- by the suite, by `check_shared_core` -- on a machine
+        # where the runtime is missing. Writing `webview.` against a module-level
+        # name that does not exist raises NameError only when a user clicks, and
+        # no green suite would have seen it.
+        import webview
+
+        start = crow_core.get_root() or os.getcwd()
+        try:
+            picked = self._window.create_file_dialog(
+                webview.FileDialog.FOLDER, directory=start)
+        except Exception:                       # noqa: BLE001 -- a cancelled or
+            picked = None                       # unavailable dialog is not a crash
+        if not picked:
+            return                              # cancelled: nothing changes, no note
+        self._bind_root(picked[0] if isinstance(picked, (list, tuple)) else str(picked))
+
+    def clear_root(self) -> None:
+        """Work without a boundary again -- the state every release up to 0.3.2 had.
+
+        It is offered rather than hidden: a user who cannot turn it off works
+        around it instead, and a boundary worked around teaches nothing.
+        """
+        if self._worker and self._worker.is_alive():
+            return
+        crow_core.set_root(None)
+        self.push_root()
+        self.push({"k": "note", "t": "no working directory -- writes are unbounded"})
 
     ARCHIVE_PREFIX = "chat-"
 
@@ -1346,6 +1547,12 @@ class Api:
         self._current_path, self._current_title = self._pointer()
         self._replay(messages)
         self._reload_rail()
+        # #92: `load_session` may have bound the root the restored chat was
+        # working in, and it runs HERE -- on the probe thread, after `ready()`
+        # already told the page there was none. Without this line the boundary
+        # holds while the button still says "no folder", which is the worst of
+        # the three states: the one where the screen and the loop disagree.
+        self.push_root()
         self.push({"k": "up", "model": None, "n_ctx": self._n_ctx,
                    "tokens": self._context_tokens})
 
@@ -2316,10 +2523,20 @@ def build_parser() -> argparse.ArgumentParser:
                         help="show tool calls instead of running them")
     # #88, the same flag the terminal client takes: the START level, with the
     # dropdown beside `send` as the same switch during a session.
-    parser.add_argument("--mode", choices=crow_core.MODES, default=DEFAULT_MODE,
+    # DEFAULT None, NOT `auto`, and the terminal's parser says the same. It is
+    # the only place that can tell "the user typed auto" from "the user typed
+    # nothing", and #92 needs the difference: a level remembered for a working
+    # directory fills a silence and never overrules a flag. `ready()` resolves
+    # it through `adopt_root` before the first turn, so nothing downstream sees
+    # None.
+    parser.add_argument("--mode", choices=crow_core.MODES, default=None,
                         help="release level for tool calls: manual asks before writing"
                              " and executing, allowedit asks before executing, auto asks"
-                             " for nothing (default)")
+                             " for nothing (default, unless the working directory"
+                             " remembers another)")
+    parser.add_argument("--root", default=None,
+                        help="the directory tool writes are confined to. States it AND"
+                             " creates it, the same as picking a folder in the window")
     return parser
 
 

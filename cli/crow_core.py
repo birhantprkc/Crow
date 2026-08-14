@@ -653,6 +653,8 @@ def load_session(base_url: str, system: str | None = None,
         return None
     if problem is not None:
         raise SessionFormatError(path, problem)
+
+
     if not messages:
         return None
 
@@ -1837,6 +1839,293 @@ def _key(path: str) -> str:
     return os.path.normcase(os.path.abspath(path))
 
 
+# #92. THE BOUNDARY REFUSES WITHOUT ASKING, and that is the whole reason it is a
+# different mechanism from the release levels (#88) rather than a stricter
+# setting of them. A level protects an ATTENTIVE user -- it hands them a path and
+# a question, and is only as good as their reading of it at round 14 of 24. A
+# boundary protects an INATTENTIVE one, at `auto`, on the turn nobody watched.
+# `auto` is the default, so without this there is nothing there at all.
+#
+# THE ROOT IS THE NEAREST ANCESTOR HOLDING `.crow/root.json` -- the rule
+# `.claude` follows, one level deeper. The start directory was the obvious answer
+# and the wrong one for a window: `crow_gui.py` is launched from a shortcut, so
+# its cwd is wherever Windows felt like.
+#
+# WHY NOT `.crow/` ITSELF, which is what this was built as first: `.crow/` is a
+# BY-PRODUCT. `SPILL_DIR` creates it wherever crow happens to run, and the window
+# archives chats into `.crow/archiv/`. MEASURED 2026-08-14 on this machine:
+# `C:\Users\robin\.crow` exists, dated 2026-08-08, holding 10+ spill files from a
+# session that was started from the home directory once. Treating `.crow/` as the
+# marker would have made the ENTIRE HOME DIRECTORY a root -- every project, every
+# download, the whole profile inside the boundary -- and the case that caught it
+# (`find_root` on a directory with no root above it) is the only reason it did
+# not ship that way.
+#
+# A marker that appears by itself cannot testify to an intention. `root.json` is
+# written only when someone picks a directory, and it carries what that pick
+# means: the release level remembered for this root (robin's decision, #92).
+#
+# WRITES ONLY, and both halves of that are robin's decision of 2026-08-14
+# recorded on #92. `read_file` stays unbounded, because a read boundary makes the
+# model blind to its own installation -- a real use -- and a read destroys
+# nothing. `run_command` is NOT covered either: a `cwd` inside the root says
+# nothing about what the command does, `cd /d C:\ && del ...` being one shell
+# line, so a path check there would read as protection nobody has. It stands on
+# #88's `executing` class instead. The cost of that is named rather than hidden:
+# at `auto`, `run_command` is unbounded.
+ROOT_MARKER = ".crow"
+ROOT_FILE = "root.json"
+
+# None means no boundary -- what a surface that never calls `set_root` gets.
+_ROOT: "str | None" = None
+
+
+
+
+
+def _resolve(path: str) -> str:
+    """Absolute and symlink-free, on a path that does not exist yet.
+
+    `abspath` normalises `..` TEXTUALLY, so `root/junction/../..` resolves to
+    `root` on paper while landing somewhere else on disk -- one junction and the
+    boundary is decoration. `realpath` walks component by component, resolving
+    each link, and stops at the first component that does not exist. That last
+    part is what makes it usable here: a write names a file that is usually not
+    there yet, above directories that are.
+
+    MEASURED 2026-08-14 on this machine, Python 3.13.3: `os.path.ALLOW_MISSING`
+    is in the 3.13 documentation and DOES NOT EXIST here -- it landed in a later
+    patch release. The missing-path case is therefore carried by the default
+    `strict=False`, not by the constant the docs point at.
+    """
+    return os.path.realpath(path)
+
+
+def _inside(root: str, path: str) -> bool:
+    """Is `path` at or below `root`? Two traps, both measured 2026-08-14.
+
+    A BARE `startswith` IS WRONG AND QUIETLY SO: `"C:\\root2\\x"` starts with
+    `"C:\\root"`, so a sibling whose name merely begins with the root's passes a
+    check that looks careful. The separator has to be part of the comparison,
+    which is what the `rstrip` + `sep` below is for.
+
+    `commonpath` and `relpath` are the obvious tools and are not used, because
+    across drive letters they RAISE `ValueError: Paths don't have the same
+    drive` instead of answering "no". The answer there is no -- a different
+    drive is outside any root -- and an exception that escapes does not refuse
+    the write, it ends the turn.
+    """
+    here = os.path.normcase(_resolve(root)).rstrip(os.sep)
+    there = os.path.normcase(_resolve(path))
+    return there == here or there.startswith(here + os.sep)
+
+
+def root_file(root: str) -> str:
+    return os.path.join(root, ROOT_MARKER, ROOT_FILE)
+
+
+def find_root(start: str | None = None) -> str | None:
+    """The nearest ancestor of `start` holding `.crow/root.json`, or None.
+
+    Walking UP rather than trusting the cwd is what lets a window opened three
+    directories deep mean the same project as a terminal opened at its top.
+    NEAREST, not highest: a sub-project that declares itself is its own root, and
+    the case for that is `test_find_root_takes_the_nearest_marker_not_the_highest`.
+    """
+    here = _resolve(start or os.getcwd())
+    while True:
+        if os.path.isfile(root_file(here)):
+            return here
+        parent = os.path.dirname(here)
+        if parent == here:                      # drive root, and no marker above
+            return None
+        here = parent
+
+
+def read_root_mode(root: str) -> str | None:
+    """The release level remembered for this root, or None if it names none.
+
+    A root whose file is unreadable or malformed answers None rather than
+    raising: the boundary is the security mechanism here, the remembered level is
+    a convenience, and a broken convenience must not take the boundary down with
+    it. The caller then falls back to DEFAULT_MODE, which is what a root without
+    a level has always meant.
+    """
+    try:
+        with open(root_file(root), encoding="utf-8") as fh:
+            mode = json.load(fh).get("mode")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return mode if mode in MODES else None
+
+
+def write_root_mode(root: str, mode: str) -> bool:
+    """Declare `root` a root, and remember `mode` for it. Returns success.
+
+    THIS IS THE ONLY THING THAT CREATES A ROOT. Nothing infers one, and that is
+    the whole correction of 2026-08-14: `.crow/` appears on its own wherever crow
+    runs, so a directory becomes a root when a human picks it, never because a
+    spill file landed there once.
+    """
+    try:
+        os.makedirs(os.path.join(root, ROOT_MARKER), exist_ok=True)
+        with open(root_file(root), "w", encoding="utf-8") as fh:
+            json.dump({"mode": mode if mode in MODES else DEFAULT_MODE}, fh, indent=1)
+    except OSError:
+        return False
+    return True
+
+
+def set_root(root: str | None) -> None:
+    """Bind the boundary, or remove it with None."""
+    global _ROOT
+    _ROOT = _resolve(root) if root else None
+
+
+def get_root() -> str | None:
+    return _ROOT
+
+
+# The roots picked before, so a window can offer them instead of asking for a
+# path. Beside the session rather than inside it: a session is one conversation,
+# the list of places a user works in outlives every one of them.
+ROOTS_FILE = os.path.join(os.path.dirname(SESSION_DIR), "roots.json")
+
+
+# Only what the picker offers. Which directory is ACTIVE is the open chat's
+# business, not this file's -- that is what makes two chats able to work in two
+# places. `{"recent": [...]}`; a bare list is the older shape and still read.
+def _roots_doc() -> dict:
+    try:
+        with open(ROOTS_FILE, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if isinstance(doc, list):
+        return {"recent": doc}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _write_roots(recent: list[str]) -> None:
+    doc: dict = {"recent": recent}
+    try:
+        os.makedirs(os.path.dirname(ROOTS_FILE), exist_ok=True)
+        with open(ROOTS_FILE, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=1)
+    except OSError:
+        pass
+
+
+
+
+
+
+def known_roots(limit: int = 8) -> list[str]:
+    """Roots picked before, newest first, and only ones that STILL declare themselves.
+
+    The filter is not tidiness. A directory whose `root.json` is gone is not a
+    root any more -- offering it would hand the user a boundary that silently
+    does not exist, which is worse than no entry at all.
+    """
+    paths = _roots_doc().get("recent")
+    if not isinstance(paths, list):
+        return []
+    out: list[str] = []
+    seen = set()
+    for path in paths:
+        if not isinstance(path, str) or not os.path.isfile(root_file(path)):
+            continue
+        key = os.path.normcase(path)
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out[:limit]
+
+
+def remember_root(root: str, limit: int = 8) -> None:
+    """Put `root` at the head of the recent list -- the menu's memory, nothing more.
+
+    It is NOT the active pick. That lives in the chat file, so a chat that names
+    no directory has none however many the list holds.
+    """
+    root = _resolve(root)
+    rest = [p for p in known_roots(limit) if os.path.normcase(p) != os.path.normcase(root)]
+    _write_roots([root] + rest[:limit - 1])
+
+
+def adopt_root(stated: str | None,
+               mode: str | None,
+               walk_up: bool = True) -> "tuple[str | None, str, str | None]":
+    """Bind the working directory for a run and resolve the level with it.
+
+    Returns `(root, mode, problem)`; `problem` is a message for the user and
+    means nothing was bound.
+
+    IN THE CORE BECAUSE BOTH SURFACES DECIDE IT, and `check_shared_core` cannot
+    see a rule that exists twice -- both would call the same tools and neither
+    would be wrong until they disagreed. The terminal calls this with `--root`,
+    the window with the folder the picker returned.
+
+    STATED CREATES, FOUND ONLY ADOPTS. `--root` (and the picker) write
+    `root.json` and thereby declare a root; walking up never does. That
+    asymmetry is the correction of 2026-08-14: `.crow/` is a by-product of
+    running crow anywhere, so a boundary inferred from the disk would have made
+    the home directory a root on this very machine.
+    """
+    if stated:
+        if not os.path.isdir(stated):
+            return None, mode or DEFAULT_MODE, f"no such directory: {stated}"
+        # READ BEFORE WRITE, and a case caught it the other way round: writing
+        # first stamps `mode or DEFAULT_MODE` over what the directory remembers,
+        # so re-opening a root released at `manual` silently handed it back at
+        # `auto` -- the memory destroyed by the act of consulting it.
+        if mode is None:
+            mode = read_root_mode(stated)
+        write_root_mode(stated, mode or DEFAULT_MODE)
+        set_root(stated)
+        remember_root(stated)
+    else:
+        # THE LAST PICK IS THE FALLBACK, and it is what makes the choice survive
+        # a restart at all. MEASURED 2026-08-14: the root was riding in
+        # session.json, and `save_session` refuses to write a conversation with
+        # nothing in it -- so picking a folder and closing the window without
+        # saying a word threw the pick away. That is the same guard `/reset` died
+        # on, in a new coat.
+        #
+        # A DIRECTORY IS A SETTING, NOT SOMETHING SAID. It has no business
+        # hanging off a conversation, and `roots.json` is already written the
+        # moment someone picks -- before any turn exists to save. `find_root`
+        # still wins: standing INSIDE a declared project means that project,
+        # whatever was picked last somewhere else.
+        #
+        # The pick is GLOBAL (robin, 2026-08-14) and survives a restart, including
+        # an explicit "no folder". Where you stand still wins over both.
+        # walk_up=False for the window: its cwd comes from a shortcut, so a
+        # stray .crow/root.json under it would outrank what the user picked.
+        set_root(find_root() if walk_up else None)
+    here = get_root()
+    if mode is None:
+        mode = (read_root_mode(here) if here else None) or DEFAULT_MODE
+    return here, mode, None
+
+
+def _outside_root(path: str) -> str | None:
+    """The refusal for a path out of bounds, or None when it is allowed.
+
+    THE REFUSAL NAMES THE ROOT (#92 done-criterion): a user who cannot see what
+    the boundary thought it was is left guessing whether the tool or their
+    directory is wrong. It is returned as a tool RESULT, never raised -- the same
+    invariant #88's decline keeps, since an assistant turn whose `tool_calls`
+    have no `tool` message behind them is a broken prefix for every later turn.
+    """
+    if _ROOT is None or _inside(_ROOT, path):
+        return None
+    return (f"error: refusing to write outside the working directory.\n"
+            f"  root: {_ROOT}\n"
+            f"  path: {_resolve(path)}\n"
+            f"Write inside the root, or start crow in the directory you mean.")
+
+
 def _clip(text: str, limit: int = MAX_TOOL_BYTES) -> str:
     """EVERY tool result goes through here. No exceptions, and that is the point.
 
@@ -1918,6 +2207,14 @@ def tool_read_file(path: str, start_line: int | None = None, end_line: int | Non
 
 
 def tool_write_file(path: str, content: str = "", **_) -> str:
+    # THE BOUNDARY GOES FIRST, ahead of read-before-write, and the order is not
+    # cosmetic: reads are NOT bounded, so a path outside the root would answer
+    # "read it first", the model would read it successfully, and only the second
+    # write would be refused -- two rounds at ~18 tok/s to deliver one refusal
+    # that was knowable without any state at all.
+    outside = _outside_root(path)
+    if outside:
+        return outside
     if os.path.exists(path) and _key(path) not in _READ:
         return (f"error: refusing to overwrite {path} without reading it first in "
                 f"this turn. Call read_file on it, then write.")
@@ -1938,6 +2235,9 @@ def tool_edit_file(path: str, old: str = "", new: str = "", **_) -> str:
     a model that mis-remembers whitespace. Exact match plus a uniqueness check
     fails loudly instead of guessing, which is the behaviour worth having first.
     """
+    outside = _outside_root(path)                   # #92, and before the read rule
+    if outside:
+        return outside
     if _key(path) not in _READ:
         return f"error: read {path} before editing it, in this turn"
     if not old:

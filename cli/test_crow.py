@@ -20,10 +20,16 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import crow  # noqa: E402
+# THE MODULE ITSELF, beside the re-exports, and #92 is what needs it: `crow.py`
+# binds names by VALUE, so `crow.ROOTS_FILE` is a copy and rebinding it moves
+# nothing -- the core would go on reading its own. Redirecting a module-level
+# path in a test has to happen where the functions read it.
+import crow_core  # noqa: E402
 
 
 class HealthUrlTests(unittest.TestCase):
@@ -2002,10 +2008,19 @@ class SessionFormatGateTests(unittest.TestCase):
         crow.SESSION_FILE = str(Path(self.dir) / "session.json")
         self.posted = []
         crow.post_json = lambda url, body, timeout=30.0: self.posted.append(url) or {}
+        # #92: this class is the only one that calls `repl()`, and `repl` binds a
+        # working directory -- from the REAL roots.json, because that is what a
+        # user's crow does. Left standing it reaches ACROSS MODULE BOUNDARIES:
+        # measured 2026-08-14, three ReleaseLevelTests in test_crow_core went red
+        # for it when the three suites ran in one process, on a machine where
+        # somebody had picked a folder once. A suite's colour may not depend on
+        # what the person running it chose in the window yesterday.
+        self._root_before = crow.get_root()
 
     def tearDown(self):
         crow.SESSION_DIR, crow.SESSION_FILE = self._real_dir, self._real_file
         crow.post_json = self._real_post
+        crow.set_root(self._root_before)
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def _conversation(self):
@@ -2491,15 +2506,31 @@ class ToolLayerCase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir, True)
         self._read_before = set(crow._READ)
         self._seen_before = dict(crow._SEEN)
+        # #92 JOINS THE LIST, and it had to: `_ROOT` is the third piece of global
+        # tool state, and unlike the two above it can be set by a case that never
+        # touches a tool -- `SessionFormatGateTests` calls `repl()`, which binds
+        # the last folder the USER picked, read from the real roots.json. Left
+        # standing, every later write case runs inside a boundary it never asked
+        # for: measured 2026-08-14, two cases red for that reason alone, on any
+        # machine where somebody had once chosen a directory.
+        #
+        # REBOUND THROUGH set_root, not by assigning `crow._ROOT`. It is a string
+        # in crow_core and `crow.py` binds names by value, so an assignment here
+        # would move a copy while the tools went on reading the core's -- the
+        # trap this docstring describes for `_READ`, in the one shape where
+        # in-place mutation cannot save it.
+        self._root_before = crow.get_root()
         self.addCleanup(self._restore_tool_state)
         crow._READ.clear()
         crow._SEEN.clear()
+        crow.set_root(None)
 
     def _restore_tool_state(self):
         crow._READ.clear()
         crow._READ.update(self._read_before)
         crow._SEEN.clear()
         crow._SEEN.update(self._seen_before)
+        crow.set_root(self._root_before)
 
     def _path(self, name):
         return os.path.join(self.dir, name)
@@ -3411,6 +3442,339 @@ class ReadScopeIsOneTurnTests(ToolLayerCase):
         self.turn(talk, "probe")
         self.assertEqual(seen["read"], set())
         self.assertEqual(seen["cached"], {})
+
+
+class WorkingDirectoryBoundaryTests(ToolLayerCase):
+    """#92: a write outside the root is refused WITHOUT asking, at every level.
+
+    THE NEGATIVE HALF IS THE ONLY REASON THIS SUITE MEANS ANYTHING. A boundary
+    that refuses every path passes "a write above the root is refused", "a write
+    through `..` is refused" and "a write through a symlink is refused" -- all
+    three, perfectly, while making the tool useless. So every refusal below is
+    paired with `test_a_deep_path_inside_the_root_is_written`, and a change that
+    breaks the pairing shows up there rather than in a green run.
+
+    THE ROOT IS NOT SET BY DEFAULT. `_ROOT` starts as None and a surface that
+    never calls `set_root` keeps the behaviour every release up to 0.3.2 had, so
+    `test_without_a_root_nothing_is_refused` pins that the core does not invent a
+    policy nobody asked for. It is the second negative half.
+
+    Reset via `crow.set_root(None)`, never by touching `_ROOT`: the name is a
+    module-level string in crow_core, so `crow.py` re-exporting it would bind the
+    VALUE and a rebinding here would move a copy while the tools went on reading
+    the core's. That is the trap `ToolLayerCase` documents for `_READ`, in the
+    one shape where it actually bites -- `_READ` is a set and survives in-place
+    mutation; a string does not.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.root = os.path.join(self.dir, "projekt")
+        os.makedirs(self.root)
+        crow.write_root_mode(self.root, "auto")
+        self.addCleanup(crow.set_root, None)
+        crow.set_root(self.root)
+
+    def _in_root(self, *parts):
+        return os.path.join(self.root, *parts)
+
+    # --- refused ---------------------------------------------------------
+
+    def test_a_write_above_the_root_is_refused(self):
+        out = crow.tool_write_file(os.path.join(self.dir, "daneben.txt"), "x")
+        self.assertIn("refusing to write outside", out)
+
+    def test_a_write_reached_through_dotdot_is_refused(self):
+        """`abspath` would normalise this to the same place -- and still be wrong
+        the moment a link is in the way, which is why `_resolve` uses realpath."""
+        out = crow.tool_write_file(self._in_root("..", "raus.txt"), "x")
+        self.assertIn("refusing to write outside", out)
+
+    def test_a_sibling_whose_name_merely_starts_with_the_root_is_refused(self):
+        """MEASURED 2026-08-14: `"C:\\root2\\x".startswith("C:\\root")` is True.
+
+        A boundary written with a bare startswith passes every other case in this
+        class and lets this one through, which is why the separator is part of
+        the comparison in `_inside`.
+        """
+        out = crow.tool_write_file(os.path.join(self.dir, "projekt2", "x.txt"), "x")
+        self.assertIn("refusing to write outside", out)
+
+    def test_another_drive_is_refused_rather_than_raising(self):
+        """`commonpath`/`relpath` raise ValueError across drives instead of
+        answering "no" -- measured 2026-08-14. An escaping exception does not
+        refuse the write, it ends the turn."""
+        out = crow.tool_write_file(r"Z:\evil.txt", "x")
+        self.assertIn("refusing to write outside", out)
+
+    def test_a_write_through_a_symlink_pointing_out_is_refused(self):
+        link = self._in_root("link")
+        try:
+            os.symlink(self.dir, link, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"no symlink privilege here: {exc}")
+        out = crow.tool_write_file(os.path.join(link, "raus.txt"), "x")
+        self.assertIn("refusing to write outside", out)
+
+    def test_edit_file_is_bounded_too(self):
+        path = os.path.join(self.dir, "fremd.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("alt")
+        crow.tool_read_file(path)                       # reads are NOT bounded
+        out = crow.tool_edit_file(path, old="alt", new="neu")
+        self.assertIn("refusing to write outside", out)
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "alt")
+
+    def test_the_refused_bytes_are_untouched(self):
+        path = os.path.join(self.dir, "wichtig.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("die arbeit")
+        crow.tool_write_file(path, "weg")
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "die arbeit")
+
+    # --- and NOT refused -------------------------------------------------
+
+    def test_a_deep_path_inside_the_root_is_written(self):
+        """THE NEGATIVE HALF. Without it a boundary that refuses everything passes."""
+        path = self._in_root("a", "b", "c", "tief.py")
+        out = crow.tool_write_file(path, "print(1)")
+        self.assertNotIn("refusing", out)
+        self.assertTrue(os.path.isfile(path))
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "print(1)")
+
+    def test_the_root_itself_is_inside_itself(self):
+        out = crow.tool_write_file(self._in_root("oben.txt"), "x")
+        self.assertNotIn("refusing", out)
+
+    def test_without_a_root_nothing_is_refused(self):
+        """The second negative half: no boundary is a valid state, not a bug."""
+        crow.set_root(None)
+        out = crow.tool_write_file(os.path.join(self.dir, "frei.txt"), "x")
+        self.assertNotIn("refusing", out)
+
+    def test_reads_are_not_bounded(self):
+        """robin's decision on #92: a read boundary makes the model blind to its
+        own installation, and a read destroys nothing."""
+        path = os.path.join(self.dir, "draussen.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("lesbar")
+        self.assertEqual(crow.tool_read_file(path), "lesbar")
+
+    def test_run_command_is_not_bounded(self):
+        """RECORDED DECISION, not an oversight (#92 point 3). A `cwd` inside the
+        root says nothing about what the command does, so run_command stands on
+        #88's `executing` class instead. If this case ever goes red, the decision
+        changed and the ticket has to say so."""
+        self.assertNotIn("refusing to write outside",
+                         crow.tool_run_command("cd", cwd=self.dir))
+
+    # --- shape of the refusal -------------------------------------------
+
+    def test_the_refusal_names_the_root(self):
+        out = crow.tool_write_file(os.path.join(self.dir, "x.txt"), "x")
+        self.assertIn(self.root, out)
+
+    def test_the_refusal_is_a_tool_result_not_an_exception(self):
+        """Same invariant as #88's decline: an assistant turn whose tool_calls
+        have no `tool` message behind them is a broken prefix for every later
+        turn."""
+        out = crow.tool_write_file(r"Z:\nope\x.txt", "x")
+        self.assertIsInstance(out, str)
+        self.assertTrue(out.startswith("error: "))
+
+    def test_the_boundary_answers_before_read_before_write(self):
+        """An existing, unread file OUTSIDE the root gets the boundary, not
+        "read it first" -- otherwise the model reads it (reads are allowed) and
+        pays a second round for a refusal that needed no state."""
+        path = os.path.join(self.dir, "fremd.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("alt")
+        out = crow.tool_write_file(path, "neu")
+        self.assertIn("refusing to write outside", out)
+        self.assertNotIn("refusing to overwrite", out)
+
+    # --- finding the root ------------------------------------------------
+
+    def test_find_root_walks_up_to_the_marker(self):
+        deep = self._in_root("a", "b")
+        os.makedirs(deep)
+        self.assertEqual(os.path.normcase(crow.find_root(deep)),
+                         os.path.normcase(os.path.realpath(self.root)))
+
+    def test_find_root_is_none_without_a_marker(self):
+        plain = os.path.join(self.dir, "ohne")
+        os.makedirs(plain)
+        self.assertIsNone(crow.find_root(plain))
+
+    def test_find_root_takes_the_nearest_marker_not_the_highest(self):
+        inner = self._in_root("unter")
+        os.makedirs(inner)
+        crow.write_root_mode(inner, "auto")
+        self.assertEqual(os.path.normcase(crow.find_root(inner)),
+                         os.path.normcase(os.path.realpath(inner)))
+
+    def test_a_bare_crow_directory_is_NOT_a_root(self):
+        """THE CORRECTION OF 2026-08-14, and the case that caught it.
+
+        `.crow/` is created by SPILL_DIR wherever crow runs. Measured that day:
+        `C:\\Users\\robin\\.crow` existed, dated 2026-08-08, from one session
+        started in the home directory -- so a `.crow/`-is-the-marker rule made the
+        entire user profile a root and the boundary decoration. A directory
+        becomes a root when someone declares it, never as a side effect.
+        """
+        spill = os.path.join(self.dir, "zufall")
+        os.makedirs(os.path.join(spill, crow.ROOT_MARKER))       # by-product only
+        self.assertIsNone(crow.find_root(spill))
+
+    def test_a_root_remembers_its_level(self):
+        crow.write_root_mode(self.root, "manual")
+        self.assertEqual(crow.read_root_mode(self.root), "manual")
+
+    def test_a_root_with_an_unreadable_file_answers_none_rather_than_raising(self):
+        """The boundary is the security mechanism; the remembered level is a
+        convenience. A broken convenience must not take the boundary down."""
+        with open(crow.root_file(self.root), "w", encoding="utf-8") as fh:
+            fh.write("{ this is not json")
+        self.assertIsNone(crow.read_root_mode(self.root))
+        self.assertIn("refusing to write outside",
+                      crow.tool_write_file(os.path.join(self.dir, "x.txt"), "x"))
+
+    def test_an_unknown_level_in_the_file_is_not_trusted(self):
+        with open(crow.root_file(self.root), "w", encoding="utf-8") as fh:
+            json.dump({"mode": "godmode"}, fh)
+        self.assertIsNone(crow.read_root_mode(self.root))
+
+
+class RootSurvivesTheSessionTests(unittest.TestCase):
+    """#92: the chosen directory is part of the session, so reopening restores it.
+
+    robin's requirement, stated while this was being built: "die auswahl muss je
+    session dann persistent gespeichert sein". A boundary that has to be re-picked
+    on every start is one people turn off.
+
+    THE FIELD IS ADDED, NOT SUBSTITUTED, and `SessionFormatGateTests` case (d) is
+    why that is allowed: an older build reads five keys and ignores the rest, so a
+    session written here still opens in 0.3.2 -- simply unbounded, which is the
+    state that build was already in. `test_an_older_build_still_reads_it` holds
+    that claim as a case rather than leaving it an assumption.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-rootsess-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._real = (crow.SESSION_DIR, crow.SESSION_FILE, crow.post_json,
+                      crow_core.ROOTS_FILE)
+        self.addCleanup(self._restore)
+        self.addCleanup(crow.set_root, None)
+        crow.SESSION_DIR = self.dir
+        crow.SESSION_FILE = os.path.join(self.dir, "session.json")
+        crow_core.ROOTS_FILE = os.path.join(self.dir, "roots.json")
+        crow.post_json = lambda *a, **k: {}
+        self.root = os.path.join(self.dir, "projekt")
+        os.makedirs(self.root)
+        crow.write_root_mode(self.root, "allowedit")
+
+    def _restore(self):
+        (crow.SESSION_DIR, crow.SESSION_FILE, crow.post_json,
+         crow_core.ROOTS_FILE) = self._real
+
+    def _talk(self):
+        talk = crow.Conversation("SYS")
+        talk.append("user", "hi")
+        return talk
+
+    def _saved(self):
+        with open(crow.SESSION_FILE, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_standing_inside_a_declared_project_beats_the_last_pick(self):
+        """THE NEGATIVE HALF of the fallback: it fills a silence, it does not
+        overrule where you actually are. Without this, opening a terminal inside
+        project B would bind project A because A was picked last."""
+        other = os.path.join(self.dir, "hier")
+        os.makedirs(other)
+        crow.write_root_mode(other, "auto")
+        crow.write_root_mode(self.root, "auto")
+        crow.remember_root(self.root)                  # picked last, elsewhere
+        crow.set_root(None)
+        with mock.patch.object(crow_core, "find_root", return_value=other):
+            root, _, _ = crow.adopt_root(None, None)
+        self.assertEqual(os.path.normcase(root or ""),
+                         os.path.normcase(other))
+
+    def test_an_older_build_still_reads_it(self):
+        """Case (d) of the format gate, for this field: the five keys 0.2.0 reads
+        are all still there and mean what they meant."""
+        crow.set_root(self.root)
+        crow.save_session(self._talk(), "http://127.0.0.1:8081", 42)
+        saved = self._saved()
+        for key in ("version", "kv", "kv_tokens", "context_tokens", "prefix",
+                    "messages"):
+            self.assertIn(key, saved)
+        self.assertEqual([m["content"] for m in saved["messages"]][-1], "hi")
+
+
+class AdoptRootTests(unittest.TestCase):
+    """#92: one rule for both surfaces -- what `--root` and the picker resolve to."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-adopt-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._roots = crow_core.ROOTS_FILE
+        crow_core.ROOTS_FILE = os.path.join(self.dir, "roots.json")
+        self.addCleanup(setattr, crow_core, "ROOTS_FILE", self._roots)
+        self.addCleanup(crow.set_root, None)
+        crow.set_root(None)
+
+    def test_a_stated_directory_becomes_a_root(self):
+        target = os.path.join(self.dir, "neu")
+        os.makedirs(target)
+        root, mode, problem = crow.adopt_root(target, None)
+        self.assertIsNone(problem)
+        self.assertTrue(os.path.isfile(crow.root_file(target)))
+        self.assertEqual(os.path.normcase(root),
+                         os.path.normcase(os.path.realpath(target)))
+        self.assertEqual(mode, crow.DEFAULT_MODE)
+
+    def test_a_stated_directory_that_is_not_there_is_a_problem_not_a_crash(self):
+        root, _, problem = crow.adopt_root(os.path.join(self.dir, "gibtsnicht"), None)
+        self.assertIsNone(root)
+        self.assertIn("no such directory", problem)
+
+    def test_a_stated_level_is_stored_with_the_root(self):
+        target = os.path.join(self.dir, "mit-level")
+        os.makedirs(target)
+        crow.adopt_root(target, "manual")
+        self.assertEqual(crow.read_root_mode(target), "manual")
+
+    def test_the_stored_level_fills_a_silence(self):
+        target = os.path.join(self.dir, "erinnert")
+        os.makedirs(target)
+        crow.write_root_mode(target, "manual")
+        crow.set_root(None)
+        _, mode, _ = crow.adopt_root(target, None)
+        self.assertEqual(mode, "manual")
+
+    def test_a_stated_level_beats_the_stored_one(self):
+        """THE NEGATIVE HALF of the case above: a memory may fill a silence, never
+        overrule a flag typed this minute."""
+        target = os.path.join(self.dir, "ueberschrieben")
+        os.makedirs(target)
+        crow.write_root_mode(target, "manual")
+        crow.set_root(None)
+        _, mode, _ = crow.adopt_root(target, "auto")
+        self.assertEqual(mode, "auto")
+        self.assertEqual(crow.read_root_mode(target), "auto")
+
+    def test_nothing_stated_and_nothing_declared_leaves_it_unbounded(self):
+        with mock.patch.object(crow_core, "find_root", return_value=None):
+            root, mode, problem = crow.adopt_root(None, None)
+        self.assertIsNone(root)
+        self.assertIsNone(problem)
+        self.assertEqual(mode, crow.DEFAULT_MODE)
 
 
 if __name__ == "__main__":

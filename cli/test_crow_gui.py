@@ -45,6 +45,7 @@ import sys
 import tempfile
 import threading
 import time
+from unittest import mock
 import unittest
 from pathlib import Path
 
@@ -1471,6 +1472,189 @@ class TheWindowBorrowsAndDoesNotRebuildTests(unittest.TestCase):
                           "the copy button writes through a clipboard that "
                           "refuses without raising")
         self.assertIn("def copy(self, text: str) -> bool:", self.source)
+
+
+class TheFolderPickerTests(ApiCase):
+    """#92 in the window: the folder picker, and what it is allowed to do.
+
+    THE PICKER IS THE ONLY THING THAT CREATES A ROOT, so these cases are the
+    other half of the core's boundary rather than a second copy of it. What is
+    checked here is the window's share: that the state reaches the page at all,
+    that a directory the user never picked cannot become one, and that the
+    boundary cannot move under a running turn.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._roots = crow_core.ROOTS_FILE
+        crow_core.ROOTS_FILE = os.path.join(self.dir, "roots.json")
+        self.addCleanup(setattr, crow_core, "ROOTS_FILE", self._roots)
+        self.addCleanup(crow_core.set_root, None)
+        crow_core.set_root(None)
+        self.root = os.path.join(self.dir, "projekt")
+        os.makedirs(self.root)
+
+    def _root_msg(self, api):
+        msgs = [m for m in self.drained(api) if m.get("k") == "root"]
+        self.assertTrue(msgs, "the page was never told about the working directory")
+        return msgs[-1]
+
+    def test_ready_tells_the_page_there_is_none(self):
+        """THE ABSENCE IS THE STATE THAT MUST BE VISIBLE. A window that says
+        nothing when nothing is bound reads as "bounded and fine"."""
+        api = self.api()
+        api.ready()
+        msg = self._root_msg(api)
+        self.assertEqual(msg["path"], "")
+        self.assertEqual(msg["roots"], [])
+
+    def test_a_root_restored_by_the_session_reaches_the_page(self):
+        """THE SEAM, and it is the one that bit three times on 2026-08-14.
+
+        `load_session` runs on the probe thread, AFTER `ready()` has already told
+        the page there is no folder. Without a second push the boundary holds
+        while the button still says "no folder" -- screen and loop disagreeing,
+        which is worse than either state alone. No Api-only case sees it; this
+        one drives `_probe` itself.
+        """
+        crow_core.write_root_mode(self.root, "auto")
+        api = self.api()
+        with mock.patch.object(crow_gui, "check_endpoint", return_value="ok"), \
+             mock.patch.object(crow_gui, "model_display_name", return_value="m"), \
+             mock.patch.object(crow_gui, "fetch_model_name", return_value="m"), \
+             mock.patch.object(crow_gui, "fetch_n_ctx", return_value=1000), \
+             mock.patch.object(crow_gui, "load_session") as load:
+            def restore(*a, **k):
+                crow_core.set_root(self.root)
+                return ([{"role": "user", "content": "hi"}], 10, False)
+            load.side_effect = restore
+            api._probe()
+        msg = self._root_msg(api)
+        self.assertEqual(os.path.normcase(msg["path"]),
+                         os.path.normcase(os.path.realpath(self.root)))
+        self.assertEqual(msg["name"], "projekt")
+
+    def test_choosing_a_root_binds_it_and_tells_the_page(self):
+        api = self.api()
+        crow_core.write_root_mode(self.root, "auto")
+        api.choose_root(self.root)
+        self.assertEqual(os.path.normcase(crow_core.get_root()),
+                         os.path.normcase(os.path.realpath(self.root)))
+        self.assertEqual(self._root_msg(api)["name"], "projekt")
+
+    def test_choosing_writes_the_marker_so_the_pick_survives(self):
+        api = self.api()
+        api.choose_root(self.root)
+        self.assertTrue(os.path.isfile(crow_core.root_file(self.root)))
+
+    def test_a_directory_that_is_gone_is_refused_and_the_page_is_resynced(self):
+        api = self.api()
+        api.choose_root(os.path.join(self.dir, "weg"))
+        self.assertIsNone(crow_core.get_root())
+        self.assertIn("fail", self.kinds(api))
+
+    def test_the_level_follows_the_root(self):
+        """robin's decision: opening a folder restores what it was allowed to do."""
+        api = self.api()
+        crow_core.write_root_mode(self.root, "manual")
+        api.choose_root(self.root)
+        self.assertEqual(api._args.mode, "manual")
+        self.assertIn("mode", self.kinds(api))
+
+    def test_clearing_the_root_is_offered_and_works(self):
+        api = self.api()
+        api.choose_root(self.root)
+        api.clear_root()
+        self.assertIsNone(crow_core.get_root())
+        self.assertEqual(self._root_msg(api)["path"], "")
+
+    def test_clearing_leaves_the_folder_in_the_menu(self):
+        api = self.api()
+        api.choose_root(self.root)
+        api.clear_root()
+        self.assertEqual([r["name"] for r in self._root_msg(api)["roots"]], ["projekt"])
+
+    def test_the_root_does_not_move_mid_turn(self):
+        """Same rule as `set_mode`: half a turn allowed to write where the other
+        half may not is worse than either boundary alone."""
+        api = self.api()
+        api._worker = _AliveWorker()
+        api.choose_root(self.root)
+        self.assertIsNone(crow_core.get_root())
+
+    def test_the_picker_does_not_open_mid_turn(self):
+        api = self.api()
+        api._worker = _AliveWorker()
+        api._window = _RefusingWindow()          # would raise if it were called
+        api.pick_root()
+        self.assertIsNone(crow_core.get_root())
+
+    def test_a_cancelled_dialog_changes_nothing_and_says_nothing(self):
+        """Cancel is an answer, not a failure. A note on every cancel trains the
+        user to ignore notes."""
+        api = self.api()
+        api._window = _PickingWindow(None)
+        api.pick_root()
+        self.assertIsNone(crow_core.get_root())
+        self.assertEqual([k for k in self.kinds(api) if k in ("fail", "note")], [])
+
+    def test_picking_a_folder_binds_it(self):
+        api = self.api()
+        api._window = _PickingWindow((self.root,))
+        api.pick_root()
+        self.assertEqual(os.path.normcase(crow_core.get_root()),
+                         os.path.normcase(os.path.realpath(self.root)))
+
+    def test_a_dialog_that_throws_is_not_a_crash(self):
+        api = self.api()
+        api._window = _RefusingWindow()
+        api.pick_root()
+        self.assertIsNone(crow_core.get_root())
+
+    def test_the_recent_list_only_offers_roots_that_still_declare_themselves(self):
+        api = self.api()
+        api.choose_root(self.root)
+        os.remove(crow_core.root_file(self.root))
+        api.push_root()
+        self.assertEqual(self._root_msg(api)["roots"], [])
+
+    def test_the_page_has_the_button_and_its_handler(self):
+        """The seam #90 exists for: a bridge method with nothing calling it is a
+        feature that does not exist, and no Api case can see the difference."""
+        page = crow_gui.PAGE
+        self.assertIn('id="root"', page)
+        self.assertIn("crow.rootMenu()", page)
+        self.assertIn("pywebview.api.pick_root()", page)
+        self.assertIn("pywebview.api.choose_root(", page)
+        self.assertIn('case "root":', page)
+
+    def test_the_menu_never_interpolates_a_path_into_html(self):
+        """A directory may be named `<img onerror=...>`. Paths reach the page as
+        textContent and dataset only -- this pins that they are not concatenated
+        into the menu's HTML string."""
+        page = crow_gui.PAGE
+        menu = page[page.index("rootMenu(){"):page.index("chooseRoot(p){")]
+        self.assertNotIn("+x.path+", menu.replace(" ", ""))
+        self.assertNotIn("+x.name+", menu.replace(" ", ""))
+        self.assertIn("textContent", menu)
+
+
+class _AliveWorker:
+    def is_alive(self):
+        return True
+
+
+class _PickingWindow:
+    def __init__(self, result):
+        self._result = result
+
+    def create_file_dialog(self, *a, **k):
+        return self._result
+
+
+class _RefusingWindow:
+    def create_file_dialog(self, *a, **k):
+        raise RuntimeError("no dialog here")
 
 
 if __name__ == "__main__":

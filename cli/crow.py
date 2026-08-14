@@ -50,6 +50,7 @@ from crow_core import (  # noqa: F401 -- re-exported for the CLI and its suite
     BLUE,
     BOLD,
     BUDGET_SPENT,
+    adopt_root,
     _c,
     check_endpoint,
     _clip,
@@ -61,6 +62,7 @@ from crow_core import (  # noqa: F401 -- re-exported for the CLI and its suite
     CrowError,
     CYAN,
     DEFAULT_BASE_URL,
+    DEFAULT_MODE,
     DEFAULT_MODEL,
     DEFAULT_SYSTEM,
     DIM,
@@ -68,6 +70,7 @@ from crow_core import (  # noqa: F401 -- re-exported for the CLI and its suite
     fetch_latest_version,
     fetch_model_name,
     fetch_n_ctx,
+    find_root,
     _fn,
     FONT_DIR,
     FONT_FAMILY,
@@ -77,6 +80,7 @@ from crow_core import (  # noqa: F401 -- re-exported for the CLI and its suite
     format_clock,
     _GGUF_QUANT,
     _GGUF_SHARD,
+    get_root,
     GREEN,
     health_url,
     install_font,
@@ -112,6 +116,14 @@ from crow_core import (  # noqa: F401 -- re-exported for the CLI and its suite
     ROLLOVER_AT,
     ROLLOVER_NOTE,
     rollover_path,
+    ROOT_MARKER,
+    ROOT_FILE,
+    ROOTS_FILE,
+    root_file,
+    known_roots,
+    remember_root,
+    read_root_mode,
+    write_root_mode,
     NEVER_CACHED,
     READ_GATED,
     SLASH_COMMANDS,
@@ -127,6 +139,7 @@ from crow_core import (  # noqa: F401 -- re-exported for the CLI and its suite
     SESSION_FORMAT_KEY,
     session_format_problem,
     SessionFormatError,
+    set_root,
     should_roll,
     SLOT_FILE,
     start_update_check,
@@ -1382,6 +1395,17 @@ def repl(args: argparse.Namespace) -> int:
     if getattr(args, "font", True):
         ensure_font()
 
+    # #92: the working directory, bound before anything can write. The rule is
+    # `adopt_root` in the core, because the window decides the same thing and a
+    # rule written twice is the divergence `check_shared_core` cannot see.
+    here, args.mode, problem = adopt_root(getattr(args, "root", None),
+                                          getattr(args, "mode", None))
+    if problem:
+        print(f"crow: {problem}", file=sys.stderr)
+        return 2
+    if here:
+        print(f"{DIM}working directory: {here}{RESET}")
+
     # Above the endpoint check, because an out-of-date client that also cannot
     # reach its server should say both things -- and the version line is the one
     # that might explain the other.
@@ -1799,11 +1823,22 @@ def build_parser() -> argparse.ArgumentParser:
     # #88. The START value; /mode is the same switch during a session. `auto`
     # is what every release up to 0.3.1 did, so the default changes nothing for
     # anyone who does not ask for a level.
-    parser.add_argument("--mode", choices=crow_core.MODES,
-                        default=crow_core.DEFAULT_MODE,
+    # DEFAULT None, NOT `auto`, and the default is still auto -- `repl` resolves
+    # it. The parser is the only place that can distinguish "the user typed auto"
+    # from "the user typed nothing", and #92 needs that difference: a level
+    # remembered for a working directory may fill a silence, never overrule a
+    # flag. Nothing downstream sees None; `repl` sets it before the first turn.
+    parser.add_argument("--mode", choices=crow_core.MODES, default=None,
                         help="release level for tool calls: manual asks before writing"
                              " and executing, allowedit asks before executing, auto asks"
-                             " for nothing (default)")
+                             " for nothing (default, unless the working directory"
+                             " remembers another)")
+    parser.add_argument("--root", default=None,
+                        help="the directory tool writes are confined to. States it"
+                             " AND creates it: writes .crow/root.json, which is what"
+                             " makes a directory a root. Without this, crow adopts a"
+                             " root declared above the working directory, or runs"
+                             " unbounded if there is none")
     return parser
 
 
