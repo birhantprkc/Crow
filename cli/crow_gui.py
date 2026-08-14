@@ -1655,22 +1655,69 @@ class Api:
         self._window.move(int(x), int(y))
         self._window.resize(int(w), int(h))
 
+    def _hwnd(self) -> int | None:
+        """This window's HWND, or None.
+
+        `native` is a System.Windows.Forms.Form and exists only after
+        before_show; `.Handle` is the documented way to the HWND on Windows.
+        int() takes it out of .NET's IntPtr, because ctypes will not.
+        """
+        try:
+            return int(self._window.native.Handle)
+        except Exception:                  # noqa: BLE001 - cosmetic
+            return None
+
     @staticmethod
-    def _work_area() -> tuple:
-        """The desktop MINUS the taskbar. Falls back to the full screen.
+    def _work_area(hwnd=None) -> tuple:
+        """The work area OF THE MONITOR THIS WINDOW IS ON, minus the taskbar.
 
         A frameless window told to fill the screen fills the SCREEN -- taskbar
-        included, which is how the first maximise buried it. Windows keeps the
-        usable rectangle in SPI_GETWORKAREA (0x0030) and it is the only number
-        that knows where the taskbar is and which edge it sits on.
+        included, which is how the first maximise buried it.
+
+        SPI_GETWORKAREA IS THE PRIMARY MONITOR'S RECTANGLE AND NOTHING ELSE.
+        That is not a quirk, it is what the call is defined to return, and it is
+        why a window on a second screen jumped back to the main one on every
+        double-click: it was told to move to coordinates that only exist over
+        there. MonitorFromWindow(MONITOR_DEFAULTTONEAREST) plus GetMonitorInfoW
+        gives the rectangle of the monitor the window actually sits on, taskbar
+        already subtracted in rcWork.
+
+        argtypes on both calls, because a handle passed without them is
+        truncated to 32 bits and the call then names a monitor that does not
+        exist -- silently, returning 0 rather than raising.
         """
         try:
             import ctypes
             from ctypes import wintypes
 
+            user32 = ctypes.windll.user32
+
+            if hwnd:
+                class MONITORINFO(ctypes.Structure):
+                    _fields_ = [("cbSize", wintypes.DWORD),
+                                ("rcMonitor", wintypes.RECT),
+                                ("rcWork", wintypes.RECT),
+                                ("dwFlags", wintypes.DWORD)]
+
+                user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+                user32.MonitorFromWindow.restype = wintypes.HMONITOR
+                user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR,
+                                                   ctypes.POINTER(MONITORINFO)]
+                user32.GetMonitorInfoW.restype = wintypes.BOOL
+
+                monitor = user32.MonitorFromWindow(wintypes.HWND(hwnd), 2)
+                info = MONITORINFO()
+                info.cbSize = ctypes.sizeof(MONITORINFO)
+                if monitor and user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                    work = info.rcWork
+                    return (work.left, work.top,
+                            work.right - work.left, work.bottom - work.top)
+
+            # No handle yet (before before_show), or the monitor query failed.
+            # The primary monitor is wrong on a second screen, but it is a
+            # rectangle that exists -- which the 1280x800 below is not.
             rect = wintypes.RECT()
-            if ctypes.windll.user32.SystemParametersInfoW(
-                    0x0030, 0, ctypes.byref(rect), 0):
+            if user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
                 return (rect.left, rect.top,
                         rect.right - rect.left, rect.bottom - rect.top)
         except Exception:                  # noqa: BLE001 - cosmetic
@@ -1684,7 +1731,7 @@ class Api:
         a frameless window has no restore state of its own, so a maximise that
         did not write the old rectangle down would be a one-way trip.
         """
-        area = self._work_area()
+        area = self._work_area(self._hwnd())
         now = (self._window.x, self._window.y, self._window.width, self._window.height)
         filled = (abs(now[2] - area[2]) < 4 and abs(now[3] - area[3]) < 4)
         if filled and self._restore:
