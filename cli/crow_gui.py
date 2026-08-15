@@ -2161,16 +2161,25 @@ class Api:
             if not fresh:
                 with open(path, encoding="utf-8") as fh:
                     data = json.load(fh)
+            # KEYS ARE ONLY WRITTEN IF KNOWN, AND NEVER REMOVED BY SILENCE.
+            # `_current_title` at None means "this window does not know a name",
+            # not "this chat has no name": `/reset` empties it while the chat's
+            # own file keeps its title on purpose -- detached, not deleted.
+            #
+            # AN `else: data.pop("crow_title", None)` STOOD HERE UNTIL NOW. It
+            # could only stay harmless as long as `_current_path` happened to be
+            # cleared in the same breath as the name -- written out by hand at
+            # four separate places, and nothing enforces it. That is a
+            # coincidence, not an invariant, and this is the one method that
+            # both CREATES a chat's file and writes its identity into it.
             if self._current_title:
                 data["crow_title"] = self._current_title
-            else:
-                data.pop("crow_title", None)
             # #101: THE BOUNDARY IS THE CHAT'S -- BUT ONLY IF IT WAS CHOSEN FOR IT.
             # A borrowed root is left out entirely rather than written as null:
             # absent means "nobody ever chose here", and that state has to stay
             # reachable, or a chat that merely displayed the template once would
-            # own it from then on. Not popped either, for the same reason the
-            # name is not popped -- silence is not a decision to erase one.
+            # own it from then on. A root this window did not read is left
+            # exactly as it lies -- silence is not a decision to erase one.
             if self._root_chosen:
                 data["crow_root"] = crow_core.get_root()
             if pointer:

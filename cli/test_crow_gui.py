@@ -1162,6 +1162,31 @@ class SlashCommandsReachTheWindowTests(ApiCase):
         with open(path, encoding="utf-8") as fh:
             self.assertEqual(len(json.load(fh)["messages"]), 3)
 
+    def test_and_the_name_of_that_chat_survives_the_reset_too(self):
+        """THE OTHER HALF OF THE SAME PROMISE. The case above pins the MESSAGES
+        of a chat `/reset` let go of and says nothing about its IDENTITY -- and
+        the name is the one thing about a chat the user typed themselves. A
+        detached chat that came back nameless would be the same loss with the
+        text still in it.
+
+        WHAT THIS DOES NOT PROVE, and the commit says so rather than implying
+        otherwise: it is not a negative probe for the `else: data.pop(...)`
+        `_stamp` carried until now. That branch needed `_current_title` to be
+        None while a file it was about to stamp still held a name, and `/reset`
+        clears `_current_path` in the same breath -- so nothing stamps this file
+        at all and the case is green either way. The branch was unreachable,
+        which is why it went without a case of its own. This one holds the
+        promise it had been standing next to.
+        """
+        api, path = self._opened_from_the_rail()
+        self.assertTrue(api.rename(path, "Schmetterlinge"))
+        api.slash_answer("/reset")
+        api.close()
+        self.assertIsNone(api._current_title, "the window kept a name it dropped")
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh).get("crow_title"), "Schmetterlinge",
+                             "/reset took the name off a chat it only let go of")
+
     def test_no_session_leaves_the_file_alone(self):
         """NEGATIVE HALF. `--no-session` means this client does not own that
         file, and a reset is not a licence to delete somebody else's."""
