@@ -1400,6 +1400,35 @@ class Api:
         self.push_root()
         self.push({"k": "note", "t": "working directory: %s (%s)" % (path, wanted)})
 
+    def _adopt_chat_root(self, chat: str | None) -> None:
+        """Bind the boundary THIS chat chose, and take the level that goes with it.
+
+        #101. One place, because three events need the same answer: opening
+        another chat, starting a new one, and restoring the live one at launch.
+        Three copies of it would drift the first time one of them was edited, and
+        the symptom would be a boundary that depends on how you got here.
+
+        A chat that never chose falls back to the template in `roots.json` --
+        which is what a NEW chat is, and what every file written before this
+        ticket looks like. Never to "whatever happened to be bound", which is the
+        defect this ticket exists to remove.
+
+        THE LEVEL FOLLOWS THE FOLDER, NOT THE CHAT (robin's rule, #101): it is a
+        statement about the project, so two chats in one folder share it. Put it
+        in the chat and the same directory has different rights depending on
+        which conversation is open.
+        """
+        root, chosen = self._stored_root(chat) if chat else (None, False)
+        if not chosen:
+            root, _ = crow_core.restore_root()
+        crow_core.set_root(root)
+        wanted = (crow_core.read_root_mode(root) if root else None) or DEFAULT_MODE
+        if wanted != getattr(self._args, "mode", DEFAULT_MODE):
+            self._args.mode = wanted
+            crow_core.forget_approvals()
+            self.push({"k": "mode", "name": wanted, "modes": self.mode_menu()})
+        self.push_root()
+
     def choose_root(self, path: str) -> None:
         """Switch to a root already on the list. Never mid-turn.
 
@@ -1541,6 +1570,37 @@ class Api:
             return None
         return (data.get("crow_title") or "").strip()[:cls.TITLE_MAX] or None
 
+    @staticmethod
+    def _stored_root(path: str) -> "tuple[str | None, bool]":
+        """A chat's own working directory: `(root, chosen)`.
+
+        THREE STATES, LIKE `active` IN roots.json AND FOR THE SAME REASON (#101):
+
+          key absent   -> `(None, False)`  nobody ever chose for this chat. Every
+                          file written before this ticket is in this state, so it
+                          must NOT read as "no folder" -- that would silently
+                          unbind the boundary for every existing chat on update.
+                          The caller falls back to the template.
+          null         -> `(None, True)`   "no folder" was chosen here, and that
+                          choice is the chat's own. It outlives the switch.
+          a path       -> `(path, True)`   bind it, if it still declares itself.
+
+        A stored root whose `root.json` is gone answers `(None, True)`: the chat
+        chose, and what it chose is not there any more. Falling back to the
+        template would put the chat somewhere nobody picked for it.
+        """
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:                  # noqa: BLE001 - no chat, no choice
+            return (None, False)
+        if "crow_root" not in data:
+            return (None, False)
+        root = data["crow_root"]
+        if not isinstance(root, str) or not os.path.isfile(crow_core.root_file(root)):
+            return (None, True)
+        return (root, True)
+
     @classmethod
     def _entry_of(cls, path: str, name: str) -> dict:
         """One rail entry, from ONE read of the file.
@@ -1607,12 +1667,16 @@ class Api:
         self._context_tokens, self._promised_warm = tokens, kv
         self._replay(messages)
         self._reload_rail()
-        # #92: `load_session` may have bound the root the restored chat was
-        # working in, and it runs HERE -- on the probe thread, after `ready()`
-        # already told the page there was none. Without this line the boundary
-        # holds while the button still says "no folder", which is the worst of
-        # the three states: the one where the screen and the loop disagree.
-        self.push_root()
+        # #101: THE RESTORED CHAT BRINGS ITS OWN BOUNDARY, and this is the second
+        # of the two bindings a launch does. `ready()` has already bound the
+        # template from `roots.json`, so the window is never unbounded while this
+        # thread waits on the endpoint; here the chat's own choice replaces it and
+        # the button is corrected. A visible correction beats an invisible gap.
+        #
+        # The line this replaces claimed `load_session` "may have bound the root
+        # the restored chat was working in". It never did -- nothing outside
+        # `adopt_root` and the picker has ever called `set_root`.
+        self._adopt_chat_root(SESSION_FILE)
         self.push({"k": "up", "model": None, "n_ctx": self._n_ctx,
                    "tokens": self._context_tokens})
 
@@ -1947,6 +2011,10 @@ class Api:
         self._conversation.reset()
         self._current_path = None
         self._current_title = None
+        # #101: A NEW CHAT STARTS FROM THE TEMPLATE, not from the chat just put
+        # aside. Without this the boundary of the previous conversation followed
+        # the user into the new one -- and then into every other chat they opened.
+        self._adopt_chat_root(None)
         self._context_tokens = 0
         self._promised_warm = False
         self.push({"k": "clear"})     # the page no longer guesses; see crow.reset
@@ -2063,6 +2131,13 @@ class Api:
                 data["crow_title"] = self._current_title
             else:
                 data.pop("crow_title", None)
+            # #101: THE BOUNDARY IS THE CHAT'S, so it is written on every file
+            # this chat gets -- the live one and its own archive file alike.
+            # Always, and as an explicit null when there is none: a chat that was
+            # worked in without a folder has CHOSEN that, and "absent" has to stay
+            # available to mean "written before this existed". `_stored_root`
+            # reads the three states back.
+            data["crow_root"] = crow_core.get_root()
             if pointer:
                 if self._current_path:
                     data["crow_path"] = self._current_path
@@ -2153,6 +2228,10 @@ class Api:
         self._conversation.restore(messages)
         self._current_path = path
         self._current_title = self._stored_title(path)
+        # #101: THE BOUNDARY TRAVELS WITH THE CHAT. Before this line the window
+        # kept whatever the previous chat had left bound, so switching to a chat
+        # moved it into the last chat's project without saying anything.
+        self._adopt_chat_root(path)
         self._context_tokens, self._promised_warm = tokens, kv
         self.push({"k": "clear"})     # the page no longer guesses; see crow.open
         self._replay(messages)

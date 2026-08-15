@@ -1549,28 +1549,131 @@ class TheFolderPickerTests(ApiCase):
     def test_a_root_restored_by_the_session_reaches_the_page(self):
         """THE SEAM, and it is the one that bit three times on 2026-08-14.
 
-        `load_session` runs on the probe thread, AFTER `ready()` has already told
-        the page there is no folder. Without a second push the boundary holds
-        while the button still says "no folder" -- screen and loop disagreeing,
-        which is worse than either state alone. No Api-only case sees it; this
-        one drives `_probe` itself.
+        The restore runs on the probe thread, AFTER `ready()` has already told the
+        page what it bound. Without a second push the boundary holds while the
+        button still says something else -- screen and loop disagreeing, which is
+        worse than either state alone. No Api-only case sees it; this one drives
+        `_probe` itself.
+
+        THE SETUP WAS REPLACED ON 2026-08-15 (#101), AND THE ASSERTIONS WERE NOT.
+        It used to hand `load_session` a `side_effect` that called `set_root` --
+        staging an internal call that has never existed: nothing outside
+        `adopt_root` and the picker has ever bound the root, and the comment that
+        claimed otherwise was removed the same day. The claim this case makes is
+        unchanged and is now stricter, because the folder it checks for arrives
+        the way the product actually delivers it: out of the chat's own file.
         """
         crow_core.write_root_mode(self.root, "auto")
         api = self.api()
+        # The chat's file carries its root, written the way the window writes it.
+        api._current_title = "ein Chat mit Ordner"
+        crow_core.set_root(self.root)
+        api._stamp(crow_gui.SESSION_FILE, pointer=True)
+        crow_core.set_root(None)
+        api._current_title = None
         with mock.patch.object(crow_gui, "check_endpoint", return_value="ok"), \
              mock.patch.object(crow_gui, "model_display_name", return_value="m"), \
              mock.patch.object(crow_gui, "fetch_model_name", return_value="m"), \
              mock.patch.object(crow_gui, "fetch_n_ctx", return_value=1000), \
-             mock.patch.object(crow_gui, "load_session") as load:
-            def restore(*a, **k):
-                crow_core.set_root(self.root)
-                return ([{"role": "user", "content": "hi"}], 10, False)
-            load.side_effect = restore
+             mock.patch.object(crow_gui, "load_session",
+                               return_value=([{"role": "user", "content": "hi"}],
+                                             10, False)):
             api._probe()
         msg = self._root_msg(api)
         self.assertEqual(os.path.normcase(msg["path"]),
                          os.path.normcase(os.path.realpath(self.root)))
         self.assertEqual(msg["name"], "projekt")
+
+    # -- #101: the working directory belongs to the chat ---------------------
+
+    def _chat_with_root(self, name, root):
+        """A chat file on disk that carries `root` as its own, the way `_stamp`
+        writes it. Returns its path."""
+        api = self.api()
+        api._current_title = name
+        crow_core.set_root(root)
+        api._stamp(crow_gui.SESSION_FILE, pointer=True)
+        crow_core.set_root(None)
+        path = os.path.join(self.dir, "chat-%s.json" % name)
+        os.replace(crow_gui.SESSION_FILE, path)
+        return path
+
+    def test_a_chat_brings_its_own_working_directory(self):
+        """POSITIVE (#101). robin: switching the folder in one chat used to move
+        it for every chat, because the window bound one root for the process."""
+        other = os.path.join(self.dir, "zweites-projekt")
+        os.makedirs(other)
+        crow_core.write_root_mode(self.root, "auto")
+        crow_core.write_root_mode(other, "auto")
+        theirs = self._chat_with_root("A", other)
+
+        api = self.api()
+        crow_core.set_root(self.root)                 # some other chat's folder
+        api._adopt_chat_root(theirs)
+        self.assertEqual(os.path.normcase(crow_core.get_root() or ""),
+                         os.path.normcase(os.path.realpath(other)))
+
+    def test_a_chat_that_chose_no_folder_keeps_that_across_a_switch(self):
+        """"None" is a choice here too, and it is the chat's. Without the third
+        state a chat deliberately working unbounded would be handed the template
+        every time it was opened."""
+        crow_core.write_root_mode(self.root, "auto")
+        theirs = self._chat_with_root("ohne", None)
+        crow_core.set_active_root(self.root)          # a template that must lose
+
+        api = self.api()
+        crow_core.set_root(self.root)
+        api._adopt_chat_root(theirs)
+        self.assertIsNone(crow_core.get_root())
+
+    def test_a_chat_that_never_chose_takes_the_template_not_what_was_bound(self):
+        """THE NEGATIVE HALF, and the whole defect in one case. Every chat file
+        written before #101 has no root in it. Falling through to "whatever is
+        bound" is exactly what made one chat's folder leak into all the others --
+        so an unmarked chat takes the template, never the neighbour's."""
+        leftover = os.path.join(self.dir, "vom-vorherigen-chat")
+        os.makedirs(leftover)
+        crow_core.write_root_mode(self.root, "auto")
+        crow_core.write_root_mode(leftover, "auto")
+        old = os.path.join(self.dir, "chat-alt.json")
+        with open(old, "w", encoding="utf-8") as fh:
+            json.dump({"messages": []}, fh)           # no crow_root at all
+        crow_core.set_active_root(self.root)
+
+        api = self.api()
+        crow_core.set_root(leftover)                  # the neighbour's folder
+        api._adopt_chat_root(old)
+        self.assertEqual(os.path.normcase(crow_core.get_root() or ""),
+                         os.path.normcase(os.path.realpath(self.root)))
+
+    def test_a_new_chat_starts_from_the_template(self):
+        """Same rule from the other side: "new chat" is a chat that never chose."""
+        leftover = os.path.join(self.dir, "vorher")
+        os.makedirs(leftover)
+        crow_core.write_root_mode(self.root, "auto")
+        crow_core.write_root_mode(leftover, "auto")
+        crow_core.set_active_root(self.root)
+
+        api = self.api()
+        crow_core.set_root(leftover)
+        api._adopt_chat_root(None)
+        self.assertEqual(os.path.normcase(crow_core.get_root() or ""),
+                         os.path.normcase(os.path.realpath(self.root)))
+
+    def test_the_level_stays_with_the_folder_not_with_the_chat(self):
+        """THE SECOND NEGATIVE HALF. The level is a statement about the project,
+        so two chats in ONE folder share it. Move it into the chat and the same
+        directory has different rights depending on which chat is open."""
+        crow_core.write_root_mode(self.root, "manual")
+        one = self._chat_with_root("eins", self.root)
+        two = self._chat_with_root("zwei", self.root)
+
+        api = self.api()
+        api._adopt_chat_root(one)
+        first = api._args.mode
+        api._adopt_chat_root(two)
+        self.assertEqual(api._args.mode, first)
+        self.assertEqual(api._args.mode, "manual")
 
     def test_choosing_a_root_binds_it_and_tells_the_page(self):
         api = self.api()

@@ -215,15 +215,26 @@ differently, and the difference is one of expectation rather than mechanism:
 | | how it picks a working directory at start | why |
 |---|---|---|
 | terminal | `--root`, otherwise the nearest ancestor holding a `.crow/root.json` — where you stand | you just typed the directory you meant |
-| window | the last folder you chose, restored silently | its cwd comes from a shortcut and means nothing; you expect the project to reopen where you left it |
+| window | **the folder that chat chose**, restored silently | its cwd comes from a shortcut and means nothing; you expect the project to reopen where you left it |
 
-The window's restore reads `active` from `%LOCALAPPDATA%\Crow\roots.json`, written only when a
-person chooses — the picker, or **no folder**. `recent` in the same file is the picker's menu and
-nothing else: both clients write it, so it cannot decide where the window opens. Choosing **no
-folder** is itself remembered, so it survives a restart instead of coming back as a folder.
-Cancelling the picker changes nothing. If the remembered folder is gone at start, Crow says so and
-runs without one — and that line is not decoration: with no root, nothing bounds the paths Crow
-picks for itself.
+**Each chat in the window carries its own working directory.** Switching chats moves the boundary
+with them, so two chats can work in two projects. A chat that never chose one — a new chat, or any
+chat from before this existed — starts from `active` in `%LOCALAPPDATA%\Crow\roots.json`, which is
+the template written whenever a person picks a folder or picks **no folder**. `recent` in the same
+file is only the picker's menu: both clients write it, so it never decides where anything opens.
+
+Choosing **no folder** is itself a choice and belongs to that chat, so it survives a switch and a
+restart instead of coming back as a folder. Cancelling the picker changes nothing. If a remembered
+folder is gone at start, Crow says so and runs without one — not decoration: with no root, nothing
+bounds the paths Crow picks for itself.
+
+**The release level stays with the folder, not with the chat** — it is a statement about the
+project, so two chats in one folder share it. Otherwise the same directory would carry different
+rights depending on which conversation happened to be open.
+
+A launch binds twice: `ready()` takes the template immediately so the window is never unbounded, and
+the restored chat replaces it once it arrives. The button may correct itself once; a visible
+correction is cheaper than an invisible gap.
 
 Until 2026-08-15 the window bound nothing at start and the folder had to be picked again after every
 single one ([#92](https://github.com/nibor1896/Crow/issues/92)).
