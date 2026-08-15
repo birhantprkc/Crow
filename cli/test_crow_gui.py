@@ -1568,6 +1568,7 @@ class TheFolderPickerTests(ApiCase):
         # The chat's file carries its root, written the way the window writes it.
         api._current_title = "ein Chat mit Ordner"
         crow_core.set_root(self.root)
+        api._root_chosen = True                   # chosen for this chat, not borrowed
         api._stamp(crow_gui.SESSION_FILE, pointer=True)
         crow_core.set_root(None)
         api._current_title = None
@@ -1592,6 +1593,7 @@ class TheFolderPickerTests(ApiCase):
         api = self.api()
         api._current_title = name
         crow_core.set_root(root)
+        api._root_chosen = True                   # a person picked, for this chat
         api._stamp(crow_gui.SESSION_FILE, pointer=True)
         crow_core.set_root(None)
         path = os.path.join(self.dir, "chat-%s.json" % name)
@@ -1674,6 +1676,59 @@ class TheFolderPickerTests(ApiCase):
         api._adopt_chat_root(two)
         self.assertEqual(api._args.mode, first)
         self.assertEqual(api._args.mode, "manual")
+
+    def test_a_borrowed_root_is_never_written_into_the_chat(self):
+        """THE CASE THAT MUST FAIL, and it is the defect robin hit within minutes
+        of #101 landing: he picked a folder in one chat, switched to another, and
+        the second chat -- a file from before the ticket, with no root of its own
+        -- took the template and then OWNED it. A fallback is a guess, and the
+        rule against writing a guess down is already in this file for the name:
+        "that guess must never be stamped back into the file as though it had
+        been chosen".
+        """
+        crow_core.write_root_mode(self.root, "auto")
+        old = os.path.join(self.dir, "chat-ohne-wahl.json")
+        with open(old, "w", encoding="utf-8") as fh:
+            json.dump({"messages": [], "crow_title": "alt"}, fh)
+        crow_core.set_active_root(self.root)
+
+        api = self.api()
+        api._adopt_chat_root(old)                  # borrows the template
+        self.assertEqual(os.path.normcase(crow_core.get_root() or ""),
+                         os.path.normcase(os.path.realpath(self.root)))
+        api._current_title = "alt"
+        api._stamp(old)
+
+        with open(old, encoding="utf-8") as fh:
+            self.assertNotIn("crow_root", json.load(fh),
+                             "the borrowed folder was written into the chat")
+
+    def test_a_named_empty_chat_survives_being_left(self):
+        """POSITIVE. #100 kept a named empty chat across closing the window;
+        switching away still dropped it, because `_leave` had nothing to archive
+        and the next write put the other chat over session.json. robin lost a
+        chat called "Schmetterlinge" that way, folder and all."""
+        api = self.api()
+        api.rename("", "Schmetterlinge")
+        self.drained(api)
+        ok, kept = api._leave()
+        self.assertTrue(ok)
+        self.assertIsNotNone(kept, "a named empty chat was not put anywhere")
+        self.assertEqual(self._stored_title_of(kept), "Schmetterlinge")
+
+    def test_an_unnamed_empty_chat_is_still_dropped_when_it_is_left(self):
+        """THE NEGATIVE HALF. A stray "new" click must still vanish, or the rail
+        fills with conversations nobody started -- which is what the emptiness
+        rule was for before the name became the line."""
+        api = self.api()
+        ok, kept = api._leave()
+        self.assertTrue(ok)
+        self.assertIsNone(kept, "an unnamed empty chat was filed away")
+
+    @staticmethod
+    def _stored_title_of(path):
+        with open(path, encoding="utf-8") as fh:
+            return (json.load(fh).get("crow_title") or "").strip() or None
 
     def test_choosing_a_root_binds_it_and_tells_the_page(self):
         api = self.api()

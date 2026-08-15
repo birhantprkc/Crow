@@ -1316,6 +1316,18 @@ class Api:
         # turned up under "Earlier" labelled with its first line. Held in the
         # object, the name survives every file the chat is written to.
         self._current_title: str | None = None
+        # #101, SECOND ATTEMPT. Whether the bound root was CHOSEN for this chat
+        # or merely BORROWED from the template. The first version wrote whatever
+        # was bound into the chat's file, so a chat that had never chosen took
+        # the template once and then owned it forever -- measured the same day:
+        # a chat from before this ticket ended up permanently holding a folder
+        # picked in a different chat.
+        #
+        # The rule was already written down two screens above, for the name:
+        # "that guess must never be stamped back into the file as though it had
+        # been chosen, because from then on it would outrank the real opening
+        # line forever". A borrowed root is that same guess.
+        self._root_chosen: bool = False
 
     # -- outward -----------------------------------------------------------
 
@@ -1387,6 +1399,7 @@ class Api:
         wanted = mode or stored or getattr(self._args, "mode", DEFAULT_MODE)
         crow_core.write_root_mode(path, wanted)
         crow_core.set_root(path)
+        self._root_chosen = True                 # #101: a person picked, for THIS chat
         crow_core.remember_root(path)
         # #92: AND THIS IS WHERE THE NEXT START READS FROM. `remember_root` fills
         # the menu, which is a different fact -- the terminal writes that list too,
@@ -1421,6 +1434,9 @@ class Api:
         root, chosen = self._stored_root(chat) if chat else (None, False)
         if not chosen:
             root, _ = crow_core.restore_root()
+        # BORROWED, AND IT STAYS BORROWED. The template may be shown and worked
+        # in; it is not written into the chat until a person picks for this chat.
+        self._root_chosen = chosen
         crow_core.set_root(root)
         wanted = (crow_core.read_root_mode(root) if root else None) or DEFAULT_MODE
         if wanted != getattr(self._args, "mode", DEFAULT_MODE):
@@ -1489,6 +1505,7 @@ class Api:
         if self._worker and self._worker.is_alive():
             return
         crow_core.set_root(None)
+        self._root_chosen = True                 # #101: "none" is a choice too
         # #92: "NONE" IS A CHOICE AND SURVIVES A RESTART. Written as an explicit
         # null rather than by deleting the key: an absent key means nobody ever
         # chose, and collapsing the two would make this decision evaporate on the
@@ -2065,6 +2082,12 @@ class Api:
             os.makedirs(folder, exist_ok=True)
             save_session(self._conversation, self._args.base_url,
                          self._context_tokens, path=path, with_kv=False)
+            # #101: FOR A NAMED EMPTY CHAT THE CORE WROTE NOTHING, and the
+            # read-back below would then fail and report the chat as unsaveable.
+            # `_stamp` creates it from the metadata -- the same door #100 opened
+            # for session.json, used here for the chat's own file.
+            if not os.path.isfile(path):
+                self._stamp(path)
             # Read back before the caller drops the original. A write that
             # returned without raising is not the same as a file on disk.
             with open(path, encoding="utf-8") as fh:
@@ -2084,7 +2107,13 @@ class Api:
         there is one answer to "does this chat have a file yet" instead of one
         per caller.
         """
-        if len(self._conversation) <= (1 if self._conversation.has_system else 0):
+        empty = len(self._conversation) <= (1 if self._conversation.has_system else 0)
+        # #101: THE LINE IS THE NAME, NOT THE EMPTINESS. An unnamed empty chat is
+        # a stray click and is meant to vanish -- that is what keeps the rail from
+        # filling with conversations nobody started. A NAMED empty chat is a
+        # declaration of intent, a slot the user reserved, and losing it on the
+        # next switch is the same defect #100 fixed one door further along.
+        if empty and not self._current_title:
             return (True, None)
         path = self._archive()
         if not path:
@@ -2114,12 +2143,17 @@ class Api:
             # that refusal is what stops a `/reset` chat coming back on the next
             # start -- so the file is created here instead of loosening it.
             #
-            # ONLY FOR THE LIVE FILE, AND ONLY FOR A NAME. An archive path that
-            # does not exist is not minted here, and an empty chat NOBODY named
-            # still leaves nothing behind: that is the negative half, and without
-            # it this fix would resurrect exactly the abandoned chat the refusal
+            # ONLY FOR A NAME, and that is the whole gate. An empty chat NOBODY
+            # named still leaves nothing behind -- the negative half, and without
+            # it this would resurrect exactly the abandoned chat the refusal
             # exists to prevent.
-            if not (pointer and self._current_title):
+            #
+            # THE `pointer` REQUIREMENT CAME OFF WITH #101. It had limited this to
+            # session.json, so a named empty chat survived closing the window and
+            # vanished the moment the user switched to another chat: `_leave` had
+            # nothing to archive and the next `_persist_live` wrote the other chat
+            # over the only copy. A reserved slot is reserved either way.
+            if not self._current_title:
                 return
             fresh = True
         try:
@@ -2131,13 +2165,14 @@ class Api:
                 data["crow_title"] = self._current_title
             else:
                 data.pop("crow_title", None)
-            # #101: THE BOUNDARY IS THE CHAT'S, so it is written on every file
-            # this chat gets -- the live one and its own archive file alike.
-            # Always, and as an explicit null when there is none: a chat that was
-            # worked in without a folder has CHOSEN that, and "absent" has to stay
-            # available to mean "written before this existed". `_stored_root`
-            # reads the three states back.
-            data["crow_root"] = crow_core.get_root()
+            # #101: THE BOUNDARY IS THE CHAT'S -- BUT ONLY IF IT WAS CHOSEN FOR IT.
+            # A borrowed root is left out entirely rather than written as null:
+            # absent means "nobody ever chose here", and that state has to stay
+            # reachable, or a chat that merely displayed the template once would
+            # own it from then on. Not popped either, for the same reason the
+            # name is not popped -- silence is not a decision to erase one.
+            if self._root_chosen:
+                data["crow_root"] = crow_core.get_root()
             if pointer:
                 if self._current_path:
                     data["crow_path"] = self._current_path
