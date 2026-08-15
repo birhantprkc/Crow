@@ -34,6 +34,7 @@ Standard library only, same as everything else here.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import inspect
 import io
 import json
@@ -52,10 +53,116 @@ sys.path.insert(0, str(HERE))
 import crow        # noqa: E402
 import crow_core   # noqa: E402
 
+# THE PALETTE IS PINNED FOR THIS WHOLE MODULE (#102). `crow_core._TTY` is decided
+# ONCE, at import, out of `sys.stdout.isatty()`, and the colour constants are
+# materialised from it on the spot -- so this file answered differently in a
+# console than through a pipe, with no line of code between the two runs. One
+# case here compared a bare string against an escape sequence and was red on
+# robin's machine while green in every automated run.
+#
+# DERIVED, NEVER LISTED: every module-level string beginning with ESC. A
+# hard-coded palette in a test is a copy of the product that goes stale silently.
+#
+# BOTH MODULES, because `crow.py` re-exports by VALUE -- patching
+# `crow_core.DIM` leaves `crow.DIM` untouched, and this file holds both.
+#
+# The positive direction -- a terminal still gets its colour -- is asked by
+# `ThePaletteFollowsTheTerminalTests` below, which cannot use this fixture: it
+# needs an import that has not happened yet.
+_PINNED: dict = {}
+
+
+def setUpModule() -> None:
+    for module in (crow, crow_core):
+        for name, value in list(vars(module).items()):
+            if isinstance(value, str) and value.startswith("\033"):
+                _PINNED[(module.__name__, name)] = value
+                setattr(module, name, "")
+        # AND THE FLAG WITH IT. An emptied palette beside a `_TTY` that still
+        # says "terminal" is a state the product can never be in, and a case
+        # that branches on the flag would then assert against the emptiness
+        # this fixture created.
+        if hasattr(module, "_TTY"):
+            _PINNED[(module.__name__, "_TTY")] = module._TTY
+            module._TTY = False
+
+
+def tearDownModule() -> None:
+    for (module_name, name), value in _PINNED.items():
+        setattr(sys.modules[module_name], name, value)
+    _PINNED.clear()
+
 
 def _source(name: str) -> str:
     with io.open(HERE / name, encoding="utf-8") as fh:
         return fh.read()
+
+
+class ThePaletteFollowsTheTerminalTests(unittest.TestCase):
+    """#102's other half: the repair must not be "switch the colour off".
+
+    The nine cases that ticket repaired are pinned to the COLOURLESS palette, so
+    a change that disabled colour everywhere would leave every one of them green
+    -- and take the product's colour with it, invisibly. Two checkers reporting
+    the same thing for opposite reasons is the shape this project has already
+    been bitten by; this is the case that goes red for exactly that.
+
+    IT IMPORTS THE CORE AGAIN rather than patching the shared one. `_TTY` is read
+    at import and never again, so the only honest way to ask "what does this
+    module look like on a terminal" is to give it a terminal and import it. The
+    two module objects below are private to this case -- neither is the one the
+    rest of the suite holds, and neither outlives it.
+    """
+
+    @staticmethod
+    def _imported_with_tty(is_tty: bool):
+        class _Stdout:
+            def __init__(self, real) -> None:
+                self._real = real
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def isatty(self) -> bool:
+                return is_tty
+
+        spec = importlib.util.spec_from_file_location(
+            "crow_core_tty_%s" % is_tty, crow_core.__file__)
+        module = importlib.util.module_from_spec(spec)
+        real = sys.stdout
+        sys.stdout = _Stdout(real)
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.stdout = real
+        return module
+
+    def test_a_terminal_gets_the_palette_and_a_pipe_gets_none(self):
+        """POSITIVE and NEGATIVE in one run, which is what makes it worth having.
+
+        The floor catches "colour switched off globally" -- the repair that
+        passes every other case in this suite and quietly ships a grey client.
+        The loop catches the opposite: escape sequences leaking into a redirected
+        transcript, which is the thing `crow_core.py:310` exists to prevent and
+        the reason the gate is there at all.
+        """
+        on = self._imported_with_tty(True)
+        off = self._imported_with_tty(False)
+
+        coloured = sorted(name for name, value in vars(on).items()
+                          if isinstance(value, str) and value.startswith("\033"))
+        self.assertGreaterEqual(
+            len(coloured), 10,
+            "a terminal got %d escape sequences: the colour was switched off "
+            "globally, and every case pinned to the colourless palette stayed "
+            "green while it happened" % len(coloured))
+        self.assertTrue(on._TTY)
+        self.assertFalse(off._TTY)
+        for name in coloured:
+            self.assertEqual(
+                getattr(off, name), "",
+                "%s carries an escape sequence through a pipe -- a redirected "
+                "transcript is no longer greppable" % name)
 
 
 class VersionStaysInTheClientTests(unittest.TestCase):

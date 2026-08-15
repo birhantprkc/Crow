@@ -31,6 +31,54 @@ import crow  # noqa: E402
 # path in a test has to happen where the functions read it.
 import crow_core  # noqa: E402
 
+# THE PALETTE IS PINNED FOR THIS WHOLE MODULE (#102), and a red suite on robin's
+# machine is why. `crow_core._TTY` is decided ONCE, at import, out of
+# `sys.stdout.isatty()`, and the colour constants are materialised from it on the
+# spot. Run this file in a console and eight cases here compared bare strings
+# against escape sequences; run the identical command through a pipe and the same
+# eight passed. A gate whose answer depends on the caller's terminal is not a
+# gate: green in every automated run, red in the one place a human types the
+# command -- and there it looks like a regression in whatever landed last.
+#
+# DERIVED, NEVER LISTED. Every module-level string beginning with ESC is one of
+# them. A hard-coded list goes stale the moment the palette grows, and a case
+# carrying its own copy of the product's values would be measuring itself.
+#
+# BOTH MODULES, for the reason the comment above gives for ROOTS_FILE: `crow.py`
+# re-exports by VALUE, so `crow.DIM` is a second binding and patching
+# `crow_core.DIM` moves nothing the CLI reads.
+#
+# WHAT THIS CANNOT PIN is the other half -- that a terminal still GETS the
+# palette. By the time this runs, the core has already been imported with
+# whatever answer the caller's stdout gave, so the question cannot be asked from
+# here. It is asked in `test_crow_core.ThePaletteFollowsTheTerminalTests`, which
+# imports the core again with an answer of its own choosing. Without that case,
+# "switch the colour off everywhere" would pass this file with flying colours.
+_PINNED: dict = {}
+
+
+def setUpModule() -> None:
+    for module in (crow, crow_core):
+        for name, value in list(vars(module).items()):
+            if isinstance(value, str) and value.startswith("\033"):
+                _PINNED[(module.__name__, name)] = value
+                setattr(module, name, "")
+        # AND THE ANSWER ITSELF, or the world is pinned only half way. Measured
+        # while building this: `test_brand_colours_are_the_measured_values`
+        # guards its assertions with `if crow._TTY` -- with the palette emptied
+        # and the flag still saying "terminal", it looked for the accent in an
+        # empty string. A fixture has to leave a state the product could
+        # actually be in.
+        if hasattr(module, "_TTY"):
+            _PINNED[(module.__name__, "_TTY")] = module._TTY
+            module._TTY = False
+
+
+def tearDownModule() -> None:
+    for (module_name, name), value in _PINNED.items():
+        setattr(sys.modules[module_name], name, value)
+    _PINNED.clear()
+
 
 class HealthUrlTests(unittest.TestCase):
     """The exact defect that shipped: base_url[:-3] + "health"."""
