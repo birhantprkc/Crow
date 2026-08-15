@@ -91,6 +91,14 @@
    "why": "#99. The one line a tool call is rendered as, on both surfaces. It lived in cli/crow.py while cli/crow_gui.py reached for crow_core.format_tool_args behind a hasattr guard that had been False since the split -- so the window showed raw JSON where the terminal showed values, and nothing could detect it because the name was not declared here."
   },
   {
+   "name": "escaped_the_working_area",
+   "kind": "def",
+   "why": "#98. Whether a shell command ran in a turn the boundary already refused -- the sequence the working-area guarantee does NOT cover, stated once so both surfaces mark the same event. A surface with its own version would drift into path matching against a shell string, which is the analysis #98 rejected on the record.",
+   "user_entry": true,
+   "evidence": ["def boundary_escaped("],
+   "_evidence_note": "The method, not the predicate: no surface CALLS escaped_the_working_area -- run_turn does, and hands the answer down as boundary_escaped. A surface's wiring is therefore the event it implements. A surface that skips it shows the user nothing when the working area is left, which is the whole defect #98 recorded."
+  },
+  {
    "name": "_clip",
    "kind": "def",
    "why": "Every tool result goes through here, no exceptions - one ceiling measured in the thing it actually costs, bytes that become prefill."

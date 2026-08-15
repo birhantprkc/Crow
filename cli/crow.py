@@ -933,6 +933,21 @@ class TerminalTurnEvents(TurnEvents):
     def tool_failed(self, name: str, result: str) -> None:
         print(f"{DIM}    {result.splitlines()[0]}{RESET}", file=self._out)
 
+    def boundary_escaped(self, name: str, refused: list[str]) -> None:
+        """#98: the one line in this class that is NOT dim, and that is the point.
+
+        Every other report here is furniture the reader may skip. This one says
+        the working area was left after Crow had just refused to leave it, and a
+        dim line saying that would be a line nobody reads. YELLOW because that is
+        already `auto`'s colour in the window's level dropdown and in the README
+        table -- the level whose guarantee is the one being named.
+        """
+        for path in refused:
+            print(f"{YELLOW}  ! the working area was refused for {path}, "
+                  f"and {name} ran anyway{RESET}", file=self._out)
+        print(f"{DIM}    write_file and edit_file stay inside the root; "
+              f"run_command is not bounded by it{RESET}", file=self._out)
+
     def tools_finished(self) -> None:
         print("", file=self._out)
 

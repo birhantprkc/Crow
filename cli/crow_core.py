@@ -2204,6 +2204,23 @@ def adopt_root(stated: str | None,
     return here, mode, None
 
 
+# WHAT THE BOUNDARY REFUSED THIS TURN. It is a REPORT, not a second boundary,
+# and #98 is the turn it exists to make visible: `write_file` was refused, and
+# the model reached the same path with `run_command` one call later -- unprompted,
+# politely, and it said so out loud. Helpfulness is the bypass.
+#
+# TURN-LEVEL, NOT PATH-LEVEL, and that is the honest version. Matching a refused
+# path against a shell line is string analysis against a shell, and that loses:
+# `cmd /c`, `%USERPROFILE%`, `>>`, a UNC path, a variable set one command
+# earlier. So the rule is STATED rather than guessed -- a shell command that runs
+# in a turn where the boundary already said no is marked. It over-reports an
+# unrelated command in the same turn; it cannot under-report the #98 sequence,
+# and a marker that is wrong in the safe direction is the only kind worth having.
+#
+# Lifetime is `_READ`'s and `_SEEN`'s: ONE USER TURN, cleared in `run_turn`.
+_REFUSED: set[str] = set()
+
+
 def _outside_root(path: str) -> str | None:
     """The refusal for a path out of bounds, or None when it is allowed.
 
@@ -2212,13 +2229,36 @@ def _outside_root(path: str) -> str | None:
     directory is wrong. It is returned as a tool RESULT, never raised -- the same
     invariant #88's decline keeps, since an assistant turn whose `tool_calls`
     have no `tool` message behind them is a broken prefix for every later turn.
+
+    IT DOES NOT NAME THE WAY AROUND ITSELF (#98). The honest sentence -- that
+    this holds for `write_file` and `edit_file` and that `run_command` is not
+    bounded by it -- belongs in the README and on the user's screen, both of
+    which the user reads and the model does not. Putting it here would hand the
+    model the map to a door it already finds on its own. What goes to the model
+    is the instruction, and the instruction is labelled as what it is: an
+    instruction, not a mechanism.
     """
     if _ROOT is None or _inside(_ROOT, path):
         return None
+    resolved = _resolve(path)
+    _REFUSED.add(resolved)
     return (f"error: refusing to write outside the working directory.\n"
             f"  root: {_ROOT}\n"
-            f"  path: {_resolve(path)}\n"
-            f"Write inside the root, or start crow in the directory you mean.")
+            f"  path: {resolved}\n"
+            f"Do not reach this path by other means either. Write inside the root, "
+            f"say plainly that the work needs a path outside it, or start crow in "
+            f"the directory you mean.")
+
+
+def escaped_the_working_area(name: str) -> bool:
+    """Is this call a shell command in a turn the boundary already refused?
+
+    The whole predicate, and it is deliberately this small: the working-area
+    guarantee covers `write_file` and `edit_file`, `run_command` is outside it,
+    and the pairing of the two inside one turn is the only thing anybody can
+    state without analysing a shell string.
+    """
+    return name == "run_command" and bool(_REFUSED)
 
 
 # IN THE CORE BECAUSE BOTH SURFACES DRAW THIS LINE (#99). It sat in
@@ -3327,7 +3367,7 @@ def run_tool(name: str, arguments: str) -> str:
 
 
 class TurnEvents:
-    """What `run_turn` reports while ONE USER TURN runs. Twelve prints, named.
+    """What `run_turn` reports while ONE USER TURN runs. Thirteen prints, named.
 
     Same seam as `ReplyEvents` one level up: the names say what HAPPENED, not
     what a terminal should do about it. Every method does nothing here, so a
@@ -3354,6 +3394,8 @@ class TurnEvents:
 
     `tools_reported` is the one that had no line to move: it belongs to the
     operating mode this stage added, where calls are reported and not run.
+    `boundary_escaped` is the second (#98), and for a different reason: it
+    reports a sequence across two calls, and no single print ever carried it.
 
     `reply_events` is not a report at all -- it is the sink for the stream
     INSIDE each round, handed down so the two seams stay one decision. None
@@ -3390,6 +3432,15 @@ class TurnEvents:
         """The result began with "error: ". The whole result is handed over,
         not its first line: how much of it fits on a screen is the screen's
         decision."""
+
+    def boundary_escaped(self, name: str, refused: list[str]) -> None:
+        """A shell command ran in a turn where the boundary refused a write (#98).
+
+        The thirteenth line, and the only one that had no terminal ancestor: it
+        reports a SEQUENCE rather than a call, so there was nothing in `repl()`
+        to move. `refused` is what the boundary turned away this turn, so the
+        surface can name the path instead of saying that something happened.
+        """
 
     def tools_finished(self) -> None:
         """Every call of this round has run and been appended."""
@@ -3512,14 +3563,21 @@ def run_turn(
     # the second name beside it: ONE USER TURN, for both. The measurement behind
     # that choice is written out where `_READ` is declared.
     #
-    # THE TWO CLEARS ARE ONE STATEMENT PAIR AND MUST STAY ONE. Split them and
+    # THE THREE CLEARS ARE ONE STATEMENT GROUP AND MUST STAY ONE. Split them and
     # the half-state is a live configuration rather than a mistake somebody has
     # to make: `_READ` emptied without `_SEEN` refuses the write correctly while
     # still handing back a tool result from the turn before, and `_SEEN` emptied
     # without `_READ` lets a stale permission outlive the results that earned
     # it. Neither is a state anyone would choose, and neither announces itself.
+    #
+    # `_REFUSED` JOINED THEM WITH #98 and fails the same way: left behind, the
+    # next turn's first `run_command` is marked as an escape from a refusal that
+    # happened before the user typed again. That is a false alarm, and a false
+    # alarm on a marker is worse than no marker -- it is the one failure mode
+    # that trains the reader to skip the line.
     _READ.clear()
     _SEEN.clear()
+    _REFUSED.clear()
     stopped = False
     cost = TurnCost()
     budget = max_tool_rounds
@@ -3659,6 +3717,21 @@ def run_turn(
             failed = errored and not declined
             cost.add_tool(took, failed, declined)
             events.tool_finished(call["name"], took, repeated)
+            # #98: THE USER HEARS THIS FROM CROW, NOT FROM THE MODEL'S APOLOGY.
+            # In the measured turn the only notice that the working area had been
+            # left came from the model itself, after the fact, phrased as a
+            # courtesy -- "mein Datei-Werkzeug ist beschraenkt, daher habe ich es
+            # ueber die Shell angelegt". A client whose only account of its own
+            # limits is the sentence of the thing that just went around them has
+            # no account at all.
+            #
+            # AFTER THE CALL, NOT BEFORE: the marker is a report of what ran, and
+            # a declined call ran nothing. `not declined` is therefore the
+            # condition, not `not errored` -- a shell command that failed on its
+            # own terms still reached the shell, and that is the fact being
+            # reported.
+            if not declined and escaped_the_working_area(call["name"]):
+                events.boundary_escaped(call["name"], sorted(_REFUSED))
             # A FAILED CALL STAYS ON SCREEN even once the model has recovered from it (#70).
             # It is not the user's problem to solve, but it is the reason the turn took longer
             # than it looks like it should have, and a turn that hides its retries reads as

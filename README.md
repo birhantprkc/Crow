@@ -209,6 +209,34 @@ budget prints `CUT OFF at the token budget -- raise --max-tokens` (`cli/crow.py:
 parser accepts no such option (`:2708-2777`). Tracked as
 [#63](https://github.com/nibor1896/Crow/issues/63).
 
+**The working area is a guarantee, not a sandbox.** A chosen root bounds **two** of the nine tools:
+
+| Tool | Bounded by the root | Where |
+|---|---|---|
+| `write_file` | yes, at every level, without asking | `cli/crow_core.py:2396` |
+| `edit_file` | yes, at every level, without asking | `cli/crow_core.py:2419` |
+| `run_command` | **no, at every level** | `cli/crow_core.py:2542` |
+| the other six | no — reads are never bounded | — |
+
+`run_command` runs with `shell=True`, so a shell line naming an absolute path outside the root
+reaches it. This is [#92](https://github.com/nibor1896/Crow/issues/92) decision 3 and it stands:
+a `cwd` check is protection nobody has, and refusing shell lines by their text is string analysis
+against a shell. [#98](https://github.com/nibor1896/Crow/issues/98) measured the consequence — the
+default model routes around the refusal **unprompted**, one call later, and says so politely.
+Decided 2026-08-15: accepted and unmitigated, with two things added rather than a mechanism.
+
+1. The refusal tells the model not to reach the path by other means. That is instruction, not
+   mechanism, and it is listed here as instruction.
+2. A shell command that runs in a turn where the boundary already refused a write is **marked on
+   screen**, in `auto`'s own colour, naming the refused path (`cli/crow.py:936`,
+   `cli/crow_gui.py:1246`). The rule is turn-level, not path-level: it over-reports an unrelated
+   command in the same turn and cannot miss the #98 sequence.
+
+What this does **not** give you: protection against a hostile prompt, or against a model that
+reaches for the shell first. `manual` and `allowedit` ask before executing — at those levels the
+gate is a person. Cases: `TheWorkingAreaIsNotASandboxTests` in `cli/test_crow.py`, including the
+three negative controls that fail if the marker ever fires on every shell call.
+
 **Rollover.** A request at or past `n_ctx` is refused outright and the turn is lost. At 90 % of the
 window Crow writes the conversation to `rollover-<stamp>.json` **and `rollover-<stamp>.md`**, empties
 it, and opens the next one with a note naming the transcript, its line count and the paths the work

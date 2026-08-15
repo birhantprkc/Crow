@@ -308,6 +308,12 @@ details.think[open] .caret{transform:rotate(90deg)}
    rather than `pre` so a long single-line note still wraps at the column
    instead of running off the side. */
 .note{color:var(--dimmer);font-size:11.5px;white-space:pre-wrap}
+/* NOT A DIM NOTE, AND THAT IS THE WHOLE REASON IT IS A SECOND CLASS (#98).
+   `--warn` is already `auto`'s colour in the level dropdown, so the line that
+   names the limit of `auto`'s guarantee is drawn in the colour of the level it
+   is about. A marker for a rare event has to look unlike the furniture around
+   it, or it becomes furniture. */
+.alarm{color:var(--warn);font-size:11.5px;white-space:pre-wrap;margin-top:6px}
 .cursor{display:inline-block;width:7px;height:14px;background:var(--accent);
   vertical-align:-2px;margin-left:2px;animation:bl 1s steps(1,end) infinite}
 @keyframes bl{50%{opacity:0}}
@@ -604,6 +610,8 @@ const crow = {
     d.textContent=msg; (this.col||flow).appendChild(d); this.bottom(); },
   note(msg){ const t=this.turn(""); const d=document.createElement("div");
     d.className="note"; d.textContent=msg; t.appendChild(d); this.bottom(); },
+  alarm(msg){ const t=this.turn(""); const d=document.createElement("div");
+    d.className="alarm"; d.textContent=msg; t.appendChild(d); this.bottom(); },
 
   // THE CURSOR ALWAYS SITS LAST. Every insert goes BEFORE it, so after a tool
   // row or a code frame it has to be moved back to the end -- otherwise it is
@@ -940,6 +948,7 @@ const crow = {
       case "tool": this.tool(e.name,e.args); break;
       case "cost": this.cost(e.line,e.share); this.ctx(e.tokens,e.n_ctx); break;
       case "note": this.note(e.t); break;
+      case "alarm": this.alarm(e.t); break;
       case "fail": this.fail(e.t); break;
       case "live":
         $("#turnstate").textContent =
@@ -1233,6 +1242,22 @@ class Turn(TurnEvents):
     def tool_started(self, name: str, arguments: str) -> None:
         self._put({"k": "tool", "name": name,
                    "args": crow_core.format_tool_args(arguments)})
+
+    def boundary_escaped(self, name: str, refused: list) -> None:
+        """#98, and it is drawn in `auto`'s own colour rather than as a note.
+
+        The window is where this matters most: the terminal at least shows the
+        shell line, while here the tool row says `run_command` and the argument
+        column is one truncated string. Without this the only account of the
+        working area being left is the model's own closing sentence.
+        """
+        for path in refused or []:
+            self._put({"k": "alarm",
+                       "t": "! the working area was refused for %s, "
+                            "and %s ran anyway" % (path, name)})
+        self._put({"k": "note",
+                   "t": "write_file and edit_file stay inside the root; "
+                        "run_command is not bounded by it"})
 
     def tools_reported(self, calls: list) -> None:
         for call in calls or []:

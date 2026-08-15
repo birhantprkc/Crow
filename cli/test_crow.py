@@ -2520,9 +2520,21 @@ class ToolLayerCase(unittest.TestCase):
         # trap this docstring describes for `_READ`, in the one shape where
         # in-place mutation cannot save it.
         self._root_before = crow.get_root()
+        # #98 JOINS THE LIST AS THE FOURTH, and it leaks in the direction that
+        # is hardest to notice: a case that provokes one refusal leaves the set
+        # armed, and the next case's first `run_command` is reported as an escape
+        # from a refusal that belongs to a different test. That is a GREEN suite
+        # with a marker firing on the wrong turn -- the same shape as the false
+        # alarm `run_turn` clears it to prevent, one level up.
+        #
+        # Reached through `crow_core`, not `crow`: unlike `_READ` and `_SEEN` the
+        # name is not in cli/crow.py's import block, so `crow._REFUSED` is an
+        # AttributeError rather than the alias it looks like.
+        self._refused_before = set(crow_core._REFUSED)
         self.addCleanup(self._restore_tool_state)
         crow._READ.clear()
         crow._SEEN.clear()
+        crow_core._REFUSED.clear()
         crow.set_root(None)
 
     def _restore_tool_state(self):
@@ -2530,6 +2542,8 @@ class ToolLayerCase(unittest.TestCase):
         crow._READ.update(self._read_before)
         crow._SEEN.clear()
         crow._SEEN.update(self._seen_before)
+        crow_core._REFUSED.clear()
+        crow_core._REFUSED.update(self._refused_before)
         crow.set_root(self._root_before)
 
     def _path(self, name):
@@ -3646,6 +3660,188 @@ class WorkingDirectoryBoundaryTests(ToolLayerCase):
         with open(crow.root_file(self.root), "w", encoding="utf-8") as fh:
             json.dump({"mode": "godmode"}, fh)
         self.assertIsNone(crow.read_root_mode(self.root))
+
+
+class _MarkRecorder(crow_core.TurnEvents):
+    """Every `boundary_escaped` this turn fired, as (name, refused) pairs."""
+
+    def __init__(self):
+        self.marks = []
+
+    def boundary_escaped(self, name, refused):
+        self.marks.append((name, list(refused)))
+
+
+class TheWorkingAreaIsNotASandboxTests(ToolLayerCase):
+    """#98: the boundary refused a write, and `run_command` reached the path anyway.
+
+    WHAT THIS SUITE PINS IS A REPORT, NOT A BOUNDARY, and reading it as the
+    second is the mistake it exists to prevent. robin's decision on #98 question
+    3 (2026-08-15) was to keep `auto` as the shipped default and to stop calling
+    the boundary something it is not: `write_file` and `edit_file` stay inside
+    the root, `run_command` is not bounded, and the user is told so instead of
+    hearing it from the model's own apology afterwards. "Accepted, unmitigated"
+    is the answer the ticket lists as admissible, and this is it -- written down,
+    with the one thing that DID change held here as cases.
+
+    THE NEGATIVE HALF IS WHERE THIS SUITE EARNS ANYTHING, and it is three cases,
+    not one. A marker that fires on every `run_command` passes
+    `test_a_shell_command_after_a_refusal_is_marked` perfectly while being
+    useless -- worse than useless, because a line that is always there is a line
+    nobody reads, which is the failure the vault records for a checker that was
+    red nine times out of twenty-five. So:
+
+      * without a refusal, nothing is marked
+      * in the NEXT turn, nothing is marked -- the state has a lifetime
+      * a reading `run_command` outside the root still RUNS
+
+    The third is the ticket's own condition, quoted: "a legitimate `run_command`
+    that touches a path outside the root for a reading purpose -- `dir`,
+    `git status` in another checkout -- must NOT be refused, or the fix is a
+    client nobody can work with." A marker that grew into a refusal would break
+    it, and nothing else in the suite would notice.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.root = os.path.join(self.dir, "projekt")
+        os.makedirs(self.root)
+        crow.write_root_mode(self.root, "auto")
+        self.addCleanup(crow.set_root, None)
+        crow.set_root(self.root)
+        self.outside = os.path.join(self.dir, "draussen.txt")
+        # Patched on `crow_core` for the reason `ReadScopeIsOneTurnTests` spells
+        # out: `run_turn` looks the transport up as a module global at call time.
+        self._post_stream_before = crow.crow_core._post_stream
+        self.addCleanup(self._restore_transport)
+        crow.crow_core._post_stream = self._serve
+        self.script = []
+
+    def _restore_transport(self):
+        crow.crow_core._post_stream = self._post_stream_before
+
+    def _serve(self, url, body, api_key, timeout):
+        if not self.script:
+            raise AssertionError("the loop asked for a round that was not scripted")
+        for delta in self.script.pop(0):
+            yield json.dumps({"choices": [{"delta": delta}]})
+        yield json.dumps({"choices": [], "timings": {"predicted_n": 1}})
+
+    def serve(self, deltas):
+        self.script.append(list(deltas))
+        return self
+
+    def turn(self, talk, marks, line="go", **kw):
+        talk.append("user", line)
+        crow.run_turn(talk, base_url="http://x/v1", model="crow", api_key="k",
+                      temperature=0.0, top_p=1.0, min_p=0.0, timeout=1.0,
+                      events=marks, **kw)
+        return marks
+
+    def _writes_outside(self):
+        return _tool_call_delta("write_file",
+                                json.dumps({"path": self.outside, "content": "x"}))
+
+    def _runs(self, command):
+        return _tool_call_delta("run_command", json.dumps({"command": command}))
+
+    # ---- the sequence #98 measured -------------------------------------
+
+    def test_a_shell_command_after_a_refusal_is_marked(self):
+        """The turn from the ticket, in the order it happened."""
+        talk = crow.Conversation("SYS")
+        self.serve([self._writes_outside()])
+        self.serve([self._runs("echo hallo")])
+        self.serve([{"content": "done"}])
+        marks = self.turn(talk, _MarkRecorder())
+        self.assertEqual(len(marks.marks), 1)
+        self.assertEqual(marks.marks[0][0], "run_command")
+
+    def test_the_report_names_the_path_that_was_refused(self):
+        """A mark that says only "something happened" leaves the user to guess
+        which of the turn's paths it was about."""
+        talk = crow.Conversation("SYS")
+        self.serve([self._writes_outside()])
+        self.serve([self._runs("echo hallo")])
+        self.serve([{"content": "done"}])
+        marks = self.turn(talk, _MarkRecorder())
+        self.assertEqual(marks.marks[0][1], [os.path.realpath(self.outside)])
+
+    # ---- the negative half ---------------------------------------------
+
+    def test_a_shell_command_without_a_refusal_is_not_marked(self):
+        """THE CASE THAT MUST FAIL if the marker ever fires on every shell call.
+
+        Delete the `_REFUSED` check in `escaped_the_working_area` and this is the
+        only case in the file that turns red.
+        """
+        talk = crow.Conversation("SYS")
+        self.serve([self._runs("echo hallo")])
+        self.serve([{"content": "done"}])
+        marks = self.turn(talk, _MarkRecorder())
+        self.assertEqual(marks.marks, [])
+
+    def test_a_write_inside_the_root_does_not_arm_the_marker(self):
+        """The write that is allowed leaves nothing behind for the shell call."""
+        talk = crow.Conversation("SYS")
+        inside = os.path.join(self.root, "drin.txt")
+        self.serve([_tool_call_delta("write_file",
+                                     json.dumps({"path": inside, "content": "x"}))])
+        self.serve([self._runs("echo hallo")])
+        self.serve([{"content": "done"}])
+        marks = self.turn(talk, _MarkRecorder())
+        self.assertEqual(marks.marks, [])
+        self.assertTrue(os.path.exists(inside))       # and it really was written
+
+    def test_the_mark_does_not_survive_into_the_next_turn(self):
+        """A false alarm on a rare-event marker is the one failure that trains
+        the reader to skip the line. `_REFUSED` is cleared with `_READ` and
+        `_SEEN`; drop it from that group and this case is what says so."""
+        talk = crow.Conversation("SYS")
+        self.serve([self._writes_outside()])
+        self.serve([{"content": "refused, fine"}])
+        self.turn(talk, _MarkRecorder())
+
+        self.serve([self._runs("echo hallo")])
+        self.serve([{"content": "done"}])
+        marks = self.turn(talk, _MarkRecorder(), line="next")
+        self.assertEqual(marks.marks, [])
+
+    def test_a_reading_shell_command_outside_the_root_still_runs(self):
+        """THE TICKET'S OWN CONDITION. The marker reports; it never refuses.
+
+        Run through the tool layer rather than the loop: what is being pinned is
+        that `run_command` has no path policy at all, which is the decision, and
+        a case that went through `run_turn` would pass just as well with one bolted
+        on as long as nothing raised.
+        """
+        crow_core._REFUSED.add(os.path.realpath(self.outside))
+        out = crow.tool_run_command("echo lesen")
+        self.assertNotIn("error:", out)
+        self.assertIn("lesen", out)
+
+    def test_the_refusal_does_not_hand_the_model_the_way_around_it(self):
+        """The honest sentence goes to the USER, in the README and on screen.
+
+        Naming `run_command` in the tool result would put the escape route in the
+        one place that is read by the thing that already found it unaided.
+        """
+        out = crow.tool_write_file(self.outside, "x")
+        self.assertIn("refusing to write outside", out)
+        self.assertIn("Do not reach this path by other means", out)
+        self.assertNotIn("run_command", out)
+
+    def test_a_declined_shell_command_is_not_marked(self):
+        """`not declined` rather than `not errored`: nothing reached a shell, so
+        there is nothing to report. At `manual` the human is the gate and the
+        gate held."""
+        talk = crow.Conversation("SYS")
+        self.serve([self._writes_outside()])
+        self.serve([self._runs("echo hallo")])
+        self.serve([{"content": "done"}])
+        marks = self.turn(talk, _MarkRecorder(), mode="manual",
+                          approve=lambda name, args: "no")
+        self.assertEqual(marks.marks, [])
 
 
 class RootSurvivesTheSessionTests(unittest.TestCase):
