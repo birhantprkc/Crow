@@ -2251,8 +2251,18 @@ class Api:
             self.push({"k": "fail", "t": "not readable: %s" % exc})
             return
         if not restored:
-            self.push({"k": "fail", "t": "empty: %s" % os.path.basename(path)})
-            return
+            # #101: EMPTY IS NOT BROKEN WHEN SOMEBODY NAMED IT. `load_session`
+            # answers None for any file with no messages, which is correct and is
+            # exactly what a reserved slot looks like -- so reading that as "this
+            # archive is damaged" locked the user out of the chat they had just
+            # created: it stood in the rail and refused every click.
+            #
+            # The line is the name, the same one `_leave` draws. A file nobody
+            # named and with nothing in it is a leftover and stays refused.
+            if not self._stored_title(path):
+                self.push({"k": "fail", "t": "empty: %s" % os.path.basename(path)})
+                return
+            restored = ([], 0, False)
         ok, _ = self._leave()
         if not ok:
             self.push({"k": "fail", "t": "the open chat could not be "

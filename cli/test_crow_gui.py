@@ -1716,6 +1716,50 @@ class TheFolderPickerTests(ApiCase):
         self.assertIsNotNone(kept, "a named empty chat was not put anywhere")
         self.assertEqual(self._stored_title_of(kept), "Schmetterlinge")
 
+    def test_a_named_empty_chat_can_be_opened_again(self):
+        """THE ROUND TRIP, and the case whose absence cost three defects in a row.
+
+        Writing is half a contract. `_leave` produced a file for a named empty
+        chat and the suite was green -- while `open` refused that very file with
+        "empty: chat-....json", because `load_session` answers None for anything
+        with no messages. robin created a chat called "Youtube", switched away,
+        and could never get back into it.
+
+        THE RULE THIS CASE EXISTS TO ENFORCE: every path that writes state to
+        disk needs, in the same commit, a case that reads that file back and puts
+        the window into the state the user expects. Testing that the write
+        happened is testing the mechanism, not the promise.
+        """
+        api = self.api()
+        api.rename("", "Youtube")
+        self.drained(api)
+        ok, kept = api._leave()
+        self.assertTrue(ok)
+
+        second = self.api()
+        second.open(kept)
+        fails = [m for m in self.drained(second) if m.get("k") == "fail"]
+        self.assertEqual(fails, [], "opening the reserved slot was refused")
+        self.assertEqual(second._current_title, "Youtube")
+        self.assertEqual(os.path.normcase(second._current_path or ""),
+                         os.path.normcase(kept))
+        spoken = [m["role"] for m in second._conversation.payload()
+                  if m["role"] in ("user", "assistant")]
+        self.assertEqual(spoken, [], "the reserved slot came back with a turn in it")
+
+    def test_an_archive_nobody_named_and_with_nothing_in_it_is_still_refused(self):
+        """THE NEGATIVE HALF of the round trip. Emptiness alone must not become a
+        thing worth opening, or a truncated or half-written file reads as a chat
+        and the user is handed a window that silently lost its contents."""
+        broken = os.path.join(self.dir, "chat-kaputt.json")
+        with open(broken, "w", encoding="utf-8") as fh:
+            json.dump({"messages": []}, fh)
+        api = self.api()
+        api.open(broken)
+        fails = [m for m in self.drained(api) if m.get("k") == "fail"]
+        self.assertTrue(fails, "an unnamed empty archive was opened as a chat")
+        self.assertIn("empty", fails[-1]["t"])
+
     def test_an_unnamed_empty_chat_is_still_dropped_when_it_is_left(self):
         """THE NEGATIVE HALF. A stray "new" click must still vanish, or the rail
         fills with conversations nobody started -- which is what the emptiness
