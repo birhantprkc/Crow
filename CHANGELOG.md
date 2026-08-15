@@ -6,6 +6,55 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
+## 0.5.0 — 2026-08-15
+
+A minor rather than a patch, because the client refuses less and remembers more, and both are
+things a user notices in the first minute.
+
+**The working area stopped arguing with you (#98).** Until now a path outside the chosen root was
+refused no matter who chose it — including a path you had just typed into the prompt. The ticket
+that opened on this recorded the model reaching the path through the shell as a *bypass*; it was
+obedience against a rule that could not tell an instruction from an invention. `write_file` and
+`edit_file` now refuse only what **Crow itself** picked. A location you name — the file, or a
+directory above it, anywhere in the conversation — is written, at every release level.
+
+A location counts as named when it carries a separator: `C:\…`, `D:/…`, `\\share\…`. "put it on the
+desktop" names no path, and deriving a directory from a noun is how a release rule starts releasing
+places nobody named. The refusal says what lifts it.
+
+`run_command` is still unbounded, as decided on #92. What is left of that gap is narrow — a path you
+never named, reached through the shell — and a shell call that runs in a turn where the boundary
+already refused a write is now marked on screen in `auto`'s colour, naming the refused path. Since
+only unnamed paths are refused, the marker fires only when Crow went somewhere on its own.
+
+**The window remembers where you were working (#92).** The folder had to be picked again after every
+single start: `adopt_root` carried fifteen lines of comment describing a restore, and the line under
+them bound nothing. `roots.json` gained `active` beside `recent` — `recent` is the picker's menu and
+is written by both clients, so it cannot decide where the window opens. Choosing **no folder** is
+itself remembered. If the folder is gone at start, Crow says so and runs without one.
+
+The terminal is unchanged: `--root`, else where you stand. The two clients divide on expectation —
+a terminal user means the directory they just typed, a window user means the project they left open,
+and a window's cwd comes from a shortcut and means nothing.
+
+**Each chat carries its own working directory (#101).** Switching chats moves the boundary with
+them, so two chats can work in two projects. A chat that never chose starts from the template. The
+release level stays with the **folder**: two chats in one folder share it, or the same directory
+would carry different rights depending on which conversation was open.
+
+**A chat named before its first turn keeps its name (#100).** `save_session` refuses to write an
+empty conversation — deliberately, that refusal is what stops a `/reset` chat returning on the next
+start — so a name given before typing had nowhere to live and died with the window. A named empty
+chat is a slot you reserved: it survives closing, survives switching away, and opens again. An
+unnamed empty chat is a stray click and still leaves nothing behind.
+
+**Measured, and not measured.** Every change above was run live in the window at the shipped
+operating point before it was accepted. Suites at release: `cli/test_crow.py` 398/398,
+`cli/test_crow_core.py` 152/152, `cli/test_crow_gui.py` 120/120, `check_shared_core` 51/51,
+`check_gui_prereqs` 3/3, `check_operating_point` 4/4 — on Python 3.13.3, the interpreter carrying
+pywebview. Throughput and quality are untouched by this release and were not re-measured; the
+operating point is the one 0.4.1 shipped.
+
 ## 0.4.1 — 2026-08-14
 
 Shipped because the 0.4.0 package predates the fix below: the tag sits on `1a50f6d`, the fix
