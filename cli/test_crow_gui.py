@@ -747,6 +747,44 @@ class RailTests(ApiCase):
         self._probe_without_a_server(second)
         self.assertEqual(self.rail(second)["title"], "Test IDE")
 
+    # -- #100: a name given before the first turn ----------------------------
+
+    def test_a_name_given_before_the_first_turn_survives_a_restart(self):
+        """POSITIVE (#100). Naming a chat before typing into it is how people
+        file things -- the name describes what the slot is FOR, not what is in
+        it. Until now it lived only in memory: `save_session` refuses an empty
+        conversation, so no file was written, so `_stamp` never ran.
+        """
+        api = self.api()
+        api.rename("", "Einkaufsliste")            # no turn in this chat at all
+        self.drained(api)
+
+        second = self.api()
+        self._probe_without_a_server(second)
+        self.assertEqual(self.rail(second)["title"], "Einkaufsliste")
+
+    def test_an_empty_chat_nobody_named_still_leaves_nothing(self):
+        """THE NEGATIVE HALF, and the one that keeps the fix above from being a
+        regression. `save_session`'s refusal is what stops an abandoned chat
+        coming back on the next start; writing a file for EVERY empty chat would
+        walk straight back into it. Only a name earns a file.
+        """
+        api = self.api()
+        api._persist_live()
+        self.assertFalse(os.path.isfile(self.session),
+                         "an unnamed empty chat wrote a session file")
+
+    def test_a_session_file_with_only_a_name_is_not_a_conversation(self):
+        """THE SECOND NEGATIVE HALF. The file this fix creates carries a name and
+        no messages. If the core read that as a chat, the window would come back
+        holding an empty conversation it never had -- so this pins that the core
+        answers "no session", and that it does not raise on the way there."""
+        api = self.api()
+        api.rename("", "nur ein Name")
+        self.drained(api)
+        self.assertTrue(os.path.isfile(self.session))
+        self.assertIsNone(crow_core.load_session("http://127.0.0.1:1/v1", None))
+
     def test_a_window_that_does_not_stamp_the_name_loses_it(self):
         """NEGATIVE. The version that wrote `crow_title` into one file and left
         it there: the core's next write drops the key."""

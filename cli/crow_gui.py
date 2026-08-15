@@ -1584,20 +1584,27 @@ class Api:
         except Exception as exc:           # noqa: BLE001
             self.push({"k": "note", "t": "session not readable: %s" % exc})
             return
+        # THE IDENTITY IS READ BACK, NOT MINTED. It used to be archived here
+        # instead, which handed the restored session a file it did not need --
+        # and another one on the next launch, until the same conversation stood
+        # in the rail as many times as the window had been opened. session.json
+        # is where the two things worth remembering about the open chat are kept:
+        # which archive file it belongs to, if it has one yet, and what the user
+        # named it.
+        #
+        # READ BEFORE THE MESSAGES ARE, and #100 is why the order matters: a chat
+        # named before its first turn has a session.json carrying the name and no
+        # messages, so `load_session` correctly answers "no session" -- and while
+        # this line sat below that early return, the name was never read back.
+        # Identity and content are two questions, and only one of them depends on
+        # the conversation being non-empty.
+        self._current_path, self._current_title = self._pointer()
         if not restored:
             self._reload_rail()
             return
         messages, tokens, kv = restored
         self._conversation.restore(messages)
         self._context_tokens, self._promised_warm = tokens, kv
-        # THE IDENTITY IS READ BACK, NOT MINTED. This line used to archive the
-        # restored session, which handed it a file it did not need -- and handed
-        # it another one on the next launch, and the one after that, until the
-        # same conversation stood in the rail as many times as the window had
-        # been opened. session.json is where the two things worth remembering
-        # about the open chat are kept: which archive file it belongs to, if it
-        # has one yet, and what the user named it.
-        self._current_path, self._current_title = self._pointer()
         self._replay(messages)
         self._reload_rail()
         # #92: `load_session` may have bound the root the restored chat was
@@ -2029,11 +2036,29 @@ class Api:
         file the open chat belongs to, so the next launch picks that chat up
         instead of minting a fresh copy of it.
         """
-        if not path or not os.path.isfile(path):
+        if not path:
             return
+        fresh = False
+        if not os.path.isfile(path):
+            # #100: THE CORE WRITES NOTHING FOR A CHAT WITH NO TURN IN IT, so the
+            # name the user just typed has no file to live in and dies with the
+            # window. `save_session` refuses an empty conversation on purpose --
+            # that refusal is what stops a `/reset` chat coming back on the next
+            # start -- so the file is created here instead of loosening it.
+            #
+            # ONLY FOR THE LIVE FILE, AND ONLY FOR A NAME. An archive path that
+            # does not exist is not minted here, and an empty chat NOBODY named
+            # still leaves nothing behind: that is the negative half, and without
+            # it this fix would resurrect exactly the abandoned chat the refusal
+            # exists to prevent.
+            if not (pointer and self._current_title):
+                return
+            fresh = True
         try:
-            with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
+            data = {}
+            if not fresh:
+                with open(path, encoding="utf-8") as fh:
+                    data = json.load(fh)
             if self._current_title:
                 data["crow_title"] = self._current_title
             else:
@@ -2260,6 +2285,11 @@ class Api:
             # dropped the key again. It is stamped on session.json here, on the
             # chat's own file if it has one yet, and on every file `_archive`
             # writes for it from now on.
+            #
+            # THAT FIRST HALF WAS NOT TRUE UNTIL #100. With no turn in the chat
+            # the core wrote no session.json at all, so there was nothing to
+            # stamp and the name died with the window -- while this comment said
+            # otherwise. `_stamp` creates the file for a named chat now.
             self._current_title = title
             self._persist_live()
             self._stamp(self._current_path or "")
