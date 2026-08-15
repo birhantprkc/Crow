@@ -2221,6 +2221,55 @@ def adopt_root(stated: str | None,
 _REFUSED: set[str] = set()
 
 
+# WHAT THE USER NAMED. The only thing that releases a path outside the root.
+#
+#   Crow itself outside the root ................ NO
+#   Crow because the user asked for it .......... YES
+#
+# and both regardless of mode -- the level decides who is ASKED, never what the
+# user is allowed to order (robin, 2026-08-15).
+#
+# WHY THE PATH ALONE COULD NEVER DECIDE THIS. `_outside_root` saw a path and
+# nothing else, so it answered identically in two situations that are not alike:
+# the model inventing a location while doing something else, and the user typing
+# a location into the prompt. #98's founding turn was the SECOND kind --
+# `Erstell mir bitte die Datei "C:\Users\robin\Desktop\x.txt"` -- so the client
+# refused an explicit instruction and then reported the model for carrying it
+# out anyway. An assistant that argues with the address its user typed is not
+# careful, it is broken, and the ticket had recorded that as a security finding.
+#
+# REBUILT EACH TURN FROM THE WHOLE CONVERSATION, not from the newest message:
+# "and put the log next to it" two turns later is the same mandate, and a rule
+# that forgot the address would start refusing in the middle of a task the user
+# had already given.
+_MANDATED: set[str] = set()
+
+# A location in prose. Drive letters and UNC shares only: something without a
+# separator is a word, not a path. "leg das auf den Desktop" names nothing this
+# can resolve, and guessing a directory out of a noun is how a release rule
+# begins releasing places nobody named. That limit is real and it is the price
+# of not guessing -- naming the path releases it.
+_PATH_IN_TEXT = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\)[^\s\"'<>|]*")
+
+
+def mandated_paths(conversation: "Conversation") -> set[str]:
+    """Every location the USER spelled out in this conversation, resolved.
+
+    Only `user` messages are read. What the MODEL wrote is not a mandate -- it is
+    the thing being bounded, and a rule that let the assistant widen its own
+    permission by mentioning a path would be no rule at all.
+    """
+    found: set[str] = set()
+    for message in conversation.payload():
+        if message.get("role") != "user":
+            continue
+        for hit in _PATH_IN_TEXT.findall(message.get("content") or ""):
+            hit = hit.rstrip(".,;:!?\"')")
+            if hit:
+                found.add(_resolve(hit))
+    return found
+
+
 def _outside_root(path: str) -> str | None:
     """The refusal for a path out of bounds, or None when it is allowed.
 
@@ -2237,17 +2286,29 @@ def _outside_root(path: str) -> str | None:
     model the map to a door it already finds on its own. What goes to the model
     is the instruction, and the instruction is labelled as what it is: an
     instruction, not a mechanism.
+
+    IT REFUSES A CHOICE, NOT A LOCATION. Everything the user named is released
+    through `_MANDATED` above, so what is left to refuse is exactly the case
+    worth refusing: a path the ASSISTANT picked, that nobody asked for. The
+    refusal says so in those words, because "outside the working directory" was
+    true of both cases and told the reader which one they were in.
     """
     if _ROOT is None or _inside(_ROOT, path):
+        return None
+    # THE USER'S OWN ADDRESS IS NOT A TRESPASS. A named file releases itself; a
+    # named directory releases what is under it, because "put it in D:\export"
+    # is an instruction about a place, and the file name is the assistant's job.
+    if any(_inside(named, path) for named in _MANDATED):
         return None
     resolved = _resolve(path)
     _REFUSED.add(resolved)
     return (f"error: refusing to write outside the working directory.\n"
             f"  root: {_ROOT}\n"
             f"  path: {resolved}\n"
-            f"Do not reach this path by other means either. Write inside the root, "
-            f"say plainly that the work needs a path outside it, or start crow in "
-            f"the directory you mean.")
+            f"Nobody asked for this location -- it is neither in the working "
+            f"directory nor named anywhere in this conversation by the user. Do not "
+            f"reach it by other means either. Write inside the root, or ask for the "
+            f"path you need and let the user name it.")
 
 
 def escaped_the_working_area(name: str) -> bool:
@@ -3578,6 +3639,14 @@ def run_turn(
     _READ.clear()
     _SEEN.clear()
     _REFUSED.clear()
+    # NOT CLEARED -- REBUILT, and from the conversation rather than this turn's
+    # line. The user's addresses accumulate: a path named two turns ago is still
+    # the place the user asked for, and forgetting it would start refusing in the
+    # middle of the very task that named it. It happens here rather than in the
+    # surfaces because a client that forgot to build the list would silently
+    # refuse everything its user typed -- the failure #98 already recorded once.
+    _MANDATED.clear()
+    _MANDATED.update(mandated_paths(conversation))
     stopped = False
     cost = TurnCost()
     budget = max_tool_rounds

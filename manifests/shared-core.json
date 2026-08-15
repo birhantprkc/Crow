@@ -91,6 +91,11 @@
    "why": "#99. The one line a tool call is rendered as, on both surfaces. It lived in cli/crow.py while cli/crow_gui.py reached for crow_core.format_tool_args behind a hasattr guard that had been False since the split -- so the window showed raw JSON where the terminal showed values, and nothing could detect it because the name was not declared here."
   },
   {
+   "name": "mandated_paths",
+   "kind": "def",
+   "why": "#98, and it is what makes the boundary usable rather than obstructive: a path the USER named is released, a path the assistant picked is not. Written once because a surface with its own idea of what counts as an instruction would refuse things its user typed -- the exact failure #98 recorded, where an explicit 'Erstell die Datei C:\\Users\\robin\\Desktop\\x.txt' was refused and the model then reported for obeying it. It reads `user` messages only; counting the assistant's own text would let the model widen its permission by mentioning a path first."
+  },
+  {
    "name": "escaped_the_working_area",
    "kind": "def",
    "why": "#98. Whether a shell command ran in a turn the boundary already refused -- the sequence the working-area guarantee does NOT cover, stated once so both surfaces mark the same event. A surface with its own version would drift into path matching against a shell string, which is the analysis #98 rejected on the record.",

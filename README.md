@@ -209,33 +209,56 @@ budget prints `CUT OFF at the token budget -- raise --max-tokens` (`cli/crow.py:
 parser accepts no such option (`:2708-2777`). Tracked as
 [#63](https://github.com/nibor1896/Crow/issues/63).
 
-**The working area is a guarantee, not a sandbox.** A chosen root bounds **two** of the nine tools:
+**The working area bounds what Crow chooses, never what you ask for.** Two rules, and the second is
+what makes the first usable:
+
+| | |
+|---|---|
+| Crow picks a path outside the root by itself | **refused**, at every level |
+| You named the path — or a directory above it — anywhere in the conversation | **written**, at every level |
+
+The level (`manual`/`allowedit`/`auto`) decides who gets *asked*; it never decides what you are
+allowed to order. An assistant that argues with the address its user typed is not careful, it is
+broken — and until 2026-08-15 this one did exactly that:
+[#98](https://github.com/nibor1896/Crow/issues/98) opens with `Erstell mir bitte die Datei
+"C:\Users\robin\Desktop\x.txt"` being refused, the model reaching the path through the shell to
+carry out the instruction, and the ticket filing that as a bypass. It was not a bypass. It was
+obedience against a rule that could not tell an instruction from an invention.
+
+A location counts as named when it carries a separator — `C:\...`, `D:/...`, `\\share\...`. A bare
+word does not: **"leg das auf den Desktop" names no path**, and guessing a directory out of a noun
+is how a release rule starts releasing places nobody named. Naming the path lifts it, and the
+refusal says so.
+
+**What the root still bounds** — two of the nine tools:
 
 | Tool | Bounded by the root | Where |
 |---|---|---|
-| `write_file` | yes, at every level, without asking | `cli/crow_core.py:2396` |
-| `edit_file` | yes, at every level, without asking | `cli/crow_core.py:2419` |
-| `run_command` | **no, at every level** | `cli/crow_core.py:2542` |
+| `write_file` | yes — for paths you did not name | `cli/crow_core.py:2457` |
+| `edit_file` | yes — for paths you did not name | `cli/crow_core.py:2480` |
+| `run_command` | **no, at every level** | `cli/crow_core.py:2603` |
 | the other six | no — reads are never bounded | — |
 
 `run_command` runs with `shell=True`, so a shell line naming an absolute path outside the root
 reaches it. This is [#92](https://github.com/nibor1896/Crow/issues/92) decision 3 and it stands:
 a `cwd` check is protection nobody has, and refusing shell lines by their text is string analysis
-against a shell. [#98](https://github.com/nibor1896/Crow/issues/98) measured the consequence — the
-default model routes around the refusal **unprompted**, one call later, and says so politely.
-Decided 2026-08-15: accepted and unmitigated, with two things added rather than a mechanism.
+against a shell. What is left of that gap after the release rule above is narrow but real — a path
+**you never named**, reached through the shell rather than through `write_file`. Two things cover
+it, neither of them a mechanism:
 
-1. The refusal tells the model not to reach the path by other means. That is instruction, not
-   mechanism, and it is listed here as instruction.
+1. The refusal tells the model not to reach the path by other means. Instruction, not mechanism,
+   and listed here as instruction.
 2. A shell command that runs in a turn where the boundary already refused a write is **marked on
    screen**, in `auto`'s own colour, naming the refused path (`cli/crow.py:936`,
-   `cli/crow_gui.py:1246`). The rule is turn-level, not path-level: it over-reports an unrelated
-   command in the same turn and cannot miss the #98 sequence.
+   `cli/crow_gui.py:1246`). Since only unnamed paths are refused, the marker fires only when Crow
+   went somewhere on its own — the case worth a line. A turn where you named the path never
+   reaches it.
 
 What this does **not** give you: protection against a hostile prompt, or against a model that
 reaches for the shell first. `manual` and `allowedit` ask before executing — at those levels the
-gate is a person. Cases: `TheWorkingAreaIsNotASandboxTests` in `cli/test_crow.py`, including the
-three negative controls that fail if the marker ever fires on every shell call.
+gate is a person. Cases: `TheWorkingAreaIsNotASandboxTests` in `cli/test_crow.py`, whose negative
+half is the half that matters: naming one location must not release a second one, and the
+assistant's own text must never count as a mandate.
 
 **Rollover.** A request at or past `n_ctx` is refused outright and the turn is lost. At 90 % of the
 window Crow writes the conversation to `rollover-<stamp>.json` **and `rollover-<stamp>.md`**, empties

@@ -2531,10 +2531,16 @@ class ToolLayerCase(unittest.TestCase):
         # name is not in cli/crow.py's import block, so `crow._REFUSED` is an
         # AttributeError rather than the alias it looks like.
         self._refused_before = set(crow_core._REFUSED)
+        # AND THE FIFTH. `_MANDATED` leaks in the direction nothing else here
+        # does: left standing, a later case writes OUTSIDE its root without
+        # asking, because a previous case's user line named a path. That is a
+        # green boundary suite with no boundary under it.
+        self._mandated_before = set(crow_core._MANDATED)
         self.addCleanup(self._restore_tool_state)
         crow._READ.clear()
         crow._SEEN.clear()
         crow_core._REFUSED.clear()
+        crow_core._MANDATED.clear()
         crow.set_root(None)
 
     def _restore_tool_state(self):
@@ -2544,6 +2550,8 @@ class ToolLayerCase(unittest.TestCase):
         crow._SEEN.update(self._seen_before)
         crow_core._REFUSED.clear()
         crow_core._REFUSED.update(self._refused_before)
+        crow_core._MANDATED.clear()
+        crow_core._MANDATED.update(self._mandated_before)
         crow.set_root(self._root_before)
 
     def _path(self, name):
@@ -3828,8 +3836,95 @@ class TheWorkingAreaIsNotASandboxTests(ToolLayerCase):
         """
         out = crow.tool_write_file(self.outside, "x")
         self.assertIn("refusing to write outside", out)
-        self.assertIn("Do not reach this path by other means", out)
+        self.assertIn("Nobody asked for this location", out)
+        self.assertIn("Do not reach it by other means", out)
         self.assertNotIn("run_command", out)
+
+    # ---- who chose the path ---------------------------------------------
+
+    def test_a_path_the_user_named_is_written_without_argument(self):
+        """robin's rule, 2026-08-15: an explicit instruction is not a trespass.
+
+        This is #98's founding turn, and under the old rule it was refused and
+        then reported. The user typed the address; there is nothing here to
+        protect anyone from.
+        """
+        talk = crow.Conversation("SYS")
+        self.serve([self._writes_outside()])
+        self.serve([{"content": "done"}])
+        marks = self.turn(talk, _MarkRecorder(),
+                          line='Leg bitte "%s" an' % self.outside)
+        self.assertEqual(marks.marks, [])                # nothing to report
+        self.assertTrue(os.path.exists(self.outside))    # and it really landed
+
+    def test_a_file_under_a_directory_the_user_named_is_written(self):
+        """"Put it in D:\\export" is an instruction about a place -- picking the
+        file name inside it is the assistant's job, not a second decision the
+        user has to spell out."""
+        talk = crow.Conversation("SYS")
+        target = os.path.join(self.dir, "ausgabe", "bericht.md")
+        self.serve([_tool_call_delta("write_file",
+                                     json.dumps({"path": target, "content": "x"}))])
+        self.serve([{"content": "done"}])
+        self.turn(talk, _MarkRecorder(),
+                  line="Schreib den Bericht nach %s" % os.path.join(self.dir, "ausgabe"))
+        self.assertTrue(os.path.exists(target))
+
+    def test_a_different_outside_path_stays_refused(self):
+        """THE CASE THAT MUST FAIL, and the reason the rule is worth anything.
+
+        Naming one location releases THAT location. If it released everything
+        outside the root, the mandate would be a switch the model can flip by
+        getting the user to mention any path at all -- and the rule would be
+        "say a path once, write anywhere" rather than "do what you were asked".
+        """
+        talk = crow.Conversation("SYS")
+        elsewhere = os.path.join(self.dir, "woanders.txt")
+        self.serve([_tool_call_delta("write_file",
+                                     json.dumps({"path": elsewhere, "content": "x"}))])
+        self.serve([{"content": "done"}])
+        self.turn(talk, _MarkRecorder(),
+                  line='Leg bitte "%s" an' % self.outside)   # names the OTHER one
+        self.assertFalse(os.path.exists(elsewhere))
+
+    def test_the_model_cannot_widen_its_own_permission(self):
+        """Only `user` messages are read. If what the ASSISTANT wrote counted,
+        the model would release any path by mentioning it first -- and the whole
+        rule would be a formality it can satisfy on its own."""
+        talk = crow.Conversation("SYS")
+        talk.append("assistant", "Ich lege das unter %s ab." % self.outside)
+        self.assertEqual(crow.crow_core.mandated_paths(talk), set())
+
+    def test_a_named_path_survives_into_a_later_turn(self):
+        """The mandate is the conversation's, not one line's. A task given two
+        turns ago must not start being refused halfway through."""
+        talk = crow.Conversation("SYS")
+        self.serve([{"content": "verstanden"}])
+        self.turn(talk, _MarkRecorder(), line='Wir arbeiten in "%s"' % self.outside)
+
+        self.serve([self._writes_outside()])
+        self.serve([{"content": "done"}])
+        self.turn(talk, _MarkRecorder(), line="jetzt leg sie an")
+        self.assertTrue(os.path.exists(self.outside))
+
+    def test_slashes_and_case_do_not_decide_it(self):
+        """The user types a location, not a normalised path. `_inside` already
+        carries normcase and the separator rule; this pins that the mandate goes
+        through it rather than comparing raw text."""
+        talk = crow.Conversation("SYS")
+        typed = self.outside.replace("\\", "/").upper()
+        self.serve([self._writes_outside()])
+        self.serve([{"content": "done"}])
+        self.turn(talk, _MarkRecorder(), line="Leg %s an" % typed)
+        self.assertTrue(os.path.exists(self.outside))
+
+    def test_a_word_without_a_separator_is_not_a_path(self):
+        """"auf den Desktop" names no location this can resolve, and inventing a
+        directory out of a noun is how a release rule starts releasing places
+        nobody named. The limit is real and the refusal says how to lift it."""
+        talk = crow.Conversation("SYS")
+        talk.append("user", "leg das bitte auf den Desktop")
+        self.assertEqual(crow.crow_core.mandated_paths(talk), set())
 
     def test_a_declined_shell_command_is_not_marked(self):
         """`not declined` rather than `not errored`: nothing reached a shell, so
