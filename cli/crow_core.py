@@ -2087,9 +2087,31 @@ def get_root() -> str | None:
 ROOTS_FILE = os.path.join(os.path.dirname(SESSION_DIR), "roots.json")
 
 
-# Only what the picker offers. Which directory is ACTIVE is the open chat's
-# business, not this file's -- that is what makes two chats able to work in two
-# places. `{"recent": [...]}`; a bare list is the older shape and still read.
+# TWO FACTS, TWO KEYS, and the split is the whole point (#92, 2026-08-15).
+#
+#   "recent"  the picker's menu. Every root ever chosen, newest first, written
+#             by `remember_root` -- from the window's picker AND from the
+#             terminal's `--root`.
+#   "active"  what the WINDOW should bind at its next start. Written only where
+#             a person chose: the picker, or "no folder".
+#
+# THEY WERE ALMOST ONE KEY. The obvious design is to read `recent[0]` as "last
+# active" and save a field. It does not survive contact with `remember_root`:
+# that list is "last PICKED, by anybody", so `crow --root D:\x` in a terminal
+# would silently move where the WINDOW opens tomorrow. Two surfaces on one
+# global head pointer, and neither of them wrong until they disagreed.
+#
+# ABSENT, NULL AND A PATH ARE THREE STATES, not two. No key at all means nobody
+# has ever chosen; `null` means somebody chose "no folder" and that has to
+# survive a restart too; a path means bind it. Collapsing the first two would
+# make an explicit "no folder" evaporate on the next start.
+#
+# The comment that stood here claimed the active directory was "the open chat's
+# business, not this file's". Nothing in the code ever read a root from a chat
+# file -- the sentence described an intention, and the window started unbounded
+# every time because of it.
+#
+# `{"recent": [...]}`; a bare list is the older shape and still read.
 def _roots_doc() -> dict:
     try:
         with open(ROOTS_FILE, encoding="utf-8") as fh:
@@ -2101,14 +2123,59 @@ def _roots_doc() -> dict:
     return doc if isinstance(doc, dict) else {}
 
 
-def _write_roots(recent: list[str]) -> None:
-    doc: dict = {"recent": recent}
+def _write_doc(doc: dict) -> None:
     try:
         os.makedirs(os.path.dirname(ROOTS_FILE), exist_ok=True)
         with open(ROOTS_FILE, "w", encoding="utf-8") as fh:
             json.dump(doc, fh, indent=1)
     except OSError:
         pass
+
+
+def _write_roots(recent: list[str]) -> None:
+    # READ-MODIFY-WRITE, not a fresh dict. The old body wrote `{"recent": ...}`
+    # whole, so the first `remember_root` after a pick would have deleted the
+    # `active` key beside it -- and the restore would have failed exactly once
+    # per session, on the run after the one that set it.
+    doc = _roots_doc()
+    doc["recent"] = recent
+    _write_doc(doc)
+
+
+def set_active_root(root: str | None) -> None:
+    """Remember what the window should bind next time. `None` means "no folder".
+
+    WRITTEN ONLY WHERE A PERSON CHOSE. Not from `adopt_root`'s `--root` branch:
+    a terminal invocation states where THAT run works, and letting it move the
+    window's next start is the coupling `active` exists to avoid.
+    """
+    doc = _roots_doc()
+    doc["active"] = _resolve(root) if root else None
+    _write_doc(doc)
+
+
+def restore_root() -> "tuple[str | None, str | None]":
+    """What the window should bind at start: `(root, problem)`.
+
+    `(path, None)`  bind it.
+    `(None, None)`  nobody ever chose, or somebody chose "no folder". Silence is
+                    the right answer to both -- a line on every start is a line
+                    nobody reads.
+    `(None, text)`  a remembered root is gone. That one is SAID, because without
+                    a root nothing bounds what Crow picks for itself: the session
+                    changes its operating mode, and a silent change of operating
+                    mode is the thing a user finds out about afterwards.
+    """
+    doc = _roots_doc()
+    if "active" not in doc:
+        return None, None                       # first run
+    path = doc["active"]
+    if path is None:
+        return None, None                       # chosen, and chosen to be none
+    if not isinstance(path, str) or not os.path.isfile(root_file(path)):
+        return None, (f"the last working directory is gone: {path}\n"
+                      f"running without one -- Crow's own writes are unbounded")
+    return path, None
 
 
 
@@ -2167,6 +2234,7 @@ def adopt_root(stated: str | None,
     running crow anywhere, so a boundary inferred from the disk would have made
     the home directory a root on this very machine.
     """
+    problem: str | None = None
     if stated:
         if not os.path.isdir(stated):
             return None, mode or DEFAULT_MODE, f"no such directory: {stated}"
@@ -2195,13 +2263,25 @@ def adopt_root(stated: str | None,
         #
         # The pick is GLOBAL (robin, 2026-08-14) and survives a restart, including
         # an explicit "no folder". Where you stand still wins over both.
-        # walk_up=False for the window: its cwd comes from a shortcut, so a
-        # stray .crow/root.json under it would outrank what the user picked.
-        set_root(find_root() if walk_up else None)
+        #
+        # THE TWO SURFACES DIVIDE HERE, AND THEY DIVIDE ON EXPECTATION rather
+        # than on mechanism. A terminal user expects Crow to work where they just
+        # put it, so `find_root()` -- the cwd they typed in -- wins and nothing is
+        # restored. A window user expects the project to open where they left it,
+        # and its cwd came from a shortcut, so the cwd means nothing and the
+        # remembered choice is everything. Until 2026-08-15 the window branch was
+        # a bare `None`: the fifteen lines above described a restore that no line
+        # under them performed, and the folder had to be picked again after every
+        # single start.
+        if walk_up:
+            set_root(find_root())
+        else:
+            restored, problem = restore_root()
+            set_root(restored)
     here = get_root()
     if mode is None:
         mode = (read_root_mode(here) if here else None) or DEFAULT_MODE
-    return here, mode, None
+    return here, mode, problem
 
 
 # WHAT THE BOUNDARY REFUSED THIS TURN. It is a REPORT, not a second boundary,

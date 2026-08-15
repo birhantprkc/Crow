@@ -4049,6 +4049,90 @@ class AdoptRootTests(unittest.TestCase):
         _, mode, _ = crow.adopt_root(target, None)
         self.assertEqual(mode, "manual")
 
+    # ---- #92: the window opens where it was left --------------------------
+    #
+    # Until 2026-08-15 `adopt_root(walk_up=False)` bound `None` under fifteen
+    # lines of comment describing a restore, so the folder had to be picked again
+    # after every start. These cases are the restore and the four ways it must
+    # not overreach.
+
+    def _declared(self, name):
+        target = os.path.join(self.dir, name)
+        os.makedirs(target, exist_ok=True)
+        crow_core.write_root_mode(target, "auto")
+        return target
+
+    def test_the_window_binds_the_remembered_choice_at_start(self):
+        target = self._declared("gemerkt")
+        crow_core.set_active_root(target)
+        root, _, problem = crow.adopt_root(None, None, walk_up=False)
+        self.assertIsNone(problem)
+        self.assertEqual(os.path.normcase(root or ""),
+                         os.path.normcase(os.path.realpath(target)))
+
+    def test_the_terminal_does_not_restore_the_windows_choice(self):
+        """THE SURFACE SPLIT, and it is a split of EXPECTATION, not of mechanism.
+        A terminal user expects Crow to work where they just put it; a window
+        user expects the project to reopen where they left it, because the
+        window's cwd came from a shortcut and means nothing."""
+        target = self._declared("gemerkt")
+        crow_core.set_active_root(target)
+        with mock.patch.object(crow_core, "find_root", return_value=None):
+            root, _, _ = crow.adopt_root(None, None)          # walk_up=True
+        self.assertIsNone(root)
+
+    def test_a_terminal_root_does_not_move_the_windows_next_start(self):
+        """THE CASE THAT KILLED THE OBVIOUS DESIGN. Reading `recent[0]` as "last
+        active" is one field cheaper and wrong: `remember_root` is written by the
+        terminal's `--root` too, so `crow --root D:\\x` in a shell would silently
+        decide where the window opens tomorrow. Two surfaces, one head pointer.
+        """
+        window_pick = self._declared("fenster")
+        crow_core.set_active_root(window_pick)
+        crow.adopt_root(self._declared("terminal"), None)     # the CLI path
+        restored, problem = crow_core.restore_root()
+        self.assertIsNone(problem)
+        self.assertEqual(os.path.normcase(restored or ""),
+                         os.path.normcase(os.path.realpath(window_pick)))
+
+    def test_remembering_a_root_does_not_wipe_the_active_key(self):
+        """`_write_roots` writes the document back, not a fresh one. With the old
+        body the restore would have failed exactly once per session -- on the run
+        after the one that set it, which is the hardest kind to notice."""
+        chosen = self._declared("gewaehlt")
+        crow_core.set_active_root(chosen)
+        crow_core.remember_root(self._declared("spaeter"))
+        restored, _ = crow_core.restore_root()
+        self.assertEqual(os.path.normcase(restored or ""),
+                         os.path.normcase(os.path.realpath(chosen)))
+
+    def test_an_explicit_no_folder_survives_a_restart(self):
+        """"None" is a choice. Written as a null rather than by dropping the key,
+        because an absent key means nobody ever chose -- collapse the two and
+        "no folder" comes back as a folder on the next start."""
+        crow_core.set_active_root(self._declared("erst"))
+        crow_core.set_active_root(None)
+        root, _, problem = crow.adopt_root(None, None, walk_up=False)
+        self.assertIsNone(root)
+        self.assertIsNone(problem)                 # a choice honoured says nothing
+
+    def test_never_having_chosen_says_nothing(self):
+        root, problem = crow_core.restore_root()
+        self.assertIsNone(root)
+        self.assertIsNone(problem)
+
+    def test_a_remembered_root_that_is_gone_is_said_not_swallowed(self):
+        """The one case that speaks. Without a root nothing bounds what Crow
+        picks for itself, so the session silently changes operating mode -- and a
+        silent change of operating mode is one the user finds out about later."""
+        target = self._declared("verschwunden")
+        crow_core.set_active_root(target)
+        os.remove(crow_core.root_file(target))
+        root, _, problem = crow.adopt_root(None, None, walk_up=False)
+        self.assertIsNone(root)
+        self.assertIn("gone", problem or "")
+        self.assertIn("unbounded", problem or "")
+
     def test_a_stated_level_beats_the_stored_one(self):
         """THE NEGATIVE HALF of the case above: a memory may fill a silence, never
         overrule a flag typed this minute."""

@@ -209,6 +209,25 @@ budget prints `CUT OFF at the token budget -- raise --max-tokens` (`cli/crow.py:
 parser accepts no such option (`:2708-2777`). Tracked as
 [#63](https://github.com/nibor1896/Crow/issues/63).
 
+**How the working directory is chosen, and how long it lasts.** The two clients answer this
+differently, and the difference is one of expectation rather than mechanism:
+
+| | how it picks a working directory at start | why |
+|---|---|---|
+| terminal | `--root`, otherwise the nearest ancestor holding a `.crow/root.json` — where you stand | you just typed the directory you meant |
+| window | the last folder you chose, restored silently | its cwd comes from a shortcut and means nothing; you expect the project to reopen where you left it |
+
+The window's restore reads `active` from `%LOCALAPPDATA%\Crow\roots.json`, written only when a
+person chooses — the picker, or **no folder**. `recent` in the same file is the picker's menu and
+nothing else: both clients write it, so it cannot decide where the window opens. Choosing **no
+folder** is itself remembered, so it survives a restart instead of coming back as a folder.
+Cancelling the picker changes nothing. If the remembered folder is gone at start, Crow says so and
+runs without one — and that line is not decoration: with no root, nothing bounds the paths Crow
+picks for itself.
+
+Until 2026-08-15 the window bound nothing at start and the folder had to be picked again after every
+single one ([#92](https://github.com/nibor1896/Crow/issues/92)).
+
 **The working area bounds what Crow chooses, never what you ask for.** Two rules, and the second is
 what makes the first usable:
 

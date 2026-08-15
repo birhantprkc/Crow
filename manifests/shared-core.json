@@ -91,6 +91,22 @@
    "why": "#99. The one line a tool call is rendered as, on both surfaces. It lived in cli/crow.py while cli/crow_gui.py reached for crow_core.format_tool_args behind a hasattr guard that had been False since the split -- so the window showed raw JSON where the terminal showed values, and nothing could detect it because the name was not declared here."
   },
   {
+   "name": "restore_root",
+   "kind": "def",
+   "why": "#92. What the window binds at start, and the three states it has to tell apart: no key at all (nobody ever chose), an explicit null (somebody chose 'no folder', and that survives a restart too), and a path that may since have stopped being a root. A surface with its own version would collapse the first two and an explicit 'no folder' would come back as a folder on the next start."
+  },
+  {
+   "name": "set_active_root",
+   "kind": "def",
+   "user_entry": true,
+   "evidence": ["set_active_root("],
+   "only": {
+    "surface": "cli/crow_gui.py",
+    "because": "The terminal must NOT write it, and that is the entry rather than a comment: `--root` states where THAT run works, while `active` decides where the WINDOW opens next time. They were nearly one key -- `recent[0]` -- and `crow --root D:\\x` in a terminal would then have silently moved the window's next start. A call site appearing in cli/crow.py is that coupling coming back, and this line is what turns it red."
+   },
+   "why": "#92. Written only where a person chose: the picker, or 'no folder'. `remember_root` fills the menu and is a different fact -- both surfaces write that one."
+  },
+  {
    "name": "mandated_paths",
    "kind": "def",
    "why": "#98, and it is what makes the boundary usable rather than obstructive: a path the USER named is released, a path the assistant picked is not. Written once because a surface with its own idea of what counts as an instruction would refuse things its user typed -- the exact failure #98 recorded, where an explicit 'Erstell die Datei C:\\Users\\robin\\Desktop\\x.txt' was refused and the model then reported for obeying it. It reads `user` messages only; counting the assistant's own text would let the model widen its permission by mentioning a path first."

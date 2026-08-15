@@ -1388,6 +1388,11 @@ class Api:
         crow_core.write_root_mode(path, wanted)
         crow_core.set_root(path)
         crow_core.remember_root(path)
+        # #92: AND THIS IS WHERE THE NEXT START READS FROM. `remember_root` fills
+        # the menu, which is a different fact -- the terminal writes that list too,
+        # and letting it decide where the window opens tomorrow was the coupling
+        # `active` was added to avoid.
+        crow_core.set_active_root(path)
         if wanted != getattr(self._args, "mode", DEFAULT_MODE):
             self._args.mode = wanted
             crow_core.forget_approvals()
@@ -1455,6 +1460,12 @@ class Api:
         if self._worker and self._worker.is_alive():
             return
         crow_core.set_root(None)
+        # #92: "NONE" IS A CHOICE AND SURVIVES A RESTART. Written as an explicit
+        # null rather than by deleting the key: an absent key means nobody ever
+        # chose, and collapsing the two would make this decision evaporate on the
+        # next start -- which is how "no folder" would come back as a folder.
+        # A cancelled picker never reaches here and still changes nothing.
+        crow_core.set_active_root(None)
         self.push_root()
         self.push({"k": "note", "t": "no working directory -- writes are unbounded"})
 

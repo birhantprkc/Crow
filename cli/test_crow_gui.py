@@ -1605,6 +1605,47 @@ class TheFolderPickerTests(ApiCase):
         self.assertEqual(os.path.normcase(crow_core.get_root()),
                          os.path.normcase(os.path.realpath(self.root)))
 
+    def test_picking_a_folder_is_what_the_next_start_reads(self):
+        """THE WIRING, not the rule -- the rule is `AdoptRootTests`'s. Without
+        this case the core could restore correctly forever while the window never
+        told it anything, which is the state #92 was in until 2026-08-15: fifteen
+        lines of comment describing a restore, and nothing writing what to
+        restore."""
+        api = self.api()
+        api._window = _PickingWindow((self.root,))
+        api.pick_root()
+        restored, problem = crow_core.restore_root()
+        self.assertIsNone(problem)
+        self.assertEqual(os.path.normcase(restored or ""),
+                         os.path.normcase(os.path.realpath(self.root)))
+
+    def test_choosing_no_folder_overwrites_the_remembered_one(self):
+        """"None" is a choice and has to outlive the window. If `clear_root` only
+        cleared the live boundary, the next start would restore the folder the
+        user had just switched off -- and it would look like the button did
+        nothing."""
+        api = self.api()
+        api._window = _PickingWindow((self.root,))
+        api.pick_root()
+        api.clear_root()
+        restored, problem = crow_core.restore_root()
+        self.assertIsNone(restored)
+        self.assertIsNone(problem)
+
+    def test_a_cancelled_dialog_leaves_the_remembered_choice_alone(self):
+        """Cancel changes nothing -- and "nothing" now includes what the next
+        start will bind. The existing case above pins the live state; this pins
+        the stored one, which a cancel could otherwise quietly overwrite with a
+        null."""
+        api = self.api()
+        api._window = _PickingWindow((self.root,))
+        api.pick_root()
+        api._window = _PickingWindow(None)
+        api.pick_root()
+        restored, _ = crow_core.restore_root()
+        self.assertEqual(os.path.normcase(restored or ""),
+                         os.path.normcase(os.path.realpath(self.root)))
+
     def test_a_dialog_that_throws_is_not_a_crash(self):
         api = self.api()
         api._window = _RefusingWindow()
