@@ -150,12 +150,12 @@ function Invoke-ModelPathSelftest {
     C "and carries the operating point"          ($null -ne ($t.entries.PSObject.Properties | Where-Object Name -eq 'operating-point'))
 
     $p = Get-ModelPath operating-point
-    C "a known key gives an absolute path"       ($p -like '*UD-IQ3_XXS*' -and $p -match '^[A-Za-z]:')
+    C "a known key gives an absolute path"       ($p -like '*UD-IQ2_XXS*' -and $p -match '^[A-Za-z]:')
     # The 0731 path, not the preview one. Until 2026-08-11 this line asserted the
     # preview GGUF and passed -- which is what a stale operating point looks like
     # from inside its own suite: green, and pointing at the model the release had
     # already replaced.
-    C "and -Relative gives the models/ form"     ((Get-ModelPath operating-point -Relative) -eq 'models/0731-gguf/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf')
+    C "and -Relative gives the models/ form"     ((Get-ModelPath operating-point -Relative) -eq 'models/0731-gguf/UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00001-of-00003.gguf')
 
     # The half that must refuse. A table lookup that answers for anything is the
     # same as no table: every typo becomes a silent empty path.

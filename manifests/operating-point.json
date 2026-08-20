@@ -49,6 +49,12 @@
         "present": true,
         "role": "alias of preview-iq3-xxs. Names a quantisation, not a generation -- 0731 ships the same quantisation, so this key is ambiguous by construction and kept only for scripts written before the switch"
       },
+      "qwen35-q4-k-xl": {
+        "path": "qwen38-gguf/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+        "present": true,
+        "role": "the second model, #103. Single file, 17,559,178,144 B, 866 tensors, GGUF v3, arch qwen35, model type 27B, apache-2.0, Unsloth. Header and config.json agreed character for character on 2026-08-20 (#104). MOVED UNDER _root ON 2026-08-21, and #104 measured it in Downloads: same file, byte count re-read after the move, and every model this table names now lives under one root. The interim entry spelled the path with '..' segments, which worked and read like an exception; the file moved instead so there is no exception to read. NOTE that _needs below is the server line #106 measured, and the model directory 'qwen38-gguf' was already there from the aborted HuggingFace download",
+        "_needs": "-c 200000 -ctk q8_0 -ctv q8_0 -ngl 99 -np 1 -- q8_0 KV because f16 left 332.8 MiB of headroom against the 924 MiB this file documents as the loss threshold (#106)"
+      },
       "q2-k-xl": {
         "path": "UD-Q2_K_XL/DeepSeek-V4-Flash-UD-Q2_K_XL-00001-of-00003.gguf",
         "present": false,
