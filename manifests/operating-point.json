@@ -83,7 +83,12 @@
     }
   },
 
-  "server": {
+  "servers": {
+    "_what": "One server command line per model key. The keys are the keys of models.entries above, so a line and the GGUF it starts are named by the same word.",
+    "_why": "A second model brings a second command line, and until #111 the checker took the FIRST region of a file that matched and never looked at the rest -- so the second line would have been unchecked prose sitting next to a checked one, which is the exact shape the whole manifest exists to prevent. Now every key here must find its own matching region in README.md and install.ps1, and a failure names the key.",
+    "_how_the_keys_stay_apart": "NOT by order, and not by the port alone. Each entry declares only the flags its line carries, and a region satisfies a key only if it carries ALL of them: the 0731 line has --moe-stream and --chat-template-file and no -ctk, the Qwen line has -ctk/-ctv q8_0 and neither of the other two. Neither region can satisfy the other's key. If a future pair of models ever declares the same flag set, they must differ in some flag or the checker cannot tell which line it found.",
+
+    "operating-point": {
     "port": 8081,
     "ctx": 200000,
     "ngl": 99,
@@ -98,6 +103,24 @@
     "moe_stream_l2": 32,
     "chat_template_file": true,
     "_chat_template_file_note": "0731 ships no Jinja template and its GGUF embeds one that fails golden vector 4 (the action turn). The verified template ships with the package as templates/0731-chat-template.jinja; the checker requires the FLAG in every copy of the command line and, like moe_stream_l2, not a specific path -- installs differ."
+    },
+
+    "qwen35-q4-k-xl": {
+      "port": 8082,
+      "ctx": 200000,
+      "ngl": 99,
+      "parallel": 1,
+      "jinja": true,
+      "cache_type_k": "q8_0",
+      "cache_type_v": "q8_0",
+      "slot_save_path": "<install>/session",
+      "_measured": "2026-08-20, #106 and #108. Loads in 7.9 s on the b10269 build (crow-lab/wt-25, 1c3c967) -- the UNPATCHED stock build loads it identically (25,594 against 25,561 MiB, 33 MiB of noise), so src/llama-mmap.cpp is out of the picture and the base jump this stage was planned around is not needed.",
+      "_why_q8_0_kv": "MEASURED, not chosen. f16 KV left 332.8 MiB of headroom -- a third of the 924 MiB this file documents at server._moe_stream_cache_note as the point where losses start. With q8_0 the card holds 25,253-25,561 MiB with 6,627 free, and the KV is 6,647.00 MiB against 6,645.8 predicted. flash_attn is switched on by the server itself, because a quantised V demands it.",
+      "_why_not_moe_stream": "This is a 16.4 GB dense model that fits on the card whole. --moe-stream routes EXPERT tensors through a slot cache and there are none; the flag would be a copied habit, and a flag in a line people copy is a recommendation.",
+      "_why_no_chat_template_file": "Unlike 0731, this GGUF's embedded template is the one to use -- unsloth's. #108 measured it: reasoning_effort low/medium/high are accepted, max and none throw, and high, xhigh and the unset case render byte-identically (sha256 a83d85ce715f), so there are three real steps and not four.",
+      "_why_port_8082": "8081 is the client's default and 0731's port. The two models are alternatives, not a pair, but they were measured side by side and every raw run under runs/2026-08-20/ carries 8082 -- so a client pointed here needs --base-url http://127.0.0.1:8082/v1. Changing it would orphan those runs.",
+      "_not_measured": "Decode at a full window: the 71.05 tok/s figure comes from a 16-token prompt at an EMPTY context and is not an operating value. Prefill is 3,163.9 / 3,236.4 / 3,020.5 tok/s at 4,028 / 16,006 / 32,012 tokens -- already not linear, so do not extrapolate to 200k. Crow never reaches 200k anyway: ROLLOVER_AT = 0.9 in cli/crow_core.py cuts at 180,000."
+    }
   },
 
   "sampling": {

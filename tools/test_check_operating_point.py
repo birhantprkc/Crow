@@ -44,6 +44,30 @@ GOOD_LINE = (
     "--moe-stream-l2 32\n"
 )
 
+# The second line, and it is APPENDED BY THE FIXTURE rather than named by each
+# case. #111 made the manifest a map of one command line per model key, so a
+# repo "that agrees" is one carrying BOTH -- and the moment it did, cases 1, 4,
+# 6, 8 and 14 went red, exactly as the note above predicts for a moved operating
+# point. Appending it centrally keeps every case saying what it was written to
+# say: a case that breaks the 0731 line still goes red for the 0731 key, and
+# only a case that breaks THIS line goes red for the Qwen one.
+#
+# Flags, and no others: this model declares no expert stream and no template
+# file, which is what stops the 0731 region from satisfying this key and this
+# region from satisfying 0731's.
+#
+# THE POSITIVE CONTROLS NOW LOOK FOR "6 of 6" AND NOT "4 of 4", and that is not
+# bookkeeping. The checker's unit became one (file, model key) pair, so the
+# number in the RESULT line is how many pairs it actually looked at -- and a
+# checker that silently skipped a key would still exit 0 while printing a
+# smaller number. Asserting the count is what makes cases 1 and 14 notice.
+# It moves again when a third model key lands, and somebody should have to look.
+QWEN_LINE = (
+    "llama-server.exe -m %LOCALAPPDATA%\\Crow\\models\\qwen38-gguf\\x.gguf "
+    "--port 8082 -c 200000 -ctk q8_0 -ctv q8_0 -ngl 99 -np 1 --jinja "
+    "--slot-save-path %LOCALAPPDATA%\\Crow\\session\n"
+)
+
 
 def run(repo, extra=None):
     cmd = [sys.executable, TOOL, "--repo", repo]
@@ -112,9 +136,11 @@ def fixture(tmp, readme=None, install=None, manifest_patch=None, client=None, gu
         json.dump(src, fh, indent=1)
     ver = src["version"]
     with open(os.path.join(root, "README.md"), "w", encoding="utf-8") as fh:
-        fh.write("version-%s-brightgreen\n\n```\n%s```\n" % (ver, readme if readme is not None else GOOD_LINE))
+        fh.write("version-%s-brightgreen\n\n```\n%s%s```\n"
+                 % (ver, readme if readme is not None else GOOD_LINE, QWEN_LINE))
     with open(os.path.join(root, "install.ps1"), "w", encoding="utf-8") as fh:
-        fh.write('param([string] $Version = "%s")\n%s' % (ver, install if install is not None else GOOD_LINE))
+        fh.write('param([string] $Version = "%s")\n%s%s'
+                 % (ver, install if install is not None else GOOD_LINE, QWEN_LINE))
     with open(os.path.join(root, "cli", "crow.py"), "w", encoding="utf-8") as fh:
         fh.write('VERSION = "%s"\n' % ver)
         fh.write(client_source(src["sampling"]) if client is None else client)
@@ -140,7 +166,7 @@ def main():
         # 1 - positive control on a fixture, so a red real repo cannot mask a
         #     checker that says no to everything.
         code, out = run(fixture(tmp, ))
-        check("1 a repo that agrees passes", code == 0 and "4 of 4" in out, out.strip()[-200:])
+        check("1 a repo that agrees passes", code == 0 and "6 of 6" in out, out.strip()[-200:])
         shutil.rmtree(os.path.join(tmp, "repo"))
 
         # 2 - a changed value must be named, not just counted.
@@ -262,7 +288,7 @@ def main():
         #      applied to the rule that counts - a sentence is not a copy.
         code, out = run(fixture(tmp, client=client_source(samp, prose=True)))
         check("14 prose quoting the value is not a second copy",
-              code == 0 and "4 of 4" in out, out.strip()[-300:])
+              code == 0 and "6 of 6" in out, out.strip()[-300:])
         shutil.rmtree(os.path.join(tmp, "repo"))
 
         # 15 - written exactly once, but in the wrong file. "Exactly one" alone

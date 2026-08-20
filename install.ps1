@@ -1531,6 +1531,42 @@ if ($l2 -gt 0) {
 Write-Host ""
 Write-Host "    python $InstallTo\cli\crow.py" -ForegroundColor White
 Write-Host ""
+# THE SECOND MODEL, AND IT IS PRINTED EVEN THOUGH THE INSTALLER DOES NOT FETCH IT.
+# A line nobody can run yet is still a line somebody will copy the day they do
+# fetch it, and an uncopied line is how the vault page ended up without
+# --slot-save-path on 2026-08-10 while README.md and this file had it. The
+# alternative -- documenting it only in the README -- is the drift this whole
+# manifest exists against, so it is printed here and checked here.
+#
+# THIS BLOCK'S "llama-server" IS ALSO WHERE THE 0731 REGION ENDS. The checker
+# cuts a region at the NEXT occurrence of the binary name, so everything from
+# here down is out of 0731's 2000 characters -- and everything 0731 needs,
+# --moe-stream-l2 included, is printed above. The 179 characters of slack noted
+# below were measured before this block existed; the cut makes them larger, not
+# smaller, because a region can only lose text that comes AFTER the cut.
+Write-Host "  3. Or the second model, Qwen3.8-27B -- a separate 16.4 GiB download, not installed here:" -ForegroundColor DarkGray
+Write-Host ""
+# -ctk/-ctv q8_0 and not f16: measured 2026-08-20, f16 KV leaves 332.8 MiB of the
+# card free, a third of the 924 MiB at which this project has documented losses
+# starting. q8_0 leaves 6,627. No --moe-stream: 16.4 GB dense, it fits whole and
+# there are no expert tensors to route. No --chat-template-file: unlike 0731 the
+# embedded template is the correct one.
+Write-Host "    $InstallTo\bin\llama-server.exe -m $InstallTo\models\qwen38-gguf\Qwen3.8-27B-UD-Q4_K_XL.gguf ``" -ForegroundColor White
+Write-Host "      --port 8082 -c 200000 -ctk q8_0 -ctv q8_0 -ngl 99 -np 1 ``" -ForegroundColor White
+# --slot-save-path IS NOT ON THE LAST LINE, and that is not layout. The checker
+# reads this file as text and captures the path with \S+, so a value ending at
+# the closing quote of a Write-Host comes back as `session"` and the flag reads
+# as pointing somewhere it does not. Caught by the checker on the first run of
+# this block. The 0731 line above is safe by accident -- a trailing backtick
+# puts a space there. Anything that ends a printed command line must be a flag
+# with no value, or a number.
+Write-Host "      --slot-save-path $InstallTo\session ``" -ForegroundColor White
+Write-Host "      --jinja" -ForegroundColor White
+Write-Host ""
+# 8082 rather than 8081, so the client has to be told -- and being told is the
+# point: the port is what says which model answered.
+Write-Host "    python $InstallTo\cli\crow.py --base-url http://127.0.0.1:8082/v1" -ForegroundColor White
+Write-Host ""
 # BOTH CLIENTS ARE INSTALLED AND NEITHER IS THE DEFAULT. The terminal one is
 # printed first because it is the one the README documents end to end and the one
 # that needs nothing but python; the window is printed second because it needs Tk

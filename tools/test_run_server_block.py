@@ -53,7 +53,7 @@ def shipped_line(**override) -> str:
     gate green against a line nobody ships any more. Built from the manifest it
     can only ever drift the way the product drifts.
     """
-    server = dict(MANIFEST["server"])
+    server = dict(MANIFEST["servers"]["operating-point"])
     server.update(override)
     return (
         "\"C:\\Users\\robin\\AppData\\Local\\Crow\\bin\\llama-server.exe\""
@@ -79,7 +79,7 @@ def shipped_props() -> dict:
     model = MANIFEST["model"]
     return {"model_path": "C:\\Users\\robin\\AppData\\Local\\Crow\\models\\%s\\%s"
                           % (model["quant"], model["first_shard"]),
-            "default_generation_settings": {"n_ctx": MANIFEST["server"]["ctx"]}}
+            "default_generation_settings": {"n_ctx": MANIFEST["servers"]["operating-point"]["ctx"]}}
 
 
 def run_main(argv, machine: str, tmp: str):

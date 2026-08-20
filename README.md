@@ -134,6 +134,33 @@ The installer leaves `--moe-stream-l2` out below 60 GB of detected RAM (Windows 
 launch waits for them. Redirect it — `2> server.err` — or the number you measure is the console's.
 *(Single observation, no run under `runs/`; direction only, no factor claimed.)*
 
+#### Second model — Qwen3.8-27B
+
+Not part of the install: a separate 16.4 GiB download (`unsloth/Qwen3.8-27B-GGUF`, `UD-Q4_K_XL`,
+17,559,178,144 B). Alternative to the line above, not an addition — one model at a time.
+
+```powershell
+$env:LOCALAPPDATA\Crow\bin\llama-server.exe `
+  -m $env:LOCALAPPDATA\Crow\models\qwen38-gguf\Qwen3.8-27B-UD-Q4_K_XL.gguf `
+  --port 8082 -c 200000 -ctk q8_0 -ctv q8_0 -ngl 99 -np 1 --jinja `
+  --slot-save-path $env:LOCALAPPDATA\Crow\session
+```
+
+```powershell
+python $env:LOCALAPPDATA\Crow\cli\crow.py --base-url http://127.0.0.1:8082/v1
+```
+
+| Flag | Why |
+|---|---|
+| `--port 8082` | 8081 is 0731's, and every raw run under `runs/2026-08-20/` carries 8082. The client needs `--base-url` |
+| `-ctk q8_0 -ctv q8_0` | f16 KV leaves **332.8 MiB** free — a third of the 924 MiB at which [the ceiling](#the-cache-has-a-ceiling) starts costing. q8_0 leaves **6,627**. KV is 6,647.00 MiB against 6,645.8 predicted |
+| no `--moe-stream` | 16.4 GB dense, fits on the card whole. There are no expert tensors to route |
+| no `--chat-template-file` | Unlike 0731, the embedded template is the one to use — unsloth's. `reasoning_effort` takes `low`, `medium`, `high`; `max` and `none` throw, and `high`, `xhigh` and unset render byte-identically |
+
+Loads in **7.9 s**, **25,253–25,561 of 32,607 MiB** after load. Decode **71.05 tok/s at an empty
+context** — not an operating figure. Prefill **3,164 / 3,236 / 3,021 tok/s** at 4,028 / 16,006 /
+32,012 tokens, so 32k costs 10.6 s; the three points are already not linear and do not extrapolate.
+
 ### Step 2 — check the server
 
 ```powershell

@@ -309,7 +309,10 @@ def props_gate(props: dict, manifest: dict) -> list[str]:
     if quant and quant.lower() not in path.lower():
         problems.append("the open model is not at %s: %s" % (quant, path))
 
-    want_ctx = (manifest.get("server") or {}).get("ctx")
+    # THE OPERATING POINT, EXPLICITLY. #111 turned `server` into a map of one
+    # line per model key, and this block measures 0731 -- so it names the key it
+    # means rather than taking whatever the map happens to yield first.
+    want_ctx = (((manifest.get("servers") or {}).get("operating-point")) or {}).get("ctx")
     got_ctx = 0
     for value in (settings.get("n_ctx"), props.get("n_ctx")):
         try:
@@ -1510,7 +1513,8 @@ def main(argv: list[str]) -> int:
     if not problems:
         print("  OK       process list        exactly one llama-server (pid %s)"
               % servers[0][0])
-        problems += command_line_gate(servers[0][1], point.expected(manifest["server"]))
+        problems += command_line_gate(servers[0][1],
+                                      point.expected(manifest["servers"]["operating-point"]))
         if problems:
             for problem in problems:
                 print("  FAILED   command line        %s" % problem)

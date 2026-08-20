@@ -46,6 +46,14 @@ FLAG_SPECS = [
     ("ngl", r"-ngl\s+(\d+)", "int"),
     ("parallel", r"-np\s+(\d+)", "int"),
     ("port", r"--port\s+(\d+)", "int"),
+    # -ctk / -ctv belong to the Qwen line, and they are half of what keeps the
+    # two keys apart. A dense model that fits on the card whole has no expert
+    # stream to declare, so its entry declares the cache types instead -- and a
+    # region without them cannot satisfy that key, just as a region without
+    # --moe-stream cannot satisfy 0731's. The ports differ too, which is the
+    # backstop if a later pair of models ever declares the same flags.
+    ("cache_type_k", r"-ctk\s+(\S+)", "str"),
+    ("cache_type_v", r"-ctv\s+(\S+)", "str"),
     ("jinja", r"(--jinja)\b", "flag"),
     ("moe_stream", r"(--moe-stream)(?![-\w])", "flag"),
     ("moe_stream_cache", r"--moe-stream-cache\s+(\S+)", "str"),
@@ -129,14 +137,39 @@ def expected(server):
     # same convention as everywhere else in the file. Treating one as a flag
     # made every copy red the moment a note moved into the server block.
     want = {k: v for k, v in server.items() if not k.startswith("_")}
-    want["slot_save_path"] = want["slot_save_path"].replace("\\", "/").split("/")[-1]
+    # EVERY NORMALISATION BELOW IS CONDITIONAL, AND THAT IS THE WHOLE OF #111's
+    # CHANGE HERE. One server block could be assumed to carry all three keys.
+    # A map of them cannot: the Qwen entry declares no expert stream and no
+    # template file, and an unconditional `want["moe_stream_l2"] = True` would
+    # ADD a requirement the manifest never made -- inventing a flag for a line
+    # that must not have it, and failing the correct copy.
+    if "slot_save_path" in want:
+        want["slot_save_path"] = want["slot_save_path"].replace("\\", "/").split("/")[-1]
     # The manifest records 32 because that is what this machine gets. install.ps1
     # computes it from the detected RAM, so a copy is correct as long as the flag
     # is there at all. Comparing the number would make the check fail on every
     # machine except one, which is a checker nobody can keep green.
-    want["moe_stream_l2"] = True
-    want["chat_template_file"] = True
+    if "moe_stream_l2" in want:
+        want["moe_stream_l2"] = True
+    if "chat_template_file" in want:
+        want["chat_template_file"] = True
     return want
+
+
+def server_keys(manifest):
+    """The model keys that declare a server line, in manifest order.
+
+    Underscore entries are notes, the same convention as everywhere else here.
+    A key with no matching entry in models.entries is a SETUP ERROR rather than
+    a skip: the point of keying the lines by model is that a line and the GGUF
+    it starts are named by the same word, and a line naming a model the table
+    does not have is exactly the drift this file exists to catch.
+    """
+    servers = manifest.get("servers") or {}
+    keys = [k for k in servers if not k.startswith("_")]
+    known = set((manifest.get("models") or {}).get("entries") or {})
+    unknown = [k for k in keys if k not in known]
+    return keys, unknown
 
 
 def compare(label, text, want):
@@ -433,7 +466,15 @@ def main(argv):
         print("SETUP ERROR: no manifest at %s" % mpath)
         return 2
     manifest = json.loads(read(mpath))
-    want = expected(manifest["server"])
+    keys, unknown = server_keys(manifest)
+    if not keys:
+        print("SETUP ERROR: %s has no 'servers' block with at least one model key" % mpath)
+        return 2
+    if unknown:
+        print("SETUP ERROR: servers declares %s, which models.entries does not have"
+              % ", ".join(sorted(unknown)))
+        return 2
+    wants = [(key, expected(manifest["servers"][key])) for key in keys]
 
     copies = [
         ("README.md", os.path.join(args.repo, "README.md")),
@@ -443,19 +484,37 @@ def main(argv):
         copies.append((os.path.basename(e), e))
 
     failed = 0
+    checked = 0
     for label, path in copies:
         if not os.path.exists(path):
+            # One failure per key, not one per file: with a map of lines the
+            # unit that can be right or wrong is (file, key), and counting a
+            # missing file once would let the RESULT line read as though only
+            # one thing was outstanding.
             print("  FAILED   %-34s does not exist" % label)
-            failed += 1
+            failed += len(wants)
+            checked += len(wants)
             continue
-        got, problems = compare(label, read(path), want)
-        if problems:
-            failed += 1
-            print("  FAILED   %-34s %d of %d flags differ" % (label, len(problems), len(want)))
-            for p in problems:
-                print("             %s" % p)
-        else:
-            print("  OK       %-34s all %d flags match" % (label, len(want)))
+        # READ ONCE, COMPARED PER KEY. Every key gets the whole file and looks
+        # for its OWN region in it; the old code took the first region that
+        # matched the single manifest line and never looked further, which is
+        # why a second command line would have been unchecked prose sitting
+        # beside a checked one.
+        text = read(path)
+        for key, want in wants:
+            checked += 1
+            # THE KEY IS IN THE LABEL, so a failure says WHICH line is wrong.
+            # Without it "3 of 12 flags differ" on a file with two command
+            # lines sends the reader to the wrong one.
+            where = "%s [%s]" % (label, key)
+            got, problems = compare(where, text, want)
+            if problems:
+                failed += 1
+                print("  FAILED   %-34s %d of %d flags differ" % (where, len(problems), len(want)))
+                for p in problems:
+                    print("             %s" % p)
+            else:
+                print("  OK       %-34s all %d flags match" % (where, len(want)))
 
     versions, badv = check_versions(args.repo, manifest["version"])
     if badv:
@@ -485,7 +544,10 @@ def main(argv):
               % ("sampling defaults", triple, core))
 
     print()
-    total = len(copies) + 2
+    # `checked` and not len(copies): the unit is one (file, model key) pair, so
+    # adding a model to the manifest raises this number and a copy that never
+    # learned about it shows up as a missing pair rather than as nothing.
+    total = checked + 2
     print("RESULT: %d of %d sources agree with manifests/operating-point.json"
           % (total - failed, total))
     return 1 if failed else 0
