@@ -463,6 +463,28 @@ if ((Get-Item (Join-Path $stage 'templates\0731-chat-template.jinja')).Length -n
     throw "template changed size on the way into the package -- a byte-checked file may not do that"
 }
 
+# THE OPERATING POINT SHIPS SINCE #112, AND THE DIRECTORY NAME IS LOAD-BEARING.
+# cli/crow_core.py resolves it as `..\manifests\operating-point.json` from its
+# own location, which is the same relative step in the repo and in an install --
+# so there is no "am I installed?" branch anywhere, and exactly one path can be
+# wrong. Renaming this directory the way the template was renamed to templates/
+# would break the client silently: a missing manifest is not an error, it is the
+# 0.5.1 behaviour, so the model's own sampling would just quietly stop arriving.
+#
+# WHY IT SHIPS AT ALL: per-model sampling has to come from data rather than from
+# a second set of literals in the client, because tools/check_operating_point.py
+# counts the places a default is written and allows exactly one. A table in the
+# core spelling min_p twice is the drift this project keeps finding, so the
+# numbers that differ per model live here.
+New-Item -ItemType Directory -Force -Path (Join-Path $stage 'manifests') | Out-Null
+Copy-Item -LiteralPath (Join-Path $repo 'manifests\operating-point.json') `
+          -Destination (Join-Path $stage 'manifests\operating-point.json')
+# Read back as JSON rather than checked for existence: this file is now product,
+# and a truncated copy would install cleanly and answer every sampling question
+# with the fallback -- which looks exactly like a correct old installation.
+try { Get-Content -LiteralPath (Join-Path $stage 'manifests\operating-point.json') -Raw | ConvertFrom-Json | Out-Null }
+catch { throw "manifests/operating-point.json did not survive staging as readable JSON: $_" }
+
 # The OFL is not a formality: without it, redistributing the typeface is a licence
 # violation. Refuse rather than ship a package that breaks it.
 if (-not (Test-Path (Join-Path $stage 'cli\fonts\OFL.txt'))) {

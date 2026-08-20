@@ -75,15 +75,13 @@ from crow_core import (  # noqa: E402
     FenceEvents,
     INTERRUPT,
     load_session,
-    MIN_P,
     model_display_name,
     ReplyEvents,
     run_turn,
+    sampling_for,
     save_session,
     SESSION_FILE,
-    TEMPERATURE,
     TOOLS,
-    TOP_P,
     TurnEvents,
 )
 
@@ -2699,11 +2697,20 @@ class Api:
         # knowable exactly here.
         self._reload_rail()
         events = Turn(self.push)
+        # #112: RESOLVED PER TURN, NOT PER LAUNCH, and per model rather than
+        # per client. `self._model` is what /props last reported; the core turns
+        # that into the model's own four numbers, or into the three constants
+        # when it has never heard of this server. Per turn because the window
+        # outlives a server restart -- the endpoint can be pointed at a
+        # different model while the window stays open, and a value cached at
+        # launch would keep sending the old model's min_p.
+        sampling = sampling_for(self._model)
         try:
             result = run_turn(
                 self._conversation, base_url=self._args.base_url,
                 model=self._args.model, api_key=self._args.api_key,
-                temperature=TEMPERATURE, top_p=TOP_P, min_p=MIN_P,
+                temperature=sampling["temperature"], top_p=sampling["top_p"],
+                min_p=sampling["min_p"], top_k=sampling.get("top_k"),
                 timeout=READ_TIMEOUT_S, context_tokens=self._context_tokens,
                 n_ctx=self._n_ctx, promised_warm=self._promised_warm,
                 rolled=self._rolled, execute_tools=self._args.execute_tools,

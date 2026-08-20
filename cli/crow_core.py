@@ -225,6 +225,154 @@ TOP_P = 0.95
 MIN_P = 0.01
 
 
+# WHERE THE SHIPPED MANIFEST SITS, SEEN FROM THIS FILE, and it is one path
+# rather than two. The repo has cli/crow_core.py beside manifests/; an install
+# has <install>\cli beside <install>\manifests. So the same `..` answers in both
+# places and there is no "am I installed?" branch to get wrong -- that branch is
+# the one that would be right on this machine and wrong on everybody else's.
+MANIFEST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             os.pardir, "manifests", "operating-point.json")
+
+
+def _manifest() -> dict:
+    """The shipped manifest, or {} if it is not there.
+
+    NOT AN ERROR WHEN MISSING, and that is deliberate rather than lax. Every
+    installation from 0.0.1 to 0.5.1 has no manifest beside its cli/, and a
+    client that refused to start without one would break every one of them on
+    upgrade. What a missing file costs is named at the call sites: the model
+    keeps the three defaults below and sends no top_k, which is exactly what
+    this client did before #112.
+    """
+    try:
+        with open(MANIFEST_PATH, encoding="utf-8-sig") as fh:
+            return json.load(fh) or {}
+    except Exception:
+        return {}
+
+
+def model_key_for(model: str | None, manifest: dict | None = None) -> str | None:
+    """Which key in models.entries names the model the server has open.
+
+    DERIVED, NOT LISTED. The pairing is `model_display_name` applied to the
+    entry's own path -- the same function the header line already runs on what
+    /props reports -- so a table with a new model in it needs no second list
+    here, and a list here could not go stale against it. A hand-kept map would
+    be green about exactly the model nobody remembered to add.
+
+    Returns None when nothing matches, which is the honest answer for a server
+    pointed at a GGUF this repo has never measured.
+    """
+    if not model:
+        return None
+    entries = (((manifest if manifest is not None else _manifest())
+                .get("models") or {}).get("entries") or {})
+    for key, entry in entries.items():
+        if model_display_name((entry or {}).get("path") or "") == model:
+            return key
+    return None
+
+
+def sampling_for(model: str | None) -> dict:
+    """The sampling values for one model: the shared block, then its own.
+
+    THE OVERRIDE CARRIES ONLY WHAT DIFFERS, and the reason is the checker rather
+    than taste. tools/check_operating_point.py COUNTS the places that write a
+    sampling default and allows exactly one, in this file. A per-model table in
+    here spelling `"min_p": 0.0` beside `MIN_P = 0.01` would be a second write
+    site for min_p and would go red -- correctly, because that is the shape two
+    clients drift in. So the numbers that differ per model live in the manifest,
+    where they are data, and this file keeps one literal each as the floor.
+
+    THE FLOOR IS WHAT THIS CLIENT ALWAYS SENT. With no manifest, no match, or a
+    model with no override, the answer is the same three values and no top_k --
+    so the change cannot alter what an existing installation puts on the wire.
+    """
+    out = {"temperature": TEMPERATURE, "top_p": TOP_P, "min_p": MIN_P}
+    manifest = _manifest()
+    blocks = [manifest.get("sampling") or {}]
+    key = model_key_for(model, manifest)
+    if key:
+        entry = ((manifest.get("models") or {}).get("entries") or {}).get(key) or {}
+        blocks.append(entry.get("sampling") or {})
+    for block in blocks:
+        for name, value in block.items():
+            # FILTERED AGAINST A FIXED LIST, and not merely against a leading
+            # underscore. The result of this function is splatted into
+            # `run_turn(**sampling)` by the terminal, so a manifest that grew a
+            # new numeric field would become an unexpected keyword argument and
+            # take down the turn. A field this build does not know is data it
+            # has no wire for, which is not the same as a mistake.
+            if name in SAMPLING_FIELDS and isinstance(value, (int, float)):
+                out[name] = value
+    return out
+
+
+def resolve_sampling(model: str | None, overrides: dict | None = None) -> dict:
+    """The model's sampling, with anything the user typed on top.
+
+    `overrides` carries ONLY what was actually given -- see `_Explicit` in
+    cli/crow.py. A dict of every flag with its default would put the terminal's
+    idea of min_p back on top of the model's and undo the whole stage.
+    """
+    out = sampling_for(model)
+    for name, value in (overrides or {}).items():
+        if name in SAMPLING_FIELDS and value is not None:
+            out[name] = value
+    return out
+
+
+def reasoning_problem(model: str | None, level: str | None) -> str | None:
+    """Why this level cannot be used on this model, or None if it can.
+
+    A STRING RATHER THAN A RAISE OR A BOOL: the caller has to print it, and the
+    two things worth saying -- which level was asked for and which ones exist --
+    are only knowable here. A bool would send the reader to the manifest to find
+    out what they should have typed.
+    """
+    if level is None:
+        return None
+    levels = reasoning_levels_for(model)
+    if level in levels:
+        return None
+    return ("--reasoning-effort %s is not one of %s for %s"
+            % (level, ", ".join(levels), model or "this model"))
+
+
+def reasoning_levels_for(model: str | None) -> tuple[str, ...]:
+    """What --reasoning-effort may be for this model, in the manifest's order.
+
+    WHY THIS IS NOT AN argparse `choices` LIST. The levels differ per model and
+    the model is not known until /props has answered, which happens long after
+    the command line is parsed. So the parser takes the union of everything any
+    model allows and the refusal happens once the model IS known -- naming the
+    model and its levels, rather than rejecting a word that is perfectly valid
+    for the server the user is about to point at.
+
+    Measured 2026-08-20 (#108): against unsloth's template `max` RAISES, and
+    `high`, `xhigh` and the unset case render byte-identically. One of the three
+    levels this client offered before #112 was fatal on the second model.
+    """
+    manifest = _manifest()
+    key = model_key_for(model, manifest)
+    entry = (((manifest.get("models") or {}).get("entries") or {}).get(key) or {}) if key else {}
+    levels = entry.get("reasoning_levels")
+    if isinstance(levels, list) and levels:
+        return tuple(str(x) for x in levels)
+    return REASONING_LEVELS
+
+
+# The union, for the parser. Not a claim that every level works on every model:
+# that is what reasoning_levels_for answers, once there is a model to ask about.
+REASONING_LEVELS = ("low", "medium", "high", "max")
+
+# What a request may carry from the manifest, and nothing else. The list is here
+# rather than derived from the manifest because it is a statement about THIS
+# build's wire format: these four are the fields `stream_reply` knows how to
+# send, and a manifest is data, not a licence to widen the request body.
+SAMPLING_FIELDS = ("temperature", "top_p", "min_p", "top_k")
+
+
 # The calls are executed -- see run_tool and the loop in repl().
 #
 # WHY LIST_DIR, FIND_FILES AND SEARCH_TEXT ARE NOT OPTIONAL. With read_file
@@ -1621,6 +1769,7 @@ def stream_reply(
     temperature: float,
     top_p: float = TOP_P,
     min_p: float = MIN_P,
+    top_k: int | None = None,
     reasoning_effort: str | None = None,
     timeout: float,
     events: "ReplyEvents | None" = None,
@@ -1693,6 +1842,18 @@ def stream_reply(
         # to the final chunk. Ignored by endpoints that do not know it.
         "timings_per_token": True,
     }
+    if top_k is not None:
+        # ABSENT BY DEFAULT, AND THAT IS NOT AN OVERSIGHT (#112). 0731 must keep
+        # sending no top_k: it is the model under measurement, and adding a
+        # sampler field to its requests would make every figure taken before
+        # today incomparable with every figure taken after. The second model
+        # names 20 in the manifest, so only its requests carry the key.
+        #
+        # WORTH SAYING BECAUSE THE TICKET SAID OTHERWISE: on Qwen this is belt
+        # and braces, not a repair. /props already reports 20 -- the GGUF
+        # carries general.sampling.top_k = 20 and llama.cpp applies it. Sending
+        # it stops the value depending on metadata nobody re-reads.
+        body["top_k"] = top_k
     if reasoning_effort is not None:
         # Only when asked for. 0731's template reads the key and treats an absent
         # one as "low"; sending nothing keeps the prompt byte-identical to a
@@ -3698,6 +3859,11 @@ def run_turn(
     # and the one that goes stale is the one no measurement reads.
     top_p: float,
     min_p: float,
+    # top_k KEEPS ITS DEFAULT WHILE THE THREE ABOVE MAY NOT HAVE ONE, and the
+    # difference is what the checker counts. None is not a value: it means "this
+    # model declares no top_k", which is 0731's case and the case of every
+    # endpoint this client has ever talked to. A number here would be a literal.
+    top_k: int | None = None,
     reasoning_effort: str | None = None,
     timeout: float,
     carry: str | None = None,
@@ -3804,6 +3970,7 @@ def run_turn(
                 temperature=temperature,
                 top_p=top_p,
                 min_p=min_p,
+                top_k=top_k,
                 reasoning_effort=reasoning_effort,
                 timeout=timeout,
                 events=events.reply_events(),

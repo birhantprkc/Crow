@@ -117,6 +117,13 @@ function Get-SamplingDefault {
     param(
         [Parameter(Mandatory = $true, Position = 0)]
         [string] $Key,
+        # #112. WITHOUT IT THE ANSWER IS EXACTLY WHAT IT ALWAYS WAS -- the shared
+        # block -- so every existing caller keeps its value and the self-test
+        # above still asks the three questions it was written to ask. With it,
+        # the model's own block wins for the keys it names and the shared block
+        # answers for the rest. A model that declares nothing is not a special
+        # case; its override is simply empty.
+        [string] $Model,
         [string] $ManifestPath = $script:ModelManifest
     )
 
@@ -125,6 +132,25 @@ function Get-SamplingDefault {
     }
     $json = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
     if (-not $json.sampling) { throw "manifest has no 'sampling' block: $ManifestPath" }
+
+    if ($Model) {
+        # An unknown MODEL throws rather than falling back to the shared block.
+        # A typo that silently answered with 0731's numbers would be a probe
+        # measuring one model with another model's sampling, and the run would
+        # look exactly like a good one -- the same failure Get-ModelPath refuses
+        # a typo for at :97.
+        $entry = $json.models.entries.PSObject.Properties | Where-Object { $_.Name -eq $Model }
+        if (-not $entry) {
+            $known = ($json.models.entries.PSObject.Properties.Name | Sort-Object) -join ', '
+            throw "unknown model key '$Model'. The table has: $known"
+        }
+        $own = $entry.Value.sampling
+        if ($own) {
+            $hit = $own.PSObject.Properties | Where-Object { $_.Name -eq $Key }
+            if ($hit) { return $hit.Value }
+        }
+    }
+
     $prop = $json.sampling.PSObject.Properties | Where-Object { $_.Name -eq $Key }
     if (-not $prop) {
         $known = ($json.sampling.PSObject.Properties.Name | Where-Object { $_ -notlike '_*' } | Sort-Object) -join ', '

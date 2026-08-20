@@ -145,8 +145,8 @@ from crow_core import (  # noqa: F401 -- re-exported for the CLI and its suite
     SLOT_FILE,
     start_update_check,
     stream_reply,
-    _STR,
     TEMPERATURE,
+    _STR,
     _TOKENS,
     tool_edit_file,
     tool_find_files,
@@ -1352,6 +1352,34 @@ def read_line(prompt: str) -> str:
         return read_coloured(prompt, getch)
 
 
+def sampling_for_run(args: argparse.Namespace, model: str | None) -> dict | None:
+    """The numbers this run sends, or None when the run must not start (#112).
+
+    BOTH HALVES LIVE HERE AND NOT IN repl(), and the reason is a test rather
+    than taste: `test_repl_is_one_job_again` caps that function at 220 lines,
+    and the cap is what keeps the loop readable after the core extraction. Two
+    lines of caller and the rest out here is what fits.
+
+    THE REFUSAL COMES FIRST because it is the cheaper failure. `max` passes the
+    parser -- some model allows it -- and RAISES against unsloth's template
+    (#108), so a run that started would fail on every turn with a message from
+    the server about a template. One line before the first turn beats that.
+
+    Returns the four fields `run_turn` takes, ready to splat.
+    """
+    problem = crow_core.reasoning_problem(model, args.reasoning_effort)
+    if problem is not None:
+        print(f"crow: {problem}", file=sys.stderr)
+        reset_background()
+        return None
+    # ONLY WHAT WAS TYPED goes on top. `sampling_given` is filled by _Explicit,
+    # so a flag left alone is absent here rather than present with a default --
+    # which is the difference between "the user chose 0.01" and "the terminal
+    # has always said 0.01", and the second must not beat the model's own.
+    return crow_core.resolve_sampling(
+        model, {name: getattr(args, name) for name in args.sampling_given})
+
+
 def repl(args: argparse.Namespace) -> int:
     enable_ansi()
     install_interrupt_handler()
@@ -1405,6 +1433,9 @@ def repl(args: argparse.Namespace) -> int:
     loaded = fetch_model_name(args.base_url)
     if loaded:
         print(f"{CROW_ACCENT}{loaded}{RESET}")
+    sampling = sampling_for_run(args, loaded)          # #112, and it can refuse
+    if sampling is None:
+        return 2
     # The repository used to be printed here. It sits beside the wordmark now,
     # under the commands, so the endpoint block is the endpoint and the model.
     print("")
@@ -1535,9 +1566,7 @@ def repl(args: argparse.Namespace) -> int:
             base_url=args.base_url,
             model=args.model,
             api_key=args.api_key,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            min_p=args.min_p,
+            **sampling,
             reasoning_effort=args.reasoning_effort,
             timeout=args.timeout,
             carry=line,
@@ -1708,6 +1737,30 @@ def ensure_font() -> None:
         pass
 
 
+class _Explicit(argparse.Action):
+    """Remember that an option was TYPED, rather than merely defaulted.
+
+    #112 needs that difference and argparse does not record it. The two obvious
+    substitutes are both wrong here, and each was tried:
+
+      * `default=None` loses the one guarantee this parser owes -- the default
+        temperature has to be above 0.0, because greedy is where reasoning
+        models loop (measured 2026-08-07, and pinned by a test);
+      * comparing the parsed value against the default is wrong in exactly the
+        case that matters: `--min-p 0.01` against a model whose own min_p is
+        0.0 would be read as "not given" and silently become 0.0.
+
+    The set is rebuilt rather than mutated, so no two parses can share it --
+    a mutable default on a parser is state that survives into the next call.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        given = set(getattr(namespace, "sampling_given", None) or ())
+        given.add(self.dest)
+        namespace.sampling_given = frozenset(given)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crow",
@@ -1730,14 +1783,37 @@ def build_parser() -> argparse.ArgumentParser:
     # up to the day one of them is edited. With a window beside this file that
     # stopped being a hypothetical, so the numbers live in the core and every
     # client reads them. The measurements behind each one moved with it.
-    parser.add_argument("--temperature", type=float, default=TEMPERATURE)
-    parser.add_argument("--top-p", dest="top_p", type=float, default=TOP_P)
-    parser.add_argument("--min-p", dest="min_p", type=float, default=MIN_P)
+    # THE DEFAULTS STAY, AND WHAT CHANGES IS THAT WE NOW KNOW WHEN THEY WERE
+    # USED (#112). The first draft set these to None so "given" could be told
+    # from "silent" -- and it broke the one guarantee this parser owes:
+    # `test_default_temperature_is_not_greedy` reads `parse_args([]).temperature`
+    # and requires it above 0.0, because greedy is where reasoning models loop
+    # (measured 2026-08-07). None is not above 0.0, and a client whose printed
+    # default is `None` tells the reader nothing either.
+    #
+    # So the default is the core's number, exactly as before, and `_Explicit`
+    # records which of the three the user actually typed. Comparing the parsed
+    # value against the default instead would be wrong in the one case that
+    # matters: `--min-p 0.01` on the second model would silently become 0.0.
+    parser.add_argument("--temperature", type=float, default=TEMPERATURE,
+                        action=_Explicit)
+    parser.add_argument("--top-p", dest="top_p", type=float, default=TOP_P,
+                        action=_Explicit)
+    parser.add_argument("--min-p", dest="min_p", type=float, default=MIN_P,
+                        action=_Explicit)
     # Lands in the chat template, not the sampler. None sends nothing and the
     # template falls back to "low" on its own; the flag exists so E12 can
     # measure what the levels actually cost.
+    # THE UNION, NOT ONE MODEL'S LIST. Which levels are legal differs per model
+    # and the model is not known until /props answers, long after this line
+    # runs. So the parser accepts anything any model allows and the refusal
+    # happens in repl(), where the model IS known and the message can name it.
+    # Baking one model's list in here would reject a word that is correct for
+    # the server the user is about to point at -- and #108 measured the other
+    # half: `max` RAISES against the second model's template, so the old list
+    # offered a level that was fatal.
     parser.add_argument("--reasoning-effort", dest="reasoning_effort",
-                        choices=("low", "high", "max"), default=None)
+                        choices=crow_core.REASONING_LEVELS, default=None)
     parser.add_argument("--timeout", type=float, default=1800.0,
                         help="socket timeout in seconds (default: 1800)")
     parser.add_argument("--no-font", dest="font", action="store_false",
@@ -1820,6 +1896,10 @@ def build_parser() -> argparse.ArgumentParser:
                              " makes a directory a root. Without this, crow adopts a"
                              " root declared above the working directory, or runs"
                              " unbounded if there is none")
+    # Empty rather than absent, so every consumer sees the same shape whether
+    # or not a sampling flag was typed. frozenset because a parser default is
+    # shared across every parse this process makes.
+    parser.set_defaults(sampling_given=frozenset())
     return parser
 
 

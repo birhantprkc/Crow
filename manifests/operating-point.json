@@ -27,7 +27,11 @@
         "path": "0731-gguf/UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00001-of-00003.gguf",
         "present": true,
         "role": "the operating point 0.2.0 ships. Moved here from UD-IQ3_XXS on 2026-08-12 (#89). This key has been wrong once before: on 2026-08-11 it still named the preview GGUF while the file above said 0731, so every script calling Get-ModelPath operating-point without -Model measured the model the release had already replaced -- that is how the prefill series in runs/2026-08-10/before-0731/ ended up published under a 0731 heading. A rung change therefore moves THIS key, not only model.quant",
-        "_needs": "--chat-template-file manifests/0731-chat-template.jinja -- the embedded template fails the model's own golden vector 4"
+        "_needs": "--chat-template-file manifests/0731-chat-template.jinja -- the embedded template fails the model's own golden vector 4",
+        "sampling": {},
+        "_sampling_note": "EMPTY ON PURPOSE, AND NOT ABSENT. This model takes the sampling block above unchanged -- temperature 1.0, top_p 0.95, min_p 0.01, and NO top_k. An empty override says that was decided; a missing key would say nobody looked. #112 leaves this model untouched deliberately: it is the one under measurement, and its 0731 series would not be comparable across a sampling change.",
+        "reasoning_levels": ["low", "high", "max"],
+        "_reasoning_levels_note": "What cli/crow.py offered for every model before #112, kept here unchanged for this one. UNMEASURED against 0731's template: nothing has driven these three through manifests/0731-chat-template.jinja to see which render differently, so this list records what is offered, not what is distinct."
       },
       "0731-iq3-xxs": {
         "path": "0731-gguf/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
@@ -52,6 +56,13 @@
       "qwen35-q4-k-xl": {
         "path": "qwen38-gguf/Qwen3.8-27B-UD-Q4_K_XL.gguf",
         "present": true,
+        "sampling": {
+          "min_p": 0.0,
+          "top_k": 20
+        },
+        "_sampling_note": "ONLY WHAT DIFFERS. temperature 1.0 and top_p 0.95 come from the sampling block below and are not repeated here -- repeating them would be a second literal for the same value, which tools/check_operating_point.py counts and refuses. min_p is the one that matters: the model card says 0.0, the GGUF is silent, llama.cpp's server default is 0.05 and Crow hard-wires 0.01. Four sources, and 0.05 is what a request that omits the field actually gets. top_k 20 is BELT-AND-BRACES rather than a repair: measured 2026-08-20 on a running server, /props already reports 20 because the GGUF carries general.sampling.top_k = 20 and llama.cpp applies it. #112's body claimed the server would run at 40; it does not. Stating it costs nothing and stops the value depending on GGUF metadata nobody re-reads.",
+        "reasoning_levels": ["low", "medium", "high"],
+        "_reasoning_levels_note": "Measured 2026-08-20 (#108) against unsloth's embedded template, which is the one this model runs. ACCEPTED: low, medium, high, xhigh. REJECTED, they throw: max, none. And high, xhigh and the UNSET case render byte-identically -- sha256 a83d85ce715f -- so there are three distinct steps, not four. xhigh is left out because it is high under another name, and max is left out because it raises: of the three cli/crow.py offered before #112, one of them died on this model.",
         "role": "the second model, #103. Single file, 17,559,178,144 B, 866 tensors, GGUF v3, arch qwen35, model type 27B, apache-2.0, Unsloth. Header and config.json agreed character for character on 2026-08-20 (#104). MOVED UNDER _root ON 2026-08-21, and #104 measured it in Downloads: same file, byte count re-read after the move, and every model this table names now lives under one root. The interim entry spelled the path with '..' segments, which worked and read like an exception; the file moved instead so there is no exception to read. NOTE that _needs below is the server line #106 measured, and the model directory 'qwen38-gguf' was already there from the aborted HuggingFace download",
         "_needs": "-c 200000 -ctk q8_0 -ctv q8_0 -ngl 99 -np 1 -- q8_0 KV because f16 left 332.8 MiB of headroom against the 924 MiB this file documents as the loss threshold (#106)"
       },
