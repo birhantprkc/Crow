@@ -54,7 +54,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -575,6 +578,369 @@ RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 
 class CrowError(RuntimeError):
     """Raised when the endpoint cannot be reached or answers with an error."""
+
+
+# ---------------------------------------------------------------------------
+# Starting the server (#114)
+# ---------------------------------------------------------------------------
+#
+# WHAT THIS IS NOT BUILT FROM: tools/measure-slot-restart.ps1, the only
+# kill-and-restart in the tree. It is stale -- `--moe-stream-cache 64s`, no
+# --chat-template-file, no --moe-stream-l2 -- and it claims to be the operating
+# point anyway. 64 slots is the state at which 390 MiB move to host memory
+# without anything printing a word, so a boot built from it would ship the
+# configuration #87 replaced and look healthy doing it.
+#
+# The line is BUILT FROM THE MANIFEST instead, which is the same source
+# README.md and install.ps1 are checked against. A boot that assembled its own
+# flags would be a fourth copy of the operating point, and this file exists
+# because three copies already drifted once.
+
+# <install> is the parent of cli/. Same step in the repo and in an install, for
+# the same reason MANIFEST_PATH takes it.
+INSTALL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(MANIFEST_PATH)))
+
+# manifest key -> the flag it becomes. ORDER IS THE PRINTED ORDER, so a command
+# line a human reads in a log looks like the one in README.md.
+#
+# `True` means a bare flag; a number or a string means flag plus value. The two
+# special cases are marked where they are handled, not here: slot_save_path
+# carries an <install> placeholder, and chat_template_file is `true` in the
+# manifest while the server needs a PATH -- the manifest says "this model needs
+# one", and where the file lives is the package's business.
+SERVER_FLAGS = (
+    ("port", "--port"),
+    ("ctx", "-c"),
+    ("cache_type_k", "-ctk"),
+    ("cache_type_v", "-ctv"),
+    ("ngl", "-ngl"),
+    ("parallel", "-np"),
+    ("jinja", "--jinja"),
+    ("slot_save_path", "--slot-save-path"),
+    ("chat_template_file", "--chat-template-file"),
+    ("moe_stream", "--moe-stream"),
+    ("moe_stream_cache", "--moe-stream-cache"),
+    ("moe_stream_io_threads", "--moe-stream-io-threads"),
+    ("moe_stream_direct", "--moe-stream-direct"),
+    ("moe_stream_l2", "--moe-stream-l2"),
+)
+
+# TWO PLACES, FOR THE SAME REASON model_candidates HAS THREE: the package
+# renames this file on the way in -- tools/pack-release.ps1 copies
+# manifests\0731-chat-template.jinja to templates\ -- so an install and a
+# checkout spell it differently. The packaged name is tried first, because a
+# package that ships its own template must not be overtaken by the repo's.
+CHAT_TEMPLATES = (os.path.join("templates", "0731-chat-template.jinja"),
+                  os.path.join("manifests", "0731-chat-template.jinja"))
+
+
+class ServerBootError(CrowError):
+    """A start that was asked for and did not happen.
+
+    ITS OWN CLASS, AND THAT IS THE NEGATIVE PROOF OF #114. `CrowError` on this
+    path is answered with "start llama-server first, then retry" -- which is the
+    right sentence for a client that found nothing listening, and exactly the
+    wrong one for a client that TRIED to start something and failed. A boot
+    failure that reads like the normal cold state is not plannable: the user
+    retries the same command forever.
+    """
+
+
+def model_candidates(key: str, manifest: dict | None = None,
+                     install: str | None = None) -> list[str]:
+    """Every path this build would accept as the GGUF for `key`, in order.
+
+    THREE PLACES BECAUSE THERE ARE TWO LAYOUTS AND THEY DISAGREE. The manifest's
+    `models._root` is the measurement machine's tree, where the path is
+    `0731-gguf/UD-IQ2_XXS/...`; an install keeps its models under
+    <install>\\models and README.md spells that one `models\\UD-IQ2_XXS\\...`.
+    The same manifest entry cannot be right for both, so the basename is tried
+    under the install root as well.
+
+    The list is RETURNED rather than reduced to the first hit, because the
+    failure message has to name what was tried -- a boot that says only "not
+    found" cannot tell a wrong table from a missing download.
+    """
+    manifest = manifest if manifest is not None else _manifest()
+    models = manifest.get("models") or {}
+    entry = (models.get("entries") or {}).get(key) or {}
+    rel = (entry.get("path") or "").replace("/", os.sep)
+    if not rel:
+        return []
+    base = os.path.basename(rel)
+    out = []
+    for root in ((models.get("_root") or "").replace("/", os.sep),
+                 os.path.join(install or INSTALL_ROOT, "models")):
+        if not root:
+            continue
+        for tail in (rel, base):
+            path = os.path.normpath(os.path.join(root, tail))
+            if path not in out:
+                out.append(path)
+    return out
+
+
+def bootable_models() -> tuple[str, ...]:
+    """The keys this build can start a server for.
+
+    WHAT MAKES `--model` SAFE TO REUSE. That flag has always been the label in
+    the request body -- `crow` by default, and llama.cpp ignores it because it
+    serves whatever it loaded. #114 gives it a second meaning, and the two do
+    not collide as long as the second only fires for a word that IS a key here:
+    `crow`, and every label anyone has ever passed, is not one, so an existing
+    command line still starts nothing and still says "start llama-server first".
+    """
+    return tuple(k for k in (_manifest().get("servers") or {})
+                 if not k.startswith("_"))
+
+
+def server_port(key: str) -> int | None:
+    """Which port this model's line listens on, or None if it does not say.
+
+    Public because the caller has to point the CLIENT at it. A boot that came up
+    on 8082 while the session talked to 8081 would end in "start llama-server
+    first" about a server that had just started -- the most confusing shape a
+    success can take.
+    """
+    line = (_manifest().get("servers") or {}).get(key) or {}
+    try:
+        return int(line.get("port")) or None
+    except (TypeError, ValueError):
+        return None
+
+
+def server_binary(install: str | None = None) -> tuple[str | None, list[str]]:
+    """The llama-server this build would run, and everywhere it looked."""
+    packaged = os.path.join(install or INSTALL_ROOT, "bin", "llama-server.exe")
+    tried = [packaged]
+    if os.path.isfile(packaged):
+        return packaged, tried
+    # PATH second, never first: a package that ships its own binary must not be
+    # overtaken by whatever happens to be on a developer's PATH -- that is how a
+    # measurement ends up describing a build nobody shipped.
+    found = shutil.which("llama-server") or shutil.which("llama-server.exe")
+    tried.append("PATH")
+    return found, tried
+
+
+def server_command(key: str, manifest: dict | None = None,
+                   install: str | None = None) -> list[str]:
+    """The argv for one model key, built from the manifest and nothing else.
+
+    Raises ServerBootError naming what it looked for -- an unknown key, a GGUF
+    that is not on disk, or no server binary. Each of those is a different fix
+    and a single "could not start" would hide which.
+    """
+    manifest = manifest if manifest is not None else _manifest()
+    install = install or INSTALL_ROOT
+    servers = manifest.get("servers") or {}
+    line = servers.get(key)
+    if not isinstance(line, dict):
+        known = ", ".join(sorted(k for k in servers if not k.startswith("_"))) or "none"
+        raise ServerBootError("no server line for model %r. The manifest has: %s"
+                              % (key, known))
+
+    tried = model_candidates(key, manifest, install)
+    gguf = next((p for p in tried if os.path.isfile(p)), None)
+    if gguf is None:
+        raise ServerBootError("model %r is not on disk. Tried: %s"
+                              % (key, ", ".join(tried) or "nothing -- the table has no path"))
+
+    binary, looked = server_binary(install)
+    if binary is None:
+        raise ServerBootError("no llama-server to run. Tried: %s" % ", ".join(looked))
+
+    argv = [binary, "-m", gguf]
+    for name, flag in SERVER_FLAGS:
+        if name not in line:
+            continue
+        value = line[name]
+        if value is True:
+            argv.append(flag)
+            if name == "chat_template_file":
+                # The manifest says THAT one is needed, not where it lives.
+                tried = [os.path.join(install, t) for t in CHAT_TEMPLATES]
+                found = next((t for t in tried if os.path.isfile(t)), None)
+                if found is None:
+                    raise ServerBootError(
+                        "%r needs a chat template and none is on disk. Tried: %s"
+                        % (key, ", ".join(tried)))
+                argv.append(found)
+        elif value is False or value is None:
+            continue
+        elif name == "slot_save_path":
+            argv += [flag, str(value).replace("<install>", install).replace("/", os.sep)]
+        else:
+            argv += [flag, str(value)]
+    return argv
+
+
+_PROCESS_QUERY = ("Get-CimInstance Win32_Process -Filter \"Name like 'llama-server%'\""
+                  " | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
+
+
+def running_servers(query: Callable[[], str] | None = None) -> list[tuple[str, str]]:
+    """Every llama-server this machine is running, as (pid, command line).
+
+    THE PORT IS NOT ENOUGH, and finding that out cost a live boot. Asking
+    /props at the address we are about to use answers "is MY server up"; it
+    says nothing about a server on another port. Start the second model while
+    the first is still up and both fit in the arithmetic but not on the card --
+    the driver moves the overflow into host memory and prints nothing, so the
+    only symptom is that requests got slower.
+
+    An unreadable process list comes back EMPTY rather than raising: this runs
+    on the path that starts a server, and refusing to boot because a query
+    failed would trade a rare risk for a certain one. The caller says what it
+    could not check.
+    """
+    if query is None:
+        argv = (["powershell", "-NoProfile", "-NonInteractive", "-Command", _PROCESS_QUERY]
+                if sys.platform == "win32" else ["ps", "-eo", "pid=,args="])
+
+        def query():
+            done = subprocess.run(argv, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=60)
+            return done.stdout if done.returncode == 0 else ""
+    try:
+        text = query()
+    except Exception:
+        return []
+    out = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or "llama-server" not in line:
+            continue
+        pid, _, rest = line.partition("\t")
+        if not rest:
+            pid, _, rest = line.partition(" ")
+        out.append((pid.strip(), rest.strip()))
+    return out
+
+
+_DASH_M = re.compile(r'-m\s+("([^"]+)"|(\S+))')
+
+
+def served_model(command_line: str) -> str:
+    """The GGUF a running server was started with, read off its own -m."""
+    hit = _DASH_M.search(command_line or "")
+    return (hit.group(2) or hit.group(3)) if hit else ""
+
+
+def server_model_path(base_url: str, timeout: float = 3.0) -> str | None:
+    """What the server at this address has open, or None if nothing answers.
+
+    The PATH and not the display name, because criterion 2 of #114 is that a
+    second server is not started and the message names the path of the one that
+    is running -- and "Qwen3.8-27B" does not tell you which of two quantisations
+    is on the card.
+    """
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[: -len("/v1")]
+    try:
+        with urllib.request.urlopen(root + "/props", timeout=timeout) as resp:
+            doc = json.loads(resp.read().decode("utf-8")) or {}
+    except Exception:
+        return None
+    return str(doc.get("model_path") or "") or None
+
+
+def start_server(key: str, base_url: str, install: str | None = None,
+                 wait_s: float = 600.0, log: Callable[[str], None] | None = None) -> str:
+    """Bring `key` up and return the path the server reports. Or raise.
+
+    ALREADY RUNNING IS SUCCESS, NOT A CONFLICT. A second llama-server beside the
+    first overbooks the card, and the driver moves what does not fit into host
+    memory without printing anything -- the failure looks like a slow day. So
+    this checks first, says what is up, and starts nothing.
+
+    POLLING IS THE POINT. `check_endpoint` runs once, which is enough for a
+    server somebody else started and useless for one this line just spawned:
+    the process exists seconds before the model is loaded. And a process that
+    exits during loading has to be noticed as an exit rather than waited out --
+    llama-server prints an impossible configuration, says `abort`, and on some
+    paths keeps running with CPU offload, so neither "the process is alive" nor
+    "/health says ok" is on its own a start.
+
+    ON GIVING UP IT SHOWS THE SERVER'S OWN stderr, not a guess. Everything this
+    function could say about why a load failed would be an invention; the
+    server's last lines are evidence.
+    """
+    say = log or (lambda _msg: None)
+    running = server_model_path(base_url)
+    if running is not None:
+        say("a server is already up: %s" % running)
+        want = model_candidates(key, None, install)
+        if want and os.path.basename(running).lower() != os.path.basename(want[0]).lower():
+            # Said, not fixed. Stopping somebody else's server to start ours is
+            # not a decision this program gets to make on its own.
+            say("note: that is not %s -- stop it first if you meant to switch" % key)
+        return running
+
+    # NOTHING AT OUR ADDRESS, BUT SOMETHING ON THE CARD. Criterion 2 of #114 is
+    # about this and not about the port: a second llama-server beside the first
+    # overbooks the VRAM, and the only counter that would report it is the one
+    # llama.cpp does not have. Refused rather than reported, because a boot that
+    # says "note: something else is running" and starts anyway has told the user
+    # about the damage after doing it.
+    others = running_servers()
+    if others:
+        pid, line = others[0]
+        raise ServerBootError(
+            "a llama-server is already running (pid %s) on %s. Two at once "
+            "overbook the card and nothing reports it -- stop that one, or "
+            "point --base-url at it."
+            % (pid, served_model(line) or "an unreadable command line"))
+
+    argv = server_command(key, None, install)
+    # THE SLOT DIRECTORY IS MADE, NOT ASSUMED, and the server is the one that
+    # taught this: `--slot-save-path` REFUSES a path that is not an existing
+    # directory -- "error while handling argument", exit 1, before a single
+    # tensor is read. install.ps1 creates it, so an install is fine; a client
+    # run from a checkout, or an install whose session directory was cleaned
+    # out, is not. Caught on the first live boot of this function, by its own
+    # rule that a failed start shows the SERVER's stderr rather than a guess.
+    if "--slot-save-path" in argv:
+        try:
+            os.makedirs(argv[argv.index("--slot-save-path") + 1], exist_ok=True)
+        except OSError:
+            # Left to the server to refuse, with its own message. A directory
+            # that cannot be made is a fact about the disk, and inventing a
+            # sentence for it here would compete with the real one.
+            pass
+    say("starting %s" % os.path.basename(argv[0]))
+    errfile = tempfile.NamedTemporaryFile(prefix="crow-server-", suffix=".log",
+                                          delete=False, mode="w", encoding="utf-8")
+    errfile.close()
+    with open(errfile.name, "w", encoding="utf-8") as sink:
+        proc = subprocess.Popen(argv, stdout=sink, stderr=subprocess.STDOUT)
+
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        code = proc.poll()
+        if code is not None:
+            raise ServerBootError("llama-server exited with %s before it was ready.\n%s"
+                                  % (code, _tail(errfile.name)))
+        path = server_model_path(base_url, timeout=2.0)
+        if path is not None:
+            say("server ready: %s" % path)
+            return path
+        time.sleep(1.0)
+
+    proc.kill()
+    raise ServerBootError("llama-server did not answer within %.0f s.\n%s"
+                          % (wait_s, _tail(errfile.name)))
+
+
+def _tail(path: str, lines: int = 20) -> str:
+    """The last lines of the server's log, or a sentence saying there are none."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            kept = fh.read().splitlines()[-lines:]
+    except Exception:
+        return "(its log could not be read: %s)" % path
+    return "\n".join(kept) if kept else "(it printed nothing; log: %s)" % path
 
 
 # Where a session is kept between runs. The messages live here; the KV state
@@ -2195,9 +2561,6 @@ ROOT_FILE = "root.json"
 _ROOT: "str | None" = None
 
 
-
-
-
 def _resolve(path: str) -> str:
     """Absolute and symlink-free, on a path that does not exist yet.
 
@@ -2396,10 +2759,6 @@ def restore_root() -> "tuple[str | None, str | None]":
         return None, (f"the last working directory is gone: {path}\n"
                       f"running without one -- Crow's own writes are unbounded")
     return path, None
-
-
-
-
 
 
 def known_roots(limit: int = 8) -> list[str]:

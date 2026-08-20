@@ -7,10 +7,8 @@
   "next_context_tokens as a user entry": "the counting is wired transitively: run_turn returns the number in TurnResult.context_tokens and the surface only draws it. Demanding a direct call site in every surface would be red at a correctly wired client.",
   "the three thought events themselves": "reasoning_started/reasoning_text/reasoning_finished are methods of ReplyEvents, not module-level names, and the four predicates anchor at column 0 or at an indented def of the DECLARED name. ReasoningBlocks below is the entry that carries them: it is the only thing that fires them, and a surface that does not implement them fails its user_entry evidence."
  },
-
  "core": "cli/crow_core.py",
  "core_module": "crow_core",
-
  "surfaces": [
   {
    "path": "cli/crow.py",
@@ -23,7 +21,6 @@
    "why": "The window, and the reason this checker can say anything at all. Until it landed the core had ONE consumer, every predicate below held by construction, and a green result here was the tool measuring itself - which is why the honesty rule refuses to report on fewer than two surfaces. It owns widgets, the tick and the German surface language; it owns no decision. It lives in cli/ and not gui/ because tools/pack-release.ps1:431 copies cli/ as a whole and nothing else, so a gui/ would be absent from the package with nothing saying so."
   }
  ],
-
  "names": [
   {
    "name": "tool_read_file",
@@ -99,7 +96,9 @@
    "name": "set_active_root",
    "kind": "def",
    "user_entry": true,
-   "evidence": ["set_active_root("],
+   "evidence": [
+    "set_active_root("
+   ],
    "only": {
     "surface": "cli/crow_gui.py",
     "because": "The terminal must NOT write it, and that is the entry rather than a comment: `--root` states where THAT run works, while `active` decides where the WINDOW opens next time. They were nearly one key -- `recent[0]` -- and `crow --root D:\\x` in a terminal would then have silently moved the window's next start. A call site appearing in cli/crow.py is that coupling coming back, and this line is what turns it red."
@@ -116,7 +115,9 @@
    "kind": "def",
    "why": "#98. Whether a shell command ran in a turn the boundary already refused -- the sequence the working-area guarantee does NOT cover, stated once so both surfaces mark the same event. A surface with its own version would drift into path matching against a shell string, which is the analysis #98 rejected on the record.",
    "user_entry": true,
-   "evidence": ["def boundary_escaped("],
+   "evidence": [
+    "def boundary_escaped("
+   ],
    "_evidence_note": "The method, not the predicate: no surface CALLS escaped_the_working_area -- run_turn does, and hands the answer down as boundary_escaped. A surface's wiring is therefore the event it implements. A surface that skips it shows the user nothing when the working area is left, which is the whole defect #98 recorded."
   },
   {
@@ -138,7 +139,9 @@
    "name": "ReasoningBlocks",
    "kind": "class",
    "user_entry": true,
-   "evidence": ["reasoning_started("],
+   "evidence": [
+    "reasoning_started("
+   ],
    "why": "#90's capability 2, and its failure point P3: THE MODEL CAN RE-ENTER REASONING MID-ANSWER, so where a thought block begins, ends and begins again is a decision, not an order. The terminal shows and hides a block, the window folds and unfolds one - two presentations of ONE decision, and a second copy of it puts answer text inside a collapsed block where nobody reads it. The evidence is the event, because a surface that never draws a block is the second half of #90's failure: the CLI could not show reasoning at all until E10, and a window that could would have made it second-class on the day it shipped.",
    "_evidence_note": "reasoning_started( rather than the class name: no surface CALLS ReasoningBlocks - stream_reply builds it - so a surface's wiring shows up as the block events it implements, not as a construction."
   },
@@ -146,7 +149,9 @@
    "name": "CodeFences",
    "kind": "class",
    "user_entry": true,
-   "evidence": ["CodeFences("],
+   "evidence": [
+    "CodeFences("
+   ],
    "only": {
     "surface": "cli/crow_gui.py",
     "because": "#90's capability 6 splits into two halves - WHERE a code block begins and ends, which is a decision, and how it is drawn with a copy button, which is a surface. This is the first half, and today only the window is wired to it. The terminal still carries its own fence handling inside cli/crow.py's Renderer, which also owns the spill file, the highlighter and the live line counter; moving that onto this class changes what every CLI answer prints and is not E12's stage. The 'only' line is here so that debt is a declaration somebody can act on rather than a duplication nobody noticed."
@@ -157,28 +162,36 @@
    "name": "run_turn",
    "kind": "def",
    "user_entry": true,
-   "evidence": ["run_turn("],
+   "evidence": [
+    "run_turn("
+   ],
    "why": "The tool loop and its four rules. Every surface runs turns, so every surface has to run THIS one: the rule about appending an assistant turn without its tool_calls has no visible effect inside the turn that breaks it, only in every later turn against the same prefix."
   },
   {
    "name": "save_session",
    "kind": "def",
    "user_entry": true,
-   "evidence": ["save_session("],
+   "evidence": [
+    "save_session("
+   ],
    "why": "#90's capability 5, 'conversation history that survives a restart'. Both halves - the server's KV and the client's messages - or neither, and a surface that writes its own half writes a session the other cannot read."
   },
   {
    "name": "load_session",
    "kind": "def",
    "user_entry": true,
-   "evidence": ["load_session("],
+   "evidence": [
+    "load_session("
+   ],
    "why": "The other end of the same file. A surface that does not wire it starts cold every time and nothing on screen says why."
   },
   {
    "name": "Conversation",
    "kind": "class",
    "user_entry": true,
-   "evidence": ["Conversation("],
+   "evidence": [
+    "Conversation("
+   ],
    "why": "The append-only context. Nothing is ever inserted in front of, or edited inside, an existing message - the prompt cache only survives while the prefix stays byte-identical, and a re-prefill of 12k tokens costs minutes here."
   },
   {
@@ -190,16 +203,30 @@
    "name": "TurnCost",
    "kind": "class",
    "user_entry": true,
-   "evidence": ["cost.line()"],
+   "evidence": [
+    "cost.line()"
+   ],
    "why": "#90's capability 7, tok/s and tokens per turn. Its FIELDS AND THEIR ORDER are the shared part: two surfaces that assemble the same six numbers into two different sentences are two products. The surface picks the colour and nothing else."
   },
   {
    "name": "TurnResult",
    "kind": "class",
    "why": "What one turn leaves behind - context_tokens, promised_warm, rolled. Those were local variables of repl() that the loop wrote through; a surface that carries them itself resumes against numbers that stopped being true."
+  },
+  {
+   "name": "start_server",
+   "kind": "def",
+   "user_entry": true,
+   "evidence": [
+    "start_server("
+   ],
+   "only": {
+    "surface": "cli/crow.py",
+    "because": "#114 gives the terminal the boot, and the window does not have one yet -- #115 is where a running window learns to switch models, and it has to answer a question this stage does not: what happens to the open conversation and the KV behind it. A call site appearing in cli/crow_gui.py before that question is answered would start a second llama-server beside the first, which overbooks the card and is reported by nothing: the driver moves what does not fit into host memory silently, and the failure looks like a slow day."
+   },
+   "why": "The one place that turns a model key into a running server. Written twice it would be two command lines, and a fourth copy of the operating point is exactly what manifests/operating-point.json exists to prevent -- three copies already drifted once, on 2026-08-10."
   }
  ],
-
  "wordings": [
   {
    "id": "write_file refuses an unread file",

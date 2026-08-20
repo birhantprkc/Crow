@@ -1903,8 +1903,56 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def boot_if_asked(args: argparse.Namespace) -> str | None:
+    """Start the server for `--model <key>`, or say why it did not (#114).
+
+    RETURNS None FOR EVERY COMMAND LINE THAT EVER WORKED. `--model` has always
+    been the label in the request body; only a word that is a key in the
+    manifest's `servers` map means "boot this". `crow` -- the default -- is not
+    one, so an existing invocation starts nothing and still meets the endpoint
+    check and its "start llama-server first".
+
+    THE PORT COMES FROM THE MANIFEST, and the client has to be pointed at it or
+    the boot is worse than useless: a server would come up on 8082 while the
+    session talked to 8081 and the user would read "start llama-server first"
+    about a server that had just started. So a base URL still at its default is
+    retargeted, out loud; one the user chose is not overridden -- that is
+    refused instead, because silently ignoring what somebody typed is the same
+    class of surprise in the other direction.
+    """
+    key = getattr(args, "model", None)
+    if key not in crow_core.bootable_models():
+        return None
+
+    port = crow_core.server_port(key)
+    if port and f":{port}/" not in args.base_url + "/":
+        if args.base_url == DEFAULT_BASE_URL:
+            args.base_url = f"http://127.0.0.1:{port}/v1"
+            print(f"{DIM}{key} listens on {port} -- using {args.base_url}{RESET}")
+        else:
+            return (f"{key} listens on port {port}, and --base-url says"
+                    f" {args.base_url}. Point one at the other.")
+
+    try:
+        crow_core.start_server(key, args.base_url,
+                               log=lambda msg: print(f"{DIM}{msg}{RESET}"))
+    except crow_core.ServerBootError as exc:
+        return str(exc)
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # #114, and BEFORE repl(): the loop's first act is to check the endpoint,
+    # and there is no point checking one this line is about to bring up.
+    problem = boot_if_asked(args)
+    if problem is not None:
+        # NOT followed by "start llama-server first". That sentence is right for
+        # a client that found nothing listening and wrong for one that tried to
+        # start something and failed -- and a failure that reads like the normal
+        # cold state is one the user retries forever.
+        print(f"crow: {problem}", file=sys.stderr)
+        return 2
     # finally, not a plain call after repl(): an unhandled exception or a
     # Ctrl+C that escapes the loop must not leave the user's terminal painted
     # in our background for whatever they run next.
