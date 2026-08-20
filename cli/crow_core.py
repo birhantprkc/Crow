@@ -361,6 +361,13 @@ BANNER_BEVEL_HEX = "#2c5bac"
 CUT_OFF_NOTE = "CUT OFF at the token budget"
 ABORT_NOTE = "[interrupted -- turn discarded, context unchanged]"
 RESUME_COLD_NOTE = "messages only -- the first turn pays a prefill"
+# ITS OWN LINE, AND THAT IS THE WHOLE POINT (#113). A model switch used to be
+# reported with the line above, which says the cache could not be reused and
+# names the wrong reason for it: the reader goes looking for a server without
+# --slot-save-path, and the actual cause is that the session belongs to another
+# network. Two causes with one sentence between them is one cause nobody can act
+# on.
+RESUME_MODEL_NOTE = "messages only -- this session was saved under another model"
 
 
 # Keywords worth colouring, kept to the three languages this assistant writes
@@ -517,7 +524,7 @@ def session_file_problem(path: str) -> str | None:
     return session_format_problem(saved)
 
 
-def prefix_fingerprint(system: str | None) -> str:
+def prefix_fingerprint(system: str | None, model: str | None = None) -> str:
     """What the saved KV state is only valid for.
 
     The chat template renders the tool declarations and the system prompt at the
@@ -528,11 +535,58 @@ def prefix_fingerprint(system: str | None) -> str:
 
     Cheaper to detect than to suffer: if this does not match, the messages are
     still restored and only the KV is dropped.
+
+    THE MODEL IS PART OF IT, and it is not the same kind of mismatch as the two
+    above. Changing the tools or the prompt makes a cache that no longer FITS;
+    changing the model makes a cache that belongs to a different network
+    entirely, and until #113 the only thing standing between the two was
+    llama.cpp's own geometry check. On a live switch that is an edge case. In a
+    boot path that chooses a model it is the normal case, because start and
+    restore are the same second.
+
+    UNKNOWN IS NOT NEUTRAL, IT IS ITS OWN VALUE. `None` hashes as the empty
+    string rather than being left out of the material, so a save that could not
+    name the model and a restore that can do not agree by accident -- they
+    disagree, the KV is dropped, and the messages survive. Every failure of this
+    function therefore lands on "pay a prefill", never on "restore the wrong
+    cache".
     """
     import hashlib
 
-    material = json.dumps(TOOLS, sort_keys=True) + "\x00" + (system or "")
+    material = (json.dumps(TOOLS, sort_keys=True) + "\x00" + (system or "")
+                + "\x00" + (model or ""))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def resume_cold_note(path: str | None = None, model: str | None = None) -> str:
+    """Which of the two cold-resume lines the user gets, and why that is a choice.
+
+    The fingerprint above is the GATE; this is the only thing the reader ever
+    sees of it. A gate that refuses correctly and then reports the wrong reason
+    has spent the refusal and bought nothing.
+
+    READ FROM THE FILE, NOT FROM THE HASH. The fingerprint is one-way on
+    purpose, so it can say "these do not match" and never "the model was X".
+    `save_session` therefore writes the name beside it, and this reads it back.
+
+    THE FALLBACK IS THE OLD LINE, NOT A THIRD ONE. A file written before #113
+    has no `model` key and every session on disk today is one of those; they
+    resume cold ONCE, on the old wording, which is the correct sentence for them
+    -- nothing about their model is known, so nothing about it is claimed.
+    Silence about the name is also why a save that could not reach /props does
+    not produce this line: an empty name is not evidence of a switch.
+    """
+    path = path or SESSION_FILE
+    try:
+        with open(path, encoding="utf-8") as fh:
+            was = (json.load(fh).get("model") or "").strip()
+    except Exception:
+        # Unreadable is not "switched". The caller is on the resume path and
+        # already has its messages; the honest answer here is the general line.
+        return RESUME_COLD_NOTE
+    if was and was != (model or ""):
+        return f"{RESUME_MODEL_NOTE}: {was}, not {model or 'this one'}"
+    return RESUME_COLD_NOTE
 
 
 def write_transcript(conversation: "Conversation", path: str) -> int:
@@ -631,7 +685,7 @@ def forget_session(path: str | None = None) -> bool:
 
 def save_session(conversation: "Conversation", base_url: str, context_tokens: int,
                  path: str | None = None, with_kv: bool = True,
-                 pretty: bool = False) -> str | None:
+                 pretty: bool = False, model: str | None = None) -> str | None:
     """Write the session so the next start does not pay for it again.
 
     TWO HALVES, AND NEITHER IS ENOUGH ALONE. The server holds the KV cache; the
@@ -695,10 +749,14 @@ def save_session(conversation: "Conversation", base_url: str, context_tokens: in
         # re-purposing an existing key would break the way back: an older build
         # reads these five keys and ignores everything else, so an extra key
         # costs it nothing and a changed one would cost it the session.
+        # `model` IS ADDED FOR THE READER, NOT FOR THE GATE. The gate is the
+        # fingerprint, which already covers the name; this key exists so the
+        # refusal can SAY which model, and it is written even when empty so the
+        # shape of the file does not depend on whether /props answered.
         json.dump({SESSION_FORMAT_KEY: SESSION_FORMAT,
                    "version": CLIENT_VERSION, "kv": saved_kv, "kv_tokens": kv_tokens,
-                   "context_tokens": context_tokens,
-                   "prefix": prefix_fingerprint(conversation.system),
+                   "context_tokens": context_tokens, "model": model or "",
+                   "prefix": prefix_fingerprint(conversation.system, model),
                    "messages": conversation.payload()},
                   fh, indent=1 if pretty else None)
 
@@ -714,7 +772,8 @@ def save_session(conversation: "Conversation", base_url: str, context_tokens: in
 
 
 def load_session(base_url: str, system: str | None = None,
-                 path: str | None = None) -> tuple[list[dict], int, bool] | None:
+                 path: str | None = None,
+                 model: str | None = None) -> tuple[list[dict], int, bool] | None:
     """The other half. Returns (messages, context_tokens, kv_restored) or None.
 
     The KV restore is attempted first and its success is carried out, because a
@@ -758,7 +817,7 @@ def load_session(base_url: str, system: str | None = None,
     # would succeed and then re-read everything, which costs minutes and looks
     # like the server misbehaving.
     kv = False
-    if saved.get("kv") and saved.get("prefix") == prefix_fingerprint(system):
+    if saved.get("kv") and saved.get("prefix") == prefix_fingerprint(system, model):
         try:
             reply = post_json(f"{base_url.rstrip('/').removesuffix('/v1')}/slots/0?action=restore",
                               {"filename": SLOT_FILE}, timeout=600.0)

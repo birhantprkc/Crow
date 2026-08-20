@@ -1431,7 +1431,8 @@ def repl(args: argparse.Namespace) -> int:
     if getattr(args, "session", True) or wanted:
         source = resume_path(wanted) if wanted else None
         try:
-            restored = load_session(args.base_url, args.system, path=source)
+            restored = load_session(args.base_url, args.system, path=source,
+                                    model=loaded)
         except SessionFormatError as exc:
             # REFUSING TO START IS THE POINT, and starting anyway would be the
             # quiet version of the same loss: this run would build a session,
@@ -1448,7 +1449,11 @@ def repl(args: argparse.Namespace) -> int:
             messages, context_tokens, kv = restored
             conversation.restore(messages)
             promised_warm = kv
-            how = "cache warm" if kv else crow_core.RESUME_COLD_NOTE
+            # WHICH cold line, not just that it is cold (#113). `loaded` is what
+            # /props answered a few lines above, so the two names being compared
+            # are the live server's and the one the file was written under.
+            how = ("cache warm" if kv
+                   else crow_core.resume_cold_note(source, loaded))
             where = f" from {os.path.basename(source)}" if source else ""
             print(f"{DIM}resumed{where}: {len(messages)} messages, {how}{RESET}\n")
         elif wanted:
@@ -1462,7 +1467,8 @@ def repl(args: argparse.Namespace) -> int:
     def leave() -> int:
         if getattr(args, "session", True):
             try:
-                note = save_session(conversation, args.base_url, context_tokens)
+                note = save_session(conversation, args.base_url, context_tokens,
+                                    model=loaded)
             except SessionFormatError as exc:
                 # Reachable even though the start path refuses such a file:
                 # --resume reads an ARCHIVE and this writes the live

@@ -263,8 +263,8 @@
   },
   {
    "id": "session format: the prefix fingerprint",
-   "text": "prefix_fingerprint(conversation.system)",
-   "why": "What decides whether a restored KV cache belongs to the conversation being resumed. Computed differently in two places, it decides differently."
+   "text": "prefix_fingerprint(conversation.system, model)",
+   "why": "What decides whether a restored KV cache belongs to the conversation being resumed. Computed differently in two places, it decides differently. The second argument arrived with #113: without it a DeepSeek session reaches a Qwen restore and only llama.cpp's geometry check stands in the way. THE ARGUMENT IS PART OF THE PINNED TEXT ON PURPOSE -- a surface that keeps calling this with the system prompt alone is red here, which is the only thing that catches a caller that silently stopped naming the model."
   },
   {
    "id": "cost line: the cache field",

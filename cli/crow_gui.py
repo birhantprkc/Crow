@@ -1292,6 +1292,12 @@ class Api:
         self._conversation = Conversation(args.system)
         self._context_tokens = 0
         self._n_ctx = 0
+        # What /props last said the server has open. Kept beside _n_ctx and for
+        # the same reason: both are answers from the endpoint that the session
+        # path needs later, and asking twice would be two answers to one
+        # question. Empty until _probe has run -- #113 treats that as "unknown",
+        # which drops a cache rather than restoring the wrong one.
+        self._model = ""
         self._promised_warm = False
         self._rolled = False
         self._worker: threading.Thread | None = None
@@ -1648,6 +1654,7 @@ class Api:
         try:
             state = check_endpoint(self._args.base_url)
             name = model_display_name(fetch_model_name(self._args.base_url))
+            self._model = name
             self._n_ctx = fetch_n_ctx(self._args.base_url)
             self.push({"k": "up", "model": name, "n_ctx": self._n_ctx,
                        "tokens": self._context_tokens, "state": state})
@@ -1657,7 +1664,8 @@ class Api:
         if not self._args.session:
             return
         try:
-            restored = load_session(self._args.base_url, self._args.system)
+            restored = load_session(self._args.base_url, self._args.system,
+                                    model=self._model)
         except Exception as exc:           # noqa: BLE001
             self.push({"k": "note", "t": "session not readable: %s" % exc})
             return
@@ -2225,7 +2233,8 @@ class Api:
             return
         try:
             save_session(self._conversation, self._args.base_url,
-                         self._context_tokens, with_kv=with_kv)
+                         self._context_tokens, with_kv=with_kv,
+                         model=self._model)
         except Exception:                  # noqa: BLE001 - a turn survives it
             return
         self._stamp(SESSION_FILE, pointer=True)
@@ -2255,7 +2264,8 @@ class Api:
         # order used to be the other way round, so an archive that turned out to
         # be unreadable had already cost the open chat a write.
         try:
-            restored = load_session(self._args.base_url, self._args.system, path)
+            restored = load_session(self._args.base_url, self._args.system, path,
+                                    model=self._model)
         except Exception as exc:           # noqa: BLE001
             self.push({"k": "fail", "t": "not readable: %s" % exc})
             return
