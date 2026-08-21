@@ -222,9 +222,18 @@
    ],
    "only": {
     "surface": "cli/crow.py",
-    "because": "#114 gives the terminal the boot, and the window does not have one yet -- #115 is where a running window learns to switch models, and it has to answer a question this stage does not: what happens to the open conversation and the KV behind it. A call site appearing in cli/crow_gui.py before that question is answered would start a second llama-server beside the first, which overbooks the card and is reported by nothing: the driver moves what does not fit into host memory silently, and the failure looks like a slow day."
+    "because": "#114 gives the terminal the boot. The window reaches a server through `model_command` instead (#115), which is where the question this stage did not answer is answered -- what happens to the open conversation -- and it answers it in one sentence both surfaces print. A DIRECT call site in cli/crow_gui.py would be a second boot path with its own idea of that, and the failure it invites is the one nothing reports: two llama-servers overbook the card, and the driver moves what does not fit into host memory without printing a word."
    },
    "why": "The one place that turns a model key into a running server. Written twice it would be two command lines, and a fourth copy of the operating point is exactly what manifests/operating-point.json exists to prevent -- three copies already drifted once, on 2026-08-10."
+  },
+  {
+   "name": "model_command",
+   "kind": "def",
+   "user_entry": true,
+   "evidence": [
+    "model_command("
+   ],
+   "why": "#115. Which models exist, how a typo is refused, and whether a switch happened at all. Both surfaces offer it -- `/model` in the terminal, the chip's menu in the window -- and a surface with its own version would be a second answer to 'may I do this now' and a second sentence about the lost context. #99 is the precedent for the cost: `format_tool_args` sat behind a hasattr guard that had been False since the split, so the command worked in one client and not the other, for months, with nothing able to see it."
   }
  ],
  "wordings": [
@@ -322,6 +331,11 @@
    "id": "brand: the accent",
    "text": "38;2;126;176;248",
    "why": "#7eb0f8, the blue of the wordmark - listed in the form it is actually WRITTEN, as the truecolor escape. The hex spelling exists only in the comment beside it, and a manifest that pinned the comment would be checking prose."
+  },
+  {
+   "id": "the model switch note",
+   "text": "the context went with the old server -- the next turn pays a full prefill",
+   "why": "#115. The one line a switch costs, and it is said BEFORE the switch is believed rather than after -- a user who reads it once the window has emptied has been informed of a loss instead of warned about one. Two wordings would be two answers to 'where did my context go', which is the same defect the rollover note is written once for."
   }
  ]
 }

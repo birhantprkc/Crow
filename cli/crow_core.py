@@ -933,6 +933,103 @@ def start_server(key: str, base_url: str, install: str | None = None,
                           % (wait_s, _tail(errfile.name)))
 
 
+# The one sentence a model switch costs, written here so both surfaces say it.
+# IT IS SAID BEFORE THE SWITCH IS BELIEVED, not after: a user who reads it once
+# the window has already emptied has been informed of a loss rather than warned
+# about one. What it does NOT promise is an archive -- an open 200k context on a
+# live switch is out of scope for #115 and stays out until M5 says what a
+# re-prefill of one costs.
+MODEL_SWITCH_NOTE = "the context went with the old server -- the next turn pays a full prefill"
+
+
+def stop_servers(log: Callable[[str], None] | None = None) -> int:
+    """Stop every llama-server on this machine. Returns how many were asked.
+
+    BY PID AND NOT BY PORT. A switch has to leave the card empty, and a server
+    on some other port holds VRAM just as firmly as the one being replaced --
+    that is the same arithmetic #114's criterion 2 refuses a second server for.
+
+    Failures are counted, not raised: the next step is a start that polls, and
+    it will say the truth about whether the card came free. A kill that reports
+    success is not evidence either.
+    """
+    say = log or (lambda _msg: None)
+    asked = 0
+    for pid, line in running_servers():
+        say("stopping pid %s (%s)" % (pid, os.path.basename(served_model(line)) or "?"))
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                               capture_output=True, timeout=30)
+            else:
+                os.kill(int(pid), 15)
+            asked += 1
+        except Exception:
+            continue
+    return asked
+
+
+def model_command(argument: str, base_url: str, install: str | None = None,
+                  log: Callable[[str], None] | None = None) -> tuple[str, str, bool]:
+    """`/model`: report, or switch. Returns (what to say, base_url, switched).
+
+    THE DECISION IS HERE AND THE PLUMBING IS NOT, which is the same split
+    `switch_mode` uses. Both surfaces have to name the same models, refuse the
+    same typo and print the same sentence about the lost context; what each of
+    them does afterwards -- empty a widget or clear a terminal -- is its own.
+
+    `switched` is the caller's instruction to drop the conversation. It is
+    returned rather than done here because the core does not own either
+    surface's idea of "the chat", and a context that was dropped in one place
+    and kept in the other is the half-state this return value exists to avoid.
+    """
+    say = log or (lambda _msg: None)
+    keys = bootable_models()
+    running = server_model_path(base_url)
+    known = ", ".join(keys) or "none -- the manifest declares no server lines"
+
+    wanted = (argument or "").strip()
+    if not wanted:
+        # THE RUNNING ONE IS ASKED FOR, NOT REMEMBERED. A name kept from the
+        # last start would still be printed after somebody stopped the server
+        # in another window, and the user would read it as "still up".
+        now = running or "nothing is answering at %s" % base_url
+        return ("model: %s\nkeys: %s" % (now, known), base_url, False)
+
+    if wanted not in keys:
+        # Named, and nothing started. A typo that silently booted something
+        # would put 17 GB on the card for a word the user did not mean.
+        return ("no model %r. The table has: %s" % (wanted, known), base_url, False)
+
+    port = server_port(wanted)
+    target = f"http://127.0.0.1:{port}/v1" if port else base_url
+    if running and served_model_matches(wanted, running):
+        return ("%s is already the one running." % wanted, target, False)
+
+    stop_servers(say)
+    try:
+        path = start_server(wanted, target, install, log=say)
+    except ServerBootError as exc:
+        # THE OLD SERVER IS ALREADY GONE, and saying so is the difference
+        # between "try again" and "you now have nothing". Reported as the
+        # answer rather than raised: this runs inside a slash command, and a
+        # traceback out of one closes the session it was typed into.
+        return ("%s did not start, and the previous server was already stopped.\n%s"
+                % (wanted, exc), target, True)
+    return ("%s is up: %s\n%s" % (wanted, path, MODEL_SWITCH_NOTE), target, True)
+
+
+def served_model_matches(key: str, path: str) -> bool:
+    """Is the file at `path` the GGUF that `key` names?
+
+    Basenames, because the same model reached through two roots is the same
+    model -- and #114 already accepts three different roots for one entry.
+    """
+    want = model_candidates(key)
+    return any(os.path.basename(c).lower() == os.path.basename(path).lower()
+               for c in want)
+
+
 def _tail(path: str, lines: int = 20) -> str:
     """The last lines of the server's log, or a sentence saying there are none."""
     try:
@@ -3891,7 +3988,7 @@ DECLINED = "error: declined by the user"
 #
 # `crow.py` keeps the prose of `HELP` and is pinned against this tuple; the
 # window reads the tuple directly. Neither owns the other.
-SLASH_COMMANDS = ("/help", "/tools", "/mode", "/thoughts",
+SLASH_COMMANDS = ("/help", "/tools", "/mode", "/model", "/thoughts",
                   "/reset", "/context", "/exit", "/quit")
 
 

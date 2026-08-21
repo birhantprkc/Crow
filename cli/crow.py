@@ -977,6 +977,7 @@ HELP = """commands:
   /help          this list
   /tools         the tools the model can call
   /mode          the release level, /mode manual|allowedit|auto to switch
+  /model         the model that is up, /model <key> restarts on another one
   /thoughts      show the model's reasoning as it arrives, or hide it again
   /reset         drop the context (costs a full re-prefill)
   /context       message count in the current context
@@ -992,16 +993,24 @@ class SlashResult(NamedTuple):
     object to satisfy one command would rewrite all eleven for the benefit of
     none of them. Four names in, four names out, and the caller keeps its own
     variables.
+
+    n_ctx JOINED THEM WITH `/model` (#115), and it is not decoration. The window
+    size is read once at start, from the server that was up then; a switch
+    replaces that server, and a stale n_ctx decides `should_roll` -- so the
+    conversation would be archived against the OLD model's window and nothing on
+    screen would say why. Every branch passes the value it was handed, so only
+    the branch that changes servers changes it.
     """
     handled: bool
     mode: str
     show_reasoning: bool
     context_tokens: int
+    n_ctx: int = 0
 
 
 def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
               context_tokens: int, n_ctx: int, rollover_at: float,
-              session: bool = True) -> SlashResult:
+              session: bool = True, args=None, sampling: dict | None = None) -> SlashResult:
     """Every slash command except the two that leave. Prints its own output.
 
     OUT OF repl() BECAUSE THE SUITE ASKED, and it asked for a reason worth
@@ -1017,11 +1026,11 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
     """
     if line == "/help":
         print(HELP)
-        return SlashResult(True, mode, show_reasoning, context_tokens)
+        return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
 
     if line == "/tools":
         print(format_tools())
-        return SlashResult(True, mode, show_reasoning, context_tokens)
+        return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
 
     if line == "/thoughts":
         # A TOGGLE AND NOT TWO COMMANDS: whoever wants to see the thoughts
@@ -1033,12 +1042,45 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
         print("the model's reasoning is shown as it arrives.\n" if show_reasoning
               else "the model's reasoning is hidden again -- "
                    "the bird carries the state.\n")
-        return SlashResult(True, mode, show_reasoning, context_tokens)
+        return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
 
     if line == "/mode" or line.startswith("/mode "):
         mode, said = switch_mode(line, mode)
         print(said)
-        return SlashResult(True, mode, show_reasoning, context_tokens)
+        return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
+
+    if line == "/model" or line.startswith("/model "):
+        # #115. THE DECISION IS IN THE CORE and only the consequences are here,
+        # the same split `/mode` uses: both surfaces have to name the same
+        # models, refuse the same typo and print the same sentence about the
+        # lost context. What each does afterwards is its own.
+        said, url, switched = crow_core.model_command(
+            line[len("/model"):], args.base_url if args else DEFAULT_BASE_URL,
+            log=lambda msg: print(f"{DIM}{msg}{RESET}"))
+        print(said + "\n")
+        if not switched:
+            return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
+        # THE CONTEXT GOES BECAUSE THE CACHE DID. The KV that made the prefix
+        # cheap belonged to a process that no longer exists, and the messages
+        # alone would be re-read against a network that never saw them -- at
+        # 200k that is the cost `/reset` documents, paid without being asked
+        # for. `model_command` has already said so in one line.
+        conversation.reset()
+        crow_core.forget_approvals()
+        if session:
+            crow_core.forget_session()
+        if args is not None:
+            args.base_url = url
+            # RE-RESOLVED, NOT CARRIED OVER: the new model's min_p is not the
+            # old one's, and #112 exists because sending one model's sampling to
+            # another is a change nothing on screen reports. The dict is edited
+            # in place because repl() splats the same object into every turn.
+            if sampling is not None:
+                fresh = sampling_for_run(args, fetch_model_name(url))
+                if fresh is not None:
+                    sampling.clear()
+                    sampling.update(fresh)
+        return SlashResult(True, mode, show_reasoning, 0, fetch_n_ctx(url))
 
     if line == "/reset":
         conversation.reset()
@@ -1051,7 +1093,7 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
         if session:
             crow_core.forget_session()
         print("context dropped -- the next turn pays a full prefill.\n")
-        return SlashResult(True, mode, show_reasoning, 0)
+        return SlashResult(True, mode, show_reasoning, 0, n_ctx)
 
     if line == "/context":
         # The rollover point is shown here or nowhere: it is the number that
@@ -1060,9 +1102,9 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
         enabled = n_ctx > 0 and rollover_at > 0
         room = f", rolls over at {int(n_ctx * rollover_at)}" if enabled else ""
         print(f"{len(conversation)} messages, {context_tokens} tokens{room}\n")
-        return SlashResult(True, mode, show_reasoning, context_tokens)
+        return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
 
-    return SlashResult(False, mode, show_reasoning, context_tokens)
+    return SlashResult(False, mode, show_reasoning, context_tokens, n_ctx)
 
 
 def switch_mode(line: str, mode: str) -> tuple[str, str]:
@@ -1352,6 +1394,27 @@ def read_line(prompt: str) -> str:
         return read_coloured(prompt, getch)
 
 
+def model_at_exit(args: argparse.Namespace) -> str:
+    """Which model the session is being saved UNDER, asked at the last moment.
+
+    NOT THE NAME FROM THE START LINE, and #115 is why. `/model` replaces the
+    server mid-session, so the name /props gave when the banner was printed can
+    belong to a process that no longer exists.
+
+    MEASURED ON THE FIRST LIVE SWITCH, and it is the exact hole #113 was cut to
+    close, reopened by the feature that came after it: the turn ran against
+    Qwen at 73 tok/s and the session was written with `model:
+    "DeepSeek-V4-Flash-0731"`. A later start under DeepSeek would then have
+    MATCHED the fingerprint and asked the server to restore a KV that Qwen had
+    written -- back to the state where only llama.cpp's geometry check stands in
+    the way.
+
+    One extra /props at exit is the whole price, and it is paid on the path that
+    is already writing about a gigabyte to disk.
+    """
+    return fetch_model_name(args.base_url)
+
+
 def sampling_for_run(args: argparse.Namespace, model: str | None) -> dict | None:
     """The numbers this run sends, or None when the run must not start (#112).
 
@@ -1499,7 +1562,7 @@ def repl(args: argparse.Namespace) -> int:
         if getattr(args, "session", True):
             try:
                 note = save_session(conversation, args.base_url, context_tokens,
-                                    model=loaded)
+                                    model=model_at_exit(args))
             except SessionFormatError as exc:
                 # Reachable even though the start path refuses such a file:
                 # --resume reads an ARCHIVE and this writes the live
@@ -1528,9 +1591,10 @@ def repl(args: argparse.Namespace) -> int:
         slash = run_slash(line, conversation=conversation, mode=mode,
                           show_reasoning=show_reasoning,
                           context_tokens=context_tokens, n_ctx=n_ctx,
-                          rollover_at=args.rollover_at, session=args.session)
+                          rollover_at=args.rollover_at, session=args.session,
+                          args=args, sampling=sampling)
         mode, show_reasoning = slash.mode, slash.show_reasoning
-        context_tokens = slash.context_tokens
+        context_tokens, n_ctx = slash.context_tokens, slash.n_ctx
         if slash.handled:
             continue
         # BEFORE the turn is appended, not after: the archive is then a complete

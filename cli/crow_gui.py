@@ -431,6 +431,26 @@ details.think[open] .caret{transform:rotate(90deg)}
 #rootmenu button .what{color:var(--dimmer);font-size:10.5px;
   word-break:break-all;line-height:1.35}
 #rootmenu button .tick{float:right;color:var(--accent)}
+/* #115. The model chip becomes a picker, and it borrows #rootmenu's rules
+   rather than inventing a second look -- one menu shape for one kind of
+   decision. It opens DOWNWARD because this chip sits in the top bar while the
+   root button sits at the bottom; everything else here is the same list. */
+.chipwrap{position:relative;display:inline-block}
+.chip.pick{cursor:pointer}
+.chip.pick:hover{border-color:var(--bevel)}
+#modelmenu{position:absolute;top:calc(100% + 6px);left:0;min-width:300px;
+  background:var(--panel);border:1px solid var(--line);border-radius:9px;
+  padding:5px 0;z-index:40;box-shadow:0 10px 26px rgba(0,0,0,.45)}
+#modelmenu[hidden]{display:none}
+#modelmenu .head{color:var(--dimmer);font-size:10px;text-transform:uppercase;
+  letter-spacing:.08em;padding:4px 9px 5px}
+#modelmenu .none{color:var(--dimmer);font-size:11px;padding:2px 9px 7px}
+#modelmenu button{display:block;width:100%;text-align:left;font:inherit;
+  background:none;border:0;color:var(--text);padding:5px 9px;cursor:pointer}
+#modelmenu button:hover{background:rgba(126,176,248,.10)}
+#modelmenu button b{display:block;font-weight:600;font-size:12px;color:var(--text)}
+#modelmenu button .what{color:var(--dimmer);font-size:10.5px}
+#modelmenu button .tick{float:right;color:var(--accent)}
 </style></head><body>
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
@@ -466,7 +486,9 @@ details.think[open] .caret{transform:rotate(90deg)}
   <div id="main">
     <div id="status">
       <span class="chip"><span id="dot"></span><span id="state">connecting …</span></span>
-      <span class="chip" id="model" hidden></span>
+      <span class="chipwrap"><span class="chip pick" id="model" hidden
+            onclick="crow.modelMenu()" title="switch model"></span>
+        <div id="modelmenu" hidden></div></span>
       <span class="chip" id="nctx" hidden></span>
       <div id="right">
         <span class="chip ghost" id="url"></span>
@@ -711,6 +733,30 @@ const crow = {
     m.hidden=false; },
 
   chooseRoot(p){ $("#rootmenu").hidden=true; pywebview.api.choose_root(p); },
+
+  // #115. THE SAME SHAPE AS rootMenu, AND FOR THE SAME REASON: a model key and
+  // a model name are text that came off the disk -- out of the manifest, in
+  // this case -- so they are set with textContent and dataset and never
+  // interpolated into an HTML string. A model file named `<img onerror=...>`
+  // has to be DRAWN, not run.
+  modelMenu(){ const m=$("#modelmenu");
+    if(!m.hidden){ m.hidden=true; return; }
+    const keys = this.models||[];
+    const rows = keys.map(() =>
+      '<button class="modelrow" onclick="crow.chooseModel(this.dataset.k)">'
+      + '<b></b><span class="what"></span></button>');
+    m.innerHTML = '<div class="head">models</div>'
+      + (rows.length ? rows.join("") : '<div class="what none">none in the manifest</div>');
+    const els = m.querySelectorAll("button.modelrow");
+    keys.forEach((k,i) => { const el = els[i];
+      if(!el) return;
+      el.dataset.k = k;
+      el.querySelector("b").textContent = k;
+      el.querySelector(".what").textContent =
+        (k === this.modelKey) ? "running" : "restarts the server"; });
+    m.hidden=false; },
+
+  chooseModel(k){ $("#modelmenu").hidden=true; pywebview.api.choose_model(k); },
   pickRoot(){ $("#rootmenu").hidden=true; pywebview.api.pick_root(); },
   clearRoot(){ $("#rootmenu").hidden=true; pywebview.api.clear_root(); },
 
@@ -906,6 +952,10 @@ const crow = {
     const e=typeof msg==="string" ? JSON.parse(msg) : msg;
     switch(e.k){
       case "up": $("#dot").className="up"; $("#state").textContent="connected";
+        // #115: kept on the page rather than asked for when the menu opens, so
+        // a click answers from what the last probe SAW instead of racing it.
+        if(e.models){ this.models=e.models; }
+        if(e.model_key!==undefined){ this.modelKey=e.model_key; }
         if(e.model){ $("#model").hidden=false; $("#model").innerHTML="<b></b>";
           $("#model b").textContent=e.model; }
         if(e.n_ctx){ $("#nctx").hidden=false;
@@ -1466,6 +1516,19 @@ class Api:
             return
         self._bind_root(path)
 
+    def choose_model(self, key: str) -> None:
+        """The chip's rows (#115). Same door as `/model <key>`, deliberately.
+
+        NOT ITS OWN PATH. A menu that switched models by some other route would
+        be a second answer to "may I do this right now" and a second sentence
+        about the lost context -- and #99 is the precedent for what that costs:
+        a command that worked in the terminal and not in the window, for months,
+        because the two halves were wired separately.
+        """
+        said = self._model_command([key] if key else [])
+        if said:
+            self.push({"k": "note", "t": said})
+
     def pick_root(self) -> None:
         """The native folder dialog, and the ONLY thing that creates a root.
 
@@ -1655,7 +1718,12 @@ class Api:
             self._model = name
             self._n_ctx = fetch_n_ctx(self._args.base_url)
             self.push({"k": "up", "model": name, "n_ctx": self._n_ctx,
-                       "tokens": self._context_tokens, "state": state})
+                       "tokens": self._context_tokens, "state": state,
+                       # #115: the chip's list travels with the probe that
+                       # learned the name, so the two can never disagree about
+                       # which model is the running one.
+                       "models": list(crow_core.bootable_models()),
+                       "model_key": crow_core.model_key_for(name)})
         except Exception as exc:           # noqa: BLE001 - shown, never raised
             self.push({"k": "down", "why": str(exc)[:120]})
             return
@@ -1744,6 +1812,7 @@ class Api:
         "/help": "this list.",
         "/tools": "what the model can call.",
         "/mode": "the release level; /mode manual|allowedit|auto to switch.",
+        "/model": "the model that is up; /model <key> restarts on another one.",
         "/thoughts": "fold the reasoning blocks open, or closed again.",
         "/reset": "drop the context. The chat stays where it is.",
         "/context": "how much of the window the conversation is using.",
@@ -1794,6 +1863,8 @@ class Api:
             return self._context_line()
         if word == "/mode":
             return self._mode_command(parts[1:])
+        if word == "/model":
+            return self._model_command(parts[1:])
         if word == "/thoughts":
             return self._fold_thoughts()
         self.close()          # /exit, /quit
@@ -1872,6 +1943,44 @@ class Api:
         # what the other half already said.
         self.set_mode(name)
         return ""
+
+    def _model_command(self, rest: list) -> str:
+        """`/model` reports, `/model <key>` restarts on the other one (#115).
+
+        NOT A SECOND IMPLEMENTATION. `crow_core.model_command` owns which models
+        exist, how a typo is refused and the one sentence about the lost
+        context; a copy here would be the divergence #90 is about, and this is
+        the command where a divergence costs 17 GB on the card.
+
+        MID-TURN IS REFUSED, like `/reset` and for a stronger reason: the turn
+        in flight is streaming from the process this would kill.
+        """
+        if self._worker and self._worker.is_alive():
+            return "the model does not change mid-turn"
+        said, url, switched = crow_core.model_command(
+            " ".join(rest), self._args.base_url,
+            log=lambda msg: self.push({"k": "note", "t": msg}))
+        if not switched:
+            return said
+        # THE SAME FOUR THINGS `/reset` DOES, because the cache the context was
+        # cheap against belonged to a process that no longer exists. The chat
+        # stays in the rail with everything in it; only the context goes.
+        self._conversation.reset()
+        crow_core.forget_approvals()
+        self._context_tokens = 0
+        self._promised_warm = False
+        self._args.base_url = url
+        # ASKED, NOT ASSUMED. The window size and the name belong to the server
+        # that is up NOW; carrying the old ones over would leave the chip naming
+        # a model that is gone and `should_roll` measuring against a window that
+        # is not there.
+        self._model = model_display_name(fetch_model_name(url))
+        self._n_ctx = fetch_n_ctx(url)
+        self.push({"k": "up", "model": self._model, "n_ctx": self._n_ctx,
+                   "tokens": 0, "state": "ok",
+                   "models": list(crow_core.bootable_models()),
+                   "model_key": crow_core.model_key_for(self._model)})
+        return said
 
     def _fold_thoughts(self) -> str:
         """`/thoughts`: the window renders reasoning always, folded.
