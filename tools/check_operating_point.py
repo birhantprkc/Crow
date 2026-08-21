@@ -71,6 +71,12 @@ FLAG_SPECS = [
     # session directory as "refuses". A checker that reads the comment explaining
     # a flag instead of the flag is the failure this whole stage is about.
     ("slot_save_path", r"--slot-save-path\s+(\S*[\\/%$]\S*)", "path"),
+    # #117: the value IS compared, unlike moe_stream_l2's. `draft-mtp` and
+    # `draft-dspark` are different speculators against different models, and the
+    # measured difference between them is a factor of two in one direction and
+    # 6 % in the other -- a checker that only asked "is some speculator named"
+    # would call the wrong one right.
+    ("spec_type", r"--spec-type\s+(\S+)", "str"),
 ]
 
 

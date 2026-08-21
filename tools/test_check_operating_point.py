@@ -65,7 +65,12 @@ GOOD_LINE = (
 QWEN_LINE = (
     "llama-server.exe -m %LOCALAPPDATA%\\Crow\\models\\qwen38-gguf\\x.gguf "
     "--port 8082 -c 200000 -ctk q8_0 -ctv q8_0 -ngl 99 -np 1 --jinja "
-    "--slot-save-path %LOCALAPPDATA%\\Crow\\session\n"
+    "--slot-save-path %LOCALAPPDATA%\\Crow\\session "
+    # #117. THIS LINE IS A MIRROR, and it went red the moment the real one grew a flag: the
+    # fixture is synthetic but the MANIFEST it is checked against is the real file on disk, so
+    # every flag the manifest starts demanding has to appear here too. That is the point of the
+    # positive controls -- they fail when the mirror stops matching, which is what happened.
+    "--spec-type draft-mtp\n"
 )
 
 

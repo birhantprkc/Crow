@@ -696,6 +696,9 @@ SERVER_FLAGS = (
     ("moe_stream_io_threads", "--moe-stream-io-threads"),
     ("moe_stream_direct", "--moe-stream-direct"),
     ("moe_stream_l2", "--moe-stream-l2"),
+    # LAST, and that is a statement about the README and not about the server: this list is the
+    # order the printed line is checked in, so a flag appended here is a flag appended there.
+    ("spec_type", "--spec-type"),
 )
 
 # TWO PLACES, FOR THE SAME REASON model_candidates HAS THREE: the package

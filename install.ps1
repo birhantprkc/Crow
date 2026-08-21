@@ -1561,6 +1561,13 @@ Write-Host "      --port 8082 -c 200000 -ctk q8_0 -ctv q8_0 -ngl 99 -np 1 ``" -F
 # puts a space there. Anything that ends a printed command line must be a flag
 # with no value, or a number.
 Write-Host "      --slot-save-path $InstallTo\session ``" -ForegroundColor White
+# NOT LAST, for the reason above: this flag carries a VALUE, and a value sitting
+# at the closing quote comes back to the checker with the quote glued on. The
+# jinja flag ends the block because it has nothing after it to swallow.
+#
+# Written without naming the flags in prose on purpose -- this file's own
+# comments have been matched by the checker's regexes before.
+Write-Host "      --spec-type draft-mtp ``" -ForegroundColor White
 Write-Host "      --jinja" -ForegroundColor White
 Write-Host ""
 # 8082 rather than 8081, so the client has to be told -- and being told is the
