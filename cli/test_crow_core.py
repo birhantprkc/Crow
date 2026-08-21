@@ -2981,19 +2981,26 @@ class BackgroundReviewTests(_MemoryFixture):
         self.assertLess(window.index('self.push({"k": "idle"})'),
                         window.index("crow_core.review_turn("))
 
-    def test_it_fires_at_half_and_at_three_quarters_and_no_oftener(self):
+    def test_it_fires_at_a_fifth_a_half_and_three_quarters_and_no_oftener(self):
         """robin, 2026-08-21: "es soll ja auch nicht jede neue Zeile ins MEMORY,
-        sondern nur was wichtig ist pro Unterhaltung". Two reviews per window,
-        each mark once."""
-        self.assertEqual(crow_core.MEMORY_REVIEW_AT, (0.50, 0.75))
-        self.assertEqual(crow_core.review_due(100, 200, 0.0), 0.50)
+        sondern nur was wichtig ist pro Unterhaltung" -- and then 0.20 on top,
+        "dann sind wir safe". Three reviews per window, each mark once."""
+        self.assertEqual(crow_core.MEMORY_REVIEW_AT, (0.20, 0.50, 0.75))
+        self.assertEqual(crow_core.review_due(40, 200, 0.0), 0.20)
+        self.assertEqual(crow_core.review_due(100, 200, 0.20), 0.50)
         self.assertEqual(crow_core.review_due(150, 200, 0.50), 0.75)
         self.assertIsNone(crow_core.review_due(199, 200, 0.75))
+
+    def test_a_short_chat_reaches_the_first_mark(self):
+        """WHY 0.20 EXISTS. Plenty of conversations are answered and closed well
+        under half a 200k window; with 0.50 as the first mark every one of them
+        ended without anything being written down."""
+        self.assertEqual(crow_core.review_due(41_000, 200_000, 0.0), 0.20)
 
     def test_nothing_fires_below_the_first_mark(self):
         """NEGATIVE PROBE, and it is the whole complaint: a short exchange must
         pass without a review at all."""
-        self.assertIsNone(crow_core.review_due(99, 200, 0.0))
+        self.assertIsNone(crow_core.review_due(39, 200, 0.0))
         self.assertIsNone(crow_core.review_due(0, 200, 0.0))
 
     def test_a_turn_that_crosses_both_marks_reviews_once(self):
@@ -3002,6 +3009,7 @@ class BackgroundReviewTests(_MemoryFixture):
         same question of the same conversation and pay twice; 0.75 sees
         everything 0.50 would have."""
         self.assertEqual(crow_core.review_due(160, 200, 0.0), 0.75)
+        self.assertEqual(crow_core.review_due(120, 200, 0.0), 0.50)
 
     def test_an_unknown_window_is_not_a_full_one(self):
         """`fetch_n_ctx` answers 0 on any failure. Dividing by it would fire on

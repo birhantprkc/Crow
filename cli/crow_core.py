@@ -1412,10 +1412,16 @@ SESSION_MEMORY_KEY = "memory"
 # first build and robin stopped it on 2026-08-21: "es soll ja auch nicht jede
 # neue Zeile ins MEMORY, sondern nur was wichtig ist pro Unterhaltung".
 #
-# TWICE PER WINDOW, at half and at three quarters of the context. Each share
-# fires at most once, so a conversation gets two reviews and never a third:
-# once when there is enough material to be worth reading, and once more before
-# the rollover at 0.9 takes the whole thing away.
+# THREE TIMES PER WINDOW, at a fifth, a half and three quarters of the context.
+# Each share fires at most once, so a conversation gets three reviews and never
+# a fourth: one early, while the exchange is still small enough that a decision
+# in it is easy to see; one when there is real material; and one more before the
+# rollover at 0.9 takes the whole thing away.
+#
+# 0.20 IS THE SAFETY MARK (robin, 2026-08-21: "dann sind wir safe"). Plenty of
+# conversations here never reach half a 200k window -- they are answered and
+# closed -- and under two marks alone every one of those would end without
+# anything having been written down at all.
 #
 # HERMES COUNTS TURNS INSTEAD -- every 10 user prompts, `_turns_since_memory`
 # against `_memory_nudge_interval`. That does not transfer. A turn here can cost
@@ -1424,7 +1430,7 @@ SESSION_MEMORY_KEY = "memory"
 # chat the same evening, fourteen rounds stood at 25.2k. The share measures the
 # material, and it bounds the cost at two reviews per window rather than at
 # however many prompts somebody types.
-MEMORY_REVIEW_AT = (0.50, 0.75)
+MEMORY_REVIEW_AT = (0.20, 0.50, 0.75)
 
 # The highest share this chat has already been reviewed at. Absent is 0.0 here
 # rather than a third state: "never reviewed" and "reviewed at 0%" are the same
