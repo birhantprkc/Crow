@@ -2465,13 +2465,13 @@ class TheThemeAndTheSettingsSheetTests(unittest.TestCase):
         mark = self.source.index('id="mark"')
         help_at = self.source.index('id="helpwrap"')
         wbtns = self.source.index('id="wbtns"')
-        self.assertLess(mark, help_at, "Hilfe is not drawn after the wordmark")
-        self.assertLess(help_at, wbtns, "Hilfe is drawn past the window buttons")
+        self.assertLess(mark, help_at, "Help is not drawn after the wordmark")
+        self.assertLess(help_at, wbtns, "Help is drawn past the window buttons")
 
     def test_the_sheet_carries_the_three_categories(self):
-        """Aussehen, Skills, About -- named even where they are still empty, so
-        the shape is visible before the contents are."""
-        for cat in ("Aussehen", "Skills", "About"):
+        """Appearance, Skills, About -- named even where they are still empty,
+        so the shape is visible before the contents are."""
+        for cat in ("Appearance", "Skills", "About"):
             self.assertIn(">%s</button>" % cat, self.source,
                           "the settings sheet has no %s" % cat)
         for key in ("look", "skills", "about"):
@@ -3242,13 +3242,13 @@ class TheEmptyChatSaysSomethingTests(ApiCase):
         return crow_gui.greeting(time.mktime((2026, 8, 21, h, m, 0, 0, 0, -1)), name)
 
     def test_the_hour_decides_which_group_the_line_comes_from(self):
-        """A line that says "Guten Morgen" at eight in the evening is worse than
+        """A line that says "Good morning" at eight in the evening is worse than
         no line at all."""
         self.assertEqual([crow_gui.daypart(h) for h in (0, 4, 5, 10, 11, 17, 18, 22, 23)],
                          ["night", "night", "morning", "morning", "day", "day",
                           "evening", "evening", "night"])
-        self.assertIn("Morgen", self.at(8))
-        self.assertIn("Abend", self.at(20))
+        self.assertIn("morning", self.at(8).lower())
+        self.assertIn("evening", self.at(20).lower())
 
     def test_the_line_changes_without_the_hour_changing(self):
         """robin asked for it in as many words: not always the same one. Four
@@ -3273,8 +3273,8 @@ class TheEmptyChatSaysSomethingTests(ApiCase):
                 self.assertEqual(crow_gui.user_first_name(), "Robin")
 
     def test_a_machine_that_will_not_say_still_gets_a_greeting(self):
-        """NEGATIVE PROBE. "Hallo, Nutzer." is worse than "Hallo." -- and a
-        greeting that came out as "Hallo, ." would read as a defect."""
+        """NEGATIVE PROBE. "Hello, user." is worse than "Hello." -- and a
+        greeting that came out as "Hello, ." would read as a defect."""
         with mock.patch.object(crow_gui.getpass, "getuser",
                                side_effect=OSError("no such user")):
             self.assertEqual(crow_gui.user_first_name(), "")
@@ -3288,7 +3288,7 @@ class TheEmptyChatSaysSomethingTests(ApiCase):
                 self.assertTrue(line[:1].isupper(), line)
                 # THE CLAIM THIS CASE IS ABOUT, and it was missing: the name is
                 # DROPPED, not filled with a stand-in. Every check above passes
-                # happily on "Hallo, Nutzer." -- only the length says which of
+                # happily on "Hello, user." -- only the length says which of
                 # the two happened.
                 named = crow_gui.greeting(
                     time.mktime((2026, 8, 21, h, m, 0, 0, 0, -1)), "Robin")
@@ -3532,6 +3532,84 @@ class TheMemoryLineTests(unittest.TestCase):
         block = block[:block.index("}}") + 2]
         self.assertIn("animation:none", block)
         self.assertIn("var(--accent)", block)
+
+    def test_the_window_speaks_one_language_and_it_is_english(self):
+        """robin, 2026-08-21: "wenn ich englisch mit crow rede, ist der output
+        dann englisch ... es wird ja mehr englisch als deutsche user geben".
+
+        THERE IS NO LOCALISATION TO FALL BACK ON. `locale`, `gettext` and
+        `getdefaultlocale` appear zero times in all three modules, so a German
+        line is not the German version -- it is the ONLY version, shown to
+        everyone. Two of them had shipped: the greeting, and the memory notice.
+
+        DOCSTRINGS ARE EXEMPT ON PURPOSE. They quote robin, in German, on why
+        several of these decisions were made; a case that could not tell
+        documentation from an interface would forbid its own evidence.
+        """
+        import ast
+
+        tree = ast.parse(self.source)
+        docs = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)):
+                first = node.body[0] if node.body else None
+                if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)                         and isinstance(first.value.value, str):
+                    docs.add(id(first.value))
+        german = set("äöüÄÖÜß")
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)                     and id(node) not in docs:
+                hit = german & set(node.value)
+                self.assertFalse(hit, "German in a user-facing string, line %d: %r"
+                                      % (node.lineno, node.value[:60]))
+        self.assertIn("Memory updated", self.source)
+        self.assertIn("Good morning, %s.", self.source)
+
+    def test_the_window_speaks_one_language_and_it_is_english(self):
+        """robin, 2026-08-21: "es wird ja mehr englisch als deutsche user geben".
+
+        THERE IS NO LOCALISATION TO FALL BACK ON. `locale`, `gettext` and
+        `getdefaultlocale` appear zero times in all three modules, so a German
+        line is not the German version -- it is the ONLY version, shown to
+        everyone who installs this. Fourteen of them had shipped: the greeting,
+        the memory notice, `Hilfe`, `Einstellungen`, `Aussehen`, the two theme
+        buttons, the rail tooltip, the empty-skills line and five context-menu
+        rows. They were found one screenshot at a time, which is why this case
+        exists rather than another pair of eyes.
+
+        DOCSTRINGS AND COMMENTS ARE EXEMPT ON PURPOSE. They quote robin, in
+        German, on why several of these decisions were made; a case that could
+        not tell documentation from an interface would forbid its own evidence.
+        The first draft of this case did exactly that -- it also banned the word
+        `gettext`, and the comment explaining that Crow has no `gettext` failed
+        it.
+
+        IT DOES NOT FORBID LOCALISATION EITHER. What it holds is that ONE
+        language ships today. If a second one is ever built, this case is the
+        one to rewrite, not to route around.
+        """
+        import ast
+
+        for module in ("crow_gui.py", "crow.py", "crow_core.py"):
+            text = (HERE / module).read_text(encoding="utf-8")
+            tree = ast.parse(text)
+            docs = set()
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                     ast.AsyncFunctionDef)) and node.body:
+                    first = node.body[0]
+                    if isinstance(first, ast.Expr)                             and isinstance(first.value, ast.Constant)                             and isinstance(first.value.value, str):
+                        docs.add(id(first.value))
+            german = set("äöüÄÖÜß")
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant)                         and isinstance(node.value, str) and id(node) not in docs:
+                    self.assertFalse(german & set(node.value),
+                                     "German in a user-facing string, %s:%d -- %r"
+                                     % (module, node.lineno, node.value[:60]))
+        self.assertIn("Memory updated", self.source)
+        self.assertIn("Good morning, %s.", self.source)
+        self.assertIn(">Help</button>", self.source)
+        self.assertIn("<h2>Settings</h2>", self.source)
 
     def test_the_line_cannot_be_switched_off(self):
         """`--no-review` stops the WRITING; there is no flag that keeps the

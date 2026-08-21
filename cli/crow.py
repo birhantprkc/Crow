@@ -980,7 +980,7 @@ class TerminalTurnEvents(TurnEvents):
         line is enough. Without a write-approval gate this is the only notice
         that something was written, so it is printed, not dimmed away.
         """
-        print(f"{CROW_ACCENT}[Gedächtnis aktualisiert: {len(what or [])}]{RESET}\n",
+        print(f"{CROW_ACCENT}[memory updated: {len(what or [])}]{RESET}\n",
               file=self._out)
 
 

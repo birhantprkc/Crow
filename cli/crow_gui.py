@@ -303,18 +303,25 @@ def current_theme() -> str:
 # reading with a name attached, and a line that says "good morning" at eight in
 # the evening is worse than no line.
 #
-# GERMAN, like `Hilfe` and `Einstellungen` beside it: this sentence is addressed
-# to the person at the window, and the two controls that address them directly
-# are already in their language.
+# ENGLISH, LIKE EVERY OTHER LINE THIS CLIENT SPEAKS. These four groups were
+# written in German on 2026-08-21 and robin caught it the same evening: Crow has
+# no localisation at all -- `grep -c "locale\|gettext" cli/*.py` answers 0 three
+# times -- so a German line is not "the German version", it is the ONLY version,
+# shown to every user of a repository whose README, issues and every other
+# message are English.
+#
+# THE MODEL'S ANSWERS ARE A DIFFERENT QUESTION and stay as they were:
+# `DEFAULT_SYSTEM` tells it to reply in the language the user wrote in. What the
+# CLIENT says about itself is not part of that conversation.
 GREETINGS = {
-    "morning": ("Guten Morgen, %s.", "Moin, %s.", "Früh dran, %s?",
-                "Morgen, %s — womit fangen wir an?"),
-    "day":     ("Hallo, %s.", "Was steht an, %s?", "Da bist du ja, %s.",
-                "Woran arbeiten wir, %s?"),
-    "evening": ("Guten Abend, %s.", "Abend, %s.", "Noch wach, %s?",
-                "Feierabend oder noch was vor, %s?"),
-    "night":   ("Noch spät unterwegs, %s?", "Gute Nacht wäre auch eine Option, %s.",
-                "Nachtschicht, %s?", "Still hier um die Zeit, %s."),
+    "morning": ("Good morning, %s.", "Morning, %s.", "Up early, %s?",
+                "Morning, %s — where do we start?"),
+    "day":     ("Hello, %s.", "What's on, %s?", "There you are, %s.",
+                "What are we working on, %s?"),
+    "evening": ("Good evening, %s.", "Evening, %s.", "Still up, %s?",
+                "Winding down, or still something on, %s?"),
+    "night":   ("Still at it, %s?", "Good night would be an option too, %s.",
+                "Night shift, %s?", "Quiet here at this hour, %s."),
 }
 
 
@@ -364,7 +371,7 @@ def greeting(now: float | None = None, name: str | None = None) -> str:
     so this is driven rather than sampled.
 
     WITHOUT A NAME IT IS STILL A GREETING. The `%s` is dropped rather than filled
-    with a placeholder: "Hallo, Nutzer." is worse than "Hallo.".
+    with a placeholder: "Hello, user." is worse than "Hello.".
     """
     stamp = time.localtime(now) if now is not None else time.localtime()
     lines = GREETINGS[daypart(stamp.tm_hour)]
@@ -1116,16 +1123,16 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
        it toggles. Inline SVG for the reason the microphone is: the system font
        has no such character, and an emoji would drag its own colour in. -->
   <button id="railtoggle" class="pywebview-no-drag" onclick="crow.toggleRail()"
-          title="Chatleiste ein- und ausklappen">
+          title="Show or hide the chat rail">
     <svg viewBox="0 0 20 20" width="15" height="15" fill="none"
          stroke="currentColor" stroke-width="1.6" aria-hidden="true">
       <rect x="2.5" y="4" width="15" height="12" rx="2"></rect>
       <line x1="8" y1="4" x2="8" y2="16"></line></svg></button>
   <span id="mark">CR<span>O</span>W</span><span id="ver"></span>
   <div id="helpwrap" class="pywebview-no-drag">
-    <button id="help" onclick="crow.helpMenu()">Hilfe</button>
+    <button id="help" onclick="crow.helpMenu()">Help</button>
     <div id="helpmenu" hidden>
-      <button onclick="crow.openSettings()">Einstellungen</button>
+      <button onclick="crow.openSettings()">Settings</button>
     </div>
   </div>
   <div id="wbtns" class="pywebview-no-drag">
@@ -1138,27 +1145,27 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 <div id="settings" hidden onclick="crow.settingsBackdrop(event)">
   <div class="sheet">
     <div class="shead">
-      <h2>Einstellungen</h2>
+      <h2>Settings</h2>
       <button class="sclose" onclick="crow.closeSettings()" title="close">&#10005;</button>
     </div>
     <div class="sbody">
       <nav id="scats">
-        <button class="on" onclick="crow.settingsCat('look')">Aussehen</button>
+        <button class="on" onclick="crow.settingsCat('look')">Appearance</button>
         <button onclick="crow.settingsCat('skills')">Skills</button>
         <button onclick="crow.settingsCat('about')">About</button>
       </nav>
       <div id="spane">
         <section data-cat="look">
-          <h3>Design</h3>
+          <h3>Theme</h3>
           <div id="themes">
-            <button data-theme="dark"  onclick="crow.setTheme('dark')">Dunkel</button>
-            <button data-theme="light" onclick="crow.setTheme('light')">Hell</button>
+            <button data-theme="dark"  onclick="crow.setTheme('dark')">Dark</button>
+            <button data-theme="light" onclick="crow.setTheme('light')">Light</button>
             <button data-theme="crow"  onclick="crow.setTheme('crow')">Crow</button>
           </div>
         </section>
         <section data-cat="skills" hidden>
           <h3>Skills</h3>
-          <p class="empty">Noch nichts hier.</p>
+          <p class="empty">Nothing here yet.</p>
         </section>
         <section data-cat="about" hidden>
           <h3>About</h3>
@@ -1750,11 +1757,11 @@ const crow = {
   // `'); doSomething('` is a label and cannot become one.
   railPlan(kind,entry,archived){
     if(kind==="rail")
-      return [{act:"newchat", label:"neuer Chat"},
-              {act:"newproj", label:"Projekt erstellen"}];
+      return [{act:"newchat", label:"new chat"},
+              {act:"newproj", label:"new project"}];
     if(kind==="project")
-      return [{act:"dropproj", label:"Projekt entfernen", arg:entry.path,
-               note:"Chats und Ordner bleiben"}];
+      return [{act:"dropproj", label:"remove project", arg:entry.path,
+               note:"chats and folder stay"}];
     const rows=[{act:"rename", label:"rename"}];
     // MOVING AN UNSAVED CHAT IS OFFERED TOO: it binds the live boundary, which
     // is `choose_root`'s job and works without a file. What it must not do is
@@ -1762,10 +1769,10 @@ const crow = {
     // as a row that failed.
     const here=this.projectOf(entry.root);
     const others=(this.projects||[]).filter(p=>!this.sameDir(p.path,entry.root));
-    if(others.length) rows.push({sep:true, head:"zu Projekt"});
+    if(others.length) rows.push({sep:true, head:"to project"});
     others.forEach(p=>rows.push({act:"toproj", label:p.name, arg:p.path,
                                  indent:true}));
-    if(here) rows.push({act:"toproj", label:"aus Projekt lösen", arg:"",
+    if(here) rows.push({act:"toproj", label:"out of project", arg:"",
                         sep:!others.length});
     rows.push({sep:true});
     rows.push({act:"arch", label:archived ? "restore" : "archive"});
@@ -2531,7 +2538,7 @@ class Turn(TurnEvents):
         would move the head of the next prompt and cost the full prefill this
         whole feature is built to avoid.
         """
-        self._put({"k": "memory", "t": "Gedächtnis aktualisiert",
+        self._put({"k": "memory", "t": "Memory updated",
                    "n": len(what or [])})
 
 
