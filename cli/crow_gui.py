@@ -466,12 +466,12 @@ details.think[open] .caret{transform:rotate(90deg)}
 #reasonmenu{min-width:0;max-width:260px}
 #reasonmenu .head{color:#fff}
 #reasonmenu button b{color:#fff}
-/* The prefill sentence, under the list instead of under a handle. The reserved two lines are
-   gone with the slider: the panel is built once on open and nothing moves inside it afterwards,
-   so there is no jump left to absorb. The line is ABSENT rather than empty when the change
-   renders the same bytes -- crow_core.reasoning_change_rerenders decides that, not the page. */
-#reasonmenu .cost{color:var(--dimmer);font-size:10.5px;line-height:1.35;
-  border-top:1px solid var(--line-soft);margin-top:4px;padding:7px 9px 3px}
+/* THE PREFILL SENTENCE IS NOT IN THIS MENU, and that is not an oversight -- robin cut it on
+   sight, 2026-08-21, and nothing was lost with it. `set_reasoning` already answers with
+   crow_core's own note in the flow the moment a level is picked, so the menu's copy said the same
+   thing one click earlier and was the widest element in a panel of three short words: it refused
+   to wrap inside the cap and put a horizontal scrollbar under the list. The rule it announced
+   still holds and is still decided in the core, by reasoning_change_rerenders. */
 </style></head><body>
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
@@ -838,8 +838,7 @@ const crow = {
       '<button class="reasonrow" onclick="crow.chooseReason(this.dataset.k)">'
       + '<span class="tick"></span><b></b><span class="what"></span></button>');
     m.innerHTML = '<div class="head">thinking level</div>'
-      + (rows.length ? rows.join("") : '<div class="what none">none in the manifest</div>')
-      + '<div class="cost"></div>';
+      + (rows.length ? rows.join("") : '<div class="what none">none in the manifest</div>');
     const els = m.querySelectorAll("button.reasonrow");
     groups.forEach((g,i) => { const el = els[i];
       if(!el) return;
@@ -857,10 +856,6 @@ const crow = {
       const twins = g.filter(x => x !== "off" && x !== name);
       if(twins.length) bits.push(twins.join(", ") + " renders the same");
       el.querySelector(".what").textContent = bits.join(" · "); });
-    // ONE SENTENCE, NOT ONE PER ROW, and only when there is a step to cross. Within a group no
-    // byte of the prompt changes, so a single-group model is charged nothing and told nothing.
-    m.querySelector(".cost").textContent = (groups.length > 1)
-      ? "switching re-reads the whole prompt -- the next turn pays a prefill" : "";
     m.hidden=false; },
 
   chooseReason(name){ $("#reasonmenu").hidden=true; pywebview.api.set_reasoning(name); },
