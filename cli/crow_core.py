@@ -571,6 +571,27 @@ TOOLS = [
     # on how somebody's Python was compiled. A session file would then stop
     # matching itself after a Python upgrade. So the tool is always there and
     # answers "unavailable, nothing was searched" where it cannot work.
+    # #124. THE DESCRIPTION SAYS WHEN TO WRITE ONE, because left to itself a
+    # model saves a summary of the turn it just had. A skill is worth writing
+    # only if the NEXT session would otherwise repeat the work.
+    _fn("skill",
+        "Your own procedures, kept between sessions. The prompt lists the ones "
+        "you have by name and description only -- call this with action=read to "
+        "get the steps of one before you follow it. Call action=save when a "
+        "conversation has worked out a repeatable WAY of doing something that "
+        "would otherwise be rediscovered: the order of steps, the flags that "
+        "worked, the check that catches the usual mistake. Do NOT save facts "
+        "about this project -- those are `memory` -- and do not save a summary "
+        "of what just happened. Rewrite an existing skill with save rather than "
+        "adding a second one beside it.",
+        {"action": dict(_STR, description="read, save or remove."),
+         "name": dict(_STR, description="Lower-case letters, digits and hyphens."),
+         "description": dict(_STR, description="One line: WHEN this applies. It is "
+                                               "all the prompt carries about the "
+                                               "skill, so it decides whether the "
+                                               "skill is ever chosen."),
+         "body": dict(_STR, description="For save: the steps, in full.")},
+        ["action"]),
     _fn("session_search",
         "Search everything said in earlier conversations, including ones from "
         "months ago. Costs no context until you call it, so use it instead of "
@@ -1479,6 +1500,9 @@ REASONING_COST_NOTE = "the level changes the head of every prompt -- the next tu
 # change, not after it. Binding a different folder to an open chat swaps that
 # chat's project memory, and the memory sits in the head.
 MEMORY_COST_NOTE = "the project memory changed -- the next turn pays a full prefill"
+
+# #124. The same bill again, and said the same way round: before the change.
+SKILL_COST_NOTE = "the skill list changed -- the next turn pays a full prefill"
 
 
 def session_reasoning(path: str | None = None) -> str | None:
@@ -3640,6 +3664,220 @@ MEMORY_FULL_AT = 0.8
 MEMORY_TARGETS = ("memory", "user")
 
 
+# ---------------------------------------------------------------- #124 -----
+# SKILLS. A procedure the model worked out once, written down so the next
+# session starts from it instead of from scratch. Memory is what is TRUE;
+# a skill is what to DO.
+#
+#   %LOCALAPPDATA%\Crow\skills\<name>\SKILL.md
+#
+# GLOBAL, NOT PER PROJECT (robin, 2026-08-21). A procedure that only works in
+# one directory is not a procedure, it is a note -- and notes already have a
+# home one section up.
+#
+# A DIRECTORY PER SKILL, NOT A FILE, which costs nothing today and is the
+# difference between adding a script to a skill later and changing the format
+# later. Both of the clients this is modelled on landed on the same shape
+# independently.
+#
+# ONLY THE NAME AND THE DESCRIPTION GO INTO THE PROMPT. The body is read when
+# the skill applies, through the ordinary `read_file` budget. This is the exact
+# INVERSE of memory, and the two inversions have one cause: memory is small
+# enough to always carry and useless if it has to be fetched; a skill is too
+# big to always carry and perfectly useful fetched. That is also why `skill`
+# HAS a `read` action while `memory` deliberately has none.
+SKILL_FILE = "SKILL.md"
+SKILLS_DIR = os.path.join(os.path.dirname(SESSION_DIR), "skills")
+
+# The whole listing, however many skills exist. AN EIGHTH OF ONE TOOL READ, and
+# a cap on the LIST rather than on each entry, because the failure this bounds
+# is twenty skills of legal length, not one long one. The twelfth skill costs
+# nothing extra -- it simply does not fit, and the head says so instead of
+# growing.
+SKILL_HEAD_CHARS = 2_000
+SKILL_DESC_CHARS = 200
+SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,48}[a-z0-9]$")
+
+
+def skill_dir(name: str) -> str:
+    return os.path.join(SKILLS_DIR, name)
+
+
+def skill_path(name: str) -> str:
+    return os.path.join(skill_dir(name), SKILL_FILE)
+
+
+def parse_skill(text: str) -> "tuple[dict, str]":
+    """(frontmatter, body) out of a SKILL.md. Both halves survive a broken file.
+
+    HAND-WRITTEN FILES ARE THE NORMAL CASE, not an edge one: the whole point of
+    plain Markdown with a fence is that a person can open it. So a file with no
+    fence at all is a body with no metadata rather than an error, and a key
+    without a colon is skipped rather than fatal.
+    """
+    lines = text.replace("\r\n", "\n").split("\n")
+    if not lines or lines[0].strip() != "---":
+        return {}, text.strip()
+    head = {}
+    for i in range(1, len(lines)):
+        if lines[i].strip() == "---":
+            return head, "\n".join(lines[i + 1:]).strip()
+        key, sep, value = lines[i].partition(":")
+        if sep:
+            head[key.strip().lower()] = value.strip()
+    # An unterminated fence is a file somebody is in the middle of writing.
+    return head, ""
+
+
+def read_skill(name: str) -> "dict | None":
+    """One skill as {name, description, enabled, body}, or None if it is not there.
+
+    THE NAME COMES FROM THE DIRECTORY, not from the frontmatter, and that is the
+    one place the two could disagree. A directory is unique by construction and a
+    key is not, so the directory wins -- a `name:` that says something else is
+    ignored rather than obeyed.
+    """
+    try:
+        with open(skill_path(name), encoding="utf-8") as fh:
+            head, body = parse_skill(fh.read())
+    except Exception:                       # noqa: BLE001 - absent is None
+        return None
+    return {"name": name,
+            "description": (head.get("description") or "")[:SKILL_DESC_CHARS],
+            # ABSENT MEANS ON. A skill somebody wrote by hand, with no `enabled`
+            # line, is a skill they want -- reading that as "off" would hide it
+            # and give them nothing to click, because the row would not be drawn.
+            "enabled": (head.get("enabled") or "true").strip().lower() != "false",
+            "body": body}
+
+
+def skills() -> "list[dict]":
+    """Every skill on disk, by name. Enabled and disabled alike -- the settings
+    sheet has to draw the ones that are off, or they cannot be switched on."""
+    try:
+        names = sorted(os.listdir(SKILLS_DIR))
+    except OSError:
+        return []
+    out = []
+    for name in names:
+        skill = read_skill(name)
+        if skill is not None:
+            out.append(skill)
+    return out
+
+
+def write_skill(name: str, description: str, body: str,
+                enabled: bool = True) -> None:
+    """Write one SKILL.md whole. Creates the directory."""
+    os.makedirs(skill_dir(name), exist_ok=True)
+    text = ("---\nname: %s\ndescription: %s\nenabled: %s\n---\n\n%s\n"
+            % (name, description.strip()[:SKILL_DESC_CHARS], "true" if enabled else "false",
+               body.strip()))
+    with open(skill_path(name), "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def set_skill_enabled(name: str, enabled: bool) -> bool:
+    """Flip one skill on or off, keeping everything else in the file.
+
+    IT REWRITES THE FILE RATHER THAN A SECOND LIST, which is the whole reason
+    `enabled` lives in the frontmatter: the switch in the settings sheet and a
+    person editing the file by hand are the same act, and there is no third
+    place that can disagree with either.
+    """
+    skill = read_skill(name)
+    if skill is None or skill["enabled"] == enabled:
+        return False
+    write_skill(name, skill["description"], skill["body"], enabled)
+    return True
+
+
+def skill_block() -> str:
+    """What the prompt says about skills: the enabled ones, name and description.
+
+    THE BODY IS NOT IN HERE and that is the design. What the model needs in
+    every prompt is enough to know a skill EXISTS and when it applies; what it
+    needs at that moment is the body, and one `skill` call fetches it.
+
+    THE LIST IS CUT AT THE LIMIT AND SAYS SO. A silent truncation would leave
+    the model certain it had seen every skill, which is worse than knowing that
+    three are out of view -- it would stop looking.
+    """
+    rows, used, dropped = [], 0, 0
+    for skill in skills():
+        if not skill["enabled"]:
+            continue
+        line = "  %s -- %s" % (skill["name"], skill["description"] or "(no description)")
+        if used + len(line) + 1 > SKILL_HEAD_CHARS:
+            dropped += 1
+            continue
+        rows.append(line)
+        used += len(line) + 1
+    if not rows and not dropped:
+        return ""
+    head = ("SKILLS (call `skill` with action=read and the name to get the steps)\n"
+            + "\n".join(rows))
+    if dropped:
+        head += "\n  [%d more did not fit -- ask for a name you remember]" % dropped
+    return head
+
+
+def tool_skill(action: str, name: "str | None" = None,
+               description: "str | None" = None, body: "str | None" = None) -> str:
+    """Read, write or drop one skill. Returns JSON, like `memory` beside it.
+
+    `save` IS CREATE AND REPLACE IN ONE ACTION, unlike `memory`'s three. A skill
+    is one document with a name, so "write this down under that name" is the
+    whole operation; splitting it would make the model ask whether the skill
+    already exists before it could write one.
+    """
+    if action == "read":
+        skill = read_skill(name or "")
+        if skill is None:
+            return json.dumps({"success": False,
+                               "error": "no skill named %r. There is: %s"
+                                        % (name, ", ".join(s["name"] for s in skills())
+                                           or "(none)")})
+        return json.dumps({"success": True, "name": skill["name"],
+                           "description": skill["description"], "body": skill["body"]})
+
+    if action == "save":
+        if not name or not SKILL_NAME.match(name):
+            return json.dumps({"success": False,
+                               "error": "name must be lower-case letters, digits and "
+                                        "hyphens, 3 to 50 characters -- got %r" % name})
+        if not description or not description.strip():
+            return json.dumps({"success": False,
+                               "error": "a skill without a description can never be "
+                                        "chosen: the description is all the prompt "
+                                        "carries about it."})
+        if not body or not body.strip():
+            return json.dumps({"success": False, "error": "save needs a body"})
+        # THE DESCRIPTION IS SCANNED, THE BODY IS NOT, and the split is the same
+        # rule the memory scan follows: what lands in the system prompt is
+        # checked, what is fetched on demand is a tool result like any other.
+        # Scanning bodies was considered and dropped -- Hermes ships that
+        # scanner OFF because real procedures legitimately touch `~/.ssh/` and
+        # name API keys, and a filter that eats those gets routed around.
+        why = memory_threat(description)
+        if why:
+            return json.dumps({"success": False, "error": "refused: %s" % why})
+        existed = read_skill(name) is not None
+        keep = read_skill(name)["enabled"] if existed else True
+        write_skill(name, description, body, keep)
+        return json.dumps({"success": True, "action": "replaced" if existed else "created",
+                           "name": name})
+
+    if action == "remove":
+        if read_skill(name or "") is None:
+            return json.dumps({"success": False, "error": "no skill named %r" % name})
+        shutil.rmtree(skill_dir(name), ignore_errors=True)
+        return json.dumps({"success": True, "action": "remove", "name": name})
+
+    return json.dumps({"success": False,
+                       "error": "unknown action %r -- use read, save or remove" % action})
+
+
 def memory_path(root: "str | None" = None) -> "str | None":
     """Where this chat's PROJECT memory lives, or None when it has no folder.
 
@@ -3801,6 +4039,21 @@ def memory_block(root: "str | None" = None) -> str:
     elif path is None and blocks:
         blocks.append("(no working directory bound -- this chat has no project memory)")
     return "\n\n".join(blocks)
+
+
+def prompt_head(root: "str | None" = None) -> str:
+    """Everything this chat carries above the conversation: memory, then skills.
+
+    ONE FUNCTION, BECAUSE ONE STRING IS PINNED. The chat file holds a single
+    head; if two callers composed memory and skills in two orders, two chats
+    would carry two byte-different heads for one set of facts and neither could
+    reuse the other's cache.
+
+    ORDER IS FIXED: what is TRUE before what to DO. Not a preference -- it is
+    part of the prefix, and a sortable head is two caches.
+    """
+    parts = [p for p in (memory_block(root), skill_block()) if p]
+    return "\n\n".join(parts)
 
 
 def system_with_memory(system: "str | None", block: "str | None") -> "str | None":
@@ -5070,6 +5323,7 @@ TOOL_IMPL = {
     "web_search": tool_web_search,
     "fetch_url": tool_fetch_url,
     "memory": tool_memory,
+    "skill": tool_skill,
     "session_search": tool_session_search,
 }
 
@@ -5111,6 +5365,9 @@ TOOL_CLASS = {
     # #123. `reading`, and it is the plainest case in the table: it opens files
     # this client wrote, on this machine, and returns what they say. No level
     # asks before a read, which is the rule that was already argued out above.
+    # #124. `memory`'s class, not `writing`: it reaches two directories this
+    # client owns, never the user's work. The reasoning is written out above.
+    "skill": "memory",
     "session_search": "reading",
 }
 
@@ -5283,7 +5540,7 @@ _SEEN: dict[tuple, str] = {}
 # able to answer "no duplicate" the second time, and `remove` then `add` of one
 # entry are two identical calls with two different correct answers. Answering
 # the second from the first would turn a correction into a silent no-op.
-NEVER_CACHED = frozenset({"run_command", "memory"})
+NEVER_CACHED = frozenset({"run_command", "memory", "skill"})
 READ_GATED = frozenset({"write_file", "edit_file"})
 
 
@@ -5402,6 +5659,12 @@ MEMORY_REVIEW_PROMPT = (
     "single line. If an existing entry already covers it, use `replace` to "
     "sharpen that one instead of adding beside it. The store is small and is "
     "never trimmed for you.\n"
+    "SEPARATELY, AND USUALLY NOT: if this conversation worked out a repeatable "
+    "WAY of doing something -- an order of steps, the flags that worked, the "
+    "check that catches the usual mistake -- save it with the `skill` tool "
+    "instead. A skill is what to DO; memory is what is TRUE. Do not save a "
+    "summary of this conversation as a skill, and do not save a procedure you "
+    "have not actually seen work here.\n"
     "Saying nothing is the normal outcome and the right one whenever you are "
     "unsure: an entry you regret costs every future session, an entry you "
     "skipped costs nothing. If nothing qualifies, call nothing and reply with "
@@ -5460,17 +5723,21 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
     saved = []
     for call in calls:
         function = call.get("function") or {}
-        # Anything but `memory` is a model that did not read the question. It is
-        # dropped rather than run: the user is not at the keyboard for this, so
-        # a write or a shell command here would have nobody to refuse it.
-        if function.get("name") != "memory":
+        # THE TWO THIS PASS MAY CALL, and nothing else. Anything further is a
+        # model that did not read the question, and it is dropped rather than
+        # run: the user is not at the keyboard for a background pass, so a write
+        # or a shell command here would have nobody to refuse it.
+        if function.get("name") not in ("memory", "skill"):
             continue
         try:
-            result = json.loads(run_tool("memory", function.get("arguments") or "{}"))
+            result = json.loads(run_tool(function["name"],
+                                         function.get("arguments") or "{}"))
         except Exception:                   # noqa: BLE001
             continue
         if result.get("success") and result.get("action"):
-            one = "%s %s" % (result["action"], result.get("target", "memory"))
+            one = "%s %s" % (result["action"],
+                             result.get("target") or result.get("name")
+                             or function["name"])
             saved.append(one)
             # The moment it is on disk, not the moment the pass is done.
             if events is not None:

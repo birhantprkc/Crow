@@ -842,6 +842,26 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    rather than `pre` so a long single-line note still wraps at the column
    instead of running off the side. */
 .note{color:var(--dimmer);font-size:11.5px;white-space:pre-wrap}
+/* #124. THE SKILL ROWS AND THEIR SWITCH. A switch rather than a checkbox
+   because what it controls is a STATE kept in a file, not a choice inside a
+   form -- and because the row has to read as on or off from across the sheet.
+   Every colour comes from the palette, so all three themes answer for it. */
+.shint{color:var(--dimmer);font-size:11.5px;margin:0 0 10px}
+.srow{display:flex;align-items:flex-start;gap:10px;padding:8px 0;
+  border-top:1px solid var(--raised)}
+.srow:first-child{border-top:none}
+.srow .stext{flex:1;min-width:0}
+.srow .sname{font-weight:600;font-size:12.5px}
+.srow .sdesc{color:var(--dim);font-size:11.5px;margin-top:2px}
+.srow.off .sname,.srow.off .sdesc{color:var(--dimmer)}
+.sw{flex:0 0 auto;width:34px;height:19px;border-radius:10px;border:none;
+  background:var(--raised);position:relative;cursor:pointer;padding:0;
+  transition:background .15s ease}
+.sw::after{content:"";position:absolute;top:3px;left:3px;width:13px;height:13px;
+  border-radius:50%;background:var(--dimmer);
+  transition:transform .15s ease,background .15s ease}
+.sw.on{background:color-mix(in srgb,var(--accent) 40%,transparent)}
+.sw.on::after{transform:translateX(15px);background:var(--accent)}
 /* #122. THE MEMORY LINE, AND IT IS NOT A NOTE. A note is grey because what
    notes say may be skimmed past; this one is the only sign a person gets that
    something entered the head of their next session, and with no approval gate
@@ -1165,7 +1185,9 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
         </section>
         <section data-cat="skills" hidden>
           <h3>Skills</h3>
-          <p class="empty">Nothing here yet.</p>
+          <p class="shint">What Crow has worked out and kept. Switching one off
+             takes it out of the prompt; the file stays.</p>
+          <div id="skilllist"></div>
         </section>
         <section data-cat="about" hidden>
           <h3>About</h3>
@@ -1424,7 +1446,43 @@ const crow = {
     document.querySelectorAll("#themes button").forEach(
       b => b.classList.toggle("on", b.dataset.theme===now));
     $("#aboutver").textContent=$("#ver").textContent;
+    this.drawSkills();
     $("#settings").hidden=false;
+  },
+  // #124. ASKED FOR EVERY TIME THE SHEET OPENS, never cached in the page: the
+  // list changes behind the window's back, because the background review writes
+  // skills without anybody clicking anything.
+  drawSkills(){
+    pywebview.api.skills().then(list => {
+      const box=$("#skilllist"); box.textContent="";
+      if(!list.length){
+        const p=document.createElement("p");
+        p.className="empty"; p.textContent="Nothing here yet.";
+        box.appendChild(p); return; }
+      list.forEach(sk => {
+        const row=document.createElement("div");
+        row.className="srow"+(sk.enabled?"":" off");
+        const text=document.createElement("div"); text.className="stext";
+        const n=document.createElement("div"); n.className="sname"; n.textContent=sk.name;
+        const d=document.createElement("div"); d.className="sdesc";
+        d.textContent=sk.description||"(no description)";
+        text.appendChild(n); text.appendChild(d);
+        // A BUTTON WIRED FROM THE OBJECT, never an onclick string: a skill name
+        // is model-written text, and the rail learned that lesson in #119.
+        const sw=document.createElement("button");
+        sw.className="sw"+(sk.enabled?" on":"");
+        sw.title=sk.enabled?"in the prompt":"not in the prompt";
+        sw.onclick=()=>this.toggleSkill(sk.name,row,sw);
+        row.appendChild(text); row.appendChild(sw);
+        box.appendChild(row); }); }); },
+  toggleSkill(name,row,sw){
+    // PAINTED FIRST, WRITTEN SECOND, the way `setTheme` does it: the write is a
+    // file, and a click that waits for one feels broken.
+    const on=!sw.classList.contains("on");
+    sw.classList.toggle("on",on);
+    row.classList.toggle("off",!on);
+    sw.title=on?"in the prompt":"not in the prompt";
+    pywebview.api.toggle_skill(name,on);
   },
   closeSettings(){ $("#settings").hidden=true; },
   // THE BACKDROP CLOSES, THE SHEET DOES NOT. Without the target test a click on
@@ -2723,7 +2781,7 @@ class Api:
         # head moves, so the next turn is a full prefill. A bind that changes no
         # memory says nothing, which is what the return value is for.
         if self._conversation.memory is not None:
-            if self._conversation.repin_memory(crow_core.memory_block()):
+            if self._conversation.repin_memory(crow_core.prompt_head()):
                 self.push({"k": "note", "t": crow_core.MEMORY_COST_NOTE})
         self.push_root()
         # #119: AND THE LIST IS REDRAWN, because the boundary is now WHERE a chat
@@ -2751,7 +2809,7 @@ class Api:
             return
         pinned = crow_core.session_memory(chat) if chat else None
         self._conversation.pin_memory(
-            pinned if pinned is not None else crow_core.memory_block())
+            pinned if pinned is not None else crow_core.prompt_head())
         # #122. THE REVIEW MARKS COME BACK WITH THE CHAT. Without this a
         # conversation reopened at 80% would be reviewed at 0.50 and 0.75 all
         # over again -- twice per OPENING instead of twice per window.
@@ -4441,6 +4499,33 @@ class Api:
             self.push({"k": "mic", "state": "off", "note": "nothing was said"})
             return
         self.push({"k": "mic", "state": "off", "text": text})
+
+    def skills(self) -> list:
+        """Every skill on disk, for the settings sheet. Off ones included.
+
+        A SHEET THAT ONLY LISTED THE ENABLED ONES would have no row to click for
+        the disabled ones, so switching one back on would need a text editor.
+        The body is left out: the sheet shows what a skill IS FOR, and the steps
+        are the model's business.
+        """
+        return [{"name": sk["name"], "description": sk["description"],
+                 "enabled": sk["enabled"]} for sk in crow_core.skills()]
+
+    def toggle_skill(self, name: str, enabled: bool) -> bool:
+        """Put a skill into the prompt or take it out. True when the file moved.
+
+        THE OPEN CHAT IS RE-PINNED HERE, and the cost is announced before it is
+        paid -- the same shape `_bind_root` uses. Without it the switch would
+        look broken in the most confusing way possible: the row flips, the file
+        changes, and the running conversation keeps the head it was pinned with,
+        so nothing about the model's behaviour changes until the next chat.
+        """
+        if not crow_core.set_skill_enabled(name, bool(enabled)):
+            return False
+        if self._conversation.memory is not None:
+            if self._conversation.repin_memory(crow_core.prompt_head()):
+                self.push({"k": "note", "t": crow_core.SKILL_COST_NOTE})
+        return True
 
     def set_theme(self, name: str) -> bool:
         """The picker in Aussehen. True when the choice reached the disk.

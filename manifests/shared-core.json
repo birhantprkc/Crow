@@ -80,6 +80,11 @@
    "why": "#120. The two memory stores are written through one function because BOTH surfaces have to fill the same files: a terminal that saved to one place and a window that saved to another would be two memories for one user. The bounds live here too -- the limit that refuses instead of trimming, the duplicate that answers success, the injection scan -- because every one of them is a rule about what may enter the system prompt, and the system prompt is the core's."
   },
   {
+   "name": "tool_skill",
+   "kind": "def",
+   "why": "#124. Skills are global and both surfaces read the same directory, so the file format, the frontmatter and the enabled flag are core rules -- a window that spelled `enabled` differently from the terminal would show a skill as on while the prompt left it out. The read action lives here for the same reason the memory tool has none: what is in the head is decided here, and a skill body is deliberately not in it."
+  },
+  {
    "name": "tool_session_search",
    "kind": "def",
    "why": "#123. The FTS5 index is derived from the chat files, so it must be built by whoever can see all of them -- which is the core, not a surface. A second builder in the window would index a different set the first time either side changed where a chat is written."

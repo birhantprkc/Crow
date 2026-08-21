@@ -3620,6 +3620,71 @@ class TheMemoryLineTests(unittest.TestCase):
             self.assertNotIn(hidden, self.source)
 
 
+class TheSkillSheetTests(unittest.TestCase):
+    """#124: the switch in the settings sheet, and what it is allowed to be."""
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+
+    def test_the_sheet_has_a_row_per_skill_and_a_switch(self):
+        """The category existed with "Nothing here yet." since the sheet was
+        built; this is the ticket that fills it."""
+        self.assertIn('<div id="skilllist"></div>', self.source)
+        self.assertIn(".srow{", self.css)
+        self.assertIn(".sw{", self.css)
+        self.assertIn(".sw.on{", self.css)
+
+    def test_a_skill_name_can_never_become_code(self):
+        """A skill name is MODEL-WRITTEN TEXT. The rail learned this in #119 --
+        a project called `'); alert('` is a label and must stay one -- and the
+        same rule holds here, where the writer is not even a person."""
+        self.assertIn("sw.onclick=()=>this.toggleSkill(", self.source)
+        self.assertNotIn('onclick="crow.toggleSkill', self.source)
+        drawn = self.source[self.source.index("drawSkills(){"):]
+        drawn = drawn[:drawn.index("toggleSkill(name,row,sw)")]
+        self.assertNotIn("innerHTML", drawn)
+
+    def test_the_list_is_asked_for_every_time_the_sheet_opens(self):
+        """It changes behind the window's back: the background review writes
+        skills without anybody clicking anything, so a list cached in the page
+        would show yesterday's set."""
+        opener = self.source[self.source.index("openSettings(){"):]
+        opener = opener[:opener.index("closeSettings()")]
+        self.assertIn("this.drawSkills();", opener)
+
+    def test_switching_one_off_repins_and_says_what_it_costs(self):
+        """Without the re-pin the switch looks broken in the most confusing way
+        available: the row flips, the file changes, and the running conversation
+        keeps the head it was pinned with -- so nothing the model does changes
+        until the next chat."""
+        toggle = self.source[self.source.index("def toggle_skill"):]
+        toggle = toggle[:toggle.index("\n    def ", 10)]
+        self.assertIn("crow_core.set_skill_enabled", toggle)
+        self.assertIn("repin_memory(crow_core.prompt_head())", toggle)
+        self.assertIn("SKILL_COST_NOTE", toggle)
+        self.assertLess(toggle.index("set_skill_enabled"), toggle.index("repin_memory"),
+                        "the head is rebuilt before the file it is built from")
+
+    def test_the_sheet_is_shown_the_disabled_ones_too(self):
+        """NEGATIVE PROBE: a sheet that listed only the enabled skills would
+        have no row to click for the others, so switching one back on would
+        need a text editor."""
+        api = self.source[self.source.index("    def skills(self)"):]
+        api = api[:api.index("\n    def ", 10)]
+        self.assertIn("crow_core.skills()", api)
+        self.assertNotIn("enabled\"]", api.split("return")[0])
+        self.assertNotIn('sk["body"]', api)
+
+    def test_the_pinned_head_is_built_in_one_place(self):
+        """Memory and skills are two stores and ONE head. Two composers would be
+        two byte-different heads for one set of facts, and neither chat could
+        reuse the other's cache."""
+        self.assertEqual(self.source.count("crow_core.prompt_head()"), 3)
+        self.assertNotIn("crow_core.memory_block()", self.source)
+        self.assertNotIn("crow_core.skill_block()", self.source)
+
+
 class TheMemoryPinWiringTests(unittest.TestCase):
     """#121 in the window: the pin is taken AFTER the boundary, never before.
 
