@@ -515,6 +515,29 @@ class TheCostLineCarriesTheShareTests(ApiCase):
         turn.round_finished({})
         self.assertIsNone(turn.share)
 
+    def test_the_share_is_the_turn_and_not_the_last_round(self):
+        """THE ONE THAT WAS RED BEFORE #117. Each round used to overwrite the value, and the page
+        then stamped the survivor onto every thought block under a label reading "% of the turn".
+
+        90 % of thinking followed by 10 % is a turn of 50 %, not a turn of 10 %. The two rounds
+        carry the same number of characters on purpose: taking the LAST round gives 10, a mean
+        over rounds gives 50 as well, and summing gives 50 -- so the case is cut to separate
+        last-round from the other two, and the case below separates summing from averaging.
+        """
+        turn = crow_gui.Turn(lambda m: None)
+        turn.round_finished({"_reasoning_chars": 90, "_content_chars": 10})
+        turn.round_finished({"_reasoning_chars": 10, "_content_chars": 90})
+        self.assertAlmostEqual(turn.share, 50.0)
+
+    def test_a_long_round_outweighs_a_short_one(self):
+        """The denominator is CHARACTERS, not rounds. 900 thought against 100 answer, then a tool
+        round of 1 against 99, is 901 of 1100 -- 82 %. A mean over the two rounds would say 45 and
+        let a round that produced almost nothing halve the figure of the one that did the work."""
+        turn = crow_gui.Turn(lambda m: None)
+        turn.round_finished({"_reasoning_chars": 900, "_content_chars": 100})
+        turn.round_finished({"_reasoning_chars": 1, "_content_chars": 99})
+        self.assertAlmostEqual(turn.share, 100.0 * 901 / 1100)
+
     def test_the_share_does_not_leave_as_a_message_of_its_own(self):
         """It is read off the turn at the end. A message with no case on the page
         is a value that looks delivered and is not."""

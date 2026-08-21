@@ -628,6 +628,11 @@ const crow = {
 
   cost(line,share){
     if(this.cursor){ this.cursor.remove(); this.cursor=null; }
+    // THE SAME NUMBER ON EVERY BLOCK IS CORRECT, because the number is the TURN's and the label
+    // says so. It was not until #117: the turn object kept the LAST ROUND's ratio, and this loop
+    // spread that over all of them. Blocks cannot carry a per-round figure anyway -- the model
+    // re-enters reasoning mid-answer, so one round can open two of them and there is no index
+    // that maps one to the other.
     if(share!==null && share!==undefined){
       this.col.querySelectorAll("details.think .dur").forEach(el=>{
         if(!el.parentNode.querySelector(".pct")){
@@ -1359,12 +1364,24 @@ class Turn(TurnEvents):
     def __init__(self, put) -> None:
         self._put = put
         self._sink = Sink(put)
-        # THE REASONING'S SHARE OF THE ROUND, KEPT RATHER THAN PUSHED. It used
+        # THE REASONING'S SHARE OF THE TURN, KEPT RATHER THAN PUSHED. It used
         # to leave here as `{"k": "_round"}` -- a message the page has no case
         # for, so it fell through the switch and was gone, while the cost line
         # was drawn from a variable nothing had written: every turn reported a
         # share of null. A number that only this window computes belongs to the
         # turn object, and the turn object is read when the turn ends.
+        #
+        # OF THE TURN, NOT OF THE LAST ROUND, and that was a real defect until #117. Each round
+        # OVERWROTE this with its own ratio, and the page then stamped whatever survived onto
+        # EVERY thought block of the turn -- so an eleven-round turn wore round eleven's number
+        # eleven times under a label reading "% of the turn". The characters are summed instead
+        # and the ratio taken once, which is what the label always claimed.
+        #
+        # SUMMED AND NOT AVERAGED: a round of 6,000 thought characters and a round of 40 are not
+        # worth the same, and a mean over rounds would let a short tool round drag the figure of
+        # a long one. The denominator is the turn's characters, so every one counts once.
+        self._reasoning_chars = 0
+        self._content_chars = 0
         self.share: float | None = None
 
     def reply_events(self) -> ReplyEvents:
@@ -1380,7 +1397,10 @@ class Turn(TurnEvents):
     def round_finished(self, timings: dict) -> None:
         rc, cc = timings.get("_reasoning_chars"), timings.get("_content_chars")
         if isinstance(rc, int) and isinstance(cc, int) and rc + cc > 0:
-            self.share = 100.0 * rc / (rc + cc)
+            self._reasoning_chars += rc
+            self._content_chars += cc
+            total = self._reasoning_chars + self._content_chars
+            self.share = 100.0 * self._reasoning_chars / total
 
     def cache_promise_broken(self) -> None:
         self._put({"k": "note",
