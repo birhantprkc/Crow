@@ -56,6 +56,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import crow_core  # noqa: E402
+import crow_voice  # noqa: E402
 
 from crow_core import (  # noqa: E402
     BANNER_BEVEL_HEX,
@@ -133,13 +134,17 @@ PAGE = r"""<!doctype html>
      number cannot drift. Both take it as min-height, so the status bar may still grow when its
      chips wrap -- and then the rail head is SUPPOSED to stay put. */
   --barh:41px;
+  /* The scrollbar's width, ONCE. #flow reserves it, the composer stops short of
+     it, and .turn centres inside it -- three rules that have to agree or the
+     input box sits 5 px off the text above it. */
+  --sbw:10px;
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;overflow:hidden}
 body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--mono);
   -webkit-font-smoothing:antialiased;display:flex;flex-direction:column;
   user-select:none}
-::-webkit-scrollbar{width:10px}
+::-webkit-scrollbar{width:var(--sbw)}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--line);border-radius:99px}
 ::-webkit-scrollbar-thumb:hover{background:var(--bevel)}
@@ -235,7 +240,8 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--mono);
 #arch.open{display:block}
 
 /* -- main --------------------------------------------------------------- */
-#main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
+#main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;
+  position:relative}
 #status{display:flex;align-items:center;gap:9px;padding:8px 16px;flex:none;
   min-height:var(--barh);
   border-bottom:1px solid var(--line);background:rgba(14,18,32,.72);
@@ -252,8 +258,11 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--mono);
 #tools:hover{border-color:var(--bevel)}
 #right{margin-left:auto;display:flex;gap:9px;align-items:center}
 
+/* STABLE GUTTER, so the column does not shift sideways the moment a chat grows
+   past one screen -- and so the composer below can line up against one number
+   instead of against a scrollbar that comes and goes. */
 #flow{overflow-y:auto;padding:22px 0 26px;flex:1;min-height:0;
-  scroll-behavior:smooth;user-select:text}
+  scroll-behavior:smooth;user-select:text;scrollbar-gutter:stable}
 /* CENTRED, NOT LEFT-HUGGING. max-width alone pins the column to the left edge
    and leaves the rest of a wide window empty; the auto margins are what put it
    in the middle. 960 includes the 30px padding, so the text runs 900 wide --
@@ -324,18 +333,33 @@ details.think[open] .caret{transform:rotate(90deg)}
 @keyframes bl{50%{opacity:0}}
 
 /* -- composer: the rounded, lifted box --------------------------------- */
-#composer{flex:none;border-top:1px solid var(--line);padding:12px 30px 14px;
-  background:rgba(11,14,23,.9)}
+/* IN THE FLOW, NOT UNDER IT. This was a docked strip with a 1px rule on top;
+   the rule was the ENTIRE separation, because the strip's own
+   `rgba(11,14,23,.9)` was CROW_BG's hex at 90% sitting on CROW_BG -- the same
+   colour twice. Now it is lifted out of the column and drawn over the bottom of
+   #flow, so text scrolls behind it the way it does in every chat window.
+   RIGHT STOPS AT THE GUTTER. Full width would run the box under the scrollbar
+   and cut its track; stopping at --sbw also puts this box's centre on .turn's
+   centre, which the docked version got wrong by 5 px whenever a chat overflowed.
+   THE FADE IS THE TOP 26px. `transparent` interpolates in premultiplied alpha
+   in Chromium, so it fades to nothing rather than through grey -- and 26px of it
+   is why the gap #flow keeps below is measured from offsetHeight, which
+   INCLUDES the fade: the last line comes to rest above it, never inside it. */
+#composer{position:absolute;left:0;right:var(--sbw);bottom:0;
+  padding:26px 30px 14px;
+  background:linear-gradient(to bottom,transparent,var(--bg) 26px)}
 #box{border:1px solid var(--bevel);border-radius:8px;background:var(--panel);
   padding:9px 11px 8px;box-shadow:0 0 0 3px rgba(126,176,248,.06);
   transition:border-color .15s ease,box-shadow .15s ease;
   /* 900, not 960: .turn spends 30px of its 960 on padding either side, so its
      text starts at 900 wide. Matching that here puts this box's border on the
-     same edge as the text above it. The composer's top rule stays full width. */
+     same edge as the text above it. */
   max-width:900px;margin-inline:auto}
 #box.focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(126,176,248,.13)}
-#line{display:flex;align-items:flex-start;gap:8px}
-#p{color:var(--accent);font-weight:700;font-size:12.5px;padding-top:1px}
+/* NO PROMPT MARK. `you>` named the typist in a box only the typist can type
+   in; the turn above already carries it where it says something. The gap
+   went with it -- one child has nothing to be spaced from. */
+#line{display:flex;align-items:flex-start}
 #in{flex:1;background:transparent;border:0;outline:0;resize:none;color:#cfdaea;
   font:inherit;font-size:13px;line-height:1.5;max-height:140px;user-select:text}
 #in::placeholder{color:var(--dimmer)}
@@ -343,17 +367,51 @@ details.think[open] .caret{transform:rotate(90deg)}
   color:var(--dimmer)}
 #ctx{font-size:11.5px;white-space:nowrap}
 #ctx .fill{color:var(--ok)} #ctx .fill.w{color:var(--warn)} #ctx .fill.b{color:var(--bad)}
-#ctx .rest,#ctx .br{color:var(--dimmer)}
+#ctx .rest{color:var(--dimmer)}
 #ctx .n{color:var(--dim);margin-left:5px}
 #acts{margin-left:auto;display:flex;gap:8px;align-items:center}
 #hint{color:var(--dimmer);font-size:10.5px}
 #go{font:inherit;font-size:11.5px;cursor:pointer;border-radius:6px;
   padding:3px 13px;background:transparent;border:1px solid var(--line);
   color:var(--dim)}
+/* THE ARROW IS THE LABEL, so the button is one glyph wide plus its padding --
+   about half of what "send" needed. The larger size applies only while idle:
+   "Stop" keeps 11.5px, because a word set at 14px would grow the button in the
+   one state where it is already the wider of the two. */
+#go:not(.stop){font-size:14px;line-height:1.2;padding:2px 11px}
 #go:hover{border-color:var(--bevel);color:var(--accent)}
 #go.stop{color:#ffd9d4;background:rgba(240,101,90,.10);
   border-color:rgba(240,101,90,.45)}
 #go.stop:hover{background:rgba(240,101,90,.18)}
+
+/* -- the microphone, between the level and the arrow ------------------- */
+/* IT BORROWS #go's SHAPE rather than inventing one. The two sit against each
+   other, and a neighbour with its own radius and padding reads as an accident.
+   The glyph is an inline SVG because the mono stack has no microphone: a font
+   that lacks it would draw a box, and an emoji would drag its own colour into
+   a row that takes every colour from state. `currentColor` means the drawing
+   follows the button, including into the recording red. */
+#mic{font:inherit;cursor:pointer;border-radius:6px;padding:2px 10px;
+  background:transparent;border:1px solid var(--line);color:var(--dim);
+  display:flex;align-items:center;
+  transition:color .15s ease,border-color .15s ease,background .15s ease}
+#mic:hover:not([disabled]){border-color:var(--bevel);color:var(--accent)}
+#mic[disabled]{cursor:default;color:var(--dimmer);border-color:var(--line-soft)}
+/* TWO STATES AND NO THIRD. Grey is snoozed, blue glow is recording -- robin's
+   rule, and both halves of it were earned. The first build painted recording
+   RED, which is the colour every conference tool on the machine uses for MUTE:
+   the one signal that had to be unambiguous said the opposite of what was
+   happening. It also had a third, yellow state while the recogniser worked, and
+   a state nobody can act on is furniture with a colour.
+   THE GLOW, NOT A SWAPPED GLYPH: a breathing ring is visible across the room
+   while the icon stays the icon it was, and `box-shadow` spreads past the border
+   without touching layout, so the row beside it does not move while someone
+   speaks. */
+#mic.rec{color:var(--accent);border-color:rgba(126,176,248,.55);
+  background:rgba(126,176,248,.10);animation:micglow 1.8s ease-in-out infinite}
+@keyframes micglow{
+  0%,100%{box-shadow:0 0 0 0 rgba(126,176,248,.32)}
+  50%    {box-shadow:0 0 0 6px rgba(126,176,248,0)}}
 
 /* -- #88: one held-back call, put to the user -------------------------- */
 .askcard{border:1px solid rgba(229,192,75,.40);border-radius:10px;
@@ -529,8 +587,8 @@ details.think[open] .caret{transform:rotate(90deg)}
     <div id="flow"></div>
     <div id="composer">
       <div id="box">
-        <div id="line"><span id="p">you&gt;</span
-          ><textarea id="in" rows="1" placeholder="Message, or /tools for what the model can call"></textarea></div>
+        <div id="line"><textarea id="in" rows="1"
+            placeholder="Message, or /tools for what the model can call"></textarea></div>
         <div id="foot">
           <span id="ctx"></span><span id="turnstate"></span>
           <div id="acts"><span id="hint"></span>
@@ -544,7 +602,14 @@ details.think[open] .caret{transform:rotate(90deg)}
                 <span class="dot"></span><span id="modename">auto</span></button>
               <div id="modemenu" hidden></div>
             </div>
-            <button id="go" onclick="crow.go()">send</button></div>
+            <button id="mic" onclick="crow.mic()" title="dictate">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                   stroke-linejoin="round" aria-hidden="true">
+                <rect x="9" y="2" width="6" height="11" rx="3"></rect>
+                <path d="M5 10a7 7 0 0 0 14 0"></path>
+                <line x1="12" y1="17" x2="12" y2="21"></line></svg></button>
+            <button id="go" onclick="crow.go()" title="send">&#8593;</button></div>
         </div>
       </div>
     </div>
@@ -690,7 +755,38 @@ const crow = {
   },
   toggleTools(){ if(this.running) return; pywebview.api.set_tools(!this.execute); },
 
-  idle(){ this.running=false; go.textContent="send"; go.classList.remove("stop");
+  // ONE BUTTON, TWO ERRANDS, and the class is the truth about which. The page
+  // never decides that a recording started -- it asks, and Python says so on
+  // the way back. A button that painted itself red on click would lie for as
+  // long as it took PortAudio to refuse.
+  mic(){ const b=$("#mic"); if(b.disabled) return;
+    if(b.classList.contains("rec")) pywebview.api.dictate_stop();
+    else pywebview.api.dictate_start(); },
+
+  micState(e){
+    const b=$("#mic");
+    b.classList.toggle("rec", e.state==="rec");
+    b.disabled=!!e.blocked;
+    b.title = e.blocked ? e.blocked
+            : e.state==="rec" ? "stop and write it down"
+            : "dictate";
+    // INTO THE BOX, NEVER STRAIGHT OUT. Whisper is wrong often enough that a
+    // dictation which sent itself would be a message nobody could take back.
+    // Appended rather than assigned, so half a typed line survives a thought
+    // finished out loud.
+    if(e.text){
+      const had=input.value.replace(/\s*$/,"");
+      input.value = had ? had+" "+e.text : e.text;
+      // The autogrow listener owns the height; firing its event is cheaper
+      // than a second copy of the same three lines that could drift from it.
+      input.dispatchEvent(new Event("input"));
+      input.focus();
+      input.selectionStart=input.selectionEnd=input.value.length;
+    }
+    if(e.note){ this.note(e.note); }
+  },
+
+  idle(){ this.running=false; go.textContent="↑"; go.classList.remove("stop");
     $("#turnstate").textContent=""; $("#hint").textContent="";
     document.querySelectorAll(".cursor").forEach(c=>c.remove());
     this.cursor=null; },
@@ -974,12 +1070,14 @@ const crow = {
     const el=$("#ctx"); if(tokens<=0){ el.innerHTML=""; return; }
     const size = tokens<1000 ? String(tokens) : (tokens/1000).toFixed(1)+"k";
     if(limit<=0){ el.innerHTML='<span class="n">'+size+'</span>'; return; }
-    const share=Math.min(1,tokens/limit), filled=Math.round(share*10);
+    // THE NUMBER, NOT A BAR OF HASHES. Ten cells could only ever say the share
+    // to within 10%, and the figure that answers "how much room is left" was
+    // already being printed beside them. The colour is the only thing the bar
+    // carried that the number did not, so it moved onto the number.
+    const share=Math.min(1,tokens/limit);
     const cls = share<0.5 ? "fill" : (share<0.85 ? "fill w" : "fill b");
-    el.innerHTML='<span class="br">[</span><span class="'+cls+'">'+"#".repeat(filled)+
-      '</span><span class="rest">'+"-".repeat(10-filled)+
-      '</span><span class="br">]</span><span class="n">'+size+"/"+
-      (limit/1000).toFixed(0)+'k</span>';
+    el.innerHTML='<span class="'+cls+'">'+size+'</span>'+
+      '<span class="rest"> / '+(limit/1000).toFixed(0)+'k</span>';
   },
 
   // A CHAT KEEPS ITS PLACE WHEN YOU OPEN IT. The open one was drawn in a slot of
@@ -1121,6 +1219,7 @@ const crow = {
         $("#turnstate").textContent =
           e.n + " tok · " + e.rate.toFixed(1) + " tok/s";
         break;
+      case "mic": this.micState(e); break;
       case "idle": this.idle(); break;
     }
   }
@@ -1134,6 +1233,27 @@ input.addEventListener("blur",()=>box.classList.remove("focus"));
 input.addEventListener("keydown",e=>{
   if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); crow.go(); }
   if(e.key==="Escape" && crow.running) pywebview.api.stop(); });
+
+// THE GAP UNDER THE FLOW IS THE COMPOSER'S OWN HEIGHT, measured and never
+// guessed. robin's rule for the floating box is absolute: THE LAST LINE MUST
+// NEVER COME TO REST BEHIND IT, because a line you cannot read is a line that
+// was not printed. A constant would break in exactly the cases that matter --
+// the textarea grows to 140px as you type, and the foot row wraps to two lines
+// on a narrow window. `offsetHeight` is the whole box INCLUDING the 26px fade,
+// so the last line stops above the fade rather than inside it.
+const composer = $("#composer");
+const fitFlow = () => {
+  // MEASURE FIRST, THEN GROW. Reading the scroll position after the padding
+  // changed would ask whether we are at a bottom that has already moved.
+  const atBottom = flow.scrollHeight - flow.scrollTop - flow.clientHeight < 4;
+  flow.style.paddingBottom = (composer.offsetHeight + 10) + "px";
+  // RE-PIN, or typing a third line pushes the answer you were reading up and
+  // out of sight -- the padding grows downwards and the view does not follow.
+  if(atBottom) flow.scrollTop = flow.scrollHeight;
+};
+// The observer covers the window resize too: a narrower window rewraps the foot
+// row, which changes the composer's height, which is the thing being watched.
+new ResizeObserver(fitFlow).observe(composer);
 // The grips: press, drag, and Python moves the window. `screenX/screenY` are
 // used rather than clientX so the numbers stay right while the window itself is
 // moving underneath the pointer.
@@ -1546,6 +1666,7 @@ class Api:
         self.push({"k": "meta", "version": client_version() or "",
                    "url": self._args.base_url, "tools": len(TOOLS),
                    "execute": bool(self._args.execute_tools)})
+        threading.Thread(target=self._mic_probe, daemon=True).start()
         # #88: the level and its menu, in the same breath as the rest of the
         # header. The button has to show what is live before the first turn --
         # a release level nobody can see is one nobody can trust.
@@ -2965,6 +3086,72 @@ class Api:
             return proc.returncode == 0
         except Exception:                  # noqa: BLE001 - reported as False
             return False
+
+    # -- dictation (crow_voice) --------------------------------------------
+    #
+    # THE PAGE CANNOT DO THIS ITSELF, and that is measured rather than assumed:
+    # the window is handed to WebView2 as HTML rather than served, so it is not
+    # a secure context, and `getUserMedia` refuses there exactly as
+    # `navigator.clipboard` did on 2026-08-13. So the button lives on the page
+    # and the microphone lives here -- the same seam `copy` above uses.
+
+    def dictate_start(self) -> None:
+        """The mic button, pressed. Recording begins, or the reason is said."""
+        why = crow_voice.available()
+        if why:
+            self.push({"k": "mic", "state": "off", "blocked": why, "note": why})
+            return
+        try:
+            crow_voice.start()
+        except Exception as exc:           # noqa: BLE001 - said, not raised
+            # THE DEVICE'S OWN WORDS. A microphone can fail for reasons this
+            # window cannot name -- in use by something else, a rate it will
+            # not take, a driver that went away -- and a guess printed in place
+            # of the real message is the guess the user then tries to fix.
+            self.push({"k": "mic", "state": "off",
+                       "note": "the microphone did not open: %s" % exc})
+            return
+        self.push({"k": "mic", "state": "rec"})
+
+    def dictate_stop(self) -> None:
+        """Stop, then transcribe on a worker.
+
+        NOT IN THIS CALL. The first dictation loads 486 MB of model, and every
+        one after it still runs the recogniser; a bridge call that did the work
+        would hold the page's promise open for seconds with the button frozen
+        mid-state. This returns at once and the result arrives as an event, the
+        way every other slow thing in this window reports.
+        """
+        # `off` THE MOMENT THE STREAM CLOSES, not when the text arrives. The
+        # button has two states and recording is over, so it goes grey now --
+        # an in-between colour for "the machine is busy" was built once, in
+        # yellow, and robin cut it: a state nobody can act on is furniture.
+        self.push({"k": "mic", "state": "off"})
+        threading.Thread(target=self._dictate_finish, daemon=True).start()
+
+    def _dictate_finish(self) -> None:
+        try:
+            text = crow_voice.stop()
+        except Exception as exc:           # noqa: BLE001 - said, not raised
+            self.push({"k": "mic", "state": "off",
+                       "note": "dictation failed: %s" % exc})
+            return
+        if not text:
+            # SAID, NOT SWALLOWED. An empty result and a broken microphone look
+            # identical from the button, and a user who gets neither text nor a
+            # sentence has to guess which of the two just happened.
+            self.push({"k": "mic", "state": "off", "note": "nothing was said"})
+            return
+        self.push({"k": "mic", "state": "off", "text": text})
+
+    def _mic_probe(self) -> None:
+        """Whether dictation can run, answered off the opening path.
+
+        `available()` asks PortAudio for the device list, and that starts an
+        audio host. A window that waited for it would open slower for everyone,
+        including every user who never presses the button.
+        """
+        self.push({"k": "mic", "state": "off", "blocked": crow_voice.available() or ""})
 
     def close(self) -> None:
         """Both copies of the open chat, then the window.

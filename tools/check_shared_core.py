@@ -119,8 +119,28 @@ ANCHORS = {
 NAME_KEYS = {"name", "kind", "why", "user_entry", "evidence", "only"}
 WORDING_KEYS = {"id", "text", "why"}
 ONLY_KEYS = {"surface", "because"}
-MANIFEST_KEYS = {"core", "core_module", "surfaces", "names", "wordings"}
+MANIFEST_KEYS = {"core", "core_module", "surfaces", "helpers", "names", "wordings"}
 SURFACE_KEYS = {"path", "label", "why"}
+
+# A HELPER IS NOT A SURFACE, AND THE DIFFERENCE IS EXACTLY ONE PREDICATE.
+# It lives under cli/ and it is not a test, so this checker has to know a class
+# for it or report it as a stray forever -- and forever-red is how a gate stops
+# being read at all.
+#
+# Held to (1), (2) and (3) exactly like a surface: it may not carry a second
+# definition of a core name, and it may not use one without taking it from the
+# core by name. Those are the predicates that stop behaviour from being decided
+# twice, and a helper can break them just as easily as a client.
+#
+# EXEMPT FROM (4), which is the whole distinction. "Offers every core behaviour"
+# is what makes a thing a client of the core; a module a surface USES is not
+# one, and demanding it wire run_turn and save_session would be red at every
+# correctly written helper. The `only ..., because` escape cannot say this: it
+# names ONE surface, not "every surface except this file".
+#
+# It does not count towards MIN_SURFACES either. Two helpers still cannot
+# demonstrate single-sourcing.
+HELPER_KEYS = SURFACE_KEYS
 
 
 class SetupError(Exception):
@@ -165,6 +185,15 @@ def load_manifest(path):
         for key in ("path", "label", "why"):
             if not entry.get(key):
                 raise SetupError("a surface entry has no %r" % key)
+
+    for entry in manifest["helpers"]:
+        bad = {k for k in entry if not k.startswith("_")} - HELPER_KEYS
+        if bad:
+            raise SetupError("helper %r carries unknown key(s): %s"
+                             % (entry.get("path"), ", ".join(sorted(bad))))
+        for key in ("path", "label", "why"):
+            if not entry.get(key):
+                raise SetupError("a helper entry has no %r" % key)
 
     seen = set()
     for entry in manifest["names"]:
@@ -279,14 +308,19 @@ def occurrences(text, needle):
     return out
 
 
-def check_name(entry, core_rel, core_code, surfaces, module):
-    """The four predicates for one declared name. Returns a list of problems."""
+def check_name(entry, core_rel, core_code, surfaces, module, helpers=()):
+    """The four predicates for one declared name. Returns a list of problems.
+
+    `helpers` join the surfaces for (1), (2) and (3) and are left out of (4).
+    See HELPER_KEYS for why that one predicate is the whole difference.
+    """
     name, kind = entry["name"], entry["kind"]
     problems = []
+    consumers = list(surfaces) + list(helpers)
 
     # (1) exactly one definition in column 0, over the core and every surface.
     sites = [(core_rel, line) for line in definitions(core_code, name, kind, False)]
-    for surf_rel, _, code, _ in surfaces:
+    for surf_rel, _, code, _ in consumers:
         sites += [(surf_rel, line) for line in definitions(code, name, kind, False)]
     if not sites:
         problems.append("defined nowhere -- the manifest declares a %s the core "
@@ -298,13 +332,13 @@ def check_name(entry, core_rel, core_code, surfaces, module):
         problems.append("the one definition sits in %s:%d, not in the core %s"
                         % (sites[0][0], sites[0][1], core_rel))
 
-    for surf_rel, _, code, _ in surfaces:
+    for surf_rel, _, code, _ in consumers:
         # (2) zero definitions in a surface, methods included.
         for line in definitions(code, name, kind, True):
             problems.append("%s:%d defines it -- a second implementation, whether "
                             "at column 0 or as a method" % (surf_rel, line))
 
-    for surf_rel, _, code, star in surfaces:
+    for surf_rel, _, code, star in consumers:
         bare = without_imports(code, module)
         uses = re.search(r"\b%s\b" % re.escape(name), bare) is not None
         if not uses:
@@ -421,6 +455,16 @@ def main(argv):
         surfaces.append((entry["path"], entry["label"], code_only(read(path)), False))
     surfaces = [(r, l, c, imported_names(c, module)[1]) for r, l, c, _ in surfaces]
 
+    helpers = []
+    for entry in manifest["helpers"]:
+        path = rel(args.repo, entry["path"])
+        if not os.path.exists(path):
+            print("SETUP ERROR: the manifest names the helper %s and it does not exist"
+                  % entry["path"])
+            return 2
+        helpers.append((entry["path"], entry["label"], code_only(read(path)), False))
+    helpers = [(r, l, c, imported_names(c, module)[1]) for r, l, c, _ in helpers]
+
     # --- the honesty rule, before any predicate -----------------------------
     total += 1
     if len(surfaces) < MIN_SURFACES:
@@ -435,22 +479,24 @@ def main(argv):
               % ("surfaces", len(surfaces), ", ".join(s[0] for s in surfaces)))
 
     total += 1
-    stray = undeclared_surfaces(args.repo, core_rel, [s[0] for s in surfaces])
+    stray = undeclared_surfaces(args.repo, core_rel,
+                                [s[0] for s in surfaces] + [h[0] for h in helpers])
     if stray:
         failed += 1
         print("  FAILED   %-34s %s under %s"
               % ("undeclared surface", ", ".join(stray),
                  "/, ".join(SURFACE_DIRS) + "/"))
         for s in stray:
-            print("             %s is a surface the manifest does not know about" % s)
+            print("             %s is neither a declared surface nor a declared "
+                  "helper" % s)
     else:
-        print("  OK       %-34s every file under %s is declared or a test"
+        print("  OK       %-34s every file under %s is a surface, a helper or a test"
               % ("undeclared surface", "/, ".join(SURFACE_DIRS) + "/"))
 
     # --- class (a): the names ------------------------------------------------
     for entry in manifest["names"]:
         total += 1
-        problems = check_name(entry, core_rel, core_code, surfaces, module)
+        problems = check_name(entry, core_rel, core_code, surfaces, module, helpers)
         if problems:
             failed += 1
             print("  FAILED   %-34s %d problem(s)" % (entry["name"], len(problems)))
@@ -480,7 +526,10 @@ def main(argv):
     # --- class (b): the wordings --------------------------------------------
     for entry in manifest["wordings"]:
         total += 1
-        problems = check_wording(entry, core_rel, core_code, surfaces)
+        # HELPERS COUNT HERE TOO. "Written once, and that once in the core" is a
+        # counting rule, and a sentence copied into a helper is copied just as
+        # surely as one copied into a client.
+        problems = check_wording(entry, core_rel, core_code, surfaces + helpers)
         if problems:
             failed += 1
             print("  FAILED   %-34s %s" % (entry["id"], problems[0]))

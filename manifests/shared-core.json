@@ -21,6 +21,13 @@
    "why": "The window, and the reason this checker can say anything at all. Until it landed the core had ONE consumer, every predicate below held by construction, and a green result here was the tool measuring itself - which is why the honesty rule refuses to report on fewer than two surfaces. It owns widgets, the tick and the German surface language; it owns no decision. It lives in cli/ and not gui/ because tools/pack-release.ps1:431 copies cli/ as a whole and nothing else, so a gui/ would be absent from the package with nothing saying so."
   }
  ],
+ "helpers": [
+  {
+   "path": "cli/crow_voice.py",
+   "label": "voice",
+   "why": "Dictation: the microphone and the recogniser, and nothing else. A HELPER and not a surface, because it is not a client of the core -- it owns audio and the text that comes out of it, never a turn, a prompt or a session. It is still held to the definition and import predicates: if it ever re-decided something crow_core.py already decides, that is exactly the drift this manifest exists to catch. It lives in cli/ for the reason crow_gui.py gives -- tools/pack-release.ps1 copies cli/ as a whole and nothing else -- and beside the window because only the window can reach it: the terminal has no button to press."
+  }
+ ],
  "names": [
   {
    "name": "tool_read_file",

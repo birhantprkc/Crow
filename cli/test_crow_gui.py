@@ -56,6 +56,7 @@ sys.path.insert(0, str(HERE))
 import crow            # noqa: E402
 import crow_core       # noqa: E402
 import crow_gui        # noqa: E402
+import crow_voice      # noqa: E402
 
 
 # ---------------------------------------------------------------- fixtures --
@@ -2226,6 +2227,134 @@ class TheReasoningSliderIsTheSameCommandTests(ApiCase):
         self.assertIn('el.querySelector("b").textContent = name;', source)
         self.assertIn('el.querySelector(".what").textContent = bits.join', source)
 
+
+class TheDictationButtonTests(unittest.TestCase):
+    """The microphone: where it sits, and what it does with what it heard.
+
+    THE FILE IS READ RATHER THAN DRIVEN, like the two classes above it: the
+    button lives in a page this suite has no browser for, so the source it is
+    built from is the evidence there is.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.code = _code_only(self.source)
+
+    def _method(self, head: str) -> str:
+        """One method of the page object, by its opening line.
+
+        `  },` at two spaces closes a method and appears nowhere inside one --
+        the bodies are indented four and six.
+        """
+        return self.code.split(head)[1].split("  },")[0]
+
+    def test_the_mic_sits_between_the_level_and_the_arrow(self):
+        """Where robin asked for it. #acts is a flex row with no ordering of its
+        own, so source order IS the order on screen and there is nothing else to
+        hold this to."""
+        order = [self.code.index(m) for m in
+                 ('id="mode" data-mode=', 'id="mic" onclick=', 'id="go" onclick=')]
+        self.assertEqual(order, sorted(order),
+                         "the microphone is not drawn between the level and the arrow")
+
+    def test_a_dictation_lands_in_the_box(self):
+        """POSITIVE. The text arrives as an event and is appended to whatever was
+        already typed, so half a typed line survives a thought finished aloud."""
+        block = self._method("micState(e){")
+        self.assertIn("input.value", block, "nothing is written into the box")
+        self.assertIn("dispatchEvent", block,
+                      "the textarea is not told to regrow around the new text")
+
+    def test_a_dictation_never_sends_itself(self):
+        """NEGATIVE, and the one that matters. Whisper is wrong often enough that
+        a dictation which submitted itself would be a message nobody could take
+        back. The text goes in the box; a human presses the arrow."""
+        block = self._method("micState(e){")
+        for forbidden in ("pywebview.api.send", "crow.go()", "this.go()"):
+            self.assertNotIn(forbidden, block,
+                             "a finished dictation reaches %s" % forbidden)
+
+    def test_recording_is_visible_without_reading_anything(self):
+        """robin's words: you should be able to see that it is recording. A glow
+        does that from across the room; a changed tooltip does not."""
+        # AGAINST THE SOURCE, NOT self.code, and it is not sloppiness: _code_only
+        # drops every line beginning with `#` as a Python comment, which takes
+        # each CSS id selector with it. The two lines below are held against
+        # self.code because neither starts with one.
+        self.assertIn("#mic.rec{", self.source, "no recording state on the button")
+        self.assertIn("@keyframes micglow", self.code,
+                      "the recording state does not move")
+        self.assertIn("animation:micglow", self.code,
+                      "the glow is defined and never used")
+
+    def test_the_button_has_exactly_two_states(self):
+        """robin's rule: grey is snoozed, blue glow is recording. NEGATIVE,
+        because the way this breaks is somebody ADDING a state. A third one was
+        built once -- yellow, while the recogniser ran -- and cut on sight: a
+        colour the user cannot act on is furniture with a colour."""
+        self.assertNotIn("#mic.work", self.source, "a third button state is back")
+        self.assertNotIn('"work"', self.source, "a third mic state is pushed")
+
+    def test_recording_is_not_drawn_in_the_mute_colour(self):
+        """Red is what every conference tool on this machine uses for MUTE. The
+        first build painted recording red, so the one signal that had to be
+        unambiguous said the opposite of what was happening."""
+        rule = self.source.split("#mic.rec{")[1].split("}")[0]
+        self.assertIn("var(--accent)", rule, "recording is not the accent colour")
+        self.assertNotIn("var(--bad)", rule, "recording is drawn in the mute colour")
+
+    def test_the_page_never_paints_itself_recording(self):
+        """NEGATIVE for the state. The class comes back from Python once the
+        stream is actually open: a button that reddened on click would lie for as
+        long as it took PortAudio to refuse."""
+        block = self._method("mic(){")
+        self.assertNotIn("classList.add", block,
+                         "the click paints the state instead of asking for it")
+
+    def test_transcription_does_not_run_inside_the_bridge_call(self):
+        """The first dictation loads 486 MB of model. A bridge call that did the
+        work would hold the page's promise open for seconds with the button
+        frozen between two states."""
+        block = self.source.split("def dictate_stop(")[1].split("def _dictate_finish")[0]
+        self.assertIn("threading.Thread", block, "the work is done on the bridge call")
+        self.assertNotIn("crow_voice.stop()", block,
+                         "dictate_stop transcribes before it returns")
+
+
+class TheVoiceModuleTests(unittest.TestCase):
+    """cli/crow_voice.py: what it promises on a machine that cannot deliver."""
+
+    def test_a_missing_package_is_named_and_not_raised(self):
+        """NEGATIVE. Both dependencies are optional the way pywebview is, so the
+        answer to "no sounddevice" is a sentence the window can print -- not an
+        exception that takes the click with it.
+
+        `None` in sys.modules is what makes `import x` raise ImportError, which
+        is the same shape as the package not being installed at all."""
+        with mock.patch.dict(sys.modules, {"sounddevice": None}):
+            why = crow_voice.available()
+        self.assertIsInstance(why, str, "a missing package did not produce a reason")
+        self.assertIn("sounddevice", why, "the reason does not name what is missing")
+
+    def test_nothing_recorded_transcribes_to_nothing(self):
+        """POSITIVE for the empty case, and it has to hold with NO optional
+        package present: this used to import numpy first, which turned a button
+        pressed twice by accident into an ImportError instead of a shrug."""
+        crow_voice._blocks.clear()
+        with mock.patch.dict(sys.modules, {"numpy": None, "faster_whisper": None}):
+            self.assertEqual(crow_voice.stop(), "")
+
+    def test_the_installer_and_the_client_name_one_directory(self):
+        """TWO FILES DECIDE WHERE THE MODEL LIVES. If they drift, install.ps1
+        fetches 486 MB into one directory and the window downloads the same bytes
+        again because it looked in another."""
+        ps = (HERE.parent / "install.ps1").read_text(encoding="utf-8")
+        self.assertIn('$WHISPER_DIRNAME   = "%s"' % crow_voice.MODEL_DIRNAME, ps,
+                      "install.ps1 does not name the directory crow_voice.py reads")
+        self.assertEqual(crow_voice.model_dir().parent.name, "models")
+        self.assertEqual(crow_voice.model_dir().parent.parent,
+                         Path(crow_voice.__file__).resolve().parent.parent,
+                         "the model is not looked for beside the client")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -94,6 +94,22 @@ $DISK_INSTALL_GB   = 2      # the package, unpacked
 # below it disagreed by a gigabyte on the previous rung until that was fixed; keep them in step.
 $DISK_MODEL_GB     = 85     # what the model will need later, reported not enforced
 
+# The dictation model for the window's microphone. 486.2 MB across four files,
+# measured against the HuggingFace API on 2026-08-21. `small` and not a bigger
+# rung because the ceiling was "no gigabyte download", and the next one up
+# (medium) is 1531 MB, turbo 1622 MB, large-v3 3087 MB. Multilingual on
+# purpose: most users speak English into this box and its author speaks German,
+# so a `distil-*` or a German-tuned checkpoint would have to be picked against
+# one of them.
+#
+# NOT ADDED TO THE DISK GUARD. That guard already reserves $DISK_MODEL_GB for
+# the LLM, and 0.47 GB inside 85 is below the resolution of the number it is
+# compared against. It is ANNOUNCED in the preflight instead, which is what the
+# user actually needs to know before the package download starts.
+$WHISPER_REPO      = "Systran/faster-whisper-small"
+$WHISPER_DIRNAME   = "whisper-small"
+$WHISPER_MB        = 486
+
 # The Tk floor the window is written against. DECIDED, not left open: 8.6. The
 # reference value on the machine every figure on this page was taken on is 8.6.15
 # under Python 3.13.3 [measured 2026-08-12]. tools/check_gui_prereqs.py carries
@@ -621,7 +637,7 @@ function Get-FileWithProgress {
     fail the size and hash check two steps later with a misleading message.
     #>
     param([string] $Uri, [string] $OutFile, [string] $Label,
-          [int] $Attempts = 5, [int] $DelaySec = 3)
+          [int] $Attempts = 8, [int] $DelaySec = 1)
 
     # Windows PowerShell 5.1 does not load System.Net.Http by default, and the
     # failure is a TypeNotFound at the moment the download starts -- i.e. after
@@ -638,9 +654,23 @@ function Get-FileWithProgress {
                 Write-Host ""
                 throw ("download failed after {0} attempts: {1}" -f $Attempts, $_.Exception.Message)
             }
-            Write-Host ("`r      {0}  attempt {1} of {2} failed ({3}), retrying in {4}s{5}" -f `
-                $Label, $try, $Attempts, $_.Exception.Message, $DelaySec, (" " * 20))
-            Start-Sleep -Seconds $DelaySec
+            # ONE LINE, REWRITTEN, NOT ONE PER ATTEMPT. Measured 2026-08-21 on the
+            # first live install: huggingface.co refused the FIRST attempt on all
+            # four model files and four in a row on one of them, so a four-file
+            # download printed eleven failure lines around four successes. The
+            # failures are real and worth seeing; they are not worth a line each.
+            #
+            # THE EXCEPTION TEXT IS DROPPED HERE AND KEPT AT THE THROW. It is long
+            # enough to wrap the console, and a wrapped line cannot be overwritten
+            # by the carriage return that makes this one line instead of ten.
+            #
+            # BACKING OFF FROM ONE SECOND, NOT THREE: these refusals come back
+            # instantly, so the old flat 3 s spent twelve seconds waiting out a
+            # failure that costs nothing to retry. Linear, capped at ten.
+            $wait = [Math]::Min($DelaySec * $try, 10)
+            Write-Host ("`r      {0}  attempt {1} of {2} failed, retrying in {3}s{4}" -f `
+                $Label, $try, $Attempts, $wait, (" " * 30)) -NoNewline
+            Start-Sleep -Seconds $wait
         }
     }
 }
@@ -886,6 +916,14 @@ function Invoke-Selftest {
     C "and does not become the exit code"         ($pipSrc -match '(?s)pipRc = \$LASTEXITCODE.*?global:LASTEXITCODE = 0')
     C "a failed pip says the CLI is unaffected"   ($pipSrc -match 'terminal client is unaffected')
 
+    # THE DICTATION STEP, held against the source for the same reason.
+    C "dictation pip names both packages"        ($pipSrc -match '--quiet faster-whisper sounddevice')
+    C "a failed one prints the manual command"   ($pipSrc -match '-m pip install faster-whisper sounddevice" -ForegroundColor White')
+    C "and says typing still works"              ($pipSrc -match 'typing is unaffected')
+    C "the model lands beside the client"        ($pipSrc -match 'Join-Path \$InstallTo "models"')
+    C "a file already there is not re-fetched"   ($pipSrc -match 'if \(Test-Path -LiteralPath \$dest\) \{ continue \}')
+    C "a failed model download is a warning"     ($pipSrc -match 'everything else installed')
+
     # BOTH START LINES, IN ORDER, AND THE SECOND ONE OUT OF THE CHECKER'S WINDOW.
     # This is the half state this stage was written against, and it cannot be
     # caught by reading the script: tools/check_operating_point.py finds the
@@ -918,9 +956,17 @@ function Invoke-Selftest {
         # the selftest and reported the start lines as inside the window. It went
         # red on a file that is correct, which is the failure that gets a check
         # deleted rather than read.
-        $mark   = '" -ForegroundColor White'
-        $cliAt  = $src.IndexOf('cli\crow.py' + $mark)
-        $guiAt  = $src.IndexOf('cli\crow_gui.py' + $mark)
+        # SEARCHED FROM THE FINAL SCREEN DOWN, and two things forced that.
+        # The needles appear in THIS block as literals six hundred lines above
+        # the printed ones, which is why they are assembled rather than written
+        # whole -- and since the installer leads with Qwen the terminal line now
+        # carries --base-url, so it no longer ends at the colour argument the
+        # old needle pinned it to. Starting after the step header answers both:
+        # what this case is about is the ORDER of the two lines on the last
+        # screen, not the flags either of them happens to carry.
+        $tailAt = [Math]::Max($src.IndexOf('Write-Step "What is left' + ' to do"'), 0)
+        $cliAt  = $src.IndexOf('cli\crow.py', $tailAt)
+        $guiAt  = $src.IndexOf('cli\crow_gui.py', $tailAt)
         C "the terminal client's start line is printed" ($cliAt -ge 0)
         C "the window's start line is printed as well"  ($guiAt -ge 0)
         C "and the terminal one comes first"            ($cliAt -ge 0 -and $guiAt -gt $cliAt)
@@ -1144,7 +1190,6 @@ if ($Selftest) { Exit-Run (Invoke-Selftest); return }
 
 Write-Host ""
 Write-Host "  Crow $Version" -ForegroundColor Cyan
-Write-Host "  A frontier coding LLM, made runnable by streaming its experts off the SSD." -ForegroundColor DarkGray
 
 Write-Step "Checking this machine"
 
@@ -1160,6 +1205,10 @@ Write-Item "Python"   $(if ($facts.PythonPath) { $facts.PythonPath } else { "not
 # leave the other half wondering which client the install is short of.
 Write-Item "WebView2" $(if ($facts.WebView2Version) { "$($facts.WebView2Version), the window renders in it" } else { "not found -- the terminal client does not need it" }) `
                       $(if ($facts.WebView2Version) { "ok" } else { "warn" })
+# SAID HERE AND NOT AT THE DOWNLOAD, for the reason at the top of this file: a
+# cost first mentioned after the package has landed is a cost mentioned at the
+# most expensive possible moment.
+Write-Item "dictation" "$WHISPER_MB MB speech model, fetched in the last step" "ok"
 
 $pf = Test-Preflight -VramMb $facts.VramMb -RamGb $facts.RamGb -FreeDiskGb $facts.FreeDiskGb `
                      -HasNvidiaSmi $facts.HasNvidiaSmi -Is64Bit $facts.Is64Bit -PsVersion $facts.PsVersion `
@@ -1445,6 +1494,78 @@ if ($facts.PythonPath) {
     }
 }
 
+# ---------------------------------------------------------------------------
+# The window's microphone: two packages, then one model
+# ---------------------------------------------------------------------------
+# A SECOND BLOCK AND NOT A WIDER FIRST ONE. Four selftest checks read the
+# pywebview step above by its exact source text; adding two package names to
+# its pip line would have broken all four to save six lines here. The two also
+# fail differently -- without pywebview there is no window, without these there
+# is a window that cannot listen.
+if ($facts.PythonPath) {
+    Write-Host ""
+    Write-Host "  dictation  the microphone needs faster-whisper and sounddevice" -ForegroundColor DarkGray
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $facts.PythonPath -m pip install --disable-pip-version-check --quiet faster-whisper sounddevice 2>&1 |
+            ForEach-Object { }
+        $micRc = $LASTEXITCODE
+    } catch {
+        $micRc = 1
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    $global:LASTEXITCODE = 0
+    if ($micRc -eq 0) {
+        Write-Item "dictation" "faster-whisper and sounddevice installed" "ok"
+    } else {
+        Write-Item "dictation" "could not be installed -- typing is unaffected" "warn"
+        Write-Host "             $($facts.PythonPath) -m pip install faster-whisper sounddevice" -ForegroundColor White
+    }
+}
+
+# THE MODEL ITSELF, FOUR FILES. Fetched here rather than left to the first
+# click, because faster-whisper would otherwise pull the same bytes into a
+# HuggingFace cache the moment somebody presses the button: a silent wait,
+# inside a window, on a machine whose owner believed the install had finished.
+# cli/crow_voice.py looks in this directory FIRST and only falls back to that
+# cache when it is empty.
+#
+# SMALLEST FILES FIRST, so a host that is refusing today costs three seconds
+# rather than most of 486 MB before it says so. A file already on disk is left
+# alone -- a re-install is not a second download -- and a failure here is a
+# warning, not an end: everything else has landed, and the window opens with a
+# microphone that names what is missing.
+if ($InstallTo) {
+    $whisperDir = Join-Path (Join-Path $InstallTo "models") $WHISPER_DIRNAME
+    New-Item -ItemType Directory -Force -Path $whisperDir | Out-Null
+    $whisperOk = $true
+    foreach ($f in @("config.json", "vocabulary.txt", "tokenizer.json", "model.bin")) {
+        $dest = Join-Path $whisperDir $f
+        if (Test-Path -LiteralPath $dest) { continue }
+        try {
+            # $null =, because Get-FileWithProgress RETURNS the byte count and an
+            # unassigned call drops it straight onto the console: the first live run
+            # printed a bare 483546902 between two progress lines. The package
+            # download above catches it in $bytes for the size check; here there is
+            # nothing to compare it against, so it goes nowhere.
+            $null = Get-FileWithProgress -Uri "https://huggingface.co/$WHISPER_REPO/resolve/main/$f" `
+                                         -OutFile $dest -Label "speech model: $f"
+        } catch {
+            $whisperOk = $false
+            break
+        }
+    }
+    $global:LASTEXITCODE = 0
+    if ($whisperOk) {
+        Write-Item "dictation model" "$WHISPER_DIRNAME is in place" "ok"
+    } else {
+        Write-Item "dictation model" "not fetched -- everything else installed" "warn"
+        Write-Host "             the window downloads it on the first click instead" -ForegroundColor White
+    }
+}
+
 Write-Step "What is left to do"
 
 # The python line that used to stand here has MOVED, it was not dropped: it is
@@ -1454,25 +1575,77 @@ Write-Step "What is left to do"
 # "Checking this machine" and the warnings Test-Preflight raises for them.
 
 Write-Host ""
-Write-Host "  1. The model. It is NOT part of this install: 84.6 GiB, three files, and it" -ForegroundColor DarkGray
+Write-Host "  1. The model. It is NOT part of this install: 16.4 GiB, one file, and it" -ForegroundColor DarkGray
 Write-Host "     belongs to somebody else." -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "       DeepSeek-V4-Flash-0731, quantised by unsloth to UD-IQ2_XXS" -ForegroundColor White
-Write-Host "       https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF" -ForegroundColor DarkGray
+Write-Host "       Qwen3.8-27B, quantised by unsloth to UD-Q4_K_XL" -ForegroundColor White
+Write-Host "       https://huggingface.co/unsloth/Qwen3.8-27B-GGUF" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "    hf download unsloth/DeepSeek-V4-Flash-0731-GGUF --include 'UD-IQ2_XXS/*' --local-dir $InstallTo\models" -ForegroundColor White
+Write-Host "    hf download unsloth/Qwen3.8-27B-GGUF --include '*UD-Q4_K_XL*' --local-dir $InstallTo\models\qwen38-gguf" -ForegroundColor White
 Write-Host ""
-# Measured 2026-08-07: when hf cannot reach the repository it prints a tick and
-# returns the local directory. Failure that looks like success is worth one line
-# here, because the next thing the user does is start a server against nothing.
-Write-Host "     If that finishes suspiciously fast, check that four files and ~97 GiB" -ForegroundColor DarkGray
-Write-Host "     actually arrived -- hf reports success even when it reached nothing." -ForegroundColor DarkGray
+# Measured 2026-08-07 on the other model, and it is the same tool: when hf cannot
+# reach the repository it prints a tick and returns the local directory. Failure
+# that looks like success is worth one line here, because the next thing the user
+# does is start a server against nothing.
+Write-Host "     If that finishes suspiciously fast, check that one file of" -ForegroundColor DarkGray
+Write-Host "     17,559,178,144 B arrived -- hf reports success even when it reached nothing." -ForegroundColor DarkGray
 Write-Host ""
+# -ctk/-ctv q8_0 and not f16: measured 2026-08-20, f16 KV leaves 332.8 MiB of the
+# card free, a third of the 924 MiB at which this project has documented losses
+# starting. q8_0 leaves 6,627. No --moe-stream: 16.4 GB dense, it fits whole and
+# there are no expert tensors to route. No --chat-template-file: unlike 0731 the
+# embedded template is the correct one.
+Write-Host "  2. Then start the server, and the client in a second terminal:" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "    $InstallTo\bin\llama-server.exe -m $InstallTo\models\qwen38-gguf\Qwen3.8-27B-UD-Q4_K_XL.gguf ``" -ForegroundColor White
+Write-Host "      --port 8082 -c 200000 -ctk q8_0 -ctv q8_0 -ngl 99 -np 1 ``" -ForegroundColor White
+# --slot-save-path IS NOT ON THE LAST LINE, and that is not layout. The checker
+# reads this file as text and captures the path with \S+, so a value ending at
+# the closing quote of a Write-Host comes back as `session"` and the flag reads
+# as pointing somewhere it does not. Caught by the checker on the first run of
+# this block. Anything that ends a printed command line must be a flag with no
+# value, or a number.
+Write-Host "      --slot-save-path $InstallTo\session ``" -ForegroundColor White
+# NOT LAST, for the reason above: this flag carries a VALUE, and a value sitting
+# at the closing quote comes back to the checker with the quote glued on. The
+# jinja flag ends the block because it has nothing after it to swallow.
+#
+# Written without naming the flags in prose on purpose -- this file's own
+# comments have been matched by the checker's regexes before.
+Write-Host "      --spec-type draft-mtp ``" -ForegroundColor White
+Write-Host "      --jinja" -ForegroundColor White
+Write-Host ""
+# 8082 rather than 8081, so the client has to be told -- and being told is the
+# point: the port is what says which model answered.
+Write-Host "    python $InstallTo\cli\crow.py --base-url http://127.0.0.1:8082/v1" -ForegroundColor White
+Write-Host ""
+# BOTH CLIENTS ARE INSTALLED AND NEITHER IS THE DEFAULT. The terminal one is
+# printed first because it needs nothing but python; the window is printed second
+# because it needs WebView2 as well, and step 1 has already said whether this
+# machine has it.
+Write-Host "     Or the same conversation in a window, if pywebview installed above:" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "    python $InstallTo\cli\crow_gui.py" -ForegroundColor White
+Write-Host ""
+Write-Host "     Same core, same session file, same server. Neither client wraps the other," -ForegroundColor DarkGray
+Write-Host "     and neither is needed to use the other." -ForegroundColor DarkGray
+Write-Host ""
+# THE SECOND MODEL, AND IT IS PRINTED EVEN THOUGH THE INSTALLER DOES NOT FETCH IT.
+# It is still shipped -- the binaries, the verified chat template and every flag
+# below -- it is simply no longer the model this installer leads with. A line
+# nobody runs today is still a line somebody copies the day they do, and an
+# uncopied line is how the vault page ended up without --slot-save-path on
+# 2026-08-10 while README.md and this file had it.
+#
+# THIS BLOCK NOW SITS LAST, AND THAT MOVED THE CHECKER'S REGION WITH IT. The
+# 2000-character window opens at the "llama-server" printed below and runs to the
+# end of this section, so --moe-stream-l2 has MORE room than it had when a second
+# server block followed it, not less. The selftest measures the real distance
+# rather than trusting that sentence.
+#
 # WHY --moe-stream-cache SAYS 58 AND NOT 64, and this note sits HERE rather than beside the flag on
-# purpose: check_operating_point.py reads a 2000-character region starting at "llama-server.exe" to
-# find the command line, and a long comment inside that window pushes the last flags out of it and
-# reports this installer as broken. Measured the hard way on 2026-08-11, which is also when the
-# number itself changed.
+# purpose: a long comment INSIDE that window pushes the last flags out of it and reports this
+# installer as broken. Measured the hard way on 2026-08-11, which is also when the number changed.
 #
 # A slot costs 360.69 MiB on 0731 -- the server prints the cache size at every step and the figure is
 # constant to five digits. Past a point the allocation no longer fits beside what the display holds,
@@ -1496,14 +1669,16 @@ Write-Host ""
 # THIS NUMBER IS DERIVED FROM 32,607 MiB OF VRAM AND WHATEVER THE DISPLAY HOLDS BESIDE IT. A smaller
 # card, or a busier display, needs a smaller value. Deriving it from the machine the way
 # --moe-stream-l2 is derived is tracked as #87 rather than guessed at here.
-Write-Host "  2. Then start the server, and the client in a second terminal:" -ForegroundColor DarkGray
+Write-Host "  3. Or the second model, DeepSeek-V4-Flash-0731 -- a separate 84.6 GiB" -ForegroundColor DarkGray
+Write-Host "     download, not installed here:" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "    hf download unsloth/DeepSeek-V4-Flash-0731-GGUF --include 'UD-IQ2_XXS/*' --local-dir $InstallTo\models" -ForegroundColor White
 Write-Host ""
 Write-Host "    $InstallTo\bin\llama-server.exe -m $InstallTo\models\UD-IQ2_XXS\DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00001-of-00003.gguf ``" -ForegroundColor White
 # --jinja is not optional here. Without it llama-server uses its own built-in
 # template instead of the model's, the client's replayed reasoning is dropped,
 # and the prompt cache breaks on every turn -- measured 2026-08-08, 138.8-242.3 s
-# of re-prefill per turn against 1.6-2.2 s. This is the line people copy, so it
-# is the line that has to carry the flag.
+# of re-prefill per turn against 1.6-2.2 s.
 Write-Host "      --port 8081 -c 200000 -ngl 99 -np 1 --jinja ``" -ForegroundColor White
 # --slot-save-path is what lets a session survive at all. Without it the client
 # can keep its messages but not the server's KV cache, and the next start pays a
@@ -1530,73 +1705,6 @@ if ($l2 -gt 0) {
 }
 Write-Host ""
 Write-Host "    python $InstallTo\cli\crow.py" -ForegroundColor White
-Write-Host ""
-# THE SECOND MODEL, AND IT IS PRINTED EVEN THOUGH THE INSTALLER DOES NOT FETCH IT.
-# A line nobody can run yet is still a line somebody will copy the day they do
-# fetch it, and an uncopied line is how the vault page ended up without
-# --slot-save-path on 2026-08-10 while README.md and this file had it. The
-# alternative -- documenting it only in the README -- is the drift this whole
-# manifest exists against, so it is printed here and checked here.
-#
-# THIS BLOCK'S "llama-server" IS ALSO WHERE THE 0731 REGION ENDS. The checker
-# cuts a region at the NEXT occurrence of the binary name, so everything from
-# here down is out of 0731's 2000 characters -- and everything 0731 needs,
-# --moe-stream-l2 included, is printed above. The 179 characters of slack noted
-# below were measured before this block existed; the cut makes them larger, not
-# smaller, because a region can only lose text that comes AFTER the cut.
-Write-Host "  3. Or the second model, Qwen3.8-27B -- a separate 16.4 GiB download, not installed here:" -ForegroundColor DarkGray
-Write-Host ""
-# -ctk/-ctv q8_0 and not f16: measured 2026-08-20, f16 KV leaves 332.8 MiB of the
-# card free, a third of the 924 MiB at which this project has documented losses
-# starting. q8_0 leaves 6,627. No --moe-stream: 16.4 GB dense, it fits whole and
-# there are no expert tensors to route. No --chat-template-file: unlike 0731 the
-# embedded template is the correct one.
-Write-Host "    $InstallTo\bin\llama-server.exe -m $InstallTo\models\qwen38-gguf\Qwen3.8-27B-UD-Q4_K_XL.gguf ``" -ForegroundColor White
-Write-Host "      --port 8082 -c 200000 -ctk q8_0 -ctv q8_0 -ngl 99 -np 1 ``" -ForegroundColor White
-# --slot-save-path IS NOT ON THE LAST LINE, and that is not layout. The checker
-# reads this file as text and captures the path with \S+, so a value ending at
-# the closing quote of a Write-Host comes back as `session"` and the flag reads
-# as pointing somewhere it does not. Caught by the checker on the first run of
-# this block. The 0731 line above is safe by accident -- a trailing backtick
-# puts a space there. Anything that ends a printed command line must be a flag
-# with no value, or a number.
-Write-Host "      --slot-save-path $InstallTo\session ``" -ForegroundColor White
-# NOT LAST, for the reason above: this flag carries a VALUE, and a value sitting
-# at the closing quote comes back to the checker with the quote glued on. The
-# jinja flag ends the block because it has nothing after it to swallow.
-#
-# Written without naming the flags in prose on purpose -- this file's own
-# comments have been matched by the checker's regexes before.
-Write-Host "      --spec-type draft-mtp ``" -ForegroundColor White
-Write-Host "      --jinja" -ForegroundColor White
-Write-Host ""
-# 8082 rather than 8081, so the client has to be told -- and being told is the
-# point: the port is what says which model answered.
-Write-Host "    python $InstallTo\cli\crow.py --base-url http://127.0.0.1:8082/v1" -ForegroundColor White
-Write-Host ""
-# BOTH CLIENTS ARE INSTALLED AND NEITHER IS THE DEFAULT. The terminal one is
-# printed first because it is the one the README documents end to end and the one
-# that needs nothing but python; the window is printed second because it needs Tk
-# as well, and step 1 has already said whether this machine has it.
-#
-# THIS BLOCK SITS BELOW THE python LINE ON PURPOSE, and the reason is measured
-# rather than stylistic. check_operating_point.py reads a 2000-character region
-# from the "llama-server" that precedes the printed command line, and on this
-# version that region has room for 179 more characters before it stops finding
-# --moe-stream-l2 -- measured by padding this file at the real path and running
-# the checker: 179 green, 180 red with "1 of 12 flags differ". The python line
-# above starts one character past the region's edge, so everything from here down
-# is free. Anything added ABOVE it is not, and it is the same trap the note above
-# the server block was moved out of the window to avoid.
-#
-# The selftest holds the margin at "the last printed flag is inside the checker's
-# window", three characters stricter than the checker for the reason given there.
-Write-Host "     Or the same conversation in a window, if pywebview installed above:" -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "    python $InstallTo\cli\crow_gui.py" -ForegroundColor White
-Write-Host ""
-Write-Host "     Same core, same session file, same server. Neither client wraps the other," -ForegroundColor DarkGray
-Write-Host "     and neither is needed to use the other." -ForegroundColor DarkGray
 Write-Host ""
 
 # The last screen is the only place these four commands appear -- the model, the
