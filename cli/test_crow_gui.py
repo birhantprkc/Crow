@@ -2191,11 +2191,17 @@ class TheReasoningSliderIsTheSameCommandTests(ApiCase):
         self.assertIsNone(level)
         self.assertIn("max", note)
 
-    def test_the_slider_labels_are_not_interpolated(self):
+    def test_the_level_names_are_not_interpolated(self):
         """The rootMenu rule, and the ticket names it: a level out of the
-        manifest is text off the disk, so the page sets it with textContent."""
+        manifest is text off the disk, so the page sets it with textContent.
+
+        THE ELEMENT MOVED, THE RULE DID NOT (#117). This used to look for `#reasonlabel`, which
+        was the label under the slider handle; the slider is gone and the names are now drawn as
+        rows by reasonMenu. A level called `<img onerror=...>` still has to be DRAWN, not run.
+        """
         source = inspect.getsource(crow_gui)
-        self.assertIn('$("#reasonlabel").textContent', source)
+        self.assertIn('el.querySelector("b").textContent = name;', source)
+        self.assertIn('el.querySelector(".what").textContent = bits.join', source)
 
 
 if __name__ == "__main__":

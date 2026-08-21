@@ -438,38 +438,30 @@ details.think[open] .caret{transform:rotate(90deg)}
 .chipwrap{position:relative;display:inline-block}
 .chip.pick{cursor:pointer}
 .chip.pick:hover{border-color:var(--bevel)}
-#modelmenu{position:absolute;top:calc(100% + 6px);left:0;min-width:300px;
+/* #117. ONE RULE SET FOR BOTH MENUS, and the reasoning one joined it by losing its slider.
+   It used to be a range input with a FIXED width, because its label swapped between "off" and
+   "medium" and the sentence under it between two lengths, so a self-sizing panel changed width
+   while the handle was being dragged. A list has neither problem: it sizes once, on open.
+   The deeper reason the slider went is in reasonMenu -- the order it drew does not exist. */
+#modelmenu,#reasonmenu{position:absolute;top:calc(100% + 6px);left:0;min-width:300px;
   background:var(--panel);border:1px solid var(--line);border-radius:9px;
   padding:5px 0;z-index:40;box-shadow:0 10px 26px rgba(0,0,0,.45)}
-#modelmenu[hidden]{display:none}
-#modelmenu .head{color:var(--dimmer);font-size:10px;text-transform:uppercase;
+#modelmenu[hidden],#reasonmenu[hidden]{display:none}
+#modelmenu .head,#reasonmenu .head{color:var(--dimmer);font-size:10px;text-transform:uppercase;
   letter-spacing:.08em;padding:4px 9px 5px}
-#modelmenu .none{color:var(--dimmer);font-size:11px;padding:2px 9px 7px}
-#modelmenu button{display:block;width:100%;text-align:left;font:inherit;
+#modelmenu .none,#reasonmenu .none{color:var(--dimmer);font-size:11px;padding:2px 9px 7px}
+#modelmenu button,#reasonmenu button{display:block;width:100%;text-align:left;font:inherit;
   background:none;border:0;color:var(--text);padding:5px 9px;cursor:pointer}
-#modelmenu button:hover{background:rgba(126,176,248,.10)}
-#modelmenu button b{display:block;font-weight:600;font-size:12px;color:var(--text)}
-#modelmenu button .what{color:var(--dimmer);font-size:10.5px}
-#modelmenu button .tick{float:right;color:var(--accent)}
-/* #116. A SLIDER AND NOT A LIST, because the levels are ordered -- off, then
-   cheapest to dearest -- and an ordered choice drawn as a list hides the one
-   thing the user is deciding. Same panel as the two menus above it. */
-/* FIXED, NOT min-width: the label under the handle is "off" at one end and
-   "medium" at the other, and the line below it swaps between two sentences of
-   very different length -- so a menu that sized itself to its content changed
-   width while the handle was being dragged. */
-#reasonmenu{position:absolute;top:calc(100% + 6px);left:0;width:250px;
-  background:var(--panel);border:1px solid var(--line);border-radius:9px;
-  padding:5px 10px 9px;z-index:40;box-shadow:0 10px 26px rgba(0,0,0,.45)}
-#reasonmenu[hidden]{display:none}
-#reasonmenu .head{color:var(--dimmer);font-size:10px;text-transform:uppercase;
-  letter-spacing:.08em;padding:4px 0 6px}
-#reasonmenu input[type=range]{width:100%;accent-color:var(--accent);margin:2px 0}
-#reasonmenu .what{color:var(--text);font-size:12px;font-weight:600;padding-top:3px}
-/* Two lines reserved, so the panel does not change HEIGHT either when the
-   sentence swaps -- the same jump, in the other axis. */
-#reasonmenu .cost{color:var(--dimmer);font-size:10.5px;font-weight:400;
-  padding-top:4px;line-height:1.35;min-height:2.7em}
+#modelmenu button:hover,#reasonmenu button:hover{background:rgba(126,176,248,.10)}
+#modelmenu button b,#reasonmenu button b{display:block;font-weight:600;font-size:12px;color:var(--text)}
+#modelmenu button .what,#reasonmenu button .what{color:var(--dimmer);font-size:10.5px}
+#modelmenu button .tick,#reasonmenu button .tick{float:right;color:var(--accent)}
+/* The prefill sentence, under the list instead of under a handle. The reserved two lines are
+   gone with the slider: the panel is built once on open and nothing moves inside it afterwards,
+   so there is no jump left to absorb. The line is ABSENT rather than empty when the change
+   renders the same bytes -- crow_core.reasoning_change_rerenders decides that, not the page. */
+#reasonmenu .cost{color:var(--dimmer);font-size:10.5px;line-height:1.35;
+  border-top:1px solid var(--line-soft);margin-top:4px;padding:7px 9px 3px}
 </style></head><body>
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
@@ -510,13 +502,7 @@ details.think[open] .caret{transform:rotate(90deg)}
         <div id="modelmenu" hidden></div></span>
       <span class="chipwrap"><span class="chip pick" id="reasoning" hidden
             onclick="crow.reasonMenu()" title="this chat's thinking level"></span>
-        <div id="reasonmenu" hidden>
-          <div class="head">thinking level</div>
-          <input type="range" id="reasonrange" min="0" max="1" step="1" value="0"
-                 oninput="crow.reasonPreview()" onchange="crow.reasonApply()">
-          <div class="what" id="reasonlabel"></div>
-          <div class="what cost" id="reasoncost"></div>
-        </div></span>
+        <div id="reasonmenu" hidden></div></span>
       <span class="chip" id="nctx" hidden></span>
       <div id="right">
         <span class="chip ghost" id="url"></span>
@@ -790,45 +776,79 @@ const crow = {
 
   chooseModel(k){ $("#modelmenu").hidden=true; pywebview.api.choose_model(k); },
 
-  // #116. THE STOPS ARE off PLUS WHAT THE MODEL TAKES, in the manifest's order,
-  // and they are LABELS OFF THE DISK -- so the label under the slider is set
-  // with textContent, never interpolated, exactly as the two menus above do it.
-  reasonStops(){ return ["off"].concat(this.levels||[]); },
+  // #117. ONE ROW PER RENDERING, not one per name. The manifest carries which levels produce the
+  // SAME prompt, measured through /apply-template, and the window draws the groups rather than
+  // the names: on Qwen `off` and `high` are one row, on 0731 `off`, `low` and `high` are.
+  //
+  // UNMEASURED COLLAPSES NOTHING. A model whose entry has no reasoning_groups gets every level as
+  // its own row and `off` as its own row -- merging two steps on no evidence would be inventing
+  // the very fact this field exists to record, and #116's rule holds here too: no manifest entry,
+  // nothing made up.
+  reasonGroups(){ const g = this.groups||[];
+    return g.length ? g : [["off"]].concat((this.levels||[]).map(l=>[l])); },
 
-  // HIDDEN WHEN THE MODEL DECLARES NO LEVELS, rather than showing an empty
-  // control: a slider with one stop invites a click that cannot do anything,
-  // and #116's second negative proof is exactly that -- no manifest entry, no
-  // invented levels.
+  // WHAT A GROUP IS CALLED: its first member that is not `off`. `off` never names a row. It is
+  // the absence of a setting, and every template has a default for the absent key -- so a row
+  // called `off` beside the step it IS would be the defect #117 was cut for: the chip read
+  // `reasoning off` while Qwen reasoned at xhigh, the dearest setting on that model.
+  reasonName(g){ for(const n of g){ if(n!=="off") return n; } return "off"; },
+
+  // HIDDEN WHEN THE MODEL DECLARES NO LEVELS, rather than showing an empty control: a menu with
+  // one row invites a click that cannot do anything, and #116's second negative proof is exactly
+  // that -- no manifest entry, no invented levels.
+  //
+  // THE CHIP NAMES THE WIRE OR THE EFFECT, whichever is true. A bound level names itself. An
+  // unbound chat names the step its emptiness lands on, plus `(default)`, because what the user
+  // needs off the chip is what the model DOES.
   showReason(level){ this.reasoning = level || "";
     const c = $("#reasoning");
     if(!(this.levels||[]).length){ c.hidden = true; return; }
     c.hidden = false;
     c.innerHTML = "<b></b>";
-    c.querySelector("b").textContent = "reasoning " + (level || "off"); },
+    let text = "reasoning " + (level || "off");
+    if(!level){
+      const g = this.reasonGroups().filter(x=>x.indexOf("off")>=0)[0];
+      const name = g ? this.reasonName(g) : "off";
+      if(name !== "off") text = "reasoning " + name + " (default)";
+    }
+    c.querySelector("b").textContent = text; },
 
+  // Built like modelMenu above it and drawn with textContent for the same reason: these names
+  // came off the disk. A click chooses AND applies, the way the model chip does -- the slider's
+  // separate preview step existed because dragging is not choosing, and a list has no drag.
   reasonMenu(){ const m=$("#reasonmenu");
     if(!m.hidden){ m.hidden=true; return; }
-    const stops = this.reasonStops();
-    const r = $("#reasonrange");
-    r.max = String(Math.max(stops.length-1, 0));
-    r.value = String(Math.max(stops.indexOf(this.reasoning||"off"), 0));
-    this.reasonPreview();
+    const groups = this.reasonGroups(), now = this.reasoning||"off";
+    const rows = groups.map(() =>
+      '<button class="reasonrow" onclick="crow.chooseReason(this.dataset.k)">'
+      + '<span class="tick"></span><b></b><span class="what"></span></button>');
+    m.innerHTML = '<div class="head">thinking level</div>'
+      + (rows.length ? rows.join("") : '<div class="what none">none in the manifest</div>')
+      + '<div class="cost"></div>';
+    const els = m.querySelectorAll("button.reasonrow");
+    groups.forEach((g,i) => { const el = els[i];
+      if(!el) return;
+      const name = this.reasonName(g);
+      el.dataset.k = name;
+      el.querySelector("b").textContent = name;
+      // The escape rather than the character: the two menus above write &#10003; into their HTML,
+      // and this one sets textContent, so the escape keeps the source ASCII either way.
+      el.querySelector(".tick").textContent = (g.indexOf(now) >= 0) ? "\u2713" : "";
+      // The row SAYS what it swallowed. A group that holds `off` is the one an unset chat lands
+      // on; a group that holds other names says so, because a user who has read `high` somewhere
+      // must be able to see where it went rather than conclude the menu lost it.
+      const bits = [];
+      if(g.indexOf("off") >= 0) bits.push("default");
+      const twins = g.filter(x => x !== "off" && x !== name);
+      if(twins.length) bits.push(twins.join(", ") + " renders the same");
+      el.querySelector(".what").textContent = bits.join(" · "); });
+    // ONE SENTENCE, NOT ONE PER ROW, and only when there is a step to cross. Within a group no
+    // byte of the prompt changes, so a single-group model is charged nothing and told nothing.
+    m.querySelector(".cost").textContent = (groups.length > 1)
+      ? "switching re-reads the whole prompt -- the next turn pays a prefill" : "";
     m.hidden=false; },
 
-  // Moving the handle SAYS what it would do; it does not do it. The cost line
-  // is on screen before the change is applied, the way #115 announces the lost
-  // context before the switch rather than after it.
-  reasonPreview(){ const stops=this.reasonStops();
-    const pick = stops[Number($("#reasonrange").value)] || "off";
-    $("#reasonlabel").textContent = pick;
-    $("#reasoncost").textContent = (pick === (this.reasoning||"off"))
-      ? "this is the current level"
-      : "changing it re-reads the whole prompt -- the next turn pays a prefill"; },
-
-  reasonApply(){ const stops=this.reasonStops();
-    const pick = stops[Number($("#reasonrange").value)] || "off";
-    $("#reasonmenu").hidden=true;
-    pywebview.api.set_reasoning(pick); },
+  chooseReason(name){ $("#reasonmenu").hidden=true; pywebview.api.set_reasoning(name); },
   pickRoot(){ $("#rootmenu").hidden=true; pywebview.api.pick_root(); },
   clearRoot(){ $("#rootmenu").hidden=true; pywebview.api.clear_root(); },
 
@@ -1029,6 +1049,9 @@ const crow = {
         if(e.models){ this.models=e.models; }
         if(e.model_key!==undefined){ this.modelKey=e.model_key; }
         if(e.levels){ this.levels=e.levels; }
+        // #117. BEFORE showReason, not after: the chip's own text depends on the grouping now,
+        // so a chip drawn first would name `off` and be corrected a frame later.
+        if(e.groups!==undefined){ this.groups=e.groups; }
         if(e.reasoning!==undefined){ this.showReason(e.reasoning); }
         if(e.model){ $("#model").hidden=false; $("#model").innerHTML="<b></b>";
           $("#model b").textContent=e.model; }
@@ -1036,6 +1059,7 @@ const crow = {
           $("#nctx").innerHTML="n_ctx <b>"+(e.n_ctx/1000).toFixed(0)+"k</b>"; }
         this.ctx(e.tokens||0,e.n_ctx||0); break;
       case "reasoning": if(e.levels){ this.levels=e.levels; }
+        if(e.groups!==undefined){ this.groups=e.groups; }
         this.showReason(e.level); break;
       case "down": $("#dot").className="down";
         $("#state").textContent=e.why||"no server"; break;
@@ -1830,7 +1854,10 @@ class Api:
                                   for k in crow_core.bootable_models()],
                        "model_key": crow_core.model_key_for(name),
                        "reasoning": self._reasoning or "",
-                       "levels": list(crow_core.reasoning_levels_for(name))})
+                       "levels": list(crow_core.reasoning_levels_for(name)),
+                       # #117. Which of those levels render the SAME prompt, measured. Empty
+                       # means unmeasured, and the page collapses nothing on an empty list.
+                       "groups": [list(g) for g in crow_core.reasoning_groups_for(name)]})
         except Exception as exc:           # noqa: BLE001 - shown, never raised
             self.push({"k": "down", "why": str(exc)[:120]})
             return
@@ -2110,7 +2137,9 @@ class Api:
         if changed:
             self._reasoning = level
             self.push({"k": "reasoning", "level": level or "",
-                       "levels": list(crow_core.reasoning_levels_for(self._model))})
+                       "levels": list(crow_core.reasoning_levels_for(self._model)),
+                       "groups": [list(g)
+                                  for g in crow_core.reasoning_groups_for(self._model)]})
         return said
 
     def _fold_thoughts(self) -> str:

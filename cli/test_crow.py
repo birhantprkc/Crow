@@ -4318,11 +4318,18 @@ class TheReasoningLevelBelongsToTheChatTests(unittest.TestCase):
 
     def test_off_reaches_the_never_chosen_state_again(self):
         """Without it, once a level is bound there is no way back to the one
-        state whose prompt is byte-identical to a client without this."""
+        state whose prompt is byte-identical to a client without this.
+
+        AND IT COSTS NOTHING ON THIS MODEL, which is why the cost note is asserted ABSENT here
+        (#117). `high` and `off` sit in one reasoning_groups entry for Qwen because they render
+        the same bytes -- measured through /apply-template, sha256 7aafe8ffbf9c both -- so a client
+        that promised a full prefill for this move would be charging for nothing. The note's
+        positive case is the test below, where `None` -> `medium` really does cross a group.
+        """
         said, level, changed = crow_core.reasoning_command("off", "Qwen3.8-27B", "high")
         self.assertTrue(changed)
         self.assertIsNone(level)
-        self.assertIn(crow_core.REASONING_COST_NOTE, said)
+        self.assertNotIn(crow_core.REASONING_COST_NOTE, said)
 
     def test_a_change_states_the_prefill_before_it_applies(self):
         said, level, changed = crow_core.reasoning_command("medium", "Qwen3.8-27B", None)

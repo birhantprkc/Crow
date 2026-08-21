@@ -369,6 +369,79 @@ def reasoning_levels_for(model: str | None) -> tuple[str, ...]:
 # that is what reasoning_levels_for answers, once there is a model to ask about.
 REASONING_LEVELS = ("low", "medium", "high", "max")
 
+
+def reasoning_groups_for(model: str | None) -> tuple[tuple[str, ...], ...]:
+    """Which of this model's levels render the SAME prompt. Measured, from the manifest.
+
+    THE LEVEL LIST AND THIS ARE NOT THE SAME LENGTH, and that is the whole point.
+    `reasoning_levels_for` says what may be SENT; this says what is DISTINCT. Measured
+    2026-08-21 (#117) through /apply-template: on Qwen `off` and `high` render byte-identically,
+    on 0731 `off`, `low` AND `high` do -- there only `max` changes anything, so two of the three
+    levels that table offers move no byte.
+
+    `off` IS A MEMBER OF A GROUP, not a fourth state beside them. It means "send no
+    reasoning_effort at all", and every template has a default for the absent key: xhigh on Qwen,
+    none on 0731. So `off` always lands ON one of the real steps -- the group naming it is the
+    default group.
+
+    EMPTY MEANS UNMEASURED, not "no duplicates". A model whose entry carries no
+    reasoning_groups gets the old behaviour: one row per level, nothing marked default, and every
+    change warned about as if it re-rendered. Guessing a grouping here would be the one failure
+    this field exists to prevent -- a window claiming two steps are the same on the strength of
+    nobody having looked.
+    """
+    manifest = _manifest()
+    key = model_key_for(model, manifest)
+    entry = (((manifest.get("models") or {}).get("entries") or {}).get(key) or {}) if key else {}
+    groups = entry.get("reasoning_groups")
+    if not isinstance(groups, list):
+        return ()
+    out = [tuple(str(x) for x in g) for g in groups if isinstance(g, list) and g]
+    return tuple(out)
+
+
+def reasoning_group_of(level: str | None,
+                       groups: tuple[tuple[str, ...], ...]) -> tuple[str, ...] | None:
+    """The group `level` belongs to, or None when nothing claims it.
+
+    `None` and `"off"` are the same question: both mean the key is not sent.
+    """
+    wanted = level or "off"
+    for group in groups:
+        if wanted in group:
+            return group
+    return None
+
+
+def reasoning_row_name(group: tuple[str, ...]) -> str:
+    """What one group is CALLED: its first member that is not `off`.
+
+    `off` never names a row. It is the absence of a setting, and a menu that offers it beside the
+    step it is identical to is the defect #117 was cut for -- on Qwen the chip read `reasoning off`
+    while the model reasoned at xhigh, the dearest setting there is.
+    """
+    for name in group:
+        if name != "off":
+            return name
+    return "off"
+
+
+def reasoning_change_rerenders(current: str | None, wanted: str | None,
+                               groups: tuple[tuple[str, ...], ...]) -> bool:
+    """Whether moving from `current` to `wanted` actually changes the prompt.
+
+    THE WARNING HAS TO BE ABLE TO STAY SILENT. REASONING_COST_NOTE says the next turn pays a full
+    prefill, which is true across groups and FALSE within one: `off` -> `high` on Qwen moves no
+    byte, so a client that warned there would be charging for nothing. Unmeasured -> warn, because
+    an unpaid warning costs a sentence and an unwarned prefill costs minutes.
+    """
+    if not groups:
+        return True
+    here, there = reasoning_group_of(current, groups), reasoning_group_of(wanted, groups)
+    if here is None or there is None:
+        return True
+    return here != there
+
 # What a request may carry from the manifest, and nothing else. The list is here
 # rather than derived from the manifest because it is a statement about THIS
 # build's wire format: these four are the fields `stream_reply` knows how to
@@ -1330,8 +1403,15 @@ def reasoning_command(argument: str, model: str | None,
     one whose prompt is byte-identical to a client without this feature.
     """
     levels = reasoning_levels_for(model)
+    groups = reasoning_groups_for(model)
     known = ", ".join(levels)
     wanted = (argument or "").strip().lower()
+
+    def cost(now: str | None, then: str | None) -> str:
+        # SILENT WITHIN A GROUP (#117). The note promises a full prefill, and that is a lie for a
+        # change that renders the same bytes -- `off` -> `high` on Qwen moves nothing. An
+        # unmeasured model still warns; see reasoning_change_rerenders for why that way round.
+        return "\n" + REASONING_COST_NOTE if reasoning_change_rerenders(now, then, groups) else ""
 
     if not wanted:
         now = current or "not set -- nothing is sent, and the model uses its own default"
@@ -1340,7 +1420,7 @@ def reasoning_command(argument: str, model: str | None,
     if wanted == "off":
         if current is None:
             return ("reasoning is already unset.", None, False)
-        return ("reasoning unset -- nothing is sent.\n%s" % REASONING_COST_NOTE, None, True)
+        return ("reasoning unset -- nothing is sent.%s" % cost(current, None), None, True)
 
     if wanted not in levels:
         # Named, and NOT sent. An invalid level reaching the server arrives as a
@@ -1350,7 +1430,7 @@ def reasoning_command(argument: str, model: str | None,
 
     if wanted == current:
         return ("reasoning is already %s." % wanted, current, False)
-    return ("reasoning: %s\n%s" % (wanted, REASONING_COST_NOTE), wanted, True)
+    return ("reasoning: %s%s" % (wanted, cost(current, wanted)), wanted, True)
 
 
 def write_transcript(conversation: "Conversation", path: str) -> int:
@@ -2480,9 +2560,16 @@ def stream_reply(
         # it stops the value depending on metadata nobody re-reads.
         body["top_k"] = top_k
     if reasoning_effort is not None:
-        # Only when asked for. 0731's template reads the key and treats an absent
-        # one as "low"; sending nothing keeps the prompt byte-identical to a
-        # client that predates the switch, which is what the prompt cache wants.
+        # Only when asked for. Sending nothing keeps the prompt byte-identical to a client that
+        # predates the switch, which is what the prompt cache wants.
+        #
+        # THIS COMMENT USED TO SAY 0731's TEMPLATE READS AN ABSENT KEY AS "low". It does not, and
+        # #117 measured it: manifests/0731-chat-template.jinja sets the absent key to `none`
+        # (lines 12-13) and names reasoning_effort in exactly ONE condition, line 64,
+        # `thinking and reasoning_effort == 'max'`. There is no low branch and no high branch, so
+        # off, low and high all render sha256 fb2ba7d332bc there and only max differs. What an
+        # absent key means is per model and belongs in the manifest -- see reasoning_groups_for.
+        #
         # The value lands in the TEMPLATE, not the sampler -- whether it took
         # effect is visible only in the rendered prompt, which is why E11's
         # counter-probe compares /apply-template output and not this body.
