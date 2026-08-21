@@ -456,6 +456,16 @@ details.think[open] .caret{transform:rotate(90deg)}
 #modelmenu button b,#reasonmenu button b{display:block;font-weight:600;font-size:12px;color:var(--text)}
 #modelmenu button .what,#reasonmenu button .what{color:var(--dimmer);font-size:10.5px}
 #modelmenu button .tick,#reasonmenu button .tick{float:right;color:var(--accent)}
+/* #117, robin on sight. THE BOX IS CAPPED, NOT FIXED, and the cap is there because the widest
+   thing in this menu is the prefill sentence, not a level: three words of content were being
+   drawn in a 430px panel because that sentence refused to wrap. min-width:0 undoes the 300 the
+   model menu needs -- it lists file names, this lists `low`. Nothing inside moves after the
+   panel opens, so a cap cannot reintroduce the jumping the old fixed width was dressing over.
+   FULL CONTRAST ON THE CHOICE, dim on the rest: the level and the heading are what the eye is
+   looking for, and the line under each level is a footnote to a decision already made. */
+#reasonmenu{min-width:0;max-width:260px}
+#reasonmenu .head{color:#fff}
+#reasonmenu button b{color:#fff}
 /* The prefill sentence, under the list instead of under a handle. The reserved two lines are
    gone with the slider: the panel is built once on open and nothing moves inside it afterwards,
    so there is no jump left to absorb. The line is ABSENT rather than empty when the change
