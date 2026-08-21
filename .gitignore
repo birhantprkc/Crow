@@ -33,3 +33,11 @@ dist/
 # installed layout keeps it under %LOCALAPPDATA%\Crow; a checkout would
 # otherwise carry a session into the repository.
 .session/
+
+# The server binary, linked in for a dev checkout so `crow` can start it.
+# The repo never carries binaries; the package builds its own bin/.
+/bin/
+
+# Same, for the name the manifest actually resolves to in a checkout:
+# <install>/session, where <install> is the repository root.
+/session/

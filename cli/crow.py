@@ -2034,6 +2034,11 @@ def boot_if_asked(args: argparse.Namespace) -> str | None:
     refused instead, because silently ignoring what somebody typed is the same
     class of surprise in the other direction.
     """
+    # Same as the window (#114 follow-up): a client that was not pointed
+    # somewhere explicitly talks to whichever server is up, not to whichever
+    # port used to be the only one.
+    if args.base_url == DEFAULT_BASE_URL:
+        args.base_url = crow_core.running_base_url(args.base_url)
     key = getattr(args, "model", None)
     if key not in crow_core.bootable_models():
         return None

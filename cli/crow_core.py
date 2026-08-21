@@ -694,6 +694,24 @@ def bootable_models() -> tuple[str, ...]:
                  if not k.startswith("_"))
 
 
+def model_label(key: str) -> str:
+    """The model's own name for a manifest key -- `Qwen3.8-27B`, not the key.
+
+    THE KEY IS THE TABLE'S WORD, NOT THE MODEL'S. `operating-point` says which
+    row of the manifest this is and nothing at all about what would load; a
+    person choosing between two models is choosing between DeepSeek and Qwen.
+    robin, 2026-08-21, at the first picker that listed keys.
+
+    DERIVED FROM THE ENTRY'S OWN PATH through `model_display_name` -- the same
+    function /props answers are run through, which is what makes the label and
+    the header line agree by construction instead of by a second list. Falls
+    back to the key, because a row whose path this build cannot read is still a
+    row the user may want to pick.
+    """
+    paths = model_candidates(key)
+    return (model_display_name(paths[0]) if paths else "") or key
+
+
 def server_port(key: str) -> int | None:
     """Which port this model's line listens on, or None if it does not say.
 
@@ -799,7 +817,14 @@ def running_servers(query: Callable[[], str] | None = None) -> list[tuple[str, s
                 if sys.platform == "win32" else ["ps", "-eo", "pid=,args="])
 
         def query():
+            # stdin=DEVNULL, AND IT IS NOT TIDINESS. Without it the child
+            # inherits this process's stdin, and `powershell -Command` READS it:
+            # measured 2026-08-21, a picker that asked which model to start got
+            # EOF instead of the answer, because listing the processes had
+            # already swallowed it. Anything that asks a question after calling
+            # this would have the same hole.
             done = subprocess.run(argv, capture_output=True, text=True,
+                                  stdin=subprocess.DEVNULL,
                                   encoding="utf-8", errors="replace", timeout=60)
             return done.stdout if done.returncode == 0 else ""
     try:
@@ -825,6 +850,34 @@ def served_model(command_line: str) -> str:
     """The GGUF a running server was started with, read off its own -m."""
     hit = _DASH_M.search(command_line or "")
     return (hit.group(2) or hit.group(3)) if hit else ""
+
+
+_DASH_PORT = re.compile(r"--port\s+(\d+)")
+
+
+def running_base_url(default: str) -> str:
+    """The address of the server that IS running, or `default`.
+
+    WHY A CLIENT MAY NOT ASSUME 8081. That is 0731's port and it was the only
+    one until a second model arrived on 8082. A window started while Qwen is up
+    then knocks on an empty port and says "no endpoint" -- about a server the
+    user can see running. robin, 2026-08-21: "NEIN ICH HAENGE NICHTS AN."
+
+    ASKED IN THIS ORDER ON PURPOSE. If something answers where the caller was
+    already pointed, that is the answer: an explicit --base-url is a decision
+    and must not be overridden by a process list. Only when nothing answers
+    there is the running server's own command line read for its --port.
+    """
+    if server_model_path(default) is not None:
+        return default
+    for _pid, line in running_servers():
+        hit = _DASH_PORT.search(line)
+        if not hit:
+            continue
+        found = "http://127.0.0.1:%s/v1" % hit.group(1)
+        if server_model_path(found) is not None:
+            return found
+    return default
 
 
 def server_model_path(base_url: str, timeout: float = 3.0) -> str | None:
@@ -960,7 +1013,8 @@ def stop_servers(log: Callable[[str], None] | None = None) -> int:
         try:
             if sys.platform == "win32":
                 subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                               capture_output=True, timeout=30)
+                               capture_output=True, stdin=subprocess.DEVNULL,
+                               timeout=30)
             else:
                 os.kill(int(pid), 15)
             asked += 1
@@ -986,7 +1040,11 @@ def model_command(argument: str, base_url: str, install: str | None = None,
     say = log or (lambda _msg: None)
     keys = bootable_models()
     running = server_model_path(base_url)
-    known = ", ".join(keys) or "none -- the manifest declares no server lines"
+    # THE KEY AND THE MODEL, not one or the other: the key is what has to be
+    # typed back, the name is what the reader recognises. Listing only keys is
+    # what `operating-point` looked like to somebody who wanted DeepSeek.
+    known = (", ".join("%s (%s)" % (k, model_label(k)) for k in keys)
+             or "none -- the manifest declares no server lines")
 
     wanted = (argument or "").strip()
     if not wanted:

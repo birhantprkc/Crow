@@ -454,7 +454,11 @@ details.think[open] .caret{transform:rotate(90deg)}
 /* #116. A SLIDER AND NOT A LIST, because the levels are ordered -- off, then
    cheapest to dearest -- and an ordered choice drawn as a list hides the one
    thing the user is deciding. Same panel as the two menus above it. */
-#reasonmenu{position:absolute;top:calc(100% + 6px);left:0;min-width:230px;
+/* FIXED, NOT min-width: the label under the handle is "off" at one end and
+   "medium" at the other, and the line below it swaps between two sentences of
+   very different length -- so a menu that sized itself to its content changed
+   width while the handle was being dragged. */
+#reasonmenu{position:absolute;top:calc(100% + 6px);left:0;width:250px;
   background:var(--panel);border:1px solid var(--line);border-radius:9px;
   padding:5px 10px 9px;z-index:40;box-shadow:0 10px 26px rgba(0,0,0,.45)}
 #reasonmenu[hidden]{display:none}
@@ -462,8 +466,10 @@ details.think[open] .caret{transform:rotate(90deg)}
   letter-spacing:.08em;padding:4px 0 6px}
 #reasonmenu input[type=range]{width:100%;accent-color:var(--accent);margin:2px 0}
 #reasonmenu .what{color:var(--text);font-size:12px;font-weight:600;padding-top:3px}
+/* Two lines reserved, so the panel does not change HEIGHT either when the
+   sentence swaps -- the same jump, in the other axis. */
 #reasonmenu .cost{color:var(--dimmer);font-size:10.5px;font-weight:400;
-  padding-top:4px;line-height:1.35}
+  padding-top:4px;line-height:1.35;min-height:2.7em}
 </style></head><body>
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
@@ -770,12 +776,16 @@ const crow = {
     m.innerHTML = '<div class="head">models</div>'
       + (rows.length ? rows.join("") : '<div class="what none">none in the manifest</div>');
     const els = m.querySelectorAll("button.modelrow");
-    keys.forEach((k,i) => { const el = els[i];
+    // Each entry is [key, label]: the KEY goes into dataset and comes back on
+    // the click, the LABEL is what the row reads as -- `operating-point` is the
+    // table's word for the row, `DeepSeek-V4-Flash-0731` is the model. Both are
+    // set by textContent and never interpolated; they came off the disk.
+    keys.forEach((x,i) => { const el = els[i];
       if(!el) return;
-      el.dataset.k = k;
-      el.querySelector("b").textContent = k;
+      el.dataset.k = x[0];
+      el.querySelector("b").textContent = x[1];
       el.querySelector(".what").textContent =
-        (k === this.modelKey) ? "running" : "restarts the server"; });
+        (x[0] === this.modelKey) ? "running" : "restarts the server"; });
     m.hidden=false; },
 
   chooseModel(k){ $("#modelmenu").hidden=true; pywebview.api.choose_model(k); },
@@ -1814,7 +1824,10 @@ class Api:
                        # #115: the chip's list travels with the probe that
                        # learned the name, so the two can never disagree about
                        # which model is the running one.
-                       "models": list(crow_core.bootable_models()),
+                       # [key, label] -- the key is what the menu sends back,
+                       # the label is what a person recognises. See model_label.
+                       "models": [[k, crow_core.model_label(k)]
+                                  for k in crow_core.bootable_models()],
                        "model_key": crow_core.model_key_for(name),
                        "reasoning": self._reasoning or "",
                        "levels": list(crow_core.reasoning_levels_for(name))})
@@ -3019,6 +3032,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # THE WINDOW FINDS THE SERVER THAT IS RUNNING. 8081 is 0731's port and was
+    # the only one until a second model arrived on 8082; a window opened while
+    # Qwen is up would otherwise knock on an empty port and say "no endpoint"
+    # about a server the user can see running. An explicit --base-url is a
+    # decision and is never overridden -- see running_base_url.
+    if args.base_url == DEFAULT_BASE_URL:
+        args.base_url = crow_core.running_base_url(args.base_url)
     try:
         import webview
     except ImportError:
