@@ -2785,8 +2785,22 @@ class TheBarLostThreeChipsAndTheMenuGainedASubmenuTests(unittest.TestCase):
         self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
         self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
         body = self.source[self.source.index("</style>"):]
-        self.bar = body[body.index('<div id="status">'):body.index('<div id="flow">')]
+        # #125. THE STATUS BAR IS GONE, so `bar` is the title ribbon that is left
+        # and `server` is where its two chips moved. The claims below did not
+        # change -- only the block they are made about, which is the point of
+        # slicing by marker rather than by line.
+        self.bar = body[body.index('<div id="bar"'):body.index('<div id="body">')]
+        self.server = body[body.index('<section data-cat="server"'):
+                           body.index('<section data-cat="skills"')]
         self.composer = body[body.index('<div id="composer">'):body.index("<script>")]
+
+    def test_the_bar_is_gone_and_nothing_was_left_hidden(self):
+        """#125. An empty bar is a band of nothing between the ribbon and the
+        first line of the chat, so it was removed rather than emptied -- and
+        with it the rule it drew, which was half the seam."""
+        self.assertNotIn('id="status"', self.source)
+        self.assertNotIn("#status{", self.css)
+        self.assertNotIn('id="right"', self.source)
 
     def test_the_bar_carries_neither_the_address_nor_the_window_size(self):
         """Both were chips that said something better said elsewhere: the URL is
@@ -2800,7 +2814,7 @@ class TheBarLostThreeChipsAndTheMenuGainedASubmenuTests(unittest.TestCase):
         """REMOVED IS NOT THE SAME AS GONE. Dropping the chip without keeping the
         address anywhere would take away the one fact worth having when the dot
         goes red."""
-        self.assertIn('id="conn"', self.bar)
+        self.assertIn('id="conn"', self.server)
         self.assertIn('$("#conn").title=e.url;', self.source)
         self.assertIn("#conn{cursor:help}", self.css,
                       "a native title with no cursor hint is a fact nobody finds")
@@ -3618,6 +3632,86 @@ class TheMemoryLineTests(unittest.TestCase):
         self.assertIn("--no-review", self.source)
         for hidden in ("--no-memory-notice", "memory_notifications", "quiet_memory"):
             self.assertNotIn(hidden, self.source)
+
+
+class TheRibbonAndTheChatRunIntoOneTests(unittest.TestCase):
+    """#125: what the window lost, and the one divider it kept."""
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+
+    def test_both_chips_moved_and_neither_was_dropped(self):
+        """REMOVED IS NOT THE SAME AS GONE, the rule the address already had.
+        The bar is deleted, so its two facts had to land somewhere a person can
+        still reach -- and the tool switch is a SWITCH there, not a chip that
+        has to shout in colour which of two modes is live."""
+        self.assertIn('<section data-cat="server"', self.source)
+        server = self.source[self.source.index('<section data-cat="server"'):
+                             self.source.index('<section data-cat="skills"')]
+        self.assertIn('id="conn"', server)
+        self.assertIn('id="dot"', server)
+        self.assertIn('id="tools"', server)
+        self.assertIn('class="sw" id="toolsw"', server)
+        self.assertIn('$("#toolsw").onclick=()=>crow.toggleTools();', self.source)
+
+    def test_the_new_category_is_reachable(self):
+        """A section nobody can click is a section that does not exist. The
+        order in the JS list is positional -- a fourth button with a three-name
+        list would open the wrong pane."""
+        self.assertIn("crow.settingsCat('server')", self.source)
+        self.assertIn('["look","skills","server","about"]', self.source)
+
+    def test_no_rule_is_drawn_between_the_ribbon_the_rail_and_the_chat(self):
+        """NEGATIVE PROBE, and it is the whole of robin's second request: the
+        three used to be separated by three 1px lines."""
+        bar = self.css[self.css.index("#bar{"):]
+        bar = bar[:bar.index("}") + 1]
+        self.assertNotIn("border-bottom", bar)
+        rail = self.css[self.css.index("#rail{"):]
+        rail = rail[:rail.index("}") + 1]
+        self.assertNotIn("border-right", rail)
+        head = self.css[self.css.index("#railhead{"):]
+        head = head[:head.index("}") + 1]
+        self.assertNotIn("border-bottom", head)
+
+    def test_the_corner_is_what_separates_them_instead(self):
+        """With every rule gone the chat would blur into the panel. The radius
+        separates them the way paper on a desk is separate -- by lying on top.
+        `#body` must carry the rail colour or the corner has nothing to cut away
+        to and reads as a notch."""
+        main = self.css[self.css.index("#main{"):]
+        main = main[:main.index("}") + 1]
+        self.assertIn("border-top-left-radius", main)
+        self.assertIn("background:var(--bg)", main)
+        self.assertIn("overflow:hidden", main)
+        body = self.css[self.css.index("#body{"):]
+        body = body[:body.index("}") + 1]
+        self.assertIn("background:var(--rail)", body)
+
+    def test_the_ribbon_is_the_same_surface_as_the_rail(self):
+        """One panel, one colour. A gradient ending in the chat's background
+        would put the seam back in, only softer and harder to name."""
+        bar = self.css[self.css.index("#bar{"):]
+        bar = bar[:bar.index("}") + 1]
+        self.assertIn("background:var(--rail)", bar)
+        self.assertNotIn("gradient", bar)
+
+    def test_the_version_is_only_where_it_is_looked_up(self):
+        """It sat beside the wordmark and was copied into the sheet on open.
+        The ribbon is a name and three window buttons now, so the number goes
+        straight to About -- and the element it was copied FROM is gone, which
+        is the half that would otherwise rot."""
+        self.assertNotIn('id="ver"', self.source)
+        self.assertNotIn('$("#ver")', self.source)
+        self.assertIn('$("#aboutver").textContent=e.version;', self.source)
+
+    def test_nothing_still_points_at_a_palette_entry_that_was_removed(self):
+        """`--status-bg` and `--titlebar` had exactly one reader each, and both
+        readers went with the bar. A palette value nothing reads is a value that
+        drifts from the three themes it is written in three times."""
+        for dead in ("--status-bg", "--titlebar"):
+            self.assertNotIn(dead, self.source, dead)
 
 
 class TheSkillSheetTests(unittest.TestCase):

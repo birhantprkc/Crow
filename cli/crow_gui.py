@@ -446,7 +446,6 @@ PAGE = r"""<!doctype html>
   --text-faint:#9a9a9e; --text-hi:#ffffff; --text-hover:#ffffff;
   --think:#8e8e93; --think-bg:rgba(255,255,255,.045);
   --code:#d4d4d8; --code-bg:#111111;
-  --titlebar:#1f1f1f; --status-bg:rgba(24,24,24,.85);
   --hover:#2a2a2b; --close-bg:#c0362b; --on-solid:#ffffff;
   --shadow:rgba(0,0,0,.5); --shadow-strong:rgba(0,0,0,.7);
   /* THE SYSTEM'S OWN, NOT OURS. The page used to name a shipped typeface first
@@ -496,7 +495,6 @@ PAGE = r"""<!doctype html>
   --text-faint:#6b7280; --text-hi:#0f1114; --text-hover:#1a1c1f;
   --think:#5b6472; --think-bg:rgba(26,28,31,.05);
   --code:#24292f; --code-bg:#f6f8fa;
-  --titlebar:#f7f7f8; --status-bg:rgba(255,255,255,.85);
   --hover:#ececed; --close-bg:#c0362b; --on-solid:#ffffff;
   --shadow:rgba(15,17,20,.14); --shadow-strong:rgba(15,17,20,.30);
 }
@@ -519,7 +517,6 @@ PAGE = r"""<!doctype html>
   --text-faint:#9fb0c9; --text-hi:#ffffff; --text-hover:#c8d4e8;
   --think:#7b89a3; --think-bg:rgba(19,24,41,.4);
   --code:#c3d0e4; --code-bg:#080b13;
-  --titlebar:#101528; --status-bg:rgba(14,18,32,.72);
   --hover:#161d2e; --close-bg:#8b2b26; --on-solid:#ffffff;
   --shadow:rgba(0,0,0,.45); --shadow-strong:rgba(0,0,0,.75);
 }
@@ -537,10 +534,11 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 /* THE CAPTION DRAGS THE WINDOW, and the hook is pywebview's own class.
    `-webkit-app-region: drag` is Electron syntax; WebView2 ignores it, which
    is why the first frameless build could not be moved at all. */
+/* #125. ONE SURFACE WITH THE RAIL, and therefore its colour and no rule under
+   it. The ribbon, the rail head and the chat list are the same panel; the chat
+   is the thing that sits ON it, which is what the rounded corner below says. */
 #bar{display:flex;align-items:center;gap:10px;height:34px;flex:none;
-  padding:0 0 0 13px;background:linear-gradient(180deg,var(--titlebar),var(--bg));
-  border-bottom:1px solid var(--line)}
-#mark,#ver{pointer-events:none}
+  padding:0 0 0 13px;background:var(--rail)}
 /* #119. THE WORDMARK IS A PALETTE ENTRY NOW. It was the accent in all three
    themes, which is Crow's own blue -- right on the dark blue ground it was
    drawn for, and a coloured word floating on a neutral or a white one.
@@ -548,9 +546,8 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
    TWO NAMES, because only `crow` splits the O off. Setting both to the same
    value in the other two is what makes them one solid word there rather than
    a word with a hole in it. */
-#mark{font-weight:700;letter-spacing:.22em;font-size:11.5px;color:var(--mark)}
+#mark{font-weight:700;letter-spacing:.22em;font-size:11.5px;color:var(--mark);pointer-events:none}
 #mark span{color:var(--mark-o)}
-#ver{font-size:10.5px;color:var(--dimmer);letter-spacing:.04em}
 #wbtns{margin-left:auto;display:flex;-webkit-app-region:no-drag}
 /* The buttons sit inside the drag region, so they opt out of it again --
    without this a click on 'close' starts a drag instead of closing. */
@@ -614,7 +611,10 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 #themes button.on{border-color:var(--accent);color:var(--accent);
   box-shadow:0 0 0 3px rgba(126,176,248,.13)}
 
-#body{display:flex;flex:1;min-height:0}
+/* #125. THE RAIL COLOUR SITS HERE, not only on the rail, because it is what
+   the chat's rounded corner cuts away to. Without it the corner would expose
+   whatever `body` happens to be and read as a notch rather than an edge. */
+#body{display:flex;flex:1;min-height:0;background:var(--rail)}
 
 /* -- resize grips ------------------------------------------------------- */
 /* A FRAMELESS WINDOW HAS NO BORDERS TO GRAB. Windows draws the resize edges as
@@ -633,10 +633,9 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 #g-se{bottom:0;right:0;width:8px;height:8px;cursor:nwse-resize}
 
 /* -- rail --------------------------------------------------------------- */
-#rail{width:242px;flex:none;border-right:1px solid var(--line);
+#rail{width:242px;flex:none;
   background:var(--rail);display:flex;flex-direction:column;min-height:0}
-#railhead{display:flex;align-items:center;padding:0 12px;min-height:var(--barh);
-  border-bottom:1px solid var(--line-soft)}
+#railhead{display:flex;align-items:center;padding:0 12px;min-height:var(--barh)}
 #railhead h2{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.13em;
   text-transform:uppercase;color:var(--dimmer)}
 #new{margin-left:auto;font:inherit;font-size:11px;color:var(--dim);
@@ -699,7 +698,7 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
    list went somewhere rather than that the window redrew. `overflow:hidden`
    is what keeps the contents from spilling across the chat while it closes. */
 #rail{transition:width .16s ease}
-body[data-rail="shut"] #rail{width:0;border-right:0;overflow:hidden}
+body[data-rail="shut"] #rail{width:0;overflow:hidden}
 /* IN THE TITLE BAR, so it survives the rail it hides. It is the one control
    that must not live in the thing it folds away. */
 #railtoggle{font:inherit;color:var(--dimmer);background:transparent;
@@ -752,12 +751,20 @@ body[data-rail="shut"] #rail{width:0;border-right:0;overflow:hidden}
 #arch.open{display:block}
 
 /* -- main --------------------------------------------------------------- */
+/* #125. THE CORNER IS THE ONLY DIVIDER LEFT. With every rule removed the chat
+   would blur into the panel; a radius separates them the way a sheet of paper
+   on a desk is separate -- by lying on top, not by having a line drawn round
+   it. `#body` carries the rail colour so there is something for the corner to
+   cut away to, and `overflow:hidden` is what stops the flow's own background
+   from squaring it off again at the first scroll. */
 #main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;
+  background:var(--bg);border-top-left-radius:12px;overflow:hidden;
   position:relative}
-#status{display:flex;align-items:center;gap:9px;padding:8px 16px;flex:none;
-  min-height:var(--barh);
-  border-bottom:1px solid var(--line);background:var(--status-bg);
-  font-size:11.5px;flex-wrap:wrap}
+/* #125. THE STATUS BAR IS GONE, not hidden. Both chips it carried moved into
+   the settings sheet -- the connection with its address, and the tool switch --
+   and an empty bar is a band of nothing between the ribbon and the first line
+   of the chat. The rule it drew is gone with it, which is half of the seam
+   robin asked to remove. */
 .chip{display:inline-flex;align-items:center;gap:6px;color:var(--dim);
   border:1px solid var(--line);border-radius:999px;padding:2px 10px;
   white-space:nowrap}
@@ -773,7 +780,7 @@ body[data-rail="shut"] #rail{width:0;border-right:0;overflow:hidden}
 #conn{cursor:help}
 #tools{cursor:pointer;transition:color .15s,border-color .15s}
 #tools:hover{border-color:var(--bevel)}
-#right{margin-left:auto;display:flex;gap:9px;align-items:center}
+
 
 /* STABLE GUTTER, so the column does not shift sideways the moment a chat grows
    past one screen -- and so the composer below can line up against one number
@@ -1148,7 +1155,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
          stroke="currentColor" stroke-width="1.6" aria-hidden="true">
       <rect x="2.5" y="4" width="15" height="12" rx="2"></rect>
       <line x1="8" y1="4" x2="8" y2="16"></line></svg></button>
-  <span id="mark">CR<span>O</span>W</span><span id="ver"></span>
+  <span id="mark">CR<span>O</span>W</span>
   <div id="helpwrap" class="pywebview-no-drag">
     <button id="help" onclick="crow.helpMenu()">Help</button>
     <div id="helpmenu" hidden>
@@ -1172,6 +1179,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
       <nav id="scats">
         <button class="on" onclick="crow.settingsCat('look')">Appearance</button>
         <button onclick="crow.settingsCat('skills')">Skills</button>
+        <button onclick="crow.settingsCat('server')">Server</button>
         <button onclick="crow.settingsCat('about')">About</button>
       </nav>
       <div id="spane">
@@ -1181,6 +1189,23 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
             <button data-theme="dark"  onclick="crow.setTheme('dark')">Dark</button>
             <button data-theme="light" onclick="crow.setTheme('light')">Light</button>
             <button data-theme="crow"  onclick="crow.setTheme('crow')">Crow</button>
+          </div>
+        </section>
+        <section data-cat="server" hidden>
+          <h3>Server</h3>
+          <div class="srow">
+            <div class="stext">
+              <div class="sname">Connection</div>
+              <div class="sdesc" id="conn" title="…"><span id="dot"></span><span
+                   id="state">connecting …</span></div>
+            </div>
+          </div>
+          <div class="srow">
+            <div class="stext">
+              <div class="sname">Tool calls</div>
+              <div class="sdesc" id="tools"></div>
+            </div>
+            <button class="sw" id="toolsw"></button>
           </div>
         </section>
         <section data-cat="skills" hidden>
@@ -1228,13 +1253,6 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
          readout in the composer. The URL is not a choice at all: it is the one
          fact you look up when something is wrong, so it is the connected
          chip's title and costs no width until asked for. -->
-    <div id="status">
-      <div id="right">
-        <span class="chip" id="conn" title="…"><span id="dot"></span><span
-              id="state">connecting …</span></span>
-        <span class="chip" id="tools"></span>
-      </div>
-    </div>
     <div id="flow"></div>
     <div id="composer">
       <div id="box">
@@ -1426,12 +1444,16 @@ const crow = {
   // the chip says which of the two modes is running, in both states.
   tools(on){
     this.execute=on;
-    const c=$("#tools"), s=c.querySelector("span");
-    s.textContent = on ? ", running" : ", shown only";
-    c.style.color = on ? "var(--warn)" : "var(--dimmer)";
-    c.style.borderColor = on ? "rgba(227,179,65,.45)" : "var(--line)";
-    c.title = on ? "Tools run. Click to only show them."
-                 : "Tools are only shown. Click to let them run.";
+    const c=$("#tools"), s=c.querySelector("span"), w=$("#toolsw");
+    if(s) s.textContent = on ? ", running" : ", shown only";
+    // #125. A SWITCH IN THE SHEET, not a coloured chip in a bar. The chip had to
+    // shout which of two modes was live, because it sat in the corner of every
+    // screen; a row in a panel somebody opened on purpose says it in words and
+    // needs no colour to be read.
+    if(w){ w.classList.toggle("on", on);
+           w.title = on ? "Tool calls run" : "Tool calls are only shown"; }
+    c.title = on ? "Tools run. Switch off to only show them."
+                 : "Tools are only shown. Switch on to let them run.";
   },
   toggleTools(){ if(this.running) return; pywebview.api.set_tools(!this.execute); },
 
@@ -1445,7 +1467,6 @@ const crow = {
     const now=document.documentElement.dataset.theme || "dark";
     document.querySelectorAll("#themes button").forEach(
       b => b.classList.toggle("on", b.dataset.theme===now));
-    $("#aboutver").textContent=$("#ver").textContent;
     this.drawSkills();
     $("#settings").hidden=false;
   },
@@ -1491,7 +1512,7 @@ const crow = {
 
   settingsCat(name){
     document.querySelectorAll("#scats button").forEach(
-      (b,i) => b.classList.toggle("on", ["look","skills","about"][i]===name));
+      (b,i) => b.classList.toggle("on", ["look","skills","server","about"][i]===name));
     document.querySelectorAll("#spane section").forEach(
       sec => sec.hidden = sec.dataset.cat!==name);
   },
@@ -2136,13 +2157,16 @@ const crow = {
         this.showReason(e.level); break;
       case "down": $("#dot").className="down";
         $("#state").textContent=e.why||"no server"; break;
-      case "meta": $("#ver").textContent=e.version;
+      // #125. STRAIGHT TO ABOUT. The version used to sit beside the wordmark and
+      // be copied into the sheet when it opened; the ribbon is a name and three
+      // window buttons now, so the number goes where somebody looks it up.
+      case "meta": $("#aboutver").textContent=e.version;
         // THE TITLE, NOT A CHIP (#119). Set rather than interpolated for the same reason every
         // other name here is: it is a string that arrived over the bridge.
         $("#conn").title=e.url;
         $("#tools").innerHTML="<b></b> tools<span></span>";
         $("#tools b").textContent=e.tools;
-        $("#tools").onclick=()=>crow.toggleTools();
+        $("#toolsw").onclick=()=>crow.toggleTools();
         this.tools(e.execute); break;
       case "tools": this.tools(e.on); break;
       case "mode": this.modeIs(e.name, e.modes); break;
