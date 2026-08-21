@@ -482,45 +482,81 @@ def main(argv):
         return 2
     wants = [(key, expected(manifest["servers"][key])) for key in keys]
 
-    copies = [
+    # #128. THE INSTALLER CARRIES EVERY KEY; THE DOCUMENTS SHARE THEM OUT.
+    #
+    # Until now both README.md and install.ps1 had to print every server line,
+    # and that was right while one page described every model. It stopped being
+    # right the moment the README was rewritten around the Qwen operating point:
+    # a page whose whole subject is one model had to print a second one, or this
+    # tool went red -- so the tool was dictating what the documentation is about.
+    #
+    # install.ps1 IS UNCHANGED AND STAYS UNCHANGED. It STARTS both servers, so a
+    # flag missing there is a broken run, not a stale sentence. Every key must
+    # still match there.
+    #
+    # WHAT THE DOCUMENTS PROMISE IS NOW WEAKER, AND HERE IS EXACTLY HOW MUCH: a
+    # key must be printed correctly by AT LEAST ONE live document. A second
+    # document carrying a WRONG line for that key is no longer caught while some
+    # other document carries it right. That is the price; it is paid because the
+    # alternative is a checker that decides which model a page may mention.
+    #
+    # NOT AN ARCHIVE, EITHER. Pointing this at docs/README-v0.5.1-*.md would
+    # make those files rise and fall with the manifest -- and a document the
+    # checker keeps current is not an archive, it is a second live page with a
+    # misleading name.
+    installer = ("install.ps1", os.path.join(args.repo, "install.ps1"))
+    docs = [
         ("README.md", os.path.join(args.repo, "README.md")),
-        ("install.ps1", os.path.join(args.repo, "install.ps1")),
+        ("docs/second-model.md", os.path.join(args.repo, "docs", "second-model.md")),
     ]
     for e in args.extra:
-        copies.append((os.path.basename(e), e))
+        docs.append((os.path.basename(e), e))
 
     failed = 0
     checked = 0
-    for label, path in copies:
+
+    label, path = installer
+    for key, want in wants:
+        checked += 1
+        # THE KEY IS IN THE LABEL, so a failure says WHICH line is wrong.
+        # Without it "3 of 12 flags differ" on a file with two command
+        # lines sends the reader to the wrong one.
+        where = "%s [%s]" % (label, key)
         if not os.path.exists(path):
-            # One failure per key, not one per file: with a map of lines the
-            # unit that can be right or wrong is (file, key), and counting a
-            # missing file once would let the RESULT line read as though only
-            # one thing was outstanding.
-            print("  FAILED   %-34s does not exist" % label)
-            failed += len(wants)
-            checked += len(wants)
+            failed += 1
+            print("  FAILED   %-34s does not exist" % where)
             continue
-        # READ ONCE, COMPARED PER KEY. Every key gets the whole file and looks
-        # for its OWN region in it; the old code took the first region that
-        # matched the single manifest line and never looked further, which is
-        # why a second command line would have been unchecked prose sitting
-        # beside a checked one.
-        text = read(path)
-        for key, want in wants:
-            checked += 1
-            # THE KEY IS IN THE LABEL, so a failure says WHICH line is wrong.
-            # Without it "3 of 12 flags differ" on a file with two command
-            # lines sends the reader to the wrong one.
-            where = "%s [%s]" % (label, key)
-            got, problems = compare(where, text, want)
+        got, problems = compare(where, read(path), want)
+        if problems:
+            failed += 1
+            print("  FAILED   %-34s %d of %d flags differ" % (where, len(problems), len(want)))
+            for p in problems:
+                print("             %s" % p)
+        else:
+            print("  OK       %-34s all %d flags match" % (where, len(want)))
+
+    for key, want in wants:
+        checked += 1
+        where = "docs [%s]" % key
+        carried, misses = None, []
+        for doc_label, doc_path in docs:
+            if not os.path.exists(doc_path):
+                misses.append((doc_label, ["does not exist"]))
+                continue
+            _got, problems = compare(where, read(doc_path), want)
             if problems:
-                failed += 1
-                print("  FAILED   %-34s %d of %d flags differ" % (where, len(problems), len(want)))
-                for p in problems:
-                    print("             %s" % p)
+                misses.append((doc_label, problems))
             else:
-                print("  OK       %-34s all %d flags match" % (where, len(want)))
+                carried = doc_label
+                break
+        if carried:
+            print("  OK       %-34s all %d flags match, in %s"
+                  % (where, len(want), carried))
+        else:
+            failed += 1
+            print("  FAILED   %-34s no document prints this line" % where)
+            for doc_label, problems in misses:
+                print("             %-22s %s" % (doc_label, "; ".join(problems[:3])))
 
     versions, badv = check_versions(args.repo, manifest["version"])
     if badv:

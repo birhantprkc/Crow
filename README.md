@@ -13,6 +13,7 @@
 <a href="cli/crow.py"><img src="https://img.shields.io/badge/client-Python%20stdlib%20only-555555?style=flat-square&logo=python&logoColor=ffd43b&labelColor=000000" alt="Python"></a>
 <a href="https://huggingface.co/unsloth/Qwen3.8-27B-GGUF"><img src="https://img.shields.io/badge/model-Qwen3.8--27B-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
 <a href="https://github.com/ggml-org/llama.cpp"><img src="https://img.shields.io/badge/engine-llama.cpp-555555?style=flat-square&logo=cplusplus&logoColor=00599c&labelColor=000000" alt="llama.cpp"></a>
+<a href="#memory"><img src="https://img.shields.io/badge/memory-persistent-555555?style=flat-square&logo=sqlite&logoColor=003b57&labelColor=000000" alt="Memory"></a>
 </p>
 
 <table>
@@ -45,17 +46,14 @@
 | Build | llama.cpp server `1c3c967` |
 | Source of truth | [`manifests/operating-point.json`](manifests/operating-point.json) |
 
-Second model, unchanged: `DeepSeek-V4-Flash-0731` at `UD-IQ2_XXS`, 304B MoE, 13.3B active, experts
-streamed off the SSD. Command line below.
-
 ---
 
 ## Requirements
 
 | | |
 |---|---|
-| **GPU** | NVIDIA. 32 GB for this operating point. 16 GB is the installer's floor, unmeasured for Qwen |
-| **System RAM** | 32 GB. The host tier is a 0731 flag and unused here |
+| **GPU** | NVIDIA. 32 GB for this operating point. 16 GB is the installer's floor, unmeasured |
+| **System RAM** | 32 GB |
 | **Disk** | ~2 GB for Crow, **16.35 GiB for the model** — one file |
 | **OS** | Windows x64 |
 | **Python** | 3.8+. Terminal client uses the standard library only |
@@ -86,7 +84,7 @@ reach the repository.
 
 ## Start
 
-### Server — Qwen3.8-27B
+### Server
 
 ```powershell
 $env:LOCALAPPDATA\Crow\bin\llama-server.exe `
@@ -96,30 +94,17 @@ $env:LOCALAPPDATA\Crow\bin\llama-server.exe `
   --spec-type draft-mtp
 ```
 
-### Server — DeepSeek-V4-Flash-0731
-
-```powershell
-$env:LOCALAPPDATA\Crow\bin\llama-server.exe `
-  -m $env:LOCALAPPDATA\Crow\models\0731-gguf\UD-IQ2_XXS\DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00001-of-00003.gguf `
-  --port 8081 -c 200000 -ngl 99 -np 1 --jinja `
-  --slot-save-path $env:LOCALAPPDATA\Crow\session `
-  --chat-template-file $env:LOCALAPPDATA\Crow\manifests\0731-chat-template.jinja `
-  --moe-stream --moe-stream-cache 58s --moe-stream-io-threads 8 --moe-stream-direct `
-  --moe-stream-l2 32
-```
-
 ### Clients
-
-```powershell
-python $env:LOCALAPPDATA\Crow\cli\crow.py --base-url http://127.0.0.1:8082/v1
-```
 
 ```powershell
 python $env:LOCALAPPDATA\Crow\cli\crow_gui.py
 ```
 
-The window attaches to whatever server is up: it reads the `--port` off the running process. The
-terminal client defaults to 8081 and needs `--base-url` for Qwen.
+```powershell
+python $env:LOCALAPPDATA\Crow\cli\crow.py --base-url http://127.0.0.1:8082/v1
+```
+
+The window reads the `--port` off the running process. The terminal client needs `--base-url`.
 
 ---
 
@@ -137,18 +122,17 @@ terminal client defaults to 8081 and needs `--base-url` for Qwen.
 | `--slot-save-path` | `<install>\session` | the server refuses to start against a path that does not exist |
 | `--spec-type` | `draft-mtp` | the model's own MTP head. 1.85x decode, measured |
 | `--spec-draft-n-max` | `3` (default) | measured, see below |
-| `--moe-stream*` | 0731 only | routes expert tensors through a slot cache. Qwen has no expert tensors |
-| `--chat-template-file` | 0731 only | that GGUF's embedded template fails its own golden vector 4 |
 
 ### Client flags
 
 | flag | default | |
 |---|---|---|
-| `--base-url` | `http://127.0.0.1:8081/v1` | Qwen needs `:8082` |
+| `--base-url` | `http://127.0.0.1:8081/v1` | this model needs `:8082` |
 | `--reasoning-effort` | unset | per chat via `/reasoning`. Levels come from the manifest |
 | `--rollover-at` | `0.9` | archive and start fresh at this share of the window. `0` disables |
 | `--max-tool-rounds` | `24` | `0` answers without running any tool |
 | `--mode` | `auto` | `manual` asks before writing and executing, `allowedit` before executing |
+| `--no-review` | off | stop the model saving memories and skills after a turn |
 | `--rounds` | off | full timing line after every tool round |
 | `--show-reasoning` | off | stream the reasoning. `/thoughts` toggles it |
 | `--no-session` | off | do not resume the last session, do not save this one |
@@ -156,20 +140,158 @@ terminal client defaults to 8081 and needs `--base-url` for Qwen.
 
 ### Reasoning levels
 
-Levels are per model, out of the manifest. Names that render the same prompt are one row in the
-window.
+Per model, out of the manifest. Names that render the same prompt are one row in the window.
 
-| model | rows offered | collapses |
+| rows offered | collapses |
+|---|---|
+| `high` (default), `low`, `medium` | `off` renders as `high` |
+
+### Tools
+
+12. `read_file` `write_file` `edit_file` `list_dir` `find_files` `search_text` `run_command`
+`web_search` `fetch_url` `memory` `skill` `session_search`.
+
+| release level | asks before |
+|---|---|
+| `auto` (default) | nothing |
+| `allowedit` | executing |
+| `manual` | writing and executing |
+
+Reading never asks, at any level.
+
+---
+
+## Memory
+
+Two files. Plain text, `§` on its own line between entries, editable by hand.
+
+| path | limit | holds |
 |---|---|---|
-| Qwen3.8-27B | `high` (default), `low`, `medium` | `off` renders as `high` |
-| DeepSeek-V4-Flash-0731 | `low` (default), `max` | `off`, `low`, `high` all render the same |
+| `<working directory>\.crow\MEMORY.md` | 4,000 chars | this project: layout, conventions, commands, traps |
+| `%LOCALAPPDATA%\Crow\USER.md` | 1,500 chars | who you are, how you want to be worked with |
+
+| | |
+|---|---|
+| Limits come from | `MAX_TOOL_BYTES` — 16,000 B is ~4,000 tokens, so 4 chars buy 1 token |
+| 4,000 chars is | a quarter of one tool read. Bigger than that and `read_file` is cheaper |
+| Head cost, both stores plus one skill | 633 chars = 158 tokens = **0.09 %** of the usable window |
+| Empty stores cost | nothing. No entries, no block, byte 0 unchanged |
+
+### Rules
+
+| | |
+|---|---|
+| Never trimmed for you | a write over the limit fails and returns the entries and both numbers |
+| No `read` action | the content is already in the prompt |
+| Exact duplicates | answered with success and one entry |
+| Injection and invisible Unicode | refused before the entry is written |
+| No working directory bound | `memory` is refused with a reason; `user` still works |
+
+### The head is pinned
+
+The rendered block is written into the chat file on first open and replayed **verbatim** from then
+on. `prefix_fingerprint` hashes the system prompt, llama-server reuses a prompt by common token
+prefix, and the KV cache lives on disk — so a head re-read at every start would go stale against
+every saved cache. Binding a different folder re-pins and says what the prefill costs first.
+
+### Who writes it
+
+| | |
+|---|---|
+| Trigger | `MEMORY_REVIEW_AT` = **0.20 / 0.50 / 0.75** of the context window |
+| Each mark fires | once. The mark is written to the chat file and travels with it |
+| A turn crossing several marks | fires once, at the highest |
+| Off with | `--no-review` |
+| When it saves | one line in the chat, per entry, at the moment it lands |
+
+---
+
+## Skills
+
+Procedures the model keeps. Memory is what is **true**; a skill is what to **do**.
+
+```
+%LOCALAPPDATA%\Crow\skills\<name>\SKILL.md
+---
+name: llama-server-starten
+description: Wenn Crow ein lokales LLM braucht (Port 8082) — exakte Flags, Wartesignal, Bind-Falle.
+enabled: true
+---
+1. …
+```
+
+| | |
+|---|---|
+| In the prompt | name and description only, never the body |
+| Body fetched with | `skill(action=read, name=…)`, one call |
+| List limit | 2,000 chars for the **whole list**, 200 per description |
+| Over the limit | the list says how many did not fit; it does not grow |
+| `enabled` | in the file's own frontmatter. Absent means on |
+| Written by | the same review at 0.20 / 0.50 / 0.75 — one pass decides both |
+
+### Creating one
+
+Crow ships with `skill-creator` and reads it before it writes. Seeded once, on the first run that
+has no skills directory; deleted, it stays deleted.
+
+```
+Lies zuerst deinen Skill "skill-creator" und halte dich daran.
+Speichere danach als Skill, wie man <Verfahren> ausführt: <Schritte, Flags wörtlich, die Falle>.
+Nenne mir zum Schluss Name und Beschreibung, die du gespeichert hast.
+```
+
+| what `skill-creator` enforces | |
+|---|---|
+| Save only what worked **here** | not a plan, not general knowledge |
+| The description says **when** | it is all the prompt carries; a description of itself is never chosen |
+| Name the job, not the topic | `messreihe-fahren`, not `messungen` |
+| Body | numbered steps, flags verbatim, what each step produces, the one trap that was hit |
+| Rewrite under the same name | `save` replaces and keeps the on/off switch |
+| Saying nothing | the normal outcome |
+
+---
+
+## Session search
+
+```
+session_search(query, limit=8)
+```
+
+| | |
+|---|---|
+| Covers | the open chat and everything under `session\archiv\` |
+| Index | `%LOCALAPPDATA%\Crow\index.db`, SQLite FTS5 |
+| The index is | derived. Delete it and the next search rebuilds it |
+| Freshness | file mtime. A changed file loses all its rows and gets new ones |
+| Returns | the real messages, clipped at 400 chars each. No summary |
+| Query syntax | every word is quoted, so `--slot-save-path` is a search and not an error |
+| Without FTS5 | the tool stays declared and answers that nothing was searched |
+
+---
+
+## Settings
+
+`Help → Settings` in the window.
+
+| pane | |
+|---|---|
+| **Appearance** | theme: dark, light, crow |
+| **Skills** | one row per skill, name and description, a switch. Off takes it out of the prompt; the file stays. Switching re-pins the open chat and says what the prefill costs |
+| **Server** | connection state, the base URL as its title, and the tool-call switch |
+| **MCPs** | coming soon |
+| **Other providers** | coming soon — keys for models that are not on this machine |
+| **About** | version |
+
+Chat rail: right-click a chat to rename, move to a project, archive or delete; right-click the empty
+space for a new chat or a new project. A project **is** a working directory — a chat belongs to one
+when its `crow_root` points there, and nothing else records it.
 
 ---
 
 ## Measurements
 
-All rows below: one user, `-np 1`, identical prompt, server restarted cold per arm, numbers
-cross-checked against the server's own `eval time` blocks.
+One user, `-np 1`, identical prompt, server restarted cold per arm, cross-checked against the
+server's own `eval time` blocks.
 
 ### Speculation
 
@@ -224,18 +346,19 @@ Prefill is a function of block size, not a constant.
 | tokens, client vs server | 6,591 = sum of 11 `eval time` blocks |
 | decode, client vs server | 6,591 / 53.564 s = 123.05 tok/s |
 | prefill, client vs server | 20,490 = sum of 11 `prompt eval` lines |
-| suite | 702 of 702 |
-| `check_shared_core` | 57 / 57 |
+| suite | 925 of 925 |
+| `check_shared_core` | 60 / 60 |
 | `check_operating_point` | 6 / 6 |
+| `install.ps1 -Selftest` | 80 / 80 |
 
 ### Not measured
 
 | open | |
 |---|---|
-| VRAM floor for Qwen | 16 GB is the installer's floor, never run |
+| VRAM floor | 16 GB is the installer's floor, never run |
 | contexts past 36k under MTP | without MTP that span costs 13 % |
 | distribution fidelity at `temperature 1.0` | one graded answer is a sample |
-| 0731 figures under MTP | its speculation path uses a separate draft model and costs 6.06 % |
+| what the background review costs | it holds the single slot; occupancy and queueing never timed |
 
 ---
 
@@ -247,12 +370,10 @@ Prefill is a function of block size, not a constant.
 
 | | |
 |---|---|
-| Chips | connection, model, reasoning level, context window, endpoint, tool count |
-| Model chip | picker. Switching restarts the server and says so before it does |
-| Reasoning chip | one row per distinct rendering. A click selects and applies |
+| Composer | model and reasoning level as one chip, context readout, working directory, release level, dictation |
 | Cost line | rounds, tokens, decode, prefill, cache hits, tool calls, wall clock |
 | Thought blocks | folded, one per re-entry, each labelled with the turn's thinking share |
-| Rail | chats, rollovers, archive |
+| Rail | chats grouped by project, archive, fold state remembered |
 
 ---
 
@@ -262,11 +383,11 @@ Prefill is a function of block size, not a constant.
 |---|---|
 | `cli/crow.py` | terminal client |
 | `cli/crow_gui.py` | window |
-| `cli/crow_core.py` | conversation, request, SSE, tool loop, cost line |
+| `cli/crow_core.py` | conversation, request, SSE, tool loop, memory, skills, cost line |
 | `tools/start-server.py` | model picker, becomes `llama-server` |
 | `manifests/operating-point.json` | source of truth for every command line above |
 | `tools/check_operating_point.py` | holds this file against that manifest |
-| `docs/README-v0.5.1-deepseek.md` | the previous README, DeepSeek-first |
+| `docs/second-model.md` | the other server `install.ps1` sets up |
 
 ---
 
@@ -274,9 +395,12 @@ Prefill is a function of block size, not a constant.
 
 MIT. See [LICENSE](LICENSE).
 
-Models are their authors': [Qwen](https://huggingface.co/Qwen/Qwen3.8-27B) (Apache-2.0),
-[DeepSeek](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731). Quantisations by
-[Unsloth](https://huggingface.co/unsloth). Engine: [llama.cpp](https://github.com/ggml-org/llama.cpp).
+Model: [Qwen](https://huggingface.co/Qwen/Qwen3.8-27B) (Apache-2.0). Quantisation by
+[Unsloth](https://huggingface.co/unsloth). Engine:
+[llama.cpp](https://github.com/ggml-org/llama.cpp).
+
+Earlier READMEs: [v0.5.1, Qwen-first](docs/README-v0.5.1-qwen.md) ·
+[v0.5.1, the one before it](docs/README-v0.5.1-deepseek.md).
 
 <div align="center">
 <a href="https://ko-fi.com/nibor1896"><img src="https://img.shields.io/badge/support%20this%20on-ko--fi-ff5e5b?style=for-the-badge" alt="Ko-fi"></a>
