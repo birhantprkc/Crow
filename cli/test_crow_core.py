@@ -2310,5 +2310,141 @@ class WebToolsAreDeclaredTests(unittest.TestCase):
         self.assertIn("unless the user asked", self._search_description())
 
 
+class AProjectIsAWorkingDirectoryTests(unittest.TestCase):
+    """#119: the project list in roots.json, and what it refuses to be.
+
+    A PROJECT IS NOT A NEW CONCEPT. It is a root somebody promoted, so every
+    rule the boundary already has applies unchanged -- which is the whole reason
+    these cases can be driven rather than read off the source.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-proj-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._real = crow_core.ROOTS_FILE
+        self.addCleanup(self._restore)
+        crow_core.ROOTS_FILE = os.path.join(self.dir, "roots.json")
+
+    def _restore(self) -> None:
+        crow_core.ROOTS_FILE = self._real
+
+    def _dir(self, name: str) -> str:
+        path = os.path.join(self.dir, name)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _doc(self) -> dict:
+        with open(crow_core.ROOTS_FILE, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_adding_one_declares_it_a_root_and_lists_it(self):
+        """Both halves, because either alone is a project that does not work: a
+        listed directory with no marker is filtered straight back out, and a
+        marked one nobody listed never reaches the rail."""
+        path = self._dir("Crow")
+        self.assertTrue(crow_core.add_project(path))
+        self.assertTrue(os.path.isfile(crow_core.root_file(path)))
+        self.assertEqual([os.path.normcase(p) for p in crow_core.projects()],
+                         [os.path.normcase(path)])
+
+    def test_a_directory_that_is_already_a_root_keeps_its_mode(self):
+        """NEGATIVE for the writer: promoting a root must not reset the release
+        level somebody chose for it. `write_root_mode` is only called when there
+        is no marker yet, and this is the case that holds it to that."""
+        path = self._dir("bound")
+        crow_core.write_root_mode(path, "allowedit")
+        crow_core.add_project(path)
+        self.assertEqual(crow_core.read_root_mode(path), "allowedit")
+
+    def test_adding_twice_lists_it_once(self):
+        """A repeated click is a repeated click, not a second project."""
+        path = self._dir("Crow")
+        crow_core.add_project(path)
+        crow_core.add_project(path)
+        self.assertEqual(len(crow_core.projects()), 1)
+        # THE FILE, NOT ONLY THE READER. `projects()` dedupes on the way out, so
+        # a writer that appended every time would still LOOK right -- and the
+        # list would grow without bound behind a correct-looking rail.
+        self.assertEqual(len(self._doc()["projects"]), 1)
+
+    def test_the_order_is_the_order_they_were_added(self):
+        """UNLIKE `recent`, which is newest-first because a picker wants the last
+        thing. A rail that reordered itself under the mouse cannot be aimed at."""
+        first, second = self._dir("aaa"), self._dir("zzz")
+        crow_core.add_project(first)
+        crow_core.add_project(second)
+        self.assertEqual([os.path.basename(p) for p in crow_core.projects()],
+                         ["aaa", "zzz"])
+
+    def test_a_project_whose_marker_is_gone_is_not_listed(self):
+        """The filter `known_roots` applies, for the same reason: a directory
+        that no longer declares itself would offer a boundary that is not there.
+        NEGATIVE PROBE for `test_adding_one...` -- without the filter that case
+        passes on a directory somebody deleted."""
+        path = self._dir("Crow")
+        crow_core.add_project(path)
+        os.remove(crow_core.root_file(path))
+        self.assertEqual(crow_core.projects(), [])
+        self.assertIn(path, self._doc()["projects"],
+                      "the entry is filtered on read, not deleted on sight")
+
+    def test_projects_and_recent_are_separate_keys(self):
+        """THE WHOLE REASON THIS KEY EXISTS. `recent` is capped at eight, so a
+        project on that list would fall out of the rail on the ninth folder
+        anybody ever opened."""
+        path = self._dir("Crow")
+        crow_core.add_project(path)
+        for n in range(9):
+            other = self._dir("other%d" % n)
+            crow_core.write_root_mode(other, crow_core.DEFAULT_MODE)
+            crow_core.remember_root(other)
+        self.assertNotIn(os.path.normcase(path),
+                         [os.path.normcase(p) for p in crow_core.known_roots()],
+                         "the cap did not evict it -- this case proves nothing")
+        self.assertEqual([os.path.normcase(p) for p in crow_core.projects()],
+                         [os.path.normcase(path)])
+
+    def test_remembering_a_root_does_not_delete_the_projects(self):
+        """The read-modify-write `_write_roots` was fixed for once already, when
+        it dropped `active`. A third key is a third thing it can drop."""
+        path = self._dir("Crow")
+        crow_core.add_project(path)
+        other = self._dir("anders")
+        crow_core.write_root_mode(other, crow_core.DEFAULT_MODE)
+        crow_core.remember_root(other)
+        crow_core.set_active_root(other)
+        self.assertEqual(len(crow_core.projects()), 1)
+
+    def test_a_subdirectory_of_a_project_is_not_in_it(self):
+        """`find_root` takes the NEAREST marker and not the highest, so a
+        sub-directory that declares itself is its own root. Folding it into the
+        project above would contradict the rule the boundary is built on."""
+        top = self._dir("Crow")
+        crow_core.add_project(top)
+        inner = self._dir(os.path.join("Crow", "cli"))
+        self.assertTrue(crow_core.is_project(top))
+        self.assertFalse(crow_core.is_project(inner))
+
+    def test_dropping_one_leaves_the_marker_and_the_directory(self):
+        """A boundary that disappeared because a list was tidied is the failure
+        the root mechanism exists to prevent. The row goes; nothing else does."""
+        path = self._dir("Crow")
+        crow_core.add_project(path)
+        crow_core.drop_project(path)
+        self.assertEqual(crow_core.projects(), [])
+        self.assertTrue(os.path.isdir(path))
+        self.assertTrue(os.path.isfile(crow_core.root_file(path)))
+        self.assertFalse(crow_core.is_project(path))
+
+    def test_nothing_is_a_project_before_anybody_says_so(self):
+        """NEGATIVE PROBE for `is_project`: a directory that merely HAS a marker
+        -- and `.crow/` appears wherever crow runs -- is not a project."""
+        path = self._dir("zufall")
+        crow_core.write_root_mode(path, crow_core.DEFAULT_MODE)
+        self.assertFalse(crow_core.is_project(path))
+        self.assertFalse(crow_core.is_project(None))
+        self.assertEqual(crow_core.projects(), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

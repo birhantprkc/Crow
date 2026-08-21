@@ -2771,5 +2771,718 @@ class TheComposerControlsAreOneHeightTests(unittest.TestCase):
                               "%s pins its own height" % selector)
 
 
+class TheBarLostThreeChipsAndTheMenuGainedASubmenuTests(unittest.TestCase):
+    """#119: what the status bar carries, and where the model is chosen.
+
+    THE FILE IS READ RATHER THAN DRIVEN, like the dictation and theme classes:
+    the suite has no browser for this page, so the source it is built from is
+    the evidence there is. What that buys is still real -- every claim below is
+    about WHERE a control is written, and a control written in the wrong block
+    is drawn in the wrong place.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+        body = self.source[self.source.index("</style>"):]
+        self.bar = body[body.index('<div id="status">'):body.index('<div id="flow">')]
+        self.composer = body[body.index('<div id="composer">'):body.index("<script>")]
+
+    def test_the_bar_carries_neither_the_address_nor_the_window_size(self):
+        """Both were chips that said something better said elsewhere: the URL is
+        looked up when something is wrong, and n_ctx is already the denominator
+        the composer prints."""
+        self.assertNotIn('id="url"', self.bar)
+        self.assertNotIn('id="nctx"', self.bar)
+        self.assertNotIn("n_ctx", self.bar)
+
+    def test_the_address_survives_as_the_connected_chip_s_title(self):
+        """REMOVED IS NOT THE SAME AS GONE. Dropping the chip without keeping the
+        address anywhere would take away the one fact worth having when the dot
+        goes red."""
+        self.assertIn('id="conn"', self.bar)
+        self.assertIn('$("#conn").title=e.url;', self.source)
+        self.assertIn("#conn{cursor:help}", self.css,
+                      "a native title with no cursor hint is a fact nobody finds")
+
+    def test_the_model_is_chosen_in_the_composer_and_not_in_the_bar(self):
+        """robin's placement: beside the number it decides. The window size the
+        context is measured against comes from the model."""
+        self.assertIn('id="model"', self.composer)
+        self.assertIn('id="modelmenu"', self.composer)
+        self.assertNotIn('id="model"', self.bar)
+        self.assertNotIn('id="modelmenu"', self.bar)
+
+    def test_the_menu_opens_upwards_now_that_it_sits_at_the_bottom(self):
+        """The same reason #modemenu and #rootmenu do: a menu that opened
+        downwards from the composer would be drawn past the window edge."""
+        rule = re.search(r"(?m)^#modelmenu\{(.*?)\}", self.css, re.S)
+        self.assertIsNotNone(rule, "no #modelmenu rule")
+        self.assertIn("bottom:calc(100% + 6px)", rule.group(1))
+        self.assertNotIn("top:calc", rule.group(1),
+                         "downwards is what put it past the edge")
+
+    def test_there_is_one_panel_and_the_second_one_is_not_renamed(self):
+        """NEGATIVE PROBE for the merge: a `#reasonmenu` left anywhere -- element,
+        rule or handler -- means the two panels still exist and only one of them
+        is reachable, which is worse than two that both are."""
+        self.assertNotIn("#reasonmenu", self.source)
+        self.assertNotIn("reasonMenu(", self.source)
+        self.assertNotIn('id="reasoning"', self.source)
+
+    def test_the_levels_hang_only_under_the_running_model(self):
+        """THE ONE INVARIANT THE MERGE COULD HAVE LOST. `levels` and `groups`
+        describe the model that ANSWERED the probe; drawing them under the other
+        row would name steps nobody measured there, and a click on one would put
+        17 GB on the card for a setting."""
+        plan = self.source[self.source.index("modelPlan(){"):
+                           self.source.index("modelMenu(){")]
+        guard = plan.index("if(!running || !(this.levels||[]).length) return;")
+        self.assertLess(guard, plan.index('kind:"level"'),
+                        "the level rows are pushed before the guard that limits them")
+        self.assertIn('const running = (x[0] === this.modelKey);', plan,
+                      "running is decided by the key the probe reported, not by order")
+
+    def test_the_chip_names_the_model_and_what_it_does(self):
+        """#117 SURVIVES THE MERGE. `high` means somebody chose it; `high
+        (default)` means nothing was chosen and the template lands there anyway.
+        The word is six characters and it is the entire finding."""
+        self.assertIn('c.querySelector("b").textContent = this.modelName;', self.source)
+        self.assertIn('c.querySelector(".lvl").textContent = this.levelLabel();',
+                      self.source)
+        self.assertIn('" (default)"', self.source)
+
+    def test_the_chip_borrows_the_shape_of_its_new_neighbours(self):
+        """The rule the microphone was built under: a neighbour with its own
+        radius and padding reads as an accident. #root and #mode are 6px and
+        3px/11px at 11.5px, and this control now stands beside them."""
+        rule = re.search(r"(?m)^#model\{(.*?)\}", self.css, re.S)
+        self.assertIsNotNone(rule, "no #model rule")
+        for decl in ("border-radius:6px", "padding:3px 11px", "font-size:11.5px"):
+            self.assertIn(decl, rule.group(1),
+                          "the chip keeps the bar's pill shape in the composer")
+
+    # -- a click elsewhere closes every popup, not two of the five -----------
+
+    def test_every_popup_is_in_the_dismiss_table(self):
+        """A menu that stays open when you look away is the one the last click
+        left behind. Two of the five closed on an outside click and three did
+        not, so the window had two behaviours and no rule for which was which."""
+        table = self.source[self.source.index("const DISMISS = ["):
+                            self.source.index("window.addEventListener(\"mousedown\"")]
+        for wrap, menu in (("#helpwrap", "#helpmenu"), ("#modelwrap", "#modelmenu"),
+                           ("#modewrap", "#modemenu"), ("#rootwrap", "#rootmenu")):
+            self.assertIn('["%s","%s"]' % (wrap, menu), table,
+                          "%s does not close on a click elsewhere" % menu)
+
+    def test_the_guard_is_the_wrapper_and_never_the_panel(self):
+        """THE TRAP THIS PAIRING EXISTS FOR. Guarding on the panel alone closes
+        the menu on the mousedown that lands on its own chip, and the click a
+        moment later finds it hidden and toggles it back open -- so the chip
+        could open a menu and never close it.
+
+        Both halves are asserted: every guard is a *wrap, and every wrapper
+        really contains the panel it is paired with in the page."""
+        table = self.source[self.source.index("const DISMISS = ["):
+                            self.source.index("window.addEventListener(\"mousedown\"")]
+        for wrap in re.findall(r'\["(#\w+)","#\w+"\]', table):
+            self.assertTrue(wrap.endswith("wrap"),
+                            "%s is not a wrapper -- the chip would re-open it" % wrap)
+        body = self.source[self.source.index("</style>"):]
+        for wrap, menu in re.findall(r'\["#(\w+)","#(\w+)"\]', table):
+            start = body.index('id="%s"' % wrap)
+            self.assertLess(start, body.index('id="%s"' % menu),
+                            "%s is not inside %s in the page" % (menu, wrap))
+
+    def test_the_table_names_every_menu_the_page_has(self):
+        """NEGATIVE PROBE, and it breaks by ADDING: a fifth wrapper-and-panel
+        pair introduced later is a fifth menu that stays open, and nothing else
+        on disk would go red about it."""
+        body = self.source[self.source.index("</style>"):]
+        wraps = {m for m in re.findall(r'id="(\w+wrap)"', body)}
+        table = self.source[self.source.index("const DISMISS = ["):
+                            self.source.index("window.addEventListener(\"mousedown\"")]
+        listed = {m for m in re.findall(r'\["#(\w+)","#\w+"\]', table)}
+        self.assertEqual(sorted(wraps - listed), [],
+                         "a wrapper in the page is not in the dismiss table")
+
+
+class ProjectsInTheRailTests(ApiCase):
+    """#119: chats grouped by the directory they are bound to.
+
+    DRIVEN, NOT READ, wherever the answer is Python's. The grouping itself is
+    the page's arithmetic and is held by the class below this one; everything
+    here -- what a rail payload carries, what a move writes into a chat file,
+    what comes back after a restart -- runs.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._roots = (crow_core.ROOTS_FILE, crow_gui.SETTINGS_FILE)
+        self.addCleanup(self._put_back)
+        crow_core.ROOTS_FILE = os.path.join(self.dir, "roots.json")
+        crow_gui.SETTINGS_FILE = os.path.join(self.dir, "settings.json")
+
+    def _put_back(self) -> None:
+        (crow_core.ROOTS_FILE, crow_gui.SETTINGS_FILE) = self._roots
+
+    def project(self, name: str) -> str:
+        path = os.path.join(self.dir, name)
+        os.makedirs(path, exist_ok=True)
+        crow_core.add_project(path)
+        return path
+
+    def chat(self, name: str, root: str | None = "", messages: int = 1) -> str:
+        """A chat file on disk. `root=""` writes no key -- nobody ever chose."""
+        path = os.path.join(self.dir, "chat-%s.json" % name)
+        data = {"format_version": crow_core.SESSION_FORMAT,
+                "crow_title": name,
+                "messages": [{"role": "user", "content": "x"}] * messages}
+        if root != "":
+            data["crow_root"] = root
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        return path
+
+    def rail_of(self, api) -> dict:
+        api._reload_rail()
+        rails = [m for m in self.drained(api) if m.get("k") == "rail"]
+        self.assertTrue(rails, "the window told the page no rail")
+        return rails[-1]
+
+    # -- what the rail payload carries --------------------------------------
+
+    def test_the_rail_carries_the_projects_and_every_chat_s_root(self):
+        """ONE PAYLOAD, ONE GROUPING. A rail drawn against a project list that
+        arrived on its own message would, for one frame, put a chat under a
+        heading that is not there."""
+        root = self.project("Crow")
+        self.chat("eins", root)
+        msg = self.rail_of(self.api())
+        self.assertEqual([p["name"] for p in msg["projects"]], ["Crow"])
+        entry = [r for r in msg["rollovers"] if r["title"] == "eins"][0]
+        self.assertEqual(os.path.normcase(entry["root"]), os.path.normcase(root))
+
+    def test_a_chat_carries_no_project_key_of_its_own(self):
+        """THE INVARIANT THE WHOLE DESIGN RESTS ON. A label beside the directory
+        is a second place for one fact, and the two part company the first time
+        either is written alone. Membership is the boundary, or it is nothing."""
+        root = self.project("Crow")
+        path = self.chat("eins", root)
+        self.rail_of(self.api())
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertNotIn("crow_project", data)
+        self.assertIn("crow_root", data)
+        # `_code_only`, because this file explains in prose that the key does
+        # not exist -- and a sentence saying so is not a place that writes one.
+        self.assertNotIn("crow_project", _code_only(
+            (HERE / "crow_gui.py").read_text(encoding="utf-8")))
+
+    def test_the_project_name_is_the_folder_s(self):
+        """Nowhere else it could come from without a second key to hold it -- and
+        a rename in the file manager reaches the rail with nothing told."""
+        root = self.project("Obsidian-Vault")
+        msg = self.rail_of(self.api())
+        self.assertEqual(msg["projects"][0]["name"], os.path.basename(root))
+
+    # -- moving one chat -----------------------------------------------------
+
+    def test_moving_a_chat_writes_the_root_into_its_own_file(self):
+        root = self.project("Crow")
+        path = self.chat("eins")
+        self.api().set_chat_root(path, root)
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["crow_root"], root)
+
+    def test_leaving_a_project_writes_null_and_not_a_missing_key(self):
+        """#101's three states. An absent key means nobody ever chose here, and
+        collapsing that with an explicit "no folder" is how a decision to be
+        unbounded comes back as a folder on the next read."""
+        root = self.project("Crow")
+        path = self.chat("eins", root)
+        self.api().set_chat_root(path, "")
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertIn("crow_root", data)
+        self.assertIsNone(data["crow_root"])
+
+    def test_moving_a_chat_keeps_everything_else_in_its_file(self):
+        """NEGATIVE PROBE for the writer: a read-modify-write that missed would
+        take the conversation with it, and a rail that still listed the title
+        would look entirely healthy."""
+        root = self.project("Crow")
+        path = self.chat("eins", messages=3)
+        self.api().set_chat_root(path, root)
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertEqual(len(data["messages"]), 3)
+        self.assertEqual(data["crow_title"], "eins")
+        self.assertEqual(data["format_version"], crow_core.SESSION_FORMAT)
+
+    def test_a_chat_that_is_gone_is_reported_and_not_raised(self):
+        api = self.api()
+        api.set_chat_root(os.path.join(self.dir, "weg.json"), self.project("Crow"))
+        # THE MESSAGE, NOT MERELY A `fail`. Without the guard the open() below
+        # raises into the broad except and reports "could not write that chat",
+        # which is also a fail -- so a test that only counted the kind could not
+        # tell the guard from the crash it exists to prevent.
+        said = [m["t"] for m in self.drained(api) if m.get("k") == "fail"]
+        self.assertEqual(said, ["that chat is gone"])
+
+    def test_a_directory_that_is_gone_is_refused(self):
+        """NEGATIVE for the mover: binding a chat to a hole would hand it a
+        boundary that does not exist, which is worse than no boundary."""
+        api = self.api()
+        path = self.chat("eins")
+        api.set_chat_root(path, os.path.join(self.dir, "nirgends"))
+        self.assertIn("fail", self.kinds(api))
+        with open(path, encoding="utf-8") as fh:
+            self.assertNotIn("crow_root", json.load(fh))
+
+    def test_moving_the_OPEN_chat_writes_the_root_into_its_file_too(self):
+        """THE BUG robin SAW: the boundary bound, the note appeared, and the row
+        stayed where it was.
+
+        The live chat goes through `_bind_root`, which sets the boundary in
+        MEMORY and marks it chosen -- but `crow_root` reached the file only on
+        the next save. `_reload_rail` reads the file, so the rail was drawn from
+        a copy that did not know yet. A window whose screen disagrees with its
+        own disk is the state that is hardest to report, because both halves
+        look right on their own.
+        """
+        root = self.project("Crow")
+        path = self.chat("offen")
+        api = self.api()
+        api._current_path = path
+        api._current_title = "offen"
+        self.addCleanup(crow_core.set_root, None)
+        api.set_chat_root(path, root)
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh).get("crow_root"), root,
+                             "the open chat's own file was never told")
+        entry = [r for r in self.rail_of(api)["rollovers"]
+                 if os.path.abspath(r["path"]) == os.path.abspath(path)][0]
+        self.assertEqual(os.path.normcase(entry["root"]), os.path.normcase(root),
+                         "the rail would draw it outside the project")
+
+    def test_the_open_chat_leaving_a_project_is_written_too(self):
+        """NEGATIVE HALF of the case above: the same gap in the other direction
+        would leave a chat drawn inside a project it had just been taken out of."""
+        root = self.project("Crow")
+        path = self.chat("offen", root)
+        api = self.api()
+        api._current_path = path
+        api._current_title = "offen"
+        self.addCleanup(crow_core.set_root, None)
+        crow_core.set_root(root)
+        api._root_chosen = True
+        api.set_chat_root(path, "")
+        with open(path, encoding="utf-8") as fh:
+            self.assertIsNone(json.load(fh).get("crow_root", "missing"),
+                              "the open chat kept a boundary it was released from")
+
+    # -- the three robin found on the built window ---------------------------
+
+    def test_a_new_chat_starts_bound_to_nothing(self):
+        """robin, on sight: "ein neuer Chat soll immer wurzellos sein".
+
+        THIS OVERTURNS A DECISION #101 WROTE DOWN. `_adopt_chat_root(None)` fell
+        back to the template in roots.json, and `active` is rewritten by every
+        bind -- so moving one chat into a project made that project the ground
+        every later chat started on. The template still answers at LAUNCH, which
+        is the case #92 added it for; a new chat is no longer one of its callers.
+        """
+        root = self.project("Crow")
+        api = self.api()
+        self.addCleanup(crow_core.set_root, None)
+        api._bind_root(root)                      # a move, which also sets active
+        self.assertEqual(crow_core.get_root(), root)
+        api.reset()
+        self.assertIsNone(crow_core.get_root(),
+                          "the new chat inherited the last project")
+        self.assertFalse(api._root_chosen,
+                         "unbound is not the same as chosen to be unbound")
+
+    def test_the_launch_template_still_answers(self):
+        """NEGATIVE HALF of the case above, and the reason it is a separate one:
+        the fix must not reach `restore_root`. A window that came up bound to
+        nothing would have thrown away #92 to fix a different event."""
+        root = self.project("Crow")
+        crow_core.set_active_root(root)
+        self.addCleanup(crow_core.set_root, None)
+        self.assertEqual(crow_core.restore_root()[0], root)
+        api = self.api()
+        api._adopt_chat_root(None)
+        self.assertEqual(crow_core.get_root(), root)
+
+    def test_binding_a_boundary_redraws_the_rail(self):
+        """robin: moving a chat in only showed up after folding the project.
+
+        A chat with no file goes through `choose_root`, and that door bound the
+        boundary, printed the note and stopped. Nothing redrew, so the row sat
+        where it was until some UNRELATED thing reloaded the rail -- folding a
+        project, which is exactly what he found. It cost nothing while the
+        boundary was invisible in the list; it costs from the moment the list is
+        GROUPED by it.
+        """
+        root = self.project("Crow")
+        api = self.api()
+        self.addCleanup(crow_core.set_root, None)
+        api.choose_root(root)
+        self.assertIn("rail", self.kinds(api),
+                      "the chat moved and the list was never told")
+
+    def test_releasing_a_boundary_redraws_the_rail_too(self):
+        """The other direction, and it has its own case because it is a
+        different door: a chat taken out of a project must leave the group on
+        the same click that took it out."""
+        root = self.project("Crow")
+        api = self.api()
+        self.addCleanup(crow_core.set_root, None)
+        api._bind_root(root)
+        self.drained(api)
+        api.clear_root()
+        self.assertIn("rail", self.kinds(api))
+
+    def test_the_live_chat_without_a_file_can_be_discarded(self):
+        """robin: the new chat could not be deleted.
+
+        It has no file, so `delete_chat` had nothing to remove -- the row armed,
+        said "really delete?" and then did nothing at all, which is the one
+        outcome worse than refusing. A chat that exists only in the window is
+        still a chat somebody can want rid of.
+        """
+        api = self.api()
+        api._current_path = None
+        api._current_title = "neu"
+        api._conversation.append("user", "hallo")
+        self.assertTrue(api.discard_live())
+        # THE SAME ARITHMETIC `_reload_rail` DOES: the system prompt is not a
+        # turn, and `reset()` keeps it on purpose.
+        spare = 1 if api._conversation.has_system else 0
+        self.assertEqual(len(api._conversation) - spare, 0)
+        self.assertIsNone(api._current_title)
+        kinds = self.kinds(api)
+        self.assertIn("clear", kinds)
+        self.assertIn("rail", kinds)
+
+    def test_discarding_refuses_when_the_chat_has_a_file(self):
+        """NEGATIVE PROBE: this door drops a conversation WITHOUT archiving it,
+        which is only safe for one that was never written. A chat with a file is
+        `delete_chat`'s business, and letting this one answer for it would be a
+        second way to lose a saved conversation."""
+        path = self.chat("gespeichert")
+        api = self.api()
+        api._current_path = path
+        self.assertFalse(api.discard_live())
+        self.assertTrue(os.path.isfile(path))
+
+    # -- what comes back after a restart ------------------------------------
+
+    def test_the_rail_state_is_written_and_read_back(self):
+        """PERSISTENCE IS A CONTRACT. A setting only ever written is one nobody
+        has proved comes back -- the rule `set_theme` states, held here as a
+        case rather than as a sentence."""
+        api = self.api()
+        self.assertTrue(crow_gui.rail_open(), "the default is open")
+        self.assertTrue(api.set_rail_open(False))
+        self.assertFalse(crow_gui.rail_open())
+        self.assertTrue(api.set_rail_open(True))
+        self.assertTrue(crow_gui.rail_open())
+
+    def test_a_folded_project_is_written_and_read_back(self):
+        root = self.project("Crow")
+        api = self.api()
+        self.assertTrue(self.rail_of(api)["projects"][0]["open"])
+        api.set_project_open(root, False)
+        self.assertFalse(self.rail_of(api)["projects"][0]["open"])
+        api.set_project_open(root, True)
+        self.assertTrue(self.rail_of(api)["projects"][0]["open"])
+
+    def test_a_project_removed_and_added_again_comes_back_unfolded(self):
+        """THE CLOSED ONES ARE THE LIST, so a new row is open like every other
+        new row rather than carrying a state from a project that is gone."""
+        root = self.project("Crow")
+        api = self.api()
+        api.set_project_open(root, False)
+        api.drop_project(root)
+        crow_core.add_project(root)
+        self.assertTrue(self.rail_of(api)["projects"][0]["open"],
+                        "it came back folded from a life it no longer has")
+
+    def test_dropping_a_project_keeps_its_chats_where_they_are(self):
+        """The row goes and nothing else does: the chats stay listed, still
+        bound, and the marker stays on the directory."""
+        root = self.project("Crow")
+        path = self.chat("eins", root)
+        api = self.api()
+        api.drop_project(root)
+        msg = self.rail_of(api)
+        self.assertEqual(msg["projects"], [])
+        # THE MARKER IS THE HALF THAT MATTERS. A boundary that disappeared
+        # because a list was tidied is the failure the root mechanism exists to
+        # prevent, and every chat here is still bound to this directory.
+        self.assertTrue(os.path.isfile(crow_core.root_file(root)))
+        entry = [r for r in msg["rollovers"] if r["title"] == "eins"][0]
+        self.assertEqual(os.path.normcase(entry["root"]), os.path.normcase(root))
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["crow_root"], root)
+
+
+class TheEmptyChatSaysSomethingTests(ApiCase):
+    """#119: the greeting under a chat with nothing in it.
+
+    THE CLOCK IS INJECTED, so these are cases and not samples. `greeting` takes
+    a timestamp for exactly this reason -- see its docstring on why it is not
+    `random`.
+    """
+
+    def at(self, h: int, m: int = 0, name: str = "Robin") -> str:
+        return crow_gui.greeting(time.mktime((2026, 8, 21, h, m, 0, 0, 0, -1)), name)
+
+    def test_the_hour_decides_which_group_the_line_comes_from(self):
+        """A line that says "Guten Morgen" at eight in the evening is worse than
+        no line at all."""
+        self.assertEqual([crow_gui.daypart(h) for h in (0, 4, 5, 10, 11, 17, 18, 22, 23)],
+                         ["night", "night", "morning", "morning", "day", "day",
+                          "evening", "evening", "night"])
+        self.assertIn("Morgen", self.at(8))
+        self.assertIn("Abend", self.at(20))
+
+    def test_the_line_changes_without_the_hour_changing(self):
+        """robin asked for it in as many words: not always the same one. Four
+        consecutive minutes inside one group have to produce four lines."""
+        lines = {self.at(8, m) for m in range(4)}
+        self.assertEqual(len(lines), len(crow_gui.GREETINGS["morning"]))
+
+    def test_the_same_minute_gives_the_same_line(self):
+        """NEGATIVE HALF, and the reason `random` was refused: without this the
+        only testable claim left is "it is one of four", which is not the
+        behaviour anybody asked for and would hide a line that never varied."""
+        # TWENTY, NOT TWO. A `random.choice` over four lines repeats itself one
+        # time in four, so a pair of calls agrees a quarter of the time -- the
+        # test would have passed on the very implementation it exists to refuse.
+        first = self.at(8, 2)
+        self.assertEqual({self.at(8, 2) for _ in range(20)}, {first})
+
+    def test_the_name_is_the_login_s_first_part(self):
+        """`DOMAIN\\robin` and `robin@host` are both logins somebody really has."""
+        for raw in ("robin", "CORP\\robin", "robin@rechner", "robin.ludwig"):
+            with mock.patch.object(crow_gui.getpass, "getuser", return_value=raw):
+                self.assertEqual(crow_gui.user_first_name(), "Robin")
+
+    def test_a_machine_that_will_not_say_still_gets_a_greeting(self):
+        """NEGATIVE PROBE. "Hallo, Nutzer." is worse than "Hallo." -- and a
+        greeting that came out as "Hallo, ." would read as a defect."""
+        with mock.patch.object(crow_gui.getpass, "getuser",
+                               side_effect=OSError("no such user")):
+            self.assertEqual(crow_gui.user_first_name(), "")
+        for h in (8, 14, 20, 2):
+            for m in range(4):
+                line = crow_gui.greeting(
+                    time.mktime((2026, 8, 21, h, m, 0, 0, 0, -1)), "")
+                self.assertNotIn("%s", line)
+                self.assertNotIn(" ,", line)
+                self.assertNotIn(", .", line)
+                self.assertTrue(line[:1].isupper(), line)
+                # THE CLAIM THIS CASE IS ABOUT, and it was missing: the name is
+                # DROPPED, not filled with a stand-in. Every check above passes
+                # happily on "Hallo, Nutzer." -- only the length says which of
+                # the two happened.
+                named = crow_gui.greeting(
+                    time.mktime((2026, 8, 21, h, m, 0, 0, 0, -1)), "Robin")
+                self.assertLess(len(line), len(named), line)
+
+    def test_a_new_chat_is_greeted(self):
+        api = self.api()
+        api.reset()
+        self.assertIn("hello", self.kinds(api))
+
+    def test_a_launch_with_nothing_to_restore_is_greeted_too(self):
+        """THE CALLER WITH NO CLEAR TO HANG ON, which is why the greeting is its
+        own message rather than a field on `clear`."""
+        api = self.api()
+        with mock.patch.object(crow_gui, "load_session", return_value=None), \
+             mock.patch.object(crow_gui, "check_endpoint", return_value="ok"), \
+             mock.patch.object(crow_gui, "model_display_name", return_value="m"), \
+             mock.patch.object(crow_gui, "fetch_model_name", return_value="m"), \
+             mock.patch.object(crow_gui, "fetch_n_ctx", return_value=1000):
+            api._probe()
+        self.assertIn("hello", self.kinds(api))
+
+    def test_the_first_turn_takes_the_line_back_off(self):
+        """Hooked to `turn()`, the ONE place a row is appended -- not to the
+        user's message. A chat restored from disk, a tool card and an error are
+        three shapes that are not `user()` and all mean the chat is not empty."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.assertIn('turn(cls){ const g=$("#hello"); if(g) g.remove();', source)
+
+    def test_the_line_is_drawn_and_never_run(self):
+        """It carries a login name off the machine."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.assertIn("d.textContent=text; flow.appendChild(d);", source)
+
+    def test_the_line_is_centred_by_the_box_and_not_by_a_number(self):
+        """It stood at `16vh`, which is a guess about one window at one size.
+        `min-height:100%` fills #flow's content box -- which already excludes
+        the bottom padding the ResizeObserver reserves for the composer -- so
+        the line sits on the middle of the space that is free, at any height."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        css = source[source.index("<style>"):source.index("</style>")]
+        rule = re.search(r"(?m)^#hello\{(.*?)\}", css, re.S)
+        self.assertIsNotNone(rule)
+        body = rule.group(1)
+        self.assertIn("min-height:100%", body)
+        self.assertIn("align-items:center", body)
+        self.assertIsNone(re.search(r"margin:\s*\d+vh", body),
+                          "a tuned offset is a guess about one window size")
+
+
+class TheRailDrawsTheGroupsTests(unittest.TestCase):
+    """#119, the page's half: how the rail arranges what that payload carries.
+
+    READ RATHER THAN DRIVEN, like every other page class here -- there is no
+    browser in this suite. What that still buys is real: each case names a rule
+    the arithmetic has to obey, and a rule deleted from the source is a rule
+    nothing else on disk would miss.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+        body = self.source[self.source.index("</style>"):]
+        self.bar = body[body.index('<div id="bar"'):body.index('<div id="menu"')]
+        self.rail = body[body.index('<aside id="rail">'):body.index('<div id="main">')]
+
+    def test_the_fold_toggle_survives_the_rail_it_folds(self):
+        """THE ONE CONTROL THAT MUST NOT LIVE IN THE THING IT HIDES. Inside the
+        rail it would go away with it, and there would be no way back."""
+        self.assertIn('id="railtoggle"', self.bar)
+        self.assertNotIn('id="railtoggle"', self.rail)
+
+    def test_the_fold_state_is_stamped_before_the_page_is_handed_over(self):
+        """The theme's rule, for the same reason: a rail drawn open and folded
+        by a script after load would do it on every start, and that frame is
+        exactly when somebody is looking at the window."""
+        self.assertIn('<body data-rail="__RAIL__">', self.source)
+        self.assertIn('.replace("__RAIL__"', self.source)
+        self.assertIn('body[data-rail="shut"] #rail{width:0', self.css)
+
+    def test_a_folded_project_draws_no_rows_rather_than_hidden_ones(self):
+        """Rows built and then hidden stay in the tree, and the fast path that
+        moves the active mark would find a node nobody can see."""
+        self.assertIn("if(p.open) mine.forEach(r=>box.appendChild(rowFor(r)));",
+                      self.source)
+
+    def test_folding_and_moving_are_both_in_the_rail_s_shape(self):
+        """THE FAST PATH IS THE TRAP HERE. It skips the rebuild when the shape
+        is unchanged, so a shape blind to roots and fold state would leave the
+        list right in Python and stale on screen."""
+        shape = self.source[self.source.index("const shape=(rollovers"):]
+        shape = shape[:shape.index("if(box.dataset.shape===shape)")]
+        self.assertIn('(r.root||"")', shape, "a move would not redraw")
+        self.assertIn('p.open?"+":"-"', shape, "a fold would not redraw")
+
+    def test_the_empty_space_below_the_chats_answers_a_right_click(self):
+        """Otherwise the two things done least often -- start a chat, make a
+        project -- are the two with no way in from the list."""
+        self.assertIn('if(e.target.closest("#sessions")){ crow.railMenu(e); return; }',
+                      self.source)
+        plan = self.source[self.source.index("railPlan(kind,entry,archived){"):]
+        plan = plan[:plan.index("menuDo(act,arg){")]
+        for act in ('act:"newchat"', 'act:"newproj"', 'act:"dropproj"',
+                    'act:"toproj"'):
+            self.assertIn(act, plan)
+
+    def test_no_menu_row_carries_a_snippet_of_code(self):
+        """A project name is a folder name off the disk. The rows carry an ACTION
+        NAME and are wired from the plan, so a folder called `'); alert('` is a
+        label and cannot become anything else -- the modelMenu rule verbatim."""
+        self.assertIn('el.querySelector("b").textContent=p.label;', self.source)
+        self.assertIn("el.onclick=()=>crow.menuDo(p.act,p.arg);", self.source)
+        menu = self.source[self.source.index("menu(e,kind,entry,row,archived){"):]
+        menu = menu[:menu.index("closeMenu()")]
+        self.assertNotIn("onclick=\\\"", menu,
+                         "a handler is being interpolated into the row's HTML")
+
+    def test_a_project_a_chat_is_already_in_is_not_offered(self):
+        """A row that changes nothing reads as a row that failed."""
+        self.assertIn(
+            "const others=(this.projects||[]).filter(p=>!this.sameDir(p.path,entry.root));",
+            self.source)
+
+    def test_membership_is_an_exact_match_and_not_an_ancestor_walk(self):
+        """`find_root` takes the NEAREST marker and not the highest, so a
+        sub-directory that declares itself is its own root. The page compares
+        the whole path, trailing separator and case folded, and nothing else."""
+        fn = self.source[self.source.index("sameDir(a,b){"):]
+        fn = fn[:fn.index("projectOf(root)")]
+        self.assertIn("toLowerCase()", fn)
+        self.assertNotIn("indexOf", fn, "a prefix test is an ancestor walk")
+        self.assertNotIn("startsWith", fn, "a prefix test is an ancestor walk")
+
+    def test_no_two_methods_on_the_page_share_a_name(self):
+        """THE BUG THIS CLASS DID NOT CATCH, and the reason it could not: the page
+        is one object literal, so a second `menuPlan` silently replaced the first
+        and the model chip called the context menu's planner with no arguments.
+        Nothing threw until a click, and no source assertion about either method
+        was false -- both strings were still in the file.
+
+        Held here rather than by reading either method, because the failure is
+        not in a method. It is in the pair.
+        """
+        page = self.source[self.source.index("const crow = {"):
+                           self.source.index("const composer =")]
+        names = re.findall(r"(?m)^  ([A-Za-z_][A-Za-z0-9_]*)\(", page)
+        # `if(` and friends sit at this indent too and are not definitions.
+        keywords = {"if", "for", "while", "switch", "catch", "return", "function"}
+        names = [n for n in names if n not in keywords]
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        self.assertEqual(dupes, [],
+                         "a later definition silently replaces the earlier one")
+
+    def test_the_wordmark_takes_its_colour_from_the_palette(self):
+        """It was the accent in all three themes -- Crow's own blue, which is
+        right on the dark blue ground it was drawn for and a coloured word
+        floating on a neutral or a white one. robin: white on dark, dark on
+        light, unchanged in `crow`.
+
+        TWO NAMES, because only `crow` splits the O off; the other two set both
+        to one value, which is what makes the word solid rather than holed."""
+        rule = re.search(r"(?m)^#mark\{(.*?)\}", self.css, re.S)
+        self.assertIsNotNone(rule)
+        self.assertIn("color:var(--mark)", rule.group(1))
+        self.assertNotIn("var(--accent)", rule.group(1))
+        self.assertIn("#mark span{color:var(--mark-o)}", self.css)
+        # THE HEX IS NEVER HERE. The palette test beside this one holds that as
+        # a rule; naming it again is what makes THIS case about the wordmark.
+        for name in ("--mark:", "--mark-o:"):
+            self.assertEqual(self.css.count(name), 3,
+                             "%s is not defined in all three palettes" % name)
+
+    def test_a_project_heading_carries_more_weight_than_its_chats(self):
+        """A heading and its children at one weight is a list with an indent,
+        not a group."""
+        proj = re.search(r"(?m)^\.proj \.t\{(.*?)\}", self.css, re.S)
+        sess = re.search(r"(?m)^\.sess \.t\{(.*?)\}", self.css, re.S)
+        self.assertIsNotNone(proj)
+        self.assertIsNotNone(sess)
+        self.assertIn("font-weight:600", proj.group(1))
+        self.assertNotIn("font-weight", sess.group(1))
+
+    def test_the_delete_still_takes_two_clicks_in_one_menu(self):
+        """NEGATIVE SIDE of building the rows from a plan: `menuDo` shuts the
+        panel before it dispatches, and delete had to be exempted or the gesture
+        would have quietly become two right-clicks."""
+        self.assertIn('if(act==="del") return this.deleteTarget(entry);',
+                      self.source)
+        self.assertIn('btn.dataset.armed="1";', self.source)
+        # BOTH WORDS, because the armed label now names which of the two acts it
+        # is: a file is deleted, a chat that was never written is discarded.
+        self.assertIn('"really delete?"', self.source)
+        self.assertIn('"really discard?"', self.source)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

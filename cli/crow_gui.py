@@ -43,6 +43,7 @@ rather than discovered at import time.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import queue
@@ -297,6 +298,109 @@ def current_theme() -> str:
     return name if name in THEMES else DEFAULT_THEME
 
 
+# #119. THE EMPTY CHAT SAYS SOMETHING. Four groups because the hour is the only
+# thing here that is actually known -- the greeting is not a mood, it is a clock
+# reading with a name attached, and a line that says "good morning" at eight in
+# the evening is worse than no line.
+#
+# GERMAN, like `Hilfe` and `Einstellungen` beside it: this sentence is addressed
+# to the person at the window, and the two controls that address them directly
+# are already in their language.
+GREETINGS = {
+    "morning": ("Guten Morgen, %s.", "Moin, %s.", "Früh dran, %s?",
+                "Morgen, %s — womit fangen wir an?"),
+    "day":     ("Hallo, %s.", "Was steht an, %s?", "Da bist du ja, %s.",
+                "Woran arbeiten wir, %s?"),
+    "evening": ("Guten Abend, %s.", "Abend, %s.", "Noch wach, %s?",
+                "Feierabend oder noch was vor, %s?"),
+    "night":   ("Noch spät unterwegs, %s?", "Gute Nacht wäre auch eine Option, %s.",
+                "Nachtschicht, %s?", "Still hier um die Zeit, %s."),
+}
+
+
+def user_first_name() -> str:
+    """The person's first name, or "" when the machine will not say.
+
+    `getpass.getuser()` RATHER THAN THE FULL DISPLAY NAME, and that is a limit
+    rather than a preference: the display name lives behind `GetUserNameEx` on
+    Windows and nowhere at all on the other two platforms, so it would be one
+    more ctypes signature for a nicety. The login name is what every platform
+    has, and on a personal machine it IS the first name.
+
+    A LOGIN THAT IS NOT A NAME still comes back -- `svc-build` reads oddly and
+    an empty greeting reads as a defect. The caller drops the name, not the line.
+    """
+    try:
+        raw = getpass.getuser()
+    except Exception:                      # noqa: BLE001 - a nicety, never fatal
+        return ""
+    # `DOMAIN\robin` and `robin@host` are both logins somebody really has -- and
+    # the name is on OPPOSITE SIDES of the two separators. Taking the last part
+    # of both turns `robin@rechner` into the machine's name.
+    for sep in ("\\", "/"):
+        raw = raw.rsplit(sep, 1)[-1]
+    raw = raw.split("@", 1)[0].split(".")[0].strip()
+    return raw[:1].upper() + raw[1:] if raw else ""
+
+
+def daypart(hour: int) -> str:
+    """Which of the four the clock is in. The boundaries are ordinary ones."""
+    if 5 <= hour < 11:
+        return "morning"
+    if 11 <= hour < 18:
+        return "day"
+    if 18 <= hour < 23:
+        return "evening"
+    return "night"
+
+
+def greeting(now: float | None = None, name: str | None = None) -> str:
+    """One line for an empty chat: the hour decides the group, the minute the line.
+
+    NOT `random`. The line has to change -- robin asked for that in as many words
+    -- but a random one cannot be held to anything: no case could say WHICH line
+    a given moment produces, so the only testable claim left would be "it is one
+    of four", which is not the behaviour. The minute is a clock somebody can set,
+    so this is driven rather than sampled.
+
+    WITHOUT A NAME IT IS STILL A GREETING. The `%s` is dropped rather than filled
+    with a placeholder: "Hallo, Nutzer." is worse than "Hallo.".
+    """
+    stamp = time.localtime(now) if now is not None else time.localtime()
+    lines = GREETINGS[daypart(stamp.tm_hour)]
+    line = lines[int(now if now is not None else time.time()) // 60 % len(lines)]
+    who = name if name is not None else user_first_name()
+    if not who:
+        # ", %s." and " %s?" and " %s —" all have to come off cleanly.
+        return re.sub(r"[,\s—-]*%s", "", line).replace(" ?", "?") % ()
+    return line % who
+
+
+def rail_open() -> bool:
+    """Is the chat rail unfolded? True for anything this build does not have.
+
+    #119. THE DEFAULT IS OPEN, and it is the default for the absent key as well
+    as for a broken one: a window that came up with no rail and no memory of why
+    would look like the list had been lost, and the way back is a button that is
+    also not there yet when someone first looks for it.
+    """
+    return read_settings().get("rail_open") is not False
+
+
+def open_projects() -> dict:
+    """Which project rows are unfolded, by path. Absent means unfolded.
+
+    A DICT AND NOT A LIST OF THE CLOSED ONES, because a project that is removed
+    and added again should come back the way every other new one does. Keyed by
+    the path as it was written; the reader normalises, so a folder reached
+    through a different spelling is still the same row.
+    """
+    doc = read_settings().get("projects_shut")
+    if not isinstance(doc, list):
+        return {}
+    return {os.path.normcase(p): False for p in doc if isinstance(p, str)}
+
+
 def client_version(path: str | None = None) -> str:
     """The client version, read out of cli/crow.py. "" when unreadable."""
     try:
@@ -330,6 +434,7 @@ PAGE = r"""<!doctype html>
   --dim:#a3a3a6; --dimmer:#6f6f73;
   --ok:#4ec98f; --warn:#e3b341; --bad:#f0655a;
   --gold:#e5c04b; --bad-text:#ffd9d4;
+  --mark:var(--text-hi); --mark-o:var(--text-hi);
   --text:#ffffff; --text-strong:#ffffff; --text-soft:#c9c9cc;
   --text-faint:#9a9a9e; --text-hi:#ffffff; --text-hover:#ffffff;
   --think:#8e8e93; --think-bg:rgba(255,255,255,.045);
@@ -379,6 +484,7 @@ PAGE = r"""<!doctype html>
   --dim:#5b6472; --dimmer:#8b93a1;
   --ok:#12855a; --warn:#8a6400; --bad:#c0362b;
   --gold:#8a6400; --bad-text:#8c241b;
+  --mark:var(--text-hi); --mark-o:var(--text-hi);
   --text:#1a1c1f; --text-strong:#0f1114; --text-soft:#3f4550;
   --text-faint:#6b7280; --text-hi:#0f1114; --text-hover:#1a1c1f;
   --think:#5b6472; --think-bg:rgba(26,28,31,.05);
@@ -401,6 +507,7 @@ PAGE = r"""<!doctype html>
   --dim:#6d7b95; --dimmer:#4a566d;
   --ok:#4ec98f; --warn:#e3b341; --bad:#f0655a;
   --gold:#e5c04b; --bad-text:#ffd9d4;
+  --mark:var(--accent); --mark-o:var(--bevel);
   --text:#cfdaea; --text-strong:#e8eef8; --text-soft:#a9bad3;
   --text-faint:#9fb0c9; --text-hi:#ffffff; --text-hover:#c8d4e8;
   --think:#7b89a3; --think-bg:rgba(19,24,41,.4);
@@ -427,8 +534,15 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
   padding:0 0 0 13px;background:linear-gradient(180deg,var(--titlebar),var(--bg));
   border-bottom:1px solid var(--line)}
 #mark,#ver{pointer-events:none}
-#mark{font-weight:700;letter-spacing:.22em;font-size:11.5px;color:var(--accent)}
-#mark span{color:var(--bevel)}
+/* #119. THE WORDMARK IS A PALETTE ENTRY NOW. It was the accent in all three
+   themes, which is Crow's own blue -- right on the dark blue ground it was
+   drawn for, and a coloured word floating on a neutral or a white one.
+   robin: white on dark, dark on light, unchanged in `crow`.
+   TWO NAMES, because only `crow` splits the O off. Setting both to the same
+   value in the other two is what makes them one solid word there rather than
+   a word with a hole in it. */
+#mark{font-weight:700;letter-spacing:.22em;font-size:11.5px;color:var(--mark)}
+#mark span{color:var(--mark-o)}
 #ver{font-size:10.5px;color:var(--dimmer);letter-spacing:.04em}
 #wbtns{margin-left:auto;display:flex;-webkit-app-region:no-drag}
 /* The buttons sit inside the drag region, so they opt out of it again --
@@ -533,6 +647,21 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 .sess .t{font-size:12px;color:var(--text-faint);display:block;white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis}
 .sess .s{font-size:10.5px;color:var(--dimmer);display:block;margin-top:1px}
+/* -- #119: the line an empty chat carries -------------------------------- */
+/* CENTRED IN THE COLUMN THE CHAT WILL FILL, not in the window: the first turn
+   lands in `.turn`, which is 960 wide and centred, so a greeting centred on
+   the window would sit off the axis every message after it uses.
+   AND CENTRED IN THE HEIGHT, WITHOUT A TUNED NUMBER. It stood at `16vh`, which
+   is a guess about one window at one size -- `min-height:100%` fills #flow's
+   CONTENT box, and that box already excludes the bottom padding the
+   ResizeObserver reserves for the composer. So the line sits on the middle of
+   the space that is actually free, at any window height, and moves when the
+   composer grows.
+   QUIET. It is a hello, not a headline -- and it is the only thing on screen,
+   which does the emphasis by itself. */
+#hello{min-height:100%;display:flex;align-items:center;justify-content:center;
+  max-width:960px;margin-inline:auto;padding:0 30px;text-align:center;
+  font-size:19px;color:var(--text-faint);letter-spacing:.01em}
 /* -- context menu -------------------------------------------------------- */
 #menu{position:fixed;z-index:200;display:none;min-width:168px;padding:4px;
   background:var(--panel);border:1px solid var(--line);border-radius:8px;
@@ -544,6 +673,57 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 #menu button:hover{background:var(--raised);color:var(--text-hover)}
 #menu button.danger:hover{background:rgba(240,101,90,.14);color:var(--bad-text)}
 #menu .sep{height:1px;background:var(--line-soft);margin:4px 2px}
+/* #119. THE LABEL IS IN A <b> because the rows are built from a plan and set by
+   textContent -- NOT to make it bold, which is why the weight is put back. */
+#menu button b{font-weight:400}
+#menu button .what{display:block;color:var(--dimmer);font-size:10px;margin-top:1px}
+#menu .mhead{color:var(--dimmer);font-size:9.5px;text-transform:uppercase;
+  letter-spacing:.09em;padding:3px 10px 2px}
+/* THE INDENT SAYS THESE ARE ARGUMENTS, not commands: "Crow" under "zu Projekt"
+   is a destination, and at the same offset as `rename` it would read as one
+   more thing the menu does. Same claim the level rows make in #modelmenu. */
+#menu button.indent{padding-left:22px}
+
+/* -- #119: the rail folds away, and so does every project ---------------- */
+/* THE ATTRIBUTE IS ON <body>, written by Python before the page is handed over,
+   for the reason the theme sits on <html>: a rail that unfolded and then collapsed would do it
+   on every single start, and that frame is when somebody is looking.
+   WIDTH TO ZERO AND NOT display:none: the transition is what tells the eye the
+   list went somewhere rather than that the window redrew. `overflow:hidden`
+   is what keeps the contents from spilling across the chat while it closes. */
+#rail{transition:width .16s ease}
+body[data-rail="shut"] #rail{width:0;border-right:0;overflow:hidden}
+/* IN THE TITLE BAR, so it survives the rail it hides. It is the one control
+   that must not live in the thing it folds away. */
+#railtoggle{font:inherit;color:var(--dimmer);background:transparent;
+  border:1px solid transparent;border-radius:6px;cursor:pointer;
+  display:flex;align-items:center;padding:3px 5px;margin-right:2px}
+#railtoggle:hover{color:var(--accent);border-color:var(--bevel)}
+
+/* A PROJECT ROW IS NOT A CHAT ROW, and the difference has to survive a glance:
+   it is a heading you can fold, so it carries a caret and a count and never the
+   two-line shape a chat has. */
+.proj{position:relative;display:flex;align-items:center;gap:7px;width:100%;
+  text-align:left;border:0;background:transparent;font:inherit;color:inherit;
+  padding:6px 9px 6px 8px;border-radius:6px;cursor:pointer;margin-top:2px}
+.proj:hover{background:var(--raised)}
+/* BOLD, robin on sight: a heading and its children at one weight is a list
+   with an indent, not a group. The chats under it stay at 400. */
+.proj .t{font-size:11.5px;font-weight:600;color:var(--text-hi);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;flex:1}
+.proj .n{font-size:10px;color:var(--dimmer);flex:none}
+/* THE CARET IS THE STATE, so it turns rather than swapping glyph: a rotation
+   reads as the same thing moving, and two different arrows read as two things.
+   The archive drawer beside this uses the same mark for the same reason. */
+.proj .caret{font-size:8px;color:var(--dimmer);flex:none;
+  transition:transform .14s ease}
+.proj.open .caret{transform:rotate(90deg)}
+/* THE INDENT IS THE MEMBERSHIP. A chat under a heading at the same offset as one
+   below it says nothing about which of the two it belongs to -- and a project
+   with its rows folded away leaves no other trace that they were there. */
+.sess.inproj{padding-left:24px}
+.sess.inproj::after{content:"";position:absolute;left:14px;top:0;bottom:0;
+  width:1px;background:var(--line-soft)}
 /* The rename field replaces the row in place, so the list never jumps. */
 .sess input{width:100%;font:inherit;font-size:12px;color:var(--model);
   background:var(--bg);border:1px solid var(--accent);border-radius:4px;
@@ -578,7 +758,12 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 #dot{width:6px;height:6px;border-radius:50%;background:var(--dimmer)}
 #dot.up{background:var(--ok);box-shadow:0 0 0 3px rgba(78,201,143,.14)}
 #dot.down{background:var(--bad);box-shadow:0 0 0 3px rgba(240,101,90,.14)}
-.chip.ghost{border-color:transparent;padding-left:2px}
+/* THE ADDRESS IS A TOOLTIP NOW (#119), so the chip that used to draw it borderless is gone with
+   it and `.ghost` went the same way -- a class with no wearer is the kind of thing that gets
+   copied onto the next element by somebody reading the file for a pattern.
+   `cursor:help` IS THE ONLY HINT THERE IS. A native title has no affordance of its own; without
+   this the base URL is a fact nobody discovers, which is worse than the width it saved. */
+#conn{cursor:help}
 #tools{cursor:pointer;transition:color .15s,border-color .15s}
 #tools:hover{border-color:var(--bevel)}
 #right{margin-left:auto;display:flex;gap:9px;align-items:center}
@@ -853,43 +1038,63 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 .chipwrap{position:relative;display:inline-block}
 .chip.pick{cursor:pointer}
 .chip.pick:hover{border-color:var(--bevel)}
-/* #117. ONE RULE SET FOR BOTH MENUS, and the reasoning one joined it by losing its slider.
-   It used to be a range input with a FIXED width, because its label swapped between "off" and
-   "medium" and the sentence under it between two lengths, so a self-sizing panel changed width
-   while the handle was being dragged. A list has neither problem: it sizes once, on open.
-   The deeper reason the slider went is in reasonMenu -- the order it drew does not exist. */
-#modelmenu,#reasonmenu{position:absolute;top:calc(100% + 6px);left:0;min-width:300px;
+/* #119. IT BORROWS #mode's SHAPE, not the bar's. `.chip` is a pill because the status bar is a
+   row of pills; this control now stands in the composer beside #root and #mode, and the rule the
+   microphone was built under applies unchanged: a neighbour with its own radius and padding
+   reads as an accident. Same 6px, same 3px/11px, same 11.5px as the two on the other side. */
+#model{border-radius:6px;padding:3px 11px;font-size:11.5px;gap:0}
+/* THE LEVEL IS DIMMER THAN THE MODEL because it is the setting, not the subject -- the same
+   split #modelmenu draws between a model row and the level rows under it. */
+#model .lvl{color:var(--dimmer)}
+/* #117 LEFT ITS SLIDER HERE AND #119 TOOK THE SECOND PANEL WITH IT. There were two menus with
+   one rule set; now there is one menu with two kinds of row, because a thinking level was never
+   a second subject -- it is how the model in the row above it thinks.
+   UPWARDS, because this chip moved into the composer at the bottom of the window. A menu that
+   opened downwards from there would be drawn past the edge; #modemenu and #rootmenu beside it
+   have opened this way since they got there. */
+#modelmenu{position:absolute;bottom:calc(100% + 6px);left:0;min-width:300px;
   background:var(--panel);border:1px solid var(--line);border-radius:9px;
   padding:5px 0;z-index:40;box-shadow:0 10px 26px var(--shadow)}
-#modelmenu[hidden],#reasonmenu[hidden]{display:none}
-#modelmenu .head,#reasonmenu .head{color:var(--dimmer);font-size:10px;text-transform:uppercase;
+#modelmenu[hidden]{display:none}
+#modelmenu .head{color:var(--dimmer);font-size:10px;text-transform:uppercase;
   letter-spacing:.08em;padding:4px 9px 5px}
-#modelmenu .none,#reasonmenu .none{color:var(--dimmer);font-size:11px;padding:2px 9px 7px}
-#modelmenu button,#reasonmenu button{display:block;width:100%;text-align:left;font:inherit;
+#modelmenu .none{color:var(--dimmer);font-size:11px;padding:2px 9px 7px}
+#modelmenu button{display:block;width:100%;text-align:left;font:inherit;
   background:none;border:0;color:var(--text);padding:5px 9px;cursor:pointer}
-#modelmenu button:hover,#reasonmenu button:hover{background:rgba(126,176,248,.10)}
-#modelmenu button b,#reasonmenu button b{display:block;font-weight:600;font-size:12px;color:var(--text)}
-#modelmenu button .what,#reasonmenu button .what{color:var(--dimmer);font-size:10.5px}
-#modelmenu button .tick,#reasonmenu button .tick{float:right;color:var(--accent)}
-/* #117, robin on sight. THE BOX IS CAPPED, NOT FIXED, and the cap is there because the widest
-   thing in this menu is the prefill sentence, not a level: three words of content were being
-   drawn in a 430px panel because that sentence refused to wrap. min-width:0 undoes the 300 the
-   model menu needs -- it lists file names, this lists `low`. Nothing inside moves after the
-   panel opens, so a cap cannot reintroduce the jumping the old fixed width was dressing over.
-   FULL CONTRAST ON THE CHOICE, dim on the rest: the level and the heading are what the eye is
-   looking for, and the line under each level is a footnote to a decision already made. */
-#reasonmenu{min-width:0;max-width:260px}
-#reasonmenu .head{color:var(--text-hi)}
-#reasonmenu button b{color:var(--text-hi)}
-/* THE PREFILL SENTENCE IS NOT IN THIS MENU, and that is not an oversight -- robin cut it on
-   sight, 2026-08-21, and nothing was lost with it. `set_reasoning` already answers with
-   crow_core's own note in the flow the moment a level is picked, so the menu's copy said the same
-   thing one click earlier and was the widest element in a panel of three short words: it refused
-   to wrap inside the cap and put a horizontal scrollbar under the list. The rule it announced
-   still holds and is still decided in the core, by reasoning_change_rerenders. */
-</style></head><body>
+#modelmenu button:hover{background:rgba(126,176,248,.10)}
+#modelmenu button b{display:block;font-weight:600;font-size:12px;color:var(--text)}
+#modelmenu button .what{color:var(--dimmer);font-size:10.5px}
+#modelmenu button .tick{float:right;color:var(--accent)}
+/* THE INDENT IS THE WHOLE CLAIM OF A SUBMENU, so it has to be unmistakable at a glance: a level
+   row is a child of the model above it and does nothing to any other model. The rule is drawn
+   rather than implied -- a border down the left says "these belong to that one" without a second
+   panel to clip against the window edge.
+   SMALLER, DIMMER, NO BOLD: the model is the decision, the level is a setting inside it. Making
+   the two look alike is what made robin ask for one control instead of two. */
+#modelmenu button.lvlrow{padding-left:26px;position:relative}
+#modelmenu button.lvlrow b{font-weight:500;font-size:11.5px;color:var(--text-hi)}
+#modelmenu button.lvlrow::before{content:"";position:absolute;left:15px;top:0;bottom:0;
+  width:1px;background:var(--line)}
+#modelmenu button.lvlrow:last-child::before{bottom:50%}
+/* ONLY THE RUNNING MODEL CARRIES LEVELS, and the reason is in the payload rather than in taste:
+   `levels` and `groups` are measured for the model that ANSWERED the probe, so they describe one
+   model and no other. Hanging them under the row that would boot 17 GB would be inventing them
+   for a model nobody has asked a question -- and #116's rule is that nothing is invented. */
+</style></head><body data-rail="__RAIL__">
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
+  <!-- #119. LEFT OF THE WORDMARK, and it has to live in the TITLE BAR rather
+       than in the rail head: a button inside the rail goes away with the rail,
+       and then there is no way back. The glyph is the side-panel mark from
+       robin's reference -- a frame with one column filled, which is the panel
+       it toggles. Inline SVG for the reason the microphone is: the system font
+       has no such character, and an emoji would drag its own colour in. -->
+  <button id="railtoggle" class="pywebview-no-drag" onclick="crow.toggleRail()"
+          title="Chatleiste ein- und ausklappen">
+    <svg viewBox="0 0 20 20" width="15" height="15" fill="none"
+         stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+      <rect x="2.5" y="4" width="15" height="12" rx="2"></rect>
+      <line x1="8" y1="4" x2="8" y2="16"></line></svg></button>
   <span id="mark">CR<span>O</span>W</span><span id="ver"></span>
   <div id="helpwrap" class="pywebview-no-drag">
     <button id="help" onclick="crow.helpMenu()">Hilfe</button>
@@ -938,12 +1143,13 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   </div>
 </div>
 
-<div id="menu">
-  <button onclick="crow.menuRename()">rename</button>
-  <button data-act="arch" onclick="crow.menuArchive()">archive</button>
-  <div class="sep"></div>
-  <button class="danger" onclick="crow.menuDelete()">delete</button>
-</div>
+<!-- #119: EMPTY, AND BUILT PER OPEN. It used to be three fixed buttons because
+     there was one thing to right-click. There are three now -- a chat, a project
+     heading, the empty rail below them -- and each offers different things, so
+     the rows are drawn from a plan. Project names are folder names off the disk,
+     which is why they go in by textContent and never into an HTML string; the
+     same rule modelMenu is built under. -->
+<div id="menu"></div>
 
 <div class="grip" id="g-n"></div><div class="grip" id="g-s"></div>
 <div class="grip" id="g-w"></div><div class="grip" id="g-e"></div>
@@ -960,17 +1166,17 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
     <div id="arch"></div>
   </aside>
   <div id="main">
+    <!-- TWO CHIPS, AND THE ADDRESS IS NOT ONE OF THEM. The bar carried five:
+         state, model, level, n_ctx and the base URL. Three of them said things
+         that belong where the typing happens -- the model and its level are a
+         choice, and the window size is already the denominator of the context
+         readout in the composer. The URL is not a choice at all: it is the one
+         fact you look up when something is wrong, so it is the connected
+         chip's title and costs no width until asked for. -->
     <div id="status">
-      <span class="chip"><span id="dot"></span><span id="state">connecting …</span></span>
-      <span class="chipwrap"><span class="chip pick" id="model" hidden
-            onclick="crow.modelMenu()" title="switch model"></span>
-        <div id="modelmenu" hidden></div></span>
-      <span class="chipwrap"><span class="chip pick" id="reasoning" hidden
-            onclick="crow.reasonMenu()" title="this chat's thinking level"></span>
-        <div id="reasonmenu" hidden></div></span>
-      <span class="chip" id="nctx" hidden></span>
       <div id="right">
-        <span class="chip ghost" id="url"></span>
+        <span class="chip" id="conn" title="…"><span id="dot"></span><span
+              id="state">connecting …</span></span>
         <span class="chip" id="tools"></span>
       </div>
     </div>
@@ -980,7 +1186,17 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
         <div id="line"><textarea id="in" rows="1"
             placeholder="Message, or /tools for what the model can call"></textarea></div>
         <div id="foot">
-          <span id="ctx"></span><span id="turnstate"></span>
+          <span id="ctx"></span>
+          <!-- BESIDE THE NUMBER IT DECIDES. The model sets the window the
+               context is measured against, and the level sets what a turn
+               costs inside it; both belong next to the readout rather than in
+               a bar at the other end of the screen. ONE CHIP, NOT TWO: the
+               level is not a second subject, it is how the model thinks, so
+               it is a submenu under the model that runs -- see modelMenu. -->
+          <span class="chipwrap" id="modelwrap"><span class="chip pick" id="model" hidden
+                onclick="crow.modelMenu()" title="model and thinking level"></span>
+            <div id="modelmenu" hidden></div></span>
+          <span id="turnstate"></span>
           <div id="acts"><span id="hint"></span>
             <div id="rootwrap">
               <button id="root" data-bound="0" onclick="crow.rootMenu()">no folder</button>
@@ -1016,8 +1232,21 @@ const crow = {
 
   esc(t){ const d=document.createElement("div"); d.textContent=t; return d.innerHTML; },
 
-  turn(cls){ const d=document.createElement("div"); d.className="turn "+cls;
+  // #119: AND THE GREETING GOES HERE, because this is the ONE place a turn is
+  // appended. Hooking it to the user's first message instead would leave it
+  // standing under a chat restored from disk, under a tool card, and under an
+  // error -- three shapes that are not `user()` and all of which mean the chat
+  // is no longer empty.
+  turn(cls){ const g=$("#hello"); if(g) g.remove();
+    const d=document.createElement("div"); d.className="turn "+cls;
     flow.appendChild(d); return d; },
+
+  // DRAWN, NOT RUN: the line carries the user's login name, which is a string
+  // off the machine. textContent, like every other name in this file.
+  hello(text){ const g=$("#hello"); if(g) g.remove();
+    if(!text) return;
+    const d=document.createElement("div"); d.id="hello";
+    d.textContent=text; flow.appendChild(d); },
 
   user(text){
     const t=this.turn(""); t.innerHTML=
@@ -1315,25 +1544,64 @@ const crow = {
   // this case -- so they are set with textContent and dataset and never
   // interpolated into an HTML string. A model file named `<img onerror=...>`
   // has to be DRAWN, not run.
+  // #119. ONE MENU, TWO KINDS OF ROW. The thinking level had its own chip and its own panel
+  // beside this one; it is a setting INSIDE a model, not a second subject, so it is drawn as
+  // rows indented under the model it belongs to.
+  //
+  // THE PLAN IS BUILT BEFORE ANY HTML IS, and that is not tidiness: the rows carry names off the
+  // disk, so the skeleton goes in as HTML and every name goes in by textContent afterwards. Two
+  // row shapes means two skeletons, and the pairing of plan to element has to survive that --
+  // hence one flat list with a `kind` on each entry rather than nested loops over two arrays.
+  // NAMED FOR ITS MENU, not for the idea of a plan. It was `menuPlan` and so was
+  // the context menu's builder below -- one object literal, so the later
+  // definition silently replaced this one and the chip called the wrong
+  // planner with no arguments. Nothing threw until somebody clicked.
+  modelPlan(){ const out = [];
+    (this.models||[]).forEach(x => {
+      const running = (x[0] === this.modelKey);
+      out.push({kind:"model", k:x[0], name:x[1],
+                what: running ? "running" : "restarts the server"});
+      // ONLY UNDER THE RUNNING ONE. `levels` and `groups` describe the model that answered the
+      // probe; hanging them under the other row would name steps nobody has measured there.
+      if(!running || !(this.levels||[]).length) return;
+      const now = this.reasoning || "off";
+      this.reasonGroups().forEach(g => {
+        const bits = [];
+        if(g.indexOf("off") >= 0) bits.push("default");
+        out.push({kind:"level", k:this.reasonName(g), name:this.reasonName(g),
+                  bits: bits, tick: (g.indexOf(now) >= 0)}); }); });
+    return out; },
+
   modelMenu(){ const m=$("#modelmenu");
     if(!m.hidden){ m.hidden=true; return; }
-    const keys = this.models||[];
-    const rows = keys.map(() =>
-      '<button class="modelrow" onclick="crow.chooseModel(this.dataset.k)">'
-      + '<b></b><span class="what"></span></button>');
-    m.innerHTML = '<div class="head">models</div>'
+    const plan = this.modelPlan();
+    const rows = plan.map(p => p.kind === "model"
+      ? '<button class="modelrow" onclick="crow.chooseModel(this.dataset.k)">'
+        + '<b></b><span class="what"></span></button>'
+      : '<button class="lvlrow" onclick="crow.chooseReason(this.dataset.k)">'
+        + '<span class="tick"></span><b></b><span class="what"></span></button>');
+    m.innerHTML = '<div class="head">model</div>'
       + (rows.length ? rows.join("") : '<div class="what none">none in the manifest</div>');
-    const els = m.querySelectorAll("button.modelrow");
-    // Each entry is [key, label]: the KEY goes into dataset and comes back on
-    // the click, the LABEL is what the row reads as -- `operating-point` is the
-    // table's word for the row, `DeepSeek-V4-Flash-0731` is the model. Both are
-    // set by textContent and never interpolated; they came off the disk.
-    keys.forEach((x,i) => { const el = els[i];
+    const els = m.querySelectorAll("button");
+    // A model entry is [key, label]: the KEY goes into dataset and comes back on the click, the
+    // LABEL is what the row reads as -- `operating-point` is the table's word for the row,
+    // `DeepSeek-V4-Flash-0731` is the model. A level entry carries its own name for both. All of
+    // them are set by textContent and never interpolated; they came off the disk.
+    plan.forEach((p,i) => { const el = els[i];
       if(!el) return;
-      el.dataset.k = x[0];
-      el.querySelector("b").textContent = x[1];
-      el.querySelector(".what").textContent =
-        (x[0] === this.modelKey) ? "running" : "restarts the server"; });
+      el.dataset.k = p.k;
+      const name = p.name;
+      el.querySelector("b").textContent = name;
+      if(p.kind === "model"){ el.querySelector(".what").textContent = p.what; return; }
+      // The escape rather than the character: the rows above write &#10003; into their HTML, and
+      // this one sets textContent, so the escape keeps the source ASCII either way.
+      el.querySelector(".tick").textContent = p.tick ? "✓" : "";
+      // ONLY `default`, AND THE SWALLOWED NAMES ARE NOT LISTED. The row used to read
+      // "default - high renders the same"; robin cut it against the built window on 0731, where
+      // three names collapse into one row: naming a step the menu does not offer is the defect
+      // #117 is about, and it does not stop being one because the sentence explains itself.
+      const bits = p.bits;
+      el.querySelector(".what").textContent = bits.join(" · "); });
     m.hidden=false; },
 
   chooseModel(k){ $("#modelmenu").hidden=true; pywebview.api.choose_model(k); },
@@ -1355,59 +1623,41 @@ const crow = {
   // `reasoning off` while Qwen reasoned at xhigh, the dearest setting on that model.
   reasonName(g){ for(const n of g){ if(n!=="off") return n; } return "off"; },
 
-  // HIDDEN WHEN THE MODEL DECLARES NO LEVELS, rather than showing an empty control: a menu with
-  // one row invites a click that cannot do anything, and #116's second negative proof is exactly
-  // that -- no manifest entry, no invented levels.
+  // THE CHIP NAMES THE ROW, ALWAYS -- not the level the chat happens to have stored. A level
+  // bound under another name still runs whatever its group renders as: on 0731 a chat set to
+  // `high` runs the `low` row, and a chip reading `high` while the tick sits on `low` names a
+  // step the menu does not offer. Measured there, seen on screen, cut on sight (#117).
   //
-  // THE CHIP NAMES THE WIRE OR THE EFFECT, whichever is true. A bound level names itself. An
-  // unbound chat names the step its emptiness lands on, plus `(default)`, because what the user
-  // needs off the chip is what the model DOES.
-  showReason(level){ this.reasoning = level || "";
-    const c = $("#reasoning");
-    if(!(this.levels||[]).length){ c.hidden = true; return; }
+  // EMPTY WHEN THE MODEL DECLARES NO LEVELS, rather than a name with nothing behind it: #116's
+  // second negative proof is that no manifest entry means no invented levels.
+  levelLabel(){ if(!(this.levels||[]).length) return "";
+    const now = this.reasoning || "off";
+    const g = this.reasonGroups().filter(x => x.indexOf(now) >= 0)[0];
+    if(!g) return " · " + now;
+    return " · " + this.reasonName(g)
+           + ((g.indexOf("off") >= 0) ? " (default)" : ""); },
+
+  // #119. ONE CHIP FOR BOTH, and `(default)` survives the merge on purpose: it is the whole
+  // finding of #117. `high` means somebody chose it; `high (default)` means nothing was chosen
+  // and the template lands there anyway. Dropping the word to save six characters would put the
+  // chip back to naming a setting instead of naming what the model DOES.
+  showModel(){ const c = $("#model");
+    if(!this.modelName){ c.hidden = true; return; }
     c.hidden = false;
-    c.innerHTML = "<b></b>";
-    // THE CHIP NAMES THE ROW, ALWAYS -- not the level the chat happens to have stored. A level
-    // bound under another name still runs whatever its group renders as: on 0731 a chat set to
-    // `high` runs the `low` row, and a chip reading `high` while the tick sits on `low` names a
-    // step the menu does not offer. Measured there, seen on screen, cut on sight.
-    const g = this.reasonGroups().filter(x => x.indexOf(level||"off") >= 0)[0];
-    let text = "reasoning " + (level || "off");
-    if(g) text = "reasoning " + this.reasonName(g)
-                 + ((g.indexOf("off") >= 0) ? " (default)" : "");
-    c.querySelector("b").textContent = text; },
+    c.innerHTML = '<b></b><span class="lvl"></span>';
+    c.querySelector("b").textContent = this.modelName;
+    c.querySelector(".lvl").textContent = this.levelLabel(); },
 
-  // Built like modelMenu above it and drawn with textContent for the same reason: these names
-  // came off the disk. A click chooses AND applies, the way the model chip does -- the slider's
-  // separate preview step existed because dragging is not choosing, and a list has no drag.
-  reasonMenu(){ const m=$("#reasonmenu");
-    if(!m.hidden){ m.hidden=true; return; }
-    const groups = this.reasonGroups(), now = this.reasoning||"off";
-    const rows = groups.map(() =>
-      '<button class="reasonrow" onclick="crow.chooseReason(this.dataset.k)">'
-      + '<span class="tick"></span><b></b><span class="what"></span></button>');
-    m.innerHTML = '<div class="head">thinking level</div>'
-      + (rows.length ? rows.join("") : '<div class="what none">none in the manifest</div>');
-    const els = m.querySelectorAll("button.reasonrow");
-    groups.forEach((g,i) => { const el = els[i];
-      if(!el) return;
-      const name = this.reasonName(g);
-      el.dataset.k = name;
-      el.querySelector("b").textContent = name;
-      // The escape rather than the character: the two menus above write &#10003; into their HTML,
-      // and this one sets textContent, so the escape keeps the source ASCII either way.
-      el.querySelector(".tick").textContent = (g.indexOf(now) >= 0) ? "\u2713" : "";
-      // ONLY `default`, AND THE SWALLOWED NAMES ARE NOT LISTED. The row used to read
-      // "default - high renders the same"; robin cut it against the built window on 0731, where
-      // three names collapse into one row: naming a step the menu does not offer is the defect
-      // this whole issue is about, and it does not stop being one because the sentence explains
-      // itself. It also wrapped to three lines inside the capped panel.
-      const bits = [];
-      if(g.indexOf("off") >= 0) bits.push("default");
-      el.querySelector(".what").textContent = bits.join(" · "); });
-    m.hidden=false; },
+  // KEPT AS A NAME the two `case` arms already call, so the merge did not have to touch the
+  // seam between the Python side and the page. It sets the level and redraws the one chip.
+  showReason(level){ this.reasoning = level || ""; this.showModel(); },
 
-  chooseReason(name){ $("#reasonmenu").hidden=true; pywebview.api.set_reasoning(name); },
+  // #119: `reasonMenu` IS GONE, not renamed. Its rows moved into modelMenu above, keeping the
+  // rule the panel existed to hold: a click chooses AND applies, and every name is drawn with
+  // textContent because it came off the disk. What is left is the door it knocked on, and that
+  // door is unchanged -- `set_reasoning` is still the command `/reasoning` uses, which is the
+  // #99 precedent for why a control is never wired separately from the command it duplicates.
+  chooseReason(name){ $("#modelmenu").hidden=true; pywebview.api.set_reasoning(name); },
   pickRoot(){ $("#rootmenu").hidden=true; pywebview.api.pick_root(); },
   clearRoot(){ $("#rootmenu").hidden=true; pywebview.api.clear_root(); },
 
@@ -1462,13 +1712,79 @@ const crow = {
   // RIGHT-CLICK ON A CHAT. Three things a list of saved conversations has to
   // offer, and none of them is reachable from a left click: rename it, put it
   // out of the way, throw it out.
-  menu(e,entry,row,archived){
+  // #119. WHAT THE MENU OFFERS DEPENDS ON WHAT WAS CLICKED, so it is a plan
+  // rather than a fixed set of buttons. Rows carry an ACTION NAME and never a
+  // snippet of code: `onclick` is wired from this table, so a project called
+  // `'); doSomething('` is a label and cannot become one.
+  railPlan(kind,entry,archived){
+    if(kind==="rail")
+      return [{act:"newchat", label:"neuer Chat"},
+              {act:"newproj", label:"Projekt erstellen"}];
+    if(kind==="project")
+      return [{act:"dropproj", label:"Projekt entfernen", arg:entry.path,
+               note:"Chats und Ordner bleiben"}];
+    const rows=[{act:"rename", label:"rename"}];
+    // MOVING AN UNSAVED CHAT IS OFFERED TOO: it binds the live boundary, which
+    // is `choose_root`'s job and works without a file. What it must not do is
+    // list a project the chat is already in -- a row that changes nothing reads
+    // as a row that failed.
+    const here=this.projectOf(entry.root);
+    const others=(this.projects||[]).filter(p=>!this.sameDir(p.path,entry.root));
+    if(others.length) rows.push({sep:true, head:"zu Projekt"});
+    others.forEach(p=>rows.push({act:"toproj", label:p.name, arg:p.path,
+                                 indent:true}));
+    if(here) rows.push({act:"toproj", label:"aus Projekt lösen", arg:"",
+                        sep:!others.length});
+    rows.push({sep:true});
+    rows.push({act:"arch", label:archived ? "restore" : "archive"});
+    rows.push({act:"del", label:"delete", danger:true});
+    return rows; },
+
+  menuDo(act,arg){
+    const entry=this.target;
+    // DELETE OWNS THE PANEL, every other row is done with it. Two clicks for a
+    // delete is not a flourish -- there is no undo behind it -- and the second
+    // click has to land on a button that says what it does. Shutting the menu
+    // first would turn that into two right-clicks, which is a different gesture
+    // and one nobody was taught.
+    if(act==="del") return this.deleteTarget(entry);
+    this.closeMenu();
+    if(act==="newchat") return this.reset();
+    if(act==="newproj") return pywebview.api.create_project();
+    if(act==="dropproj") return pywebview.api.drop_project(arg);
+    if(act==="rename") return this.renameTarget(entry);
+    if(act==="arch") return this.archiveTarget(entry);
+    if(act!=="toproj") return;
+    // AN UNSAVED CHAT HAS NO FILE TO WRITE, so it goes through the door that
+    // binds the LIVE boundary. Python decides which of the two a path is; this
+    // only picks the door, and `set_chat_root` checks again on the other side.
+    if(!entry || !entry.path){
+      if(arg) return pywebview.api.choose_root(arg);
+      return pywebview.api.clear_root(); }
+    return pywebview.api.set_chat_root(entry.path,arg); },
+
+  menu(e,kind,entry,row,archived){
     e.preventDefault(); this.target=entry; this.targetRow=row;
     const m=$("#menu");
-    // An archived chat is put BACK, not away again; the open one has nowhere to
-    // be restored from. One menu, three labels.
-    m.querySelector("[data-act=arch]").textContent =
-      archived ? "restore" : "archive";
+    const plan=this.railPlan(kind,entry,archived);
+    m.innerHTML=plan.map(p=>
+      (p.sep ? '<div class="sep"></div>' : "")
+      + (p.head ? '<div class="mhead"></div>' : "")
+      + (p.act ? '<button class="'+(p.danger ? "danger" : "")
+                 + (p.indent ? " indent" : "")+'"><b></b>'
+                 + (p.note ? '<span class="what"></span>' : "")+'</button>' : "")
+    ).join("");
+    // NAMES IN BY textContent, HANDLERS FROM THE PLAN. A project name is a
+    // folder name off the disk, which is the modelMenu rule verbatim.
+    const heads=m.querySelectorAll(".mhead"), btns=m.querySelectorAll("button");
+    let hi=0, bi=0;
+    plan.forEach(p=>{
+      if(p.head) heads[hi++].textContent=p.head;
+      if(!p.act) return;
+      const el=btns[bi++];
+      el.querySelector("b").textContent=p.label;
+      if(p.note) el.querySelector(".what").textContent=p.note;
+      el.onclick=()=>crow.menuDo(p.act,p.arg); });
     m.classList.add("on");
     // Kept inside the window: a menu opened near the bottom edge would
     // otherwise hang off it with its last item unreachable.
@@ -1478,9 +1794,8 @@ const crow = {
   },
   closeMenu(){ $("#menu").classList.remove("on"); },
 
-  menuRename(){
-    this.closeMenu();
-    const row=this.targetRow, entry=this.target;
+  renameTarget(entry){
+    const row=this.targetRow;
     if(!row||!entry) return;
     const label=row.querySelector(".t"), was=label.textContent;
     const field=document.createElement("input");
@@ -1497,17 +1812,35 @@ const crow = {
     field.onblur=()=>done(true);
   },
 
-  menuArchive(){ this.closeMenu();
-    if(this.target) pywebview.api.archive_chat(this.target.path); },
+  archiveTarget(entry){
+    if(entry && entry.path) pywebview.api.archive_chat(entry.path); },
 
   // TWO CLICKS FOR A DELETE, because there is no undo behind it. The second
   // click is on a button that says what it does, not on a generic "yes".
-  menuDelete(){
-    const m=$("#menu"), btn=m.querySelector(".danger"), entry=this.target;
-    if(btn.dataset.armed==="1"){ btn.dataset.armed=""; btn.textContent="delete";
-      this.closeMenu(); if(entry) pywebview.api.delete_chat(entry.path); return; }
-    btn.dataset.armed="1"; btn.textContent="really delete?";
-    setTimeout(()=>{ btn.dataset.armed=""; btn.textContent="delete"; },4000);
+  // TWO CLICKS FOR A DELETE, because there is no undo behind it. The second
+  // click is on a button that says what it does, not on a generic "yes". The
+  // label sits in a <b> now that the rows are built from a plan; the arming
+  // itself is unchanged.
+  deleteTarget(entry){
+    const btn=$("#menu").querySelector("button.danger");
+    if(!btn) return;
+    const label=btn.querySelector("b");
+    if(btn.dataset.armed==="1"){ btn.dataset.armed=""; label.textContent="delete";
+      this.closeMenu();
+      if(!entry) return;
+      // NO FILE, NO delete_chat. It has nothing to remove and used to return
+      // silently -- the row robin could not get rid of. `discard_live` is the
+      // door for a conversation that was never written, and it refuses one
+      // that was.
+      if(entry.path) pywebview.api.delete_chat(entry.path);
+      else pywebview.api.discard_live();
+      return; }
+    btn.dataset.armed="1";
+    // A CHAT WITH NO FILE SAYS SO, because the two are not the same act: one
+    // removes a file, the other throws away something that was never written.
+    label.textContent=(entry && entry.path) ? "really delete?" : "really discard?";
+    setTimeout(()=>{ if(!btn.isConnected) return;
+      btn.dataset.armed=""; label.textContent="delete"; },4000);
   },
 
   ctx(tokens,limit){
@@ -1528,12 +1861,70 @@ const crow = {
   // its own AND filtered out of the list, so a click moved it. Now the list holds
   // every chat with a file and the open one is marked `on` where it sits; the top
   // slot is only for a chat with no file yet, which is what `unsaved` says.
-  rail(title,meta,rollovers,unsaved){
+  // #119. WHICH PROJECT A CHAT IS IN IS NOT STORED ANYWHERE -- it is its working
+  // directory, compared against the project list. A `crow_project` key beside
+  // `crow_root` would be a second place for one fact, and the two would part
+  // company the first time either was written alone.
+  //
+  // EXACT, NOT AN ANCESTOR WALK. `find_root` takes the NEAREST marker and not the
+  // highest on purpose, so a sub-directory that declares itself is its own root;
+  // folding it into the project above would contradict the rule the boundary is
+  // built on. The core says the same in `is_project`.
+  sameDir(a,b){ if(!a||!b) return false;
+    return a.replace(/[\\\/]+$/,"").toLowerCase()
+        === b.replace(/[\\\/]+$/,"").toLowerCase(); },
+
+  projectOf(root){ if(!root) return null;
+    return (this.projects||[]).filter(p=>this.sameDir(p.path,root))[0] || null; },
+
+  // ONE ROW, DRAWN THE SAME WAY WHEREVER IT SITS. A chat under a project and a
+  // chat below them are the same thing to a reader and to a click, so they are
+  // the same builder -- the indent is a class, not a second implementation.
+  chatRow(r,inproj){ const b=document.createElement("button");
+    b.className=(r.active ? "sess on" : "sess")+(inproj ? " inproj" : "");
+    if(r.path) b.dataset.path=r.path;   // what the mark is moved by, below
+    b.innerHTML='<span class="t"></span><span class="s"></span>';
+    b.querySelector(".t").textContent=r.title || r;
+    b.querySelector(".s").textContent=r.meta || "";
+    b.title="open · right-click for more";
+    // EVERY ENTRY IS CLICKABLE, the open one included. Clicking it is a no-op in
+    // Python -- and that is where the decision belongs, not in whether a handler
+    // exists.
+    if(r.path){ b.onclick=()=>crow.open(r.path);
+      b.oncontextmenu=e=>crow.menu(e,"chat",r,b); }
+    return b; },
+
+  projectRow(p,count){ const h=document.createElement("button");
+    h.className="proj"+(p.open ? " open" : "");
+    h.dataset.path=p.path;
+    h.innerHTML='<span class="caret">&#9654;</span><span class="t"></span>'
+               +'<span class="n"></span>';
+    h.querySelector(".t").textContent=p.name;
+    // THE COUNT IS THE ONLY THING THAT SURVIVES FOLDING. A shut project with no
+    // number is a heading that says nothing about what is inside it, which is
+    // the state that makes people open every one of them to look.
+    h.querySelector(".n").textContent=count ? String(count) : "";
+    h.title=p.path;
+    h.onclick=()=>crow.toggleProject(p.path,!p.open);
+    h.oncontextmenu=e=>crow.menu(e,"project",p,h);
+    return h; },
+
+  rail(e){
+    const title=e.title, meta=e.meta, rollovers=e.rollovers, unsaved=e.unsaved;
+    this.projects=e.projects||[];
+    this.liveRoot=e.live_root||"";
     const box=$("#sessions");
     // SAME CHATS, SAME ORDER -> MOVE THE MARK, DO NOT REBUILD. Every update used
     // to throw the list away and remake it, so a click exchanged every node under
     // the cursor.
-    const shape=(rollovers||[]).map(r=>r.path||"").join("\n")+"|"+(unsaved?"live":"");
+    //
+    // THE PROJECTS ARE IN THE SHAPE, and every chat's ROOT with them. Without
+    // that, folding a project or moving a chat into one would land on the fast
+    // path and change nothing on screen -- the list would be right in Python and
+    // stale in the window, which is the worst of the three possible states.
+    const shape=(rollovers||[]).map(r=>(r.path||"")+">"+(r.root||"")).join("\n")
+      +"|"+(unsaved?"live":"")+"|"+this.liveRoot
+      +"|"+this.projects.map(p=>p.path+(p.open?"+":"-")).join("\n");
     if(box.dataset.shape===shape){
       (rollovers||[]).forEach(r=>{ if(!r.path) return;
         const b=box.querySelector('[data-path="'+CSS.escape(r.path)+'"]');
@@ -1548,35 +1939,56 @@ const crow = {
     }
     box.dataset.shape=shape;
     box.innerHTML="";
-    if(unsaved){
-      const live=document.createElement("button");
-      live.className="sess on";
-      live.innerHTML='<span class="t"></span><span class="s"></span>';
-      live.querySelector(".t").textContent=title;
-      live.querySelector(".s").textContent=meta;
-      live.title="right-click for more";
-      live.oncontextmenu=e=>crow.menu(e,{path:null,title:title},live);
-      box.appendChild(live);
-    }
-    if(rollovers && rollovers.length){
-      // "Earlier" only means anything while something is on top.
-      if(unsaved){ const h=document.createElement("div"); h.id="railsep";
-        h.textContent="Earlier"; box.appendChild(h); }
-      rollovers.forEach(r=>{ const b=document.createElement("button");
-        b.className=r.active ? "sess on" : "sess";
-        if(r.path) b.dataset.path=r.path;   // what the mark is moved by, above
-        b.innerHTML='<span class="t"></span><span class="s"></span>';
-        b.querySelector(".t").textContent=r.title || r;
-        b.querySelector(".s").textContent=r.meta || "";
-        b.title="open · right-click for more";
-        // EVERY ENTRY IS CLICKABLE, the open one included. Clicking it is a
-        // no-op in Python -- and that is where the decision belongs, not in
-        // whether a handler exists.
-        if(r.path){ b.onclick=()=>crow.open(r.path);
-          b.oncontextmenu=e=>crow.menu(e,r,b); }
-        box.appendChild(b); });
+
+    // THE LIVE CHAT WITHOUT A FILE is drawn from the window's own copy: it has
+    // no entry in `rollovers` yet because the core writes nothing for a chat
+    // with no turn in it. It goes under its project like any other, because a
+    // new chat started inside one belongs there from its first line -- not from
+    // its first save.
+    const live=unsaved ? {path:null,title:title,meta:meta,active:true,
+                          root:this.liveRoot} : null;
+    const all=(rollovers||[]).slice();
+    const rowFor=r=>{
+      if(r!==live) return this.chatRow(r,!!this.projectOf(r.root));
+      const b=this.chatRow(r,!!this.projectOf(r.root));
+      b.title="right-click for more";
+      b.oncontextmenu=ev=>crow.menu(ev,"chat",r,b);
+      return b; };
+    if(live) all.unshift(live);
+
+    const taken=new Set();
+    this.projects.forEach(p=>{
+      const mine=all.filter(r=>this.sameDir(p.path,r.root));
+      mine.forEach(r=>taken.add(r));
+      box.appendChild(this.projectRow(p,mine.length));
+      // FOLDED MEANS NOT DRAWN, not drawn and hidden. A shut project that still
+      // built its rows would keep every one of them in the tree, and the mark
+      // that moves on the fast path above would find a node nobody can see.
+      if(p.open) mine.forEach(r=>box.appendChild(rowFor(r)));
+    });
+
+    const loose=all.filter(r=>!taken.has(r));
+    if(loose.length){
+      // THE HEADING ONLY MEANS SOMETHING WITH A PROJECT ABOVE IT. Without one
+      // these are simply the chats, and a word over the whole list is furniture.
+      if(this.projects.length){ const h=document.createElement("div");
+        h.id="railsep"; h.textContent="Chats"; box.appendChild(h); }
+      loose.forEach(r=>box.appendChild(rowFor(r)));
     }
   },
+
+  // #119. THE EMPTY SPACE IS A TARGET TOO. Right-clicking the list where no chat
+  // is has to answer something, or the two things you do least often -- start a
+  // chat, make a project -- are the two with no way in from here.
+  railMenu(e){ if(e.target.closest(".sess,.proj")) return;
+    this.menu(e,"rail",null,null); },
+
+  toggleRail(){ const el=document.body;
+    const open=el.dataset.rail!=="shut";
+    el.dataset.rail=open ? "shut" : "open";
+    pywebview.api.set_rail_open(!open); },
+
+  toggleProject(path,open){ pywebview.api.set_project_open(path,open); },
 
   // THE ARCHIVE IS A DRAWER, shut by default. It holds what the user put out of
   // the way, so opening it has to be their move -- a section that is always
@@ -1593,7 +2005,7 @@ const crow = {
       b.querySelector(".s").textContent=r.meta;
       b.title="open · right-click for more";
       b.onclick=()=>crow.open(r.path);
-      b.oncontextmenu=e=>crow.menu(e,r,b,true);
+      b.oncontextmenu=e=>crow.menu(e,"chat",r,b,true);
       box.appendChild(b);
     });
     if(!items.length) $("#arch").classList.remove("open");
@@ -1613,11 +2025,14 @@ const crow = {
         // #117. BEFORE showReason, not after: the chip's own text depends on the grouping now,
         // so a chip drawn first would name `off` and be corrected a frame later.
         if(e.groups!==undefined){ this.groups=e.groups; }
-        if(e.reasoning!==undefined){ this.showReason(e.reasoning); }
-        if(e.model){ $("#model").hidden=false; $("#model").innerHTML="<b></b>";
-          $("#model b").textContent=e.model; }
-        if(e.n_ctx){ $("#nctx").hidden=false;
-          $("#nctx").innerHTML="n_ctx <b>"+(e.n_ctx/1000).toFixed(0)+"k</b>"; }
+        // #119. STORED, THEN DRAWN ONCE. Both halves live on one chip now, so a payload that
+        // carries the model and the level must not paint twice -- the first paint would name
+        // the level against the OLD model for a frame, and a switch is exactly when the two
+        // disagree. `n_ctx` is no longer a chip of its own: it is the denominator the composer
+        // already prints, and printing it twice is the bloat this bar was cut for.
+        if(e.reasoning!==undefined){ this.reasoning=e.reasoning||""; }
+        if(e.model){ this.modelName=e.model; }
+        this.showModel();
         this.ctx(e.tokens||0,e.n_ctx||0); break;
       case "reasoning": if(e.levels){ this.levels=e.levels; }
         if(e.groups!==undefined){ this.groups=e.groups; }
@@ -1625,7 +2040,9 @@ const crow = {
       case "down": $("#dot").className="down";
         $("#state").textContent=e.why||"no server"; break;
       case "meta": $("#ver").textContent=e.version;
-        $("#url").textContent=e.url;
+        // THE TITLE, NOT A CHIP (#119). Set rather than interpolated for the same reason every
+        // other name here is: it is a string that arrived over the bridge.
+        $("#conn").title=e.url;
         $("#tools").innerHTML="<b></b> tools<span></span>";
         $("#tools b").textContent=e.tools;
         $("#tools").onclick=()=>crow.toggleTools();
@@ -1634,12 +2051,13 @@ const crow = {
       case "mode": this.modeIs(e.name, e.modes); break;
       case "root": this.rootIs(e.path, e.name, e.roots); break;
       case "ask": this.ask(e.name, e.args, e.scope); break;
-      case "rail": this.rail(e.title,e.meta,e.rollovers,e.unsaved);
+      case "rail": this.rail(e);
         this.archive(e.archived||[]); break;
       // THE PAGE CLEARS ITSELF ON "new", because the click is here. A DELETE of
       // the chat being read starts on the page too but is decided in Python --
       // it may fail -- so the emptying has to come back from there.
       case "clear": flow.innerHTML=""; this.cost("",null); break;
+      case "hello": this.hello(e.t); break;
       // #94. /thoughts in the terminal shows or hides the reasoning; here it is
       // always rendered and folded, so the same question is open-or-closed.
       // EVERY block, not just the ones on screen -- a fold that only reached
@@ -1758,10 +2176,31 @@ new ResizeObserver(fitFlow).observe(composer);
   window.addEventListener("mouseup",()=>{ drag=null; });
 })();
 
+// A TABLE, NOT FOUR IF-LINES. Only the chat menu and the help menu closed on a click elsewhere;
+// the three in the composer never joined, so the window had two dismissal behaviours and no rule
+// saying which control got which. A menu that stays open when you look away is not a mode anybody
+// chose -- it is the one the last click left behind.
+//
+// THE WRAPPER, NOT THE PANEL, and that is the whole reason each of these has a wrapper. Guarding
+// on `#modelmenu` alone would close the menu on the mousedown that lands on its own chip, and the
+// click a moment later would find it hidden and toggle it straight back open -- so the chip could
+// open the menu and never close it. `#helpwrap` was written this way first; the other three now
+// match it.
+//
+// `mousedown` RATHER THAN `click`, unchanged from what was here: the panel is gone before
+// whatever sits under it does its work, and a row inside a panel is caught by its own wrapper.
+const DISMISS = [["#helpwrap","#helpmenu"], ["#modelwrap","#modelmenu"],
+                 ["#modewrap","#modemenu"], ["#rootwrap","#rootmenu"]];
 window.addEventListener("mousedown",e=>{
   if(!e.target.closest("#menu")) crow.closeMenu();
-  if(!e.target.closest("#helpwrap")) $("#helpmenu").hidden=true; });
+  DISMISS.forEach(pair => {
+    if(!e.target.closest(pair[0])) $(pair[1]).hidden=true; }); });
+// #119. THE LIST ITSELF ANSWERS NOW, not only the rows in it. A right-click
+// on the empty space below the chats used to be swallowed by this guard --
+// which was right when the rail had nothing to offer there, and is the
+// reason "new chat" and "new project" had nowhere to live.
 window.addEventListener("contextmenu",e=>{
+  if(e.target.closest("#sessions")){ crow.railMenu(e); return; }
   if(!e.target.closest(".sess")) e.preventDefault(); });
 
 window.addEventListener("pywebviewready",()=>{ pywebview.api.ready(); input.focus(); });
@@ -2201,16 +2640,44 @@ class Api:
             self._args.mode = wanted
             crow_core.forget_approvals()
             self.push({"k": "mode", "name": wanted, "modes": self.mode_menu()})
+        # #119: AND THE CHAT'S OWN FILE IS TOLD, HERE, rather than at the next
+        # save. `_root_chosen` above is what makes `_stamp` write `crow_root`,
+        # and until this line the two were separated by however long it took the
+        # user to type again -- the boundary lived in memory while the file said
+        # nothing. It cost nothing while a chat's directory was only ever read
+        # back at start-up. It costs the moment anything reads the FILE to
+        # decide where the chat belongs: the rail is drawn from `_entry_of`, so
+        # moving the open chat into a project bound the boundary, printed the
+        # note, and left the row exactly where it was. A window whose screen
+        # disagrees with its own disk is the hardest state to report, because
+        # each half looks right on its own.
+        #
+        # ALL THREE DOORS, not just the project move: the folder chip and the
+        # picker adopt a boundary the same way and had the same gap.
+        if self._current_path:
+            self._stamp(self._current_path)
         self.push_root()
+        # #119: AND THE LIST IS REDRAWN, because the boundary is now WHERE a chat
+        # is drawn and not merely what it may write. This door bound the root,
+        # printed the note and stopped -- so a chat moved into a project stayed
+        # in place until something unrelated reloaded the rail, which is how
+        # robin found it: folding the project was what finally showed the move.
+        self._reload_rail()
         self.push({"k": "note", "t": "working directory: %s (%s)" % (path, wanted)})
 
-    def _adopt_chat_root(self, chat: str | None) -> None:
+    def _adopt_chat_root(self, chat: str | None, fresh: bool = False) -> None:
         """Bind the boundary THIS chat chose, and take the level that goes with it.
 
-        #101. One place, because three events need the same answer: opening
+        #101. One place, because three events needed the same answer: opening
         another chat, starting a new one, and restoring the live one at launch.
         Three copies of it would drift the first time one of them was edited, and
         the symptom would be a boundary that depends on how you got here.
+
+        #119: TWO OF THE THREE STILL DO. `fresh` is the new chat, and it binds
+        NOTHING -- robin's rule once the rail was grouped by the boundary, because
+        `active` is rewritten by every bind and the template therefore carried the
+        last project into every chat started after it. It stays one place: the
+        difference is a parameter, not a second copy.
 
         A chat that never chose falls back to the template in `roots.json` --
         which is what a NEW chat is, and what every file written before this
@@ -2223,7 +2690,11 @@ class Api:
         which conversation is open.
         """
         root, chosen = self._stored_root(chat) if chat else (None, False)
-        if not chosen:
+        # UNBOUND, AND NOT CHOSEN TO BE. `chosen` stays False so `_stamp` writes
+        # no `crow_root` at all: absent means nobody ever picked for this chat,
+        # which is what a chat one second old is. An explicit null would be the
+        # user's "no folder" and would survive being opened again.
+        if not chosen and not fresh:
             root, _ = crow_core.restore_root()
         # BORROWED, AND IT STAYS BORROWED. The template may be shown and worked
         # in; it is not written into the chat until a person picks for this chat.
@@ -2312,6 +2783,119 @@ class Api:
             return                              # cancelled: nothing changes, no note
         self._bind_root(picked[0] if isinstance(picked, (list, tuple)) else str(picked))
 
+    def create_project(self) -> None:
+        """#119. A project is a working directory somebody named by picking it.
+
+        THE SAME DIALOG AND THE SAME WRITER AS `pick_root`, deliberately. A
+        project that created its root any other way would be a second answer to
+        "what makes a directory a root", and the first answer is the security
+        boundary -- `write_root_mode` has been the only thing that creates one
+        since 2026-08-14, and `add_project` calls it rather than writing the
+        file itself.
+
+        IT DOES NOT BIND. Creating a project puts a row in the rail; it does not
+        move the open chat into it and does not touch `active`. Those are two
+        decisions and a click that made both would be the one nobody could undo
+        by looking at it.
+        """
+        import webview
+
+        start = crow_core.get_root() or os.getcwd()
+        try:
+            picked = self._window.create_file_dialog(
+                webview.FileDialog.FOLDER, directory=start)
+        except Exception:                       # noqa: BLE001 - same as pick_root
+            picked = None
+        if not picked:
+            return                              # cancelled: nothing changes, no note
+        path = picked[0] if isinstance(picked, (list, tuple)) else str(picked)
+        if not crow_core.add_project(path):
+            self.push({"k": "fail", "t": "could not mark %s as a project"
+                       % os.path.basename(path)})
+            return
+        self._reload_rail()
+
+    def drop_project(self, path: str) -> None:
+        """Take a project row out of the rail. Chats and directory are untouched.
+
+        THE OFFER EXISTS BECAUSE THE PICK CANNOT BE UNDONE OTHERWISE. A folder
+        chosen by mistake would otherwise sit in the rail for good, and the only
+        way out would be editing roots.json by hand.
+
+        WHAT IT DOES NOT DO is the important half: the marker stays, so every
+        chat bound to that directory keeps its boundary, and the chats
+        themselves are not touched at all. They simply stop being drawn under a
+        heading. The core says the same thing in `drop_project`.
+        """
+        if not path:
+            return
+        crow_core.drop_project(path)
+        # THE FOLD STATE GOES WITH THE ROW. Left behind, it would be waiting for
+        # a project that no longer exists -- and the same folder added again
+        # would come back folded from a life it does not have. `set_project_open`
+        # states this as the reason the CLOSED ones are the list; without this
+        # the sentence was true of the reader and not of the writer.
+        doc = read_settings()
+        shut = [p for p in (doc.get("projects_shut") or []) if isinstance(p, str)]
+        key = os.path.normcase(path)
+        kept = [p for p in shut if os.path.normcase(p) != key]
+        if len(kept) != len(shut):
+            doc["projects_shut"] = kept
+            write_settings(doc)
+        self._reload_rail()
+
+    def set_chat_root(self, path: str, root: str) -> None:
+        """Move ONE chat into a project, or out of every project with root="".
+
+        NOT `choose_root`, AND THE DIFFERENCE IS WHICH CHAT. `choose_root` binds
+        the boundary of the conversation in the window; this writes `crow_root`
+        into the file of a chat that is not open, which changes nothing about
+        what may be written right now.
+
+        THE OPEN CHAT GOES THROUGH `_bind_root` INSTEAD. Writing its file behind
+        its back would be overwritten by the next `_stamp` -- the window holds
+        the authoritative copy of the live chat and re-stamps it after every
+        save. Two writers on one file, and the loser is whichever wrote first.
+        """
+        if not path or not os.path.isfile(path):
+            self.push({"k": "fail", "t": "that chat is gone"})
+            self._reload_rail()
+            return
+        if root and not os.path.isdir(root):
+            self.push({"k": "fail", "t": "that directory is gone"})
+            self._reload_rail()
+            return
+        live = (self._current_path
+                and os.path.abspath(path) == os.path.abspath(self._current_path))
+        if live:
+            if self._worker and self._worker.is_alive():
+                self.push({"k": "note",
+                           "t": "the working directory does not change mid-turn"})
+                return
+            # BOTH DOORS RELOAD THE RAIL THEMSELVES NOW, so a third call here
+            # would only draw the same list twice.
+            if root:
+                self._bind_root(root)
+            else:
+                self.clear_root()
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            # NULL RATHER THAN A MISSING KEY when it leaves a project, the same
+            # three states #101 wrote down: absent means nobody ever chose here,
+            # null means somebody chose "no folder". Dropping the key would put
+            # the chat back into "never chosen", and the next thing that reads
+            # it would be free to bind it to the template.
+            data["crow_root"] = root or None
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception:                  # noqa: BLE001 - reported, never raised
+            self.push({"k": "fail", "t": "could not write that chat"})
+        self._reload_rail()
+
     def clear_root(self) -> None:
         """Work without a boundary again -- the state every release up to 0.3.2 had.
 
@@ -2328,7 +2912,15 @@ class Api:
         # next start -- which is how "no folder" would come back as a folder.
         # A cancelled picker never reaches here and still changes nothing.
         crow_core.set_active_root(None)
+        # #119: THE OTHER DIRECTION OF `_bind_root`'s LINE, and it has to be here
+        # too. `_stamp` writes `crow_root` from `get_root()`, which is None now --
+        # an explicit null, which is the state "somebody chose no folder", not the
+        # absent key that means nobody ever chose. Without this a chat taken out
+        # of a project stays drawn inside it until the next save.
+        if self._current_path:
+            self._stamp(self._current_path)
         self.push_root()
+        self._reload_rail()          # the other direction of the line above
         self.push({"k": "note", "t": "no working directory -- writes are unbounded"})
 
     ARCHIVE_PREFIX = "chat-"
@@ -2457,6 +3049,12 @@ class Api:
         kind = "rolled over" if name.startswith("rollover-") else "put aside"
         return {"path": path,
                 "title": given or cls._first_line(messages) or name,
+                # #119. THE CHAT'S OWN BOUNDARY IS ITS PROJECT MEMBERSHIP, and it
+                # is read here because this is the one read of the file. There is
+                # no `crow_project` key and there must not be: a label beside the
+                # directory is a second place for the same fact, and the two
+                # would part company the first time either was written alone.
+                "root": data.get("crow_root") or "",
                 "meta": ("%d messages · %s" % (len(messages), kind)
                          if messages else kind)}
 
@@ -2516,11 +3114,18 @@ class Api:
         # the conversation being non-empty.
         self._current_path, self._current_title = self._pointer()
         if not restored:
+            # #119: THE ONE CALLER WITH NO CLEAR TO HANG ON. A launch that finds
+            # nothing to restore leaves an empty flow that was never emptied --
+            # which is why the greeting is its own message and not a field.
+            self._hello()
             self._reload_rail()
             return
         messages, tokens, kv = restored
         self._conversation.restore(messages)
         self._context_tokens, self._promised_warm = tokens, kv
+        # An empty restored chat is still an empty chat; `turn()` takes the line
+        # back off the moment `_replay` puts a row in.
+        self._hello()
         self._replay(messages)
         self._reload_rail()
         # #101: THE RESTORED CHAT BRINGS ITS OWN BOUNDARY, and this is the second
@@ -2674,6 +3279,7 @@ class Api:
         if self._args.session:
             crow_core.forget_session()
         self.push({"k": "clear"})
+        self._hello()
         self.push({"k": "up", "model": None, "n_ctx": self._n_ctx, "tokens": 0})
         self._reload_rail()
         return "context dropped -- the next turn pays a full prefill."
@@ -2944,13 +3550,25 @@ class Api:
         self._conversation.reset()
         self._current_path = None
         self._current_title = None
-        # #101: A NEW CHAT STARTS FROM THE TEMPLATE, not from the chat just put
-        # aside. Without this the boundary of the previous conversation followed
-        # the user into the new one -- and then into every other chat they opened.
-        self._adopt_chat_root(None)
+        # #119 OVERTURNS #101's ANSWER FOR THIS ONE EVENT. A new chat used to
+        # start from the template in roots.json; robin, on the built window:
+        # "ein neuer Chat soll immer wurzellos sein".
+        #
+        # WHY THE TEMPLATE STOPPED BEING HARMLESS. `_bind_root` writes `active`,
+        # so moving one chat into a project made that project the ground every
+        # later chat started on -- and with the rail GROUPED by the boundary,
+        # that is a new chat appearing inside a project nobody put it in. The
+        # template was invisible while it only decided what a tool could write.
+        #
+        # THE OTHER TWO CALLERS ARE UNTOUCHED: opening a chat that never chose
+        # still falls back to the template, and so does the launch -- which is
+        # the case #92 added it for. `_adopt_chat_root` is no longer one answer
+        # for three events, and the docstring there says so.
+        self._adopt_chat_root(None, fresh=True)
         self._context_tokens = 0
         self._promised_warm = False
         self.push({"k": "clear"})     # the page no longer guesses; see crow.reset
+        self._hello()
         # SESSION.JSON GOES WITH IT, and only after the chat has been read back
         # off disk above. It still holds the conversation just put aside; left
         # there, the next launch would restore it as the open chat AND list the
@@ -3206,6 +3824,7 @@ class Api:
         self._adopt_chat_root(path)
         self._context_tokens, self._promised_warm = tokens, kv
         self.push({"k": "clear"})     # the page no longer guesses; see crow.open
+        self._hello()
         self._replay(messages)
         # SESSION.JSON FOLLOWS THE SWITCH AT ONCE. Still pointing at the chat
         # just closed, a window shut before the next turn would come back up
@@ -3314,8 +3933,31 @@ class Api:
                    "unsaved": self._current_path is None,
                    "rollovers": self._archives(),
                    "archived": self._archived(),
+                   # #119. THE PROJECTS TRAVEL WITH THE RAIL, not on their own
+                   # message, because a rail drawn against a stale project list
+                   # puts a chat under a heading that is no longer there. One
+                   # payload, one grouping, no frame where the two disagree.
+                   # The live chat's own root rides along so the page can mark
+                   # the project it belongs to before it has a file.
+                   "projects": self._projects(),
+                   "live_root": crow_core.get_root() or "",
                    "foot": os.path.basename(self._current_path)
                    if self._current_path else ""})
+
+    @staticmethod
+    def _projects() -> list:
+        """The project rows: path, and the name a person recognises.
+
+        THE NAME IS THE FOLDER'S, and there is nowhere else it could come from
+        without inventing a second key to hold it. `os.path.basename` is what
+        the root picker beside this already shows, so a folder reads the same
+        in both lists -- and a rename in the file manager reaches the rail
+        without anything here being told.
+        """
+        shut = open_projects()
+        return [{"path": p, "name": os.path.basename(p) or p,
+                 "open": shut.get(os.path.normcase(p), True)}
+                for p in crow_core.projects()]
 
     def rename(self, path: str, title: str) -> bool:
         """Give a saved chat a name. The file keeps its own name.
@@ -3409,6 +4051,55 @@ class Api:
         self._reload_rail()
         return True
 
+    def _hello(self) -> None:
+        """Put the greeting under an empty chat. #119.
+
+        ITS OWN MESSAGE RATHER THAN A FIELD ON `clear`, because the start-up
+        case has no clear to hang it on: a window that comes up on a chat with
+        no turns in it needs the line too, and that path never empties anything.
+
+        SAFE AFTER EVERY CLEAR, INCLUDING `open()`, which clears and then
+        replays a conversation on top. The page drops the greeting inside
+        `turn()` -- the one place a turn is appended -- so a replay removes it
+        on its first row and an empty chat keeps it. The caller does not have to
+        know which of the two it is.
+        """
+        self.push({"k": "hello", "t": greeting()})
+
+    def discard_live(self) -> bool:
+        """#119. Throw away the open chat that was never written. True when done.
+
+        THE ROW THAT COULD NOT BE DELETED. A chat with no file has no path, so
+        `delete_chat` had nothing to remove: the menu armed, said "really
+        delete?", and then did nothing at all -- which is worse than refusing,
+        because a refusal at least reaches the user.
+
+        IT REFUSES A CHAT THAT HAS A FILE, and that guard is the whole safety of
+        this door: it drops a conversation WITHOUT archiving it, which is only
+        ever right for one that was never on disk. A saved chat is
+        `delete_chat`'s business, and a second way to lose one is a second way
+        to lose one.
+
+        NOT `reset`, WHICH ARCHIVES. That is the difference the user is asking
+        for: "new" puts the chat aside, "delete" does not keep it.
+        """
+        if self._worker and self._worker.is_alive():
+            self.push({"k": "note", "t": "not while a turn is running"})
+            return False
+        if self._current_path:
+            return False
+        self._conversation.reset()
+        self._current_title = None
+        self._context_tokens = 0
+        self._promised_warm = False
+        # SESSION.JSON GOES WITH IT, for the reason `delete_chat` states below:
+        # left there, the next launch restores the very chat that was discarded.
+        self._forget_live()
+        self.push({"k": "clear"})
+        self._hello()
+        self._reload_rail()
+        return True
+
     def delete_chat(self, path: str) -> bool:
         """Remove a saved chat. There is no undo, which is why the page asks
         twice before it gets here."""
@@ -3434,6 +4125,7 @@ class Api:
             self._promised_warm = False
             self._forget_live()
             self.push({"k": "clear"})
+            self._hello()
         self.push({"k": "note", "t": "deleted: %s" % os.path.basename(path)})
         self._reload_rail()
         return True
@@ -3643,6 +4335,45 @@ class Api:
         doc["theme"] = name
         return write_settings(doc)
 
+    def set_rail_open(self, open_: bool) -> bool:
+        """#119. Remember whether the chat rail is folded away.
+
+        WRITTEN HERE AND READ AT START, the rule `set_theme` above states: a
+        setting only ever written is a setting nobody has proved comes back. The
+        reader is `rail_open`, and the page is stamped from it before it is
+        handed over -- the same trick the theme uses, and for the same reason. A
+        rail that unfolded and then collapsed would do it on every single start,
+        and that frame is exactly when somebody is looking.
+        """
+        doc = read_settings()
+        doc["rail_open"] = bool(open_)
+        return write_settings(doc)
+
+    def set_project_open(self, path: str, open_: bool) -> bool:
+        """Remember one project row folded. Read back by `open_projects`.
+
+        THE CLOSED ONES ARE THE LIST, so a project nobody has touched is open
+        like every other new one, and a project removed and re-added comes back
+        the way a new one does rather than carrying a state from before.
+        """
+        if not path:
+            return False
+        doc = read_settings()
+        shut = [p for p in (doc.get("projects_shut") or []) if isinstance(p, str)]
+        key = os.path.normcase(path)
+        shut = [p for p in shut if os.path.normcase(p) != key]
+        if not open_:
+            shut.append(path)
+        doc["projects_shut"] = shut
+        ok = write_settings(doc)
+        # REDRAWN FROM THE DISK, not toggled on the page. The rail is built from
+        # one payload on purpose, and a page that folded a row on its own would
+        # be the second place that knows which rows are folded -- the state the
+        # settings file exists to be the only holder of. If the write failed,
+        # this redraw is what puts the row back where it really is.
+        self._reload_rail()
+        return ok
+
     def on_drop(self, event) -> None:
         """A file was dropped on the window. Its real path goes to the page.
 
@@ -3835,7 +4566,12 @@ def main(argv: list[str] | None = None) -> int:
                 # then switched would show the wrong theme for a frame on every
                 # single start -- and the frame is exactly the moment somebody
                 # looks at it.
-                .replace("__THEME__", current_theme()))
+                .replace("__THEME__", current_theme())
+                # #119. THE SAME REASON THE THEME IS STAMPED HERE: a rail that
+                # was drawn open and then folded away by a script after load
+                # would do it on every start, and that frame is the moment
+                # somebody is looking at the window.
+                .replace("__RAIL__", "open" if rail_open() else "shut"))
 
     api = Api(args)
     # FRAMELESS, because the title bar is part of the design: the caption is

@@ -3132,6 +3132,106 @@ def known_roots(limit: int = 8) -> list[str]:
     return out[:limit]
 
 
+def projects() -> list[str]:
+    """The roots a person promoted to projects, in the order they were added.
+
+    #119. A THIRD FACT, A THIRD KEY, for the reason the comment above `recent`
+    and `active` states: two facts on one key held only until they disagreed.
+
+    NOT `recent`, AND THAT IS THE WHOLE REASON THIS KEY EXISTS. `recent` is the
+    picker's memory -- "last chosen, by anybody", capped at eight so the menu
+    stays a menu. A project is not a memory of a click; it is a place the user
+    said they work in, and the ninth folder they ever open must not push it out
+    of the rail.
+
+    OLDEST FIRST, unlike `recent`. That list is ordered by when it was touched
+    because a picker wants the last thing; this one is a set of standing places,
+    and a rail that reorders itself under the mouse is a rail nobody can aim at.
+
+    THE SAME FILTER `known_roots` APPLIES, and for the same reason: a directory
+    whose `root.json` is gone is not a root any more, and drawing it as a project
+    would offer a boundary that silently does not exist.
+    """
+    paths = _roots_doc().get("projects")
+    if not isinstance(paths, list):
+        return []
+    out: list[str] = []
+    seen = set()
+    for path in paths:
+        if not isinstance(path, str) or not os.path.isfile(root_file(path)):
+            continue
+        key = os.path.normcase(path)
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out
+
+
+def is_project(root: str | None) -> bool:
+    """Is this exact directory one of the projects?
+
+    EXACT, NOT AN ANCESTOR WALK, and that is a decision rather than a shortcut.
+    `find_root` deliberately takes the NEAREST marker and not the highest, so a
+    sub-directory that declares itself is its own root; treating it as part of
+    the project above it would contradict the rule the rest of the file is built
+    on. A chat bound to `Crow/cli` belongs to `Crow/cli`, and if that is not a
+    project, the chat has no project.
+    """
+    if not root:
+        return False
+    key = os.path.normcase(_resolve(root))
+    return any(os.path.normcase(p) == key for p in projects())
+
+
+def add_project(root: str) -> bool:
+    """Declare `root` a root if it is not one yet, and list it as a project.
+
+    RETURNS FALSE WHEN THE MARKER COULD NOT BE WRITTEN, and nothing is listed in
+    that case. A project whose directory refused the marker would be drawn in
+    the rail, filtered straight back out by `projects`, and look like a click
+    that did nothing -- which is exactly the state that is hardest to report.
+
+    `write_root_mode` IS THE ONLY THING THAT CREATES A ROOT (2026-08-14), so it
+    is called here rather than the file being written by hand: a second writer
+    is a second answer to "what is a root", and the first one is the security
+    boundary.
+
+    IDEMPOTENT. Adding a project twice is a click somebody repeated, not an
+    error, and it must not put the same folder in the rail twice.
+    """
+    root = _resolve(root)
+    if not os.path.isfile(root_file(root)):
+        if not write_root_mode(root, DEFAULT_MODE):
+            return False
+    doc = _roots_doc()
+    listed = doc.get("projects")
+    listed = [p for p in listed if isinstance(p, str)] if isinstance(listed, list) else []
+    key = os.path.normcase(root)
+    if not any(os.path.normcase(p) == key for p in listed):
+        listed.append(root)
+    doc["projects"] = listed
+    _write_doc(doc)
+    return True
+
+
+def drop_project(root: str) -> None:
+    """Take `root` off the project list. The directory and its chats are untouched.
+
+    THE MARKER STAYS. Removing `.crow/root.json` would un-root a directory that
+    chats are still bound to, and a boundary that disappears because a list was
+    tidied is the failure mode the whole root mechanism exists to prevent. This
+    removes a row from the rail and nothing else.
+    """
+    doc = _roots_doc()
+    listed = doc.get("projects")
+    if not isinstance(listed, list):
+        return
+    key = os.path.normcase(_resolve(root))
+    doc["projects"] = [p for p in listed
+                       if not (isinstance(p, str) and os.path.normcase(p) == key)]
+    _write_doc(doc)
+
+
 def remember_root(root: str, limit: int = 8) -> None:
     """Put `root` at the head of the recent list -- the menu's memory, nothing more.
 
