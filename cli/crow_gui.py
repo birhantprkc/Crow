@@ -820,12 +820,14 @@ const crow = {
     if(!(this.levels||[]).length){ c.hidden = true; return; }
     c.hidden = false;
     c.innerHTML = "<b></b>";
+    // THE CHIP NAMES THE ROW, ALWAYS -- not the level the chat happens to have stored. A level
+    // bound under another name still runs whatever its group renders as: on 0731 a chat set to
+    // `high` runs the `low` row, and a chip reading `high` while the tick sits on `low` names a
+    // step the menu does not offer. Measured there, seen on screen, cut on sight.
+    const g = this.reasonGroups().filter(x => x.indexOf(level||"off") >= 0)[0];
     let text = "reasoning " + (level || "off");
-    if(!level){
-      const g = this.reasonGroups().filter(x=>x.indexOf("off")>=0)[0];
-      const name = g ? this.reasonName(g) : "off";
-      if(name !== "off") text = "reasoning " + name + " (default)";
-    }
+    if(g) text = "reasoning " + this.reasonName(g)
+                 + ((g.indexOf("off") >= 0) ? " (default)" : "");
     c.querySelector("b").textContent = text; },
 
   // Built like modelMenu above it and drawn with textContent for the same reason: these names
@@ -848,13 +850,13 @@ const crow = {
       // The escape rather than the character: the two menus above write &#10003; into their HTML,
       // and this one sets textContent, so the escape keeps the source ASCII either way.
       el.querySelector(".tick").textContent = (g.indexOf(now) >= 0) ? "\u2713" : "";
-      // The row SAYS what it swallowed. A group that holds `off` is the one an unset chat lands
-      // on; a group that holds other names says so, because a user who has read `high` somewhere
-      // must be able to see where it went rather than conclude the menu lost it.
+      // ONLY `default`, AND THE SWALLOWED NAMES ARE NOT LISTED. The row used to read
+      // "default - high renders the same"; robin cut it against the built window on 0731, where
+      // three names collapse into one row: naming a step the menu does not offer is the defect
+      // this whole issue is about, and it does not stop being one because the sentence explains
+      // itself. It also wrapped to three lines inside the capped panel.
       const bits = [];
       if(g.indexOf("off") >= 0) bits.push("default");
-      const twins = g.filter(x => x !== "off" && x !== name);
-      if(twins.length) bits.push(twins.join(", ") + " renders the same");
       el.querySelector(".what").textContent = bits.join(" · "); });
     m.hidden=false; },
 
