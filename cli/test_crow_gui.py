@@ -3907,13 +3907,23 @@ class TheSkillSheetTests(unittest.TestCase):
         self.assertNotIn("enabled\"]", api.split("return")[0])
         self.assertNotIn('sk["body"]', api)
 
-    def test_the_pinned_head_is_built_in_one_place(self):
+    def test_the_pinned_head_is_built_in_one_place_by_both_surfaces(self):
         """Memory and skills are two stores and ONE head. Two composers would be
         two byte-different heads for one set of facts, and neither chat could
-        reuse the other's cache."""
+        reuse the other's cache.
+
+        BOTH FILES, and that is not thoroughness -- it is the defect. The window
+        was moved to `prompt_head()` and the terminal's two lines were left on
+        `memory_block()` for one commit: no crash, no failing case, just a
+        terminal whose prompt silently carried no skills while the window's did.
+        A surface-by-surface check is the only kind that sees it.
+        """
         self.assertEqual(self.source.count("crow_core.prompt_head()"), 3)
-        self.assertNotIn("crow_core.memory_block()", self.source)
-        self.assertNotIn("crow_core.skill_block()", self.source)
+        terminal = (HERE / "crow.py").read_text(encoding="utf-8")
+        self.assertEqual(terminal.count("crow_core.prompt_head()"), 2)
+        for name, text in (("crow_gui.py", self.source), ("crow.py", terminal)):
+            self.assertNotIn("crow_core.memory_block()", text, name)
+            self.assertNotIn("crow_core.skill_block()", text, name)
 
 
 class TheMemoryPinWiringTests(unittest.TestCase):

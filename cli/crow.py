@@ -1550,7 +1550,7 @@ def resume_into(conversation: "crow_core.Conversation", args: argparse.Namespace
             # in -- `adopt_root` ran before this call, so that folder is already
             # decided. Such a resume is cold either way in this release.
             conversation.pin_memory(pinned if pinned is not None
-                                    else crow_core.memory_block())
+                                    else crow_core.prompt_head())
             # #122. The review marks travel with the chat too, or a resumed
             # conversation is reviewed twice per resume instead of twice ever.
             conversation.mark_reviewed(crow_core.session_reviewed(source))
@@ -1573,7 +1573,7 @@ def resume_into(conversation: "crow_core.Conversation", args: argparse.Namespace
     # with nothing in it. `pin_memory` refuses a second call, so the guard is
     # what keeps this from reaching past a pin the branch above already set.
     if conversation.memory is None:
-        conversation.pin_memory(crow_core.memory_block())
+        conversation.pin_memory(crow_core.prompt_head())
     return 0, False
 
 
