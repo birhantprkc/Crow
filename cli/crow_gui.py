@@ -48,6 +48,7 @@ import os
 import queue
 import re
 import sys
+import struct
 import threading
 import time
 
@@ -106,6 +107,227 @@ _VERSION_LITERAL = re.compile(r'^VERSION\s*=\s*"([^"]+)"', re.M)
 # the only place that disagreed, and no check reads this constant.
 READ_TIMEOUT_S = 600.0
 
+# WINDOW SETTINGS, AND THEY ARE THE WINDOW'S ALONE. The terminal client has no
+# theme to pick, so this does not belong in the core -- check_shared_core would
+# be right to call a copy of it there a second decision. It sits beside
+# roots.json for the same reason roots.json sits there: it is remembered ACROSS
+# chats, so it cannot live in a chat file.
+SETTINGS_FILE = os.path.join(os.path.dirname(crow_core.SESSION_DIR), "settings.json")
+THEMES = ("dark", "light", "crow")
+DEFAULT_THEME = "dark"
+
+# THE GROUND PYWEBVIEW PAINTS BEFORE THE PAGE EXISTS, and it has to be the same
+# one the page will paint a moment later. A window filled with one ground and
+# repainted in another is a flash of the wrong product on every start -- the
+# same failure the data-theme attribute exists to avoid, one layer further out.
+#
+# CROW_BG IS A VALUE HERE, NOT A FALLBACK. `crow` is the theme the window shipped
+# with, so the brand ground is what that theme paints; the dict's default only
+# catches a name no build has.
+THEME_BG = {"dark": "#181818", "light": "#ffffff", "crow": CROW_BG}
+
+# PASTED PICTURES LAND OUTSIDE THE WORKING DIRECTORY, ON PURPOSE. A screenshot
+# is not part of the project it is about, and writing one into whatever folder
+# happens to be bound would put Crow's own files in a user's repository. Beside
+# roots.json is where things that outlive a chat already live.
+#
+# READING IS NOT BOUNDED -- the guard in the core covers `write_file` and
+# `edit_file` -- so a path here is one the model's own tools can still open.
+PASTE_DIR = os.path.join(os.path.dirname(crow_core.SESSION_DIR), "pastes")
+
+# 20 MB. A screenshot is under one; anything past this is a paste nobody meant.
+PASTE_MAX_BYTES = 20 * 1024 * 1024
+
+# 30 DAYS, robin's answer on 2026-08-21, and the trade it buys is worth writing
+# down: the PATH of a pasted picture lives in the conversation, so deleting the
+# file breaks what an old chat points at. Thirty days is the span where "the
+# chat I had recently" still works and the folder does not grow without end.
+PASTE_KEEP_DAYS = 30
+
+# A POSITIVE LIST, NOT AN EXCEPTION LIST. A delete path may only touch what it
+# put there itself: this matches the names `write_paste` builds and nothing
+# else, so a file a user dropped into the folder by hand survives every sweep.
+# The alternative -- deleting everything except a list of things to spare --
+# only protects what somebody thought of in advance.
+PASTE_NAME = re.compile(r"^paste-\d{8}-\d{6}(?:-\d+)?\.(?:png|bmp)$", re.I)
+
+# CF_DIB. The number is Windows', not ours.
+CF_DIB = 8
+
+
+def dib_to_bmp(dib: bytes) -> bytes:
+    """A clipboard DIB wrapped in the 14 bytes that make it a .bmp file.
+
+    THE CLIPBOARD STORES A DIB WITHOUT ITS FILE HEADER, because inside Windows
+    nothing needs one. Prepending it is the whole conversion -- no pixels move.
+
+    THE OFFSET IS THE PART THAT CAN BE WRONG, and it is arithmetic rather than a
+    constant: the pixels begin after the header AND after whatever sits between,
+    which is a palette below 8 bits and three colour masks when the compression
+    is BI_BITFIELDS. Get it wrong and the file opens as a picture of noise, which
+    is worse than failing.
+    """
+    if len(dib) < 40:
+        return b""
+    (size, _w, _h, _planes, bits, comp,
+     _sizeimage, _xppm, _yppm, used, _important) = struct.unpack_from("<IiiHHIIiiII", dib, 0)
+    palette = (used * 4) if used else ((1 << bits) * 4 if bits <= 8 else 0)
+    if comp == 3:                                     # BI_BITFIELDS
+        palette += 12
+    offset = 14 + size + palette
+    return b"BM" + struct.pack("<IHHI", 14 + len(dib), 0, 0, offset) + dib
+
+
+def clipboard_image() -> "tuple[str, bytes] | None":
+    """`(suffix, bytes)` for a picture on the Windows clipboard, else None.
+
+    READ HERE AND NOT IN THE PAGE, and that is measured rather than preferred.
+    On 2026-08-21 a Windows screenshot sat on the clipboard as `PNG` and `Bitmap`
+    -- 296,135 bytes of valid PNG, pulled by exactly this code -- and the page's
+    own `paste` event handed over no image item at all. The bytes were there the
+    whole time; what was missing was a reader that WebView2 did not have to
+    volunteer.
+
+    NO NEW DEPENDENCY. This is ctypes against user32 and kernel32, both of which
+    are already on every machine that can run the window.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    u32 = ctypes.WinDLL("user32", use_last_error=True)
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    # EVERY SIGNATURE IS DECLARED. A handle is 64 bits and ctypes defaults to a
+    # C int, so an undeclared GlobalUnlock raises "int too long to convert" on
+    # the one call that releases the memory -- caught the first time this ran.
+    u32.OpenClipboard.restype, u32.OpenClipboard.argtypes = wintypes.BOOL, [wintypes.HWND]
+    u32.CloseClipboard.restype = wintypes.BOOL
+    u32.RegisterClipboardFormatW.restype = wintypes.UINT
+    u32.IsClipboardFormatAvailable.restype = wintypes.BOOL
+    u32.GetClipboardData.restype, u32.GetClipboardData.argtypes = wintypes.HANDLE, [wintypes.UINT]
+    k32.GlobalLock.restype, k32.GlobalLock.argtypes = ctypes.c_void_p, [wintypes.HANDLE]
+    k32.GlobalSize.restype, k32.GlobalSize.argtypes = ctypes.c_size_t, [wintypes.HANDLE]
+    k32.GlobalUnlock.restype, k32.GlobalUnlock.argtypes = wintypes.BOOL, [wintypes.HANDLE]
+
+    def grab(fmt: int) -> bytes:
+        if not fmt or not u32.IsClipboardFormatAvailable(fmt):
+            return b""
+        handle = u32.GetClipboardData(fmt)
+        if not handle:
+            return b""
+        pointer = k32.GlobalLock(handle)
+        if not pointer:
+            return b""
+        try:
+            return ctypes.string_at(pointer, k32.GlobalSize(handle))
+        finally:
+            k32.GlobalUnlock(handle)
+
+    if not u32.OpenClipboard(None):
+        return None
+    try:
+        # PNG FIRST, because the screenshot tool already registered one and
+        # anything this module built out of a DIB would be a second-hand copy.
+        png = grab(u32.RegisterClipboardFormatW("PNG"))
+        if png[:8] == b"\x89PNG\r\n\x1a\n":
+            return ".png", png
+        bmp = dib_to_bmp(grab(CF_DIB))
+        return (".bmp", bmp) if bmp else None
+    except Exception:                  # noqa: BLE001 - reported as None
+        return None
+    finally:
+        u32.CloseClipboard()
+
+
+def theme_bg(name: str) -> str:
+    """The window's ground for a theme, and the brand's for anything else."""
+    return THEME_BG.get(name, CROW_BG)
+
+
+def read_settings() -> dict:
+    """The settings document, or an empty one. Never raises."""
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def write_settings(doc: dict) -> bool:
+    """Write it back. False when the disk said no, and the caller says so."""
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=1)
+        return True
+    except OSError:
+        return False
+
+
+def write_paste(suffix: str, raw: bytes) -> str:
+    """Put `raw` in PASTE_DIR under a name nothing else has, and return it.
+
+    "" when it did not land. The caller says nothing rather than inventing a
+    reason: a paste that fails on a full disk and a paste of an empty clipboard
+    look the same from the box, and neither is worth a sentence.
+    """
+    if not raw or len(raw) > PASTE_MAX_BYTES:
+        return ""
+    try:
+        os.makedirs(PASTE_DIR, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        # THE SECOND PASTE IN THE SAME SECOND IS NOT A RARE CASE when the
+        # clipboard is a keyboard shortcut. The counter is what keeps the first
+        # one from disappearing under the second.
+        for n in range(1, 1000):
+            name = "paste-%s%s%s" % (stamp, "" if n == 1 else "-%d" % n, suffix)
+            path = os.path.join(PASTE_DIR, name)
+            if not os.path.exists(path):
+                break
+        else:
+            return ""
+        with open(path, "wb") as fh:
+            fh.write(raw)
+    except OSError:
+        return ""
+    return path
+
+
+def prune_pastes(now: float | None = None) -> int:
+    """Delete pasted pictures older than PASTE_KEEP_DAYS. Returns how many.
+
+    NEVER RAISES, and never reports either. This runs while a window is opening;
+    a user who pastes screenshots did not ask to be told about housekeeping, and
+    a folder that could not be read is not a reason to fail a start.
+    """
+    cutoff = (now if now is not None else time.time()) - PASTE_KEEP_DAYS * 86400
+    gone = 0
+    try:
+        names = os.listdir(PASTE_DIR)
+    except OSError:
+        return 0
+    for name in names:
+        if not PASTE_NAME.match(name):
+            continue
+        path = os.path.join(PASTE_DIR, name)
+        try:
+            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                gone += 1
+        except OSError:
+            continue
+    return gone
+
+
+def current_theme() -> str:
+    """The remembered theme, and DEFAULT_THEME for anything else.
+
+    A file holding "solarized" is not an error worth a message: it is a value
+    this build does not have, and the answer to that is the one it does have.
+    """
+    name = read_settings().get("theme")
+    return name if name in THEMES else DEFAULT_THEME
+
 
 def client_version(path: str | None = None) -> str:
     """The client version, read out of cli/crow.py. "" when unreadable."""
@@ -120,14 +342,44 @@ def client_version(path: str | None = None) -> str:
 # ---------------------------------------------------------------- the page
 
 PAGE = r"""<!doctype html>
-<html lang="de"><head><meta charset="utf-8">
+<html lang="de" data-theme="__THEME__"><head><meta charset="utf-8">
 <style>
 :root{
-  --bg:__BG__; --accent:__ACCENT__; --bevel:__BEVEL__; --model:__TEXT__;
-  --panel:#0e1220; --raised:#131829; --line:#1c2438; --line-soft:#161d2e;
-  --dim:#6d7b95; --dimmer:#4a566d;
+  --accent:__ACCENT__; --bevel:__BEVEL__; --model:__TEXT__;
+
+  /* THE DARK GROUND IS NEUTRAL, and that is robin's call on 2026-08-21: the
+     window was the wordmark's own ground, and next to the reference he gave it
+     read as a colour rather than as a background. The brand value did not
+     change and it did not go away -- it is the third theme below. The hex is
+     NOT written here: it comes from the core, and the manifest counts copies.
+
+     EVERY COLOUR HAS A NAME, and that is what makes a second theme possible at
+     all: a rule can only be switched if what it points at can be redefined.
+     Before this, 52 lines of CSS carried a literal and no palette could reach
+     any of them. A test holds that: no rule may name a colour of its own. */
+  --bg:#181818; --rail:#141414; --panel:#1f1f1f; --raised:#2a2a2b;
+  --line:#2e2e30; --line-soft:#242426;
+  --dim:#a3a3a6; --dimmer:#6f6f73;
   --ok:#4ec98f; --warn:#e3b341; --bad:#f0655a;
-  --mono:"Google Sans Code",ui-monospace,"Cascadia Mono",Consolas,monospace;
+  --gold:#e5c04b; --bad-text:#ffd9d4;
+  --text:#ffffff; --text-strong:#ffffff; --text-soft:#c9c9cc;
+  --text-faint:#9a9a9e; --text-hi:#ffffff; --text-hover:#ffffff;
+  --think:#8e8e93; --think-bg:rgba(255,255,255,.045);
+  --code:#d4d4d8; --code-bg:#111111;
+  --titlebar:#1f1f1f; --status-bg:rgba(24,24,24,.85);
+  --hover:#2a2a2b; --close-bg:#c0362b; --on-solid:#ffffff;
+  --shadow:rgba(0,0,0,.5); --shadow-strong:rgba(0,0,0,.7);
+  /* THE SYSTEM'S OWN, NOT OURS. The page used to name a shipped typeface first
+     and fall back; it still ships in cli/fonts for anyone who wants it, but a
+     window that looks different depending on whether the user installed a font
+     has two appearances and no way to say which is the real one. system-ui IS
+     whatever this machine calls its interface font.
+     TWO STACKS, because "system default" means different things for prose and
+     for code: Windows' interface font is proportional, and a diff or a code
+     fence set in it stops lining up. The monospace stack is the system's as
+     well -- Cascadia and Consolas ship with Windows, neither is ours. */
+  --ui:system-ui,"Segoe UI",-apple-system,Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,"Cascadia Mono",Consolas,"Courier New",monospace;
   /* The height of the two bars across the top, ONCE. The rail's head and the status bar sit side
      by side and were 3 px apart: 11+9 padding against 8+8, plus a button that builds 0.8 px taller
      than a chip. Matching them by arithmetic works until a font changes; matching them against one
@@ -139,9 +391,59 @@ PAGE = r"""<!doctype html>
      input box sits 5 px off the text above it. */
   --sbw:10px;
 }
+
+/* -- light ------------------------------------------------------------- */
+/* THE SAME NAMES, OTHER VALUES. Nothing below this line knows a theme exists;
+   it is one attribute on <html>, written by Python before the page is handed
+   over so there is no flash of the wrong one on start.
+   --bg, --accent, --bevel and --model arrive from the core as the brand values
+   and are REDEFINED here rather than written twice: the model's own text colour
+   is a dark-on-dark choice, and on white it would be a paragraph nobody can
+   read. The accent survives both grounds and stays what the core says. */
+:root[data-theme="light"]{
+  --bevel:#d3d7dd; --model:#1a1c1f;
+  /* THE RAIL IS NOT THE PAGE. On the first build both were #ffffff and the chat
+     list dissolved into the conversation beside it -- the reference robin gave
+     sets its sidebar off against the content, and one border was not enough to
+     do that on white. */
+  --bg:#ffffff; --rail:#f7f7f8; --panel:#ffffff; --raised:#eeeef0;
+  --line:#e4e4e7; --line-soft:#ededf0;
+  --dim:#5b6472; --dimmer:#8b93a1;
+  --ok:#12855a; --warn:#8a6400; --bad:#c0362b;
+  --gold:#8a6400; --bad-text:#8c241b;
+  --text:#1a1c1f; --text-strong:#0f1114; --text-soft:#3f4550;
+  --text-faint:#6b7280; --text-hi:#0f1114; --text-hover:#1a1c1f;
+  --think:#5b6472; --think-bg:rgba(26,28,31,.05);
+  --code:#24292f; --code-bg:#f6f8fa;
+  --titlebar:#f7f7f8; --status-bg:rgba(255,255,255,.85);
+  --hover:#ececed; --close-bg:#c0362b; --on-solid:#ffffff;
+  --shadow:rgba(15,17,20,.14); --shadow-strong:rgba(15,17,20,.30);
+}
+
+/* -- crow ---------------------------------------------------------------- */
+/* THE WINDOW AS IT SHIPPED, kept as a choice rather than as history. Every
+   value below is the one that was in the file before the palette existed, so
+   this theme is not a new design -- it is the old one, given a name.
+   --bg is the ONLY colour here that is not written down: it is the wordmark's
+   ground and it comes from the core, because the manifest counts every place a
+   brand value is spelled out. */
+:root[data-theme="crow"]{
+  --bg:__BG__; --rail:#0e1220; --panel:#0e1220; --raised:#131829;
+  --line:#1c2438; --line-soft:#161d2e;
+  --dim:#6d7b95; --dimmer:#4a566d;
+  --ok:#4ec98f; --warn:#e3b341; --bad:#f0655a;
+  --gold:#e5c04b; --bad-text:#ffd9d4;
+  --text:#cfdaea; --text-strong:#e8eef8; --text-soft:#a9bad3;
+  --text-faint:#9fb0c9; --text-hi:#ffffff; --text-hover:#c8d4e8;
+  --think:#7b89a3; --think-bg:rgba(19,24,41,.4);
+  --code:#c3d0e4; --code-bg:#080b13;
+  --titlebar:#101528; --status-bg:rgba(14,18,32,.72);
+  --hover:#161d2e; --close-bg:#8b2b26; --on-solid:#ffffff;
+  --shadow:rgba(0,0,0,.45); --shadow-strong:rgba(0,0,0,.75);
+}
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;overflow:hidden}
-body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--mono);
+body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
   -webkit-font-smoothing:antialiased;display:flex;flex-direction:column;
   user-select:none}
 ::-webkit-scrollbar{width:var(--sbw)}
@@ -154,7 +456,7 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--mono);
    `-webkit-app-region: drag` is Electron syntax; WebView2 ignores it, which
    is why the first frameless build could not be moved at all. */
 #bar{display:flex;align-items:center;gap:10px;height:34px;flex:none;
-  padding:0 0 0 13px;background:linear-gradient(180deg,#101528,var(--bg));
+  padding:0 0 0 13px;background:linear-gradient(180deg,var(--titlebar),var(--bg));
   border-bottom:1px solid var(--line)}
 #mark,#ver{pointer-events:none}
 #mark{font-weight:700;letter-spacing:.22em;font-size:11.5px;color:var(--accent)}
@@ -165,8 +467,63 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--mono);
    without this a click on 'close' starts a drag instead of closing. */
 .wb{width:42px;height:33px;display:grid;place-items:center;color:var(--dimmer);
   font-size:11px;cursor:default}
-.wb:hover{background:#161d2e;color:#c8d4e8}
-.wb.close:hover{background:#8b2b26;color:#fff}
+.wb:hover{background:var(--hover);color:var(--text-hover)}
+.wb.close:hover{background:var(--close-bg);color:var(--on-solid)}
+
+/* -- Hilfe, and the sheet it opens -------------------------------------- */
+/* INSIDE THE DRAG REGION AND OPTED OUT OF IT, the same way #wbtns is: the title
+   bar moves the window, so anything clickable in it has to say it is not that.
+   Without the opt-out a click on Hilfe starts a drag and the menu never opens. */
+#helpwrap{position:relative;-webkit-app-region:no-drag}
+#help{font:inherit;font-size:11px;cursor:pointer;border:1px solid transparent;
+  border-radius:6px;padding:2px 9px;background:transparent;color:var(--dim)}
+#help:hover{border-color:var(--line);color:var(--text-hover)}
+/* DOWNWARDS, unlike the four menus at the bottom of the window: this one hangs
+   off the title bar, and a menu that opened upwards from there would be drawn
+   outside the window. */
+#helpmenu{position:absolute;top:calc(100% + 5px);left:0;min-width:150px;
+  background:var(--panel);border:1px solid var(--bevel);border-radius:8px;
+  padding:5px;box-shadow:0 8px 26px var(--shadow);z-index:60}
+#helpmenu[hidden]{display:none}
+#helpmenu button{display:block;width:100%;text-align:left;font:inherit;
+  font-size:11.5px;cursor:pointer;background:transparent;border:0;
+  border-radius:6px;padding:7px 9px;color:var(--dim)}
+#helpmenu button:hover{background:var(--hover);color:var(--text-hover)}
+
+/* A LAYER IN THIS WINDOW, NOT A SECOND WINDOW. A second pywebview window would
+   need its own bridge, its own theme attribute and its own close path, for a
+   panel that is only ever open on top of this one. */
+#settings{position:fixed;inset:0;z-index:80;display:grid;place-items:center;
+  background:var(--shadow-strong)}
+#settings[hidden]{display:none}
+#settings .sheet{width:min(760px,92vw);height:min(560px,88vh);display:flex;
+  flex-direction:column;background:var(--panel);border:1px solid var(--bevel);
+  border-radius:12px;box-shadow:0 24px 60px var(--shadow-strong);overflow:hidden}
+#settings .shead{display:flex;align-items:center;gap:10px;padding:13px 16px;
+  border-bottom:1px solid var(--line)}
+#settings .shead h2{margin:0;font-size:13px;font-weight:600;color:var(--text-strong)}
+#settings .sclose{margin-left:auto;font:inherit;font-size:12px;cursor:pointer;
+  background:transparent;border:0;color:var(--dimmer);padding:2px 7px;border-radius:6px}
+#settings .sclose:hover{background:var(--hover);color:var(--text-hover)}
+#settings .sbody{display:flex;flex:1;min-height:0}
+#scats{flex:none;width:170px;border-right:1px solid var(--line);padding:10px 8px;
+  display:flex;flex-direction:column;gap:2px}
+#scats button{font:inherit;font-size:12px;text-align:left;cursor:pointer;
+  background:transparent;border:0;border-radius:6px;padding:7px 10px;color:var(--dim)}
+#scats button:hover{background:var(--hover);color:var(--text-hover)}
+#scats button.on{background:var(--raised);color:var(--text-strong)}
+#spane{flex:1;min-width:0;overflow-y:auto;padding:16px 20px;user-select:text}
+#spane h3{margin:0 0 11px;font-size:11px;font-weight:600;color:var(--text-soft);
+  letter-spacing:.08em;text-transform:uppercase}
+#spane .empty{color:var(--dimmer);font-size:12px}
+#spane .about{color:var(--text);font-size:12px;line-height:1.75}
+#spane .about b{color:var(--text-strong);font-weight:600}
+#themes{display:flex;gap:10px}
+#themes button{font:inherit;font-size:12px;cursor:pointer;border-radius:8px;
+  padding:9px 15px;background:transparent;border:1px solid var(--line);color:var(--dim)}
+#themes button:hover{border-color:var(--bevel);color:var(--text-hover)}
+#themes button.on{border-color:var(--accent);color:var(--accent);
+  box-shadow:0 0 0 3px rgba(126,176,248,.13)}
 
 #body{display:flex;flex:1;min-height:0}
 
@@ -188,7 +545,7 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--mono);
 
 /* -- rail --------------------------------------------------------------- */
 #rail{width:242px;flex:none;border-right:1px solid var(--line);
-  background:var(--panel);display:flex;flex-direction:column;min-height:0}
+  background:var(--rail);display:flex;flex-direction:column;min-height:0}
 #railhead{display:flex;align-items:center;padding:0 12px;min-height:var(--barh);
   border-bottom:1px solid var(--line-soft)}
 #railhead h2{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.13em;
@@ -205,19 +562,19 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--mono);
 .sess.on .t{color:var(--model)}
 .sess.on::before{content:"";position:absolute;left:2px;top:8px;bottom:8px;
   width:2px;background:var(--accent);border-radius:2px}
-.sess .t{font-size:12px;color:#9fb0c9;display:block;white-space:nowrap;
+.sess .t{font-size:12px;color:var(--text-faint);display:block;white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis}
 .sess .s{font-size:10.5px;color:var(--dimmer);display:block;margin-top:1px}
 /* -- context menu -------------------------------------------------------- */
 #menu{position:fixed;z-index:200;display:none;min-width:168px;padding:4px;
   background:var(--panel);border:1px solid var(--line);border-radius:8px;
-  box-shadow:0 12px 34px -10px rgba(0,0,0,.75)}
+  box-shadow:0 12px 34px -10px var(--shadow-strong)}
 #menu.on{display:block}
 #menu button{display:block;width:100%;text-align:left;font:inherit;
   font-size:11.5px;color:var(--dim);background:transparent;border:0;
   padding:6px 10px;border-radius:5px;cursor:pointer}
-#menu button:hover{background:var(--raised);color:#c8d4e8}
-#menu button.danger:hover{background:rgba(240,101,90,.14);color:#ffd9d4}
+#menu button:hover{background:var(--raised);color:var(--text-hover)}
+#menu button.danger:hover{background:rgba(240,101,90,.14);color:var(--bad-text)}
 #menu .sep{height:1px;background:var(--line-soft);margin:4px 2px}
 /* The rename field replaces the row in place, so the list never jumps. */
 .sess input{width:100%;font:inherit;font-size:12px;color:var(--model);
@@ -244,12 +601,12 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--mono);
   position:relative}
 #status{display:flex;align-items:center;gap:9px;padding:8px 16px;flex:none;
   min-height:var(--barh);
-  border-bottom:1px solid var(--line);background:rgba(14,18,32,.72);
+  border-bottom:1px solid var(--line);background:var(--status-bg);
   font-size:11.5px;flex-wrap:wrap}
 .chip{display:inline-flex;align-items:center;gap:6px;color:var(--dim);
   border:1px solid var(--line);border-radius:999px;padding:2px 10px;
   white-space:nowrap}
-.chip b{font-weight:500;color:#a9bad3}
+.chip b{font-weight:500;color:var(--text-soft)}
 #dot{width:6px;height:6px;border-radius:50%;background:var(--dimmer)}
 #dot.up{background:var(--ok);box-shadow:0 0 0 3px rgba(78,201,143,.14)}
 #dot.down{background:var(--bad);box-shadow:0 0 0 3px rgba(240,101,90,.14)}
@@ -271,7 +628,7 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--mono);
 .turn+.turn{margin-top:26px}
 .you{display:grid;grid-template-columns:38px 1fr;gap:2px}
 .you .m{color:var(--accent);font-weight:700;font-size:12.5px;padding-top:1px}
-.you .txt{color:#cfdaea;white-space:pre-wrap}
+.you .txt{color:var(--text);white-space:pre-wrap}
 .as{display:grid;grid-template-columns:38px 1fr;gap:2px}
 .as .m{color:var(--bevel);padding-top:1px}
 .col{min-width:0}
@@ -286,7 +643,7 @@ details.think>summary:hover{color:var(--dim)}
 details.think[open] .caret{transform:rotate(90deg)}
 .pct{color:var(--dimmer);border-left:1px solid var(--line);padding-left:7px}
 .tbody{margin:8px 0 2px;padding:10px 13px;border-left:2px solid var(--line);
-  color:#7b89a3;font-size:12px;line-height:1.65;background:rgba(19,24,41,.4);
+  color:var(--think);font-size:12px;line-height:1.65;background:var(--think-bg);
   border-radius:0 6px 6px 0;white-space:pre-wrap}
 .say{color:var(--model);line-height:1.62;white-space:pre-wrap}
 .tool{margin:11px 0;border:1px solid var(--line);border-radius:8px;
@@ -294,12 +651,12 @@ details.think[open] .caret{transform:rotate(90deg)}
 .tool .hd{display:flex;align-items:center;gap:9px;padding:6px 11px;
   font-size:11.5px}
 .tool .ico{color:var(--warn);font-size:9px}
-.tool .name{color:#a9bad3}
+.tool .name{color:var(--text-soft)}
 .tool .arg{color:var(--dimmer);overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap}
 .tool .note{margin-left:auto;color:var(--dimmer);white-space:nowrap}
 .code{margin:12px 0;border:1px solid var(--line);border-radius:8px;
-  background:#080b13;overflow:hidden}
+  background:var(--code-bg);overflow:hidden}
 .code .hd{display:flex;align-items:center;gap:8px;padding:6px 8px 6px 12px;
   background:var(--panel);border-bottom:1px solid var(--line);font-size:11.5px}
 .code .lang{color:var(--dimmer);font-size:10.5px;letter-spacing:.06em;
@@ -310,7 +667,10 @@ details.think[open] .caret{transform:rotate(90deg)}
 .copy:hover{border-color:var(--bevel);color:var(--accent)}
 .copy.done{color:var(--ok);border-color:rgba(78,201,143,.4)}
 .code pre{margin:0;padding:11px 13px;overflow-x:auto;font-size:12px;
-  line-height:1.6;color:#c3d0e4;user-select:text}
+  line-height:1.6;color:var(--code);user-select:text;font-family:var(--mono)}
+/* Anything that names a path, a flag or a symbol is code and keeps the mono
+   stack; the body around it does not. */
+code,.asktop code,#url,.cost{font-family:var(--mono)}
 .cost{margin-top:11px;font-size:10.5px;color:var(--dimmer);
   border-top:1px dashed var(--line);padding-top:7px;overflow-x:auto;
   white-space:nowrap}
@@ -356,11 +716,16 @@ details.think[open] .caret{transform:rotate(90deg)}
      same edge as the text above it. */
   max-width:900px;margin-inline:auto}
 #box.focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(126,176,248,.13)}
+/* THE WHOLE BOX, NOT A SEPARATE ZONE. A drop target that is smaller than the
+   thing it looks like is a target people miss; the window takes a file anywhere
+   and the box is what says so. */
+#box.drag{border-color:var(--accent);background:rgba(126,176,248,.07);
+  box-shadow:0 0 0 3px rgba(126,176,248,.20)}
 /* NO PROMPT MARK. `you>` named the typist in a box only the typist can type
    in; the turn above already carries it where it says something. The gap
    went with it -- one child has nothing to be spaced from. */
 #line{display:flex;align-items:flex-start}
-#in{flex:1;background:transparent;border:0;outline:0;resize:none;color:#cfdaea;
+#in{flex:1;background:transparent;border:0;outline:0;resize:none;color:var(--text);
   font:inherit;font-size:13px;line-height:1.5;max-height:140px;user-select:text}
 #in::placeholder{color:var(--dimmer)}
 #foot{display:flex;align-items:center;gap:10px;margin-top:9px;font-size:11px;
@@ -380,7 +745,7 @@ details.think[open] .caret{transform:rotate(90deg)}
    one state where it is already the wider of the two. */
 #go:not(.stop){font-size:14px;line-height:1.2;padding:2px 11px}
 #go:hover{border-color:var(--bevel);color:var(--accent)}
-#go.stop{color:#ffd9d4;background:rgba(240,101,90,.10);
+#go.stop{color:var(--bad-text);background:rgba(240,101,90,.10);
   border-color:rgba(240,101,90,.45)}
 #go.stop:hover{background:rgba(240,101,90,.18)}
 
@@ -417,15 +782,15 @@ details.think[open] .caret{transform:rotate(90deg)}
 .askcard{border:1px solid rgba(229,192,75,.40);border-radius:10px;
   background:rgba(229,192,75,.05);padding:11px 13px}
 .asktop{display:flex;gap:9px;align-items:baseline;flex-wrap:wrap}
-.asktop b{color:#e5c04b;font-weight:600}
+.asktop b{color:var(--gold);font-weight:600}
 .asktop code{color:var(--dim);font-size:11.5px;word-break:break-all}
 .askrow{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
 .askrow button{font:inherit;font-size:11.5px;cursor:pointer;border-radius:6px;
   padding:4px 12px;background:transparent;border:1px solid var(--line);
   color:var(--dim)}
-.askrow button.yes{color:#4ec98f;border-color:rgba(78,201,143,.45)}
+.askrow button.yes{color:var(--ok);border-color:rgba(78,201,143,.45)}
 .askrow button.yes:hover{background:rgba(78,201,143,.12)}
-.askrow button.no{color:#ffd9d4;border-color:rgba(240,101,90,.45)}
+.askrow button.no{color:var(--bad-text);border-color:rgba(240,101,90,.45)}
 .askrow button.no:hover{background:rgba(240,101,90,.12)}
 .askrow button.always em{font-style:normal;color:var(--accent)}
 .askrow button:hover{border-color:var(--bevel)}
@@ -442,15 +807,15 @@ details.think[open] .caret{transform:rotate(90deg)}
 #mode:hover{border-color:var(--bevel)}
 #mode .dot{width:7px;height:7px;border-radius:50%;background:currentColor;
   flex:none}
-#mode[data-mode="manual"]{color:#e8eef8;border-color:rgba(232,238,248,.40)}
-#mode[data-mode="allowedit"]{color:#4ec98f;border-color:rgba(78,201,143,.45)}
-#mode[data-mode="auto"]{color:#e5c04b;border-color:rgba(229,192,75,.45)}
+#mode[data-mode="manual"]{color:var(--text-strong);border-color:var(--bevel)}
+#mode[data-mode="allowedit"]{color:var(--ok);border-color:rgba(78,201,143,.45)}
+#mode[data-mode="auto"]{color:var(--gold);border-color:rgba(229,192,75,.45)}
 
 /* UPWARDS, because the composer sits at the bottom of the window: a menu
    that opened downwards would be drawn outside it. */
 #modemenu{position:absolute;bottom:calc(100% + 6px);right:0;min-width:266px;
   background:var(--panel);border:1px solid var(--bevel);border-radius:8px;
-  padding:5px;box-shadow:0 8px 26px rgba(0,0,0,.45);z-index:40}
+  padding:5px;box-shadow:0 8px 26px var(--shadow);z-index:40}
 #modemenu[hidden]{display:none}
 #modemenu button{display:block;width:100%;text-align:left;font:inherit;
   font-size:11.5px;cursor:pointer;background:transparent;border:0;
@@ -458,9 +823,9 @@ details.think[open] .caret{transform:rotate(90deg)}
 #modemenu button:hover{background:rgba(126,176,248,.10)}
 #modemenu button b{display:block;font-weight:600;font-size:12px}
 #modemenu button .what{color:var(--dimmer);font-size:10.5px}
-#modemenu button[data-mode="manual"] b{color:#e8eef8}
-#modemenu button[data-mode="allowedit"] b{color:#4ec98f}
-#modemenu button[data-mode="auto"] b{color:#e5c04b}
+#modemenu button[data-mode="manual"] b{color:var(--text-strong)}
+#modemenu button[data-mode="allowedit"] b{color:var(--ok)}
+#modemenu button[data-mode="auto"] b{color:var(--gold)}
 #modemenu button .tick{float:right;color:var(--accent)}
 
 /* #92: the working directory, beside the level and deliberately quieter than
@@ -480,7 +845,7 @@ details.think[open] .caret{transform:rotate(90deg)}
 
 #rootmenu{position:absolute;bottom:calc(100% + 6px);right:0;min-width:300px;
   max-width:420px;background:var(--panel);border:1px solid var(--bevel);
-  border-radius:8px;padding:5px;box-shadow:0 8px 26px rgba(0,0,0,.45);z-index:40}
+  border-radius:8px;padding:5px;box-shadow:0 8px 26px var(--shadow);z-index:40}
 #rootmenu[hidden]{display:none}
 #rootmenu .head{color:var(--dimmer);font-size:10px;text-transform:uppercase;
   letter-spacing:.06em;padding:5px 9px 3px}
@@ -510,7 +875,7 @@ details.think[open] .caret{transform:rotate(90deg)}
    The deeper reason the slider went is in reasonMenu -- the order it drew does not exist. */
 #modelmenu,#reasonmenu{position:absolute;top:calc(100% + 6px);left:0;min-width:300px;
   background:var(--panel);border:1px solid var(--line);border-radius:9px;
-  padding:5px 0;z-index:40;box-shadow:0 10px 26px rgba(0,0,0,.45)}
+  padding:5px 0;z-index:40;box-shadow:0 10px 26px var(--shadow)}
 #modelmenu[hidden],#reasonmenu[hidden]{display:none}
 #modelmenu .head,#reasonmenu .head{color:var(--dimmer);font-size:10px;text-transform:uppercase;
   letter-spacing:.08em;padding:4px 9px 5px}
@@ -529,8 +894,8 @@ details.think[open] .caret{transform:rotate(90deg)}
    FULL CONTRAST ON THE CHOICE, dim on the rest: the level and the heading are what the eye is
    looking for, and the line under each level is a footnote to a decision already made. */
 #reasonmenu{min-width:0;max-width:260px}
-#reasonmenu .head{color:#fff}
-#reasonmenu button b{color:#fff}
+#reasonmenu .head{color:var(--text-hi)}
+#reasonmenu button b{color:var(--text-hi)}
 /* THE PREFILL SENTENCE IS NOT IN THIS MENU, and that is not an oversight -- robin cut it on
    sight, 2026-08-21, and nothing was lost with it. `set_reasoning` already answers with
    crow_core's own note in the flow the moment a level is picked, so the menu's copy said the same
@@ -541,10 +906,50 @@ details.think[open] .caret{transform:rotate(90deg)}
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
   <span id="mark">CR<span>O</span>W</span><span id="ver"></span>
+  <div id="helpwrap" class="pywebview-no-drag">
+    <button id="help" onclick="crow.helpMenu()">Hilfe</button>
+    <div id="helpmenu" hidden>
+      <button onclick="crow.openSettings()">Einstellungen</button>
+    </div>
+  </div>
   <div id="wbtns" class="pywebview-no-drag">
     <div class="wb" onclick="pywebview.api.minimise()">&#8211;</div>
     <div class="wb" onclick="pywebview.api.maximise()">&#9633;</div>
     <div class="wb close" onclick="pywebview.api.close()">&#10005;</div>
+  </div>
+</div>
+
+<div id="settings" hidden onclick="crow.settingsBackdrop(event)">
+  <div class="sheet">
+    <div class="shead">
+      <h2>Einstellungen</h2>
+      <button class="sclose" onclick="crow.closeSettings()" title="close">&#10005;</button>
+    </div>
+    <div class="sbody">
+      <nav id="scats">
+        <button class="on" onclick="crow.settingsCat('look')">Aussehen</button>
+        <button onclick="crow.settingsCat('skills')">Skills</button>
+        <button onclick="crow.settingsCat('about')">About</button>
+      </nav>
+      <div id="spane">
+        <section data-cat="look">
+          <h3>Design</h3>
+          <div id="themes">
+            <button data-theme="dark"  onclick="crow.setTheme('dark')">Dunkel</button>
+            <button data-theme="light" onclick="crow.setTheme('light')">Hell</button>
+            <button data-theme="crow"  onclick="crow.setTheme('crow')">Crow</button>
+          </div>
+        </section>
+        <section data-cat="skills" hidden>
+          <h3>Skills</h3>
+          <p class="empty">Noch nichts hier.</p>
+        </section>
+        <section data-cat="about" hidden>
+          <h3>About</h3>
+          <p class="about">CROW <span id="aboutver"></span></p>
+        </section>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -755,6 +1160,40 @@ const crow = {
   },
   toggleTools(){ if(this.running) return; pywebview.api.set_tools(!this.execute); },
 
+  helpMenu(){ const m=$("#helpmenu"); m.hidden=!m.hidden; },
+
+  openSettings(){
+    $("#helpmenu").hidden=true;
+    // THE ATTRIBUTE IS THE TRUTH, not a variable beside it. Python wrote it onto
+    // <html> before the page was handed over, so the sheet marks whatever is
+    // actually on screen rather than what a second copy of the state believes.
+    const now=document.documentElement.dataset.theme || "dark";
+    document.querySelectorAll("#themes button").forEach(
+      b => b.classList.toggle("on", b.dataset.theme===now));
+    $("#aboutver").textContent=$("#ver").textContent;
+    $("#settings").hidden=false;
+  },
+  closeSettings(){ $("#settings").hidden=true; },
+  // THE BACKDROP CLOSES, THE SHEET DOES NOT. Without the target test a click on
+  // anything inside the panel bubbles up here and shuts it.
+  settingsBackdrop(e){ if(e.target.id==="settings") this.closeSettings(); },
+
+  settingsCat(name){
+    document.querySelectorAll("#scats button").forEach(
+      (b,i) => b.classList.toggle("on", ["look","skills","about"][i]===name));
+    document.querySelectorAll("#spane section").forEach(
+      sec => sec.hidden = sec.dataset.cat!==name);
+  },
+
+  setTheme(name){
+    // PAINTED FIRST, WRITTEN SECOND. The attribute swap is one frame; the write
+    // is a file. A version that waited for Python made the click feel broken.
+    document.documentElement.dataset.theme=name;
+    document.querySelectorAll("#themes button").forEach(
+      b => b.classList.toggle("on", b.dataset.theme===name));
+    pywebview.api.set_theme(name);
+  },
+
   // ONE BUTTON, TWO ERRANDS, and the class is the truth about which. The page
   // never decides that a recording started -- it asks, and Python says so on
   // the way back. A button that painted itself red on click would lie for as
@@ -771,19 +1210,39 @@ const crow = {
             : e.state==="rec" ? "stop and write it down"
             : "dictate";
     // INTO THE BOX, NEVER STRAIGHT OUT. Whisper is wrong often enough that a
-    // dictation which sent itself would be a message nobody could take back.
-    // Appended rather than assigned, so half a typed line survives a thought
-    // finished out loud.
-    if(e.text){
-      const had=input.value.replace(/\s*$/,"");
-      input.value = had ? had+" "+e.text : e.text;
-      // The autogrow listener owns the height; firing its event is cheaper
-      // than a second copy of the same three lines that could drift from it.
-      input.dispatchEvent(new Event("input"));
-      input.focus();
-      input.selectionStart=input.selectionEnd=input.value.length;
-    }
+    // dictation which submitted itself would be a message nobody could take
+    // back.
+    if(e.text){ this.attach(e.text); }
     if(e.note){ this.note(e.note); }
+  },
+
+  // ONE PLACE THAT WRITES INTO THE BOX, and three callers use it: a finished
+  // dictation, a dropped file, a pasted picture. Appended rather than assigned,
+  // so half a typed line survives whatever arrives next.
+  attach(text){
+    const had=input.value.replace(/\s*$/,"");
+    input.value = had ? had+" "+text : text;
+    // The autogrow listener owns the height; firing its event is cheaper than a
+    // second copy of the same three lines that could drift from it.
+    input.dispatchEvent(new Event("input"));
+    input.focus();
+    input.selectionStart=input.selectionEnd=input.value.length;
+  },
+
+  // THE PAGE NEVER SEES THE PATH. A browser hands a drop over as a File with a
+  // name and bytes and no location on disk; pywebview puts the real one on the
+  // Python side as `pywebviewFullPath`. So the page's whole job here is to stop
+  // WebView2 from navigating to the file and to say that a drop is happening --
+  // the paths come back through `on(...)` a moment later.
+  dragging(on){ box.classList.toggle("drag", !!on); },
+
+  dropped(paths){
+    this.dragging(false);
+    if(!paths || !paths.length){ return; }
+    // QUOTED WHEN IT HAS TO BE. A Windows path with a space in it is the normal
+    // case, not the exception, and an unquoted one is two arguments to whatever
+    // reads the line next.
+    this.attach(paths.map(p => /\s/.test(p) ? '"'+p+'"' : p).join(" "));
   },
 
   idle(){ this.running=false; go.textContent="↑"; go.classList.remove("stop");
@@ -1220,6 +1679,7 @@ const crow = {
           e.n + " tok · " + e.rate.toFixed(1) + " tok/s";
         break;
       case "mic": this.micState(e); break;
+      case "drop": this.dropped(e.paths); break;
       case "idle": this.idle(); break;
     }
   }
@@ -1233,6 +1693,36 @@ input.addEventListener("blur",()=>box.classList.remove("focus"));
 input.addEventListener("keydown",e=>{
   if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); crow.go(); }
   if(e.key==="Escape" && crow.running) pywebview.api.stop(); });
+
+// BOTH HAVE TO BE PREVENTED, and dragover is the one people forget: without it
+// the drop never reaches a listener at all, because WebView2 has already
+// decided to navigate to the file and show it instead of the window.
+document.addEventListener("dragover", e => { e.preventDefault(); crow.dragging(true); });
+document.addEventListener("drop",     e => { e.preventDefault(); crow.dragging(false); });
+// LEAVING THE DOCUMENT, not an element: dragleave fires for every child the
+// pointer crosses, and `relatedTarget === null` is what tells the two apart.
+document.addEventListener("dragleave", e => { if(!e.relatedTarget) crow.dragging(false); });
+
+// CTRL+V, AND THE PICTURE IS FETCHED RATHER THAN RECEIVED. The first build read
+// `clipboardData.items` and found nothing: measured 2026-08-21, a Windows
+// screenshot sat on the clipboard as PNG and Bitmap while the paste event handed
+// the page no image item at all. So the page stops digging and asks Python,
+// which reads the same clipboard through user32.
+//
+// TEXT WINS AND IS LEFT ALONE. `types` carrying text/plain means somebody pasted
+// words, and that path is untouched -- no preventDefault, no bridge call.
+//
+// ON THE DOCUMENT, NOT THE BOX: Ctrl+V should work when the focus sits on a chip
+// or on nothing, and `attach` puts the caret back where the typing happens.
+document.addEventListener("paste", e => {
+  const dt = e.clipboardData;
+  const types = dt ? Array.prototype.slice.call(dt.types || []) : [];
+  if(types.indexOf("text/plain") !== -1) return;
+  e.preventDefault();
+  pywebview.api.paste_clipboard().then(path => {
+    if(path) crow.attach(/\s/.test(path) ? '"'+path+'"' : path);
+  });
+});
 
 // THE GAP UNDER THE FLOW IS THE COMPOSER'S OWN HEIGHT, measured and never
 // guessed. robin's rule for the floating box is absolute: THE LAST LINE MUST
@@ -1284,7 +1774,8 @@ new ResizeObserver(fitFlow).observe(composer);
 })();
 
 window.addEventListener("mousedown",e=>{
-  if(!e.target.closest("#menu")) crow.closeMenu(); });
+  if(!e.target.closest("#menu")) crow.closeMenu();
+  if(!e.target.closest("#helpwrap")) $("#helpmenu").hidden=true; });
 window.addEventListener("contextmenu",e=>{
   if(!e.target.closest(".sess")) e.preventDefault(); });
 
@@ -3144,6 +3635,47 @@ class Api:
             return
         self.push({"k": "mic", "state": "off", "text": text})
 
+    def set_theme(self, name: str) -> bool:
+        """The picker in Aussehen. True when the choice reached the disk.
+
+        WRITTEN HERE AND READ AT START, in the same change: a setting that is
+        only ever written is a setting nobody has proved comes back. The reader
+        is `current_theme`, and the page is stamped from it above.
+        """
+        if name not in THEMES:
+            return False
+        doc = read_settings()
+        doc["theme"] = name
+        return write_settings(doc)
+
+    def on_drop(self, event) -> None:
+        """A file was dropped on the window. Its real path goes to the page.
+
+        THE PATH IS THE POINT, not the bytes. The model reads files with its own
+        tools, so handing it a location costs one line and works for a 40 MB log
+        exactly as it does for a note; copying the content in would spend the
+        context window on something the model can fetch itself, and would have
+        to invent a limit at which it stops.
+        """
+        files = ((event or {}).get("dataTransfer") or {}).get("files") or []
+        paths = [f.get("pywebviewFullPath") for f in files
+                 if isinstance(f, dict) and f.get("pywebviewFullPath")]
+        self.push({"k": "drop", "paths": paths})
+
+    def paste_clipboard(self) -> str:
+        """Ctrl+V. Writes the picture on the clipboard down, returns its path.
+
+        THE CLIPBOARD HAS NO PATH. A screenshot exists only as bytes, so there is
+        nothing to hand over until somebody writes it down -- and the file has to
+        outlive the turn, because the model may not read it until several turns
+        later.
+
+        "" IS THE ORDINARY ANSWER, not a failure: most of what people paste is
+        text, and the page only reaches here when the clipboard carried none.
+        """
+        found = clipboard_image()
+        return write_paste(*found) if found else ""
+
     def _mic_probe(self) -> None:
         """Whether dictation can run, answered off the opening path.
 
@@ -3302,16 +3834,25 @@ def main(argv: list[str] | None = None) -> int:
                 .replace("__ACCENT__", CROW_ACCENT_HEX)
                 .replace("__BEVEL__", BANNER_BEVEL_HEX)
                 .replace("__TEXT__", CROW_TEXT_HEX)
-                .replace("__TIMEOUT__", "%.0f" % READ_TIMEOUT_S))
+                .replace("__TIMEOUT__", "%.0f" % READ_TIMEOUT_S)
+                # ON THE ELEMENT BEFORE THE PAGE IS HANDED OVER, not applied by
+                # a script after load. A window that painted itself dark and
+                # then switched would show the wrong theme for a frame on every
+                # single start -- and the frame is exactly the moment somebody
+                # looks at it.
+                .replace("__THEME__", current_theme()))
 
     api = Api(args)
+    # ON ITS OWN THREAD, because the opening path is not the place to walk a
+    # directory that has been collecting files for a year.
+    threading.Thread(target=prune_pastes, daemon=True).start()
     # FRAMELESS, because the title bar is part of the design: the caption is
     # drawn in the page with the wordmark in it, the way the mockup shows it.
     title = "CROW %s" % (client_version() or "")
     window = webview.create_window(
         title, html=page, js_api=api,
         width=1180, height=800, min_size=(760, 520), frameless=True,
-        easy_drag=False, background_color=CROW_BG)
+        easy_drag=False, background_color=theme_bg(current_theme()))
     api._window = window
     threading.Thread(target=api.pump, daemon=True).start()
     # The styles can only be set once the window exists, so this runs as the
@@ -3326,6 +3867,24 @@ def main(argv: list[str] | None = None) -> int:
                 return
             time.sleep(0.2)
 
+    # THE DROP EVENT IS SUBSCRIBED FROM PYTHON, and that is the only way to get
+    # a path at all: the page receives a File with a name and no location, while
+    # pywebview adds `pywebviewFullPath` on this side. Wired on `loaded` rather
+    # than beside create_window, because window.dom needs a document.
+    def wire_drop(*_) -> None:
+        try:
+            from webview.dom import DOMEventHandler
+
+            window.dom.document.events.drop += DOMEventHandler(
+                api.on_drop, prevent_default=True)
+        except Exception:              # noqa: BLE001 - the window still works
+            # SAID, NOT SWALLOWED SILENTLY: dropping is a convenience, and a
+            # window that opens without it is still a window. The page keeps its
+            # own dragover guard either way, so a file never navigates it away.
+            api.push({"k": "note", "t": "dropping files is unavailable in this "
+                                        "pywebview build -- typing a path works"})
+
+    window.events.loaded += wire_drop
     webview.start(styles, window)
     return 0
 

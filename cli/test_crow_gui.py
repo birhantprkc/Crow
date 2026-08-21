@@ -42,6 +42,7 @@ import os
 import re
 import shutil
 import socket
+import struct
 import sys
 import tempfile
 import threading
@@ -2259,10 +2260,16 @@ class TheDictationButtonTests(unittest.TestCase):
 
     def test_a_dictation_lands_in_the_box(self):
         """POSITIVE. The text arrives as an event and is appended to whatever was
-        already typed, so half a typed line survives a thought finished aloud."""
-        block = self._method("micState(e){")
-        self.assertIn("input.value", block, "nothing is written into the box")
-        self.assertIn("dispatchEvent", block,
+        already typed, so half a typed line survives a thought finished aloud.
+
+        THE WRITING MOVED TO `attach` when the drop and the paste needed the same
+        four lines; what this case is about is that a dictation still reaches it,
+        and that whatever it reaches still writes."""
+        self.assertIn("this.attach(e.text)", self._method("micState(e){"),
+                      "a finished dictation does not reach the box")
+        writer = self._method("attach(text){")
+        self.assertIn("input.value", writer, "nothing is written into the box")
+        self.assertIn("dispatchEvent", writer,
                       "the textarea is not told to regrow around the new text")
 
     def test_a_dictation_never_sends_itself(self):
@@ -2355,6 +2362,366 @@ class TheVoiceModuleTests(unittest.TestCase):
         self.assertEqual(crow_voice.model_dir().parent.parent,
                          Path(crow_voice.__file__).resolve().parent.parent,
                          "the model is not looked for beside the client")
+
+class TheThemeAndTheSettingsSheetTests(unittest.TestCase):
+    """Two palettes, one attribute, and the sheet that switches them."""
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+
+    def test_no_rule_carries_a_colour_of_its_own(self):
+        """THE ONE THAT KEEPS A LIGHT MODE POSSIBLE, and it is a negative probe
+        because this breaks by ADDING: one new rule with `color:#cfdaea` in it is
+        a rule the light palette cannot reach, and nothing else would go red.
+
+        Hex only. The rgba() tints left in the file are derived from the accent
+        and the three state colours and read on both grounds; a flat hex does
+        not."""
+        import re
+
+        palette, offenders = False, []
+        for line in self.css.split("\n"):
+            t = line.strip()
+            if t.startswith(":root"):
+                palette = True
+            elif palette and t == "}":
+                palette = False
+            if palette or t.startswith(("/*", "*", "//")):
+                continue
+            if re.search(r"#[0-9a-fA-F]{6}\b", line):
+                offenders.append(t[:80])
+        self.assertEqual(offenders, [],
+                         "a CSS rule names a colour the light palette cannot reach")
+
+    def test_every_palette_defines_the_same_names(self):
+        """A name defined in one theme and not the other is a colour that falls
+        back to the dark value on a white ground -- invisible text, and only on
+        the theme nobody develops in."""
+        import re
+
+        def names(block):
+            return set(re.findall(r"(--[a-z0-9-]+)\s*:", block))
+
+        base = names(self.css.split(":root{")[1].split("\n}")[0])
+        # Structure rather than colour, and three deliberate carry-throughs: the
+        # accent, the bevel and the model's own colour are brand values out of
+        # the core, and a theme that redefined them would be inventing a second
+        # brand rather than choosing a ground.
+        structural = {"--mono", "--ui", "--barh", "--sbw"}
+        carried = {"--accent", "--bevel", "--model"}
+        for theme in ("light", "crow"):
+            head = ':root[data-theme="%s"]{' % theme
+            self.assertIn(head, self.css, "no palette for %s" % theme)
+            got = names(self.css.split(head)[1].split("\n}")[0])
+            missing = (base - got) - structural - carried
+            self.assertEqual(missing, set(),
+                             "the %s palette does not redefine %s"
+                             % (theme, sorted(missing)))
+
+    def test_the_theme_is_on_the_element_before_the_page_is_handed_over(self):
+        """NOT applied by a script after load. A window that painted itself dark
+        and then switched would show the wrong theme for a frame on every start,
+        and the frame is exactly when somebody looks at it."""
+        self.assertIn('<html lang="de" data-theme="__THEME__">', self.source)
+        self.assertIn('.replace("__THEME__", current_theme())', self.source)
+
+    def test_a_chosen_theme_comes_back(self):
+        """PERSISTENCE IS A CONTRACT: whatever writes has to read in the same
+        change. `set_theme` writes the file and `current_theme` is what the page
+        is stamped from -- so the round trip is the test, not the write."""
+        with tempfile.TemporaryDirectory() as tmp:
+            before = crow_gui.SETTINGS_FILE
+            crow_gui.SETTINGS_FILE = os.path.join(tmp, "settings.json")
+            try:
+                self.assertEqual(crow_gui.current_theme(), crow_gui.DEFAULT_THEME)
+                api = crow_gui.Api.__new__(crow_gui.Api)
+                self.assertTrue(api.set_theme("light"))
+                self.assertEqual(crow_gui.current_theme(), "light")
+                # NEGATIVE: a value this build does not have is refused, and the
+                # refusal must not overwrite the one that works.
+                self.assertFalse(api.set_theme("solarized"))
+                self.assertEqual(crow_gui.current_theme(), "light")
+            finally:
+                crow_gui.SETTINGS_FILE = before
+
+    def test_a_settings_file_that_is_rubbish_is_not_an_error(self):
+        """NEGATIVE for the reader. A half-written file is a value this build
+        does not have, and the answer to that is the value it does have."""
+        with tempfile.TemporaryDirectory() as tmp:
+            before = crow_gui.SETTINGS_FILE
+            crow_gui.SETTINGS_FILE = os.path.join(tmp, "settings.json")
+            try:
+                io.open(crow_gui.SETTINGS_FILE, "w", encoding="utf-8").write("{oh no")
+                self.assertEqual(crow_gui.current_theme(), crow_gui.DEFAULT_THEME)
+            finally:
+                crow_gui.SETTINGS_FILE = before
+
+    def test_hilfe_sits_in_the_title_bar_and_leaves_the_drag_region(self):
+        """The bar moves the window. Anything clickable in it has to opt out, or
+        the click becomes a drag and the menu never opens."""
+        self.assertIn('<div id="helpwrap" class="pywebview-no-drag">', self.source)
+        self.assertIn('id="help" onclick="crow.helpMenu()"', self.source)
+        mark = self.source.index('id="mark"')
+        help_at = self.source.index('id="helpwrap"')
+        wbtns = self.source.index('id="wbtns"')
+        self.assertLess(mark, help_at, "Hilfe is not drawn after the wordmark")
+        self.assertLess(help_at, wbtns, "Hilfe is drawn past the window buttons")
+
+    def test_the_sheet_carries_the_three_categories(self):
+        """Aussehen, Skills, About -- named even where they are still empty, so
+        the shape is visible before the contents are."""
+        for cat in ("Aussehen", "Skills", "About"):
+            self.assertIn(">%s</button>" % cat, self.source,
+                          "the settings sheet has no %s" % cat)
+        for key in ("look", "skills", "about"):
+            self.assertIn('data-cat="%s"' % key, self.source)
+
+    def test_the_typeface_is_the_machine_own(self):
+        """NEGATIVE. The shipped typeface must not be named by the page: a window
+        that looks different depending on whether the user installed a font has
+        two appearances and no way to say which is the real one."""
+        # THE DECLARATIONS, NOT THE COMMENTS. The note above the stack names the
+        # typeface it replaced, and a test that could not tell the two apart
+        # would forbid writing down why the change happened.
+        rules = chr(10).join(l for l in self.css.splitlines()
+                        if not l.strip().startswith(("/*", "*", "//")))
+        self.assertNotIn("Google Sans Code", rules,
+                         "the page still asks for the shipped typeface")
+        self.assertIn("--ui:system-ui", self.css)
+
+class TheDropAndThePasteTests(unittest.TestCase):
+    """Files into the box: dropped from Explorer, pasted from the clipboard."""
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.code = _code_only(self.source)
+
+    # -- what the page has to do -------------------------------------------
+
+    def test_dragover_is_prevented(self):
+        """THE ONE EVERYBODY FORGETS. Without preventDefault on dragover the
+        drop never reaches a listener at all: WebView2 has already decided to
+        navigate to the file, and the window shows a picture instead of a chat."""
+        self.assertIn('document.addEventListener("dragover"', self.code)
+        block = self.code.split('document.addEventListener("dragover"')[1][:120]
+        self.assertIn("preventDefault", block, "dragover does not stop the navigation")
+
+    def test_text_is_pasted_the_way_it_always_was(self):
+        """NEGATIVE, and it is the one that protects everyday use. Pasting a
+        path, a log or a stack trace must not reach the bridge at all: the
+        handler returns before preventDefault, so the browser's own paste runs."""
+        block = self.code.split('document.addEventListener("paste"')[1].split("});")[0]
+        want = 'if(types.indexOf("text/plain") !== -1) return;'
+        self.assertIn(want, block, "a text paste is not let through untouched")
+        self.assertLess(block.index(want), block.index("preventDefault"),
+                        "the handler stops the browser before it checks for text")
+
+    def test_a_path_with_a_space_is_quoted(self):
+        """A Windows path with a space in it is the normal case. Unquoted it is
+        two arguments to whatever reads the line next."""
+        for caller in ("this.attach(paths.map(", "crow.attach(/"):
+            self.assertIn(caller, self.code)
+        self.assertEqual(self.code.count('+p+'), 1, "the drop path is not quoted")
+        self.assertIn("'\"'+path+'\"'", self.code, "the pasted path is not quoted")
+
+    def test_one_place_writes_into_the_box(self):
+        """Three callers -- dictation, drop, paste -- and one `attach`. Three
+        copies of the same four lines would drift the day one of them is fixed."""
+        self.assertEqual(self.code.count("  attach(text){"), 1)
+        for caller in ("this.attach(e.text)", "this.attach(paths.map(", "crow.attach(/"):
+            self.assertIn(caller, self.code, "%s does not go through attach" % caller)
+
+    # -- what Python has to do ---------------------------------------------
+
+    def test_the_dropped_path_comes_from_pywebview_not_the_page(self):
+        """The page is handed a File with a name and no location; pywebview puts
+        the real one on this side. A drop entry without it is skipped rather than
+        pushed as an empty string -- NEGATIVE, because an empty path in the box
+        looks like a bug in the drop and is a bug in the reading."""
+        api = crow_gui.Api.__new__(crow_gui.Api)
+        seen = []
+        api.push = seen.append
+        api.on_drop({"dataTransfer": {"files": [
+            {"name": "a.md", "pywebviewFullPath": r"C:\tmp\a.md"},
+            {"name": "nameless.png"},
+        ]}})
+        self.assertEqual(seen, [{"k": "drop", "paths": [r"C:\tmp\a.md"]}])
+
+    def test_a_drop_of_nothing_does_not_crash(self):
+        """NEGATIVE. pywebview hands over whatever the event carried, and a drop
+        of selected text carries no files at all."""
+        api = crow_gui.Api.__new__(crow_gui.Api)
+        seen = []
+        api.push = seen.append
+        for event in (None, {}, {"dataTransfer": None}, {"dataTransfer": {"files": None}}):
+            api.on_drop(event)
+        self.assertEqual(seen, [{"k": "drop", "paths": []}] * 4)
+
+    def test_a_pasted_picture_is_written_and_named(self):
+        """POSITIVE, and the round trip is the test: the path that comes back has
+        to be a file that is really there, with the bytes that went in."""
+        with tempfile.TemporaryDirectory() as tmp:
+            before = crow_gui.PASTE_DIR
+            crow_gui.PASTE_DIR = os.path.join(tmp, "pastes")
+            try:
+                raw = b"\x89PNG\r\n\x1a\n" + b"x" * 40
+                path = crow_gui.write_paste(".png", raw)
+                self.assertTrue(path, "nothing came back")
+                self.assertTrue(path.endswith(".png"))
+                with open(path, "rb") as fh:
+                    self.assertEqual(fh.read(), raw)
+                # THE SECOND PASTE IN THE SAME SECOND is not a rare case when the
+                # clipboard is a keyboard shortcut. It must not eat the first.
+                second = crow_gui.write_paste(".png", raw)
+                self.assertNotEqual(second, path, "the second paste overwrote the first")
+                self.assertTrue(os.path.isfile(path))
+            finally:
+                crow_gui.PASTE_DIR = before
+
+    def test_nothing_and_too_much_are_both_refused(self):
+        """NEGATIVE. Each returns "" and leaves the directory empty -- an empty
+        answer is what the page checks before it writes into the box."""
+        with tempfile.TemporaryDirectory() as tmp:
+            before = crow_gui.PASTE_DIR
+            crow_gui.PASTE_DIR = os.path.join(tmp, "pastes")
+            try:
+                self.assertEqual(crow_gui.write_paste(".png", b""), "")
+                too_big = b"x" * (crow_gui.PASTE_MAX_BYTES + 1)
+                self.assertEqual(crow_gui.write_paste(".png", too_big), "")
+                self.assertFalse(os.path.isdir(crow_gui.PASTE_DIR) and
+                                 os.listdir(crow_gui.PASTE_DIR),
+                                 "something was written that should not have been")
+            finally:
+                crow_gui.PASTE_DIR = before
+
+    def test_an_empty_clipboard_is_an_empty_answer(self):
+        """NEGATIVE for the bridge call. Most of what people paste is text, so
+        "" is the ORDINARY result here and must not raise or write."""
+        before = crow_gui.clipboard_image
+        crow_gui.clipboard_image = lambda: None
+        try:
+            api = crow_gui.Api.__new__(crow_gui.Api)
+            self.assertEqual(api.paste_clipboard(), "")
+        finally:
+            crow_gui.clipboard_image = before
+
+    # -- the DIB arithmetic, which is the part that can be quietly wrong ----
+
+    def _dib(self, bits, comp=0, used=0, size=40, payload=64):
+        return struct.pack("<IiiHHIIiiII", size, 8, 8, 1, bits, comp,
+                           0, 0, 0, used, 0) + b"p" * payload
+
+    def test_the_pixel_offset_is_arithmetic_and_not_a_constant(self):
+        """A DIB carries its palette and its colour masks BETWEEN the header and
+        the pixels. An offset that ignored them opens as a picture of noise --
+        which is worse than failing, because it looks like it worked.
+
+        The four cases are the four shapes a screenshot can arrive in."""
+        cases = [
+            (self._dib(32), 54),                    # BI_RGB, no palette
+            (self._dib(24), 54),                    # 24-bit, no palette
+            (self._dib(8), 54 + 256 * 4),           # 8-bit, implied 256 entries
+            (self._dib(8, used=16), 54 + 16 * 4),   # 8-bit, biClrUsed wins
+            (self._dib(32, comp=3), 54 + 12),       # BI_BITFIELDS, three masks
+        ]
+        for dib, want in cases:
+            out = crow_gui.dib_to_bmp(dib)
+            self.assertEqual(out[:2], b"BM")
+            total, _r1, _r2, offset = struct.unpack_from("<IHHI", out, 2)
+            self.assertEqual(offset, want, "wrong pixel offset for %d-bit" % dib[14])
+            self.assertEqual(total, len(out), "the size field does not match the file")
+            self.assertEqual(out[14:], dib, "the DIB was altered on the way through")
+
+    def test_a_dib_too_short_to_have_a_header_is_refused(self):
+        """NEGATIVE. GlobalSize can hand back less than a header; unpacking that
+        would raise inside a bridge call, where nobody sees it."""
+        self.assertEqual(crow_gui.dib_to_bmp(b""), b"")
+        self.assertEqual(crow_gui.dib_to_bmp(b"x" * 39), b"")
+
+    def test_pasted_pictures_land_outside_the_working_directory(self):
+        """A screenshot is not part of the project it is about. Writing one into
+        whatever folder happens to be bound would put Crow's own files into a
+        user's repository."""
+        self.assertIn("os.path.dirname(crow_core.SESSION_DIR)", self.source)
+        self.assertTrue(crow_gui.PASTE_DIR.endswith("pastes"))
+
+class ThePasteFolderIsSweptTests(unittest.TestCase):
+    """30 days, and a delete path that may only touch its own files."""
+
+    def _folder(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        before = crow_gui.PASTE_DIR
+        crow_gui.PASTE_DIR = os.path.join(tmp, "pastes")
+        self.addCleanup(setattr, crow_gui, "PASTE_DIR", before)
+        os.makedirs(crow_gui.PASTE_DIR)
+        return crow_gui.PASTE_DIR
+
+    def _age(self, path, days):
+        old = time.time() - days * 86400
+        os.utime(path, (old, old))
+
+    def test_the_name_it_writes_is_the_name_it_sweeps(self):
+        """THE ONE THAT MATTERS MOST, and it is the one that fails silently: if
+        the pattern and the writer ever drift, nothing is deleted, nothing goes
+        red, and the folder grows for a year before anybody notices.
+
+        So the sweep is held against a REAL name from the writer, not against a
+        string in this file."""
+        folder = self._folder()
+        path = crow_gui.write_paste(".png", b"x" * 32)
+        self.assertTrue(path, "the writer produced nothing to check against")
+        self.assertRegex(os.path.basename(path), crow_gui.PASTE_NAME,
+                         "the sweep would never recognise its own file")
+        self._age(path, crow_gui.PASTE_KEEP_DAYS + 1)
+        self.assertEqual(crow_gui.prune_pastes(), 1)
+        self.assertFalse(os.path.exists(path))
+        self.assertEqual(os.listdir(folder), [])
+
+    def test_a_recent_picture_stays(self):
+        """NEGATIVE for the cutoff. The path of a pasted picture lives in the
+        conversation, so a sweep that took yesterday's would break the chat the
+        user is most likely to reopen."""
+        self._folder()
+        fresh = crow_gui.write_paste(".png", b"x" * 32)
+        self._age(fresh, crow_gui.PASTE_KEEP_DAYS - 1)
+        self.assertEqual(crow_gui.prune_pastes(), 0)
+        self.assertTrue(os.path.isfile(fresh))
+
+    def test_nothing_it_did_not_write_is_ever_deleted(self):
+        """NEGATIVE, and this is why the rule is a POSITIVE list. An exception
+        list only protects what somebody thought of in advance; this touches
+        exactly the names the writer builds and leaves the rest of the folder
+        alone, however old it is."""
+        folder = self._folder()
+        strangers = ["notes.txt", "paste-notes.png", "screenshot.png",
+                     "paste-2026-08-21.png", "paste-20260821-150552.png.bak"]
+        for name in strangers:
+            path = os.path.join(folder, name)
+            with open(path, "wb") as fh:
+                fh.write(b"x")
+            self._age(path, 400)
+        self.assertEqual(crow_gui.prune_pastes(), 0)
+        self.assertEqual(sorted(os.listdir(folder)), sorted(strangers),
+                         "the sweep deleted a file it did not write")
+
+    def test_a_folder_that_is_not_there_is_not_a_failure(self):
+        """NEGATIVE. This runs while a window is opening, on a machine where
+        nobody has ever pasted anything. A start must not depend on it."""
+        before = crow_gui.PASTE_DIR
+        crow_gui.PASTE_DIR = os.path.join(tempfile.gettempdir(), "crow-no-such-folder")
+        try:
+            self.assertEqual(crow_gui.prune_pastes(), 0)
+        finally:
+            crow_gui.PASTE_DIR = before
+
+    def test_the_sweep_runs_without_holding_the_window_back(self):
+        """A directory that has collected files for a year is not something the
+        opening path should wait on."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.assertIn("threading.Thread(target=prune_pastes, daemon=True).start()",
+                      source, "the sweep is not on a thread of its own")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
