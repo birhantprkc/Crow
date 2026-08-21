@@ -3658,15 +3658,48 @@ class TheBirdTests(unittest.TestCase):
             self.assertIn("<svg", crow_gui.mark_svg(background))
         self.assertNotEqual(crow_gui.mark_svg("dark"), crow_gui.mark_svg("light"))
 
-    def test_they_are_named_for_the_background_they_are_legible_on(self):
-        """NOT for the theme that produced them. Pale strokes vanish on white
-        and dark ones vanish on black -- a fact about contrast, and the reason
-        the two files arrived with their names the other way round."""
-        on_dark, on_light = crow_gui.mark_svg("dark"), crow_gui.mark_svg("light")
-        self.assertIn("#b9c0c4", on_dark)      # pale, needs a dark ground
-        self.assertNotIn("#283647", on_dark)
-        self.assertIn("#283647", on_light)     # near-black, needs a light one
-        self.assertNotIn("#6789b2", on_light)
+    def test_every_stroke_is_legible_on_the_ground_it_is_drawn_on(self):
+        """MEASURED, NOT MATCHED AGAINST A LIST OF COLOURS, because the defect
+        this exists for is a colour that was simply left behind: the light
+        drawing shipped with 66 of its 118 strokes still carrying the DARK
+        version's values, at 1.8:1 and 1.3:1 on white -- present in the file,
+        invisible on the screen, and a case that compared literals would have
+        passed while robin was looking at a blank space.
+
+        3:1 is the floor for a graphic that has to be made out, not read.
+        """
+        import re
+
+        def lum(colour):
+            def channel(c):
+                c = int(colour[c:c + 2], 16) / 255
+                return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+            return (0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5))
+
+        def contrast(a, b):
+            high, low = sorted((lum(a), lum(b)), reverse=True)
+            return (high + 0.05) / (low + 0.05)
+
+        grounds = {"dark": ["#181818", crow_core.CROW_BG], "light": ["#ffffff"]}
+        for background, on in grounds.items():
+            strokes = set(re.findall(r'stroke="(#[0-9a-f]{6})"',
+                                     crow_gui.mark_svg(background)))
+            self.assertTrue(strokes, background)
+            for stroke in sorted(strokes):
+                for ground in on:
+                    self.assertGreaterEqual(
+                        contrast(stroke, ground), 3.0,
+                        "%s on %s is %.1f:1" % (stroke, ground,
+                                                contrast(stroke, ground)))
+
+    def test_the_two_drawings_are_the_same_bird(self):
+        """NEGATIVE HALF of the case above: the light one is a RECOLOURING, so
+        every path must still be there. A version that dropped the strokes it
+        could not colour would also pass a contrast check."""
+        import re
+
+        paths = lambda which: re.findall(r'd="([^"]+)"', crow_gui.mark_svg(which))
+        self.assertEqual(paths("dark"), paths("light"))
 
     def test_a_missing_drawing_is_empty_and_not_an_error(self):
         """NEGATIVE PROBE. A greeting without a bird is a greeting; a window
