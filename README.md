@@ -364,10 +364,6 @@ Prefill is a function of block size, not a constant.
 
 ## Window
 
-<div align="center">
-<img src="docs/images/window.png" alt="Crow window" width="900">
-</div>
-
 | | |
 |---|---|
 | Composer | model and reasoning level as one chip, context readout, working directory, release level, dictation |
