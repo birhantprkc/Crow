@@ -835,6 +835,32 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    rather than `pre` so a long single-line note still wraps at the column
    instead of running off the side. */
 .note{color:var(--dimmer);font-size:11.5px;white-space:pre-wrap}
+/* #122. THE MEMORY LINE, AND IT IS NOT A NOTE. A note is grey because what
+   notes say may be skimmed past; this one is the only sign a person gets that
+   something entered the head of their next session, and with no approval gate
+   in front of it there is no second chance to notice.
+   THE GLOW RUNS ONCE AND SETTLES. `forwards` on both animations is the whole
+   trick: the gradient sweeps across on arrival, the halo fades out, and what
+   is left afterwards is a quiet accent-tinted row. A glow that kept pulsing
+   would be a thing to switch off, and this line may not be switchable.
+   THE COLOURS COME FROM THE PALETTE, never from a literal, so all three themes
+   answer for it -- `--accent` is the brand value the core hands in. */
+.memnote{font-size:11.5px;white-space:pre-wrap;color:var(--accent);
+  padding:3px 8px;border-radius:6px;border:1px solid transparent;
+  background:linear-gradient(90deg,transparent 0%,color-mix(in srgb,var(--accent) 22%,transparent) 50%,transparent 100%);
+  background-size:220% 100%;
+  animation:memsweep .9s ease-out 1 forwards, memglow 1.6s ease-out 1 forwards}
+@keyframes memsweep{from{background-position:120% 0}to{background-position:-40% 0}}
+@keyframes memglow{
+  0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 45%,transparent)}
+  35%{box-shadow:0 0 14px 2px color-mix(in srgb,var(--accent) 38%,transparent)}
+  100%{box-shadow:0 0 0 0 transparent}}
+/* A reader who asked the system not to animate gets the colour and no motion.
+   The row still has to be visible -- so the sweep is replaced by a flat tint,
+   not by nothing. */
+@media (prefers-reduced-motion: reduce){
+  .memnote{animation:none;
+    background:color-mix(in srgb,var(--accent) 14%,transparent)}}
 /* NOT A DIM NOTE, AND THAT IS THE WHOLE REASON IT IS A SECOND CLASS (#98).
    `--warn` is already `auto`'s colour in the level dropdown, so the line that
    names the limit of `auto`'s guarantee is drawn in the colour of the level it
@@ -1352,6 +1378,12 @@ const crow = {
     d.className="note"; d.textContent=msg; t.appendChild(d); this.bottom(); },
   alarm(msg){ const t=this.turn(""); const d=document.createElement("div");
     d.className="alarm"; d.textContent=msg; t.appendChild(d); this.bottom(); },
+  // #122. THE ONLY NOTICE THAT SOMETHING WAS REMEMBERED. There is no approval
+  // gate, so this line is where a person finds out -- it glows once on arrival
+  // and then sits there like any other row.
+  memory(msg,n){ const t=this.turn(""); const d=document.createElement("div");
+    d.className="memnote"; d.textContent = n>1 ? msg+" ("+n+")" : msg;
+    t.appendChild(d); this.bottom(); },
 
   // THE CURSOR ALWAYS SITS LAST. Every insert goes BEFORE it, so after a tool
   // row or a code frame it has to be moved back to the end -- otherwise it is
@@ -2075,6 +2107,7 @@ const crow = {
       case "tool": this.tool(e.name,e.args); break;
       case "cost": this.cost(e.line,e.share); this.ctx(e.tokens,e.n_ctx); break;
       case "note": this.note(e.t); break;
+      case "memory": this.memory(e.t,e.n); break;
       case "alarm": this.alarm(e.t); break;
       case "fail": this.fail(e.t); break;
       case "live":
@@ -2484,6 +2517,23 @@ class Turn(TurnEvents):
         self._put({"k": "note", "t": "rolled over at %d tokens -> %s"
                                      % (tokens, os.path.basename(path))})
 
+    def memory_saved(self, what: list) -> None:
+        """#122. Its OWN kind, not a `note`, and the page draws it with a glow.
+
+        A note is grey and easy to skim past, which is right for the things
+        notes say. This one is the only sign a person gets that something has
+        entered the head of their next session, so it has to catch the eye once
+        and then stay out of the way -- a gradient that runs and settles, not a
+        colour that keeps shouting.
+
+        IT IS A MESSAGE, NOT A TURN. `_put` queues it for the page; nothing
+        appends it to the conversation. A line that slipped into the history
+        would move the head of the next prompt and cost the full prefill this
+        whole feature is built to avoid.
+        """
+        self._put({"k": "memory", "t": "Gedächtnis aktualisiert",
+                   "n": len(what or [])})
+
 
 class Api:
     """What the page may call. Nothing here touches a widget; it queues."""
@@ -2656,6 +2706,18 @@ class Api:
         # picker adopt a boundary the same way and had the same gap.
         if self._current_path:
             self._stamp(self._current_path)
+        # #121: AND THE MEMORY FOLLOWS THE BOUNDARY, through this one door with
+        # the rest. Binding a folder to an open chat is the user saying which
+        # project this conversation is about; leaving it on the old project's
+        # notes until the next chat would be a rule nobody asked for.
+        #
+        # THE COST IS SAID BEFORE THE CHANGE, never after -- `REASONING_COST_NOTE`
+        # sets that shape for the level and the mechanism here is identical: the
+        # head moves, so the next turn is a full prefill. A bind that changes no
+        # memory says nothing, which is what the return value is for.
+        if self._conversation.memory is not None:
+            if self._conversation.repin_memory(crow_core.memory_block()):
+                self.push({"k": "note", "t": crow_core.MEMORY_COST_NOTE})
         self.push_root()
         # #119: AND THE LIST IS REDRAWN, because the boundary is now WHERE a chat
         # is drawn and not merely what it may write. This door bound the root,
@@ -2664,6 +2726,25 @@ class Api:
         # robin found it: folding the project was what finally showed the move.
         self._reload_rail()
         self.push({"k": "note", "t": "working directory: %s (%s)" % (path, wanted)})
+
+    def _pin_memory(self, chat: str | None) -> None:
+        """Pin this chat's memory head ONCE, after its boundary is known.
+
+        THE ORDER IS THE WHOLE CONTRACT. A pin taken before `_adopt_chat_root`
+        would be the template's memory, not the chat's, and it would be wrong
+        for exactly the chats that have a project. Every caller here sits below
+        the line that binds.
+
+        A FILE THAT CARRIES A PIN WINS OVER THE FOLDER. That is #121: what this
+        chat was sent last time is what it is sent again, so the KV cache saved
+        against it still fits. Only a chat with no pin -- every chat written
+        before this build, and every new one -- takes a fresh block.
+        """
+        if self._conversation.memory is not None:
+            return
+        pinned = crow_core.session_memory(chat) if chat else None
+        self._conversation.pin_memory(
+            pinned if pinned is not None else crow_core.memory_block())
 
     def _adopt_chat_root(self, chat: str | None, fresh: bool = False) -> None:
         """Bind the boundary THIS chat chose, and take the level that goes with it.
@@ -3093,8 +3174,14 @@ class Api:
         if not self._args.session:
             return
         try:
-            restored = load_session(self._args.base_url, self._args.system,
-                                    model=self._model)
+            # #121. The pin is read before the payload -- see the same two lines
+            # in `crow.py`. A file without one composes to what every release up
+            # to here sent, so no existing cache is disturbed by this.
+            restored = load_session(
+                self._args.base_url,
+                crow_core.system_with_memory(self._args.system,
+                                             crow_core.session_memory(SESSION_FILE)),
+                model=self._model)
         except Exception as exc:           # noqa: BLE001
             self.push({"k": "note", "t": "session not readable: %s" % exc})
             return
@@ -3117,6 +3204,7 @@ class Api:
             # #119: THE ONE CALLER WITH NO CLEAR TO HANG ON. A launch that finds
             # nothing to restore leaves an empty flow that was never emptied --
             # which is why the greeting is its own message and not a field.
+            self._pin_memory(SESSION_FILE)
             self._hello()
             self._reload_rail()
             return
@@ -3138,6 +3226,10 @@ class Api:
         # the restored chat was working in". It never did -- nothing outside
         # `adopt_root` and the picker has ever called `set_root`.
         self._adopt_chat_root(SESSION_FILE)
+        # #121. AFTER THE BOUNDARY, NEVER BEFORE IT. A chat with no pin yet is
+        # pinned from the folder it stands in, and the line above is where that
+        # folder stops being the template and becomes the chat's own.
+        self._pin_memory(SESSION_FILE)
         self.push({"k": "up", "model": None, "n_ctx": self._n_ctx,
                    "tokens": self._context_tokens})
 
@@ -3565,6 +3657,11 @@ class Api:
         # the case #92 added it for. `_adopt_chat_root` is no longer one answer
         # for three events, and the docstring there says so.
         self._adopt_chat_root(None, fresh=True)
+        # #121. `Conversation.reset` dropped the old chat's pin; this takes the
+        # new one. A fresh chat is rootless by the decision above, so what it
+        # gets is the profile and a line saying there is no project -- until the
+        # user moves it into one, which re-pins through `_bind_root`.
+        self._pin_memory(None)
         self._context_tokens = 0
         self._promised_warm = False
         self.push({"k": "clear"})     # the page no longer guesses; see crow.reset
@@ -3790,8 +3887,14 @@ class Api:
         # order used to be the other way round, so an archive that turned out to
         # be unreadable had already cost the open chat a write.
         try:
-            restored = load_session(self._args.base_url, self._args.system, path,
-                                    model=self._model)
+            # #121. The pin decides the head this file was written under, so it
+            # is read before the payload -- the fingerprint cannot be taken from
+            # messages nobody has opened yet.
+            restored = load_session(
+                self._args.base_url,
+                crow_core.system_with_memory(self._args.system,
+                                             crow_core.session_memory(path)),
+                path, model=self._model)
         except Exception as exc:           # noqa: BLE001
             self.push({"k": "fail", "t": "not readable: %s" % exc})
             return
@@ -3822,6 +3925,7 @@ class Api:
         # kept whatever the previous chat had left bound, so switching to a chat
         # moved it into the last chat's project without saying anything.
         self._adopt_chat_root(path)
+        self._pin_memory(path)        # #121, and below the bind for that reason
         self._context_tokens, self._promised_warm = tokens, kv
         self.push({"k": "clear"})     # the page no longer guesses; see crow.open
         self._hello()
@@ -3835,7 +3939,11 @@ class Api:
         self.push({"k": "cost", "line": "", "share": None,
                    "tokens": self._context_tokens, "n_ctx": self._n_ctx})
 
-    ARCHIVE_DIR = "archiv"
+    # #123 MOVED THE LITERAL, NOT THE MEANING. The search index has to walk the
+    # same folder the rail is drawn from, and a second `"archiv"` typed in the
+    # core would be a chat that is in the rail and not in the index, or the
+    # reverse, the first time either spelling changed.
+    ARCHIVE_DIR = crow_core.ARCHIVE_DIR
 
     def _replay(self, messages: list) -> None:
         """Draw a restored conversation the way a live one is drawn.
@@ -4466,6 +4574,11 @@ class Api:
                 rolled=self._rolled, execute_tools=self._args.execute_tools,
                 mode=getattr(self._args, "mode", DEFAULT_MODE),
                 approve=self._ask_page,
+                # #122, and the window opts in for the same reason the
+                # terminal does. `getattr` rather than the field: a test
+                # builds its args by hand and must not have to know about a
+                # flag in order to run one turn.
+                review=getattr(self._args, "review", True),
                 events=events)
         except CrowError as exc:
             self.push({"k": "fail", "t": str(exc)})
@@ -4517,6 +4630,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tools", dest="execute_tools", action="store_true",
                         default=True,
                         help="run tool calls (the default)")
+    parser.add_argument("--no-review", dest="review", action="store_false",
+                        help="do not let the model save memories after a turn")
     parser.add_argument("--no-tools", dest="execute_tools", action="store_false",
                         help="show tool calls instead of running them")
     # #88, the same flag the terminal client takes: the START level, with the

@@ -75,6 +75,16 @@
    "why": "#96. One page, as text, with extraction ahead of the clip. It is here rather than in a surface because the two rules it carries are core rules: http(s) only, so it cannot become a disk read around #92's boundary, and every failure comes back as a tool result rather than an exception."
   },
   {
+   "name": "tool_memory",
+   "kind": "def",
+   "why": "#120. The two memory stores are written through one function because BOTH surfaces have to fill the same files: a terminal that saved to one place and a window that saved to another would be two memories for one user. The bounds live here too -- the limit that refuses instead of trimming, the duplicate that answers success, the injection scan -- because every one of them is a rule about what may enter the system prompt, and the system prompt is the core's."
+  },
+  {
+   "name": "tool_session_search",
+   "kind": "def",
+   "why": "#123. The FTS5 index is derived from the chat files, so it must be built by whoever can see all of them -- which is the core, not a surface. A second builder in the window would index a different set the first time either side changed where a chat is written."
+  },
+  {
    "name": "TOOL_IMPL",
    "kind": "binding",
    "why": "The name-to-function table. It is a dict rather than a def, which is why the manifest needs a kind at all: hanging a def predicate on it would declare it and check nothing. A second table is how one surface ends up offering six tools and the other seven."

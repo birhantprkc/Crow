@@ -129,6 +129,13 @@ WEB_MAX_DOWNLOAD = 2_000_000   # bytes taken off the socket before extraction
 MAX_FETCHES = 4                # pages one question may open; see the note above
 SEARCH_RESULTS = 6
 
+# #123. How many past messages one `session_search` returns, and how much of
+# each. UP HERE WITH THE OTHER TOOL BUDGETS rather than beside the index, because
+# `TOOLS` is built a few lines below and reads the first of them: a constant
+# defined further down is a NameError at import, which is how this was found.
+SEARCH_HITS = 8
+SEARCH_SNIPPET = 400
+
 # WHERE THE SEARCH RUNS, AND WHY IT IS NOT A SELF-HOSTED SERVICE BY DEFAULT.
 #
 # There is no free, keyless, reliable, general web search endpoint. Every route
@@ -528,6 +535,54 @@ TOOLS = [
         "Use it on a result from web_search that the snippet did not settle, or "
         "on a URL the user gave you.",
         {"url": dict(_STR, description="An http or https URL.")}, ["url"]),
+    # #120. THE DESCRIPTION IS THE CURATION POLICY -- it is the only place the
+    # model is told what belongs in a bounded store and what does not. Left to
+    # itself it saves the conversation; the limit then fills with one afternoon.
+    #
+    # THERE IS NO PLACE PARAMETER, and that is the design rather than a missing
+    # feature: project notes go to the project the chat stands in, because the
+    # position decides and not the model. A choosable location is a button that
+    # can be pressed wrong, and a misfiled note is only noticed much later, in
+    # another project, where it is missing or in the way.
+    _fn("memory",
+        "Remember something across sessions, or correct what you remember. "
+        "Save what you would want to know at the START of the next session and "
+        "cannot cheaply look up again: how this project is laid out, its "
+        "conventions and commands, a tool quirk you had to work around, a "
+        "correction the user made, work you finished. Do NOT save what a single "
+        "read would answer, raw output, or anything that is only true for this "
+        "one turn. Entries are short and dense -- pack related facts into one "
+        "line rather than adding a line each. The store is small and never "
+        "trimmed for you: when it is nearly full, use 'replace' to merge two "
+        "entries into one shorter entry before you add.",
+        {"action": dict(_STR, description="add, replace or remove."),
+         "target": dict(_STR, description="'memory' for facts about this project "
+                                          "and machine, 'user' for who the user is "
+                                          "and how they want to be worked with."),
+         "content": dict(_STR, description="The new entry, for add and replace."),
+         "old_text": dict(_STR, description="For replace and remove: a SHORT "
+                                            "substring that occurs in exactly one "
+                                            "entry. Not the whole entry.")},
+        ["action"]),
+    # #123. IT IS DECLARED ON EVERY MACHINE, INCLUDING THOSE WITHOUT FTS5, and
+    # that is the opposite of what the ticket first said. Dropping it from the
+    # schema where SQLite lacks FTS5 would make `json.dumps(TOOLS)` -- and
+    # therefore `prefix_fingerprint`, and therefore every saved cache -- depend
+    # on how somebody's Python was compiled. A session file would then stop
+    # matching itself after a Python upgrade. So the tool is always there and
+    # answers "unavailable, nothing was searched" where it cannot work.
+    _fn("session_search",
+        "Search everything said in earlier conversations, including ones from "
+        "months ago. Costs no context until you call it, so use it instead of "
+        "guessing when the user refers to something you cannot see -- 'the thing "
+        "we decided last week', a number, a path, a name. Returns the real "
+        "messages, not a summary.",
+        {"query": dict(_STR, description="Words to look for. All of them must "
+                                         "appear; two or three specific ones beat "
+                                         "a sentence."),
+         "limit": {"type": "integer",
+                   "description": f"How many messages, default {SEARCH_HITS}."}},
+        ["query"]),
 ]
 
 
@@ -1342,11 +1397,27 @@ def resume_cold_note(path: str | None = None, model: str | None = None) -> str:
 # that survives in one client and evaporates in the other.
 SESSION_REASONING_KEY = "reasoning"
 
+# #121. THE PINNED MEMORY HEAD, and it is the same kind of fact as the two
+# above: something about THIS CHAT rather than about this run. Absent means
+# "never pinned" -- every chat file on disk today is in that state, and it must
+# not read as "pinned to an empty memory", which is a claim nobody made.
+#
+# WHY IT IS WRITTEN AT ALL, given that the system message is already in
+# `messages`: the fingerprint has to be computed BEFORE the payload is read.
+# `load_session` needs the composed system prompt to decide whether the saved KV
+# still fits, and it cannot get it from the messages it has not opened yet.
+SESSION_MEMORY_KEY = "memory"
+
 # Said BEFORE the level is changed, the way #115 announces the lost context
 # before the switch. The value lands in `chat_template_kwargs`, so it is
 # rendered into the HEAD of the prompt -- byte 0 moves and the whole cached
 # prefix stops matching. That is not a detail at 200k.
 REASONING_COST_NOTE = "the level changes the head of every prompt -- the next turn pays a full prefill"
+
+# #121. THE SAME BILL FOR THE SAME REASON, said the same way round: before the
+# change, not after it. Binding a different folder to an open chat swaps that
+# chat's project memory, and the memory sits in the head.
+MEMORY_COST_NOTE = "the project memory changed -- the next turn pays a full prefill"
 
 
 def session_reasoning(path: str | None = None) -> str | None:
@@ -1364,6 +1435,22 @@ def session_reasoning(path: str | None = None) -> str | None:
     except Exception:
         return None
     return value if isinstance(value, str) and value else None
+
+
+def session_memory(path: str | None = None) -> str | None:
+    """The memory head this chat was pinned to, or None if it never pinned one.
+
+    THE ABSENT KEY IS A STATE, not a missing value -- see `SESSION_MEMORY_KEY`.
+    A caller that reads None must decide what to pin; a caller that reads "" has
+    been told the answer and must not go looking for a better one.
+    """
+    path = path or SESSION_FILE
+    try:
+        with open(path, encoding="utf-8") as fh:
+            value = json.load(fh).get(SESSION_MEMORY_KEY)
+    except Exception:                       # noqa: BLE001 - no file, no pin
+        return None
+    return value if isinstance(value, str) else None
 
 
 def reasoning_for_chat(model: str | None,
@@ -1613,6 +1700,13 @@ def save_session(conversation: "Conversation", base_url: str, context_tokens: in
                    # predates the switch -- so the cache of every session on
                    # disk survives this change. Writing "" or a default here
                    # would bind every existing chat to a level nobody picked.
+                   # #121: ABSENT WHEN NEVER PINNED, for the reason the key's
+                   # own comment gives. `conversation.memory` is None only for a
+                   # chat that never pinned; "" is a pin, and it is written,
+                   # because "this chat deliberately carries no memory" is a
+                   # different fact from "nobody ever decided".
+                   **({SESSION_MEMORY_KEY: conversation.memory}
+                      if conversation.memory is not None else {}),
                    **({SESSION_REASONING_KEY: reasoning} if reasoning else {})},
                   fh, indent=1 if pretty else None)
 
@@ -1978,11 +2072,19 @@ class Conversation:
     had generated 2046 tokens. It does not accumulate; it repeats.
     """
 
-    def __init__(self, system: str | None = None) -> None:
+    def __init__(self, system: str | None = None, memory: str | None = None) -> None:
+        self._base_system = system
+        # #121. None means "never pinned", "" means "pinned to nothing" -- the
+        # same three-way shape #101 gave the working directory, and for the same
+        # reason: every chat file written before this build lacks the key, and
+        # reading that as "pinned to nothing" would be a claim nobody made.
+        self._pinned: str | None = None
         self._system = system
         self._messages: list[dict[str, str]] = []
         if system:
             self._messages.append({"role": "system", "content": system})
+        if memory is not None:
+            self.pin_memory(memory)
 
     @property
     def has_system(self) -> bool:
@@ -1991,6 +2093,78 @@ class Conversation:
     @property
     def system(self) -> str | None:
         return self._system
+
+    @property
+    def memory(self) -> str | None:
+        """The pinned memory head, or None when this chat never pinned one."""
+        return self._pinned
+
+    def pin_memory(self, block: str | None) -> None:
+        """Fix the memory head for the LIFE OF THIS CHAT. Once, before the first request.
+
+        THIS IS THE WHOLE OF #121 IN ONE METHOD. llama-server reuses a prompt by
+        matching a common token prefix -- `n_past =
+        slot.prompt.tokens.get_common_prefix(input_tokens)` -- and the system
+        prompt is where that prefix begins. `prefix_fingerprint` hashes it, and
+        Crow keeps its KV on disk. So a memory head that were re-read from the
+        files at every start would go stale against every saved cache the moment
+        anything was saved: measured 2026-08-10, a cache that does not match is
+        `cached 0/21004` and 469.51 s to the first token.
+
+        Pinning also turns the guarantee into something a test can hold. "The
+        head does not change mid-session" is a claim about TIME and cannot be
+        checked; "the head is what this file says" is a claim about a FILE.
+
+        RAISES ON THE SECOND CALL rather than quietly re-pinning, which is the
+        same refusal `restore()` makes and for the same reason: after the first
+        request a prefix exists, and moving it is not an update, it is a bill.
+        """
+        if self._pinned is not None:
+            raise RuntimeError("memory is pinned for the life of a chat, not per turn")
+        self._write_head(block or "")
+
+    def repin_memory(self, block: str | None) -> bool:
+        """Move the head of a RUNNING chat. Returns True when it actually moved.
+
+        THE ONE EVENT THAT JUSTIFIES THIS is a person binding a different working
+        directory to an open chat. They have just said which project this
+        conversation belongs to, and answering "you get that project's memory in
+        the next chat" would be a rule nobody asked for -- robin, 2026-08-21:
+        a user moves a project chat into its project, and that move is when the
+        memory should follow.
+
+        IT COSTS A FULL PREFILL, the same bill `REASONING_COST_NOTE` announces
+        for the thinking level and for exactly the same mechanism: the head moves,
+        so `get_common_prefix` ends at byte 0 and the whole conversation is read
+        again. The caller says so BEFORE calling, never after -- and the return
+        value is there so that a bind which changes nothing says nothing.
+
+        THIS IS NOT THE EDIT THE CLASS DOCSTRING REFUSES. What moves is the
+        system message, which is not a turn: `reset()` has always replaced it
+        wholesale. No turn is edited, removed or reordered here.
+        """
+        if self._pinned is not None and (block or "") == self._pinned:
+            return False
+        self._write_head(block or "")
+        return True
+
+    def _write_head(self, block: str) -> None:
+        """The one place the head is composed and put into message 0.
+
+        IT REPLACES A HEAD, IT NEVER INVENTS ONE. A conversation restored from a
+        payload that carries no system message has no head, and giving it one
+        here would insert a message into somebody else's history -- the exact
+        edit this class refuses everywhere else. `__init__` and `reset()` follow
+        the same rule (`if system:` on an EMPTY message list), so all three
+        agree about when message 0 exists.
+        """
+        self._pinned = block
+        self._system = system_with_memory(self._base_system, self._pinned)
+        if self._messages:
+            if self._messages[0].get("role") == "system":
+                self._messages[0] = {"role": "system", "content": self._system}
+        elif self._system:
+            self._messages.append({"role": "system", "content": self._system})
 
     def restore(self, messages: list[dict]) -> None:
         """Adopt a saved history wholesale, at construction time only.
@@ -2004,6 +2178,21 @@ class Conversation:
         if len(self._messages) > (1 if self._system else 0):
             raise RuntimeError("restore() is for a fresh conversation, not a running one")
         self._messages = [dict(m) for m in messages]
+        # #121. A PINNED CONVERSATION OWNS ITS HEAD, so the restored payload's
+        # system message is brought into line with it. Not tidiness: the head is
+        # what the next request will actually send and what the next save will
+        # fingerprint, and a payload written under a different one would leave
+        # the file describing a prompt the request does not carry.
+        #
+        # ONLY WHEN A PIN EXISTS. Without one this is the behaviour every release
+        # up to here had -- the saved head is the head -- and changing that for
+        # unpinned chats would rewrite the first message of every session on disk
+        # in a commit that is supposed to add a key.
+        if self._pinned is not None and self._system:
+            if self._messages and self._messages[0].get("role") == "system":
+                self._messages[0] = {"role": "system", "content": self._system}
+            else:
+                self._messages.insert(0, {"role": "system", "content": self._system})
 
     def append(self, role: str, content: str, reasoning: str | None = None,
                tool_calls: list[dict] | None = None,
@@ -2024,6 +2213,17 @@ class Conversation:
         self._messages.append(message)
 
     def reset(self) -> None:
+        # #121. THE PIN GOES WITH THE CONVERSATION, because `reset` is not a
+        # cleanup -- it is the start of a NEW chat, and a new chat has not been
+        # pinned yet. Keeping the old head here would hand the next conversation
+        # the memory of the project the last one happened to stand in, which is
+        # the same mistake `reset()` stopped making with the working directory.
+        # The caller pins again once the new chat's boundary is known.
+        #
+        # A conversation that never pinned is unaffected: `_system` is
+        # `_base_system` for it, so this is the line every release up to here had.
+        self._pinned = None
+        self._system = self._base_system
         self._messages = []
         if self._system:
             self._messages.append({"role": "system", "content": self._system})
@@ -3312,6 +3512,533 @@ def adopt_root(stated: str | None,
     return here, mode, problem
 
 
+# ---------------------------------------------------------------- #120 -----
+# PERSISTENT MEMORY. Two stores, and the working directory decides which one a
+# chat gets:
+#
+#   <root>\.crow\MEMORY.md          what was learned about THIS project
+#   %LOCALAPPDATA%\Crow\USER.md     who the user is and how they work
+#
+# A THIRD, GLOBAL `MEMORY.md` WAS DESIGNED AND DROPPED, and the reason is
+# written here so that it is not designed a second time. It was meant for chats
+# with no working directory -- but a chat that never chose binds the template
+# from `roots.json` (#101), so that state is nearly unreachable, and a second
+# notes store for the remainder would be a second place for the same kind of
+# fact. What is left is the one honest case: "no folder", chosen on purpose.
+# Such a chat gets NO project memory and is told so. It does not get a
+# substitute somewhere nobody picked.
+#
+# THE LIMITS ARE ANCHORED ON `MAX_TOOL_BYTES`, NOT ON THE CONTEXT WINDOW. The
+# comment up there prices 16,000 bytes at ~4,000 tokens, so four characters buy
+# one token. 4,000 characters is a QUARTER of a single tool read, and that ratio
+# is the whole point: memory has to stay cheaper than letting the model read the
+# file. A store that outgrows it is not a store that needs a bigger limit, it is
+# a file that should be reached with `read_file`.
+#
+# Coupling the limit to `-c` was considered and refused. A MEMORY.md written at
+# 200k would be over the limit at 40k without anyone changing it, and
+# `check_operating_point` compares the operating point as raw text -- it may not
+# become a function.
+MEMORY_FILE = "MEMORY.md"
+MEMORY_CHARS = 4_000
+USER_CHARS = 1_500
+
+# Beside `roots.json` and `settings.json`, for the reason `ROOTS_FILE` already
+# gives: a session is one conversation, and who the user is outlives every one
+# of them.
+USER_PATH = os.path.join(os.path.dirname(SESSION_DIR), "USER.md")
+
+# What separates two entries. A section sign alone on its line: it does not
+# occur inside a path, a command or a sentence the model writes, and someone
+# opening the file by hand sees the boundary without needing a legend.
+MEMORY_SEP = "§"
+
+# Above this share the header tells the model to consolidate before it adds.
+# ADVICE, NOT A SECOND GATE -- the gate is the limit itself, below.
+MEMORY_FULL_AT = 0.8
+
+MEMORY_TARGETS = ("memory", "user")
+
+
+def memory_path(root: "str | None" = None) -> "str | None":
+    """Where this chat's PROJECT memory lives, or None when it has no folder.
+
+    None is an answer, not a failure: it is the "no folder" state of #101
+    arriving here, and every caller has to have a sentence for it rather than a
+    fallback path. A substitute location would be a boundary nobody drew.
+    """
+    here = get_root() if root is None else root
+    if not here:
+        return None
+    return os.path.join(here, ROOT_MARKER, MEMORY_FILE)
+
+
+def _store(target: str, root: "str | None" = None) -> "tuple[str | None, int, str]":
+    """(path, limit, label) for one target. Path is None only for a rootless chat."""
+    if target == "user":
+        return USER_PATH, USER_CHARS, "USER PROFILE"
+    here = get_root() if root is None else root
+    label = "MEMORY -- %s" % os.path.basename(here.rstrip("\\/")) if here else "MEMORY"
+    return memory_path(root), MEMORY_CHARS, label
+
+
+def read_store(path: "str | None") -> "list[str]":
+    """The entries in one store file. A missing file is an empty store.
+
+    UNREADABLE IS ALSO EMPTY, and that is deliberate rather than lazy: this runs
+    on the path that builds the system prompt, and a store that cannot be parsed
+    must not take the start of a session down with it. The write path is where a
+    problem is reported, because that is where someone is waiting for an answer.
+    """
+    if not path:
+        return []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = fh.read()
+    except Exception:                       # noqa: BLE001 - no file, no entries
+        return []
+    out = []
+    for chunk in raw.split("\n%s\n" % MEMORY_SEP):
+        chunk = chunk.strip()
+        if chunk:
+            out.append(chunk)
+    return out
+
+
+def write_store(path: str, entries: "list[str]") -> None:
+    """Replace a store with these entries. Creates `.crow` if it is missing."""
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    body = ("\n%s\n" % MEMORY_SEP).join(entries)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(body + ("\n" if body else ""))
+
+
+def store_chars(entries: "list[str]") -> int:
+    """What a set of entries costs against its limit: the file as it is written.
+
+    COUNTING THE SEPARATORS IS THE HONEST VERSION. The limit exists to bound the
+    prompt, and the separators are rendered into the prompt too. Counting only
+    the entries would let ten short ones cost more than the limit allows while
+    the arithmetic said they fit.
+    """
+    if not entries:
+        return 0
+    return len(("\n%s\n" % MEMORY_SEP).join(entries))
+
+
+# THE SCAN IS NARROW ON PURPOSE. Every entry is rendered into the system prompt,
+# so a memory entry is the one place where text the model READ can become text
+# the model OBEYS -- a file carrying "ignore previous instructions", saved as a
+# note, is an injection with a delay fuse.
+#
+# But a filter that refuses ordinary notes is a filter that gets routed around,
+# and a coding assistant's memory is full of what a broad one would eat: `curl`,
+# `http://localhost`, "run as administrator", key paths, shell lines. So these
+# are the narrow, high-signal patterns only -- instruction override, forged
+# prompt boundaries, private key material -- plus the invisible-character check,
+# which has no legitimate use in a note at all.
+_MEMORY_THREATS = (
+    (re.compile(r"\bignore\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above|earlier)\s+"
+                r"(?:instructions?|prompts?|rules?)", re.I), "instruction override"),
+    (re.compile(r"\bdisregard\s+(?:all\s+)?(?:the\s+)?"
+                r"(?:previous|prior|above|earlier)\b", re.I), "instruction override"),
+    (re.compile(r"</?\s*(?:system|instructions?)\s*>", re.I), "forged prompt boundary"),
+    (re.compile(r"^\s*\[\s*system\s*\]", re.I | re.M), "forged prompt boundary"),
+    (re.compile(r"-----BEGIN\s+(?:[A-Z0-9 ]+\s+)?PRIVATE KEY-----"), "private key material"),
+    (re.compile(r"\bssh-(?:rsa|ed25519|dss)\s+AAAA"), "ssh key material"),
+)
+
+
+def memory_threat(text: str) -> "str | None":
+    """Why this entry may not be stored, or None when it may.
+
+    Cf is Unicode's "format" category -- zero-width joiners, bidi overrides, the
+    soft hyphen. None of them can be SEEN in a rendered prompt and all of them
+    can change what it says, which is the whole trick. A newline is not Cf, so
+    multi-line entries are untouched by this.
+    """
+    import unicodedata
+
+    for pattern, why in _MEMORY_THREATS:
+        if pattern.search(text):
+            return why
+    hidden = sorted({"U+%04X" % ord(ch) for ch in text
+                     if unicodedata.category(ch) == "Cf"})
+    if hidden:
+        return "invisible characters (%s)" % ", ".join(hidden)
+    return None
+
+
+def render_store(label: str, entries: "list[str]", limit: int) -> str:
+    """One block of the injected head: rule, header with usage, then the entries.
+
+    THE USAGE IS IN THE HEADER BECAUSE THE MODEL NEEDS IT. It is the only way it
+    can know, before writing, whether it has to consolidate first -- and a write
+    that discovers the limit by failing has already cost a round.
+    """
+    used = store_chars(entries)
+    pct = int(round(100.0 * used / limit)) if limit else 0
+    rule = "=" * 46
+    head = "%s\n%s [%d%% -- %s/%s chars]\n%s" % (
+        rule, label, pct, "{:,}".format(used), "{:,}".format(limit), rule)
+    body = ("\n%s\n" % MEMORY_SEP).join(entries)
+    return head + ("\n" + body if body else "")
+
+
+def memory_block(root: "str | None" = None) -> str:
+    """The whole memory head for one chat, or "" when there is nothing to say.
+
+    ORDER IS FIXED AND NOT SORTABLE -- profile, then project. This lands at byte
+    0 of the prompt, where llama-server matches a common token prefix; two
+    orders would be two caches for one set of facts.
+
+    NOTHING REMEMBERED MEANS NOTHING IN THE HEAD -- not a pair of empty frames
+    announcing two stores with nothing in them. Two reasons, and the second is
+    the one that decided it:
+
+      * An empty block reads as "nothing was learned here", which is a different
+        claim from "there is nothing here", and it is the more dangerous of the
+        two because it looks answered.
+      * Until something is actually remembered, this feature must cost the
+        prompt NOTHING. A head that appears on a fresh installation would change
+        byte 0 for every existing chat on every machine, in exchange for two
+        headers saying 0%.
+
+    A ROOTLESS CHAT GETS NO SECOND BLOCK EITHER, but it does get the line saying
+    why -- once there is anything else in the head at all. Silence about the
+    project would otherwise be indistinguishable from an empty project.
+    """
+    blocks = []
+    user = read_store(USER_PATH)
+    if user:
+        blocks.append(render_store("USER PROFILE", user, USER_CHARS))
+    path = memory_path(root)
+    entries = read_store(path)
+    if entries:
+        blocks.append(render_store(_store("memory", root)[2], entries, MEMORY_CHARS))
+    elif path is None and blocks:
+        blocks.append("(no working directory bound -- this chat has no project memory)")
+    return "\n\n".join(blocks)
+
+
+def system_with_memory(system: "str | None", block: "str | None") -> "str | None":
+    """The system prompt this chat is actually sent, memory included.
+
+    ONE FUNCTION, BECAUSE THE JOIN IS PART OF THE CACHE KEY. `prefix_fingerprint`
+    hashes the system prompt; two surfaces joining these two strings with
+    different whitespace would produce two fingerprints for one chat, and the
+    second one to run would drop a perfectly good KV cache.
+    """
+    if not block:
+        return system
+    return ((system or "") + "\n\n" + block).strip()
+
+
+def tool_memory(action: str, target: str = "memory",
+                content: "str | None" = None, old_text: "str | None" = None) -> str:
+    """Add, replace or remove one memory entry. Returns JSON.
+
+    THERE IS NO `read` ACTION, and that is not an omission. The entries are
+    already rendered into the system prompt the model is reading; a read action
+    would be a second source for the same text and would spend a round telling
+    the model what it can already see.
+
+    JSON RATHER THAN A SENTENCE, unlike every other tool here, because the
+    failure that matters carries structure: over the limit the model needs the
+    current entries and both numbers in order to consolidate IN THE SAME TURN,
+    and a prose line would make it guess at what is in there.
+
+    NOTHING IS EVER DROPPED TO MAKE ROOM. A store that silently evicts on
+    overflow evicts the wrong entry eventually and nobody learns when. The write
+    fails, says by how much, and hands back what is in the way.
+    """
+    if target not in MEMORY_TARGETS:
+        return json.dumps({"success": False,
+                           "error": "unknown target %r -- use %s"
+                                    % (target, " or ".join(MEMORY_TARGETS))})
+    path, limit, label = _store(target)
+    if path is None:
+        # The one honest rootless case, answered rather than redirected.
+        return json.dumps({"success": False,
+                           "error": "this chat has no working directory, so it has no "
+                                    "project memory. Use target 'user' for facts about "
+                                    "the user, or bind a folder first."})
+    entries = read_store(path)
+
+    if action == "add":
+        if not content or not content.strip():
+            return json.dumps({"success": False, "error": "add needs content"})
+        content = content.strip()
+        why = memory_threat(content)
+        if why:
+            return json.dumps({"success": False,
+                               "error": "refused: %s" % why})
+        if content in entries:
+            # Success, not failure: the wanted state is already the state.
+            return json.dumps({"success": True, "note": "no duplicate added",
+                               "usage": _usage(entries, limit)})
+        room = store_chars(entries + [content])
+        if room > limit:
+            return _too_big(entries, limit, room - store_chars(entries),
+                            "Adding costs")
+        write_store(path, entries + [content])
+        return json.dumps({"success": True, "action": "add", "target": target,
+                           "usage": _usage(entries + [content], limit)})
+
+    if action in ("replace", "remove"):
+        if not old_text or not old_text.strip():
+            return json.dumps({"success": False,
+                               "error": "%s needs old_text -- a short substring "
+                                        "unique to one entry" % action})
+        hits = [i for i, e in enumerate(entries) if old_text in e]
+        if not hits:
+            return json.dumps({"success": False,
+                               "error": "no entry contains %r" % old_text,
+                               "current_entries": entries})
+        if len(hits) > 1:
+            # A pick by order would be a coin toss dressed as a result.
+            return json.dumps({"success": False,
+                               "error": "%r matches %d entries -- give a longer, "
+                                        "unique substring" % (old_text, len(hits)),
+                               "matches": [entries[i] for i in hits]})
+        i = hits[0]
+        if action == "remove":
+            write_store(path, entries[:i] + entries[i + 1:])
+            return json.dumps({"success": True, "action": "remove", "target": target,
+                               "usage": _usage(entries[:i] + entries[i + 1:], limit)})
+        if not content or not content.strip():
+            return json.dumps({"success": False, "error": "replace needs content"})
+        content = content.strip()
+        why = memory_threat(content)
+        if why:
+            return json.dumps({"success": False, "error": "refused: %s" % why})
+        after = entries[:i] + [content] + entries[i + 1:]
+        # REPLACE IS BOUND BY THE LIMIT TOO. Swapping a short entry for a long
+        # one is an addition wearing another name, and letting it through here
+        # would be the one door around the gate.
+        if store_chars(after) > limit:
+            return _too_big(entries, limit, store_chars(after) - store_chars(entries),
+                            "Replacing grows the store by")
+        write_store(path, after)
+        return json.dumps({"success": True, "action": "replace", "target": target,
+                           "usage": _usage(after, limit)})
+
+    return json.dumps({"success": False,
+                       "error": "unknown action %r -- use add, replace or remove" % action})
+
+
+def _usage(entries: "list[str]", limit: int) -> str:
+    return "%s/%s" % ("{:,}".format(store_chars(entries)), "{:,}".format(limit))
+
+
+def _too_big(entries: "list[str]", limit: int, cost: int, verb: str) -> str:
+    """The refusal, with everything needed to fix it without another round.
+
+    `cost` IS THE GROWTH OF THE STORE, not the length of the entry, and the two
+    differ: a replace swaps one entry for another, and an add pays for the
+    separator as well. Reporting the entry length would hand the model a number
+    that does not add up against the usage beside it.
+    """
+    return json.dumps({
+        "success": False,
+        "error": "Memory at %s chars. %s %d chars, which would exceed the limit. "
+                 "Consolidate now: use 'replace' to merge overlapping entries into "
+                 "shorter ones, or 'remove' stale ones (see current_entries), then "
+                 "retry -- all in this turn."
+                 % (_usage(entries, limit), verb, cost),
+        "current_entries": entries,
+        "usage": _usage(entries, limit)})
+
+
+# ---------------------------------------------------------------- #123 -----
+# SEARCHING WHAT WAS SAID BEFORE. Memory is small on purpose; this is the other
+# half -- everything ever said, searchable, and free.
+#
+# `index.db` IS AN INDEX AND NOT A SECOND STORE, and that sentence is the whole
+# design. The truth stays the chat JSON; the database is built from it and is
+# disposable. Delete it and it comes back. An index is not a second place for a
+# fact, because it knows nothing the file does not say -- whereas a COPY of the
+# messages, held as a source, would be exactly the appointment at which the two
+# disagree and nobody can say which one is the conversation.
+#
+# Two consequences are load-bearing rather than nice: the file's mtime decides
+# whether its rows are stale, and a row whose file has gone is dropped instead
+# of being answered from.
+ARCHIVE_DIR = "archiv"
+INDEX_PATH = os.path.join(os.path.dirname(SESSION_DIR), "index.db")
+
+
+def fts5_available() -> bool:
+    """Whether this Python's SQLite was built with FTS5.
+
+    ASKED, NOT ASSUMED. Measured 2026-08-21 on Python 3.13.3 / SQLite 3.49.1 --
+    the version `install.ps1` measures against -- where it is present. That says
+    nothing about a stranger's machine: FTS5 is a compile-time option, and the
+    honest answer on a build without it is to drop the tool and SAY so, rather
+    than to fail at the first search with a message about SQL.
+    """
+    import sqlite3
+    try:
+        con = sqlite3.connect(":memory:")
+        try:
+            con.execute("CREATE VIRTUAL TABLE t USING fts5(body)")
+        finally:
+            con.close()
+        return True
+    except Exception:                       # noqa: BLE001 - absence is the answer
+        return False
+
+
+def index_sources(session_file: str | None = None) -> "list[str]":
+    """Every chat file the index covers: the live one and the archive.
+
+    ONE LIST, so that "searchable" and "in the rail" cannot drift apart. The
+    window draws its rail out of the same two places.
+    """
+    live = session_file or SESSION_FILE
+    out = [live] if os.path.exists(live) else []
+    folder = os.path.join(os.path.dirname(live) or ".", ARCHIVE_DIR)
+    try:
+        for name in sorted(os.listdir(folder)):
+            if name.startswith("chat-") and name.endswith(".json"):
+                out.append(os.path.join(folder, name))
+    except OSError:
+        pass
+    return out
+
+
+def _index_connect(db_path: str | None = None):
+    import sqlite3
+    path = db_path or INDEX_PATH
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, mtime REAL)")
+    con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS messages USING fts5("
+                "body, path UNINDEXED, title UNINDEXED, role UNINDEXED, pos UNINDEXED)")
+    return con
+
+
+def sync_index(db_path: str | None = None,
+               session_file: str | None = None) -> "tuple[int, int]":
+    """Bring the index level with the files. Returns (files indexed, rows written).
+
+    MTIME IS THE WHOLE FRESHNESS RULE. A file whose timestamp has not moved is
+    not re-read; one that has moved has ALL its rows dropped and rewritten,
+    because a conversation is append-only on disk but an archive can be replaced
+    wholesale, and a partial update would leave the tail of a previous version
+    answering searches.
+
+    A FILE THAT IS GONE LOSES ITS ROWS. The alternative is an index that answers
+    with text nobody can open any more, which is worse than not answering.
+    """
+    con = _index_connect(db_path)
+    try:
+        live = index_sources(session_file)
+        seen = {}
+        for path in live:
+            try:
+                seen[path] = os.path.getmtime(path)
+            except OSError:
+                pass
+        known = dict(con.execute("SELECT path, mtime FROM files").fetchall())
+        for gone in set(known) - set(seen):
+            con.execute("DELETE FROM messages WHERE path = ?", (gone,))
+            con.execute("DELETE FROM files WHERE path = ?", (gone,))
+        files = rows = 0
+        for path, mtime in seen.items():
+            if known.get(path) == mtime:
+                continue
+            con.execute("DELETE FROM messages WHERE path = ?", (path,))
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except Exception:               # noqa: BLE001 - unreadable is not indexed
+                con.execute("DELETE FROM files WHERE path = ?", (path,))
+                continue
+            title = (data.get("crow_title") or os.path.basename(path)).strip()
+            for i, message in enumerate(data.get("messages") or []):
+                body = (message.get("content") or "").strip()
+                role = message.get("role") or ""
+                # The system message is the HEAD, not something anybody said.
+                # Indexing it would answer every search with the same prompt.
+                if not body or role == "system":
+                    continue
+                con.execute("INSERT INTO messages (body, path, title, role, pos) "
+                            "VALUES (?, ?, ?, ?, ?)", (body, path, title, role, i))
+                rows += 1
+            con.execute("INSERT OR REPLACE INTO files (path, mtime) VALUES (?, ?)",
+                        (path, mtime))
+            files += 1
+        con.commit()
+        return files, rows
+    finally:
+        con.close()
+
+
+def _match_expression(query: str) -> str:
+    """A user's words as an FTS5 MATCH expression, with its syntax defused.
+
+    EVERY TOKEN IS QUOTED. FTS5's query language treats `-`, `*`, `:`, `(` and
+    `"` as operators, so a perfectly ordinary question -- "what did we say about
+    --slot-save-path?" -- is a syntax error rather than a search. Quoting each
+    token makes it a phrase, and several phrases side by side are an implicit
+    AND, which is what someone typing three words means.
+    """
+    tokens = [t for t in re.split(r"\s+", query.strip()) if t]
+    return " ".join('"%s"' % t.replace('"', '""') for t in tokens)
+
+
+def search_sessions(query: str, limit: int = SEARCH_HITS,
+                    db_path: str | None = None,
+                    session_file: str | None = None) -> "list[dict]":
+    """Messages matching `query`, newest file first. Actual text, never a summary."""
+    if not fts5_available():
+        return []
+    sync_index(db_path, session_file)
+    expression = _match_expression(query)
+    if not expression:
+        return []
+    con = _index_connect(db_path)
+    try:
+        rows = con.execute(
+            "SELECT title, role, body, path FROM messages "
+            "WHERE messages MATCH ? ORDER BY rank LIMIT ?",
+            (expression, int(limit))).fetchall()
+    except Exception:                       # noqa: BLE001 - a bad query is no hits
+        return []
+    finally:
+        con.close()
+    return [{"chat": t, "role": r, "text": b, "path": p} for t, r, b, p in rows]
+
+
+def tool_session_search(query: str, limit: int | None = None) -> str:
+    """Search every past conversation. Returns the messages, not a summary.
+
+    NO SUMMARISATION AND NO TRUNCATION OF THE ANSWER SET, because the moment a
+    search starts summarising it is a second model standing between the question
+    and the transcript -- and the transcript is the only thing here that cannot
+    be wrong. Individual messages are clipped, which is a length decision; what
+    is returned is what was said.
+    """
+    if not fts5_available():
+        return ("error: session_search is unavailable -- this Python's SQLite was "
+                "built without FTS5. Nothing was searched.")
+    hits = search_sessions(query, limit or SEARCH_HITS)
+    if not hits:
+        return "no past message matches %r." % query
+    out = ["%d match(es) for %r:" % (len(hits), query)]
+    for hit in hits:
+        text = hit["text"]
+        if len(text) > SEARCH_SNIPPET:
+            text = text[:SEARCH_SNIPPET] + " [...]"
+        out.append("\n-- %s (%s) --\n%s" % (hit["chat"], hit["role"], text))
+    return "\n".join(out)
+
+
 # WHAT THE BOUNDARY REFUSED THIS TURN. It is a REPORT, not a second boundary,
 # and #98 is the turn it exists to make visible: `write_file` was refused, and
 # the model reached the same path with `run_command` one call later -- unprompted,
@@ -4262,6 +4989,8 @@ TOOL_IMPL = {
     "run_command": tool_run_command,
     "web_search": tool_web_search,
     "fetch_url": tool_fetch_url,
+    "memory": tool_memory,
+    "session_search": tool_session_search,
 }
 
 
@@ -4289,6 +5018,20 @@ TOOL_CLASS = {
     # Both halves matter -- what leaves, and what arrives.
     "web_search": "network",
     "fetch_url": "network",
+    # #120. `memory` IS NOT `writing`, and the difference is whose file it is.
+    # The `writing` class exists because `write_file` and `edit_file` reach the
+    # user's work -- source, notes, anything a wrong path could destroy. This one
+    # reaches exactly two files that belong to the client itself, both bounded,
+    # both plain text, both readable with an editor. Classing it as `writing`
+    # would make `manual` stop and ask before every saved note, which IS the
+    # write-approval gate -- and that gate was offered on 2026-08-21 and declined.
+    # Naming the class `memory` keeps the classification true without any level
+    # acting on it, the way `network` already does.
+    "memory": "memory",
+    # #123. `reading`, and it is the plainest case in the table: it opens files
+    # this client wrote, on this machine, and returns what they say. No level
+    # asks before a read, which is the rule that was already argued out above.
+    "session_search": "reading",
 }
 
 # Which classes stop and ask, per level. A class not named here runs.
@@ -4455,7 +5198,12 @@ _SEEN: dict[tuple, str] = {}
 # That last line is what keeps the 2026-08-09 loop closed: it happened on
 # `read_file` for a path that did not exist, and a path does not start existing
 # because it was asked for twice.
-NEVER_CACHED = frozenset({"run_command"})
+# #120 PUTS `memory` HERE, and it is the same reason `run_command` is: the
+# result is not a function of the arguments. `add` the same entry twice must be
+# able to answer "no duplicate" the second time, and `remove` then `add` of one
+# entry are two identical calls with two different correct answers. Answering
+# the second from the first would turn a correction into a silent no-op.
+NEVER_CACHED = frozenset({"run_command", "memory"})
 READ_GATED = frozenset({"write_file", "edit_file"})
 
 
@@ -4533,6 +5281,96 @@ def run_tool(name: str, arguments: str) -> str:
         return f"error: wrong arguments for {name}: {exc}"
     except Exception as exc:  # a tool must never take the turn down with it
         return f"error: {name} failed: {exc!r}"
+
+
+# ---------------------------------------------------------------- #122 -----
+# THE BACKGROUND REVIEW. After a turn is finished and shown, the model is asked
+# once whether anything in it is worth keeping. Curation is the hard half of a
+# bounded memory, and a model that only saves when it happens to think of it
+# mid-answer saves almost nothing.
+#
+# IT RIDES THE PREFIX IT WAS JUST GIVEN. llama-server reuses a prompt by common
+# token prefix, so replaying the finished conversation plus one short question
+# is a cache hit up to the question -- and the NEXT user turn matches that same
+# conversation again, because the review sits behind it. Cost is therefore one
+# short prefill plus whatever the review decides to write, not a second pass.
+#
+# WHICH IS A DERIVATION FROM `server-context.cpp`, NOT A MEASUREMENT. On a
+# single slot (`-np 1`) the review holds the server while it runs, and nobody has
+# yet timed how long that is or whether a fast typist waits behind it. The
+# measurement is owed before this ships and is written down in #122.
+#
+# THE TOOL LIST IS SENT WHOLE, NOT NARROWED TO `memory`. Narrowing it looks
+# obviously right and would throw away the entire saving above: `tools` is
+# rendered into the HEAD of the prompt, so a shorter list is a different byte 0
+# and the whole conversation would be re-read. The restriction is stated in the
+# question instead, and enforced here by ignoring every call that is not
+# `memory`.
+MEMORY_REVIEW_PROMPT = (
+    "[system] The exchange above is finished and has already been shown to the "
+    "user; nothing you write now reaches them. Decide whether anything in it is "
+    "worth remembering at the START of a future session, and if so call the "
+    "`memory` tool -- once per fact, as few times as possible. Save durable "
+    "things: how this project is laid out, a convention, a command that works, a "
+    "correction the user made, a preference they stated, a quirk you had to work "
+    "around. Do NOT save the question, the answer, anything a single read would "
+    "tell you again, or anything true only for this one turn. If nothing "
+    "qualifies -- which is the normal case -- call nothing and reply with the "
+    "single word NOTHING. Call no other tool."
+)
+
+
+def review_turn(conversation: "Conversation", *, base_url: str, model: str,
+                api_key: str, temperature: float, top_p: float, min_p: float,
+                top_k: int | None = None, reasoning_effort: str | None = None,
+                timeout: float = 180.0) -> "list[str]":
+    """Ask once whether this turn left anything worth keeping. Returns what was saved.
+
+    NOTHING IT DOES REACHES THE CONVERSATION. The question and the answer are
+    built into a throwaway list and dropped; appending them would put the review
+    into the history, which would move the head of every later turn and cost the
+    prefix this whole design protects.
+
+    IT NEVER RAISES. A review that takes a finished turn down with it would turn
+    a working answer into an error after the user has already read it. Every
+    failure here is silence.
+    """
+    if len(conversation) < 2:
+        return []
+    messages = conversation.payload() + [{"role": "user",
+                                          "content": MEMORY_REVIEW_PROMPT}]
+    body = {"model": model, "messages": messages, "tools": TOOLS, "stream": False,
+            "temperature": temperature, "top_p": top_p, "min_p": min_p}
+    if top_k is not None:
+        body["top_k"] = top_k
+    if reasoning_effort:
+        body["chat_template_kwargs"] = {"reasoning_effort": reasoning_effort}
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    try:
+        request = urllib.request.Request(
+            url, data=json.dumps(body).encode("utf-8"), method="POST",
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {api_key}"})
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            answer = json.loads(resp.read().decode("utf-8") or "{}")
+        calls = (answer.get("choices") or [{}])[0].get("message", {}).get("tool_calls") or []
+    except Exception:                       # noqa: BLE001 - see the docstring
+        return []
+    saved = []
+    for call in calls:
+        function = call.get("function") or {}
+        # Anything but `memory` is a model that did not read the question. It is
+        # dropped rather than run: the user is not at the keyboard for this, so
+        # a write or a shell command here would have nobody to refuse it.
+        if function.get("name") != "memory":
+            continue
+        try:
+            result = json.loads(run_tool("memory", function.get("arguments") or "{}"))
+        except Exception:                   # noqa: BLE001
+            continue
+        if result.get("success") and result.get("action"):
+            saved.append("%s %s" % (result["action"], result.get("target", "memory")))
+    return saved
 
 
 class TurnEvents:
@@ -4623,6 +5461,20 @@ class TurnEvents:
     def rollover_refused(self) -> None:
         """Twice in one turn. The question itself does not fit."""
 
+    def memory_saved(self, what: "list[str]") -> None:
+        """#122. The background review saved something, and this is how anyone knows.
+
+        NOT OPTIONAL AND NOT SWITCHABLE. There is no write-approval gate here --
+        robin declined it on 2026-08-21 -- so this line is the ONLY moment a
+        person finds out that something entered the head of their next session.
+        A silent learner is a system nobody can correct.
+
+        FIRED ONLY WHEN SOMETHING WAS WRITTEN. The review runs after every turn
+        and saves after almost none of them; a line saying "nothing to remember"
+        after each answer would be noise that teaches the reader to skip the one
+        line that matters.
+        """
+
 
 class TurnResult:
     """What one user turn left behind, for the caller that owns the session.
@@ -4689,6 +5541,13 @@ def run_turn(
     # half-wired client.
     mode: str = DEFAULT_MODE,
     approve: "Callable[[str, str], str] | None" = None,
+    # #122. OFF UNLESS ASKED FOR, and that default is the decision rather than
+    # caution. The review is a SECOND REQUEST to the endpoint, fired after the
+    # answer the caller asked for is already finished -- a side effect on the
+    # network, and a function does not acquire one of those by default. Both
+    # surfaces pass True; a probe, a batch run or a test that only wanted a turn
+    # gets exactly the turn it asked for, at the speed it used to run at.
+    review: bool = False,
     events: "TurnEvents | None" = None,
 ) -> TurnResult:
     """Run one USER turn to its end: however many tool rounds it takes.
@@ -4952,6 +5811,22 @@ def run_turn(
                 context_tokens = 0
                 rolled = True
 
+    # #122. AFTER THE ANSWER IS IN THE CONVERSATION AND BEFORE THE CALLER GETS
+    # ITS RESULT, so the review sees the finished exchange and the next turn
+    # matches the same prefix behind it.
+    #
+    # NOT AFTER A TURN THAT STOPPED. An error, an interrupt or a refused second
+    # rollover leaves an exchange that is not what the user asked for, and the
+    # last thing a broken turn should do is decide what to remember about it.
+    # `execute_tools=False` is the other exclusion: that mode runs nothing, and
+    # a review is something running.
+    if review and not stopped and execute_tools:
+        saved = review_turn(conversation, base_url=base_url, model=model,
+                            api_key=api_key, temperature=temperature, top_p=top_p,
+                            min_p=min_p, top_k=top_k,
+                            reasoning_effort=reasoning_effort)
+        if saved and events is not None:
+            events.memory_saved(saved)
     return TurnResult(cost=cost, context_tokens=context_tokens,
                       promised_warm=promised_warm, rolled=rolled,
                       stopped=stopped, reported=reported)

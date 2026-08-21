@@ -3484,5 +3484,128 @@ class TheRailDrawsTheGroupsTests(unittest.TestCase):
         self.assertIn('"really discard?"', self.source)
 
 
+class TheMemoryLineTests(unittest.TestCase):
+    """#122: the one sign a person gets that something was remembered.
+
+    THERE IS NO APPROVAL GATE IN FRONT OF IT -- robin declined it on 2026-08-21
+    -- so this line is not decoration. It is the whole of the user's control
+    over an automatic writer, which is why several of these cases are about it
+    being impossible to miss and impossible to switch off.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+
+    def test_the_event_reaches_the_page_as_its_own_kind(self):
+        """Not a `note`. A note is grey because what notes say may be skimmed
+        past, and this one may not be."""
+        seen = []
+        crow_gui.Turn(seen.append).memory_saved(["add memory", "add user"])
+        self.assertEqual([m["k"] for m in seen], ["memory"])
+        self.assertEqual(seen[0]["n"], 2)
+
+    def test_the_line_is_never_a_turn(self):
+        """NEGATIVE PROBE, and the expensive one: a line that slipped into the
+        history would move the head of the next prompt and cost the full
+        prefill the whole feature is built to avoid. `Turn` only queues."""
+        seen = []
+        turn = crow_gui.Turn(seen.append)
+        turn.memory_saved(["add memory"])
+        self.assertFalse(hasattr(turn, "_conversation"))
+        self.assertTrue(all("role" not in m for m in seen))
+
+    def test_the_page_draws_it_with_a_glow_that_settles(self):
+        """`forwards` on both animations is the trick. A glow that kept pulsing
+        would be a thing to switch off, and this line may not be switchable."""
+        self.assertIn('case "memory": this.memory(e.t,e.n); break;', self.source)
+        self.assertIn(".memnote{", self.css)
+        self.assertIn("@keyframes memsweep", self.css)
+        self.assertIn("@keyframes memglow", self.css)
+        self.assertEqual(self.css.count("1 forwards"), 2)
+
+    def test_a_reader_who_asked_for_no_motion_still_sees_it(self):
+        """NEGATIVE PROBE for the animation: with motion off the row must keep
+        its tint. Replacing the sweep with nothing would hide the only notice
+        there is from exactly the people who asked for fewer moving things."""
+        block = self.css[self.css.index("prefers-reduced-motion"):]
+        block = block[:block.index("}}") + 2]
+        self.assertIn("animation:none", block)
+        self.assertIn("var(--accent)", block)
+
+    def test_the_line_cannot_be_switched_off(self):
+        """`--no-review` stops the WRITING; there is no flag that keeps the
+        writing and hides the notice. A silent learner is a system nobody can
+        correct."""
+        self.assertIn("--no-review", self.source)
+        for hidden in ("--no-memory-notice", "memory_notifications", "quiet_memory"):
+            self.assertNotIn(hidden, self.source)
+
+
+class TheMemoryPinWiringTests(unittest.TestCase):
+    """#121 in the window: the pin is taken AFTER the boundary, never before.
+
+    ALL THREE DOORS ARE CHECKED BY POSITION rather than by running them,
+    because the failure is an ordering one and it is invisible at runtime: a pin
+    taken too early is a perfectly valid head -- the template's -- and it is
+    wrong for exactly the chats that have a project.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def _after(self, bind: str, pin: str) -> bool:
+        return self.source.index(pin) > self.source.index(bind)
+
+    def test_every_pin_sits_below_the_line_that_binds(self):
+        """The launch, and opening an archived chat. Both bind the chat's own
+        directory first; a pin above either would be the template's memory.
+
+        `rindex` FOR THE LAUNCH, because it pins in two branches: the one that
+        restored a chat, below the bind, and the early return where there was
+        nothing to restore -- which never binds at all, since `ready()` has
+        already put the template up and there is no chat to correct it with.
+        """
+        self.assertGreater(self.source.rindex("self._pin_memory(SESSION_FILE)"),
+                           self.source.index("self._adopt_chat_root(SESSION_FILE)"))
+        self.assertTrue(self._after("self._adopt_chat_root(path)",
+                                    "self._pin_memory(path)"))
+        self.assertEqual(self.source.count("self._pin_memory("), 4,
+                         "a fourth caller pins somewhere this case has not read")
+
+    def test_a_new_chat_pins_after_it_is_made_rootless(self):
+        """`reset()` makes a new chat rootless on purpose (#119). The pin has to
+        happen after that, or a new chat would inherit the last one's project."""
+        self.assertTrue(self._after("self._adopt_chat_root(None, fresh=True)",
+                                    "self._pin_memory(None)"))
+
+    def test_the_pin_is_read_before_the_payload_at_both_readers(self):
+        """`load_session` needs the COMPOSED system prompt to decide whether the
+        saved KV still fits, and that cannot be read out of messages nobody has
+        opened yet."""
+        self.assertEqual(self.source.count("crow_core.system_with_memory("), 2)
+        # THE HELPER IS THE THIRD READER and it is the one that must not be
+        # duplicated: `_pin_memory` is the single place that decides between a
+        # stored pin and a fresh block. Two such decisions is two answers.
+        self.assertEqual(self.source.count("crow_core.session_memory("), 3)
+        self.assertEqual(self.source.count("def _pin_memory"), 1)
+
+    def test_binding_a_folder_announces_the_prefill_before_it_is_paid(self):
+        """The same shape `REASONING_COST_NOTE` already has. A cost said
+        afterwards is not a warning, it is an excuse."""
+        self.assertIn("crow_core.MEMORY_COST_NOTE", self.source)
+        self.assertIn("if self._conversation.repin_memory(", self.source)
+
+    def test_the_archive_folder_is_named_once(self):
+        """#123 walks the same folder the rail is drawn from. A second
+        `\"archiv\"` typed in the core would be a chat that is in the rail and
+        not in the index, the first time either spelling changed."""
+        self.assertIn("ARCHIVE_DIR = crow_core.ARCHIVE_DIR", self.source)
+        # The ASSIGNMENT, not the word: the sentence above says "archiv" while
+        # explaining why nothing here may define it, and a case that cannot tell
+        # a comment from a declaration would forbid its own reason.
+        self.assertNotIn('ARCHIVE_DIR = "archiv"', self.source)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

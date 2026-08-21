@@ -972,6 +972,17 @@ class TerminalTurnEvents(TurnEvents):
         print(f"{DIM}[the window filled again inside this turn -- stopping here."
               f" Ask for a narrower slice, or /reset]{RESET}\n", file=self._out)
 
+    def memory_saved(self, what: list) -> None:
+        """#122. The terminal's half of the line the window draws with a glow.
+
+        THE SAME EVENT, SAID IN THIS ROOM'S VOICE. A terminal has no gradient;
+        what it has is the accent it already uses for the model name, and one
+        line is enough. Without a write-approval gate this is the only notice
+        that something was written, so it is printed, not dimmed away.
+        """
+        print(f"{CROW_ACCENT}[Gedächtnis aktualisiert: {len(what or [])}]{RESET}\n",
+              file=self._out)
+
 
 HELP = """commands:
   /help          this list
@@ -1493,6 +1504,76 @@ def sampling_for_run(args: argparse.Namespace, model: str | None) -> dict | None
         model, {name: getattr(args, name) for name in args.sampling_given})
 
 
+def resume_into(conversation: "crow_core.Conversation", args: argparse.Namespace,
+                loaded: str | None) -> "tuple[int, bool] | None":
+    """Restore what this run continues, pin its memory head, and say which.
+
+    Returns `(context_tokens, promised_warm)`, or None when the run must stop.
+    Both stopping cases have already printed their own two lines; the caller
+    resets the terminal and leaves with 2.
+
+    IT CAME OUT OF `repl()` RATHER THAN GROWING INSIDE IT. The guard in
+    `test_repl_is_one_job_again` is a ceiling on that function for a reason --
+    the loop used to live there and everything else with it -- and restoring a
+    session is a job of its own: it reads a file, decides whether a cache still
+    fits, and reports which of two cold reasons applies.
+
+    THE PIN IS READ BEFORE THE PAYLOAD, and it has to be. The fingerprint that
+    decides whether the saved KV still fits is taken over the COMPOSED system
+    prompt, and that composition cannot be read out of messages nobody has
+    opened yet. A file with no pin composes to exactly what every release up to
+    here sent, so no existing cache is disturbed by this -- only by the tools
+    that grew in the same release, and only once.
+    """
+    wanted = getattr(args, "resume", None)
+    if getattr(args, "session", True) or wanted:
+        source = resume_path(wanted) if wanted else None
+        pinned = crow_core.session_memory(source)
+        try:
+            restored = load_session(args.base_url,
+                                    crow_core.system_with_memory(args.system, pinned),
+                                    path=source, model=loaded)
+        except SessionFormatError as exc:
+            # REFUSING TO START IS THE POINT, and starting anyway would be the
+            # quiet version of the same loss: this run would build a session,
+            # leave() would refuse to write it over a file it cannot read, and
+            # the whole conversation would go at exit instead of at the start.
+            # The two lines say what is there and what the two ways out are.
+            print(f"crow: {exc}", file=sys.stderr)
+            print("crow: nothing was read and nothing was written. Move that file"
+                  " aside, or start with --no-session to leave it where it is.",
+                  file=sys.stderr)
+            return None
+        if restored:
+            messages, context_tokens, kv = restored
+            # A chat that never pinned is pinned NOW, from the folder it stands
+            # in -- `adopt_root` ran before this call, so that folder is already
+            # decided. Such a resume is cold either way in this release.
+            conversation.pin_memory(pinned if pinned is not None
+                                    else crow_core.memory_block())
+            conversation.restore(messages)
+            # WHICH cold line, not just that it is cold (#113). `loaded` is what
+            # /props answered, so the two names being compared are the live
+            # server's and the one the file was written under.
+            how = ("cache warm" if kv
+                   else crow_core.resume_cold_note(source, loaded))
+            where = f" from {os.path.basename(source)}" if source else ""
+            print(f"{DIM}resumed{where}: {len(messages)} messages, {how}{RESET}\n")
+            return context_tokens, kv
+        if wanted:
+            # Named explicitly and not there: silence would look like an empty
+            # archive rather than a wrong name, and the user would go looking in
+            # the wrong place.
+            print(f"crow: no session at {source}", file=sys.stderr)
+            return None
+    # EVERY OTHER WAY IN LANDS HERE: a fresh start, --no-session, a session file
+    # with nothing in it. `pin_memory` refuses a second call, so the guard is
+    # what keeps this from reaching past a pin the branch above already set.
+    if conversation.memory is None:
+        conversation.pin_memory(crow_core.memory_block())
+    return 0, False
+
+
 def repl(args: argparse.Namespace) -> int:
     enable_ansi()
     install_interrupt_handler()
@@ -1571,42 +1652,11 @@ def repl(args: argparse.Namespace) -> int:
     mode = getattr(args, "mode", crow_core.DEFAULT_MODE)   # #88, see switch_mode()
 
     # Before the first turn, so no prefix exists yet to break.
-    wanted = getattr(args, "resume", None)
-    if getattr(args, "session", True) or wanted:
-        source = resume_path(wanted) if wanted else None
-        try:
-            restored = load_session(args.base_url, args.system, path=source,
-                                    model=loaded)
-        except SessionFormatError as exc:
-            # REFUSING TO START IS THE POINT, and starting anyway would be the
-            # quiet version of the same loss: this run would build a session,
-            # leave() would refuse to write it over a file it cannot read, and
-            # the whole conversation would go at exit instead of at the start.
-            # The two lines say what is there and what the two ways out are.
-            print(f"crow: {exc}", file=sys.stderr)
-            print("crow: nothing was read and nothing was written. Move that file"
-                  " aside, or start with --no-session to leave it where it is.",
-                  file=sys.stderr)
-            reset_background()
-            return 2
-        if restored:
-            messages, context_tokens, kv = restored
-            conversation.restore(messages)
-            promised_warm = kv
-            # WHICH cold line, not just that it is cold (#113). `loaded` is what
-            # /props answered a few lines above, so the two names being compared
-            # are the live server's and the one the file was written under.
-            how = ("cache warm" if kv
-                   else crow_core.resume_cold_note(source, loaded))
-            where = f" from {os.path.basename(source)}" if source else ""
-            print(f"{DIM}resumed{where}: {len(messages)} messages, {how}{RESET}\n")
-        elif wanted:
-            # Named explicitly and not there: silence would look like an empty
-            # archive rather than a wrong name, and the user would go looking in
-            # the wrong place.
-            print(f"crow: no session at {source}", file=sys.stderr)
-            reset_background()
-            return 2
+    resumed = resume_into(conversation, args, loaded)
+    if resumed is None:
+        reset_background()
+        return 2
+    context_tokens, promised_warm = resumed
 
     def leave() -> int:
         if getattr(args, "session", True):
@@ -1693,6 +1743,10 @@ def repl(args: argparse.Namespace) -> int:
             execute_tools=getattr(args, "run_tools", True),
             mode=mode,
             approve=ask_approval,
+            # #122. The terminal opts in, because the terminal is a session a
+            # person is having -- which is the only place a review has
+            # anything worth reviewing.
+            review=getattr(args, "review", True),
             events=TerminalTurnEvents(rounds=args.rounds, show_reasoning=show_reasoning),
         )
         # The three the loop wrote through while it was a block of this
@@ -1940,6 +1994,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="do not ask GitHub whether a newer release exists")
     parser.add_argument("--no-session", dest="session", action="store_false",
                         help="do not resume the last session, and do not save this one")
+    # #122. THE REVIEW IS THE ONLY THING HERE THAT WRITES WITHOUT BEING ASKED,
+    # so it gets the one switch that turns it off. Default on: a memory that
+    # only fills when somebody remembers to fill it stays empty.
+    parser.add_argument("--no-review", dest="review", action="store_false",
+                        help="do not let the model save memories after a turn")
     # --resume, not --session <file>: --no-session already owns dest="session"
     # as a flag, and one name that is both a switch and a path is how a parser
     # starts lying about what it accepts.
