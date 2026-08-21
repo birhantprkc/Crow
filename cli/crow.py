@@ -180,7 +180,7 @@ from crow_core import (  # noqa: F401 -- re-exported for the CLI and its suite
 # one line the README documents. tools/pack-release.ps1:254 reads the same
 # pattern to stamp the package, and tools/check_operating_point.py holds it
 # against manifests/operating-point.json.
-VERSION = "0.5.1"
+VERSION = "1.0.0"
 
 # The core carries no version of its own -- the owner of the literal hands it
 # over. Three places in there need one: the session file's `version` field, the

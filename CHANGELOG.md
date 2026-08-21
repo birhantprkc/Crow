@@ -6,6 +6,122 @@ carries the conditions it was taken under, or it says that it is unmeasured.
 This file records the **released** history. The full reasoning behind each change
 is in its commit message and on its issue; this is the short version.
 
+## 1.0.0 — 2026-08-21
+
+A one rather than a minor. The client gained a memory, its own procedures, a search across every
+past conversation, and a window rebuilt from the status bar up — and it stopped speaking two
+languages. Nothing here is a refinement of 0.5.1; a user opening this build meets a different
+program.
+
+**Crow remembers, and the head does not move while a chat lives (#119).** Two stores, plain text,
+editable by hand: `<root>\.crow\MEMORY.md` at 4,000 characters beside `root.json`, and
+`%LOCALAPPDATA%\Crow\USER.md` at 1,500 for the profile. Both are anchored to `MAX_TOOL_BYTES` at
+four characters per token — memory has to stay cheaper than letting the model read the file, and
+when it stops being cheaper the answer is not a bigger cap.
+
+The rendered block is **pinned into the chat's own JSON** under `memory` and replayed word for word
+on open, whatever the files say by then. llama-server reuses a prompt by common token prefix and
+Crow holds its KV cache on disk; a head that moves mid-session throws that cache away. The price is
+named rather than hidden: a chat left open for weeks learns nothing new, and new memory takes effect
+from the next chat.
+
+**An empty store costs byte 0 nothing.** No frame, no 0% line, nothing in the prompt until an entry
+exists. A chat with no working directory bound says so instead of showing an empty frame — an empty
+frame reads as "nothing learned", which is the more dangerous of the two.
+
+Writes never truncate. Over the cap, the write **fails** and the error carries both numbers and the
+current entries; from 80% the head tells the model to consolidate. A store that silently drops
+something on overflow eventually drops the wrong thing and nobody learns when.
+
+**The review runs three times per window, behind the turn (#119).** `MEMORY_REVIEW_AT` is
+`(0.20, 0.50, 0.75)` of the context — shares, not turn counts, because one turn here can cost 20k
+tokens; measured live, fourteen rounds stood at 25.2k of 200k. Each mark fires once and travels with
+the chat. It sits **behind the visible end of the turn**, never inside it: it ran inside `run_turn`
+for one afternoon and was caught live — the answer stood complete, the cost line never came, and the
+composer still said `Stop`. `--no-review` switches it off entirely.
+
+Every saved entry is announced the moment it is written, and that line **cannot be switched off**.
+Without an approval gate it is the only thing a person sees of a system writing into its own prompt.
+
+**Crow keeps its own procedures.** Skills live globally at
+`%LOCALAPPDATA%\Crow\skills\<name>\SKILL.md`, plain text with front matter. Memory is what is
+**true**; a skill is what is **to do** — and the two invert: memory puts its whole content in the
+prompt and has no `read` action, a skill puts only name and description there and has one. The cap
+sits on the **list**, not the entry: the failure case is twenty valid skills, not one long one, and
+the list says how many did not fit rather than truncating in silence. `enabled` lives in the file,
+so the toggle in the settings sheet and editing by hand are the same act. One skill ships:
+`skill-creator`, seeded once if the directory is missing.
+
+**Every past conversation is searchable.** `session_search` runs an FTS5 index at
+`%LOCALAPPDATA%\Crow\index.db` over the live session and the archive. The index is **derived and
+disposable** — delete it and the next search rebuilds it with the same hits; truth stays in the chat
+JSON. Every query word is quoted as a phrase, so `--slot-save-path` is a search and not a syntax
+error. Where FTS5 is missing the tool stays **declared** and says it cannot work: dropping it from
+the schema would make `TOOLS`, and therefore every stored cache, depend on how someone's Python was
+compiled.
+
+**The window was rebuilt.** The status bar is gone and the chat lies on the panel; the rules between
+regions went with it. A settings sheet with six tabs — Appearance, Skills, Server, MCPs, Other
+providers, About. Three themes. A rounded top-left corner, a taskbar icon, and a wireframe bird over
+an empty chat. The rail groups chats by working directory, so a project is a root folder rather than
+a list someone maintains. A new chat is **rootless** and gains its memory the moment it is moved into
+a project — and the cost of that prefill is announced before it is paid.
+
+**The window speaks one language, and it is English.** Fourteen German strings were still in it.
+There is no locale switch and no translation layer: `locale`, `gettext` and `getdefaultlocale`
+appear zero times in all three modules. A language nobody can set is the only language, and half a
+translation is worse than either whole one.
+
+**The thinking level belongs to the chat (#117).** The menu draws renderings rather than names, is
+capped, carries its contrast with the level, and no longer names a step it does not offer. The
+thinking share reported is the turn's, not the last round's.
+
+**Bringing a server up is its own job.** A client must not guess a port. Starting the server is a
+separate tool with a separate responsibility, and the client finds what is already running.
+
+**The README is Qwen's.** Rewritten against the shipped operating point with no DeepSeek in it; the
+previous one is archived whole under `docs/README-v0.5.1-qwen.md` with its image paths repaired —
+an archive whose pictures resolve to nothing is not an archive.
+
+**Measured, and not measured.** The operating point is unchanged from 0.5.1 and was not
+re-measured: `Qwen3.8-27B-UD-Q4_K_XL.gguf` at `-c 200000` on one slot. `TOOLS` grew from 9 tools and
+4,273 characters to 12 and 6,209, so **every session on disk resumes cold exactly once** after this
+update — unavoidable, and stated here rather than sprung on the first turn. Suites at release,
+on Python 3.13.3: `cli/test_crow.py` 415/415, `cli/test_crow_core.py` 248/248,
+`cli/test_crow_gui.py` 262/262, `check_shared_core` 60/60, `check_operating_point` 6/6,
+`install.ps1 -Selftest` 80/80. What the background
+review costs on a single slot is **unmeasured** and closed that way (#122): how long it holds the
+slot, whether the next user turn queues behind it, and whether the prefix hit on the next turn is the
+full history are all without a number. The reasoning came from `get_common_prefix` in
+`tools/server/server-context.cpp`, which is a reading of the source and not a run.
+
+## 0.5.1 — 2026-08-15
+
+Written down after the fact: this release was cut and tagged without an entry here, and a changelog
+that skips a shipped version is worse than one that admits the gap late.
+
+**The stamp writes what it knows and never erases out of silence.** `_stamp` carried an
+`else: data.pop("crow_title", None)`: a stamp arriving without a name deleted a title that was
+already there. A write path that removes on absence turns every caller that does not know a field
+into a caller that destroys it.
+
+**A suite that answers differently in a console is not a gate (#102).** The three suites returned
+662 of 671 in an interactive PowerShell console and 671 of 671 through a pipe, minutes apart, with
+no line of code between the runs. `crow_core._TTY` is decided once at import from
+`sys.stdout.isatty()`, and nine cases were comparing bare strings against escape sequences. The
+colour gate itself was right and is unchanged — a redirected transcript has to stay greppable. What
+was wrong is that the cases **inherited** that decision from whoever ran them instead of pinning it.
+
+Pinning alone would have made "switch the colour off everywhere" pass and ship a grey client
+invisibly, so the opposite direction became a case of its own: a terminal must **get** the
+sequences, a pipe must get none. With `_c()` forced to return `""`, that one case goes red and the
+other 671 stay green — which is the measurement worth keeping.
+
+Suites on Python 3.13.3, run both ways with `isatty` forced: 672 of 672 as a console, 672 of 672
+through a pipe. `check_shared_core` 51/51, `check_gui_prereqs` 3/3, `check_operating_point` 4/4.
+No live run, and none was due: `cli/crow_core.py` and `cli/crow.py` were byte-identical to their
+previous state.
+
 ## 0.5.0 — 2026-08-15
 
 A minor rather than a patch, because the client refuses less and remembers more, and both are
