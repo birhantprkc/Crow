@@ -3655,12 +3655,34 @@ class TheRibbonAndTheChatRunIntoOneTests(unittest.TestCase):
         self.assertIn('class="sw" id="toolsw"', server)
         self.assertIn('$("#toolsw").onclick=()=>crow.toggleTools();', self.source)
 
-    def test_the_new_category_is_reachable(self):
-        """A section nobody can click is a section that does not exist. The
-        order in the JS list is positional -- a fourth button with a three-name
-        list would open the wrong pane."""
-        self.assertIn("crow.settingsCat('server')", self.source)
-        self.assertIn('["look","skills","server","about"]', self.source)
+    def test_every_category_has_a_button_a_pane_and_the_same_key(self):
+        """A section nobody can click does not exist; a button whose pane is
+        missing opens nothing. #126 took the KEY off a positional array and put
+        it on the button, so this compares the two sets instead of an order:
+        a fifth button with a four-name list used to mark the wrong tab, and the
+        fault read like a CSS problem."""
+        import re
+
+        nav = self.source[self.source.index('<nav id="scats">'):]
+        nav = nav[:nav.index("</nav>")]
+        buttons = set(re.findall(r'<button[^>]*data-cat="([a-z]+)"', nav))
+        panes = set(re.findall(r'<section data-cat="([a-z]+)"', self.source))
+        self.assertEqual(buttons, panes)
+        self.assertEqual(buttons, {"look", "skills", "server", "mcp",
+                                   "providers", "about"})
+        self.assertIn("b.dataset.cat===name", self.source)
+        self.assertNotIn('["look","skills"', self.source,
+                         "the positional list is back")
+
+    def test_the_two_empty_ones_say_what_they_will_be(self):
+        """#126. "Coming soon" alone is a dead end. Each says what the section
+        is FOR, so the placeholder is a promise rather than a shrug -- and so
+        the next person to open it knows what belongs there."""
+        for key, word in (("mcp", "Tool servers"), ("providers", "OpenRouter")):
+            pane = self.source[self.source.index('<section data-cat="%s"' % key):]
+            pane = pane[:pane.index("</section>")]
+            self.assertIn("Coming soon.", pane, key)
+            self.assertIn(word, pane, key)
 
     def test_no_rule_is_drawn_between_the_ribbon_the_rail_and_the_chat(self):
         """NEGATIVE PROBE, and it is the whole of robin's second request: the

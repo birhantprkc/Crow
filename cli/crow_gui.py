@@ -1177,10 +1177,12 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
     </div>
     <div class="sbody">
       <nav id="scats">
-        <button class="on" onclick="crow.settingsCat('look')">Appearance</button>
-        <button onclick="crow.settingsCat('skills')">Skills</button>
-        <button onclick="crow.settingsCat('server')">Server</button>
-        <button onclick="crow.settingsCat('about')">About</button>
+        <button class="on" data-cat="look" onclick="crow.settingsCat('look')">Appearance</button>
+        <button data-cat="skills" onclick="crow.settingsCat('skills')">Skills</button>
+        <button data-cat="server" onclick="crow.settingsCat('server')">Server</button>
+        <button data-cat="mcp" onclick="crow.settingsCat('mcp')">MCPs</button>
+        <button data-cat="providers" onclick="crow.settingsCat('providers')">Other providers</button>
+        <button data-cat="about" onclick="crow.settingsCat('about')">About</button>
       </nav>
       <div id="spane">
         <section data-cat="look">
@@ -1213,6 +1215,19 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
           <p class="shint">What Crow has worked out and kept. Switching one off
              takes it out of the prompt; the file stays.</p>
           <div id="skilllist"></div>
+        </section>
+        <section data-cat="mcp" hidden>
+          <h3>MCPs</h3>
+          <p class="shint">Tool servers Crow could borrow tools from, the way it
+             borrows none today: everything it can call is built in.</p>
+          <p class="empty">Coming soon.</p>
+        </section>
+        <section data-cat="providers" hidden>
+          <h3>Other providers</h3>
+          <p class="shint">Keys for models that are not on this machine —
+             Anthropic, OpenAI, OpenRouter and the rest. Crow talks to one local
+             endpoint today; this is where a second, remote one would be named.</p>
+          <p class="empty">Coming soon.</p>
         </section>
         <section data-cat="about" hidden>
           <h3>About</h3>
@@ -1511,8 +1526,12 @@ const crow = {
   settingsBackdrop(e){ if(e.target.id==="settings") this.closeSettings(); },
 
   settingsCat(name){
+    // #126. THE KEY IS ON THE BUTTON, not in a list beside it. It used to be a
+    // positional array -- a fifth button with a four-name list would mark the
+    // wrong tab, and the fault would look like a CSS problem. The panes below
+    // were already keyed this way; now both halves read the same attribute.
     document.querySelectorAll("#scats button").forEach(
-      (b,i) => b.classList.toggle("on", ["look","skills","server","about"][i]===name));
+      b => b.classList.toggle("on", b.dataset.cat===name));
     document.querySelectorAll("#spane section").forEach(
       sec => sec.hidden = sec.dataset.cat!==name);
   },
