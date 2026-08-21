@@ -1408,6 +1408,61 @@ SESSION_REASONING_KEY = "reasoning"
 # still fits, and it cannot get it from the messages it has not opened yet.
 SESSION_MEMORY_KEY = "memory"
 
+# #122. WHEN THE REVIEW RUNS, and it is not after every turn -- that was the
+# first build and robin stopped it on 2026-08-21: "es soll ja auch nicht jede
+# neue Zeile ins MEMORY, sondern nur was wichtig ist pro Unterhaltung".
+#
+# TWICE PER WINDOW, at half and at three quarters of the context. Each share
+# fires at most once, so a conversation gets two reviews and never a third:
+# once when there is enough material to be worth reading, and once more before
+# the rollover at 0.9 takes the whole thing away.
+#
+# HERMES COUNTS TURNS INSTEAD -- every 10 user prompts, `_turns_since_memory`
+# against `_memory_nudge_interval`. That does not transfer. A turn here can cost
+# 20k tokens (`MAX_TOOL_BYTES` is ~4,000 tokens and `MAX_TOOL_ROUNDS` is 24), so
+# ten prompts say nothing about how much conversation exists; measured on a live
+# chat the same evening, fourteen rounds stood at 25.2k. The share measures the
+# material, and it bounds the cost at two reviews per window rather than at
+# however many prompts somebody types.
+MEMORY_REVIEW_AT = (0.50, 0.75)
+
+# The highest share this chat has already been reviewed at. Absent is 0.0 here
+# rather than a third state: "never reviewed" and "reviewed at 0%" are the same
+# fact, unlike the pin, where "never" and "empty" are two different claims.
+SESSION_REVIEWED_KEY = "reviewed"
+
+
+def session_reviewed(path: str | None = None) -> float:
+    """How far this chat has already been reviewed. 0.0 when it never was."""
+    path = path or SESSION_FILE
+    try:
+        with open(path, encoding="utf-8") as fh:
+            value = json.load(fh).get(SESSION_REVIEWED_KEY)
+    except Exception:                       # noqa: BLE001 - no file, no marks
+        return 0.0
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def review_due(context_tokens: int, n_ctx: int, reviewed: float) -> "float | None":
+    """The share this turn crossed and has not been reviewed at, or None.
+
+    ONE FIRING PER TURN, EVEN WHEN A TURN CROSSES BOTH. A single round can add
+    tens of thousands of tokens, so a chat can go from 0.4 to 0.8 in one answer;
+    reviewing twice back to back would ask the same question of the same
+    conversation and pay for it twice. The higher mark is taken, because a
+    review at 0.75 sees everything the one at 0.50 would have seen.
+
+    n_ctx OF ZERO MEANS "THE SERVER WOULD NOT SAY", NOT "NO ROOM LEFT" -- the
+    same reading `should_roll` gives it, and for the same reason: a division by
+    an unknown window would fire on the first turn of every session where /props
+    did not answer.
+    """
+    if n_ctx <= 0 or context_tokens <= 0:
+        return None
+    share = context_tokens / n_ctx
+    crossed = [t for t in MEMORY_REVIEW_AT if share >= t and t > reviewed]
+    return max(crossed) if crossed else None
+
 # Said BEFORE the level is changed, the way #115 announces the lost context
 # before the switch. The value lands in `chat_template_kwargs`, so it is
 # rendered into the HEAD of the prompt -- byte 0 moves and the whole cached
@@ -1707,6 +1762,10 @@ def save_session(conversation: "Conversation", base_url: str, context_tokens: in
                    # different fact from "nobody ever decided".
                    **({SESSION_MEMORY_KEY: conversation.memory}
                       if conversation.memory is not None else {}),
+                   # #122: written only once it has happened, so a file from
+                   # before this build reads as 0.0 -- which is true of it.
+                   **({SESSION_REVIEWED_KEY: conversation.reviewed}
+                      if conversation.reviewed else {}),
                    **({SESSION_REASONING_KEY: reasoning} if reasoning else {})},
                   fh, indent=1 if pretty else None)
 
@@ -2079,6 +2138,10 @@ class Conversation:
         # reason: every chat file written before this build lacks the key, and
         # reading that as "pinned to nothing" would be a claim nobody made.
         self._pinned: str | None = None
+        # #122. How far this chat has been reviewed, so the two marks fire once
+        # each. It rides on the conversation because that is what a chat IS to
+        # every caller here, and because `reset()` then clears it with the rest.
+        self._reviewed = 0.0
         self._system = system
         self._messages: list[dict[str, str]] = []
         if system:
@@ -2098,6 +2161,16 @@ class Conversation:
     def memory(self) -> str | None:
         """The pinned memory head, or None when this chat never pinned one."""
         return self._pinned
+
+    @property
+    def reviewed(self) -> float:
+        """The highest share the background review has already run at."""
+        return self._reviewed
+
+    def mark_reviewed(self, share: float) -> None:
+        """Record a review. Never moves backwards, so adopting a saved mark and
+        recording a fresh one are the same call and cannot undo each other."""
+        self._reviewed = max(self._reviewed, float(share or 0.0))
 
     def pin_memory(self, block: str | None) -> None:
         """Fix the memory head for the LIFE OF THIS CHAT. Once, before the first request.
@@ -2223,6 +2296,7 @@ class Conversation:
         # A conversation that never pinned is unaffected: `_system` is
         # `_base_system` for it, so this is the line every release up to here had.
         self._pinned = None
+        self._reviewed = 0.0
         self._system = self._base_system
         self._messages = []
         if self._system:
@@ -5284,10 +5358,11 @@ def run_tool(name: str, arguments: str) -> str:
 
 
 # ---------------------------------------------------------------- #122 -----
-# THE BACKGROUND REVIEW. After a turn is finished and shown, the model is asked
-# once whether anything in it is worth keeping. Curation is the hard half of a
-# bounded memory, and a model that only saves when it happens to think of it
-# mid-answer saves almost nothing.
+# THE BACKGROUND REVIEW. Twice per window -- see `MEMORY_REVIEW_AT` -- the model
+# is asked to read the conversation so far and decide what a future session
+# would need from it. Curation is the hard half of a bounded memory: a model
+# that only saves when it happens to think of it mid-answer saves almost
+# nothing, and one asked after every turn saves the turn.
 #
 # IT RIDES THE PREFIX IT WAS JUST GIVEN. llama-server reuses a prompt by common
 # token prefix, so replaying the finished conversation plus one short question
@@ -5307,24 +5382,44 @@ def run_tool(name: str, arguments: str) -> str:
 # question instead, and enforced here by ignoring every call that is not
 # `memory`.
 MEMORY_REVIEW_PROMPT = (
-    "[system] The exchange above is finished and has already been shown to the "
-    "user; nothing you write now reaches them. Decide whether anything in it is "
-    "worth remembering at the START of a future session, and if so call the "
-    "`memory` tool -- once per fact, as few times as possible. Save durable "
-    "things: how this project is laid out, a convention, a command that works, a "
-    "correction the user made, a preference they stated, a quirk you had to work "
-    "around. Do NOT save the question, the answer, anything a single read would "
-    "tell you again, or anything true only for this one turn. If nothing "
-    "qualifies -- which is the normal case -- call nothing and reply with the "
-    "single word NOTHING. Call no other tool."
+    "[system] Read the WHOLE conversation above, not just the last exchange. It "
+    "has already been shown to the user; nothing you write now reaches them. "
+    "Decide what a future session would need to know at its very first turn.\n"
+    "SAVE, at most two or three entries: a decision and the reason for it; a "
+    "convention, command or path that turned out to be the right one; a "
+    "correction the user made; a constraint they stated; a trap that cost time "
+    "and how it was avoided.\n"
+    "DO NOT SAVE: the question or the answer; anything one read of a file would "
+    "tell you again; a restatement of code; anything true only inside this "
+    "conversation; progress, plans or what you are about to do next.\n"
+    "Prefer ONE dense entry over three thin ones -- merge related facts into a "
+    "single line. If an existing entry already covers it, use `replace` to "
+    "sharpen that one instead of adding beside it. The store is small and is "
+    "never trimmed for you.\n"
+    "Saying nothing is the normal outcome and the right one whenever you are "
+    "unsure: an entry you regret costs every future session, an entry you "
+    "skipped costs nothing. If nothing qualifies, call nothing and reply with "
+    "the single word NOTHING. Call no tool other than `memory`."
 )
 
 
 def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                 api_key: str, temperature: float, top_p: float, min_p: float,
                 top_k: int | None = None, reasoning_effort: str | None = None,
-                timeout: float = 180.0) -> "list[str]":
+                timeout: float = 180.0,
+                events: "TurnEvents | None" = None) -> "list[str]":
     """Ask once whether this turn left anything worth keeping. Returns what was saved.
+
+    IT IS CALLED AFTER THE TURN IS OVER ON SCREEN, never inside it. It sat
+    inside `run_turn` for one afternoon and robin found it live on 2026-08-21:
+    the answer was complete, the cost line never came and the composer still
+    said `Stop`, because the turn does not end until this returns -- and at
+    `high` it thinks about a 20k conversation first. What a person waits for is
+    the answer; the review is something that happens afterwards.
+
+    `events` FIRES PER SAVED ENTRY, IN THE LOOP, not once at the end -- robin,
+    same evening. The return value still carries everything, for the caller that
+    wants the total rather than the moments.
 
     NOTHING IT DOES REACHES THE CONVERSATION. The question and the answer are
     built into a throwaway list and dropped; appending them would put the review
@@ -5369,7 +5464,11 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
         except Exception:                   # noqa: BLE001
             continue
         if result.get("success") and result.get("action"):
-            saved.append("%s %s" % (result["action"], result.get("target", "memory")))
+            one = "%s %s" % (result["action"], result.get("target", "memory"))
+            saved.append(one)
+            # The moment it is on disk, not the moment the pass is done.
+            if events is not None:
+                events.memory_saved([one])
     return saved
 
 
@@ -5541,13 +5640,6 @@ def run_turn(
     # half-wired client.
     mode: str = DEFAULT_MODE,
     approve: "Callable[[str, str], str] | None" = None,
-    # #122. OFF UNLESS ASKED FOR, and that default is the decision rather than
-    # caution. The review is a SECOND REQUEST to the endpoint, fired after the
-    # answer the caller asked for is already finished -- a side effect on the
-    # network, and a function does not acquire one of those by default. Both
-    # surfaces pass True; a probe, a batch run or a test that only wanted a turn
-    # gets exactly the turn it asked for, at the speed it used to run at.
-    review: bool = False,
     events: "TurnEvents | None" = None,
 ) -> TurnResult:
     """Run one USER turn to its end: however many tool rounds it takes.
@@ -5811,22 +5903,6 @@ def run_turn(
                 context_tokens = 0
                 rolled = True
 
-    # #122. AFTER THE ANSWER IS IN THE CONVERSATION AND BEFORE THE CALLER GETS
-    # ITS RESULT, so the review sees the finished exchange and the next turn
-    # matches the same prefix behind it.
-    #
-    # NOT AFTER A TURN THAT STOPPED. An error, an interrupt or a refused second
-    # rollover leaves an exchange that is not what the user asked for, and the
-    # last thing a broken turn should do is decide what to remember about it.
-    # `execute_tools=False` is the other exclusion: that mode runs nothing, and
-    # a review is something running.
-    if review and not stopped and execute_tools:
-        saved = review_turn(conversation, base_url=base_url, model=model,
-                            api_key=api_key, temperature=temperature, top_p=top_p,
-                            min_p=min_p, top_k=top_k,
-                            reasoning_effort=reasoning_effort)
-        if saved and events is not None:
-            events.memory_saved(saved)
     return TurnResult(cost=cost, context_tokens=context_tokens,
                       promised_warm=promised_warm, rolled=rolled,
                       stopped=stopped, reported=reported)

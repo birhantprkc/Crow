@@ -2961,15 +2961,135 @@ class BackgroundReviewTests(_MemoryFixture):
         self.run_review(conversation)
         self.assertEqual(conversation.payload(), before)
 
-    def test_run_turn_does_not_review_unless_asked(self):
-        """A second request to the endpoint is a side effect on the network, and
-        a function does not acquire one of those by default. Both surfaces pass
-        it explicitly; a probe or a batch run gets the turn it asked for."""
-        signature = inspect.signature(crow_core.run_turn)
-        self.assertIs(signature.parameters["review"].default, False)
-        self.assertIn("review=getattr(args, \"review\", True)", _source("crow.py"))
-        self.assertIn("review=getattr(self._args, \"review\", True)",
-                      _source("crow_gui.py"))
+    def test_a_turn_never_waits_for_the_review(self):
+        """DRIVEN LIVE ON 2026-08-21 AND WRONG. The review sat inside
+        `run_turn`, so a turn did not end until it had thought about the whole
+        conversation at the chat's reasoning level: the answer stood finished on
+        screen, the cost line never came, and the composer still said `Stop`.
+        What a person waits for is the answer."""
+        self.assertNotIn("review", inspect.signature(crow_core.run_turn).parameters)
+        self.assertNotIn("review_turn(", inspect.getsource(crow_core.run_turn))
+
+    def test_both_surfaces_review_below_the_line_that_ends_the_turn(self):
+        """NEGATIVE PROBE for the case above, by position: moving the call out
+        of the core is only half the fix if a surface then puts it back in front
+        of its own cost line."""
+        terminal = _source("crow.py")
+        self.assertLess(terminal.index("[{cost.line()}]"),
+                        terminal.index("crow_core.review_turn("))
+        window = _source("crow_gui.py")
+        self.assertLess(window.index('self.push({"k": "idle"})'),
+                        window.index("crow_core.review_turn("))
+
+    def test_it_fires_at_half_and_at_three_quarters_and_no_oftener(self):
+        """robin, 2026-08-21: "es soll ja auch nicht jede neue Zeile ins MEMORY,
+        sondern nur was wichtig ist pro Unterhaltung". Two reviews per window,
+        each mark once."""
+        self.assertEqual(crow_core.MEMORY_REVIEW_AT, (0.50, 0.75))
+        self.assertEqual(crow_core.review_due(100, 200, 0.0), 0.50)
+        self.assertEqual(crow_core.review_due(150, 200, 0.50), 0.75)
+        self.assertIsNone(crow_core.review_due(199, 200, 0.75))
+
+    def test_nothing_fires_below_the_first_mark(self):
+        """NEGATIVE PROBE, and it is the whole complaint: a short exchange must
+        pass without a review at all."""
+        self.assertIsNone(crow_core.review_due(99, 200, 0.0))
+        self.assertIsNone(crow_core.review_due(0, 200, 0.0))
+
+    def test_a_turn_that_crosses_both_marks_reviews_once(self):
+        """One round can add tens of thousands of tokens, so a chat can go from
+        0.4 to 0.8 in a single answer. Two reviews back to back would ask the
+        same question of the same conversation and pay twice; 0.75 sees
+        everything 0.50 would have."""
+        self.assertEqual(crow_core.review_due(160, 200, 0.0), 0.75)
+
+    def test_an_unknown_window_is_not_a_full_one(self):
+        """`fetch_n_ctx` answers 0 on any failure. Dividing by it would fire on
+        the first turn of every session where /props did not answer -- the same
+        reading `should_roll` gives that zero."""
+        self.assertIsNone(crow_core.review_due(5000, 0, 0.0))
+
+    def test_the_mark_survives_the_chat_file(self):
+        """Without this a conversation reopened at 80% would be reviewed at both
+        marks again -- twice per OPENING instead of twice per window."""
+        path = os.path.join(self.dir, "chat.json")
+        conversation = self._conversation()
+        conversation.mark_reviewed(0.75)
+        crow_core.save_session(conversation, "http://127.0.0.1:1/v1", 0,
+                               path=path, with_kv=False)
+        self.assertEqual(crow_core.session_reviewed(path), 0.75)
+        fresh = crow_core.Conversation("SYS", memory="")
+        fresh.mark_reviewed(crow_core.session_reviewed(path))
+        self.assertIsNone(crow_core.review_due(150, 200, fresh.reviewed))
+
+    def test_a_file_from_before_this_build_reads_as_never_reviewed(self):
+        """NEGATIVE for the reader: absent is 0.0 here, and that is true of it
+        -- unlike the pin, where absent and empty are two different claims."""
+        path = os.path.join(self.dir, "alt.json")
+        crow_core.save_session(self._conversation(), "http://127.0.0.1:1/v1", 0,
+                               path=path, with_kv=False)
+        with open(path, encoding="utf-8") as fh:
+            self.assertNotIn(crow_core.SESSION_REVIEWED_KEY, json.load(fh))
+        self.assertEqual(crow_core.session_reviewed(path), 0.0)
+
+    def test_a_new_chat_starts_unreviewed(self):
+        """`reset()` is a new conversation, and it gets its own two reviews."""
+        conversation = self._conversation()
+        conversation.mark_reviewed(0.75)
+        conversation.reset()
+        self.assertEqual(conversation.reviewed, 0.0)
+
+    def test_the_mark_never_moves_backwards(self):
+        """Adopting a saved mark and recording a fresh one are the same call, so
+        the order they happen in must not be able to undo either."""
+        conversation = self._conversation()
+        conversation.mark_reviewed(0.75)
+        conversation.mark_reviewed(0.50)
+        self.assertEqual(conversation.reviewed, 0.75)
+
+    def test_both_surfaces_mark_before_they_ask(self):
+        """A review that dies on the endpoint has still used its slot. Leaving
+        the mark unset would make it try again next turn and the turn after --
+        the every-turn behaviour this replaces, arriving through the failure
+        path."""
+        for name, mark in (("crow.py", "conversation.mark_reviewed(due)"),
+                           ("crow_gui.py", "self._conversation.mark_reviewed(due)")):
+            source = _source(name)
+            self.assertLess(source.index(mark), source.index("crow_core.review_turn("),
+                            name)
+
+    def test_the_question_names_what_must_not_be_saved(self):
+        """"Es muss ja das wichtige erfasst werden nicht das unwichtige" -- with
+        only two passes per window the question is the whole filter, so it has
+        to carry the negative half as explicitly as the positive one."""
+        prompt = crow_core.MEMORY_REVIEW_PROMPT
+        self.assertIn("WHOLE conversation", prompt)
+        self.assertIn("DO NOT SAVE", prompt)
+        self.assertIn("Saying nothing is the normal outcome", prompt)
+        for skipped in ("the question or the answer", "progress, plans",
+                        "true only inside this conversation"):
+            self.assertIn(skipped, prompt)
+
+    def test_the_glow_line_fires_per_entry_not_per_pass(self):
+        """robin, 2026-08-21: the line is to appear when the memory is written,
+        not when the function that writes it is done. Two saved entries are two
+        moments, and the second one may be seconds after the first."""
+        self._answer([self._call("memory", {"action": "add", "content": "EINS"}),
+                      self._call("memory", {"action": "add", "content": "ZWEI"})])
+
+        class _Sink(crow_core.TurnEvents):
+            def __init__(self):
+                self.seen = []
+
+            def memory_saved(self, what):
+                self.seen.append(list(what))
+
+        sink = _Sink()
+        crow_core.review_turn(self._conversation(), base_url="http://127.0.0.1:1/v1",
+                              model="crow", api_key="k", temperature=1.0, top_p=0.95,
+                              min_p=0.01, events=sink)
+        self.assertEqual(sink.seen, [["add memory"], ["add memory"]])
+        self.assertEqual(self.entries(), ["EINS", "ZWEI"])
 
 
 if __name__ == "__main__":

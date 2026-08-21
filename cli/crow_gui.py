@@ -2745,6 +2745,11 @@ class Api:
         pinned = crow_core.session_memory(chat) if chat else None
         self._conversation.pin_memory(
             pinned if pinned is not None else crow_core.memory_block())
+        # #122. THE REVIEW MARKS COME BACK WITH THE CHAT. Without this a
+        # conversation reopened at 80% would be reviewed at 0.50 and 0.75 all
+        # over again -- twice per OPENING instead of twice per window.
+        if chat:
+            self._conversation.mark_reviewed(crow_core.session_reviewed(chat))
 
     def _adopt_chat_root(self, chat: str | None, fresh: bool = False) -> None:
         """Bind the boundary THIS chat chose, and take the level that goes with it.
@@ -4574,11 +4579,6 @@ class Api:
                 rolled=self._rolled, execute_tools=self._args.execute_tools,
                 mode=getattr(self._args, "mode", DEFAULT_MODE),
                 approve=self._ask_page,
-                # #122, and the window opts in for the same reason the
-                # terminal does. `getattr` rather than the field: a test
-                # builds its args by hand and must not have to know about a
-                # flag in order to run one turn.
-                review=getattr(self._args, "review", True),
                 events=events)
         except CrowError as exc:
             self.push({"k": "fail", "t": str(exc)})
@@ -4603,6 +4603,38 @@ class Api:
         # happened to redraw the list.
         self._reload_rail()
         self.push({"k": "idle"})
+        # #122. AFTER `idle`, AND THAT ORDER IS THE FIX FOR A DEFECT robin found
+        # live on 2026-08-21. The review sat inside `run_turn`, so the turn did
+        # not end until it had thought about the whole conversation at the
+        # chat's reasoning level: the answer stood complete on screen, the cost
+        # line never came, and the composer still said `Stop`.
+        #
+        # WHAT A PERSON WAITS FOR IS THE ANSWER. Everything above has already
+        # happened by the time this line runs -- cost, rail, idle -- so the
+        # review costs the reader nothing but the slot, and the glow line
+        # arrives on its own whenever it arrives.
+        # TWICE PER WINDOW, NOT PER TURN (robin, 2026-08-21): "es soll ja auch
+        # nicht jede neue Zeile ins MEMORY, sondern nur was wichtig ist pro
+        # Unterhaltung". `review_due` answers with the share this turn crossed,
+        # or None.
+        #
+        # THE MARK IS SET AND PERSISTED BEFORE THE REQUEST. A review that dies
+        # on the endpoint has still used its slot; leaving the mark unset would
+        # make it try again on the next turn, and the one after that, for the
+        # rest of the window -- which is the every-turn behaviour this replaces,
+        # arriving through the failure path.
+        due = crow_core.review_due(self._context_tokens, self._n_ctx,
+                                   self._conversation.reviewed)
+        if due is not None and getattr(self._args, "review", True) \
+                and not result.stopped and self._args.execute_tools:
+            self._conversation.mark_reviewed(due)
+            self._persist_live()
+            crow_core.review_turn(
+                self._conversation, base_url=self._args.base_url,
+                model=self._args.model, api_key=self._args.api_key,
+                temperature=sampling["temperature"], top_p=sampling["top_p"],
+                min_p=sampling["min_p"], top_k=sampling.get("top_k"),
+                reasoning_effort=self._reasoning, events=events)
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -1551,6 +1551,9 @@ def resume_into(conversation: "crow_core.Conversation", args: argparse.Namespace
             # decided. Such a resume is cold either way in this release.
             conversation.pin_memory(pinned if pinned is not None
                                     else crow_core.memory_block())
+            # #122. The review marks travel with the chat too, or a resumed
+            # conversation is reviewed twice per resume instead of twice ever.
+            conversation.mark_reviewed(crow_core.session_reviewed(source))
             conversation.restore(messages)
             # WHICH cold line, not just that it is cold (#113). `loaded` is what
             # /props answered, so the two names being compared are the live
@@ -1743,10 +1746,6 @@ def repl(args: argparse.Namespace) -> int:
             execute_tools=getattr(args, "run_tools", True),
             mode=mode,
             approve=ask_approval,
-            # #122. The terminal opts in, because the terminal is a session a
-            # person is having -- which is the only place a review has
-            # anything worth reviewing.
-            review=getattr(args, "review", True),
             events=TerminalTurnEvents(rounds=args.rounds, show_reasoning=show_reasoning),
         )
         # The three the loop wrote through while it was a block of this
@@ -1766,6 +1765,23 @@ def repl(args: argparse.Namespace) -> int:
 
         if stopped:
             continue
+
+        # #122. BELOW THE COST LINE, never above it and never inside the turn.
+        # It sat inside `run_turn` until robin drove it live on 2026-08-21: the
+        # answer was finished, the cost line did not come and the window still
+        # said `Stop`, because a turn does not end until the review has thought
+        # about the whole conversation at the chat's reasoning level.
+        due = crow_core.review_due(context_tokens, n_ctx, conversation.reviewed)
+        if due is not None and getattr(args, "review", True)                 and getattr(args, "run_tools", True):
+            # Marked before the request, so a review that dies on the endpoint
+            # does not re-fire on every turn after it.
+            conversation.mark_reviewed(due)
+            crow_core.review_turn(
+                conversation, base_url=args.base_url, model=args.model,
+                api_key=args.api_key, **sampling,
+                reasoning_effort=args.reasoning_effort,
+                events=TerminalTurnEvents(rounds=args.rounds,
+                                          show_reasoning=show_reasoning))
 
 
 # Values we wrote ourselves in earlier versions and may correct without asking.
