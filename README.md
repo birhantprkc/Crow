@@ -364,6 +364,10 @@ Prefill is a function of block size, not a constant.
 
 ## Window
 
+<div align="center">
+<img src="docs/images/window.png" alt="Crow window: chat rail, the wireframe over an empty chat, and the composer" width="920">
+</div>
+
 | | |
 |---|---|
 | Composer | model and reasoning level as one chip, context readout, working directory, release level, dictation |
