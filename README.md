@@ -4,7 +4,9 @@
 
 <h1>CROW</h1>
 
-<h3>Qwen3.8-27B at 200k context on one consumer graphics card.</h3>
+<h3>Qwen3.8-27B at 200k context on one GPU.</h3>
+
+<p><b>An agent, not a chat box:</b> 12 tools, persistent memory, its own skills.</p>
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
