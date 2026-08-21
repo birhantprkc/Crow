@@ -2772,6 +2772,11 @@ class SkillTests(_MemoryFixture):
         self._skills = crow_core.SKILLS_DIR
         self.addCleanup(setattr, crow_core, "SKILLS_DIR", self._skills)
         crow_core.SKILLS_DIR = os.path.join(self.dir, "skills")
+        # THE DIRECTORY IS CREATED EMPTY so the shipped skills do not seed into
+        # every case here: `seed_skills` reads an ABSENT directory as "this
+        # machine has never had skills". `SeededSkillTests` is where that path
+        # is driven, on its own, with the directory left missing.
+        os.makedirs(crow_core.SKILLS_DIR)
 
     def save(self, name="messreihe", desc="Wenn eine Messung mehr als einen Lauf hat.",
              body="1. Skript schreiben  2. Reihe fahren  3. Negativprobe"):
@@ -2926,6 +2931,54 @@ class SkillTests(_MemoryFixture):
         what happened in between."""
         self.assertIn("skill", crow_core.NEVER_CACHED)
         self.assertIsNone(crow_core._cache_key("skill", '{"action":"read"}'))
+
+
+class SeededSkillTests(unittest.TestCase):
+    """#124: the one skill that ships, and the one time it is written."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-seed-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._skills = crow_core.SKILLS_DIR
+        self.addCleanup(setattr, crow_core, "SKILLS_DIR", self._skills)
+        # LEFT MISSING ON PURPOSE -- that absence is the state being tested.
+        crow_core.SKILLS_DIR = os.path.join(self.dir, "skills")
+
+    def test_a_machine_with_no_skills_gets_the_shipped_one(self):
+        """Without it the only guidance is one sentence in the tool description,
+        which is enough to make the model save SOMETHING and not enough to make
+        it save something that can ever be chosen."""
+        self.assertEqual([s["name"] for s in crow_core.skills()], ["skill-creator"])
+        self.assertIn("skill-creator", crow_core.skill_block())
+
+    def test_a_deleted_skill_does_not_come_back(self):
+        """NEGATIVE PROBE, and the reason the check is on the DIRECTORY and not
+        on the files in it: a deletion that undoes itself at the next start is
+        not a deletion."""
+        crow_core.skills()
+        crow_core.tool_skill("remove", name="skill-creator")
+        self.assertEqual(crow_core.skills(), [])
+        self.assertEqual(crow_core.seed_skills(), 0)
+
+    def test_the_shipped_skill_is_an_ordinary_file(self):
+        """Seeded rather than hard-wired, so it can be switched off in the sheet
+        and edited by the person whose procedures it describes -- neither of
+        which a constant in the head could offer."""
+        crow_core.skills()
+        self.assertTrue(os.path.isfile(crow_core.skill_path("skill-creator")))
+        self.assertTrue(crow_core.set_skill_enabled("skill-creator", False))
+        self.assertEqual(crow_core.skill_block(), "")
+
+    def test_the_shipped_description_says_when_and_fits(self):
+        """It is held to the rule it teaches. A description over the cap would
+        be silently clipped mid-sentence, and one that described itself instead
+        of its moment would be the exact failure the body warns about."""
+        for name, description, body in crow_core.BUILTIN_SKILLS:
+            self.assertLessEqual(len(description), crow_core.SKILL_DESC_CHARS, name)
+            self.assertNotIn("\n", description, name)
+            self.assertIn("When", description, name)
+            self.assertIsNone(crow_core.memory_threat(description), name)
+            self.assertGreater(len(body), 500, name)
 
 
 class SessionSearchTests(unittest.TestCase):

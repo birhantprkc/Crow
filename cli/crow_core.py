@@ -3699,6 +3699,94 @@ SKILL_DESC_CHARS = 200
 SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,48}[a-z0-9]$")
 
 
+# ONE SKILL SHIPS WITH THE CLIENT, and it is the one about writing skills.
+#
+# WHY IT IS SEEDED AND NOT HARD-WIRED. It could have been a constant the head
+# always carried, and that would have been the wrong shape twice over: it could
+# not be switched off in the sheet like every other skill, and it could not be
+# edited by the person whose procedures it is meant to describe. Seeded, it is
+# an ordinary file -- same directory, same frontmatter, same switch.
+#
+# WHY THE MODEL NEEDS IT AT ALL. Without it the only guidance is the sentence in
+# the tool description, which is enough to make the model save SOMETHING and not
+# enough to make it save something usable: the failure is a skill whose
+# description says "helps with the project", which can never be chosen, and a
+# body that recounts one conversation instead of naming the steps.
+BUILTIN_SKILLS = (
+    ("skill-creator",
+     "When a conversation has worked out a repeatable procedure and you are "
+     "about to save it: read this first for what a good skill looks like.",
+     """A skill is a procedure you keep. Memory is what is TRUE about a project;
+a skill is what to DO. If it has no steps, it is memory.
+
+## Save one only when all three hold
+
+1. It WORKED here, in this conversation. Not a plan, not a guess, not something
+   you know in general -- something you watched succeed.
+2. The next session would otherwise redo the work: find the flags again, hit the
+   same trap again, rebuild the same order of steps.
+3. It is not already covered. If a skill nearly covers it, use `save` on THAT
+   name to sharpen it. Two skills for one job means neither gets chosen.
+
+Saying nothing is the normal outcome. A wrong skill costs every future session.
+
+## The description decides whether the skill is ever used
+
+It is the ONLY thing the prompt carries about you. The body is invisible until
+somebody reads it, so a description that does not say WHEN to reach for the
+skill guarantees it is never reached for.
+
+  bad:  "Helps with measurements."          -- when? nobody can tell
+  bad:  "A guide to the measurement setup."  -- describes itself, not its moment
+  good: "When a measurement needs more than one run: write the script BEFORE the
+         series, never after."
+
+Name the situation, in the words that situation actually arrives in. Two hundred
+characters, one line, no line breaks.
+
+## The body
+
+Write it for yourself in three months, having forgotten everything.
+
+- Numbered steps, in order, each one an action.
+- Commands and flags VERBATIM. A remembered flag is a wrong flag.
+- Say what each step is supposed to produce, so a failure is visible at the step
+  that caused it rather than at the end.
+- One line on the trap: the mistake that was actually made here, and what it
+  looked like. This is the most valuable thing in the file.
+- No summary of the conversation. No "we then decided". Steps only.
+
+## Naming
+
+The name IS the directory: lower case, digits, hyphens, 3 to 50 characters. Name
+the JOB, not the topic -- `messreihe-fahren` beats `messungen`, because the first
+one tells you when you need it.
+
+## Keeping them
+
+Rewrite with `save` under the same name; it replaces the file and keeps the
+on/off switch as it was. `remove` when the procedure has stopped being true --
+a skill that describes a workflow nobody uses any more is worse than no skill,
+because it will still be chosen."""),
+)
+
+
+def seed_skills() -> int:
+    """Write the shipped skills, ONCE, the first time this machine has any.
+
+    THE DIRECTORY'S ABSENCE IS THE "NEVER BEEN HERE" STATE, which is why the
+    check is on the directory and not on the files in it. Seeding per missing
+    FILE would mean a skill the user deleted came back at the next start, and a
+    deletion that undoes itself is not a deletion. Deleting the whole directory
+    does bring them back -- that is a documented reset, not an accident.
+    """
+    if os.path.isdir(SKILLS_DIR):
+        return 0
+    for name, description, body in BUILTIN_SKILLS:
+        write_skill(name, description, body)
+    return len(BUILTIN_SKILLS)
+
+
 def skill_dir(name: str) -> str:
     return os.path.join(SKILLS_DIR, name)
 
@@ -3754,6 +3842,7 @@ def read_skill(name: str) -> "dict | None":
 def skills() -> "list[dict]":
     """Every skill on disk, by name. Enabled and disabled alike -- the settings
     sheet has to draw the ones that are off, or they cannot be switched on."""
+    seed_skills()
     try:
         names = sorted(os.listdir(SKILLS_DIR))
     except OSError:
