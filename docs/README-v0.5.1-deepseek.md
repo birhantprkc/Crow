@@ -55,7 +55,7 @@ token. `--moe-stream-l2 32` adds a page-locked host-RAM tier between the slots a
 per miss falls from 1.331–1.383 ms to 0.713–0.722 ms, decode from 11.04 to 18.03 tok/s — a factor of
 **1.63** *(measured on `UD-IQ3_XXS`, not repeated)*. On the shipped rung a miss costs **0.6470 ms**.
 
-![Where every byte lives, what crosses between VRAM and the drive, and what it costs per token](docs/images/architecture.svg)
+![Where every byte lives, what crosses between VRAM and the drive, and what it costs per token](images/architecture.svg)
 
 ---
 
@@ -465,13 +465,13 @@ longer fits beside the display and per-slot cost stops being constant.
 DeepSeek-V4-Flash-0731 is **304,180,418,494 parameters**, counted from the safetensors headers of all
 48 shards. Resident at bf16 that is 608 GB, against 34.2 GB of VRAM and 63.4 GB of system RAM.
 
-![Every parameter resident at bf16](docs/images/eq_naive_memory.png)
+![Every parameter resident at bf16](images/eq_naive_memory.png)
 
 ## 1. Sparsity
 
 43 layers, 256 experts each, 6 selected per token.
 
-![Six of 256 experts fire per layer](docs/images/eq_sparsity.png)
+![Six of 256 experts fire per layer](images/eq_sparsity.png)
 
 The always-active set — attention, norms, embeddings, shared expert — is **6,378.40 MiB on CUDA0 plus
 284.06 MiB of CUDA_Host buffers = 6.51 GiB, 7.69 % of the 84.62 GiB file**, GPU-resident by
@@ -536,7 +536,7 @@ evictions, never first touches.
 
 The cache has a hard floor the graph imposes:
 
-![The wave cap](docs/images/eq_wave_cap.png)
+![The wave cap](images/eq_wave_cap.png)
 
 Multi-pass expert GEMMs need at least `3 × n_expert_used` slots. Upstream's default computed
 `2 × n_expert_used` clamped to 16, below the required 18, and did not fail at load — the `GGML_ABORT`
@@ -627,7 +627,7 @@ direct-I/O alignment slack, so any slab fits any slot and the allocator cannot f
 **No extra read to fill it.** The worker already read every missing slab into a staging buffer; the
 read now lands in a tier slot and the upload sources from there.
 
-![The host tier against no tier, paired on identical tasks](docs/images/host_tier.png)
+![The host tier against no tier, paired on identical tasks](images/host_tier.png)
 
 **Cost:** 32 GiB of page-locked memory for the life of the process. Off by default; the installer
 prints it above 60 GB of detected RAM, because 32 GiB on ~64 GB is the only ratio run.
@@ -642,9 +642,9 @@ Tier mutex cost, measured: **0.539 µs per operation, 457.20 ms over 848,297 ope
 
 ## What it costs per token
 
-![Bytes per token](docs/images/eq_bytes_per_token.png)
+![Bytes per token](images/eq_bytes_per_token.png)
 
-![Wait share](docs/images/eq_wait_share.png)
+![Wait share](images/eq_wait_share.png)
 
 Decode time spent waiting on a miss: **65.2 / 67.4 / 70.0 %** with the tier, **78.6 / 79.3 / 81.0 %**
 without, same tasks (`runs/2026-08-11/slot58-pairs/l2-pairs.csv`, `load stall` over summed
@@ -663,7 +663,7 @@ included.
 
 Context is nearly free by comparison — 1,353.50 MiB of KV at `n_ctx = 200192`, 6.92 KiB per token:
 
-![A 200k context costs 1.32 GiB](docs/images/eq_kv_cost.png)
+![A 200k context costs 1.32 GiB](images/eq_kv_cost.png)
 
 ---
 
