@@ -4558,6 +4558,22 @@ class Api:
     # -- the turn ----------------------------------------------------------
 
     def _run(self, text: str) -> None:
+        # #121. THE LAST LINE OF DEFENCE FOR THE PIN, and it is here because
+        # `_probe` has three ways to return before it reaches its own pin: the
+        # endpoint would not answer, `--no-session`, or the session file could
+        # not be read. The first of those is ordinary -- a window opened while
+        # the server is still starting -- and until this line such a chat was
+        # never pinned at all, so its memory never entered a single prompt. It
+        # was silent by construction: an unpinned head is a VALID head, just one
+        # without the memory in it. Found on 2026-08-21 in a session.json that
+        # had no `memory` key after a full conversation.
+        #
+        # BEFORE THE USER MESSAGE IS APPENDED, so `pin_memory` still meets the
+        # empty conversation `restore()` and `__init__` leave behind, and no
+        # prefix exists yet to move. `pin_memory` refuses a second call, so the
+        # guard is what keeps this from reaching past a pin already taken.
+        if self._conversation.memory is None:
+            self._pin_memory(self._current_path)
         self._conversation.append("user", text)
         # THE RAIL LEARNS THE CHAT EXISTS NOW, NOT AFTER THE TURN. Every other
         # caller of `_reload_rail` ends something, so an entry kept "new chat ·

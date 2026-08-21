@@ -3648,14 +3648,36 @@ class TheMemoryPinWiringTests(unittest.TestCase):
                            self.source.index("self._adopt_chat_root(SESSION_FILE)"))
         self.assertTrue(self._after("self._adopt_chat_root(path)",
                                     "self._pin_memory(path)"))
-        self.assertEqual(self.source.count("self._pin_memory("), 4,
-                         "a fourth caller pins somewhere this case has not read")
+        self.assertEqual(self.source.count("self._pin_memory("), 5,
+                         "a caller pins somewhere this case has not read")
 
     def test_a_new_chat_pins_after_it_is_made_rootless(self):
         """`reset()` makes a new chat rootless on purpose (#119). The pin has to
         happen after that, or a new chat would inherit the last one's project."""
         self.assertTrue(self._after("self._adopt_chat_root(None, fresh=True)",
                                     "self._pin_memory(None)"))
+
+    def test_a_turn_never_starts_from_an_unpinned_chat(self):
+        """`_probe` has THREE ways to return before it reaches its own pin: the
+        endpoint would not answer, `--no-session`, or an unreadable session
+        file. The first is ordinary -- a window opened while the server is still
+        starting -- and such a chat was never pinned at all, so its memory never
+        entered a single prompt.
+
+        SILENT BY CONSTRUCTION, which is why it needed finding rather than
+        failing: an unpinned head is a VALID head, only one without the memory
+        in it. Found on 2026-08-21 in a session.json that had no `memory` key
+        after a whole conversation.
+
+        BEFORE THE USER MESSAGE IS APPENDED, so the pin still meets an empty
+        conversation and no prefix exists yet to move.
+        """
+        run = self.source[self.source.index("    def _run(self, text: str)"):]
+        run = run[:run.index("\n    def ", 10)]
+        self.assertIn("if self._conversation.memory is None:", run)
+        self.assertLess(run.index("self._pin_memory("),
+                        run.index('self._conversation.append("user"'),
+                        "the chat is pinned after its own first message")
 
     def test_the_pin_is_read_before_the_payload_at_both_readers(self):
         """`load_session` needs the COMPOSED system prompt to decide whether the
