@@ -665,9 +665,24 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
    composer grows.
    QUIET. It is a hello, not a headline -- and it is the only thing on screen,
    which does the emphasis by itself. */
-#hello{min-height:100%;display:flex;align-items:center;justify-content:center;
+/* #127. A COLUMN NOW, because the greeting is a drawing with a line under it.
+   Everything else about the block is unchanged -- it still fills the empty
+   flow and still centres in both directions. */
+#hello{min-height:100%;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:26px;
   max-width:960px;margin-inline:auto;padding:0 30px;text-align:center;
   font-size:19px;color:var(--text-faint);letter-spacing:.01em}
+/* SIZED IN THE PAGE, NOT IN THE FILE. Both drawings are 1024 square; a width
+   here keeps them from filling the window, and `height:auto` keeps the square
+   without the file having to know how big it is drawn. */
+.mk{width:200px;max-width:46vw;line-height:0}
+.mk svg{width:100%;height:auto;display:block}
+/* WHICH ONE IS VISIBLE IS A CSS QUESTION, so switching theme needs no
+   JavaScript and no second copy of which theme is live. Dark is the default
+   because two of the three themes are dark; only `light` swaps. */
+.mk-light{display:none}
+:root[data-theme="light"] .mk-dark{display:none}
+:root[data-theme="light"] .mk-light{display:block}
 /* -- context menu -------------------------------------------------------- */
 #menu{position:fixed;z-index:200;display:none;min-width:168px;padding:4px;
   background:var(--panel);border:1px solid var(--line);border-radius:8px;
@@ -1251,6 +1266,15 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 <div class="grip" id="g-nw"></div><div class="grip" id="g-ne"></div>
 <div class="grip" id="g-sw"></div><div class="grip" id="g-se"></div>
 
+<!-- #127. A TEMPLATE, NOT A HIDDEN DIV. `hello()` builds its block fresh every
+     time it is called, so the drawing has to be clonable rather than moved --
+     moved, the second greeting of a session would find it gone. Both
+     backgrounds ship; the stylesheet picks, so switching theme needs no
+     JavaScript and no second copy of which theme is live. -->
+<template id="marktpl">
+  <div class="mk mk-dark">__MARKDARK__</div>
+  <div class="mk mk-light">__MARKLIGHT__</div>
+</template>
 <div id="body">
   <aside id="rail">
     <div id="railhead"><h2>Chats</h2>
@@ -1334,7 +1358,12 @@ const crow = {
   hello(text){ const g=$("#hello"); if(g) g.remove();
     if(!text) return;
     const d=document.createElement("div"); d.id="hello";
-    d.textContent=text; flow.appendChild(d); },
+    // #127. THE DRAWING FIRST, THE LINE UNDER IT, and the template is CLONED so
+    // a second greeting in the same session still has one to clone.
+    const t=$("#marktpl"); if(t) d.appendChild(t.content.cloneNode(true));
+    const p=document.createElement("div"); p.className="hellotext";
+    p.textContent=text; d.appendChild(p);
+    flow.appendChild(d); },
 
   user(text){
     const t=this.turn(""); t.innerHTML=
@@ -2349,8 +2378,110 @@ window.addEventListener("pywebviewready",()=>{ pywebview.api.ready(); input.focu
 """
 
 
+ICON_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crow.ico")
+
+# #127. THE BIRD UNDER THE GREETING. Two files rather than one recoloured by
+# CSS: it is a low-poly drawing with five stroke colours, and `currentColor`
+# can carry one. They are named for the BACKGROUND they are legible on, not for
+# the file they came from -- pale strokes vanish on white, dark ones vanish on
+# black, and that is a fact about contrast rather than a preference.
+MARK_FILES = {"dark": "mark-on-dark.svg", "light": "mark-on-light.svg"}
+
+
+def mark_svg(background: str) -> str:
+    """The wireframe drawn for that background, or "" when it is not on disk.
+
+    ABSENT IS EMPTY, NOT AN ERROR. A greeting without a bird is a greeting; a
+    window that refused to open because a drawing was missing is not a window.
+    """
+    name = MARK_FILES.get(background)
+    if not name:
+        return ""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name),
+                  encoding="utf-8") as fh:
+            return fh.read().strip()
+    except Exception:                      # noqa: BLE001 - see the docstring
+        return ""
+
+
+def taskbar_identity() -> bool:
+    """Tell the shell this process is Crow, before the window exists.
+
+    WITHOUT IT THE TASKBAR SHOWS PYTHON. A button is grouped and labelled by the
+    Application User Model ID, and a process that never sets one inherits the
+    interpreter's -- so the icon set on the window below is drawn under Python's
+    name, beside every other script the user has running.
+
+    BEFORE THE WINDOW, not after: the shell reads the ID when it registers the
+    button, the same way it reads the style bits in `shell_buttons`, and neither
+    is looked at again afterwards.
+    """
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Crow.Window")
+        return True
+    except Exception:                      # noqa: BLE001 - cosmetic, never fatal
+        return False
+
+
+def set_icon(hwnd) -> bool:
+    """Hang `crow.ico` on one window. True when both sizes went on.
+
+    pywebview CANNOT DO THIS ON WINDOWS. Its `icon=` is a parameter of
+    `start()`, documented in its own source as "supported only on GTK and QT";
+    on Windows the icon is meant to be baked in when the app is frozen, and Crow
+    runs as a script. So the icon goes on the way every other Win32 thing here
+    goes on: through the handle the search above already found.
+
+    TWO SIZES, LOADED SEPARATELY. `ICON_BIG` is what Alt-Tab and the taskbar
+    draw, `ICON_SMALL` is the caption and the Alt-Tab strip; asking for one and
+    letting Windows scale it gives a soft 16px from a 256px source. The metrics
+    are asked for rather than hard-coded because they change with the display
+    scaling.
+
+    A MISSING FILE IS NOT AN ERROR. The window works without an icon, and a
+    client that refused to open because a decoration was absent would be the
+    worse failure.
+    """
+    if not os.path.isfile(ICON_FILE):
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        IMAGE_ICON, LR_LOADFROMFILE = 1, 0x0010
+        WM_SETICON, ICON_SMALL, ICON_BIG = 0x0080, 0, 1
+        SM_CXICON, SM_CYICON, SM_CXSMICON, SM_CYSMICON = 11, 12, 49, 50
+        user32 = ctypes.windll.user32
+        user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+                                      ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        user32.LoadImageW.restype = wintypes.HANDLE
+        user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                        ctypes.c_ssize_t, ctypes.c_ssize_t]
+        both = True
+        for which, cx, cy in ((ICON_BIG, SM_CXICON, SM_CYICON),
+                              (ICON_SMALL, SM_CXSMICON, SM_CYSMICON)):
+            handle = user32.LoadImageW(None, ICON_FILE, IMAGE_ICON,
+                                       user32.GetSystemMetrics(cx),
+                                       user32.GetSystemMetrics(cy), LR_LOADFROMFILE)
+            if not handle:
+                both = False
+                continue
+            user32.SendMessageW(hwnd, WM_SETICON, which, handle)
+        return both
+    except Exception:                      # noqa: BLE001 - cosmetic, never fatal
+        return False
+
+
 def shell_buttons(title: str) -> bool:
-    """Give the frameless window the styles the taskbar reads. True when set.
+    """Give the frameless window the styles and the icon the taskbar reads.
+
+    THE ICON RIDES THIS SEARCH RATHER THAN DOING ITS OWN. Finding the window is
+    the hard half -- four things had to be right at once, see below -- and a
+    second EnumWindows would be a second chance to pick the HELPER window, which
+    looks like a working icon on a window nobody sees.
 
     CLICKING A RUNNING APP'S TASKBAR BUTTON MINIMISES IT -- but only when the
     window says it can be minimised. The shell decides that from WS_MINIMIZEBOX
@@ -2424,6 +2555,7 @@ def shell_buttons(title: str) -> bool:
             set_long(hwnd, GWL_STYLE, style | WS_SYSMENU | WS_MINIMIZEBOX)
             if not get_long(hwnd, GWL_STYLE) & WS_MINIMIZEBOX:
                 continue
+            set_icon(hwnd)
             user32.ShowWindow(hwnd, SW_HIDE)
             user32.ShowWindow(hwnd, SW_SHOW)
             return True
@@ -4869,9 +5001,15 @@ def main(argv: list[str] | None = None) -> int:
                 # was drawn open and then folded away by a script after load
                 # would do it on every start, and that frame is the moment
                 # somebody is looking at the window.
-                .replace("__RAIL__", "open" if rail_open() else "shut"))
+                .replace("__RAIL__", "open" if rail_open() else "shut")
+                .replace("__MARKDARK__", mark_svg("dark"))
+                .replace("__MARKLIGHT__", mark_svg("light")))
 
     api = Api(args)
+    # #127. BEFORE THE WINDOW: the shell reads the application id when it
+    # registers the taskbar button, and an id set afterwards is not looked at
+    # again -- the same rule the style bits in `shell_buttons` run into.
+    taskbar_identity()
     # FRAMELESS, because the title bar is part of the design: the caption is
     # drawn in the page with the wordmark in it, the way the mockup shows it.
     title = "CROW %s" % (client_version() or "")

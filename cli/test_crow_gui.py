@@ -3333,9 +3333,18 @@ class TheEmptyChatSaysSomethingTests(ApiCase):
         self.assertIn('turn(cls){ const g=$("#hello"); if(g) g.remove();', source)
 
     def test_the_line_is_drawn_and_never_run(self):
-        """It carries a login name off the machine."""
+        """It carries a login name off the machine.
+
+        THE CLAIM IS UNCHANGED, THE LINE MOVED. #127 put a drawing above the
+        greeting, so the text is its own element inside the block -- which is
+        why this reads the whole `hello()` body for `innerHTML` instead of
+        matching one statement that a layout change can shift.
+        """
         source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
-        self.assertIn("d.textContent=text; flow.appendChild(d);", source)
+        hello = source[source.index("  hello(text){"):]
+        hello = hello[:hello.index("  user(text){")]
+        self.assertIn("p.textContent=text;", hello)
+        self.assertNotIn("innerHTML", hello)
 
     def test_the_line_is_centred_by_the_box_and_not_by_a_number(self):
         """It stood at `16vh`, which is a guess about one window at one size.
@@ -3632,6 +3641,79 @@ class TheMemoryLineTests(unittest.TestCase):
         self.assertIn("--no-review", self.source)
         for hidden in ("--no-memory-notice", "memory_notifications", "quiet_memory"):
             self.assertNotIn(hidden, self.source)
+
+
+class TheBirdTests(unittest.TestCase):
+    """#127: the drawing under the greeting, and the icon on the taskbar."""
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+
+    def test_both_drawings_ship_and_are_read_from_disk(self):
+        """Two files rather than one recoloured by CSS: it is a wireframe with
+        five stroke colours, and `currentColor` carries one."""
+        for background in ("dark", "light"):
+            self.assertTrue((HERE / crow_gui.MARK_FILES[background]).is_file(), background)
+            self.assertIn("<svg", crow_gui.mark_svg(background))
+        self.assertNotEqual(crow_gui.mark_svg("dark"), crow_gui.mark_svg("light"))
+
+    def test_they_are_named_for_the_background_they_are_legible_on(self):
+        """NOT for the theme that produced them. Pale strokes vanish on white
+        and dark ones vanish on black -- a fact about contrast, and the reason
+        the two files arrived with their names the other way round."""
+        on_dark, on_light = crow_gui.mark_svg("dark"), crow_gui.mark_svg("light")
+        self.assertIn("#b9c0c4", on_dark)      # pale, needs a dark ground
+        self.assertNotIn("#283647", on_dark)
+        self.assertIn("#283647", on_light)     # near-black, needs a light one
+        self.assertNotIn("#6789b2", on_light)
+
+    def test_a_missing_drawing_is_empty_and_not_an_error(self):
+        """NEGATIVE PROBE. A greeting without a bird is a greeting; a window
+        that refused to open because a decoration was absent is not a window."""
+        self.assertEqual(crow_gui.mark_svg("gibtsnicht"), "")
+
+    def test_the_page_carries_both_and_the_stylesheet_picks(self):
+        """No JavaScript and no second copy of which theme is live. Dark is the
+        default because two of the three themes are dark; only `light` swaps."""
+        self.assertIn("__MARKDARK__", self.source)
+        self.assertIn("__MARKLIGHT__", self.source)
+        self.assertIn(".mk-light{display:none}", self.css)
+        self.assertIn(':root[data-theme="light"] .mk-dark{display:none}', self.css)
+
+    def test_the_drawing_is_cloned_and_never_moved(self):
+        """A `<template>` and `cloneNode`. Moved, the second greeting of a
+        session would find the drawing gone -- and `hello()` builds its block
+        fresh every time it is called."""
+        self.assertIn('<template id="marktpl">', self.source)
+        self.assertIn("t.content.cloneNode(true)", self.source)
+
+    def test_the_icon_ships_and_is_found_beside_the_client(self):
+        """A path built from `__file__`, so an installed copy finds its own."""
+        self.assertTrue(os.path.isfile(crow_gui.ICON_FILE))
+        self.assertTrue(crow_gui.ICON_FILE.endswith("crow.ico"))
+        with open(crow_gui.ICON_FILE, "rb") as fh:
+            self.assertEqual(fh.read(4), b"\x00\x00\x01\x00", "not an ICO")
+
+    def test_the_application_id_is_set_before_the_window_exists(self):
+        """Without one the taskbar groups this under the interpreter and draws
+        Python's icon over Crow's name. The shell reads the id when it registers
+        the button and never looks again -- the same rule the style bits hit."""
+        main = self.source[self.source.index("    api = Api(args)"):]
+        main = main[:main.index("webview.start(")]
+        self.assertIn("taskbar_identity()", main)
+        self.assertLess(main.index("taskbar_identity()"),
+                        main.index("webview.create_window("))
+
+    def test_the_icon_rides_the_search_that_already_found_the_window(self):
+        """Finding the window is the hard half -- four things had to be right at
+        once -- and a second EnumWindows is a second chance to pick the HELPER
+        window, which looks like a working icon on a window nobody sees."""
+        buttons = self.source[self.source.index("def shell_buttons"):]
+        buttons = buttons[:buttons.index("\ndef ", 10)]
+        self.assertIn("set_icon(hwnd)", buttons)
+        self.assertEqual(self.source.count("EnumWindows"), 3,
+                         "a second window search appeared")
 
 
 class TheRibbonAndTheChatRunIntoOneTests(unittest.TestCase):
