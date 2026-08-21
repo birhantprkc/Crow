@@ -234,6 +234,24 @@
     "model_command("
    ],
    "why": "#115. Which models exist, how a typo is refused, and whether a switch happened at all. Both surfaces offer it -- `/model` in the terminal, the chip's menu in the window -- and a surface with its own version would be a second answer to 'may I do this now' and a second sentence about the lost context. #99 is the precedent for the cost: `format_tool_args` sat behind a hasattr guard that had been False since the split, so the command worked in one client and not the other, for months, with nothing able to see it."
+  },
+  {
+   "name": "reasoning_command",
+   "kind": "def",
+   "user_entry": true,
+   "evidence": [
+    "reasoning_command("
+   ],
+   "why": "#116. Which thinking levels this model takes, how a typo is refused, and whether the change is worth a prefill. Both surfaces offer it -- `/reasoning` in the terminal, the slider in the window -- and the slider does not set the level, it types the command, for the reason #99 records: a control wired separately from the command it duplicates works in one client and not the other, and nothing in the suite can see it. The refusal is the load-bearing half: an invalid level does not fail here, it fails on the server AFTER the prefill has been paid for."
+  },
+  {
+   "name": "reasoning_for_chat",
+   "kind": "def",
+   "user_entry": true,
+   "evidence": [
+    "reasoning_for_chat("
+   ],
+   "why": "#116's third state. A level bound under one model is not necessarily one the next takes -- `max` is fine for 0731 and raises against unsloth's template -- so a stored value outside this model's list is treated as never chosen AND said. Two surfaces with two answers here is a chat that silently stopped doing what its own setting says. It also owns the rule that the invalid value is NOT written back: the user may return to the model it was valid for."
   }
  ],
  "wordings": [
@@ -336,6 +354,11 @@
    "id": "the model switch note",
    "text": "the context went with the old server -- the next turn pays a full prefill",
    "why": "#115. The one line a switch costs, and it is said BEFORE the switch is believed rather than after -- a user who reads it once the window has emptied has been informed of a loss instead of warned about one. Two wordings would be two answers to 'where did my context go', which is the same defect the rollover note is written once for."
+  },
+  {
+   "id": "the reasoning cost line",
+   "text": "the level changes the head of every prompt -- the next turn pays a full prefill",
+   "why": "#116. The value lands in chat_template_kwargs, so it is rendered into the HEAD of the prompt: byte 0 moves and the whole cached prefix stops matching. At 200k that is minutes, and it is said BEFORE the change the way #115 announces the lost context before the switch."
   }
  ]
 }

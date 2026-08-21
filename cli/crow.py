@@ -978,6 +978,7 @@ HELP = """commands:
   /tools         the tools the model can call
   /mode          the release level, /mode manual|allowedit|auto to switch
   /model         the model that is up, /model <key> restarts on another one
+  /reasoning     this chat's thinking level, /reasoning <level>|off to set it
   /thoughts      show the model's reasoning as it arrives, or hide it again
   /reset         drop the context (costs a full re-prefill)
   /context       message count in the current context
@@ -1049,6 +1050,20 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
         print(said)
         return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
 
+    if line == "/reasoning" or line.startswith("/reasoning "):
+        # #116. The level is the CHAT's, so it is kept on `args` -- the same
+        # object the turn reads from -- and written to the session file on the
+        # way out. repl() has no line to spare for a fifth switch, and a fifth
+        # field in SlashResult would be a name three commands never set.
+        said, level, changed = crow_core.reasoning_command(
+            line[len("/reasoning"):],
+            fetch_model_name(args.base_url if args else DEFAULT_BASE_URL),
+            getattr(args, "reasoning_effort", None) if args else None)
+        print(said + "\n")
+        if changed and args is not None:
+            args.reasoning_effort = level
+        return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
+
     if line == "/model" or line.startswith("/model "):
         # #115. THE DECISION IS IN THE CORE and only the consequences are here,
         # the same split `/mode` uses: both surfaces have to name the same
@@ -1076,6 +1091,15 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
             # another is a change nothing on screen reports. The dict is edited
             # in place because repl() splats the same object into every turn.
             if sampling is not None:
+                # #116 RIDES ALONG HERE, and it has to: a level bound under the
+                # old model is not necessarily one the new one takes -- `max` is
+                # fine for 0731 and RAISES against unsloth's template. The
+                # request would fail after the prefill was already paid for.
+                kept = args.reasoning_effort
+                if kept and crow_core.reasoning_problem(fetch_model_name(url), kept):
+                    args.reasoning_effort = None
+                    print(f"{DIM}{kept} is not a level {url} takes -- sending"
+                          f" nothing until it is set again{RESET}")
                 fresh = sampling_for_run(args, fetch_model_name(url))
                 if fresh is not None:
                     sampling.clear()
@@ -1394,6 +1418,21 @@ def read_line(prompt: str) -> str:
         return read_coloured(prompt, getch)
 
 
+def exit_stamp(args: argparse.Namespace) -> dict:
+    """What the session file records about the run that is ending.
+
+    ONE DICT SO THE CALL SITE STAYS ONE LINE, and that is a real constraint
+    rather than style: `leave()` lives inside repl(), which a test caps at 220
+    lines so the five-job block the 0.3.0 split took apart cannot grow back.
+    """
+    return {"model": model_at_exit(args),
+            # #116: written only when the chat HAS a level. `save_session`
+            # leaves the key out for None, which is the "never chosen" state --
+            # so a chat that never touched the slider keeps a prompt
+            # byte-identical to one from a client without it.
+            "reasoning": getattr(args, "reasoning_effort", None)}
+
+
 def model_at_exit(args: argparse.Namespace) -> str:
     """Which model the session is being saved UNDER, asked at the last moment.
 
@@ -1435,6 +1474,17 @@ def sampling_for_run(args: argparse.Namespace, model: str | None) -> dict | None
         print(f"crow: {problem}", file=sys.stderr)
         reset_background()
         return None
+    # #116. THE CHAT'S LEVEL IS BOUND HERE because this is the one call in the
+    # loop that already has both the model and the arguments, and repl() has no
+    # line to spare for a second. A flag that was typed wins -- it names THIS
+    # run; silence takes what the chat was left on. An invalid stored level
+    # comes back as None and a line, and is not written back: the user may
+    # switch to the model it was valid for.
+    if args.reasoning_effort is None:
+        level, note = crow_core.reasoning_for_chat(model)
+        args.reasoning_effort = level
+        if note:
+            print(f"{DIM}{note}{RESET}")
     # ONLY WHAT WAS TYPED goes on top. `sampling_given` is filled by _Explicit,
     # so a flag left alone is absent here rather than present with a default --
     # which is the difference between "the user chose 0.01" and "the terminal
@@ -1562,7 +1612,7 @@ def repl(args: argparse.Namespace) -> int:
         if getattr(args, "session", True):
             try:
                 note = save_session(conversation, args.base_url, context_tokens,
-                                    model=model_at_exit(args))
+                                    **exit_stamp(args))
             except SessionFormatError as exc:
                 # Reachable even though the start path refuses such a file:
                 # --resume reads an ARCHIVE and this writes the live

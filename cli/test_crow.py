@@ -4200,6 +4200,213 @@ class AdoptRootTests(unittest.TestCase):
         self.assertEqual(mode, crow.DEFAULT_MODE)
 
 
+
+class TheReasoningLevelBelongsToTheChatTests(unittest.TestCase):
+    """#116, the terminal half. The window half is in test_crow_gui.py, and
+    BOTH exist because #99 is the case where one surface was forgotten: a
+    command that worked in the terminal and not in the window, for months,
+    with nothing in the suite able to see it.
+
+    Driven through the core and `run_slash` rather than asserted about source
+    text -- a test that greps for a branch passes for a branch never reached.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "session.json")
+        self._real = (crow.SESSION_DIR, crow.SESSION_FILE)
+        crow.SESSION_DIR, crow.SESSION_FILE = self.dir, self.path
+        crow_core.SESSION_DIR, crow_core.SESSION_FILE = self.dir, self.path
+        self._real_post = crow.post_json
+        crow.post_json = lambda url, body, timeout=0: {"n_saved": 7, "n_restored": 7}
+
+    def tearDown(self):
+        crow.SESSION_DIR, crow.SESSION_FILE = self._real
+        crow_core.SESSION_DIR, crow_core.SESSION_FILE = self._real
+        crow.post_json = self._real_post
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _talk(self):
+        c = crow.Conversation("system prompt")
+        c.append("user", "hello")
+        c.append("assistant", "hi")
+        return c
+
+    # -- the three states ---------------------------------------------------
+
+    def test_a_chat_that_never_chose_writes_no_key_at_all(self):
+        """STATE ONE, and every session on disk today is in it. An empty string
+        or a default here would bind every existing chat to a level nobody
+        picked, and move the head of every prompt they resume with."""
+        crow.save_session(self._talk(), "http://x/v1", 9, path=self.path)
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertNotIn(crow_core.SESSION_REASONING_KEY, json.load(fh))
+        self.assertIsNone(crow_core.session_reasoning(self.path))
+
+    def test_a_bound_level_is_written_and_read_back(self):
+        """STATE TWO, and the ticket asks for both halves in one commit: a value
+        that is written and never read is not a setting."""
+        crow.save_session(self._talk(), "http://x/v1", 9, path=self.path,
+                          reasoning="high")
+        self.assertEqual(crow_core.session_reasoning(self.path), "high")
+
+    def test_it_sits_in_the_same_file_as_the_chats_own_keys(self):
+        """robin, 2026-08-21: the level goes where the working directory goes.
+        `crow_root` and `crow_title` are stamped into THIS file by the window,
+        so the assertion is that one file carries all three."""
+        crow.save_session(self._talk(), "http://x/v1", 9, path=self.path,
+                          reasoning="low")
+        with open(self.path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data["crow_root"] = "D:\\somewhere"
+        data["crow_title"] = "a chat"
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        with open(self.path, encoding="utf-8") as fh:
+            back = json.load(fh)
+        self.assertEqual(back[crow_core.SESSION_REASONING_KEY], "low")
+        self.assertIn("crow_root", back)
+        self.assertIn("crow_title", back)
+
+    def test_a_level_this_model_does_not_take_is_unset_and_said(self):
+        """STATE THREE. `max` is fine for 0731 and RAISES against unsloth's
+        template (#108), so a stored level outside the model's list may not be
+        sent -- and may not disappear in silence either."""
+        crow.save_session(self._talk(), "http://x/v1", 9, path=self.path,
+                          reasoning="max")
+        level, note = crow_core.reasoning_for_chat("Qwen3.8-27B", self.path)
+        self.assertIsNone(level)
+        self.assertIn("max", note)
+        self.assertIn("Qwen3.8-27B", note)
+
+    def test_the_invalid_value_is_not_written_back(self):
+        """The other half of state three: reading it does not erase it."""
+        crow.save_session(self._talk(), "http://x/v1", 9, path=self.path,
+                          reasoning="max")
+        crow_core.reasoning_for_chat("Qwen3.8-27B", self.path)
+        self.assertEqual(crow_core.session_reasoning(self.path), "max")
+
+    def test_a_level_the_model_does_take_comes_back_without_a_line(self):
+        """COUNTER-PROBE: a checker that objects to everything is not a checker.
+        `max` IS valid for 0731, and the same file must then be silent."""
+        crow.save_session(self._talk(), "http://x/v1", 9, path=self.path,
+                          reasoning="max")
+        level, note = crow_core.reasoning_for_chat("DeepSeek-V4-Flash-0731", self.path)
+        self.assertEqual(level, "max")
+        self.assertIsNone(note)
+
+    # -- the command --------------------------------------------------------
+
+    def test_bare_reasoning_names_the_level_and_the_levels(self):
+        said, level, changed = crow_core.reasoning_command("", "Qwen3.8-27B", None)
+        self.assertFalse(changed)
+        self.assertIsNone(level)
+        for word in crow_core.reasoning_levels_for("Qwen3.8-27B"):
+            self.assertIn(word, said)
+        self.assertIn("off", said)
+
+    def test_an_unknown_level_is_refused_and_nothing_is_bound(self):
+        """NEGATIVE PROOF, and the refusal is the load-bearing half: an invalid
+        level does not fail here, it fails on the server AFTER the prefill has
+        already been paid for."""
+        said, level, changed = crow_core.reasoning_command("careful", "Qwen3.8-27B", "low")
+        self.assertFalse(changed)
+        self.assertEqual(level, "low")
+        self.assertIn("careful", said)
+        for word in crow_core.reasoning_levels_for("Qwen3.8-27B"):
+            self.assertIn(word, said)
+
+    def test_off_reaches_the_never_chosen_state_again(self):
+        """Without it, once a level is bound there is no way back to the one
+        state whose prompt is byte-identical to a client without this."""
+        said, level, changed = crow_core.reasoning_command("off", "Qwen3.8-27B", "high")
+        self.assertTrue(changed)
+        self.assertIsNone(level)
+        self.assertIn(crow_core.REASONING_COST_NOTE, said)
+
+    def test_a_change_states_the_prefill_before_it_applies(self):
+        said, level, changed = crow_core.reasoning_command("medium", "Qwen3.8-27B", None)
+        self.assertTrue(changed)
+        self.assertEqual(level, "medium")
+        self.assertIn(crow_core.REASONING_COST_NOTE, said)
+
+    def test_setting_the_level_it_already_has_costs_no_prefill(self):
+        """The cost line is a statement about a CHANGE. Printing it for a
+        no-op would teach the reader to ignore it."""
+        said, level, changed = crow_core.reasoning_command("high", "Qwen3.8-27B", "high")
+        self.assertFalse(changed)
+        self.assertNotIn(crow_core.REASONING_COST_NOTE, said)
+
+    def test_a_manifest_without_the_entry_invents_no_levels(self):
+        """NEGATIVE PROOF: no entry, no model-specific claim. What comes back is
+        the parser's union, which is not a statement about this model."""
+        with mock.patch.object(crow_core, "_manifest", return_value={}):
+            self.assertEqual(crow_core.reasoning_levels_for("whatever"),
+                             crow_core.REASONING_LEVELS)
+
+    # -- through the loop ---------------------------------------------------
+
+    def test_the_slash_command_binds_it_on_the_arguments(self):
+        """The value has to reach the object the turn reads from, or the command
+        is a message and not a switch."""
+        args = crow.build_parser().parse_args([])
+        args.reasoning_effort = None
+        with mock.patch.object(crow, "fetch_model_name", return_value="Qwen3.8-27B"):
+            result = crow.run_slash("/reasoning high", conversation=self._talk(),
+                                    mode="auto", show_reasoning=False,
+                                    context_tokens=0, n_ctx=0, rollover_at=0.9,
+                                    session=False, args=args)
+        self.assertTrue(result.handled)
+        self.assertEqual(args.reasoning_effort, "high")
+
+    def test_a_refused_level_leaves_the_arguments_alone(self):
+        args = crow.build_parser().parse_args([])
+        args.reasoning_effort = "low"
+        with mock.patch.object(crow, "fetch_model_name", return_value="Qwen3.8-27B"):
+            crow.run_slash("/reasoning careful", conversation=self._talk(),
+                           mode="auto", show_reasoning=False, context_tokens=0,
+                           n_ctx=0, rollover_at=0.9, session=False, args=args)
+        self.assertEqual(args.reasoning_effort, "low")
+
+    def test_the_exit_stamp_carries_the_level_and_the_model(self):
+        args = crow.build_parser().parse_args([])
+        args.reasoning_effort = "medium"
+        with mock.patch.object(crow, "fetch_model_name", return_value="Qwen3.8-27B"):
+            stamp = crow.exit_stamp(args)
+        self.assertEqual(stamp["reasoning"], "medium")
+        self.assertEqual(stamp["model"], "Qwen3.8-27B")
+
+    def test_nothing_is_sent_when_nothing_was_chosen(self):
+        """The whole point of state one, at the wire: `stream_reply` may not put
+        `chat_template_kwargs` in a body for a chat that never chose."""
+        sent = {}
+
+        def capture(url, body, api_key, timeout):
+            sent.update(body)
+            return iter(())
+
+        with mock.patch.object(crow_core, "_post_stream", capture):
+            crow_core.stream_reply(self._talk(), base_url="http://x/v1",
+                                   model="crow", api_key="k", temperature=1.0,
+                                   reasoning_effort=None, timeout=1.0)
+        self.assertNotIn("chat_template_kwargs", sent)
+
+    def test_a_bound_level_does_reach_the_body(self):
+        """COUNTER-PROBE to the case above: an absence that is absent for every
+        input proves nothing."""
+        sent = {}
+
+        def capture(url, body, api_key, timeout):
+            sent.update(body)
+            return iter(())
+
+        with mock.patch.object(crow_core, "_post_stream", capture):
+            crow_core.stream_reply(self._talk(), base_url="http://x/v1",
+                                   model="crow", api_key="k", temperature=1.0,
+                                   reasoning_effort="high", timeout=1.0)
+        self.assertEqual(sent["chat_template_kwargs"], {"reasoning_effort": "high"})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

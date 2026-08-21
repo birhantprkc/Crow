@@ -1200,6 +1200,101 @@ def resume_cold_note(path: str | None = None, model: str | None = None) -> str:
     return RESUME_COLD_NOTE
 
 
+# #116. Where the chat's reasoning level lives: the SESSION FILE, beside
+# `crow_root` and `crow_title`, because it is the same kind of fact -- something
+# about this chat rather than about this run. Written by the core and not
+# stamped on afterwards the way the window's two keys are: the terminal has a
+# `/reasoning` too, and a key only one surface knows how to write is a setting
+# that survives in one client and evaporates in the other.
+SESSION_REASONING_KEY = "reasoning"
+
+# Said BEFORE the level is changed, the way #115 announces the lost context
+# before the switch. The value lands in `chat_template_kwargs`, so it is
+# rendered into the HEAD of the prompt -- byte 0 moves and the whole cached
+# prefix stops matching. That is not a detail at 200k.
+REASONING_COST_NOTE = "the level changes the head of every prompt -- the next turn pays a full prefill"
+
+
+def session_reasoning(path: str | None = None) -> str | None:
+    """The level this chat was left on, or None if it never chose one.
+
+    THE ABSENT KEY IS A STATE AND NOT A MISSING VALUE, the same three-way shape
+    #101 gave the working directory: absent means nobody ever chose, and it has
+    to stay reachable or a chat that merely displayed a slider once would own a
+    level from then on.
+    """
+    path = path or SESSION_FILE
+    try:
+        with open(path, encoding="utf-8") as fh:
+            value = json.load(fh).get(SESSION_REASONING_KEY)
+    except Exception:
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def reasoning_for_chat(model: str | None,
+                       path: str | None = None) -> tuple[str | None, str | None]:
+    """What to send for this chat, and what to say about it: (level, line).
+
+    THE THIRD STATE IS THE ONE THAT NEEDED WRITING DOWN. A level bound under one
+    model is not necessarily a level the next one accepts -- `max` is fine for
+    0731 and RAISES against unsloth's template (#108) -- so a stored value that
+    is not in this model's list is treated as never chosen. It is SAID, because
+    the alternative is a chat that silently stopped doing what its own setting
+    says it does.
+
+    NOT WRITTEN BACK. The invalid value stays in the file untouched: the user may
+    switch back to the model it was valid for, and rewriting it here would erase
+    a choice on the strength of a server that happens to be up right now.
+    """
+    level = session_reasoning(path)
+    if level is None:
+        return None, None
+    levels = reasoning_levels_for(model)
+    if level in levels:
+        return level, None
+    return None, ("this chat is set to %s, which %s does not take (%s) -- "
+                  "sending nothing until it is set again"
+                  % (level, model or "this model", ", ".join(levels)))
+
+
+def reasoning_command(argument: str, model: str | None,
+                      current: str | None) -> tuple[str, str | None, bool]:
+    """`/reasoning`: report, or bind. Returns (what to say, level, changed).
+
+    THE DECISION IS HERE AND THE PLUMBING IS NOT, the same split `/mode` and
+    `/model` use: both surfaces have to offer the same levels, refuse the same
+    typo and say the same thing about the prefill a change costs.
+
+    `off` IS OFFERED ON PURPOSE. Without it the third state is reachable only by
+    editing the file: once a level is bound there would be no way back to
+    "send nothing", which is the state every existing chat is in and the only
+    one whose prompt is byte-identical to a client without this feature.
+    """
+    levels = reasoning_levels_for(model)
+    known = ", ".join(levels)
+    wanted = (argument or "").strip().lower()
+
+    if not wanted:
+        now = current or "not set -- nothing is sent, and the model uses its own default"
+        return ("reasoning: %s\nlevels: %s, or off" % (now, known), current, False)
+
+    if wanted == "off":
+        if current is None:
+            return ("reasoning is already unset.", None, False)
+        return ("reasoning unset -- nothing is sent.\n%s" % REASONING_COST_NOTE, None, True)
+
+    if wanted not in levels:
+        # Named, and NOT sent. An invalid level reaching the server arrives as a
+        # template exception AFTER the prefill has been paid for.
+        return ("no level %r for %s. There is: %s, or off"
+                % (wanted, model or "this model", known), current, False)
+
+    if wanted == current:
+        return ("reasoning is already %s." % wanted, current, False)
+    return ("reasoning: %s\n%s" % (wanted, REASONING_COST_NOTE), wanted, True)
+
+
 def write_transcript(conversation: "Conversation", path: str) -> int:
     """The archive as plain text, for whoever has to read it back.
 
@@ -1296,7 +1391,8 @@ def forget_session(path: str | None = None) -> bool:
 
 def save_session(conversation: "Conversation", base_url: str, context_tokens: int,
                  path: str | None = None, with_kv: bool = True,
-                 pretty: bool = False, model: str | None = None) -> str | None:
+                 pretty: bool = False, model: str | None = None,
+                 reasoning: str | None = None) -> str | None:
     """Write the session so the next start does not pay for it again.
 
     TWO HALVES, AND NEITHER IS ENOUGH ALONE. The server holds the KV cache; the
@@ -1368,7 +1464,15 @@ def save_session(conversation: "Conversation", base_url: str, context_tokens: in
                    "version": CLIENT_VERSION, "kv": saved_kv, "kv_tokens": kv_tokens,
                    "context_tokens": context_tokens, "model": model or "",
                    "prefix": prefix_fingerprint(conversation.system, model),
-                   "messages": conversation.payload()},
+                   "messages": conversation.payload(),
+                   # #116: ABSENT WHEN NEVER CHOSEN, and that is the first of
+                   # the three states rather than a tidy-up. A chat with no
+                   # level sends no `reasoning_effort` at all, which keeps its
+                   # prompt byte-identical to one written by a client that
+                   # predates the switch -- so the cache of every session on
+                   # disk survives this change. Writing "" or a default here
+                   # would bind every existing chat to a level nobody picked.
+                   **({SESSION_REASONING_KEY: reasoning} if reasoning else {})},
                   fh, indent=1 if pretty else None)
 
     if saved_kv:
@@ -3988,7 +4092,7 @@ DECLINED = "error: declined by the user"
 #
 # `crow.py` keeps the prose of `HELP` and is pinned against this tuple; the
 # window reads the tuple directly. Neither owns the other.
-SLASH_COMMANDS = ("/help", "/tools", "/mode", "/model", "/thoughts",
+SLASH_COMMANDS = ("/help", "/tools", "/mode", "/model", "/reasoning", "/thoughts",
                   "/reset", "/context", "/exit", "/quit")
 
 

@@ -451,6 +451,19 @@ details.think[open] .caret{transform:rotate(90deg)}
 #modelmenu button b{display:block;font-weight:600;font-size:12px;color:var(--text)}
 #modelmenu button .what{color:var(--dimmer);font-size:10.5px}
 #modelmenu button .tick{float:right;color:var(--accent)}
+/* #116. A SLIDER AND NOT A LIST, because the levels are ordered -- off, then
+   cheapest to dearest -- and an ordered choice drawn as a list hides the one
+   thing the user is deciding. Same panel as the two menus above it. */
+#reasonmenu{position:absolute;top:calc(100% + 6px);left:0;min-width:230px;
+  background:var(--panel);border:1px solid var(--line);border-radius:9px;
+  padding:5px 10px 9px;z-index:40;box-shadow:0 10px 26px rgba(0,0,0,.45)}
+#reasonmenu[hidden]{display:none}
+#reasonmenu .head{color:var(--dimmer);font-size:10px;text-transform:uppercase;
+  letter-spacing:.08em;padding:4px 0 6px}
+#reasonmenu input[type=range]{width:100%;accent-color:var(--accent);margin:2px 0}
+#reasonmenu .what{color:var(--text);font-size:12px;font-weight:600;padding-top:3px}
+#reasonmenu .cost{color:var(--dimmer);font-size:10.5px;font-weight:400;
+  padding-top:4px;line-height:1.35}
 </style></head><body>
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
@@ -489,6 +502,15 @@ details.think[open] .caret{transform:rotate(90deg)}
       <span class="chipwrap"><span class="chip pick" id="model" hidden
             onclick="crow.modelMenu()" title="switch model"></span>
         <div id="modelmenu" hidden></div></span>
+      <span class="chipwrap"><span class="chip pick" id="reasoning" hidden
+            onclick="crow.reasonMenu()" title="this chat's thinking level"></span>
+        <div id="reasonmenu" hidden>
+          <div class="head">thinking level</div>
+          <input type="range" id="reasonrange" min="0" max="1" step="1" value="0"
+                 oninput="crow.reasonPreview()" onchange="crow.reasonApply()">
+          <div class="what" id="reasonlabel"></div>
+          <div class="what cost" id="reasoncost"></div>
+        </div></span>
       <span class="chip" id="nctx" hidden></span>
       <div id="right">
         <span class="chip ghost" id="url"></span>
@@ -757,6 +779,46 @@ const crow = {
     m.hidden=false; },
 
   chooseModel(k){ $("#modelmenu").hidden=true; pywebview.api.choose_model(k); },
+
+  // #116. THE STOPS ARE off PLUS WHAT THE MODEL TAKES, in the manifest's order,
+  // and they are LABELS OFF THE DISK -- so the label under the slider is set
+  // with textContent, never interpolated, exactly as the two menus above do it.
+  reasonStops(){ return ["off"].concat(this.levels||[]); },
+
+  // HIDDEN WHEN THE MODEL DECLARES NO LEVELS, rather than showing an empty
+  // control: a slider with one stop invites a click that cannot do anything,
+  // and #116's second negative proof is exactly that -- no manifest entry, no
+  // invented levels.
+  showReason(level){ this.reasoning = level || "";
+    const c = $("#reasoning");
+    if(!(this.levels||[]).length){ c.hidden = true; return; }
+    c.hidden = false;
+    c.innerHTML = "<b></b>";
+    c.querySelector("b").textContent = "reasoning " + (level || "off"); },
+
+  reasonMenu(){ const m=$("#reasonmenu");
+    if(!m.hidden){ m.hidden=true; return; }
+    const stops = this.reasonStops();
+    const r = $("#reasonrange");
+    r.max = String(Math.max(stops.length-1, 0));
+    r.value = String(Math.max(stops.indexOf(this.reasoning||"off"), 0));
+    this.reasonPreview();
+    m.hidden=false; },
+
+  // Moving the handle SAYS what it would do; it does not do it. The cost line
+  // is on screen before the change is applied, the way #115 announces the lost
+  // context before the switch rather than after it.
+  reasonPreview(){ const stops=this.reasonStops();
+    const pick = stops[Number($("#reasonrange").value)] || "off";
+    $("#reasonlabel").textContent = pick;
+    $("#reasoncost").textContent = (pick === (this.reasoning||"off"))
+      ? "this is the current level"
+      : "changing it re-reads the whole prompt -- the next turn pays a prefill"; },
+
+  reasonApply(){ const stops=this.reasonStops();
+    const pick = stops[Number($("#reasonrange").value)] || "off";
+    $("#reasonmenu").hidden=true;
+    pywebview.api.set_reasoning(pick); },
   pickRoot(){ $("#rootmenu").hidden=true; pywebview.api.pick_root(); },
   clearRoot(){ $("#rootmenu").hidden=true; pywebview.api.clear_root(); },
 
@@ -956,11 +1018,15 @@ const crow = {
         // a click answers from what the last probe SAW instead of racing it.
         if(e.models){ this.models=e.models; }
         if(e.model_key!==undefined){ this.modelKey=e.model_key; }
+        if(e.levels){ this.levels=e.levels; }
+        if(e.reasoning!==undefined){ this.showReason(e.reasoning); }
         if(e.model){ $("#model").hidden=false; $("#model").innerHTML="<b></b>";
           $("#model b").textContent=e.model; }
         if(e.n_ctx){ $("#nctx").hidden=false;
           $("#nctx").innerHTML="n_ctx <b>"+(e.n_ctx/1000).toFixed(0)+"k</b>"; }
         this.ctx(e.tokens||0,e.n_ctx||0); break;
+      case "reasoning": if(e.levels){ this.levels=e.levels; }
+        this.showReason(e.level); break;
       case "down": $("#dot").className="down";
         $("#state").textContent=e.why||"no server"; break;
       case "meta": $("#ver").textContent=e.version;
@@ -1346,6 +1412,12 @@ class Api:
         # question. Empty until _probe has run -- #113 treats that as "unknown",
         # which drops a cache rather than restoring the wrong one.
         self._model = ""
+        # #116. The chat's thinking level, and `None` is a value: "never chosen",
+        # which sends no `reasoning_effort` at all and keeps the prompt
+        # byte-identical to a window that predates the slider. Bound from the
+        # session file once the model is known, because which levels are legal
+        # is the model's answer, not this window's.
+        self._reasoning: str | None = None
         self._promised_warm = False
         self._rolled = False
         self._worker: threading.Thread | None = None
@@ -1526,6 +1598,18 @@ class Api:
         because the two halves were wired separately.
         """
         said = self._model_command([key] if key else [])
+        if said:
+            self.push({"k": "note", "t": said})
+
+    def set_reasoning(self, level: str) -> None:
+        """The slider (#116). Same door as `/reasoning <level>`, deliberately.
+
+        #99 is the precedent this obeys: a control wired separately from the
+        command it duplicates is one that works in one surface and not the
+        other, and nothing in the suite can see it. So the slider does not set
+        the level -- it types the command.
+        """
+        said = self._reasoning_command([level] if level else [])
         if said:
             self.push({"k": "note", "t": said})
 
@@ -1717,13 +1801,23 @@ class Api:
             name = model_display_name(fetch_model_name(self._args.base_url))
             self._model = name
             self._n_ctx = fetch_n_ctx(self._args.base_url)
+            # #116. BOUND HERE BECAUSE THIS IS WHERE THE MODEL BECOMES KNOWN,
+            # and which levels are legal is the model's answer. A level the new
+            # model does not take comes back as None with a line, and is left in
+            # the file untouched -- the user may go back to the model it was
+            # valid for.
+            self._reasoning, note = crow_core.reasoning_for_chat(name, SESSION_FILE)
+            if note:
+                self.push({"k": "note", "t": note})
             self.push({"k": "up", "model": name, "n_ctx": self._n_ctx,
                        "tokens": self._context_tokens, "state": state,
                        # #115: the chip's list travels with the probe that
                        # learned the name, so the two can never disagree about
                        # which model is the running one.
                        "models": list(crow_core.bootable_models()),
-                       "model_key": crow_core.model_key_for(name)})
+                       "model_key": crow_core.model_key_for(name),
+                       "reasoning": self._reasoning or "",
+                       "levels": list(crow_core.reasoning_levels_for(name))})
         except Exception as exc:           # noqa: BLE001 - shown, never raised
             self.push({"k": "down", "why": str(exc)[:120]})
             return
@@ -1813,6 +1907,7 @@ class Api:
         "/tools": "what the model can call.",
         "/mode": "the release level; /mode manual|allowedit|auto to switch.",
         "/model": "the model that is up; /model <key> restarts on another one.",
+        "/reasoning": "this chat's thinking level; /reasoning <level>|off to set it.",
         "/thoughts": "fold the reasoning blocks open, or closed again.",
         "/reset": "drop the context. The chat stays where it is.",
         "/context": "how much of the window the conversation is using.",
@@ -1865,6 +1960,8 @@ class Api:
             return self._mode_command(parts[1:])
         if word == "/model":
             return self._model_command(parts[1:])
+        if word == "/reasoning":
+            return self._reasoning_command(parts[1:])
         if word == "/thoughts":
             return self._fold_thoughts()
         self.close()          # /exit, /quit
@@ -1980,6 +2077,27 @@ class Api:
                    "tokens": 0, "state": "ok",
                    "models": list(crow_core.bootable_models()),
                    "model_key": crow_core.model_key_for(self._model)})
+        return said
+
+    def _reasoning_command(self, rest: list) -> str:
+        """`/reasoning` reports, `/reasoning <level>|off` binds it (#116).
+
+        NOT A SECOND IMPLEMENTATION: `crow_core.reasoning_command` owns which
+        levels exist, how a typo is refused and the sentence about the prefill a
+        change costs. The slider goes through this same method for the reason
+        #115 gives about the model chip -- a control with its own path is a
+        second answer to the same question.
+
+        MID-TURN IS ALLOWED, unlike `/model`. The level is read when the NEXT
+        request is built; nothing about the turn in flight changes, and refusing
+        would be a rule with no failure behind it.
+        """
+        said, level, changed = crow_core.reasoning_command(
+            " ".join(rest), self._model, self._reasoning)
+        if changed:
+            self._reasoning = level
+            self.push({"k": "reasoning", "level": level or "",
+                       "levels": list(crow_core.reasoning_levels_for(self._model))})
         return said
 
     def _fold_thoughts(self) -> str:
@@ -2341,7 +2459,7 @@ class Api:
         try:
             save_session(self._conversation, self._args.base_url,
                          self._context_tokens, with_kv=with_kv,
-                         model=self._model)
+                         model=self._model, reasoning=self._reasoning)
         except Exception:                  # noqa: BLE001 - a turn survives it
             return
         self._stamp(SESSION_FILE, pointer=True)
@@ -2820,6 +2938,8 @@ class Api:
                 model=self._args.model, api_key=self._args.api_key,
                 temperature=sampling["temperature"], top_p=sampling["top_p"],
                 min_p=sampling["min_p"], top_k=sampling.get("top_k"),
+                # #116: None sends nothing, which is the "never chosen" state.
+                reasoning_effort=self._reasoning,
                 timeout=READ_TIMEOUT_S, context_tokens=self._context_tokens,
                 n_ctx=self._n_ctx, promised_warm=self._promised_warm,
                 rolled=self._rolled, execute_tools=self._args.execute_tools,

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import difflib
 import io
+import inspect
 import json
 import os
 import re
@@ -2095,6 +2096,106 @@ class TheLiveRateIsWallClockOnPurposeTests(unittest.TestCase):
         without = self._rate([0.05] * 50)
         self.assertGreater(without - with_pause, 10.0,
                            "the pause stopped counting -- see #97 before changing this")
+
+
+
+class TheReasoningSliderIsTheSameCommandTests(ApiCase):
+    """#116, the window half. The terminal half is in test_crow.py, and BOTH
+    exist for the reason the ticket names: #99 is the case where one surface was
+    forgotten -- `format_tool_args` behind a hasattr guard that had been False
+    since the split, so the feature worked in one client and not the other for
+    months with nothing in the suite able to see it.
+    """
+
+    def _api(self, model="Qwen3.8-27B"):
+        api = self.api()
+        api._model = model
+        return api
+
+    def test_the_command_is_on_the_shared_list_and_described(self):
+        self.assertIn("/reasoning", crow_core.SLASH_COMMANDS)
+        self.assertIn("/reasoning", crow_gui.Api.WHAT_THEY_DO)
+        self.assertNotIn("nothing here answers this yet", self.api().help_listing())
+
+    def test_bare_reasoning_answers_rather_than_reaching_the_model(self):
+        answer = self._api().slash_answer("/reasoning")
+        self.assertIsNotNone(answer)
+        self.assertIn("levels", answer)
+        for level in crow_core.reasoning_levels_for("Qwen3.8-27B"):
+            self.assertIn(level, answer)
+
+    def test_setting_a_level_binds_it_and_states_the_prefill(self):
+        api = self._api()
+        answer = api.slash_answer("/reasoning medium")
+        self.assertEqual(api._reasoning, "medium")
+        self.assertIn(crow_core.REASONING_COST_NOTE, answer)
+
+    def test_the_slider_types_the_command_rather_than_setting_the_level(self):
+        """THE POINT OF THE WHOLE CLASS. A control wired separately from the
+        command it duplicates is #99 all over again, so the slider goes through
+        `_reasoning_command` and its refusal applies to both."""
+        api = self._api()
+        api.set_reasoning("high")
+        self.assertEqual(api._reasoning, "high")
+        api.set_reasoning("careful")
+        self.assertEqual(api._reasoning, "high",
+                         "the slider bypassed the refusal the command applies")
+
+    def test_an_unknown_level_is_named_and_nothing_is_bound(self):
+        """NEGATIVE PROOF. An invalid level does not fail here -- it fails on
+        the server, after the prefill has been paid for."""
+        api = self._api()
+        api.slash_answer("/reasoning low")
+        answer = api.slash_answer("/reasoning careful")
+        self.assertIn("careful", answer)
+        self.assertEqual(api._reasoning, "low")
+
+    def test_off_returns_to_the_never_chosen_state(self):
+        api = self._api()
+        api.slash_answer("/reasoning high")
+        api.slash_answer("/reasoning off")
+        self.assertIsNone(api._reasoning)
+
+    def test_a_change_tells_the_page_and_a_refusal_does_not(self):
+        """The chip has to follow the value, and only when it moved: a push on
+        every attempt would repaint the chip for a level that was refused."""
+        api = self._api()
+        api.slash_answer("/reasoning high")
+        moved = [m for m in self.drained(api) if m.get("k") == "reasoning"]
+        self.assertEqual([m["level"] for m in moved], ["high"])
+        api.slash_answer("/reasoning careful")
+        self.assertEqual([m for m in self.drained(api) if m.get("k") == "reasoning"], [])
+
+    def test_the_page_has_a_case_for_the_message_it_is_sent(self):
+        """#99's shape in the transport: a `k` the Python side pushes and the
+        page has no case for is a message into a void."""
+        self.assertIn("reasoning", _drawn_kinds(inspect.getsource(crow_gui)))
+
+    def test_the_level_reaches_the_session_file_and_comes_back(self):
+        api = self._api()
+        api.slash_answer("/reasoning medium")
+        api._conversation.append("user", "hello")
+        api._conversation.append("assistant", "hi")
+        crow_core.post_json = lambda url, body, timeout=0: {"n_saved": 3}
+        api._persist_live()
+        self.assertEqual(crow_core.session_reasoning(self.session), "medium")
+
+    def test_a_level_the_new_model_refuses_is_dropped_and_said(self):
+        """The model-switch criterion, at the level of the state: `max` is fine
+        for 0731 and raises against unsloth's template."""
+        with open(self.session, "w", encoding="utf-8") as fh:
+            json.dump({"format_version": crow_core.SESSION_FORMAT,
+                       "messages": [{"role": "user", "content": "x"}],
+                       "reasoning": "max"}, fh)
+        level, note = crow_core.reasoning_for_chat("Qwen3.8-27B", self.session)
+        self.assertIsNone(level)
+        self.assertIn("max", note)
+
+    def test_the_slider_labels_are_not_interpolated(self):
+        """The rootMenu rule, and the ticket names it: a level out of the
+        manifest is text off the disk, so the page sets it with textContent."""
+        source = inspect.getsource(crow_gui)
+        self.assertIn('$("#reasonlabel").textContent', source)
 
 
 if __name__ == "__main__":
