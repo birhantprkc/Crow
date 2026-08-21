@@ -138,18 +138,12 @@ PASTE_DIR = os.path.join(os.path.dirname(crow_core.SESSION_DIR), "pastes")
 # 20 MB. A screenshot is under one; anything past this is a paste nobody meant.
 PASTE_MAX_BYTES = 20 * 1024 * 1024
 
-# 30 DAYS, robin's answer on 2026-08-21, and the trade it buys is worth writing
-# down: the PATH of a pasted picture lives in the conversation, so deleting the
-# file breaks what an old chat points at. Thirty days is the span where "the
-# chat I had recently" still works and the folder does not grow without end.
-PASTE_KEEP_DAYS = 30
-
-# A POSITIVE LIST, NOT AN EXCEPTION LIST. A delete path may only touch what it
-# put there itself: this matches the names `write_paste` builds and nothing
-# else, so a file a user dropped into the folder by hand survives every sweep.
-# The alternative -- deleting everything except a list of things to spare --
-# only protects what somebody thought of in advance.
-PASTE_NAME = re.compile(r"^paste-\d{8}-\d{6}(?:-\d+)?\.(?:png|bmp)$", re.I)
+# NOTHING IS EVER DELETED HERE, and that is a decision rather than an
+# oversight. A 30-day sweep was built on 2026-08-21 and switched off again
+# the same day: the PATH of a pasted picture lives in the conversation, so
+# deleting the file breaks what an old chat points at, and a chat that
+# silently stops working is worse than a folder that grows. The machinery
+# is in commit 81a913d if it is ever wanted back.
 
 # CF_DIB. The number is Windows', not ours.
 CF_DIB = 8
@@ -291,32 +285,6 @@ def write_paste(suffix: str, raw: bytes) -> str:
     except OSError:
         return ""
     return path
-
-
-def prune_pastes(now: float | None = None) -> int:
-    """Delete pasted pictures older than PASTE_KEEP_DAYS. Returns how many.
-
-    NEVER RAISES, and never reports either. This runs while a window is opening;
-    a user who pastes screenshots did not ask to be told about housekeeping, and
-    a folder that could not be read is not a reason to fail a start.
-    """
-    cutoff = (now if now is not None else time.time()) - PASTE_KEEP_DAYS * 86400
-    gone = 0
-    try:
-        names = os.listdir(PASTE_DIR)
-    except OSError:
-        return 0
-    for name in names:
-        if not PASTE_NAME.match(name):
-            continue
-        path = os.path.join(PASTE_DIR, name)
-        try:
-            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
-                os.remove(path)
-                gone += 1
-        except OSError:
-            continue
-    return gone
 
 
 def current_theme() -> str:
@@ -3843,9 +3811,6 @@ def main(argv: list[str] | None = None) -> int:
                 .replace("__THEME__", current_theme()))
 
     api = Api(args)
-    # ON ITS OWN THREAD, because the opening path is not the place to walk a
-    # directory that has been collecting files for a year.
-    threading.Thread(target=prune_pastes, daemon=True).start()
     # FRAMELESS, because the title bar is part of the design: the caption is
     # drawn in the page with the wordmark in it, the way the mockup shows it.
     title = "CROW %s" % (client_version() or "")
