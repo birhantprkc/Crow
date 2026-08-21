@@ -2646,5 +2646,130 @@ class TheDropAndThePasteTests(unittest.TestCase):
         self.assertIn("os.path.dirname(crow_core.SESSION_DIR)", self.source)
         self.assertTrue(crow_gui.PASTE_DIR.endswith("pastes"))
 
+class TheModelMenuSurvivesASwitchTests(ApiCase):
+    """#115's menu, after the switch it exists to perform.
+
+    THE DEFECT THIS CLASS IS CUT FOR: two places pushed `models` and they pushed
+    two different shapes. The probe sent `[key, label]` pairs; the switch sent
+    bare keys. The page keeps ONE `this.models` and the last payload wins, so the
+    first switch replaced pairs with strings -- and `modelMenu`, which indexes
+    x[0] and x[1], drew the second LETTER of each key. `operating-point` became
+    `p`, `qwen35-q4-k-xl` became `w`, the running row said "restarts the server"
+    because "o" never equals "operating-point", and a click sent "o" into
+    `choose_model`, where `model_command` refused it as a typo. Nothing on disk
+    went red: no test named the shape.
+    """
+
+    def _switched(self, api):
+        """Drive `/model <other>` with the boot stubbed out, and hand back the
+        `up` payload the page would have received."""
+        with mock.patch.object(crow_core, "model_command",
+                               return_value=("up", "http://127.0.0.1:2/v1", True)), \
+             mock.patch.object(crow_gui, "fetch_model_name", return_value="m"), \
+             mock.patch.object(crow_gui, "model_display_name", return_value="m"), \
+             mock.patch.object(crow_gui, "fetch_n_ctx", return_value=1000):
+            api._model_command(["qwen35-q4-k-xl"])
+        ups = [m for m in self.drained(api) if m.get("k") == "up" and "models" in m]
+        self.assertTrue(ups, "the switch told the page nothing about the models")
+        return ups[-1]
+
+    def test_the_switch_sends_pairs_not_bare_keys(self):
+        """Every row the menu draws needs BOTH halves: the key goes into dataset
+        and comes back on the click, the label is what a person recognises."""
+        rows = self._switched(self.api())["models"]
+        self.assertEqual(rows, [[k, crow_core.model_label(k)]
+                                for k in crow_core.bootable_models()])
+        for row in rows:
+            self.assertEqual(len(row), 2, "a row that is not a pair draws letters")
+            self.assertIn(row[0], crow_core.bootable_models())
+            self.assertNotEqual(row[0], row[1],
+                                "the key is the table's word, the label is the model's")
+
+    def test_the_key_that_comes_back_is_one_the_table_knows(self):
+        """THE CONSEQUENCE THE LABELS HID. A wrong shape does not just misspell
+        the row -- it puts x[0] into dataset.k, and a single letter is refused by
+        `model_command` as a typo, so the menu stops switching entirely."""
+        for key, _label in self._switched(self.api())["models"]:
+            said, _url, switched = crow_core.model_command(
+                key, "http://127.0.0.1:1/v1")
+            self.assertNotIn("no model", said,
+                             "the menu would send a key the table refuses")
+            del switched
+
+    def test_a_bare_key_producer_would_be_caught(self):
+        """NEGATIVE PROBE for the two above, and the guard against a THIRD
+        producer: the positives only see the switch, so they would stay green
+        while a new `push` somewhere else re-introduced the bare list."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        pairs = len(re.findall(r'"models":\s*\[\[k,', _code_only(source)))
+        total = len(re.findall(r'"models":', _code_only(source)))
+        self.assertEqual(pairs, total,
+                         "a place that pushes models does not push pairs")
+        salted = _code_only(source) + '\n"models": list(bootable_models()),\n'
+        self.assertNotEqual(len(re.findall(r'"models":\s*\[\[k,', salted)),
+                            len(re.findall(r'"models":', salted)),
+                            "the check cannot see a bare-key producer")
+
+
+class TheComposerControlsAreOneHeightTests(unittest.TestCase):
+    """The four controls in #acts -- folder, level, microphone, arrow.
+
+    THEY SAT AT FOUR HEIGHTS because each was as tall as whatever it held: the
+    folder and the level are an 11.5px line box at the inherited 1.55 factor
+    (25.83px once padding and border are counted), the arrow is 14px at a 1.2
+    line-height (22.8), and the microphone is an SVG that declares height="13"
+    (19). `align-items:center` let every one of them keep its own number.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+
+    def rule(self, selector: str) -> str:
+        """The declarations of one rule, by its exact selector. Against the CSS
+        slice of `source` and never against `_code_only`: that helper drops every
+        line starting with `#`, which is every id selector in this file."""
+        m = re.search(r"(?m)^%s\{(.*?)\}" % re.escape(selector), self.css, re.S)
+        self.assertIsNotNone(m, "no rule for %s" % selector)
+        return m.group(1)
+
+    def test_the_row_stretches_so_one_height_reaches_all_four(self):
+        """`stretch` is the initial value of align-items; the row gets ONE height
+        from its tallest control and the rest adopt it. Pinning a px number on
+        each button instead would go stale the first time a font-size moves."""
+        acts = self.rule("#acts")
+        self.assertIn("align-items:stretch", acts)
+        self.assertNotIn("align-items:center", acts,
+                         "center is what let the four keep four heights")
+
+    def test_the_stretch_reaches_the_buttons_inside_their_wrappers(self):
+        """#root and #mode are not children of #acts -- their menu wrappers are.
+        A stretch that stops at a transparent div moves nothing."""
+        for selector in ("#rootwrap", "#modewrap"):
+            body = self.rule(selector)
+            self.assertIn("display:flex", body,
+                          "%s does not pass the stretch on" % selector)
+            self.assertIn("position:relative", body,
+                          "%s must stay the menu's containing block" % selector)
+
+    def test_the_glyph_stays_on_the_centre_line_once_stretched(self):
+        """A stretched button grows at the BOTTOM. #mic was already a centred
+        flex box; #go was not, and its arrow would have ridden high."""
+        self.assertIn("align-items:center", self.rule("#go"))
+        self.assertIn("align-items:center", self.rule("#mic"))
+
+    def test_the_hint_is_the_one_child_that_does_not_stretch(self):
+        """NEGATIVE SIDE of the stretch: it is a bare word with no border to line
+        up, and a stretched span puts its text at the top of the box."""
+        self.assertIn("align-self:center", self.rule("#hint"))
+
+    def test_no_control_pins_a_height_of_its_own(self):
+        """The whole point of the fix. A `height:` on any of the four would be
+        the number that disagrees with the row the next time the font moves."""
+        for selector in ("#root", "#mode", "#mic", "#go"):
+            self.assertIsNone(re.search(r"(?<![-a-z])height:\s*\d", self.rule(selector)),
+                              "%s pins its own height" % selector)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

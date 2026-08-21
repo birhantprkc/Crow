@@ -702,11 +702,24 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 #ctx .fill{color:var(--ok)} #ctx .fill.w{color:var(--warn)} #ctx .fill.b{color:var(--bad)}
 #ctx .rest{color:var(--dimmer)}
 #ctx .n{color:var(--dim);margin-left:5px}
-#acts{margin-left:auto;display:flex;gap:8px;align-items:center}
-#hint{color:var(--dimmer);font-size:10.5px}
+/* STRETCH, NOT CENTER, AND THAT IS THE WHOLE FIX. Four controls sat here at
+   four heights because each one was as tall as whatever it happened to hold:
+   the level and the folder are a 11.5px line box at the inherited 1.55 factor
+   (25.83px with padding and border), the arrow is 14px at 1.2 (22.8), and the
+   microphone is an SVG that declares height="13" (19). Pinning a number on
+   each would be the fix that goes stale the first time a font-size moves --
+   `stretch` is the initial value of align-items for a reason: the row gets ONE
+   height, from its tallest control, and the rest adopt it. */
+#acts{margin-left:auto;display:flex;gap:8px;align-items:stretch}
+/* CENTRED, NOT STRETCHED: it is a bare word with no border to line up, and a
+   stretched span puts its text at the top of the box instead of on the row. */
+#hint{color:var(--dimmer);font-size:10.5px;align-self:center}
+/* A FLEX BOX SO THE GLYPH STAYS ON THE CENTRE LINE once #acts stretches this
+   button past its own line box. Left as a plain button it would grow at the
+   bottom and the arrow would ride high in it. */
 #go{font:inherit;font-size:11.5px;cursor:pointer;border-radius:6px;
   padding:3px 13px;background:transparent;border:1px solid var(--line);
-  color:var(--dim)}
+  color:var(--dim);display:flex;align-items:center;justify-content:center}
 /* THE ARROW IS THE LABEL, so the button is one glyph wide plus its padding --
    about half of what "send" needed. The larger size applies only while idle:
    "Stop" keeps 11.5px, because a word set at 14px would grow the button in the
@@ -768,7 +781,11 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 /* THE COLOUR IS THE STATE. robin's three: manual white, allowedit green,
    auto yellow -- brightest where the least is held back, because the level
    that runs a shell unasked is the one worth noticing across the room. */
-#modewrap{position:relative}
+/* FLEX SO THE BUTTON FILLS IT. The wrapper is what #acts stretches; without
+   this the button inside keeps its own height and the stretch stops at a
+   transparent div. The menu is position:absolute and is not a flex item, so
+   it is untouched by this. */
+#modewrap{position:relative;display:flex}
 #mode{font:inherit;font-size:11.5px;cursor:pointer;border-radius:6px;
   padding:3px 11px;background:transparent;border:1px solid var(--line);
   color:var(--dim);display:flex;align-items:center;gap:6px}
@@ -800,7 +817,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    it. The level is the loud control -- it decides whether a shell runs unasked;
    the boundary decides where, and only ever refuses. Same shape so the two read
    as one row of controls, no colour of its own so it does not compete. */
-#rootwrap{position:relative}
+#rootwrap{position:relative;display:flex}
 #root{font:inherit;font-size:11.5px;cursor:pointer;border-radius:6px;
   padding:3px 11px;background:transparent;border:1px solid var(--line);
   color:var(--dimmer);max-width:150px;overflow:hidden;text-overflow:ellipsis;
@@ -2729,7 +2746,17 @@ class Api:
         self._n_ctx = fetch_n_ctx(url)
         self.push({"k": "up", "model": self._model, "n_ctx": self._n_ctx,
                    "tokens": 0, "state": "ok",
-                   "models": list(crow_core.bootable_models()),
+                   # THE SAME SHAPE THE PROBE SENDS, and it has to be: the page
+                   # keeps ONE `this.models` and the last payload wins, so a
+                   # bare list of keys here silently replaced the [key, label]
+                   # pairs the probe had put there. `modelMenu` then indexed a
+                   # STRING -- x[0] and x[1] became letters -- and the menu drew
+                   # `p` and `w`, marked the running model "restarts the
+                   # server", and sent "o"/"q" back into choose_model, where
+                   # model_command refused them as typos. Two producers, one
+                   # consumer, one shape.
+                   "models": [[k, crow_core.model_label(k)]
+                              for k in crow_core.bootable_models()],
                    "model_key": crow_core.model_key_for(self._model)})
         return said
 
