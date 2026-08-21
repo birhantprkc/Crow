@@ -127,6 +127,12 @@ PAGE = r"""<!doctype html>
   --dim:#6d7b95; --dimmer:#4a566d;
   --ok:#4ec98f; --warn:#e3b341; --bad:#f0655a;
   --mono:"Google Sans Code",ui-monospace,"Cascadia Mono",Consolas,monospace;
+  /* The height of the two bars across the top, ONCE. The rail's head and the status bar sit side
+     by side and were 3 px apart: 11+9 padding against 8+8, plus a button that builds 0.8 px taller
+     than a chip. Matching them by arithmetic works until a font changes; matching them against one
+     number cannot drift. Both take it as min-height, so the status bar may still grow when its
+     chips wrap -- and then the rail head is SUPPOSED to stay put. */
+  --barh:41px;
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;overflow:hidden}
@@ -178,7 +184,7 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--mono);
 /* -- rail --------------------------------------------------------------- */
 #rail{width:242px;flex:none;border-right:1px solid var(--line);
   background:var(--panel);display:flex;flex-direction:column;min-height:0}
-#railhead{display:flex;align-items:center;padding:11px 12px 9px;
+#railhead{display:flex;align-items:center;padding:0 12px;min-height:var(--barh);
   border-bottom:1px solid var(--line-soft)}
 #railhead h2{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.13em;
   text-transform:uppercase;color:var(--dimmer)}
@@ -231,6 +237,7 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--mono);
 /* -- main --------------------------------------------------------------- */
 #main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
 #status{display:flex;align-items:center;gap:9px;padding:8px 16px;flex:none;
+  min-height:var(--barh);
   border-bottom:1px solid var(--line);background:rgba(14,18,32,.72);
   font-size:11.5px;flex-wrap:wrap}
 .chip{display:inline-flex;align-items:center;gap:6px;color:var(--dim);
