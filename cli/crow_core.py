@@ -1872,7 +1872,8 @@ def session_tools_cleared(path: str | None = None) -> int:
 
 def load_session(base_url: str, system: str | None = None,
                  path: str | None = None,
-                 model: str | None = None) -> tuple[list[dict], int, bool] | None:
+                 model: str | None = None,
+                 with_kv: bool = True) -> tuple[list[dict], int, bool] | None:
     """The other half. Returns (messages, context_tokens, kv_restored) or None.
 
     The KV restore is attempted first and its success is carried out, because a
@@ -1915,8 +1916,15 @@ def load_session(base_url: str, system: str | None = None,
     # what produced it. Restoring it against changed tools would not fail -- it
     # would succeed and then re-read everything, which costs minutes and looks
     # like the server misbehaving.
+    # WITH_KV=FALSE MEANS THERE IS NO SLOT TO RESTORE INTO, and that is a
+    # statement about the ENDPOINT, not about this file. A session saved against
+    # the local server carries `kv: true` forever; opened while a remote provider
+    # is chosen, the restore below would POST /slots/0 at somebody else's API --
+    # a request that cannot succeed and that nobody asked for. The caller knows
+    # which endpoint is chosen and says so here, the way `save_session` has
+    # always been told which half to write.
     kv = False
-    if saved.get("kv") and saved.get("prefix") == prefix_fingerprint(system, model):
+    if with_kv and saved.get("kv") and saved.get("prefix") == prefix_fingerprint(system, model):
         try:
             reply = post_json(f"{base_url.rstrip('/').removesuffix('/v1')}/slots/0?action=restore",
                               {"filename": SLOT_FILE}, timeout=600.0)
@@ -2400,7 +2408,8 @@ class Conversation:
         return len(self._messages)
 
 
-def _post_stream(url: str, body: dict, api_key: str, timeout: float):
+def _post_stream(url: str, body: dict, api_key: str, timeout: float,
+                 extra: "dict | None" = None):
     """Yield decoded SSE data lines from an OpenAI-compatible endpoint.
 
     THE READ RUNS IN A THREAD SO Ctrl+C WORKS. Measured 2026-08-07: with the
@@ -2427,6 +2436,16 @@ def _post_stream(url: str, body: dict, api_key: str, timeout: float):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
             "Accept": "text/event-stream",
+            # SINCE THIS PATH LEAVES THE MACHINE, and it did not before. A
+            # local server answers anything; a remote one decides on the
+            # signature before the protocol starts -- measured 2026-08-22, HTTP
+            # 403 error 1010 to `Python-urllib` and 200 to this line.
+            "User-Agent": crow_agent(),
+            # WHAT THE PROVIDER ASKED FOR, LAST, so a header this client
+            # considers part of the transport cannot be replaced by
+            # configuration. Same order the MCP transport settled on: identity,
+            # then the block, then the transport wins.
+            **(extra or {}),
         },
         method="POST",
     )
@@ -2844,6 +2863,7 @@ def stream_reply(
     top_k: int | None = None,
     reasoning_effort: str | None = None,
     timeout: float,
+    extra_headers: "dict | None" = None,
     events: "ReplyEvents | None" = None,
 ) -> tuple[str, str, dict]:
     """Stream one assistant turn. Returns (text, reasoning, timings).
@@ -2971,7 +2991,18 @@ def stream_reply(
             first_token_at = now
 
     try:
-        for payload in _post_stream(f"{base_url}/chat/completions", body, api_key, timeout):
+        # THE FIFTH ARGUMENT IS PASSED ONLY WHEN THERE IS ONE, and that is the
+        # transport contract rather than tidiness. `_post_stream` is looked up as
+        # a module global so a test double can replace it -- see this function's
+        # docstring -- and every double written before providers existed takes
+        # four parameters. Widening the call unconditionally breaks all of them,
+        # including the ones outside this repository; widening it only when a
+        # provider actually asked for a header leaves the old shape intact.
+        where = f"{base_url}/chat/completions"
+        stream = (_post_stream(where, body, api_key, timeout, extra_headers)
+                  if extra_headers else
+                  _post_stream(where, body, api_key, timeout))
+        for payload in stream:
             try:
                 chunk = json.loads(payload)
             except json.JSONDecodeError:
@@ -3248,7 +3279,7 @@ def _key(path: str) -> str:
 # WHY NOT `.crow/` ITSELF, which is what this was built as first: `.crow/` is a
 # BY-PRODUCT. `SPILL_DIR` creates it wherever crow happens to run, and the window
 # archives chats into `.crow/archiv/`. MEASURED 2026-08-14 on this machine:
-# `C:\Users\robin\.crow` exists, dated 2026-08-08, holding 10+ spill files from a
+# `%USERPROFILE%\.crow` exists, dated 2026-08-08, holding 10+ spill files from a
 # session that was started from the home directory once. Treating `.crow/` as the
 # marker would have made the ENTIRE HOME DIRECTORY a root -- every project, every
 # download, the whole profile inside the boundary -- and the case that caught it
@@ -4550,7 +4581,7 @@ _REFUSED: set[str] = set()
 # nothing else, so it answered identically in two situations that are not alike:
 # the model inventing a location while doing something else, and the user typing
 # a location into the prompt. #98's founding turn was the SECOND kind --
-# `Erstell mir bitte die Datei "C:\Users\robin\Desktop\x.txt"` -- so the client
+# `Erstell mir bitte die Datei "C:\Users\...\Desktop\x.txt"` -- so the client
 # refused an explicit instruction and then reported the model for carrying it
 # out anyway. An assistant that argues with the address its user typed is not
 # careful, it is broken, and the ticket had recorded that as a security finding.
@@ -7730,7 +7761,7 @@ def mcp_name_from(argv: list) -> str:
     if parts and _mcp_is_url(parts[0]):
         return _mcp_name_from_host(parts[0])
     # THE FIRST TOKEN AFTER THE LAUNCHER, NOT THE LAST. `npx -y
-    # @modelcontextprotocol/server-filesystem C:/Users/robin/dev/Crow` ends in
+    # @modelcontextprotocol/server-filesystem C:/Users/.../dev/Crow` ends in
     # the directory the server was pointed AT -- reading backwards named that
     # server "crow", after the folder it happens to serve.
     for token in (parts[1:] or parts):
@@ -8850,6 +8881,7 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                 api_key: str, temperature: float, top_p: float, min_p: float,
                 top_k: int | None = None, reasoning_effort: str | None = None,
                 timeout: float = 180.0, gate: bool = False,
+                extra_headers: "dict | None" = None,
                 events: "TurnEvents | None" = None) -> "list[str]":
     """Ask once whether this turn left anything worth keeping. Returns what was saved.
 
@@ -8888,7 +8920,11 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
         request = urllib.request.Request(
             url, data=json.dumps(body).encode("utf-8"), method="POST",
             headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {api_key}"})
+                     "Authorization": f"Bearer {api_key}",
+                     # The same reason as `_post_stream`: this one leaves the
+                     # machine too, and it leaves it without being asked.
+                     "User-Agent": crow_agent(),
+                     **(extra_headers or {})})
         with urllib.request.urlopen(request, timeout=timeout) as resp:
             answer = json.loads(resp.read().decode("utf-8") or "{}")
         calls = (answer.get("choices") or [{}])[0].get("message", {}).get("tool_calls") or []
@@ -9116,6 +9152,10 @@ def run_turn(
     # half-wired client.
     mode: str = DEFAULT_MODE,
     approve: "Callable[[str, str], str] | None" = None,
+    # THE PROVIDER'S OWN HEADERS, threaded rather than resolved here: this
+    # function does not know which endpoint it is talking to and must not start
+    # asking, or there would be a second answer to that question.
+    extra_headers: "dict | None" = None,
     events: "TurnEvents | None" = None,
 ) -> TurnResult:
     """Run one USER turn to its end: however many tool rounds it takes.
@@ -9208,6 +9248,7 @@ def run_turn(
                 top_k=top_k,
                 reasoning_effort=reasoning_effort,
                 timeout=timeout,
+                extra_headers=extra_headers,
                 events=events.reply_events(),
             )
         except CrowError as exc:
@@ -9382,6 +9423,954 @@ def run_turn(
     return TurnResult(cost=cost, context_tokens=context_tokens,
                       promised_warm=promised_warm, rolled=rolled,
                       stopped=stopped, reported=reported)
+
+
+# ----------------------------------------------------------- remote models
+
+# A REMOTE ENDPOINT HAS NO SLOT, NO PREFIX CACHE AND NO OPERATING POINT. Every
+# cache rule in this file belongs to llama-server -- SLOT_FILE and its save,
+# `prefix_fingerprint`, `check_operating_point`, every "pays a full prefill"
+# line. None of them describes a model somebody else is serving: there is no
+# slot to keep warm, no /props to ask and no byte 0 that survives a turn. So a
+# remote endpoint SAYS SO ONCE, where it is chosen, instead of leaving a screen
+# full of local promises standing.
+#
+# WHAT IS DELIBERATELY NOT HERE: a price display. Whoever brings their own key
+# knows their own costs (robin, 2026-08-22), and a figure this client invents
+# about somebody else's billing is one nobody can hold it to.
+#
+# THE FILE, beside `mcp.json` and `settings.json` because a provider binds the
+# machine and not one conversation:
+#
+#   %LOCALAPPDATA%\Crow\providers.json
+#   {"active": "openrouter",
+#    "model": {"openrouter": "z-ai/glm-5.2:free"},   what was picked, PER provider
+#    "catalog": {"openrouter": {"fetched": 1755, "models": [
+#        {"id": "...", "name": "...", "context": 131072}]}}}
+PROVIDERS_FILE = os.path.join(os.path.dirname(SESSION_DIR), "providers.json")
+
+# THE KEYS ARE NOT IN IT, and the reason is the one MCP_TOKEN_FILE already
+# carries: `providers.json` is drawn by a sheet, pasted into bug reports and
+# edited by hand. This one is written by Crow alone and leaves the process as a
+# mask or not at all.
+PROVIDER_KEYS_FILE = os.path.join(os.path.dirname(SESSION_DIR), "provider_keys.json")
+
+LOCAL_PROVIDER = "local"
+
+# Anthropic's native endpoints refuse a request without it, and the value is a
+# date rather than a number: it pins the request shape, so a client that stopped
+# sending it would be asking for whatever is current.
+ANTHROPIC_VERSION = "2023-06-01"
+
+# WHAT AN OAUTH CREDENTIAL COSTS IN HEADERS, per provider. A pasted key needs
+# none of this; a token minted by a sign-in is only accepted when the request
+# says that is what it is carrying.
+PROVIDER_OAUTH_HEADERS = {"anthropic": {"anthropic-beta": "oauth-2025-04-20"}}
+
+# ORDERED, because the sheet draws it in this order: the machine first, then the
+# one key that reaches everything else. Step 2 of the decided order -- direct
+# keys per vendor -- adds entries HERE and nowhere else, which is the whole
+# reason the shape is this thin. Step 4 -- OAuth per vendor -- adds a second way
+# to fill the key, not a second way to choose a model.
+#
+# `catalog` IS A URL OR IT IS EMPTY, and empty is not a defect: a local server
+# has one model open and says which in /props, so there is nothing to list.
+PROVIDERS = {
+    LOCAL_PROVIDER: {
+        "label": "This machine",
+        "base_url": DEFAULT_BASE_URL,
+        "needs_key": False,
+        "key_hint": "",
+        "catalog": "",
+        "blurb": "The llama-server on this box. Warm slot, no bill.",
+    },
+    "openrouter": {
+        "label": "OpenRouter",
+        "base_url": "https://openrouter.ai/api/v1",
+        "needs_key": True,
+        "key_hint": "sk-or-...",
+        "catalog": "https://openrouter.ai/api/v1/models",
+        "blurb": "One key, hundreds of models.",
+    },
+    # THE OPENAI-SHAPED LAYER, NOT THE NATIVE API. Read as raw text on
+    # 2026-08-22: `https://api.anthropic.com/v1/` answers `chat/completions`,
+    # `authorization` is "fully supported", and so are `stream`, `stream_options`
+    # and `tools`. So this is an ENTRY and not a second transport -- which the
+    # native `/v1/messages` with its own body shape would have been.
+    #
+    # WHAT THE PAGE ALSO SAYS, and it belongs beside the entry rather than in a
+    # release note: the layer exists to compare models, is not offered as a
+    # production path, and prompt caching does not work through it. The last one
+    # costs nothing here -- there is no cache on a remote endpoint anyway.
+    #
+    # `temperature` is capped at 1 and Crow sends exactly 1.0; `min_p` and
+    # `timings_per_token` are not fields it knows and are ignored rather than
+    # refused.
+    "anthropic": {
+        "label": "Anthropic",
+        "base_url": "https://api.anthropic.com/v1",
+        "needs_key": True,
+        "key_hint": "sk-ant-...",
+        "catalog": "https://api.anthropic.com/v1/models",
+        "catalog_auth": "anthropic",
+        # `max_input_tokens` is where Anthropic reports the window; there is no
+        # `context_length` field on that endpoint at all.
+        "context_keys": ("max_input_tokens", "context_length"),
+        "blurb": "Claude, through the OpenAI-shaped layer.",
+        "sub_blurb": "Sign in with your Claude subscription.",
+        "oauth": {},
+    },
+    "openai": {
+        "label": "OpenAI",
+        "base_url": "https://api.openai.com/v1",
+        "needs_key": True,
+        "key_hint": "sk-...",
+        "catalog": "https://api.openai.com/v1/models",
+        # ITS CATALOGUE REPORTS NO WINDOW, so every model off it carries 0 and
+        # the bar stays off. That is the honest outcome of the rule one line
+        # further down in `provider_context`, not an oversight here.
+        "blurb": "GPT models, straight from the source.",
+        "sub_blurb": "Sign in with your ChatGPT account.",
+        # MEASURED 2026-08-22: auth.openai.com publishes an
+        # openid-configuration with authorize and token endpoints. It publishes
+        # NO registration_endpoint, so the client_id still has to be named.
+        "oauth": {"issuer": "https://auth.openai.com"},
+    },
+}
+
+# Said once, where the endpoint is chosen, in the form MEMORY_COST_NOTE has.
+# NOT a second answer to "where did my context go" -- MODEL_SWITCH_NOTE is that
+# answer and is reused for the switch itself. This one says the part that has no
+# local equivalent at all.
+REMOTE_ENDPOINT_NOTE = ("a remote model has no slot and no prefix cache -- "
+                        "nothing here stays warm between turns, and every turn "
+                        "is a full prompt on your own key")
+
+# The catalog call. It is not a turn -- nobody is watching tokens per second --
+# so it is seconds and not minutes.
+PROVIDER_TIMEOUT = 20.0
+
+
+def crow_agent() -> str:
+    """How Crow signs an outgoing request.
+
+    ITS OWN FUNCTION BECAUSE THE STRING DECIDES WHETHER A SERVER ANSWERS AT ALL.
+    Measured 2026-08-22: `Python-urllib/3.13` gets HTTP 403 error 1010 from
+    Cloudflare's MCP endpoint, and the identical client with this line gets 200.
+    Naming yourself is not disguising yourself -- a tool that lies about where it
+    came from cannot be rate-limited fairly, and a service that would rather not
+    answer Crow may say so.
+    """
+    return "Crow/%s (+%s)" % (CLIENT_VERSION or "dev", REPO_URL)
+
+
+def provider_doc(path: "str | None" = None) -> dict:
+    """The providers document, or an empty one. Never raises."""
+    try:
+        with open(path or PROVIDERS_FILE, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def provider_write(doc: dict, path: "str | None" = None) -> "str | None":
+    """Write it back, then READ IT BACK. The reason it did not, or None.
+
+    The read is not caution, it is the contract: a writer that never reads has
+    only proved that `json.dump` did not raise.
+    """
+    target = path or PROVIDERS_FILE
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=1)
+    except OSError as exc:
+        return "providers.json could not be written: %s" % exc
+    if provider_doc(target) != doc:
+        return "providers.json did not read back as it was written"
+    return None
+
+
+def provider_keys(path: "str | None" = None) -> dict:
+    """Every stored key by provider. NEVER handed to a surface as it stands."""
+    try:
+        with open(path or PROVIDER_KEYS_FILE, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    return {k: v for k, v in doc.items() if isinstance(v, str) and v}
+
+
+def provider_key_set(name: str, key: str, path: "str | None" = None) -> "str | None":
+    """Store or clear one key. The reason it failed, or None.
+
+    AN EMPTY STRING CLEARS THE ENTRY rather than storing emptiness: a field a
+    person blanked means "I am not using this one", and a stored "" would leave
+    `needs_key` looking satisfied.
+    """
+    target = path or PROVIDER_KEYS_FILE
+    doc = provider_keys(target)
+    key = (key or "").strip()
+    if key:
+        doc[name] = key
+    else:
+        doc.pop(name, None)
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=1)
+        # Best effort, and the real answer is the ACL on %LOCALAPPDATA%. It
+        # costs one call and is right on the systems where it means anything.
+        try:
+            os.chmod(target, 0o600)
+        except OSError:
+            pass
+    except OSError as exc:
+        return "provider_keys.json could not be written: %s" % exc
+    if provider_keys(target).get(name, "") != key:
+        return "provider_keys.json did not read back as it was written"
+    return None
+
+
+def provider_key_for(name: str, path: "str | None" = None) -> str:
+    """The key for a provider, or "" -- including for one that needs none."""
+    return provider_keys(path).get(name, "")
+
+
+def provider_key_mask(key: str) -> str:
+    """`sk-o...786c`, or "" for nothing at all.
+
+    Four from each end. A mask exists so a person can tell WHICH key is in the
+    box, not so they can read it back: anything longer starts being the secret.
+    """
+    key = (key or "").strip()
+    if not key:
+        return ""
+    if len(key) <= 12:
+        return "*" * len(key)
+    return "%s...%s" % (key[:4], key[-4:])
+
+
+def provider_models(name: str, doc: "dict | None" = None) -> list:
+    """What this provider last said it serves. From disk, never the network.
+
+    THE LIST IS NOT FETCHED AT START, for the reason `TOOLS` is not: a provider
+    slow to answer would otherwise decide how long a window takes to open. It is
+    fetched when a key lands and when a person asks, and it sits on disk between.
+    """
+    doc = provider_doc() if doc is None else doc
+    block = (doc.get("catalog") or {}).get(name) or {}
+    models = block.get("models")
+    if not isinstance(models, list):
+        return []
+    return [m for m in models if isinstance(m, dict) and m.get("id")]
+
+
+def provider_fetch_models(name: str, key: "str | None" = None,
+                          timeout: float = PROVIDER_TIMEOUT,
+                          kind: str = "key") -> "tuple[list, str | None]":
+    """Ask the provider what it serves. (models, problem).
+
+    THE SLUG IS COPIED WHOLE, SUFFIX AND ALL. OpenRouter's `:free` is not a
+    label beside a model, it is part of the id -- `nvidia/nemotron-3-ultra-550b-
+    a55b` and `...:free` are two entries with two bills, and a client that tidies
+    the suffix away sends the paid twin. `:extended` is a DIFFERENT window under
+    the same name; `:nitro` and `:floor` change which provider serves it.
+    """
+    spec = PROVIDERS.get(name) or {}
+    url = spec.get("catalog") or ""
+    if not url:
+        return [], "%s does not publish a model list" % (spec.get("label") or name)
+    headers = {"Accept": "application/json", "User-Agent": crow_agent()}
+    # THE CATALOGUE IS NOT ALWAYS ON THE SAME DOOR AS THE CHAT. Anthropic's
+    # OpenAI-shaped layer answers `chat/completions` with a bearer, while
+    # `/v1/models` is the native API and wants `x-api-key` and a version -- one
+    # provider, two dialects, and a client that assumed one of them gets a 401
+    # from an endpoint it can otherwise talk to.
+    if key and spec.get("catalog_auth") == "anthropic" and kind != "oauth":
+        headers["x-api-key"] = key
+        headers["anthropic-version"] = ANTHROPIC_VERSION
+    elif key:
+        headers["Authorization"] = "Bearer %s" % key
+        if spec.get("catalog_auth") == "anthropic":
+            headers["anthropic-version"] = ANTHROPIC_VERSION
+            headers.update(PROVIDER_OAUTH_HEADERS.get(name) or {})
+    try:
+        request = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            doc = json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        return [], "HTTP %s from %s" % (exc.code, url)
+    except Exception as exc:                # noqa: BLE001 - reported, never raised
+        return [], "cannot reach %s: %s" % (url, exc)
+    rows = doc.get("data") if isinstance(doc, dict) else None
+    if not isinstance(rows, list):
+        return [], "%s answered without a model list" % (spec.get("label") or name)
+    models = []
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        # CONTEXT IS A DECLARED NUMBER HERE, not a measured one. /props reports
+        # what a server actually allocated; this is what a catalogue claims.
+        # 0 means the provider did not say, and 0 is what the bar reads as "no
+        # bar" -- an invented limit is worse than none.
+        window = 0
+        for field in (spec.get("context_keys") or ("context_length",)):
+            try:
+                window = int(row.get(field) or 0)
+            except (TypeError, ValueError):
+                window = 0
+            if window > 0:
+                break
+        models.append({"id": str(row["id"]),
+                       "name": str(row.get("name") or row["id"]),
+                       "context": window if window > 0 else 0})
+    if not models:
+        return [], "%s listed no models" % (spec.get("label") or name)
+    return models, None
+
+
+def provider_refresh(name: str) -> "str | None":
+    """Fetch the catalog and keep it. The reason it failed, or None."""
+    if name not in PROVIDERS:
+        return "no provider called %s" % name
+    credential, kind, problem = provider_credential(name)
+    if problem:
+        return problem
+    models, problem = provider_fetch_models(name, credential, kind=kind)
+    if problem:
+        return problem
+    doc = provider_doc()
+    catalog = doc.get("catalog")
+    if not isinstance(catalog, dict):
+        catalog = {}
+    catalog[name] = {"fetched": int(time.time()), "models": models}
+    doc["catalog"] = catalog
+    return provider_write(doc)
+
+
+def provider_model_for(name: str, doc: "dict | None" = None) -> str:
+    """The slug picked for this provider, or "" if none was."""
+    doc = provider_doc() if doc is None else doc
+    picked = doc.get("model")
+    if not isinstance(picked, dict):
+        return ""
+    value = picked.get(name)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def provider_pick(name: str, model: "str | None" = None) -> "str | None":
+    """Choose the provider, and the model on it. The problem, or None.
+
+    THE MODEL IS REMEMBERED PER PROVIDER, not once for all of them. A slug is
+    the property of whoever serves it: switching to the machine and back must
+    not leave `z-ai/glm-5.2:free` standing in front of llama-server, and must not
+    lose it either.
+    """
+    if name not in PROVIDERS:
+        return "no provider called %s" % name
+    # A LOGIN COUNTS AS A KEY. Refusing a provider somebody just signed in to,
+    # because the key box beside it is empty, would be the sheet answering a
+    # question nobody asked.
+    if PROVIDERS[name]["needs_key"] and not (provider_key_for(name)
+                                             or provider_signed_in(name)
+                                             or provider_borrowing(name)):
+        return "%s needs a key or a sign-in first" % PROVIDERS[name]["label"]
+    doc = provider_doc()
+    doc["active"] = name
+    if model is not None:
+        picked = doc.get("model")
+        if not isinstance(picked, dict):
+            picked = {}
+        model = (model or "").strip()
+        if model:
+            picked[name] = model
+        else:
+            picked.pop(name, None)
+        doc["model"] = picked
+    return provider_write(doc)
+
+
+def provider_active(doc: "dict | None" = None) -> str:
+    """Which provider is chosen. LOCAL_PROVIDER for anything this build lacks.
+
+    A file naming a provider that was removed is not an error worth a message:
+    it is a value this build does not have, and the answer to that is the one it
+    does have -- the machine, which is always there.
+    """
+    doc = provider_doc() if doc is None else doc
+    name = doc.get("active")
+    return name if name in PROVIDERS else LOCAL_PROVIDER
+
+
+def provider_endpoint(fallback_base_url: str = "", fallback_model: str = "",
+                      fallback_key: str = "") -> dict:
+    """Where a turn goes, and it is the ONLY answer to that question.
+
+    BOTH CALL PATHS READ THIS ONE. `stream_reply` is the visible one;
+    `review_turn` is the one that runs without being asked, with its own body and
+    its own Authorization header. A change that reaches only the first leaves the
+    background pass talking to whatever the command line said -- which, once a
+    key is involved, is a request nobody chose to send.
+
+    THE FALLBACKS ONLY REACH THE LOCAL PROVIDER. A remote endpoint's URL and key
+    come from the file, never from an argument somebody typed months ago.
+    """
+    doc = provider_doc()
+    name = provider_active(doc)
+    spec = PROVIDERS[name]
+    model = provider_model_for(name, doc)
+    if name == LOCAL_PROVIDER:
+        return {"provider": name, "label": spec["label"], "remote": False,
+                "base_url": fallback_base_url or spec["base_url"],
+                "model": model or fallback_model or DEFAULT_MODEL,
+                "api_key": fallback_key or "local-no-provider", "headers": {}}
+    credential, kind, _problem = provider_credential(name)
+    # THE HEADER TRAVELS WITH THE CREDENTIAL, not with the provider. The same
+    # endpoint takes a pasted key with nothing extra and an OAuth token only
+    # when the request says which kind it is carrying.
+    headers = dict(PROVIDER_OAUTH_HEADERS.get(name) or {}) if kind == "oauth" else {}
+    return {"provider": name, "label": spec["label"], "remote": True,
+            "base_url": spec["base_url"], "model": model,
+            "api_key": credential, "headers": headers}
+
+
+def provider_context(name: str, model: str, doc: "dict | None" = None) -> int:
+    """The declared window for one slug, or 0 when nobody declared one.
+
+    0 IS A REAL ANSWER AND NOT A FAILURE, the same one `fetch_n_ctx` gives when a
+    server will not say. `should_roll` and `review_due` already read 0 as "the
+    server would not say" rather than "no room left", so a provider that lists no
+    context degrades into a count without a bar and changes nothing else.
+
+    NO 128K DEFAULT. Hermes' detection chain ends in one, and it is exactly the
+    failure this split exists to avoid: a client that measures locally and
+    guesses remotely, with nothing on screen saying which it just did.
+    """
+    if not model:
+        return 0
+    for row in provider_models(name, doc):
+        if row.get("id") == model:
+            try:
+                window = int(row.get("context") or 0)
+            except (TypeError, ValueError):
+                return 0
+            return window if window > 0 else 0
+    return 0
+
+
+def provider_view() -> dict:
+    """What the sheet draws. Keys appear as masks and never as themselves."""
+    doc = provider_doc()
+    rows = []
+    for name, spec in PROVIDERS.items():
+        key = provider_key_for(name)
+        models = provider_models(name, doc)
+        rows.append({"name": name, "label": spec["label"], "blurb": spec["blurb"],
+                     "remote": name != LOCAL_PROVIDER,
+                     "needs_key": spec["needs_key"], "key_hint": spec["key_hint"],
+                     "key": provider_key_mask(key), "has_key": bool(key),
+                     "signed_in": provider_signed_in(name),
+                     "borrowing": provider_borrowing(name, doc),
+                     "listable": bool(spec["catalog"]), "models": models,
+                     "model": provider_model_for(name, doc), "count": len(models)})
+    return {"active": provider_active(doc), "providers": rows,
+            "subscriptions": provider_subscriptions(),
+            "file": PROVIDERS_FILE, "note": REMOTE_ENDPOINT_NOTE}
+
+
+# ------------------------------------------------------- subscriptions (OAuth)
+
+# NEITHER PROVIDER LETS THIS CLIENT REGISTER ITSELF. Measured 2026-08-22 against
+# the endpoints, not read anywhere:
+#
+#   claude.ai, api.anthropic.com, console.anthropic.com
+#       /.well-known/oauth-authorization-server   404
+#       /.well-known/openid-configuration         404
+#   auth.openai.com
+#       /.well-known/openid-configuration         200, authorize + token present,
+#                                                 registration_endpoint  null
+#
+# So the browser leg is buildable -- every piece of it already exists for MCP --
+# and the ONE thing missing is a `client_id`. Crow answers that the way it
+# already answers it for an MCP server with no dynamic registration: the value
+# comes out of the configuration, named, and until it is there the tile says so
+# instead of opening a login that comes back 400.
+#
+# WHAT IS NOT DONE HERE: sending somebody else's `client_id`. A client that
+# presents itself as another product to get past a registration it was never
+# granted is the disguise half of the line this codebase already draws at
+# `User-Agent` -- naming yourself is not dressing up as somebody else. If that
+# is wanted it is a value a person puts in the file knowingly, not a constant
+# this file ships.
+PROVIDER_TOKEN_FILE = os.path.join(os.path.dirname(SESSION_DIR), "provider_tokens.json")
+
+# Refresh this many seconds before expiry, and the reason is MCP_TOKEN_SKEW's:
+# a token valid when the request is built and stale when it arrives is the
+# failure a margin exists for.
+PROVIDER_TOKEN_SKEW = 60.0
+
+# How long the browser leg may take. A person is reading a consent screen.
+PROVIDER_OAUTH_WAIT = 300.0
+
+# Said where a tile cannot open a browser, and it names the file and the key
+# rather than the concept -- the same shape the MCP path answers with.
+PROVIDER_NO_CLIENT = ("%s does not let a client register itself, so it needs a "
+                      "client_id. Put one in providers.json under "
+                      "oauth.%s.client_id")
+
+
+def provider_oauth_block(name: str, doc: "dict | None" = None) -> dict:
+    """What is known about a provider's login: the built-in half plus the file.
+
+    THE FILE WINS, because everything the built-in half can carry was measured
+    against a public endpoint and everything it cannot -- the `client_id` above
+    all -- is a value only the person running this has.
+    """
+    spec = (PROVIDERS.get(name) or {}).get("oauth") or {}
+    doc = provider_doc() if doc is None else doc
+    theirs = (doc.get("oauth") or {}).get(name)
+    block = dict(spec)
+    if isinstance(theirs, dict):
+        for key, value in theirs.items():
+            if isinstance(value, str) and value.strip():
+                block[key] = value.strip()
+    return block
+
+
+# WHERE ANOTHER PROGRAM'S SIGN-IN LIVES, and every one of these is a PATTERN
+# rather than a value: the home directory is expanded at call time, so no path
+# belonging to whoever runs this is written down here, and nothing out of these
+# files is ever copied into Crow's own.
+#
+# READ, NEVER WRITTEN, AND NEVER REFRESHED. The refresh token in these stores
+# belongs to the program that owns them; spending it would rotate the credential
+# the other product is still using and could sign a person out of the tool they
+# were working in. An expired borrowed token is therefore reported and not
+# repaired -- the owning program refreshes it the next time it runs.
+#
+# WHAT IT MEANS ON THE WIRE, said once here because it is the whole trade: a
+# request authenticated this way carries a grant issued to that other product.
+# Nothing is registered under a false name and no new grant is created, but the
+# provider sees that grant. It happens only when somebody switches it on.
+PROVIDER_BORROW = {
+    "anthropic": {"product": "Claude Code",
+                  "path": ("~", ".claude", ".credentials.json"),
+                  "block": "claudeAiOauth", "token": "accessToken",
+                  "expires": "expiresAt", "unit": 1000.0},
+}
+
+# WHY CODEX IS NOT IN THAT TABLE, and it was for one build. `~/.codex/auth.json`
+# holds an access token, and borrowing it looked like the same trade as Claude
+# Code's. Measured 2026-08-23 the moment it was switched on: `GET
+# https://api.openai.com/v1/models` answers **HTTP 403**, not 401 -- the request
+# authenticates and is then refused the resource, which is what a token for a
+# different audience looks like. That token belongs to the ChatGPT backend
+# Codex talks to; the platform API at api.openai.com wants an `sk-...` key from
+# a billing account, and no header turns one into the other. Hermes carries the
+# same split as two separate providers, `openai-codex` beside `openai-api`.
+#
+# A CODEX PROVIDER WOULD BE ITS OWN ENTRY with its own base URL, and that URL is
+# not written here because nobody has measured it. A tile that said "signed in"
+# while every turn came back 403 is the failure this line exists to prevent.
+
+
+def provider_borrow_path(name: str) -> str:
+    """Where that provider's other sign-in would be, expanded. "" if none."""
+    spec = PROVIDER_BORROW.get(name)
+    if not spec:
+        return ""
+    parts = list(spec["path"])
+    root = os.path.expanduser(parts[0]) if parts[0] == "~" else parts[0]
+    return os.path.join(root, *parts[1:])
+
+
+def provider_borrow_seen(name: str) -> bool:
+    """Whether such a store exists at all. Says nothing about what is in it."""
+    target = provider_borrow_path(name)
+    return bool(target) and os.path.isfile(target)
+
+
+def provider_borrowed(name: str) -> "tuple[str, str | None]":
+    """The token another program holds. (token, problem), and it never writes.
+
+    THE FILE IS OPENED FOR THE ONE FIELD IT IS ASKED FOR. Everything else in it
+    -- and these stores hold plenty -- is not read into any structure this
+    process keeps, is never logged, and never reaches a view.
+
+    A STALE `expiresAt` IS NOT A VETO, and that was wrong for one build.
+    Measured 2026-08-23: the field said 00:11, the clock said 00:49, and the file
+    had not been written since 21:41 -- while the program that owns it was
+    running the whole time. The timestamp is another program's bookkeeping, and
+    the authority on whether a credential still works is the provider that
+    issued it. So the token is handed over and the staleness is SAID; a refusal
+    here turns "probably expired" into "certainly unusable" on evidence that is
+    second-hand. `provider_borrowed_stale` is what a surface asks.
+    """
+    spec = PROVIDER_BORROW.get(name)
+    if not spec:
+        return "", "%s has no sign-in to borrow" % name
+    target = provider_borrow_path(name)
+    if not os.path.isfile(target):
+        return "", "no %s sign-in on this machine" % spec["product"]
+    try:
+        with open(target, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return "", ("%s's sign-in could not be read (%s)"
+                    % (spec["product"], type(exc).__name__))
+    block = doc.get(spec["block"])
+    token = (block or {}).get(spec["token"]) if isinstance(block, dict) else None
+    if not isinstance(token, str) or not token:
+        return "", "%s is not signed in" % spec["product"]
+    return token, None
+
+
+def provider_borrowed_stale(name: str) -> str:
+    """The line to show when the borrowed token looks past its date, or "".
+
+    NOT REPAIRED, EVER. The refresh token in that file is the other product's,
+    and spending it would rotate the credential that program is still using.
+    """
+    spec = PROVIDER_BORROW.get(name)
+    if not spec or not spec["expires"] or not spec["unit"]:
+        return ""
+    try:
+        with open(provider_borrow_path(name), encoding="utf-8") as fh:
+            block = (json.load(fh) or {}).get(spec["block"]) or {}
+    except (OSError, ValueError):
+        return ""
+    due = block.get(spec["expires"]) if isinstance(block, dict) else None
+    if isinstance(due, (int, float)) and due / spec["unit"] <= time.time():
+        return ("%s's sign-in looks expired -- open %s once and it refreshes "
+                "itself" % (spec["product"], spec["product"]))
+    return ""
+
+
+def provider_borrowing(name: str, doc: "dict | None" = None) -> bool:
+    """Whether this machine's other sign-in is switched on for that provider.
+
+    A FLAG FOR A PROVIDER THIS BUILD CANNOT BORROW FROM IS NOT A STATE. Codex
+    was in that table for one build and came out of it after a measured 403; a
+    file switched on back then must not leave the resolver reaching for a store
+    it no longer knows -- it falls through to the key, which is the answer this
+    build has.
+    """
+    if name not in PROVIDER_BORROW:
+        return False
+    doc = provider_doc() if doc is None else doc
+    return bool((doc.get("borrow") or {}).get(name))
+
+
+def provider_borrow_set(name: str, on: bool) -> "str | None":
+    """Switch it on or off. The problem, or None.
+
+    ON IS A DECISION AND IT IS TAKEN ONCE, in the sheet, by a person who is told
+    what it means. Nothing switches it on by finding a file.
+    """
+    if name not in PROVIDER_BORROW:
+        return "%s has no sign-in to borrow" % name
+    if on:
+        _token, problem = provider_borrowed(name)
+        if problem:
+            return problem
+    doc = provider_doc()
+    block = doc.get("borrow")
+    if not isinstance(block, dict):
+        block = {}
+    if on:
+        block[name] = True
+    else:
+        block.pop(name, None)
+    doc["borrow"] = block
+    return provider_write(doc)
+
+
+def provider_oauth_set(name: str, fields: dict) -> "str | None":
+    """Put a login's missing halves in the file. The problem, or None.
+
+    THE SHEET WRITES THIS AND NOT A PERSON WITH AN EDITOR. The values are the
+    ones no endpoint would hand over -- neither provider publishes a
+    registration document -- so they have to be typed once; asking somebody to
+    find `providers.json` to do it is a control that exists only in a sentence.
+
+    AN EMPTY FIELD CLEARS ITS KEY rather than storing emptiness, the same rule
+    `provider_key_set` follows: a box somebody blanked means "not this one", and
+    a stored "" would read as a value.
+    """
+    if name not in PROVIDERS:
+        return "no provider called %s" % name
+    doc = provider_doc()
+    block = doc.get("oauth")
+    if not isinstance(block, dict):
+        block = {}
+    mine = dict(block.get(name) or {})
+    for key in ("client_id", "authorize", "token", "scope", "client_secret"):
+        if key not in fields:
+            continue
+        value = str(fields.get(key) or "").strip()
+        if value:
+            mine[key] = value
+        else:
+            mine.pop(key, None)
+    if mine:
+        block[name] = mine
+    else:
+        block.pop(name, None)
+    doc["oauth"] = block
+    return provider_write(doc)
+
+
+def provider_tokens(path: "str | None" = None) -> dict:
+    """Every stored token by provider. NEVER handed to a surface as it stands."""
+    try:
+        with open(path or PROVIDER_TOKEN_FILE, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def provider_token_write(doc: dict, path: "str | None" = None) -> "str | None":
+    target = path or PROVIDER_TOKEN_FILE
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=1)
+        try:
+            os.chmod(target, 0o600)
+        except OSError:
+            pass
+    except OSError as exc:
+        return "provider_tokens.json could not be written: %s" % exc
+    if provider_tokens(target) != doc:
+        return "provider_tokens.json did not read back as it was written"
+    return None
+
+
+def provider_token_drop(name: str) -> "str | None":
+    """Sign out of one provider. The reason it failed, or None."""
+    doc = provider_tokens()
+    if name not in doc:
+        return None
+    doc.pop(name, None)
+    return provider_token_write(doc)
+
+
+def provider_signed_in(name: str) -> bool:
+    """Whether a login is on disk. Says nothing about whether it still works."""
+    return bool((provider_tokens().get(name) or {}).get("access_token"))
+
+
+def provider_refresh_token(name: str) -> "str | None":
+    """Trade the refresh token for a fresh access token. The problem, or None.
+
+    A PROVIDER THAT ISSUED NO REFRESH TOKEN IS NOT A FAILURE -- it is a login
+    that runs out, and the honest answer to that is the tile saying so, not a
+    silent retry loop against an endpoint that will keep refusing.
+    """
+    record = provider_tokens().get(name) or {}
+    refresh = record.get("refresh_token")
+    if not refresh:
+        return "%s issued no refresh token -- sign in again" % name
+    meta = {"token_endpoint": record.get("token_endpoint") or ""}
+    if not _oauth_safe(meta["token_endpoint"]):
+        return "%s has no token endpoint on file -- sign in again" % name
+    form = {"grant_type": "refresh_token", "refresh_token": refresh,
+            "client_id": record.get("client_id") or ""}
+    if record.get("scope"):
+        form["scope"] = record["scope"]
+    answer, problem = _oauth_exchange(meta, form)
+    if problem:
+        return problem
+    doc = provider_tokens()
+    kept = dict(doc.get(name) or {})
+    kept["access_token"] = answer["access_token"]
+    # THE OLD REFRESH TOKEN IS KEPT WHEN THE ANSWER CARRIES NONE. Overwriting it
+    # with an empty value would turn every future refresh into a browser leg.
+    if answer.get("refresh_token"):
+        kept["refresh_token"] = answer["refresh_token"]
+    try:
+        kept["expires_at"] = time.time() + float(answer.get("expires_in"))
+    except (TypeError, ValueError):
+        kept.pop("expires_at", None)
+    doc[name] = kept
+    return provider_token_write(doc)
+
+
+def provider_credential(name: str) -> "tuple[str, str, str | None]":
+    """(value, kind, problem). `kind` is "oauth", "key" or "".
+
+    A LOGIN OUTRANKS A PASTED KEY, because a person who signed in meant to use
+    the subscription they signed in with -- and a key left in the box from last
+    week would quietly spend money instead.
+
+    THE KIND TRAVELS WITH THE VALUE and is not derived from it later. A token
+    and a key are the same shape on the wire; only the caller that resolved them
+    knows which one it holds, and the headers differ.
+    """
+    record = provider_tokens().get(name) or {}
+    token = record.get("access_token")
+    if token:
+        due = record.get("expires_at")
+        if isinstance(due, (int, float)) and due - PROVIDER_TOKEN_SKEW <= time.time():
+            problem = provider_refresh_token(name)
+            if problem:
+                return "", "oauth", problem
+            token = (provider_tokens().get(name) or {}).get("access_token") or ""
+        return str(token), "oauth", None
+    # CROW'S OWN LOGIN FIRST, THEN A BORROWED ONE. A grant this client obtained
+    # itself is the one it may refresh and the one the provider sees as Crow;
+    # the borrowed store is what a machine has when nobody has done that yet.
+    if provider_borrowing(name):
+        token, problem = provider_borrowed(name)
+        if problem:
+            return "", "oauth", problem
+        return token, "oauth", None
+    key = provider_key_for(name)
+    if key:
+        return key, "key", None
+    return "", "", None
+
+
+def provider_authorise(name: str) -> "str | None":
+    """The whole browser flow for one provider. None when it worked.
+
+    EVERY PIECE OF THIS ALREADY EXISTED for MCP -- PKCE, the loopback catcher,
+    the browser, the metadata check, the exchange. What is new is only where the
+    endpoints come from: an MCP server hands them over in its own metadata,
+    while these two are named in the configuration because neither publishes a
+    document this client is allowed to register against.
+
+    NO `resource`. RFC 8707 binds a token to the API it was issued for, and the
+    MCP path sends it because the specification requires it there. Here there is
+    no resource identifier to send: asking for a token bound to a name nobody
+    published would be this client inventing an audience.
+    """
+    if name not in PROVIDERS:
+        return "no provider called %s" % name
+    block = provider_oauth_block(name)
+    client_id = block.get("client_id")
+    if not client_id:
+        return PROVIDER_NO_CLIENT % (PROVIDERS[name]["label"], name)
+
+    issuer = block.get("issuer") or ""
+    if issuer:
+        meta, problem = _oauth_server_metadata(issuer)
+        if problem:
+            return problem
+    else:
+        # NAMED BY HAND, AND CHECKED THE SAME WAY. `_oauth_safe` is what keeps a
+        # typo in a config file from sending a consent screen to plain http or
+        # to something that is not a URL at all.
+        meta = {"authorization_endpoint": block.get("authorize") or "",
+                "token_endpoint": block.get("token") or ""}
+        for field, key in (("authorization_endpoint", "authorize"),
+                           ("token_endpoint", "token")):
+            if not _oauth_safe(meta[field]):
+                return ("%s has no usable %s -- put one in providers.json under "
+                        "oauth.%s.%s" % (PROVIDERS[name]["label"], key, name, key))
+
+    listener, redirect = _oauth_listen(block.get("redirect_host") or "127.0.0.1")
+    try:
+        verifier, challenge = _oauth_pkce()
+        state = _oauth_state()
+        query = {"response_type": "code", "client_id": client_id,
+                 "redirect_uri": redirect, "state": state,
+                 "code_challenge": challenge, "code_challenge_method": "S256"}
+        if block.get("scope"):
+            query["scope"] = block["scope"]
+        where = (meta["authorization_endpoint"]
+                 + ("&" if "?" in meta["authorization_endpoint"] else "?")
+                 + urllib.parse.urlencode(query))
+        _oauth_open(where)
+        if not listener.done.wait(PROVIDER_OAUTH_WAIT):
+            return ("nobody finished the sign-in for %s within %gs"
+                    % (PROVIDERS[name]["label"], PROVIDER_OAUTH_WAIT))
+        caught = listener.caught
+        if caught.get("error"):
+            return ("%s refused: %s %s" % (
+                PROVIDERS[name]["label"],
+                strip_tag_characters(str(caught.get("error")))[:80],
+                strip_tag_characters(str(caught.get("error_description") or ""))[:200]))
+        # THE STATE IS THE BINDING. Without it anything that can reach the
+        # loopback port can feed this client a code of its own.
+        if caught.get("state") != state:
+            return "the sign-in came back with a state this client did not send"
+        if not caught.get("code"):
+            return "the sign-in came back without a code"
+        form = {"grant_type": "authorization_code", "code": caught["code"],
+                "redirect_uri": redirect, "client_id": client_id,
+                "code_verifier": verifier}
+        if block.get("client_secret"):
+            form["client_secret"] = block["client_secret"]
+        answer, problem = _oauth_exchange(meta, form)
+        if problem:
+            return problem
+        record = {"access_token": answer["access_token"],
+                  "client_id": str(client_id),
+                  "token_endpoint": meta["token_endpoint"]}
+        if answer.get("refresh_token"):
+            record["refresh_token"] = answer["refresh_token"]
+        if block.get("scope"):
+            record["scope"] = block["scope"]
+        try:
+            record["expires_at"] = time.time() + float(answer.get("expires_in"))
+        except (TypeError, ValueError):
+            pass
+        doc = provider_tokens()
+        doc[name] = record
+        problem = provider_token_write(doc)
+        if problem:
+            return problem
+        # THE CATALOGUE IS FETCHED ON THE WAY OUT, while the person is still
+        # looking at the sheet they just signed in from. A list fetched later is
+        # a wait nobody is expecting.
+        provider_refresh(name)
+        return None
+    finally:
+        listener.shutdown()
+        listener.server_close()
+
+
+def provider_subscriptions() -> list:
+    """What the Subscriptions page draws. One row per provider that can log in."""
+    doc = provider_doc()
+    rows = []
+    for name, spec in PROVIDERS.items():
+        # `in`, NOT truthiness. Anthropic's block is EMPTY -- it publishes no
+        # discovery document, so there is nothing to prefill -- and a tile that
+        # vanished because nothing could be measured about it would be the page
+        # hiding the provider the person came here for.
+        if "oauth" not in spec:
+            continue
+        block = provider_oauth_block(name, doc)
+        # WHICH HALVES ARE MISSING, not merely that one is. A provider that
+        # publishes discovery needs the client_id alone; one that publishes
+        # nothing needs the two endpoints as well, and a form that asked for all
+        # three either way would make the simpler case look like the harder one.
+        wants = ["client_id"] if block.get("issuer") else ["client_id", "authorize", "token"]
+        borrow = PROVIDER_BORROW.get(name) or {}
+        rows.append({"name": name, "label": spec["label"],
+                     "blurb": spec.get("sub_blurb") or spec["blurb"],
+                     "signed_in": provider_signed_in(name),
+                     "ready": bool(block.get("client_id")),
+                     "wants": wants,
+                     "has": {k: bool(block.get(k)) for k in wants},
+                     "discovers": bool(block.get("issuer")),
+                     # THE STORE IS ONLY REPORTED AS PRESENT OR NOT. What is in
+                     # it does not cross into a view, and the product's NAME is
+                     # the only thing about it a person is shown.
+                     "product": borrow.get("product") or "",
+                     "borrowable": provider_borrow_seen(name),
+                     "borrowing": provider_borrowing(name, doc),
+                     "stale": provider_borrowed_stale(name),
+                     "missing": "" if block.get("client_id")
+                                else PROVIDER_NO_CLIENT % (spec["label"], name)})
+    return rows
 
 
 def health_url(base_url: str) -> str:

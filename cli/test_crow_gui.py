@@ -72,6 +72,18 @@ import crow_gui        # noqa: E402
 crow_core.MCP_FILE = os.path.join(tempfile.gettempdir(),
                                   "crow-suite-has-no-mcp", "mcp.json")
 crow_core.mcp_apply()
+
+# THE SAME RULE FOR THE PROVIDER FILES (#130 again). `provider_endpoint` reads
+# providers.json under %LOCALAPPDATA%, so on a machine with OpenRouter chosen
+# every case that resolves an endpoint would answer differently from the same
+# case on a fresh install -- and the one that broke would be the one about where
+# a turn goes. A path whose parent does not exist is the empty configuration.
+crow_core.PROVIDERS_FILE = os.path.join(tempfile.gettempdir(),
+                                        "crow-suite-has-no-provider", "providers.json")
+crow_core.PROVIDER_KEYS_FILE = os.path.join(tempfile.gettempdir(),
+                                            "crow-suite-has-no-provider", "keys.json")
+crow_core.PROVIDER_TOKEN_FILE = os.path.join(tempfile.gettempdir(),
+                                             "crow-suite-has-no-provider", "tokens.json")
 import crow_voice      # noqa: E402
 
 
@@ -3935,27 +3947,35 @@ class TheRibbonAndTheChatRunIntoOneTests(unittest.TestCase):
         buttons = set(re.findall(r'<button[^>]*data-cat="([a-z]+)"', nav))
         panes = set(re.findall(r'<section data-cat="([a-z]+)"', self.source))
         self.assertEqual(buttons, panes)
+        # MOVED, NOT WIDENED (2026-08-22): `providers` was the "Coming soon"
+        # placeholder and is now two built pages, Model and API Keys. The set is
+        # still exact, so a seventh button with a six-name list is still red.
         self.assertEqual(buttons, {"look", "skills", "server", "mcp",
-                                   "providers", "about"})
+                                   "model", "subs", "keys", "about"})
         self.assertIn("b.dataset.cat===name", self.source)
         self.assertNotIn('["look","skills"', self.source,
                          "the positional list is back")
 
-    def test_the_empty_one_says_what_it_will_be(self):
-        """#126. "Coming soon" alone is a dead end. It says what the section is
-        FOR, so the placeholder is a promise rather than a shrug -- and so the
-        next person to open it knows what belongs there.
+    def test_nothing_in_the_sheet_is_a_promise_any_more(self):
+        """#126 pinned what an UNBUILT section says: "Coming soon" plus what the
+        section is FOR, so a placeholder is a promise rather than a shrug.
 
-        #129 TOOK MCP OUT OF THIS PAIR, and the rule it pins is untouched by
-        that: the case is about what an UNBUILT section says, and MCPs is built.
-        What used to be asserted here is asserted below instead, from the other
-        side -- the pane has a list, a form and no promise in it.
+        BOTH SECTIONS IT WAS WRITTEN ABOUT ARE BUILT NOW (2026-08-22), the way
+        #129 took MCPs out of the same pair. So the assurance MOVES to the other
+        side rather than weakening -- and it moves to the stronger side: the two
+        panes have their controls, and there is no dead-end left in the sheet at
+        all. A bare placeholder added tomorrow turns this red, which the old
+        loop over a single hard-coded key could not do.
         """
-        for key, word in (("providers", "OpenRouter"),):
+        for key, want in (("model", ('id="provbody"', 'id="modbody"')),
+                          ("keys", ('id="keylist"',))):
             pane = self.source[self.source.index('<section data-cat="%s"' % key):]
             pane = pane[:pane.index("</section>")]
-            self.assertIn("Coming soon.", pane, key)
-            self.assertIn(word, pane, key)
+            for hook in want:
+                self.assertIn(hook, pane, key)
+            self.assertNotIn("Coming soon", pane, key)
+        self.assertNotIn("Coming soon.", self.source,
+                         "a dead-end placeholder is back in the sheet")
 
     def test_no_rule_is_drawn_between_the_ribbon_the_rail_and_the_chat(self):
         """NEGATIVE PROBE, and it is the whole of robin's second request: the
@@ -4765,6 +4785,412 @@ class ADismissedToolRowStaysDismissedTests(ApiCase):
             self.assertNotIn(crow_core.SESSION_TOOLS_CLEARED_KEY, json.load(fh))
         self.assertEqual(crow_core.session_tools_cleared(path), 0)
 
+
+class TheRemoteEndpointTests(ApiCase):
+    """The trennlinie, drawn where the window can actually cross it.
+
+    A REMOTE ENDPOINT HAS NO SLOT, NO PREFIX CACHE AND NO OPERATING POINT.
+    /health, /props and /slots are llama-server's; every case here exists
+    because the window used to ask them of whatever `--base-url` said, and once
+    that can be somebody's paid API the questions are not merely useless -- they
+    are round trips nobody asked for against an endpoint that answers 404.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._prov = (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE,
+                      crow_core.PROVIDER_TOKEN_FILE)
+        self.addCleanup(self._restore_prov)
+        crow_core.PROVIDERS_FILE = os.path.join(self.dir, "providers.json")
+        crow_core.PROVIDER_KEYS_FILE = os.path.join(self.dir, "provider_keys.json")
+        crow_core.PROVIDER_TOKEN_FILE = os.path.join(self.dir, "provider_tokens.json")
+
+    def _restore_prov(self) -> None:
+        (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE,
+         crow_core.PROVIDER_TOKEN_FILE) = self._prov
+
+    def remote(self, model: str = "z-ai/glm-5.2:free", context: int = 131072):
+        """A configured provider, exactly as the sheet would leave one."""
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        doc = crow_core.provider_doc()
+        doc["catalog"] = {"openrouter": {"fetched": 1, "models": [
+            {"id": model, "name": model, "context": context}]}}
+        crow_core.provider_write(doc)
+        self.assertIsNone(crow_core.provider_pick("openrouter", model))
+
+    def test_the_local_questions_are_not_put_to_a_provider(self):
+        """NEGATIVE, and the one the whole stage turns on. All three probes are
+        replaced with something that raises: if the window still reaches for
+        /health, /props or a model name, the case fails loudly instead of
+        quietly costing a round trip on somebody's key."""
+        self.remote()
+        api = self.api()
+
+        def refuse(*_a, **_k):
+            raise AssertionError("a remote endpoint was asked a local question")
+
+        with mock.patch.object(crow_gui, "check_endpoint", refuse), \
+             mock.patch.object(crow_gui, "fetch_n_ctx", refuse), \
+             mock.patch.object(crow_gui, "fetch_model_name", refuse):
+            state, name, window = api._look(api._endpoint())
+        self.assertEqual(name, "z-ai/glm-5.2:free")
+        self.assertEqual(window, 131072)
+        self.assertEqual(state, "ready")
+
+    def test_the_local_endpoint_is_still_measured(self):
+        """THE POSITIVE HALF. Without it the case above would pass on a window
+        that had stopped asking anybody anything, which is a different defect
+        with the same green tick."""
+        asked = []
+        api = self.api()
+        with mock.patch.object(crow_gui, "check_endpoint", lambda u, *a, **k: asked.append(u) or "ok"), \
+             mock.patch.object(crow_gui, "fetch_n_ctx", lambda u, *a, **k: 200000), \
+             mock.patch.object(crow_gui, "fetch_model_name", lambda u, *a, **k: "Q.gguf"):
+            state, name, window = api._look(api._endpoint())
+        self.assertEqual((state, window), ("ok", 200000))
+        self.assertTrue(asked)
+
+    def test_an_undeclared_window_leaves_the_bar_off_rather_than_inventing_one(self):
+        """0 travels to the page as `n_ctx`, and `ctx()` draws a bare count for
+        it. A 128k default here would be the client guessing remotely while it
+        measures locally, with nothing on screen saying which it just did."""
+        self.remote(context=0)
+        api = self.api()
+        self.assertEqual(api._look(api._endpoint())[2], 0)
+
+    def test_a_provider_with_no_model_picked_is_a_state_not_a_crash(self):
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        crow_core.provider_pick("openrouter")
+        api = self.api()
+        state, _name, window = api._look(api._endpoint())
+        self.assertIn("no model", state)
+        self.assertEqual(window, 0)
+
+    def test_the_command_line_does_not_decide_where_a_key_bearing_turn_goes(self):
+        """`--base-url` is the local server's default. A window launched months
+        ago against 127.0.0.1 must not send an OpenRouter key there, and must
+        not send OpenRouter's turn to 127.0.0.1 either."""
+        self.remote()
+        spot = self.api()._endpoint()
+        self.assertEqual(spot["base_url"], "https://openrouter.ai/api/v1")
+        self.assertEqual(spot["api_key"], "not-a-real-key-0123456789")
+        self.assertTrue(spot["remote"])
+
+    def test_both_senders_of_one_turn_get_the_same_endpoint(self):
+        """THE POINT THAT IS EASIEST TO MISS. `stream_reply` is the visible
+        sender; `review_turn` runs afterwards without being asked, with its own
+        body and its own Authorization header. A change that reached only the
+        first would leave the background pass talking to the command line --
+        which, once a key is involved, is a request nobody chose to send."""
+        self.remote()
+        seen = {}
+
+        def fake_run(conversation, **kw):
+            seen["turn"] = (kw["base_url"], kw["model"], kw["api_key"])
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost="", context_tokens=9,
+                                        promised_warm=False, rolled=False,
+                                        stopped=False, reported=True)
+
+        def fake_review(conversation, **kw):
+            seen["review"] = (kw["base_url"], kw["model"], kw["api_key"])
+            return []
+
+        api = self.api()
+        api._conversation.append("user", "hello")
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "review_turn", fake_review), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: 1.0):
+            api._run("hello")
+        self.assertEqual(seen.get("turn"),
+                         ("https://openrouter.ai/api/v1", "z-ai/glm-5.2:free",
+                          "not-a-real-key-0123456789"))
+        self.assertEqual(seen.get("review"), seen.get("turn"))
+
+    def test_a_turn_with_no_model_picked_is_refused_before_it_is_sent(self):
+        """NEGATIVE: an empty slug in the body is a 400 from the provider and a
+        line in the chat that names neither the cause nor the control."""
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        crow_core.provider_pick("openrouter")
+        api = self.api()
+
+        def refuse(*_a, **_k):
+            raise AssertionError("a turn went out with no model")
+
+        with mock.patch.object(crow_gui, "run_turn", refuse):
+            api._run("hello")
+        said = [m for m in self.drained(api) if m.get("k") == "fail"]
+        self.assertTrue(said and "Model" in said[0]["t"], said)
+
+    def test_switching_provider_says_both_lines_and_empties_the_chat(self):
+        """THE TWO LINES COME BEFORE THE SCREEN CHANGES. A person who reads them
+        after the window has emptied has been informed of a loss instead of
+        warned about one -- and the second line is the only place the local
+        cache rules are withdrawn."""
+        self.remote()
+        api = self.api()
+        api._conversation.append("user", "hello")
+        with mock.patch.object(crow_gui, "check_endpoint", lambda *a, **k: "ok"), \
+             mock.patch.object(crow_gui, "fetch_n_ctx", lambda *a, **k: 0), \
+             mock.patch.object(crow_gui, "fetch_model_name", lambda *a, **k: ""):
+            said = api.provider_pick(crow_core.LOCAL_PROVIDER, None)
+        self.assertEqual(said, "")
+        sent = self.drained(api)
+        notes = [m["t"] for m in sent if m.get("k") == "note"]
+        self.assertIn(crow_core.MODEL_SWITCH_NOTE, notes)
+        # THE HEAD SURVIVES A RESET AND THE CONVERSATION DOES NOT -- so what is
+        # asserted is the turn being gone, not a length that counts the system
+        # message and would pass on a chat nobody emptied.
+        self.assertNotIn("hello", json.dumps(api._conversation.payload()))
+        # AND NOTHING AFTER THEM WIPES THEM. The first version of this path
+        # pushed `clear` at the end, which the page answers with
+        # `flow.innerHTML=""` -- the queue still carried both lines and this case
+        # was green while the screen showed neither. Reading the queue is not
+        # reading the screen, and this is the half that says so.
+        self.assertNotIn("clear", [m.get("k") for m in sent],
+                         "a clear after the lines erases them from the page")
+
+    def test_the_remote_line_is_said_going_out_and_not_coming_back(self):
+        """It names what a remote endpoint does NOT have. Said on the way back to
+        the machine it would be false, and a screen that reports what is not
+        happening teaches nobody anything."""
+        api = self.api()
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        crow_core.provider_pick("openrouter", "a/b")
+        api._endpoint_changed(reset=True)
+        out = [m["t"] for m in self.drained(api) if m.get("k") == "note"]
+        self.assertIn(crow_core.REMOTE_ENDPOINT_NOTE, out)
+        with mock.patch.object(crow_gui, "check_endpoint", lambda *a, **k: "ok"), \
+             mock.patch.object(crow_gui, "fetch_n_ctx", lambda *a, **k: 0), \
+             mock.patch.object(crow_gui, "fetch_model_name", lambda *a, **k: ""):
+            api.provider_pick(crow_core.LOCAL_PROVIDER, None)
+        back = [m["t"] for m in self.drained(api) if m.get("k") == "note"]
+        self.assertNotIn(crow_core.REMOTE_ENDPOINT_NOTE, back)
+
+    def test_the_endpoint_does_not_change_mid_turn(self):
+        """The loop read its endpoint at the top. Changing it underneath would
+        send the second half of a turn somewhere else -- the same refusal
+        `/model` gives, for the same reason."""
+        api = self.api()
+        api._worker = _AliveWorker()
+        self.assertIn("mid-turn", api.provider_pick(crow_core.LOCAL_PROVIDER, None))
+
+    def test_the_page_is_never_handed_the_key_itself(self):
+        """`provider_view` crosses into the page, and the page is a browser.
+        Nothing that goes through that seam may carry the secret."""
+        secret = "not-a-real-key-9f3c0d11223344556677889900aabbcc"
+        crow_core.provider_key_set("openrouter", secret)
+        self.assertNotIn(secret, json.dumps(self.api().provider_view()))
+
+    def test_the_sheet_has_a_model_page_and_a_key_page_wired_to_them(self):
+        """A section nobody can open, or a button calling a method that is not
+        there, is the shape a page-level defect takes -- and neither shows up in
+        any behaviour test."""
+        page = crow_gui.PAGE
+        for hook in ('data-cat="model"', 'data-cat="keys"',
+                     "crow.settingsCat('model')", "crow.settingsCat('keys')",
+                     "provider_view()", "provider_pick(", "provider_key(",
+                     "provider_refresh("):
+            self.assertIn(hook, page, hook)
+        for method in ("provider_view", "provider_pick", "provider_key",
+                       "provider_refresh"):
+            self.assertTrue(callable(getattr(crow_gui.Api, method, None)), method)
+        self.assertNotIn("Coming soon", page)
+
+    def test_the_subscriptions_page_exists_and_its_tiles_are_wired(self):
+        """A tile nobody can click, or a click calling a method that is not
+        there, is the shape a page-level defect takes -- and no behaviour test
+        reaches it. The marks are drawn rather than fetched: the page has no
+        external host to load an image from."""
+        page = crow_gui.PAGE
+        for hook in ('data-cat="subs"', "crow.settingsCat('subs')", 'id="subs"',
+                     "provider_authorise(", "provider_signout(", "subMark("):
+            self.assertIn(hook, page, hook)
+        for method in ("provider_authorise", "provider_signout"):
+            self.assertTrue(callable(getattr(crow_gui.Api, method, None)), method)
+        # NOTHING IS LOADED FROM A HOST. A logo behind a URL would be a
+        # settings pane that needs the network to draw itself -- and on the one
+        # screen where somebody is about to sign in, a remote asset is also a
+        # request that says when they opened it.
+        self.assertNotIn('src="http', page)
+        self.assertNotIn("url(http", page)
+
+    def test_the_marks_are_the_providers_own_and_take_the_skin(self):
+        """robin, 2026-08-23: the real logos, white under dark and crow, black
+        under light.
+
+        THE COLOUR IS A PALETTE VARIABLE AND THE MARK IS NOT TINTED. `--text-hi`
+        is already #ffffff in both dark skins and #0f1114 in light, so a fourth
+        theme gets an answer without anybody remembering this rule -- and a mark
+        that turned accent when signed in would be recolouring somebody else's
+        logo to say something about Crow.
+
+        THE PLACEHOLDERS ARE NAMED so this cannot quietly go back to them: the
+        first version drew a four-pointed spark and a hexagon, and both looked
+        deliberate enough that nothing but a person would have caught it.
+        """
+        page = crow_gui.PAGE
+        self.assertIn('anthropic: {box: "0 0 35 24"', page)
+        self.assertIn('openai: {box: "29 29 122 122"', page)
+        # The wordmark's counter and the knot's first curve, each long enough
+        # to be that path and nothing else.
+        self.assertIn("M24.5475 0H19.3384L28.8374 24H34.0465L24.5475 0Z", page)
+        self.assertIn("M75.91 73.628V62.232c0-.96.36-1.68 1.199-2.16", page)
+        self.assertNotIn("M12 2l2.3 6.4L20.6 10", page)          # the old spark
+        self.assertNotIn("M12 3.2 18.6 7v7.6L12 18.4", page)     # the old hexagon
+        self.assertIn(".sub .mark{width:26px;height:26px;color:var(--text-hi)}", page)
+        self.assertNotIn(".sub.on .mark{color:var(--accent)}", page)
+        # #102's rule, and it holds here too: no RULE may name a colour of its
+        # own, or only the theme it was picked in answers for it. The comments
+        # come out first -- one of them quotes the two hex values on purpose,
+        # and a check that could not tell a declaration from a sentence about
+        # one would have been red at exactly the line that explains itself.
+        import re as _re
+        subs = page[page.index("#subs{"):page.index(".subout")]
+        subs = _re.sub(r"/\*.*?\*/", "", subs, flags=_re.S)
+        self.assertNotIn("#", subs.replace("#subs{", ""))
+
+    def test_a_tile_that_cannot_sign_in_yet_opens_a_form_instead(self):
+        """robin, 2026-08-23: the click answered with the sentence already
+        printed on the tile, which reads as nothing having happened. A control
+        does the next step -- with the values in place that is the browser,
+        without them it is the form that puts them there. And the line under the
+        sheet no longer repeats what the tile says."""
+        page = crow_gui.PAGE
+        self.assertIn("subForm(", page)
+        self.assertIn('id="subform"', page)
+        self.assertIn("if(s.ready) this.connectSub(s.name);", page)
+        self.assertTrue(callable(getattr(crow_gui.Api, "provider_oauth", None)))
+        # THE TILE'S OWN TEXT IS NOT THE STORED SENTENCE any more: `missing`
+        # names a file and a key, which is what a person editing by hand needed
+        # and exactly what a person with a form does not.
+        self.assertNotIn("s.ready?s.blurb:s.missing", page)
+
+    def test_a_sign_in_does_not_run_mid_turn(self):
+        """The credential it replaces is the one the running turn is
+        authenticating with."""
+        api = self.api()
+        api._worker = _AliveWorker()
+        self.assertIn("mid-turn", api.provider_authorise("anthropic"))
+
+    def test_both_senders_carry_the_providers_own_headers(self):
+        """THE HEADER TRAVELS WITH THE CREDENTIAL, and it has to reach BOTH
+        paths. The background review builds its own request with its own
+        Authorization line; a header that only reached the visible turn would
+        leave the unasked one being refused by an endpoint the chat can talk
+        to."""
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        doc = crow_core.provider_doc()
+        doc["catalog"] = {"openrouter": {"fetched": 1, "models": [
+            {"id": "a/b", "name": "b", "context": 1000}]}}
+        crow_core.provider_write(doc)
+        crow_core.provider_pick("openrouter", "a/b")
+        seen = {}
+
+        def fake_run(conversation, **kw):
+            seen["turn"] = kw.get("extra_headers")
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost="", context_tokens=9,
+                                        promised_warm=False, rolled=False,
+                                        stopped=False, reported=True)
+
+        def fake_review(conversation, **kw):
+            seen["review"] = kw.get("extra_headers")
+            return []
+
+        api = self.api()
+        api._conversation.append("user", "hello")
+        # A KEY CARRIES NOTHING EXTRA -- the negative half, and without it the
+        # positive one below would pass on a header that is simply always sent.
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "review_turn", fake_review), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: 1.0):
+            api._run("hello")
+        self.assertIsNone(seen.get("turn"))
+        self.assertIsNone(seen.get("review"))
+
+        crow_core.provider_token_write({"openrouter": {
+            "access_token": "tok", "client_id": "c",
+            "token_endpoint": "https://example.invalid/token"}})
+        real = dict(crow_core.PROVIDER_OAUTH_HEADERS)
+        crow_core.PROVIDER_OAUTH_HEADERS["openrouter"] = {"x-crow-probe": "1"}
+        self.addCleanup(lambda: (crow_core.PROVIDER_OAUTH_HEADERS.clear(),
+                                 crow_core.PROVIDER_OAUTH_HEADERS.update(real)))
+        api = self.api()
+        api._conversation.append("user", "hello")
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "review_turn", fake_review), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: 1.0):
+            api._run("hello")
+        self.assertEqual(seen.get("turn"), {"x-crow-probe": "1"})
+        self.assertEqual(seen.get("review"), seen.get("turn"))
+
+    def test_a_report_does_not_move_the_endpoint(self):
+        """NEGATIVE, and the defect it was cut for was mine: writing the local
+        provider BEFORE `model_command` meant a bare `/model` -- which only ever
+        prints what is running -- switched the endpoint on its way to answering.
+        Nothing was said, nothing was emptied, and the chip went on naming the
+        remote model while turns went somewhere else."""
+        self.remote()
+        api = self.api()
+        with mock.patch.object(crow_core, "server_model_path", lambda *a, **k: ""):
+            api._model_command([])
+        self.assertEqual(crow_core.provider_active(), "openrouter")
+
+    def test_a_typo_does_not_move_the_endpoint(self):
+        """NEGATIVE: `model_command` refuses a word that is not a key and boots
+        nothing. A provider written before that refusal would have moved the
+        endpoint for a word the user did not mean."""
+        self.remote()
+        api = self.api()
+        api._model_command(["nonsense"])
+        self.assertEqual(crow_core.provider_active(), "openrouter")
+
+    def test_a_local_model_already_running_still_ends_the_remote_chat(self):
+        """"Already the one running" is about the PROCESS, not about where the
+        last turn went. Coming back from a provider to a server that happens to
+        be up is still an endpoint change: the context was built somewhere else,
+        so it is dropped, said out loud, and the window is re-read -- or the
+        chip keeps the remote model's declared window while llama-server
+        answers."""
+        self.remote()
+        api = self.api()
+        api._conversation.append("user", "hello")
+        with mock.patch.object(crow_core, "model_command",
+                               lambda *a, **k: ("qwen is already the one running.",
+                                                "http://127.0.0.1:8081/v1", False)), \
+             mock.patch.object(crow_core, "bootable_models", lambda: ("qwen",)), \
+             mock.patch.object(crow_gui, "check_endpoint", lambda *a, **k: "ok"), \
+             mock.patch.object(crow_gui, "fetch_n_ctx", lambda *a, **k: 200000), \
+             mock.patch.object(crow_gui, "fetch_model_name", lambda *a, **k: "Q.gguf"):
+            api._model_command(["qwen"])
+        self.assertEqual(crow_core.provider_active(), crow_core.LOCAL_PROVIDER)
+        sent = self.drained(api)
+        self.assertIn(crow_core.MODEL_SWITCH_NOTE,
+                      [m.get("t") for m in sent if m.get("k") == "note"])
+        up = [m for m in sent if m.get("k") == "up"]
+        self.assertTrue(up, "the page was never told the window changed")
+        self.assertEqual(up[-1]["n_ctx"], 200000)
+        self.assertNotIn("hello", json.dumps(api._conversation.payload()))
+
+    def test_a_local_model_from_the_chip_comes_back_to_the_local_provider(self):
+        """The chip names the models this machine can boot. Left refusing while a
+        provider is chosen it would be dead, with no way back except the sheet --
+        so booting one IS the way back, written before the server starts.
+
+        `bootable_models` IS MOCKED TOO, and leaving it out was this case setting
+        its own trap: "qwen" is not a key in the shipped manifest, so the window
+        was right to change nothing -- the case would have been measuring a
+        refusal while its name claimed a boot."""
+        self.remote()
+        api = self.api()
+        with mock.patch.object(crow_core, "model_command",
+                               lambda *a, **k: ("said", "http://127.0.0.1:8081/v1", True)), \
+             mock.patch.object(crow_core, "bootable_models", lambda: ("qwen",)), \
+             mock.patch.object(crow_gui, "fetch_n_ctx", lambda *a, **k: 200000), \
+             mock.patch.object(crow_gui, "fetch_model_name", lambda *a, **k: "Q.gguf"):
+            api._model_command(["qwen"])
+        self.assertEqual(crow_core.provider_active(), crow_core.LOCAL_PROVIDER)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

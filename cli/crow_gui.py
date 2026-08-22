@@ -977,6 +977,64 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   color:var(--dimmer)}
 .mcphead button:hover{border-color:var(--bevel);color:var(--text-hover)}
 .mcpcost{color:var(--dimmer);font-size:10.5px;margin:5px 0 0}
+/* THE TWO FOLDS ON THE MODEL PAGE. Provider and model are one page because
+   picking the first is most of picking the second, and they fold because a
+   provider list nobody is changing should not push the model out of view. The
+   head is the same shape `.mcphead` already draws, so the sheet keeps one idea
+   of what a foldable heading looks like. */
+.fold{display:flex;align-items:baseline;gap:8px;margin:14px 0 2px;cursor:pointer;
+  border-top:1px solid var(--raised);padding-top:11px}
+.fold:first-child{border-top:none;margin-top:0;padding-top:0}
+.fold .sname{flex:0 0 auto}
+.fold .count{margin-left:auto;color:var(--dimmer);font-size:10.5px}
+.fold .caret{color:var(--dimmer)}
+.fold.open .caret{transform:rotate(90deg)}
+.foldbody{display:none}
+.foldbody.open{display:block}
+/* THE MODEL LIST IS A SELECT AND NOT A COLUMN OF ROWS. OpenRouter answers with
+   hundreds of slugs; drawn as rows they would be the longest thing in the
+   window and none of them easier to find. Monospace because a slug is an
+   identifier -- `:free` at its end is part of the id and decides which bill the
+   turn lands on. */
+.msel{font:inherit;font-size:12px;font-family:var(--mono);width:100%;
+  color:var(--text);background:var(--raised);border:1px solid var(--line);
+  border-radius:6px;padding:7px 9px}
+.msel:focus{outline:none;border-color:var(--accent)}
+.keyrow{display:flex;gap:7px;align-items:center;margin-top:6px}
+.keyrow input{font:inherit;font-size:12px;font-family:var(--mono);flex:1;
+  min-width:0;color:var(--text);background:var(--raised);
+  border:1px solid var(--line);border-radius:6px;padding:7px 9px}
+.keyrow input:focus{outline:none;border-color:var(--accent)}
+.keyrow button{font:inherit;font-size:11px;cursor:pointer;padding:6px 12px;
+  border-radius:6px;background:transparent;border:1px solid var(--line);
+  color:var(--dim)}
+.keyrow button:hover{border-color:var(--bevel);color:var(--text-hover)}
+/* THE SUBSCRIPTION TILES. A tile rather than a row because what it offers is
+   one act -- sign in -- and a row with a switch would say the state is
+   something the page can set. It is not: it is the outcome of a browser leg
+   that happens somewhere else and may not come back for minutes.
+   Every colour is a palette variable, so all three themes answer for it. */
+#subs{display:flex;flex-wrap:wrap;gap:10px}
+.sub{flex:1 1 190px;display:flex;flex-direction:column;gap:6px;cursor:pointer;
+  border:1px solid var(--line);border-radius:10px;padding:13px 14px;
+  background:transparent;color:inherit;font:inherit;text-align:left}
+.sub:hover{border-color:var(--bevel)}
+.sub.on{border-color:var(--accent);
+  background:color-mix(in srgb,var(--accent) 8%,transparent)}
+/* THE BRAND COLOUR IS THE SKIN'S, and `--text-hi` is already what robin asked
+   for: #ffffff under dark and crow, #0f1114 under light. A mark that took the
+   accent when signed in would be recolouring somebody else's logo to say
+   something about Crow's state -- the tile's own border says that. */
+.sub .mark{width:26px;height:26px;color:var(--text-hi)}
+.sub .sname{font-weight:600;font-size:12.5px}
+.sub .sdesc{color:var(--dim);font-size:11.5px}
+.sub .state{font-size:10.5px;color:var(--dimmer);letter-spacing:.04em;
+  text-transform:uppercase}
+.sub.on .state{color:var(--accent)}
+.subout{align-self:flex-start;font:inherit;font-size:10.5px;cursor:pointer;
+  padding:2px 9px;border-radius:5px;background:transparent;
+  border:1px solid var(--line);color:var(--dimmer)}
+.subout:hover{border-color:var(--bevel);color:var(--text-hover)}
 .mcpbad{color:var(--bad);font-size:11.5px;margin:0 0 7px;white-space:pre-wrap}
 .mcpsaid{color:var(--dim);font-size:11.5px;margin:0 0 7px;white-space:pre-wrap}
 /* ONE ARGUMENT PER LINE, not a space-separated string: half of every MCP
@@ -1407,7 +1465,9 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
         <button data-cat="skills" onclick="crow.settingsCat('skills')">Skills</button>
         <button data-cat="server" onclick="crow.settingsCat('server')">Server</button>
         <button data-cat="mcp" onclick="crow.settingsCat('mcp')">MCPs</button>
-        <button data-cat="providers" onclick="crow.settingsCat('providers')">Other providers</button>
+        <button data-cat="model" onclick="crow.settingsCat('model')">Model</button>
+        <button data-cat="subs" onclick="crow.settingsCat('subs')">Subscriptions</button>
+        <button data-cat="keys" onclick="crow.settingsCat('keys')">API Keys</button>
         <button data-cat="about" onclick="crow.settingsCat('about')">About</button>
       </nav>
       <div id="spane">
@@ -1453,12 +1513,38 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
             <button onclick="crow.addMcp()">Add</button>
           </div>
         </section>
-        <section data-cat="providers" hidden>
-          <h3>Other providers</h3>
-          <p class="shint">Keys for models that are not on this machine —
-             Anthropic, OpenAI, OpenRouter and the rest. Crow talks to one local
-             endpoint today; this is where a second, remote one would be named.</p>
-          <p class="empty">Coming soon.</p>
+        <section data-cat="model" hidden>
+          <h3>Model</h3>
+          <p class="shint">Where a turn goes. This machine, or a provider you
+             brought a key for.</p>
+          <div class="fold open" id="provfold" onclick="crow.foldPane('prov')">
+            <span class="caret">&#9654;</span>
+            <div class="sname">Provider</div>
+            <div class="count" id="provcount"></div>
+          </div>
+          <div class="foldbody open" id="provbody"></div>
+          <div class="fold open" id="modfold" onclick="crow.foldPane('mod')">
+            <span class="caret">&#9654;</span>
+            <div class="sname">Model</div>
+            <div class="count" id="modcount"></div>
+          </div>
+          <div class="foldbody open" id="modbody"></div>
+          <p class="mcpsaid" id="provsaid"></p>
+          <p class="mcpcost" id="provnote"></p>
+        </section>
+        <section data-cat="subs" hidden>
+          <h3>Subscriptions</h3>
+          <p class="shint">Sign in with an account you already pay for. The
+             browser opens at the provider; Crow keeps what comes back.</p>
+          <div id="subs"></div>
+          <p class="mcpsaid" id="subsaid"></p>
+        </section>
+        <section data-cat="keys" hidden>
+          <h3>API Keys</h3>
+          <p class="shint">One key per provider. It is kept in its own file that
+             no view reads back — what a box shows after that is a mask.</p>
+          <div id="keylist"></div>
+          <p class="mcpsaid" id="keysaid"></p>
         </section>
         <section data-cat="about" hidden>
           <h3>About</h3>
@@ -1854,6 +1940,8 @@ const crow = {
       b => b.classList.toggle("on", b.dataset.theme===now));
     this.drawSkills();
     this.drawMcp();
+    this.drawProviders();
+    this.drawSubs();
     $("#settings").hidden=false;
   },
   // #124. ASKED FOR EVERY TIME THE SHEET OPENS, never cached in the page: the
@@ -2027,6 +2115,292 @@ const crow = {
   // THE BACKDROP CLOSES, THE SHEET DOES NOT. Without the target test a click on
   // anything inside the panel bubbles up here and shuts it.
   settingsBackdrop(e){ if(e.target.id==="settings") this.closeSettings(); },
+
+  // THE MODEL PAGE AND THE KEY PAGE READ THE SAME VIEW, because they are two
+  // halves of one fact: a provider with no key cannot be chosen, and a key with
+  // no provider is a string in a file. Asked for on every open rather than kept
+  // in the page -- a key entered on the second tab changes what the first one
+  // may offer.
+  foldPane(which){
+    const head=$("#"+which+"fold"), body=$("#"+which+"body");
+    const now=!head.classList.contains("open");
+    head.classList.toggle("open",now); body.classList.toggle("open",now); },
+
+  // THE TWO MARKS, HELD HERE AND NOT FETCHED. The page has no external host to
+  // load an image from -- and on the one screen where somebody is about to sign
+  // in, a remote asset is also a request that says when they opened it. The
+  // geometry is the providers own: the wordmark off anthropic.com and the knot
+  // out of openai.com/favicon.svg, whose box is the PATH's own bounds rather
+  // than the file's 180-square -- most of that square is a background this does
+  // not draw, and inside a 26px tile the padding would have eaten the mark.
+  //
+  // `currentColor` AND NOTHING ELSE, so the colour stays a palette decision one
+  // level up. A literal here would be the next theme's problem.
+  MARKS: {
+    anthropic: {box: "0 0 35 24", d: ["M24.5475 0H19.3384L28.8374 24H34.0465L24.5475 0Z", "M9.49897 0L0 24H5.31125L7.25395 18.96H17.1914L19.1341 24H24.4454L14.9464 0H9.49897ZM8.97193 14.5029L12.2227 6.06857L15.4735 14.5029H8.97193Z"]},
+    openai: {box: "29 29 122 122", d: ["M75.91 73.628V62.232c0-.96.36-1.68 1.199-2.16l22.912-13.194c3.119-1.8 6.838-2.639 10.676-2.639 14.394 0 23.511 11.157 23.511 23.032 0 .839 0 1.799-.12 2.758l-23.752-13.914c-1.439-.84-2.879-.84-4.318 0L75.91 73.627Zm53.499 44.383v-27.23c0-1.68-.72-2.88-2.159-3.719L97.142 69.55l9.836-5.638c.839-.48 1.559-.48 2.399 0l22.912 13.195c6.598 3.839 11.035 11.995 11.035 19.912 0 9.116-5.397 17.513-13.915 20.992v.001Zm-60.577-23.99-9.836-5.758c-.84-.48-1.2-1.2-1.2-2.16v-26.39c0-12.834 9.837-22.55 23.152-22.55 5.039 0 9.716 1.679 13.676 4.678L70.993 55.516c-1.44.84-2.16 2.039-2.16 3.719v34.787-.002Zm21.173 12.234L75.91 98.339V81.546l14.095-7.917 14.094 7.917v16.793l-14.094 7.916Zm9.056 36.467c-5.038 0-9.716-1.68-13.675-4.678l23.631-13.676c1.439-.839 2.159-2.038 2.159-3.718V85.863l9.956 5.757c.84.48 1.2 1.2 1.2 2.16v26.389c0 12.835-9.957 22.552-23.27 22.552v.001Zm-28.43-26.75L47.72 102.778c-6.599-3.84-11.036-11.996-11.036-19.913 0-9.236 5.518-17.513 14.034-20.992v27.35c0 1.68.72 2.879 2.16 3.718l29.989 17.393-9.837 5.638c-.84.48-1.56.48-2.399 0Zm-1.318 19.673c-13.555 0-23.512-10.196-23.512-22.792 0-.959.12-1.919.24-2.879l23.63 13.675c1.44.84 2.88.84 4.32 0l30.108-17.392v11.395c0 .96-.361 1.68-1.2 2.16l-22.912 13.194c-3.119 1.8-6.837 2.639-10.675 2.639Zm29.748 14.274c14.515 0 26.63-10.316 29.39-23.991 13.434-3.479 22.071-16.074 22.071-28.91 0-8.396-3.598-16.553-10.076-22.43.6-2.52.96-5.039.96-7.557 0-17.153-13.915-29.99-29.989-29.99-3.239 0-6.358.48-9.477 1.56-5.398-5.278-12.835-8.637-20.992-8.637-14.515 0-26.63 10.316-29.39 23.991-13.434 3.48-22.07 16.074-22.07 28.91 0 8.396 3.598 16.553 10.075 22.431-.6 2.519-.96 5.038-.96 7.556 0 17.154 13.915 29.989 29.99 29.989 3.238 0 6.357-.479 9.476-1.559 5.397 5.278 12.835 8.637 20.992 8.637Z"]},
+  },
+
+  subMark(name){
+    const NS="http://www.w3.org/2000/svg";
+    const spec=this.MARKS[name];
+    const svg=document.createElementNS(NS,"svg");
+    svg.setAttribute("class","mark");
+    svg.setAttribute("fill","currentColor");
+    if(!spec) return svg;
+    svg.setAttribute("viewBox",spec.box);
+    spec.d.forEach(d => { const p=document.createElementNS(NS,"path");
+      p.setAttribute("d",d); svg.appendChild(p); });
+    return svg; },
+
+  drawSubs(){
+    pywebview.api.provider_view().then(view => {
+      const box=$("#subs"); box.textContent="";
+      (view.subscriptions||[]).forEach(s => {
+        const tile=document.createElement("button");
+        tile.className="sub"+(s.signed_in?" on":"");
+        const n=document.createElement("div");
+        n.className="sname"; n.textContent=s.label;
+        const d=document.createElement("div");
+        // WHAT IS MISSING IS ON THE TILE, not behind the click. A provider that
+        // cannot open a browser yet has one reason and it is the same one every
+        // time -- and it names the file and the key, not the concept.
+        // ONE SENTENCE, WHEREVER IT BELONGS. The tile says what it needs; the
+        // line under the sheet does not repeat it, because a message that
+        // arrives on click and already stands two inches above it reads as
+        // nothing having happened.
+        //
+        // FOUR STATES, AND THE ORDER IS THE ORDER THE CREDENTIAL RESOLVER USES:
+        // Crow's own sign-in, then the one another program on this machine
+        // holds, then a client_id waiting to be used, then nothing yet. A tile
+        // that offered the borrowed login while Crow had its own would be
+        // offering the weaker of two.
+        d.className="sdesc";
+        const st=document.createElement("div");
+        st.className="state";
+        if(s.signed_in){ d.textContent=s.blurb; st.textContent="signed in"; }
+        else if(s.borrowing){
+          // THE STALE LINE IS A WARNING AND NOT A STATE. The token is sent
+          // either way; what a provider does with it is the provider's answer,
+          // and this only says why a refusal would not be a surprise.
+          d.textContent=s.stale||("Using the "+s.product+" sign-in on this "
+            +"machine. Crow reads it and never writes it.");
+          st.textContent="signed in · "+s.product; }
+        else if(s.borrowable){
+          d.textContent="There is a "+s.product+" sign-in on this machine. One "
+            +"click uses it — requests then carry its grant.";
+          st.textContent="use "+s.product; }
+        else if(s.ready){ d.textContent=s.blurb; st.textContent="connect"; }
+        else{
+          d.textContent="Needs a client_id — "+(s.discovers
+            ?"this one publishes the rest itself."
+            :"and the two endpoints, which it does not publish.");
+          st.textContent="set it up"; }
+        tile.appendChild(this.subMark(s.name));
+        tile.appendChild(n); tile.appendChild(d); tile.appendChild(st);
+        // A CLICK IS ALWAYS THE NEXT STEP, never a refusal. Whichever of the
+        // four states the tile is in, the control does the thing that state is
+        // one step away from.
+        tile.onclick=()=>{
+          if(s.borrowing) return;
+          if(s.borrowable) this.borrowSub(s.name,true);
+          else if(s.ready) this.connectSub(s.name);
+          else this.subForm(s); };
+        box.appendChild(tile);
+        if(s.signed_in || s.borrowing){
+          const out=document.createElement("button");
+          out.className="subout";
+          out.textContent=s.borrowing?"stop using it":"sign out";
+          // THE BUTTON SITS BESIDE THE TILE, NOT INSIDE IT. Inside, a click on
+          // it would bubble into the tile and start the browser leg it was
+          // meant to end -- the trap the MCP head already carries a note about.
+          out.onclick=()=>{ if(s.borrowing) this.borrowSub(s.name,false);
+                            else this.signOutSub(s.name); };
+          box.appendChild(out); } }); }); },
+
+  borrowSub(name,on){
+    pywebview.api.provider_borrow(name,on).then(said => {
+      $("#subsaid").textContent=said||"";
+      this.drawSubs(); this.drawProviders(); }); },
+
+  // THE FORM THAT REPLACES AN EDITOR. It is drawn on demand rather than always:
+  // a provider that is set up has nothing to fill in, and three empty boxes
+  // under a working tile would read as three things still to do.
+  subForm(s){
+    const old=$("#subform");
+    if(old && old.dataset.name===s.name){ old.remove(); return; }
+    if(old) old.remove();
+    const box=document.createElement("div");
+    box.id="subform"; box.className="sform"; box.dataset.name=s.name;
+    const hint=document.createElement("p");
+    hint.className="shint";
+    hint.textContent=s.label+" — paste the values, then click the tile again "
+      + "to sign in.";
+    box.appendChild(hint);
+    const fields={};
+    const LABEL={client_id:"client_id", authorize:"authorization endpoint",
+                 token:"token endpoint"};
+    s.wants.forEach(key => {
+      const input=document.createElement("input");
+      input.placeholder=LABEL[key]+(s.has[key]?"  (stored)":"");
+      input.onkeydown=(e)=>{ if(e.key==="Enter") save(); };
+      fields[key]=input; box.appendChild(input); });
+    const save=()=>{
+      const out={};
+      // AN UNTOUCHED BOX IS NOT AN EMPTY ONE. Sending "" for a field somebody
+      // left alone would clear a value they never meant to remove -- and the
+      // stored ones are never read back into the page, so a blank box is the
+      // normal state of a filled key.
+      Object.keys(fields).forEach(k => { const v=fields[k].value.trim();
+        if(v) out[k]=v; });
+      pywebview.api.provider_oauth(s.name,out).then(said => {
+        $("#subsaid").textContent=said||"";
+        if(!said){ box.remove(); this.drawSubs(); } }); };
+    const go=document.createElement("button");
+    go.textContent="Save"; go.onclick=save;
+    box.appendChild(go);
+    $("#subs").after(box); },
+
+  connectSub(name){
+    // A BROWSER LEG IS MINUTES, and the sheet has to say so. Somebody reading a
+    // consent screen is not somebody watching a frozen window.
+    $("#subsaid").textContent="the browser is opening \u2026";
+    pywebview.api.provider_authorise(name).then(said => {
+      $("#subsaid").textContent=said||"";
+      this.drawSubs(); this.drawProviders(); }); },
+
+  signOutSub(name){
+    pywebview.api.provider_signout(name).then(said => {
+      $("#subsaid").textContent=said||"";
+      this.drawSubs(); this.drawProviders(); }); },
+
+  drawProviders(){
+    pywebview.api.provider_view().then(view => {
+      this.provView=view;
+      const box=$("#provbody"); box.textContent="";
+      view.providers.forEach(p => box.appendChild(this.provRow(p,view.active)));
+      const on=view.providers.find(p => p.name===view.active) || null;
+      $("#provcount").textContent=on?on.label:"";
+      this.drawModels(view);
+      this.drawKeys(view);
+      // THE ONE LINE A REMOTE ENDPOINT OWES, and only where it is true. Under
+      // the local server it is absent rather than negated: a screen that says
+      // what is NOT happening teaches nobody anything.
+      $("#provnote").textContent=(on&&on.remote)?view.note:""; }); },
+
+  provRow(p,active){
+    const row=document.createElement("div");
+    row.className="srow"+(p.name===active?"":" off");
+    const text=document.createElement("div"); text.className="stext";
+    const n=document.createElement("div"); n.className="sname"; n.textContent=p.label;
+    const d=document.createElement("div"); d.className="sdesc";
+    // WHAT IS MISSING IS SAID ON THE ROW, not after the click -- and a provider
+    // that is signed in is not missing anything. Reading only the key box left
+    // the row saying "needs a key first" under a switch that was already on,
+    // which is the sheet contradicting itself in one line.
+    const held=p.has_key||p.signed_in||p.borrowing;
+    d.textContent=p.blurb+(p.needs_key&&!held?"  ·  needs a key or a sign-in":"");
+    text.appendChild(n); text.appendChild(d);
+    const sw=document.createElement("button");
+    sw.className="sw"+(p.name===active?" on":"");
+    sw.title=p.name===active?"turns go here":"use this one";
+    sw.onclick=()=>this.pickProvider(p.name);
+    row.appendChild(text); row.appendChild(sw);
+    return row; },
+
+  drawModels(view){
+    const box=$("#modbody"); box.textContent="";
+    const p=view.providers.find(x => x.name===view.active);
+    $("#modcount").textContent="";
+    if(!p) return;
+    if(!p.listable){
+      // THE LOCAL SERVER IS NOT ASKED WHAT IT COULD SERVE. It has one model
+      // open and /props says which, so a picker here would offer a choice the
+      // endpoint cannot take.
+      const q=document.createElement("p"); q.className="empty";
+      q.textContent="Whatever llama-server has open — the chip at the top says which.";
+      box.appendChild(q); return; }
+    $("#modcount").textContent=p.count?p.count+" models":"";
+    if(!p.models.length){
+      const q=document.createElement("p"); q.className="empty";
+      q.textContent="No list yet."; box.appendChild(q); }
+    else{
+      const sel=document.createElement("select"); sel.className="msel";
+      const none=document.createElement("option");
+      none.value=""; none.textContent="— pick a model —";
+      if(!p.model) none.selected=true;
+      sel.appendChild(none);
+      p.models.forEach(m => {
+        const o=document.createElement("option");
+        // BY value AND textContent, never into an HTML string: a slug is a
+        // foreign name off a foreign catalogue, the rule #119 was cut for.
+        o.value=m.id; o.textContent=m.id;
+        if(m.id===p.model) o.selected=true;
+        sel.appendChild(o); });
+      sel.onchange=()=>this.pickModel(p.name,sel.value);
+      box.appendChild(sel);
+      const ctx=document.createElement("p"); ctx.className="mcpcost";
+      const row=p.models.find(m => m.id===p.model);
+      // DECLARED, AND IT SAYS SO. /props reports what a server allocated; this
+      // is what a catalogue claims, and the two are not the same kind of number.
+      ctx.textContent=!p.model ? ""
+        : (row&&row.context ? row.context.toLocaleString("en-US")+" tokens declared"
+                            : "no context declared — the bar stays off");
+      box.appendChild(ctx); }
+    const again=document.createElement("div"); again.className="keyrow";
+    const b=document.createElement("button");
+    b.textContent=p.models.length?"ask again":"ask for the list";
+    b.onclick=()=>this.refreshProvider(p.name);
+    again.appendChild(b); box.appendChild(again); },
+
+  drawKeys(view){
+    const box=$("#keylist"); box.textContent="";
+    view.providers.filter(p => p.needs_key).forEach(p => {
+      const row=document.createElement("div"); row.className="srow";
+      const text=document.createElement("div"); text.className="stext";
+      const n=document.createElement("div"); n.className="sname"; n.textContent=p.label;
+      const d=document.createElement("div"); d.className="sdesc";
+      d.textContent=p.has_key?p.key:"not set";
+      text.appendChild(n); text.appendChild(d);
+      const wrap=document.createElement("div"); wrap.className="keyrow";
+      const box2=document.createElement("input");
+      box2.type="password"; box2.placeholder=p.key_hint;
+      // ENTER SAVES, because a key is pasted and a paste ends with a return.
+      box2.onkeydown=(e)=>{ if(e.key==="Enter") this.saveKey(p.name,box2); };
+      const save=document.createElement("button");
+      save.textContent="Save"; save.onclick=()=>this.saveKey(p.name,box2);
+      wrap.appendChild(box2); wrap.appendChild(save);
+      if(p.has_key){
+        const gone=document.createElement("button");
+        gone.textContent="Remove";
+        gone.onclick=()=>{ box2.value=""; this.saveKey(p.name,box2); };
+        wrap.appendChild(gone); }
+      text.appendChild(wrap);
+      box.appendChild(row); row.appendChild(text); }); },
+
+  saveKey(name,box){
+    pywebview.api.provider_key(name,box.value).then(said => {
+      box.value="";
+      $("#keysaid").textContent=said||"";
+      // A KEY LANDING IS ALSO A CATALOGUE ARRIVING, and asking for it here is
+      // the only moment a person expects to wait. The list is on disk after
+      // this, so no later screen has to reach the network to open.
+      if(!said) this.drawProviders(); }); },
+
+  pickProvider(name){
+    $("#provsaid").textContent="";
+    pywebview.api.provider_pick(name,null).then(said => {
+      $("#provsaid").textContent=said||""; this.drawProviders(); }); },
+
+  pickModel(name,slug){
+    $("#provsaid").textContent="";
+    pywebview.api.provider_pick(name,slug).then(said => {
+      $("#provsaid").textContent=said||""; this.drawProviders(); }); },
+
+  refreshProvider(name){
+    $("#provsaid").textContent="asking …";
+    pywebview.api.provider_refresh(name).then(said => {
+      $("#provsaid").textContent=said||""; this.drawProviders(); }); },
 
   settingsCat(name){
     // #126. THE KEY IS ON THE BUTTON, not in a list beside it. It used to be a
@@ -4041,18 +4415,53 @@ class Api:
                 "meta": ("%d messages · %s" % (len(messages), kind)
                          if messages else kind)}
 
+    def _endpoint(self) -> dict:
+        """Where a turn goes. ONE resolution, read by every path that sends.
+
+        The command line is the LOCAL provider's default and reaches nothing
+        else: a remote endpoint's URL and key come off disk, never from an
+        argument somebody typed months ago.
+        """
+        return crow_core.provider_endpoint(self._args.base_url, self._args.model,
+                                           self._args.api_key)
+
+    def _look(self, spot: dict) -> tuple:
+        """(state, model, window) for whatever endpoint is chosen.
+
+        THE THREE LOCAL QUESTIONS ARE NOT PUT TO A REMOTE ENDPOINT. /health and
+        /props belong to llama-server; asking a provider for them costs a round
+        trip to learn nothing, and answering out of them would put a MEASURED
+        number where only a declared one exists. What a remote endpoint's state
+        actually is -- a key, a slug -- is on disk, so it is read there.
+        """
+        if not spot["remote"]:
+            return (check_endpoint(spot["base_url"]),
+                    model_display_name(fetch_model_name(spot["base_url"])),
+                    fetch_n_ctx(spot["base_url"]))
+        if not spot["model"]:
+            return ("no model picked", spot["label"], 0)
+        return ("ready", spot["model"],
+                crow_core.provider_context(spot["provider"], spot["model"]))
+
     def _probe(self) -> None:
+        spot = self._endpoint()
         try:
-            state = check_endpoint(self._args.base_url)
-            name = model_display_name(fetch_model_name(self._args.base_url))
+            state, name, window = self._look(spot)
             self._model = name
-            self._n_ctx = fetch_n_ctx(self._args.base_url)
+            self._n_ctx = window
             # #116. BOUND HERE BECAUSE THIS IS WHERE THE MODEL BECOMES KNOWN,
             # and which levels are legal is the model's answer. A level the new
             # model does not take comes back as None with a line, and is left in
             # the file untouched -- the user may go back to the model it was
             # valid for.
-            self._reasoning, note = crow_core.reasoning_for_chat(name, SESSION_FILE)
+            #
+            # NOT ASKED OF A REMOTE SLUG. The levels come from a manifest of
+            # models this machine can boot, and `z-ai/glm-5.2:free` is not one of
+            # them -- a lookup there would answer about a model nobody is running.
+            if spot["remote"]:
+                self._reasoning, note = None, ""
+            else:
+                self._reasoning, note = crow_core.reasoning_for_chat(name, SESSION_FILE)
             if note:
                 self.push({"k": "note", "t": note})
             self.push({"k": "up", "model": name, "n_ctx": self._n_ctx,
@@ -4064,12 +4473,13 @@ class Api:
                        # the label is what a person recognises. See model_label.
                        "models": [[k, crow_core.model_label(k)]
                                   for k in crow_core.bootable_models()],
-                       "model_key": crow_core.model_key_for(name),
+                       "model_key": "" if spot["remote"] else crow_core.model_key_for(name),
                        "reasoning": self._reasoning or "",
-                       "levels": list(crow_core.reasoning_levels_for(name)),
+                       "levels": [] if spot["remote"] else list(crow_core.reasoning_levels_for(name)),
                        # #117. Which of those levels render the SAME prompt, measured. Empty
                        # means unmeasured, and the page collapses nothing on an empty list.
-                       "groups": [list(g) for g in crow_core.reasoning_groups_for(name)]})
+                       "groups": [] if spot["remote"] else
+                                 [list(g) for g in crow_core.reasoning_groups_for(name)]})
         except Exception as exc:           # noqa: BLE001 - shown, never raised
             self.push({"k": "down", "why": str(exc)[:120]})
             return
@@ -4080,10 +4490,10 @@ class Api:
             # in `crow.py`. A file without one composes to what every release up
             # to here sent, so no existing cache is disturbed by this.
             restored = load_session(
-                self._args.base_url,
+                spot["base_url"],
                 crow_core.system_with_memory(self._args.system,
                                              crow_core.session_memory(SESSION_FILE)),
-                model=self._model)
+                model=self._model, with_kv=not spot["remote"])
         except Exception as exc:           # noqa: BLE001
             self.push({"k": "note", "t": "session not readable: %s" % exc})
             return
@@ -4330,10 +4740,36 @@ class Api:
         """
         if self._worker and self._worker.is_alive():
             return "the model does not change mid-turn"
+        # NAMING A LOCAL MODEL IS COMING BACK TO THE LOCAL PROVIDER, so the
+        # choice is written rather than left to disagree with the server that is
+        # about to answer. Refusing here instead would leave the chip -- the one
+        # control that names the models this machine can run -- dead for as long
+        # as a provider is chosen, with no way back except the sheet.
+        #
+        # ONLY FOR A COMMAND THAT NAMES ONE. A bare `/model` REPORTS and a typo
+        # is REFUSED; both come back with `switched` false, and a provider
+        # written before the call moved the endpoint out from under the
+        # conversation for a word the user never meant -- silently, because the
+        # early return below never says anything, never empties the chat and
+        # never pushes an `up`. The chip would still have read `1049k` while the
+        # turns went to a 200k server. `bootable_models` is READ here, not
+        # decided: `model_command` refuses out of the same list.
+        wanted = " ".join(rest).strip()
+        back = (wanted in crow_core.bootable_models()
+                and crow_core.provider_active() != crow_core.LOCAL_PROVIDER)
+        if back:
+            crow_core.provider_pick(crow_core.LOCAL_PROVIDER)
         said, url, switched = crow_core.model_command(
-            " ".join(rest), self._args.base_url,
+            wanted, self._args.base_url,
             log=lambda msg: self.push({"k": "note", "t": msg}))
         if not switched:
+            # THE SERVER NEEDED NO BOOT AND THE ENDPOINT STILL MOVED. "already
+            # the one running" is about the process, not about where the last
+            # turn went -- so the context is dropped and said out loud here, the
+            # same four things the boot path does below.
+            if back:
+                self._args.base_url = url
+                self._endpoint_changed(reset=True)
             return said
         # THE SAME FOUR THINGS `/reset` DOES, because the cache the context was
         # cheap against belonged to a process that no longer exists. The chat
@@ -4787,8 +5223,14 @@ class Api:
         if not self._args.session:
             return
         try:
-            save_session(self._conversation, self._args.base_url,
-                         self._context_tokens, with_kv=with_kv,
+            # A REMOTE ENDPOINT HAS NO SLOT TO SAVE. `with_kv` is the caller's
+            # half of the same contract `load_session` now reads: the messages
+            # are still written, the cache half is not attempted, and the file
+            # says `kv: false` so the next start does not try to restore one.
+            spot = self._endpoint()
+            save_session(self._conversation, spot["base_url"],
+                         self._context_tokens,
+                         with_kv=with_kv and not spot["remote"],
                          model=self._model, reasoning=self._reasoning,
                          tools_cleared=self._tools_cleared)
         except Exception:                  # noqa: BLE001 - a turn survives it
@@ -4824,10 +5266,11 @@ class Api:
             # is read before the payload -- the fingerprint cannot be taken from
             # messages nobody has opened yet.
             restored = load_session(
-                self._args.base_url,
+                self._endpoint()["base_url"],
                 crow_core.system_with_memory(self._args.system,
                                              crow_core.session_memory(path)),
-                path, model=self._model)
+                path, model=self._model,
+                with_kv=not self._endpoint()["remote"])
         except Exception as exc:           # noqa: BLE001
             self.push({"k": "fail", "t": "not readable: %s" % exc})
             return
@@ -5453,6 +5896,142 @@ class Api:
     def mcp_remove(self, name: str) -> str:
         return crow_core.mcp_remove_server(name) or ""
 
+    # THE MODEL PAGE AND THE KEY PAGE. Thin passes to `crow_core` for the reason
+    # the MCP block above is: which endpoint a turn goes to is not a window
+    # decision, and a second copy of it here would be a second answer to it.
+    def provider_view(self) -> dict:
+        """What both pages draw. A key is in it as a mask or not at all."""
+        return crow_core.provider_view()
+
+    def provider_pick(self, name: str, model=None) -> str:
+        """Choose the endpoint, and the model on it. The refusal, or "".
+
+        REFUSED MID-TURN, the same answer `/model` gives: the loop read its
+        endpoint at the top and changing it underneath would send the second
+        half of a turn somewhere else.
+
+        A CHANGED PROVIDER EMPTIES THE CHAT, and it has to. The context was
+        cheap against a cache that belonged to the endpoint being left; carried
+        across, it would be re-read from byte 0 by a server that never saw it --
+        or by a provider that bills for reading it.
+        """
+        if self._worker and self._worker.is_alive():
+            return "the endpoint does not change mid-turn"
+        before = crow_core.provider_active()
+        problem = crow_core.provider_pick(name, model)
+        if problem:
+            return problem
+        self._endpoint_changed(reset=name != before)
+        return ""
+
+    def provider_key(self, name: str, key: str) -> str:
+        """Store or clear one key, then fetch what it unlocks. Refusal or "".
+
+        THE CATALOGUE IS FETCHED HERE and nowhere later: this is the one moment
+        a person is expecting to wait for a provider. A failed fetch is not a
+        failed key -- the key is already stored, and the line says which of the
+        two went wrong.
+        """
+        problem = crow_core.provider_key_set(name, key)
+        if problem:
+            return problem
+        if not (key or "").strip():
+            return ""
+        return crow_core.provider_refresh(name) or ""
+
+    def provider_refresh(self, name: str) -> str:
+        """Ask a provider for its model list again. The problem, or ""."""
+        return crow_core.provider_refresh(name) or ""
+
+    def provider_authorise(self, name: str) -> str:
+        """The Subscriptions tile. Opens the browser and waits. Problem, or "".
+
+        IT BLOCKS FOR AS LONG AS THE PERSON TAKES, up to five minutes -- the
+        same shape `mcp_add` has, and for the same reason: the flow is not done
+        until somebody has finished at the provider, and a call that returned
+        early would leave the page saying "signed in" while nothing was.
+
+        REFUSED MID-TURN: the credential this replaces is the one the running
+        turn is authenticating with.
+        """
+        if self._worker and self._worker.is_alive():
+            return "the sign-in does not run mid-turn"
+        return crow_core.provider_authorise(name) or ""
+
+    def provider_oauth(self, name: str, fields: dict) -> str:
+        """The setup form on a Subscriptions tile. The problem, or "".
+
+        THE VALUES ARRIVE FROM THE PAGE AS A DICT and are filtered in the core,
+        not here: which keys a login may carry is not a window decision.
+        """
+        return crow_core.provider_oauth_set(name, dict(fields or {})) or ""
+
+    def provider_borrow(self, name: str, on: bool) -> str:
+        """Use, or stop using, another program's sign-in. Problem, or "".
+
+        REFUSED MID-TURN, like every other credential change: the running turn
+        is authenticating with the one this replaces.
+        """
+        if self._worker and self._worker.is_alive():
+            return "the sign-in does not change mid-turn"
+        return crow_core.provider_borrow_set(name, bool(on)) or ""
+
+    def provider_signout(self, name: str) -> str:
+        """Drop one stored login. The problem, or "".
+
+        THE PASTED KEY, IF THERE IS ONE, SURVIVES. They are two credentials in
+        two files, and signing out of a subscription is not the same act as
+        forgetting a key somebody typed.
+        """
+        return crow_core.provider_token_drop(name) or ""
+
+    def _endpoint_changed(self, reset: bool) -> None:
+        """Re-read the endpoint and tell the page. Empties the chat if asked.
+
+        THE TWO LINES ARE SAID BEFORE THE SCREEN CHANGES, not after: a person
+        who reads them once the window has emptied has been informed of a loss
+        instead of warned about one. MODEL_SWITCH_NOTE is reused rather than
+        rewritten -- it is already the one answer to "where did my context go".
+
+        AND NOTHING IS CLEARED, which is the whole reason they are readable. A
+        first version pushed `clear` at the end of this block; the page answers
+        that with `flow.innerHTML=""`, so both lines were wiped by the message
+        that followed them. The queue still carried them and the case that read
+        the queue was green -- a note nobody can read is not a note.
+
+        THE FOUR THINGS `/model` DOES, and only those. There the transcript
+        stays on screen while the conversation empties, which is the honest
+        picture: the chat is still in the rail with everything in it, and it is
+        the CONTEXT that went.
+        """
+        spot = self._endpoint()
+        if reset:
+            self.push({"k": "note", "t": crow_core.MODEL_SWITCH_NOTE})
+            if spot["remote"]:
+                self.push({"k": "note", "t": crow_core.REMOTE_ENDPOINT_NOTE})
+            self._conversation.reset()
+            crow_core.forget_approvals()
+            self._tools_cleared = 0
+            self._context_tokens = 0
+            self._promised_warm = False
+        try:
+            state, name, window = self._look(spot)
+        except Exception as exc:           # noqa: BLE001 - shown, never raised
+            self.push({"k": "down", "why": str(exc)[:120]})
+            return
+        self._model = name
+        self._n_ctx = window
+        self.push({"k": "up", "model": name, "n_ctx": self._n_ctx,
+                   "tokens": self._context_tokens, "state": state,
+                   "models": [[k, crow_core.model_label(k)]
+                              for k in crow_core.bootable_models()],
+                   "model_key": "" if spot["remote"] else crow_core.model_key_for(name),
+                   "reasoning": self._reasoning or "",
+                   "levels": [] if spot["remote"] else
+                             list(crow_core.reasoning_levels_for(name)),
+                   "groups": [] if spot["remote"] else
+                             [list(g) for g in crow_core.reasoning_groups_for(name)]})
+
     def set_theme(self, name: str) -> bool:
         """The picker in Aussehen. True when the choice reached the disk.
 
@@ -5600,10 +6179,23 @@ class Api:
         # different model while the window stays open, and a value cached at
         # launch would keep sending the old model's min_p.
         sampling = sampling_for(self._model)
+        # RESOLVED ONCE FOR THE WHOLE TURN, and handed to BOTH senders below.
+        # The reply is the one a person is waiting for; the review at the end is
+        # the one that goes without being asked, with its own body and its own
+        # Authorization header. Two resolutions could disagree the moment a
+        # provider is switched mid-turn, and the one that would be wrong is the
+        # one nobody is watching.
+        spot = self._endpoint()
+        if spot["remote"] and not spot["model"]:
+            self.push({"k": "fail", "t": "%s has no model picked -- Settings, "
+                                         "Model" % spot["label"]})
+            self.push({"k": "idle"})
+            return
         try:
             result = run_turn(
-                self._conversation, base_url=self._args.base_url,
-                model=self._args.model, api_key=self._args.api_key,
+                self._conversation, base_url=spot["base_url"],
+                model=spot["model"], api_key=spot["api_key"],
+                extra_headers=spot.get("headers") or None,
                 temperature=sampling["temperature"], top_p=sampling["top_p"],
                 min_p=sampling["min_p"], top_k=sampling.get("top_k"),
                 # #116: None sends nothing, which is the "never chosen" state.
@@ -5664,8 +6256,9 @@ class Api:
             self._conversation.mark_reviewed(due)
             self._persist_live()
             crow_core.review_turn(
-                self._conversation, base_url=self._args.base_url,
-                model=self._args.model, api_key=self._args.api_key,
+                self._conversation, base_url=spot["base_url"],
+                model=spot["model"], api_key=spot["api_key"],
+                extra_headers=spot.get("headers") or None,
                 temperature=sampling["temperature"], top_p=sampling["top_p"],
                 min_p=sampling["min_p"], top_k=sampling.get("top_k"),
                 reasoning_effort=self._reasoning,

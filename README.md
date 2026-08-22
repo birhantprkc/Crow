@@ -46,6 +46,7 @@
 - [Session search](#session-search)
 - [MCP servers](#mcp-servers)
 - [MCP over HTTP](#mcp-over-http)
+- [Remote models](#remote-models)
 - [Settings](#settings)
 - [Measurements](#measurements)
 - [Window](#window)
@@ -563,6 +564,93 @@ so does re-fetching a configured server; `/mcp auth <server>` repeats it on its 
 
 ---
 
+## Remote models
+
+`Settings → API Keys`, paste the key, then `Settings → Model`. The catalogue is fetched once, when
+the key lands and when `ask again` is clicked, and lives in `providers.json` — nothing is asked of a
+provider while a window opens.
+
+| file | |
+|---|---|
+| `%LOCALAPPDATA%\Crow\providers.json` | active provider, the model picked per provider, the catalogue |
+| `%LOCALAPPDATA%\Crow\provider_keys.json` | the keys, `0600`, read by no view |
+
+| provider | endpoint | key |
+|---|---|---|
+| This machine | `--base-url`, default `http://127.0.0.1:8081/v1` | none |
+| OpenRouter | `https://openrouter.ai/api/v1` | `sk-or-...` |
+| Anthropic | `https://api.anthropic.com/v1` | `sk-ant-...` or a sign-in |
+| OpenAI | `https://api.openai.com/v1` | `sk-...` or a sign-in |
+
+The model id is sent as listed. `:free`, `:extended`, `:nitro` and `:floor` are part of the slug —
+`z-ai/glm-5.2` and `z-ai/glm-5.2:free` are two entries with two bills.
+
+### Subscriptions
+
+`Settings → Subscriptions`, one tile per provider. A tile opens the browser at
+the provider and Crow keeps what comes back — PKCE, `state`, refresh, the same
+flow `/mcp` uses. A sign-in outranks a pasted key; `sign out` drops the login and
+leaves the key.
+
+Neither provider lets a client register itself, measured 2026-08-22:
+
+| | discovery | registration |
+|---|---|---|
+| `claude.ai`, `api.anthropic.com`, `console.anthropic.com` | 404 | none |
+| `auth.openai.com` | `openid-configuration`, authorize + token | none |
+
+So each needs a `client_id`, and until one is there the tile says so instead of
+opening a login that comes back `400`:
+
+```json
+{"oauth": {"anthropic": {"client_id": "...", "authorize": "https://...", "token": "https://..."}}}
+```
+
+`issuer` instead of `authorize`/`token` where the provider publishes discovery —
+`auth.openai.com` does. Crow does not ship another product's `client_id`.
+
+**Or use the sign-in already on this machine.** Where another program holds one,
+the tile offers it and one click switches it on:
+
+| provider | store | read |
+|---|---|---|
+| Anthropic | `~/.claude/.credentials.json` | `claudeAiOauth.accessToken` |
+
+**Not Codex.** `~/.codex/auth.json` holds a token, and `GET
+https://api.openai.com/v1/models` answers it `403` — authenticated, then refused
+the resource. It belongs to the ChatGPT backend Codex talks to; the platform API
+wants an `sk-...` key. Two providers, not one.
+
+Read at the moment a request needs it, never copied, never written, never
+refreshed — the refresh token belongs to the program that owns the file, and
+spending it would sign you out of that tool. An expired one is reported; open
+that program once and it refreshes itself. Requests then carry **that program's
+grant**, which is why nothing switches it on by finding a file.
+
+Order when several exist: Crow's own sign-in, then the borrowed one, then the
+pasted key.
+
+| file | |
+|---|---|
+| `%LOCALAPPDATA%\Crow\provider_tokens.json` | the logins, `0600`, read by no view |
+
+### No slot, no cache, no operating point
+
+`SLOT_FILE`, `prefix_fingerprint`, `/props` and every "pays a full prefill" line are llama-server's.
+Against a provider none of them exists, and the window says so once, where the endpoint is chosen:
+
+| | local | remote |
+|---|---|---|
+| context window | `/props`, **measured** | the catalogue's `context_length`, **declared** |
+| no window reported | bare token count, no bar | bare token count, no bar |
+| KV save and restore | `/slots/0` | not attempted; the session file says `kv: false` |
+| `/health`, `/props` | asked | not asked |
+| reasoning levels | per `manifests/` | none offered |
+
+There is no price display. Whoever brings a key knows their costs.
+
+---
+
 ## Settings
 
 `Help → Settings` in the window.
@@ -573,7 +661,9 @@ so does re-fetching a configured server; `/mcp auth <server>` repeats it on its 
 | **Skills** | one row per skill, name and description, a switch. Off takes it out of the prompt; the file stays. Switching re-pins the open chat and says what the prefill costs |
 | **Server** | connection state, the base URL as its title, and the tool-call switch |
 | **MCPs** | one row per server, folded; per tool a switch and its class. Add with a command line, `ask again`, `remove`. See [MCP servers](#mcp-servers) |
-| **Other providers** | coming soon — keys for models that are not on this machine |
+| **Model** | provider and model, two folds. Picking a provider empties the chat. See [Remote models](#remote-models) |
+| **Subscriptions** | one tile per provider that can log in. Click opens the browser; `sign out` drops the login |
+| **API Keys** | one key per provider. Stored in `provider_keys.json`, shown as a mask afterwards |
 | **About** | version |
 
 Chat rail: right-click a chat to rename, move to a project, archive or delete; right-click the empty

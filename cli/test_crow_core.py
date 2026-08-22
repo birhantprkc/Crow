@@ -74,6 +74,19 @@ crow_core.MCP_FILE = os.path.join(tempfile.gettempdir(),
                                   "crow-suite-has-no-mcp", "mcp.json")
 crow_core.mcp_apply()
 
+# THE SAME RULE FOR THE PROVIDER FILES (#130 again). `provider_active` reads
+# %LOCALAPPDATA%\Crow\providers.json, so on a machine where OpenRouter is
+# chosen every case that resolves an endpoint would answer differently from the
+# same case on a fresh install -- and the one that broke would be the one about
+# where a turn goes. A path whose parent does not exist is the empty
+# configuration, which is the state the local server is the only endpoint in.
+crow_core.PROVIDERS_FILE = os.path.join(tempfile.gettempdir(),
+                                        "crow-suite-has-no-provider", "providers.json")
+crow_core.PROVIDER_KEYS_FILE = os.path.join(tempfile.gettempdir(),
+                                            "crow-suite-has-no-provider", "keys.json")
+crow_core.PROVIDER_TOKEN_FILE = os.path.join(tempfile.gettempdir(),
+                                             "crow-suite-has-no-provider", "tokens.json")
+
 # THE PALETTE IS PINNED FOR THIS WHOLE MODULE (#102). `crow_core._TTY` is decided
 # ONCE, at import, out of `sys.stdout.isatty()`, and the colour constants are
 # materialised from it on the spot -- so this file answered differently in a
@@ -5105,8 +5118,16 @@ class _FakeAuthServer(http.server.BaseHTTPRequestHandler):
             return self._json(200, state["meta"])
         if parsed.path == "/authorize":
             # WHAT A CONSENT SCREEN WOULD CHECK BEFORE IT DREW ITSELF.
-            for needed in ("client_id", "redirect_uri", "state", "code_challenge",
-                           "code_challenge_method", "resource"):
+            needs = ["client_id", "redirect_uri", "state", "code_challenge",
+                     "code_challenge_method"]
+            # `resource` IS REQUIRED UNLESS A CASE SAYS OTHERWISE, and the
+            # default is the strict one so every MCP case here keeps asking for
+            # it. A subscription login has no resource identifier to send --
+            # neither provider publishes one -- and the case that drives this
+            # flow sets the flag AND asserts the field is absent.
+            if state.get("need_resource", True):
+                needs.append("resource")
+            for needed in needs:
                 if not got.get(needed):
                     return self._json(400, {"error": "missing " + needed})
             if got["code_challenge_method"] != "S256":
@@ -6108,11 +6129,11 @@ class TheChecklistTests(unittest.TestCase):
 
     def test_the_package_names_it_and_not_what_it_was_pointed_at(self):
         """FOUND IN THE WINDOW, 2026-08-22. `npx -y
-        @modelcontextprotocol/server-filesystem C:/Users/robin/dev/Crow` ends in
+        @modelcontextprotocol/server-filesystem C:/Users/.../dev/Crow` ends in
         the directory the server SERVES, so reading the line backwards called
         that server "crow". The package is the first token after the launcher."""
         self.assertEqual(crow_core.mcp_name_from(
-            "npx -y @modelcontextprotocol/server-filesystem C:/Users/robin/dev/Crow".split()),
+            "npx -y @modelcontextprotocol/server-filesystem C:/Users/.../dev/Crow".split()),
             "filesystem")
 
     def test_a_path_falls_back_to_the_project_not_to_index(self):
@@ -6208,6 +6229,883 @@ class TheChecklistTests(unittest.TestCase):
         self.assertIn("prefill", said)
         self.assertIn("prefill", crow_core.MCP_COST_NOTE)
 
+
+class _FakeCatalogue(http.server.BaseHTTPRequestHandler):
+    """A provider's /models, and a record of how it was asked.
+
+    THE HEADERS ARE KEPT because the signature is the part that decides whether
+    a real provider answers at all -- measured 2026-08-22, `Python-urllib` gets
+    403/1010 from Cloudflare and the same client naming itself gets 200. A case
+    that only checked the parsed models would be green against a client no
+    protected endpoint would ever talk to.
+    """
+
+    seen: dict = {}
+    body: str = ""
+    code: int = 200
+
+    def log_message(self, *_args):
+        pass
+
+    def do_GET(self):                                    # noqa: N802
+        # LOWERCASED, because header names are case-INSENSITIVE on the wire and
+        # urllib capitalises what it is handed -- `x-api-key` leaves this
+        # process as `X-api-key`. A fixture that compared the spelling would be
+        # measuring urllib rather than Crow, and would go red on a client that
+        # was perfectly correct.
+        _FakeCatalogue.seen = {k.lower(): v for k, v in self.headers.items()}
+        raw = _FakeCatalogue.body.encode("utf-8")
+        self.send_response(_FakeCatalogue.code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+class TheProviderRegistryTests(unittest.TestCase):
+    """Step 1 of remote models: which endpoint a turn goes to, and on what.
+
+    THE SENTENCE THIS STAGE HANGS ON: a remote endpoint has no slot, no prefix
+    cache and no operating point. Everything this file pins is downstream of
+    that -- the window it reports is DECLARED and not measured, 0 means "nobody
+    said" rather than "no room", and none of it may be answered out of /props.
+
+    NOT ONE CASE HERE OPENS A SOCKET. The catalogue over the wire is
+    `TheProviderCatalogueTests`; this is the file on disk.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-prov-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._real = (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE)
+        self.addCleanup(self._restore)
+        crow_core.PROVIDERS_FILE = os.path.join(self.dir, "providers.json")
+        crow_core.PROVIDER_KEYS_FILE = os.path.join(self.dir, "provider_keys.json")
+
+    def _restore(self) -> None:
+        crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE = self._real
+
+    def _catalogue(self, *rows) -> None:
+        doc = crow_core.provider_doc()
+        doc["catalog"] = {"openrouter": {"fetched": 1, "models": list(rows)}}
+        self.assertIsNone(crow_core.provider_write(doc))
+
+    # ---------------------------------------------------------------- disk
+
+    def test_what_is_written_is_read_back_in_the_same_call(self):
+        """Persistence is a contract, not a one-way valve: `provider_write`
+        opens the file again itself, so a writer that only proved `json.dump`
+        did not raise cannot report success."""
+        self.assertIsNone(crow_core.provider_write({"active": "openrouter"}))
+        self.assertEqual(crow_core.provider_doc()["active"], "openrouter")
+
+    def test_a_directory_where_the_file_should_be_is_reported_not_raised(self):
+        """NEGATIVE: the write has to fail somewhere, and when it does the
+        caller gets a sentence instead of a traceback through the page."""
+        os.makedirs(crow_core.PROVIDERS_FILE, exist_ok=True)
+        said = crow_core.provider_write({"active": "local"})
+        self.assertTrue(said and "providers.json" in said)
+
+    def test_a_provider_this_build_does_not_have_falls_back_to_the_machine(self):
+        """A file naming a removed provider is a value, not an error -- and the
+        answer to a value this build lacks is the one it has."""
+        crow_core.provider_write({"active": "wetware"})
+        self.assertEqual(crow_core.provider_active(), crow_core.LOCAL_PROVIDER)
+
+    # ---------------------------------------------------------------- keys
+
+    def test_a_provider_that_needs_a_key_is_refused_until_there_is_one(self):
+        """POSITIVE AND NEGATIVE IN ONE PAIR: the refusal has to hold before the
+        key and lift after it, or the check is measuring nothing."""
+        self.assertIn("key", crow_core.provider_pick("openrouter") or "")
+        self.assertEqual(crow_core.provider_active(), crow_core.LOCAL_PROVIDER)
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        self.assertIsNone(crow_core.provider_pick("openrouter"))
+        self.assertEqual(crow_core.provider_active(), "openrouter")
+
+    def test_an_empty_key_clears_the_entry_rather_than_storing_emptiness(self):
+        """A blanked field means "I am not using this one". A stored "" would
+        leave `needs_key` looking satisfied and the pick would go through onto
+        an endpoint that answers 401."""
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        crow_core.provider_key_set("openrouter", "   ")
+        self.assertEqual(crow_core.provider_key_for("openrouter"), "")
+        self.assertIn("key", crow_core.provider_pick("openrouter") or "")
+
+    def test_the_key_never_appears_in_what_a_surface_is_handed(self):
+        """NEGATIVE, and the one that matters: `provider_view` is drawn by a
+        sheet and pasted into bug reports. The whole secret is searched for in
+        the whole document -- a mask that leaked the middle would pass a check
+        that only looked at the field it expected."""
+        secret = "not-a-real-key-9f3c0d11223344556677889900aabbcc"
+        crow_core.provider_key_set("openrouter", secret)
+        dumped = json.dumps(crow_core.provider_view())
+        self.assertNotIn(secret, dumped)
+        self.assertNotIn(secret[4:-4], dumped)
+        self.assertIn("not-...bbcc", dumped)
+
+    def test_a_short_key_is_not_half_printed(self):
+        """NEGATIVE: four from each end of a nine-character string is the whole
+        string with a "..." in it. Below the length where a mask can hide
+        anything, it hides everything."""
+        self.assertEqual(crow_core.provider_key_mask("sk-abc123"), "*********")
+        self.assertEqual(crow_core.provider_key_mask(""), "")
+
+    # ------------------------------------------------------------ the slug
+
+    def test_the_free_suffix_survives_the_whole_path(self):
+        """`:free` IS PART OF THE ID, not a label beside it. OpenRouter lists
+        `nvidia/nemotron-3-ultra-550b-a55b` and `...:free` as two entries with
+        two bills, so a client that tidies the suffix away sends the paid twin.
+        Measured off robin's own screenshot of the model list, 2026-08-22."""
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        free = "nvidia/nemotron-3-ultra-550b-a55b:free"
+        self.assertIsNone(crow_core.provider_pick("openrouter", free))
+        self.assertEqual(crow_core.provider_endpoint()["model"], free)
+        self.assertEqual(crow_core.provider_model_for("openrouter"), free)
+
+    def test_the_paid_twin_is_never_what_comes_out(self):
+        """NEGATIVE: the failure this guards against is silent by construction.
+        A stripped suffix still names a real model, the request still succeeds,
+        and the only place it shows up is the bill."""
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        paid = "z-ai/glm-5.2"
+        crow_core.provider_pick("openrouter", paid + ":free")
+        self.assertNotEqual(crow_core.provider_endpoint()["model"], paid)
+
+    def test_the_model_is_remembered_per_provider(self):
+        """A slug is the property of whoever serves it. Switching to the machine
+        and back must not leave a foreign slug standing in front of llama-server,
+        and must not lose it either."""
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        crow_core.provider_pick("openrouter", "z-ai/glm-5.2:free")
+        crow_core.provider_pick(crow_core.LOCAL_PROVIDER)
+        self.assertEqual(crow_core.provider_endpoint("", "crow")["model"], "crow")
+        crow_core.provider_pick("openrouter")
+        self.assertEqual(crow_core.provider_endpoint("", "crow")["model"],
+                         "z-ai/glm-5.2:free")
+
+    # ------------------------------------------------------------ endpoint
+
+    def test_the_command_line_reaches_the_machine_and_nothing_else(self):
+        """A remote endpoint's URL and key come off disk. An argument somebody
+        typed months ago may not decide where a key-bearing request goes."""
+        local = crow_core.provider_endpoint("http://127.0.0.1:9/v1", "crow", "k")
+        self.assertEqual(local["base_url"], "http://127.0.0.1:9/v1")
+        self.assertFalse(local["remote"])
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        crow_core.provider_pick("openrouter", "z-ai/glm-5.2:free")
+        remote = crow_core.provider_endpoint("http://127.0.0.1:9/v1", "crow", "k")
+        self.assertTrue(remote["remote"])
+        self.assertEqual(remote["base_url"], "https://openrouter.ai/api/v1")
+        self.assertEqual(remote["api_key"], "not-a-real-key-0123456789")
+
+    # ------------------------------------------------------------- context
+
+    def test_the_declared_window_is_reported_for_the_slug_that_declared_it(self):
+        self._catalogue({"id": "a/b:free", "name": "B", "context": 131072},
+                        {"id": "a/b", "name": "B", "context": 1048576})
+        self.assertEqual(crow_core.provider_context("openrouter", "a/b:free"), 131072)
+        self.assertEqual(crow_core.provider_context("openrouter", "a/b"), 1048576)
+
+    def test_an_undeclared_window_is_zero_and_never_a_default(self):
+        """NEGATIVE, and it is the whole trennlinie in one case. Hermes' own
+        detection chain ends in a 128K fallback; a number invented here would be
+        a client that measures locally and guesses remotely, with nothing on
+        screen saying which it just did. `should_roll` and `review_due` already
+        read 0 as "the server would not say"."""
+        self._catalogue({"id": "a/quiet", "name": "Q", "context": 0})
+        self.assertEqual(crow_core.provider_context("openrouter", "a/quiet"), 0)
+        self.assertEqual(crow_core.provider_context("openrouter", "a/unknown"), 0)
+        self.assertEqual(crow_core.provider_context("openrouter", ""), 0)
+        self.assertFalse(crow_core.should_roll(500000, 0))
+        self.assertIsNone(crow_core.review_due(500000, 0, 0.0))
+
+    def test_the_note_says_the_thing_that_has_no_local_equivalent(self):
+        """MEMORY_COST_NOTE's shape. It is NOT a second answer to "where did my
+        context go" -- MODEL_SWITCH_NOTE is that answer and is reused for the
+        switch itself; this one names what a remote endpoint does not have."""
+        self.assertIn("no slot", crow_core.REMOTE_ENDPOINT_NOTE)
+        self.assertIn("prefix cache", crow_core.REMOTE_ENDPOINT_NOTE)
+        self.assertNotEqual(crow_core.REMOTE_ENDPOINT_NOTE,
+                            crow_core.MODEL_SWITCH_NOTE)
+
+    def test_a_session_saved_against_a_slot_is_not_restored_into_a_provider(self):
+        """`kv: true` in a file is a statement about the endpoint it was written
+        against. Opened while a provider is chosen, the restore would POST
+        /slots/0 at somebody else's API -- a request that cannot succeed and
+        that nobody asked for. NEGATIVE HALF: with the slot there, the same file
+        still restores, or this would be passing by doing nothing at all."""
+        path = os.path.join(self.dir, "session.json")
+        posted = []
+
+        def fake_post(url, body, timeout=0):
+            posted.append(url)
+            return {"n_restored": 1}
+
+        real, crow_core.post_json = crow_core.post_json, fake_post
+        self.addCleanup(lambda: setattr(crow_core, "post_json", real))
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({crow_core.SESSION_FORMAT_KEY: crow_core.SESSION_FORMAT,
+                       "kv": True,
+                       "prefix": crow_core.prefix_fingerprint(None, None),
+                       "context_tokens": 7,
+                       "messages": [{"role": "user", "content": "hi"}]}, fh)
+        crow_core.load_session("http://127.0.0.1:1/v1", None, path, with_kv=True)
+        self.assertEqual(len(posted), 1)
+        crow_core.load_session("http://127.0.0.1:1/v1", None, path, with_kv=False)
+        self.assertEqual(len(posted), 1)
+
+
+class TheProviderCatalogueTests(unittest.TestCase):
+    """The model list over a real socket, and how the request is signed.
+
+    THE CATALOGUE IS NOT FETCHED AT START, for the reason `TOOLS` is not: a
+    provider slow to answer would otherwise decide how long a window takes to
+    open. It is fetched when a key lands and when a person asks.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-cat-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._real = (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE,
+                      dict(crow_core.PROVIDERS["openrouter"]))
+        self.addCleanup(self._restore)
+        crow_core.PROVIDERS_FILE = os.path.join(self.dir, "providers.json")
+        crow_core.PROVIDER_KEYS_FILE = os.path.join(self.dir, "provider_keys.json")
+        self.server = _QuietHttpServer(("127.0.0.1", 0), _FakeCatalogue)
+        self.addCleanup(self.server.server_close)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.shutdown)
+        crow_core.PROVIDERS["openrouter"]["catalog"] = (
+            "http://127.0.0.1:%d/models" % self.server.server_address[1])
+        _FakeCatalogue.code = 200
+        _FakeCatalogue.seen = {}
+
+    def _restore(self) -> None:
+        (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE,
+         crow_core.PROVIDERS["openrouter"]) = (
+            self._real[0], self._real[1], self._real[2])
+
+    def test_the_list_comes_back_with_the_declared_window(self):
+        _FakeCatalogue.body = json.dumps({"data": [
+            {"id": "z-ai/glm-5.2:free", "name": "GLM", "context_length": 131072},
+            {"id": "a/b", "context_length": "8000"}]})
+        models, problem = crow_core.provider_fetch_models("openrouter", "k")
+        self.assertIsNone(problem)
+        self.assertEqual([m["id"] for m in models], ["z-ai/glm-5.2:free", "a/b"])
+        self.assertEqual(models[0]["context"], 131072)
+        self.assertEqual(models[1]["context"], 8000)
+        self.assertEqual(models[1]["name"], "a/b")
+
+    def test_the_request_says_who_is_asking(self):
+        """The lesson of 2026-08-22, applied at the FIRST build of an outgoing
+        path rather than after the first 403: `Python-urllib` is on Cloudflare's
+        block list and the identical client naming itself is not."""
+        _FakeCatalogue.body = json.dumps({"data": [{"id": "a/b"}]})
+        crow_core.provider_fetch_models("openrouter", "k")
+        agent = _FakeCatalogue.seen.get("user-agent", "")
+        self.assertTrue(agent.startswith("Crow/"), agent)
+        self.assertNotIn("urllib", agent)
+        self.assertEqual(_FakeCatalogue.seen.get("authorization"), "Bearer k")
+
+    def test_a_body_without_a_list_is_a_problem_and_not_an_empty_catalogue(self):
+        """NEGATIVE: an empty list stored as if it were an answer would leave the
+        sheet saying the provider serves nothing, which is a different and much
+        quieter failure than saying the provider did not answer."""
+        _FakeCatalogue.body = json.dumps({"error": "nope"})
+        models, problem = crow_core.provider_fetch_models("openrouter", "k")
+        self.assertEqual(models, [])
+        self.assertTrue(problem)
+
+    def test_a_refusal_is_reported_with_its_code(self):
+        """NEGATIVE: 401 is the shape a wrong key arrives in, and the sheet has
+        to be able to say so rather than showing an empty list."""
+        _FakeCatalogue.code = 401
+        _FakeCatalogue.body = "{}"
+        models, problem = crow_core.provider_fetch_models("openrouter", "bad")
+        self.assertEqual(models, [])
+        self.assertIn("401", problem or "")
+
+    def test_the_fetched_list_lands_on_disk_and_answers_from_there(self):
+        """`provider_models` reads the file, never the network -- so once this
+        has run, the sheet opens without a socket."""
+        _FakeCatalogue.body = json.dumps({"data": [
+            {"id": "a/b:free", "context_length": 4096}]})
+        self.assertIsNone(crow_core.provider_refresh("openrouter"))
+        self.server.shutdown()
+        self.assertEqual([m["id"] for m in crow_core.provider_models("openrouter")],
+                         ["a/b:free"])
+        self.assertEqual(crow_core.provider_context("openrouter", "a/b:free"), 4096)
+
+    def test_a_provider_with_no_catalogue_says_so_instead_of_asking(self):
+        """NEGATIVE: the local server has one model open and /props says which.
+        A picker in front of it would offer a choice the endpoint cannot take."""
+        models, problem = crow_core.provider_fetch_models(crow_core.LOCAL_PROVIDER)
+        self.assertEqual(models, [])
+        self.assertTrue(problem)
+
+class TheSubscriptionSignInTests(unittest.TestCase):
+    """The Subscriptions tile: a browser leg against a real authorization server.
+
+    THE SAME MACHINERY MCP USES, and that is the point of the stage rather than
+    a saving: PKCE, the loopback catcher, the state binding and the exchange are
+    one implementation. What differs is only where the endpoints come from --
+    measured 2026-08-22, neither Anthropic nor OpenAI publishes a registration
+    endpoint, so the `client_id` is named in the file instead of earned by
+    registering.
+
+    THE ONLY THING STOOD IN FOR IS THE PERSON. `_oauth_open` normally hands a URL
+    to a browser; here a thread fetches it and follows the redirect.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-sub-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.auth_state = {"mode": "ok", "seen": [], "codes": {}, "registered": None,
+                           "refresh": "refresh-1", "access": None, "issued": 0,
+                           "expires_in": 3600,
+                           # A CONSENT SCREEN FOR A SUBSCRIPTION ASKS FOR NO
+                           # `resource`: RFC 8707 binds a token to an API
+                           # identifier the server published, and neither of
+                           # these two publishes one. The MCP cases leave this
+                           # flag unset and stay strict.
+                           "need_resource": False}
+        self.auth = _QuietHttpServer(("127.0.0.1", 0), _FakeAuthServer)
+        self.auth.state = self.auth_state
+        threading.Thread(target=self.auth.serve_forever, daemon=True).start()
+        self.addCleanup(self.auth.server_close)
+        self.addCleanup(self.auth.shutdown)
+        self.issuer = "http://127.0.0.1:%d" % self.auth.server_address[1]
+        self.auth_state["meta"] = {
+            "issuer": self.issuer,
+            "authorization_endpoint": self.issuer + "/authorize",
+            "token_endpoint": self.issuer + "/token",
+            "code_challenge_methods_supported": ["S256"],
+        }
+        self._real = (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE,
+                      crow_core.PROVIDER_TOKEN_FILE, crow_core._oauth_open)
+        self.addCleanup(self._restore)
+        crow_core.PROVIDERS_FILE = os.path.join(self.dir, "providers.json")
+        crow_core.PROVIDER_KEYS_FILE = os.path.join(self.dir, "keys.json")
+        crow_core.PROVIDER_TOKEN_FILE = os.path.join(self.dir, "tokens.json")
+        crow_core._oauth_open = self._be_the_person
+
+    def _restore(self) -> None:
+        (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE,
+         crow_core.PROVIDER_TOKEN_FILE, crow_core._oauth_open) = self._real
+
+    def _be_the_person(self, url: str) -> bool:
+        def walk():
+            try:
+                urllib.request.urlopen(url, timeout=20).read()
+            except Exception:
+                pass
+        threading.Thread(target=walk, daemon=True).start()
+        return True
+
+    def _configure(self, **over) -> None:
+        """THROUGH THE FUNCTION THE SHEET CALLS, not by writing the file. A
+        fixture that assembled the block by hand would leave the one path a
+        person actually uses untested."""
+        block = {"client_id": "crow-test", "authorize": self.issuer + "/authorize",
+                 "token": self.issuer + "/token"}
+        block.update(over)
+        self.assertIsNone(crow_core.provider_oauth_set("anthropic", block))
+
+    def _asked(self) -> dict:
+        for path, got in self.auth_state["seen"]:
+            if path == "/authorize":
+                return got
+        return {}
+
+    # ------------------------------------------------------------ the flow
+
+    def test_the_whole_leg_runs_and_the_token_lands(self):
+        self._configure()
+        self.assertIsNone(crow_core.provider_authorise("anthropic"))
+        self.assertTrue(crow_core.provider_signed_in("anthropic"))
+        value, kind, problem = crow_core.provider_credential("anthropic")
+        self.assertIsNone(problem)
+        self.assertEqual(kind, "oauth")
+        self.assertTrue(value)
+
+    def test_pkce_and_the_state_are_both_sent(self):
+        """Without PKCE an authorization code is redeemable by anyone who sees
+        it; without `state` anything that can reach the loopback port can feed
+        this client a code of its own. The fake refuses a request missing
+        either, so this passing means both were on the wire."""
+        self._configure()
+        crow_core.provider_authorise("anthropic")
+        asked = self._asked()
+        self.assertEqual(asked.get("code_challenge_method"), "S256")
+        self.assertTrue(asked.get("code_challenge"))
+        self.assertTrue(asked.get("state"))
+        self.assertEqual(asked.get("client_id"), "crow-test")
+
+    def test_no_resource_is_invented(self):
+        """NEGATIVE. RFC 8707 binds a token to an API identifier the server
+        published. Neither provider publishes one, so sending a name of this
+        client's own devising would be asking for a token bound to an audience
+        nobody declared."""
+        self._configure()
+        crow_core.provider_authorise("anthropic")
+        self.assertNotIn("resource", self._asked())
+
+    def test_without_a_client_id_no_browser_opens(self):
+        """NEGATIVE, and the one that matters on a machine with no client_id:
+        the answer is a line naming the file and the key, not a login that comes
+        back 400 after the person has already been sent somewhere."""
+        opened = []
+        crow_core._oauth_open = lambda url: opened.append(url) or True
+        said = crow_core.provider_authorise("anthropic")
+        self.assertIn("client_id", said or "")
+        self.assertIn("providers.json", said or "")
+        self.assertEqual(opened, [])
+        self.assertFalse(crow_core.provider_signed_in("anthropic"))
+
+    def test_a_typo_in_the_endpoint_is_refused_before_the_browser(self):
+        """NEGATIVE: `http://` or a word that is not a URL would put a consent
+        screen -- and the code that follows it -- somewhere unencrypted."""
+        opened = []
+        crow_core._oauth_open = lambda url: opened.append(url) or True
+        self._configure(authorize="not-a-url")
+        said = crow_core.provider_authorise("anthropic")
+        self.assertIn("authorize", said or "")
+        self.assertEqual(opened, [])
+
+    # --------------------------------------------------------- credentials
+
+    def test_a_login_outranks_a_key_left_in_the_box(self):
+        """Somebody who signed in meant to use what they signed in with. A key
+        still sitting in the field would quietly spend money instead."""
+        crow_core.provider_key_set("anthropic", "not-a-real-anthropic-key-0123")
+        self._configure()
+        crow_core.provider_authorise("anthropic")
+        _value, kind, _ = crow_core.provider_credential("anthropic")
+        self.assertEqual(kind, "oauth")
+
+    def test_signing_out_drops_the_login_and_keeps_the_key(self):
+        """Two credentials, two files. Signing out of a subscription is not the
+        same act as forgetting a key somebody typed."""
+        crow_core.provider_key_set("anthropic", "not-a-real-anthropic-key-0123")
+        self._configure()
+        crow_core.provider_authorise("anthropic")
+        self.assertIsNone(crow_core.provider_token_drop("anthropic"))
+        value, kind, _ = crow_core.provider_credential("anthropic")
+        self.assertEqual(kind, "key")
+        self.assertEqual(value, "not-a-real-anthropic-key-0123")
+
+    def test_an_expired_token_is_refreshed_before_it_is_handed_over(self):
+        """A token valid when the request is built and stale when it arrives is
+        the failure the skew exists for."""
+        self._configure()
+        crow_core.provider_authorise("anthropic")
+        doc = crow_core.provider_tokens()
+        first = doc["anthropic"]["access_token"]
+        doc["anthropic"]["expires_at"] = time.time() - 1
+        crow_core.provider_token_write(doc)
+        value, kind, problem = crow_core.provider_credential("anthropic")
+        self.assertIsNone(problem)
+        self.assertEqual(kind, "oauth")
+        self.assertTrue(value)
+        self.assertNotEqual(value, first)
+
+    def test_no_stored_token_reaches_a_surface(self):
+        """NEGATIVE: both views cross into a page that is a browser, and the
+        whole token is searched for in the whole document."""
+        self._configure()
+        crow_core.provider_authorise("anthropic")
+        token = crow_core.provider_tokens()["anthropic"]["access_token"]
+        self.assertNotIn(token, json.dumps(crow_core.provider_view()))
+        self.assertNotIn(token, json.dumps(crow_core.provider_subscriptions()))
+
+    def test_a_signed_in_provider_may_be_picked_without_a_key(self):
+        """The gate asks for a credential, not for a key. Refusing a provider
+        somebody just signed in to would be the sheet answering a question
+        nobody asked."""
+        self._configure()
+        crow_core.provider_authorise("anthropic")
+        self.assertIsNone(crow_core.provider_pick("anthropic", "claude-opus-5"))
+        spot = crow_core.provider_endpoint()
+        self.assertEqual(spot["base_url"], "https://api.anthropic.com/v1")
+        # THE HEADER TRAVELS WITH THE CREDENTIAL. A pasted key needs none of it;
+        # a token is only accepted when the request says which kind it carries.
+        self.assertEqual(spot["headers"].get("anthropic-beta"), "oauth-2025-04-20")
+
+    def test_a_pasted_key_carries_no_oauth_header(self):
+        """NEGATIVE HALF of the case above -- without it the header would be a
+        constant nobody could tell from a decision."""
+        crow_core.provider_key_set("anthropic", "not-a-real-anthropic-key-abcd")
+        crow_core.provider_pick("anthropic", "claude-opus-5")
+        self.assertEqual(crow_core.provider_endpoint()["headers"], {})
+
+    def test_the_form_writes_what_no_endpoint_would_hand_over(self):
+        """The values are the ones neither provider publishes, so they are typed
+        once -- and the sheet writes them, because a control that only exists as
+        a sentence about `providers.json` is not a control."""
+        self.assertIsNone(crow_core.provider_oauth_set(
+            "anthropic", {"client_id": "abc", "authorize": "https://a.example/go",
+                          "token": "https://a.example/t"}))
+        block = crow_core.provider_oauth_block("anthropic")
+        self.assertEqual(block["client_id"], "abc")
+        self.assertEqual(block["token"], "https://a.example/t")
+        self.assertTrue(crow_core.provider_subscriptions()[0]["ready"])
+
+    def test_a_field_left_out_keeps_what_was_stored(self):
+        """AN UNTOUCHED BOX IS NOT AN EMPTY ONE. The stored values are never
+        read back into the page, so a blank field is the normal state of a key
+        that is already set -- and sending "" for it would clear what nobody
+        meant to remove."""
+        self._configure()
+        self.assertIsNone(crow_core.provider_oauth_set("anthropic", {"scope": "openid"}))
+        block = crow_core.provider_oauth_block("anthropic")
+        self.assertEqual(block["client_id"], "crow-test")
+        self.assertEqual(block["scope"], "openid")
+
+    def test_an_emptied_field_clears_it(self):
+        """NEGATIVE HALF: without it the case above would pass on a writer that
+        simply never removes anything, and a wrong client_id could not be taken
+        out except with an editor."""
+        self._configure()
+        self.assertIsNone(crow_core.provider_oauth_set("anthropic", {"client_id": "  "}))
+        self.assertNotIn("client_id", crow_core.provider_oauth_block("anthropic"))
+        self.assertFalse(crow_core.provider_subscriptions()[0]["ready"])
+
+    def test_the_form_asks_for_what_is_actually_missing(self):
+        """A provider that publishes discovery needs the client_id alone; one
+        that publishes nothing needs the endpoints too. Asking for all three
+        either way would make the simpler case look like the harder one."""
+        rows = {r["name"]: r for r in crow_core.provider_subscriptions()}
+        self.assertEqual(rows["openai"]["wants"], ["client_id"])
+        self.assertTrue(rows["openai"]["discovers"])
+        self.assertEqual(rows["anthropic"]["wants"],
+                         ["client_id", "authorize", "token"])
+        self.assertFalse(rows["anthropic"]["discovers"])
+
+    def test_a_provider_this_build_does_not_have_takes_no_values(self):
+        """NEGATIVE: the page sends the name back, so the name is checked."""
+        self.assertTrue(crow_core.provider_oauth_set("wetware", {"client_id": "x"}))
+
+    def test_both_tiles_are_offered_even_where_nothing_can_be_prefilled(self):
+        """Anthropic publishes no discovery document at all, so its built-in
+        block is EMPTY -- and a tile that vanished because nothing could be
+        measured about it would hide the provider the person came for."""
+        names = [row["name"] for row in crow_core.provider_subscriptions()]
+        self.assertEqual(names, ["anthropic", "openai"])
+        for row in crow_core.provider_subscriptions():
+            self.assertFalse(row["ready"])
+            self.assertIn("client_id", row["missing"])
+
+
+class TheProviderDialectsTests(unittest.TestCase):
+    """One provider, two doors: the chat takes a bearer, the catalogue may not.
+
+    Anthropic's OpenAI-shaped layer answers `chat/completions` with an
+    `Authorization` header, while `/v1/models` is the native API and wants
+    `x-api-key` and a version. A client that assumed one dialect gets a 401 from
+    an endpoint it can otherwise talk to.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-dia-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._real = (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE,
+                      crow_core.PROVIDER_TOKEN_FILE,
+                      dict(crow_core.PROVIDERS["anthropic"]))
+        self.addCleanup(self._restore)
+        crow_core.PROVIDERS_FILE = os.path.join(self.dir, "providers.json")
+        crow_core.PROVIDER_KEYS_FILE = os.path.join(self.dir, "keys.json")
+        crow_core.PROVIDER_TOKEN_FILE = os.path.join(self.dir, "tokens.json")
+        self.server = _QuietHttpServer(("127.0.0.1", 0), _FakeCatalogue)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        crow_core.PROVIDERS["anthropic"]["catalog"] = (
+            "http://127.0.0.1:%d/models" % self.server.server_address[1])
+        _FakeCatalogue.code = 200
+        _FakeCatalogue.seen = {}
+
+    def _restore(self) -> None:
+        (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE,
+         crow_core.PROVIDER_TOKEN_FILE, crow_core.PROVIDERS["anthropic"]) = self._real
+
+    def test_a_key_goes_in_x_api_key_with_a_version(self):
+        _FakeCatalogue.body = json.dumps({"data": [
+            {"id": "claude-opus-5", "display_name": "Opus", "max_input_tokens": 1000000}]})
+        models, problem = crow_core.provider_fetch_models("anthropic", "not-a-real-anthropic-key-x",
+                                                          kind="key")
+        self.assertIsNone(problem)
+        self.assertEqual(_FakeCatalogue.seen.get("x-api-key"), "not-a-real-anthropic-key-x")
+        self.assertTrue(_FakeCatalogue.seen.get("anthropic-version"))
+        self.assertNotIn("authorization", _FakeCatalogue.seen)
+        # `max_input_tokens` IS WHERE ANTHROPIC REPORTS THE WINDOW. There is no
+        # `context_length` on that endpoint, so a reader that only knew the
+        # OpenRouter field would have shown every Claude model as windowless.
+        self.assertEqual(models[0]["context"], 1000000)
+
+    def test_a_token_goes_in_authorization_with_the_oauth_header(self):
+        """The other half, and the pair is the whole point: one credential store
+        feeding two spellings, chosen by what the credential IS."""
+        _FakeCatalogue.body = json.dumps({"data": [{"id": "claude-opus-5"}]})
+        crow_core.provider_fetch_models("anthropic", "tok-1", kind="oauth")
+        self.assertEqual(_FakeCatalogue.seen.get("authorization"), "Bearer tok-1")
+        self.assertEqual(_FakeCatalogue.seen.get("anthropic-beta"), "oauth-2025-04-20")
+        self.assertNotIn("x-api-key", _FakeCatalogue.seen)
+
+class TheBorrowedSignInTests(unittest.TestCase):
+    """Using the sign-in another program on this machine already holds.
+
+    WHY IT EXISTS: neither provider issues a client_id to a third party
+    (measured 2026-08-22), so the browser leg cannot be reached on a fresh
+    machine at all. What CAN be reached is the login the person already
+    completed in another tool -- which is what Hermes does, and its own page
+    says so: it "prefers Claude Code's own credential store".
+
+    NOT ONE CASE HERE OPENS THE REAL STORE. Every fixture writes an invented
+    file into a temp directory; the values below are made up and match nobody.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-borrow-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.store = os.path.join(self.dir, "store.json")
+        self._real = (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE,
+                      crow_core.PROVIDER_TOKEN_FILE,
+                      dict(crow_core.PROVIDER_BORROW["anthropic"]))
+        self.addCleanup(self._restore)
+        crow_core.PROVIDERS_FILE = os.path.join(self.dir, "providers.json")
+        crow_core.PROVIDER_KEYS_FILE = os.path.join(self.dir, "keys.json")
+        crow_core.PROVIDER_TOKEN_FILE = os.path.join(self.dir, "tokens.json")
+        crow_core.PROVIDER_BORROW["anthropic"] = dict(
+            crow_core.PROVIDER_BORROW["anthropic"], path=(self.dir, "store.json"))
+
+    def _restore(self) -> None:
+        (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE,
+         crow_core.PROVIDER_TOKEN_FILE,
+         crow_core.PROVIDER_BORROW["anthropic"]) = self._real
+
+    def _store(self, token: str = "invented-token-not-anybodys",
+               expires: "float | None" = None) -> None:
+        block = {"accessToken": token, "refreshToken": "invented-refresh",
+                 "scopes": ["a", "b"], "subscriptionType": "max"}
+        if expires is not None:
+            block["expiresAt"] = int(expires * 1000)
+        with open(self.store, "w", encoding="utf-8") as fh:
+            json.dump({"claudeAiOauth": block, "organizationUuid": "invented"}, fh)
+
+    # ------------------------------------------------------------- reading
+
+    def test_the_token_is_read_and_used(self):
+        self._store(expires=time.time() + 3600)
+        self.assertTrue(crow_core.provider_borrow_seen("anthropic"))
+        token, problem = crow_core.provider_borrowed("anthropic")
+        self.assertIsNone(problem)
+        self.assertEqual(token, "invented-token-not-anybodys")
+        self.assertIsNone(crow_core.provider_borrow_set("anthropic", True))
+        value, kind, problem = crow_core.provider_credential("anthropic")
+        self.assertEqual((value, kind, problem),
+                         ("invented-token-not-anybodys", "oauth", None))
+
+    def test_no_store_is_a_sentence_and_not_a_crash(self):
+        """NEGATIVE: the file is simply not there on most machines."""
+        self.assertFalse(crow_core.provider_borrow_seen("anthropic"))
+        token, problem = crow_core.provider_borrowed("anthropic")
+        self.assertEqual(token, "")
+        self.assertIn("Claude Code", problem or "")
+        self.assertTrue(crow_core.provider_borrow_set("anthropic", True))
+        self.assertFalse(crow_core.provider_borrowing("anthropic"))
+
+    def test_an_expired_borrowed_token_is_said_and_still_handed_over(self):
+        """THE ASSURANCE THIS WHOLE CLASS TURNS ON is that the file is never
+        written: the refresh token in it belongs to the other product, and
+        spending it would rotate the credential that program is still using. So
+        the store is compared byte for byte after the read.
+
+        THE EXPIRY IS ADVISORY, and refusing on it was wrong for one build.
+        Measured 2026-08-23: the field said 00:11, the clock said 00:49, and the
+        file had not been written since 21:41 while the owning program ran the
+        whole time. That timestamp is somebody else's bookkeeping; whether a
+        credential works is the provider's answer, and a client-side veto turns
+        "probably expired" into "certainly unusable" on second-hand evidence."""
+        self._store(token="invented-token-not-anybodys", expires=time.time() - 10)
+        with open(self.store, "rb") as fh:
+            before = fh.read()
+        token, problem = crow_core.provider_borrowed("anthropic")
+        self.assertEqual(token, "invented-token-not-anybodys")
+        self.assertIsNone(problem)
+        said = crow_core.provider_borrowed_stale("anthropic")
+        self.assertIn("looks expired", said)
+        self.assertIn("open Claude Code once", said)
+        with open(self.store, "rb") as fh:
+            self.assertEqual(fh.read(), before, "the other product's store was written to")
+
+    def test_a_token_inside_its_lifetime_says_nothing(self):
+        """NEGATIVE HALF: without it the line above could be a constant."""
+        self._store(expires=time.time() + 3600)
+        self.assertEqual(crow_core.provider_borrowed_stale("anthropic"), "")
+
+    def test_a_store_with_nobody_signed_in_says_so(self):
+        """NEGATIVE: the file exists on any machine that ever ran the tool, and
+        an empty token in it is not the same as no file."""
+        with open(self.store, "w", encoding="utf-8") as fh:
+            json.dump({"claudeAiOauth": {"accessToken": ""}}, fh)
+        token, problem = crow_core.provider_borrowed("anthropic")
+        self.assertEqual(token, "")
+        self.assertIn("not signed in", problem or "")
+
+    def test_unreadable_is_reported_by_kind_and_not_by_content(self):
+        """NEGATIVE: a half-written file must not reach a message. What went
+        wrong is the exception's NAME -- putting the bytes in a line would put
+        somebody's credential in a bug report."""
+        with open(self.store, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        token, problem = crow_core.provider_borrowed("anthropic")
+        self.assertEqual(token, "")
+        self.assertIn("could not be read", problem or "")
+        self.assertNotIn("not json", problem or "")
+
+    # ------------------------------------------------------------- ranking
+
+    def test_crows_own_sign_in_outranks_the_borrowed_one(self):
+        """A grant this client obtained itself is the one it may refresh and the
+        one the provider sees as Crow. The borrowed store is what a machine has
+        when nobody has done that yet."""
+        self._store(expires=time.time() + 3600)
+        crow_core.provider_borrow_set("anthropic", True)
+        crow_core.provider_token_write({"anthropic": {
+            "access_token": "crows-own-invented", "client_id": "c",
+            "token_endpoint": "https://example.invalid/t"}})
+        value, kind, _ = crow_core.provider_credential("anthropic")
+        self.assertEqual((value, kind), ("crows-own-invented", "oauth"))
+
+    def test_the_borrowed_one_outranks_a_pasted_key(self):
+        self._store(expires=time.time() + 3600)
+        crow_core.provider_key_set("anthropic", "not-a-real-anthropic-key-9876")
+        crow_core.provider_borrow_set("anthropic", True)
+        _value, kind, _ = crow_core.provider_credential("anthropic")
+        self.assertEqual(kind, "oauth")
+
+    def test_switching_it_off_falls_back_to_the_key(self):
+        """NEGATIVE HALF: without it the case above would pass on a resolver
+        that had simply stopped reading keys."""
+        self._store(expires=time.time() + 3600)
+        crow_core.provider_key_set("anthropic", "not-a-real-anthropic-key-9876")
+        crow_core.provider_borrow_set("anthropic", True)
+        self.assertIsNone(crow_core.provider_borrow_set("anthropic", False))
+        value, kind, _ = crow_core.provider_credential("anthropic")
+        self.assertEqual((value, kind), ("not-a-real-anthropic-key-9876", "key"))
+
+    def test_a_flag_for_a_provider_that_cannot_borrow_is_not_a_state(self):
+        """MEASURED 2026-08-23, and it took a provider back out of the table:
+        `~/.codex/auth.json` holds a token, and `GET api.openai.com/v1/models`
+        answered it with **403** -- authenticated, then refused the resource,
+        which is a token for another audience. A `borrow` flag written while
+        that entry existed must not leave the resolver reaching for a store this
+        build no longer knows; it falls through to the key."""
+        crow_core.provider_key_set("openai", "not-a-real-openai-key-1234")
+        doc = crow_core.provider_doc()
+        doc["borrow"] = {"openai": True}
+        crow_core.provider_write(doc)
+        self.assertNotIn("openai", crow_core.PROVIDER_BORROW)
+        self.assertFalse(crow_core.provider_borrowing("openai"))
+        value, kind, problem = crow_core.provider_credential("openai")
+        self.assertEqual((value, kind, problem),
+                         ("not-a-real-openai-key-1234", "key", None))
+
+    def test_nothing_switches_itself_on_by_finding_a_file(self):
+        """A store on disk is not consent. Requests made with it carry another
+        product's grant, so it is a decision taken once, in the sheet, by
+        somebody who was told what it means."""
+        self._store(expires=time.time() + 3600)
+        self.assertFalse(crow_core.provider_borrowing("anthropic"))
+        _value, kind, _ = crow_core.provider_credential("anthropic")
+        self.assertEqual(kind, "")
+
+    # -------------------------------------------------------------- privacy
+
+    def test_no_borrowed_token_reaches_a_view(self):
+        """NEGATIVE, and robin's own condition, 2026-08-23: nothing out of that
+        store may travel. The whole token is searched for in both documents; the
+        product's NAME is the only thing about the file a person is shown."""
+        self._store(expires=time.time() + 3600)
+        crow_core.provider_borrow_set("anthropic", True)
+        for doc in (crow_core.provider_subscriptions(), crow_core.provider_view()):
+            dumped = json.dumps(doc)
+            self.assertNotIn("invented-token-not-anybodys", dumped)
+            self.assertNotIn("invented-refresh", dumped)
+            self.assertNotIn(self.store, dumped)
+        row = crow_core.provider_subscriptions()[0]
+        self.assertEqual(row["product"], "Claude Code")
+        self.assertTrue(row["borrowing"])
+
+    def test_the_store_is_never_copied_into_crows_own_files(self):
+        """The token is read at the moment a request needs it and put nowhere.
+        A copy would be a second place to leak from and a stale value the day
+        the other product refreshes."""
+        self._store(expires=time.time() + 3600)
+        crow_core.provider_borrow_set("anthropic", True)
+        crow_core.provider_credential("anthropic")
+        for path in (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_TOKEN_FILE,
+                     crow_core.PROVIDER_KEYS_FILE):
+            if not os.path.exists(path):
+                continue
+            with open(path, encoding="utf-8") as fh:
+                self.assertNotIn("invented-token-not-anybodys", fh.read())
+
+
+class TheRepositoryHoldsNobodysCredentialsTests(unittest.TestCase):
+    """robin, 2026-08-23: the values must NEVER land in the repository.
+
+    THE RULE IS CHECKED AT THE SOURCE, not promised in a comment. A path
+    belonging to whoever ran this, or a token pasted in while debugging, is the
+    shape that leaks -- and both are greppable.
+    """
+
+    FILES = ("cli/crow_core.py", "cli/crow_gui.py", "cli/crow.py",
+             "cli/test_crow_core.py", "cli/test_crow_gui.py", "README.md")
+
+    def _root(self) -> str:
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def test_no_concrete_home_directory_is_written_down(self):
+        """`~` IS EXPANDED AT CALL TIME, so the pattern in the source belongs to
+        nobody. An absolute one names the machine it was written on -- and this
+        repository is public.
+
+        A PLACEHOLDER IS NOT A FINDING. `C:\\Users\\...\\project` in a comment about
+        tooltip width teaches something; `C:\\Users\\<somebody>\\dev` names them. The
+        account name itself is NOT listed here -- writing it into the checker
+        would be the very thing the checker forbids.
+        """
+        import re as _re
+        home = _re.compile(r"(?:[A-Za-z]:[\\\\/]Users|/home|/Users)[\\\\/](?!\.\.\.)[A-Za-z0-9._-]{2,}")
+        for rel in self.FILES:
+            path = os.path.join(self._root(), rel)
+            if not os.path.exists(path):
+                continue
+            with open(path, encoding="utf-8") as fh:
+                found = home.search(fh.read())
+            self.assertIsNone(found, "%s names a home directory: %s"
+                              % (rel, found.group(0) if found else ""))
+
+    def test_the_store_is_reached_by_pattern_and_not_by_value(self):
+        for name, spec in crow_core.PROVIDER_BORROW.items():
+            self.assertEqual(spec["path"][0], "~", name)
+
+    def test_no_credential_shaped_literal_is_committed(self):
+        """The prefixes are the ones the providers actually mint. A real one
+        pasted in while debugging is the failure this catches -- the fixtures
+        say `invented` on purpose."""
+        import re as _re
+        pattern = _re.compile(r"(sk-ant-api|sk-or-v1-|sk-proj-)[A-Za-z0-9_\-]{20,}")
+        for rel in self.FILES:
+            path = os.path.join(self._root(), rel)
+            if not os.path.exists(path):
+                continue
+            with open(path, encoding="utf-8") as fh:
+                found = pattern.search(fh.read())
+            self.assertIsNone(found, "%s carries a credential-shaped literal" % rel)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
