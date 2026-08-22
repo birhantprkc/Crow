@@ -535,9 +535,15 @@ TOOLS = [
     # exactly that, and a model forbidden to answer them is broken in the
     # opposite direction. What is banned is substituting links FOR an answer.
     _fn("web_search",
-        "Search the web when the answer is not on this machine -- a library "
-        "version, a flag added recently, anything past your training. Read the "
-        "snippets first: they usually settle it. Answer from what you read and "
+        "Look something up beyond this machine -- a library version, a flag "
+        "added recently, anything past your training. WHAT THIS REACHES DEPENDS "
+        "ON THE INSTALLATION AND NOT ON THE QUESTION: with a general index "
+        "configured it is the open web; with none it is an index of code, "
+        "packages and reference, which settles a version or a flag and answers "
+        "nothing about the world. The result says which on its first line -- "
+        "read that line before you build on a hit, because without a general "
+        "index a match can be a keyword collision rather than an answer. Read "
+        "the snippets first: they usually settle it. Answer from what you read and "
         "name the sources you used. A list of links is not an answer, unless the "
         "user asked for the link itself. Weigh what you found: a registry or an "
         "official page settles a fact, one forum post or one pull request in "
@@ -625,6 +631,13 @@ TOOLS = [
                    "description": f"How many messages, default {SEARCH_HITS}."}},
         ["query"]),
 ]
+
+# THE TWELVE AS SHIPPED, AND THE FLOOR EVERY LATER ENTRY SITS ON. `TOOLS` grows
+# from `mcp.json` at import (see MCP_FILE), and it grows IN PLACE because
+# `crow.py` binds the value rather than the name. Keeping the built-ins under a
+# second name is what lets that rebuild be idempotent: drop everything above the
+# floor, then add. A count would do the same job and say nothing about why.
+BUILTIN_TOOLS = tuple(TOOLS)
 
 
 # ANSI only, and only when stdout is a terminal: a redirected transcript has
@@ -5519,6 +5532,322 @@ DEFAULT_MODE = "auto"
 # broken prefix for every later turn of the session. The model can read this
 # line and try something else; it cannot read a turn that ended.
 DECLINED = "error: declined by the user"
+
+
+# ---------------------------------------------------------------- E2 ------
+# MCP SERVERS. THE SCHEMA LIES ON DISK, AND `TOOLS` IS BUILT FROM IT.
+#
+# THE SENTENCE THE WHOLE STAGE HANGS ON: `TOOLS` may not move because a foreign
+# server is slow. `prefix_fingerprint` hashes `json.dumps(TOOLS, sort_keys=True)`,
+# llama-server reuses a prompt by common token prefix, and the KV state Crow
+# keeps on disk was 212,742,060 bytes on 2026-08-21. A cache that does not fit
+# is `cached 0/21004` and 469.51 s to the first token -- measured 2026-08-10.
+#
+# Hermes asks every server for `tools/list` at every start. For a cloud model
+# that pays for the head in every turn anyway that is free. Here it would mean:
+# an `npx` server that comes up slower than the client turns EVERY saved session
+# into a full re-prefill, and nobody could see why. So:
+#
+#   schema            asked ONCE, when the server is added, then written here
+#   `TOOLS` at start  read from this file, never from a server
+#   connecting        only when a tool is actually CALLED (E3)
+#   server is down    the CALL fails and the model says so. `TOOLS` is untouched
+#
+# Same construction `session_search` already has: the tool stays declared even
+# where FTS5 is missing, so that the list cannot depend on how somebody's Python
+# was compiled. A session file has to keep matching itself.
+#
+# WHAT IS DELIBERATELY NOT HERE: `notifications/tools/list_changed` is not acted
+# on. A tool list that changes mid-chat moves byte 0. A server announcing new
+# tools is a note for the user, not something that carries itself out.
+#
+# THE FILE, beside `roots.json` and `settings.json` because a server binds the
+# machine and not one conversation:
+#
+#   %LOCALAPPDATA%\Crow\mcp.json
+#   {"servers": {"github": {
+#       "command": "npx", "args": [...], "env": {...},   stdio
+#       "url": "...", "headers": {...},                  http (E5)
+#       "enabled": false,                                skip it entirely
+#       "timeout": 60, "connect_timeout": 15,
+#       "tools": {"include": [...], "exclude": [...]},
+#       "schema":  {"tools": [ ...what the server answered... ]},
+#       "classes": {"create_issue": "writing"}           what the USER decided
+#   }}}
+#
+# TWO KEYS FOR TWO AUTHORS, and that split is the point. `schema` is what the
+# server said and the specification calls it untrusted; `classes` is what a
+# person confirmed. A server that reports `readOnlyHint: true` tomorrow changes
+# nothing here -- the same construction as the pinned memory head.
+MCP_FILE = os.path.join(os.path.dirname(SESSION_DIR), "mcp.json")
+
+# The three the checklist offers: reads / writes / executes. They are names
+# `TOOL_CLASS` already means something by, so an MCP tool hangs in the level
+# system Crow has rather than beside it. `network` and `memory` are NOT
+# offered -- both describe something about Crow itself, and neither is a
+# statement anybody can make about a foreign process.
+MCP_TOOL_CLASSES = ("reading", "writing", "executing")
+
+# Same bill as MEMORY_COST_NOTE and said the same way round: before the change,
+# never after. The second half is the one nobody expects -- a tool list that
+# grew is a different byte 0 for conversations that were saved months ago.
+MCP_COST_NOTE = ("the tool list changed -- the next turn pays a full prefill, "
+                 "and so does the first turn of every saved session")
+
+# The tag block. Every one of these renders as nothing at all and every one of
+# them is fully visible to the model, which is the whole trick: a description
+# fetched from a stranger's server is text that lands in the HEAD of the prompt.
+# Crow's memory scan already refuses the neighbouring class (Unicode Cf) for the
+# same reason -- but Cf does not cover this block, because most of it is
+# unassigned, so a check built on `unicodedata.category` would let the middle of
+# it through.
+_TAG_FIRST, _TAG_LAST = 0xE0000, 0xE007F
+_TAG_BASE = "\U0001F3F4"       # waving black flag: the one legitimate opener
+_TAG_TERM = "\U000E007F"       # cancel tag: what closes a real emoji sequence
+
+
+def strip_tag_characters(text: str) -> str:
+    """Drop invisible tag characters, and keep the one sequence that is not one.
+
+    A REGIONAL FLAG IS A TAG SEQUENCE. U+1F3F4 followed by tag letters and
+    U+E007F is how the Scottish, Welsh and English flags are written, so a plain
+    range delete would mangle ordinary text -- and a filter that mangles ordinary
+    text is a filter somebody switches off. The exception is therefore the
+    SEQUENCE, not the block: tag characters that do not follow U+1F3F4 are not a
+    flag and they go.
+    """
+    if not any(_TAG_FIRST <= ord(ch) <= _TAG_LAST for ch in text):
+        return text
+    out, i, n = [], 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == _TAG_BASE:
+            j = i + 1
+            while j < n and 0xE0020 <= ord(text[j]) <= 0xE007E:
+                j += 1
+            if j > i + 1 and j < n and text[j] == _TAG_TERM:
+                out.append(text[i:j + 1])
+                i = j + 1
+                continue
+        if not _TAG_FIRST <= ord(ch) <= _TAG_LAST:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _mcp_clean(value):
+    """Strip tag characters everywhere in a stored schema, not only the surface.
+
+    A parameter's own `description` is prompt-head text exactly like the tool's,
+    and it is one level deeper than a filter aimed at the obvious field looks.
+    """
+    if isinstance(value, str):
+        return strip_tag_characters(value)
+    if isinstance(value, list):
+        return [_mcp_clean(v) for v in value]
+    if isinstance(value, dict):
+        return {(strip_tag_characters(k) if isinstance(k, str) else k): _mcp_clean(v)
+                for k, v in value.items()}
+    return value
+
+
+def _mcp_slug(text: str) -> str:
+    return re.sub(r"[^0-9a-z]+", "_", strip_tag_characters(str(text)).lower()).strip("_")
+
+
+def mcp_tool_name(server: str, tool: str) -> str:
+    """`mcp_<server>_<tool>`, the scheme Hermes uses and users already know.
+
+    The prefix is what keeps a foreign tool from ever colliding with one of the
+    twelve, and the server part is what keeps two servers offering `search` from
+    colliding with each other.
+    """
+    return "mcp_%s_%s" % (_mcp_slug(server), _mcp_slug(tool))
+
+
+def mcp_doc(path: str | None = None) -> "tuple[dict, list[str]]":
+    """The configuration, and why it is not usable when it is not.
+
+    NO FILE IS THE NORMAL CASE and it is silent -- that is every installation
+    until somebody adds a server. A file that cannot be read is NOT silent: it
+    is hand-edited JSON, the likeliest state of it is half-written, and the
+    failure it must not have is a client that will not start.
+    """
+    target = path or MCP_FILE
+    try:
+        with open(target, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except FileNotFoundError:
+        return {}, []
+    except (OSError, ValueError) as exc:
+        return {}, ["mcp.json could not be read (%s: %s) -- no MCP server is "
+                    "configured this run" % (exc.__class__.__name__, exc)]
+    if not isinstance(doc, dict) or not isinstance(doc.get("servers"), dict):
+        return {}, ["mcp.json has no 'servers' object -- no MCP server is "
+                    "configured this run"]
+    return doc, []
+
+
+def mcp_catalog(doc: dict | None = None) -> "tuple[list[dict], list[str]]":
+    """What the file declares: one entry per tool, plus everything wrong with it.
+
+    DETERMINISTIC ORDER, SERVERS AND TOOLS BOTH SORTED, and that is a cache
+    decision rather than tidiness. The order of this list reaches
+    `json.dumps(TOOLS)` and therefore the fingerprint, so reading the file in the
+    order somebody happened to type it would bill a cold start for moving two
+    blocks around in an editor.
+    """
+    problems: list[str] = []
+    if doc is None:
+        doc, problems = mcp_doc()
+    entries: list[dict] = []
+    taken = {t["function"]["name"] for t in BUILTIN_TOOLS}
+    for server in sorted(doc.get("servers") or {}):
+        block = (doc.get("servers") or {})[server]
+        if not isinstance(block, dict):
+            problems.append("server %r is not an object and was skipped" % server)
+            continue
+        if block.get("enabled", True) is False:
+            continue
+        # A NAME THAT SURVIVES THE FILTER AS NOTHING IS NOT A NAME. `mcp_x_` is a
+        # prefix, and a tool offered under one is a tool nobody can talk about.
+        if not _mcp_slug(server):
+            problems.append("server name %r is nothing the tool list can carry and "
+                            "was skipped" % server)
+            continue
+        schema = block.get("schema") if isinstance(block.get("schema"), dict) else {}
+        tools = schema.get("tools")
+        if not isinstance(tools, list):
+            problems.append("server %r has no stored schema -- nothing is declared "
+                            "for it. Add it again to fetch one" % server)
+            continue
+        wanted = block.get("tools") if isinstance(block.get("tools"), dict) else {}
+        include = wanted.get("include") if isinstance(wanted.get("include"), list) else None
+        exclude = wanted.get("exclude") if isinstance(wanted.get("exclude"), list) else []
+        classes = block.get("classes") if isinstance(block.get("classes"), dict) else {}
+
+        for tool in sorted(tools, key=lambda t: str((t or {}).get("name", ""))):
+            if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+                problems.append("server %r stored a tool with no name" % server)
+                continue
+            raw = tool["name"]
+            # INCLUDE IS THE POSITIVE LIST AND IT WINS. An exception list only
+            # ever protects what somebody guessed in advance (measured
+            # 2026-08-10), so the narrowing list is the one that names what may
+            # pass -- and where the two disagree, the naming one decides.
+            if include is not None:
+                if raw not in include:
+                    continue
+            elif raw in exclude:
+                continue
+
+            if not _mcp_slug(raw):
+                problems.append("server %r offers %r, which is nothing the tool list "
+                                "can carry, and it was skipped" % (server, raw))
+                continue
+            name = mcp_tool_name(server, raw)
+            if name in taken:
+                problems.append("server %r offers %r, which collides with %s and "
+                                "was skipped" % (server, raw, name))
+                continue
+            taken.add(name)
+
+            klass = classes.get(raw)
+            if klass is None:
+                problems.append("%s is not classified -- it asks at every level "
+                                "until somebody says whether it reads, writes or "
+                                "executes" % name)
+                klass = None
+            elif klass not in MCP_TOOL_CLASSES:
+                problems.append("%s is stored as %r, which is not one of %s -- it "
+                                "asks at every level until that is corrected"
+                                % (name, klass, ", ".join(MCP_TOOL_CLASSES)))
+                klass = None
+
+            # THE SCHEMA GOES THROUGH `_fn`, NOT STRAIGHT INTO THE LIST, so every
+            # entry of `TOOLS` has the one shape both listings and the request
+            # builder already read. What the server described is kept whole
+            # inside it -- an `enum` or a nested description is information the
+            # model needs -- but every string in it has been through the filter.
+            params = tool.get("inputSchema")
+            params = params if isinstance(params, dict) else {}
+            required = params.get("required")
+            entries.append({
+                "name": name, "server": server, "tool": raw, "class": klass,
+                "declaration": _fn(name,
+                                   strip_tag_characters(tool.get("description") or ""),
+                                   _mcp_clean(params.get("properties") or {}),
+                                   _mcp_clean(required) if isinstance(required, list) else []),
+            })
+    return entries, problems
+
+
+def _mcp_unreachable(server: str, tool: str):
+    """What a configured tool answers until E3 builds the transport.
+
+    A RESULT AND NOT AN EXCEPTION, the rule `run_tool` already keeps: a tool that
+    raises costs the whole prefix, a tool that answers lets the model do
+    something else in the next round. And not `no tool named` either -- the tool
+    IS declared, and saying otherwise would be a lie the model cannot check.
+
+    `**_` ON PURPOSE. `run_tool` turns a TypeError into "wrong arguments", which
+    would blame the model's call for a connection nobody has built yet.
+    """
+    def call(**_):
+        return ("error: %s belongs to the MCP server %r, and this build cannot "
+                "reach an MCP server yet -- the connection is not built. Nothing "
+                "was called." % (tool, server))
+    return call
+
+
+def mcp_apply(doc: dict | None = None) -> "list[str]":
+    """Rebuild the three registries from the file. Returns what was wrong with it.
+
+    IN PLACE, NEVER REBOUND. `crow.py` does `from crow_core import TOOLS`, which
+    binds the VALUE -- the same trap `SESSION_FILE` carries a comment about. A
+    fresh list here would leave every surface holding the old one, and both
+    halves would work, on different state.
+
+    IDEMPOTENT, because it is called again whenever the file changes: the
+    built-ins are the floor and everything above them is dropped first, so
+    applying twice adds nothing twice.
+    """
+    entries, problems = mcp_catalog(doc)
+    del TOOLS[len(BUILTIN_TOOLS):]
+    for registry in (TOOL_IMPL, TOOL_CLASS):
+        for name in [n for n in registry if n.startswith("mcp_")]:
+            del registry[name]
+    for entry in entries:
+        TOOLS.append(entry["declaration"])
+        # EVERY DECLARED NAME GETS AN IMPLEMENTATION, including here where there
+        # is nothing behind it yet. A name in `TOOLS` and not in `TOOL_IMPL` is a
+        # tool the model calls and never reaches.
+        TOOL_IMPL[entry["name"]] = _mcp_unreachable(entry["server"], entry["tool"])
+        # AN UNCLASSIFIED TOOL GETS NO ENTRY AT ALL, which is not an omission:
+        # `needs_approval` answers `executing` for a name it has not heard of, so
+        # the absent entry IS the strict answer. Writing a guessed class here
+        # would look like a decision somebody made.
+        if entry["class"]:
+            TOOL_CLASS[entry["name"]] = entry["class"]
+    return problems
+
+
+def mcp_prompt_cost() -> int:
+    """How many characters the configured servers add to the hashed head.
+
+    MEASURED, NOT PREDICTED. What a server costs is per server -- Cloudflare's
+    reports around 3,300 tools at `?codemode=false`, Crow's own twelve are about
+    6,200 characters -- and it is not a property of Crow. But the schema is in
+    hand once it is on disk, so this counts it instead of guessing.
+    """
+    return (len(json.dumps(TOOLS, sort_keys=True))
+            - len(json.dumps(list(BUILTIN_TOOLS), sort_keys=True)))
+
+
+# READ AT IMPORT, ONCE, FROM DISK. Not from a server -- see the top of this
+# section. `MCP_PROBLEMS` is what a surface shows; nothing is raised, because a
+# broken configuration file may not be the reason a client will not start.
+MCP_PROBLEMS = mcp_apply()
 
 
 # #94. THE LIST IS SHARED, THE ANSWERS ARE NOT.
