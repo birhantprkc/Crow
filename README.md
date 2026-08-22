@@ -358,6 +358,7 @@ The name comes out of the line: `filesystem`, `notekeeper`, `fetch`. A URL is na
 | Launcher | resolved through `PATH` + `PATHEXT` before it starts. `npx` is `npx.CMD` on Windows and `CreateProcess` does not look for it |
 | Environment | a fixed base set plus the block's `env`, never the whole shell |
 | stderr | drained, last 20 lines kept and printed with a failure |
+| stdout that is not a message | kept too, and named apart. A command that is not an MCP server — an installer, a wizard, a CLI printing usage — says so only there |
 | Close | EOF on stdin, `kill` after 3 s, then reaped |
 
 ### Elicitation

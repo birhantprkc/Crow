@@ -6107,6 +6107,11 @@ class McpServer:
         self._id = 0
         self._lines = None
         self._stderr = None
+        # WHAT CAME OUT OF stdout AND WAS NOT A MESSAGE. Kept, because it is
+        # usually the only thing that explains the failure -- and it was being
+        # dropped on the floor until 2026-08-22, when `npx ctx7 setup` timed out
+        # after printing an interactive menu that nobody ever saw.
+        self._noise = None
         self._reinitialising = False
         self._reauthorising = False
         # ONE CALLER AT A TIME ON ONE PIPE. The background review runs on its own
@@ -6206,6 +6211,7 @@ class McpServer:
             return "the MCP server %r could not be started: %s" % (self.name, exc)
         self._lines = queue.Queue()
         self._stderr = collections.deque(maxlen=MCP_STDERR_LINES)
+        self._noise = collections.deque(maxlen=MCP_STDERR_LINES)
         threading.Thread(target=self._pump, daemon=True,
                          name="mcp-%s-out" % self.name).start()
         threading.Thread(target=self._sip, daemon=True,
@@ -6531,13 +6537,25 @@ class McpServer:
         except Exception:
             pass
 
+    def _heard_noise(self, line: str) -> None:
+        if self._noise is not None:
+            self._noise.append(
+                _mcp_redact(strip_tag_characters(str(line)))[:MCP_HTTP_SAID])
+
     def _gone(self, why: str) -> str:
         said = "\n".join(line for line in (self._stderr or ()) if line.strip())
+        # TWO CHANNELS, NAMED APART. A server writes its errors to stderr and a
+        # program that is not a server at all writes its interface to stdout;
+        # merging them would tell somebody their MCP server had an error when
+        # what actually happened is that it was never an MCP server.
+        printed = "\n".join(line for line in (self._noise or ()) if line.strip())
         code = self.proc.poll() if self.proc is not None else None
-        return ("the MCP server %r %s.%s%s"
+        return ("the MCP server %r %s.%s%s%s"
                 % (self.name, why,
                    " It exited with %s." % code if code is not None else "",
-                   " It said:\n%s" % said if said else ""))
+                   " It said:\n%s" % said if said else "",
+                   " It printed, which is not a protocol message:\n%s" % printed
+                   if printed else ""))
 
     def close(self) -> None:
         # THE SESSION GOES FIRST, AND IT GOES OVER THE WIRE. There is no process
@@ -6684,8 +6702,14 @@ class McpServer:
             try:
                 message = json.loads(line)
             except ValueError:
-                continue        # a server printing to stdout is not a message
+                # NOT A MESSAGE, AND NOT NOTHING. A command that is not an MCP
+                # server at all -- an installer, a wizard, a CLI printing its
+                # usage -- says so here and nowhere else, and dropping it was
+                # what made `npx ctx7 setup` fail as a bare timeout.
+                self._heard_noise(line)
+                continue
             if not isinstance(message, dict):
+                self._heard_noise(line)
                 continue
             if message.get("id") == wanted and ("result" in message or "error" in message):
                 return message, None

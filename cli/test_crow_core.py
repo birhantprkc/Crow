@@ -4055,6 +4055,15 @@ def call(mid, params):
 
 def main():
     global MODE
+    if MODE == "wizard":
+        # NOT AN MCP SERVER AT ALL. `npx ctx7 setup` is an installer that prints
+        # a menu and waits -- the case that timed out on 2026-08-22 with nothing
+        # to show for it.
+        print("Context7 setup")
+        print("  1) CLI + Skills   2) MCP")
+        sys.stdout.flush()
+        time.sleep(600)
+        return
     if MODE == "dies":
         sys.stderr.write("fake server: refusing to start\n")
         sys.stderr.flush()
@@ -4190,6 +4199,29 @@ class TheStdioConnectionTests(unittest.TestCase):
         self.assertTrue(out.startswith("error:"), out)
         self.assertIn("fake", out)
         self.assertIn("refusing to start", out)
+
+    def test_a_command_that_is_not_a_server_shows_what_it_printed(self):
+        """FOUND IN THE WINDOW ON 2026-08-22: `npx ctx7 setup` is an installer
+        that prints a menu and waits for a choice. Crow timed out after 20s and
+        showed a bare "did not answer" -- the menu, which is the only thing that
+        explains it, went into the parser and was dropped as not-a-message.
+
+        TWO CHANNELS, NAMED APART. stderr is a server reporting an error; stdout
+        that does not parse is a program saying it was never a server."""
+        self._configure("wizard", connect_timeout=1)
+        out = self._call("echo", '{"text": "x"}')
+        self.assertTrue(out.startswith("error:"), out)
+        self.assertIn("Context7 setup", out)
+        self.assertIn("CLI + Skills", out)
+        self.assertIn("not a protocol message", out)
+
+    def test_a_server_that_behaves_prints_nothing_extra(self):
+        """NEGATIVE: the channel is for the failure case. A working server puts
+        messages on stdout and nothing else, so this stays empty and no failure
+        of its ever carries a paragraph nobody wrote."""
+        self._configure()
+        self._call("echo", '{"text": "x"}')
+        self.assertFalse([n for n in (self._live()._noise or ()) if n.strip()])
 
     def test_a_command_that_does_not_exist_is_a_result_not_a_crash(self):
         self._configure(command=os.path.join(self.dir, "nothing-here.exe"), args=[])
