@@ -51,6 +51,7 @@ Standard library only, same as the client.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
@@ -5782,24 +5783,6 @@ def mcp_catalog(doc: dict | None = None) -> "tuple[list[dict], list[str]]":
     return entries, problems
 
 
-def _mcp_unreachable(server: str, tool: str):
-    """What a configured tool answers until E3 builds the transport.
-
-    A RESULT AND NOT AN EXCEPTION, the rule `run_tool` already keeps: a tool that
-    raises costs the whole prefix, a tool that answers lets the model do
-    something else in the next round. And not `no tool named` either -- the tool
-    IS declared, and saying otherwise would be a lie the model cannot check.
-
-    `**_` ON PURPOSE. `run_tool` turns a TypeError into "wrong arguments", which
-    would blame the model's call for a connection nobody has built yet.
-    """
-    def call(**_):
-        return ("error: %s belongs to the MCP server %r, and this build cannot "
-                "reach an MCP server yet -- the connection is not built. Nothing "
-                "was called." % (tool, server))
-    return call
-
-
 def mcp_apply(doc: dict | None = None) -> "list[str]":
     """Rebuild the three registries from the file. Returns what was wrong with it.
 
@@ -5812,23 +5795,29 @@ def mcp_apply(doc: dict | None = None) -> "list[str]":
     built-ins are the floor and everything above them is dropped first, so
     applying twice adds nothing twice.
     """
+    read: list[str] = []
+    if doc is None:
+        doc, read = mcp_doc()
     entries, problems = mcp_catalog(doc)
+    problems = read + problems
     del TOOLS[len(BUILTIN_TOOLS):]
     for registry in (TOOL_IMPL, TOOL_CLASS):
         for name in [n for n in registry if n.startswith("mcp_")]:
             del registry[name]
     for entry in entries:
         TOOLS.append(entry["declaration"])
-        # EVERY DECLARED NAME GETS AN IMPLEMENTATION, including here where there
-        # is nothing behind it yet. A name in `TOOLS` and not in `TOOL_IMPL` is a
-        # tool the model calls and never reaches.
-        TOOL_IMPL[entry["name"]] = _mcp_unreachable(entry["server"], entry["tool"])
+        # EVERY DECLARED NAME GETS AN IMPLEMENTATION. A name in `TOOLS` and not
+        # in `TOOL_IMPL` is a tool the model calls and never reaches.
+        TOOL_IMPL[entry["name"]] = _mcp_caller(entry["server"], entry["tool"])
         # AN UNCLASSIFIED TOOL GETS NO ENTRY AT ALL, which is not an omission:
         # `needs_approval` answers `executing` for a name it has not heard of, so
         # the absent entry IS the strict answer. Writing a guessed class here
         # would look like a decision somebody made.
         if entry["class"]:
             TOOL_CLASS[entry["name"]] = entry["class"]
+    # E3: a process started from a block that no longer exists is a server
+    # running yesterday's command. It goes with the configuration that made it.
+    _mcp_retire(doc)
     return problems
 
 
@@ -5844,10 +5833,515 @@ def mcp_prompt_cost() -> int:
             - len(json.dumps(list(BUILTIN_TOOLS), sort_keys=True)))
 
 
-# READ AT IMPORT, ONCE, FROM DISK. Not from a server -- see the top of this
-# section. `MCP_PROBLEMS` is what a surface shows; nothing is raised, because a
-# broken configuration file may not be the reason a client will not start.
+# ---------------------------------------------------------------- E3 ------
+# THE CONNECTION HAPPENS WHEN A TOOL IS CALLED, AND NEVER BEFORE.
+#
+# E2 is why: `TOOLS` comes off the disk so that a server which is slow, broken or
+# uninstalled cannot move byte 0. This half keeps the other end of that promise
+# -- such a server has to cost a CALL and nothing else. So no process is started
+# at import, none at the start of a turn, and none for a server nobody uses.
+#
+# ONE PROCESS PER SERVER, KEPT. `npx` takes seconds to come up; paying that per
+# call would make round two of a turn slower than the model. The process is
+# started on the first call, reused, and ended when the configuration changes
+# under it or the client goes away.
+#
+# THE FRAMING IS ONE JSON OBJECT PER LINE, both ways, with no embedded newline --
+# that is the whole of the stdio transport. Anything the server prints to stdout
+# that is not a message would corrupt the stream, so a line that does not parse
+# is dropped rather than guessed at; stderr is a separate pipe and is DRAINED,
+# because a full stderr pipe blocks the server rather than losing its output.
+#
+# WHAT THE SERVER MAY ASK OF CROW: nothing. `capabilities` is sent empty, so no
+# `sampling` and no `elicitation` -- on one slot a foreign process asking for
+# inference takes the hardware from the person at the keyboard, decided
+# 2026-08-22. The specification makes that safe to do BY NAME rather than by
+# silence: a capability the client never declared may not be relied on, so a
+# server asking anyway gets a JSON-RPC error naming what is missing. Silence
+# would hang it, and a hung server looks exactly like a slow one.
+MCP_PROTOCOL_VERSION = "2025-06-18"
+
+# Seconds, overridable per server with `connect_timeout` and `timeout`. Both
+# exist for the same reason `COMMAND_TIMEOUT` does: a turn runs at ~10 tok/s and
+# a call that never returns would hold it until the socket timeout, 30 minutes.
+MCP_CONNECT_TIMEOUT = 20.0
+MCP_CALL_TIMEOUT = 60.0
+
+# How many `tools/list` pages are followed before giving up on a server that
+# keeps handing out cursors. Only the add path pages; nothing at start does.
+MCP_LIST_PAGES = 20
+
+# How much of a failed server's own words are kept. Its stderr is usually the
+# only thing that ever explains `npx: not found`, and throwing it away is what
+# makes this class of failure unreadable.
+MCP_STDERR_LINES = 20
+
+# A POSITIVE LIST, WHICH `run_command` IS NOT, and the difference is who runs.
+# There the child is a command the user just typed, and a blocklist that "stops
+# the accident, not an attacker" is the honest trade. Here it is a foreign
+# server the user configured once and forgot, so the question turns around: not
+# "what must not travel" -- nobody can guess that -- but "what does a process
+# need in order to start at all". Everything else is added per server in `env`.
+#
+# ON WINDOWS THE SHORT LIST IS ALREADY WRONG. Without SYSTEMROOT neither Python
+# nor Node comes up; without PATHEXT a bare `npx` is not found; without TEMP the
+# npm cache has nowhere to go. An empty environment is not safety, it is a
+# server that never answers.
+_MCP_ENV_KEEP = frozenset((
+    "PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC",
+    "TEMP", "TMP", "HOME", "HOMEDRIVE", "HOMEPATH", "USERPROFILE",
+    "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)",
+    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS", "LANG", "LC_ALL",
+))
+
+
+def _mcp_seconds(value, default: float) -> float:
+    """A timeout from the file, or the default where it is absent or nonsense.
+
+    Zero and negative are nonsense rather than "no limit": a configuration that
+    says 0 is a typo, and reading it as "wait forever" turns a typo into a
+    client that hangs.
+    """
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return default
+    return seconds if seconds > 0 else default
+
+
+class McpServer:
+    """One stdio server process, and the single conversation running over it."""
+
+    def __init__(self, name: str, block: dict) -> None:
+        self.name = name
+        self.block = block
+        self.proc = None
+        self.protocol: str | None = None
+        self.info: dict = {}
+        self.asked: dict = {}
+        self._id = 0
+        self._lines = None
+        self._stderr = None
+        # ONE CALLER AT A TIME ON ONE PIPE. The background review runs on its own
+        # thread and can call a tool; two writers interleaving on one stdin would
+        # hand each other's answers back.
+        self._lock = threading.Lock()
+
+    # -- what the child is given -------------------------------------------
+
+    def environment(self) -> dict:
+        kept = {k: v for k, v in os.environ.items() if k.upper() in _MCP_ENV_KEEP}
+        configured = self.block.get("env")
+        if isinstance(configured, dict):
+            kept.update({str(k): str(v) for k, v in configured.items()})
+        return kept
+
+    def argv(self) -> "list[str] | None":
+        command = self.block.get("command")
+        if not isinstance(command, str) or not command.strip():
+            return None
+        args = self.block.get("args")
+        return [command] + [str(a) for a in (args if isinstance(args, list) else [])]
+
+    # -- the process --------------------------------------------------------
+
+    def start(self) -> "str | None":
+        import collections
+        import queue
+
+        argv = self.argv()
+        if argv is None:
+            return ("the MCP server %r has no 'command'. Only stdio servers work "
+                    "in this build; 'url' arrives with HTTP" % self.name)
+        try:
+            self.proc = subprocess.Popen(
+                argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=self.environment(),
+                cwd=self.block.get("cwd") if isinstance(self.block.get("cwd"), str) else None,
+                text=True, encoding="utf-8", errors="replace", bufsize=1)
+        except OSError as exc:
+            self.proc = None
+            return "the MCP server %r could not be started: %s" % (self.name, exc)
+        self._lines = queue.Queue()
+        self._stderr = collections.deque(maxlen=MCP_STDERR_LINES)
+        threading.Thread(target=self._pump, daemon=True,
+                         name="mcp-%s-out" % self.name).start()
+        threading.Thread(target=self._sip, daemon=True,
+                         name="mcp-%s-err" % self.name).start()
+        return self._handshake()
+
+    def _pump(self) -> None:
+        """stdout into a queue, and a `None` at the end of it.
+
+        A THREAD RATHER THAN A NON-BLOCKING READ, because there is no portable
+        non-blocking read of a pipe -- and the timeout has to hold on Windows,
+        where this client lives.
+        """
+        try:
+            for line in self.proc.stdout:
+                self._lines.put(line)
+        except Exception:
+            pass
+        finally:
+            self._lines.put(None)
+
+    def _sip(self) -> None:
+        """stderr, drained and kept. DRAINED IS THE LOAD-BEARING HALF: a stderr
+        pipe nobody reads fills up and blocks the server mid-answer."""
+        try:
+            for line in self.proc.stderr:
+                self._stderr.append(line.rstrip("\r\n"))
+        except Exception:
+            pass
+
+    def _gone(self, why: str) -> str:
+        said = "\n".join(line for line in (self._stderr or ()) if line.strip())
+        code = self.proc.poll() if self.proc is not None else None
+        return ("the MCP server %r %s.%s%s"
+                % (self.name, why,
+                   " It exited with %s." % code if code is not None else "",
+                   " It said:\n%s" % said if said else ""))
+
+    def close(self) -> None:
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return
+        try:
+            if proc.stdin is not None:
+                proc.stdin.close()          # EOF on stdin is how a server is asked to go
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            # A SERVER ASLEEP IN ITS OWN HANDSHAKE NEVER READS THE EOF, so the
+            # polite ask above expires and it is killed -- and then REAPED, because
+            # a killed child that nobody waits for is a zombie on POSIX and an
+            # object warning about itself at collection time here.
+            try:
+                proc.kill()
+                proc.wait(timeout=3)
+            except Exception:
+                pass
+        # AND THE READ ENDS TOO. The two pump threads hold the other pipes open;
+        # closing stdin alone leaves a file object per server behind, which a
+        # long-running window would accumulate one at a time.
+        for pipe in (proc.stdout, proc.stderr):
+            try:
+                if pipe is not None:
+                    pipe.close()
+            except Exception:
+                pass
+
+    # -- the wire -----------------------------------------------------------
+
+    def _send(self, message: dict) -> "str | None":
+        if self.proc is None or self.proc.stdin is None:
+            return self._gone("is not running")
+        try:
+            self.proc.stdin.write(json.dumps(message) + "\n")
+            self.proc.stdin.flush()
+        except (OSError, ValueError):
+            return self._gone("could not be written to")
+        return None
+
+    def _refuse(self, message: dict) -> None:
+        """Answer a request the server made of Crow. BY NAME, NEVER BY SILENCE.
+
+        The specification says a server may not rely on a capability the client
+        did not declare and must be told so. A client that simply ignores the
+        request leaves the server waiting, and a waiting server is
+        indistinguishable from a slow one.
+        """
+        method = str(message.get("method") or "")
+        self._send({"jsonrpc": "2.0", "id": message.get("id"),
+                    "error": {"code": -32601,
+                              "message": "Crow declares no %r capability, so %s "
+                                         "cannot be served"
+                                         % (method.split("/")[0] or method, method)}})
+
+    def _hear(self, wanted, timeout: float) -> "tuple[dict | None, str | None]":
+        import queue as _queue
+
+        deadline = time.monotonic() + timeout
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None, self._gone("did not answer within %gs" % timeout)
+            try:
+                line = self._lines.get(timeout=left)
+            except _queue.Empty:
+                return None, self._gone("did not answer within %gs" % timeout)
+            if line is None:
+                return None, self._gone("closed the connection")
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue        # a server printing to stdout is not a message
+            if not isinstance(message, dict):
+                continue
+            if message.get("id") == wanted and ("result" in message or "error" in message):
+                return message, None
+            if message.get("method") and message.get("id") is not None:
+                self._refuse(message)
+            # everything else is a notification, and this client acts on none of
+            # them -- `notifications/tools/list_changed` least of all, because a
+            # tool list that changes mid-chat moves byte 0.
+
+    def request(self, method: str, params: dict, timeout: float
+                ) -> "tuple[dict | None, str | None]":
+        with self._lock:
+            self._id += 1
+            wanted = self._id
+            problem = self._send({"jsonrpc": "2.0", "id": wanted,
+                                  "method": method, "params": params})
+            if problem:
+                return None, problem
+            return self._hear(wanted, timeout)
+
+    # -- the handshake ------------------------------------------------------
+
+    def _handshake(self) -> "str | None":
+        """`initialize`, then `notifications/initialized`, and one retry.
+
+        THE RETRY READS WHAT THE REFUSAL OFFERS. A version error carries the
+        list of versions that WOULD have worked, so acting on it is the
+        difference between one extra round-trip and a server nobody can use.
+        Exactly one retry: a server that refuses twice is refusing.
+        """
+        timeout = _mcp_seconds(self.block.get("connect_timeout"), MCP_CONNECT_TIMEOUT)
+        wanted = MCP_PROTOCOL_VERSION
+        for attempt in (1, 2):
+            self.asked = {"protocolVersion": wanted,
+                          "capabilities": {},
+                          "clientInfo": {"name": "Crow",
+                                         "version": CLIENT_VERSION or "0"}}
+            answer, problem = self.request("initialize", self.asked, timeout)
+            if problem:
+                return problem
+            failure = answer.get("error")
+            if not failure:
+                result = answer.get("result") or {}
+                self.protocol = result.get("protocolVersion") or wanted
+                self.info = result.get("serverInfo") or {}
+                self._send({"jsonrpc": "2.0", "method": "notifications/initialized",
+                            "params": {}})
+                return None
+            data = failure.get("data")
+            offered = data.get("supported") if isinstance(data, dict) else None
+            if attempt == 1 and isinstance(offered, list) and offered:
+                wanted = max(str(v) for v in offered)
+                continue
+            return ("the MCP server %r refused the handshake: %s"
+                    % (self.name, strip_tag_characters(str(failure.get("message")
+                                                          or failure))))
+        return None
+
+
+# Live processes, by server name. NOT a cache -- a cache may be dropped and
+# rebuilt at will, and each entry here is a child process that has to be ended.
+_MCP_LIVE: "dict[str, McpServer]" = {}
+_MCP_LIVE_LOCK = threading.Lock()
+
+
+def mcp_server(name: str, block: dict | None = None
+               ) -> "tuple[McpServer | None, str | None]":
+    """The running server of that name, started now if this is the first call.
+
+    PASSING `block` IS THE AD-HOC PATH and it is filed under NOTHING. That is
+    the add flow: a server not in the file yet, or one already in it whose
+    schema is being fetched again. Registering it would replace the process the
+    open chat is talking to and orphan the old one -- alive, unreferenced, and
+    invisible to `forget_mcp_servers`. The caller closes what it asked for.
+    """
+    if block is not None:
+        server = McpServer(name, block)
+        problem = server.start()
+        if problem:
+            server.close()
+            return None, problem
+        return server, None
+    with _MCP_LIVE_LOCK:
+        live = _MCP_LIVE.get(name)
+        if live is not None:
+            return live, None
+        doc, problems = mcp_doc()
+        configured = (doc.get("servers") or {}).get(name)
+        if not isinstance(configured, dict):
+            return None, (problems[0] if problems else
+                          "no MCP server named %r is configured" % name)
+        server = McpServer(name, configured)
+    problem = server.start()
+    if problem:
+        server.close()
+        return None, problem
+    # TWO CALLERS CAN MISS THE SAME EMPTY SLOT -- the background review runs on
+    # its own thread. Whoever lands second closes its own child rather than
+    # writing over the first, which would leak exactly the process nobody holds.
+    with _MCP_LIVE_LOCK:
+        winner = _MCP_LIVE.setdefault(name, server)
+    if winner is not server:
+        server.close()
+    return winner, None
+
+
+def forget_mcp_servers() -> None:
+    """End every running server. Called at exit and when the file changes.
+
+    A window open for a day would otherwise leave one `npx` per server behind
+    it, with nothing in the client knowing they exist.
+    """
+    with _MCP_LIVE_LOCK:
+        running = list(_MCP_LIVE.values())
+        _MCP_LIVE.clear()
+    for server in running:
+        server.close()
+
+
+def _mcp_retire(doc: dict) -> None:
+    """End servers whose configuration no longer matches the one that started them.
+
+    A LIVE PROCESS BELONGS TO THE BLOCK THAT STARTED IT. Keeping one across a
+    rewrite would leave yesterday's command running while the file says
+    something else -- and nothing on screen would disagree.
+    """
+    servers = doc.get("servers") or {}
+    with _MCP_LIVE_LOCK:
+        stale = [name for name, live in _MCP_LIVE.items()
+                 if servers.get(name) != live.block]
+        retired = [_MCP_LIVE.pop(name) for name in stale]
+    for server in retired:
+        server.close()
+
+
+def mcp_render(result: dict) -> str:
+    """A `tools/call` result as the text the model gets back.
+
+    THE FILTER RUNS ON THIS DIRECTION TOO. A result is prompt text written by a
+    stranger exactly as a description is, so the invisible tag characters go
+    here as well -- and a check that only cleaned the descriptions would be
+    guarding the door a server does not walk through.
+    """
+    parts = []
+    blocks = result.get("content")
+    for block in blocks if isinstance(blocks, list) else []:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text":
+            parts.append(strip_tag_characters(str(block.get("text") or "")))
+            continue
+        resource = block.get("resource")
+        if kind == "resource" and isinstance(resource, dict) and isinstance(
+                resource.get("text"), str):
+            parts.append(strip_tag_characters(resource["text"]))
+            continue
+        # An image or an audio block cannot travel through a tool result -- this
+        # client has one channel to the model and it is text. Saying what came
+        # back beats returning nothing, which reads as a tool that did nothing.
+        parts.append("[the server returned a %s block, which this client cannot "
+                     "pass on]" % strip_tag_characters(str(kind or "nameless")))
+    if not parts and result.get("structuredContent") is not None:
+        parts.append(json.dumps(_mcp_clean(result["structuredContent"]), indent=1))
+    body = "\n".join(part for part in parts if part)
+    if not body:
+        body = "[the server answered with nothing]"
+    # `isError` IS THE SPECIFICATION'S OWN SHAPE and it exists so the model can
+    # see the failure and correct itself. It is a result, not a client fault.
+    return ("error: " + body) if result.get("isError") else body
+
+
+def mcp_call(server: str, tool: str, arguments: dict) -> str:
+    """One `tools/call`, and every way it can fail rendered as a tool result."""
+    live, problem = mcp_server(server)
+    if problem:
+        return _clip("error: " + problem)
+    timeout = _mcp_seconds(live.block.get("timeout"), MCP_CALL_TIMEOUT)
+    answer, problem = live.request("tools/call",
+                                   {"name": tool, "arguments": arguments}, timeout)
+    if problem:
+        # THE SESSION GOES WITH THE FAILURE. A server that timed out may still
+        # answer later, and that answer would arrive in the queue in front of the
+        # NEXT call's -- one late reply and every result after it is off by one.
+        _mcp_drop(server)
+        return _clip("error: " + problem)
+    failure = answer.get("error")
+    if failure:
+        return _clip("error: the MCP server %r refused the call: [%s] %s"
+                     % (server, failure.get("code"),
+                        strip_tag_characters(str(failure.get("message") or failure))))
+    return _clip(mcp_render(answer.get("result") or {}))
+
+
+def _mcp_drop(name: str) -> None:
+    with _MCP_LIVE_LOCK:
+        server = _MCP_LIVE.pop(name, None)
+    if server is not None:
+        server.close()
+
+
+def mcp_fetch_tools(name: str, block: dict | None = None
+                    ) -> "tuple[list | None, str | None]":
+    """Ask a server what it offers. THE ONE PLACE `tools/list` IS EVER ASKED.
+
+    Called when a server is ADDED, so that the answer can be written to disk and
+    `TOOLS` never has to ask again. Never at start -- that is the sentence the
+    whole design hangs on.
+
+    `block` is passed when the server is not in the file yet, which is the add
+    path itself: it is started, asked and ended again, and nothing is kept.
+    """
+    ad_hoc = block is not None
+    live, problem = mcp_server(name, block)
+    if problem:
+        return None, problem
+    try:
+        timeout = _mcp_seconds(live.block.get("timeout"), MCP_CALL_TIMEOUT)
+        found, cursor = [], None
+        for _ in range(MCP_LIST_PAGES):
+            answer, problem = live.request(
+                "tools/list", {"cursor": cursor} if cursor else {}, timeout)
+            if problem:
+                return None, problem
+            failure = answer.get("error")
+            if failure:
+                return None, ("the MCP server %r would not list its tools: [%s] %s"
+                              % (name, failure.get("code"),
+                                 strip_tag_characters(str(failure.get("message")
+                                                          or failure))))
+            result = answer.get("result") or {}
+            page = result.get("tools")
+            found.extend(t for t in (page if isinstance(page, list) else [])
+                         if isinstance(t, dict))
+            cursor = result.get("nextCursor")
+            if not cursor:
+                break
+        return [_mcp_clean(tool) for tool in found], None
+    finally:
+        if ad_hoc:
+            live.close()
+
+
+def _mcp_caller(server: str, tool: str):
+    """What a declared MCP tool runs. `**arguments` because the schema is the
+    server's, so `run_tool`'s TypeError arm would blame the model for a shape
+    this client never validated."""
+    def call(**arguments):
+        return mcp_call(server, tool, arguments)
+    return call
+
+
+# READ AT IMPORT, ONCE, FROM DISK. Not from a server -- see the top of the E2
+# section. It sits HERE rather than up there because `mcp_apply` wires
+# `_mcp_caller` into `TOOL_IMPL`, and a name is only resolvable once it exists.
 MCP_PROBLEMS = mcp_apply()
+
+# Nothing else in this client owns a child process, so nothing else had to do
+# this. An interpreter that exits without it leaves the servers running.
+atexit.register(forget_mcp_servers)
 
 
 # #94. THE LIST IS SHARED, THE ANSWERS ARE NOT.
@@ -6162,7 +6656,18 @@ def _cache_key(name: str, arguments: str) -> tuple | None:
     result back either, or the next identical call is answered from a key that
     was never a promise about anything.
     """
-    if name in NEVER_CACHED:
+    # EVERY MCP TOOL IS `run_command`'S CASE, and it is not in the set above
+    # because the set cannot hold it: the names arrive from `mcp.json` at import,
+    # `NEVER_CACHED` is a frozenset, and rebinding it would leave `crow.py`
+    # holding the old one -- it imports the VALUE. A prefix test also holds for a
+    # server added after this line was written, which a list would not.
+    #
+    # The reason is the one `run_command` carries: the result is not a function
+    # of the arguments. A foreign process asked the same thing twice may answer
+    # twice on purpose -- creating one issue and then a second one is two calls --
+    # and answering the second from the first is a write the model is told
+    # happened while nothing did.
+    if name in NEVER_CACHED or name.startswith("mcp_"):
         return None
     if name not in READ_GATED:
         return (name, arguments)
