@@ -6595,6 +6595,57 @@ class McpServer:
             return self._gone("could not be written to")
         return None
 
+    def _elicits(self) -> bool:
+        """Whether this server may ask. On unless the block says otherwise.
+
+        ON BY DEFAULT, and that is not the same call `sampling` got. Sampling
+        spends the one slot on a request nobody made; this spends a person's
+        attention, and only while that person is sitting there answering a turn
+        they started. The gate asks every single time -- there is no standing
+        yes, because a form is different every time it appears.
+        """
+        return self.block.get("elicitation", True) is not False
+
+    def _elicit(self, message: dict) -> None:
+        """One `elicitation/create`, from the wire to a person and back.
+
+        BLOCKS THE CALL, deliberately: the tool call is waiting, the server is
+        waiting, and the person is the only one who can move it. That is the
+        opposite of the OAuth rule, and the difference is who asked for what --
+        nobody asked for a browser mid-turn, and this server was asked to do
+        something by the model in this very turn.
+        """
+        params = message.get("params") or {}
+        wanted = strip_tag_characters(str(params.get("message") or ""))[:400]
+        fields, problem = elicit_fields(params.get("requestedSchema"))
+        if problem:
+            # A SCHEMA THIS CLIENT CANNOT DRAW IS DECLINED, not ignored and not
+            # guessed at. `decline` is the specification's own word for a
+            # refusal, so the server learns it was answered rather than dropped.
+            self._send({"jsonrpc": "2.0", "id": message.get("id"),
+                        "result": {"action": "decline",
+                                   "_meta": {"crow/reason": problem}}})
+            return
+        entry = stage_elicitation(self.name, wanted or "This server is asking.",
+                                  fields)
+        announce = ELICIT_ANNOUNCE
+        if announce is not None:
+            try:
+                announce(elicit_view())
+            except Exception:               # noqa: BLE001 - a surface may be gone
+                pass
+        if not entry["answered"].wait(ELICIT_TTL):
+            # NOT `decline`. The specification separates the two, and a person
+            # who never saw the question has not said no to it.
+            entry["action"], entry["content"] = "cancel", {}
+            with _ASKS_LOCK:
+                if entry in _ASKS:
+                    _ASKS.remove(entry)
+        result = {"action": entry["action"] or "cancel"}
+        if result["action"] == "accept":
+            result["content"] = entry["content"] or {}
+        self._send({"jsonrpc": "2.0", "id": message.get("id"), "result": result})
+
     def _refuse(self, message: dict) -> None:
         """Answer a request the server made of Crow. BY NAME, NEVER BY SILENCE.
 
@@ -6639,7 +6690,11 @@ class McpServer:
             if message.get("id") == wanted and ("result" in message or "error" in message):
                 return message, None
             if message.get("method") and message.get("id") is not None:
-                self._refuse(message)
+                if (message.get("method") == "elicitation/create"
+                        and self._elicits()):
+                    self._elicit(message)
+                else:
+                    self._refuse(message)
             # everything else is a notification, and this client acts on none of
             # them -- `notifications/tools/list_changed` least of all, because a
             # tool list that changes mid-chat moves byte 0.
@@ -6669,7 +6724,12 @@ class McpServer:
         wanted = MCP_PROTOCOL_VERSION
         for attempt in (1, 2):
             self.asked = {"protocolVersion": wanted,
-                          "capabilities": {},
+                          # DECLARED ONLY WHERE IT IS ALLOWED. A capability
+                          # announced and then refused is a server left waiting
+                          # on a promise; the specification's whole point is
+                          # that this list is the truth.
+                          "capabilities": ({"elicitation": {}}
+                                           if self._elicits() else {}),
                           "clientInfo": {"name": "Crow",
                                          "version": CLIENT_VERSION or "0"}}
             answer, problem = self.request("initialize", self.asked, timeout)
@@ -8194,6 +8254,10 @@ def forget_approvals() -> None:
     # the eight would be eight chances to forget one, and the forgotten one
     # would carry a note out of a conversation the user has already dropped.
     forget_pending()
+    # AND EVERY WAITING QUESTION, as `cancel`. A server blocked on an
+    # answer from a conversation that has ended is a tool call hanging
+    # until its own timeout, in a chat nobody is looking at.
+    forget_asks()
 
 
 # #128. THE MEMORY GATE -- what the background review wants to write, held back
@@ -8351,6 +8415,232 @@ def forget_pending() -> None:
     for the same reason: `/reset` and the window's new-chat button are where a
     session actually ends."""
     _PENDING.clear()
+
+
+# ---------------------------------------------------------------- E6 ------
+# ELICITATION: THE SERVER ASKS, A PERSON ANSWERS, AND THE SERVER NEVER DRAWS.
+#
+# This was refused outright until 2026-08-22, and the reason was real: it is the
+# only place in the protocol where a foreign server puts words in front of a
+# human who then acts on them. What changed is that the risk turned out to be
+# SEPARABLE, and Hermes had already separated it -- form mode through the
+# client's own approval surface, URL mode declined as unsupported.
+#
+# THE SPLIT IS THE WHOLE DESIGN:
+#
+#   * what the server sends is a SCHEMA, not a rendering. Crow draws the fields
+#     from `requestedSchema` itself, so there is no markup, no link and no
+#     button that came off the wire;
+#   * the subset is deliberately tiny -- a flat object of primitives. Anything
+#     nested, an array, a `$ref`, a URL mode, or a schema with no properties at
+#     all is DECLINED with a reason. That refusal is what covers every future
+#     mode nobody has read yet;
+#   * every string that reaches a screen goes through the tag filter first, the
+#     same one tool descriptions get;
+#   * the answer is validated against the schema the person was shown, so a
+#     server cannot get back a field it never asked for.
+#
+# AND IT BLOCKS, on purpose. The tool call that triggered it is waiting, the
+# server is waiting, and the person is the only one who can move it. That is the
+# opposite of the OAuth rule one file above -- and the difference is consent:
+# nobody asked for a browser mid-turn, and this server was asked to do something
+# by the model in this very turn.
+
+# The five shapes a field may have. A `format` is read and then ignored: it is a
+# hint for a nicer input, never a reason to refuse a schema.
+ELICIT_TYPES = ("string", "number", "integer", "boolean")
+
+# How many fields a form may carry. A server that wants more than this is not
+# asking a question, it is handing over a configuration screen -- and a screen
+# nobody reads is a screen everybody confirms.
+ELICIT_FIELDS = 12
+
+# Seconds a question stands. Hermes uses 300 and the reasoning transfers: long
+# enough that somebody coming back to the machine still answers it, short enough
+# that a tool call does not hang for an afternoon. A timeout is `cancel`, which
+# the specification defines as dismissed without a choice -- and it is NOT
+# `decline`, because the person never said no.
+ELICIT_TTL = 300.0
+
+_ASKS: "list[dict]" = []
+_ASKS_SEQ = 0
+_ASKS_LOCK = threading.Lock()
+
+# What a surface installs so it can draw the question the moment it is asked.
+# ONE PLUG PER SURFACE AND NO SECOND GATE: the core still owns the staging, the
+# waiting, the validation and the answer. This only says "somebody is asking
+# now", because a terminal has to prompt in line and a window has to push.
+ELICIT_ANNOUNCE = None
+
+
+def elicit_fields(schema) -> "tuple[list, str | None]":
+    """The restricted subset out of `requestedSchema`, or why it is refused.
+
+    THE REFUSAL IS THE SECURITY BOUNDARY, not the parsing. Everything this
+    function does not understand is declined by name -- which is how a mode that
+    does not exist yet, a nested object that would need a layout, and a `$ref`
+    that would need fetching all end up in the same safe place.
+    """
+    if not isinstance(schema, dict):
+        return [], "the server sent no requestedSchema"
+    if schema.get("type") != "object":
+        return [], ("this client answers a flat object of primitives, and that "
+                    "schema is %r" % strip_tag_characters(str(schema.get("type")))[:40])
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        return [], "that schema asks for nothing"
+    if len(properties) > ELICIT_FIELDS:
+        return [], ("that schema asks for %d values, and this client draws at "
+                    "most %d" % (len(properties), ELICIT_FIELDS))
+    required = schema.get("required")
+    required = [str(r) for r in required] if isinstance(required, list) else []
+
+    fields = []
+    for name in properties:
+        spec = properties[name]
+        if not isinstance(spec, dict):
+            return [], "the field %r has no description" % strip_tag_characters(str(name))[:40]
+        kind = spec.get("type")
+        if kind not in ELICIT_TYPES:
+            return [], ("the field %r is a %r, and this client answers only %s"
+                        % (strip_tag_characters(str(name))[:40],
+                           strip_tag_characters(str(kind))[:40],
+                           ", ".join(ELICIT_TYPES)))
+        # AN ENUM IS A LIST OF STRINGS AND NOTHING ELSE. A number enum would
+        # render fine and come back as text, and the mismatch would be the
+        # server's problem to discover at the worst moment.
+        choices = spec.get("enum")
+        if choices is not None:
+            if (kind != "string" or not isinstance(choices, list) or not choices
+                    or not all(isinstance(c, str) for c in choices)):
+                return [], ("the field %r offers choices this client cannot draw"
+                            % strip_tag_characters(str(name))[:40])
+            choices = [strip_tag_characters(c)[:80] for c in choices][:ELICIT_FIELDS * 2]
+        fields.append({
+            "name": str(name),
+            "type": kind,
+            # EVERY STRING THROUGH THE FILTER. A title is prompt-head text
+            # written by a stranger exactly as a tool description is, except
+            # this one is read by a person rather than a model.
+            "title": strip_tag_characters(str(spec.get("title") or name))[:80],
+            "description": strip_tag_characters(str(spec.get("description") or ""))[:200],
+            "enum": choices,
+            "required": str(name) in required,
+        })
+    return fields, None
+
+
+def stage_elicitation(server: str, message: str, fields: list) -> dict:
+    """Hold one question until a person answers it."""
+    global _ASKS_SEQ
+    with _ASKS_LOCK:
+        _ASKS_SEQ += 1
+        entry = {"id": _ASKS_SEQ, "server": server, "message": message,
+                 "fields": fields, "staged": time.monotonic(),
+                 "action": None, "content": None,
+                 "answered": threading.Event()}
+        _ASKS.append(entry)
+    return entry
+
+
+def pending_asks() -> "list[dict]":
+    """What is still being asked. Expired questions are dropped on the read, the
+    same construction `pending_memory` uses and for the same reason."""
+    now = time.monotonic()
+    with _ASKS_LOCK:
+        _ASKS[:] = [e for e in _ASKS if now - e["staged"] < ELICIT_TTL]
+        return list(_ASKS)
+
+
+def elicit_view() -> "list[dict]":
+    """What the surfaces draw. ONE SHAPE FOR BOTH, and neither reaches into the
+    entry: the event and the clock are this module's business."""
+    return [{"id": e["id"], "server": e["server"], "message": e["message"],
+             "fields": e["fields"]} for e in pending_asks()]
+
+
+def _elicit_value(field: dict, given):
+    """One answer, coerced to the type the person was shown, or `None`.
+
+    STRICT, BECAUSE THE SERVER TRUSTS THIS. It declared a boolean; handing it
+    the string "false" -- which is true in most languages that will read it --
+    is worse than handing it nothing.
+    """
+    kind = field["type"]
+    if kind == "boolean":
+        if isinstance(given, bool):
+            return given
+        if isinstance(given, str) and given.strip().lower() in ("true", "false"):
+            return given.strip().lower() == "true"
+        return None
+    if kind in ("number", "integer"):
+        try:
+            number = float(str(given).strip())
+        except (TypeError, ValueError):
+            return None
+        if kind == "integer":
+            return int(number) if number == int(number) else None
+        return number
+    text = "" if given is None else str(given)
+    if field.get("enum") is not None and text not in field["enum"]:
+        return None
+    return text
+
+
+def answer_elicitation(ident: int, action: str, content=None) -> "str | None":
+    """What a person decided, checked against the schema they were shown.
+
+    THE SERVER GETS BACK ONLY WHAT IT ASKED FOR. A surface that passed extra
+    keys through would let whatever filled that form reach a foreign process,
+    and the form is the one thing on screen a stranger wrote the labels for.
+    """
+    if action not in ("accept", "decline", "cancel"):
+        return "%r is not accept, decline or cancel" % strip_tag_characters(str(action))[:40]
+    entry = next((e for e in pending_asks() if e["id"] == ident), None)
+    if entry is None:
+        return "that question is no longer waiting"
+
+    kept = {}
+    if action == "accept":
+        given = content if isinstance(content, dict) else {}
+        for field in entry["fields"]:
+            raw = given.get(field["name"])
+            # ABSENT AND WRONG ARE NOT THE SAME ANSWER. An optional field left
+            # empty is a decision and travels as nothing; a field somebody
+            # filled in with something the schema does not allow is a mistake,
+            # and dropping it silently would send the server a form that looks
+            # like it was answered.
+            if raw is None or (isinstance(raw, str) and not raw.strip()):
+                if field["required"]:
+                    return "%s is needed" % field["title"]
+                continue
+            value = _elicit_value(field, raw)
+            if value is None:
+                if field.get("enum") is not None:
+                    return "%s must be one of: %s" % (field["title"],
+                                                      ", ".join(field["enum"]))
+                return "%s is not a %s" % (field["title"], field["type"])
+            kept[field["name"]] = value
+
+    with _ASKS_LOCK:
+        if entry in _ASKS:
+            _ASKS.remove(entry)
+    entry["action"] = action
+    entry["content"] = kept
+    entry["answered"].set()
+    return None
+
+
+def forget_asks() -> None:
+    """Release every waiting question as `cancel`. Called where the session
+    ends, because a server blocked on an answer nobody will ever give is a tool
+    call that hangs until its own timeout."""
+    with _ASKS_LOCK:
+        waiting, _ASKS[:] = list(_ASKS), []
+    for entry in waiting:
+        entry["action"] = "cancel"
+        entry["content"] = {}
+        entry["answered"].set()
 
 
 # What has already been asked this turn, and what came back. Cleared per user

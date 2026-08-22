@@ -344,7 +344,7 @@ The name comes out of the line: `filesystem`, `notekeeper`, `fetch`. A URL is na
 | Tool names | `mcp_<server>_<tool>` |
 | Adding takes | every tool the server offers |
 | Classes | empty until you set them. An unclassified tool is `executing` |
-| Client capabilities | sent empty. `sampling` and `elicitation` get `-32601` naming what is missing |
+| Client capabilities | `elicitation` only. `sampling` gets `-32601` naming what is missing |
 | Invisible U+E0000–U+E007F | stripped from names, descriptions, schemas and results. Emoji flags survive |
 | `${VAR}` | in `command`, `args`, `cwd`, `env`, `url`, `headers`. Read from the environment when the server is used, never stored. An unset one refuses the server by name |
 | Credential redaction | on **errors** only — a server that quotes the request it refused would otherwise put the token in the prompt, the chat and the session file. A successful result is untouched |
@@ -359,6 +359,22 @@ The name comes out of the line: `filesystem`, `notekeeper`, `fetch`. A URL is na
 | Environment | a fixed base set plus the block's `env`, never the whole shell |
 | stderr | drained, last 20 lines kept and printed with a failure |
 | Close | EOF on stdin, `kill` after 3 s, then reaped |
+
+### Elicitation
+
+A server may ask the person a question in the middle of a tool call. What arrives is a **schema**,
+never a rendering — Crow draws the fields, so nothing on screen came off the wire.
+
+| | |
+|---|---|
+| Accepted | a flat object of `string`, `number`, `integer`, `boolean`. `enum` of strings. At most 12 fields |
+| Declined, with a reason | anything else — nested objects, arrays, `$ref`, a schema asking for nothing, and every mode this client does not draw |
+| Labels | `title`, `description` and `enum` go through the `U+E0000–U+E007F` filter and reach the page by `textContent` |
+| Answer | `accept` with values, `decline`, or `cancel`. Three buttons, because the specification separates a refusal from a dismissal |
+| Values | checked against the schema that was shown. Only declared fields travel; a `boolean` arrives as a boolean |
+| Timeout | 300 s, then `cancel` |
+| Off per server | `"elicitation": false` in the block. The capability is then not declared at all |
+| Where | in the chat, on the turn that caused it — the same place a tool approval lands |
 
 ### Commands
 
@@ -398,6 +414,7 @@ Removing a server: `Help → Settings → MCPs`.
 | `include` | positive list, and it wins over `exclude` |
 | Globs | both lists take `*`, `?`, `[…]`. An entry without one is an exact name — `docs` excludes the tool `docs`, never `docs_search` |
 | `enabled: false` | skipped. No connection attempted |
+| `elicitation` | `false` stops this server asking, and stops the capability being declared |
 | `timeout` · `connect_timeout` | seconds. Defaults 60 and 20 |
 | `url` | Streamable HTTP endpoint, `http` or `https`. Not alongside `command` |
 | `headers` | sent on every HTTP request. Never shown in either surface |
@@ -425,8 +442,8 @@ byte 0: the next turn and the first turn of every saved session pay a full prefi
 
 | | |
 |---|---|
-| `sampling` | `capabilities` goes out empty. A server that asks for inference anyway gets `-32601` naming the missing capability |
-| `elicitation` | not declared, same answer |
+| `sampling` | not declared. A server that asks for inference anyway gets `-32601` naming the missing capability |
+| Elicitation URL mode · nested schemas · arrays | declined with a reason. Crow draws the form itself, so it answers only what it can draw |
 | `notifications/tools/list_changed` | ignored. A tool list that changed mid-chat would move byte 0 |
 | No catalog | no curated list of servers. You enter the command line or the URL |
 

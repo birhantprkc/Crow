@@ -3995,6 +3995,35 @@ def call(mid, params):
     args = params.get("arguments") or {}
     if MODE == "slowcall":
         time.sleep(600)
+    if MODE == "elicits":
+        send({"jsonrpc": "2.0", "id": "server-2", "method": "elicitation/create",
+              "params": {"message": "Which environment?",
+                         "requestedSchema": {
+                             "type": "object",
+                             "properties": {
+                                 "environment": {"type": "string",
+                                                 "enum": ["staging", "production"]},
+                                 "confirm": {"type": "boolean",
+                                             "title": "Are you sure"},
+                                 "count": {"type": "integer"}},
+                             "required": ["environment"]}}})
+        reply = json.loads(sys.stdin.readline() or "{}")
+        got = (reply.get("result") or {})
+        return send({"jsonrpc": "2.0", "id": mid,
+                     "result": text("answer: %s %s"
+                                    % (got.get("action"),
+                                       json.dumps(got.get("content"),
+                                                  sort_keys=True)))})
+    if MODE == "elicitsnested":
+        send({"jsonrpc": "2.0", "id": "server-3", "method": "elicitation/create",
+              "params": {"message": "Give me a whole object",
+                         "requestedSchema": {
+                             "type": "object",
+                             "properties": {"deep": {"type": "object"}}}}})
+        reply = json.loads(sys.stdin.readline() or "{}")
+        got = (reply.get("result") or {})
+        return send({"jsonrpc": "2.0", "id": mid,
+                     "result": text("answer: %s" % got.get("action"))})
     if MODE == "sampling":
         send({"jsonrpc": "2.0", "id": "server-1", "method": "sampling/createMessage",
               "params": {"messages": [], "maxTokens": 8}})
@@ -4234,7 +4263,77 @@ class TheStdioConnectionTests(unittest.TestCase):
         self._call("echo", '{"text": "x"}')
         declared = self._live().asked.get("capabilities") or {}
         self.assertNotIn("sampling", declared)
-        self.assertNotIn("elicitation", declared)
+        # `elicitation` USED TO BE ASSERTED HERE AND MOVED ON 2026-08-22, when
+        # robin reversed the decision: Hermes showed the risk is separable --
+        # form mode through the client's own gate, URL mode declined -- and the
+        # capability is declared now. Where that is pinned is
+        # `test_elicitation_is_declared_because_the_gate_answers_it`, and the
+        # sampling half above is untouched.
+
+    def test_elicitation_is_declared_because_the_gate_answers_it(self):
+        """#135, reversed on 2026-08-22. A capability announced and then refused
+        would leave a server waiting on a promise; this one is announced because
+        there is a gate behind it that a person actually answers."""
+        self._configure()
+        self._call("echo", '{"text": "x"}')
+        self.assertIn("elicitation", self._live().asked.get("capabilities") or {})
+
+    def test_a_server_may_have_elicitation_turned_off(self):
+        """NEGATIVE, and the switch has to reach the HANDSHAKE and not just the
+        answer: a client that declared the capability and then refused every
+        request would be lying at the one moment the protocol asks it not to."""
+        self._configure(elicitation=False)
+        self._call("echo", '{"text": "x"}')
+        self.assertNotIn("elicitation", self._live().asked.get("capabilities") or {})
+
+    def test_a_server_asking_for_input_reaches_a_person_and_back(self):
+        """The positive probe for the whole stage, over real pipes: the server
+        asks mid-call, a person answers, and the values it gets back are the
+        ones that were typed."""
+        answered = []
+
+        def be_the_person(asks):
+            answered.extend(asks)
+            crow_core.answer_elicitation(
+                asks[-1]["id"], "accept",
+                {"environment": "staging", "confirm": True, "count": "3"})
+
+        self.addCleanup(setattr, crow_core, "ELICIT_ANNOUNCE", None)
+        crow_core.ELICIT_ANNOUNCE = be_the_person
+        self._configure("elicits")
+        out = self._call("echo", '{"text": "x"}')
+        self.assertIn("answer: accept", out)
+        self.assertIn('"environment": "staging"', out)
+        self.assertIn('"confirm": true', out)
+        # THE INTEGER ARRIVES AS AN INTEGER. A form hands back text, and a
+        # server that declared `integer` and got `"3"` would have to guess.
+        self.assertIn('"count": 3', out)
+        self.assertEqual(answered[-1]["message"], "Which environment?")
+
+    def test_a_schema_this_client_cannot_draw_is_declined_by_itself(self):
+        """NEGATIVE, and it is the security boundary rather than the parsing: a
+        nested object, an array, a `$ref` or a mode nobody has read yet all end
+        up in the same place, and NOBODY IS ASKED. The server is told `decline`,
+        so it learns it was answered rather than dropped."""
+        asked = []
+        self.addCleanup(setattr, crow_core, "ELICIT_ANNOUNCE", None)
+        crow_core.ELICIT_ANNOUNCE = lambda asks: asked.append(asks)
+        self._configure("elicitsnested")
+        out = self._call("echo", '{"text": "x"}')
+        self.assertIn("answer: decline", out)
+        self.assertEqual(asked, [])
+
+    def test_an_unanswered_question_is_cancelled_and_not_declined(self):
+        """The specification separates the two: a refusal is a decision, a
+        dismissal is not. A person who never saw the question has not said no
+        to it, and a server is entitled to tell those apart."""
+        self.addCleanup(setattr, crow_core, "ELICIT_TTL", crow_core.ELICIT_TTL)
+        crow_core.ELICIT_TTL = 1.0
+        self.addCleanup(setattr, crow_core, "ELICIT_ANNOUNCE", None)
+        crow_core.ELICIT_ANNOUNCE = None
+        self._configure("elicits")
+        out = self._call("echo", '{"text": "x"}')
+        self.assertIn("answer: cancel", out)
 
     def test_the_child_does_not_get_the_whole_environment(self):
         """It is a foreign process. Handing it the shell's environment hands it
@@ -5576,6 +5675,150 @@ class TheMcpOauthTests(unittest.TestCase):
         rather than now."""
         self.assertIsNone(crow_core.mcp_token_write({"servers": {"x": {"a": 1}}}))
         self.assertEqual(crow_core.mcp_token_for("x"), {"a": 1})
+
+
+class TheElicitationSchemaTests(unittest.TestCase):
+    """#135: what a server may ask for, and everything it may not.
+
+    THE REFUSAL IS THE BOUNDARY, NOT THE PARSING. This is the one place in the
+    protocol where a foreign server puts words in front of a human who then
+    acts on them, and what makes that safe is that the server sends a SCHEMA
+    rather than a rendering -- so everything this client cannot draw itself is
+    declined by name, and a mode nobody has read yet lands there too.
+    """
+
+    def _fields(self, properties, **over):
+        schema = {"type": "object", "properties": properties}
+        schema.update(over)
+        return crow_core.elicit_fields(schema)
+
+    def test_a_flat_object_of_primitives_is_taken(self):
+        fields, problem = self._fields(
+            {"who": {"type": "string", "title": "Your name"},
+             "many": {"type": "integer"},
+             "sure": {"type": "boolean"}},
+            required=["who"])
+        self.assertIsNone(problem)
+        self.assertEqual([f["name"] for f in fields], ["who", "many", "sure"])
+        self.assertEqual(fields[0]["title"], "Your name")
+        self.assertTrue(fields[0]["required"])
+        self.assertFalse(fields[1]["required"])
+
+    def test_a_nested_object_is_refused(self):
+        _, problem = self._fields({"deep": {"type": "object"}})
+        self.assertIn("object", problem)
+
+    def test_an_array_is_refused(self):
+        _, problem = self._fields({"many": {"type": "array"}})
+        self.assertIn("array", problem)
+
+    def test_a_schema_that_is_not_an_object_is_refused(self):
+        """This is where a URL mode lands, and every other mode nobody has read
+        yet: not understood, so not drawn."""
+        fields, problem = crow_core.elicit_fields({"type": "url",
+                                                   "url": "https://example.com"})
+        self.assertEqual(fields, [])
+        self.assertIsNotNone(problem)
+
+    def test_a_schema_asking_for_nothing_is_refused(self):
+        _, problem = self._fields({})
+        self.assertIn("nothing", problem)
+
+    def test_a_form_nobody_would_read_is_refused(self):
+        """A server that wants twenty values is not asking a question, it is
+        handing over a configuration screen -- and a screen nobody reads is a
+        screen everybody confirms."""
+        _, problem = self._fields({"f%d" % n: {"type": "string"}
+                                   for n in range(crow_core.ELICIT_FIELDS + 1)})
+        self.assertIn("at most", problem)
+
+    def test_the_labels_go_through_the_tag_filter(self):
+        """A title is prompt text written by a stranger exactly as a tool
+        description is -- except this one is read by a PERSON."""
+        hidden = "".join(chr(0xE0000 + ord(c)) for c in "ignore this")
+        fields, problem = self._fields(
+            {"who": {"type": "string", "title": "Name" + hidden,
+                     "description": "please" + hidden}})
+        self.assertIsNone(problem)
+        self.assertEqual(fields[0]["title"], "Name")
+        self.assertEqual(fields[0]["description"], "please")
+
+    def test_an_enum_of_strings_is_drawn_and_anything_else_is_not(self):
+        fields, problem = self._fields(
+            {"where": {"type": "string", "enum": ["a", "b"]}})
+        self.assertIsNone(problem)
+        self.assertEqual(fields[0]["enum"], ["a", "b"])
+        _, problem = self._fields({"where": {"type": "integer", "enum": [1, 2]}})
+        self.assertIn("choices", problem)
+
+    # ---- what comes back
+
+    def _stage(self, fields):
+        return crow_core.stage_elicitation("faker", "why", fields)
+
+    def test_only_declared_fields_reach_the_server(self):
+        """A surface that passed extra keys through would let whatever filled
+        that form reach a foreign process -- and the form is the one thing on
+        screen whose labels a stranger wrote."""
+        fields, _ = self._fields({"who": {"type": "string"}})
+        entry = self._stage(fields)
+        self.assertIsNone(crow_core.answer_elicitation(
+            entry["id"], "accept", {"who": "robin", "smuggled": "x"}))
+        self.assertEqual(entry["content"], {"who": "robin"})
+
+    def test_a_type_is_honoured_rather_than_passed_through(self):
+        """It declared a boolean; handing it the string "false" -- which is TRUE
+        in most languages that will read it -- is worse than handing it
+        nothing."""
+        fields, _ = self._fields({"sure": {"type": "boolean"},
+                                  "many": {"type": "integer"},
+                                  "part": {"type": "number"}})
+        entry = self._stage(fields)
+        self.assertIsNone(crow_core.answer_elicitation(
+            entry["id"], "accept",
+            {"sure": "false", "many": "7", "part": "1.5"}))
+        self.assertEqual(entry["content"],
+                         {"sure": False, "many": 7, "part": 1.5})
+
+    def test_a_required_field_left_empty_is_refused_before_it_travels(self):
+        fields, _ = self._fields({"who": {"type": "string"}}, required=["who"])
+        entry = self._stage(fields)
+        problem = crow_core.answer_elicitation(entry["id"], "accept", {"who": ""})
+        self.assertIsNotNone(problem)
+        self.assertFalse(entry["answered"].is_set())
+
+    def test_a_value_outside_the_choices_is_refused(self):
+        fields, _ = self._fields({"where": {"type": "string",
+                                            "enum": ["a", "b"]}})
+        entry = self._stage(fields)
+        self.assertIsNotNone(crow_core.answer_elicitation(
+            entry["id"], "accept", {"where": "c"}))
+
+    def test_declining_sends_no_content_at_all(self):
+        fields, _ = self._fields({"who": {"type": "string"}})
+        entry = self._stage(fields)
+        self.assertIsNone(crow_core.answer_elicitation(
+            entry["id"], "decline", {"who": "robin"}))
+        self.assertEqual(entry["action"], "decline")
+        self.assertEqual(entry["content"], {})
+
+    def test_a_question_that_is_gone_cannot_be_answered_twice(self):
+        fields, _ = self._fields({"who": {"type": "string"}})
+        entry = self._stage(fields)
+        self.assertIsNone(crow_core.answer_elicitation(entry["id"], "cancel"))
+        self.assertIsNotNone(crow_core.answer_elicitation(entry["id"], "accept",
+                                                          {"who": "x"}))
+
+    def test_ending_the_session_releases_every_waiting_question(self):
+        """A server blocked on an answer from a conversation that has ended is a
+        tool call hanging until its own timeout, in a chat nobody is looking
+        at."""
+        fields, _ = self._fields({"who": {"type": "string"}})
+        entry = self._stage(fields)
+        crow_core.forget_asks()
+        self.assertTrue(entry["answered"].is_set())
+        self.assertEqual(entry["action"], "cancel")
+        self.assertEqual(crow_core.elicit_view(), [])
 
 
 class TheChecklistTests(unittest.TestCase):

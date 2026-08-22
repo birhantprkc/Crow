@@ -4549,6 +4549,65 @@ class ToolCallsLeaveTheReadingColumnTests(unittest.TestCase):
         self.assertIn("this.toolsReset()", drawn[:drawn.index("break;")])
 
 
+class AServerAsksAndCrowDrawsTests(unittest.TestCase):
+    """#135. The form is drawn from a SCHEMA, and never by the server.
+
+    THAT SENTENCE IS THE WHOLE REASON THIS FEATURE IS ALLOWED. What arrives is a
+    list of fields with types; what a person sees is markup this file wrote. A
+    label, a description and a choice are all text a stranger supplied, so every
+    one of them goes in by `textContent` -- #119's lesson, and it applies harder
+    here than it does to a tool description, because a person acts on this one.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.js = self.source[self.source.index("  elicit(ask){"):
+                              self.source.index("  elicitAnswer(btn, action){")]
+
+    def test_nothing_the_server_wrote_becomes_markup(self):
+        for setter in ('.textContent=ask.server',
+                       '.textContent=ask.message',
+                       'label.textContent=f.title',
+                       'hint.textContent=f.description',
+                       'o.textContent=c'):
+            self.assertIn(setter, self.js)
+        # THE ONLY `innerHTML` IN HERE IS THIS FILE'S OWN SKELETON. Every value
+        # off the wire is put on a node afterwards, one at a time.
+        skeleton = self.js[self.js.index("d.innerHTML="):self.js.index("const card=")]
+        for wrote in ("ask.", "f.title", "f.name", "f.description", "f.enum"):
+            self.assertNotIn(wrote, skeleton)
+
+    def test_the_three_answers_are_three_buttons(self):
+        """`decline` and `dismiss` are not one answer. The specification
+        separates a refusal from a dismissal, and a server is entitled to treat
+        them differently -- so a client that offered one button would be
+        deciding on the person's behalf which of the two they meant."""
+        # The backslashes are Python's, escaping the quotes inside the HTML
+        # string; what the page sees is `crow.elicitAnswer(this,'accept')`.
+        plain = self.js.replace(chr(92), "")
+        for action in ("accept", "decline", "cancel"):
+            self.assertIn("crow.elicitAnswer(this,'%s')" % action, plain)
+
+    def test_a_checkbox_comes_back_as_a_boolean(self):
+        """A form hands back text. A server that declared `boolean` and got the
+        string "false" -- which is true in most languages that will read it --
+        would act on the opposite of what was ticked."""
+        answer = self.source[self.source.index("  elicitAnswer(btn, action){"):
+                             self.source.index("  // The card stays, with the answer")]
+        self.assertIn('el.type==="checkbox" ? el.checked : el.value', answer)
+
+    def test_the_answer_goes_through_the_core_and_not_around_it(self):
+        api = inspect.getsource(crow_gui.Api.answer_elicit)
+        self.assertIn("crow_core.answer_elicitation", api)
+        self.assertNotIn("_ASKS", api)
+
+    def test_the_window_installs_itself_as_the_place_a_question_lands(self):
+        """One plug per surface and no second gate: the core keeps the staging,
+        the waiting, the schema check and the answer."""
+        setup = inspect.getsource(crow_gui.Api.__init__)
+        self.assertIn("crow_core.ELICIT_ANNOUNCE = self.announce_elicit", setup)
+
+
 class TheUserBubbleTests(unittest.TestCase):
     """#131. robin, 2026-08-22: the label goes, and the bubble has to break."""
 

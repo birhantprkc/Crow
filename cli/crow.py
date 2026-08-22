@@ -1269,6 +1269,46 @@ def ask_memory() -> None:
         print(f"{DIM}[memory discarded: {dropped}]{RESET}\n")
 
 
+def elicit_prompt(asks: list) -> None:
+    """A server asking for input, answered in line.
+
+    #135. IN LINE AND BLOCKING, which is what the terminal can do and the
+    window cannot: the MCP call is waiting on this very thread, so the prompt
+    happens here and the answer goes straight back.
+
+    EVERY EXIT THAT IS NOT AN ANSWER IS `cancel`, including EOF and Ctrl+C --
+    the specification's word for a question dismissed without a decision, which
+    is exactly what a closed terminal is. `decline` is reserved for somebody
+    actually saying no.
+    """
+    for ask in asks:
+        print(f"\n{CROW_ACCENT}  {ask['server']} is asking:{RESET}")
+        print(f"{DIM}    {ask['message']}{RESET}")
+        values, action = {}, "accept"
+        try:
+            for field in ask["fields"]:
+                mark = "*" if field["required"] else ""
+                if field["description"]:
+                    print(f"{DIM}    {field['description']}{RESET}")
+                if field["enum"]:
+                    print(f"{DIM}    one of: {', '.join(field['enum'])}{RESET}")
+                given = input(f"  {field['title']}{mark}: ").strip()
+                values[field["name"]] = given
+            answer = input(f"  send it? {YELLOW}y{RESET}es / "
+                           f"{YELLOW}n{RESET}o{DIM} [n]{RESET} ").strip().lower()
+            if answer not in ("y", "yes"):
+                action = "decline"
+        except (EOFError, KeyboardInterrupt):
+            print()
+            action = "cancel"
+        problem = crow_core.answer_elicitation(ask["id"], action, values)
+        if problem:
+            crow_core.answer_elicitation(ask["id"], "cancel", {})
+            print(f"{DIM}[not sent: {problem}]{RESET}\n")
+        else:
+            print(f"{DIM}[{action}]{RESET}\n")
+
+
 def _first_sentence(text: str) -> str:
     """The opening sentence of a tool description, for the one-line listing.
 
@@ -2207,6 +2247,10 @@ def boot_if_asked(args: argparse.Namespace) -> str | None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # #135. WHERE A SERVER'S QUESTION LANDS IN THE TERMINAL. Installed once, at
+    # the top, because `crow_core` reads the name at call time and the MCP call
+    # that triggers it happens deep inside a turn.
+    crow_core.ELICIT_ANNOUNCE = elicit_prompt
     # #114, and BEFORE repl(): the loop's first act is to check the endpoint,
     # and there is no point checking one this line is about to bring up.
     problem = boot_if_asked(args)

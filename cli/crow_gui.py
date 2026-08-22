@@ -1030,6 +1030,19 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    COLLAPSED IT IS TWO NUMBERS. Lines gained in green, lines lost in red -- the
    shape everyone already reads on a diff. The text of every entry is one click
    away; a tile that printed all of it would cover the chat it lies behind. */
+.askcard .elicwhat{display:block;color:var(--dim);white-space:pre-wrap;
+  margin:2px 0 9px;font-size:12px}
+.askcard .elicfield{display:flex;align-items:baseline;gap:9px;margin:0 0 7px}
+.askcard .eliclabel{flex:0 0 30%;min-width:0;color:var(--dim);font-size:11.5px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.askcard .eliclabel em{font-style:normal;color:var(--bad)}
+.askcard .elicfield input[type=text],.askcard .elicfield input[type=number],
+.askcard .elicfield select{flex:1;min-width:0;font:inherit;font-size:11.5px;
+  padding:4px 7px;border-radius:6px;border:1px solid var(--bevel);
+  background:var(--sunken);color:var(--text)}
+.askcard .elicfield input[type=checkbox]{margin:0}
+.askcard .elichint{color:var(--dimmer);font-size:10.5px;margin:-4px 0 8px
+  calc(30% + 9px)}
 #pendbar{max-width:900px;margin:0 auto -14px;padding:9px 13px 22px;
   border:1px solid color-mix(in srgb,var(--accent) 32%,transparent);
   border-radius:10px;color:var(--accent);font-size:11.5px;cursor:pointer;
@@ -2364,6 +2377,76 @@ const crow = {
     if(scope) d.querySelector(".always em").textContent=scope;
     flow.appendChild(d); this.bottom(); },
 
+  // #135. A SERVER ASKING FOR INPUT, drawn by Crow and never by the server.
+  //
+  // WHAT ARRIVES IS A SCHEMA, NOT A RENDERING: a list of fields with types, and
+  // every label goes in by textContent. There is no markup, no link and no
+  // button here that came off the wire -- which is the whole reason this is
+  // allowed at all. The card lands IN THE FLOW like the approval card, because
+  // it belongs to the turn that caused it and the answer belongs in the record.
+  elicit(ask){
+    if(!ask) return;
+    const d=document.createElement("div");
+    d.className="turn ask";
+    d.innerHTML='<div class="askcard" data-elicit=""><div class="asktop">'
+      + '<b></b><code></code></div><span class="elicwhat"></span>'
+      + '<div class="elicfields"></div>'
+      + '<div class="askrow">'
+      + '<button class="yes" onclick="crow.elicitAnswer(this,\'accept\')">send</button>'
+      + '<button class="no" onclick="crow.elicitAnswer(this,\'decline\')">decline</button>'
+      + '<button class="no" onclick="crow.elicitAnswer(this,\'cancel\')">dismiss</button>'
+      + '</div></div>';
+    const card=d.querySelector(".askcard");
+    card.dataset.elicit=String(ask.id);
+    card.querySelector("b").textContent=ask.server||"a server";
+    card.querySelector("code").textContent="is asking";
+    card.querySelector(".elicwhat").textContent=ask.message||"";
+    const box=card.querySelector(".elicfields");
+    (ask.fields||[]).forEach(f => {
+      const row=document.createElement("div"); row.className="elicfield";
+      const label=document.createElement("label"); label.className="eliclabel";
+      label.textContent=f.title||f.name;
+      if(f.required){ const star=document.createElement("em");
+                      star.textContent=" *"; label.appendChild(star); }
+      let input;
+      if(f.enum){ input=document.createElement("select");
+        (f.enum||[]).forEach(c => { const o=document.createElement("option");
+          o.value=c; o.textContent=c; input.appendChild(o); }); }
+      else if(f.type==="boolean"){ input=document.createElement("input");
+        input.type="checkbox"; }
+      else { input=document.createElement("input");
+        input.type=(f.type==="number"||f.type==="integer")?"number":"text"; }
+      input.dataset.field=f.name;
+      input.dataset.kind=f.type;
+      row.appendChild(label); row.appendChild(input); box.appendChild(row);
+      if(f.description){ const hint=document.createElement("div");
+        hint.className="elichint"; hint.textContent=f.description;
+        box.appendChild(hint); } });
+    flow.appendChild(d); this.bottom(); },
+
+  // `decline` and `dismiss` are two answers and not one. The specification
+  // separates them -- a refusal is a decision, a dismissal is not -- and a
+  // server is entitled to treat them differently.
+  elicitAnswer(btn, action){
+    const card=btn.closest(".askcard");
+    const values={};
+    card.querySelectorAll("[data-field]").forEach(el => {
+      values[el.dataset.field] =
+        el.type==="checkbox" ? el.checked : el.value; });
+    pywebview.api.answer_elicit(Number(card.dataset.elicit), action, values)
+      .then(said => {
+        if(said){ let bad=card.querySelector(".askdone");
+          if(!bad){ bad=document.createElement("span"); bad.className="askdone";
+                    card.querySelector(".askrow").appendChild(bad); }
+          bad.textContent=said; return; }
+        card.querySelector(".elicfields").querySelectorAll("[data-field]")
+          .forEach(el => { el.disabled=true; });
+        card.querySelector(".askrow").innerHTML=
+          '<span class="askdone"></span>';
+        card.querySelector(".askdone").textContent=
+          action==="accept" ? "sent" : action==="decline" ? "declined"
+                                                          : "dismissed"; }); },
+
   // The card stays, with the answer on it: a question that vanishes leaves no
   // record of what was released, and the transcript is where that belongs.
   answered(btn, what){
@@ -2773,6 +2856,7 @@ const crow = {
           e.n + " tok · " + e.rate.toFixed(1) + " tok/s";
         break;
       case "pend": this.pendState(e.items); break;
+      case "elicit": this.elicit(e.ask); break;
       case "mic": this.micState(e); break;
       case "drop": this.dropped(e.paths); break;
       case "idle": this.idle(); break;
@@ -3333,6 +3417,10 @@ class Api:
         # recurses until the stack gives out. Private names are skipped.
         self._window = None
         self._out: "queue.Queue" = queue.Queue()
+        # #135. THE WINDOW IS WHERE A SERVER'S QUESTION LANDS. Installed once,
+        # here, because `crow_core` reads the name at call time -- and read from
+        # the MCP thread, which is why the plug only queues.
+        crow_core.ELICIT_ANNOUNCE = self.announce_elicit
         self._conversation = Conversation(args.system)
         self._context_tokens = 0
         self._n_ctx = 0
@@ -3392,6 +3480,21 @@ class Api:
 
     def push(self, message: dict) -> None:
         self._out.put(message)
+
+    def announce_elicit(self, asks: list) -> None:
+        """The core says a server is asking; the page gets the newest question.
+
+        THE PLUG, AND THERE IS ONLY ONE. `crow_core` owns the staging, the
+        waiting, the schema check and the answer -- this says "now", because a
+        window has to push and a terminal has to prompt in line.
+        """
+        if asks:
+            self.push({"k": "elicit", "ask": asks[-1]})
+
+    def answer_elicit(self, ident: int, action: str, values) -> str:
+        """What a person typed, handed back to the waiting server. "" when it
+        went through; the sentence why, when it did not."""
+        return crow_core.answer_elicitation(int(ident), str(action), values) or ""
 
     def pump(self) -> None:
         """One thread, forever: queue -> page. The only place JS is called."""
