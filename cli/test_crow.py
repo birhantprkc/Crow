@@ -36,7 +36,7 @@ import crow_core  # noqa: E402
 # it finds to TOOLS, TOOL_IMPL and TOOL_CLASS. Every case that enumerates the
 # tool table therefore answered differently on a machine with an MCP server than
 # on one without -- found on 2026-08-22, when `ReleaseLevelTests` went red
-# against a real pontifex install and nothing in this file had changed.
+# against a real MCP install and nothing in this file had changed.
 #
 # A PATH WHOSE PARENT DOES NOT EXIST, not a temp file that might: the reader
 # treats "no file" as the empty configuration, and that is the state the twelve

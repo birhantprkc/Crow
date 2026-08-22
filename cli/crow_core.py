@@ -1451,6 +1451,7 @@ def resume_cold_note(path: str | None = None, model: str | None = None) -> str:
 # `/reasoning` too, and a key only one surface knows how to write is a setting
 # that survives in one client and evaporates in the other.
 SESSION_REASONING_KEY = "reasoning"
+SESSION_TOOLS_CLEARED_KEY = "tools_cleared"
 
 # #121. THE PINNED MEMORY HEAD, and it is the same kind of fact as the two
 # above: something about THIS CHAT rather than about this run. Absent means
@@ -1739,7 +1740,8 @@ def forget_session(path: str | None = None) -> bool:
 def save_session(conversation: "Conversation", base_url: str, context_tokens: int,
                  path: str | None = None, with_kv: bool = True,
                  pretty: bool = False, model: str | None = None,
-                 reasoning: str | None = None) -> str | None:
+                 reasoning: str | None = None,
+                 tools_cleared: int = 0) -> str | None:
     """Write the session so the next start does not pay for it again.
 
     TWO HALVES, AND NEITHER IS ENOUGH ALONE. The server holds the KV cache; the
@@ -1830,7 +1832,16 @@ def save_session(conversation: "Conversation", base_url: str, context_tokens: in
                    # before this build reads as 0.0 -- which is true of it.
                    **({SESSION_REVIEWED_KEY: conversation.reviewed}
                       if conversation.reviewed else {}),
-                   **({SESSION_REASONING_KEY: reasoning} if reasoning else {})},
+                   **({SESSION_REASONING_KEY: reasoning} if reasoning else {}),
+                   # #131: HOW MANY TOOL ROWS THE USER HAS ALREADY DISMISSED.
+                   # The conversation itself is untouched -- the model still has
+                   # every call it made -- this is a VIEW fact: a reopened chat
+                   # replays its tool rows, so without a watermark a list
+                   # somebody emptied comes back at the next start. Absent means
+                   # nothing was ever cleared, which is true of every file
+                   # written before this build.
+                   **({SESSION_TOOLS_CLEARED_KEY: tools_cleared}
+                      if tools_cleared else {})},
                   fh, indent=1 if pretty else None)
 
     if saved_kv:
@@ -1842,6 +1853,21 @@ def save_session(conversation: "Conversation", base_url: str, context_tokens: in
            "messages only: the server runs without --slot-save-path, so the next"
            " start pays a prefill")
     return f"session saved -- {len(conversation)} messages ({why})"
+
+
+def session_tools_cleared(path: str | None = None) -> int:
+    """How many tool rows this chat has already had dismissed.
+
+    A COUNT AND NOT A FLAG, so that clearing means "everything up to here" and a
+    call made afterwards still shows. robin, 2026-08-22: what was deleted stays
+    deleted, unless something new happened.
+    """
+    try:
+        with open(path or SESSION_FILE, encoding="utf-8") as fh:
+            value = json.load(fh).get(SESSION_TOOLS_CLEARED_KEY)
+    except (OSError, ValueError, AttributeError):
+        return 0
+    return value if isinstance(value, int) and value > 0 else 0
 
 
 def load_session(base_url: str, system: str | None = None,
@@ -3793,8 +3819,8 @@ Write it for yourself in three months, having forgotten everything.
 ## Naming
 
 The name IS the directory: lower case, digits, hyphens, 3 to 50 characters. Name
-the JOB, not the topic -- `messreihe-fahren` beats `messungen`, because the first
-one tells you when you need it.
+the JOB, not the topic -- `run-a-measurement-series` beats `measurements`,
+because the first one tells you when you need it.
 
 ## Keeping them
 
@@ -6449,7 +6475,7 @@ def mcp_add_line(line: str) -> "tuple[str | None, dict | None, str | None]":
     THE NAME COMES BACK, and that is not decoration. Without it the caller has
     to guess which of the servers it is now looking at is the one it just added
     -- and "the last one" is wrong the moment the list is sorted: adding
-    `filesystem` beside `pontifex` confirmed *pontifex*, on screen, on
+    a second server beside the first confirmed the WRONG one, on screen, on
     2026-08-22.
     """
     argv = [a for a in str(line or "").split() if a]

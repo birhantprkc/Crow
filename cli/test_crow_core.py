@@ -59,7 +59,7 @@ import crow_core   # noqa: E402
 # it finds to TOOLS, TOOL_IMPL and TOOL_CLASS. Every case that enumerates the
 # tool table therefore answered differently on a machine with an MCP server than
 # on one without -- found on 2026-08-22, when `ReleaseLevelTests` went red
-# against a real pontifex install and nothing in this file had changed.
+# against a real MCP install and nothing in this file had changed.
 #
 # A PATH WHOSE PARENT DOES NOT EXIST, not a temp file that might: the reader
 # treats "no file" as the empty configuration, and that is the state the twelve
@@ -4561,8 +4561,8 @@ class TheChecklistTests(unittest.TestCase):
         """NEGATIVE for a basename-only rule, and it is the normal case for a
         Node server: dist/index.js names nothing, the directory above it does."""
         self.assertEqual(
-            crow_core.mcp_name_from("node C:/Users/robin/dev/pontifex/dist/index.js".split()),
-            "pontifex")
+            crow_core.mcp_name_from("node C:/dev/notekeeper/dist/index.js".split()),
+            "notekeeper")
 
     # ---- one command, both surfaces
 
@@ -4609,7 +4609,7 @@ class TheChecklistTests(unittest.TestCase):
 
     def test_it_confirms_the_server_that_was_added_not_the_last_one(self):
         """FOUND ON SCREEN, 2026-08-22: adding `server-filesystem` next to a
-        configured `pontifex` answered "pontifex installed". The list is sorted,
+        a configured second server answered with the WRONG name. The list is sorted,
         so "the last one" is whichever name comes last in the alphabet."""
         crow_core.mcp_add_server("zeta", self._block())
         said = crow_core.mcp_command(

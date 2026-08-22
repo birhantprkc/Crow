@@ -63,7 +63,7 @@ import crow_gui        # noqa: E402
 # it finds to TOOLS, TOOL_IMPL and TOOL_CLASS. Every case that enumerates the
 # tool table therefore answered differently on a machine with an MCP server than
 # on one without -- found on 2026-08-22, when `ReleaseLevelTests` went red
-# against a real pontifex install and nothing in this file had changed.
+# against a real MCP install and nothing in this file had changed.
 #
 # A PATH WHOSE PARENT DOES NOT EXIST, not a temp file that might: the reader
 # treats "no file" as the empty configuration, and that is the state the twelve
@@ -4348,7 +4348,7 @@ class TheMcpSheetTests(ApiCase):
         self.assertIn("Math.max(0", held)
 
     def test_a_server_folds_away(self):
-        """pontifex alone is 13 tools and already outruns the sheet. Twenty
+        """One ordinary server is a dozen tools and already outruns the sheet. Twenty
         servers unfolded is a scroll nobody finishes."""
         CLOSE = chr(125)
         shut = self.css[self.css.index(".mcptools{"):]
@@ -4443,6 +4443,250 @@ class TheMcpSheetTests(ApiCase):
         self.assertIn("mcp_add_line", source)
         said = self.api().mcp_add("")
         self.assertIn("command line", said)
+
+
+class ToolCallsLeaveTheReadingColumnTests(unittest.TestCase):
+    """#131. A 24-round turn put 24 tool rows between the question and the
+    answer, and the answer is what a person came back for.
+
+    THE PAGE IS NOT EXECUTED BY THIS SUITE, so these hold the drawing against
+    the markup and the stylesheet -- the same way the rail's and the memory
+    tile's structure is held. What they cannot see is what it looks like.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+
+    def _rule(self, selector: str) -> str:
+        found = self.css[self.css.index(selector):]
+        return found[:found.index(chr(125))]
+
+    def test_a_tool_row_is_appended_to_the_tile_and_not_to_the_turn(self):
+        js = self.source[self.source.index("  tool(name,args){"):
+                         self.source.index("  toolsCount(){")]
+        self.assertIn('$("#tclist")', js)
+        self.assertNotIn("this.col.insertBefore", js)
+
+    def test_the_tile_is_in_the_page_before_anything_is_called(self):
+        """"Immer da, auch im leeren Chat" -- a tile that appears with the first
+        call is one nobody has learned to look at."""
+        self.assertIn('id="toolcalls"', self.source)
+        self.assertIn("crow.toolsCount();", self.source)
+        js = self.source[self.source.index("  toolsCount(){"):
+                         self.source.index("  toolsToggle(){")]
+        self.assertIn("Nothing called yet.", js)
+
+    def test_it_opens_and_shuts_on_the_plus(self):
+        self.assertIn("display:none", self._rule("#toolcalls.shut .tcbody{"))
+        js = self.source[self.source.index("  toolsToggle(){"):
+                         self.source.index("  toolsClear(e){")]
+        self.assertIn('classList.toggle("shut")', js)
+        # THE SIGN FOLLOWS THE STATE. A plus on an open tile is a control that
+        # lies about what pressing it will do.
+        self.assertIn('shut ? "+"', js)
+
+    def test_open_it_is_as_wide_as_its_widest_row(self):
+        """A tool line is a path plus arguments. A fixed width would ellipsis
+        away the half that says which file, which is the half worth reading."""
+        self.assertIn("width:max-content", self._rule("#toolcalls{"))
+        self.assertIn("overflow:visible", self._rule("#toolcalls .tool .arg{"))
+
+    def test_it_wears_the_bubble_of_whichever_skin_is_on(self):
+        """robin, 2026-08-22. NOT a literal that matches today's dark bubble --
+        the same TOKENS, so the tile follows the skin that is on rather than the
+        one it was picked in. Both are defined once per palette."""
+        tile, bubble = self._rule("#toolcalls{"), self._rule(".you .txt{")
+        import re as _re
+        for prop in ("background", "border"):
+            want = _re.search(prop + r"[^;]*var\((--[a-z-]+)\)", bubble)
+            self.assertIsNotNone(want, prop)
+            self.assertIn("var(%s)" % want.group(1), tile, prop)
+            self.assertEqual(self.css.count(want.group(1) + ":"), 3,
+                             "%s is not in all three palettes" % want.group(1))
+        self.assertFalse(_re.findall(r"#[0-9a-fA-F]{3,6}", tile),
+                         "the tile names a colour of its own")
+
+    def test_it_sits_clear_of_the_edge(self):
+        """It was 14 and 18 px off the corner and read as stuck to it."""
+        import re as _re
+        tile = self._rule("#toolcalls{")
+        top = int(_re.search(r"top:(\d+)px", tile).group(1))
+        right = int(_re.search(r"right:(\d+)px", tile).group(1))
+        self.assertGreaterEqual(top, 24)
+        self.assertGreaterEqual(right, 30)
+
+    def test_clearing_does_not_also_fold_the_tile_away(self):
+        """NEGATIVE, and the trap the memory tile already hit: the button sits
+        inside the head, so without catching the click it would bubble up to the
+        fold and hide the list it had just emptied."""
+        js = self.source[self.source.index("  toolsClear(e){"):
+                         self.source.index("  toolsReset(){")]
+        self.assertIn("stopPropagation()", js)
+        self.assertIn('$("#tclist").textContent=""', js)
+
+    def test_a_new_chat_empties_it(self):
+        """The tile belongs to the conversation, not to the window."""
+        drawn = self.source[self.source.index('case "clear":'):]
+        self.assertIn("this.toolsReset()", drawn[:drawn.index("break;")])
+
+
+class TheUserBubbleTests(unittest.TestCase):
+    """#131. robin, 2026-08-22: the label goes, and the bubble has to break."""
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+
+    def test_the_label_is_gone_from_the_markup_and_the_stylesheet(self):
+        js = self.source[self.source.index("  user(text){"):
+                         self.source.index("  start(){")]
+        self.assertNotIn("you&gt;", js)
+        self.assertNotIn(".you .m{", self.css, "a rule with no wearer is left")
+
+    def test_the_bubble_breaks_before_it_fills_the_column(self):
+        """A bubble that runs the full width is a slab, and nothing about it
+        reads as one side of a conversation."""
+        rule = self.css[self.css.index(".you .txt{"):]
+        rule = rule[:rule.index(chr(125))]
+        self.assertIn("max-width:75%", rule)
+
+    def test_the_model_keeps_its_own_column(self):
+        """NEGATIVE: the cap is the user's line only. Narrowing the answer would
+        cost the reader a quarter of every page of it."""
+        rule = self.css[self.css.index(".as{"):]
+        rule = rule[:rule.index(chr(125))]
+        self.assertNotIn("max-width", rule)
+        say = self.css[self.css.index(".say{"):]
+        self.assertNotIn("max-width", say[:say.index(chr(125))])
+
+
+class TheTraceFoldsFinishedRoundsTests(unittest.TestCase):
+    """#131, variant A. `reply_started` fires once per ROUND, so a 24-round turn
+    drew 24 blocks of thoughts and running commentary -- and the answer, which is
+    what somebody came back for, was below the fold.
+
+    THE LIVE ROUND IS NOT FOLDED, and that is the half that makes it usable: the
+    interim text is the only sign of life a long turn has, so hiding it too
+    would leave a blank screen for minutes.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+
+    def _js(self, start: str, end: str) -> str:
+        return self.source[self.source.index(start):self.source.index(end)]
+
+    def test_a_new_round_folds_the_one_before_it(self):
+        """The only signal there is: nothing tells the page a round was the LAST
+        one, so the last round is the one nobody folded."""
+        start = self._js("  start(){", "  say_(")  if False else self._js(
+            "  start(){", "  thinkOpen(")
+        self.assertIn("this.fold()", start)
+        self.assertIn("this.round=t", start)
+
+    def test_the_running_round_stays_where_it_is(self):
+        """NEGATIVE, and it is the whole difference between variant A and B: only
+        `fold` moves anything, and it moves `this.round` -- which `start` has
+        just replaced with the new one."""
+        fold = self._js("  fold(){", "  start(){")
+        self.assertIn("const done=this.round; this.round=null;", fold)
+        self.assertIn('.tb").appendChild(done)', fold)
+
+    def test_an_empty_round_is_dropped_rather_than_counted(self):
+        """A round that produced nothing but a tool call has no text and no
+        thought left in the column -- the rows went to the tile. Counting it
+        would make `Trace 24 rounds` out of a turn with four things in it."""
+        fold = self._js("  fold(){", "  start(){")
+        self.assertIn("done.remove()", fold)
+
+    def test_it_says_how_many_rounds_it_holds(self):
+        fold = self._js("  fold(){", "  start(){")
+        self.assertIn('this.traceN===1 ? " round" : " rounds"', fold)
+
+    def test_a_new_user_line_starts_a_new_trace(self):
+        """One trace per turn. Without this the second question's rounds would
+        pile into the first question's block."""
+        user = self._js("  user(text){", "  fold(){")
+        self.assertIn("this.endTrace()", user)
+        drawn = self.source[self.source.index('case "clear":'):]
+        self.assertIn("this.endTrace()", drawn[:drawn.index("break;")])
+
+    def test_folded_it_costs_one_line(self):
+        CLOSE = chr(125)
+        body = self.css[self.css.index("details.trace .tb{"):]
+        self.assertIn("border-left", body[:body.index(CLOSE)])
+        summary = self.css[self.css.index("details.trace>summary{"):]
+        self.assertIn("inline-flex", summary[:summary.index(CLOSE)])
+
+
+class ADismissedToolRowStaysDismissedTests(ApiCase):
+    """#131. robin, after rebooting the window: the calls he had deleted were
+    back. A reopened chat replays its tool rows, and clearing had only emptied
+    the page.
+
+    THE CONVERSATION IS NOT TOUCHED. The model keeps every call it made; what is
+    remembered is a VIEW fact -- how far the user has dismissed.
+    """
+
+    def test_the_watermark_is_a_count_of_what_the_conversation_holds(self):
+        """COUNTED FROM THE CONVERSATION, not from what the page was showing:
+        clearing twice would otherwise set it to the SECOND batch and bring the
+        first one back."""
+        api = self.api()
+        api._conversation.append("user", "go")
+        api._conversation.append(
+            "assistant", "",
+            tool_calls=[{"id": "a", "name": "read_file", "arguments": "{}"},
+                        {"id": "b", "name": "list_dir", "arguments": "{}"}])
+        self.assertEqual(api.tools_cleared(), 2)
+        self.assertEqual(api._tools_cleared, 2)
+
+    def test_a_replay_draws_only_what_came_after_it(self):
+        api = self.api()
+        api._tools_cleared = 1
+        messages = [{"role": "user", "content": "go"},
+                    {"role": "assistant", "content": "",
+                     "tool_calls": [{"function": {"name": "read_file", "arguments": "{}"}},
+                                    {"function": {"name": "list_dir", "arguments": "{}"}}]}]
+        api._replay(messages)
+        rows = [m for m in self.drained(api) if m.get("k") == "tool"]
+        self.assertEqual([r["name"] for r in rows], ["list_dir"])
+
+    def test_without_a_watermark_everything_is_drawn(self):
+        """NEGATIVE: the skip may only ever hide what somebody dismissed."""
+        api = self.api()
+        messages = [{"role": "assistant", "content": "",
+                     "tool_calls": [{"function": {"name": "read_file", "arguments": "{}"}},
+                                    {"function": {"name": "list_dir", "arguments": "{}"}}]}]
+        api._replay(messages)
+        rows = [m for m in self.drained(api) if m.get("k") == "tool"]
+        self.assertEqual([r["name"] for r in rows], ["read_file", "list_dir"])
+
+    def test_it_survives_the_file(self):
+        """Written and READ BACK. A watermark only ever written is one nobody
+        has proved comes back -- and coming back is its entire job."""
+        path = os.path.join(self.dir, "chat.json")
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "go")
+        talk.append("assistant", "done")
+        crow_core.save_session(talk, "http://127.0.0.1:1/v1", 10, path=path,
+                               with_kv=False, tools_cleared=3)
+        self.assertEqual(crow_core.session_tools_cleared(path), 3)
+
+    def test_a_file_that_never_cleared_carries_no_key(self):
+        """NEGATIVE, and the three-state rule this file already keeps: absent is
+        its own value, and every session written before this build is absent."""
+        path = os.path.join(self.dir, "chat.json")
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "go")
+        talk.append("assistant", "done")
+        crow_core.save_session(talk, "http://127.0.0.1:1/v1", 10, path=path,
+                               with_kv=False)
+        with open(path, encoding="utf-8") as fh:
+            self.assertNotIn(crow_core.SESSION_TOOLS_CLEARED_KEY, json.load(fh))
+        self.assertEqual(crow_core.session_tools_cleared(path), 0)
 
 
 if __name__ == "__main__":

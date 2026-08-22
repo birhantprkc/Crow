@@ -263,8 +263,8 @@ Procedures the model keeps. Memory is what is **true**; a skill is what to **do*
 ```
 %LOCALAPPDATA%\Crow\skills\<name>\SKILL.md
 ---
-name: llama-server-starten
-description: Wenn Crow ein lokales LLM braucht (Port 8082) — exakte Flags, Wartesignal, Bind-Falle.
+name: start-llama-server
+description: When Crow needs a local LLM (port 8082) — exact flags, the wait signal, the bind trap.
 enabled: true
 ---
 1. …
@@ -285,16 +285,16 @@ Crow ships with `skill-creator` and reads it before it writes. Seeded once, on t
 has no skills directory; deleted, it stays deleted.
 
 ```
-Lies zuerst deinen Skill "skill-creator" und halte dich daran.
-Speichere danach als Skill, wie man <Verfahren> ausführt: <Schritte, Flags wörtlich, die Falle>.
-Nenne mir zum Schluss Name und Beschreibung, die du gespeichert hast.
+Read your skill "skill-creator" first and follow it.
+Then save, as a skill, how to <do the thing>: <steps, flags verbatim, the trap>.
+Tell me at the end which name and description you saved.
 ```
 
 | what `skill-creator` enforces | |
 |---|---|
 | Save only what worked **here** | not a plan, not general knowledge |
 | The description says **when** | it is all the prompt carries; a description of itself is never chosen |
-| Name the job, not the topic | `messreihe-fahren`, not `messungen` |
+| Name the job, not the topic | `run-a-measurement-series`, not `measurements` |
 | Body | numbered steps, flags verbatim, what each step produces, the one trap that was hit |
 | Rewrite under the same name | `save` replaces and keeps the on/off switch |
 | Saying nothing | the normal outcome |
@@ -323,11 +323,12 @@ session_search(query, limit=8)
 
 ```
 /mcp add npx -y @modelcontextprotocol/server-filesystem C:\dev\Crow
-/mcp add node C:\dev\pontifex\dist\index.js
+/mcp add node C:\dev
+otekeeper\dist\index.js
 /mcp add uvx mcp-server-fetch
 ```
 
-The name comes out of the line: `filesystem`, `pontifex`, `fetch`.
+The name comes out of the line: `filesystem`, `notekeeper`, `fetch`.
 
 | | |
 |---|---|
@@ -391,7 +392,6 @@ strictest of the three.
 |---|---|---|
 | built-in | 12 | 7,758 |
 | `@modelcontextprotocol/server-filesystem` | 14 | 8,217 |
-| `node pontifex/dist/index.js` | 14 | 7,131 |
 | `mcp-server-fetch` | 1 | 1,137 |
 
 Measured 2026-08-22. The tool list is rendered into the head of the prompt, so changing it moves

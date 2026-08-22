@@ -808,8 +808,9 @@ body[data-rail="shut"] #rail{width:0;overflow:hidden}
    the same 900 #box is held to, which is what makes the two flush. */
 .turn{padding:0 30px;max-width:960px;margin-inline:auto}
 .turn+.turn{margin-top:26px}
-.you{display:grid;grid-template-columns:38px 1fr;gap:2px}
-.you .m{color:var(--accent);font-weight:700;font-size:12.5px;padding-top:1px}
+/* #131. NO LABEL. The bubble says whose the line is; a three-letter prefix in
+   front of it says it a second time, and the model's own turns never had one. */
+.you{display:grid;grid-template-columns:1fr;gap:2px}
 /* #130. ONE BUBBLE PER MESSAGE. What the user said and what the model said
    used to differ only by the colour of a three-letter label, and in a long
    scroll that is not a boundary anyone sees. The bubble is drawn out of the
@@ -819,10 +820,27 @@ body[data-rail="shut"] #rail{width:0;overflow:hidden}
    fills the grid column and a two-word message is a full-width slab. */
 .you .txt{color:var(--text);white-space:pre-wrap;background:var(--raised);
   border:1px solid var(--line);border-radius:12px;padding:9px 13px;
-  justify-self:start;max-width:100%;box-sizing:border-box}
+  justify-self:start;max-width:75%;box-sizing:border-box}
 .as{display:grid;grid-template-columns:38px 1fr;gap:2px}
 .as .m{color:var(--bevel);padding-top:1px}
 .col{min-width:0}
+
+/* #131. THE TRACE. Same furniture as a reasoning block, one level up: it holds
+   the ROUNDS, each of which holds its own thoughts. Folded it is one line, so a
+   turn of any length costs the reader one line before the answer. */
+details.trace{margin:0 0 14px}
+details.trace>summary{list-style:none;cursor:pointer;display:inline-flex;
+  align-items:center;gap:8px;font-size:11.5px;color:var(--dimmer);padding:2px 0}
+details.trace>summary::-webkit-details-marker{display:none}
+details.trace>summary:hover{color:var(--dim)}
+details.trace[open]>summary .caret{transform:rotate(90deg)}
+details.trace .tl{color:var(--text-soft)}
+details.trace .tn{font-variant-numeric:tabular-nums}
+details.trace .tb{margin-top:8px;padding-left:11px;
+  border-left:2px solid var(--line)}
+/* The rounds inside carry their own turn padding, and a second column width
+   inside a column is an indent nobody asked for. */
+details.trace .tb .turn{padding:0;max-width:none;margin-inline:0}
 
 details.think{margin:0 0 10px}
 details.think>summary{list-style:none;cursor:pointer;display:inline-flex;
@@ -837,6 +855,39 @@ details.think[open] .caret{transform:rotate(90deg)}
   color:var(--think);font-size:12px;line-height:1.65;background:var(--think-bg);
   border-radius:0 6px 6px 0;white-space:pre-wrap}
 .say{color:var(--model);line-height:1.62;white-space:pre-wrap}
+/* #131. THE TOOL-CALL TILE. Collapsed it is a title, a count and a plus; open
+   it is every call this chat has made. It sizes to the WIDEST row it holds --
+   `width:max-content` -- because a tool line is a path plus arguments and a
+   fixed width would ellipsis away the half that says which file.
+   ABSOLUTE AND NOT STICKY: sticky inside `#flow` scrolls with the first turn
+   until it hits the top, which is a tile that moves for no reason. */
+/* THE SAME GROUND AS THE USER'S BUBBLE, and by the same tokens rather than by
+   a matching literal: `--raised` and `--line` are defined once per palette, so
+   the tile follows the skin that is on instead of following one that was. */
+#toolcalls{position:absolute;top:28px;right:36px;z-index:2;width:max-content;
+  max-width:min(620px,44vw);border:1px solid var(--line);border-radius:12px;
+  background:var(--raised);box-shadow:0 8px 24px var(--shadow);
+  font-size:11.5px;overflow:hidden}
+#toolcalls .tchd{display:flex;align-items:center;gap:9px;padding:7px 12px;
+  cursor:pointer;user-select:none}
+#toolcalls .tct{font-weight:600;color:var(--text-soft)}
+#toolcalls .tcn{color:var(--dimmer);font-variant-numeric:tabular-nums}
+#toolcalls .tcx{margin-left:auto;color:var(--dimmer);font-size:15px;
+  line-height:1;width:11px;text-align:center}
+#toolcalls.shut .tcbody{display:none}
+#toolcalls .tcbody{border-top:1px solid var(--line);padding:8px;
+  max-height:56vh;overflow:auto}
+#toolcalls .tool{margin:0 0 6px}
+/* INSIDE THE TILE THE ARGUMENTS ARE THE POINT, so they are not clipped -- the
+   tile grew to fit them. In the flow they were one line of a column that had
+   other things to show. */
+#toolcalls .tool .arg{overflow:visible;text-overflow:clip}
+#toolcalls .tcclear{font:inherit;font-size:10.5px;cursor:pointer;
+  border-radius:5px;padding:2px 9px;background:transparent;
+  border:1px solid var(--line);color:var(--dimmer)}
+#toolcalls .tcclear:hover{border-color:var(--bevel);color:var(--text-hover)}
+#toolcalls .empty{margin:0;padding:2px 4px}
+
 .tool{margin:11px 0;border:1px solid var(--line);border-radius:8px;
   background:var(--panel);overflow:hidden}
 .tool .hd{display:flex;align-items:center;gap:9px;padding:6px 11px;
@@ -1042,8 +1093,8 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   .installbar{animation:none;
     background:color-mix(in srgb,var(--accent) 14%,transparent)}}
 
-/* #130. A SERVER IS ONE ROW UNTIL IT IS OPENED. pontifex alone is 13 tools and
-   already outruns the sheet; twenty servers would be a scroll nobody finishes.
+/* #130. A SERVER IS ONE ROW UNTIL IT IS OPENED. One ordinary server is a dozen
+   tools and already outruns the sheet; twenty servers would be a scroll nobody finishes.
    The head stays, the tools fold. */
 .mcphead{cursor:pointer}
 .mcphead .caret{font-size:9px;color:var(--bevel);transition:transform .12s ease}
@@ -1444,6 +1495,22 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
          readout in the composer. The URL is not a choice at all: it is the one
          fact you look up when something is wrong, so it is the connected
          chip's title and costs no width until asked for. -->
+    <!-- #131. TOOL CALLS DO NOT BELONG IN THE READING COLUMN. A turn of 24
+         rounds put 24 rows between the question and the answer, and what a
+         person came back for was the answer. They are collected here instead:
+         one tile, per chat, always present so there is somewhere to look even
+         before the first call. ABSOLUTE, so it does not scroll away from the
+         reader who wants it. -->
+    <div id="toolcalls" class="shut">
+      <div class="tchd" onclick="crow.toolsToggle()">
+        <span class="tct">Tool-Calls</span><span class="tcn"></span>
+        <span class="tcx">+</span>
+      </div>
+      <div class="tcbody">
+        <div id="tclist"></div>
+        <button class="tcclear" onclick="crow.toolsClear(event)">clear</button>
+      </div>
+    </div>
     <div id="flow"></div>
     <div id="composer">
       <div id="pendbar" hidden onclick="crow.pendToggle(event)"></div>
@@ -1506,6 +1573,11 @@ const crow = {
     const d=document.createElement("div"); d.className="turn "+cls;
     flow.appendChild(d); return d; },
 
+  // WHAT `fold` WILL MOVE NEXT TIME. Set by `start`, cleared by anything that
+  // ends the trace: a new user line, a reset, a reopened chat.
+  round: null, trace: null, traceN: 0,
+  endTrace(){ this.round=null; this.trace=null; this.traceN=0; },
+
   // DRAWN, NOT RUN: the line carries the user's login name, which is a string
   // off the machine. textContent, like every other name in this file.
   hello(text){ const g=$("#hello"); if(g) g.remove();
@@ -1519,12 +1591,44 @@ const crow = {
     flow.appendChild(d); },
 
   user(text){
+    this.endTrace();
     const t=this.turn(""); t.innerHTML=
-      '<div class="you"><span class="m">you&gt;</span><div class="txt"></div></div>';
+      '<div class="you"><div class="txt"></div></div>';
     t.querySelector(".txt").textContent=text; this.bottom();
   },
 
+  // #131. VARIANT A (robin, 2026-08-22). A 24-round turn put 24 rounds of
+  // thoughts and running commentary between the question and the answer, and
+  // the answer was below the fold when it finally arrived.
+  //
+  // EVERY FINISHED ROUND FOLDS, THE RUNNING ONE DOES NOT. Hiding the live round
+  // too would leave a blank screen for minutes -- the interim text is the only
+  // sign of life a long turn has. So what is on screen is one `Trace` line plus
+  // whatever is happening right now, and the answer ends up at the top of it.
+  //
+  // A NEW ROUND IS WHAT FOLDS THE OLD ONE, which is the only signal there is:
+  // nothing tells this page that a round was the LAST one until the turn ends,
+  // so the last round is simply the one nobody folded.
+  fold(){
+    if(!this.round || !this.round.isConnected) { this.round=null; return; }
+    const done=this.round; this.round=null;
+    if(!done.textContent.trim() && !done.querySelector("details")){
+      done.remove(); return; }
+    if(!this.trace || !this.trace.isConnected){
+      const t=this.turn("");
+      const d=document.createElement("details"); d.className="trace";
+      d.innerHTML='<summary><span class="caret"></span>'
+        + '<span class="tl">Trace</span><span class="tn"></span></summary>'
+        + '<div class="tb"></div>';
+      d.querySelector(".caret").textContent=String.fromCharCode(9654);
+      t.appendChild(d); this.trace=d; this.traceN=0; }
+    this.trace.querySelector(".tb").appendChild(done);
+    this.traceN++;
+    this.trace.querySelector(".tn").textContent =
+      this.traceN + (this.traceN===1 ? " round" : " rounds"); },
+
   start(){
+    this.fold();
     const t=this.turn("");
     t.innerHTML='<div class="as"><span class="m">&#9679;</span><div class="col"></div></div>';
     this.col=t.querySelector(".col"); this.say=null; this.think=null;
@@ -1534,6 +1638,7 @@ const crow = {
     // left blinking in a finished answer. Every existing one goes before a new
     // one is made, which also covers the round that ended without an idle.
     document.querySelectorAll(".cursor").forEach(c=>c.remove());
+    this.round=t;
     this.cursor=document.createElement("span"); this.cursor.className="cursor";
     this.col.appendChild(this.cursor); this.bottom();
   },
@@ -1594,8 +1699,45 @@ const crow = {
       this.execute ? "ran" : "shown, not run";
     d.querySelector(".name").textContent=name;
     d.querySelector(".arg").textContent=args||"";
-    this.col.insertBefore(d,this.cursor); this.bottom();
+    // #131. INTO THE TILE, NOT INTO THE COLUMN. A 24-round turn used to put 24
+    // of these between the question and the answer.
+    const list=$("#tclist");
+    const empty=list.querySelector(".empty"); if(empty) empty.remove();
+    list.appendChild(d); this.toolsCount();
+    this.tail();
   },
+
+  toolsCount(){
+    const n=$("#tclist").querySelectorAll(".tool").length;
+    $("#toolcalls .tcn").textContent = n ? String(n) : "";
+    if(!n && !$("#tclist").querySelector(".empty")){
+      const p=document.createElement("p");
+      p.className="empty"; p.textContent="Nothing called yet.";
+      $("#tclist").appendChild(p); } },
+
+  toolsToggle(){
+    const box=$("#toolcalls"), shut=box.classList.toggle("shut");
+    $("#toolcalls .tcx").textContent = shut ? "+" : "−";
+    if(!shut) this.toolsCount(); },
+
+  // THE CLICK IS CAUGHT, or it bubbles to the head and folds the tile away --
+  // the trap the memory tile hit on 2026-08-22, where `discard` would have
+  // hidden the very thing it discarded.
+  toolsClear(e){
+    if(e) e.stopPropagation();
+    $("#tclist").textContent=""; this.toolsCount();
+    // AND IT STAYS CLEARED ACROSS A RESTART. The chat replays its tool rows on
+    // open, so without a watermark on the Python side a list somebody emptied
+    // comes back at the next start -- found by robin after rebooting the window.
+    pywebview.api.tools_cleared(); },
+
+  // A NEW CHAT IS A NEW LIST. The tile belongs to the conversation, not to the
+  // window, so switching or resetting empties it with everything else.
+  toolsReset(){
+    $("#tclist").textContent="";
+    $("#toolcalls").classList.add("shut");
+    $("#toolcalls .tcx").textContent="+";
+    this.toolsCount(); },
 
   cost(line,share){
     if(this.cursor){ this.cursor.remove(); this.cursor=null; }
@@ -2592,7 +2734,7 @@ const crow = {
       // about notes that no longer exist. One place, because `clear` is already
       // the one event that means "this conversation is gone".
       case "clear": flow.innerHTML=""; this.cost("",null);
-        this.pendState([]); break;
+        this.pendState([]); this.toolsReset(); this.endTrace(); break;
       case "hello": this.hello(e.t); break;
       // #94. /thoughts in the terminal shows or hides the reasoning; here it is
       // always rendered and folded, so the same question is open-or-closed.
@@ -2741,6 +2883,10 @@ window.addEventListener("contextmenu",e=>{
   if(e.target.closest("#sessions")){ crow.railMenu(e); return; }
   if(!e.target.closest(".sess")) e.preventDefault(); });
 
+// #131. THE TILE IS THERE BEFORE THE FIRST CALL IS, because "always present"
+// is what makes it a place to look rather than something that appears once and
+// is missed.
+crow.toolsCount();
 window.addEventListener("pywebviewready",()=>{ pywebview.api.ready(); input.focus(); });
 </script></body></html>
 """
@@ -3184,6 +3330,9 @@ class Api:
         # question. Empty until _probe has run -- #113 treats that as "unknown",
         # which drops a cache rather than restoring the wrong one.
         self._model = ""
+        # #131. HOW MANY TOOL ROWS THIS CHAT HAS HAD DISMISSED. A view fact, not
+        # a conversation fact: the model keeps every call it made.
+        self._tools_cleared = 0
         # #116. The chat's thinking level, and `None` is a value: "never chosen",
         # which sends no `reasoning_effort` at all and keeps the prompt
         # byte-identical to a window that predates the slider. Bound from the
@@ -3245,6 +3394,20 @@ class Api:
                 return
 
     # -- inward ------------------------------------------------------------
+
+    def tools_cleared(self) -> int:
+        """The page emptied the tool tile. Remember how far, and say so.
+
+        COUNTED HERE AND NOT IN THE PAGE, because the page only holds what it
+        was shown -- clearing twice would otherwise set the watermark to the
+        SECOND batch and bring the first one back. The conversation is the only
+        place that knows how many calls there have been.
+        """
+        self._tools_cleared = sum(
+            len(m.get("tool_calls") or [])
+            for m in self._conversation.payload()
+            if m.get("role") == "assistant")
+        return self._tools_cleared
 
     def ready(self) -> None:
         self.push({"k": "meta", "version": client_version() or "",
@@ -3833,6 +3996,7 @@ class Api:
             self._reload_rail()
             return
         messages, tokens, kv = restored
+        self._tools_cleared = crow_core.session_tools_cleared()
         self._conversation.restore(messages)
         self._context_tokens, self._promised_warm = tokens, kv
         # An empty restored chat is still an empty chat; `turn()` takes the line
@@ -3976,6 +4140,7 @@ class Api:
             return "the context does not change mid-turn"
         self._conversation.reset()
         crow_core.forget_approvals()   # #88: the chat goes, its releases go
+        self._tools_cleared = 0        # #131: and so do the dismissed rows
         self._context_tokens = 0
         self._promised_warm = False
         # AND IT LETS GO OF THE FILE THE CHAT CAME FROM. A conversation opened
@@ -4060,6 +4225,7 @@ class Api:
         # stays in the rail with everything in it; only the context goes.
         self._conversation.reset()
         crow_core.forget_approvals()
+        self._tools_cleared = 0        # #131: an empty chat has dismissed nothing
         self._context_tokens = 0
         self._promised_warm = False
         self._args.base_url = url
@@ -4362,7 +4528,8 @@ class Api:
         try:
             os.makedirs(folder, exist_ok=True)
             save_session(self._conversation, self._args.base_url,
-                         self._context_tokens, path=path, with_kv=False)
+                         self._context_tokens, path=path, with_kv=False,
+                         tools_cleared=self._tools_cleared)
             # #101: FOR A NAMED EMPTY CHAT THE CORE WROTE NOTHING, and the
             # read-back below would then fail and report the chat as unsaveable.
             # `_stamp` creates it from the metadata -- the same door #100 opened
@@ -4507,7 +4674,8 @@ class Api:
         try:
             save_session(self._conversation, self._args.base_url,
                          self._context_tokens, with_kv=with_kv,
-                         model=self._model, reasoning=self._reasoning)
+                         model=self._model, reasoning=self._reasoning,
+                         tools_cleared=self._tools_cleared)
         except Exception:                  # noqa: BLE001 - a turn survives it
             return
         self._stamp(SESSION_FILE, pointer=True)
@@ -4577,6 +4745,9 @@ class Api:
         self._adopt_chat_root(path)
         self._pin_memory(path)        # #121, and below the bind for that reason
         self._context_tokens, self._promised_warm = tokens, kv
+        # #131. THE WATERMARK BELONGS TO THE CHAT, so it is read from the chat's
+        # own file rather than carried over from the one just closed.
+        self._tools_cleared = crow_core.session_tools_cleared(path)
         self.push({"k": "clear"})     # the page no longer guesses; see crow.open
         self._hello()
         self._replay(messages)
@@ -4608,6 +4779,11 @@ class Api:
         One renderer for both paths means a reopened chat cannot drift from the
         one that was just typed.
         """
+        seen = 0
+        # #131. READ ONCE, AND OPTIONAL. A chat that never cleared anything has
+        # no watermark -- the normal state, and also what a bare replay harness
+        # hands in.
+        cleared = getattr(self, "_tools_cleared", 0)
         for message in messages:
             role = message.get("role")
             body = (message.get("content") or "")
@@ -4640,6 +4816,13 @@ class Api:
             # this method exists to prevent.
             rows = Turn(self.push)
             for call in calls:
+                # #131. A ROW THE USER DISMISSED STAYS DISMISSED. `seen` counts
+                # every call in the conversation, in order, and everything up to
+                # the watermark is drawn by nobody -- the message itself is
+                # untouched, so the model still has the call it made.
+                seen += 1
+                if seen <= cleared:
+                    continue
                 function = call.get("function") or {}
                 rows.tool_started(function.get("name") or "?",
                                   function.get("arguments") or "")
