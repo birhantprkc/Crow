@@ -5923,6 +5923,27 @@ MCP_ACCEPT = "application/json, text/event-stream"
 # every other line out of the deque that has to carry it.
 MCP_HTTP_SAID = 400
 
+# WHERE TOKENS LIVE, AND WHY NOT IN `mcp.json`. That file is read by
+# `mcp_view`, drawn by two surfaces, pasted into bug reports and edited by hand;
+# a refresh token in it is a credential with a rotation nobody performs. This
+# one is written by Crow alone, never read into a view, and dropped with the
+# server it belongs to.
+MCP_TOKEN_FILE = os.path.join(os.path.dirname(SESSION_DIR), "mcp_tokens.json")
+
+# Seconds for the discovery and token calls. They are not a turn -- nothing is
+# streaming and nobody is waiting on tokens per second -- so this is short.
+MCP_OAUTH_TIMEOUT = 20.0
+
+# How long the browser leg may take. It is a person reading a consent screen,
+# which is why it is minutes and not seconds, and why it runs at ADD time and
+# never inside a tool call.
+MCP_OAUTH_WAIT = 300.0
+
+# Refresh this many seconds before the token would expire. A token that is
+# valid when the request is built and stale when it arrives is the failure this
+# margin exists for.
+MCP_TOKEN_SKEW = 60.0
+
 # Seconds allowed for the `DELETE` that ends a session. It is a courtesy to the
 # server, it happens while a window is closing, and a client that waited on it
 # would hang on the way out for a message nobody reads.
@@ -5984,6 +6005,7 @@ class McpServer:
         self._lines = None
         self._stderr = None
         self._reinitialising = False
+        self._reauthorising = False
         # ONE CALLER AT A TIME ON ONE PIPE. The background review runs on its own
         # thread and can call a tool; two writers interleaving on one stdin would
         # hand each other's answers back.
@@ -6163,6 +6185,14 @@ class McpServer:
         far end decide.
         """
         sending = {"User-Agent": "Crow/%s (+%s)" % (CLIENT_VERSION or "dev", REPO_URL)}
+        # LAYER 1b: a token this client obtained itself, UNDER the block rather
+        # than over it. Somebody who typed an `Authorization` into `mcp.json`
+        # meant it, and a server that accepts it never issues the 401 that would
+        # have started an OAuth flow in the first place.
+        token = mcp_token_for(self.name)
+        if token.get("access_token"):
+            sending["Authorization"] = "%s %s" % (token.get("token_type") or "Bearer",
+                                                  token["access_token"])
         configured = self.block.get("headers")
         if isinstance(configured, dict):
             sending.update({str(k): str(v) for k, v in configured.items()})
@@ -6179,6 +6209,15 @@ class McpServer:
         return sending
 
     def _post(self, message: dict, timeout: float) -> "str | None":
+        # BEFORE THE HEADERS ARE BUILT, because a token that is valid when the
+        # request is assembled and stale when it lands is exactly the failure
+        # `MCP_TOKEN_SKEW` exists for. Costs a clock read when there is nothing
+        # to do, which is every call but one.
+        due = mcp_token_for(self.name).get("expires_at")
+        if due is not None and float(due) - time.time() < MCP_TOKEN_SKEW:
+            problem = mcp_refresh_token(self.name)
+            if problem:
+                return "the MCP server %r needs authorising again: %s" % (self.name, problem)
         request = urllib.request.Request(
             self.endpoint, data=json.dumps(message).encode("utf-8"),
             headers=self._headers(), method="POST")
@@ -6212,6 +6251,29 @@ class McpServer:
         except Exception:
             said = ""
         self._said("HTTP %s %s" % (exc.code, " ".join(said.split())))
+        # 401 IS A CREDENTIAL QUESTION, AND A CALL MAY ANSWER ONLY HALF OF IT.
+        # A stored refresh token costs a round trip and no human, so it is spent
+        # here; a browser leg is not, at any price. The challenge is put where
+        # the ADD path can find it, and the sentence names the command that
+        # opens the page while somebody is actually sitting there.
+        if exc.code == 401 and not self._reauthorising:
+            challenge = mcp_www_auth(exc.headers.get("WWW-Authenticate") or "")
+            _mcp_saw_401(self.name, challenge)
+            if mcp_token_for(self.name).get("refresh_token"):
+                self._reauthorising = True
+                try:
+                    problem = mcp_refresh_token(self.name)
+                    if problem:
+                        return "%s The refresh failed: %s" % (
+                            self._gone("answered HTTP 401"), problem)
+                    return self._post(message, timeout)
+                finally:
+                    self._reauthorising = False
+            # THE SERVER'S OWN WORDS SURVIVE THE ADVICE. A sentence that only
+            # said "run /mcp auth" would drop the one line separating a wrong
+            # token from a missing one, and the body is where that line is.
+            return "%s Run: /mcp auth %s" % (self._gone("answered HTTP 401"),
+                                             self.name)
         if exc.code == 404 and self.session and not self._reinitialising:
             self.session = None
             self.protocol = None
@@ -6502,6 +6564,28 @@ class McpServer:
         return None
 
 
+# WHAT A 401 LEFT BEHIND, by server name. Written where the challenge is seen
+# and POPPED where it is read, so a stale one from an earlier attempt can never
+# start a browser leg nobody asked for.
+#
+# WHY IT IS NOT RETURNED INSTEAD: the 401 is seen four layers below the add
+# path -- `_post` inside `_send` inside `request` inside `_handshake` -- and
+# every one of them answers with a problem STRING. Threading a second value up
+# through all four to serve one caller would change four signatures and the
+# suite that pins them.
+_MCP_CHALLENGE: "dict[str, dict]" = {}
+
+
+def _mcp_saw_401(name: str, challenge: dict) -> None:
+    with _MCP_LIVE_LOCK:
+        _MCP_CHALLENGE[name] = challenge
+
+
+def _mcp_take_401(name: str) -> "dict | None":
+    with _MCP_LIVE_LOCK:
+        return _MCP_CHALLENGE.pop(name, None)
+
+
 # Live processes, by server name. NOT a cache -- a cache may be dropped and
 # rebuilt at will, and each entry here is a child process that has to be ended.
 _MCP_LIVE: "dict[str, McpServer]" = {}
@@ -6603,6 +6687,528 @@ def _mcp_retire(doc: dict) -> None:
         retired = [_MCP_LIVE.pop(name) for name in stale]
     for server in retired:
         server.close()
+
+
+# ---------------------------------------------------------------- E5b -----
+# MCP AUTHORIZATION: OAuth 2.1, and the whole of it hangs on one decision.
+#
+# THE BROWSER LEG RUNS WHEN A SERVER IS ADDED, NEVER WHEN A TOOL IS CALLED.
+# That is the same sentence E2 and E3 are built on, one layer up: adding is when
+# the person is at the keyboard and expects to be asked, and a turn is when they
+# are not. A client that opened a consent page in round 14 of a 24-round turn
+# would stall the turn on a human who walked away -- and it would do it for a
+# token that expired quietly an hour ago. So a CALL may refresh silently, and a
+# call may fail with a sentence naming what to run. It may not ask.
+#
+# WHAT IS IMPLEMENTED, all of it required of a client by the specification:
+#   * RFC 9728 protected resource metadata, from `WWW-Authenticate` when the 401
+#     carries it and from the two well-known paths when it does not;
+#   * RFC 8414 authorization server metadata, tried in the documented order,
+#     with the issuer compared against the URL it was fetched from;
+#   * PKCE with S256, and a REFUSAL where the server does not advertise it --
+#     `code_challenge_methods_supported` absent means no PKCE, and no PKCE means
+#     an authorization code anybody who sees it can redeem;
+#   * RFC 7591 dynamic client registration, with a configured `client_id` as the
+#     way out where a server does not offer it;
+#   * RFC 8707 `resource`, on the authorization request AND the token request,
+#     so the token is bound to this server and cannot be replayed at another;
+#   * `state` on the way out and compared on the way back, and `iss` compared
+#     where the server returns it.
+
+
+def _oauth_open(url: str) -> bool:
+    """Hand the authorisation URL to the browser.
+
+    THE ONE STEP A SUITE CANNOT PERFORM, and it is a seam for exactly that
+    reason: a test replaces the PERSON here and nothing else. Everything below
+    -- the loopback listener, the redirect, the code, the exchange -- stays real
+    HTTP against a real server.
+    """
+    import webbrowser
+    try:
+        return bool(webbrowser.open(url))
+    except Exception:
+        return False
+
+
+def _oauth_pkce() -> "tuple[str, str]":
+    """A verifier and its S256 challenge. Never `plain`: the specification calls
+    S256 mandatory where the client can do it, and this one can."""
+    import base64
+    import hashlib
+    import secrets
+
+    def b64(raw: bytes) -> str:
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    verifier = b64(secrets.token_bytes(32))
+    return verifier, b64(hashlib.sha256(verifier.encode("ascii")).digest())
+
+
+def _oauth_state() -> str:
+    import base64
+    import secrets
+    return base64.urlsafe_b64encode(secrets.token_bytes(16)).decode("ascii").rstrip("=")
+
+
+def mcp_www_auth(header: str) -> dict:
+    """The parameters out of a `WWW-Authenticate` challenge.
+
+    QUOTED VALUES MAY CONTAIN COMMAS -- a `scope="files:read files:write"` is
+    one value and a URL is another, and splitting the header on commas first
+    cuts both in half. So the pairs are read with a scanner, not a split.
+    """
+    found = {}
+    for key, quoted, bare in re.findall(
+            r'([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(?:"([^"]*)"|([^\s,]+))',
+            str(header or "")):
+        found[key.lower()] = quoted if quoted else bare
+    return found
+
+
+def _oauth_loopback(url: str) -> bool:
+    """Is this an address a token may travel to without TLS?
+
+    The specification allows exactly two: `https`, or a loopback redirect. A
+    plain `http://` anywhere else is a token on the wire in clear text, and it
+    is refused rather than warned about.
+    """
+    parsed = urllib.parse.urlparse(str(url or ""))
+    return (parsed.scheme.lower() == "http"
+            and (parsed.hostname or "").lower() in ("127.0.0.1", "::1", "localhost"))
+
+
+def _oauth_safe(url: str) -> bool:
+    return urllib.parse.urlparse(str(url or "")).scheme.lower() == "https" or _oauth_loopback(url)
+
+
+def _oauth_canonical(endpoint: str) -> str:
+    """The `resource` value: this server's canonical URI.
+
+    Lowercase scheme and host, no fragment, and the path kept -- a host may
+    serve two MCP servers under two paths, and a token bound to the host alone
+    would be valid at both.
+    """
+    parsed = urllib.parse.urlparse(str(endpoint or ""))
+    path = parsed.path.rstrip("/")
+    return urllib.parse.urlunparse((parsed.scheme.lower(), (parsed.netloc or "").lower(),
+                                    path, "", "", ""))
+
+
+def _oauth_json(url: str, data=None, headers=None
+                ) -> "tuple[dict | None, str | None]":
+    """One JSON call in the authorisation flow, and every failure as a sentence.
+
+    THE CLIENT NAMES ITSELF HERE TOO. Measured 2026-08-22 on the MCP endpoint
+    itself: a network that refuses `Python-urllib` refuses it at every path, and
+    a discovery call that came back 403 while the tool call worked would be the
+    least readable failure in this file.
+    """
+    if not _oauth_safe(url):
+        return None, ("%s is not https and not loopback -- a token may not "
+                      "travel over it" % url)
+    sending = {"Accept": "application/json",
+               "User-Agent": "Crow/%s (+%s)" % (CLIENT_VERSION or "dev", REPO_URL)}
+    body = None
+    if data is not None:
+        if isinstance(data, dict) and headers is None:
+            body = urllib.parse.urlencode(data).encode("utf-8")
+            sending["Content-Type"] = "application/x-www-form-urlencoded"
+        else:
+            body = json.dumps(data).encode("utf-8")
+            sending["Content-Type"] = "application/json"
+    sending.update(headers or {})
+    try:
+        request = urllib.request.Request(url, data=body, headers=sending)
+        with urllib.request.urlopen(request, timeout=MCP_OAUTH_TIMEOUT) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        try:
+            said = " ".join(exc.read().decode("utf-8", "replace").split())
+        except Exception:
+            said = ""
+        return None, "%s answered HTTP %s%s" % (url, exc.code,
+                                                (": " + said[:MCP_HTTP_SAID]) if said else "")
+    except (OSError, ValueError) as exc:
+        return None, "%s could not be reached: %s" % (url, exc)
+    try:
+        answer = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        return None, "%s did not answer JSON" % url
+    if not isinstance(answer, dict):
+        return None, "%s answered JSON that is not an object" % url
+    return answer, None
+
+
+def _oauth_resource_metadata(endpoint: str, challenge: dict
+                             ) -> "tuple[dict | None, str | None]":
+    """RFC 9728, from the header where the server put it and from the two
+    well-known paths where it did not.
+
+    BOTH MECHANISMS, IN THIS ORDER, because the specification requires a client
+    to support both: the header when present, then the path-qualified
+    well-known, then the root one. A client that only read the header cannot
+    reach a server that only serves the file.
+    """
+    parsed = urllib.parse.urlparse(endpoint)
+    root = "%s://%s" % (parsed.scheme, parsed.netloc)
+    path = parsed.path.rstrip("/")
+    tries = []
+    if challenge.get("resource_metadata"):
+        tries.append(challenge["resource_metadata"])
+    if path:
+        tries.append(root + "/.well-known/oauth-protected-resource" + path)
+    tries.append(root + "/.well-known/oauth-protected-resource")
+
+    problems = []
+    for url in tries:
+        found, problem = _oauth_json(url)
+        if problem:
+            problems.append(problem)
+            continue
+        servers = found.get("authorization_servers")
+        if not isinstance(servers, list) or not servers:
+            problems.append("%s names no authorization_servers" % url)
+            continue
+        return found, None
+    return None, ("no protected resource metadata for %s -- %s"
+                  % (endpoint, "; ".join(problems[:2])))
+
+
+def _oauth_server_metadata(issuer: str) -> "tuple[dict | None, str | None]":
+    """RFC 8414, tried in the documented order, and the issuer CHECKED.
+
+    THE CHECK IS THE POINT, not paperwork: a document fetched from
+    `attacker.example` that names `honest.example` as its issuer would otherwise
+    send the user's consent -- and the token that follows it -- to whoever
+    answered. The specification says reject, in those words.
+    """
+    parsed = urllib.parse.urlparse(str(issuer or ""))
+    root = "%s://%s" % (parsed.scheme, parsed.netloc)
+    path = parsed.path.rstrip("/")
+    if path:
+        tries = [root + "/.well-known/oauth-authorization-server" + path,
+                 root + "/.well-known/openid-configuration" + path,
+                 root + path + "/.well-known/openid-configuration"]
+    else:
+        tries = [root + "/.well-known/oauth-authorization-server",
+                 root + "/.well-known/openid-configuration"]
+
+    problems = []
+    for url in tries:
+        found, problem = _oauth_json(url)
+        if problem:
+            problems.append(problem)
+            continue
+        if str(found.get("issuer") or "").rstrip("/") != str(issuer).rstrip("/"):
+            return None, ("%s claims issuer %r while it was fetched as %r -- "
+                          "refusing it" % (url, found.get("issuer"), issuer))
+        # NO PKCE, NO FLOW. There is no other way for a client to learn whether
+        # the server supports it, so an absent field is a NO -- and an
+        # authorization code without PKCE is one anybody who sees it can redeem.
+        methods = found.get("code_challenge_methods_supported")
+        if not isinstance(methods, list) or "S256" not in methods:
+            return None, ("%s does not advertise S256 in "
+                          "code_challenge_methods_supported -- without PKCE this "
+                          "client will not authorise" % issuer)
+        for needed in ("authorization_endpoint", "token_endpoint"):
+            if not _oauth_safe(found.get(needed)):
+                return None, ("%s names no usable %s" % (issuer, needed))
+        return found, None
+    return None, ("no authorization server metadata for %s -- %s"
+                  % (issuer, "; ".join(problems[:2])))
+
+
+def _oauth_register(meta: dict, redirect: str, client_name: str
+                    ) -> "tuple[dict | None, str | None]":
+    """RFC 7591. A public client, because Crow ships to desktops.
+
+    `token_endpoint_auth_method: none` IS THE HONEST DECLARATION. A secret in a
+    program the user runs is not a secret, and claiming otherwise would have the
+    authorization server treat this client as confidential when it cannot be.
+    """
+    where = meta.get("registration_endpoint")
+    if not where:
+        return None, ("this authorization server offers no dynamic registration. "
+                      "Put a 'client_id' in the server's block in mcp.json")
+    return _oauth_json(where, data={
+        "client_name": client_name,
+        "redirect_uris": [redirect],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+        "application_type": "native",
+    }, headers={"Content-Type": "application/json"})
+
+
+def _oauth_listen():
+    """A listener on a port the operating system picks, and the redirect it is.
+
+    LOOPBACK ONLY. `0.0.0.0` here would put the authorization code -- the one
+    thing between a stranger and this user's account -- on every interface of
+    the machine for the length of the flow.
+
+    THE IMPORT IS LOCAL, and that is a start-up decision rather than style:
+    `http.server` drags in `mimetypes`, which reads the registry on Windows at
+    import time. Every client start would pay for it, and a browser leg happens
+    once per server per year.
+    """
+    import http.server
+
+    class Catch(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.0"
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            got = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            self.server.caught = {k: v[0] for k, v in got.items()}
+            self.server.done.set()
+            said = ("Crow: authorisation received. Close this tab."
+                    if "code" in self.server.caught else
+                    "Crow: the authorization server sent no code. Close this tab.")
+            body = said.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Catch)
+    server.caught = {}
+    server.done = threading.Event()
+    threading.Thread(target=server.serve_forever, daemon=True,
+                     name="crow-oauth").start()
+    return server, "http://127.0.0.1:%d/callback" % server.server_address[1]
+
+
+def _oauth_exchange(meta: dict, form: dict) -> "tuple[dict | None, str | None]":
+    answer, problem = _oauth_json(meta["token_endpoint"], data=form)
+    if problem:
+        return None, problem
+    if not answer.get("access_token"):
+        return None, ("the token endpoint returned no access_token: %s"
+                      % strip_tag_characters(str(answer.get("error") or answer))[:200])
+    return answer, None
+
+
+def mcp_token_doc() -> dict:
+    try:
+        with open(MCP_TOKEN_FILE, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def mcp_token_write(doc: dict) -> "str | None":
+    """Write the token store, and read it back in the same call.
+
+    Same contract as `mcp_write`, and here it decides more: a token that was not
+    written is a browser leg the user gets to do again, and they would find that
+    out on the next call rather than now.
+    """
+    try:
+        os.makedirs(os.path.dirname(MCP_TOKEN_FILE), exist_ok=True)
+        with open(MCP_TOKEN_FILE, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=1)
+    except OSError as exc:
+        return "mcp_tokens.json could not be written: %s" % exc
+    if mcp_token_doc().get("servers") != doc.get("servers"):
+        return "mcp_tokens.json did not read back as it was written"
+    return None
+
+
+def mcp_token_for(name: str) -> dict:
+    record = (mcp_token_doc().get("servers") or {}).get(name)
+    return record if isinstance(record, dict) else {}
+
+
+def mcp_token_drop(name: str) -> None:
+    """Forget a server's credentials. Called when the server is removed.
+
+    A TOKEN THAT OUTLIVES ITS SERVER is a grant nobody can see and nobody
+    revokes -- the configuration no longer mentions the server, so nothing in
+    either surface would ever show it again.
+    """
+    doc = mcp_token_doc()
+    servers = doc.get("servers") or {}
+    if name in servers:
+        servers.pop(name)
+        doc["servers"] = servers
+        mcp_token_write(doc)
+
+
+def _oauth_store(name: str, record: dict, answer: dict) -> "str | None":
+    kept = dict(record)
+    kept["access_token"] = answer["access_token"]
+    kept["token_type"] = answer.get("token_type") or "Bearer"
+    # A REFRESH TOKEN IS ROTATED BY SOME SERVERS AND OMITTED BY OTHERS. Keeping
+    # the old one when the answer carries none is right; overwriting it with an
+    # empty value would turn every future refresh into a browser leg.
+    if answer.get("refresh_token"):
+        kept["refresh_token"] = answer["refresh_token"]
+    try:
+        kept["expires_at"] = time.time() + float(answer.get("expires_in"))
+    except (TypeError, ValueError):
+        kept.pop("expires_at", None)
+    doc = mcp_token_doc()
+    doc.setdefault("servers", {})[name] = kept
+    return mcp_token_write(doc)
+
+
+def mcp_authorise(name: str, block: dict, challenge: dict | None = None
+                  ) -> "str | None":
+    """The whole browser flow, start to stored token. None when it worked.
+
+    CALLED FROM THE ADD PATH AND FROM `/mcp auth`, never from a tool call.
+    """
+    endpoint = str(block.get("url") or "").strip()
+    if not endpoint:
+        return "%r is not an HTTP server, so there is nothing to authorise" % name
+    challenge = challenge or {}
+    resource = _oauth_canonical(endpoint)
+
+    prm, problem = _oauth_resource_metadata(endpoint, challenge)
+    if problem:
+        return problem
+    # THE DOCUMENT'S OWN `resource` WINS OVER THE DERIVED ONE, and it is checked
+    # against the host before it does. Measured 2026-08-22: GitHub's metadata
+    # names `https://api.githubcopilot.com/mcp/` WITH the trailing slash, and a
+    # client that sent its own stripped form would be asking for a token bound
+    # to a resource the server does not know it by.
+    #
+    # THE CHECK IS NOT A FORMALITY: this document is fetched from a host that
+    # just refused us, and one that named somebody else's resource would have
+    # this client ask an authorization server for a token belonging to a service
+    # it is not talking to.
+    named = prm.get("resource")
+    if isinstance(named, str) and named.strip():
+        if (urllib.parse.urlparse(named).netloc.lower()
+                != urllib.parse.urlparse(endpoint).netloc.lower()):
+            return ("the metadata for %s names resource %r, which is a different "
+                    "host -- refusing it"
+                    % (endpoint, strip_tag_characters(named)[:120]))
+        resource = named.strip()
+    issuer = str(prm["authorization_servers"][0])
+    meta, problem = _oauth_server_metadata(issuer)
+    if problem:
+        return problem
+
+    listener, redirect = _oauth_listen()
+    try:
+        record = {"issuer": issuer, "resource": resource,
+                  "token_endpoint": meta["token_endpoint"]}
+        client_id = block.get("client_id") or mcp_token_for(name).get("client_id")
+        if not client_id:
+            registered, problem = _oauth_register(meta, redirect, "Crow")
+            if problem:
+                # THE WAY OUT IS NAMED WHATEVER WENT WRONG. A registration
+                # endpoint that is absent and one that answers 404 leave the
+                # user in the same place, and only one of them was saying so.
+                return ("%s. Put a 'client_id' in the server's block in mcp.json"
+                        % problem.rstrip("."))
+            client_id = registered.get("client_id")
+            if not client_id:
+                return "dynamic registration returned no client_id"
+            if registered.get("client_secret"):
+                record["client_secret"] = registered["client_secret"]
+        record["client_id"] = str(client_id)
+
+        # SCOPE COMES FROM THE SERVER OR NOT AT ALL. Asking for scopes nobody
+        # named is a client deciding on the user's behalf how much access to
+        # request, and the consent screen is where that decision is shown.
+        scope = challenge.get("scope") or prm.get("scopes_supported")
+        if isinstance(scope, list):
+            scope = " ".join(str(s) for s in scope)
+        verifier, code_challenge = _oauth_pkce()
+        state = _oauth_state()
+        query = {"response_type": "code", "client_id": client_id,
+                 "redirect_uri": redirect, "state": state,
+                 "code_challenge": code_challenge, "code_challenge_method": "S256",
+                 "resource": resource}
+        if scope:
+            query["scope"] = str(scope)
+            record["scope"] = str(scope)
+        where = (meta["authorization_endpoint"]
+                 + ("&" if "?" in meta["authorization_endpoint"] else "?")
+                 + urllib.parse.urlencode(query))
+        _oauth_open(where)
+        if not listener.done.wait(MCP_OAUTH_WAIT):
+            return ("nobody finished the authorisation for %r within %gs. The "
+                    "page was: %s" % (name, MCP_OAUTH_WAIT, where))
+        caught = listener.caught
+        if caught.get("error"):
+            return ("the authorization server refused: %s %s"
+                    % (strip_tag_characters(str(caught.get("error")))[:80],
+                       strip_tag_characters(str(caught.get("error_description") or ""))[:200]))
+        # THE STATE IS COMPARED, AND SO IS `iss` WHERE IT CAME BACK. Without the
+        # first, anyone who can reach the loopback port can feed this client a
+        # code of their own; without the second, a server that is one of several
+        # can hand back a code that belongs to another one.
+        if caught.get("state") != state:
+            return "the authorisation came back with a state this client did not send"
+        if caught.get("iss") and str(caught["iss"]).rstrip("/") != issuer.rstrip("/"):
+            return ("the authorisation came back from %r, not from %r"
+                    % (strip_tag_characters(str(caught["iss"]))[:120], issuer))
+        if not caught.get("code"):
+            return "the authorisation came back without a code"
+
+        form = {"grant_type": "authorization_code", "code": caught["code"],
+                "redirect_uri": redirect, "client_id": client_id,
+                "code_verifier": verifier, "resource": resource}
+        if record.get("client_secret"):
+            form["client_secret"] = record["client_secret"]
+        answer, problem = _oauth_exchange(meta, form)
+        if problem:
+            return problem
+        return _oauth_store(name, record, answer)
+    finally:
+        listener.shutdown()
+        listener.server_close()
+
+
+def mcp_refresh_token(name: str) -> "str | None":
+    """One refresh, from the stored record. NO BROWSER, EVER.
+
+    This is the half a tool call is allowed to run: it costs a round trip and no
+    human. When it fails, the call fails with a sentence naming `/mcp auth`,
+    because the alternative is a consent page opening in the middle of a turn.
+    """
+    record = mcp_token_for(name)
+    if not record.get("refresh_token"):
+        return "%r has no refresh token. Run: /mcp auth %s" % (name, name)
+    form = {"grant_type": "refresh_token", "refresh_token": record["refresh_token"],
+            "client_id": record.get("client_id", ""),
+            "resource": record.get("resource", "")}
+    if record.get("client_secret"):
+        form["client_secret"] = record["client_secret"]
+    if record.get("scope"):
+        form["scope"] = record["scope"]
+    answer, problem = _oauth_exchange({"token_endpoint": record.get("token_endpoint", "")},
+                                      form)
+    if problem:
+        return "%s. Run: /mcp auth %s" % (problem, name)
+    return _oauth_store(name, record, answer)
+
+
+def mcp_authorise_server(name: str) -> "str | None":
+    """`/mcp auth <server>` and the sheet's button: authorise a configured one."""
+    doc, problems = mcp_doc()
+    if problems:
+        return problems[0]
+    block = (doc.get("servers") or {}).get(name)
+    if not isinstance(block, dict):
+        return "no MCP server named %r is configured" % name
+    problem = mcp_authorise(name, block)
+    if problem:
+        return problem
+    # PROVED BY USE, not by a stored token. A record on disk says a token
+    # arrived, not that this server accepts it -- and the next thing anybody
+    # does with it is exactly this call.
+    _, problem = mcp_fetch_tools(name, dict(block))
+    return problem
 
 
 def mcp_render(result: dict) -> str:
@@ -6753,6 +7359,7 @@ MCP_USAGE = (
     "  /mcp                               what is configured\n"
     "  /mcp add <command line>            add a server, take what it offers\n"
     "  /mcp add <url> [--header n: v]     the same server, over HTTP\n"
+    "  /mcp auth <server>                 authorise it in the browser\n"
     "  /mcp fetch <server>                ask it again\n"
     "  /mcp use <server> <tool> <class>   reading, writing or executing\n"
     "  /mcp drop <server> <tool>          take it out"
@@ -6966,9 +7573,22 @@ def mcp_add_server(name: str, block: dict) -> "tuple[dict | None, str | None]":
     doc, problems = mcp_doc()
     if problems:
         return None, problems[0]
+    _mcp_take_401(name)
     tools, problem = mcp_fetch_tools(name, block)
     if problem:
-        return None, problem
+        # THE ONE PLACE A BROWSER MAY OPEN, and it is this one because it is the
+        # only moment the client knows somebody is at the keyboard: they just
+        # typed the line. A tool call three rounds into a turn does not know
+        # that and must never assume it.
+        challenge = _mcp_take_401(name)
+        if challenge is None:
+            return None, problem
+        problem = mcp_authorise(name, block, challenge)
+        if problem:
+            return None, problem
+        tools, problem = mcp_fetch_tools(name, block)
+        if problem:
+            return None, problem
 
     known = (doc.get("servers") or {}).get(name)
     known = known if isinstance(known, dict) else {}
@@ -7096,6 +7716,9 @@ def mcp_remove_server(name: str) -> "str | None":
         return "no MCP server named %r is configured" % name
     servers.pop(name)
     doc["servers"] = servers
+    # THE CREDENTIAL GOES WITH THE SERVER. A token left behind is a grant
+    # nothing in either surface would ever show again and nobody would revoke.
+    mcp_token_drop(name)
     problem = mcp_write(doc)
     if problem:
         return problem
@@ -7226,6 +7849,10 @@ def mcp_command(argv: list) -> str:
     if verb == "add" and rest:
         name, view, problem = mcp_add_line(" ".join(rest))
         return ("error: " + problem) if problem else mcp_installed(view, name)
+
+    if verb == "auth" and len(rest) == 1:
+        problem = mcp_authorise_server(rest[0])
+        return ("error: " + problem) if problem else mcp_installed(mcp_view(), rest[0])
 
     if verb == "fetch" and len(rest) == 1:
         problem = mcp_refresh_server(rest[0])

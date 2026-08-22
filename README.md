@@ -365,6 +365,7 @@ The name comes out of the line: `filesystem`, `notekeeper`, `fetch`. A URL is na
 | `/mcp` | what is configured, and its cost |
 | `/mcp add <command line>` | add a server, take what it offers |
 | `/mcp add <url> [--header <name: value>]` | the same, over HTTP. `--header` may repeat |
+| `/mcp auth <server>` | authorise an HTTP server in the browser |
 | `/mcp fetch <server>` | ask it again, keeping what was ticked |
 | `/mcp use <server> <tool> <class>` | `reading`, `writing` or `executing` |
 | `/mcp drop <server> <tool>` | take it out of the tool list |
@@ -499,11 +500,31 @@ Three servers, 2026-08-22:
 `docs.mcp.cloudflare.com` answers `Python-urllib` with `403`, error 1010, `browser_signature`. It is
 the `User-Agent` that decides, not the protocol.
 
+### OAuth
+
+A server that answers `401` is authorised in the browser. `/mcp add <url>` does it by itself, and
+so does re-fetching a configured server; `/mcp auth <server>` repeats it on its own.
+
+| | |
+|---|---|
+| Discovery | `WWW-Authenticate: resource_metadata=...` when the `401` carries it, else `/.well-known/oauth-protected-resource<path>`, else `/.well-known/oauth-protected-resource` |
+| Authorization server | `authorization_servers[0]` from that document. Metadata from `/.well-known/oauth-authorization-server` then `/.well-known/openid-configuration`, path-inserted first where the issuer has a path |
+| `issuer` | compared against the URL the document came from. A mismatch is refused |
+| PKCE | `S256`, required. `code_challenge_methods_supported` without it, or absent, is refused |
+| Client | RFC 7591 dynamic registration, `token_endpoint_auth_method: none`. A `client_id` in the block is used instead where the server offers no registration |
+| Redirect | `http://127.0.0.1:<port>/callback`, listener bound to loopback only |
+| `state` · `iss` | sent and compared; `iss` compared when the server returns it |
+| `resource` | RFC 8707. The `resource` the metadata names, checked against the endpoint's host first; the canonical URI of the endpoint where it names none. On the authorization request and the token request |
+| Transport | every endpoint must be `https`, or loopback. Anything else is refused before a token moves |
+| Tokens | `%LOCALAPPDATA%\Crow\mcp_tokens.json`, never in `mcp.json` and never in a view. Dropped with the server |
+| Refresh | inside a tool call, silently, `60 s` before expiry and on a `401`. A browser never opens during a turn — the call fails naming `/mcp auth <server>` |
+
 ### Not built
 
 | | |
 |---|---|
-| OAuth | a static `headers` block is the whole of it. A server that answers `401` needs its token there |
+| Browser leg inside a turn | a tool call may refresh, never ask. It runs when a server is added, when somebody is at the keyboard |
+| Client ID Metadata Documents | `2025-11-25` recommends them; Crow speaks `2025-06-18` and registers dynamically |
 | `GET` stream | not opened. `MAY` in the specification, and Crow acts on no unsolicited notification |
 | `Last-Event-ID` | no resumption. Nothing is held open to lose |
 | Batching | one message per request. Removed from the protocol in `2025-06-18` |

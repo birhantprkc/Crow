@@ -49,6 +49,8 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -4876,6 +4878,519 @@ class TheHttpConnectionTests(unittest.TestCase):
         self.assertIsNotNone(self._live())
         self._configure(headers={"Authorization": "Bearer two"})
         self.assertIsNone(self._live())
+
+
+# --------------------------------------------------------------- E5b ------
+# A REAL AUTHORIZATION SERVER ON A REAL SOCKET, beside the MCP one.
+#
+# THE ONLY THING STOOD IN FOR IS THE PERSON. `_oauth_open` normally hands a URL
+# to a browser; here a thread fetches it and follows the redirect, which is what
+# a browser does. Discovery, registration, the consent redirect, the loopback
+# listener, the code, PKCE, the exchange and the refresh are all real HTTP
+# against a server that checks what it is sent -- a fake that accepted anything
+# would be green against a client that sent nothing.
+
+class _FakeAuthServer(http.server.BaseHTTPRequestHandler):
+    """RFC 9728 + RFC 8414 + RFC 7591 + OAuth 2.1, small enough to read."""
+
+    protocol_version = "HTTP/1.0"
+
+    def log_message(self, *args):
+        pass
+
+    def _json(self, code, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        state = self.server.state
+        parsed = urllib.parse.urlparse(self.path)
+        got = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items()}
+        state["seen"].append((parsed.path, got))
+
+        if parsed.path.startswith("/.well-known/oauth-authorization-server"):
+            if state["mode"] == "wrongissuer":
+                return self._json(200, dict(state["meta"], issuer="https://honest.example"))
+            if state["mode"] == "nopkce":
+                meta = dict(state["meta"])
+                meta.pop("code_challenge_methods_supported", None)
+                return self._json(200, meta)
+            return self._json(200, state["meta"])
+        if parsed.path == "/authorize":
+            # WHAT A CONSENT SCREEN WOULD CHECK BEFORE IT DREW ITSELF.
+            for needed in ("client_id", "redirect_uri", "state", "code_challenge",
+                           "code_challenge_method", "resource"):
+                if not got.get(needed):
+                    return self._json(400, {"error": "missing " + needed})
+            if got["code_challenge_method"] != "S256":
+                return self._json(400, {"error": "S256 only"})
+            code = "code-%d" % (len(state["codes"]) + 1)
+            state["codes"][code] = got
+            back = got["redirect_uri"] + "?" + urllib.parse.urlencode(
+                {"code": code, "state": got["state"], "iss": state["meta"]["issuer"]})
+            self.send_response(302)
+            self.send_header("Location", back)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        return self._json(404, {"error": "no such path"})
+
+    def do_POST(self):
+        import base64
+        import hashlib
+
+        state = self.server.state
+        parsed = urllib.parse.urlparse(self.path)
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        text = raw.decode("utf-8")
+        if (self.headers.get("Content-Type") or "").startswith("application/json"):
+            form = json.loads(text or "{}")
+        else:
+            form = {k: v[0] for k, v in urllib.parse.parse_qs(text).items()}
+        state["seen"].append((parsed.path, form))
+
+        if parsed.path == "/register":
+            if state["mode"] == "noregister":
+                return self._json(404, {"error": "not here"})
+            state["registered"] = form
+            return self._json(201, {"client_id": "client-1",
+                                    "redirect_uris": form.get("redirect_uris")})
+        if parsed.path != "/token":
+            return self._json(404, {"error": "no such path"})
+
+        if form.get("grant_type") == "refresh_token":
+            if form.get("refresh_token") != state["refresh"]:
+                return self._json(400, {"error": "invalid_grant"})
+            if state["mode"] == "refusedrefresh":
+                return self._json(400, {"error": "invalid_grant"})
+            state["issued"] += 1
+            state["access"] = "access-%d" % state["issued"]
+            # THE SAME LIFETIME THE FIRST TOKEN GOT. Handing back an hour here
+            # would let one refresh end the test's whole premise: a short-lived
+            # token that has to be refreshed again on the next call.
+            return self._json(200, {"access_token": state["access"],
+                                    "token_type": "Bearer",
+                                    "expires_in": state["expires_in"]})
+
+        asked = state["codes"].get(form.get("code"))
+        if asked is None:
+            return self._json(400, {"error": "invalid_grant"})
+        # PKCE, VERIFIED RATHER THAN ACCEPTED. A server that took any verifier
+        # would let a client that sent none look correct.
+        digest = base64.urlsafe_b64encode(hashlib.sha256(
+            (form.get("code_verifier") or "").encode("ascii")).digest()
+        ).decode("ascii").rstrip("=")
+        if digest != asked.get("code_challenge"):
+            return self._json(400, {"error": "invalid_grant: PKCE"})
+        if form.get("resource") != asked.get("resource"):
+            return self._json(400, {"error": "invalid_target"})
+        state["issued"] += 1
+        state["access"] = "access-%d" % state["issued"]
+        return self._json(200, {"access_token": state["access"],
+                                "refresh_token": state["refresh"],
+                                "token_type": "Bearer",
+                                "expires_in": state["expires_in"]})
+
+
+class _GuardedHttpMcp(_FakeHttpMcp):
+    """The same MCP endpoint, behind a bearer token.
+
+    THE GUARD IS A REAL ONE. It compares against the token the authorization
+    server issued LAST, so a client that stored a token and then failed to send
+    it, or sent an expired one, is refused exactly as a real server refuses it.
+    """
+
+    def _prm(self):
+        state = self.server.state
+        issuer = self.server.auth_state["meta"]["issuer"]
+        named = state.get("prm_resource")
+        return {"resource": named or ("http://127.0.0.1:%d/mcp"
+                                      % self.server.server_address[1]),
+                "authorization_servers": [issuer]}
+
+    def do_GET(self):
+        state = self.server.state
+        path = urllib.parse.urlparse(self.path).path
+        state.setdefault("prm_paths", []).append(path)
+        if path.startswith("/.well-known/oauth-protected-resource") and state["prm"]:
+            body = json.dumps(self._prm()).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self._fail(404, "no")
+
+    def do_POST(self):
+        state = self.server.state
+        if state["challenge"] != "open":
+            wanted = state["bearer"]()
+            given = self.headers.get("Authorization") or ""
+            if not wanted or given != "Bearer %s" % wanted:
+                body = b"no token, no talking"
+                self.send_response(401)
+                # THE HEADER IS THE FIRST OF THE TWO DISCOVERY MECHANISMS. In
+                # `bare` mode it is left off on purpose: a client that reads only
+                # this one is stuck, and the specification requires both.
+                if state["challenge"] is True:
+                    self.send_header(
+                        "WWW-Authenticate",
+                        'Bearer resource_metadata="http://127.0.0.1:%d'
+                        '/.well-known/oauth-protected-resource/mcp", scope="mcp:use"'
+                        % self.server.server_address[1])
+                else:
+                    self.send_header("WWW-Authenticate", "Bearer")
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+        _FakeHttpMcp.do_POST(self)
+
+
+class TheMcpOauthTests(unittest.TestCase):
+    """E5b: a server that answers 401 is authorised in the browser.
+
+    THE DECISION THE WHOLE STAGE HANGS ON is when the browser may open: when a
+    server is ADDED, and never inside a tool call. Adding is the one moment the
+    client knows somebody is at the keyboard, because they just typed the line.
+    A consent page opening in round 14 of a 24-round turn would stall the turn on
+    a person who walked away -- for a token that quietly expired an hour ago.
+    So a call may REFRESH and may not ASK.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-mcp6-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+        self.auth_state = {"mode": "ok", "seen": [], "codes": {}, "registered": None,
+                           "refresh": "refresh-1", "access": None, "issued": 0,
+                           "expires_in": 3600}
+        self.auth = _QuietHttpServer(("127.0.0.1", 0), _FakeAuthServer)
+        self.auth.state = self.auth_state
+        threading.Thread(target=self.auth.serve_forever, daemon=True).start()
+        self.issuer = "http://127.0.0.1:%d" % self.auth.server_address[1]
+        self.auth_state["meta"] = {
+            "issuer": self.issuer,
+            "authorization_endpoint": self.issuer + "/authorize",
+            "token_endpoint": self.issuer + "/token",
+            "registration_endpoint": self.issuer + "/register",
+            "code_challenge_methods_supported": ["S256"],
+        }
+
+        self.state = {"mode": "sse", "seen": [], "deleted": [], "session": None,
+                      "minted": 0, "expired": False, "client_said": None,
+                      "answered": threading.Event(), "stop": threading.Event(),
+                      "bearer": lambda: self.auth_state["access"],
+                      "challenge": True, "prm": True}
+        self.server = _QuietHttpServer(("127.0.0.1", 0), _GuardedHttpMcp)
+        self.server.state = self.state
+        self.server.auth_state = self.auth_state
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.endpoint = "http://127.0.0.1:%d/mcp" % self.server.server_address[1]
+
+        self.addCleanup(self._shut)
+        self._real, self._real_tokens = crow_core.MCP_FILE, crow_core.MCP_TOKEN_FILE
+        self._real_open = crow_core._oauth_open
+        self.addCleanup(self._restore)
+        crow_core.MCP_FILE = os.path.join(self.dir, "mcp.json")
+        crow_core.MCP_TOKEN_FILE = os.path.join(self.dir, "mcp_tokens.json")
+        crow_core._oauth_open = self._be_the_person
+        crow_core.mcp_apply()
+
+    def _be_the_person(self, url: str) -> bool:
+        """Stand in for the human, and for nothing else.
+
+        A browser fetches the URL and follows the redirect back to the loopback
+        listener. So does this, on a thread, over real sockets -- what it does
+        NOT do is inspect, shortcut or fake any part of the flow.
+        """
+        def walk():
+            try:
+                urllib.request.urlopen(url, timeout=20).read()
+            except Exception:
+                pass
+        threading.Thread(target=walk, daemon=True).start()
+        return True
+
+    def _shut(self) -> None:
+        self.state["stop"].set()
+        for srv in (self.server, self.auth):
+            srv.shutdown()
+            srv.server_close()
+
+    def _restore(self) -> None:
+        crow_core.forget_mcp_servers()
+        crow_core._oauth_open = self._real_open
+        crow_core.MCP_FILE, crow_core.MCP_TOKEN_FILE = self._real, self._real_tokens
+        crow_core.mcp_apply()
+
+    def _configure(self, **over) -> None:
+        block = {"url": self.endpoint, "connect_timeout": 20, "timeout": 20,
+                 "schema": {"tools": _HTTP_TOOLS},
+                 "classes": {t["name"]: "reading" for t in _HTTP_TOOLS}}
+        block.update(over)
+        with open(crow_core.MCP_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"servers": {"faker": block}}, fh)
+        self.assertEqual(crow_core.mcp_apply(), [])
+
+    def _paths(self) -> list:
+        return [p for p, _ in self.auth_state["seen"]]
+
+    def _sent(self, path: str) -> dict:
+        for seen, form in self.auth_state["seen"]:
+            if seen == path:
+                return form
+        return {}
+
+    # ---- the point of the stage
+
+    def test_adding_a_guarded_server_authorises_and_takes_its_tools(self):
+        """The positive probe: one line in, a 401, a browser leg, a token, and
+        the schema on disk -- all of it without a second command."""
+        name, view, problem = crow_core.mcp_add_line(self.endpoint)
+        self.assertIsNone(problem)
+        entry = [s for s in view["servers"] if s["name"] == name][0]
+        self.assertEqual([t["tool"] for t in entry["tools"]],
+                         [t["name"] for t in _HTTP_TOOLS])
+        self.assertTrue(crow_core.mcp_token_for(name).get("access_token"))
+
+    def test_the_token_is_then_used_on_the_tool_call(self):
+        """NEGATIVE for a token that is only stored: this endpoint answers 401
+        to anything without the CURRENT bearer, so the answer is the proof."""
+        crow_core.mcp_add_line(self.endpoint)
+        crow_core.mcp_confirm("127_0_0_1", {"echo": {"included": True,
+                                                     "class": "reading"}})
+        out = crow_core.run_tool("mcp_127_0_0_1_echo", '{"text": "hello"}')
+        self.assertIn("you said: hello", out)
+
+    def test_a_server_that_needs_nothing_is_not_sent_down_this_road(self):
+        """NEGATIVE: the flow starts at a 401 and at nothing else. A server that
+        answers must never see a registration, a consent page or a token."""
+        self.state["challenge"] = "open"
+        crow_core.mcp_add_line(self.endpoint)
+        self.assertEqual(self.auth_state["seen"], [])
+        self.assertEqual(crow_core.mcp_token_for("127_0_0_1"), {})
+
+    # ---- discovery
+
+    def test_the_challenge_names_where_the_metadata_is(self):
+        crow_core.mcp_add_line(self.endpoint)
+        self.assertIn("/.well-known/oauth-authorization-server", self._paths())
+
+    def test_discovery_falls_back_to_the_well_known_path(self):
+        """NEGATIVE for reading only the header: the specification requires BOTH
+        mechanisms, and a server may serve the file and send a bare challenge."""
+        self.state["challenge"] = "bare"
+        name, _, problem = crow_core.mcp_add_line(self.endpoint)
+        self.assertIsNone(problem)
+        self.assertTrue(crow_core.mcp_token_for(name).get("access_token"))
+        self.assertIn("/.well-known/oauth-protected-resource/mcp",
+                      self.state.get("prm_paths", []))
+
+    def test_an_issuer_that_does_not_match_its_url_is_refused(self):
+        """The mix-up mitigation, and the reason it is not paperwork: a document
+        fetched from one host that names another as its issuer would send this
+        user's consent, and the token after it, to whoever answered."""
+        self.auth_state["mode"] = "wrongissuer"
+        _, _, problem = crow_core.mcp_add_line(self.endpoint)
+        self.assertIsNotNone(problem)
+        self.assertIn("issuer", problem)
+        self.assertNotIn("/token", self._paths())
+
+    def test_a_server_without_s256_is_refused(self):
+        """No PKCE, no flow. There is no other way to learn whether the server
+        supports it, so an absent field is a NO -- and a code without PKCE is one
+        anybody who sees it can redeem."""
+        self.auth_state["mode"] = "nopkce"
+        _, _, problem = crow_core.mcp_add_line(self.endpoint)
+        self.assertIsNotNone(problem)
+        self.assertIn("S256", problem)
+        self.assertNotIn("/authorize", self._paths())
+
+    def test_a_plain_http_authorization_server_is_refused(self):
+        """NEGATIVE, and loopback is the exception that proves it: a token may
+        travel over https or over the machine's own interface, nowhere else."""
+        self.auth_state["meta"]["token_endpoint"] = "http://example.invalid/token"
+        _, _, problem = crow_core.mcp_add_line(self.endpoint)
+        self.assertIsNotNone(problem)
+        self.assertIn("token_endpoint", problem)
+
+    # ---- registration and the flow
+
+    def test_the_client_registers_itself_as_a_public_client(self):
+        """A secret inside a program the user runs is not a secret, and saying
+        otherwise has the server treat this client as something it cannot be."""
+        crow_core.mcp_add_line(self.endpoint)
+        registered = self.auth_state["registered"]
+        self.assertEqual(registered["token_endpoint_auth_method"], "none")
+        self.assertEqual(len(registered["redirect_uris"]), 1)
+        self.assertTrue(registered["redirect_uris"][0].startswith("http://127.0.0.1:"))
+
+    def test_a_configured_client_id_skips_registration(self):
+        """NEGATIVE for registration being mandatory: a server may not offer it,
+        and then the way through is a client_id somebody was given."""
+        self.auth_state["mode"] = "noregister"
+        self._configure(client_id="preconfigured-1")
+        problem = crow_core.mcp_authorise_server("faker")
+        self.assertIsNone(problem)
+        self.assertNotIn("/register", self._paths())
+        self.assertEqual(self._sent("/authorize")["client_id"], "preconfigured-1")
+
+    def test_no_registration_and_no_client_id_says_which_it_needs(self):
+        self.auth_state["mode"] = "noregister"
+        _, _, problem = crow_core.mcp_add_line(self.endpoint)
+        self.assertIsNotNone(problem)
+        self.assertIn("client_id", problem)
+
+    def test_pkce_state_and_resource_all_leave_with_the_request(self):
+        """One case for the three parameters that make the difference between an
+        authorisation and a code anybody can spend."""
+        crow_core.mcp_add_line(self.endpoint)
+        asked = self._sent("/authorize")
+        self.assertEqual(asked["code_challenge_method"], "S256")
+        self.assertTrue(asked["state"])
+        self.assertEqual(asked["resource"], crow_core._oauth_canonical(self.endpoint))
+        spent = self._sent("/token")
+        self.assertTrue(spent.get("code_verifier"))
+        self.assertEqual(spent["resource"], asked["resource"])
+
+    def test_the_metadata_names_the_resource_and_it_is_used_verbatim(self):
+        """FOUND LIVE ON 2026-08-22 against GitHub: its metadata names
+        `https://api.githubcopilot.com/mcp/` WITH the trailing slash. A client
+        that sent its own stripped form would ask for a token bound to a name
+        the server does not know the resource by."""
+        self.state["prm_resource"] = self.endpoint + "/"
+        name, _, problem = crow_core.mcp_add_line(self.endpoint)
+        self.assertIsNone(problem)
+        self.assertEqual(self._sent("/authorize")["resource"], self.endpoint + "/")
+        self.assertNotEqual(self.endpoint + "/",
+                            crow_core._oauth_canonical(self.endpoint))
+
+    def test_metadata_that_names_another_host_is_refused(self):
+        """NEGATIVE, and it is the reason the field is checked rather than
+        copied: this document comes from a host that just refused us, and one
+        naming somebody else's resource would have this client ask for a token
+        belonging to a service it is not talking to."""
+        self.state["prm_resource"] = "https://elsewhere.example/mcp"
+        _, _, problem = crow_core.mcp_add_line(self.endpoint)
+        self.assertIsNotNone(problem)
+        self.assertIn("different host", problem)
+        self.assertNotIn("/authorize", self._paths())
+
+    def test_a_state_that_came_back_wrong_is_refused(self):
+        """NEGATIVE, and it is the loopback port's own risk: without this,
+        anything that can reach 127.0.0.1 can hand this client a code."""
+        real = crow_core._oauth_open
+
+        def meddle(url):
+            back = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            forged = (back["redirect_uri"][0] + "?"
+                      + urllib.parse.urlencode({"code": "x", "state": "not-the-one"}))
+            threading.Thread(target=lambda: urllib.request.urlopen(forged, timeout=20).read(),
+                             daemon=True).start()
+            return True
+
+        crow_core._oauth_open = meddle
+        self.addCleanup(setattr, crow_core, "_oauth_open", real)
+        _, _, problem = crow_core.mcp_add_line(self.endpoint)
+        self.assertIsNotNone(problem)
+        self.assertIn("state", problem)
+
+    # ---- what a tool call may and may not do
+
+    def test_an_expired_token_is_refreshed_inside_the_call(self):
+        """A round trip and no human: that is the half a turn is allowed to
+        spend. The old token stops working, and nobody is asked anything."""
+        self.auth_state["expires_in"] = 1
+        crow_core.mcp_add_line(self.endpoint)
+        crow_core.mcp_confirm("127_0_0_1", {"echo": {"included": True,
+                                                     "class": "reading"}})
+        first = crow_core.mcp_token_for("127_0_0_1")["access_token"]
+        crow_core._oauth_open = self._never
+        out = crow_core.run_tool("mcp_127_0_0_1_echo", '{"text": "later"}')
+        self.assertIn("you said: later", out)
+        self.assertNotEqual(crow_core.mcp_token_for("127_0_0_1")["access_token"], first)
+        self.assertIn("/token", self._paths())
+
+    def test_a_token_the_server_rejected_early_is_refreshed_on_the_401(self):
+        """THE OTHER REFRESH PATH, and the one no clock can predict: by this
+        client's reckoning the token is good for another hour, and the server
+        has already stopped taking it. Rotation, revocation and a clock that
+        drifted all arrive looking exactly like this -- found by a negative
+        probe, which passed with this arm disabled because the expiry path was
+        covering for it."""
+        crow_core.mcp_add_line(self.endpoint)
+        crow_core.mcp_confirm("127_0_0_1", {"echo": {"included": True,
+                                                     "class": "reading"}})
+        first = crow_core.mcp_token_for("127_0_0_1")["access_token"]
+        self.assertGreater(crow_core.mcp_token_for("127_0_0_1")["expires_at"],
+                           time.time() + crow_core.MCP_TOKEN_SKEW)
+        self.auth_state["access"] = "rotated-away"
+        crow_core._oauth_open = self._never
+        out = crow_core.run_tool("mcp_127_0_0_1_echo", '{"text": "again"}')
+        self.assertIn("you said: again", out)
+        self.assertNotEqual(crow_core.mcp_token_for("127_0_0_1")["access_token"], first)
+
+    def test_a_refresh_that_fails_ends_the_call_and_opens_no_browser(self):
+        """THE SENTENCE THE WHOLE STAGE IS BUILT ON. A consent page in the middle
+        of a turn stalls it on somebody who may not be there, so the call fails
+        and says what to run instead."""
+        self.auth_state["expires_in"] = 1
+        crow_core.mcp_add_line(self.endpoint)
+        crow_core.mcp_confirm("127_0_0_1", {"echo": {"included": True,
+                                                     "class": "reading"}})
+        self.auth_state["mode"] = "refusedrefresh"
+        crow_core._oauth_open = self._never
+        out = crow_core.run_tool("mcp_127_0_0_1_echo", '{"text": "x"}')
+        self.assertTrue(out.startswith("error:"), out)
+        self.assertIn("/mcp auth", out)
+
+    def test_a_401_inside_a_call_without_any_token_says_what_to_run(self):
+        """NEGATIVE for the case above: no token at all is not a crash and not a
+        browser either, and the server's own words survive the advice."""
+        self._configure()
+        out = crow_core.run_tool("mcp_faker_echo", '{"text": "x"}')
+        self.assertTrue(out.startswith("error:"), out)
+        self.assertIn("401", out)
+        self.assertIn("/mcp auth faker", out)
+
+    def _never(self, url):
+        raise AssertionError("a browser was opened inside a tool call: %s" % url)
+
+    # ---- where the credential lives
+
+    def test_the_token_is_not_in_mcp_json(self):
+        """`mcp.json` is drawn by two surfaces, pasted into bug reports and
+        edited by hand. A refresh token in it is a credential with a rotation
+        nobody performs."""
+        crow_core.mcp_add_line(self.endpoint)
+        with io.open(crow_core.MCP_FILE, encoding="utf-8") as fh:
+            raw = fh.read()
+        self.assertNotIn("access-", raw)
+        self.assertNotIn("refresh-", raw)
+        self.assertNotIn("access-", json.dumps(crow_core.mcp_view()))
+        self.assertNotIn("access-", crow_core.mcp_listing())
+
+    def test_removing_the_server_drops_its_credential(self):
+        """A token that outlives its server is a grant nothing shows and nobody
+        revokes -- the configuration no longer mentions the server at all."""
+        name, _, _ = crow_core.mcp_add_line(self.endpoint)
+        self.assertTrue(crow_core.mcp_token_for(name).get("access_token"))
+        self.assertIsNone(crow_core.mcp_remove_server(name))
+        self.assertEqual(crow_core.mcp_token_for(name), {})
+
+    def test_the_store_is_read_back_in_the_same_call(self):
+        """Persistence is a contract. A browser leg whose token did not land is
+        one the user gets to do again, and they would find out on the next call
+        rather than now."""
+        self.assertIsNone(crow_core.mcp_token_write({"servers": {"x": {"a": 1}}}))
+        self.assertEqual(crow_core.mcp_token_for("x"), {"a": 1})
 
 
 class TheChecklistTests(unittest.TestCase):

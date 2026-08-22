@@ -1978,6 +1978,9 @@ const crow = {
       this.drawMcp(); }); },
 
   refreshMcp(name){
+    // ASK AGAIN IS ALSO THE AUTHORISE PATH: it goes through `mcp_add_server`,
+    // which answers a 401 by running the browser leg. So the window needs no
+    // second control for it, and the head keeps its two buttons.
     this.mcpSaid("asking "+name+" again …");
     pywebview.api.mcp_refresh(name).then(said => {
       this.mcpSaid(said||""); this.drawMcp(); }); },
