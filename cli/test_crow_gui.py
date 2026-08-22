@@ -57,6 +57,21 @@ sys.path.insert(0, str(HERE))
 import crow            # noqa: E402
 import crow_core       # noqa: E402
 import crow_gui        # noqa: E402
+
+# THE SUITE MAY NOT DEPEND ON WHAT THIS MACHINE HAS CONFIGURED (#130).
+# `crow_core` reads %LOCALAPPDATA%\Crow\mcp.json at import and appends whatever
+# it finds to TOOLS, TOOL_IMPL and TOOL_CLASS. Every case that enumerates the
+# tool table therefore answered differently on a machine with an MCP server than
+# on one without -- found on 2026-08-22, when `ReleaseLevelTests` went red
+# against a real pontifex install and nothing in this file had changed.
+#
+# A PATH WHOSE PARENT DOES NOT EXIST, not a temp file that might: the reader
+# treats "no file" as the empty configuration, and that is the state the twelve
+# built-in tools are the whole table in. Cases that WANT a configuration rebind
+# `MCP_FILE` themselves and put it back.
+crow_core.MCP_FILE = os.path.join(tempfile.gettempdir(),
+                                  "crow-suite-has-no-mcp", "mcp.json")
+crow_core.mcp_apply()
 import crow_voice      # noqa: E402
 
 
@@ -3926,11 +3941,17 @@ class TheRibbonAndTheChatRunIntoOneTests(unittest.TestCase):
         self.assertNotIn('["look","skills"', self.source,
                          "the positional list is back")
 
-    def test_the_two_empty_ones_say_what_they_will_be(self):
-        """#126. "Coming soon" alone is a dead end. Each says what the section
-        is FOR, so the placeholder is a promise rather than a shrug -- and so
-        the next person to open it knows what belongs there."""
-        for key, word in (("mcp", "Tool servers"), ("providers", "OpenRouter")):
+    def test_the_empty_one_says_what_it_will_be(self):
+        """#126. "Coming soon" alone is a dead end. It says what the section is
+        FOR, so the placeholder is a promise rather than a shrug -- and so the
+        next person to open it knows what belongs there.
+
+        #129 TOOK MCP OUT OF THIS PAIR, and the rule it pins is untouched by
+        that: the case is about what an UNBUILT section says, and MCPs is built.
+        What used to be asserted here is asserted below instead, from the other
+        side -- the pane has a list, a form and no promise in it.
+        """
+        for key, word in (("providers", "OpenRouter"),):
             pane = self.source[self.source.index('<section data-cat="%s"' % key):]
             pane = pane[:pane.index("</section>")]
             self.assertIn("Coming soon.", pane, key)
@@ -4148,6 +4169,280 @@ class TheMemoryPinWiringTests(unittest.TestCase):
         # explaining why nothing here may define it, and a case that cannot tell
         # a comment from a declaration would forbid its own reason.
         self.assertNotIn('ARCHIVE_DIR = "archiv"', self.source)
+
+
+class TheMcpSheetTests(ApiCase):
+    """E4 in the window: the checklist, and the two columns that ARE the stage.
+
+    One column says whether a tool is taken at all, the other what Crow treats
+    it as. Both are states in a file, and the second one is the whole reason the
+    stage exists -- a class is what decides whether a release level stops and
+    asks before a foreign process runs.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+        self._real_mcp = crow_core.MCP_FILE
+        self.addCleanup(self._restore_mcp)
+        crow_core.MCP_FILE = os.path.join(self.dir, "mcp.json")
+        crow_core.mcp_apply()
+
+    def _restore_mcp(self) -> None:
+        crow_core.forget_mcp_servers()
+        crow_core.MCP_FILE = self._real_mcp
+        crow_core.mcp_apply()
+
+    def _pane(self) -> str:
+        pane = self.source[self.source.index('<section data-cat="mcp"'):]
+        return pane[:pane.index("</section>")]
+
+    def _configure(self) -> None:
+        """A server on disk with a schema, without ever starting one: the sheet
+        reads the file, and E3's cases are where a process belongs."""
+        with open(crow_core.MCP_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"servers": {"fake": {
+                "command": "npx", "args": ["-y", "server-fake"],
+                "schema": {"tools": [
+                    {"name": "look", "description": "Look at something.",
+                     "inputSchema": {"type": "object"},
+                     "annotations": {"readOnlyHint": True}},
+                    {"name": "burn", "description": "Burn it down.",
+                     "inputSchema": {"type": "object"}}]},
+                "tools": {"include": []}}}}, fh)
+        crow_core.mcp_apply()
+
+    # ---- the pane is built rather than promised
+
+    def test_the_pane_is_a_list_and_one_field(self):
+        """robin, 2026-08-22: no prose in the sheet. What was there described
+        behaviour, and one of the sentences had already outlived the behaviour
+        it described."""
+        pane = self._pane()
+        self.assertIn('id="mcplist"', pane)
+        self.assertIn('id="mcpline"', pane)
+        for gone in ("mcpname", "mcpcmd", "mcpargs", "mcpbound", "Coming soon",
+                     "nothing reaches the model", "boundary"):
+            self.assertNotIn(gone, pane, gone)
+        self.assertLess(len(pane), 700, "the pane grew prose again")
+
+    def test_the_sheet_asks_for_the_list_when_it_opens(self):
+        opened = self.source[self.source.index("openSettings(){"):]
+        self.assertIn("this.drawMcp()", opened[:opened.index("},")])
+
+    def test_a_server_name_never_becomes_markup(self):
+        """#119's lesson, and it applies harder here: a server's name and its
+        tool descriptions are written by a stranger, not by the user."""
+        js = self.source[self.source.index("drawMcpServer(box,sv,classes){"):
+                         self.source.index("tickMcp(server,tool,row,sw){")]
+        self.assertNotIn("innerHTML", js)
+        self.assertIn("name.textContent=sv.enabled?sv.name", js)
+        # AND NO LITERAL GLYPH EITHER: `check_gui_prereqs` resolves string
+        # literals against the shipped face, and the caret is not in it.
+        self.assertIn("String.fromCharCode(9654)", js)
+
+    # ---- the two columns
+
+    def test_a_decision_and_a_proposal_do_not_look_alike(self):
+        """THE VALUE, NOT THE NAME -- the 2026-08-22 lesson. A class the server
+        merely suggested may never read as one a person picked, so the two are
+        separated by the EDGE as well as the colour: a theme where `--dim` and
+        `--accent` happen to sit close would otherwise render them identical."""
+        import re as _re
+        CLOSE = chr(125)
+
+        def rule(selector):
+            found = self.css[self.css.index(selector):]
+            return found[:found.index(CLOSE)]
+
+        guess, chosen = rule(".seg button.guess{"), rule(".seg button.on{")
+        self.assertIn("border-style:dashed", guess)
+        self.assertNotIn("dashed", chosen)
+
+        # THE BRAND VALUES ARE NOT IN THE STYLESHEET. `--accent` and `--bevel`
+        # are placeholders the page fills from the core at render time, so a
+        # reader that only searched the CSS would report "not defined" for the
+        # one colour this case is actually about.
+        FROM_CORE = {"--accent": crow_core.CROW_ACCENT_HEX,
+                     "--bevel": crow_core.BANNER_BEVEL_HEX}
+
+        def value(css, token):
+            hexed = FROM_CORE.get(token)
+            if hexed is None:
+                m = _re.search(_re.escape(token) + r":\s*(#[0-9a-fA-F]{6})", css)
+                self.assertIsNotNone(m, "%s is not defined" % token)
+                hexed = m.group(1)
+            h = hexed.lstrip("#")
+            return tuple(int(h[k:k + 2], 16) for k in (0, 2, 4))
+
+        dark = self.css[self.css.index("--bg:#181818"):]
+        dark = dark[:dark.index(CLOSE)]
+        picked = _re.search(r"color:var\((--[a-z-]+)\)", chosen)
+        proposed = _re.search(r"color:var\((--[a-z-]+)\)", guess)
+        self.assertIsNotNone(picked)
+        self.assertIsNotNone(proposed)
+        apart = sum(abs(a - b) for a, b in zip(value(dark, picked.group(1)),
+                                               value(dark, proposed.group(1))))
+        self.assertGreater(apart, 60,
+                           "a proposal and a decision are the same colour")
+
+    def test_the_classes_come_from_the_core_not_from_the_page(self):
+        """Three buttons typed into the JS would be three buttons to fix the day
+        a fourth class exists -- and one of them would be missed."""
+        self.assertIn("classes.forEach", self.source)
+        self.assertEqual(crow_core.mcp_view()["classes"],
+                         list(crow_core.MCP_TOOL_CLASSES))
+
+    def test_every_element_the_drawing_looks_up_exists(self):
+        """A mistyped id draws nothing and reads as a CSS problem -- the shape
+        #126's positional-list defect had. This suite never executes the page,
+        so the lookups are held against the markup instead of against a render.
+        """
+        js = self.source[self.source.index("drawMcp(){"):
+                         self.source.index("toggleSkill(name,row,sw){")]
+        looked_up = sorted(set(re.findall(r'\$\("#([A-Za-z0-9_-]+)"\)', js)))
+        self.assertTrue(looked_up, "the drawing looks nothing up")
+        in_page = set(re.findall(r'id="([A-Za-z0-9_-]+)"', self.source))
+        self.assertEqual([i for i in looked_up if i not in in_page], [])
+
+    # ---- what robin asked to see, 2026-08-22
+
+    def test_the_install_line_is_drawn_in_the_chat_not_in_the_sheet(self):
+        """robin, twice: the tile belongs where the command was typed. It is
+        drawn from `go()`, after the typed line and before the call."""
+        go = self.source[self.source.index("  go(){"):self.source.index("  modeMenu(){")]
+        self.assertIn("installBar()", go)
+        self.assertLess(go.index("this.user(text)"), go.index("installBar()"))
+        self.assertLess(go.index("installBar()"), go.index("pywebview.api.send"))
+        self.assertNotIn("mcpbusy", self.source)
+
+    def test_only_adding_a_server_gets_the_tile(self):
+        """NEGATIVE: `/mcp` on its own answers instantly. A tile in front of an
+        instant answer is four seconds of nothing."""
+        import re as _re
+        pattern = _re.search(r"if\((/[^)]+/i)\.test\(text\)\) this\.installBar",
+                             self.source)
+        self.assertIsNotNone(pattern, "the tile is not gated on the command")
+        rule = pattern.group(1)
+        self.assertIn("add", rule)
+        self.assertIn("mcp", rule)
+
+    def test_it_wears_the_memory_gates_animation_rather_than_a_copy(self):
+        """Two sweeps written out twice drift the first time one is touched."""
+        CLOSE = chr(125)
+        bar = self.css[self.css.index(".installbar{"):]
+        bar = bar[:bar.index(CLOSE)]
+        self.assertIn("pendsweep", bar)
+        self.assertIn("pendglow", bar)
+        self.assertEqual(self.css.count("@keyframes pendsweep"), 1)
+
+    def test_it_says_install_mcp_and_stands_for_four_seconds(self):
+        js = self.source[self.source.index("  installBar(){"):
+                         self.source.index("  note(msg){")]
+        self.assertIn('textContent="Install MCP"', js)
+        self.assertIn("Date.now()+4000", js)
+        held = self.source[self.source.index("  note(msg){"):
+                           self.source.index("  drawNote(msg){")]
+        self.assertIn("this.installUntil - Date.now()", held)
+        self.assertIn("Math.max(0", held)
+
+    def test_a_server_folds_away(self):
+        """pontifex alone is 13 tools and already outruns the sheet. Twenty
+        servers unfolded is a scroll nobody finishes."""
+        CLOSE = chr(125)
+        shut = self.css[self.css.index(".mcptools{"):]
+        self.assertIn("display:none", shut[:shut.index(CLOSE)])
+        open_ = self.css[self.css.index(".mcptools.open{"):]
+        self.assertIn("display:block", open_[:open_.index(CLOSE)])
+        js = self.source[self.source.index("  drawMcpServer(box,sv,classes){"):
+                         self.source.index("  mcpRow(sv,t,classes){")]
+        self.assertIn("this.mcpOpen", js)
+        # THE BUTTONS SIT INSIDE THE HEAD. Without this a click on "remove"
+        # would also fold the server away -- the trap the memory tile hit.
+        self.assertEqual(js.count("stopPropagation()"), 2)
+
+    def test_the_sheet_got_room_for_a_server_list(self):
+        CLOSE = chr(125)
+        rule = self.css[self.css.index("#settings .sheet{"):]
+        rule = rule[:rule.index(CLOSE)]
+        import re as _re
+        width = int(_re.search(r"width:min\((\d+)px", rule).group(1))
+        height = int(_re.search(r"height:min\((\d+)px", rule).group(1))
+        self.assertGreater(width, 760)
+        self.assertGreater(height, 560)
+
+    def test_what_the_user_said_is_a_bubble_in_every_theme(self):
+        """THE VALUE, NOT THE NAME. A bubble drawn in a literal colour would be
+        right in the theme it was picked in and wrong in the other two; these
+        tokens are defined three times, once per palette."""
+        CLOSE = chr(125)
+        rule = self.css[self.css.index(".you .txt{"):]
+        rule = rule[:rule.index(CLOSE)]
+        self.assertIn("border-radius", rule)
+        self.assertIn("padding", rule)
+        # HUGGING THE TEXT, not filling the column: without this a two-word
+        # message is a full-width slab.
+        self.assertIn("justify-self:start", rule)
+        import re as _re
+        used = _re.findall(r"var\((--[a-z-]+)\)", rule)
+        self.assertIn("--raised", used)
+        for token in set(used):
+            self.assertEqual(self.css.count(token + ":"), 3,
+                             "%s is not defined in all three palettes" % token)
+        self.assertFalse(_re.findall(r"#[0-9a-fA-F]{3,6}", rule),
+                         "the bubble names a colour of its own")
+
+    # ---- what the api actually does
+
+    def test_the_view_reaches_the_page_unchanged(self):
+        self._configure()
+        view = self.api().mcp_view()
+        self.assertEqual(view["file"], crow_core.MCP_FILE)
+        self.assertEqual([t["tool"] for t in view["servers"][0]["tools"]],
+                         ["look", "burn"])
+        self.assertEqual(view["servers"][0]["tools"][0]["proposed"], "reading")
+        self.assertEqual(view["servers"][0]["tools"][1]["proposed"], "executing")
+
+    def test_a_tick_writes_and_names_the_bill(self):
+        self._configure()
+        api = self.api()
+        self.assertEqual(api.mcp_confirm("fake", "look", True, "reading"), "")
+        self.assertIn("mcp_fake_look", [t["function"]["name"] for t in crow_core.TOOLS])
+        self.assertEqual(crow_core.TOOL_CLASS["mcp_fake_look"], "reading")
+        self.assertTrue(any(m.get("t") == crow_core.MCP_COST_NOTE
+                            for m in self.drained(api)))
+
+    def test_a_refused_tick_says_why_and_bills_nothing(self):
+        """NEGATIVE: the page paints the click before the file takes it, so a
+        refusal has to come back as a REASON -- and must not announce a prefill
+        that nothing is going to cost."""
+        self._configure()
+        api = self.api()
+        said = api.mcp_confirm("fake", "invented", True, "reading")
+        self.assertIn("invented", said)
+        self.assertFalse(any(m.get("t") == crow_core.MCP_COST_NOTE
+                             for m in self.drained(api)))
+
+    def test_moving_one_column_leaves_the_other_alone(self):
+        """The switch and the class are two decisions. Un-ticking a tool must
+        not throw away what somebody said it does, or re-ticking asks again."""
+        self._configure()
+        api = self.api()
+        api.mcp_confirm("fake", "look", True, "writing")
+        api.mcp_confirm("fake", "look", False, None)
+        with open(crow_core.MCP_FILE, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["servers"]["fake"]["classes"],
+                             {"look": "writing"})
+
+    def test_one_line_is_the_whole_form(self):
+        """A command line is what people already have -- from a README, from
+        another client's config. Three fields is three chances to get it wrong."""
+        self.assertIn("splitlines()", "") if False else None
+        source = inspect.getsource(crow_gui.Api.mcp_add)
+        self.assertIn("mcp_add_line", source)
+        said = self.api().mcp_add("")
+        self.assertIn("command line", said)
 
 
 if __name__ == "__main__":

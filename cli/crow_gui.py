@@ -582,7 +582,7 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 #settings{position:fixed;inset:0;z-index:80;display:grid;place-items:center;
   background:var(--shadow-strong)}
 #settings[hidden]{display:none}
-#settings .sheet{width:min(760px,92vw);height:min(560px,88vh);display:flex;
+#settings .sheet{width:min(1040px,94vw);height:min(780px,90vh);display:flex;
   flex-direction:column;background:var(--panel);border:1px solid var(--bevel);
   border-radius:12px;box-shadow:0 24px 60px var(--shadow-strong);overflow:hidden}
 #settings .shead{display:flex;align-items:center;gap:10px;padding:13px 16px;
@@ -810,7 +810,16 @@ body[data-rail="shut"] #rail{width:0;overflow:hidden}
 .turn+.turn{margin-top:26px}
 .you{display:grid;grid-template-columns:38px 1fr;gap:2px}
 .you .m{color:var(--accent);font-weight:700;font-size:12.5px;padding-top:1px}
-.you .txt{color:var(--text);white-space:pre-wrap}
+/* #130. ONE BUBBLE PER MESSAGE. What the user said and what the model said
+   used to differ only by the colour of a three-letter label, and in a long
+   scroll that is not a boundary anyone sees. The bubble is drawn out of the
+   palette -- `--raised` and `--line` are defined in all three themes -- so
+   light, dark and crow all answer for it without a second rule.
+   `justify-self:start` is what makes it hug the text: without it the bubble
+   fills the grid column and a two-word message is a full-width slab. */
+.you .txt{color:var(--text);white-space:pre-wrap;background:var(--raised);
+  border:1px solid var(--line);border-radius:12px;padding:9px 13px;
+  justify-self:start;max-width:100%;box-sizing:border-box}
 .as{display:grid;grid-template-columns:38px 1fr;gap:2px}
 .as .m{color:var(--bevel);padding-top:1px}
 .col{min-width:0}
@@ -884,6 +893,54 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   transition:transform .15s ease,background .15s ease}
 .sw.on{background:color-mix(in srgb,var(--accent) 40%,transparent)}
 .sw.on::after{transform:translateX(15px);background:var(--accent)}
+/* #129. THE MCP CHECKLIST, AND ITS TWO COLUMNS ARE THE WHOLE STAGE. A switch
+   says whether a tool is taken at all; the segment beside it says what Crow
+   treats it as, which is what decides whether a release level stops and asks.
+   Both are states in a file, so both are switches rather than form controls.
+
+   A DASHED EDGE IS A PROPOSAL, A SOLID ONE IS A DECISION, and the difference
+   has to be visible without reading a legend: the specification calls a
+   server's annotation untrusted, so what it suggested may never look the same
+   as what a person confirmed. Colour alone would not do it -- one of the three
+   themes would always render the two too close -- so the EDGE carries it.
+
+   Every colour is a palette variable, never a literal, or only the theme it was
+   picked in answers for it. */
+.seg{display:flex;flex:0 0 auto}
+.seg button{font:inherit;font-size:10.5px;cursor:pointer;padding:3px 9px;
+  background:transparent;border:1px solid var(--line);color:var(--dimmer)}
+.seg button:first-child{border-radius:6px 0 0 6px}
+.seg button:last-child{border-radius:0 6px 6px 0}
+.seg button+button{border-left:none}
+.seg button:hover{color:var(--text-hover)}
+.seg button.guess{color:var(--dim);border-style:dashed}
+.seg button.on{color:var(--accent);border-color:var(--accent);
+  background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.mcphead{display:flex;align-items:baseline;gap:8px;margin:15px 0 2px;
+  border-top:1px solid var(--raised);padding-top:11px}
+.mcphead .sname{flex:0 0 auto}
+.mcphead .cmd{flex:1;min-width:0;color:var(--dimmer);font-family:var(--mono);
+  font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mcphead button{font:inherit;font-size:10.5px;cursor:pointer;padding:2px 9px;
+  border-radius:5px;background:transparent;border:1px solid var(--line);
+  color:var(--dimmer)}
+.mcphead button:hover{border-color:var(--bevel);color:var(--text-hover)}
+.mcpcost{color:var(--dimmer);font-size:10.5px;margin:5px 0 0}
+.mcpbad{color:var(--bad);font-size:11.5px;margin:0 0 7px;white-space:pre-wrap}
+.mcpsaid{color:var(--dim);font-size:11.5px;margin:0 0 7px;white-space:pre-wrap}
+/* ONE ARGUMENT PER LINE, not a space-separated string: half of every MCP
+   example is a path, and half of the paths on this machine have a space in
+   them. A textarea is the only field shape that can carry them. */
+.sform{margin-top:18px;border-top:1px solid var(--raised);padding-top:13px;
+  display:flex;flex-direction:column;gap:7px}
+.sform input,.sform textarea{font:inherit;font-size:12px;font-family:var(--mono);
+  color:var(--text);background:var(--raised);border:1px solid var(--line);
+  border-radius:6px;padding:7px 9px;resize:vertical}
+.sform input:focus,.sform textarea:focus{outline:none;border-color:var(--accent)}
+.sform button{font:inherit;font-size:12px;cursor:pointer;border-radius:8px;
+  padding:8px 15px;background:transparent;border:1px solid var(--line);
+  color:var(--dim);align-self:flex-start}
+.sform button:hover{border-color:var(--bevel);color:var(--text-hover)}
 /* #122. THE MEMORY LINE, AND IT IS NOT A NOTE. A note is grey because what
    notes say may be skimmed past; this one is the only sign a person gets that
    something entered the head of their next session, and with no approval gate
@@ -963,6 +1020,38 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 @media (prefers-reduced-motion: reduce){
   #pendbar{animation:none;
     background:color-mix(in srgb,var(--accent) 14%,transparent)}}
+/* #130. THE INSTALL LINE, IN THE CHAT, WHERE THE COMMAND WAS TYPED. `/mcp add`
+   is the one slash command that takes real time -- a process starts, a
+   handshake runs, a schema comes back -- so it wears the memory gate's tile
+   rather than answering out of nowhere half a second later.
+   THE KEYFRAMES ARE `#pendbar`'s, NOT COPIES. Two sweeps written out twice are
+   two things to fix, and they drift the first time one of them is touched.
+   A FLOOR OF FOUR SECONDS (robin, 2026-08-22) lives in the page, not here: an
+   answer that arrives in 300 ms would flash past and read as nothing having
+   happened at all. */
+.installbar{max-width:900px;margin:0 auto;padding:9px 13px;
+  border:1px solid color-mix(in srgb,var(--accent) 32%,transparent);
+  border-radius:10px;color:var(--accent);font-size:11.5px;
+  background:linear-gradient(90deg,transparent 0%,color-mix(in srgb,var(--accent) 20%,transparent) 50%,transparent 100%),var(--raised);
+  background-size:220% 100%,auto;
+  animation:pendsweep 2.6s ease-in-out infinite, pendglow 2.6s ease-in-out infinite}
+.installbar .top{display:flex;align-items:center;gap:10px}
+.installbar .title{font-weight:600}
+.installbar .hint{color:var(--dimmer);margin-left:auto;font-size:10.5px}
+@media (prefers-reduced-motion: reduce){
+  .installbar{animation:none;
+    background:color-mix(in srgb,var(--accent) 14%,transparent)}}
+
+/* #130. A SERVER IS ONE ROW UNTIL IT IS OPENED. pontifex alone is 13 tools and
+   already outruns the sheet; twenty servers would be a scroll nobody finishes.
+   The head stays, the tools fold. */
+.mcphead{cursor:pointer}
+.mcphead .caret{font-size:9px;color:var(--bevel);transition:transform .12s ease}
+.mcphead.open .caret{transform:rotate(90deg)}
+.mcphead .count{color:var(--dimmer);font-size:10.5px;white-space:nowrap}
+.mcptools{display:none}
+.mcptools.open{display:block}
+
 /* ONE LAYER UP, so the composer covers the tile's lower edge instead of the
    other way round. Without this the negative margin would only overlap them
    in source order and the tile would sit ON the box. */
@@ -1291,9 +1380,14 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
         </section>
         <section data-cat="mcp" hidden>
           <h3>MCPs</h3>
-          <p class="shint">Tool servers Crow could borrow tools from, the way it
-             borrows none today: everything it can call is built in.</p>
-          <p class="empty">Coming soon.</p>
+          <div id="mcpproblems"></div>
+          <div class="mcpsaid" id="mcpsaid"></div>
+          <div id="mcplist"></div>
+          <div class="sform">
+            <input id="mcpline"
+                   placeholder="npx -y @modelcontextprotocol/server-github">
+            <button onclick="crow.addMcp()">Add</button>
+          </div>
         </section>
         <section data-cat="providers" hidden>
           <h3>Other providers</h3>
@@ -1524,7 +1618,40 @@ const crow = {
 
   fail(msg){ const d=document.createElement("div"); d.className="fail";
     d.textContent=msg; (this.col||flow).appendChild(d); this.bottom(); },
-  note(msg){ const t=this.turn(""); const d=document.createElement("div");
+  // #130. THE INSTALL LINE, AND WHY THE NOTE WAITS FOR IT. `/mcp add` starts a
+  // foreign process and waits for a handshake -- the one slash command that
+  // takes real time. It gets the memory gate's tile, in the chat, under the
+  // command that was typed.
+  //
+  // FOUR SECONDS AT LEAST (robin, 2026-08-22), even when the server answers in
+  // three hundred milliseconds: a tile that flashes past is indistinguishable
+  // from nothing having happened, which is the whole complaint it answers.
+  installBar(){
+    const t=this.turn(""); const d=document.createElement("div");
+    d.className="installbar";
+    const top=document.createElement("span"); top.className="top";
+    const title=document.createElement("span");
+    title.className="title"; title.textContent="Install MCP";
+    const hint=document.createElement("span");
+    hint.className="hint"; hint.textContent="starting the server …";
+    top.appendChild(title); top.appendChild(hint);
+    d.appendChild(top); t.appendChild(d);
+    this.installTurn=t; this.installUntil=Date.now()+4000; this.bottom(); },
+
+  // THE ANSWER IS HELD, NOT THE CALL. Python pushes its note the moment the
+  // schema is on disk; delaying it HERE keeps the whole floor in one place and
+  // leaves the core with nothing to know about an animation.
+  note(msg){
+    if(this.installUntil){
+      const wait=Math.max(0, this.installUntil - Date.now());
+      this.installUntil=0;
+      setTimeout(() => {
+        if(this.installTurn){ this.installTurn.remove(); this.installTurn=null; }
+        this.drawNote(msg); }, wait);
+      return; }
+    this.drawNote(msg); },
+
+  drawNote(msg){ const t=this.turn(""); const d=document.createElement("div");
     d.className="note"; d.textContent=msg; t.appendChild(d); this.bottom(); },
   alarm(msg){ const t=this.turn(""); const d=document.createElement("div");
     d.className="alarm"; d.textContent=msg; t.appendChild(d); this.bottom(); },
@@ -1571,6 +1698,7 @@ const crow = {
     document.querySelectorAll("#themes button").forEach(
       b => b.classList.toggle("on", b.dataset.theme===now));
     this.drawSkills();
+    this.drawMcp();
     $("#settings").hidden=false;
   },
   // #124. ASKED FOR EVERY TIME THE SHEET OPENS, never cached in the page: the
@@ -1599,6 +1727,126 @@ const crow = {
         sw.onclick=()=>this.toggleSkill(sk.name,row,sw);
         row.appendChild(text); row.appendChild(sw);
         box.appendChild(row); }); }); },
+  // #129. THE SHEET ASKS EVERY TIME IT OPENS, and again after every tick. The
+  // cost line is the reason it cannot be cached in the page: it is a count of
+  // characters that changes with the tick that was just made, and a stale one
+  // would understate what the next turn is about to pay.
+  drawMcp(){
+    pywebview.api.mcp_view().then(view => {
+      const bad=$("#mcpproblems"); bad.textContent="";
+      view.problems.forEach(p => {
+        const line=document.createElement("p");
+        line.className="mcpbad"; line.textContent=p; bad.appendChild(line); });
+      const box=$("#mcplist"); box.textContent="";
+      if(!view.servers.length){
+        const p=document.createElement("p");
+        p.className="empty"; p.textContent="Nothing here yet.";
+        box.appendChild(p); return; }
+      view.servers.forEach(sv => this.drawMcpServer(box,sv,view.classes)); }); },
+
+  drawMcpServer(box,sv,classes){
+    const head=document.createElement("div");
+    const open=this.mcpOpen.has(sv.name);
+    head.className="mcphead"+(open?" open":"");
+    const caret=document.createElement("span");
+    caret.className="caret"; caret.textContent=String.fromCharCode(9654);
+    // A SERVER NAME AND ITS COMMAND ARE OFF THE DISK, so they go in by
+    // textContent and never into an HTML string -- the rail learned that in #119.
+    const name=document.createElement("div");
+    name.className="sname";
+    name.textContent=sv.enabled?sv.name:sv.name+"  (switched off)";
+    const cmd=document.createElement("div"); cmd.className="cmd";
+    cmd.textContent=[sv.command].concat(sv.args).join(" "); cmd.title=cmd.textContent;
+    const count=document.createElement("div"); count.className="count";
+    count.textContent=sv.tools.length+" tools · "+sv.cost+" chars";
+    const again=document.createElement("button");
+    again.textContent="ask again";
+    again.onclick=(e)=>{ e.stopPropagation(); this.refreshMcp(sv.name); };
+    const gone=document.createElement("button");
+    gone.textContent="remove";
+    gone.onclick=(e)=>{ e.stopPropagation(); this.removeMcp(sv.name); };
+    [caret,name,cmd,count,again,gone].forEach(el => head.appendChild(el));
+    const tools=document.createElement("div");
+    tools.className="mcptools"+(open?" open":"");
+    // THE BUTTONS SIT INSIDE THE HEAD, so a click on one bubbles up to the fold
+    // -- the same trap the memory tile hit on 2026-08-22, where `discard` would
+    // have folded away the only record of what was being discarded.
+    head.onclick=()=>{ const now=!this.mcpOpen.has(sv.name);
+      if(now) this.mcpOpen.add(sv.name); else this.mcpOpen.delete(sv.name);
+      head.classList.toggle("open",now); tools.classList.toggle("open",now); };
+    box.appendChild(head);
+    if(!sv.tools.length){
+      const p=document.createElement("p");
+      p.className="empty"; p.textContent="It offered nothing.";
+      tools.appendChild(p); }
+    sv.tools.forEach(t => tools.appendChild(this.mcpRow(sv,t,classes)));
+    box.appendChild(tools); },
+
+  mcpRow(sv,t,classes){
+    const row=document.createElement("div");
+    row.className="srow"+(t.included?"":" off");
+    const text=document.createElement("div"); text.className="stext";
+    const name=document.createElement("div");
+    name.className="sname"; name.textContent=t.name;
+    const desc=document.createElement("div");
+    desc.className="sdesc"; desc.textContent=t.description||"(no description)";
+    text.appendChild(name); text.appendChild(desc);
+    const seg=document.createElement("div"); seg.className="seg";
+    classes.forEach(k => {
+      const b=document.createElement("button"); b.textContent=k;
+      // SOLID IS A DECISION, DASHED IS THE SERVER'S GUESS. Nothing is marked as
+      // chosen that nobody chose -- and where nobody has, the strict default is
+      // what actually applies, because needs_approval has never heard the name.
+      if(t.class===k) b.classList.add("on");
+      else if(!t.class && t.proposed===k){ b.classList.add("guess");
+        b.title="what the server suggests. Nothing is stored until you pick one"; }
+      b.onclick=()=>this.setMcpClass(sv.name,t,k);
+      seg.appendChild(b); });
+    const sw=document.createElement("button");
+    sw.className="sw"+(t.included?" on":"");
+    sw.title=t.included?"the model can call it":"not in the tool list";
+    sw.onclick=()=>this.tickMcp(sv.name,t,row,sw);
+    row.appendChild(text); row.appendChild(seg); row.appendChild(sw);
+    return row; },
+
+  tickMcp(server,tool,row,sw){
+    // PAINTED FIRST, WRITTEN SECOND, the way toggleSkill does it -- and PUT BACK
+    // if the write is refused, which toggleSkill has no way to be.
+    const on=!sw.classList.contains("on");
+    sw.classList.toggle("on",on); row.classList.toggle("off",!on);
+    pywebview.api.mcp_confirm(server,tool.tool,on,null).then(said => {
+      if(said){ sw.classList.toggle("on",!on); row.classList.toggle("off",on);
+                this.mcpSaid(said); return; }
+      this.mcpSaid(""); this.drawMcp(); }); },
+
+  setMcpClass(server,tool,klass){
+    pywebview.api.mcp_confirm(server,tool.tool,tool.included,klass).then(said => {
+      this.mcpSaid(said||""); if(!said) this.drawMcp(); }); },
+
+  addMcp(){
+    const line=$("#mcpline").value.trim();
+    if(!line){ this.mcpSaid("a command line."); return; }
+    this.mcpSaid("asking …");
+    pywebview.api.mcp_add(line).then(said => {
+      this.mcpSaid(said||"");
+      if(!said) $("#mcpline").value="";
+      this.drawMcp(); }); },
+
+  refreshMcp(name){
+    this.mcpSaid("asking "+name+" again …");
+    pywebview.api.mcp_refresh(name).then(said => {
+      this.mcpSaid(said||""); this.drawMcp(); }); },
+
+  removeMcp(name){
+    this.mcpOpen.delete(name);
+    pywebview.api.mcp_remove(name).then(said => {
+      this.mcpSaid(said||""); this.drawMcp(); }); },
+
+  mcpSaid(text){ $("#mcpsaid").textContent=text; },
+  // WHICH SERVERS ARE UNFOLDED, kept in the page rather than on disk: it is
+  // where somebody is looking right now, not a setting they chose.
+  mcpOpen: new Set(),
+
   toggleSkill(name,row,sw){
     // PAINTED FIRST, WRITTEN SECOND, the way `setTheme` does it: the write is a
     // file, and a click that waits for one feels broken.
@@ -1707,7 +1955,11 @@ const crow = {
   go(){ if(this.running){ pywebview.api.stop(); return; }
     const text=input.value.trim(); if(!text) return;
     input.value=""; input.style.height="auto";
-    this.user(text); this.running=true;
+    this.user(text);
+    // #130. AFTER the typed line, before the call: the tile belongs under the
+    // command it is about, and the answer to `/mcp add` waits for it.
+    if(/^\/mcp\s+add\s+\S/i.test(text)) this.installBar();
+    this.running=true;
     pywebview.api.send(text).then(
       started => started ? this.busy() : this.idle(),
       () => this.idle()); },
@@ -3645,6 +3897,7 @@ class Api:
     WHAT_THEY_DO = {
         "/help": "this list.",
         "/tools": "what the model can call.",
+        "/mcp": "the tool servers; /mcp fetch|use|drop <server> to change them.",
         "/mode": "the release level; /mode manual|allowedit|auto to switch.",
         "/model": "the model that is up; /model <key> restarts on another one.",
         "/reasoning": "this chat's thinking level; /reasoning <level>|off to set it.",
@@ -3690,6 +3943,8 @@ class Api:
             return None
         if word == "/tools":
             return self.tools_listing()
+        if word == "/mcp":
+            return crow_core.mcp_command(parts[1:])
         if word == "/help":
             return self.help_listing()
         if word == "/reset":
@@ -4851,6 +5106,49 @@ class Api:
             if self._conversation.repin_memory(crow_core.prompt_head()):
                 self.push({"k": "note", "t": crow_core.SKILL_COST_NOTE})
         return True
+
+    # #129. THE MCP SHEET. Every one of these is a thin pass to `crow_core`,
+    # and that is deliberate rather than lazy: `/mcp` in both clients runs the
+    # same functions, so the terminal and the window cannot describe one
+    # configuration differently. The window adds exactly one thing the terminal
+    # does not need -- a shape the page can draw.
+    def mcp_view(self) -> dict:
+        """What the sheet draws. Asked for on every open and after every tick."""
+        return crow_core.mcp_view()
+
+    def mcp_confirm(self, name: str, tool: str, included, klass) -> str:
+        """One tick or one class. Returns the reason it was refused, or "".
+
+        A STRING RATHER THAN A BOOLEAN, because the page painted the click before
+        the file took it and has to be able to say WHY it is putting the row
+        back. "Refused" alone would leave a switch flicking for no stated reason.
+
+        `klass=None` MEANS "DO NOT TOUCH IT", which is not the same as clearing
+        it: the switch column and the class column are two decisions, and moving
+        one may not silently discard the other.
+        """
+        choice = {"included": bool(included)}
+        if klass is not None:
+            choice["class"] = klass or None
+        problem = crow_core.mcp_confirm(name, {tool: choice})
+        if problem:
+            return problem
+        # THE BILL IS SAID WHERE IT IS INCURRED, the shape `SKILL_COST_NOTE`
+        # already has. The tool list is rendered into the HEAD of the prompt, so
+        # a tick moves byte 0 -- for this chat and for every saved one.
+        self.push({"k": "note", "t": crow_core.MCP_COST_NOTE})
+        return ""
+
+    def mcp_add(self, line: str) -> str:
+        """One command line in, a working server out. "" when it worked."""
+        _, _, problem = crow_core.mcp_add_line(line)
+        return problem or ""
+
+    def mcp_refresh(self, name: str) -> str:
+        return crow_core.mcp_refresh_server(name) or ""
+
+    def mcp_remove(self, name: str) -> str:
+        return crow_core.mcp_remove_server(name) or ""
 
     def set_theme(self, name: str) -> bool:
         """The picker in Aussehen. True when the choice reached the disk.

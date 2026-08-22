@@ -5603,8 +5603,14 @@ MCP_COST_NOTE = ("the tool list changed -- the next turn pays a full prefill, "
 # unassigned, so a check built on `unicodedata.category` would let the middle of
 # it through.
 _TAG_FIRST, _TAG_LAST = 0xE0000, 0xE007F
-_TAG_BASE = "\U0001F3F4"       # waving black flag: the one legitimate opener
-_TAG_TERM = "\U000E007F"       # cancel tag: what closes a real emoji sequence
+# CODEPOINTS AND NOT LITERALS, and that is not style. `check_gui_prereqs`
+# parses string literals and asks whether the shipped face can DRAW what is
+# in them -- because a braille cell written as an escape still lands on
+# somebody's screen. These two are never drawn: they are compared with `==`
+# and nothing else. Written as literals they were 4 of that checker's 6 red
+# lines, and a checker carrying false red is a checker that stops being read.
+_TAG_BASE = chr(0x1F3F4)       # waving black flag: the one legitimate opener
+_TAG_TERM = chr(0xE007F)       # cancel tag: what closes a real emoji sequence
 
 
 def strip_tag_characters(text: str) -> str:
@@ -5754,11 +5760,14 @@ def mcp_catalog(doc: dict | None = None) -> "tuple[list[dict], list[str]]":
             taken.add(name)
 
             klass = classes.get(raw)
+            # UNCLASSIFIED IS NOT A PROBLEM, it is the normal state of a
+            # freshly added server -- and the strict one. Reporting it would
+            # print a red line per tool on every listing, and a report that is
+            # always red is a report nobody reads. The listing shows the
+            # unconfirmed class in brackets instead, which says the same thing
+            # where somebody is already looking.
             if klass is None:
-                problems.append("%s is not classified -- it asks at every level "
-                                "until somebody says whether it reads, writes or "
-                                "executes" % name)
-                klass = None
+                pass
             elif klass not in MCP_TOOL_CLASSES:
                 problems.append("%s is stored as %r, which is not one of %s -- it "
                                 "asks at every level until that is corrected"
@@ -5940,8 +5949,22 @@ class McpServer:
         command = self.block.get("command")
         if not isinstance(command, str) or not command.strip():
             return None
+        # RESOLVED HERE, NOT LEFT TO Popen. On Windows `npx` is `npx.CMD`, and
+        # CreateProcess does not consult PATHEXT -- `Popen(["npx", ...])` raises
+        # WinError 2 while `where npx` finds it on the first try. Measured
+        # 2026-08-22 against @modelcontextprotocol/server-filesystem.
+        #
+        # THIS IS NOT COSMETIC. Nearly every MCP example in the world starts with
+        # `npx`, so without this line not one documented server can be started on
+        # the platform this client ships for.
+        #
+        # `shell=True` WOULD ALSO "FIX" IT and is the wrong fix: it would hand a
+        # configured string to cmd.exe, where a space or an ampersand in a path
+        # stops being an argument and becomes syntax.
+        found = shutil.which(command)
         args = self.block.get("args")
-        return [command] + [str(a) for a in (args if isinstance(args, list) else [])]
+        return ([found or command]
+                + [str(a) for a in (args if isinstance(args, list) else [])])
 
     # -- the process --------------------------------------------------------
 
@@ -6201,6 +6224,25 @@ def forget_mcp_servers() -> None:
         server.close()
 
 
+def _mcp_launch_key(block) -> tuple:
+    """What about a block decides the PROCESS, and nothing else.
+
+    Which tools are exposed and how they are classed are facts about the PROMPT.
+    Restarting the child for them would drop a live connection mid-turn over a
+    change the server never sees -- and the checklist writes one of those on
+    every single tick.
+    """
+    if not isinstance(block, dict):
+        return ()
+    env = block.get("env")
+    return (block.get("command"),
+            tuple(str(a) for a in (block.get("args") or [])),
+            tuple(sorted((str(k), str(v)) for k, v in env.items()))
+            if isinstance(env, dict) else (),
+            block.get("cwd"),
+            block.get("enabled", True) is not False)
+
+
 def _mcp_retire(doc: dict) -> None:
     """End servers whose configuration no longer matches the one that started them.
 
@@ -6211,7 +6253,7 @@ def _mcp_retire(doc: dict) -> None:
     servers = doc.get("servers") or {}
     with _MCP_LIVE_LOCK:
         stale = [name for name, live in _MCP_LIVE.items()
-                 if servers.get(name) != live.block]
+                 if _mcp_launch_key(servers.get(name)) != _mcp_launch_key(live.block)]
         retired = [_MCP_LIVE.pop(name) for name in stale]
     for server in retired:
         server.close()
@@ -6334,6 +6376,432 @@ def _mcp_caller(server: str, tool: str):
     return call
 
 
+# ---------------------------------------------------------------- E4 ------
+# THE CHECKLIST. THE HINT PROPOSES, A PERSON DISPOSES, THE FILE REMEMBERS WHICH.
+#
+# The specification is blunt about what an annotation is worth: clients "must
+# treat these hints as untrusted unless they come from a trusted server source",
+# and they "are not authorization constructs". So a hint may fill a form in. It
+# may not answer it.
+#
+# WHY FOLLOWING AN UNTRUSTED HINT IS STILL SAFE HERE: because it decides
+# nothing. It pre-fills a form somebody nods at, and what the nod produces is
+# written into Crow's own configuration -- not the server's answer. A server
+# that reports `readOnlyHint: true` tomorrow changes the stored classification
+# by exactly nothing, the same construction the pinned memory head has.
+#
+# AND THE DEFAULTS ALREADY POINT THE SAFE WAY. Absent, `readOnlyHint` is false
+# and `destructiveHint` is true -- "no statement" reads as "writes, and
+# destructively". A server can therefore only lie in ONE direction, towards
+# harmless, and that single direction is what the person at the keyboard is
+# there to catch. Somebody who clicks through the list without reading it gets
+# the strict answer, not the convenient one.
+#
+# ADDING IS NOT CONFIRMING, and that split is the whole stage. Adding fetches
+# the schema once and writes it down, so nothing ever has to ask again -- and
+# declares NOT ONE TOOL, because nobody has said yes to one yet. The prompt head
+# does not move until somebody ticks something, which is also where the bill for
+# moving it belongs.
+
+MCP_USAGE = (
+    "  /mcp                               what is configured\n"
+    "  /mcp add <command line>            add a server, take what it offers\n"
+    "  /mcp fetch <server>                ask it again\n"
+    "  /mcp use <server> <tool> <class>   reading, writing or executing\n"
+    "  /mcp drop <server> <tool>          take it out"
+)
+
+
+_MCP_GENERIC = frozenset(("index", "main", "server", "dist", "build", "src",
+                          "app", "cli", "bin", "start", "run"))
+
+
+def mcp_name_from(argv: list) -> str:
+    """A server name out of the command line, so nobody has to invent one.
+
+    `npx -y @modelcontextprotocol/server-github` is github. A path ending in
+    dist/index.js is the project it sits in, because "index" names nothing --
+    that is what `_MCP_GENERIC` is for, and it is the case a basename-only rule
+    gets wrong on every Node server there is.
+    """
+    parts = [str(a) for a in argv if not str(a).startswith("-")]
+    # THE FIRST TOKEN AFTER THE LAUNCHER, NOT THE LAST. `npx -y
+    # @modelcontextprotocol/server-filesystem C:/Users/robin/dev/Crow` ends in
+    # the directory the server was pointed AT -- reading backwards named that
+    # server "crow", after the folder it happens to serve.
+    for token in (parts[1:] or parts):
+        raw = str(token).replace("\\", "/").rstrip("/")
+        pieces = [p for p in raw.split("/") if p]
+        while pieces:
+            stem = pieces.pop().split(".")[0]
+            for _ in range(3):     # mcp-server-fetch strips twice, not once
+                stem = re.sub(r"^(?:@[^/]*|mcp|server)[-_]", "", stem)
+                stem = re.sub(r"[-_](?:mcp|server)$", "", stem)
+            slug = _mcp_slug(stem)
+            if slug and slug not in _MCP_GENERIC:
+                return slug
+    return _mcp_slug(str(parts[0]).replace("\\", "/").split("/")[-1].split(".")[0]) or "server"
+
+
+def mcp_add_line(line: str) -> "tuple[str | None, dict | None, str | None]":
+    """Add a server from one command line: `(name, view, problem)`.
+
+    THE NAME COMES BACK, and that is not decoration. Without it the caller has
+    to guess which of the servers it is now looking at is the one it just added
+    -- and "the last one" is wrong the moment the list is sorted: adding
+    `filesystem` beside `pontifex` confirmed *pontifex*, on screen, on
+    2026-08-22.
+    """
+    argv = [a for a in str(line or "").split() if a]
+    if not argv:
+        return None, None, ("give a command line, e.g. "
+                            "npx -y @modelcontextprotocol/server-github")
+    name = mcp_name_from(argv)
+    view, problem = mcp_add_server(name, {"command": argv[0], "args": argv[1:]})
+    return name, view, problem
+
+
+def mcp_proposed_class(tool: dict) -> str:
+    """What the annotation SUGGESTS, with the specification's defaults where it
+    is silent. A proposal for a form, never an answer to one.
+
+    `is True` AND `is False`, NOT TRUTHINESS. A hint arrives as JSON from a
+    stranger: `"readOnlyHint": "yes"` is a string, and a truthy test would read
+    it as the safe-for-the-server answer. Anything that is not exactly the
+    boolean falls through to the strict end.
+    """
+    hints = tool.get("annotations")
+    hints = hints if isinstance(hints, dict) else {}
+    if hints.get("readOnlyHint") is True:
+        return "reading"
+    if hints.get("destructiveHint") is False:
+        return "writing"
+    return "executing"
+
+
+def _mcp_cost(declarations: list) -> int:
+    """Characters these declarations add to `json.dumps(TOOLS)`.
+
+    The list's own separators count: appending one entry to a non-empty list
+    costs `", "` as well as the object, which is exactly what `json.dumps` of
+    the appended entries alone comes to.
+    """
+    return len(json.dumps(declarations, sort_keys=True)) if declarations else 0
+
+
+def mcp_write(doc: dict) -> "str | None":
+    """Write the configuration, and READ IT BACK in the same call.
+
+    Persistence is a contract, not a one-way valve. A writer nobody reads back
+    is a writer nobody has proved -- three times in one day on 2026-08-21, each
+    time with a green suite behind it.
+    """
+    try:
+        os.makedirs(os.path.dirname(MCP_FILE), exist_ok=True)
+        with open(MCP_FILE, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=1)
+    except OSError as exc:
+        return "mcp.json could not be written: %s" % exc
+    back, problems = mcp_doc()
+    if problems:
+        return problems[0]
+    if back.get("servers") != doc.get("servers"):
+        return "mcp.json did not read back as it was written"
+    return None
+
+
+def mcp_add_server(name: str, block: dict) -> "tuple[dict | None, str | None]":
+    """Ask a server once what it offers, and write the answer down.
+
+    NOTHING IS DECLARED BY THIS. A new server arrives with an EMPTY positive
+    list, so the prompt head does not move and no tool is offered to the model
+    until somebody ticks it. An existing server keeps the ticks and the classes
+    it already had -- a refresh is not an undo.
+
+    NOTHING IS WRITTEN IF THE FETCH FAILS. Half a block for a server nobody can
+    reach is a configuration the next start reports as broken.
+    """
+    if not _mcp_slug(name):
+        return None, "%r is not a name the tool list can carry" % name
+    if not isinstance(block, dict):
+        return None, "server %r needs a command block" % name
+    doc, problems = mcp_doc()
+    if problems:
+        return None, problems[0]
+    tools, problem = mcp_fetch_tools(name, block)
+    if problem:
+        return None, problem
+
+    known = (doc.get("servers") or {}).get(name)
+    known = known if isinstance(known, dict) else {}
+    offered = {t.get("name") for t in tools if isinstance(t, dict)}
+    kept_tools = known.get("tools") if isinstance(known.get("tools"), dict) else {}
+    kept_classes = known.get("classes") if isinstance(known.get("classes"), dict) else {}
+
+    stored = {k: v for k, v in block.items() if k not in ("schema",)}
+    stored["schema"] = {"tools": tools}
+    # ADDING A SERVER MAKES IT USABLE, and that is robin's call on 2026-08-22
+    # against the way I first built it. Every other client works this way -- one
+    # command and the tools are there -- and a client that demands twelve ticks
+    # before anything works is a client nobody configures twice.
+    #
+    # `classes` STAYS EMPTY, which is what keeps this safe: `needs_approval`
+    # answers `executing` for a name it has not heard of, so `manual` and
+    # `allowedit` still stop before every call. The checklist is where somebody
+    # UNTICKS and relaxes -- effort buys convenience, never safety.
+    #
+    # A SERVER THAT IS ALREADY CONFIGURED KEEPS ITS TICKS. A refresh is not an
+    # undo, and it may not re-take what somebody took out.
+    known_before = isinstance(known.get("tools"), dict)
+    include = ([t for t in (kept_tools.get("include") or []) if t in offered]
+               if known_before else sorted(offered))
+    stored["tools"] = dict(kept_tools, include=sorted(include))
+    classes = {t: c for t, c in kept_classes.items()
+               if t in offered and c in MCP_TOOL_CLASSES}
+    if classes:
+        stored["classes"] = classes
+    else:
+        stored.pop("classes", None)
+
+    doc.setdefault("servers", {})[name] = stored
+    problem = mcp_write(doc)
+    if problem:
+        return None, problem
+    mcp_apply(doc)
+    return mcp_view(), None
+
+
+def mcp_confirm(name: str, choices: dict) -> "str | None":
+    """What a person ticked, written into Crow's configuration.
+
+    CHECKED WHOLE BEFORE ANYTHING IS WRITTEN. A checklist half applied is worse
+    than one refused: the sheet would show one state, the file another, and only
+    the file decides what the model is offered.
+
+    A CHOICE WITHOUT A `class` KEY LEAVES THE STORED CLASS ALONE, and that is
+    not the same as `"class": None`. Un-ticking a tool must not also throw away
+    the decision about what it does, or re-ticking it later would ask again.
+    """
+    doc, problems = mcp_doc()
+    if problems:
+        return problems[0]
+    block = (doc.get("servers") or {}).get(name)
+    if not isinstance(block, dict):
+        return "no MCP server named %r is configured" % name
+    if not isinstance(choices, dict):
+        return "that checklist could not be read"
+    schema = block.get("schema") if isinstance(block.get("schema"), dict) else {}
+    stored = schema.get("tools")
+    offered = {t.get("name") for t in (stored if isinstance(stored, list) else [])
+               if isinstance(t, dict)}
+    for tool, choice in choices.items():
+        if tool not in offered:
+            return ("%r is not a tool the server %r offered -- only what its "
+                    "stored schema lists can be taken" % (tool, name))
+        klass = (choice or {}).get("class")
+        if "class" in (choice or {}) and klass is not None and klass not in MCP_TOOL_CLASSES:
+            return ("%r is not one of %s" % (klass, ", ".join(MCP_TOOL_CLASSES)))
+
+    kept = block.get("tools") if isinstance(block.get("tools"), dict) else {}
+    include = [t for t in (kept.get("include") or []) if t in offered]
+    classes = dict(block.get("classes") or {}) if isinstance(
+        block.get("classes"), dict) else {}
+    for tool, choice in choices.items():
+        choice = choice or {}
+        if choice.get("included"):
+            if tool not in include:
+                include.append(tool)
+        elif tool in include:
+            include.remove(tool)
+        if "class" in choice:
+            if choice.get("class"):
+                classes[tool] = choice["class"]
+            else:
+                classes.pop(tool, None)
+    block["tools"] = dict(kept, include=sorted(include))
+    if classes:
+        block["classes"] = classes
+    else:
+        block.pop("classes", None)
+
+    problem = mcp_write(doc)
+    if problem:
+        return problem
+    mcp_apply(doc)
+    return None
+
+
+def mcp_refresh_server(name: str) -> "str | None":
+    """Ask a configured server for its tools again, keeping what was ticked.
+
+    ONE FUNCTION FOR BOTH SURFACES rather than the same four steps written out
+    in each. `/mcp fetch` and the sheet's "ask again" are one operation, and two
+    copies of it would agree right up to the day one of them was fixed.
+    """
+    doc, problems = mcp_doc()
+    if problems:
+        return problems[0]
+    block = (doc.get("servers") or {}).get(name)
+    if not isinstance(block, dict):
+        return "no MCP server named %r is configured" % name
+    _, problem = mcp_add_server(name, block)
+    return problem
+
+
+def mcp_remove_server(name: str) -> "str | None":
+    """Take a server out of the configuration, and end it if it is running."""
+    doc, problems = mcp_doc()
+    if problems:
+        return problems[0]
+    servers = doc.get("servers") or {}
+    if name not in servers:
+        return "no MCP server named %r is configured" % name
+    servers.pop(name)
+    doc["servers"] = servers
+    problem = mcp_write(doc)
+    if problem:
+        return problem
+    mcp_apply(doc)
+    return None
+
+
+def mcp_view() -> dict:
+    """Everything a surface needs to draw the checklist, in one shape.
+
+    ONE VIEW FOR BOTH CLIENTS. Two ways of describing one configuration diverge,
+    and the second one gets worse -- #90's failure in the shape
+    `check_shared_core` cannot see, because both sides would still call the core.
+    """
+    doc, problems = mcp_doc()
+    entries, more = mcp_catalog(doc)
+    declared = {entry["name"]: entry for entry in entries}
+    servers = []
+    for name in sorted(doc.get("servers") or {}):
+        block = (doc.get("servers") or {})[name]
+        if not isinstance(block, dict):
+            continue
+        schema = block.get("schema") if isinstance(block.get("schema"), dict) else {}
+        stored = schema.get("tools")
+        classes = block.get("classes") if isinstance(block.get("classes"), dict) else {}
+        tools, taken = [], []
+        for tool in (stored if isinstance(stored, list) else []):
+            if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+                continue
+            raw = tool["name"]
+            qualified = mcp_tool_name(name, raw)
+            entry = declared.get(qualified)
+            if entry is not None:
+                taken.append(entry["declaration"])
+            klass = classes.get(raw)
+            tools.append({
+                "tool": raw,
+                "name": qualified,
+                "description": strip_tag_characters(str(tool.get("description") or "")),
+                "proposed": mcp_proposed_class(tool),
+                "class": klass if klass in MCP_TOOL_CLASSES else None,
+                "included": entry is not None,
+            })
+        servers.append({"name": name,
+                        "command": str(block.get("command") or ""),
+                        "args": [str(a) for a in (block.get("args") or [])],
+                        "enabled": block.get("enabled", True) is not False,
+                        "cost": _mcp_cost(taken),
+                        "tools": tools})
+    return {"file": MCP_FILE, "classes": list(MCP_TOOL_CLASSES),
+            "problems": problems + more, "servers": servers}
+
+
+def mcp_installed(view: dict, name: str) -> str:
+    """What `/mcp add` says when it worked. NOT the listing.
+
+    robin, 2026-08-22, having watched it: printing the whole table and the
+    command palette after an install is not a confirmation -- the user asked one
+    question ("did it install?") and got the same answer `/mcp` gives, which is
+    indistinguishable from having changed nothing. What each tool may do is a
+    question for later, and it has a place of its own.
+    """
+    servers = [s for s in (view.get("servers") or []) if s["name"] == name]
+    added = servers[0] if servers else None
+    if added is None:
+        return "nothing was added."
+    return ("%s installed: %d tools, %s characters in every prompt.%s"
+            "%s lists them; the window keeps them under Settings, MCPs.%s%s"
+            % (added["name"], len(added["tools"]), "{:,}".format(added["cost"]),
+               "\n", "/mcp", "\n", MCP_COST_NOTE))
+
+
+def mcp_listing() -> str:
+    """`/mcp`, in both clients, out of `mcp_view`.
+
+    NO SENTENCE HERE POINTS AT A CONTROL. Prose about pixels cannot be tested,
+    and the one time this repository tried it the prose was wrong about which
+    side of the rail a button sits on. A path can be checked; "the panel on the
+    left" cannot.
+    """
+    view = mcp_view()
+    if not view["servers"]:
+        return ("no MCP server is configured.\nwrite one into %s, then "
+                "'/mcp fetch <server>'.\n\n%s" % (view["file"], MCP_USAGE))
+    lines = ["MCP servers, from %s" % view["file"]]
+    for server in view["servers"]:
+        started = " ".join([server["command"]] + server["args"]).strip()
+        lines.append("")
+        lines.append("%s   %s%s" % (server["name"], started,
+                                    "" if server["enabled"] else "   [switched off]"))
+        for tool in server["tools"]:
+            # A CLASS IN BRACKETS IS A PROPOSAL, a bare one is a decision. The
+            # difference is the whole stage, so it has to survive into the line
+            # somebody actually reads.
+            klass = tool["class"] or "(%s)" % tool["proposed"]
+            first = tool["description"].split(". ")[0].rstrip(".")
+            lines.append("  %s %-30s %-12s %s"
+                         % ("[x]" if tool["included"] else "[ ]",
+                            tool["name"], klass, first[:64]))
+        lines.append("  %d characters in every prompt" % server["cost"])
+    if view["problems"]:
+        lines.append("")
+        lines.extend("! " + problem for problem in view["problems"])
+    lines.append("")
+    lines.append(MCP_USAGE)
+    return "\n".join(lines)
+
+
+def mcp_command(argv: list) -> str:
+    """`/mcp` and its three forms, answered once for both surfaces."""
+    argv = [str(a) for a in (argv or [])]
+    if not argv:
+        return mcp_listing()
+    verb, rest = argv[0].lower(), argv[1:]
+
+    if verb == "add" and rest:
+        name, view, problem = mcp_add_line(" ".join(rest))
+        return ("error: " + problem) if problem else mcp_installed(view, name)
+
+    if verb == "fetch" and len(rest) == 1:
+        problem = mcp_refresh_server(rest[0])
+        return ("error: " + problem) if problem else mcp_installed(mcp_view(),
+                                                                  rest[0])
+
+    if verb == "use" and len(rest) == 3:
+        name, tool, klass = rest
+        problem = mcp_confirm(name, {tool: {"included": True, "class": klass}})
+        if problem:
+            return "error: " + problem
+        return "%s is taken, as %s.\n%s" % (mcp_tool_name(name, tool), klass,
+                                            MCP_COST_NOTE)
+
+    if verb == "drop" and len(rest) == 2:
+        name, tool = rest
+        # NO `class` KEY: dropping a tool is not un-deciding what it does.
+        problem = mcp_confirm(name, {tool: {"included": False}})
+        if problem:
+            return "error: " + problem
+        return "%s is out of the tool list.\n%s" % (mcp_tool_name(name, tool),
+                                                    MCP_COST_NOTE)
+
+    return "that is not a form of /mcp.\n" + MCP_USAGE
+
+
 # READ AT IMPORT, ONCE, FROM DISK. Not from a server -- see the top of the E2
 # section. It sits HERE rather than up there because `mcp_apply` wires
 # `_mcp_caller` into `TOOL_IMPL`, and a name is only resolvable once it exists.
@@ -6361,8 +6829,8 @@ atexit.register(forget_mcp_servers)
 #
 # `crow.py` keeps the prose of `HELP` and is pinned against this tuple; the
 # window reads the tuple directly. Neither owns the other.
-SLASH_COMMANDS = ("/help", "/tools", "/mode", "/model", "/reasoning", "/thoughts",
-                  "/reset", "/context", "/exit", "/quit")
+SLASH_COMMANDS = ("/help", "/tools", "/mcp", "/mode", "/model", "/reasoning",
+                  "/thoughts", "/reset", "/context", "/exit", "/quit")
 
 
 def needs_approval(name: str, mode: str) -> bool:

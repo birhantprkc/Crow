@@ -999,6 +999,7 @@ class TerminalTurnEvents(TurnEvents):
 HELP = """commands:
   /help          this list
   /tools         the tools the model can call
+  /mcp           the tool servers, /mcp fetch|use|drop <server> to change them
   /mode          the release level, /mode manual|allowedit|auto to switch
   /model         the model that is up, /model <key> restarts on another one
   /reasoning     this chat's thinking level, /reasoning <level>|off to set it
@@ -1054,6 +1055,15 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
 
     if line == "/tools":
         print(format_tools())
+        return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
+
+    # #129. THE WHOLE ANSWER IS THE CORE'S, arguments and all. The window runs
+    # the same call on the same words, so the two cannot describe one
+    # configuration differently -- which is the divergence a checker cannot see,
+    # because both surfaces would still be calling the core.
+    if line == "/mcp" or line.startswith("/mcp "):
+        print(crow_core.mcp_command(line.split()[1:]))
+        print()
         return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
 
     if line == "/thoughts":

@@ -44,6 +44,7 @@
 - [Memory](#memory)
 - [Skills](#skills)
 - [Session search](#session-search)
+- [MCP servers](#mcp-servers)
 - [Settings](#settings)
 - [Measurements](#measurements)
 - [Window](#window)
@@ -79,6 +80,7 @@
 | **Python** | 3.8+. Terminal client uses the standard library only |
 | **WebView2** | Window only. Ships with Windows 11 and with Edge |
 | **pywebview** | Window only, ~2 MB. Installed by `install.ps1` |
+| **Node** | Only for MCP servers started with `npx`. NOT installed by `install.ps1` |
 
 ---
 
@@ -169,7 +171,9 @@ Per model, out of the manifest. Names that render the same prompt are one row in
 
 ### Tools
 
-12. `read_file` `write_file` `edit_file` `list_dir` `find_files` `search_text` `run_command`
+12 built in, plus whatever [MCP servers](#mcp-servers) are configured.
+
+`read_file` `write_file` `edit_file` `list_dir` `find_files` `search_text` `run_command`
 `web_search` `fetch_url` `memory` `skill` `session_search`.
 
 | release level | asks before |
@@ -315,6 +319,96 @@ session_search(query, limit=8)
 
 ---
 
+## MCP servers
+
+```
+/mcp add npx -y @modelcontextprotocol/server-filesystem C:\dev\Crow
+/mcp add node C:\dev\pontifex\dist\index.js
+/mcp add uvx mcp-server-fetch
+```
+
+The name comes out of the line: `filesystem`, `pontifex`, `fetch`.
+
+| | |
+|---|---|
+| Config | `%LOCALAPPDATA%\Crow\mcp.json`, one block per server |
+| Transport | stdio. `url`, HTTP and OAuth are not built |
+| Schema | asked **once**, when the server is added, then written to disk |
+| `TOOLS` at start | read from that file, never from a server |
+| Connection | opened when a tool is first called, then kept until the config changes |
+| Tool names | `mcp_<server>_<tool>` |
+| Adding takes | every tool the server offers |
+| Classes | empty until you set them. An unclassified tool is `executing` |
+| Launcher | resolved through `PATH` + `PATHEXT` before it starts. `npx` is `npx.CMD` on Windows and `CreateProcess` does not look for it |
+| Environment | a fixed base set plus the block's `env`, never the whole shell |
+| Invisible U+E0000–U+E007F | stripped from names, descriptions, schemas and results. Emoji flags survive |
+
+### Commands
+
+| | |
+|---|---|
+| `/mcp` | what is configured, and its cost |
+| `/mcp add <command line>` | add a server, take what it offers |
+| `/mcp fetch <server>` | ask it again, keeping what was ticked |
+| `/mcp use <server> <tool> <class>` | `reading`, `writing` or `executing` |
+| `/mcp drop <server> <tool>` | take it out of the tool list |
+
+Removing a server: `Help → Settings → MCPs`.
+
+### The file
+
+```json
+{"servers": {"filesystem": {
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/dev/Crow"],
+  "env": {},
+  "enabled": true,
+  "timeout": 60,
+  "connect_timeout": 20,
+  "tools": {"include": ["read_file"], "exclude": []},
+  "schema": {"tools": [{"name": "read_file", "description": "...",
+                        "inputSchema": {}, "annotations": {}}]},
+  "classes": {"read_file": "reading"}
+}}}
+```
+
+| key | |
+|---|---|
+| `schema` | what the server answered. Untrusted, per the specification |
+| `classes` | what you confirmed. This is the half a release level acts on |
+| `include` | positive list, and it wins over `exclude` |
+| `enabled: false` | skipped. No connection attempted |
+| `timeout` · `connect_timeout` | seconds. Defaults 60 and 20 |
+
+The classification is pre-filled from `annotations`: `readOnlyHint: true` → `reading`,
+`destructiveHint: false` → `writing`, anything else → `executing`. The specification's own defaults
+are `readOnlyHint: false` and `destructiveHint: true`, so a server that says nothing gets the
+strictest of the three.
+
+### Cost
+
+| | tools | chars in every prompt |
+|---|---|---|
+| built-in | 12 | 7,758 |
+| `@modelcontextprotocol/server-filesystem` | 14 | 8,217 |
+| `node pontifex/dist/index.js` | 14 | 7,131 |
+| `mcp-server-fetch` | 1 | 1,137 |
+
+Measured 2026-08-22. The tool list is rendered into the head of the prompt, so changing it moves
+byte 0: the next turn and the first turn of every saved session pay a full prefill.
+
+### Not built
+
+| | |
+|---|---|
+| `sampling` | `capabilities` goes out empty. A server that asks for inference anyway gets `-32601` naming the missing capability |
+| `elicitation` | not declared, same answer |
+| `notifications/tools/list_changed` | ignored. A tool list that changed mid-chat would move byte 0 |
+| HTTP · OAuth | stdio only |
+| No catalog | no curated list of servers. You enter the command line |
+
+---
+
 ## Settings
 
 `Help → Settings` in the window.
@@ -324,7 +418,7 @@ session_search(query, limit=8)
 | **Appearance** | theme: dark, light, crow |
 | **Skills** | one row per skill, name and description, a switch. Off takes it out of the prompt; the file stays. Switching re-pins the open chat and says what the prefill costs |
 | **Server** | connection state, the base URL as its title, and the tool-call switch |
-| **MCPs** | coming soon |
+| **MCPs** | one row per server, folded; per tool a switch and its class. Add with a command line, `ask again`, `remove`. See [MCP servers](#mcp-servers) |
 | **Other providers** | coming soon — keys for models that are not on this machine |
 | **About** | version |
 

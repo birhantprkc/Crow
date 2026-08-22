@@ -54,6 +54,21 @@ sys.path.insert(0, str(HERE))
 import crow        # noqa: E402
 import crow_core   # noqa: E402
 
+# THE SUITE MAY NOT DEPEND ON WHAT THIS MACHINE HAS CONFIGURED (#130).
+# `crow_core` reads %LOCALAPPDATA%\Crow\mcp.json at import and appends whatever
+# it finds to TOOLS, TOOL_IMPL and TOOL_CLASS. Every case that enumerates the
+# tool table therefore answered differently on a machine with an MCP server than
+# on one without -- found on 2026-08-22, when `ReleaseLevelTests` went red
+# against a real pontifex install and nothing in this file had changed.
+#
+# A PATH WHOSE PARENT DOES NOT EXIST, not a temp file that might: the reader
+# treats "no file" as the empty configuration, and that is the state the twelve
+# built-in tools are the whole table in. Cases that WANT a configuration rebind
+# `MCP_FILE` themselves and put it back.
+crow_core.MCP_FILE = os.path.join(tempfile.gettempdir(),
+                                  "crow-suite-has-no-mcp", "mcp.json")
+crow_core.mcp_apply()
+
 # THE PALETTE IS PINNED FOR THIS WHOLE MODULE (#102). `crow_core._TTY` is decided
 # ONCE, at import, out of `sys.stdout.isatty()`, and the colour constants are
 # materialised from it on the spot -- so this file answered differently in a
@@ -3661,7 +3676,10 @@ class TheMcpConfigurationTests(unittest.TestCase):
         self.assertIn("mcp_github_create_issue", self._names())
         self.assertNotIn("mcp_github_create_issue", crow_core.TOOL_CLASS)
         self.assertTrue(crow_core.needs_approval("mcp_github_create_issue", "manual"))
-        self.assertTrue(any("classified" in p for p in problems), problems)
+        # AND IT IS NOT REPORTED AS A PROBLEM. After `add` this is the normal
+        # state of every tool, so a line per tool would be a listing that is
+        # always red -- and a report that is always red is one nobody reads.
+        self.assertEqual(problems, [])
 
     def test_a_class_crow_does_not_have_is_refused_not_invented(self):
         """A hand-edited `"create_issue": "safe"` must not become a class. It
@@ -4275,6 +4293,362 @@ class TheStdioConnectionTests(unittest.TestCase):
         self._configure(env={"FAKE_OWN": "changed"})
         proc.wait(timeout=10)
         self.assertIsNone(self._live())
+
+
+class TheChecklistTests(unittest.TestCase):
+    """E4: the hint proposes, the person disposes, and the file remembers which.
+
+    THE ONE SENTENCE THIS STAGE IS BUILT ON comes out of the specification:
+    annotations are untrusted unless the server is, and they are not an
+    authorisation construct. So they may fill a form in and may not answer it.
+    Everything here is about keeping those two apart -- what a server SAID, and
+    what a person then DECIDED -- and about the direction the defaults lean when
+    nobody has decided anything yet.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-mcp4-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.server_py = os.path.join(self.dir, "fake_mcp.py")
+        with open(self.server_py, "w", encoding="utf-8") as fh:
+            fh.write(FAKE_MCP_SERVER)
+        self._real = crow_core.MCP_FILE
+        self.addCleanup(self._restore)
+        crow_core.MCP_FILE = os.path.join(self.dir, "mcp.json")
+        crow_core.mcp_apply()
+
+    def _restore(self) -> None:
+        crow_core.forget_mcp_servers()
+        crow_core.MCP_FILE = self._real
+        crow_core.mcp_apply()
+
+    def _block(self, mode: str = "ok") -> dict:
+        return {"command": sys.executable, "args": [self.server_py, mode],
+                "connect_timeout": 20, "timeout": 20}
+
+    def _doc(self) -> dict:
+        with open(crow_core.MCP_FILE, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def _names(self) -> list:
+        return [t["function"]["name"] for t in crow_core.TOOLS]
+
+    def test_a_launcher_is_resolved_before_it_is_started(self):
+        """FOUND IN THE WINDOW, 2026-08-22: `[WinError 2]` for `npx`. On Windows
+        it is `npx.CMD`, and CreateProcess does not consult PATHEXT -- so
+        `Popen(["npx", ...])` fails while `where npx` finds it. Nearly every MCP
+        example starts with `npx`, so this one line decides whether any
+        documented server can be started on the platform Crow ships for."""
+        import stat
+        launcher = os.path.join(self.dir, "fakelauncher.cmd")
+        with open(launcher, "w", encoding="utf-8") as fh:
+            fh.write("@echo off" + chr(13) + chr(10))
+        os.chmod(launcher, os.stat(launcher).st_mode | stat.S_IEXEC)
+        before = os.environ.get("PATH", "")
+        self.addCleanup(os.environ.__setitem__, "PATH", before)
+        os.environ["PATH"] = self.dir + os.pathsep + before
+        server = crow_core.McpServer("x", {"command": "fakelauncher", "args": ["a"]})
+        found = server.argv()
+        # normcase, because PATHEXT hands the extension back in ITS case: the
+        # answer here is `fakelauncher.CMD` for a file written as `.cmd`, and
+        # they are one file.
+        self.assertEqual(os.path.normcase(found[0]), os.path.normcase(launcher))
+        self.assertEqual(found[1:], ["a"])
+
+    def test_an_unknown_launcher_is_left_as_it_was_written(self):
+        """NEGATIVE: resolution may not swallow the name. A command nobody can
+        find has to reach Popen unchanged, so the error names what was typed."""
+        server = crow_core.McpServer("x", {"command": "no-such-launcher-anywhere"})
+        self.assertEqual(server.argv(), ["no-such-launcher-anywhere"])
+
+    # ---- what the annotation proposes
+
+    def test_read_only_proposes_reading(self):
+        self.assertEqual(crow_core.mcp_proposed_class(
+            {"name": "x", "annotations": {"readOnlyHint": True}}), "reading")
+
+    def test_not_destructive_proposes_writing(self):
+        self.assertEqual(crow_core.mcp_proposed_class(
+            {"name": "x", "annotations": {"destructiveHint": False}}), "writing")
+
+    def test_no_annotation_at_all_proposes_executing(self):
+        """THE DEFAULTS POINT THE SAFE WAY BY THEMSELVES. The specification says
+        `readOnlyHint` is false and `destructiveHint` true where nothing is
+        stated, so "no annotation" reads as "writes, and destructively" -- the
+        strictest of the three, and the one a server cannot lie its way into."""
+        self.assertEqual(crow_core.mcp_proposed_class({"name": "x"}), "executing")
+        self.assertEqual(crow_core.mcp_proposed_class(
+            {"name": "x", "annotations": {"title": "Nice"}}), "executing")
+
+    def test_a_server_can_only_lie_towards_harmless(self):
+        """NEGATIVE PROBE for the whole scheme: every direction a hint can be
+        wrong in is a direction that asks MORE, except one -- and that one is
+        the reason a person confirms rather than the annotation deciding."""
+        self.assertEqual(crow_core.mcp_proposed_class(
+            {"name": "x", "annotations": {"readOnlyHint": "yes"}}), "executing")
+        self.assertEqual(crow_core.mcp_proposed_class(
+            {"name": "x", "annotations": {"destructiveHint": None}}), "executing")
+
+    # ---- adding a server
+
+    def test_adding_takes_what_the_server_offers(self):
+        """robin, 2026-08-22, against the way this was first built: adding a
+        server MAKES IT USABLE. One command and the tools are there, which is
+        what every other client does -- a client that demands twelve ticks
+        before anything works is one nobody configures twice.
+
+        What keeps it safe is the other column, not this one: `classes` stays
+        empty, so `needs_approval` answers `executing` for every one of them."""
+        view, problem = crow_core.mcp_add_server("fake", self._block())
+        self.assertIsNone(problem)
+        stored = self._doc()["servers"]["fake"]
+        self.assertEqual([t["name"] for t in stored["schema"]["tools"]][:2],
+                         ["echo", "boom"])
+        self.assertEqual(stored["tools"]["include"],
+                         sorted(t["name"] for t in stored["schema"]["tools"]))
+        self.assertIn("mcp_fake_echo", self._names())
+        self.assertNotIn("classes", stored)
+        self.assertTrue(crow_core.needs_approval("mcp_fake_echo", "manual"))
+        self.assertGreater(view["servers"][0]["cost"], 0)
+
+    def test_a_refresh_does_not_re_take_what_somebody_took_out(self):
+        """NEGATIVE for the line above: taking everything is what a NEW server
+        gets. A refresh is not an undo of the ticks somebody already moved."""
+        crow_core.mcp_add_server("fake", self._block())
+        crow_core.mcp_confirm("fake", {"echo": {"included": False}})
+        self.assertIsNone(crow_core.mcp_refresh_server("fake"))
+        self.assertNotIn("mcp_fake_echo", self._names())
+
+    def test_what_was_written_is_read_back_in_the_same_call(self):
+        """Persistence is a contract, not a one-way valve. A writer nobody reads
+        back is a writer nobody has proved works -- three times in one day on
+        2026-08-21, every time with a green suite."""
+        crow_core.mcp_add_server("fake", self._block())
+        view = crow_core.mcp_view()
+        names = [t["tool"] for t in view["servers"][0]["tools"]]
+        self.assertEqual(names[:2], ["echo", "boom"])
+
+    def test_adding_a_server_that_will_not_start_writes_nothing(self):
+        """NEGATIVE for the writer: a half-written block for a server nobody can
+        reach is a configuration the next start reports as broken."""
+        view, problem = crow_core.mcp_add_server("fake", self._block("dies"))
+        self.assertIsNotNone(problem)
+        self.assertFalse(os.path.exists(crow_core.MCP_FILE))
+
+    def test_the_proposal_rides_along_and_is_not_stored(self):
+        """The view carries what the annotation suggests so a person can see it.
+        The FILE carries only what they confirmed -- and after an add that is
+        nothing at all."""
+        crow_core.mcp_add_server("fake", self._block())
+        tools = {t["tool"]: t for t in crow_core.mcp_view()["servers"][0]["tools"]}
+        self.assertEqual(tools["echo"]["proposed"], "reading")
+        self.assertEqual(tools["boom"]["proposed"], "executing")
+        self.assertIsNone(tools["echo"]["class"])
+        self.assertNotIn("classes", self._doc()["servers"]["fake"])
+
+    # ---- confirming
+
+    def test_confirming_is_what_puts_a_tool_in_the_prompt(self):
+        crow_core.mcp_add_server("fake", self._block())
+        problem = crow_core.mcp_confirm("fake", {"echo": {"included": True,
+                                                          "class": "reading"}})
+        self.assertIsNone(problem)
+        self.assertIn("mcp_fake_echo", self._names())
+        self.assertEqual(crow_core.TOOL_CLASS["mcp_fake_echo"], "reading")
+        self.assertEqual(self._doc()["servers"]["fake"]["classes"], {"echo": "reading"})
+
+    def test_a_tool_taken_without_a_class_is_declared_and_asks_everywhere(self):
+        """Taking a tool and refusing to say what it does is allowed, and it
+        costs the strict default rather than a guess: `needs_approval` answers
+        `executing` for a name it has never heard of."""
+        crow_core.mcp_add_server("fake", self._block())
+        crow_core.mcp_confirm("fake", {"echo": {"included": True, "class": None}})
+        self.assertIn("mcp_fake_echo", self._names())
+        self.assertNotIn("mcp_fake_echo", crow_core.TOOL_CLASS)
+        self.assertTrue(crow_core.needs_approval("mcp_fake_echo", "manual"))
+
+    def test_unticking_takes_it_back_out_of_the_prompt(self):
+        """NEGATIVE for the confirm: the checklist has to work in both
+        directions, or the only way to undo a tick is a text editor."""
+        crow_core.mcp_add_server("fake", self._block())
+        self.assertIn("mcp_fake_echo", self._names())
+        crow_core.mcp_confirm("fake", {"echo": {"included": False, "class": "reading"}})
+        self.assertNotIn("mcp_fake_echo", self._names())
+        self.assertNotIn("echo", self._doc()["servers"]["fake"]["tools"]["include"])
+        self.assertIn("boom", self._doc()["servers"]["fake"]["tools"]["include"])
+
+    def test_a_class_crow_does_not_have_is_refused_at_the_door(self):
+        crow_core.mcp_add_server("fake", self._block())
+        problem = crow_core.mcp_confirm("fake", {"echo": {"included": True,
+                                                          "class": "safe"}})
+        self.assertIn("safe", problem)
+        self.assertNotIn("classes", self._doc()["servers"]["fake"])
+
+    def test_a_tool_the_server_never_offered_cannot_be_confirmed(self):
+        """The checklist may only tick what the stored schema lists. Anything
+        else would put a name in `TOOLS` that no server answers to."""
+        crow_core.mcp_add_server("fake", self._block())
+        problem = crow_core.mcp_confirm("fake", {"invented": {"included": True,
+                                                             "class": "reading"}})
+        self.assertIn("invented", problem)
+        self.assertNotIn("mcp_fake_invented", self._names())
+
+    def test_confirming_does_not_restart_a_running_server(self):
+        """NEGATIVE for `_mcp_retire`: which tools are exposed is a fact about
+        the PROMPT, not about the process. Killing the child for it would drop a
+        connection mid-turn for a change the server never sees."""
+        crow_core.mcp_add_server("fake", self._block())
+        crow_core.mcp_confirm("fake", {"echo": {"included": True, "class": "reading"}})
+        crow_core.run_tool("mcp_fake_echo", '{"text": "x"}')
+        running = crow_core._MCP_LIVE["fake"]
+        crow_core.mcp_confirm("fake", {"echo": {"included": True, "class": "writing"},
+                                       "boom": {"included": True, "class": "reading"}})
+        self.assertIs(crow_core._MCP_LIVE.get("fake"), running)
+        self.assertIsNone(running.proc.poll())
+
+    def test_changing_the_command_does_restart_it(self):
+        """POSITIVE for the same rule, from the other side: what decides the
+        process is the command, its arguments and its environment."""
+        crow_core.mcp_add_server("fake", self._block())
+        crow_core.mcp_confirm("fake", {"echo": {"included": True, "class": "reading"}})
+        crow_core.run_tool("mcp_fake_echo", '{"text": "x"}')
+        proc = crow_core._MCP_LIVE["fake"].proc
+        doc = self._doc()
+        doc["servers"]["fake"]["env"] = {"FAKE_OWN": "changed"}
+        crow_core.mcp_apply(doc)
+        proc.wait(timeout=10)
+        self.assertIsNone(crow_core._MCP_LIVE.get("fake"))
+
+    # ---- what it costs, measured
+
+    def test_the_cost_is_counted_from_the_schema_in_hand(self):
+        """Nobody's estimate: Crow holds the schema, so it counts the characters
+        the taken tools add to the head -- and it counts them at the moment they
+        are taken, which is now the moment the server is added."""
+        crow_core.mcp_add_server("fake", self._block())
+        cost = crow_core.mcp_view()["servers"][0]["cost"]
+        self.assertGreater(cost, 0)
+        self.assertEqual(cost, crow_core.mcp_prompt_cost())
+
+    def test_removing_a_server_takes_its_tools_with_it(self):
+        crow_core.mcp_add_server("fake", self._block())
+        crow_core.mcp_confirm("fake", {"echo": {"included": True, "class": "reading"}})
+        self.assertIsNone(crow_core.mcp_remove_server("fake"))
+        self.assertNotIn("mcp_fake_echo", self._names())
+        self.assertEqual(self._doc().get("servers"), {})
+
+    # ---- a name nobody has to invent
+
+    def test_the_name_comes_out_of_the_command_line(self):
+        """One line in, a server out. A separate name field is one more thing to
+        fill in for a value that is already sitting in the line."""
+        for line, want in (
+                ("npx -y @modelcontextprotocol/server-github", "github"),
+                ("uvx mcp-server-fetch", "fetch"),
+                ("npx @upstash/context7-mcp", "context7")):
+            self.assertEqual(crow_core.mcp_name_from(line.split()), want, line)
+
+    def test_the_package_names_it_and_not_what_it_was_pointed_at(self):
+        """FOUND IN THE WINDOW, 2026-08-22. `npx -y
+        @modelcontextprotocol/server-filesystem C:/Users/robin/dev/Crow` ends in
+        the directory the server SERVES, so reading the line backwards called
+        that server "crow". The package is the first token after the launcher."""
+        self.assertEqual(crow_core.mcp_name_from(
+            "npx -y @modelcontextprotocol/server-filesystem C:/Users/robin/dev/Crow".split()),
+            "filesystem")
+
+    def test_a_path_falls_back_to_the_project_not_to_index(self):
+        """NEGATIVE for a basename-only rule, and it is the normal case for a
+        Node server: dist/index.js names nothing, the directory above it does."""
+        self.assertEqual(
+            crow_core.mcp_name_from("node C:/Users/robin/dev/pontifex/dist/index.js".split()),
+            "pontifex")
+
+    # ---- one command, both surfaces
+
+    def test_the_listing_names_the_file_when_there_is_nothing(self):
+        """A user with no servers needs to know where one would go, and the
+        answer is a path -- not a description of a control."""
+        said = crow_core.mcp_command([])
+        self.assertIn("mcp.json", said)
+        for pixel in ("button", "click", "top left", "beside"):
+            self.assertNotIn(pixel, said.lower())
+
+    def test_the_listing_marks_what_is_taken_and_what_is_only_proposed(self):
+        crow_core.mcp_add_server("fake", self._block())
+        crow_core.mcp_confirm("fake", {"echo": {"included": True, "class": "reading"}})
+        said = crow_core.mcp_command([])
+        self.assertIn("mcp_fake_echo", said)
+        self.assertIn("reading", said)
+        self.assertIn("boom", said)
+
+    def test_adding_confirms_rather_than_printing_the_table(self):
+        """robin, 2026-08-22, having watched it happen: the whole listing plus
+        the command palette after an install is not a confirmation. The user
+        asked one question -- did it install? -- and got the answer `/mcp`
+        already gives, which reads as nothing having changed."""
+        said = crow_core.mcp_command(
+            ["add", self._block()["command"]] + self._block()["args"])
+        self.assertIn("installed", said)
+        self.assertIn("6 tools", said)
+        self.assertIn("prefill", said)
+        # NOT the table, and not the palette.
+        self.assertNotIn("[x]", said)
+        self.assertNotIn("/mcp drop", said)
+        self.assertLess(len(said.splitlines()), 5, said)
+
+    def test_the_confirmation_says_where_to_change_what_they_may_do(self):
+        """The classes are the half an install does NOT decide, so the line that
+        says it worked is where a person learns there is a second question."""
+        crow_core.mcp_add_server("fake", self._block())
+        said = crow_core.mcp_installed(crow_core.mcp_view(), "fake")
+        self.assertIn("Settings", said)
+        self.assertIn("/mcp", said)
+        for pixel in ("button", "click", "top left", "beside", "dropdown"):
+            self.assertNotIn(pixel, said.lower())
+
+    def test_it_confirms_the_server_that_was_added_not_the_last_one(self):
+        """FOUND ON SCREEN, 2026-08-22: adding `server-filesystem` next to a
+        configured `pontifex` answered "pontifex installed". The list is sorted,
+        so "the last one" is whichever name comes last in the alphabet."""
+        crow_core.mcp_add_server("zeta", self._block())
+        said = crow_core.mcp_command(
+            ["add", self._block()["command"]] + self._block()["args"])
+        self.assertIn("fake installed", said)
+        self.assertNotIn("zeta", said)
+
+    def test_the_command_can_fetch_use_and_drop(self):
+        """The terminal's whole loop, through the same core the sheet calls --
+        two ways of doing one thing diverge, and the second one gets worse."""
+        with open(crow_core.MCP_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"servers": {"fake": self._block()}}, fh)
+        crow_core.mcp_apply()
+        # `fetch` confirms too -- it is the same operation with the schema
+        # already on disk, and it says the same three facts.
+        said = crow_core.mcp_command(["fetch", "fake"])
+        self.assertIn("fake", said)
+        self.assertIn("6 tools", said)
+        crow_core.mcp_command(["use", "fake", "echo", "reading"])
+        self.assertIn("mcp_fake_echo", self._names())
+        crow_core.mcp_command(["drop", "fake", "echo"])
+        self.assertNotIn("mcp_fake_echo", self._names())
+
+    def test_the_command_says_what_it_did_not_understand(self):
+        """NEGATIVE: a subcommand nobody typed correctly must not read as
+        success, and must not travel to the model as a question about a word."""
+        for argv in (["use"], ["use", "fake"], ["nonsense"], ["use", "fake", "echo"]):
+            said = crow_core.mcp_command(argv)
+            self.assertTrue(said.strip(), argv)
+            self.assertIn("/mcp", said, argv)
+
+    def test_the_command_announces_the_cold_start_before_it_happens(self):
+        """MEMORY_COST_NOTE's shape and MEMORY_COST_NOTE's direction: the bill
+        is named with the change, and the half nobody expects is that a
+        conversation saved months ago pays it too."""
+        crow_core.mcp_add_server("fake", self._block())
+        said = crow_core.mcp_command(["use", "fake", "echo", "reading"])
+        self.assertIn("prefill", said)
+        self.assertIn("prefill", crow_core.MCP_COST_NOTE)
 
 
 if __name__ == "__main__":

@@ -31,6 +31,21 @@ import crow  # noqa: E402
 # path in a test has to happen where the functions read it.
 import crow_core  # noqa: E402
 
+# THE SUITE MAY NOT DEPEND ON WHAT THIS MACHINE HAS CONFIGURED (#130).
+# `crow_core` reads %LOCALAPPDATA%\Crow\mcp.json at import and appends whatever
+# it finds to TOOLS, TOOL_IMPL and TOOL_CLASS. Every case that enumerates the
+# tool table therefore answered differently on a machine with an MCP server than
+# on one without -- found on 2026-08-22, when `ReleaseLevelTests` went red
+# against a real pontifex install and nothing in this file had changed.
+#
+# A PATH WHOSE PARENT DOES NOT EXIST, not a temp file that might: the reader
+# treats "no file" as the empty configuration, and that is the state the twelve
+# built-in tools are the whole table in. Cases that WANT a configuration rebind
+# `MCP_FILE` themselves and put it back.
+crow_core.MCP_FILE = os.path.join(tempfile.gettempdir(),
+                                  "crow-suite-has-no-mcp", "mcp.json")
+crow_core.mcp_apply()
+
 # THE PALETTE IS PINNED FOR THIS WHOLE MODULE (#102), and a red suite on robin's
 # machine is why. `crow_core._TTY` is decided ONCE, at import, out of
 # `sys.stdout.isatty()`, and the colour constants are materialised from it on the
@@ -4412,6 +4427,58 @@ class TheReasoningLevelBelongsToTheChatTests(unittest.TestCase):
                                    model="crow", api_key="k", temperature=1.0,
                                    reasoning_effort="high", timeout=1.0)
         self.assertEqual(sent["chat_template_kwargs"], {"reasoning_effort": "high"})
+
+
+class TheTerminalAnswersMcpItselfTests(unittest.TestCase):
+    """#129. The terminal runs `/mcp`, it does not point at the window.
+
+    Driven through `run_slash` rather than asserted about its source: the defect
+    this guards is a command that LOOKS handled and travels to the model as a
+    question about a word, which is exactly what six commands did until #94.
+    """
+
+    def setUp(self) -> None:
+        import crow_core     # this suite drives `crow`; the binding is the core's
+        self.dir = tempfile.mkdtemp(prefix="crow-cli-mcp-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._before = crow_core.MCP_FILE
+        self.addCleanup(self._restore)
+        crow_core.MCP_FILE = os.path.join(self.dir, "mcp.json")
+        crow_core.mcp_apply()
+
+    def _restore(self) -> None:
+        import crow_core
+        crow_core.forget_mcp_servers()
+        crow_core.MCP_FILE = self._before
+        crow_core.mcp_apply()
+
+    def _run(self, line):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = crow.run_slash(line, conversation=crow.Conversation("SYS"),
+                                    mode="auto", show_reasoning=False,
+                                    context_tokens=0, n_ctx=200000,
+                                    rollover_at=0.9, session=False)
+        return result, out.getvalue()
+
+    def test_it_is_handled_here_and_not_sent_on(self):
+        result, said = self._run("/mcp")
+        self.assertTrue(result.handled)
+        self.assertIn("mcp.json", said)
+
+    def test_an_argument_is_part_of_the_command(self):
+        """`/mcp fetch <server>` is the documented form, so it may not arrive at
+        the model as a sentence."""
+        result, said = self._run("/mcp fetch nothing-configured")
+        self.assertTrue(result.handled)
+        self.assertIn("nothing-configured", said)
+
+    def test_both_surfaces_read_the_same_answer(self):
+        """NEGATIVE for a second implementation: the window and the terminal run
+        one function on one configuration, so the text cannot differ."""
+        import crow_core
+        _, said = self._run("/mcp")
+        self.assertIn(crow_core.mcp_command([]), said)
 
 
 if __name__ == "__main__":
