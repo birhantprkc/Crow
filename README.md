@@ -81,7 +81,7 @@
 | **Python** | 3.8+. Terminal client uses the standard library only |
 | **WebView2** | Window only. Ships with Windows 11 and with Edge |
 | **pywebview** | Window only, ~2 MB. Installed by `install.ps1` |
-| **Node** | Only for MCP servers started with `npx`. NOT installed by `install.ps1` |
+| **Node** | Only for MCP servers started with `npx` or `node`. Reported by the preflight, never required. NOT installed by `install.ps1` |
 
 ---
 
@@ -410,9 +410,6 @@ strictest of the three.
 | built-in | 12 | 7,758 |
 | `@modelcontextprotocol/server-filesystem` | 14 | 8,217 |
 | `mcp-server-fetch` | 1 | 1,137 |
-| `https://mcp.context7.com/mcp` | 2 | 4,615 |
-| `https://mcp.deepwiki.com/mcp` | 3 | 1,233 |
-| `https://docs.mcp.cloudflare.com/mcp` | 2 | 1,032 |
 
 Measured 2026-08-22. The tool list is rendered into the head of the prompt, so changing it moves
 byte 0: the next turn and the first turn of every saved session pay a full prefill.

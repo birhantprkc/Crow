@@ -256,7 +256,8 @@ function Test-Preflight {
         [bool]   $Is64Bit,
         [version] $PsVersion,
         [string] $PythonPath = "",
-        [string] $WebView2Version = ""
+        [string] $WebView2Version = "",
+        [string] $NodePath = ""
     )
 
     $problems = @()
@@ -299,6 +300,21 @@ function Test-Preflight {
     }
     elseif (-not $WebView2Version) {
         $warnings += "no WebView2 runtime found. cli\crow.py runs in a terminal without it; cli\crow_gui.py is the window and renders in it. It ships with Windows 11 and with Edge"
+    }
+
+    # NODE IS THE THIRD PREREQUISITE AND THE ONLY WHOLLY OPTIONAL ONE, which is
+    # why it warns here and blocks nowhere. Nothing in Crow itself needs it --
+    # MCP servers do, and nearly every published one starts with npx. Decided
+    # 2026-08-22: a preflight line, not a requirement. Refusing a machine over a
+    # feature it may never configure charges everybody for the few, and the two
+    # rows above already set the precedent for a prerequisite that costs one
+    # client and not the install.
+    #
+    # NOT CHAINED to the pair above, because it is not the same cause: a machine
+    # can have Python and no Node, and a user who reads "python missing" and
+    # nothing else would find out about Node from a failed tool call instead.
+    if (-not $NodePath) {
+        $warnings += "node is not on the PATH. Only MCP servers started with npx or node need it; the clients, the model and every built-in tool run without it"
     }
 
     return [pscustomobject]@{
@@ -346,6 +362,13 @@ function Get-MachineFacts {
     # honestly before the download is whether there is one at all.
     $py     = Get-Command python -ErrorAction SilentlyContinue
     $pyPath = if ($py) { $py.Source } else { "" }
+    # `node`, NOT `npx`, and the difference matters on this platform: npx is
+    # npx.CMD, Get-Command reads PATHEXT and finds it, but CreateProcess does
+    # not -- which is why cli/crow_core.py resolves the launcher itself before
+    # starting one. What the preflight can honestly answer is whether a Node is
+    # installed at all, and npm ships with it.
+    $node     = Get-Command node -ErrorAction SilentlyContinue
+    $nodePath = if ($node) { $node.Source } else { "" }
     $wv     = ""
     $guid   = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
     foreach ($key in @(
@@ -368,6 +391,7 @@ function Get-MachineFacts {
         PsVersion       = $PSVersionTable.PSVersion
         PythonPath      = $pyPath
         WebView2Version = $wv
+        NodePath        = $nodePath
     }
 }
 
@@ -851,7 +875,8 @@ function Invoke-Selftest {
     Write-Host "install.ps1 selftest"
 
     $good = @{ VramMb=32607; RamGb=63.4; FreeDiskGb=450; HasNvidiaSmi=$true; Is64Bit=$true; PsVersion=[version]"5.1"
-               PythonPath="C:\Python313\python.exe"; WebView2Version="151.0.4129.78" }
+               PythonPath="C:\Python313\python.exe"; WebView2Version="151.0.4129.78"
+               NodePath="C:\Program Files\nodejs\node.exe" }
 
     C "the development machine passes"            ((Test-Preflight @good).Ok)
     C "and passes without warnings"               ((Test-Preflight @good).Warnings.Count -eq 0)
@@ -898,6 +923,16 @@ function Invoke-Selftest {
     C "and does NOT block the install"            ((Test-Preflight @noWv).Ok)
     C "and says which client that costs"          ((((Test-Preflight @noWv).Warnings) -match 'crow_gui').Count -gt 0)
     C "a runtime that is there warns about none"  ((Test-Preflight @good).Warnings.Count -eq 0)
+
+    # Node, decided 2026-08-22: reported, never required. The third check is the
+    # one that keeps the decision honest -- an installer that refused here would
+    # still pass the first two.
+    $noNode = $good.Clone(); $noNode.NodePath = ""
+    C "no node warns"                             ((Test-Preflight @noNode).Warnings.Count -gt 0)
+    C "and does NOT block the install"            ((Test-Preflight @noNode).Ok)
+    C "and names what needs it"                   ((((Test-Preflight @noNode).Warnings) -match 'MCP').Count -gt 0)
+    C "a missing node is one warning, not two"    ((Test-Preflight @noNode).Warnings.Count -eq 1)
+    C "node on the PATH warns about none"         ((Test-Preflight @good).Warnings.Count -eq 0)
 
     # THE PROMISE THE PREFLIGHT MAY NOT MAKE. pywebview is installed after the
     # download, so nothing before it may claim the window will run -- a green
@@ -1205,6 +1240,8 @@ Write-Item "Python"   $(if ($facts.PythonPath) { $facts.PythonPath } else { "not
 # leave the other half wondering which client the install is short of.
 Write-Item "WebView2" $(if ($facts.WebView2Version) { "$($facts.WebView2Version), the window renders in it" } else { "not found -- the terminal client does not need it" }) `
                       $(if ($facts.WebView2Version) { "ok" } else { "warn" })
+Write-Item "Node"     $(if ($facts.NodePath) { "$($facts.NodePath), MCP servers can use npx" } else { "not on the PATH -- only MCP servers need it" }) `
+                      $(if ($facts.NodePath) { "ok" } else { "warn" })
 # SAID HERE AND NOT AT THE DOWNLOAD, for the reason at the top of this file: a
 # cost first mentioned after the package has landed is a cost mentioned at the
 # most expensive possible moment.
@@ -1212,7 +1249,8 @@ Write-Item "dictation" "$WHISPER_MB MB speech model, fetched in the last step" "
 
 $pf = Test-Preflight -VramMb $facts.VramMb -RamGb $facts.RamGb -FreeDiskGb $facts.FreeDiskGb `
                      -HasNvidiaSmi $facts.HasNvidiaSmi -Is64Bit $facts.Is64Bit -PsVersion $facts.PsVersion `
-                     -PythonPath $facts.PythonPath -WebView2Version $facts.WebView2Version
+                     -PythonPath $facts.PythonPath -WebView2Version $facts.WebView2Version `
+                     -NodePath $facts.NodePath
 
 foreach ($w in $pf.Warnings) { Write-Item "warning:" $w "warn" }
 if (-not $pf.Ok) {
