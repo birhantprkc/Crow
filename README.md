@@ -153,6 +153,7 @@ The window reads the `--port` off the running process. The terminal client needs
 | `--max-tool-rounds` | `24` | `0` answers without running any tool |
 | `--mode` | `auto` | `manual` asks before writing and executing, `allowedit` before executing |
 | `--no-review` | off | stop the model saving memories and skills after a turn |
+| `--no-memory-approval` | off | let the review write to memory without asking. **The gate is on by default** |
 | `--rounds` | off | full timing line after every tool round |
 | `--show-reasoning` | off | stream the reasoning. `/thoughts` toggles it |
 | `--no-session` | off | do not resume the last session, do not save this one |
@@ -222,7 +223,32 @@ every saved cache. Binding a different folder re-pins and says what the prefill 
 | Each mark fires | once. The mark is written to the chat file and travels with it |
 | A turn crossing several marks | fires once, at the highest |
 | Off with | `--no-review` |
+| Before it writes | **it asks.** The proposed entries wait on a chip in the composer; nothing reaches the file until you press it |
+| Nobody answers | they expire after **300 s** and are dropped. Nothing is ever written by a timer |
+| Ask nothing, write always | `--no-memory-approval` |
 | When it saves | one line in the chat, per entry, at the moment it lands |
+
+### The gate
+
+The review never writes on its own. What it wants to keep is staged and shown behind the composer,
+and it stays there until you answer.
+
+<div align="center">
+<img src="docs/images/memory-consolidation.png" alt="Memory Consolidation: the staged writes behind the composer, +2 gained and -0 lost" width="900">
+</div>
+
+| | |
+|---|---|
+| Collapsed | the title, lines **gained** in green and **lost** in red. A `replace` is one entry and both |
+| Click | opens every proposed entry in full, and the two answers |
+| `save to memory` | writes through the same `memory` tool the model uses — the cap, the duplicate check and the injection scan all still answer |
+| `discard` | nothing is written |
+| No answer | the entries expire after 300 s and are dropped. **Nothing is ever written by a timer** |
+| New chat | the questions go with it |
+| Off | `--no-memory-approval`, and then the review writes unasked as it did before 1.0.0 |
+
+It keeps breathing while it waits, because a question is still true until it is answered. The line
+that reports a **finished** write glows once and settles — same colour, different grammar.
 
 ---
 

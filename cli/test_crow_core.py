@@ -2072,6 +2072,43 @@ class WebSearchTests(unittest.TestCase):
         self.assertTrue(any("api.github.com" in u for u in spy.seen))
         self.assertTrue(any("wikipedia.org" in u for u in spy.seen))
 
+    def test_the_scope_is_said_even_when_something_was_found(self):
+        """THE DEFECT THIS CASE EXISTS FOR. The honest sentence used to reach the
+        model only when the federation found NOTHING -- and it almost always
+        finds something: `was kostet ein rtx 5090` came back with github issue
+        #5090 at rank one, because the NUMBER matched an issue number. A
+        non-empty list with the warning suppressed reads as a web search that
+        worked, and the model answers from noise."""
+        with _Backend(), _Urlopen(self._federation(
+                **{"api.github.com/search/issues": {"items": [
+                    {"number": 5090, "title": "URL markdown bug",
+                     "html_url": "https://gh/i", "body": "unrelated",
+                     "state": "closed"}]}})):
+            out = crow_core.tool_web_search("was kostet ein rtx 5090")
+        self.assertIn("NOT the open web", out)
+        self.assertIn("CROW_TAVILY_KEY", out)
+
+    def test_the_scope_is_the_first_line_the_model_reads(self):
+        """Under the list it would be read after the list has been believed --
+        the same reasoning the registry notes above already carry."""
+        with _Backend(), _Urlopen(self._federation(
+                **{"api.github.com/search/repositories": {"items": [
+                    {"full_name": "a/b", "html_url": "https://gh/x",
+                     "description": "d", "stargazers_count": 1}]}})):
+            out = crow_core.tool_web_search("anything")
+        self.assertTrue(out.splitlines()[0].startswith("note: this index covers"))
+
+    def test_a_real_index_is_not_told_it_is_not_one(self):
+        """NEGATIVE PROBE, and it guards a lie in the OTHER direction. With
+        tavily or searxng configured the results ARE a web search; printing the
+        keyless warning over them would talk a working index down and send the
+        user shopping for a key they already have."""
+        with _Backend(tavily="k"), _Urlopen(lambda url: self._json(
+                {"results": [{"title": "T", "url": "https://u", "content": "c"}]})):
+            out = crow_core.tool_web_search("anything")
+        self.assertIn("https://u", out)
+        self.assertNotIn("NOT the open web", out)
+
     def test_no_source_is_asked_to_identify_as_a_browser(self):
         """MEASURED 2026-08-14, and the reason the open web is not among these
         sources: lite.duckduckgo.com answered 200 with 10 results to a browser
@@ -3072,6 +3109,132 @@ class SessionSearchTests(unittest.TestCase):
         names = [t["function"]["name"] for t in crow_core.TOOLS]
         self.assertIn("session_search", names)
         self.assertNotIn("fts5", json.dumps(crow_core.TOOLS))
+
+
+class TheMemoryGateTests(_MemoryFixture):
+    """#128: the review proposes, a person disposes, and nothing writes itself.
+
+    ITS OWN CLASS AND ITS OWN HELPERS rather than a `gate=` on the one above.
+    The cases there assert what an UNGATED review does, and that behaviour is
+    still the shipped default -- borrowing their fixture would make the two
+    read as one story with a switch in the middle, when they are two stories
+    and only one of them is on.
+    """
+
+    def _answer(self, calls):
+        payload = json.dumps({"choices": [{"message": {"tool_calls": calls}}]}).encode()
+
+        class _Resp:
+            def read(self_inner):
+                return payload
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+        real = crow_core.urllib.request.urlopen
+        crow_core.urllib.request.urlopen = lambda *a, **k: _Resp()
+        self.addCleanup(setattr, crow_core.urllib.request, "urlopen", real)
+
+    @staticmethod
+    def _call(name, arguments):
+        return {"function": {"name": name, "arguments": json.dumps(arguments)}}
+
+    def _conversation(self):
+        conversation = crow_core.Conversation("SYS", memory="")
+        conversation.append("user", "frage")
+        conversation.append("assistant", "antwort")
+        return conversation
+
+    def run_review(self, gate):
+        self.addCleanup(crow_core.forget_pending)
+        return crow_core.review_turn(
+            self._conversation(), base_url="http://127.0.0.1:1/v1",
+            model="crow", api_key="k", temperature=1.0, top_p=0.95, min_p=0.01,
+            gate=gate)
+
+    def test_the_gate_is_on_unless_it_is_switched_off(self):
+        """THE DEFAULT IS THE FEATURE. A gate that ships off is a setting
+        nobody finds, and what this one guards is the only writer in the client
+        that runs with nobody at the keyboard. Asserted against the constant
+        both surfaces read, so a surface cannot quietly disagree with it."""
+        self.assertIs(crow_core.MEMORY_APPROVAL_DEFAULT, True)
+
+    def test_with_the_gate_off_the_review_still_writes(self):
+        """NEGATIVE PROBE FOR THE WHOLE GATE. `--no-memory-approval` has to
+        reach the old behaviour exactly -- written, reported, nothing staged.
+        Without this case a gate that ignored its own off-switch would look
+        identical to one that works, and the person who turned it off would
+        find out by losing notes."""
+        self._answer([self._call("memory", {"action": "add", "content": "OHNE TOR"})])
+        self.assertEqual(self.run_review(gate=False), ["add memory"])
+        self.assertEqual(self.entries(), ["OHNE TOR"])
+        self.assertEqual(crow_core.pending_memory(), [])
+
+    def test_with_the_gate_on_nothing_reaches_the_file(self):
+        """The store is untouched and the write is waiting. Asserting only that
+        something is staged would pass just as well if it had ALSO been
+        written, which is the failure this gate exists to prevent."""
+        self._answer([self._call("memory", {"action": "add", "content": "MIT TOR"})])
+        self.assertEqual(self.run_review(gate=True), [])
+        self.assertEqual(self.entries(), [])
+        self.assertEqual(len(crow_core.pending_memory()), 1)
+
+    def test_the_held_entry_names_what_would_be_written(self):
+        """A prompt that does not show what it releases is not a question
+        (#88 point 2). The summary carries the CONTENT, not the call."""
+        self._answer([self._call("memory", {"action": "add", "content": "MIT TOR"})])
+        self.run_review(gate=True)
+        self.assertIn("MIT TOR", crow_core.pending_memory()[0]["summary"])
+
+    def test_approving_writes_it_and_declining_does_not(self):
+        """One case for both directions, because a gate where only one of them
+        works is not half a gate -- it is either a writer nobody stopped or a
+        control that does nothing."""
+        self._answer([self._call("memory", {"action": "add", "content": "JA"})])
+        self.run_review(gate=True)
+        self.assertEqual(crow_core.approve_pending(), ["add memory"])
+        self.assertEqual(self.entries(), ["JA"])
+
+        self._answer([self._call("memory", {"action": "add", "content": "NEIN"})])
+        self.run_review(gate=True)
+        self.assertEqual(crow_core.decline_pending(), 1)
+        self.assertEqual(self.entries(), ["JA"])
+        self.assertEqual(crow_core.pending_memory(), [])
+
+    def test_an_approved_write_still_meets_the_limit(self):
+        """The gate adds a question, not a second way to write. An approval that
+        bypassed `run_tool` would carry the entry past the character cap, the
+        duplicate check and the injection scan in one step."""
+        crow_core.write_store(crow_core.memory_path(), ["a" * 3900])
+        self._answer([self._call("memory", {"action": "add", "content": "b" * 500})])
+        self.run_review(gate=True)
+        self.assertEqual(crow_core.approve_pending(), [])
+        self.assertEqual(self.entries(), ["a" * 3900])
+
+    def test_an_expired_entry_can_never_be_approved(self):
+        """Expiry has to fall on the side of NOT writing, or the gate is a
+        delay. Checked on the read, so there is no path where an expired entry
+        is still reachable by an approval that arrives late."""
+        self._answer([self._call("memory", {"action": "add", "content": "ZU SPAET"})])
+        self.run_review(gate=True)
+        entry = crow_core._PENDING[0]
+        entry["staged"] -= crow_core.PENDING_TTL + 1
+        self.assertEqual(crow_core.pending_memory(), [])
+        self.assertEqual(crow_core.approve_pending(), [])
+        self.assertEqual(self.entries(), [])
+
+    def test_dropping_the_chat_drops_what_was_staged(self):
+        """`forget_approvals` ends a session's releases, and a proposed note is
+        one. Without this a `/reset` would leave a question standing about a
+        conversation that no longer exists."""
+        self._answer([self._call("memory", {"action": "add", "content": "WEG"})])
+        self.run_review(gate=True)
+        crow_core.forget_approvals()
+        self.assertEqual(crow_core.pending_memory(), [])
+        self.assertEqual(self.entries(), [])
 
 
 class BackgroundReviewTests(_MemoryFixture):

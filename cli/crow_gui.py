@@ -910,6 +910,64 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 @media (prefers-reduced-motion: reduce){
   .memnote{animation:none;
     background:color-mix(in srgb,var(--accent) 14%,transparent)}}
+/* #128. THE HELD-BACK WRITES, as a tile BEHIND the composer.
+   IT IS A SIBLING OF #box AND TUCKED UNDER IT -- negative margin below, extra
+   padding to pay for it, and #box lifted one layer. That is what makes it read
+   as something lying behind the input rather than another row inside it, which
+   is the whole shape robin asked for.
+   THE LOOK IS `.memnote`'s, not a second visual language for one subject: same
+   accent, same sweep gradient, same halo. `.memnote` settles after one pass
+   because a save is OVER; this keeps breathing because a question is still
+   true until it is answered.
+   COLLAPSED IT IS TWO NUMBERS. Lines gained in green, lines lost in red -- the
+   shape everyone already reads on a diff. The text of every entry is one click
+   away; a tile that printed all of it would cover the chat it lies behind. */
+#pendbar{max-width:900px;margin:0 auto -14px;padding:9px 13px 22px;
+  border:1px solid color-mix(in srgb,var(--accent) 32%,transparent);
+  border-radius:10px;color:var(--accent);font-size:11.5px;cursor:pointer;
+  background:linear-gradient(90deg,transparent 0%,color-mix(in srgb,var(--accent) 20%,transparent) 50%,transparent 100%),var(--raised);
+  background-size:220% 100%,auto;
+  animation:pendsweep 2.6s ease-in-out infinite, pendglow 2.6s ease-in-out infinite}
+#pendbar[hidden]{display:none}
+#pendbar .top{display:flex;align-items:center;gap:10px}
+#pendbar .title{font-weight:600}
+#pendbar .plus{color:var(--ok);font-variant-numeric:tabular-nums}
+/* `--bad`, NOT `--bad-text`. The latter is #ffd9d4 -- a pale pink meant as
+   TEXT ON A RED GROUND, and on this dark surface it reads as white. Robin
+   saw a white minus and a green plus. The name looked right in the file and
+   the colour was wrong on the screen, which is the same failure the light
+   drawing had: a check that compares colour NAMES cannot see it. */
+#pendbar .minus{color:var(--bad);font-variant-numeric:tabular-nums}
+#pendbar .hint{color:var(--dimmer);margin-left:auto;font-size:10.5px}
+/* Only while it is open, so the collapsed tile stays two lines high no matter
+   how much the review wants to write. */
+#pendbar .body{display:none;margin-top:9px}
+#pendbar.open .body{display:block}
+#pendbar .what{display:block;color:var(--dim);white-space:pre-wrap;
+  word-break:break-word;margin-bottom:6px;line-height:1.4}
+#pendbar .acts{display:flex;gap:8px;margin-top:9px}
+#pendbar button{font:inherit;font-size:11.5px;cursor:pointer;border-radius:6px;
+  padding:4px 12px;background:transparent;border:1px solid var(--line);
+  color:var(--dim)}
+#pendbar button.yes{color:var(--ok);border-color:rgba(78,201,143,.45)}
+#pendbar button.yes:hover{background:rgba(78,201,143,.12)}
+#pendbar button.no:hover{border-color:var(--bevel)}
+@keyframes pendsweep{
+  0%{background-position:120% 0,0 0}
+  100%{background-position:-40% 0,0 0}}
+@keyframes pendglow{
+  0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 26%,transparent)}
+  50%    {box-shadow:0 0 14px 2px color-mix(in srgb,var(--accent) 30%,transparent)}}
+/* Motion off, colour stays. The tile is the only sign there is, so it may not
+   vanish for the people who asked for fewer moving things. */
+@media (prefers-reduced-motion: reduce){
+  #pendbar{animation:none;
+    background:color-mix(in srgb,var(--accent) 14%,transparent)}}
+/* ONE LAYER UP, so the composer covers the tile's lower edge instead of the
+   other way round. Without this the negative margin would only overlap them
+   in source order and the tile would sit ON the box. */
+#box{position:relative;z-index:1}
+
 /* NOT A DIM NOTE, AND THAT IS THE WHOLE REASON IT IS A SECOND CLASS (#98).
    `--warn` is already `auto`'s colour in the level dropdown, so the line that
    names the limit of `auto`'s guarantee is drawn in the colour of the level it
@@ -1294,6 +1352,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
          chip's title and costs no width until asked for. -->
     <div id="flow"></div>
     <div id="composer">
+      <div id="pendbar" hidden onclick="crow.pendToggle(event)"></div>
       <div id="box">
         <div id="line"><textarea id="in" rows="1"
             placeholder="Message, or /tools for what the model can call"></textarea></div>
@@ -1665,6 +1724,57 @@ const crow = {
     m.hidden=false; },
 
   setMode(name){ $("#modemenu").hidden=true; pywebview.api.set_mode(name); },
+
+  // #128. THE HELD-BACK WRITES, as a tile behind the composer.
+  //
+  // THE ENTRIES ARE DRAWN, NEVER INTERPOLATED. A staged note is model-written
+  // text out of a conversation and may contain anything at all; the page shows
+  // it rather than running it. Same rule the root menu keeps for directory
+  // names that could be called `<img onerror=...>`.
+  //
+  // OPEN SURVIVES A REDRAW. The review can stage a second time while the tile
+  // is already open, and collapsing it under the reader's hands would hide the
+  // thing they were in the middle of reading.
+  pendState(items){
+    const bar = $("#pendbar"), list = items || [];
+    if(!list.length){ bar.hidden = true; bar.classList.remove("open");
+                      bar.innerHTML = ""; return; }
+    // `replace` is a line gained AND a line lost -- it is one entry and two
+    // changes, and a count that showed it as one would understate what is
+    // about to happen to the file.
+    let plus = 0, minus = 0;
+    list.forEach(x => { const a = x.action || "add";
+      if(a === "remove"){ minus++; }
+      else if(a === "replace"){ plus++; minus++; }
+      else { plus++; } });
+    bar.innerHTML =
+      '<span class="top"><span class="title">Memory Consolidation</span>'
+      + '<span class="plus"></span><span class="minus"></span>'
+      + '<span class="hint"></span></span>'
+      + '<span class="body">'
+      + list.map(()=>'<span class="what"></span>').join("")
+      + '<span class="acts">'
+      + '<button class="yes" onclick="crow.pendAnswer(true)">save to memory</button>'
+      + '<button class="no" onclick="crow.pendAnswer(false)">discard</button>'
+      + '</span></span>';
+    bar.querySelector(".plus").textContent = "+" + plus;
+    bar.querySelector(".minus").textContent = "\u2212" + minus;
+    bar.querySelector(".hint").textContent =
+      bar.classList.contains("open") ? "click to collapse" : "click to review";
+    const rows = bar.querySelectorAll(".what");
+    list.forEach((x,i)=>{ if(rows[i]) rows[i].textContent = x.text || ""; });
+    bar.hidden = false; },
+
+  // The buttons live inside the tile, so a click on one would bubble up and
+  // toggle it shut on the way out.
+  pendToggle(e){ if(e && e.target.closest("button")) return;
+    const bar = $("#pendbar");
+    bar.classList.toggle("open");
+    const hint = bar.querySelector(".hint");
+    if(hint) hint.textContent =
+      bar.classList.contains("open") ? "click to collapse" : "click to review"; },
+
+  pendAnswer(yes){ pywebview.api.answer_memory(!!yes); },
 
   // #92: THE WORKING DIRECTORY. The button shows the folder's NAME and carries
   // the full path as its tooltip -- a rail-width button cannot hold
@@ -2225,7 +2335,12 @@ const crow = {
       // THE PAGE CLEARS ITSELF ON "new", because the click is here. A DELETE of
       // the chat being read starts on the page too but is decided in Python --
       // it may fail -- so the emptying has to come back from there.
-      case "clear": flow.innerHTML=""; this.cost("",null); break;
+      // #128: THE CHIP GOES WITH THE CHAT. `forget_approvals` drops the staged
+      // writes on the Python side; without this the page would keep breathing
+      // about notes that no longer exist. One place, because `clear` is already
+      // the one event that means "this conversation is gone".
+      case "clear": flow.innerHTML=""; this.cost("",null);
+        this.pendState([]); break;
       case "hello": this.hello(e.t); break;
       // #94. /thoughts in the terminal shows or hides the reasoning; here it is
       // always rendered and folded, so the same question is open-or-closed.
@@ -2251,6 +2366,7 @@ const crow = {
         $("#turnstate").textContent =
           e.n + " tok · " + e.rate.toFixed(1) + " tok/s";
         break;
+      case "pend": this.pendState(e.items); break;
       case "mic": this.micState(e); break;
       case "drop": this.dropped(e.paths); break;
       case "idle": this.idle(); break;
@@ -2773,6 +2889,17 @@ class Turn(TurnEvents):
         """
         self._put({"k": "memory", "t": "Memory updated",
                    "n": len(what or [])})
+
+    def memory_pending(self, what: list) -> None:
+        """#128. The gate held the review's writes. Nothing is on disk yet.
+
+        NOT A ROW IN THE CHAT, and that is the difference from `memory_saved`.
+        A saved note happened at a point in the conversation, so it belongs in
+        the conversation. A held-back note is a CONDITION that is still true --
+        it has no place in the transcript, it has a place behind the composer,
+        and it stays there until it is answered or expires.
+        """
+        self._put({"k": "pend", "items": crow_core.pending_view()})
 
 
 class Api:
@@ -3842,6 +3969,29 @@ class Api:
                         "what": ("asks before " + ", ".join(asks)) if asks
                                 else "every tool runs unasked"})
         return out
+
+    def answer_memory(self, yes: bool) -> None:
+        """#128. The user answered the held-back writes. Yes writes, no drops.
+
+        NOT REFUSED MID-TURN, unlike `set_mode`. The level has to hold still
+        during a turn because `run_turn` read it once at the top and the loop
+        and the screen would otherwise disagree; a staged memory write is not
+        part of any turn and no running loop is holding an opinion about it.
+        Refusing here would mean the chip breathes at somebody who is not
+        allowed to press it.
+
+        THE GLOW LINE STILL FIRES on yes, through the same `memory` kind the
+        ungated path uses. The gate changed who decides, not what a person sees
+        afterwards -- a write that happened is still announced.
+        """
+        if yes:
+            saved = crow_core.approve_pending()
+            if saved:
+                self.push({"k": "memory", "t": "Memory updated",
+                           "n": len(saved)})
+        else:
+            crow_core.decline_pending()
+        self.push({"k": "pend", "items": crow_core.pending_view()})
 
     def set_mode(self, name: str) -> None:
         """Switch the release level, from the dropdown. Never mid-turn.
@@ -4917,7 +5067,10 @@ class Api:
                 model=self._args.model, api_key=self._args.api_key,
                 temperature=sampling["temperature"], top_p=sampling["top_p"],
                 min_p=sampling["min_p"], top_k=sampling.get("top_k"),
-                reasoning_effort=self._reasoning, events=events)
+                reasoning_effort=self._reasoning,
+                gate=getattr(self._args, "memory_approval",
+                             crow_core.MEMORY_APPROVAL_DEFAULT),
+                events=events)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -4945,6 +5098,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tools", dest="execute_tools", action="store_true",
                         default=True,
                         help="run tool calls (the default)")
+    # #128. THE MEMORY GATE IS ON, and this flag is how it comes off.
+    #
+    # THE FLAG IS THE EXIT, NOT THE ENTRANCE -- see MEMORY_APPROVAL_DEFAULT for
+    # why the usual "do not change existing behaviour" rule loses to it here. A
+    # review that writes into the head of every later session while nobody is
+    # at the keyboard is exactly the thing a person should have been asked
+    # about, and a gate that has to be discovered protects nobody.
+    parser.add_argument("--no-memory-approval", dest="memory_approval",
+                        action="store_false",
+                        default=crow_core.MEMORY_APPROVAL_DEFAULT,
+                        help="let the review write to memory without asking")
     parser.add_argument("--no-review", dest="review", action="store_false",
                         help="do not let the model save memories after a turn")
     parser.add_argument("--no-tools", dest="execute_tools", action="store_false",

@@ -180,6 +180,26 @@ KEYLESS_TIMEOUT = 8
 # encyclopaedia entries, which is most of what a coding assistant needs and not
 # the open web. A question outside that is a reason to offer the upgrade, not to
 # report a fault.
+# SAID ON EVERY KEYLESS ANSWER, not only on the empty one -- and that gap was
+# the defect. `NO_GENERAL_INDEX` below is the honest sentence, but it only ever
+# reached the model when the federation found NOTHING. It almost always finds
+# something: measured 2026-08-22, `was kostet ein rtx 5090` came back with
+# github issue #5090 at rank one, because the number matched an issue NUMBER.
+# A non-empty list with the warning suppressed reads as a web search that
+# worked, so the model answered from noise -- and then went around the tool with
+# `fetch_url` against Bing and DuckDuckGo, which block it. One live turn paid
+# 18 rounds, 27 tool calls, 3 of them failed, and 2m52s of waiting for that.
+#
+# FIRST, NOT LAST, for the reason the registry notes below already carry: a line
+# about what the whole list is worth, printed under the list, is read after the
+# list has already been believed.
+KEYLESS_SCOPE = (
+    "note: this index covers code, packages and reference -- NOT the open web. "
+    "A hit here may be a keyword match rather than an answer; weigh it before "
+    "using it. For a general index set CROW_TAVILY_KEY (free, no credit card, "
+    "https://tavily.com) or CROW_SEARXNG_URL to your own instance."
+)
+
 NO_GENERAL_INDEX = (
     "\n[these sources cover code, packages and reference, not the open web. "
     "For a general index set CROW_TAVILY_KEY (free, no credit card, "
@@ -5370,6 +5390,12 @@ def tool_web_search(query: str = "", count: int = SEARCH_RESULTS, **_) -> str:
         text = answer.get("answer") if isinstance(answer, dict) else answer
         if text:
             lines.append(f"answer: {text}")
+    # THE SCOPE COMES BEFORE EVERYTHING, including the registry notes: it is the
+    # sentence that decides how much any of the rest is worth. Only on the
+    # keyless path -- with a real index configured the results ARE a web search
+    # and the warning would be a lie in the other direction.
+    if not (SEARXNG_URL or TAVILY_KEY):
+        lines.append(KEYLESS_SCOPE)
     # Before the results, because a registry saying "this does not exist" outranks
     # every keyword match underneath it -- and underneath is where it would be
     # read last, if at all.
@@ -5384,7 +5410,10 @@ def tool_web_search(query: str = "", count: int = SEARCH_RESULTS, **_) -> str:
         tag = f" [{hit['source']}]" if hit.get("source") else ""
         lines.append(f"{n}. {(hit.get('title') or '').strip()}{tag}\n"
                      f"   {(hit.get('url') or '').strip()}\n   {snippet}")
-    if not lines:
+    # `lines` now carries the scope note on every keyless run, so "nothing was
+    # found" can no longer be read off its emptiness. The results themselves are
+    # what that question is about.
+    if not results and not answers:
         # AN EMPTY RESULT AND A BROKEN BACKEND LOOK IDENTICAL from here, and they
         # are not the same answer: searxng reports the engines that failed
         # separately, so a query that found nothing because every engine was
@@ -5591,6 +5620,170 @@ def forget_approvals() -> None:
     places a session actually ends, and they are what call this.
     """
     _ALLOWED.clear()
+    # #128: THE STAGED MEMORY WRITES GO WITH THEM, from in here rather than
+    # from eight call sites. A write the review proposed belongs to the chat
+    # that produced it exactly as much as a standing approval does, so the two
+    # have one lifetime and one place that ends it. A second call beside each of
+    # the eight would be eight chances to forget one, and the forgotten one
+    # would carry a note out of a conversation the user has already dropped.
+    forget_pending()
+
+
+# #128. THE MEMORY GATE -- what the background review wants to write, held back
+# until a person says yes.
+#
+# WHY THIS IS NOT A `MODE_ASKS` CLASS. The three levels gate calls the MODEL
+# makes inside a turn: `run_turn` reaches one, asks the surface through
+# `approve`, and the user is sitting there because their answer is what the turn
+# is waiting on. The review is the opposite case in every respect -- it runs
+# BEHIND the visible end of the turn, `run_turn` does not know it exists, and
+# `review_turn`'s own comment says why a question there is useless: "the user is
+# not at the keyboard for a background pass, so a write or a shell command here
+# would have nobody to refuse it".
+#
+# So this gate does not ask. It STAGES, and the surface raises a state the user
+# meets whenever they next look. A question needs someone in the chair; a state
+# waits.
+#
+# NOTHING IS EVER WRITTEN BY A TIMER, and that is the difference between a gate
+# and a delay. An entry nobody approves EXPIRES and is dropped. Expiry has to
+# fall on the side of not writing, or the gate is a speed bump.
+#
+# ON BY DEFAULT (robin, 2026-08-22), against this file's own precedent, and the
+# reason the precedent loses here. `DEFAULT_MODE` is `auto` because every
+# release before it ran the tools unasked and a commit that adds a CHOICE must
+# not change what an existing session does -- a good rule, and it was the first
+# answer here too. It does not hold for this one: a gate that ships off is not a
+# gate, it is a setting nobody finds. What it guards is the one writer in this
+# client that runs with nobody at the keyboard and writes into the head of every
+# later session, and the whole reason it exists is that "the review writes
+# unasked" was the behaviour worth changing. `--no-memory-approval` is one word
+# away for anyone who wants the old shape back.
+MEMORY_APPROVAL_DEFAULT = True
+
+# How long a staged entry waits. Hermes uses 300 s for elicitation and the
+# reasoning transfers: long enough that an answer noticed on the way back from
+# the kettle still counts, short enough that a note nobody looked at does not
+# surface days later out of a conversation that has since ended.
+#
+# CHECKED WHEN SOMEBODY LOOKS, NOT BY A THREAD. A timer would be a second thing
+# in this client that can write to memory, and the entire point of the gate is
+# that there is exactly one.
+PENDING_TTL = 300.0
+
+# Per session, never written to disk -- the same shape and the same reason as
+# `_ALLOWED` above. A staged write that survived a restart would be a decision
+# the user made in a conversation they have already forgotten.
+_PENDING: "list[dict]" = []
+_PENDING_SEQ = 0
+
+
+def _pending_summary(name: str, arguments: str) -> str:
+    """One line naming what WOULD be written, in the note's words not the API's.
+
+    THE CONTENT, NOT THE CALL. `memory(action=add, target=memory)` is a
+    keystroke; the sentence that would stand in the head of every later session
+    is a decision. Same reasoning that put the arguments into the terminal's
+    approval prompt (#88 point 2) -- a prompt that does not show what it
+    releases is not a question.
+    """
+    try:
+        args = json.loads(arguments or "{}")
+    except (json.JSONDecodeError, AttributeError):
+        args = {}
+    if not isinstance(args, dict):
+        args = {}
+    action = str(args.get("action") or "?")
+    where = str(args.get("target") or args.get("name") or name)
+    body = args.get("content") or args.get("old_text") or args.get("description") or ""
+    body = " ".join(str(body).split())
+    if len(body) > 160:
+        body = body[:157] + "..."
+    return "%s %s: %s" % (action, where, body) if body else "%s %s" % (action, where)
+
+
+def stage_memory(name: str, arguments: str) -> dict:
+    """Hold one write until a person answers. Returns the staged entry."""
+    global _PENDING_SEQ
+    _PENDING_SEQ += 1
+    try:
+        args = json.loads(arguments or "{}")
+        action = str((args or {}).get("action") or "add")
+    except (json.JSONDecodeError, AttributeError):
+        action = "add"
+    entry = {"id": _PENDING_SEQ, "name": name, "arguments": arguments,
+             # #128. THE ACTION IS CARRIED SEPARATELY from the summary, because
+             # the window counts with it: `add` is a line gained, `remove` a
+             # line lost, `replace` is both at once. A surface that had to parse
+             # that back out of the summary string would be reading its own
+             # prose, and the prose is for people.
+             "action": action,
+             "summary": _pending_summary(name, arguments),
+             "staged": time.monotonic()}
+    _PENDING.append(entry)
+    return entry
+
+
+def pending_memory() -> "list[dict]":
+    """What is still waiting.
+
+    EXPIRED ENTRIES ARE DROPPED HERE, on the read, and therefore never run. Any
+    caller that is about to show the state or act on it passes through this
+    function first, so there is no path on which an expired write survives long
+    enough to be approved.
+    """
+    now = time.monotonic()
+    _PENDING[:] = [e for e in _PENDING if now - e["staged"] < PENDING_TTL]
+    return list(_PENDING)
+
+
+def pending_view() -> "list[dict]":
+    """What the surfaces draw: the action and the text, nothing else.
+
+    ONE SHAPE FOR BOTH SURFACES and neither of them reaches into the entry. The
+    window counts lines gained and lost off `action`; the terminal prints
+    `text`. `arguments`, `id` and the staged clock are this module's business.
+    """
+    return [{"action": e["action"], "text": e["summary"]}
+            for e in pending_memory()]
+
+
+def approve_pending(ident: "int | None" = None) -> "list[str]":
+    """Run what was staged. `None` means all of it. Returns what was saved.
+
+    THE SAME `run_tool` THE REVIEW WOULD HAVE CALLED. An approved write and an
+    ungated write are one code path, so the character cap, the duplicate check
+    and the injection scan all still answer -- the gate adds a question, it does
+    not add a second way to write.
+    """
+    ready = [e for e in pending_memory() if ident is None or e["id"] == ident]
+    saved = []
+    for entry in ready:
+        _PENDING.remove(entry)
+        try:
+            result = json.loads(run_tool(entry["name"], entry["arguments"]))
+        except Exception:                   # noqa: BLE001 - failure is silence, as in review_turn
+            continue
+        if result.get("success") and result.get("action"):
+            saved.append("%s %s" % (result["action"],
+                                    result.get("target") or result.get("name")
+                                    or entry["name"]))
+    return saved
+
+
+def decline_pending(ident: "int | None" = None) -> int:
+    """Drop what was staged, writing nothing. `None` means all of it."""
+    doomed = [e for e in pending_memory() if ident is None or e["id"] == ident]
+    for entry in doomed:
+        _PENDING.remove(entry)
+    return len(doomed)
+
+
+def forget_pending() -> None:
+    """Drop every staged write. Called where `forget_approvals` is called, and
+    for the same reason: `/reset` and the window's new-chat button are where a
+    session actually ends."""
+    _PENDING.clear()
 
 
 # What has already been asked this turn, and what came back. Cleared per user
@@ -5764,7 +5957,7 @@ MEMORY_REVIEW_PROMPT = (
 def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                 api_key: str, temperature: float, top_p: float, min_p: float,
                 top_k: int | None = None, reasoning_effort: str | None = None,
-                timeout: float = 180.0,
+                timeout: float = 180.0, gate: bool = False,
                 events: "TurnEvents | None" = None) -> "list[str]":
     """Ask once whether this turn left anything worth keeping. Returns what was saved.
 
@@ -5809,7 +6002,7 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
         calls = (answer.get("choices") or [{}])[0].get("message", {}).get("tool_calls") or []
     except Exception:                       # noqa: BLE001 - see the docstring
         return []
-    saved = []
+    saved, staged = [], []
     for call in calls:
         function = call.get("function") or {}
         # THE TWO THIS PASS MAY CALL, and nothing else. Anything further is a
@@ -5817,6 +6010,14 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
         # run: the user is not at the keyboard for a background pass, so a write
         # or a shell command here would have nobody to refuse it.
         if function.get("name") not in ("memory", "skill"):
+            continue
+        # #128. STAGED, NOT WRITTEN. The gate cannot ask here -- see
+        # MEMORY_APPROVAL_DEFAULT for why a question in a background pass is a
+        # question put to an empty chair. What it can do is leave the write
+        # where the user will meet it.
+        if gate:
+            staged.append(stage_memory(function["name"],
+                                       function.get("arguments") or "{}"))
             continue
         try:
             result = json.loads(run_tool(function["name"],
@@ -5831,6 +6032,12 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
             # The moment it is on disk, not the moment the pass is done.
             if events is not None:
                 events.memory_saved([one])
+    # ONE REPORT FOR THE WHOLE PASS, unlike `memory_saved` which fires per entry
+    # at the moment of writing. Nothing has happened yet here: what the surface
+    # raises is a state ("something is waiting"), and a state does not need to
+    # be told twice.
+    if staged and events is not None:
+        events.memory_pending([e["summary"] for e in staged])
     return saved
 
 
@@ -5921,6 +6128,21 @@ class TurnEvents:
 
     def rollover_refused(self) -> None:
         """Twice in one turn. The question itself does not fit."""
+
+    def memory_pending(self, what: "list[str]") -> None:
+        """#128. The review wants to write and the gate held it. Nothing is on
+        disk yet.
+
+        A STATE, NOT AN EVENT, and the surfaces draw it that way: `memory_saved`
+        reports something that happened and is over, so the window's line glows
+        once and settles. This one reports something that is still true and will
+        stay true until the user answers or it expires -- so it breathes, the
+        same grammar the recording microphone already uses.
+
+        AND IT HAS TO BE ACTIONABLE. A state nobody can act on is furniture with
+        a colour (robin, on the microphone, and it holds here): whatever the
+        surface raises has to be the thing you press to see the entries.
+        """
 
     def memory_saved(self, what: "list[str]") -> None:
         """#122. The background review saved something, and this is how anyone knows.

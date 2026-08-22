@@ -3507,6 +3507,143 @@ class TheRailDrawsTheGroupsTests(unittest.TestCase):
         self.assertIn('"really discard?"', self.source)
 
 
+class TheHeldWriteBarTests(unittest.TestCase):
+    """#128: the strip that pops up over the composer while a write waits."""
+
+    def setUp(self):
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+
+    def _bar(self):
+        return self.css[self.css.index("#pendbar{"):self.css.index("#pendbar[hidden]")]
+
+    def test_it_wears_the_memory_line_own_look(self):
+        """NOT A SECOND VISUAL LANGUAGE FOR THE SAME SUBJECT. `.memnote` announces
+        a write that HAPPENED; this announces one that WANTS to. Same accent,
+        same gradient, same halo -- a reader should not have to learn two
+        appearances for one thing."""
+        bar = self._bar()
+        self.assertIn("var(--accent)", bar)
+        self.assertIn("linear-gradient", bar)
+        self.assertIn("@keyframes pendglow", self.css)
+
+    def test_it_breathes_because_it_is_a_state(self):
+        """`.memnote` settles after one pass because a save is over. A question
+        is still true until it is answered, so this one does not stop."""
+        bar = self._bar()
+        self.assertIn("infinite", bar)
+        self.assertNotIn("forwards", bar)
+
+    def test_it_sits_over_the_composer_and_not_in_the_button_row(self):
+        """THE ROW IS FOR CONTROLS THAT ARE ALWAYS THERE, and this is not one: it
+        pops in when there is something to answer and leaves again. Asserted by
+        position in the page, because "it looks right" is not something a file
+        on disk can say."""
+        body = self.source[self.source.index("</style>"):]
+        self.assertLess(body.index('id="pendbar"'), body.index('id="line"'))
+        self.assertNotIn('id="pendwrap"', body)
+
+    def test_a_reader_who_asked_for_no_motion_still_sees_it(self):
+        """Motion off, colour stays -- the strip is the only sign there is, so it
+        may not vanish for the people who asked for fewer moving things."""
+        block = self.css[self.css.index("#pendbar{"):]
+        block = block[block.index("prefers-reduced-motion"):]
+        block = block[:block.index("}}") + 2]
+        self.assertIn("animation:none", block)
+        self.assertIn("var(--accent)", block)
+
+    def test_the_entries_are_drawn_and_never_interpolated(self):
+        """A staged note is model-written text out of a conversation and may
+        contain anything at all; the page draws it rather than running it."""
+        js = self.source[self.source.index("pendState(items){"):
+                         self.source.index("pendAnswer(yes)")]
+        self.assertIn("textContent", js)
+
+    def test_it_lies_behind_the_composer(self):
+        """BEHIND, NOT ABOVE, and the two look the same in source order -- what
+        separates them is the negative margin that tucks the tile under the box
+        and the layer that lifts the box over it. Without the z-index the
+        overlap happens the wrong way round and the tile sits ON the input."""
+        bar = self._bar()
+        self.assertIn("margin:0 auto -14px", bar)
+        box = self.css[self.css.index("#box{position:relative"):]
+        self.assertIn("z-index:1", box[:80])
+
+    def test_collapsed_it_is_a_title_and_two_numbers(self):
+        """A tile that printed every entry would cover the chat it lies behind.
+        Collapsed it says what it is and how much is coming; the text is one
+        click away."""
+        js = self.source[self.source.index("pendState(items){"):
+                         self.source.index("pendToggle(e)")]
+        self.assertIn("Memory Consolidation", js)
+        self.assertIn('class="plus"', js)
+        self.assertIn('class="minus"', js)
+        body = self.css[self.css.index("#pendbar .body{"):]
+        self.assertIn("display:none", body[:60])
+
+    def test_gained_is_green_and_lost_is_red(self):
+        """THE VALUE, NOT THE NAME -- and the first version of this case is why.
+        It asserted `var(--bad-text)` and passed while the minus rendered WHITE:
+        `--bad-text` is #ffd9d4, a pale pink meant as text ON a red ground, and
+        on this dark surface it is indistinguishable from the text colour. The
+        name was right in the file and the colour was wrong on the screen.
+
+        Same failure the light drawing had, and the same fix: resolve what the
+        palette actually gives and look at it. A checker that compares colour
+        names cannot see an invisible colour."""
+        import re
+        CLOSE = chr(125)
+
+        def value(css, token):
+            m = re.search(re.escape(token) + r":\s*(#[0-9a-fA-F]{6})", css)
+            self.assertIsNotNone(m, "%s is not defined" % token)
+            h = m.group(1).lstrip("#")
+            return tuple(int(h[k:k + 2], 16) for k in (0, 2, 4))
+
+        # The dark palette is the shipped default and the one robin looked at.
+        dark = self.css[self.css.index("--bg:#181818"):]
+        dark = dark[:dark.index(CLOSE)]
+        used = {}
+        for cls in ("plus", "minus"):
+            rule = self.css[self.css.index("#pendbar .%s{" % cls):]
+            m = re.search(r"color:var\((--[a-z-]+)\)", rule[:120])
+            self.assertIsNotNone(m, "%s has no palette colour" % cls)
+            used[cls] = m.group(1)
+
+        r, g, b = value(dark, used["minus"])
+        self.assertGreater(r, g + 40, "the minus is not red: %r" % (used["minus"],))
+        self.assertGreater(r, b + 40, "the minus is not red: %r" % (used["minus"],))
+        self.assertLess(min(g, b), 200,
+                        "%s is near-white, not a red anyone can see" % used["minus"])
+
+        r, g, b = value(dark, used["plus"])
+        self.assertGreater(g, r + 40, "the plus is not green: %r" % (used["plus"],))
+
+    def test_a_replace_counts_as_one_gained_and_one_lost(self):
+        """NEGATIVE PROBE FOR THE COUNTER. `replace` is ONE entry and TWO
+        changes; counting it once would understate what is about to happen to
+        the file, and the tile's whole job is to say how much is coming."""
+        js = self.source[self.source.index("pendState(items){"):
+                         self.source.index("pendToggle(e)")]
+        block = js[js.index('a === "replace"'):]
+        self.assertIn("plus++", block[:60])
+        self.assertIn("minus++", block[:60])
+
+    def test_a_click_on_a_button_does_not_collapse_the_tile(self):
+        """The buttons live inside the tile, so their click bubbles out through
+        it. Without this guard answering the question would fold the thing shut
+        on the way out -- and on a decline, fold away the only evidence of what
+        was just discarded."""
+        js = self.source[self.source.index("pendToggle(e){"):]
+        self.assertIn('closest("button")', js[:160])
+
+    def test_the_bar_goes_when_the_chat_goes(self):
+        """The Python side drops the staged writes inside `forget_approvals`;
+        without this the strip would keep glowing about notes that are gone."""
+        clear = self.source[self.source.index('case "clear":'):]
+        self.assertIn("pendState([])", clear[:200])
+
+
 class TheMemoryLineTests(unittest.TestCase):
     """#122: the one sign a person gets that something was remembered.
 

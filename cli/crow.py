@@ -983,6 +983,18 @@ class TerminalTurnEvents(TurnEvents):
         print(f"{CROW_ACCENT}[memory updated: {len(what or [])}]{RESET}\n",
               file=self._out)
 
+    def memory_pending(self, what: list) -> None:
+        """#128. The gate held a write back. Nothing is on disk.
+
+        A REPORT, NOT THE QUESTION. This sink says what happened; the asking is
+        done by `repl` the moment the review returns, because a TurnEvents
+        method that stops to read a key is a sink that decides -- and the class
+        docstring above says these names carry what HAPPENED, not what a
+        terminal should do about it.
+        """
+        for one in (what or []):
+            print(f"{CROW_ACCENT}[memory held: {one}]{RESET}", file=self._out)
+
 
 HELP = """commands:
   /help          this list
@@ -1213,6 +1225,38 @@ def ask_approval(name: str, arguments: str) -> str:
     if answer in ("a", "always") and scope:
         return "always"
     return "no"
+
+
+def ask_memory() -> None:
+    """#128: put what the review staged to the user, once, after the turn.
+
+    ASKED HERE AND NOT IN THE EVENT SINK, for the reason the sink's own
+    docstring gives. Asked AFTER the review returned, and that is not an
+    accident either: the request is finished, the one slot is free and the
+    terminal is idle -- the same window `ask_approval` uses between rounds.
+
+    EVERY ANSWER THAT IS NOT YES IS NO, including a stray key, EOF and Ctrl+C.
+    The staged entries then expire on their own; nothing is written by not
+    answering, which is the direction this gate has to fail in.
+    """
+    waiting = crow_core.pending_memory()
+    if not waiting:
+        return
+    print(f"\n{CROW_ACCENT}  the review wants to remember:{RESET}")
+    for entry in waiting:
+        print(f"{DIM}    - {entry['summary']}{RESET}")
+    try:
+        answer = input(f"  save {'it' if len(waiting) == 1 else 'them'}? "
+                       f"{YELLOW}y{RESET}es / {YELLOW}n{RESET}o{DIM} [n]{RESET} ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        answer = "n"
+    if answer in ("y", "yes"):
+        saved = crow_core.approve_pending()
+        print(f"{CROW_ACCENT}[memory updated: {len(saved)}]{RESET}\n")
+    else:
+        dropped = crow_core.decline_pending()
+        print(f"{DIM}[memory discarded: {dropped}]{RESET}\n")
 
 
 def _first_sentence(text: str) -> str:
@@ -1780,8 +1824,13 @@ def repl(args: argparse.Namespace) -> int:
                 conversation, base_url=args.base_url, model=args.model,
                 api_key=args.api_key, **sampling,
                 reasoning_effort=args.reasoning_effort,
+                gate=getattr(args, "memory_approval",
+                             crow_core.MEMORY_APPROVAL_DEFAULT),
                 events=TerminalTurnEvents(rounds=args.rounds,
                                           show_reasoning=show_reasoning))
+            # AFTER IT RETURNED. With the gate off this finds nothing and costs
+            # a list comprehension; with it on, this is where the user answers.
+            ask_memory()
 
 
 # Values we wrote ourselves in earlier versions and may correct without asking.
@@ -2013,6 +2062,17 @@ def build_parser() -> argparse.ArgumentParser:
     # #122. THE REVIEW IS THE ONLY THING HERE THAT WRITES WITHOUT BEING ASKED,
     # so it gets the one switch that turns it off. Default on: a memory that
     # only fills when somebody remembers to fill it stays empty.
+    # #128. THE MEMORY GATE IS ON, and this flag is how it comes off.
+    #
+    # THE FLAG IS THE EXIT, NOT THE ENTRANCE -- see MEMORY_APPROVAL_DEFAULT for
+    # why the usual "do not change existing behaviour" rule loses to it here. A
+    # review that writes into the head of every later session while nobody is
+    # at the keyboard is exactly the thing a person should have been asked
+    # about, and a gate that has to be discovered protects nobody.
+    parser.add_argument("--no-memory-approval", dest="memory_approval",
+                        action="store_false",
+                        default=crow_core.MEMORY_APPROVAL_DEFAULT,
+                        help="let the review write to memory without asking")
     parser.add_argument("--no-review", dest="review", action="store_false",
                         help="do not let the model save memories after a turn")
     # --resume, not --session <file>: --no-session already owns dest="session"
