@@ -1970,8 +1970,14 @@ const crow = {
 
   addMcp(){
     const line=$("#mcpline").value.trim();
-    if(!line){ this.mcpSaid("a command line."); return; }
-    this.mcpSaid("asking …");
+    if(!line){ this.mcpSaid("a command line or a URL."); return; }
+    // A URL MAY TAKE MINUTES AND A BROWSER, and the sheet has to say so. A
+    // server that answers 401 sends this off to its own consent page, and until
+    // somebody finishes it there this call does not return -- "asking ..." alone
+    // reads as frozen.
+    this.mcpSaid(/^https?:/i.test(line)
+      ? "asking … if it wants a login, a browser opens; finish it there"
+      : "asking …");
     pywebview.api.mcp_add(line).then(said => {
       this.mcpSaid(said||"");
       if(!said) $("#mcpline").value="";

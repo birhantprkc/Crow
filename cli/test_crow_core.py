@@ -3629,6 +3629,58 @@ class TheMcpConfigurationTests(unittest.TestCase):
 
     # ---- the two lists
 
+    def test_a_glob_keeps_a_whole_product_area_out(self):
+        """Cloudflare's API server reports around 3,300 tools at
+        `?codemode=false`. Excluding product areas one endpoint at a time is not
+        a thing anybody finishes, so both lists take fnmatch globs."""
+        self.assertEqual(self._write(self._server(tools={"exclude": ["*_issue"]})), [])
+        self.assertNotIn("mcp_github_create_issue", self._names())
+        self.assertNotIn("mcp_github_get_issue", self._names())
+
+    def test_a_name_without_a_metacharacter_is_still_exact(self):
+        """NEGATIVE for the case above, and it is the trap a prefix rule falls
+        into: `create` excludes a tool called `create`, never `create_issue`."""
+        self.assertEqual(self._write(self._server(tools={"exclude": ["create"]})), [])
+        self.assertIn("mcp_github_create_issue", self._names())
+
+    def test_a_glob_in_the_positive_list_declares_by_pattern(self):
+        self.assertEqual(self._write(self._server(tools={"include": ["get_*"]})), [])
+        self.assertIn("mcp_github_get_issue", self._names())
+        self.assertNotIn("mcp_github_create_issue", self._names())
+
+    def test_a_variable_in_a_block_is_read_from_the_environment(self):
+        """A token in `mcp.json` sits in a file two surfaces draw and a person
+        edits. `${VAR}` keeps it in the environment -- the rule
+        `CROW_TAVILY_KEY` already follows -- and what a sheet shows is the
+        placeholder rather than the secret."""
+        self.addCleanup(os.environ.pop, "CROW_TEST_MCP_TOKEN", None)
+        os.environ["CROW_TEST_MCP_TOKEN"] = "the-real-one"
+        server = crow_core.McpServer("x", {
+            "url": "https://example.invalid/mcp",
+            "headers": {"Authorization": "Bearer ${CROW_TEST_MCP_TOKEN}"}})
+        self.assertEqual(server._headers()["Authorization"], "Bearer the-real-one")
+
+    def test_a_variable_that_names_nothing_is_refused_by_name(self):
+        """NEGATIVE, and it is the failure that would be unreadable otherwise:
+        the literal `${CROW_TEST_MCP_ABSENT}` would travel as the token itself
+        and come back as a 401 with no hint of the cause."""
+        server = crow_core.McpServer("x", {
+            "url": "https://example.invalid/mcp",
+            "headers": {"Authorization": "Bearer ${CROW_TEST_MCP_ABSENT}"}})
+        problem = server.start()
+        self.assertIsNotNone(problem)
+        self.assertIn("CROW_TEST_MCP_ABSENT", problem)
+        self.assertIn("environment", problem)
+
+    def test_a_variable_in_a_schema_is_not_a_missing_variable(self):
+        """NEGATIVE for the scan's reach: a server's own description may carry a
+        `${...}`, and treating that as unset would make the server unusable over
+        its own documentation."""
+        self.assertEqual(crow_core._mcp_missing(
+            {"schema": {"tools": [{"description": "use ${NOT_A_SETTING}"}]}}), [])
+        self.assertEqual(crow_core._mcp_missing(
+            {"url": "https://x/${NOT_A_SETTING}"}), ["NOT_A_SETTING"])
+
     def test_exclude_drops_one_and_leaves_the_rest(self):
         self._write(self._server(tools={"exclude": ["get_issue"]}))
         self.assertIn("mcp_github_create_issue", self._names())
@@ -4930,8 +4982,11 @@ class _FakeAuthServer(http.server.BaseHTTPRequestHandler):
                 return self._json(400, {"error": "S256 only"})
             code = "code-%d" % (len(state["codes"]) + 1)
             state["codes"][code] = got
+            # A BROKER STAMPS ITS OWN ISSUER, which is what Clerk, Auth0 and
+            # Okta all do when they sit behind somebody else's front door.
             back = got["redirect_uri"] + "?" + urllib.parse.urlencode(
-                {"code": code, "state": got["state"], "iss": state["meta"]["issuer"]})
+                {"code": code, "state": got["state"],
+                 "iss": state.get("iss") or state["meta"]["issuer"]})
             self.send_response(302)
             self.send_header("Location", back)
             self.send_header("Content-Length", "0")
@@ -4969,11 +5024,13 @@ class _FakeAuthServer(http.server.BaseHTTPRequestHandler):
                 return self._json(400, {"error": "invalid_grant"})
             state["issued"] += 1
             state["access"] = "access-%d" % state["issued"]
+            # LOWERCASE, LIKE THE SERVER THAT FOUND THIS. A fake that answered
+            # `Bearer` would let a client echo the field back and stay green.
             # THE SAME LIFETIME THE FIRST TOKEN GOT. Handing back an hour here
             # would let one refresh end the test's whole premise: a short-lived
             # token that has to be refreshed again on the next call.
             return self._json(200, {"access_token": state["access"],
-                                    "token_type": "Bearer",
+                                    "token_type": "bearer",
                                     "expires_in": state["expires_in"]})
 
         asked = state["codes"].get(form.get("code"))
@@ -4992,7 +5049,7 @@ class _FakeAuthServer(http.server.BaseHTTPRequestHandler):
         state["access"] = "access-%d" % state["issued"]
         return self._json(200, {"access_token": state["access"],
                                 "refresh_token": state["refresh"],
-                                "token_type": "Bearer",
+                                "token_type": "bearer",
                                 "expires_in": state["expires_in"]})
 
 
@@ -5010,7 +5067,7 @@ class _GuardedHttpMcp(_FakeHttpMcp):
         named = state.get("prm_resource")
         return {"resource": named or ("http://127.0.0.1:%d/mcp"
                                       % self.server.server_address[1]),
-                "authorization_servers": [issuer]}
+                "authorization_servers": (state.get("issuers") or [issuer])}
 
     def do_GET(self):
         state = self.server.state
@@ -5260,6 +5317,105 @@ class TheMcpOauthTests(unittest.TestCase):
         self.assertTrue(spent.get("code_verifier"))
         self.assertEqual(spent["resource"], asked["resource"])
 
+    def test_the_scheme_is_capitalised_whatever_the_endpoint_called_it(self):
+        """FOUND LIVE ON 2026-08-22, with one token and two requests: higgsfield
+        answers `"token_type": "bearer"` and then refuses `bearer <token>` with
+        401 while accepting `Bearer <token>` with 200. The scheme is
+        case-insensitive by RFC 6750 and a resource server is still free to
+        compare the string it was handed -- so echoing the endpoint's own
+        spelling back at it turned a completed browser leg into a refused one."""
+        crow_core.mcp_add_line(self.endpoint)
+        self.assertEqual(crow_core.mcp_token_for("127_0_0_1")["token_type"],
+                         "bearer")
+        sent = [h.get("Authorization") for h in self.state["seen"]
+                if h.get("Authorization")]
+        self.assertTrue(sent)
+        for header in sent:
+            self.assertTrue(header.startswith("Bearer "), header[:20])
+
+    def test_a_scheme_that_is_not_bearer_is_passed_through(self):
+        """NEGATIVE for the case above: `DPoP` is a different scheme with
+        different rules, not a different spelling, and rewriting it would break
+        a server this client has no business overruling."""
+        crow_core.mcp_add_line(self.endpoint)
+        doc = crow_core.mcp_token_doc()
+        doc["servers"]["127_0_0_1"]["token_type"] = "DPoP"
+        crow_core.mcp_token_write(doc)
+        server = crow_core.McpServer("127_0_0_1", {"url": self.endpoint})
+        self.assertTrue(server._headers()["Authorization"].startswith("DPoP "))
+
+    def test_the_registered_client_name_comes_from_the_block(self):
+        """Figma's endpoint allowlists dynamic registration BY `client_name` and
+        403s a name it does not know. Crow says "Crow" and lets somebody who
+        needs another name set one -- rather than shipping a name that claims to
+        be a different client."""
+        self._configure(client_name="Some Other Name")
+        self.assertIsNone(crow_core.mcp_authorise_server("faker"))
+        self.assertEqual(self.auth_state["registered"]["client_name"],
+                         "Some Other Name")
+
+    def test_the_default_client_name_is_crow(self):
+        """NEGATIVE for the case above: without a block key Crow names itself,
+        and it names itself honestly."""
+        crow_core.mcp_add_line(self.endpoint)
+        self.assertEqual(self.auth_state["registered"]["client_name"], "Crow")
+
+    def test_the_redirect_may_say_localhost_while_the_listener_stays_loopback(self):
+        """A few authorization servers sit behind a WAF that 403s any authorize
+        request carrying a literal 127.0.0.1. Only the NAME changes -- binding
+        anything but loopback would put the authorization code on every
+        interface of the machine."""
+        self._configure(redirect_host="localhost")
+        self.assertIsNone(crow_core.mcp_authorise_server("faker"))
+        redirect = self._sent("/authorize")["redirect_uri"]
+        self.assertTrue(redirect.startswith("http://localhost:"), redirect)
+        self.assertEqual(self.auth_state["registered"]["redirect_uris"], [redirect])
+
+    def test_a_block_may_carry_a_pre_registered_secret(self):
+        """Some servers reject dynamic registration outright -- Google's Drive
+        endpoint answers 400 -- and then the only way in is a client created in
+        the provider's console, which may well be a confidential one."""
+        self.auth_state["mode"] = "noregister"
+        self._configure(client_id="preconfigured-1", client_secret="shhh")
+        self.assertIsNone(crow_core.mcp_authorise_server("faker"))
+        self.assertEqual(self._sent("/token")["client_secret"], "shhh")
+
+    def test_a_login_brokered_to_another_domain_is_accepted(self):
+        """robin, 2026-08-22, after it refused a working server: a user adds
+        WHATEVER MCP server they have, and the identity service behind it is
+        almost never on the same domain.
+
+        MEASURED ON higgsfield: its metadata declares `https://mcp.higgsfield.ai`,
+        its `/oauth2/authorize` hands off to Clerk, and Clerk stamps
+        `iss=https://clerk.higgsfield.ai` on the way back. Auth0 and Okta do the
+        same. `iss` guards MIX-UP -- one server's code reaching another's token
+        endpoint -- and this client cannot mix up: the token endpoint comes from
+        metadata fetched before the browser opened, and nothing in the redirect
+        can move it. What binds the answer to this request is `state`."""
+        self.auth_state["iss"] = "https://clerk.somewhere-else.example"
+        name, _, problem = crow_core.mcp_add_line(self.endpoint)
+        self.assertIsNone(problem)
+        self.assertTrue(crow_core.mcp_token_for(name).get("access_token"))
+
+    def test_the_second_authorization_server_is_tried_when_the_first_is_dead(self):
+        """RFC 9728 lets a document list several and says the choice is the
+        client's. Taking the first and stopping refuses a resource whose first
+        entry is retired or is not one a desktop client can use."""
+        self.state["issuers"] = ["http://127.0.0.1:9",
+                                 self.auth_state["meta"]["issuer"]]
+        name, _, problem = crow_core.mcp_add_line(self.endpoint)
+        self.assertIsNone(problem)
+        self.assertTrue(crow_core.mcp_token_for(name).get("access_token"))
+
+    def test_a_resource_whose_servers_are_all_unusable_says_why(self):
+        """NEGATIVE for the case above: trying them all is not the same as
+        accepting anything, and the reasons are what somebody debugs with."""
+        self.state["issuers"] = ["http://127.0.0.1:9", "http://127.0.0.1:7"]
+        _, _, problem = crow_core.mcp_add_line(self.endpoint)
+        self.assertIsNotNone(problem)
+        self.assertIn("127.0.0.1:9", problem)
+        self.assertNotIn("/authorize", self._paths())
+
     def test_the_metadata_names_the_resource_and_it_is_used_verbatim(self):
         """FOUND LIVE ON 2026-08-22 against GitHub: its metadata names
         `https://api.githubcopilot.com/mcp/` WITH the trailing slash. A client
@@ -5364,6 +5520,35 @@ class TheMcpOauthTests(unittest.TestCase):
         raise AssertionError("a browser was opened inside a tool call: %s" % url)
 
     # ---- where the credential lives
+
+    def test_a_failing_server_does_not_quote_a_credential_back_into_the_prompt(self):
+        """An MCP error lands in three places at once: the prompt, the chat on
+        screen and the session file on disk. Servers routinely quote the request
+        that failed -- "invalid token: Bearer ..." -- and that sentence is then
+        permanent. This repository paid for that lesson on 2026-08-22, when a
+        configuration block reached a chat log and the key had to be rotated."""
+        said = crow_core.mcp_render({"isError": True, "content": [
+            {"type": "text", "text": "invalid token: Bearer abcdefghijklmnop1234"}]})
+        self.assertIn("[REDACTED]", said)
+        self.assertNotIn("abcdefghijklmnop1234", said)
+
+    def test_a_working_answer_is_left_exactly_as_it_came(self):
+        """NEGATIVE, and it is the reason this runs on errors only: a tool that
+        returns documentation about API keys, or a file with `password=` in it,
+        is doing its job. Mangling that would break real answers to protect
+        nothing."""
+        text = "set api_key=YOUR_KEY_HERE in the file"
+        said = crow_core.mcp_render({"content": [{"type": "text", "text": text}]})
+        self.assertEqual(said, text)
+        self.assertNotIn("[REDACTED]", said)
+
+    def test_a_plain_sentence_is_not_mistaken_for_a_credential(self):
+        """The other half of the same balance: the shapes are named prefixes and
+        `name=value` pairs, not any long word."""
+        for harmless in ("read the file password.txt for the layout",
+                         "the secret is that there is no secret",
+                         "Bearer of bad news"):
+            self.assertEqual(crow_core._mcp_redact(harmless), harmless)
 
     def test_the_token_is_not_in_mcp_json(self):
         """`mcp.json` is drawn by two surfaces, pasted into bug reports and

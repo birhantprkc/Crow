@@ -5684,6 +5684,44 @@ def _mcp_clean(value):
     return value
 
 
+# WHAT A FAILING SERVER ECHOES BACK, AND WHAT MAY NOT TRAVEL WITH IT.
+#
+# An MCP error is written by the server and lands in three places at once: the
+# prompt, the chat on screen, and the session file on disk. Servers routinely
+# quote the request that failed -- "invalid token: Bearer ghp_..." -- and that
+# sentence is then permanent. This repository has already paid for that lesson
+# once, on 2026-08-22, when a configuration block reached a chat log and the key
+# in it had to be rotated.
+#
+# ERRORS ONLY, NEVER A SUCCESSFUL RESULT. A tool that legitimately returns
+# documentation about API keys, or a file containing the word `password=`, is
+# doing its job; mangling that would break real answers to protect nothing. The
+# leak path is the failure path, and that is where this runs.
+_MCP_SECRETS = (
+    # Named tokens, by their own published prefixes.
+    re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{16,})"),
+    re.compile(r"\b(github_pat_[A-Za-z0-9_]{20,})"),
+    re.compile(r"\b(sk-[A-Za-z0-9_\-]{16,})"),
+    re.compile(r"\b(xox[baprs]-[A-Za-z0-9\-]{10,})"),
+    # A JWT is three base64 segments and always starts with the same header.
+    re.compile(r"\b(eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{6,})"),
+    # An HTTP credential, however the scheme is spelled.
+    re.compile(r"(?i)\b((?:bearer|basic|dpop)\s+[A-Za-z0-9._~+/\-]{12,}=*)"),
+    # `key=value` shapes. The NAME is what marks it, so the value may be anything.
+    re.compile(r"(?i)\b((?:api[_\-]?key|access[_\-]?token|refresh[_\-]?token|"
+               r"client[_\-]?secret|token|secret|password|passwd|credential)"
+               r"\s*[=:]\s*\"?[A-Za-z0-9._~+/\-]{8,}\"?)"),
+)
+
+
+def _mcp_redact(text: str) -> str:
+    """Credential-shaped runs replaced by `[REDACTED]`."""
+    out = str(text)
+    for pattern in _MCP_SECRETS:
+        out = pattern.sub("[REDACTED]", out)
+    return out
+
+
 def _mcp_slug(text: str) -> str:
     return re.sub(r"[^0-9a-z]+", "_", strip_tag_characters(str(text)).lower()).strip("_")
 
@@ -5696,6 +5734,71 @@ def mcp_tool_name(server: str, tool: str) -> str:
     colliding with each other.
     """
     return "mcp_%s_%s" % (_mcp_slug(server), _mcp_slug(tool))
+
+
+# `${VAR}` IN A BLOCK, RESOLVED WHEN THE SERVER IS USED AND NEVER STORED.
+# A token written into `mcp.json` sits in a file two surfaces draw and a person
+# edits; a token named `${GITHUB_TOKEN}` sits in the environment, and what the
+# sheet shows is the placeholder. Crow already keeps `CROW_TAVILY_KEY` this way
+# -- this is the same rule for a foreign server's credentials.
+_MCP_VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _mcp_expand(value) -> str:
+    """`${VAR}` from the environment. An unresolved one is left ALONE here and
+    caught in `start`, where it can be named -- silently sending the literal
+    `${GITHUB_TOKEN}` as a bearer token is a 401 nobody can explain."""
+    return _MCP_VAR.sub(lambda m: os.environ.get(m.group(1), m.group(0)), str(value))
+
+
+def _mcp_missing(block: dict) -> list:
+    """Which `${VAR}` in a block names nothing in the environment.
+
+    ONLY THE SIX KEYS THAT REACH A PROCESS OR A REQUEST. `schema` is the
+    server's own words and may legitimately contain a `${...}` in a description;
+    treating that as a missing variable would make a server unusable over its
+    own documentation.
+    """
+    found = []
+
+    def walk(value):
+        if isinstance(value, str):
+            found.extend(n for n in _MCP_VAR.findall(value) if n not in os.environ)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+
+    for key in ("command", "args", "cwd", "env", "url", "headers"):
+        walk(block.get(key))
+    return sorted(set(found))
+
+
+def _mcp_pattern(text: str) -> bool:
+    return any(ch in str(text) for ch in "*?[")
+
+
+def _mcp_listed(name: str, patterns) -> bool:
+    """Is this tool named by that list, exactly or by glob?
+
+    AN ENTRY WITHOUT A METACHARACTER IS AN EXACT NAME, never a prefix: `docs`
+    excludes the tool called `docs` and not `docs_search`. The globs are what
+    make a flat surface manageable at all -- Cloudflare's API server reports
+    around 3,300 tools at `?codemode=false`, and excluding product areas one
+    endpoint at a time is not a thing anybody finishes.
+    """
+    import fnmatch
+
+    for pattern in (patterns or ()):
+        pattern = str(pattern)
+        if _mcp_pattern(pattern):
+            if fnmatch.fnmatchcase(name, pattern):
+                return True
+        elif name == pattern:
+            return True
+    return False
 
 
 def mcp_doc(path: str | None = None) -> "tuple[dict, list[str]]":
@@ -5769,9 +5872,9 @@ def mcp_catalog(doc: dict | None = None) -> "tuple[list[dict], list[str]]":
             # 2026-08-10), so the narrowing list is the one that names what may
             # pass -- and where the two disagree, the naming one decides.
             if include is not None:
-                if raw not in include:
+                if not _mcp_listed(raw, include):
                     continue
-            elif raw in exclude:
+            elif _mcp_listed(raw, exclude):
                 continue
 
             if not _mcp_slug(raw):
@@ -6023,7 +6126,7 @@ class McpServer:
         kept = {k: v for k, v in os.environ.items() if k.upper() in _MCP_ENV_KEEP}
         configured = self.block.get("env")
         if isinstance(configured, dict):
-            kept.update({str(k): str(v) for k, v in configured.items()})
+            kept.update({str(k): _mcp_expand(v) for k, v in configured.items()})
         return kept
 
     def argv(self) -> "list[str] | None":
@@ -6042,10 +6145,11 @@ class McpServer:
         # `shell=True` WOULD ALSO "FIX" IT and is the wrong fix: it would hand a
         # configured string to cmd.exe, where a space or an ampersand in a path
         # stops being an argument and becomes syntax.
+        command = _mcp_expand(command)
         found = shutil.which(command)
         args = self.block.get("args")
         return ([found or command]
-                + [str(a) for a in (args if isinstance(args, list) else [])])
+                + [_mcp_expand(a) for a in (args if isinstance(args, list) else [])])
 
     def url(self) -> "str | None":
         """The configured endpoint, or None where this server is a command.
@@ -6055,7 +6159,7 @@ class McpServer:
         deciding it here would report a typed-in scheme as "no url configured".
         """
         url = self.block.get("url")
-        url = url.strip() if isinstance(url, str) else ""
+        url = _mcp_expand(url).strip() if isinstance(url, str) else ""
         return url or None
 
     def _call_seconds(self) -> float:
@@ -6070,6 +6174,14 @@ class McpServer:
         import collections
         import queue
 
+        # BEFORE ANYTHING IS STARTED OR SENT. A `${VAR}` that names nothing
+        # would otherwise travel as its own literal text -- into a command line,
+        # or into an `Authorization` header, where it comes back as a 401 with
+        # no hint of what went wrong.
+        missing = _mcp_missing(self.block)
+        if missing:
+            return ("the MCP server %r wants %s from the environment, and "
+                    "nothing is set" % (self.name, ", ".join(missing)))
         endpoint = self.url()
         if endpoint is not None:
             # ONE BLOCK IS ONE TRANSPORT. Letting one of them quietly win would
@@ -6165,8 +6277,12 @@ class McpServer:
         return self._handshake()
 
     def _said(self, line: str) -> None:
+        # THE BODY OF A FAILED REQUEST, and the likeliest place a credential
+        # comes back: a gateway that answers 401 with the header it did not
+        # like. This deque is read by `_gone` straight into a tool result.
         if self._stderr is not None:
-            self._stderr.append(strip_tag_characters(str(line))[:MCP_HTTP_SAID])
+            self._stderr.append(
+                _mcp_redact(strip_tag_characters(str(line)))[:MCP_HTTP_SAID])
 
     def _headers(self) -> dict:
         """What rides on every request, and the order the two sources merge in.
@@ -6191,11 +6307,25 @@ class McpServer:
         # have started an OAuth flow in the first place.
         token = mcp_token_for(self.name)
         if token.get("access_token"):
-            sending["Authorization"] = "%s %s" % (token.get("token_type") or "Bearer",
-                                                  token["access_token"])
+            # `Bearer`, WHATEVER THE TOKEN ENDPOINT SPELLED IT. RFC 6750 makes
+            # the scheme case-insensitive and RFC 7235 says so for every scheme,
+            # but a resource server is free to compare the string it was handed.
+            #
+            # MEASURED 2026-08-22 against higgsfield, with one token and two
+            # requests: its token endpoint answers `"token_type": "bearer"` and
+            # its MCP endpoint answers `bearer <token>` with 401 and
+            # `Bearer <token>` with 200. Echoing the endpoint's own spelling back
+            # at it is what made a completed browser leg look like a refused one.
+            #
+            # ANYTHING THAT IS NOT bearer GOES THROUGH UNCHANGED -- `DPoP` is a
+            # different scheme with different rules, not a different spelling.
+            kind = str(token.get("token_type") or "Bearer")
+            sending["Authorization"] = "%s %s" % (
+                "Bearer" if kind.lower() == "bearer" else kind,
+                token["access_token"])
         configured = self.block.get("headers")
         if isinstance(configured, dict):
-            sending.update({str(k): str(v) for k, v in configured.items()})
+            sending.update({str(k): _mcp_expand(v) for k, v in configured.items()})
         sending["Content-Type"] = "application/json"
         sending["Accept"] = MCP_ACCEPT
         if self.session:
@@ -6827,8 +6957,9 @@ def _oauth_json(url: str, data=None, headers=None
             said = " ".join(exc.read().decode("utf-8", "replace").split())
         except Exception:
             said = ""
-        return None, "%s answered HTTP %s%s" % (url, exc.code,
-                                                (": " + said[:MCP_HTTP_SAID]) if said else "")
+        return None, _mcp_redact(
+            "%s answered HTTP %s%s"
+            % (url, exc.code, (": " + said[:MCP_HTTP_SAID]) if said else ""))
     except (OSError, ValueError) as exc:
         return None, "%s could not be reached: %s" % (url, exc)
     try:
@@ -6941,8 +7072,14 @@ def _oauth_register(meta: dict, redirect: str, client_name: str
     }, headers={"Content-Type": "application/json"})
 
 
-def _oauth_listen():
+def _oauth_listen(host: str = "127.0.0.1"):
     """A listener on a port the operating system picks, and the redirect it is.
+
+    THE LISTENER ALWAYS BINDS 127.0.0.1; only the NAME in the redirect URI
+    changes. Some authorization servers sit behind a WAF that refuses any
+    authorize request whose query string carries a literal `127.0.0.1`, and
+    `localhost` is the way past it -- documented by Hermes, read 2026-08-22.
+    Binding the name would be a different thing entirely and is not done.
 
     LOOPBACK ONLY. `0.0.0.0` here would put the authorization code -- the one
     thing between a stranger and this user's account -- on every interface of
@@ -6980,7 +7117,8 @@ def _oauth_listen():
     server.done = threading.Event()
     threading.Thread(target=server.serve_forever, daemon=True,
                      name="crow-oauth").start()
-    return server, "http://127.0.0.1:%d/callback" % server.server_address[1]
+    name = host if host in ("127.0.0.1", "localhost") else "127.0.0.1"
+    return server, "http://%s:%d/callback" % (name, server.server_address[1])
 
 
 def _oauth_exchange(meta: dict, form: dict) -> "tuple[dict | None, str | None]":
@@ -6988,8 +7126,9 @@ def _oauth_exchange(meta: dict, form: dict) -> "tuple[dict | None, str | None]":
     if problem:
         return None, problem
     if not answer.get("access_token"):
-        return None, ("the token endpoint returned no access_token: %s"
-                      % strip_tag_characters(str(answer.get("error") or answer))[:200])
+        return None, _mcp_redact(
+            "the token endpoint returned no access_token: %s"
+            % strip_tag_characters(str(answer.get("error") or answer))[:200])
     return answer, None
 
 
@@ -7013,6 +7152,14 @@ def mcp_token_write(doc: dict) -> "str | None":
         os.makedirs(os.path.dirname(MCP_TOKEN_FILE), exist_ok=True)
         with open(MCP_TOKEN_FILE, "w", encoding="utf-8") as fh:
             json.dump(doc, fh, indent=1)
+        # OWNER ONLY, WHERE THE PLATFORM MEANS IT. On POSIX this is the whole
+        # protection; on Windows `chmod` reaches only the read-only bit and the
+        # real answer is the ACL on %LOCALAPPDATA%. Doing it anyway costs one
+        # call and is right on the platform where it counts.
+        try:
+            os.chmod(MCP_TOKEN_FILE, 0o600)
+        except OSError:
+            pass
     except OSError as exc:
         return "mcp_tokens.json could not be written: %s" % exc
     if mcp_token_doc().get("servers") != doc.get("servers"):
@@ -7091,18 +7238,41 @@ def mcp_authorise(name: str, block: dict, challenge: dict | None = None
                     "host -- refusing it"
                     % (endpoint, strip_tag_characters(named)[:120]))
         resource = named.strip()
-    issuer = str(prm["authorization_servers"][0])
-    meta, problem = _oauth_server_metadata(issuer)
-    if problem:
-        return problem
 
-    listener, redirect = _oauth_listen()
+    # EVERY SERVER THE DOCUMENT LISTS, IN ORDER, not just the first one. RFC 9728
+    # allows several and says the choice is the client's; taking `[0]` and
+    # stopping would refuse a resource whose first entry is retired, misconfigured
+    # or simply not the one a desktop client can use.
+    issuer, meta, problem = None, None, None
+    reasons = []
+    for candidate in prm["authorization_servers"]:
+        meta, problem = _oauth_server_metadata(str(candidate))
+        if not problem:
+            issuer = str(candidate)
+            break
+        reasons.append(problem)
+    if issuer is None:
+        return "; ".join(reasons[:3])
+
+    listener, redirect = _oauth_listen(str(block.get("redirect_host") or "127.0.0.1"))
     try:
         record = {"issuer": issuer, "resource": resource,
                   "token_endpoint": meta["token_endpoint"]}
+        # A PRE-REGISTERED PAIR COMES FROM THE BLOCK, BOTH HALVES. Some servers
+        # reject dynamic registration outright -- Google's Drive endpoint answers
+        # 400 -- and then the only way in is a client the user created in the
+        # provider's console, which may well be a confidential one.
         client_id = block.get("client_id") or mcp_token_for(name).get("client_id")
+        if block.get("client_secret"):
+            record["client_secret"] = str(block["client_secret"])
         if not client_id:
-            registered, problem = _oauth_register(meta, redirect, "Crow")
+            # THE NAME IS CONFIGURABLE, and it is not cosmetic: Figma's endpoint
+            # allowlists dynamic registration BY `client_name` and 403s anything
+            # it does not know. Crow says "Crow" and lets somebody who needs a
+            # different name set one, rather than shipping a name that claims to
+            # be another client.
+            registered, problem = _oauth_register(
+                meta, redirect, str(block.get("client_name") or "Crow"))
             if problem:
                 # THE WAY OUT IS NAMED WHATEVER WENT WRONG. A registration
                 # endpoint that is absent and one that answers 404 leave the
@@ -7143,15 +7313,28 @@ def mcp_authorise(name: str, block: dict, challenge: dict | None = None
             return ("the authorization server refused: %s %s"
                     % (strip_tag_characters(str(caught.get("error")))[:80],
                        strip_tag_characters(str(caught.get("error_description") or ""))[:200]))
-        # THE STATE IS COMPARED, AND SO IS `iss` WHERE IT CAME BACK. Without the
-        # first, anyone who can reach the loopback port can feed this client a
-        # code of their own; without the second, a server that is one of several
-        # can hand back a code that belongs to another one.
+        # THE STATE IS THE BINDING, AND IT IS THE ONLY ONE THIS CLIENT NEEDS.
+        # Without it, anything that can reach the loopback port can feed this
+        # client a code of its own.
         if caught.get("state") != state:
             return "the authorisation came back with a state this client did not send"
-        if caught.get("iss") and str(caught["iss"]).rstrip("/") != issuer.rstrip("/"):
-            return ("the authorisation came back from %r, not from %r"
-                    % (strip_tag_characters(str(caught["iss"]))[:120], issuer))
+        # `iss` IS READ AND NOT ENFORCED, decided 2026-08-22 after it refused a
+        # working server. RFC 9207 has it guard MIX-UP: a client talking to
+        # SEVERAL authorization servers in one flow could otherwise send one
+        # server's code to another's token endpoint. This client talks to
+        # exactly one -- the token endpoint is taken from the metadata
+        # discovered BEFORE the browser opened and held in a local until the
+        # exchange, so nothing coming back through the redirect can move it. The
+        # code itself is worthless without the verifier held here, and the token
+        # is bound to `resource`.
+        #
+        # WHAT ENFORCING IT COSTS IS EVERY BROKERED LOGIN. Measured on
+        # higgsfield: its metadata declares `https://mcp.higgsfield.ai`, its
+        # `/oauth2/authorize` hands off to Clerk, and Clerk stamps
+        # `iss=https://clerk.higgsfield.ai` on the way back. Auth0, Okta, Clerk
+        # and every other identity service sit on a domain of their own -- a
+        # client that insisted on one issuer string would work with servers that
+        # run their own login and with nobody else's.
         if not caught.get("code"):
             return "the authorisation came back without a code"
 
@@ -7204,9 +7387,17 @@ def mcp_authorise_server(name: str) -> "str | None":
     problem = mcp_authorise(name, block)
     if problem:
         return problem
-    # PROVED BY USE, not by a stored token. A record on disk says a token
-    # arrived, not that this server accepts it -- and the next thing anybody
-    # does with it is exactly this call.
+    # BOTH HALVES, AND THE ORDER MATTERS. A stored token says one arrived, not
+    # that this server accepts it; a successful `tools/list` says the server
+    # answered, not that it needed the token at all.
+    #
+    # THE SECOND HALF EXISTS BECAUSE THE FAILURE IS SILENT. A server that serves
+    # `tools/list` WITHOUT auth -- Hermes documents Google Drive as one -- lets
+    # an authorisation that never produced a token look like it worked, and the
+    # first real tool call is where somebody finds out. Read 2026-08-22.
+    if not mcp_token_for(name).get("access_token"):
+        return ("%r was authorised and no token arrived. The server may reject "
+                "dynamic registration -- put a 'client_id' in its block" % name)
     _, problem = mcp_fetch_tools(name, dict(block))
     return problem
 
@@ -7244,15 +7435,17 @@ def mcp_render(result: dict) -> str:
     if not body:
         body = "[the server answered with nothing]"
     # `isError` IS THE SPECIFICATION'S OWN SHAPE and it exists so the model can
-    # see the failure and correct itself. It is a result, not a client fault.
-    return ("error: " + body) if result.get("isError") else body
+    # see the failure and correct itself. It is a result, not a client fault --
+    # and it is the half that gets REDACTED, because a failing server quotes the
+    # request that failed and a working one quotes nothing.
+    return ("error: " + _mcp_redact(body)) if result.get("isError") else body
 
 
 def mcp_call(server: str, tool: str, arguments: dict) -> str:
     """One `tools/call`, and every way it can fail rendered as a tool result."""
     live, problem = mcp_server(server)
     if problem:
-        return _clip("error: " + problem)
+        return _clip("error: " + _mcp_redact(problem))
     timeout = _mcp_seconds(live.block.get("timeout"), MCP_CALL_TIMEOUT)
     answer, problem = live.request("tools/call",
                                    {"name": tool, "arguments": arguments}, timeout)
@@ -7261,12 +7454,13 @@ def mcp_call(server: str, tool: str, arguments: dict) -> str:
         # answer later, and that answer would arrive in the queue in front of the
         # NEXT call's -- one late reply and every result after it is off by one.
         _mcp_drop(server)
-        return _clip("error: " + problem)
+        return _clip("error: " + _mcp_redact(problem))
     failure = answer.get("error")
     if failure:
         return _clip("error: the MCP server %r refused the call: [%s] %s"
                      % (server, failure.get("code"),
-                        strip_tag_characters(str(failure.get("message") or failure))))
+                        _mcp_redact(strip_tag_characters(
+                            str(failure.get("message") or failure)))))
     return _clip(mcp_render(answer.get("result") or {}))
 
 
@@ -7611,7 +7805,11 @@ def mcp_add_server(name: str, block: dict) -> "tuple[dict | None, str | None]":
     # A SERVER THAT IS ALREADY CONFIGURED KEEPS ITS TICKS. A refresh is not an
     # undo, and it may not re-take what somebody took out.
     known_before = isinstance(known.get("tools"), dict)
-    include = ([t for t in (kept_tools.get("include") or []) if t in offered]
+    # A HAND-WRITTEN GLOB SURVIVES A REFRESH. It matches no name in `offered`,
+    # so a filter that only kept known names would quietly delete the one line
+    # somebody wrote to keep 3,000 tools out.
+    include = ([t for t in (kept_tools.get("include") or [])
+                if t in offered or _mcp_pattern(t)]
                if known_before else sorted(offered))
     stored["tools"] = dict(kept_tools, include=sorted(include))
     classes = {t: c for t, c in kept_classes.items()
@@ -7661,7 +7859,8 @@ def mcp_confirm(name: str, choices: dict) -> "str | None":
             return ("%r is not one of %s" % (klass, ", ".join(MCP_TOOL_CLASSES)))
 
     kept = block.get("tools") if isinstance(block.get("tools"), dict) else {}
-    include = [t for t in (kept.get("include") or []) if t in offered]
+    include = [t for t in (kept.get("include") or [])
+               if t in offered or _mcp_pattern(t)]
     classes = dict(block.get("classes") or {}) if isinstance(
         block.get("classes"), dict) else {}
     for tool, choice in choices.items():

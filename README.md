@@ -346,6 +346,8 @@ The name comes out of the line: `filesystem`, `notekeeper`, `fetch`. A URL is na
 | Classes | empty until you set them. An unclassified tool is `executing` |
 | Client capabilities | sent empty. `sampling` and `elicitation` get `-32601` naming what is missing |
 | Invisible U+E0000–U+E007F | stripped from names, descriptions, schemas and results. Emoji flags survive |
+| `${VAR}` | in `command`, `args`, `cwd`, `env`, `url`, `headers`. Read from the environment when the server is used, never stored. An unset one refuses the server by name |
+| Credential redaction | on **errors** only — a server that quotes the request it refused would otherwise put the token in the prompt, the chat and the session file. A successful result is untouched |
 | Timeouts | `connect_timeout` 20 s, `timeout` 60 s. Per block, `0` and below fall back to the default |
 
 ### stdio
@@ -394,10 +396,14 @@ Removing a server: `Help → Settings → MCPs`.
 | `schema` | what the server answered. Untrusted, per the specification |
 | `classes` | what you confirmed. This is the half a release level acts on |
 | `include` | positive list, and it wins over `exclude` |
+| Globs | both lists take `*`, `?`, `[…]`. An entry without one is an exact name — `docs` excludes the tool `docs`, never `docs_search` |
 | `enabled: false` | skipped. No connection attempted |
 | `timeout` · `connect_timeout` | seconds. Defaults 60 and 20 |
 | `url` | Streamable HTTP endpoint, `http` or `https`. Not alongside `command` |
 | `headers` | sent on every HTTP request. Never shown in either surface |
+| `client_id` · `client_secret` | a pre-registered OAuth client, for servers that reject dynamic registration |
+| `client_name` | what dynamic registration calls this client. Default `Crow` |
+| `redirect_host` | `127.0.0.1` (default) or `localhost` in the redirect URI. The listener binds loopback either way |
 
 The classification is pre-filled from `annotations`: `readOnlyHint: true` → `reading`,
 `destructiveHint: false` → `writing`, anything else → `executing`. The specification's own defaults
@@ -511,12 +517,15 @@ so does re-fetching a configured server; `/mcp auth <server>` repeats it on its 
 | Authorization server | `authorization_servers[0]` from that document. Metadata from `/.well-known/oauth-authorization-server` then `/.well-known/openid-configuration`, path-inserted first where the issuer has a path |
 | `issuer` | compared against the URL the document came from. A mismatch is refused |
 | PKCE | `S256`, required. `code_challenge_methods_supported` without it, or absent, is refused |
-| Client | RFC 7591 dynamic registration, `token_endpoint_auth_method: none`. A `client_id` in the block is used instead where the server offers no registration |
-| Redirect | `http://127.0.0.1:<port>/callback`, listener bound to loopback only |
-| `state` · `iss` | sent and compared; `iss` compared when the server returns it |
+| Client | RFC 7591 dynamic registration, `token_endpoint_auth_method: none`. `client_id` + `client_secret` in the block are used instead where the server rejects registration — Google Drive answers `400`, GitHub Copilot advertises no endpoint at all |
+| `client_name` | `Crow`, overridable. Figma's endpoint allowlists registration by exact name and `403`s one it does not know |
+| Redirect | `http://127.0.0.1:<port>/callback`, listener bound to loopback only. `redirect_host: localhost` changes only the name — some authorization servers sit behind a WAF that `403`s a literal `127.0.0.1` |
+| `state` | sent and compared. This is what binds the answer to the request |
+| `iss` | read, not enforced. It guards mix-up, which needs a client talking to several authorization servers in one flow; this one talks to exactly one and takes the token endpoint from metadata fetched before the browser opened. Enforcing it refuses every brokered login — Clerk, Auth0 and Okta all stamp their own domain |
+| Several `authorization_servers` | tried in the order the metadata lists them |
 | `resource` | RFC 8707. The `resource` the metadata names, checked against the endpoint's host first; the canonical URI of the endpoint where it names none. On the authorization request and the token request |
 | Transport | every endpoint must be `https`, or loopback. Anything else is refused before a token moves |
-| Tokens | `%LOCALAPPDATA%\Crow\mcp_tokens.json`, never in `mcp.json` and never in a view. Dropped with the server |
+| Tokens | `%LOCALAPPDATA%\Crow\mcp_tokens.json`, never in `mcp.json` and never in a view. `0600` where the platform means it. Dropped with the server |
 | Refresh | inside a tool call, silently, `60 s` before expiry and on a `401`. A browser never opens during a turn — the call fails naming `/mcp auth <server>` |
 
 ### Not built
