@@ -5911,6 +5911,23 @@ MCP_LIST_PAGES = 20
 # makes this class of failure unreadable.
 MCP_STDERR_LINES = 20
 
+# BOTH TYPES, ON EVERY POST, and the specification writes it as a MUST rather
+# than a preference. A server picks its answer shape off this header: context7
+# answers `tools/list` as an SSE STREAM, measured 2026-08-22, so a client that
+# asks for JSON alone is a client context7 has nothing to say to. THE STREAM IS
+# THE NORMAL CASE, not the exception.
+MCP_ACCEPT = "application/json, text/event-stream"
+
+# How much of an HTTP failure body is kept. A 401 explains itself in its first
+# line and in nobody's second page, and the whole of an error page would push
+# every other line out of the deque that has to carry it.
+MCP_HTTP_SAID = 400
+
+# Seconds allowed for the `DELETE` that ends a session. It is a courtesy to the
+# server, it happens while a window is closing, and a client that waited on it
+# would hang on the way out for a message nobody reads.
+MCP_DELETE_TIMEOUT = 3.0
+
 # A POSITIVE LIST, WHICH `run_command` IS NOT, and the difference is who runs.
 # There the child is a command the user just typed, and a blocklist that "stops
 # the accident, not an attacker" is the honest trade. Here it is a foreign
@@ -5945,22 +5962,38 @@ def _mcp_seconds(value, default: float) -> float:
 
 
 class McpServer:
-    """One stdio server process, and the single conversation running over it."""
+    """One server, and the single conversation running over it.
+
+    TWO TRANSPORTS, ONE CLASS, and the seam is `_send`. A child process on a
+    pipe and an endpoint behind a POST have nothing in common below that line
+    and nothing DIFFERENT above it: `request`, `_hear` and `_handshake` are the
+    same code either way, because what they work on is a queue of JSON-RPC
+    messages and neither of them ever asks where the queue is filled from.
+    """
 
     def __init__(self, name: str, block: dict) -> None:
         self.name = name
         self.block = block
         self.proc = None
+        self.endpoint: str | None = None
+        self.session: str | None = None
         self.protocol: str | None = None
         self.info: dict = {}
         self.asked: dict = {}
         self._id = 0
         self._lines = None
         self._stderr = None
+        self._reinitialising = False
         # ONE CALLER AT A TIME ON ONE PIPE. The background review runs on its own
         # thread and can call a tool; two writers interleaving on one stdin would
         # hand each other's answers back.
-        self._lock = threading.Lock()
+        #
+        # RE-ENTRANT, AND ONLY HTTP NEEDS THAT. A 404 on a session obliges the
+        # client to initialise again, and that second handshake goes out through
+        # `request` -- from inside the `request` that is still holding this. A
+        # plain Lock would deadlock the thread against itself; other threads are
+        # held out exactly as before.
+        self._lock = threading.RLock()
 
     # -- what the child is given -------------------------------------------
 
@@ -5992,16 +6025,42 @@ class McpServer:
         return ([found or command]
                 + [str(a) for a in (args if isinstance(args, list) else [])])
 
+    def url(self) -> "str | None":
+        """The configured endpoint, or None where this server is a command.
+
+        THE FIELD, NOT THE SCHEME. Whether `ftp://` is a transport this client
+        opens is a question with its own answer and its own sentence, and
+        deciding it here would report a typed-in scheme as "no url configured".
+        """
+        url = self.block.get("url")
+        url = url.strip() if isinstance(url, str) else ""
+        return url or None
+
+    def _call_seconds(self) -> float:
+        return _mcp_seconds(self.block.get("timeout"), MCP_CALL_TIMEOUT)
+
+    def _connect_seconds(self) -> float:
+        return _mcp_seconds(self.block.get("connect_timeout"), MCP_CONNECT_TIMEOUT)
+
     # -- the process --------------------------------------------------------
 
     def start(self) -> "str | None":
         import collections
         import queue
 
+        endpoint = self.url()
+        if endpoint is not None:
+            # ONE BLOCK IS ONE TRANSPORT. Letting one of them quietly win would
+            # leave somebody watching a command that never starts, with a file
+            # in front of them that plainly says it should.
+            if self.block.get("command"):
+                return ("the MCP server %r has both 'url' and 'command'. One "
+                        "block is one transport -- take one of them out"
+                        % self.name)
+            return self._open(endpoint)
         argv = self.argv()
         if argv is None:
-            return ("the MCP server %r has no 'command'. Only stdio servers work "
-                    "in this build; 'url' arrives with HTTP" % self.name)
+            return "the MCP server %r has neither 'command' nor 'url'" % self.name
         try:
             self.proc = subprocess.Popen(
                 argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -6043,6 +6102,243 @@ class McpServer:
         except Exception:
             pass
 
+    # -- the other transport ------------------------------------------------
+    #
+    # STREAMABLE HTTP, the transport that replaced the old HTTP+SSE pair. One
+    # endpoint that takes POST, every message its own request, and an answer
+    # that is either a JSON object or a stream of them. Read as raw text from
+    # the 2025-06-18 specification and driven against context7 on 2026-08-22,
+    # which is where the two assumptions that look obvious both turned out
+    # wrong: the answer to `tools/list` is a STREAM, and no session id at all is
+    # a valid state rather than a fault.
+    #
+    # WHAT IS NOT BUILT HERE, and both are MAY in the specification: the
+    # standing `GET` stream, because a server's unsolicited notifications are
+    # the one class of message this client acts on none of; and `Last-Event-ID`
+    # resumption, because there is no stream held open to lose.
+
+    def _open(self, endpoint: str) -> "str | None":
+        """The HTTP half of `start`: no child, and the same queue behind it.
+
+        THE QUEUE IS WHAT KEEPS `_hear` TRANSPORT-FREE. Over stdio a thread
+        pumps lines off a pipe into it; here a thread pumps events off a
+        response body into it. Neither knows what a JSON-RPC id is, and nothing
+        above them ever learns which one it is talking through.
+        """
+        import collections
+        import queue
+
+        scheme = urllib.parse.urlparse(endpoint).scheme.lower()
+        if scheme not in ("http", "https"):
+            return ("the MCP server %r has a 'url' this client will not open: "
+                    "%s. http and https only"
+                    % (self.name, scheme or "no scheme in it"))
+        self.endpoint = endpoint
+        self._lines = queue.Queue()
+        # THE DEQUE THE stdio ARM FILLS FROM stderr, filled here from failure
+        # bodies -- and for the same reason. A 401 explains itself in its body
+        # and nowhere else, and `_gone` is already the one place that reads this
+        # back out into a sentence somebody sees.
+        self._stderr = collections.deque(maxlen=MCP_STDERR_LINES)
+        return self._handshake()
+
+    def _said(self, line: str) -> None:
+        if self._stderr is not None:
+            self._stderr.append(strip_tag_characters(str(line))[:MCP_HTTP_SAID])
+
+    def _headers(self) -> dict:
+        """What rides on every request, and the order the two sources merge in.
+
+        THREE LAYERS, AND WHICH ONE WINS SAYS WHAT EACH IS FOR. Identity is a
+        default, because a server may insist on its own; the block is a token
+        and whatever else that server wants; the transport's four are not
+        preferences at all -- `Accept`, `Content-Type`, the session and the
+        version ARE the transport, and a server handed the wrong ones answers
+        nothing at all.
+
+        IDENTIFYING, NOT DISGUISED -- the sentence `web_fetch` already carries.
+        urllib signs itself `Python-urllib`, which several networks refuse on
+        sight; a client that answered that by dressing as a browser would be
+        taking an answer it was not offered. Crow says who it is and lets the
+        far end decide.
+        """
+        sending = {"User-Agent": "Crow/%s (+%s)" % (CLIENT_VERSION or "dev", REPO_URL)}
+        configured = self.block.get("headers")
+        if isinstance(configured, dict):
+            sending.update({str(k): str(v) for k, v in configured.items()})
+        sending["Content-Type"] = "application/json"
+        sending["Accept"] = MCP_ACCEPT
+        if self.session:
+            sending["Mcp-Session-Id"] = self.session
+        # AFTER THE HANDSHAKE, NEVER BEFORE IT. The header names the version the
+        # two sides AGREED on, and there is no agreement until `initialize` has
+        # come back. Sending one first is a client announcing its own decision
+        # as a negotiated one.
+        if self.protocol:
+            sending["MCP-Protocol-Version"] = self.protocol
+        return sending
+
+    def _post(self, message: dict, timeout: float) -> "str | None":
+        request = urllib.request.Request(
+            self.endpoint, data=json.dumps(message).encode("utf-8"),
+            headers=self._headers(), method="POST")
+        try:
+            resp = urllib.request.urlopen(request, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            return self._refused(exc, message, timeout)
+        except (OSError, ValueError) as exc:
+            self._said("%s: %s" % (exc.__class__.__name__, exc))
+            return self._gone("could not be reached")
+        # THE SESSION IS ASSIGNED ONCE, AT INITIALISATION, and taken only while
+        # there is none. A server that puts a different id on a later answer is
+        # not renaming the session, it is a proxy answering for somebody else.
+        given = resp.headers.get("Mcp-Session-Id")
+        if given and not self.session:
+            self.session = str(given).strip()
+        return self._take(resp)
+
+    def _refused(self, exc, message: dict, timeout: float) -> "str | None":
+        """A status that is not 2xx -- and the one of them that is not a failure.
+
+        404 WITH A SESSION IN HAND IS AN EXPIRY, NOT AN ERROR. The specification
+        is flat about it: a client that gets 404 for a request carrying a session
+        id MUST start a new session with a fresh `initialize`. Handing that back
+        as a failed tool call would make every server that recycles sessions look
+        broken once an hour, and from the keyboard it would look like the tool
+        itself was unreliable.
+        """
+        try:
+            said = exc.read().decode("utf-8", "replace")
+        except Exception:
+            said = ""
+        self._said("HTTP %s %s" % (exc.code, " ".join(said.split())))
+        if exc.code == 404 and self.session and not self._reinitialising:
+            self.session = None
+            self.protocol = None
+            # THE FLAG COVERS THE RETRY, NOT ONLY THE HANDSHAKE, and that is the
+            # difference between one extra round-trip and a client spinning. A
+            # server that answers 404 to everything would otherwise hand the
+            # retry its own 404, and the retry would start the whole thing again.
+            # Exactly one new session per call: a server that refuses twice is
+            # refusing.
+            self._reinitialising = True
+            try:
+                problem = self._handshake()
+                if problem:
+                    return problem
+                return self._post(message, timeout)
+            finally:
+                self._reinitialising = False
+        return self._gone("answered HTTP %s" % exc.code)
+
+    def _take(self, resp) -> "str | None":
+        """What came back on a POST: nothing, one object, or a stream of them.
+
+        202 WITH AN EMPTY BODY IS THE NORMAL ANSWER to a notification and to a
+        response Crow sends -- there is nothing to wait for and nothing to
+        enqueue. Measured against context7 on 2026-08-22:
+        `notifications/initialized` comes back 202 with a body of zero bytes.
+
+        THE JSON ARM RE-SERIALISES, and that is what the seam costs. `_hear`
+        reads LINES, so a parsed object goes back to a line before it is put in
+        the queue -- one `json.dumps` per message, against a `_hear` that would
+        otherwise have to know two shapes and stop being transport-free.
+        """
+        kind = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if kind == "text/event-stream":
+            threading.Thread(target=self._sip_stream, args=(resp,), daemon=True,
+                             name="mcp-%s-sse" % self.name).start()
+            return None
+        try:
+            with resp:
+                raw = resp.read()
+        except (OSError, ValueError) as exc:
+            self._said("%s: %s" % (exc.__class__.__name__, exc))
+            return self._gone("stopped mid-answer")
+        if not raw.strip():
+            return None
+        try:
+            payload = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            self._said(" ".join(raw.decode("utf-8", "replace").split()))
+            return self._gone("answered with something that is not JSON")
+        for one in (payload if isinstance(payload, list) else [payload]):
+            self._lines.put(json.dumps(one))
+        return None
+
+    def _sip_stream(self, resp) -> None:
+        """An SSE body, event by event, into the queue stdout goes into.
+
+        A THREAD RATHER THAN A READ IN LINE, and the reason is a server that ASKS
+        something mid-answer. Over HTTP its request arrives on this stream while
+        Crow's refusal has to leave as a SEPARATE POST -- a client reading the
+        stream in the calling thread could not send that refusal until the stream
+        ended, and the stream does not end until the server has it. That is a
+        deadlock with a timeout on it.
+
+        IT STOPS AT THE RESPONSE. The specification has the server close the
+        stream once it has answered; not every server does, and a reader waiting
+        for an EOF that never comes is one thread per call that never ends.
+        """
+        data, answered = [], False
+        try:
+            for raw in resp:
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                if line.startswith(":"):
+                    continue                # a comment, and a keep-alive is one
+                if line:
+                    field, _, value = line.partition(":")
+                    if field == "data":
+                        data.append(value[1:] if value.startswith(" ") else value)
+                    continue                # `event:` and `id:` decide nothing here
+                if not data:
+                    continue
+                body, data = "\n".join(data), []
+                self._lines.put(body)
+                try:
+                    message = json.loads(body)
+                except ValueError:
+                    continue
+                if isinstance(message, dict) and (
+                        "result" in message or "error" in message):
+                    answered = True
+                    return
+        except Exception:
+            pass
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
+            # A STREAM THAT ENDED WITHOUT AN ANSWER ENDS THE WAIT, and saying so
+            # is what stdio's `None` says. It goes in ONLY in that case: after an
+            # answer the queue belongs to whoever calls next, and a sentinel left
+            # lying in it would fail their call instead of this one.
+            if not answered:
+                self._lines.put(None)
+
+    def _end_session(self) -> None:
+        """`HTTP DELETE` with the session id, and every way it can fail ignored.
+
+        A SERVER MAY REFUSE TO BE TOLD -- the specification lets it answer 405 --
+        and a client that treated that as a failure would report an error while
+        closing, every time, against a server doing nothing wrong.
+        """
+        endpoint, session = self.endpoint, self.session
+        self.session = None
+        if not endpoint or not session:
+            return
+        try:
+            request = urllib.request.Request(
+                endpoint, method="DELETE",
+                headers={"Mcp-Session-Id": session,
+                         "MCP-Protocol-Version": self.protocol
+                         or MCP_PROTOCOL_VERSION})
+            with urllib.request.urlopen(request, timeout=MCP_DELETE_TIMEOUT) as resp:
+                resp.read()
+        except Exception:
+            pass
+
     def _gone(self, why: str) -> str:
         said = "\n".join(line for line in (self._stderr or ()) if line.strip())
         code = self.proc.poll() if self.proc is not None else None
@@ -6052,6 +6348,10 @@ class McpServer:
                    " It said:\n%s" % said if said else ""))
 
     def close(self) -> None:
+        # THE SESSION GOES FIRST, AND IT GOES OVER THE WIRE. There is no process
+        # to end on that transport, so an id nobody released is a session the
+        # server keeps holding open for a client that will never come back.
+        self._end_session()
         proc, self.proc = self.proc, None
         if proc is None:
             return
@@ -6084,7 +6384,16 @@ class McpServer:
 
     # -- the wire -----------------------------------------------------------
 
-    def _send(self, message: dict) -> "str | None":
+    def _send(self, message: dict, timeout: "float | None" = None) -> "str | None":
+        """One message out. THE ONE METHOD THAT KNOWS WHICH TRANSPORT THIS IS.
+
+        Everything above it -- `request`, `_hear`, `_handshake` -- is the same
+        code for a child on a pipe and for an endpoint on the other side of the
+        world. Everything below it has nothing in common. That is where the seam
+        belongs, and it is why the second transport did not need a second class.
+        """
+        if self.endpoint is not None:
+            return self._post(message, timeout or self._call_seconds())
         if self.proc is None or self.proc.stdin is None:
             return self._gone("is not running")
         try:
@@ -6103,6 +6412,9 @@ class McpServer:
         indistinguishable from a slow one.
         """
         method = str(message.get("method") or "")
+        # OVER HTTP THIS LEAVES AS ITS OWN POST, while the stream that carried
+        # the question is still open. That arrangement is what the reader thread
+        # exists for.
         self._send({"jsonrpc": "2.0", "id": message.get("id"),
                     "error": {"code": -32601,
                               "message": "Crow declares no %r capability, so %s "
@@ -6146,7 +6458,7 @@ class McpServer:
             self._id += 1
             wanted = self._id
             problem = self._send({"jsonrpc": "2.0", "id": wanted,
-                                  "method": method, "params": params})
+                                  "method": method, "params": params}, timeout)
             if problem:
                 return None, problem
             return self._hear(wanted, timeout)
@@ -6161,7 +6473,7 @@ class McpServer:
         difference between one extra round-trip and a server nobody can use.
         Exactly one retry: a server that refuses twice is refusing.
         """
-        timeout = _mcp_seconds(self.block.get("connect_timeout"), MCP_CONNECT_TIMEOUT)
+        timeout = self._connect_seconds()
         wanted = MCP_PROTOCOL_VERSION
         for attempt in (1, 2):
             self.asked = {"protocolVersion": wanted,
@@ -6177,7 +6489,7 @@ class McpServer:
                 self.protocol = result.get("protocolVersion") or wanted
                 self.info = result.get("serverInfo") or {}
                 self._send({"jsonrpc": "2.0", "method": "notifications/initialized",
-                            "params": {}})
+                            "params": {}}, timeout)
                 return None
             data = failure.get("data")
             offered = data.get("supported") if isinstance(data, dict) else None
@@ -6261,11 +6573,19 @@ def _mcp_launch_key(block) -> tuple:
     if not isinstance(block, dict):
         return ()
     env = block.get("env")
+    headers = block.get("headers")
     return (block.get("command"),
             tuple(str(a) for a in (block.get("args") or [])),
             tuple(sorted((str(k), str(v)) for k, v in env.items()))
             if isinstance(env, dict) else (),
             block.get("cwd"),
+            # THE ENDPOINT AND THE TOKEN DECIDE THE CONNECTION exactly as the
+            # command and its environment decide the process. A url edited under
+            # a live connection would otherwise leave calls going to yesterday's
+            # server, and a rotated key would go on failing against the old one.
+            block.get("url"),
+            tuple(sorted((str(k), str(v)) for k, v in headers.items()))
+            if isinstance(headers, dict) else (),
             block.get("enabled", True) is not False)
 
 
@@ -6432,6 +6752,7 @@ def _mcp_caller(server: str, tool: str):
 MCP_USAGE = (
     "  /mcp                               what is configured\n"
     "  /mcp add <command line>            add a server, take what it offers\n"
+    "  /mcp add <url> [--header n: v]     the same server, over HTTP\n"
     "  /mcp fetch <server>                ask it again\n"
     "  /mcp use <server> <tool> <class>   reading, writing or executing\n"
     "  /mcp drop <server> <tool>          take it out"
@@ -6441,6 +6762,75 @@ MCP_USAGE = (
 _MCP_GENERIC = frozenset(("index", "main", "server", "dist", "build", "src",
                           "app", "cli", "bin", "start", "run"))
 
+# The same idea one layer up: labels in a host that say what a thing IS rather
+# than whose it is. `mcp.context7.com` is context7's, and the `mcp.` in front of
+# it names every MCP server on earth.
+_MCP_HOST_GENERIC = frozenset(("mcp", "www", "api", "sse", "http", "https",
+                               "remote", "server"))
+
+# Second-level suffixes, where the label before the last one is still the
+# registry rather than the house: `something.co.uk` is not `co`.
+_MCP_SUFFIX = frozenset(("co", "com", "org", "net", "gov", "edu", "ac"))
+
+
+def _mcp_is_url(token) -> bool:
+    return urllib.parse.urlparse(str(token)).scheme.lower() in ("http", "https")
+
+
+def _mcp_name_from_host(url: str) -> str:
+    """`https://mcp.context7.com/mcp` is context7, and Cloudflare's several are
+    not all called cloudflare.
+
+    THE HOUSE IS THE LABEL BEFORE THE SUFFIX -- that is the part of a host that
+    says WHO answers. What sits in front of it is either noise (`mcp.`, `www.`,
+    `api.`) or the only thing telling two servers of one house apart, and
+    `docs.mcp.cloudflare.com` beside `bindings.mcp.cloudflare.com` is exactly
+    that case. Taking the first label instead would have named the first of them
+    "docs", which says nothing about whose docs.
+    """
+    host = urllib.parse.urlparse(url).hostname or ""
+    labels = [part for part in host.split(".") if part]
+    if not labels:
+        return "server"
+    # AN ADDRESS HAS NO HOUSE IN IT. `127.0.0.1` would otherwise be named after
+    # its third octet, which is a name nobody could guess twice.
+    if all(part.isdigit() for part in labels):
+        return _mcp_slug(host) or "server"
+    cut = 2 if len(labels) > 1 else 1
+    if len(labels) > cut and _mcp_slug(labels[-cut]) in _MCP_SUFFIX:
+        cut += 1
+    marks = [part for part in labels[:-cut]
+             if _mcp_slug(part) not in _MCP_HOST_GENERIC]
+    return _mcp_slug("_".join([labels[-cut]] + marks)) or "server"
+
+
+def _mcp_headers_from(line: str) -> "tuple[str, dict, list]":
+    """`--header Authorization: Bearer x` cut off an add line.
+
+    SPLIT ON THE FLAG, NOT ON WHITESPACE, and that is the whole reason this is
+    not `shlex`. A token is `Bearer <something>` -- two words -- and a Windows
+    path is full of backslashes that POSIX quoting eats. Cutting the line at
+    each flag takes all of the rest as one value and never meets either problem.
+
+    A HEADER THAT DID NOT PARSE COMES BACK AS A COMPLAINT, never as a header
+    quietly dropped. The failure it prevents is the confusing one: an
+    `Authorization` nobody sent, reported by the server as a plain 401.
+    """
+    chunks = re.split(r"(?:^|\s)(?:--header|-H)\s+", str(line or ""))
+    headers, bad = {}, []
+    for chunk in chunks[1:]:
+        chunk = chunk.strip().strip('"').strip("'").strip()
+        field, sep, value = chunk.partition(":")
+        field, value = field.strip(), value.strip()
+        # A NEWLINE IN A HEADER IS A SECOND HEADER. Anything below a space ends
+        # the field as far as HTTP is concerned, so it may not travel in one.
+        if not sep or not field or not value or any(
+                ord(ch) < 32 or ord(ch) == 127 for ch in field + value):
+            bad.append(chunk)
+            continue
+        headers[field] = value
+    return chunks[0], headers, bad
+
 
 def mcp_name_from(argv: list) -> str:
     """A server name out of the command line, so nobody has to invent one.
@@ -6448,9 +6838,12 @@ def mcp_name_from(argv: list) -> str:
     `npx -y @modelcontextprotocol/server-github` is github. A path ending in
     dist/index.js is the project it sits in, because "index" names nothing --
     that is what `_MCP_GENERIC` is for, and it is the case a basename-only rule
-    gets wrong on every Node server there is.
+    gets wrong on every Node server there is. A URL is named from its host,
+    which is the same idea against a different kind of line.
     """
     parts = [str(a) for a in argv if not str(a).startswith("-")]
+    if parts and _mcp_is_url(parts[0]):
+        return _mcp_name_from_host(parts[0])
     # THE FIRST TOKEN AFTER THE LAUNCHER, NOT THE LAST. `npx -y
     # @modelcontextprotocol/server-filesystem C:/Users/robin/dev/Crow` ends in
     # the directory the server was pointed AT -- reading backwards named that
@@ -6470,7 +6863,7 @@ def mcp_name_from(argv: list) -> str:
 
 
 def mcp_add_line(line: str) -> "tuple[str | None, dict | None, str | None]":
-    """Add a server from one command line: `(name, view, problem)`.
+    """Add a server from one line, a command or a URL: `(name, view, problem)`.
 
     THE NAME COMES BACK, and that is not decoration. Without it the caller has
     to guess which of the servers it is now looking at is the one it just added
@@ -6478,12 +6871,31 @@ def mcp_add_line(line: str) -> "tuple[str | None, dict | None, str | None]":
     a second server beside the first confirmed the WRONG one, on screen, on
     2026-08-22.
     """
-    argv = [a for a in str(line or "").split() if a]
+    rest, headers, bad = _mcp_headers_from(line)
+    argv = [a for a in rest.split() if a]
     if not argv:
-        return None, None, ("give a command line, e.g. "
+        return None, None, ("give a command line or a URL, e.g. "
                             "npx -y @modelcontextprotocol/server-github")
+    if bad:
+        return None, None, ("--header takes 'name: value'; %r is not one"
+                            % bad[0][:80])
     name = mcp_name_from(argv)
-    view, problem = mcp_add_server(name, {"command": argv[0], "args": argv[1:]})
+    if _mcp_is_url(argv[0]):
+        # A URL IS ONE TOKEN AND NOTHING FOLLOWS IT. Anything else on the line is
+        # somebody typing a stdio line at an HTTP server, and swallowing it would
+        # store an endpoint with an argument nothing will ever read.
+        if len(argv) > 1:
+            return None, None, ("a URL takes no arguments -- %r is one. A token "
+                                "goes in --header <name: value>" % argv[1][:80])
+        block = {"url": argv[0]}
+        if headers:
+            block["headers"] = headers
+    elif headers:
+        return None, None, ("--header belongs to a URL. A command gets its "
+                            "secrets through 'env' in mcp.json")
+    else:
+        block = {"command": argv[0], "args": argv[1:]}
+    view, problem = mcp_add_server(name, block)
     return name, view, problem
 
 
@@ -6727,9 +7139,15 @@ def mcp_view() -> dict:
                 "class": klass if klass in MCP_TOOL_CLASSES else None,
                 "included": entry is not None,
             })
+        # `headers` IS NOT IN HERE AND MAY NOT BE. This shape is what both
+        # surfaces draw and what any future one would; a Bearer token that
+        # reaches a view reaches a screen, a screenshot and a bug report. The
+        # url carries no secret and is what somebody needs to see to recognise
+        # the server -- that pair is the whole rule.
         servers.append({"name": name,
                         "command": str(block.get("command") or ""),
                         "args": [str(a) for a in (block.get("args") or [])],
+                        "url": str(block.get("url") or ""),
                         "enabled": block.get("enabled", True) is not False,
                         "cost": _mcp_cost(taken),
                         "tools": tools})
@@ -6770,7 +7188,8 @@ def mcp_listing() -> str:
                 "'/mcp fetch <server>'.\n\n%s" % (view["file"], MCP_USAGE))
     lines = ["MCP servers, from %s" % view["file"]]
     for server in view["servers"]:
-        started = " ".join([server["command"]] + server["args"]).strip()
+        started = (server["url"]
+                   or " ".join([server["command"]] + server["args"]).strip())
         lines.append("")
         lines.append("%s   %s%s" % (server["name"], started,
                                     "" if server["enabled"] else "   [switched off]"))
@@ -6779,7 +7198,12 @@ def mcp_listing() -> str:
             # difference is the whole stage, so it has to survive into the line
             # somebody actually reads.
             klass = tool["class"] or "(%s)" % tool["proposed"]
-            first = tool["description"].split(". ")[0].rstrip(".")
+            # COLLAPSED FIRST, SLICED SECOND. A foreign description is written
+            # by a stranger and Cloudflare's are written over several lines with
+            # tabs in them -- found in the live run, 2026-08-22. Cutting one
+            # straight into a column printed the remainder underneath it, out of
+            # line, and a row that is sometimes two rows is not a table.
+            first = " ".join(tool["description"].split()).split(". ")[0].rstrip(".")
             lines.append("  %s %-30s %-12s %s"
                          % ("[x]" if tool["included"] else "[ ]",
                             tool["name"], klass, first[:64]))

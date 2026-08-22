@@ -45,6 +45,7 @@
 - [Skills](#skills)
 - [Session search](#session-search)
 - [MCP servers](#mcp-servers)
+- [MCP over HTTP](#mcp-over-http)
 - [Settings](#settings)
 - [Measurements](#measurements)
 - [Window](#window)
@@ -323,26 +324,39 @@ session_search(query, limit=8)
 
 ```
 /mcp add npx -y @modelcontextprotocol/server-filesystem C:\dev\Crow
-/mcp add node C:\dev
-otekeeper\dist\index.js
+/mcp add node C:\dev\notekeeper\dist\index.js
 /mcp add uvx mcp-server-fetch
+/mcp add https://mcp.context7.com/mcp
+/mcp add https://mcp.example.com/mcp --header Authorization: Bearer <token>
 ```
 
-The name comes out of the line: `filesystem`, `notekeeper`, `fetch`.
+The name comes out of the line: `filesystem`, `notekeeper`, `fetch`. A URL is named from its host:
+`context7`, and `docs.mcp.cloudflare.com` is `cloudflare_docs`.
 
 | | |
 |---|---|
 | Config | `%LOCALAPPDATA%\Crow\mcp.json`, one block per server |
-| Transport | stdio. `url`, HTTP and OAuth are not built |
+| Transport | `command` → stdio, `url` → [Streamable HTTP](#mcp-over-http). One block is one transport, never both |
+| Protocol | `2025-06-18`. A `-32022` with `data.supported` is retried once against the highest version offered |
 | Schema | asked **once**, when the server is added, then written to disk |
 | `TOOLS` at start | read from that file, never from a server |
-| Connection | opened when a tool is first called, then kept until the config changes |
+| Connection | opened when a tool is first called, then kept until `command`, `args`, `env`, `cwd`, `url`, `headers` or `enabled` change |
 | Tool names | `mcp_<server>_<tool>` |
 | Adding takes | every tool the server offers |
 | Classes | empty until you set them. An unclassified tool is `executing` |
+| Client capabilities | sent empty. `sampling` and `elicitation` get `-32601` naming what is missing |
+| Invisible U+E0000–U+E007F | stripped from names, descriptions, schemas and results. Emoji flags survive |
+| Timeouts | `connect_timeout` 20 s, `timeout` 60 s. Per block, `0` and below fall back to the default |
+
+### stdio
+
+| | |
+|---|---|
+| Framing | one JSON object per line, both ways. A stdout line that does not parse is dropped |
 | Launcher | resolved through `PATH` + `PATHEXT` before it starts. `npx` is `npx.CMD` on Windows and `CreateProcess` does not look for it |
 | Environment | a fixed base set plus the block's `env`, never the whole shell |
-| Invisible U+E0000–U+E007F | stripped from names, descriptions, schemas and results. Emoji flags survive |
+| stderr | drained, last 20 lines kept and printed with a failure |
+| Close | EOF on stdin, `kill` after 3 s, then reaped |
 
 ### Commands
 
@@ -350,6 +364,7 @@ The name comes out of the line: `filesystem`, `notekeeper`, `fetch`.
 |---|---|
 | `/mcp` | what is configured, and its cost |
 | `/mcp add <command line>` | add a server, take what it offers |
+| `/mcp add <url> [--header <name: value>]` | the same, over HTTP. `--header` may repeat |
 | `/mcp fetch <server>` | ask it again, keeping what was ticked |
 | `/mcp use <server> <tool> <class>` | `reading`, `writing` or `executing` |
 | `/mcp drop <server> <tool>` | take it out of the tool list |
@@ -380,6 +395,8 @@ Removing a server: `Help → Settings → MCPs`.
 | `include` | positive list, and it wins over `exclude` |
 | `enabled: false` | skipped. No connection attempted |
 | `timeout` · `connect_timeout` | seconds. Defaults 60 and 20 |
+| `url` | Streamable HTTP endpoint, `http` or `https`. Not alongside `command` |
+| `headers` | sent on every HTTP request. Never shown in either surface |
 
 The classification is pre-filled from `annotations`: `readOnlyHint: true` → `reading`,
 `destructiveHint: false` → `writing`, anything else → `executing`. The specification's own defaults
@@ -393,6 +410,9 @@ strictest of the three.
 | built-in | 12 | 7,758 |
 | `@modelcontextprotocol/server-filesystem` | 14 | 8,217 |
 | `mcp-server-fetch` | 1 | 1,137 |
+| `https://mcp.context7.com/mcp` | 2 | 4,615 |
+| `https://mcp.deepwiki.com/mcp` | 3 | 1,233 |
+| `https://docs.mcp.cloudflare.com/mcp` | 2 | 1,032 |
 
 Measured 2026-08-22. The tool list is rendered into the head of the prompt, so changing it moves
 byte 0: the next turn and the first turn of every saved session pay a full prefill.
@@ -404,8 +424,92 @@ byte 0: the next turn and the first turn of every saved session pay a full prefi
 | `sampling` | `capabilities` goes out empty. A server that asks for inference anyway gets `-32601` naming the missing capability |
 | `elicitation` | not declared, same answer |
 | `notifications/tools/list_changed` | ignored. A tool list that changed mid-chat would move byte 0 |
-| HTTP · OAuth | stdio only |
-| No catalog | no curated list of servers. You enter the command line |
+| No catalog | no curated list of servers. You enter the command line or the URL |
+
+---
+
+## MCP over HTTP
+
+Transport `Streamable HTTP`, specification `2025-06-18`. A block with a `url` uses it; a block with
+a `command` does not.
+
+| | |
+|---|---|
+| Endpoint | one URL, `http` or `https`. `POST` only — no `GET` stream is opened |
+| Per message | one `POST`, `Content-Type: application/json` |
+| `Accept` | `application/json, text/event-stream` — both, on every request |
+| Answer | a JSON object **or** an SSE stream (`event: message` / `data: {…}`). Both are normal; context7 answers `tools/list` as a stream |
+| SSE reader | own thread, stops at the first message carrying `result` or `error`. `:` comment lines and notifications ahead of the answer are skipped |
+| Notification · client response | `202`, empty body, nothing enqueued |
+| Session | `Mcp-Session-Id` off the `initialize` response where the server sets one, then on every request. **No id is a valid state**, not a fault |
+| `404` on a session | expiry. The session is dropped, `initialize` runs again, the call is retried **once** |
+| Close | `HTTP DELETE` with the session id. `405` and any other refusal are ignored |
+| Server → client requests | arrive on the open stream, answered by a separate `POST` |
+
+### Headers
+
+Three layers. Later ones overwrite earlier ones.
+
+| layer | |
+|---|---|
+| 1 · identity | `User-Agent: Crow/<version> (+<repo>)` |
+| 2 · block | everything in `headers`, e.g. `Authorization` |
+| 3 · transport | `Content-Type`, `Accept`, `Mcp-Session-Id`, `MCP-Protocol-Version` |
+
+`MCP-Protocol-Version` is sent only after `initialize` has come back, never on it.
+
+`headers` is not in `mcp_view()` and appears in no listing, no sheet and no log.
+
+### Adding one
+
+```
+/mcp add https://mcp.context7.com/mcp
+/mcp add https://mcp.example.com/mcp --header Authorization: Bearer <token>
+/mcp add https://mcp.example.com/mcp -H X-Api-Key: <key> -H X-Org: acme
+```
+
+| | |
+|---|---|
+| Name | from the host: `mcp.context7.com` → `context7`, `docs.mcp.cloudflare.com` → `cloudflare_docs` |
+| `--header` · `-H` | `name: value`, may repeat. Everything after the flag up to the next flag is the value, so a value may contain spaces |
+| Refused | a URL with arguments after it, `--header` without a `:`, a header carrying a control character, `--header` on a command line |
+
+### The block
+
+```json
+{"servers": {"context7": {
+  "url": "https://mcp.context7.com/mcp",
+  "headers": {"Authorization": "Bearer <token>"},
+  "timeout": 60,
+  "connect_timeout": 20,
+  "tools": {"include": ["query-docs"], "exclude": []},
+  "schema": {"tools": [{"name": "query-docs", "description": "...",
+                        "inputSchema": {}, "annotations": {}}]},
+  "classes": {"query-docs": "reading"}
+}}}
+```
+
+### Measured
+
+Three servers, 2026-08-22:
+
+| | protocol | answer | session |
+|---|---|---|---|
+| `mcp.context7.com` | 2025-06-18 | SSE | none |
+| `mcp.deepwiki.com` | 2025-06-18 | SSE | none |
+| `docs.mcp.cloudflare.com` | 2025-06-18 | SSE | none |
+
+`docs.mcp.cloudflare.com` answers `Python-urllib` with `403`, error 1010, `browser_signature`. It is
+the `User-Agent` that decides, not the protocol.
+
+### Not built
+
+| | |
+|---|---|
+| OAuth | a static `headers` block is the whole of it. A server that answers `401` needs its token there |
+| `GET` stream | not opened. `MAY` in the specification, and Crow acts on no unsolicited notification |
+| `Last-Event-ID` | no resumption. Nothing is held open to lose |
+| Batching | one message per request. Removed from the protocol in `2025-06-18` |
 
 ---
 

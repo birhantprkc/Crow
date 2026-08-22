@@ -1436,7 +1436,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
           <div id="mcplist"></div>
           <div class="sform">
             <input id="mcpline"
-                   placeholder="npx -y @modelcontextprotocol/server-github">
+                   placeholder="npx -y @modelcontextprotocol/server-github or https://mcp.example.com/mcp">
             <button onclick="crow.addMcp()">Add</button>
           </div>
         </section>
@@ -1898,7 +1898,10 @@ const crow = {
     name.className="sname";
     name.textContent=sv.enabled?sv.name:sv.name+"  (switched off)";
     const cmd=document.createElement("div"); cmd.className="cmd";
-    cmd.textContent=[sv.command].concat(sv.args).join(" "); cmd.title=cmd.textContent;
+    // THE URL WHERE THERE IS ONE, and there is never both -- one block is one
+    // transport. A token is not in here: `headers` never reaches a view.
+    cmd.textContent=sv.url||[sv.command].concat(sv.args).join(" ");
+    cmd.title=cmd.textContent;
     const count=document.createElement("div"); count.className="count";
     count.textContent=sv.tools.length+" tools · "+sv.cost+" chars";
     const again=document.createElement("button");
@@ -5323,7 +5326,12 @@ class Api:
         return ""
 
     def mcp_add(self, line: str) -> str:
-        """One command line in, a working server out. "" when it worked."""
+        """One line in -- a command or a URL -- and a working server out.
+
+        "" when it worked. The field takes both because a server is a server:
+        which transport it happens to speak is the first token's business, not
+        something anybody should have to declare in a second control.
+        """
         _, _, problem = crow_core.mcp_add_line(line)
         return problem or ""
 

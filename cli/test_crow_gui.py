@@ -4242,6 +4242,24 @@ class TheMcpSheetTests(ApiCase):
         # literals against the shipped face, and the caret is not in it.
         self.assertIn("String.fromCharCode(9654)", js)
 
+    def test_the_head_names_an_http_server_by_its_endpoint(self):
+        """E5. An HTTP server has no command line, and a row whose second column
+        is empty names nothing anybody can recognise. The url is the half of the
+        block that may be shown -- the other half is a token, and `mcp_view`
+        does not carry it here to be shown or forgotten."""
+        js = self.source[self.source.index("drawMcpServer(box,sv,classes){"):
+                         self.source.index("mcpRow(sv,t,classes){")]
+        self.assertIn("cmd.textContent=sv.url||", js)
+        self.assertNotIn("sv.headers", self.source)
+
+    def test_the_field_takes_a_url_as_well_as_a_command(self):
+        """NEGATIVE for a second control: a transport is what the first token
+        already says it is, and a client that asked somebody to declare it in a
+        dropdown would be asking for the one thing it can read for itself."""
+        self.assertIn("https://", self._pane())
+        source = inspect.getsource(crow_gui.Api.mcp_add)
+        self.assertIn("a command or a URL", source)
+
     # ---- the two columns
 
     def test_a_decision_and_a_proposal_do_not_look_alike(self):
