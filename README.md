@@ -354,7 +354,7 @@ The name comes out of the line: `filesystem`, `notekeeper`, `fetch`. A URL is na
 
 | | |
 |---|---|
-| Framing | one JSON object per line, both ways. A stdout line that does not parse is dropped |
+| Framing | one JSON object per line, both ways. A stdout line that does not parse is kept and reported, not dropped |
 | Launcher | resolved through `PATH` + `PATHEXT` before it starts. `npx` is `npx.CMD` on Windows and `CreateProcess` does not look for it |
 | Environment | a fixed base set plus the block's `env`, never the whole shell |
 | stderr | drained, last 20 lines kept and printed with a failure |
@@ -524,6 +524,11 @@ Three servers, 2026-08-22:
 `docs.mcp.cloudflare.com` answers `Python-urllib` with `403`, error 1010, `browser_signature`. It is
 the `User-Agent` that decides, not the protocol.
 
+Driven end to end on 2026-08-22: static headers against `mcp.context7.com`, and the full OAuth leg
+against `mcp.higgsfield.ai`, whose `/oauth2/authorize` hands off to Clerk. Its token endpoint
+answers `"token_type": "bearer"` and its MCP endpoint refuses `bearer <token>` while accepting
+`Bearer <token>` — the scheme is sent capitalised for that reason.
+
 ### OAuth
 
 A server that answers `401` is authorised in the browser. `/mcp add <url>` does it by itself, and
@@ -532,8 +537,8 @@ so does re-fetching a configured server; `/mcp auth <server>` repeats it on its 
 | | |
 |---|---|
 | Discovery | `WWW-Authenticate: resource_metadata=...` when the `401` carries it, else `/.well-known/oauth-protected-resource<path>`, else `/.well-known/oauth-protected-resource` |
-| Authorization server | `authorization_servers[0]` from that document. Metadata from `/.well-known/oauth-authorization-server` then `/.well-known/openid-configuration`, path-inserted first where the issuer has a path |
-| `issuer` | compared against the URL the document came from. A mismatch is refused |
+| Authorization server | every entry in `authorization_servers`, in the order the document lists them. Metadata from `/.well-known/oauth-authorization-server` then `/.well-known/openid-configuration`, path-inserted first where the issuer has a path |
+| `issuer` | in the metadata document, compared against the URL it was fetched from. A mismatch is refused |
 | PKCE | `S256`, required. `code_challenge_methods_supported` without it, or absent, is refused |
 | Client | RFC 7591 dynamic registration, `token_endpoint_auth_method: none`. `client_id` + `client_secret` in the block are used instead where the server rejects registration — Google Drive answers `400`, GitHub Copilot advertises no endpoint at all |
 | `client_name` | `Crow`, overridable. Figma's endpoint allowlists registration by exact name and `403`s one it does not know |
