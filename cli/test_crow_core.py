@@ -7608,9 +7608,11 @@ class TheStickyRoutingTests(unittest.TestCase):
     the same shape -- `stream_reply` and the review that runs unasked -- and
     `provider_endpoint`'s own docstring already says why that is the trap.
 
-    `provider.require_parameters` WAS THE SECOND FIELD HERE AND IS NOT ANY MORE.
-    It shipped for twenty minutes on 2026-08-23 and 404'd the first live turn.
-    The case that pins its absence carries the measurement.
+    `provider.require_parameters` WAS THE SECOND FIELD HERE AND IS NOT A STATIC
+    ONE. It shipped unconditionally for twenty minutes on 2026-08-23 and 404'd
+    the first live turn. The case below pins the static half empty and carries
+    the measurement; what replaced it is decided per model, in
+    `TheParameterFilterTests`.
     """
 
     def setUp(self) -> None:
@@ -7638,7 +7640,10 @@ class TheStickyRoutingTests(unittest.TestCase):
     # ------------------------------------------------------------ the field
 
     def test_the_broker_is_asked_for_no_parameter_filter(self):
-        """`require_parameters` IS NOT SENT, AND THIS CASE IS WHY IT MAY NOT BE.
+        """`require_parameters` IS NOT IN THE REGISTRY, AND THIS CASE IS WHY IT
+        MAY NOT BE. It pins the STATIC half. The flag exists again as a per-model
+        decision in `turn_routing` -- see `TheParameterFilterTests` -- and the
+        reason it cannot live here is the measurement below.
 
         It was, for twenty minutes on 2026-08-23, and the first live turn came
         back `HTTP 404 -- "No endpoints found that can handle the requested
@@ -7652,9 +7657,10 @@ class TheStickyRoutingTests(unittest.TestCase):
         supports -- so "route only to someone who supports all of it" resolves
         to nobody, and the request never leaves OpenRouter.
 
-        THE FIELD IS NOT WRONG, THIS BODY IS NOT ELIGIBLE FOR IT. Re-adding it
-        while a remote request still carries local-only fields turns every turn
-        into a 404, including the review nobody is watching."""
+        THE FIELD IS NOT WRONG, A STATIC ANSWER TO IT IS. Put here it applies to
+        every model this provider serves, and 87 of the 337 tool-capable ones
+        refuse `temperature` or `top_p` -- for those it is the same 404 again,
+        including on the review nobody is watching."""
         self.assertEqual(self._broker()["routing"], {})
 
     def test_the_machine_is_asked_for_no_routing_at_all(self):
@@ -7711,8 +7717,8 @@ class TheStickyRoutingTests(unittest.TestCase):
         self.assertEqual(crow_core.turn_routing(spot, "chat-1.json"), {})
 
     def test_an_unsaved_chat_on_the_broker_sends_nothing(self):
-        """NEGATIVE: no chat file means no key, and with the parameter filter
-        gone there is nothing else the broker is told. An empty block, not a
+        """NEGATIVE: no chat file means no key, and this fixture catalogues no
+        model, so the filter has nothing to hold either. An empty block, not a
         block with an empty key -- the endpoint would read `""` literally and
         make one session of every unsaved chat there has ever been."""
         self.assertEqual(crow_core.turn_routing(self._broker(), ""), {})
@@ -7910,6 +7916,164 @@ class TheLocalOnlyFieldsStayHomeTests(unittest.TestCase):
         self.assertEqual(sent["min_p"], 0.01)
         self.assertEqual(sent["chat_template_kwargs"],
                          {"reasoning_effort": "high"})
+
+
+
+class TheParameterFilterTests(unittest.TestCase):
+    """`provider.require_parameters` PER MODEL, because per provider it cannot
+    work.
+
+    MEASURED 2026-08-23 at openrouter.ai, no key needed: 422 models, 337 accept
+    `tools`, and 250 accept everything a remote body still carries. The 87 that
+    do not are the current reasoning models -- 61 from openai, 16 from anthropic,
+    among them claude-opus-5, claude-sonnet-5 and claude-fable-5 -- and what they
+    are missing is `temperature` and `top_p`, which they REFUSE rather than lack.
+    Setting the flag for everybody would take those 87 off this client to protect
+    the other 250. Setting it where the catalogue says it holds costs nobody
+    anything.
+
+    WHAT THE FLAG IS FOR, and it is the only thing it is for: an upstream with no
+    tool support DROPS `tools` and answers anyway. The model then appears to have
+    forgotten that it can search, remember or reach an MCP server, and nothing on
+    screen says why. `require_parameters` routes past those upstreams instead.
+
+    A MODEL NOBODY CATALOGUED GETS NO FLAG. "The catalogue did not say" is the
+    answer `provider_context` already gives as 0, and it is read the same way
+    here: no claim, so no constraint.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-filter-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._real = (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE)
+        self.addCleanup(self._restore)
+        crow_core.PROVIDERS_FILE = os.path.join(self.dir, "providers.json")
+        crow_core.PROVIDER_KEYS_FILE = os.path.join(self.dir, "provider_keys.json")
+
+    def _restore(self) -> None:
+        crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE = self._real
+
+    def _broker(self, params, slug="z-ai/glm-5.2:free") -> dict:
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        crow_core.provider_pick("openrouter", slug)
+        doc = crow_core.provider_doc()
+        doc["catalog"] = {"openrouter": {"fetched": 1, "models": [
+            {"id": slug, "name": "G", "context": 131072, "params": list(params)}]}}
+        self.assertIsNone(crow_core.provider_write(doc))
+        return crow_core.provider_endpoint()
+
+    def _block(self, params, slug="z-ai/glm-5.2:free") -> dict:
+        return crow_core.turn_routing(self._broker(params, slug), "")
+
+    def test_a_model_that_takes_everything_is_asked_for_the_filter(self):
+        """POSITIVE. `nvidia/nemotron-3.5-lightning:free` is one of these:
+        measured on the day, its one endpoint lists `tools`, `temperature`,
+        `top_p` and `max_tokens`."""
+        block = self._block(crow_core._REMOTE_BODY_PARAMETERS)
+        self.assertEqual(block, {"provider": {"require_parameters": True}})
+
+    def test_a_model_that_refuses_one_of_them_is_not(self):
+        """NEGATIVE, AND IT IS THE HALF THAT KEEPS 87 MODELS ON THE CLIENT.
+        claude-opus-5 lists no `top_p`. Asked for the filter it would answer
+        `HTTP 404 -- no endpoints found` on every turn, including the review
+        nobody watches."""
+        block = self._block([p for p in crow_core._REMOTE_BODY_PARAMETERS
+                             if p != "top_p"])
+        self.assertNotIn("provider", block)
+
+    def test_a_model_nobody_catalogued_is_not(self):
+        """NEGATIVE. An empty list is "the catalogue did not say", never "it
+        supports nothing" and never "it supports everything"."""
+        self.assertNotIn("provider", self._block([]))
+
+    def test_the_key_and_the_filter_travel_together(self):
+        """Both halves of the block in one turn, and the review that follows
+        reads the same one."""
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        crow_core.provider_pick("openrouter", "z-ai/glm-5.2:free")
+        doc = crow_core.provider_doc()
+        doc["catalog"] = {"openrouter": {"fetched": 1, "models": [
+            {"id": "z-ai/glm-5.2:free", "name": "G", "context": 1,
+             "params": list(crow_core._REMOTE_BODY_PARAMETERS)}]}}
+        crow_core.provider_write(doc)
+        block = crow_core.turn_routing(crow_core.provider_endpoint(),
+                                       "chat-20260823-101120.json")
+        self.assertEqual(block["provider"], {"require_parameters": True})
+        self.assertEqual(block["session_id"],
+                         crow_core.sticky_key("chat-20260823-101120.json"))
+
+    def test_the_machine_is_asked_for_no_filter(self):
+        """NEGATIVE: llama-server has no upstream to choose between, and an
+        unknown field it ignores is still bytes in front of byte 0."""
+        crow_core.provider_pick(crow_core.LOCAL_PROVIDER)
+        spot = crow_core.provider_endpoint("", "crow")
+        self.assertEqual(crow_core.turn_routing(spot, "chat-1.json"), {})
+
+    def test_a_direct_connection_is_asked_for_no_filter(self):
+        """NEGATIVE, and here it would be an error rather than a waste: routing
+        belongs to the broker, and that Messages endpoint refuses a body field
+        it does not know."""
+        crow_core.provider_key_set("anthropic", "not-a-real-key-0123456789")
+        crow_core.provider_pick("anthropic", "claude-opus-5")
+        self.assertNotIn("provider", crow_core.turn_routing(
+            crow_core.provider_endpoint(), "chat-1.json"))
+
+    def test_the_named_parameters_are_the_ones_a_remote_body_carries(self):
+        """THE GUARD, and without it the list is a second answer to what the
+        body holds. A field added to the body has to be classified here as
+        transport or as a parameter or this case goes red, which is the point:
+        an unclassified field would be required of every upstream without
+        anybody having decided that it should be."""
+        sent = {}
+
+        def fake(url, body, api_key, timeout, extra=None):
+            sent.update(body)
+            return iter(())
+
+        real, crow_core._post_stream = crow_core._post_stream, fake
+        self.addCleanup(lambda: setattr(crow_core, "_post_stream", real))
+        conversation = crow_core.Conversation("be brief")
+        conversation.append("user", "hi")
+        crow_core.stream_reply(conversation, base_url="http://127.0.0.1:1/v1",
+                               model="m", api_key="k", temperature=1.0,
+                               top_p=0.95, min_p=0.01, timeout=1, remote=True,
+                               max_tokens=crow_core.REMOTE_MAX_TOKENS,
+                               routing={"session_id": "abc",
+                                        "provider": {"require_parameters": True}})
+        self.assertEqual(set(sent),
+                         set(crow_core._REMOTE_BODY_TRANSPORT)
+                         | set(crow_core._REMOTE_BODY_PARAMETERS))
+
+    def test_the_catalogue_keeps_what_each_model_supports(self):
+        """The field has to survive the trip to disk or the decision above is
+        made against nothing. `supported_parameters` is OpenRouter's name for
+        it; a catalogue that carries none leaves the list empty rather than
+        inventing one."""
+        payload = json.dumps({"data": [
+            {"id": "a/loud", "name": "L", "context_length": 8192,
+             "supported_parameters": ["tools", "temperature", "top_p",
+                                      "max_tokens", "seed"]},
+            {"id": "a/quiet", "name": "Q", "context_length": 4096}]}).encode("utf-8")
+
+        class _Resp:
+            def read(self_inner):
+                return payload
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+        real = crow_core.urllib.request.urlopen
+        crow_core.urllib.request.urlopen = lambda *a, **k: _Resp()
+        self.addCleanup(setattr, crow_core.urllib.request, "urlopen", real)
+        models, problem = crow_core.provider_fetch_models("openrouter", "k")
+        self.assertIsNone(problem)
+        by_id = {m["id"]: m for m in models}
+        self.assertIn("tools", by_id["a/loud"]["params"])
+        self.assertIn("seed", by_id["a/loud"]["params"])
+        self.assertEqual(by_id["a/quiet"]["params"], [])
 
 
 if __name__ == "__main__":

@@ -2472,6 +2472,16 @@ _ANTHROPIC_DROPS = ("temperature", "top_p", "min_p", "top_k",
 # asks for completeness.
 _REMOTE_DROPS = ("min_p", "timings_per_token", "chat_template_kwargs")
 
+# WHAT IS LEFT, AND IT IS SPLIT BECAUSE ONE HALF IS NEGOTIABLE AND THE OTHER IS
+# NOT. `provider.require_parameters` asks a broker to route only to upstreams
+# that support every PARAMETER in the request; the transport half is not what
+# it means by that. Keeping both lists here rather than one is what lets a case
+# check them against a body that was really built, so this cannot drift into a
+# second answer to what Crow sends.
+_REMOTE_BODY_TRANSPORT = ("model", "messages", "stream", "stream_options",
+                          "session_id", "provider")
+_REMOTE_BODY_PARAMETERS = ("tools", "temperature", "top_p", "max_tokens")
+
 
 def remote_body(body: dict) -> dict:
     """The same request with llama-server's own fields taken back out.
@@ -9797,7 +9807,12 @@ def run_turn(
 #   {"active": "openrouter",
 #    "model": {"openrouter": "z-ai/glm-5.2:free"},   what was picked, PER provider
 #    "catalog": {"openrouter": {"fetched": 1755, "models": [
-#        {"id": "...", "name": "...", "context": 131072}]}}}
+#        {"id": "...", "name": "...", "context": 131072,
+#         "params": ["tools", "temperature", ...]}]}}}
+#
+# `params` ARRIVED AFTER THE FILE DID, and it needs no migration: a catalogue
+# written before it exists reads back as "did not say", which is the answer
+# that asks for no filter. Same rule `context` already follows with 0.
 PROVIDERS_FILE = os.path.join(os.path.dirname(SESSION_DIR), "providers.json")
 
 # THE KEYS ARE NOT IN IT, and the reason is the one MCP_TOKEN_FILE already
@@ -9855,19 +9870,27 @@ PROVIDERS = {
         #
         # The mechanism is documented and it is the whole point of the field:
         # by default an upstream that does not know a parameter IGNORES it, and
-        # `require_parameters` turns that into an exclusion. Crow's body carries
-        # `timings_per_token` and `chat_template_kwargs`, which are llama.cpp
-        # extensions -- NOBODY outside llama.cpp supports them, so requiring
-        # full support excludes every upstream there is and the request never
-        # leaves OpenRouter.
+        # `require_parameters` turns that into an exclusion. Crow's body carried
+        # `timings_per_token` and `chat_template_kwargs`, llama.cpp extensions
+        # nobody outside llama.cpp supports, so requiring full support excluded
+        # every upstream there is and the request never left OpenRouter.
         #
-        # The field is not wrong; this body is not eligible for it. It becomes
-        # available the day a remote request stops carrying local-only fields,
-        # and not before. See the README.
+        # THE FIELD IS NOT WRONG, AND A STATIC ANSWER TO IT WOULD BE. Those two
+        # fields are gone from a remote body now, and the flag still cannot live
+        # here: measured the same day, 87 of 337 tool-capable models refuse
+        # `temperature` or `top_p`, and for those the filter is the same 404
+        # again. Whether it travels is a question about the MODEL, so it is
+        # asked in `turn_routing` against what the catalogue declares. `filter`
+        # below says only that asking is meaningful at this provider.
         "routing": {},
         # It reads `session_id` as a sticky routing key, and that one costs
         # nothing: it is metadata, not a constraint on who may answer.
         "sticky": True,
+        # AND IT IS THE ONLY ENTRY THAT UNDERSTANDS `provider.require_parameters`,
+        # because it is the only one with upstreams to choose between. Whether
+        # the flag actually travels is decided per MODEL in `turn_routing`; this
+        # says no more than that asking here is meaningful.
+        "filter": True,
     },
     # THE OPENAI-SHAPED LAYER, NOT THE NATIVE API. Read as raw text on
     # 2026-08-22: `https://api.anthropic.com/v1/` answers `chat/completions`,
@@ -10128,7 +10151,15 @@ def provider_fetch_models(name: str, key: "str | None" = None,
                 break
         models.append({"id": str(row["id"]),
                        "name": str(row.get("name") or row["id"]),
-                       "context": window if window > 0 else 0})
+                       "context": window if window > 0 else 0,
+                       # WHAT THIS SLUG ACCEPTS. Kept because `turn_routing`
+                       # decides the parameter filter per model and cannot ask
+                       # the network while a turn is being built. A catalogue
+                       # that publishes no such field leaves this empty, and
+                       # empty means nobody claimed anything.
+                       "params": sorted(str(p) for p
+                                        in (row.get("supported_parameters") or [])
+                                        if isinstance(p, str))})
     if not models:
         return [], "%s listed no models" % (spec.get("label") or name)
     return models, None
@@ -10252,7 +10283,7 @@ def provider_endpoint(fallback_base_url: str = "", fallback_model: str = "",
                 "model": model or fallback_model or DEFAULT_MODEL,
                 "api_key": fallback_key or "local-no-provider", "headers": {},
                 "transport": TRANSPORT_CHAT,
-                "routing": {}, "sticky": False}
+                "routing": {}, "sticky": False, "filter": False, "params": []}
     credential, kind, _problem = provider_credential(name)
     return {"provider": name, "label": spec["label"], "remote": True,
             "base_url": spec["base_url"], "model": model,
@@ -10264,7 +10295,12 @@ def provider_endpoint(fallback_base_url: str = "", fallback_model: str = "",
             # reason the cap does: it is a fact about where the turn goes, and a
             # second place deciding it would be a second answer.
             "routing": _routing_copy(spec.get("routing") or {}),
-            "sticky": bool(spec.get("sticky"))}
+            "sticky": bool(spec.get("sticky")),
+            # THE TWO HALVES OF THE PARAMETER FILTER, read here because this is
+            # where the model is already known and the catalogue is already
+            # open. `turn_routing` decides; it does not go looking.
+            "filter": bool(spec.get("filter")),
+            "params": provider_params(name, model, doc)}
 
 
 def _routing_copy(block: dict) -> dict:
@@ -10324,6 +10360,23 @@ def turn_routing(spot: dict, session_path: "str | None" = "") -> dict:
         key = sticky_key(session_path)
         if key:
             block["session_id"] = key
+    # THE FILTER IS A QUESTION ABOUT THE MODEL, NOT ABOUT THE PROVIDER, and that
+    # is the whole reason it can be asked at all. Measured 2026-08-23 at
+    # openrouter.ai: of 337 tool-capable models, 250 accept everything a remote
+    # body carries and 87 refuse `temperature` or `top_p` -- the current
+    # reasoning models, claude-opus-5 and claude-sonnet-5 among them. Set for
+    # everybody, the flag takes those 87 off this client with HTTP 404 on every
+    # turn. Set where the catalogue says it holds, it costs nobody anything and
+    # prevents the fault it exists for: an upstream without tool support DROPS
+    # `tools` and answers anyway, so the model looks like it forgot it can
+    # search, remember or reach an MCP server, with nothing on screen saying why.
+    #
+    # AN EMPTY LIST ASKS FOR NOTHING. "The catalogue did not say" is not "it
+    # supports everything", and a filter built on a guess is the 404 again.
+    if spot.get("filter"):
+        declared = set(spot.get("params") or ())
+        if declared.issuperset(_REMOTE_BODY_PARAMETERS):
+            block["provider"] = {"require_parameters": True}
     return block
 
 
@@ -10349,6 +10402,23 @@ def provider_context(name: str, model: str, doc: "dict | None" = None) -> int:
                 return 0
             return window if window > 0 else 0
     return 0
+
+
+def provider_params(name: str, model: str, doc: "dict | None" = None) -> list:
+    """What the catalogue says one slug accepts, or nothing when it did not say.
+
+    AN EMPTY LIST IS NOT "ACCEPTS NOTHING", and reading it that way would be the
+    same mistake `provider_context` avoids by refusing a 128k default: it is the
+    absence of a claim. Nothing is claimed, so nothing may be required of an
+    upstream on the strength of it.
+    """
+    if not model:
+        return []
+    for row in provider_models(name, doc):
+        if row.get("id") == model:
+            params = row.get("params")
+            return [str(p) for p in params] if isinstance(params, list) else []
+    return []
 
 
 def provider_view() -> dict:
