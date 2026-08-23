@@ -77,7 +77,7 @@
 |---|---|
 | **GPU** | NVIDIA. 32 GB for this operating point. 16 GB is the installer's floor, unmeasured |
 | **System RAM** | 32 GB |
-| **Disk** | ~2 GB for Crow, **16.35 GiB for the model** — one file |
+| **Disk** | ~2 GB for Crow, **16.35 GiB for the model**, one file |
 | **OS** | Windows x64 |
 | **Python** | 3.8+. Terminal client uses the standard library only |
 | **WebView2** | Window only. Ships with Windows 11 and with Edge |
@@ -199,7 +199,7 @@ Two files. Plain text, `§` on its own line between entries, editable by hand.
 
 | | |
 |---|---|
-| Limits come from | `MAX_TOOL_BYTES` — 16,000 B is ~4,000 tokens, so 4 chars buy 1 token |
+| Limits come from | `MAX_TOOL_BYTES`. 16,000 B is ~4,000 tokens, so 4 chars buy 1 token |
 | 4,000 chars is | a quarter of one tool read. Bigger than that and `read_file` is cheaper |
 | Head cost, both stores plus one skill | 633 chars = 158 tokens = **0.09 %** of the usable window |
 | Empty stores cost | nothing. No entries, no block, byte 0 unchanged |
@@ -218,7 +218,7 @@ Two files. Plain text, `§` on its own line between entries, editable by hand.
 
 The rendered block is written into the chat file on first open and replayed **verbatim** from then
 on. `prefix_fingerprint` hashes the system prompt, llama-server reuses a prompt by common token
-prefix, and the KV cache lives on disk — so a head re-read at every start would go stale against
+prefix, and the KV cache lives on disk, so a head re-read at every start would go stale against
 every saved cache. Binding a different folder re-pins and says what the prefill costs first.
 
 ### Who writes it
@@ -247,14 +247,14 @@ and it stays there until you answer.
 |---|---|
 | Collapsed | the title, lines **gained** in green and **lost** in red. A `replace` is one entry and both |
 | Click | opens every proposed entry in full, and the two answers |
-| `save to memory` | writes through the same `memory` tool the model uses — the cap, the duplicate check and the injection scan all still answer |
+| `save to memory` | writes through the same `memory` tool the model uses. The cap, the duplicate check and the injection scan all still answer |
 | `discard` | nothing is written |
 | No answer | the entries expire after 300 s and are dropped. **Nothing is ever written by a timer** |
 | New chat | the questions go with it |
 | Off | `--no-memory-approval`, and then the review writes unasked as it did before 1.0.0 |
 
 It keeps breathing while it waits, because a question is still true until it is answered. The line
-that reports a **finished** write glows once and settles — same colour, different grammar.
+that reports a **finished** write glows once and settles: same colour, different grammar.
 
 ---
 
@@ -266,7 +266,7 @@ Procedures the model keeps. Memory is what is **true**; a skill is what to **do*
 %LOCALAPPDATA%\Crow\skills\<name>\SKILL.md
 ---
 name: start-llama-server
-description: When Crow needs a local LLM (port 8082) — exact flags, the wait signal, the bind trap.
+description: When Crow needs a local LLM (port 8082). Exact flags, the wait signal, the bind trap.
 enabled: true
 ---
 1. …
@@ -279,7 +279,7 @@ enabled: true
 | List limit | 2,000 chars for the **whole list**, 200 per description |
 | Over the limit | the list says how many did not fit; it does not grow |
 | `enabled` | in the file's own frontmatter. Absent means on |
-| Written by | the same review at 0.20 / 0.50 / 0.75 — one pass decides both |
+| Written by | the same review at 0.20 / 0.50 / 0.75. One pass decides both |
 
 ### Creating one
 
@@ -348,7 +348,7 @@ The name comes out of the line: `filesystem`, `notekeeper`, `fetch`. A URL is na
 | Client capabilities | `elicitation` only. `sampling` gets `-32601` naming what is missing |
 | Invisible U+E0000–U+E007F | stripped from names, descriptions, schemas and results. Emoji flags survive |
 | `${VAR}` | in `command`, `args`, `cwd`, `env`, `url`, `headers`. Read from the environment when the server is used, never stored. An unset one refuses the server by name |
-| Credential redaction | on **errors** only — a server that quotes the request it refused would otherwise put the token in the prompt, the chat and the session file. A successful result is untouched |
+| Credential redaction | on **errors** only. A server that quotes the request it refused would otherwise put the token in the prompt, the chat and the session file. A successful result is untouched |
 | Timeouts | `connect_timeout` 20 s, `timeout` 60 s. Per block, `0` and below fall back to the default |
 
 ### stdio
@@ -359,24 +359,24 @@ The name comes out of the line: `filesystem`, `notekeeper`, `fetch`. A URL is na
 | Launcher | resolved through `PATH` + `PATHEXT` before it starts. `npx` is `npx.CMD` on Windows and `CreateProcess` does not look for it |
 | Environment | a fixed base set plus the block's `env`, never the whole shell |
 | stderr | drained, last 20 lines kept and printed with a failure |
-| stdout that is not a message | kept too, and named apart. A command that is not an MCP server — an installer, a wizard, a CLI printing usage — says so only there |
+| stdout that is not a message | kept too, and named apart. A command that is not an MCP server (an installer, a wizard, a CLI printing usage) says so only there |
 | Close | EOF on stdin, `kill` after 3 s, then reaped |
 
 ### Elicitation
 
 A server may ask the person a question in the middle of a tool call. What arrives is a **schema**,
-never a rendering — Crow draws the fields, so nothing on screen came off the wire.
+never a rendering. Crow draws the fields, so nothing on screen came off the wire.
 
 | | |
 |---|---|
 | Accepted | a flat object of `string`, `number`, `integer`, `boolean`. `enum` of strings. At most 12 fields |
-| Declined, with a reason | anything else — nested objects, arrays, `$ref`, a schema asking for nothing, and every mode this client does not draw |
+| Declined, with a reason | anything else: nested objects, arrays, `$ref`, a schema asking for nothing, and every mode this client does not draw |
 | Labels | `title`, `description` and `enum` go through the `U+E0000–U+E007F` filter and reach the page by `textContent` |
 | Answer | `accept` with values, `decline`, or `cancel`. Three buttons, because the specification separates a refusal from a dismissal |
 | Values | checked against the schema that was shown. Only declared fields travel; a `boolean` arrives as a boolean |
 | Timeout | 300 s, then `cancel` |
 | Off per server | `"elicitation": false` in the block. The capability is then not declared at all |
-| Where | in the chat, on the turn that caused it — the same place a tool approval lands |
+| Where | in the chat, on the turn that caused it, the same place a tool approval lands |
 
 ### Commands
 
@@ -414,7 +414,7 @@ Removing a server: `Help → Settings → MCPs`.
 | `schema` | what the server answered. Untrusted, per the specification |
 | `classes` | what you confirmed. This is the half a release level acts on |
 | `include` | positive list, and it wins over `exclude` |
-| Globs | both lists take `*`, `?`, `[…]`. An entry without one is an exact name — `docs` excludes the tool `docs`, never `docs_search` |
+| Globs | both lists take `*`, `?`, `[…]`. An entry without one is an exact name. `docs` excludes the tool `docs`, never `docs_search` |
 | `enabled: false` | skipped. No connection attempted |
 | `elicitation` | `false` stops this server asking, and stops the capability being declared |
 | `timeout` · `connect_timeout` | seconds. Defaults 60 and 20 |
@@ -458,9 +458,9 @@ a `command` does not.
 
 | | |
 |---|---|
-| Endpoint | one URL, `http` or `https`. `POST` only — no `GET` stream is opened |
+| Endpoint | one URL, `http` or `https`. `POST` only. No `GET` stream is opened |
 | Per message | one `POST`, `Content-Type: application/json` |
-| `Accept` | `application/json, text/event-stream` — both, on every request |
+| `Accept` | `application/json, text/event-stream`. Both, on every request |
 | Answer | a JSON object **or** an SSE stream (`event: message` / `data: {…}`). Both are normal; context7 answers `tools/list` as a stream |
 | SSE reader | own thread, stops at the first message carrying `result` or `error`. `:` comment lines and notifications ahead of the answer are skipped |
 | Notification · client response | `202`, empty body, nothing enqueued |
@@ -528,7 +528,7 @@ the `User-Agent` that decides, not the protocol.
 Driven end to end on 2026-08-22: static headers against `mcp.context7.com`, and the full OAuth leg
 against `mcp.higgsfield.ai`, whose `/oauth2/authorize` hands off to Clerk. Its token endpoint
 answers `"token_type": "bearer"` and its MCP endpoint refuses `bearer <token>` while accepting
-`Bearer <token>` — the scheme is sent capitalised for that reason.
+`Bearer <token>`. The scheme is sent capitalised for that reason.
 
 ### OAuth
 
@@ -541,16 +541,16 @@ so does re-fetching a configured server; `/mcp auth <server>` repeats it on its 
 | Authorization server | every entry in `authorization_servers`, in the order the document lists them. Metadata from `/.well-known/oauth-authorization-server` then `/.well-known/openid-configuration`, path-inserted first where the issuer has a path |
 | `issuer` | in the metadata document, compared against the URL it was fetched from. A mismatch is refused |
 | PKCE | `S256`, required. `code_challenge_methods_supported` without it, or absent, is refused |
-| Client | RFC 7591 dynamic registration, `token_endpoint_auth_method: none`. `client_id` + `client_secret` in the block are used instead where the server rejects registration — Google Drive answers `400`, GitHub Copilot advertises no endpoint at all |
+| Client | RFC 7591 dynamic registration, `token_endpoint_auth_method: none`. `client_id` + `client_secret` in the block are used instead where the server rejects registration. Google Drive answers `400`, GitHub Copilot advertises no endpoint at all |
 | `client_name` | `Crow`, overridable. Figma's endpoint allowlists registration by exact name and `403`s one it does not know |
-| Redirect | `http://127.0.0.1:<port>/callback`, listener bound to loopback only. `redirect_host: localhost` changes only the name — some authorization servers sit behind a WAF that `403`s a literal `127.0.0.1` |
+| Redirect | `http://127.0.0.1:<port>/callback`, listener bound to loopback only. `redirect_host: localhost` changes only the name. Some authorization servers sit behind a WAF that `403`s a literal `127.0.0.1` |
 | `state` | sent and compared. This is what binds the answer to the request |
-| `iss` | read, not enforced. It guards mix-up, which needs a client talking to several authorization servers in one flow; this one talks to exactly one and takes the token endpoint from metadata fetched before the browser opened. Enforcing it refuses every brokered login — Clerk, Auth0 and Okta all stamp their own domain |
+| `iss` | read, not enforced. It guards mix-up, which needs a client talking to several authorization servers in one flow; this one talks to exactly one and takes the token endpoint from metadata fetched before the browser opened. Enforcing it refuses every brokered login. Clerk, Auth0 and Okta all stamp their own domain |
 | Several `authorization_servers` | tried in the order the metadata lists them |
 | `resource` | RFC 8707. The `resource` the metadata names, checked against the endpoint's host first; the canonical URI of the endpoint where it names none. On the authorization request and the token request |
 | Transport | every endpoint must be `https`, or loopback. Anything else is refused before a token moves |
 | Tokens | `%LOCALAPPDATA%\Crow\mcp_tokens.json`, never in `mcp.json` and never in a view. `0600` where the platform means it. Dropped with the server |
-| Refresh | inside a tool call, silently, `60 s` before expiry and on a `401`. A browser never opens during a turn — the call fails naming `/mcp auth <server>` |
+| Refresh | inside a tool call, silently, `60 s` before expiry and on a `401`. A browser never opens during a turn. The call fails naming `/mcp auth <server>` |
 
 ### Not built
 
@@ -589,7 +589,7 @@ lands and on `ask again`. Nothing is asked of a provider while a window opens.
 
 ### Subscriptions
 
-`Settings → Subscriptions`, one tile per provider. PKCE, `state`, refresh — the flow `/mcp` uses.
+`Settings → Subscriptions`, one tile per provider. PKCE, `state`, refresh: the flow `/mcp` uses.
 A sign-in outranks a pasted key; `sign out` drops the login and leaves the key.
 
 Measured 2026-08-22, neither provider registers a client:
@@ -627,13 +627,13 @@ window at 7 %.
 | borrowed token | |
 |---|---|
 | Read | at the moment a request needs it |
-| Never | copied, written, refreshed — the refresh token belongs to the program that owns the file |
+| Never | copied, written, refreshed. The refresh token belongs to the program that owns the file |
 | Expired | reported; open that program once and it refreshes itself |
 | Grant | requests carry **that program's** grant, so nothing switches on by finding a file |
 | Order | Crow's own sign-in, then borrowed, then pasted key |
 
 **Not Codex.** `~/.codex/auth.json` holds a token; `GET https://api.openai.com/v1/models` answers it
-`403` — authenticated, resource refused. It belongs to the ChatGPT backend; the platform API wants
+`403`: authenticated, resource refused. It belongs to the ChatGPT backend; the platform API wants
 an `sk-...` key. Two providers, not one.
 
 ### Two dialects
@@ -643,7 +643,7 @@ an `sk-...` key. Two providers, not one.
 | `chat_completions` | `<base>/chat/completions` | the local server, OpenRouter, OpenAI |
 | `anthropic_messages` | `<base>/messages` | Anthropic, key **and** sign-in |
 
-The dialect belongs to the provider, not to the credential — measured 2026-08-23, a Codex token got
+The dialect belongs to the provider, not to the credential. Measured 2026-08-23, a Codex token got
 `403` from the OpenAI-shaped endpoint.
 
 What `anthropic_messages` translates, each mandatory:
@@ -688,7 +688,7 @@ to nobody else.
 
 | | |
 |---|---|
-| Value | sha256 of the chat's path, never the path — that path names a person and a directory layout |
+| Value | sha256 of the chat's path, never the path. That path names a person and a directory layout |
 | Length | 64 characters against a documented limit of 256 |
 | Unsaved chat | sends none; an empty string would make every unsaved chat one session |
 | Both senders | the visible turn and the background review carry the same key, or the review is a second session inside the first |
@@ -740,7 +740,7 @@ No price display. Whoever brings a key knows their costs.
 | **About** | version |
 
 Chat rail: right-click a chat to rename, move to a project, archive or delete; right-click the empty
-space for a new chat or a new project. A project **is** a working directory — a chat belongs to one
+space for a new chat or a new project. A project **is** a working directory. A chat belongs to one
 when its `crow_root` points there, and nothing else records it.
 
 ---
