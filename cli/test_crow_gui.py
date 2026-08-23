@@ -5066,6 +5066,156 @@ class TheRemoteEndpointTests(ApiCase):
         # and exactly what a person with a form does not.
         self.assertNotIn("s.ready?s.blurb:s.missing", page)
 
+    def test_both_senders_carry_the_same_sticky_key(self):
+        """THE SISTER CASE TO THE ONE BELOW, and it fails the same way: quietly.
+
+        OpenRouter is a broker, and `session_id` is what keeps consecutive
+        requests of one chat on one upstream -- "a sticky routing key to direct
+        all requests in the session to the same provider, maximizing prompt
+        cache hits", read at the source 2026-08-23. The review runs with nobody
+        at the keyboard and builds its own body, so a key that reached only the
+        visible turn would make the review a second session inside the first.
+        Hermes shipped precisely that and fixed it as their #70820.
+
+        The key is the ONLY thing that travels. `require_parameters` was here
+        for twenty minutes on 2026-08-23 and took the client down with a 404 --
+        see `TheStickyRoutingTests` in test_crow_core for the measurement."""
+        self.remote()
+        seen = {}
+
+        def fake_run(conversation, **kw):
+            seen["turn"] = kw.get("routing")
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost="", context_tokens=9,
+                                        promised_warm=False, rolled=False,
+                                        stopped=False, reported=True)
+
+        def fake_review(conversation, **kw):
+            seen["review"] = kw.get("routing")
+            return []
+
+        api = self.api()
+        api._args.session = os.path.join(self.dir, "chat-20260823-101120.json")
+        api._conversation.append("user", "hello")
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "review_turn", fake_review), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: 1.0):
+            api._run("hello")
+        self.assertEqual(seen["turn"],
+                         {"session_id": crow_core.sticky_key(api._args.session)})
+        self.assertEqual(seen["review"], seen["turn"])
+
+    def test_the_machine_is_sent_no_routing_by_either_sender(self):
+        """NEGATIVE, and it covers every turn taken before today. llama-server
+        has no upstream to pick between and no sticky routing to do; two fields
+        it would ignore are still two fields in front of byte 0."""
+        crow_core.provider_pick(crow_core.LOCAL_PROVIDER)
+        seen = {}
+
+        def fake_run(conversation, **kw):
+            seen["turn"] = kw.get("routing")
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost="", context_tokens=9,
+                                        promised_warm=False, rolled=False,
+                                        stopped=False, reported=True)
+
+        def fake_review(conversation, **kw):
+            seen["review"] = kw.get("routing")
+            return []
+
+        api = self.api()
+        api._args.session = os.path.join(self.dir, "chat-20260823-101120.json")
+        api._conversation.append("user", "hello")
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "review_turn", fake_review), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: 1.0):
+            api._run("hello")
+        self.assertEqual(seen["turn"], {})
+        self.assertEqual(seen["review"], {})
+
+    def test_both_senders_are_told_which_dialect_the_endpoint_speaks(self):
+        """Anthropic answers `POST /v1/messages` and nothing else; the OpenAI
+        shape is a different door at the same host. A transport that reached
+        only the visible turn would leave the background review posting an
+        OpenAI body to an endpoint that does not read one -- and that is the
+        request nobody is watching."""
+        crow_core.provider_key_set("anthropic", "not-a-real-anthropic-key-abcd")
+        doc = crow_core.provider_doc()
+        doc["catalog"] = {"anthropic": {"fetched": 1, "models": [
+            {"id": "claude-opus-5", "name": "Opus", "context": 1000000}]}}
+        crow_core.provider_write(doc)
+        crow_core.provider_pick("anthropic", "claude-opus-5")
+        seen = {}
+
+        def fake_run(conversation, **kw):
+            seen["turn"] = kw.get("transport")
+            seen["cap"] = kw.get("max_tokens")
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost="", context_tokens=9,
+                                        promised_warm=False, rolled=False,
+                                        stopped=False, reported=True)
+
+        def fake_review(conversation, **kw):
+            seen["review"] = kw.get("transport")
+            return []
+
+        api = self.api()
+        api._conversation.append("user", "hello")
+        with mock.patch.object(crow_gui, "run_turn", fake_run),              mock.patch.object(crow_core, "review_turn", fake_review),              mock.patch.object(crow_core, "review_due", lambda *a, **k: 1.0):
+            api._run("hello")
+        self.assertEqual(seen.get("turn"), crow_core.TRANSPORT_MESSAGES)
+        self.assertEqual(seen.get("review"), seen.get("turn"))
+        self.assertEqual(seen.get("cap"), crow_core.REMOTE_MAX_TOKENS)
+        # THE LOCAL SERVER IS THE NEGATIVE HALF: without it this would pass on a
+        # client that had started sending the Anthropic dialect everywhere.
+        crow_core.provider_pick(crow_core.LOCAL_PROVIDER)
+        api = self.api()
+        api._conversation.append("user", "hello")
+        with mock.patch.object(crow_gui, "run_turn", fake_run),              mock.patch.object(crow_core, "review_turn", fake_review),              mock.patch.object(crow_core, "review_due", lambda *a, **k: 1.0):
+            api._run("hello")
+        self.assertEqual(seen.get("turn"), crow_core.TRANSPORT_CHAT)
+        # AND NO CAP AT HOME, which is the half that keeps a long local answer
+        # from being cut by a rule written for somebody else's billing.
+        self.assertIsNone(seen.get("cap"))
+
+    def test_a_model_can_be_typed_when_no_catalogue_answers(self):
+        """The field is always there rather than appearing on failure: a control
+        that only exists after something went wrong is one nobody finds when it
+        matters, and the provider takes the slug the same way either way."""
+        page = crow_gui.PAGE
+        self.assertIn("model id, as the provider lists it", page)
+        self.assertIn("slug.value.trim()", page)
+        self.assertIn('use.textContent="Use"', page)
+
+    def test_the_tile_offers_the_documented_command(self):
+        """robin, 2026-08-23, from Hermes' own sign-in dialog: it prints
+        `claude setup-token` and waits. No client_id borrowed from a product
+        that never granted one -- which is why the browser leg is not what this
+        tile reaches for first."""
+        page = crow_gui.PAGE
+        self.assertIn("tokenForm(", page)
+        self.assertIn("if(s.command) this.tokenForm(s);", page)
+        self.assertIn("provider_token(", page)
+        self.assertTrue(callable(getattr(crow_gui.Api, "provider_token", None)))
+        self.assertIn("cmd.readOnly=true", page)
+
+    def test_saving_an_untouched_field_does_not_clear_a_stored_credential(self):
+        """robin, 2026-08-23, and it cost him his OpenRouter key. The stored
+        value is never read back into the field, so a BLANK box is the normal
+        state of a key that IS set -- and Save sent that blank on, which the
+        core reads as "clear it". Only the explicit control clears now.
+
+        THE PAGE IS WHERE THIS LIVES: the core is right to treat an empty string
+        as a clear, because something has to. What may not happen is a control
+        sending one nobody typed."""
+        page = crow_gui.PAGE
+        self.assertIn("clearKey(", page)
+        self.assertIn("`Remove` is what clears a stored key.", page)
+        self.assertIn("`sign out` is what clears one.", page)
+        # NEGATIVE: the old wiring blanked the box and called the SAVE path.
+        self.assertNotIn("box2.value=\"\"; this.saveKey(", page)
+        self.assertIn("gone.onclick=()=>this.clearKey(p.name);", page)
+
     def test_a_sign_in_does_not_run_mid_turn(self):
         """The credential it replaces is the one the running turn is
         authenticating with."""

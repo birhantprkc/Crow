@@ -2178,7 +2178,19 @@ const crow = {
         d.className="sdesc";
         const st=document.createElement("div");
         st.className="state";
-        if(s.signed_in){ d.textContent=s.blurb; st.textContent="signed in"; }
+        if(s.signed_in){
+          d.textContent=s.from_env?("Signed in through "+s.name.toUpperCase()
+            +"'s environment variable."):s.blurb;
+          st.textContent="signed in"; }
+        else if(s.command){
+          // THE DOCUMENTED WAY IN, and it is a command rather than a browser:
+          // `claude setup-token` mints a long-lived token FOR another program,
+          // which is what Crow is here. No client_id borrowed from a product
+          // that never granted one, and nothing refreshed that belongs to
+          // somebody else.
+          d.textContent="Run " + s.command + " in a terminal and paste what it "
+            + "prints. It is a token your subscription mints for other programs.";
+          st.textContent="paste a token"; }
         else if(s.borrowing){
           // THE STALE LINE IS A WARNING AND NOT A STATE. The token is sent
           // either way; what a provider does with it is the provider's answer,
@@ -2202,8 +2214,9 @@ const crow = {
         // four states the tile is in, the control does the thing that state is
         // one step away from.
         tile.onclick=()=>{
-          if(s.borrowing) return;
-          if(s.borrowable) this.borrowSub(s.name,true);
+          if(s.signed_in || s.borrowing) return;
+          if(s.command) this.tokenForm(s);
+          else if(s.borrowable) this.borrowSub(s.name,true);
           else if(s.ready) this.connectSub(s.name);
           else this.subForm(s); };
         box.appendChild(tile);
@@ -2222,6 +2235,49 @@ const crow = {
     pywebview.api.provider_borrow(name,on).then(said => {
       $("#subsaid").textContent=said||"";
       this.drawSubs(); this.drawProviders(); }); },
+
+  // WHAT `claude setup-token` PRINTS, pasted. The command is shown rather than
+  // run: it is the other product's, it wants a terminal of its own, and a
+  // client that ran it for somebody would be deciding on their behalf what to
+  // mint against their subscription.
+  tokenForm(s){
+    const old=$("#subform");
+    if(old && old.dataset.name===s.name){ old.remove(); return; }
+    if(old) old.remove();
+    const box=document.createElement("div");
+    box.id="subform"; box.className="sform"; box.dataset.name=s.name;
+    const hint=document.createElement("p");
+    hint.className="shint";
+    hint.textContent="Run this in a terminal, then paste what it prints:";
+    const cmd=document.createElement("input");
+    cmd.value=s.command; cmd.readOnly=true;
+    cmd.onclick=()=>cmd.select();
+    const field=document.createElement("input");
+    field.type="password"; field.placeholder=s.hint||"the token";
+    field.onkeydown=(e)=>{ if(e.key==="Enter") save(); };
+    const save=()=>{
+      // THE SAME TRAP, and the same answer: signing out is the side button, not
+      // an empty field somebody pressed Save on.
+      const value=field.value.trim();
+      if(!value){
+        $("#subsaid").textContent="nothing pasted. `sign out` is what clears one.";
+        return; }
+      pywebview.api.provider_token(s.name, value).then(said => {
+        field.value="";
+        $("#subsaid").textContent=said||"";
+        if(!said){ box.remove(); this.drawSubs(); this.drawProviders(); } }); };
+    const go=document.createElement("button");
+    go.textContent="Save"; go.onclick=save;
+    [hint, cmd, field, go].forEach(el => box.appendChild(el));
+    // THE BORROWED SESSION STAYS REACHABLE and stays second: it is built and
+    // tested, and it is the one that came back 429.
+    if(s.borrowable){
+      const other=document.createElement("button");
+      other.className="subout";
+      other.textContent="or use this machine's "+s.product+" sign-in";
+      other.onclick=()=>{ box.remove(); this.borrowSub(s.name,true); };
+      box.appendChild(other); }
+    $("#subs").after(box); },
 
   // THE FORM THAT REPLACES AN EDITOR. It is drawn on demand rather than always:
   // a provider that is set up has nothing to fill in, and three empty boxes
@@ -2347,11 +2403,25 @@ const crow = {
         : (row&&row.context ? row.context.toLocaleString("en-US")+" tokens declared"
                             : "no context declared — the bar stays off");
       box.appendChild(ctx); }
+    // TYPING A SLUG IS ALWAYS OPEN, and that is not a fallback -- it is what
+    // keeps the picker from depending on a list somebody else has to hand over.
+    // Measured 2026-08-23: Anthropic's /v1/models answered a borrowed sign-in
+    // with 401, and a Model page that can only offer what a catalogue returned
+    // is a page with no way forward the moment one refuses. Crow sends the slug
+    // as typed either way.
     const again=document.createElement("div"); again.className="keyrow";
+    const slug=document.createElement("input");
+    slug.placeholder=p.model||"model id, as the provider lists it";
+    slug.onkeydown=(e)=>{ if(e.key==="Enter"&&slug.value.trim())
+      this.pickModel(p.name,slug.value.trim()); };
+    const use=document.createElement("button");
+    use.textContent="Use"; use.onclick=()=>{ if(slug.value.trim())
+      this.pickModel(p.name,slug.value.trim()); };
     const b=document.createElement("button");
     b.textContent=p.models.length?"ask again":"ask for the list";
     b.onclick=()=>this.refreshProvider(p.name);
-    again.appendChild(b); box.appendChild(again); },
+    again.appendChild(slug); again.appendChild(use); again.appendChild(b);
+    box.appendChild(again); },
 
   drawKeys(view){
     const box=$("#keylist"); box.textContent="";
@@ -2373,19 +2443,33 @@ const crow = {
       if(p.has_key){
         const gone=document.createElement("button");
         gone.textContent="Remove";
-        gone.onclick=()=>{ box2.value=""; this.saveKey(p.name,box2); };
+        gone.onclick=()=>this.clearKey(p.name);
         wrap.appendChild(gone); }
       text.appendChild(wrap);
       box.appendChild(row); row.appendChild(text); }); },
 
+  // AN UNTOUCHED BOX IS NOT AN EMPTY ONE, and getting that wrong here cost
+  // robin his stored key on 2026-08-23: the stored value is never read back
+  // into the field, so a BLANK box is the normal state of a key that is set --
+  // and Save sent the blank on, which the core reads as "clear it". Only
+  // `Remove` clears now, and it says so.
   saveKey(name,box){
-    pywebview.api.provider_key(name,box.value).then(said => {
+    const value=box.value.trim();
+    if(!value){
+      $("#keysaid").textContent="nothing typed. `Remove` is what clears a stored key.";
+      return; }
+    pywebview.api.provider_key(name,value).then(said => {
       box.value="";
       $("#keysaid").textContent=said||"";
       // A KEY LANDING IS ALSO A CATALOGUE ARRIVING, and asking for it here is
       // the only moment a person expects to wait. The list is on disk after
       // this, so no later screen has to reach the network to open.
       if(!said) this.drawProviders(); }); },
+
+  clearKey(name){
+    pywebview.api.provider_key(name,"").then(said => {
+      $("#keysaid").textContent=said||"";
+      if(!said){ this.drawProviders(); this.drawSubs(); } }); },
 
   pickProvider(name){
     $("#provsaid").textContent="";
@@ -5976,6 +6060,22 @@ class Api:
             return "the sign-in does not change mid-turn"
         return crow_core.provider_borrow_set(name, bool(on)) or ""
 
+    def provider_token(self, name: str, token: str) -> str:
+        """What `claude setup-token` printed, kept. The problem, or "".
+
+        REFUSED MID-TURN like every other credential change.
+        """
+        if self._worker and self._worker.is_alive():
+            return "the sign-in does not change mid-turn"
+        problem = crow_core.provider_token_paste(name, token)
+        if problem:
+            return problem
+        if (token or "").strip():
+            # THE CATALOGUE IS ASKED FOR HERE, the one moment somebody expects
+            # to wait -- and a refusal from it is not a refusal of the token.
+            crow_core.provider_refresh(name)
+        return ""
+
     def provider_signout(self, name: str) -> str:
         """Drop one stored login. The problem, or "".
 
@@ -6186,6 +6286,11 @@ class Api:
         # provider is switched mid-turn, and the one that would be wrong is the
         # one nobody is watching.
         spot = self._endpoint()
+        # ONE BLOCK, READ BY BOTH SENDERS. Worked out once here rather than at
+        # each call, because the whole point of the sticky key is that the turn
+        # and the review that follows it carry the SAME one -- two expressions
+        # would be two chances to drift, and the review is the one nobody sees.
+        routing = crow_core.turn_routing(spot, self._args.session)
         if spot["remote"] and not spot["model"]:
             self.push({"k": "fail", "t": "%s has no model picked -- Settings, "
                                          "Model" % spot["label"]})
@@ -6196,6 +6301,13 @@ class Api:
                 self._conversation, base_url=spot["base_url"],
                 model=spot["model"], api_key=spot["api_key"],
                 extra_headers=spot.get("headers") or None,
+                transport=spot.get("transport") or crow_core.TRANSPORT_CHAT,
+                # A PROVIDER RESERVES AND PRICES THE MAXIMUM when the body names
+                # no cap -- measured 2026-08-23, `HTTP 402 ... you requested up
+                # to 65536 tokens, but can only afford 313`. The local server
+                # reserves nothing, so it is sent nothing.
+                max_tokens=crow_core.REMOTE_MAX_TOKENS if spot["remote"] else None,
+                routing=routing,
                 temperature=sampling["temperature"], top_p=sampling["top_p"],
                 min_p=sampling["min_p"], top_k=sampling.get("top_k"),
                 # #116: None sends nothing, which is the "never chosen" state.
@@ -6259,6 +6371,14 @@ class Api:
                 self._conversation, base_url=spot["base_url"],
                 model=spot["model"], api_key=spot["api_key"],
                 extra_headers=spot.get("headers") or None,
+                transport=spot.get("transport") or crow_core.TRANSPORT_CHAT,
+                # A PROVIDER RESERVES AND PRICES THE MAXIMUM when the body names
+                # no cap -- measured 2026-08-23, `HTTP 402 ... you requested up
+                # to 65536 tokens, but can only afford 313`. The local server
+                # reserves nothing, so it is sent nothing.
+                max_tokens=crow_core.REMOTE_MAX_TOKENS if spot["remote"] else None,
+                # THE SAME BLOCK THE TURN CARRIED, not a second one built here.
+                routing=routing,
                 temperature=sampling["temperature"], top_p=sampling["top_p"],
                 min_p=sampling["min_p"], top_k=sampling.get("top_k"),
                 reasoning_effort=self._reasoning,

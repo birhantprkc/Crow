@@ -2408,6 +2408,272 @@ class Conversation:
         return len(self._messages)
 
 
+# ------------------------------------------------------- the second transport
+
+# TWO DIALECTS, ONE LOOP. Everything above speaks OpenAI's `chat/completions`,
+# and that is the only shape `stream_reply` has ever parsed. Anthropic's own API
+# is a different one -- `POST /v1/messages`, a system prompt hoisted out of the
+# message list, tools carrying `input_schema`, a stream of typed content blocks
+# -- and Hermes' provider page names it as its own transport beside
+# `chat_completions` and `codex_responses`.
+#
+# WHY IT HAD TO EXIST AT ALL, measured 2026-08-23: a subscription token does not
+# reach the OpenAI-shaped layer. Codex's answered `GET api.openai.com/v1/models`
+# with 403 -- authenticated, then refused the resource. A borrowed Claude Code
+# sign-in is a credential for THIS transport, and no header turns one into the
+# other.
+#
+# THE SEAM IS THE WIRE, NOT THE LOOP. This file translates Anthropic's events
+# into the chunk shape `stream_reply` already reads, so the reasoning/content
+# state machine, the tool-call accumulator, the events and every case that pins
+# them stay exactly as they are. A second copy of that loop would be the
+# divergence #90 exists to prevent, one layer down.
+TRANSPORT_CHAT = "chat_completions"
+TRANSPORT_MESSAGES = "anthropic_messages"
+
+# WHAT ONE ANSWER MAY COST, and it is not the same question locally and away.
+# The Messages API REQUIRES it, and this is the value every Claude model accepts
+# -- the newer ones take 64k or 128k, the older ones cap at exactly this, and
+# which is which is per-model knowledge this client does not have.
+#
+# THE OPENAI-SHAPED PATH NEEDS IT TOO, AWAY FROM HOME, and leaving it off was a
+# defect measured on 2026-08-23: OpenRouter answered `HTTP 402 -- you requested
+# up to 65536 tokens, but can only afford 313`. With no cap in the body a
+# provider RESERVES the model's maximum output and prices the request against
+# it, so a small balance cannot buy even a one-line answer. llama-server bills
+# nobody and reserves nothing, which is why this never showed up at home.
+#
+# NOT SENT LOCALLY. A cap here would cut long answers the local server is happy
+# to finish, and no measurement asked for one.
+REMOTE_MAX_TOKENS = 8192
+ANTHROPIC_MAX_TOKENS = REMOTE_MAX_TOKENS
+
+# NOT SENT ON THIS TRANSPORT: temperature, top_p, top_k. They are REMOVED on the
+# current Claude models -- a request carrying them comes back 400 -- while the
+# local server needs all three. The sampling triple is llama-server's, the same
+# way the slot and the prefix cache are.
+_ANTHROPIC_DROPS = ("temperature", "top_p", "min_p", "top_k",
+                    "chat_template_kwargs", "timings_per_token", "stream_options")
+
+
+def anthropic_tools(tools: list) -> list:
+    """OpenAI's `function` wrapper off, `input_schema` on. Same tools."""
+    out = []
+    for tool in tools or []:
+        fn = tool.get("function") if isinstance(tool, dict) else None
+        if not isinstance(fn, dict) or not fn.get("name"):
+            continue
+        out.append({"name": fn["name"],
+                    "description": fn.get("description") or "",
+                    "input_schema": fn.get("parameters")
+                    or {"type": "object", "properties": {}}})
+    return out
+
+
+def anthropic_messages(payload: list) -> "tuple[str, list]":
+    """Crow's history in Anthropic's shape. Returns (system, messages).
+
+    THREE THINGS MOVE, and each of them is a rejection if it does not:
+
+      * the SYSTEM prompt is hoisted out of the list. That API takes one, at the
+        top level, and a `role: "system"` entry inside `messages` is refused.
+      * an assistant turn that called tools becomes CONTENT BLOCKS -- its text,
+        then one `tool_use` block per call, with `input` as an OBJECT. Crow
+        carries the arguments as the JSON string the wire gave it.
+      * RESULTS ARE BATCHED. Crow appends one `tool` message per call, which is
+        OpenAI's shape; here every result answering the same assistant turn has
+        to sit in ONE user message. Left unbatched, a turn with two parallel
+        calls is two user messages in a row and the second one answers a turn
+        that no longer looks unanswered.
+    """
+    system, out = "", []
+    pending: list = []
+
+    def flush() -> None:
+        if pending:
+            out.append({"role": "user", "content": list(pending)})
+            pending.clear()
+
+    for message in payload or []:
+        role = message.get("role")
+        content = message.get("content") or ""
+        if role == "system":
+            system = content
+            continue
+        if role == "tool":
+            pending.append({"type": "tool_result",
+                            "tool_use_id": message.get("tool_call_id") or "",
+                            "content": content or "(no output)"})
+            continue
+        flush()
+        if role == "assistant":
+            blocks = []
+            if content:
+                blocks.append({"type": "text", "text": content})
+            for call in message.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                try:
+                    arguments = json.loads(fn.get("arguments") or "{}")
+                except ValueError:
+                    # A CALL THAT DID NOT PARSE IS STILL A CALL THAT HAPPENED.
+                    # Dropping it would leave the result below answering
+                    # nothing, which is the broken prefix #88 already names.
+                    arguments = {}
+                if not isinstance(arguments, dict):
+                    arguments = {}
+                blocks.append({"type": "tool_use", "id": call.get("id") or "",
+                               "name": fn.get("name") or "", "input": arguments})
+            # AN EMPTY ASSISTANT TURN IS REFUSED by that API, and one can exist
+            # here: an interrupted reply that produced nothing.
+            if blocks:
+                out.append({"role": "assistant", "content": blocks})
+            continue
+        if content:
+            out.append({"role": "user", "content": content})
+    flush()
+    return system, out
+
+
+def anthropic_body(body: dict) -> dict:
+    """The same request, in the other dialect."""
+    system, messages = anthropic_messages(body.get("messages") or [])
+    out = {"model": body.get("model") or "",
+           "messages": messages,
+           "max_tokens": body.get("max_tokens") or ANTHROPIC_MAX_TOKENS}
+    if system:
+        out["system"] = system
+    tools = anthropic_tools(body.get("tools") or [])
+    if tools:
+        out["tools"] = tools
+    if body.get("stream"):
+        out["stream"] = True
+    return out
+
+
+def _anthropic_chunks(event: dict, state: dict) -> list:
+    """One Anthropic event in, zero or more OpenAI-shaped chunks out.
+
+    `state` carries what the wire splits across events: which content block
+    index is a tool call, and which slot that call occupies. The API sends the
+    tool's NAME and ID once, in `content_block_start`, and its arguments as
+    partial JSON afterwards -- so the name cannot be recovered from the deltas,
+    and the mapping has to be kept.
+    """
+    kind = event.get("type")
+    if kind == "content_block_start":
+        block = event.get("content_block") or {}
+        if block.get("type") in ("tool_use", "server_tool_use"):
+            slot = state["slots"]
+            state["tools"][event.get("index")] = slot
+            state["slots"] = slot + 1
+            return [{"choices": [{"delta": {"tool_calls": [
+                {"index": slot, "id": block.get("id") or "",
+                 "function": {"name": block.get("name") or "", "arguments": ""}}]}}]}]
+        return []
+    if kind == "content_block_delta":
+        delta = event.get("delta") or {}
+        what = delta.get("type")
+        if what == "text_delta":
+            return [{"choices": [{"delta": {"content": delta.get("text") or ""}}]}]
+        if what == "thinking_delta":
+            # THE SAME FIELD THE LOCAL SERVER USES, so `ReasoningBlocks` sees a
+            # thought here exactly as it does there and the window folds it the
+            # same way.
+            return [{"choices": [{"delta": {
+                "reasoning_content": delta.get("thinking") or ""}}]}]
+        if what == "input_json_delta":
+            slot = state["tools"].get(event.get("index"))
+            if slot is None:
+                return []
+            return [{"choices": [{"delta": {"tool_calls": [
+                {"index": slot,
+                 "function": {"arguments": delta.get("partial_json") or ""}}]}}]}]
+        # `signature_delta` carries the integrity signature of a thinking block.
+        # It is not text and it is not shown; dropping it is the whole handling.
+        return []
+    if kind == "message_start":
+        usage = ((event.get("message") or {}).get("usage")) or {}
+        state["input"] = int(usage.get("input_tokens") or 0)
+        return []
+    if kind == "message_delta":
+        # THE CONTEXT SIZE, ASSEMBLED. That API reports input and output
+        # separately and never their sum; the local server sends `total_tokens`
+        # on the last chunk and the whole context line is built from it.
+        out = int(((event.get("usage") or {}).get("output_tokens")) or 0)
+        stop = (event.get("delta") or {}).get("stop_reason")
+        chunk = {"choices": [{"delta": {}, "finish_reason":
+                              "tool_calls" if stop == "tool_use" else stop}]}
+        if state.get("input") or out:
+            chunk["usage"] = {"total_tokens": state.get("input", 0) + out}
+        return [chunk]
+    if kind == "error":
+        problem = (event.get("error") or {}).get("message") or "the stream failed"
+        raise CrowError("the model refused: %s"
+                        % strip_tag_characters(str(problem))[:300])
+    return []
+
+
+def _post_messages(url: str, body: dict, api_key: str, timeout: float,
+                   extra: "dict | None" = None):
+    """`/v1/messages` in, `chat/completions` chunks out.
+
+    IT WRAPS `_post_stream` RATHER THAN REPLACING IT. Every line that made that
+    function interruptible on Windows -- the reader thread, the poll, the
+    daemon that is left behind -- is the same work here, and a second socket
+    loop would be a second place for Ctrl+C to stop working.
+    """
+    state = {"tools": {}, "slots": 0, "input": 0}
+    for payload in _post_stream(url, body, api_key, timeout, extra):
+        try:
+            event = json.loads(payload)
+        except ValueError:
+            continue
+        for chunk in _anthropic_chunks(event, state):
+            yield json.dumps(chunk)
+
+
+def anthropic_calls(answer: dict) -> list:
+    """`tool_use` blocks out of a non-streamed reply, in OpenAI's call shape.
+
+    For the background review, which is the one path that does not stream.
+    """
+    calls = []
+    for block in (answer.get("content") or []):
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        calls.append({"id": block.get("id") or "", "type": "function",
+                      "function": {"name": block.get("name") or "",
+                                   "arguments": json.dumps(block.get("input") or {})}})
+    return calls
+
+
+def _stream_headers(api_key: str, extra: "dict | None" = None) -> dict:
+    """What goes on the wire, and WHO SAYS SO when two dialects disagree.
+
+    `Authorization: Bearer` is right for every OpenAI-shaped endpoint and for an
+    Anthropic OAuth token. It is NOT how an Anthropic API key travels -- that one
+    is `x-api-key` -- and a request carrying both is a request with two opinions
+    about who is asking. So a caller that has already named an auth header keeps
+    it, and this only fills in the default.
+    """
+    head = {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        # SINCE THIS PATH LEAVES THE MACHINE, and it did not before. A local
+        # server answers anything; a remote one decides on the signature before
+        # the protocol starts -- measured 2026-08-22, HTTP 403 error 1010 to
+        # `Python-urllib` and 200 to this line.
+        "User-Agent": crow_agent(),
+    }
+    if not any(k.lower() in ("authorization", "x-api-key") for k in (extra or {})):
+        head["Authorization"] = "Bearer %s" % api_key
+    # WHAT THE PROVIDER ASKED FOR, LAST, so a header this client considers part
+    # of the transport cannot be replaced by configuration. Same order the MCP
+    # transport settled on: identity, then the block, then the transport wins.
+    head.update(extra or {})
+    return head
+
+
 def _post_stream(url: str, body: dict, api_key: str, timeout: float,
                  extra: "dict | None" = None):
     """Yield decoded SSE data lines from an OpenAI-compatible endpoint.
@@ -2432,21 +2698,7 @@ def _post_stream(url: str, body: dict, api_key: str, timeout: float,
     req = urllib.request.Request(
         url,
         data=data,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-            "Accept": "text/event-stream",
-            # SINCE THIS PATH LEAVES THE MACHINE, and it did not before. A
-            # local server answers anything; a remote one decides on the
-            # signature before the protocol starts -- measured 2026-08-22, HTTP
-            # 403 error 1010 to `Python-urllib` and 200 to this line.
-            "User-Agent": crow_agent(),
-            # WHAT THE PROVIDER ASKED FOR, LAST, so a header this client
-            # considers part of the transport cannot be replaced by
-            # configuration. Same order the MCP transport settled on: identity,
-            # then the block, then the transport wins.
-            **(extra or {}),
-        },
+        headers=_stream_headers(api_key, extra),
         method="POST",
     )
     try:
@@ -2864,6 +3116,16 @@ def stream_reply(
     reasoning_effort: str | None = None,
     timeout: float,
     extra_headers: "dict | None" = None,
+    # WHICH DIALECT THE ENDPOINT SPEAKS, and it is a parameter rather than
+    # something this function works out: the provider registry knows, and a
+    # second place deciding it would be a second answer to where a turn goes.
+    transport: str = TRANSPORT_CHAT,
+    # None MEANS "DO NOT SEND ONE", which is the local case and every case up to
+    # today. See REMOTE_MAX_TOKENS for what leaving it off costs away from home.
+    max_tokens: "int | None" = None,
+    # WHAT THIS ENDPOINT ALONE UNDERSTANDS, from `turn_routing`. None is the
+    # local case and the case of every direct connection: nothing extra travels.
+    routing: "dict | None" = None,
     events: "ReplyEvents | None" = None,
 ) -> tuple[str, str, dict]:
     """Stream one assistant turn. Returns (text, reasoning, timings).
@@ -2934,6 +3196,8 @@ def stream_reply(
         # to the final chunk. Ignored by endpoints that do not know it.
         "timings_per_token": True,
     }
+    if max_tokens:
+        body["max_tokens"] = max_tokens
     if top_k is not None:
         # ABSENT BY DEFAULT, AND THAT IS NOT AN OVERSIGHT (#112). 0731 must keep
         # sending no top_k: it is the model under measurement, and adding a
@@ -2961,6 +3225,12 @@ def stream_reply(
         # effect is visible only in the rendered prompt, which is why E11's
         # counter-probe compares /apply-template output and not this body.
         body["chat_template_kwargs"] = {"reasoning_effort": reasoning_effort}
+    # EXTRA FIELDS THE ENDPOINT ITSELF ASKED FOR, and only on the dialect that
+    # knows them. `turn_routing` decides what they are; this is where they land.
+    # Empty for the machine and for every direct connection, which is every turn
+    # taken before today.
+    if routing and transport != TRANSPORT_MESSAGES:
+        body.update(routing)
 
     text_parts: list[str] = []
     # THE THOUGHT BLOCKS, and this used to be a flat list plus an `in_reasoning`
@@ -2998,10 +3268,19 @@ def stream_reply(
         # four parameters. Widening the call unconditionally breaks all of them,
         # including the ones outside this repository; widening it only when a
         # provider actually asked for a header leaves the old shape intact.
-        where = f"{base_url}/chat/completions"
-        stream = (_post_stream(where, body, api_key, timeout, extra_headers)
-                  if extra_headers else
-                  _post_stream(where, body, api_key, timeout))
+        if transport == TRANSPORT_MESSAGES:
+            # THE BODY IS TRANSLATED, THE LOOP IS NOT. `_post_messages` yields
+            # the same chunk shape this loop has always read, so the reasoning
+            # state machine, the tool-call accumulator and every case pinning
+            # them are untouched by a second endpoint existing.
+            stream = _post_messages(f"{base_url.rstrip('/')}/messages",
+                                    anthropic_body(body), api_key, timeout,
+                                    extra_headers)
+        else:
+            where = f"{base_url}/chat/completions"
+            stream = (_post_stream(where, body, api_key, timeout, extra_headers)
+                      if extra_headers else
+                      _post_stream(where, body, api_key, timeout))
         for payload in stream:
             try:
                 chunk = json.loads(payload)
@@ -8882,6 +9161,9 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                 top_k: int | None = None, reasoning_effort: str | None = None,
                 timeout: float = 180.0, gate: bool = False,
                 extra_headers: "dict | None" = None,
+                transport: str = TRANSPORT_CHAT,
+                max_tokens: "int | None" = None,
+                routing: "dict | None" = None,
                 events: "TurnEvents | None" = None) -> "list[str]":
     """Ask once whether this turn left anything worth keeping. Returns what was saved.
 
@@ -8911,23 +9193,39 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                                           "content": MEMORY_REVIEW_PROMPT}]
     body = {"model": model, "messages": messages, "tools": TOOLS, "stream": False,
             "temperature": temperature, "top_p": top_p, "min_p": min_p}
+    if max_tokens:
+        body["max_tokens"] = max_tokens
     if top_k is not None:
         body["top_k"] = top_k
     if reasoning_effort:
         body["chat_template_kwargs"] = {"reasoning_effort": reasoning_effort}
-    url = f"{base_url.rstrip('/')}/chat/completions"
+    # AND IT CARRIES THE SAME ROUTING KEY AS THE TURN IT FOLLOWS. Same chat, own
+    # body, nobody watching -- without this it is a second session inside the
+    # first, answered by whichever upstream happened to be cheapest that second.
+    # Hermes shipped exactly that gap and fixed it as their #70820.
+    if routing and transport != TRANSPORT_MESSAGES:
+        body.update(routing)
+    # THE UNASKED PASS SPEAKS THE SAME DIALECT AS THE TURN IT FOLLOWS. It builds
+    # its own body and its own headers -- that is what makes it the one easiest
+    # to forget -- so the translation happens here as well or this pass alone
+    # talks to an endpoint in a language it does not answer.
+    if transport == TRANSPORT_MESSAGES:
+        body = anthropic_body(body)
+        url = f"{base_url.rstrip('/')}/messages"
+    else:
+        url = f"{base_url.rstrip('/')}/chat/completions"
     try:
         request = urllib.request.Request(
             url, data=json.dumps(body).encode("utf-8"), method="POST",
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {api_key}",
-                     # The same reason as `_post_stream`: this one leaves the
-                     # machine too, and it leaves it without being asked.
-                     "User-Agent": crow_agent(),
-                     **(extra_headers or {})})
+            headers=dict(_stream_headers(api_key, extra_headers),
+                         # NOT AN EVENT STREAM. This pass asks once and reads
+                         # one object; `_stream_headers` owns everything else,
+                         # including which way the credential is spelled.
+                         **{"Accept": "application/json"}))
         with urllib.request.urlopen(request, timeout=timeout) as resp:
             answer = json.loads(resp.read().decode("utf-8") or "{}")
-        calls = (answer.get("choices") or [{}])[0].get("message", {}).get("tool_calls") or []
+        calls = (anthropic_calls(answer) if transport == TRANSPORT_MESSAGES else
+                 (answer.get("choices") or [{}])[0].get("message", {}).get("tool_calls") or [])
     except Exception:                       # noqa: BLE001 - see the docstring
         return []
     saved, staged = [], []
@@ -9154,8 +9452,12 @@ def run_turn(
     approve: "Callable[[str, str], str] | None" = None,
     # THE PROVIDER'S OWN HEADERS, threaded rather than resolved here: this
     # function does not know which endpoint it is talking to and must not start
-    # asking, or there would be a second answer to that question.
+    # asking, or there would be a second answer to that question. Same for the
+    # dialect and for the output cap.
     extra_headers: "dict | None" = None,
+    transport: str = TRANSPORT_CHAT,
+    max_tokens: "int | None" = None,
+    routing: "dict | None" = None,
     events: "TurnEvents | None" = None,
 ) -> TurnResult:
     """Run one USER turn to its end: however many tool rounds it takes.
@@ -9249,6 +9551,9 @@ def run_turn(
                 reasoning_effort=reasoning_effort,
                 timeout=timeout,
                 extra_headers=extra_headers,
+                transport=transport,
+                max_tokens=max_tokens,
+                routing=routing,
                 events=events.reply_events(),
             )
         except CrowError as exc:
@@ -9491,6 +9796,32 @@ PROVIDERS = {
         "key_hint": "sk-or-...",
         "catalog": "https://openrouter.ai/api/v1/models",
         "blurb": "One key, hundreds of models.",
+        # THE ONLY BROKER HERE: one slug is served by many upstream companies,
+        # and which one answers is otherwise decided per request by somebody
+        # else. This is where a field that steers that choice would go.
+        #
+        # IT IS EMPTY, AND `require_parameters` IS WHY IT STAYS EMPTY. Measured
+        # 2026-08-23 in the window, `nvidia/nemotron-3.5-lightning:free`, one
+        # variable changed against a turn that had answered minutes earlier:
+        #
+        #   HTTP 404 -- "No endpoints found that can handle the requested
+        #   parameters"
+        #
+        # The mechanism is documented and it is the whole point of the field:
+        # by default an upstream that does not know a parameter IGNORES it, and
+        # `require_parameters` turns that into an exclusion. Crow's body carries
+        # `timings_per_token` and `chat_template_kwargs`, which are llama.cpp
+        # extensions -- NOBODY outside llama.cpp supports them, so requiring
+        # full support excludes every upstream there is and the request never
+        # leaves OpenRouter.
+        #
+        # The field is not wrong; this body is not eligible for it. It becomes
+        # available the day a remote request stops carrying local-only fields,
+        # and not before. See the README.
+        "routing": {},
+        # It reads `session_id` as a sticky routing key, and that one costs
+        # nothing: it is metadata, not a constraint on who may answer.
+        "sticky": True,
     },
     # THE OPENAI-SHAPED LAYER, NOT THE NATIVE API. Read as raw text on
     # 2026-08-22: `https://api.anthropic.com/v1/` answers `chat/completions`,
@@ -9513,10 +9844,16 @@ PROVIDERS = {
         "key_hint": "sk-ant-...",
         "catalog": "https://api.anthropic.com/v1/models",
         "catalog_auth": "anthropic",
+        # ITS OWN DIALECT, AND FOR BOTH CREDENTIAL KINDS. The OpenAI-shaped
+        # layer at the same host takes an API key and is documented by Anthropic
+        # as a way to compare models rather than a way to run on them -- and a
+        # subscription token does not reach it at all. One transport for the
+        # provider is one answer; one per credential kind would be two.
+        "transport": TRANSPORT_MESSAGES,
         # `max_input_tokens` is where Anthropic reports the window; there is no
         # `context_length` field on that endpoint at all.
         "context_keys": ("max_input_tokens", "context_length"),
-        "blurb": "Claude, through the OpenAI-shaped layer.",
+        "blurb": "Claude, on its own Messages API.",
         "sub_blurb": "Sign in with your Claude subscription.",
         "oauth": {},
     },
@@ -9542,9 +9879,17 @@ PROVIDERS = {
 # NOT a second answer to "where did my context go" -- MODEL_SWITCH_NOTE is that
 # answer and is reused for the switch itself. This one says the part that has no
 # local equivalent at all.
-REMOTE_ENDPOINT_NOTE = ("a remote model has no slot and no prefix cache -- "
-                        "nothing here stays warm between turns, and every turn "
-                        "is a full prompt on your own key")
+#
+# IT SPEAKS ABOUT CROW AND NOT ABOUT THE PROVIDER, and the first version did
+# not. It said "no prefix cache", which is simply untrue of Anthropic -- prompt
+# caching is one of that API's headline features, with its own breakpoints and
+# its own `cache_read_input_tokens`. What is true is that CROW sets no
+# breakpoints, so nothing it sends is kept warm; the endpoint's own abilities
+# are not this line's to describe. It also said "on your own key", which stops
+# being true the moment a subscription is the credential.
+REMOTE_ENDPOINT_NOTE = ("a remote model has no slot here -- nothing is kept "
+                        "warm between turns, and every turn sends the whole "
+                        "prompt again")
 
 # The catalog call. It is not a turn -- nobody is watching tokens per second --
 # so it is seconds and not minutes.
@@ -9806,6 +10151,25 @@ def provider_active(doc: "dict | None" = None) -> str:
     return name if name in PROVIDERS else LOCAL_PROVIDER
 
 
+def provider_headers(name: str, kind: str, credential: str) -> dict:
+    """What this provider wants on top of the transport's own headers.
+
+    THE CREDENTIAL DECIDES THE SPELLING, not the provider. Anthropic takes an
+    API key as `x-api-key` and an OAuth token as `Authorization: Bearer` with a
+    beta flag beside it; the same endpoint, two ways of saying who is asking,
+    and sending both is a request with two opinions.
+    """
+    spec = PROVIDERS.get(name) or {}
+    head = {}
+    if spec.get("transport") == TRANSPORT_MESSAGES:
+        head["anthropic-version"] = ANTHROPIC_VERSION
+    if kind == "oauth":
+        head.update(PROVIDER_OAUTH_HEADERS.get(name) or {})
+    elif kind == "key" and spec.get("catalog_auth") == "anthropic" and credential:
+        head["x-api-key"] = credential
+    return head
+
+
 def provider_endpoint(fallback_base_url: str = "", fallback_model: str = "",
                       fallback_key: str = "") -> dict:
     """Where a turn goes, and it is the ONLY answer to that question.
@@ -9823,19 +10187,88 @@ def provider_endpoint(fallback_base_url: str = "", fallback_model: str = "",
     name = provider_active(doc)
     spec = PROVIDERS[name]
     model = provider_model_for(name, doc)
+    # THE CAP TRAVELS WITH THE ENDPOINT, because that is what decides whether
+    # one exists at all: a provider reserves and prices the maximum when the
+    # body names none, and the local server neither reserves nor bills.
     if name == LOCAL_PROVIDER:
         return {"provider": name, "label": spec["label"], "remote": False,
                 "base_url": fallback_base_url or spec["base_url"],
                 "model": model or fallback_model or DEFAULT_MODEL,
-                "api_key": fallback_key or "local-no-provider", "headers": {}}
+                "api_key": fallback_key or "local-no-provider", "headers": {},
+                "transport": TRANSPORT_CHAT,
+                "routing": {}, "sticky": False}
     credential, kind, _problem = provider_credential(name)
-    # THE HEADER TRAVELS WITH THE CREDENTIAL, not with the provider. The same
-    # endpoint takes a pasted key with nothing extra and an OAuth token only
-    # when the request says which kind it is carrying.
-    headers = dict(PROVIDER_OAUTH_HEADERS.get(name) or {}) if kind == "oauth" else {}
     return {"provider": name, "label": spec["label"], "remote": True,
             "base_url": spec["base_url"], "model": model,
-            "api_key": credential, "headers": headers}
+            "api_key": credential,
+            "headers": provider_headers(name, kind, credential),
+            "transport": spec.get("transport") or TRANSPORT_CHAT,
+            # BODY FIELDS ONLY THIS ENDPOINT UNDERSTANDS, and empty for every
+            # entry but the broker. It travels with the endpoint for the same
+            # reason the cap does: it is a fact about where the turn goes, and a
+            # second place deciding it would be a second answer.
+            "routing": _routing_copy(spec.get("routing") or {}),
+            "sticky": bool(spec.get("sticky"))}
+
+
+def _routing_copy(block: dict) -> dict:
+    """A fresh dict per turn, two levels deep.
+
+    `PROVIDERS` is module state. A caller that merged `session_id` into the
+    entry itself would leave it there for every later turn -- including the
+    ones belonging to a different chat, which is the exact fault the key exists
+    to prevent.
+    """
+    return {k: (dict(v) if isinstance(v, dict) else v) for k, v in block.items()}
+
+
+def sticky_key(session_path: "str | None") -> str:
+    """One chat, one routing key. Empty when there is no chat file.
+
+    OpenRouter's API reference, read 2026-08-23: `session_id` is used "as a
+    sticky routing key to direct all requests in the session to the same
+    provider, maximizing prompt cache hits", with a limit of 256 characters.
+    Without one, two turns of the same conversation may be answered by two
+    different upstream companies, and nothing either of them cached can hold.
+
+    IT IS A HASH AND NOT THE PATH, and that is the whole reason this is a
+    function. A chat path is `C:\\Users\\<a person>\\...` -- sending it would
+    hand a stranger's name and directory layout to a third party on every
+    request, to identify something only this client needs to tell apart. A
+    digest is stable, is 64 characters against a documented 256, and says
+    nothing about the machine it came from.
+
+    AN UNSAVED CHAT HAS NO IDENTITY, so it gets no key rather than a shared one:
+    an empty string is a value the endpoint would take literally, and every
+    unsaved chat would then be one session.
+    """
+    import hashlib
+    if not session_path:
+        return ""
+    settled = os.path.normcase(os.path.abspath(str(session_path)))
+    return hashlib.sha256(settled.encode("utf-8")).hexdigest()
+
+
+def turn_routing(spot: dict, session_path: "str | None" = "") -> dict:
+    """The extra body fields for one turn. BOTH SENDERS READ THIS ONE.
+
+    `stream_reply` is the visible sender; `review_turn` is the one that runs
+    without being asked. Hermes shipped this half-missing and fixed it as their
+    #70820: their auxiliary call sites passed no key, so each of them routed
+    away from the conversation it belonged to. The review is exactly that shape
+    here -- same chat, own body, nobody watching -- so it must carry the same
+    key or it is a second session inside the first.
+
+    Today the block is the key and nothing else. The static half exists and is
+    empty on purpose -- see the OpenRouter entry in `PROVIDERS` for the 404 that
+    emptied it.
+    """
+    block = _routing_copy(spot.get("routing") or {})
+    if spot.get("sticky"):
+        key = sticky_key(session_path)
+        if key:
+            block["session_id"] = key
+    return block
 
 
 def provider_context(name: str, model: str, doc: "dict | None" = None) -> int:
@@ -9921,6 +10354,54 @@ PROVIDER_OAUTH_WAIT = 300.0
 PROVIDER_NO_CLIENT = ("%s does not let a client register itself, so it needs a "
                       "client_id. Put one in providers.json under "
                       "oauth.%s.client_id")
+
+
+# THE SANCTIONED WAY IN, and it is neither a browser leg nor a borrowed session.
+# `claude setup-token` is documented as "generate a long-lived OAuth token for CI
+# and scripts. Prints the token to the terminal without saving it. Requires a
+# Claude subscription" -- a credential the subscriber mints FOR another program,
+# which is exactly what Crow is here. Claude Code itself stores it under the name
+# below when it wires up GitHub Actions, and Hermes' own sign-in dialog does the
+# same thing: it prints this command and waits.
+#
+# WHAT IT REPLACES: nothing had to be invented after all. No client_id borrowed
+# from another product, no refresh of somebody else's grant, no reading a session
+# store that was refused anyway -- measured 2026-08-23, a borrowed Claude Code
+# session token authenticated at `/v1/messages` and came back 429 with a body
+# that named no limit, while the account's own five-hour window stood at 7 %.
+PROVIDER_SETUP = {
+    "anthropic": {"command": "claude setup-token",
+                  "env": "CLAUDE_CODE_OAUTH_TOKEN",
+                  "hint": "sk-ant-oat..."},
+}
+
+
+def provider_setup_env(name: str) -> str:
+    """A subscription token handed over by the environment, or "".
+
+    THE SAME NAME CLAUDE CODE USES for it, so a machine that already exports one
+    for CI needs nothing typed here at all.
+    """
+    spec = PROVIDER_SETUP.get(name) or {}
+    return (os.environ.get(spec.get("env") or "") or "").strip()
+
+
+def provider_token_paste(name: str, token: str) -> "str | None":
+    """Keep a pasted subscription token. The problem, or None.
+
+    NO REFRESH TOKEN AND NO EXPIRY, because that is what "long-lived" means: it
+    is minted once and used until the person revokes it. Storing an expiry this
+    client invented would put a deadline on a credential that has none.
+    """
+    if name not in PROVIDER_SETUP:
+        return "%s has no setup command" % name
+    token = (token or "").strip()
+    doc = provider_tokens()
+    if not token:
+        doc.pop(name, None)
+        return provider_token_write(doc)
+    doc[name] = {"access_token": token, "source": "setup-token"}
+    return provider_token_write(doc)
 
 
 def provider_oauth_block(name: str, doc: "dict | None" = None) -> dict:
@@ -10222,9 +10703,15 @@ def provider_credential(name: str) -> "tuple[str, str, str | None]":
                 return "", "oauth", problem
             token = (provider_tokens().get(name) or {}).get("access_token") or ""
         return str(token), "oauth", None
-    # CROW'S OWN LOGIN FIRST, THEN A BORROWED ONE. A grant this client obtained
-    # itself is the one it may refresh and the one the provider sees as Crow;
-    # the borrowed store is what a machine has when nobody has done that yet.
+    # THEN THE ENVIRONMENT, under the name Claude Code gives it. A machine that
+    # already exports one for CI is a machine that has already answered this
+    # question, and asking again would be a second place for the same fact.
+    token = provider_setup_env(name)
+    if token:
+        return token, "oauth", None
+    # AND ONLY THEN A BORROWED SESSION. It is last among the OAuth sources
+    # because it is the one that was refused: measured 2026-08-23, 429 from
+    # `/v1/messages` with no limit named and the account's own window at 7 %.
     if provider_borrowing(name):
         token, problem = provider_borrowed(name)
         if problem:
@@ -10354,7 +10841,11 @@ def provider_subscriptions() -> list:
         # three either way would make the simpler case look like the harder one.
         wants = ["client_id"] if block.get("issuer") else ["client_id", "authorize", "token"]
         borrow = PROVIDER_BORROW.get(name) or {}
+        setup = PROVIDER_SETUP.get(name) or {}
         rows.append({"name": name, "label": spec["label"],
+                     "command": setup.get("command") or "",
+                     "hint": setup.get("hint") or "",
+                     "from_env": bool(provider_setup_env(name)),
                      "blurb": spec.get("sub_blurb") or spec["blurb"],
                      "signed_in": provider_signed_in(name),
                      "ready": bool(block.get("client_id")),
