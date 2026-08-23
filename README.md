@@ -1,7 +1,5 @@
 <div align="center">
-
-<img src="docs/images/crow-qwen.png" alt="Crow" width="640">
-
+  
 <h1>CROW</h1>
 
 <h3>Qwen3.8-27B at 200k context on one GPU.</h3>
