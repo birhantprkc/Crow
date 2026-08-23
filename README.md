@@ -10,7 +10,7 @@
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
-<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-1.0.1-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
+<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-1.1.0-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
 <a href="#requirements"><img src="https://img.shields.io/badge/platform-Windows%20x64%20%C2%B7%20CUDA-555555?style=flat-square&logo=nvidia&logoColor=76b900&labelColor=000000" alt="Platform"></a>
 <a href="cli/crow.py"><img src="https://img.shields.io/badge/client-Python%20stdlib%20only-555555?style=flat-square&logo=python&logoColor=ffd43b&labelColor=000000" alt="Python"></a>
 <a href="https://huggingface.co/unsloth/Qwen3.8-27B-GGUF"><img src="https://img.shields.io/badge/model-Qwen3.8--27B-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
@@ -693,7 +693,8 @@ to nobody else.
 | Unsaved chat | sends none; an empty string would make every unsaved chat one session |
 | Both senders | the visible turn and the background review carry the same key, or the review is a second session inside the first |
 
-**`provider.require_parameters` is not sent.** Measured 2026-08-23:
+**`provider.require_parameters` is sent per model, never per provider.** Sent for everyone once,
+measured 2026-08-23:
 
 ```
 HTTP 404 -- No endpoints found that can handle the requested parameters
@@ -701,13 +702,24 @@ HTTP 404 -- No endpoints found that can handle the requested parameters
 
 | | |
 |---|---|
-| Default | an upstream that does not know a parameter ignores it |
-| With the flag | ignoring becomes exclusion |
-| Crow's body | carries `timings_per_token` and `chat_template_kwargs`, llama.cpp extensions no remote upstream supports |
-| Result | every candidate excluded |
-| Available again | the day a remote body stops carrying local-only fields |
+| Default | an upstream that does not know a parameter ignores it, `tools` included, and answers anyway |
+| With the flag | ignoring becomes exclusion, so a model keeps the tools it was sent |
+| Then | the body carried `timings_per_token`, `chat_template_kwargs` and `min_p`. Every candidate excluded |
+| Now | those three stay at home, and the flag rides only where the catalogue says the model takes what is left |
+| No claim, no flag | a model the catalogue does not describe is asked for nothing |
 
-### No slot, no cache, no operating point
+| measured 2026-08-23, openrouter.ai, no key needed | |
+|---|---|
+| models | 422 |
+| accept `tools` | 337 |
+| accept `tools`, `temperature`, `top_p`, `max_tokens` | 250 |
+| accept those and `min_p` | 72 |
+
+The 87 that fall out are the current reasoning models, `claude-opus-5` and `claude-sonnet-5` among
+them, and what they are missing is `temperature` or `top_p`, which they refuse rather than lack.
+They are asked for no filter and stay usable.
+
+### No slot, no operating point
 
 `SLOT_FILE`, `prefix_fingerprint`, `/props` and every "pays a full prefill" line are llama-server's.
 Against a provider none of them exists, and the window says so once, where the endpoint is chosen:
@@ -719,6 +731,7 @@ Against a provider none of them exists, and the window says so once, where the e
 | KV save and restore | `/slots/0` | not attempted; the session file says `kv: false` |
 | `/health`, `/props` | asked | not asked |
 | reasoning levels | per `manifests/` | none offered |
+| prompt cache | llama-server's, held by `prefix_fingerprint` | the upstream's. Crow marks nothing for caching; `session_id` keeps the turns of one chat on the same one |
 
 No price display. Whoever brings a key knows their costs.
 
@@ -737,7 +750,7 @@ No price display. Whoever brings a key knows their costs.
 | **Model** | provider and model, two folds. Picking a provider empties the chat. See [Remote models](#remote-models) |
 | **Subscriptions** | one tile per provider that can log in. Click opens the browser; `sign out` drops the login |
 | **API Keys** | one key per provider. Stored in `provider_keys.json`, shown as a mask afterwards |
-| **About** | version |
+| **About** | version, the release check, and the button that installs it. A restart is needed afterwards |
 
 Chat rail: right-click a chat to rename, move to a project, archive or delete; right-click the empty
 space for a new chat or a new project. A project **is** a working directory. A chat belongs to one
@@ -830,6 +843,7 @@ Prefill is a function of block size, not a constant.
 | Composer | model and reasoning level as one chip, context readout, working directory, release level, dictation |
 | Cost line | rounds, tokens, decode, prefill, cache hits, tool calls, wall clock |
 | Thought blocks | folded, one per re-entry, each labelled with the turn's thinking share |
+| Answers | headings, lists, tables, bold, italic, inline code and links, drawn when the turn ends |
 | Rail | chats grouped by project, archive, fold state remembered |
 
 ---

@@ -3,6 +3,63 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 1.1.0 — 2026-08-23
+
+6 commits. Formatted answers, an update button, and a routing filter that is asked per model.
+
+### The core cuts the answer, the window draws it
+
+| | |
+|---|---|
+| In | headings, bullet and numbered lists, tables, paragraphs; bold, italic, inline code, links |
+| Out | nested lists, block quotes, reference links. They stay the characters they are, as all of it did |
+| Where | `crow_core.markdown_blocks`. The page builds elements out of `textContent` and no markup comes off the wire |
+| When | at the end of a run of prose, at a fence and at the end of the turn. Half of `**bold` is not bold yet |
+| Line breaks | a single newline inside a paragraph is still a line break, which is what this client always did |
+| Links | `http` and `https` only, checked in the core and again in the window, and opened outside it |
+| Emphasis | CommonMark 0.31.2's flanking rule, so `2 * 3 * 4` stays arithmetic |
+
+### Update from the About pane
+
+| | |
+|---|---|
+| Check | the latest release, asked when the pane opens |
+| Run | install.ps1 fetched to a file, started as `-File ... -NoPause` |
+| Not `iex` | it cannot take parameters, and without `-NoPause` the installer waits for ENTER behind a window that has no console |
+| Progress | the installer's own lines |
+| Failure | exit code and last line, and no promise of a restart |
+| Restart | required. Python keeps the modules it started with |
+| Current version | the button is offered anyway; install.ps1 answers "nothing to do" and exits before it downloads |
+
+### Local fields stay local
+
+| measured 2026-08-23, openrouter.ai, no key needed | |
+|---|---|
+| models | 422 |
+| accept `tools` | 337 |
+| accept `tools`, `temperature`, `top_p`, `max_tokens` | 250 |
+| accept those and `min_p` | 72 |
+
+| | |
+|---|---|
+| Dropped from a remote body | `min_p`, `timings_per_token`, `chat_template_kwargs` |
+| Kept at home | all three. `min_p` 0.01 is measured against llama-server, which is the only endpoint that acts on it |
+| `provider.require_parameters` | sent where the catalogue says the model takes everything the body holds, nowhere else |
+| Live | `nvidia/nemotron-3.5-lightning:free`, a turn with `web_search`, 2 rounds, 1 tool call, 2.5 s of tool time |
+
+### Also
+
+| | |
+|---|---|
+| Taskbar icon | the raven filled 66 % of the width of its canvas at every size, now 90 to 93 % |
+| `REMOTE_ENDPOINT_NOTE` | said "nothing is kept warm between turns", which `session_id` had made untrue |
+| README | 27 em dashes replaced by punctuation, and the routing section rewritten |
+
+| suite | |
+|---|---|
+| 1344 | `test_crow` 418, `test_crow_core` 566, `test_crow_gui` 360 |
+| checkers | `check_shared_core` 60/60, `check_operating_point` 6/6, `install.ps1 -Selftest` 85 |
+
 ## 1.0.1 — 2026-08-23
 
 15 commits. MCP servers, remote providers, and a gate in front of the only writer that runs unasked.
