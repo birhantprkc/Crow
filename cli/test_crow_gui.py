@@ -5702,14 +5702,24 @@ class TheVoiceLineTests(ApiCase):
         self.assertIn('box.classList.toggle("rec"', source,
                       "niemand setzt die Klasse, die den Platzhalter nimmt")
 
-    def test_the_composer_is_narrower_than_the_column(self):
-        """robin, 2026-08-23: die Maske um ein Viertel schmaler. 900 war die
-        Breite der Textspalte darueber; 675 ist dieselbe Zahl minus 25 %."""
+    def test_the_composer_stands_on_the_edge_of_its_own_column(self):
+        """DIE ZAHL IST EINMAL HIN UND WIEDER ZURUECK GEGANGEN, und der Fall
+        traegt beide Haelften, weil sonst der naechste Versuch dieselbe Runde
+        dreht. robin, 2026-08-23: erst "die Maske um 25 % schmaler" (900 ->
+        675), am selben Abend zurueck auf die Breite des Chats. Gesehen ist die
+        Maske, die unter ihrer eigenen Spalte steht, die ruhigere.
+
+        900 UND NICHT 960: `.turn` gibt von seinen 960 je 30 an das Polster ab,
+        der Text beginnt also bei 900 -- und genau darauf sitzt dieser Rahmen.
+        """
         source = self._source()
         box = source[source.index("#box{border:"):]
         box = box[:box.index("#box.focus")]
-        self.assertIn("max-width:675px", box)
-        self.assertNotIn("max-width:900px", box)
+        self.assertIn("max-width:900px", box)
+        self.assertNotIn("max-width:675px", box)
+        column = source[source.index(".turn{padding:"):]
+        self.assertIn("max-width:960px", column[:column.index("}")],
+                      "die Spalte hat sich bewegt, die Maske folgt ihr nicht mehr")
 
     def test_the_bars_are_mirrored_and_thin(self):
         """robins zweite Vorgabe: nach oben UND unten, und nicht so breit.

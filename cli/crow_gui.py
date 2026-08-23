@@ -1297,13 +1297,14 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 #box{border:1px solid var(--bevel);border-radius:8px;background:var(--panel);
   padding:9px 11px 8px;box-shadow:0 0 0 3px rgba(126,176,248,.06);
   transition:border-color .15s ease,box-shadow .15s ease;
-  /* 675, UND DAS IST EIN VIERTEL WENIGER ALS 900 (robin, 2026-08-23). 900 war
-     die Breite der Textspalte darueber -- .turn gibt von seinen 960 je 30 an
-     das Polster ab -- und die Maske stand genau auf deren Kante. Sie steht
-     jetzt schmaler und mittig darunter, was der ausdrueckliche Wunsch ist:
-     eine Eingabezeile, die so breit ist wie ein Absatz, liest sich als zweite
-     Spalte statt als Eingabe. */
-  max-width:675px;margin-inline:auto}
+  /* 900, not 960: .turn spends 30px of its 960 on padding either side, so its
+     text starts at 900 wide. Matching that here puts this box's border on the
+     same edge as the text above it.
+     ES WAR EINEN ABEND LANG 675 (robin, 2026-08-23), also ein Viertel schmaler,
+     und robin hat es am selben Abend zurueckgenommen: gesehen ist die Maske,
+     die unter ihrer eigenen Spalte steht, die ruhigere. Die Zahl steht hier
+     mit ihrer Geschichte, damit sie niemand ein zweites Mal probiert. */
+  max-width:900px;margin-inline:auto}
 /* KEIN PLATZHALTER, WAEHREND GESPROCHEN WIRD. Das Band liegt ueber der Zeile,
    also stuenden sonst beide uebereinander und die ruhenden Punkte laesen sich
    als Zeichen im Satz -- genau so sah es am 2026-08-23 bei robin aus. */
