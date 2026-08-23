@@ -87,6 +87,31 @@ crow_core.PROVIDER_KEYS_FILE = os.path.join(tempfile.gettempdir(),
 crow_core.PROVIDER_TOKEN_FILE = os.path.join(tempfile.gettempdir(),
                                              "crow-suite-has-no-provider", "tokens.json")
 
+# DIE TOKEN-DATEI DES MCP-TEILS, aus demselben Grund und bis zum 2026-08-23
+# vergessen: sie liegt neben den anderen unter %LOCALAPPDATA%\\Crow und wird
+# vom laufenden Client gelesen.
+crow_core.MCP_TOKEN_FILE = os.path.join(tempfile.gettempdir(),
+                                        "crow-suite-has-no-mcp", "mcp_tokens.json")
+
+# UND DER REST DES VERZEICHNISSES, gefunden am 2026-08-23 vom Waechter weiter
+# unten, nachdem zwei Faelle in robins laufende Installation geschrieben hatten.
+# Die vier oben sahen aus wie die Loesung; tatsaechlich stand die Suite mit acht
+# weiteren Konstanten weiterhin auf seinen echten Sessions, seinen Roots, seinen
+# Skills, seiner USER.md und seinem Suchindex. Ein Fall, der eine davon
+# schreibt, aendert, was der laufende Client danach liest.
+#
+# EIN PFAD, DESSEN ELTERN NICHT EXISTIEREN, wie bei den vier oben: der Leser
+# behandelt "keine Datei" als leeren Zustand, und das ist der Zustand, gegen den
+# diese Suite gedacht ist. Faelle, die Inhalt WOLLEN, biegen selbst um und legen
+# ihn an.
+_NOWHERE = os.path.join(tempfile.gettempdir(), "crow-suite-has-no-install")
+crow_core.INDEX_PATH = os.path.join(_NOWHERE, "index.db")
+crow_core.ROOTS_FILE = os.path.join(_NOWHERE, "roots.json")
+crow_core.SESSION_DIR = os.path.join(_NOWHERE, "session")
+crow_core.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
+crow_core.SKILLS_DIR = os.path.join(_NOWHERE, "skills")
+crow_core.USER_PATH = os.path.join(_NOWHERE, "USER.md")
+
 # THE PALETTE IS PINNED FOR THIS WHOLE MODULE (#102). `crow_core._TTY` is decided
 # ONCE, at import, out of `sys.stdout.isatty()`, and the colour constants are
 # materialised from it on the spot -- so this file answered differently in a

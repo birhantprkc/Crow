@@ -84,6 +84,38 @@ crow_core.PROVIDER_KEYS_FILE = os.path.join(tempfile.gettempdir(),
                                             "crow-suite-has-no-provider", "keys.json")
 crow_core.PROVIDER_TOKEN_FILE = os.path.join(tempfile.gettempdir(),
                                              "crow-suite-has-no-provider", "tokens.json")
+
+# UND DIE BEIDEN, DIE HIER BIS ZUM 2026-08-23 GEFEHLT HABEN. Ein Fall schrieb
+# einen erfundenen API-Schluessel in robins ECHTE `mcp_tokens.json`, ein
+# zweiter eine `rail_width` in seine echte `settings.json` -- beides Dateien,
+# die der laufende Client liest, und die erste kostete eine Stunde Fehlersuche
+# an der falschen Stelle. `TheSuiteTouchesNoRealConfigurationTests` weiter
+# unten sucht ab jetzt nach dem naechsten Pfad, den jemand hier vergisst.
+crow_core.MCP_TOKEN_FILE = os.path.join(tempfile.gettempdir(),
+                                        "crow-suite-has-no-mcp", "mcp_tokens.json")
+
+# UND DER REST DES VERZEICHNISSES, gefunden am 2026-08-23 vom Waechter weiter
+# unten, nachdem zwei Faelle in robins laufende Installation geschrieben hatten.
+# Die vier oben sahen aus wie die Loesung; tatsaechlich stand die Suite mit acht
+# weiteren Konstanten weiterhin auf seinen echten Sessions, seinen Roots, seinen
+# Skills, seiner USER.md und seinem Suchindex. Ein Fall, der eine davon
+# schreibt, aendert, was der laufende Client danach liest.
+#
+# EIN PFAD, DESSEN ELTERN NICHT EXISTIEREN, wie bei den vier oben: der Leser
+# behandelt "keine Datei" als leeren Zustand, und das ist der Zustand, gegen den
+# diese Suite gedacht ist. Faelle, die Inhalt WOLLEN, biegen selbst um und legen
+# ihn an.
+_NOWHERE = os.path.join(tempfile.gettempdir(), "crow-suite-has-no-install")
+crow_core.INDEX_PATH = os.path.join(_NOWHERE, "index.db")
+crow_core.ROOTS_FILE = os.path.join(_NOWHERE, "roots.json")
+crow_core.SESSION_DIR = os.path.join(_NOWHERE, "session")
+crow_core.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
+crow_core.SKILLS_DIR = os.path.join(_NOWHERE, "skills")
+crow_core.USER_PATH = os.path.join(_NOWHERE, "USER.md")
+crow_gui.PASTE_DIR = os.path.join(_NOWHERE, "pastes")
+crow_gui.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
+crow_gui.SETTINGS_FILE = os.path.join(tempfile.gettempdir(),
+                                      "crow-suite-has-no-settings", "settings.json")
 import crow_voice      # noqa: E402
 
 
@@ -5813,6 +5845,49 @@ class TheRailIsDraggableTests(ApiCase):
         rule = rule[:rule.index("}")]
         self.assertIn("padding-inline", rule)
         self.assertIn("scrollbar-gutter:stable", rule)
+
+
+
+class TheSuiteTouchesNoRealConfigurationTests(unittest.TestCase):
+    """robin, 2026-08-23, nach einer Stunde Fehlersuche: ein Fall dieser Datei
+    hat einen erfundenen API-Schluessel in seine ECHTE `mcp_tokens.json`
+    geschrieben, und ein zweiter eine `rail_width` in seine echte
+    `settings.json`. Beides sind Dateien, die der laufende Client liest.
+
+    DER KOPF DIESER DATEI BOG SCHON VIER PFADE UM -- `MCP_FILE`,
+    `PROVIDERS_FILE`, `PROVIDER_KEYS_FILE`, `PROVIDER_TOKEN_FILE` -- und genau
+    das ist die Falle: es SAH aus wie geloest. Wer den fuenften Pfad hinzufuegt,
+    denkt nicht daran, ihn hier einzutragen, und nichts sagt es ihm.
+
+    ALSO ZAEHLT DIESER FALL NICHT DIE BEKANNTEN, SONDERN SUCHT DIE UNBEKANNTEN:
+    er geht jede Konstante beider Module durch, die auf einen Pfad zeigt, und
+    verlangt, dass keine davon in das echte Crow-Verzeichnis fuehrt. Ein neuer
+    Speicherort geht damit rot, bevor er zum ersten Mal schreibt.
+    """
+
+    def _real_root(self) -> str:
+        base = os.environ.get("LOCALAPPDATA") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Local")
+        return os.path.normcase(os.path.abspath(os.path.join(base, "Crow")))
+
+    def test_no_path_constant_points_into_the_real_crow_directory(self):
+        root = self._real_root()
+        offenders = []
+        for module in (crow_core, crow_gui):
+            for name in dir(module):
+                if not name.isupper():
+                    continue
+                value = getattr(module, name)
+                if not isinstance(value, str) or not value:
+                    continue
+                if os.sep not in value and "/" not in value:
+                    continue
+                here = os.path.normcase(os.path.abspath(value))
+                if here == root or here.startswith(root + os.sep):
+                    offenders.append("%s.%s -> %s" % (module.__name__, name, value))
+        self.assertEqual(offenders, [],
+                         "diese Konstanten zeigen auf die echte Konfiguration:\n  "
+                         + "\n  ".join(offenders))
 
 
 if __name__ == "__main__":
