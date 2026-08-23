@@ -6307,6 +6307,9 @@ class Api:
                 # to 65536 tokens, but can only afford 313`. The local server
                 # reserves nothing, so it is sent nothing.
                 max_tokens=crow_core.REMOTE_MAX_TOKENS if spot["remote"] else None,
+                # THE SAME ANSWER THE CAP IS READ FROM, so the two can never
+                # disagree about which endpoint this turn is going to.
+                remote=spot["remote"],
                 routing=routing,
                 temperature=sampling["temperature"], top_p=sampling["top_p"],
                 min_p=sampling["min_p"], top_k=sampling.get("top_k"),
@@ -6377,6 +6380,7 @@ class Api:
                 # to 65536 tokens, but can only afford 313`. The local server
                 # reserves nothing, so it is sent nothing.
                 max_tokens=crow_core.REMOTE_MAX_TOKENS if spot["remote"] else None,
+                remote=spot["remote"],
                 # THE SAME BLOCK THE TURN CARRIED, not a second one built here.
                 routing=routing,
                 temperature=sampling["temperature"], top_p=sampling["top_p"],

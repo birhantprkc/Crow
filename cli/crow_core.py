@@ -2455,6 +2455,36 @@ ANTHROPIC_MAX_TOKENS = REMOTE_MAX_TOKENS
 _ANTHROPIC_DROPS = ("temperature", "top_p", "min_p", "top_k",
                     "chat_template_kwargs", "timings_per_token", "stream_options")
 
+# NOT SENT AWAY FROM HOME, and the list is SHORTER than the one above: a remote
+# OpenAI-shaped endpoint takes the sampling pair that Anthropic refuses. What
+# goes is only what llama-server alone can act on. `timings_per_token` and
+# `chat_template_kwargs` are its extensions, and `min_p` is a sampler measured
+# against it.
+#
+# MEASURED 2026-08-23 at openrouter.ai, no key needed: 422 models, 337 accept
+# `tools`, and 72 accept `tools` and `min_p` together. The slug that answered
+# `HTTP 404 -- no endpoints found` the moment `require_parameters` was set,
+# `nvidia/nemotron-3.5-lightning:free`, has ONE endpoint, and it lists `tools`,
+# `temperature`, `top_p` and `max_tokens` while `min_p` is absent. So the two
+# llama.cpp fields were never the whole reason: dropping them alone would have
+# left that 404 exactly where it was. A field 265 of 337 tool-capable models do
+# not implement buys nothing out there and costs everything the day anybody
+# asks for completeness.
+_REMOTE_DROPS = ("min_p", "timings_per_token", "chat_template_kwargs")
+
+
+def remote_body(body: dict) -> dict:
+    """The same request with llama-server's own fields taken back out.
+
+    IN PLACE, UNLIKE `anthropic_body`, and the difference is the job: that one
+    translates into a second dialect and builds a new object, this one only
+    takes away. The body the caller is about to send is the thing that must not
+    carry these fields.
+    """
+    for field in _REMOTE_DROPS:
+        body.pop(field, None)
+    return body
+
 
 def anthropic_tools(tools: list) -> list:
     """OpenAI's `function` wrapper off, `input_schema` on. Same tools."""
@@ -3123,6 +3153,11 @@ def stream_reply(
     # None MEANS "DO NOT SEND ONE", which is the local case and every case up to
     # today. See REMOTE_MAX_TOKENS for what leaving it off costs away from home.
     max_tokens: "int | None" = None,
+    # TRUE FOR EVERY ENDPOINT THAT IS NOT THIS MACHINE, and a parameter for the
+    # same reason `transport` is: the provider registry knows, and a second
+    # place working it out would be a second answer. It CANNOT be read off
+    # `transport` -- a broker speaks the same OpenAI shape llama-server does.
+    remote: bool = False,
     # WHAT THIS ENDPOINT ALONE UNDERSTANDS, from `turn_routing`. None is the
     # local case and the case of every direct connection: nothing extra travels.
     routing: "dict | None" = None,
@@ -3231,6 +3266,10 @@ def stream_reply(
     # taken before today.
     if routing and transport != TRANSPORT_MESSAGES:
         body.update(routing)
+    # THE LAST THING THAT HAPPENS TO THE BODY. Put here rather than beside each
+    # field so a field added above cannot travel by being forgotten.
+    if remote:
+        remote_body(body)
 
     text_parts: list[str] = []
     # THE THOUGHT BLOCKS, and this used to be a flat list plus an `in_reasoning`
@@ -9163,6 +9202,7 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                 extra_headers: "dict | None" = None,
                 transport: str = TRANSPORT_CHAT,
                 max_tokens: "int | None" = None,
+                remote: bool = False,
                 routing: "dict | None" = None,
                 events: "TurnEvents | None" = None) -> "list[str]":
     """Ask once whether this turn left anything worth keeping. Returns what was saved.
@@ -9205,6 +9245,10 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
     # Hermes shipped exactly that gap and fixed it as their #70820.
     if routing and transport != TRANSPORT_MESSAGES:
         body.update(routing)
+    # THE SAME GATE THE TURN PASSES. This body is built here and not there, so
+    # a fix applied once would leave this the only request still carrying them.
+    if remote:
+        remote_body(body)
     # THE UNASKED PASS SPEAKS THE SAME DIALECT AS THE TURN IT FOLLOWS. It builds
     # its own body and its own headers -- that is what makes it the one easiest
     # to forget -- so the translation happens here as well or this pass alone
@@ -9457,6 +9501,7 @@ def run_turn(
     extra_headers: "dict | None" = None,
     transport: str = TRANSPORT_CHAT,
     max_tokens: "int | None" = None,
+    remote: bool = False,
     routing: "dict | None" = None,
     events: "TurnEvents | None" = None,
 ) -> TurnResult:
@@ -9553,6 +9598,7 @@ def run_turn(
                 extra_headers=extra_headers,
                 transport=transport,
                 max_tokens=max_tokens,
+                remote=remote,
                 routing=routing,
                 events=events.reply_events(),
             )

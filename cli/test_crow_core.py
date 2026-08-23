@@ -7793,5 +7793,115 @@ class TheStickyRoutingTests(unittest.TestCase):
         return seen
 
 
+
+class TheLocalOnlyFieldsStayHomeTests(unittest.TestCase):
+    """llama.cpp's own fields do not travel, and neither does a sampler almost
+    nobody out there implements.
+
+    MEASURED 2026-08-23 against openrouter.ai, no key needed: of 422 models 337
+    accept `tools`, and only 72 accept `tools` and `min_p` together. The slug
+    that 404'd, `nvidia/nemotron-3.5-lightning:free`, has ONE endpoint, and it
+    lists `tools`, `temperature`, `top_p` and `max_tokens` while `min_p` is
+    absent. So the two llama.cpp fields were not the whole reason for that 404:
+    with `require_parameters` set, `min_p` alone excludes that endpoint, and
+    taking only the llama.cpp fields out would have changed nothing.
+
+    `min_p` 0.01 IS A MEASURED VALUE AND STAYS ONE, at home. It was measured
+    against llama-server, the only endpoint here that acts on it. Away from home
+    it is a field 265 of 337 tool-capable models do not implement: it buys
+    nothing there and costs every upstream that takes a strictness flag
+    seriously.
+    """
+
+    def _conversation(self):
+        conversation = crow_core.Conversation("be brief")
+        conversation.append("user", "hello")
+        conversation.append("assistant", "hi")
+        return conversation
+
+    def _turn_body(self, **kw) -> dict:
+        """Run one turn against a captured sender and hand back its body."""
+        sent = {}
+
+        def fake(url, body, api_key, timeout, extra=None):
+            sent.update(body)
+            return iter(())
+
+        real, crow_core._post_stream = crow_core._post_stream, fake
+        self.addCleanup(lambda: setattr(crow_core, "_post_stream", real))
+        crow_core.stream_reply(self._conversation(),
+                               base_url="http://127.0.0.1:1/v1", model="m",
+                               api_key="k", temperature=1.0, top_p=0.95,
+                               min_p=0.01, timeout=1, reasoning_effort="high",
+                               **kw)
+        return sent
+
+    def _review_body(self, **kw) -> dict:
+        """The same for the pass that runs unasked."""
+        seen = {}
+        payload = json.dumps({"choices": [{"message": {"tool_calls": []}}],
+                              "content": []}).encode("utf-8")
+
+        class _Resp:
+            def read(self_inner):
+                return payload
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+        def fake(request, *a, **k):
+            seen.update(json.loads(request.data.decode("utf-8")))
+            return _Resp()
+
+        real = crow_core.urllib.request.urlopen
+        crow_core.urllib.request.urlopen = fake
+        self.addCleanup(setattr, crow_core.urllib.request, "urlopen", real)
+        crow_core.review_turn(self._conversation(),
+                              base_url="http://127.0.0.1:1/v1", model="m",
+                              api_key="k", temperature=1.0, top_p=0.95,
+                              min_p=0.01, timeout=1, reasoning_effort="high",
+                              **kw)
+        return seen
+
+    def test_a_remote_body_carries_none_of_the_three(self):
+        """POSITIVE. What is left is what a stranger can actually answer."""
+        sent = self._turn_body(remote=True)
+        for local_only in ("min_p", "timings_per_token", "chat_template_kwargs"):
+            self.assertNotIn(local_only, sent)
+        self.assertIn("tools", sent)
+        self.assertEqual(sent["temperature"], 1.0)
+        self.assertEqual(sent["top_p"], 0.95)
+
+    def test_the_local_body_still_carries_all_three(self):
+        """NEGATIVE, and it is the half that matters most: llama-server acts on
+        every one of them, and 0.82 percent of decode has been measured against
+        settings this body carries. A fix that reached home would be a
+        regression nobody would see until the next measurement."""
+        sent = self._turn_body()
+        self.assertEqual(sent["min_p"], 0.01)
+        self.assertTrue(sent["timings_per_token"])
+        self.assertEqual(sent["chat_template_kwargs"],
+                         {"reasoning_effort": "high"})
+
+    def test_the_unasked_pass_drops_them_too(self):
+        """POSITIVE for the sender nobody watches. `review_turn` builds its own
+        body, so a fix applied to the turn alone would leave the background pass
+        as the one request that still carries local-only fields."""
+        sent = self._review_body(remote=True)
+        for local_only in ("min_p", "chat_template_kwargs"):
+            self.assertNotIn(local_only, sent)
+        self.assertIn("tools", sent)
+
+    def test_the_local_review_keeps_them(self):
+        """NEGATIVE for the same sender."""
+        sent = self._review_body()
+        self.assertEqual(sent["min_p"], 0.01)
+        self.assertEqual(sent["chat_template_kwargs"],
+                         {"reasoning_effort": "high"})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
