@@ -50,6 +50,7 @@ import queue
 import re
 import sys
 import struct
+import subprocess
 import threading
 import time
 import webbrowser
@@ -956,6 +957,11 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    form -- and because the row has to read as on or off from across the sheet.
    Every colour comes from the palette, so all three themes answer for it. */
 .shint{color:var(--dimmer);font-size:11.5px;margin:0 0 10px}
+#updbtn{margin:0 0 9px;padding:5px 12px;border:1px solid var(--line);
+  border-radius:6px;background:var(--raised);color:var(--accent);
+  font-size:12px;cursor:pointer}
+#updbtn:hover{border-color:var(--accent)}
+#updbtn:disabled{color:var(--dimmer);border-color:var(--line);cursor:default}
 .srow{display:flex;align-items:flex-start;gap:10px;padding:8px 0;
   border-top:1px solid var(--raised)}
 .srow:first-child{border-top:none}
@@ -1576,6 +1582,11 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
         <section data-cat="about" hidden>
           <h3>About</h3>
           <p class="about">CROW <span id="aboutver"></span></p>
+          <p class="mcpsaid" id="updsaid"></p>
+          <button id="updbtn" hidden onclick="crow.updateRun()"></button>
+          <p class="shint">An update replaces the installed copy under
+             %LOCALAPPDATA%\Crow. Crow keeps running the version it started
+             with, so it has to be restarted afterwards.</p>
         </section>
       </div>
     </div>
@@ -2571,7 +2582,43 @@ const crow = {
       b => b.classList.toggle("on", b.dataset.cat===name));
     document.querySelectorAll("#spane section").forEach(
       sec => sec.hidden = sec.dataset.cat!==name);
+    // ASKED WHEN THE PANE OPENS, not on every start. It is a call to
+    // github.com, and this window already refuses to spend one on a catalogue
+    // nobody asked to see.
+    if(name==="about") this.updateCheck();
   },
+
+  updateCheck(){
+    const said=$("#updsaid"), btn=$("#updbtn");
+    said.textContent="checking github.com \u2026"; btn.hidden=true;
+    pywebview.api.update_check().then(s=>{
+      if(!s.latest){ said.textContent="could not reach github.com"; return; }
+      // WHICH DIRECTORY IS ABOUT TO CHANGE, said before the button is offered.
+      // A checkout runs from wherever it was cloned and the installer writes
+      // %LOCALAPPDATA%\Crow either way, so without this line the reader would
+      // press update and watch an unchanged copy.
+      const where=s.installed_here?"":", and this window runs from a copy outside "
+        +s.install_dir;
+      said.textContent=(s.newer ? s.latest+" is out, this is "+s.current
+                                 : s.latest+" is the newest release")+where;
+      // OFFERED EITHER WAY, and the label is the difference. install.ps1
+      // decides for itself what a run means: a newer release is an update, the
+      // same one answers "already installed -- nothing to do" and exits before
+      // it downloads anything. So the button is also the repair for a copy that
+      // was interrupted, and it costs a second to find out.
+      btn.textContent=(s.newer?"install ":"reinstall ")+s.latest;
+      btn.disabled=false; btn.hidden=false; }); },
+
+  updateRun(){
+    const btn=$("#updbtn");
+    btn.disabled=true;
+    $("#updsaid").textContent="installing \u2026";
+    pywebview.api.update_start().then(why=>{
+      if(why){ btn.disabled=false; $("#updsaid").textContent=why; } }); },
+
+  updated(e){
+    $("#updsaid").textContent=e.t;
+    if(e.done){ $("#updbtn").hidden=true; } },
 
   setTheme(name){
     // PAINTED FIRST, WRITTEN SECOND. The attribute swap is one frame; the write
@@ -3379,6 +3426,7 @@ const crow = {
       case "text": this.answer(e.t); break;
       case "code_open": this.codeOpen(e.lang); break;
       case "format": this.format(e.blocks); break;
+      case "update": this.updated(e); break;
       case "code_close": this.codeClose(e.closed); break;
       case "tool": this.tool(e.name,e.args); break;
       case "cost": this.cost(e.line,e.share); this.ctx(e.tokens,e.n_ctx); break;
@@ -4004,6 +4052,9 @@ class Api:
         self._promised_warm = False
         self._rolled = False
         self._worker: threading.Thread | None = None
+        # ONE INSTALLER AT A TIME. Two of them writing the same
+        # directory is the one way an update leaves a broken copy.
+        self._updating = False
         # #88: one open question at a time. The worker waits on the Event, the
         # page's click sets it. Not a Queue -- there is never a second question
         # in flight, because the loop that asks is the one that blocks.
@@ -5951,6 +6002,88 @@ class Api:
             return proc.returncode == 0
         except Exception:                  # noqa: BLE001 - reported as False
             return False
+
+    def update_check(self) -> dict:
+        """What the About pane asks when it opens. Never raises.
+
+        The versions are not decided here: `update_state` is a thin line over
+        `fetch_latest_version` and `is_newer`, which the terminal has used since
+        0.0.6. What this adds is the pair a button needs, `installed_here` and
+        `install_dir`, because the answer to "which copy is this" is often no.
+        """
+        try:
+            return crow_core.update_state(current=client_version())
+        except Exception:                  # noqa: BLE001 - a pane, never fatal
+            return {"current": client_version(), "latest": None,
+                    "newer": False, "installed_here": False,
+                    "install_dir": crow_core.install_dir()}
+
+    def update_start(self) -> str:
+        """Press the button. Empty when it started, otherwise why it did not.
+
+        ONE AT A TIME. Two installers writing the same directory at once is the
+        one way this leaves a broken copy behind, and the button is reachable
+        again the moment the first press fails.
+        """
+        if self._updating:
+            return "an update is already running"
+        self._updating = True
+        threading.Thread(target=self._update_run, daemon=True).start()
+        return ""
+
+    def _update_run(self) -> None:
+        """Fetch install.ps1, run it, and say what happened.
+
+        ITS OWN LINES ARE THE PROGRESS. The package is around half a gigabyte,
+        so this takes minutes; a window that said "installing" and then nothing
+        for four of them is indistinguishable from a window that has hung.
+
+        A NON-ZERO EXIT PROMISES NOTHING. The files may be half replaced, and
+        "restart to use it" there sends the reader to find out alone.
+        """
+        script = ""
+        try:
+            script = crow_core.fetch_install_script()
+            argv = crow_core.update_argv(script)
+            # NO CONSOLE OF ITS OWN. Started from a shortcut this process has
+            # none, and a child that asks for one puts a black window in front
+            # of the reader for the length of the download.
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            proc = subprocess.Popen(
+                argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                # stdin=DEVNULL for the reason `nvidia_smi` carries: a child
+                # that inherits this one's stdin reads it.
+                stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
+                errors="replace", creationflags=flags)
+            last = ""
+            for line in proc.stdout:
+                line = line.strip()
+                if line:
+                    last = line
+                    self.push({"k": "update", "t": line, "done": False})
+            code = proc.wait()
+        except Exception as exc:           # noqa: BLE001 - reported, never raised
+            self.push({"k": "update", "done": True,
+                       "t": "the update could not run: %s" % exc})
+            self._updating = False
+            return
+        finally:
+            if script:
+                try:
+                    os.remove(script)
+                except OSError:
+                    pass
+        if code == 0:
+            # THE INSTALLER'S OWN VERDICT, not a sentence of this window's. It
+            # answers "nothing to do" when the same version is already there,
+            # and a fixed "installed" would be wrong exactly then.
+            self.push({"k": "update", "done": True,
+                       "t": ("%s -- restart Crow to run it." % last if last
+                             else "done. restart Crow to run it.")})
+        else:
+            self.push({"k": "update", "done": True,
+                       "t": "the installer stopped with %d: %s" % (code, last)})
+        self._updating = False
 
     def open_url(self, url: str) -> bool:
         """A link in an answer, opened OUTSIDE this window. True when it went.

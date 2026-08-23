@@ -5456,5 +5456,146 @@ class TheFormattedAnswerTests(ApiCase):
         self.assertEqual(opened, ["https://www.wetter.com"])
 
 
+
+class TheUpdateButtonTests(ApiCase):
+    """robin, 2026-08-23: the window should be able to update itself.
+
+    THE TERMINAL HAS HAD THE CHECK SINCE 0.0.6 and prints the command to run.
+    That works at a prompt and nowhere else, so the same knowledge ends in a
+    button here. The versions are not decided again: `update_state` is a thin
+    line over `fetch_latest_version` and `is_newer`, which the CLI already uses.
+
+    A RESTART IS PART OF THE FEATURE, NOT AN AFTERTHOUGHT. The installer
+    replaces the files under the running process; Python has the modules in
+    memory and goes on running the old ones until it is started again. A button
+    that said "installed" and left it there would leave the reader looking at
+    the version they were trying to leave.
+    """
+
+    def _source(self) -> str:
+        return (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def test_the_about_pane_carries_the_button_and_the_restart_line(self):
+        source = self._source()
+        about = source[source.index('<section data-cat="about"'):]
+        about = about[:about.index("</section>")]
+        self.assertIn('id="updbtn"', about)
+        self.assertIn('id="updsaid"', about)
+        self.assertIn("restart", about.lower(),
+                      "the pane never says that a restart is needed")
+
+    def test_opening_about_asks_github(self):
+        """The check runs when the pane is opened, not on every start: it is a
+        network call, and the window already refuses to spend one on a catalogue
+        nobody asked for."""
+        source = self._source()
+        switch = source[source.index("  settingsCat(name){"):]
+        switch = switch[:switch.index("\n  },")]
+        self.assertIn("updateCheck()", switch)
+
+    def test_the_check_hands_both_versions_to_the_page(self):
+        api = self.api()
+        real = crow_core.fetch_latest_version
+        crow_core.fetch_latest_version = lambda timeout=4.0: "99.0.0"
+        self.addCleanup(setattr, crow_core, "fetch_latest_version", real)
+        state = api.update_check()
+        self.assertEqual(state["current"], crow_core.CLIENT_VERSION)
+        self.assertEqual(state["latest"], "99.0.0")
+        self.assertTrue(state["newer"])
+        self.assertIn("install_dir", state)
+
+    def test_the_check_uses_the_version_the_window_knows(self):
+        """FOUND BY RUNNING IT, AND THE SUITE COULD NOT HAVE. `CLIENT_VERSION`
+        is assigned by cli/crow.py when that file is imported, and the window
+        never imports it -- it reads the literal out of that file with
+        `client_version()` instead. So the constant is EMPTY in this process,
+        `parse_version` refuses it, and a check built on it answers "no update"
+        forever -- including on the day one is published, which is the only day
+        it matters.
+
+        The core's own default stays the constant, because for the terminal it
+        is right."""
+        api = self.api()
+        real = crow_core.fetch_latest_version
+        crow_core.fetch_latest_version = lambda timeout=4.0: "99.0.0"
+        self.addCleanup(setattr, crow_core, "fetch_latest_version", real)
+        # THE CONSTANT IS EMPTIED ON PURPOSE, and without this line the case is
+        # blind: THIS FILE imports cli/crow.py at the top, and that import is
+        # what assigns `CLIENT_VERSION`. The window imports no such thing, so
+        # the state under test is the empty one, and a case that measured the
+        # test runner's imports would pass while the window answered "no
+        # update" forever.
+        was, crow_core.CLIENT_VERSION = crow_core.CLIENT_VERSION, ""
+        self.addCleanup(setattr, crow_core, "CLIENT_VERSION", was)
+        state = api.update_check()
+        self.assertTrue(state["current"], "the window handed over no version")
+        self.assertEqual(state["current"], crow_gui.client_version())
+        self.assertTrue(state["newer"])
+
+    def test_a_second_press_while_one_runs_is_refused(self):
+        """NEGATIVE: two installers writing the same directory at once is the
+        one way this can leave a broken copy behind."""
+        api = self.api()
+        api._updating = True
+        self.assertTrue(api.update_start(), "the second press was allowed")
+
+    def test_the_installer_is_run_as_a_file_and_the_end_says_to_restart(self):
+        api = self.api()
+        handle, script = tempfile.mkstemp(prefix="crow-fake-", suffix=".ps1")
+        os.close(handle)
+        real_fetch = crow_core.fetch_install_script
+        crow_core.fetch_install_script = lambda timeout=20.0: script
+        self.addCleanup(setattr, crow_core, "fetch_install_script", real_fetch)
+        seen = []
+
+        class _Proc:
+            stdout = iter(["step 1 of 5 -- downloading\n", "\n", "done\n"])
+
+            def wait(self_inner):
+                return 0
+
+        real_popen = crow_gui.subprocess.Popen
+        crow_gui.subprocess.Popen = lambda argv, **kw: (seen.append(argv), _Proc())[1]
+        self.addCleanup(setattr, crow_gui.subprocess, "Popen", real_popen)
+        api._update_run()
+        said = [m for m in self.drained(api) if m.get("k") == "update"]
+        self.assertIn("-NoPause", seen[0])
+        self.assertIn(script, seen[0])
+        self.assertTrue(said[-1]["done"])
+        self.assertIn("restart", said[-1]["t"].lower())
+        self.assertTrue(any("downloading" in m.get("t", "") for m in said),
+                        "the installer's own lines never reached the page")
+        self.assertFalse(os.path.exists(script),
+                         "the downloaded installer was left on the disk")
+        self.assertFalse(api._updating, "the button stayed locked")
+
+    def test_an_installer_that_failed_promises_nothing(self):
+        """NEGATIVE, and it is the half that matters: a non-zero exit means the
+        files may be half replaced. Saying "restart to use it" there sends the
+        reader to find out for themselves."""
+        api = self.api()
+        handle, script = tempfile.mkstemp(prefix="crow-fake-", suffix=".ps1")
+        os.close(handle)
+        real_fetch = crow_core.fetch_install_script
+        crow_core.fetch_install_script = lambda timeout=20.0: script
+        self.addCleanup(setattr, crow_core, "fetch_install_script", real_fetch)
+
+        class _Proc:
+            stdout = iter(["not enough disk\n"])
+
+            def wait(self_inner):
+                return 3
+
+        real_popen = crow_gui.subprocess.Popen
+        crow_gui.subprocess.Popen = lambda argv, **kw: _Proc()
+        self.addCleanup(setattr, crow_gui.subprocess, "Popen", real_popen)
+        api._update_run()
+        last = [m for m in self.drained(api) if m.get("k") == "update"][-1]
+        self.assertTrue(last["done"])
+        self.assertNotIn("restart", last["t"].lower())
+        self.assertIn("3", last["t"])
+        self.assertFalse(api._updating)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

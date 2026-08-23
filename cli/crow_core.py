@@ -2088,6 +2088,110 @@ def post_json(url: str, body: dict, timeout: float = 30.0) -> dict:
         return json.loads(resp.read().decode("utf-8") or "{}")
 
 
+
+# ---------------------------------------------------------------------------
+# Updating an installation from inside the client
+# ---------------------------------------------------------------------------
+#
+# THE TERMINAL PRINTS A LINE, A WINDOW CANNOT. `update_notice` has told CLI
+# users since 0.0.6 that a version is out and which command installs it, and
+# that works because the reader is standing at a prompt. In a window there is no
+# prompt, so the same knowledge has to end in a button.
+#
+# NOTHING HERE IS A SECOND OPINION about versions: `fetch_latest_version`,
+# `parse_version` and `is_newer` are the ones the terminal already uses. What is
+# new is only what a button needs and a printed line does not -- where the copy
+# on disk lives, and how to run the installer without a console.
+
+INSTALL_SCRIPT_URL = f"https://raw.githubusercontent.com/{REPO}/main/install.ps1"
+
+
+def install_dir() -> str:
+    """Where install.ps1 puts an installation: its own default, not a guess.
+
+    `%LOCALAPPDATA%\\Crow`, which is the installer's `$InstallTo` default and
+    the path its own documentation names. Nothing is written to Program Files,
+    so no elevation is involved anywhere in this path.
+    """
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(
+        os.path.expanduser("~"), "AppData", "Local")
+    return os.path.join(base, "Crow")
+
+
+def running_from_install(path: str = "") -> bool:
+    """Is the file that is running part of an installed copy?
+
+    IT MATTERS BECAUSE THE ANSWER IS OFTEN NO. A checkout runs from wherever it
+    was cloned, and an update installs into `install_dir()` either way -- so a
+    window that offered "update" without saying which directory it was about to
+    change would leave the reader watching an unchanged copy and wondering.
+
+    `normcase` because this is Windows: the same directory is spelled a dozen
+    ways and a comparison that respected case would answer no to all but one.
+    """
+    here = os.path.normcase(os.path.abspath(path or __file__))
+    root = os.path.normcase(os.path.abspath(install_dir()))
+    return here == root or here.startswith(root + os.sep)
+
+
+def update_argv(script: str) -> list:
+    """PowerShell, the installer as a FILE, and told not to wait.
+
+    TWO FACTS, EACH FATAL ON ITS OWN. `irm <url> | iex` cannot take parameters
+    -- install.ps1 says so in its own comment and prints its URL back at the
+    user for exactly that reason -- so the script is fetched to a file and run
+    with `-File`. And the installer waits for ENTER at the end so the last
+    screen can be read; behind a window there is no console to press it in, and
+    that wait would never end.
+
+    `-NoProfile` so a profile that prints or prompts cannot join in, and
+    `-ExecutionPolicy Bypass` because a downloaded file is exactly what the
+    default policy refuses.
+    """
+    return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", script, "-NoPause"]
+
+
+def fetch_install_script(timeout: float = 20.0) -> str:
+    """The installer, written to a temp file. Returns the path.
+
+    Raises on failure rather than returning None: this one is asked for by a
+    person who pressed a button, and a silent nothing there is worse than a
+    line saying what went wrong.
+    """
+    import tempfile
+
+    request = urllib.request.Request(INSTALL_SCRIPT_URL, headers={
+        "User-Agent": f"crow/{CLIENT_VERSION}"})
+    with urllib.request.urlopen(request, timeout=timeout) as resp:
+        body = resp.read().decode("utf-8")
+    handle, path = tempfile.mkstemp(prefix="crow-install-", suffix=".ps1")
+    with os.fdopen(handle, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    return path
+
+
+def update_state(timeout: float = 4.0, current: str = "") -> dict:
+    """What is running, what is published, and whether the second is newer.
+
+    A CHECK THAT COULD NOT RUN OFFERS NOTHING. `latest` is None for no network,
+    a rate limit or a shape nobody recognises, and None never becomes a button
+    that promises a version -- the same rule `update_notice` follows for the
+    line it prints.
+    """
+    # THE CALLER MAY KNOW BETTER, AND ONE OF THEM DOES. `CLIENT_VERSION` is
+    # assigned on import by cli/crow.py; the window does not import that file,
+    # it reads the literal out of it. Left to the constant, the window would
+    # compare against "" -- which `parse_version` refuses, so `is_newer` would
+    # answer False for every release there will ever be.
+    current = current or CLIENT_VERSION
+    latest = fetch_latest_version(timeout)
+    return {"current": current, "latest": latest,
+            "newer": bool(latest and is_newer(latest, current)),
+            "installed_here": running_from_install(),
+            "install_dir": install_dir()}
+
+
 def parse_version(text: str) -> tuple[int, ...] | None:
     """"0.0.5" -> (0, 0, 5). None when it is not a plain dotted number.
 

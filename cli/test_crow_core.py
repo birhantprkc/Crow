@@ -8195,5 +8195,101 @@ class TheMarkdownIsCutInTheCoreTests(unittest.TestCase):
         self.assertEqual(crow_core.markdown_blocks("   \n\n  "), [])
 
 
+
+class TheUpdateIsRunFromTheWindowTests(unittest.TestCase):
+    """The terminal has had the check since 0.0.6: it asks GitHub on a thread
+    and prints the line to run. A window cannot print a line to run -- the
+    person is not at a prompt -- so it has to be able to DO it.
+
+    THE PIECES ARE THE ONES THAT ARE ALREADY THERE. `fetch_latest_version`,
+    `is_newer` and `UPDATE_COMMAND` were written for the CLI and are not copied
+    here; what is new is the part a button needs and a printed line does not.
+    """
+
+    def test_the_installer_is_run_as_a_file_and_told_not_to_wait(self):
+        """TWO FACTS, AND BOTH ARE FATAL IF MISSED. `irm | iex` cannot take
+        parameters -- install.ps1's own comment says so -- so the script is
+        downloaded and run with `-File`. And without `-NoPause` it waits for
+        ENTER at the end: behind a window with no console that wait never ends,
+        and the update hangs with nothing on screen to say why."""
+        argv = crow_core.update_argv(r"C:\Temp\install.ps1")
+        self.assertIn("-File", argv)
+        self.assertIn(r"C:\Temp\install.ps1", argv)
+        self.assertIn("-NoPause", argv)
+        self.assertNotIn("iex", " ".join(argv))
+        self.assertLess(argv.index("-File"), argv.index(r"C:\Temp\install.ps1"))
+
+    def test_a_copy_that_runs_from_somewhere_else_is_not_the_installed_one(self):
+        r"""robin runs from a checkout. An update installs into
+        %LOCALAPPDATA%\Crow, which is NOT what he is looking at -- so the window
+        has to be able to say which directory it is about to change."""
+        root = crow_core.install_dir()
+        self.assertTrue(root.endswith("Crow"), root)
+        self.assertTrue(crow_core.running_from_install(
+            os.path.join(root, "cli", "crow_gui.py")))
+        self.assertTrue(crow_core.running_from_install(
+            os.path.join(root.upper(), "cli", "crow_gui.py")),
+            "the comparison is case sensitive on a case insensitive disk")
+        self.assertFalse(crow_core.running_from_install(
+            r"D:\src\Crow\cli\crow_gui.py"))
+
+    def test_the_state_carries_both_versions_and_the_verdict(self):
+        real = crow_core.fetch_latest_version
+        crow_core.fetch_latest_version = lambda timeout=4.0: "99.0.0"
+        self.addCleanup(setattr, crow_core, "fetch_latest_version", real)
+        state = crow_core.update_state()
+        self.assertEqual(state["current"], crow_core.CLIENT_VERSION)
+        self.assertEqual(state["latest"], "99.0.0")
+        self.assertTrue(state["newer"])
+
+    def test_a_check_that_could_not_run_offers_nothing(self):
+        """NEGATIVE, and it is the same rule `update_notice` already follows: no
+        network, a rate limit or a shape nobody recognises is None, and None
+        must never become a button that promises a version."""
+        real = crow_core.fetch_latest_version
+        crow_core.fetch_latest_version = lambda timeout=4.0: None
+        self.addCleanup(setattr, crow_core, "fetch_latest_version", real)
+        state = crow_core.update_state()
+        self.assertIsNone(state["latest"])
+        self.assertFalse(state["newer"])
+
+    def test_the_running_version_is_never_offered_to_itself(self):
+        """NEGATIVE: the same version is not an update, and neither is an older
+        one. `is_newer` already decides this; the case is here because the
+        button is what a user sees, and a button that lies is worse than a line
+        that lies."""
+        for same in (crow_core.CLIENT_VERSION, "0.0.1"):
+            real = crow_core.fetch_latest_version
+            crow_core.fetch_latest_version = lambda timeout=4.0, v=same: v
+            self.addCleanup(setattr, crow_core, "fetch_latest_version", real)
+            self.assertFalse(crow_core.update_state()["newer"], same)
+
+    def test_the_script_comes_off_the_repository_and_lands_in_a_file(self):
+        """The same URL install.ps1 prints when it needs to be re-run with a
+        switch, and the same one `UPDATE_COMMAND` pipes into iex."""
+        self.assertIn(crow_core.REPO, crow_core.INSTALL_SCRIPT_URL)
+        self.assertTrue(crow_core.INSTALL_SCRIPT_URL.endswith("install.ps1"))
+        self.assertIn(crow_core.INSTALL_SCRIPT_URL, crow_core.UPDATE_COMMAND)
+
+        class _Resp:
+            def read(self_inner):
+                return b"# install"
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+        real = crow_core.urllib.request.urlopen
+        crow_core.urllib.request.urlopen = lambda *a, **k: _Resp()
+        self.addCleanup(setattr, crow_core.urllib.request, "urlopen", real)
+        path = crow_core.fetch_install_script()
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        self.assertTrue(path.endswith(".ps1"))
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "# install")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
