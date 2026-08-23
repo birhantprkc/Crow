@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/images/crow-qwen.png" alt="Crow" width="640">
+<img src="docs/images/og-dark.png" alt="Crow" width="880">
 
 <h1>CROW</h1>
 
