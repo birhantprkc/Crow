@@ -3892,6 +3892,46 @@ class TheBirdTests(unittest.TestCase):
         with open(crow_gui.ICON_FILE, "rb") as fh:
             self.assertEqual(fh.read(4), b"\x00\x00\x01\x00", "not an ICO")
 
+    def test_the_bird_fills_the_icon_it_is_drawn_on(self):
+        """MEASURED, AND IT IS WHY THE TASKBAR BUTTON LOOKED SMALL. The file
+        carried all seven sizes and `set_icon` hung big and small separately, so
+        every part a client controls was already right. What was wrong sat
+        INSIDE the drawing: the raven occupied 66 % of the width and 57 % of the
+        height of its own canvas, and Windows draws the canvas. A correctly
+        sized icon with a fifth of its box empty on every side reads as a small
+        icon beside buttons that fill theirs.
+
+        85 % OF THE LONGER SIDE IS THE FLOOR, and only the longer one. This bird
+        is wider than it is tall; demanding the same of the shorter side would
+        be demanding a bird that has been stretched to fit.
+
+        NO PILLOW, NO MEASUREMENT. The sizes in the directory can be read with
+        `struct`, but the images are PNG-compressed and the alpha channel is the
+        whole question here, so a machine without it skips rather than guesses.
+        """
+        try:
+            from PIL import Image
+        except ImportError:                 # noqa: BLE001 - skipped, never faked
+            self.skipTest("Pillow is not installed")
+        import struct
+
+        raw = open(crow_gui.ICON_FILE, "rb").read()
+        count = struct.unpack_from("<H", raw, 4)[0]
+        self.assertGreaterEqual(count, 7, "the icon lost sizes")
+        for i in range(count):
+            width, height = struct.unpack_from("<BB", raw, 6 + i * 16)
+            size, offset = struct.unpack_from("<II", raw, 6 + i * 16 + 8)
+            width, height = width or 256, height or 256
+            image = Image.open(io.BytesIO(raw[offset:offset + size])).convert("RGBA")
+            solid = image.split()[3].point(lambda v: 255 if v > 8 else 0)
+            box = solid.getbbox()
+            self.assertIsNotNone(box, "%dx%d is empty" % (width, height))
+            longer = max(box[2] - box[0], box[3] - box[1])
+            self.assertGreaterEqual(
+                longer / max(width, height), 0.85,
+                "%dx%d: the drawing fills %.0f %% of its canvas"
+                % (width, height, 100 * longer / max(width, height)))
+
     def test_the_application_id_is_set_before_the_window_exists(self):
         """Without one the taskbar groups this under the interpreter and draws
         Python's icon over Crow's name. The shell reads the id when it registers
