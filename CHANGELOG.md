@@ -3,6 +3,47 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 1.2.0 — 2026-08-23
+
+3 commits. A rail you can drag, air around the chat, the voice drawn as a line, and a
+suite that no longer writes into a real installation.
+
+### The window
+
+| | |
+|---|---|
+| Rail | dragged by a five-pixel handle, clamped to 180..520 in the page AND in Python, kept in `settings.json` |
+| Chat | ten pixels of air on each side. The stable scrollbar gutter was there, but a gutter is not a distance |
+| Composer | 900 again, the edge of its own text column. It was 675 for one evening |
+| Voice | while dictating, a line of pill bars mirrored around the middle, inside the input row |
+| Placeholder | gone while recording, or the resting dots read as marks in the sentence |
+
+### How the level is read
+
+| | |
+|---|---|
+| Source | the block PortAudio hands over anyway. No second stream, nothing new that can refuse to open |
+| Peak, not RMS | an average over 20 ms flattens exactly the syllables a meter is there to show |
+| Scale | a running peak that decays three percent per frame, with a noise floor, reset at every start |
+| Why | the first scale was fixed and wrong by an order of magnitude: float32 speech sits at 0.05 to 0.3, and `level*22` is four pixels. The band stayed flat while the transcription came back clean |
+
+### The suite stopped standing on the live installation
+
+Two cases wrote into robin's running client: an invented API key into
+`mcp_tokens.json`, a `rail_width` into `settings.json`. The head of both test
+files already redirected four paths, which is what made it look solved.
+
+| | |
+|---|---|
+| The fix | a case that walks every path constant of both modules and refuses any that resolves into the real `%LOCALAPPDATA%\Crow` |
+| What it found | eight more beyond the two: the search index, roots, the session directory and file, skills, USER.md, the paste directory |
+| Now | all ten point at a directory whose parent does not exist, the state the readers treat as "nothing configured" |
+
+| suite | |
+|---|---|
+| 1360 | `test_crow` 418, `test_crow_core` 566, `test_crow_gui` 376 |
+| checkers | `check_shared_core` 60/60, `check_operating_point` 6/6, `install.ps1 -Selftest` 85 |
+
 ## 1.1.0 — 2026-08-23
 
 6 commits. Formatted answers, an update button, and a routing filter that is asked per model.
