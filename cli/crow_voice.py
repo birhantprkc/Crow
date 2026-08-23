@@ -116,6 +116,7 @@ def start() -> None:
             if held["frames"] >= limit:
                 return
             held["frames"] += len(indata)
+            _note_level(indata)
             _blocks.append(indata.copy())
 
         _stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS,
@@ -123,12 +124,53 @@ def start() -> None:
         _stream.start()
 
 
+_level = 0.0
+
+
+def _note_level(block) -> None:
+    """Den lautesten Wert eines Blocks merken, fuer die Anzeige im Fenster.
+
+    SPITZE STATT MITTEL. Ein RMS ueber 20 ms glaettet genau die Silben weg, die
+    eine Anzeige sichtbar machen soll -- gesprochene Sprache ist Stille mit
+    Ausschlaegen darin, und der Mittelwert davon steht fast still.
+
+    KEIN ZWEITER STROM. Der Block ist der, den `take` ohnehin bekommt und
+    kopiert; ein eigener Strom fuer den Pegel waere ein zweites Geraet, das
+    sich weigern kann.
+
+    EIN LEERER BLOCK IST KEIN FEHLER: der Treiber reicht einen durch, wenn er
+    nachlaedt, und eine Ausnahme in PortAudios eigenem Faden nimmt die Aufnahme
+    mit.
+    """
+    global _level
+    try:
+        _level = float(abs(block).max()) if len(block) else 0.0
+        return
+    except (AttributeError, TypeError, ValueError):
+        pass
+    try:
+        _level = max((abs(float(v)) for v in block), default=0.0)
+    except (TypeError, ValueError):
+        _level = 0.0
+
+
+def level() -> float:
+    """Der letzte Pegel, 0.0 sobald nichts mehr aufgenommen wird.
+
+    NULL BEIM STILLSTAND, und das ist keine Formsache: eine Anzeige, die nach
+    dem Stopp weiterzappelt, behauptet ein Mikrofon, das nicht mehr zuhoert.
+    `cancel` und `stop` setzen ihn zurueck, nicht diese Funktion -- sie liest.
+    """
+    return _level
+
+
 def cancel() -> None:
     """Drop the stream and everything collected. Nothing is transcribed."""
-    global _stream
+    global _stream, _level
     with _lock:
         stream, _stream = _stream, None
         _blocks.clear()
+        _level = 0.0
     _close(stream)
 
 

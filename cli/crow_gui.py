@@ -410,6 +410,25 @@ def open_projects() -> dict:
     return {os.path.normcase(p): False for p in doc if isinstance(p, str)}
 
 
+# WIE SCHMAL UND WIE BREIT DIE RAIL WERDEN DARF. Beides geklemmt, und beides
+# auch in Python: der Wert kommt aus einer Maus, und eine Seite, die sich
+# vertut, schriebe ihn sonst in die Einstellungen.
+RAIL_MIN, RAIL_MAX, RAIL_DEFAULT = 180, 520, 242
+
+
+def rail_width_setting() -> int:
+    """Die gespeicherte Rail-Breite, oder die Vorgabe.
+
+    Ein Wert ausserhalb der Grenzen wird zur Vorgabe und nicht zur Grenze: er
+    stammt dann nicht aus dieser Geste, und ihn auf 520 zu ziehen waere eine
+    Entscheidung, die niemand getroffen hat.
+    """
+    value = read_settings().get("rail_width")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return RAIL_DEFAULT
+    return int(value) if RAIL_MIN <= value <= RAIL_MAX else RAIL_DEFAULT
+
+
 def client_version(path: str | None = None) -> str:
     """The client version, read out of cli/crow.py. "" when unreadable."""
     try:
@@ -635,8 +654,17 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 #g-se{bottom:0;right:0;width:8px;height:8px;cursor:nwse-resize}
 
 /* -- rail --------------------------------------------------------------- */
-#rail{width:242px;flex:none;
+#rail{width:var(--railw,242px);flex:none;
   background:var(--rail);display:flex;flex-direction:column;min-height:0}
+/* ZIEHBAR, UND DER GRIFF IST BREITER ALS DIE LINIE, DIE ER BEWEGT. Fuenf Pixel
+   trifft man mit der Maus, einen nicht -- und die negativen Raender legen ihn
+   ueber die Kante, statt dem Chat Platz wegzunehmen. */
+#railgrip{flex:none;width:5px;margin:0 -2px;z-index:3;cursor:col-resize;
+  background:transparent;transition:background .12s ease}
+#railgrip:hover,#railgrip.on{background:var(--bevel)}
+/* WAEHREND DES ZIEHENS OHNE UEBERGANG. Die Rail blendet ihre Breite sonst mit
+   .16s ein, und das macht aus einer Geste ein Nachlaufen. */
+#rail.dragging{transition:none}
 #railhead{display:flex;align-items:center;padding:0 12px;min-height:var(--barh)}
 #railhead h2{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.13em;
   text-transform:uppercase;color:var(--dimmer)}
@@ -802,8 +830,13 @@ body[data-rail="shut"] #rail{width:0;overflow:hidden}
 /* STABLE GUTTER, so the column does not shift sideways the moment a chat grows
    past one screen -- and so the composer below can line up against one number
    instead of against a scrollbar that comes and goes. */
-#flow{overflow-y:auto;padding:22px 0 26px;flex:1;min-height:0;
-  scroll-behavior:smooth;user-select:text;scrollbar-gutter:stable}
+/* LUFT AN BEIDEN SEITEN (robin, 2026-08-23). Links steht die Rail, rechts der
+   Scrollbalken; der Rinnstein daneben haelt die Spalte ruhig, aber er ist kein
+   Abstand. Zehn Pixel sind es, und `#composer` traegt dieselben zehn, damit
+   Spalte und Eingabemaske weiter auf derselben Kante stehen. */
+#flow{overflow-y:auto;padding:22px 0 26px;padding-inline:10px;flex:1;
+  min-height:0;scroll-behavior:smooth;user-select:text;
+  scrollbar-gutter:stable}
 /* CENTRED, NOT LEFT-HUGGING. max-width alone pins the column to the left edge
    and leaves the rest of a wide window empty; the auto margins are what put it
    in the middle. 960 includes the 30px padding, so the text runs 900 wide --
@@ -1236,15 +1269,45 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    is why the gap #flow keeps below is measured from offsetHeight, which
    INCLUDES the fade: the last line comes to rest above it, never inside it. */
 #composer{position:absolute;left:0;right:var(--sbw);bottom:0;
-  padding:26px 30px 14px;
+  padding:26px 40px 14px;
   background:linear-gradient(to bottom,transparent,var(--bg) 26px)}
+/* DAS BAND LIEGT UEBER DEM PLATZHALTER, NICHT UEBER DER ZEILE (robin,
+   2026-08-23). Eine eigene Zeile machte die Maske hoeher, sobald jemand zu
+   sprechen anfaengt, und schoebe alles darunter -- dieselbe Bewegung, die der
+   Mikrofonknopf mit seinem Ring von Anfang an vermeidet. Absolut im `#line`,
+   also kostet es keine Hoehe, und `pointer-events:none`, damit das Textfeld
+   darunter anklickbar bleibt.
+   GESPIEGELT UM DIE MITTE: `align-items:center` laesst jeden Balken nach oben
+   UND unten wachsen, was eine Stimme ist -- vom Boden nach oben ist ein
+   Balkendiagramm. Drei Pixel breit und vier Pixel Abstand, weil `flex:1` sie
+   sonst ueber die ganze Zeile zieht und aus der Welle Kloetze macht.
+   VOLL GERUNDET, und das ist der Unterschied zwischen einer Sprachnotiz und
+   einem Diagramm: bei `border-radius:99px` ist ein lauter Balken eine Pille
+   und ein leiser ein Punkt -- Stille zeichnet sich als Punktreihe, nicht als
+   Luecke. Genau die Form, die robin am 2026-08-23 als Vorbild geschickt hat. */
+#voice{position:absolute;inset:0;display:flex;align-items:center;gap:4px;
+  pointer-events:none;overflow:hidden}
+#voice i{width:3px;flex:none;height:3px;border-radius:99px;
+  background:var(--accent);opacity:.45;
+  transition:height .07s linear,opacity .07s linear}
+/* UND DIESE ZEILE IST NICHT ZIER. Die Regel darueber ist spezifischer als das
+   `display:none`, das der Browser an `[hidden]` haengt -- ohne sie stuende das
+   Band immer da, und das `hidden` im Markup saehe aus, als taete es etwas. */
+#voice[hidden]{display:none}
 #box{border:1px solid var(--bevel);border-radius:8px;background:var(--panel);
   padding:9px 11px 8px;box-shadow:0 0 0 3px rgba(126,176,248,.06);
   transition:border-color .15s ease,box-shadow .15s ease;
-  /* 900, not 960: .turn spends 30px of its 960 on padding either side, so its
-     text starts at 900 wide. Matching that here puts this box's border on the
-     same edge as the text above it. */
-  max-width:900px;margin-inline:auto}
+  /* 675, UND DAS IST EIN VIERTEL WENIGER ALS 900 (robin, 2026-08-23). 900 war
+     die Breite der Textspalte darueber -- .turn gibt von seinen 960 je 30 an
+     das Polster ab -- und die Maske stand genau auf deren Kante. Sie steht
+     jetzt schmaler und mittig darunter, was der ausdrueckliche Wunsch ist:
+     eine Eingabezeile, die so breit ist wie ein Absatz, liest sich als zweite
+     Spalte statt als Eingabe. */
+  max-width:675px;margin-inline:auto}
+/* KEIN PLATZHALTER, WAEHREND GESPROCHEN WIRD. Das Band liegt ueber der Zeile,
+   also stuenden sonst beide uebereinander und die ruhenden Punkte laesen sich
+   als Zeichen im Satz -- genau so sah es am 2026-08-23 bei robin aus. */
+#box.rec #in::placeholder{color:transparent}
 #box.focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(126,176,248,.13)}
 /* THE WHOLE BOX, NOT A SEPARATE ZONE. A drop target that is smaller than the
    thing it looks like is a target people miss; the window takes a file anywhere
@@ -1254,7 +1317,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 /* NO PROMPT MARK. `you>` named the typist in a box only the typist can type
    in; the turn above already carries it where it says something. The gap
    went with it -- one child has nothing to be spaced from. */
-#line{display:flex;align-items:flex-start}
+#line{display:flex;position:relative;align-items:flex-start}
 #in{flex:1;background:transparent;border:0;outline:0;resize:none;color:var(--text);
   font:inherit;font-size:13px;line-height:1.5;max-height:140px;user-select:text}
 #in::placeholder{color:var(--dimmer)}
@@ -1624,6 +1687,10 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
       <span class="caret">&#9654;</span>Archive<span class="count"></span></button>
     <div id="arch"></div>
   </aside>
+  <!-- #132. Der Griff zwischen Rail und Chat. Ein eigenes Element und nicht ein
+       `resize` auf der Rail: CSS-resize zeichnet einen Anfasser in die Ecke und
+       kennt weder Minimum noch Gedaechtnis. -->
+  <div id="railgrip" onmousedown="crow.railDrag(event)" title="drag to resize"></div>
   <div id="main">
     <!-- TWO CHIPS, AND THE ADDRESS IS NOT ONE OF THEM. The bar carried five:
          state, model, level, n_ctx and the base URL. Three of them said things
@@ -1653,7 +1720,8 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
       <div id="pendbar" hidden onclick="crow.pendToggle(event)"></div>
       <div id="box">
         <div id="line"><textarea id="in" rows="1"
-            placeholder="Message, or /tools for what the model can call"></textarea></div>
+            placeholder="Message, or /tools for what the model can call"></textarea>
+          <div id="voice" hidden></div></div>
         <div id="foot">
           <span id="ctx"></span>
           <!-- BESIDE THE NUMBER IT DECIDES. The model sets the window the
@@ -2573,6 +2641,63 @@ const crow = {
     pywebview.api.provider_refresh(name).then(said => {
       $("#provsaid").textContent=said||""; this.drawProviders(); }); },
 
+  railDrag(ev){
+    // AUF document UND NICHT AUF DEM GRIFF. Die Maus verlaesst fuenf Pixel in
+    // der ersten Bewegung, und ein Listener auf dem Griff verloere sie dort.
+    ev.preventDefault();
+    const rail=$("#rail"), grip=$("#railgrip");
+    grip.classList.add("on"); rail.classList.add("dragging");
+    const left=rail.getBoundingClientRect().left;
+    const move=e=>{
+      // GEKLEMMT IN DER SEITE UND NOCH EINMAL IN PYTHON. Der Wert kommt aus
+      // einer Maus, und eine Rail von zwoelf Pixeln ist keine Rail.
+      const w=Math.max(180,Math.min(520,Math.round(e.clientX-left)));
+      document.documentElement.style.setProperty("--railw",w+"px"); };
+    const up=()=>{
+      document.removeEventListener("mousemove",move);
+      document.removeEventListener("mouseup",up);
+      grip.classList.remove("on"); rail.classList.remove("dragging");
+      pywebview.api.rail_width(Math.round(
+        rail.getBoundingClientRect().width)); };
+    document.addEventListener("mousemove",move);
+    document.addEventListener("mouseup",up); },
+
+  // DIE STIMME ALS ZEILE. Der Pegel kommt aus Python, weil die Seite kein
+  // sicherer Kontext ist und `getUserMedia` dort scheitert -- dieselbe Naht,
+  // ueber die der fertige Text zurueckkommt.
+  voice(e){
+    const band=$("#voice");
+    // SO VIELE BALKEN, WIE HINEINPASSEN. Drei Pixel breit, vier Abstand, also
+    // einer je sieben -- und neu gebaut, sobald die Maske ihre Breite aendert.
+    // Eine feste Zahl liess das Band bei jeder anderen Fensterbreite entweder
+    // auslaufen oder auf halber Strecke enden.
+    const want=Math.max(8,Math.floor((band.clientWidth||300)/7));
+    if(band.childElementCount!==want){
+      band.textContent="";
+      for(let i=0;i<want;i++) band.appendChild(document.createElement("i")); }
+    const bars=band.children;
+    for(let i=0;i<bars.length-1;i++){
+      bars[i].style.height=bars[i+1].style.height;
+      bars[i].style.opacity=bars[i+1].style.opacity; }
+    // DIE SKALA MISST SICH SELBST. Ein fester Faktor muesste die Verstaerkung
+    // des Mikrofons raten: float32-Sprache liegt bei 0,05 bis 0,3, und der
+    // erste Entwurf rechnete `level*22` -- vier Pixel, also der Boden, waehrend
+    // robin sprach und der Text danach sauber zurueckkam. Ein mitlaufender
+    // Spitzenwert mit Abklingen ist, was ein Aussteuerungsmesser tut: laut
+    // zieht ihn hoch, Stille laesst ihn um drei Prozent je Bild sinken. Der
+    // Boden von 0,02 ist es, was verhindert, dass Rauschen auf volle Hoehe
+    // normiert wird.
+    this.vpeak=Math.max(e.level,(this.vpeak||0.02)*0.97,0.02);
+    const share=e.level/this.vpeak;
+    // DREI PIXEL BODEN, UND DAS IST DIE BREITE: so tief gerundet ist der
+    // ruhende Balken ein Punkt und keine kurze Linie. Die halbe Deckkraft
+    // dazu trennt Stille von Sprache, ohne eine zweite Farbe einzufuehren.
+    const h=Math.max(3,Math.min(20,Math.round(3+share*17)));
+    const last=bars[bars.length-1];
+    last.style.height=h+"px";
+    last.style.opacity=h>5?"0.9":"0.45";
+    if(e.level>0) band.hidden=false; },
+
   settingsCat(name){
     // #126. THE KEY IS ON THE BUTTON, not in a list beside it. It used to be a
     // positional array -- a fifth button with a four-name list would mark the
@@ -2640,6 +2765,14 @@ const crow = {
   micState(e){
     const b=$("#mic");
     b.classList.toggle("rec", e.state==="rec");
+    box.classList.toggle("rec", e.state==="rec");
+    // DAS BAND GEHT MIT DEM KNOPF. Es einzublenden ist Sache des ersten
+    // Pegels; es auszublenden gehoert hierher, weil "es wird nicht mehr
+    // aufgenommen" genau dieser Zustand ist.
+    // ZURUECKGESETZT MIT DEM KNOPF, nicht mitgeschleppt: ein Spitzenwert aus
+    // der letzten Aufnahme druecke die naechste flach, bis er abgeklungen ist.
+    if(e.state==="rec"){ this.vpeak=0.02; }
+    if(e.state!=="rec"){ $("#voice").hidden=true; }
     b.disabled=!!e.blocked;
     b.title = e.blocked ? e.blocked
             : e.state==="rec" ? "stop and write it down"
@@ -3389,6 +3522,8 @@ const crow = {
       // be copied into the sheet when it opened; the ribbon is a name and three
       // window buttons now, so the number goes where somebody looks it up.
       case "meta": $("#aboutver").textContent=e.version;
+        if(e.rail) document.documentElement.style.setProperty(
+          "--railw", e.rail+"px");
         // THE TITLE, NOT A CHIP (#119). Set rather than interpolated for the same reason every
         // other name here is: it is a string that arrived over the bridge.
         $("#conn").title=e.url;
@@ -3427,6 +3562,7 @@ const crow = {
       case "code_open": this.codeOpen(e.lang); break;
       case "format": this.format(e.blocks); break;
       case "update": this.updated(e); break;
+      case "voice": this.voice(e); break;
       case "code_close": this.codeClose(e.closed); break;
       case "tool": this.tool(e.name,e.args); break;
       case "cost": this.cost(e.line,e.share); this.ctx(e.tokens,e.n_ctx); break;
@@ -4138,7 +4274,8 @@ class Api:
         return self._tools_cleared
 
     def ready(self) -> None:
-        self.push({"k": "meta", "version": client_version() or "",
+        self.push({"k": "meta", "rail": rail_width_setting(),
+                   "version": client_version() or "",
                    "url": self._args.base_url, "tools": len(TOOLS),
                    "execute": bool(self._args.execute_tools)})
         threading.Thread(target=self._mic_probe, daemon=True).start()
@@ -6085,6 +6222,22 @@ class Api:
                        "t": "the installer stopped with %d: %s" % (code, last)})
         self._updating = False
 
+    def rail_width(self, px) -> bool:
+        """Die gezogene Breite merken. False, wenn es keine brauchbare ist.
+
+        GEKLEMMT, OBWOHL DIE SEITE SCHON KLEMMT. Zwei Tore fuer denselben Wert,
+        weil er aus einer Maus kommt und in eine Datei geht, die beim naechsten
+        Start gelesen wird -- eine kaputte Zahl dort ueberlebt jedes Fenster.
+        """
+        if isinstance(px, bool) or not isinstance(px, (int, float)):
+            return False
+        width = int(px)
+        if width < RAIL_MIN or width > RAIL_MAX:
+            return False
+        doc = read_settings()
+        doc["rail_width"] = width
+        return write_settings(doc)
+
     def open_url(self, url: str) -> bool:
         """A link in an answer, opened OUTSIDE this window. True when it went.
 
@@ -6131,6 +6284,25 @@ class Api:
                        "note": "the microphone did not open: %s" % exc})
             return
         self.push({"k": "mic", "state": "rec"})
+        threading.Thread(target=self._voice_meter, daemon=True).start()
+
+    def _voice_tick(self) -> None:
+        """Eine Ablesung. Null, sobald der Strom zu ist -- das ist das Zeichen,
+        an dem die Seite das Band stehen laesst."""
+        self.push({"k": "voice",
+                   "level": crow_voice.level() if crow_voice.recording() else 0.0})
+
+    def _voice_meter(self) -> None:
+        """Solange aufgenommen wird, etwa sechzehnmal je Sekunde.
+
+        AUF EINEM FADEN UND NICHT IM CALLBACK. PortAudios eigener Faden fuellt
+        die Bloecke; wer von dort aus in die Queue der Seite schriebe, haengte
+        die Aufnahme an das Zeichentempo eines Fensters.
+        """
+        while crow_voice.recording():
+            self._voice_tick()
+            time.sleep(0.06)
+        self._voice_tick()
 
     def dictate_stop(self) -> None:
         """Stop, then transcribe on a worker.

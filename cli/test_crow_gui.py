@@ -5597,5 +5597,213 @@ class TheUpdateButtonTests(ApiCase):
         self.assertFalse(api._updating)
 
 
+
+class TheMicrophoneReportsItsLevelTests(unittest.TestCase):
+    """robin, 2026-08-23: die Stimme soll als Voiceline in der Eingabemaske zu
+    sehen sein, "besseres Feedback für den User".
+
+    THE STREAM ALREADY HAS THE BLOCKS. PortAudio hands `take()` a buffer every
+    few milliseconds and the recorder copies it into a list; the level is that
+    same buffer, read once, and nothing new is opened for it. A second stream
+    for a meter would be a second thing that can fail to open.
+
+    NULL BEIM STILLSTAND, und das ist keine Formsache: eine Anzeige, die nach
+    dem Stopp weiterzappelt, behauptet ein Mikrofon, das nicht mehr zuhört.
+    """
+
+    def setUp(self) -> None:
+        crow_voice.cancel()
+
+    def test_a_silent_stream_reports_nothing(self):
+        """NEGATIVE, und die wichtigste: ohne Aufnahme ist der Pegel 0."""
+        self.assertEqual(crow_voice.level(), 0.0)
+
+    def test_the_level_follows_the_loudest_sample_of_the_block(self):
+        """Spitze statt Mittel: ein RMS über 20 ms glättet genau die Silben
+        weg, die man sehen will."""
+        import array
+        crow_voice._note_level(array.array("f", [0.0, 0.5, -0.25]))
+        self.assertAlmostEqual(crow_voice.level(), 0.5, places=3)
+        crow_voice._note_level(array.array("f", [0.0, 0.02]))
+        self.assertLess(crow_voice.level(), 0.5, "der Pegel blieb oben stehen")
+
+    def test_a_block_of_nothing_is_not_an_error(self):
+        """NEGATIVE: ein leerer Block kommt vor, wenn der Treiber nachlädt."""
+        import array
+        crow_voice._note_level(array.array("f", []))
+        self.assertEqual(crow_voice.level(), 0.0)
+
+    def test_the_level_is_dropped_when_the_stream_is(self):
+        """`cancel` und `stop` schließen den Strom; was danach noch angezeigt
+        würde, wäre der letzte Ton von vorhin."""
+        import array
+        crow_voice._note_level(array.array("f", [1.0]))
+        crow_voice.cancel()
+        self.assertEqual(crow_voice.level(), 0.0)
+
+
+
+class TheVoiceLineTests(ApiCase):
+    """Was das Fenster daraus macht: ein Balkenband in der Eingabemaske,
+    solange aufgenommen wird.
+
+    GEZEICHNET WIRD IM FENSTER, GEMESSEN IN PYTHON. Die Seite ist kein
+    sicherer Kontext -- `getUserMedia` scheitert dort, gemessen am 2026-08-13
+    an `navigator.clipboard` -- also kann sie das Mikrofon nicht selbst hören
+    und bekommt den Pegel über dieselbe Naht wie den Text.
+    """
+
+    def _source(self) -> str:
+        return (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def test_the_band_lies_in_the_line_and_adds_no_row(self):
+        """robin, 2026-08-23: nicht ueber dem Platzhalter, sondern an seiner
+        Stelle. Eine eigene Zeile machte die Maske jedes Mal hoeher, wenn
+        jemand zu sprechen anfaengt, und schoebe alles darunter nach unten --
+        genau die Bewegung, die der Mikrofonknopf mit seinem Ring vermeidet."""
+        source = self._source()
+        line = source[source.index('<div id="line">'):]
+        line = line[:line.index('<div id="foot">')]
+        self.assertIn('id="voice"', line, "das Band steht nicht in der Zeile")
+        css = source[source.index("#voice{"):]
+        css = css[:css.index("}")]
+        self.assertIn("position:absolute", css,
+                      "das Band nimmt Platz und schiebt die Zeile")
+        self.assertIn("pointer-events:none", css,
+                      "das Band faengt die Klicks des Textfeldes ab")
+        self.assertIn("#line{display:flex;position:relative", source,
+                      "die Zeile ist kein Bezugsrahmen, das Band landet woanders")
+
+    def test_a_quiet_microphone_is_not_a_flat_band(self):
+        """GEFUNDEN IM LAUF, 2026-08-23: robin sprach, der Text kam sauber
+        zurueck, und das Band blieb eine Punktreihe. Der Pegel war richtig, die
+        Skala war geraten -- float32-Sprache liegt bei 0,05 bis 0,3, und
+        `level*22` macht daraus vier Pixel, also den Boden.
+
+        DIE SKALA MISST SICH JETZT SELBST. Ein mitlaufender Spitzenwert mit
+        Abklingen ist das, was ein Aussteuerungsmesser tut: laut zieht ihn
+        hoch, Stille laesst ihn sinken, und das Band fuellt sich unabhaengig
+        davon, wie laut das Mikrofon eingestellt ist. Ein fester Faktor kann
+        das nicht, weil er die Verstaerkung des Geraets raten muesste."""
+        source = self._source()
+        wave = source[source.index("  voice(e){"):]
+        wave = wave[:wave.index("\n  settingsCat")]
+        self.assertIn("vpeak", wave, "die Skala ist wieder fest")
+        self.assertNotIn("e.level*22", wave)
+        self.assertIn("band.clientWidth", wave,
+                      "die Zahl der Balken haengt nicht an der Breite")
+
+    def test_the_placeholder_goes_while_it_records(self):
+        """robin, 2026-08-23: der Platzhalter steht noch da, wenn die
+        Spracheingabe laeuft. Das Band liegt darueber, also stehen beide
+        uebereinander -- und die Punkte lesen sich als Zeichen im Satz."""
+        source = self._source()
+        self.assertIn("#box.rec #in::placeholder", source)
+        self.assertIn('box.classList.toggle("rec"', source,
+                      "niemand setzt die Klasse, die den Platzhalter nimmt")
+
+    def test_the_composer_is_narrower_than_the_column(self):
+        """robin, 2026-08-23: die Maske um ein Viertel schmaler. 900 war die
+        Breite der Textspalte darueber; 675 ist dieselbe Zahl minus 25 %."""
+        source = self._source()
+        box = source[source.index("#box{border:"):]
+        box = box[:box.index("#box.focus")]
+        self.assertIn("max-width:675px", box)
+        self.assertNotIn("max-width:900px", box)
+
+    def test_the_bars_are_mirrored_and_thin(self):
+        """robins zweite Vorgabe: nach oben UND unten, und nicht so breit.
+        `align-items:center` ist das, was einen Balken um die Mitte wachsen
+        laesst statt vom Boden -- und eine feste Breite ist das, was ihn schmal
+        haelt, wenn `flex:1` ihn sonst ueber die ganze Zeile zieht."""
+        source = self._source()
+        band = source[source.index("#voice{"):]
+        band = band[:band.index("#voice[hidden]")]
+        self.assertIn("align-items:center", band)
+        self.assertIn("flex:none", band, "die Balken teilen sich noch die Breite")
+        self.assertNotIn("align-items:flex-end", band)
+        # VOLL GERUNDET: nur so ist ein ruhender Balken ein Punkt statt einer
+        # kurzen Linie, und Stille zeichnet sich als Punktreihe.
+        self.assertIn("border-radius:99px", band)
+
+    def test_the_band_only_exists_while_it_records(self):
+        """Kein Balken im Ruhezustand: die Maske sieht aus wie immer, bis
+        jemand spricht."""
+        source = self._source()
+        self.assertIn("#voice{", source, "die Regel fehlt")
+        # DIE EIGENE REGEL SCHLAEGT DAS ATTRIBUT. `#voice{display:flex}` ist
+        # spezifischer als das `display:none`, das der Browser an `[hidden]`
+        # haengt -- ohne die zweite Regel steht das Band immer da, und das
+        # `hidden` im Markup sieht dabei aus, als taete es etwas.
+        self.assertIn("#voice[hidden]{display:none}", source)
+        self.assertIn('$("#voice").hidden', source,
+                      "niemand blendet das Band aus")
+
+    def test_a_recording_pushes_levels_and_a_stop_ends_them(self):
+        """POSITIVE und NEGATIVE in einem Lauf: solange der Strom offen ist,
+        kommen Pegel; danach keiner mehr."""
+        api = self.api()
+        real_level = crow_voice.level
+        real_rec = crow_voice.recording
+        crow_voice.level = lambda: 0.4
+        crow_voice.recording = lambda: True
+        self.addCleanup(setattr, crow_voice, "level", real_level)
+        self.addCleanup(setattr, crow_voice, "recording", real_rec)
+        api._voice_tick()
+        pushed = [m for m in self.drained(api) if m.get("k") == "voice"]
+        self.assertTrue(pushed, "kein Pegel erreichte die Seite")
+        self.assertAlmostEqual(pushed[-1]["level"], 0.4, places=3)
+        crow_voice.recording = lambda: False
+        api._voice_tick()
+        last = [m for m in self.drained(api) if m.get("k") == "voice"]
+        self.assertTrue(last and last[-1]["level"] == 0.0,
+                        "das Band wurde nicht auf null gesetzt")
+
+
+class TheRailIsDraggableTests(ApiCase):
+    """robin, 2026-08-23: die Trennlinie zwischen Rail und Chat soll gezogen
+    werden können.
+
+    DIE BREITE IST EINE EINSTELLUNG, kein Zustand der Seite. Ein Fenster, das
+    beim nächsten Start wieder 242 Pixel breit ist, hat die Geste nicht
+    gespeichert, sondern nur vorgeführt.
+    """
+
+    def _source(self) -> str:
+        return (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def test_there_is_a_handle_between_the_rail_and_the_chat(self):
+        source = self._source()
+        self.assertIn('id="railgrip"', source)
+        self.assertLess(source.index('<aside id="rail">'),
+                        source.index('id="railgrip"'))
+        self.assertLess(source.index('id="railgrip"'), source.index('<div id="flow">'))
+
+    def test_the_width_survives_a_restart(self):
+        api = self.api()
+        self.assertTrue(api.rail_width(310))
+        self.assertEqual(crow_gui.read_settings().get("rail_width"), 310)
+
+    def test_a_width_nobody_could_use_is_refused(self):
+        """NEGATIVE: eine Rail von 12 Pixeln ist keine Rail, und eine, die den
+        halben Bildschirm nimmt, lässt keinen Chat übrig. Der Griff klemmt in
+        der Seite, und Python klemmt noch einmal -- der Wert kommt aus einer
+        Maus."""
+        api = self.api()
+        for silly in (0, 12, 4000, -30, "breit", None):
+            self.assertFalse(api.rail_width(silly), silly)
+
+    def test_the_chat_keeps_its_distance_from_both_edges(self):
+        """robins zweiter Punkt: der Chat soll links wie rechts ein paar Pixel
+        Luft haben. Links ist die Rail, rechts der Scrollbalken -- der Rinnstein
+        steht schon stabil, die Luft daneben ist neu."""
+        source = self._source()
+        css = source[source.index("<style>"):source.index("</style>")]
+        rule = css[css.index("#flow{"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn("padding-inline", rule)
+        self.assertIn("scrollbar-gutter:stable", rule)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
