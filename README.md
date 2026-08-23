@@ -50,6 +50,7 @@
 - [Window](#window)
 - [Repo](#repo)
 - [Licence](#licence)
+- [Screenshots](#screenshots)
 
 ---
 
@@ -874,3 +875,87 @@ Earlier READMEs: [v0.5.1, Qwen-first](docs/README-v0.5.1-qwen.md) ·
 <div align="center">
 <a href="https://ko-fi.com/nibor1896"><img src="https://img.shields.io/badge/support%20this%20on-ko--fi-ff5e5b?style=for-the-badge" alt="Ko-fi"></a>
 </div>
+
+
+---
+
+## Screenshots
+
+Taken on the shipped build. Windows, `Qwen3.8-27B` on the local llama-server unless a shot says
+otherwise.
+
+<div align="center">
+<img src="docs/images/Crow.png" alt="Crow's empty chat: the rail on the left, the wireframe raven, the composer" width="920">
+</div>
+
+An empty chat. The rail groups chats by working directory, the composer carries the model, the
+release level, the working directory and dictation.
+
+<div align="center">
+<img src="docs/images/CrowToolCallsAndTraceInChat.png" alt="A turn with the trace open and the tool-call panel listing what ran" width="920">
+</div>
+
+A turn with its trace open and the tool-call panel on the right. Every call is listed with its
+arguments and what it did.
+
+<div align="center">
+<img src="docs/images/CrowVoiceInput.png" alt="The composer while dictating, with the voice line in the input row" width="920">
+</div>
+
+Dictation. The voice line sits in the input row and costs no height; the level scale calibrates
+itself against a running peak.
+
+### Settings
+
+<div align="center">
+<img src="docs/images/CrowModelLocal.png" alt="The Model pane with This machine selected" width="920">
+</div>
+
+Where a turn goes. `This machine` is the llama-server on this box: warm slot, no bill.
+
+<div align="center">
+<img src="docs/images/CrowModelOpen.png" alt="The Model pane with OpenRouter selected and its catalogue open" width="920">
+</div>
+
+The same pane on OpenRouter, catalogue open. The count beside it is what the provider last
+reported, read from disk rather than fetched per open.
+
+<div align="center">
+<img src="docs/images/CrowMCP.png" alt="The MCPs pane with a server folded open and a class per tool" width="920">
+</div>
+
+MCP servers. Per tool a switch and a class -- reading, writing, executing -- pre-filled from the
+server's annotations and decided by the user.
+
+<div align="center">
+<img src="docs/images/CrowSkills.png" alt="The Skills pane, one row per skill with a switch" width="920">
+</div>
+
+Skills. One row per skill; off takes it out of the prompt and leaves the file where it is.
+
+<div align="center">
+<img src="docs/images/CrowAPI.png" alt="The API Keys pane, one key per provider, shown as a mask" width="920">
+</div>
+
+API keys. One key per provider, kept in its own file that no view reads back -- what a box shows
+afterwards is a mask.
+
+### Themes
+
+<div align="center">
+<img src="docs/images/Skin13.png" alt="The dark theme" width="920">
+</div>
+
+Dark.
+
+<div align="center">
+<img src="docs/images/Skin23.png" alt="The light theme" width="920">
+</div>
+
+Light.
+
+<div align="center">
+<img src="docs/images/Skin33.png" alt="The crow theme" width="920">
+</div>
+
+Crow.
