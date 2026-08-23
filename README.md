@@ -6,11 +6,11 @@
 
 <h3>Qwen3.8-27B at 200k context on one GPU.</h3>
 
-<p><b>An agent, not a chat box:</b> 12 tools, persistent memory, its own skills.</p>
+<p><b>An agent, not a chat box:</b> 12 tools plus MCP servers, persistent memory, its own skills.<br>Runs on this machine, or on a provider you choose.</p>
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
-<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-1.0.0-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
+<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-1.0.1-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
 <a href="#requirements"><img src="https://img.shields.io/badge/platform-Windows%20x64%20%C2%B7%20CUDA-555555?style=flat-square&logo=nvidia&logoColor=76b900&labelColor=000000" alt="Platform"></a>
 <a href="cli/crow.py"><img src="https://img.shields.io/badge/client-Python%20stdlib%20only-555555?style=flat-square&logo=python&logoColor=ffd43b&labelColor=000000" alt="Python"></a>
 <a href="https://huggingface.co/unsloth/Qwen3.8-27B-GGUF"><img src="https://img.shields.io/badge/model-Qwen3.8--27B-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
@@ -566,93 +566,75 @@ so does re-fetching a configured server; `/mcp auth <server>` repeats it on its 
 
 ## Remote models
 
-`Settings → API Keys`, paste the key, then `Settings → Model`. The catalogue is fetched once, when
-the key lands and when `ask again` is clicked, and lives in `providers.json` — nothing is asked of a
-provider while a window opens.
+`Settings → API Keys`, paste the key, then `Settings → Model`. The catalogue is fetched when the key
+lands and on `ask again`. Nothing is asked of a provider while a window opens.
 
 | file | |
 |---|---|
-| `%LOCALAPPDATA%\Crow\providers.json` | active provider, the model picked per provider, the catalogue |
-| `%LOCALAPPDATA%\Crow\provider_keys.json` | the keys, `0600`, read by no view |
+| `%LOCALAPPDATA%\Crow\providers.json` | active provider, model per provider, catalogue |
+| `%LOCALAPPDATA%\Crow\provider_keys.json` | keys, `0600`, read by no view |
+| `%LOCALAPPDATA%\Crow\provider_tokens.json` | logins, `0600`, read by no view |
 
-| provider | endpoint | key |
+| provider | endpoint | credential |
 |---|---|---|
 | This machine | `--base-url`, default `http://127.0.0.1:8081/v1` | none |
 | OpenRouter | `https://openrouter.ai/api/v1` | `sk-or-...` |
 | Anthropic | `https://api.anthropic.com/v1` (Messages) | `sk-ant-...` or a sign-in |
 | OpenAI | `https://api.openai.com/v1` | `sk-...` or a sign-in |
 
-A model can also be **typed** — the field sits beside `ask for the list`, and
-the slug goes out exactly as entered. Measured 2026-08-23: Anthropic's
-`/v1/models` answered a borrowed sign-in with `401`, and a picker that can only
-offer what a catalogue returned has no way forward when one refuses.
-
-The model id is sent as listed. `:free`, `:extended`, `:nitro` and `:floor` are part of the slug —
-`z-ai/glm-5.2` and `z-ai/glm-5.2:free` are two entries with two bills.
+| | |
+|---|---|
+| Typed slug | field beside `ask for the list`, sent exactly as entered. Measured 2026-08-23: Anthropic's `/v1/models` answers a borrowed sign-in `401` |
+| Variant suffix | `:free`, `:extended`, `:nitro`, `:floor` are part of the slug. `z-ai/glm-5.2` and `z-ai/glm-5.2:free` are two entries with two bills |
 
 ### Subscriptions
 
-`Settings → Subscriptions`, one tile per provider. A tile opens the browser at
-the provider and Crow keeps what comes back — PKCE, `state`, refresh, the same
-flow `/mcp` uses. A sign-in outranks a pasted key; `sign out` drops the login and
-leaves the key.
+`Settings → Subscriptions`, one tile per provider. PKCE, `state`, refresh — the flow `/mcp` uses.
+A sign-in outranks a pasted key; `sign out` drops the login and leaves the key.
 
-Neither provider lets a client register itself, measured 2026-08-22:
+Measured 2026-08-22, neither provider registers a client:
 
 | | discovery | registration |
 |---|---|---|
 | `claude.ai`, `api.anthropic.com`, `console.anthropic.com` | 404 | none |
 | `auth.openai.com` | `openid-configuration`, authorize + token | none |
 
-So each needs a `client_id`, and until one is there the tile says so instead of
-opening a login that comes back `400`:
+Each needs a `client_id`. Until one is set the tile says so instead of opening a login that returns
+`400`. Crow ships no other product's `client_id`.
 
 ```json
 {"oauth": {"anthropic": {"client_id": "...", "authorize": "https://...", "token": "https://..."}}}
 ```
 
-`issuer` instead of `authorize`/`token` where the provider publishes discovery —
-`auth.openai.com` does. Crow does not ship another product's `client_id`.
+`issuer` replaces `authorize`/`token` where the provider publishes discovery. `auth.openai.com` does.
 
-**The documented way in for Anthropic** is neither of those. `claude setup-token`
-prints a long-lived OAuth token — one a subscription mints *for other programs* —
-and the tile takes it:
+**Anthropic, documented way in:**
 
 ```bash
 claude setup-token
 ```
 
-Paste what it prints. `CLAUDE_CODE_OAUTH_TOKEN` in the environment is read too,
-under the name Claude Code itself writes for CI. No `client_id` from another
-product, nothing refreshed that belongs to one.
+Paste what it prints. `CLAUDE_CODE_OAUTH_TOKEN` in the environment is read under the same name.
 
-**Or use the sign-in already on this machine.** Where another program holds one,
-the tile offers it and one click switches it on — second, because it is the one
-that was refused: measured 2026-08-23, a borrowed Claude Code session token
-authenticated at `/v1/messages` and came back `429` naming no limit, with the
-account's own five-hour window at 7 %.
+**Borrowed sign-in, second choice.** Measured 2026-08-23: a borrowed Claude Code session token
+authenticated at `/v1/messages` and returned `429` naming no limit, with the account's five-hour
+window at 7 %.
 
 | provider | store | read |
 |---|---|---|
 | Anthropic | `~/.claude/.credentials.json` | `claudeAiOauth.accessToken` |
 
-**Not Codex.** `~/.codex/auth.json` holds a token, and `GET
-https://api.openai.com/v1/models` answers it `403` — authenticated, then refused
-the resource. It belongs to the ChatGPT backend Codex talks to; the platform API
-wants an `sk-...` key. Two providers, not one.
-
-Read at the moment a request needs it, never copied, never written, never
-refreshed — the refresh token belongs to the program that owns the file, and
-spending it would sign you out of that tool. An expired one is reported; open
-that program once and it refreshes itself. Requests then carry **that program's
-grant**, which is why nothing switches it on by finding a file.
-
-Order when several exist: Crow's own sign-in, then the borrowed one, then the
-pasted key.
-
-| file | |
+| borrowed token | |
 |---|---|
-| `%LOCALAPPDATA%\Crow\provider_tokens.json` | the logins, `0600`, read by no view |
+| Read | at the moment a request needs it |
+| Never | copied, written, refreshed — the refresh token belongs to the program that owns the file |
+| Expired | reported; open that program once and it refreshes itself |
+| Grant | requests carry **that program's** grant, so nothing switches on by finding a file |
+| Order | Crow's own sign-in, then borrowed, then pasted key |
+
+**Not Codex.** `~/.codex/auth.json` holds a token; `GET https://api.openai.com/v1/models` answers it
+`403` — authenticated, resource refused. It belongs to the ChatGPT backend; the platform API wants
+an `sk-...` key. Two providers, not one.
 
 ### Two dialects
 
@@ -661,65 +643,69 @@ pasted key.
 | `chat_completions` | `<base>/chat/completions` | the local server, OpenRouter, OpenAI |
 | `anthropic_messages` | `<base>/messages` | Anthropic, key **and** sign-in |
 
-A subscription token does not reach an OpenAI-shaped endpoint — measured
-2026-08-23, Codex's answered `GET api.openai.com/v1/models` with `403`:
-authenticated, then refused the resource. So the dialect belongs to the
-provider, not to the credential.
+The dialect belongs to the provider, not to the credential — measured 2026-08-23, a Codex token got
+`403` from the OpenAI-shaped endpoint.
 
-What the second one translates, and each of them is a rejection otherwise: the
-system prompt moves to the top level; tools carry `input_schema` instead of
-`function`; a tool call becomes `tool_use` blocks with an object `input`; every
-result answering one turn is batched into **one** user message; `max_tokens` is
-required; `temperature`, `top_p` and `top_k` are removed on current models and
-are not sent. The stream is translated back into the chunk shape the reply loop
-already reads — `text_delta` to content, `thinking_delta` to reasoning,
-`input_json_delta` to tool arguments — so there is one loop, not two.
+What `anthropic_messages` translates, each mandatory:
 
-Credentials are spelled per kind: a key travels as `x-api-key`, a sign-in as
-`Authorization: Bearer` with `anthropic-beta: oauth-2025-04-20`. Never both.
+| | |
+|---|---|
+| System prompt | moves to the top level |
+| Tools | `input_schema` instead of `function` |
+| Tool call | `tool_use` blocks with an object `input` |
+| Tool results | every result answering one turn batched into **one** user message |
+| `max_tokens` | required |
+| `temperature`, `top_p`, `top_k` | removed on current models, not sent |
+| Stream back | `text_delta` → content, `thinking_delta` → reasoning, `input_json_delta` → tool arguments. One loop, not two |
+
+| credential | header |
+|---|---|
+| key | `x-api-key` |
+| sign-in | `Authorization: Bearer` plus `anthropic-beta: oauth-2025-04-20` |
+
+Never both.
 
 ### One answer's ceiling
 
-A remote request carries `max_tokens`; a local one does not. Measured
-2026-08-23: without it OpenRouter answered `HTTP 402 — you requested up to 65536
-tokens, but can only afford 313`. A provider **reserves and prices the model's
-maximum output** when the body names no cap, so a small balance buys nothing at
-all. llama-server reserves nothing and bills nobody, and a cap there would cut
-long answers it is happy to finish.
+`max_tokens` travels on a remote request and not on a local one. Measured 2026-08-23, without it
+OpenRouter answered:
+
+```
+HTTP 402 -- you requested up to 65536 tokens, but can only afford 313
+```
+
+A provider reserves and prices the model's maximum output when the body names no cap. llama-server
+reserves nothing and bills nobody, and a cap there would cut long answers it is happy to finish.
 
 ### Which upstream answers
 
-OpenRouter is a broker: one slug is served by many upstream companies. One field
-is sent to it and to nobody else.
+OpenRouter is a broker: one slug is served by many upstream companies. One field is sent to it and
+to nobody else.
 
-| field | what it does |
+| field | | |
+|---|---|---|
+| `session_id` | sticky routing key | all turns of one chat go to the same upstream |
+
+| | |
 |---|---|
-| `session_id` | a sticky routing key — all turns of one chat go to the same upstream |
+| Value | sha256 of the chat's path, never the path — that path names a person and a directory layout |
+| Length | 64 characters against a documented limit of 256 |
+| Unsaved chat | sends none; an empty string would make every unsaved chat one session |
+| Both senders | the visible turn and the background review carry the same key, or the review is a second session inside the first |
 
-It is a sha256 of the chat's path, never the path itself: that path is
-`C:\Users\<a person>\...`, and a routing key is not a reason to hand a stranger
-a name and a directory layout. 64 characters against a documented limit of 256.
-An unsaved chat sends none — an empty string would make every unsaved chat one
-session.
-
-**Both senders carry the same key.** The background review builds its own body
-and runs with nobody at the keyboard; a key that reached only the visible turn
-would make the review a second session inside the first.
-
-**`provider.require_parameters` is NOT sent, and that is measured.** It restricts
-routing to upstreams supporting every parameter in the request, which would stop
-an upstream from silently dropping `tools`. Turned on 2026-08-23 it returned:
+**`provider.require_parameters` is not sent.** Measured 2026-08-23:
 
 ```
 HTTP 404 -- No endpoints found that can handle the requested parameters
 ```
 
-By default an upstream that does not know a parameter ignores it; this flag turns
-ignoring into exclusion. Crow's body carries `timings_per_token` and
-`chat_template_kwargs` — llama.cpp extensions no remote upstream supports — so
-requiring full support excludes every candidate and the request never leaves
-OpenRouter. The field becomes available the day a remote body stops carrying
-local-only fields, and not before.
+| | |
+|---|---|
+| Default | an upstream that does not know a parameter ignores it |
+| With the flag | ignoring becomes exclusion |
+| Crow's body | carries `timings_per_token` and `chat_template_kwargs`, llama.cpp extensions no remote upstream supports |
+| Result | every candidate excluded |
+| Available again | the day a remote body stops carrying local-only fields |
 
 ### No slot, no cache, no operating point
 
@@ -734,7 +720,7 @@ Against a provider none of them exists, and the window says so once, where the e
 | `/health`, `/props` | asked | not asked |
 | reasoning levels | per `manifests/` | none offered |
 
-There is no price display. Whoever brings a key knows their costs.
+No price display. Whoever brings a key knows their costs.
 
 ---
 

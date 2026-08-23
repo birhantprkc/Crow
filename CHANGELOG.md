@@ -1,10 +1,96 @@
 # Changelog
 
-Every entry says what changed and what was measured to justify it. A number here
-carries the conditions it was taken under, or it says that it is unmeasured.
+Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
+The reasoning is in the commit and on the issue.
 
-This file records the **released** history. The full reasoning behind each change
-is in its commit message and on its issue; this is the short version.
+## 1.0.1 — 2026-08-23
+
+15 commits. MCP servers, remote providers, and a gate in front of the only writer that runs unasked.
+
+### MCP servers (#128, closed with ten children)
+
+| | |
+|---|---|
+| Transports | stdio, and Streamable HTTP per spec 2025-06-18 |
+| Auth | OAuth 2.1 — discovery, DCR, PKCE, `resource`, refresh |
+| Tool schema | fetched **once** when the server is added, then read from disk. `TOOLS` cannot move because a server is slow or down |
+| Per tool | a switch and a class: reading / writing / executing |
+| Class source | pre-filled from `annotations`, decided by the user, stored in Crow's config. The spec calls annotations untrusted |
+| Naming | `mcp_<server>_<tool>` |
+| Config | `%LOCALAPPDATA%\Crow\mcp.json`; `tools.include` / `tools.exclude`, `enabled`, `timeout`, `connect_timeout` |
+| Not built | `sampling`, live `notifications/tools/list_changed`, `elicitation`, standing `GET` stream, `Last-Event-ID` resume, curated catalogue |
+
+Driven against `mcp.context7.com`, `mcp.deepwiki.com`, `docs.mcp.cloudflare.com` and
+`mcp.higgsfield.ai` (73 tools, 143,739 chars, full Clerk OAuth leg).
+
+| measured 2026-08-22 | |
+|---|---|
+| `Python-urllib/3.13` at `docs.mcp.cloudflare.com` | `HTTP 403`, error 1010, `browser_signature` |
+| same client, `User-Agent: Crow/<version>` | `200` |
+| `bearer <token>` at `mcp.higgsfield.ai` | `401` |
+| `Bearer <token>`, same token | `200` |
+
+| measured 2026-08-23, local Qwen3.8-27B, one `context7` call | |
+|---|---|
+| Prompt cache | `cached 3,687/3,968` — 92.9 % held with a foreign schema in `TOOLS` |
+| Wall time | 7.5 s: model 5.1 s, tools 2.4 s |
+
+### Remote models
+
+| provider | endpoint | credential |
+|---|---|---|
+| This machine | `--base-url` | none |
+| OpenRouter | `https://openrouter.ai/api/v1` | `sk-or-...` |
+| Anthropic | `https://api.anthropic.com/v1` | `sk-ant-...` or a sign-in |
+| OpenAI | `https://api.openai.com/v1` | `sk-...` or a sign-in |
+
+| | |
+|---|---|
+| Second transport | `anthropic_messages` — system hoisted, `input_schema`, `tool_use` blocks, results batched per turn, stream translated back into the chunk shape the reply loop already reads. One loop, two dialects |
+| One resolution point | `provider_endpoint()`. `stream_reply` **and** the background review read it |
+| Subscriptions | `claude setup-token`, `CLAUDE_CODE_OAUTH_TOKEN`, and a borrowed `~/.claude/.credentials.json` read at request time, never written, never refreshed |
+| Context bar | `/props` measured locally, `context_length` declared remotely, no bar when nobody says |
+| Sticky routing | `session_id`, sha256 of the chat path, on both senders. OpenRouter only |
+| Not built | price display, default context window, `codex_responses`, foreign `client_id`, `provider.require_parameters` |
+
+| measured 2026-08-23 | |
+|---|---|
+| `openrouter.ai/api/v1/models` | 421 models, 18 with `:free` |
+| `api.anthropic.com/v1/models`, setup token | `200`, 10 models |
+| `api.anthropic.com/v1/messages`, borrowed session | `429`, no limit named, account window at 7 % |
+| `api.openai.com/v1/models`, Codex token | `403` |
+| `chat/completions` without `max_tokens` | `HTTP 402 — you requested up to 65536 tokens, but can only afford 313` |
+| `chat/completions` with `provider.require_parameters` | `HTTP 404 — No endpoints found that can handle the requested parameters` |
+
+`require_parameters` was reverted the same day. The flag turns "ignore an unknown parameter" into
+"exclude the provider", and Crow's body carries `timings_per_token` and `chat_template_kwargs`,
+which no remote upstream supports.
+
+### Memory gate
+
+| | |
+|---|---|
+| Default | **on**. The background review asks before it writes |
+| Off | `--no-memory-approval` |
+| Reason | the review is the only writer that runs with nobody at the keyboard |
+
+### Fixes
+
+| | |
+|---|---|
+| `run_command` | non-JSON on stdout is kept and reported separately from stderr — `npx ctx7 setup` is an installer, not a server, and was being dropped |
+| Tool calls | leave the reading column; a dismissed row stays dismissed |
+| Foreign strings | tool descriptions carrying tabs and newlines are condensed before they are cut to a fixed column |
+| Preflight | reports `node`, refuses nobody over it |
+
+### Numbers
+
+| | |
+|---|---|
+| Suite | 1,298 — `test_crow` 418, `test_crow_core` 533, `test_crow_gui` 347 |
+| `check_shared_core` | 60 / 60 |
+| `check_operating_point` | 6 / 6 |
+| `install.ps1 -Selftest` | 85 |
 
 ## 1.0.0 — 2026-08-21
 
