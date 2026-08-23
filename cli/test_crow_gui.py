@@ -5382,5 +5382,79 @@ class TheRemoteEndpointTests(ApiCase):
             api._model_command(["qwen"])
         self.assertEqual(crow_core.provider_active(), crow_core.LOCAL_PROVIDER)
 
+
+class TheFormattedAnswerTests(ApiCase):
+    """ROBIN, 2026-08-23: the answers arrive as their own source. `**Wetter:**`
+    with the stars on screen, a table drawn as pipes.
+
+    THE CUT IS THE CORE'S, THE DRAWING IS THE WINDOW'S, which is the seam
+    `CodeFences` already uses. The page receives named pieces and builds
+    elements out of `textContent`; it never turns text from the wire into
+    markup, and the case below holds it to that.
+
+    IT HAPPENS WHEN A RUN OF PROSE IS OVER, not while it streams. Half of
+    `**bold` is not bold yet, so a page fed deltas would flicker between two
+    readings of the same sentence. The visible cost is one repaint at the end of
+    the turn; the alternative is a parser that has to be right about text it has
+    not seen yet.
+    """
+
+    def test_the_answer_is_cut_into_blocks_once_it_is_finished(self):
+        """POSITIVE: the shape of robin's weather answer."""
+        sent = self.sink_events([{"content": "## Palma\n\n"},
+                                 {"content": "- **Wetter:** Sonnig\n"},
+                                 {"content": "- Wind: 4 km/h\n"}])
+        drawn = [m for m in sent if m["k"] == "format"]
+        self.assertEqual(len(drawn), 1, "the answer was never cut")
+        self.assertEqual([b["t"] for b in drawn[0]["blocks"]], ["h", "ul"])
+        self.assertEqual(drawn[0]["blocks"][1]["items"][0][0],
+                         {"s": "Wetter:", "b": True})
+
+    def test_the_prose_above_a_code_block_is_drawn_before_it_opens(self):
+        """THE ORDER IS THE WHOLE POINT. The page hangs the blocks on the prose
+        element it is holding, and `codeOpen` lets go of it -- so a `format`
+        that arrived after the fence would find nothing and the bold above the
+        code would stay stars."""
+        sent = self.sink_events([{"content": "**hi**\n```py\nx = 1\n```\n"}])
+        kinds = [m["k"] for m in sent]
+        self.assertIn("format", kinds)
+        self.assertIn("code_open", kinds)
+        self.assertLess(kinds.index("format"), kinds.index("code_open"))
+
+    def test_an_answer_with_nothing_in_it_leaves_no_frame(self):
+        """NEGATIVE: a turn that only thought, or one cut off before it spoke,
+        must not push an empty block for the page to draw."""
+        sent = self.sink_events([{"reasoning_content": "only thinking"}])
+        self.assertEqual([m for m in sent if m["k"] == "format"], [])
+
+    def test_the_page_builds_the_blocks_and_never_writes_markup(self):
+        """THE RULE THIS FEATURE COULD HAVE BROKEN. Everything between the two
+        markers is the drawing, and a single `innerHTML` in there would make a
+        model's answer a place to put script."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        start = source.index("// -- markdown, drawn from what the core cut")
+        end = source.index("// -- end markdown")
+        drawing = source[start:end]
+        self.assertNotIn("innerHTML", drawing)
+        self.assertIn("textContent", drawing)
+        self.assertIn("createElement", drawing)
+
+    def test_a_target_that_is_not_http_never_reaches_a_browser(self):
+        """THE SECOND GATE. The core already refuses to name one, and this one
+        would still be reached by a page that was handed something else -- the
+        text is a stranger's, so it is checked on both sides of the boundary."""
+        api = self.api()
+        opened = []
+        real = crow_gui.webbrowser.open
+        crow_gui.webbrowser.open = lambda url: opened.append(url) or True
+        self.addCleanup(setattr, crow_gui.webbrowser, "open", real)
+        for bad in ("javascript:alert(1)", "file:///C:/Windows/win.ini",
+                    "data:text/html,<script>", "", "ftp://x/y"):
+            self.assertFalse(api.open_url(bad), bad)
+        self.assertEqual(opened, [], "one of them reached the browser")
+        self.assertTrue(api.open_url("https://www.wetter.com"))
+        self.assertEqual(opened, ["https://www.wetter.com"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

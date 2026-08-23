@@ -52,6 +52,7 @@ import sys
 import struct
 import threading
 import time
+import webbrowser
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -855,6 +856,32 @@ details.think[open] .caret{transform:rotate(90deg)}
   color:var(--think);font-size:12px;line-height:1.65;background:var(--think-bg);
   border-radius:0 6px 6px 0;white-space:pre-wrap}
 .say{color:var(--model);line-height:1.62;white-space:pre-wrap}
+/* THE FORMATTED ANSWER. `pre-wrap` moves off the box and onto the paragraph:
+   inside one, a single newline is still a line break -- this client has never
+   folded them and folding them now would reflow every answer robin has read --
+   while a table or a list wraps the way its own box says. */
+.say.md{white-space:normal}
+.md p{margin:0 0 9px;white-space:pre-wrap}
+.md p:last-child,.md ul:last-child,.md ol:last-child,.md table:last-child{
+  margin-bottom:0}
+.md .mdh{color:var(--text-hi);font-weight:600;margin:13px 0 6px;line-height:1.3}
+.md .mdh:first-child{margin-top:0}
+.md .mdh1{font-size:16px}
+.md .mdh2{font-size:14.5px}
+.md .mdh3,.md .mdh4,.md .mdh5,.md .mdh6{font-size:13px}
+.md ul,.md ol{margin:0 0 9px;padding-left:21px}
+.md li{margin:2px 0}
+.md strong{color:var(--text-hi);font-weight:600}
+.md code{font-family:var(--mono);font-size:12px;background:var(--raised);
+  border-radius:4px;padding:1px 5px}
+.md a.lnk{color:var(--accent);text-decoration:underline;cursor:pointer}
+/* A WIDE TABLE SCROLLS INSIDE ITSELF rather than widening the chat: the column
+   is what every other block is measured against. */
+.md table{display:block;overflow-x:auto;border-collapse:collapse;margin:0 0 9px;
+  font-size:12.5px}
+.md th,.md td{border:1px solid var(--line);padding:5px 9px;text-align:left;
+  vertical-align:top}
+.md th{background:var(--raised);color:var(--text-hi);font-weight:600}
 /* #131. THE TOOL-CALL TILE. Collapsed it is a title, a count and a plus; open
    it is every call this chat has made. It sizes to the WIDEST row it holds --
    `width:max-content` -- because a tool line is a path plus arguments and a
@@ -1763,6 +1790,55 @@ const crow = {
       this.col.insertBefore(this.say,this.cursor); }
     this.say.textContent+=p; this.bottom();
   },
+
+  // -- markdown, drawn from what the core cut ------------------------------
+  //
+  // NOTHING FROM THE WIRE BECOMES MARKUP. Every piece arrives named and its
+  // text goes in through textContent, the same rule the rest of this file
+  // follows. A single line of raw markup in here would turn a model's answer
+  // into a place to put script, and a case in test_crow_gui.py reads this whole
+  // region and refuses the one property that would allow it.
+  span(sp){
+    let node=document.createTextNode(sp.s||"");
+    if(sp.c){ const c=document.createElement("code"); c.textContent=sp.s||""; node=c; }
+    if(sp.b){ const b=document.createElement("strong"); b.appendChild(node); node=b; }
+    if(sp.i){ const i=document.createElement("em"); i.appendChild(node); node=i; }
+    // THE SECOND GATE ON A TARGET. The core already refuses to name anything
+    // but http and https; this one is here because the text is a stranger's and
+    // a link that navigates would replace the whole window, which has no way
+    // back -- so it never navigates, it asks the browser outside.
+    if(sp.href && /^https?:\/\//i.test(sp.href)){
+      const a=document.createElement("a"); a.className="lnk"; a.title=sp.href;
+      a.appendChild(node);
+      a.onclick=ev=>{ ev.preventDefault(); pywebview.api.open_url(sp.href); };
+      node=a; }
+    return node; },
+  spansInto(el,spans){ (spans||[]).forEach(sp=>el.appendChild(this.span(sp)));
+    return el; },
+  cellsInto(row,cells,tag){ (cells||[]).forEach(cell=>this.spansInto(
+    row.appendChild(document.createElement(tag)),cell)); },
+  block(b){
+    if(b.t==="h"){ const h=document.createElement("div");
+      h.className="mdh mdh"+b.n; return this.spansInto(h,b.spans); }
+    if(b.t==="ul"||b.t==="ol"){ const l=document.createElement(b.t);
+      (b.items||[]).forEach(item=>this.spansInto(
+        l.appendChild(document.createElement("li")),item));
+      return l; }
+    if(b.t==="table"){ const t=document.createElement("table");
+      this.cellsInto(t.appendChild(document.createElement("thead"))
+        .appendChild(document.createElement("tr")),b.head,"th");
+      const body=t.appendChild(document.createElement("tbody"));
+      (b.rows||[]).forEach(r=>this.cellsInto(
+        body.appendChild(document.createElement("tr")),r,"td"));
+      return t; }
+    return this.spansInto(document.createElement("p"),b.spans); },
+  format(blocks){
+    const box=this.say;
+    if(!box||!blocks||!blocks.length) return;
+    box.textContent=""; box.classList.add("md");
+    blocks.forEach(b=>box.appendChild(this.block(b)));
+    this.say=null; this.bottom(); },
+  // -- end markdown --------------------------------------------------------
 
   codeOpen(lang){
     this.say=null; this.fenceLang=lang||"code";
@@ -3302,6 +3378,7 @@ const crow = {
       case "think_close": this.thinkClose(); break;
       case "text": this.answer(e.t); break;
       case "code_open": this.codeOpen(e.lang); break;
+      case "format": this.format(e.blocks); break;
       case "code_close": this.codeClose(e.closed); break;
       case "tool": this.tool(e.name,e.args); break;
       case "cost": this.cost(e.line,e.share); this.ctx(e.tokens,e.n_ctx); break;
@@ -3650,6 +3727,10 @@ class Sink(ReplyEvents, FenceEvents):
         self._put = put
         self._live = live
         self._fences: CodeFences | None = None
+        # THE PROSE OF THE RUN THAT IS OPEN, kept so it can be cut into blocks
+        # once it is over. Code lines are NOT in here: they arrive through
+        # `code_text` and already have a frame of their own.
+        self._prose: list[str] = []
         self._deltas = 0
         self._started = 0.0
         self._last = 0.0
@@ -3657,6 +3738,7 @@ class Sink(ReplyEvents, FenceEvents):
     def reply_started(self) -> None:
         self._put({"k": "start"})
         self._fences = CodeFences(self)
+        self._prose = []
         self._deltas = 0
         self._started = self._last = time.monotonic()
 
@@ -3719,14 +3801,36 @@ class Sink(ReplyEvents, FenceEvents):
         if self._fences is not None:
             self._fences.finish()
             self._fences = None
+        self._formatted()
 
     # -- FenceEvents: what the core decided, drawn --------------------------
 
     def prose(self, piece: str) -> None:
+        self._prose.append(piece)
         self._put({"k": "text", "t": piece})
 
     def code_started(self, language: str) -> None:
+        # BEFORE THE FENCE, NOT AFTER IT. The page hangs the blocks on the prose
+        # element it is holding and `codeOpen` lets go of that element, so a
+        # `format` arriving afterwards would find nothing and the bold above the
+        # code would stay stars.
+        self._formatted()
         self._put({"k": "code_open", "lang": language or ""})
+
+    def _formatted(self) -> None:
+        """The run of prose that just ended, cut into blocks.
+
+        NOT WHILE IT STREAMS. Half of `**bold` is not bold yet, and a page fed
+        deltas would flicker between two readings of one sentence. `CodeFences`
+        can stream because a fence is a whole line; emphasis is not.
+
+        NOTHING TO SAY IS NOTHING SENT: an answer that was cut off before it
+        spoke must not leave an empty frame on the screen.
+        """
+        text, self._prose = "".join(self._prose), []
+        blocks = crow_core.markdown_blocks(text)
+        if blocks:
+            self._put({"k": "format", "blocks": blocks})
 
     def code_text(self, line: str) -> None:
         self._put({"k": "text", "t": line + "\n"})
@@ -5846,6 +5950,27 @@ class Api:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=False)
             return proc.returncode == 0
         except Exception:                  # noqa: BLE001 - reported as False
+            return False
+
+    def open_url(self, url: str) -> bool:
+        """A link in an answer, opened OUTSIDE this window. True when it went.
+
+        NEVER IN THE WEBVIEW. Following a link in here would replace the client
+        with a web page, and a frameless window has no back button -- the chat,
+        the composer and the rail would simply be gone until Crow was restarted.
+
+        THE SCHEME IS CHECKED AGAIN, and the core already checked it. Two gates
+        for one decision, because this text was written by somebody else's model
+        and `javascript:` and `data:` are script while `file:` is the disk of
+        whoever is reading.
+        """
+        if not isinstance(url, str):
+            return False
+        if not url.lower().startswith(("http://", "https://")):
+            return False
+        try:
+            return bool(webbrowser.open(url))
+        except Exception:                  # noqa: BLE001 - a link, never fatal
             return False
 
     # -- dictation (crow_voice) --------------------------------------------

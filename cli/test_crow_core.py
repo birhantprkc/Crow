@@ -8076,5 +8076,124 @@ class TheParameterFilterTests(unittest.TestCase):
         self.assertEqual(by_id["a/quiet"]["params"], [])
 
 
+
+class TheMarkdownIsCutInTheCoreTests(unittest.TestCase):
+    """WHERE A BOLD RUN BEGINS IS A DECISION, and every decision in this client
+    belongs to the core -- the same sentence `CodeFences` already carries. The
+    window draws what comes out of here and builds no markup of its own, so
+    nothing that arrived over the wire can become HTML on the way in.
+
+    ROBIN SAW IT ON 2026-08-23: a weather answer arrived with `**Wetter:**` and
+    a pipe table drawn as pipes. Only fenced code was ever cut into blocks; the
+    rest reached the screen as its own source.
+
+    WHAT IS IN AND WHAT IS NOT. Headings, bullet and numbered lists, tables,
+    paragraphs; bold, italic, inline code and links inside them. Nested lists,
+    block quotes and reference links are NOT handled and fall through as the
+    text they are, which is what this client did with all of it until today.
+    """
+
+    def spans(self, text):
+        blocks = crow_core.markdown_blocks(text)
+        self.assertEqual(len(blocks), 1, blocks)
+        return blocks[0]["spans"]
+
+    def test_text_without_markup_comes_back_as_itself(self):
+        """THE CASE THAT MATTERS MOST, because it is every answer that carries
+        no markup at all: one paragraph, one span, the same characters. A parser
+        that rewrote plain prose would change what the client has always shown.
+        """
+        blocks = crow_core.markdown_blocks("just a sentence.\nand a second line")
+        self.assertEqual(blocks, [{"t": "p", "spans":
+                                   [{"s": "just a sentence.\nand a second line"}]}])
+
+    def test_the_line_breaks_of_a_paragraph_survive(self):
+        """NEGATIVE HALF of the case above. Markdown folds a single newline into
+        a space; this client never has, and `white-space:pre-wrap` in the page
+        is why. Folding them now would reflow every answer robin has read."""
+        self.assertIn("\n", self.spans("one\ntwo")[0]["s"])
+
+    def test_bold_and_italic_and_code_are_named(self):
+        spans = self.spans("plain **bold** and *slant* and `lit`")
+        self.assertEqual(spans[0], {"s": "plain "})
+        self.assertEqual(spans[1], {"s": "bold", "b": True})
+        self.assertEqual(spans[3], {"s": "slant", "i": True})
+        self.assertEqual(spans[5], {"s": "lit", "c": True})
+
+    def test_underscores_do_the_same_as_stars(self):
+        self.assertEqual(self.spans("__x__")[0], {"s": "x", "b": True})
+        self.assertEqual(self.spans("_y_")[0], {"s": "y", "i": True})
+
+    def test_a_star_inside_code_is_a_star(self):
+        """NEGATIVE, and it is the one a naive replacement gets wrong: inline
+        code is verbatim, so a shell glob or a C pointer keeps its stars."""
+        spans = self.spans("run `a**b` now")
+        self.assertEqual(spans[1], {"s": "a**b", "c": True})
+
+    def test_a_lone_star_is_not_emphasis(self):
+        """NEGATIVE: `2 * 3 * 4` is arithmetic, and a parser that pairs any two
+        stars turns it into slanted text."""
+        self.assertEqual(self.spans("2 * 3 * 4"), [{"s": "2 * 3 * 4"}])
+
+    def test_a_link_keeps_its_text_and_its_target(self):
+        spans = self.spans("see [wetter.com](https://www.wetter.com) for it")
+        self.assertEqual(spans[1], {"s": "wetter.com",
+                                    "href": "https://www.wetter.com"})
+
+    def test_a_link_that_is_not_http_stays_text(self):
+        """NEGATIVE, AND IT IS A SECURITY CASE. `javascript:` and `file:` reach
+        the page as characters, never as a target. The window checks again -- two
+        gates for one decision, because this one is somebody else's text."""
+        for bad in ("javascript:alert(1)", "file:///C:/Windows", "data:text/html,x"):
+            spans = self.spans("click [here](%s) now" % bad)
+            self.assertEqual(len(spans), 1, bad)
+            self.assertNotIn("href", spans[0], bad)
+            self.assertIn(bad, spans[0]["s"])
+
+    def test_a_heading_carries_its_level(self):
+        blocks = crow_core.markdown_blocks("## Aktuelle Bedingungen")
+        self.assertEqual(blocks, [{"t": "h", "n": 2, "spans":
+                                   [{"s": "Aktuelle Bedingungen"}]}])
+
+    def test_a_bullet_list_becomes_items(self):
+        blocks = crow_core.markdown_blocks("- **Wetter:** Sonnig\n- Wind: 4 km/h")
+        self.assertEqual(blocks[0]["t"], "ul")
+        self.assertEqual(len(blocks[0]["items"]), 2)
+        self.assertEqual(blocks[0]["items"][0][0], {"s": "Wetter:", "b": True})
+
+    def test_a_numbered_list_is_told_apart_from_a_bullet_one(self):
+        blocks = crow_core.markdown_blocks("1. first\n2. second")
+        self.assertEqual(blocks[0]["t"], "ol")
+        self.assertEqual(len(blocks[0]["items"]), 2)
+
+    def test_a_table_needs_its_rule_line(self):
+        """THE RULE IS WHAT MAKES IT A TABLE. A line of pipes on its own is a
+        sentence with pipes in it, and drawing that as a one-column table would
+        be a parser inventing structure."""
+        table = crow_core.markdown_blocks(
+            "| Quelle | Zusammenfassung |\n|---|---|\n| **wetter.com** | Sonnig |")[0]
+        self.assertEqual(table["t"], "table")
+        self.assertEqual(table["head"][0][0]["s"], "Quelle")
+        self.assertEqual(table["rows"][0][0][0], {"s": "wetter.com", "b": True})
+        self.assertEqual(table["rows"][0][1][0]["s"], "Sonnig")
+
+    def test_pipes_without_a_rule_stay_a_paragraph(self):
+        """NEGATIVE half of the case above."""
+        blocks = crow_core.markdown_blocks("| a | b |\n| c | d |")
+        self.assertEqual([b["t"] for b in blocks], ["p"])
+
+    def test_the_blocks_of_one_answer_keep_their_order(self):
+        """The shape robin's weather answer had: a sentence, a heading, a list."""
+        blocks = crow_core.markdown_blocks(
+            "Hier ist die Vorhersage:\n\n## Palma\n\n- Sonnig\n- 26 Grad")
+        self.assertEqual([b["t"] for b in blocks], ["p", "h", "ul"])
+
+    def test_nothing_at_all_is_no_blocks(self):
+        """NEGATIVE: an answer that was interrupted before it said anything must
+        not leave an empty paragraph behind for the page to draw."""
+        self.assertEqual(crow_core.markdown_blocks(""), [])
+        self.assertEqual(crow_core.markdown_blocks("   \n\n  "), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -3143,6 +3143,182 @@ class CodeFences:
         self._events.code_finished(closed)
 
 
+# ------------------------------------------------------------------ markdown
+#
+# ROBIN, 2026-08-23: an answer arrived reading `**Wetter:**` with a table drawn
+# as pipes. Only fenced code had ever been cut into blocks -- everything else
+# reached the screen as its own source.
+#
+# IT IS CUT HERE AND NOT IN THE PAGE, and that is the same sentence `CodeFences`
+# carries: where a bold run begins is a decision, and a second opinion about it
+# is how one surface frames what the other reads as prose. The harder half is
+# the one the page cannot solve at all -- a renderer in the window would have to
+# turn text that came off the wire into HTML, and this file's rule is that
+# NOTHING from the wire becomes markup. So the core names the pieces and the
+# window draws them out of `textContent`, the way it draws every other name.
+#
+# ONLY WHAT THE MODELS ACTUALLY EMIT. Headings, bullet and numbered lists,
+# tables, paragraphs, and inside them bold, italic, inline code and links.
+# Nested lists, block quotes, reference links and setext headings fall through
+# as the characters they are, which is what this client did with ALL of it
+# until today: a gap here is the old behaviour, never a broken screen.
+
+_MD_HEADING = re.compile(r"^(#{1,6})[ \t]+(.*)$")
+_MD_BULLET = re.compile(r"^[ \t]*[-*+][ \t]+(.*)$")
+_MD_NUMBER = re.compile(r"^[ \t]*\d+[.)][ \t]+(.*)$")
+_MD_ROW = re.compile(r"^[ \t]*\|.*\|[ \t]*$")
+# The line that turns a row of pipes INTO a table. Without it the same
+# characters are a sentence that happens to contain pipes.
+_MD_RULE = re.compile(r"^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)*\|?[ \t]*$")
+
+# ONE PASS, AND CODE COMES FIRST IN THE ALTERNATION so that a star inside
+# backticks is a star: `a**b` is a glob or a pointer, not the start of a bold
+# run. Emphasis takes no newline, which is what keeps a lone star in "2 * 3"
+# from pairing with one two lines further down.
+_MD_INLINE = re.compile(
+    r"(?P<fence>`+)(?P<code>.+?)(?P=fence)"
+    r"|\[(?P<text>[^\]\n]*)\]\((?P<href>[^)\s]+)\)"
+    r"|(?P<strong>\*\*|__)(?P<bold>[^\s\n](?:[^\n]*?[^\s\n])?)(?P=strong)"
+    r"|(?P<slant>[*_])(?P<italic>[^\s*_\n](?:[^*_\n]*[^\s*_\n])?)(?P=slant)")
+
+# THE EDGES OF EMPHASIS MAY NOT BE WHITESPACE, and that is the spec rather than
+# taste: CommonMark 0.31.2 calls an opener a "left-flanking delimiter run" and
+# gives `a * foo bar*` as the example that stays a sentence. Without the rule
+# "2 * 3 * 4" reads as arithmetic to a person and as italics to the parser.
+
+# THE ONLY TWO SCHEMES THAT MAY BECOME A TARGET. `javascript:` and `data:` are
+# script, `file:` is the disk of whoever is reading -- and this text was written
+# by somebody else's model. Anything else stays the characters it is. The window
+# checks again before it opens one: two gates, because one of them is a page.
+_MD_SCHEMES = ("http://", "https://")
+
+
+def _md_span(text: str, bold: bool, italic: bool, href: str,
+             code: bool = False) -> dict:
+    """One run of text and what is true about it. Absent means false."""
+    span = {"s": text}
+    if bold:
+        span["b"] = True
+    if italic:
+        span["i"] = True
+    if code:
+        span["c"] = True
+    if href:
+        span["href"] = href
+    return span
+
+
+def _md_plain(out: list, text: str, bold: bool, italic: bool, href: str) -> None:
+    """Text with no markup of its own, merged into the run before it when that
+    run carries the same flags -- otherwise every character between two bold
+    words would arrive as its own span."""
+    if not text:
+        return
+    span = _md_span(text, bold, italic, href)
+    if out and dict(out[-1], s="") == dict(span, s=""):
+        out[-1]["s"] += text
+        return
+    out.append(span)
+
+
+def _md_spans(text: str, bold: bool = False, italic: bool = False,
+              href: str = "") -> list:
+    """The runs of one line of text. Recurses so `**a *b* c**` keeps both."""
+    out: list = []
+    at = 0
+    for found in _MD_INLINE.finditer(text):
+        _md_plain(out, text[at:found.start()], bold, italic, href)
+        if found.group("code") is not None:
+            out.append(_md_span(found.group("code"), bold, italic, href, code=True))
+        elif found.group("href") is not None:
+            target = found.group("href")
+            if target.lower().startswith(_MD_SCHEMES):
+                out.extend(_md_spans(found.group("text"), bold, italic, target))
+            else:
+                _md_plain(out, found.group(0), bold, italic, href)
+        elif found.group("bold") is not None:
+            out.extend(_md_spans(found.group("bold"), True, italic, href))
+        else:
+            out.extend(_md_spans(found.group("italic"), bold, True, href))
+        at = found.end()
+    _md_plain(out, text[at:], bold, italic, href)
+    return out
+
+
+def _md_cells(line: str) -> list:
+    """One table row, outer pipes off, each cell parsed like any other text."""
+    inner = line.strip()
+    if inner.startswith("|"):
+        inner = inner[1:]
+    if inner.endswith("|"):
+        inner = inner[:-1]
+    return [_md_spans(cell.strip()) for cell in inner.split("|")]
+
+
+def _md_starts_a_block(lines: list, at: int) -> bool:
+    """Whether this line begins something that is not the paragraph it is in."""
+    line = lines[at]
+    return bool(_MD_HEADING.match(line) or _MD_BULLET.match(line)
+                or _MD_NUMBER.match(line)
+                or (_MD_ROW.match(line) and at + 1 < len(lines)
+                    and _MD_RULE.match(lines[at + 1])))
+
+
+def markdown_blocks(text: str) -> list:
+    """A finished answer, cut into the pieces a surface can draw.
+
+    CALLED ON A RUN OF PROSE THAT IS OVER, never on a piece as it streams: half
+    of `**bold` is not bold yet, and a parser fed deltas would flicker between
+    two readings of the same sentence. `CodeFences` can stream because a fence
+    is a whole line; emphasis is not.
+
+    AN EMPTY ANSWER IS NO BLOCKS AT ALL, not one empty paragraph. A turn that
+    was interrupted before it said anything must not leave a frame behind.
+    """
+    lines = (text or "").replace("\r\n", "\n").split("\n")
+    blocks: list = []
+    at = 0
+    while at < len(lines):
+        if not lines[at].strip():
+            at += 1
+            continue
+        heading = _MD_HEADING.match(lines[at])
+        if heading:
+            blocks.append({"t": "h", "n": len(heading.group(1)),
+                           "spans": _md_spans(heading.group(2).strip())})
+            at += 1
+            continue
+        if (_MD_ROW.match(lines[at]) and at + 1 < len(lines)
+                and _MD_RULE.match(lines[at + 1])):
+            head = _md_cells(lines[at])
+            at += 2
+            rows = []
+            while at < len(lines) and _MD_ROW.match(lines[at]):
+                rows.append(_md_cells(lines[at]))
+                at += 1
+            blocks.append({"t": "table", "head": head, "rows": rows})
+            continue
+        ordered = _MD_NUMBER.match(lines[at]) is not None
+        if ordered or _MD_BULLET.match(lines[at]):
+            pattern = _MD_NUMBER if ordered else _MD_BULLET
+            items = []
+            while at < len(lines):
+                item = pattern.match(lines[at])
+                if not item:
+                    break
+                items.append(_md_spans(item.group(1).strip()))
+                at += 1
+            blocks.append({"t": "ol" if ordered else "ul", "items": items})
+            continue
+        paragraph = [lines[at]]
+        at += 1
+        while at < len(lines) and lines[at].strip() and not _md_starts_a_block(lines, at):
+            paragraph.append(lines[at])
+            at += 1
+        blocks.append({"t": "p", "spans": _md_spans("\n".join(paragraph))})
+    return blocks
+
+
 def stream_reply(
     conversation: Conversation,
     *,
