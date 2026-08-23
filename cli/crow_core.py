@@ -9929,13 +9929,23 @@ PROVIDERS = {
 # IT SPEAKS ABOUT CROW AND NOT ABOUT THE PROVIDER, and the first version did
 # not. It said "no prefix cache", which is simply untrue of Anthropic -- prompt
 # caching is one of that API's headline features, with its own breakpoints and
-# its own `cache_read_input_tokens`. What is true is that CROW sets no
-# breakpoints, so nothing it sends is kept warm; the endpoint's own abilities
-# are not this line's to describe. It also said "on your own key", which stops
-# being true the moment a subscription is the credential.
-REMOTE_ENDPOINT_NOTE = ("a remote model has no slot here -- nothing is kept "
-                        "warm between turns, and every turn sends the whole "
-                        "prompt again")
+# its own `cache_read_input_tokens`. What is true is that CROW marks nothing
+# for caching; the endpoint's own abilities are not this line's to describe. It
+# also said "on your own key", which stops being true the moment a subscription
+# is the credential.
+#
+# AND IT SAID "NOTHING IS KEPT WARM BETWEEN TURNS" UNTIL 2026-08-23. That was
+# the same mistake a second time, and it survived because the inference looked
+# sound: Crow sets no breakpoints, therefore nothing is warm. IT DOES NOT
+# FOLLOW. An endpoint may cache without being asked -- OpenRouter's endpoint
+# listing carries `supports_implicit_caching` per provider -- and `session_id`
+# went into this client precisely to keep the turns of one chat on the upstream
+# that holds that cache, "maximizing prompt cache hits" in their own words. The
+# line was telling the user the opposite of what the client had just been built
+# to do.
+REMOTE_ENDPOINT_NOTE = ("a remote model has no slot here -- Crow marks nothing "
+                        "for caching, and every turn sends the whole prompt "
+                        "again")
 
 # The catalog call. It is not a turn -- nobody is watching tokens per second --
 # so it is seconds and not minutes.

@@ -6444,7 +6444,16 @@ class TheProviderRegistryTests(unittest.TestCase):
         # a remote endpoint has no prefix cache. Anthropic's has one, with its
         # own breakpoints -- Crow simply sets none. A user-visible line may say
         # what THIS client does and not what somebody else's API cannot.
-        for overreach in ("prefix cache", "your own key", "no cache"):
+        #
+        # "kept warm" JOINED THAT LIST ON 2026-08-23, when `session_id` shipped.
+        # That field exists to direct every turn of one chat to the same
+        # upstream and, in OpenRouter's own words, to maximise prompt cache
+        # hits; their endpoint listing even carries `supports_implicit_caching`
+        # per provider. So "nothing is kept warm between turns" states an
+        # ability of somebody else's endpoint, and states it wrongly. What Crow
+        # can say about itself is that it marks nothing for caching.
+        for overreach in ("prefix cache", "your own key", "no cache",
+                          "kept warm"):
             self.assertNotIn(overreach, crow_core.REMOTE_ENDPOINT_NOTE)
 
     def test_a_session_saved_against_a_slot_is_not_restored_into_a_provider(self):
