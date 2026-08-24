@@ -3043,6 +3043,26 @@ class ReplyEvents:
     def reasoning_text(self, piece: str) -> None:
         """One reasoning delta, verbatim and in order."""
 
+    def tool_arguments(self, index: int, name: str, piece: str) -> None:
+        """#138. Ein Stueck der Argumente eines Aufrufs, in der Reihenfolge des
+        Stroms. Vorgabe: nichts, wie bei den sieben davor.
+
+        DAS ACHTE, UND ES MELDET NICHTS NEUES VOM NETZ. `stream_reply` setzte
+        diese Fragmente schon immer zusammen und behielt sie fuer sich, bis der
+        Aufruf vollstaendig war -- `tool_started` bekommt fertige Argumente.
+        Gemessen im Fenster am 2026-08-24: ein `write_file` von 8 kB erscheint
+        als eine Zeile, nachdem die Datei geschrieben wurde, und waehrend der
+        Arbeit steht dort ein Cursor.
+
+        `index` TRENNT ZWEI AUFRUFE IM SELBEN ZUG, die sich den Strom teilen.
+        `name` reist bei JEDEM Stueck mit, obwohl die Gegenseite ihn nur auf dem
+        ersten Fragment schickt: eine Oberflaeche muesste ihn sonst selbst
+        mitfuehren, und das waere dieselbe Zuordnung ein zweites Mal gebaut.
+
+        EIN LEERES STUECK IST KEIN EREIGNIS. Die Gegenseite schickt leere
+        `arguments` mit, wenn nur `id` oder `name` gemeint sind.
+        """
+
     def reasoning_finished(self) -> None:
         """The open thought block ended. The answer resumes, or the turn does."""
 
@@ -3709,6 +3729,12 @@ def stream_reply(
                         slot["name"] = fn["name"]
                     if fn.get("arguments"):
                         slot["arguments"] += fn["arguments"]
+                        # #138. GEMELDET, BEVOR ES VOLLSTAENDIG IST. Der Aufruf
+                        # selbst wird weiter erst gemeldet, wenn er ganz da ist
+                        # -- `tool_started` bleibt, was es war. Das hier ist die
+                        # Sicht waehrend des Schreibens, und sie ist der einzige
+                        # Grund, warum ueberhaupt jemand zusieht.
+                        events.tool_arguments(idx, slot["name"], fn["arguments"])
                     _mark_first_token(time.monotonic())
 
                 piece = delta.get("content")

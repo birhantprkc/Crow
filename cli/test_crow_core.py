@@ -959,6 +959,88 @@ def _dangling(messages: list[dict]) -> list[str]:
             if c["id"] not in answered]
 
 
+class ToolArgumentsArriveWhileTheyAreWrittenTests(ReplySeamTests):
+    """#138. Die achte Naht: was ein Werkzeug schreibt, waehrend es geschrieben wird.
+
+    WARUM SIE FEHLTE. `stream_reply` setzt die Argumente eines Aufrufs aus
+    Fragmenten zusammen und meldet den Aufruf erst, wenn er vollstaendig ist --
+    `tool_started` bekommt fertige Argumente. Ein `write_file` von 8 kB ist damit
+    eine einzige Zeile, die erscheint, nachdem die Datei geschrieben wurde.
+    Gemessen am 2026-08-24 im Fenster: 25 Runden, 56 Aufrufe, und die einzige
+    Spur waehrend der Arbeit war ein Cursor.
+    """
+
+    class _Recorder(crow_core.ReplyEvents):
+        def __init__(self):
+            self.args = []
+            self.text = []
+
+        def tool_arguments(self, index, name, piece):
+            self.args.append((index, name, piece))
+
+        def answer_text(self, piece):
+            self.text.append(piece)
+
+    def test_every_fragment_is_reported_in_the_order_it_arrived(self):
+        rec = self._Recorder()
+        self._run([
+            {"tool_calls": [{"index": 0, "id": "a1",
+                             "function": {"name": "write_file",
+                                          "arguments": '{"path": "x.py",'}}]},
+            {"tool_calls": [{"index": 0, "function": {"arguments": ' "content": "de'}}]},
+            {"tool_calls": [{"index": 0, "function": {"arguments": 'f go():\\n    pass"}'}}]},
+        ], events=rec)
+        self.assertEqual([p for _i, _n, p in rec.args],
+                         ['{"path": "x.py",', ' "content": "de', 'f go():\\n    pass"}'])
+
+    def test_the_name_rides_along_after_the_first_fragment(self):
+        """DER NAME KOMMT NUR EINMAL, auf dem ersten Fragment -- so schickt es
+        die Gegenseite. Eine Oberflaeche, die ihn je Fragment braeuchte, muesste
+        ihn selbst mitfuehren; also traegt ihn jedes Ereignis."""
+        rec = self._Recorder()
+        self._run([
+            {"tool_calls": [{"index": 0, "id": "a1",
+                             "function": {"name": "edit_file", "arguments": "{"}}]},
+            {"tool_calls": [{"index": 0, "function": {"arguments": "}"}}]},
+        ], events=rec)
+        self.assertEqual([n for _i, n, _p in rec.args], ["edit_file", "edit_file"])
+
+    def test_two_calls_in_one_round_stay_apart(self):
+        """NEGATIV: zwei Aufrufe im selben Zug teilen sich den Strom und werden
+        nur durch `index` getrennt. Zusammengelegt waere die Anzeige ein
+        Reissverschluss aus zwei Dateien."""
+        rec = self._Recorder()
+        self._run([
+            {"tool_calls": [
+                {"index": 0, "id": "a", "function": {"name": "read_file", "arguments": "aa"}},
+                {"index": 1, "id": "b", "function": {"name": "list_dir", "arguments": "bb"}}]},
+            {"tool_calls": [{"index": 1, "function": {"arguments": "cc"}}]},
+        ], events=rec)
+        self.assertEqual(rec.args, [(0, "read_file", "aa"),
+                                    (1, "list_dir", "bb"),
+                                    (1, "list_dir", "cc")])
+
+    def test_an_empty_fragment_is_not_an_event(self):
+        """NEGATIV: die Gegenseite schickt leere `arguments` mit, wenn nur `id`
+        oder `name` gemeint sind. Jedes davon zu melden hiesse, die Anzeige bei
+        jedem Aufruf einmal grundlos anzustossen."""
+        rec = self._Recorder()
+        self._run([
+            {"tool_calls": [{"index": 0, "id": "a1",
+                             "function": {"name": "read_file", "arguments": ""}}]},
+            {"tool_calls": [{"index": 0, "function": {"arguments": "x"}}]},
+        ], events=rec)
+        self.assertEqual(rec.args, [(0, "read_file", "x")])
+
+    def test_a_surface_that_wants_none_of_it_stays_silent(self):
+        """Die Vorgabe tut nichts, wie bei den sieben davor -- ein Aufrufer, der
+        nur den Text will, uebergibt nichts und bekommt Ruhe."""
+        said = self._run([{"tool_calls": [{"index": 0, "id": "a",
+                                           "function": {"name": "read_file",
+                                                        "arguments": "{}"}}]}])
+        self.assertIsNotNone(said)
+
+
 class TurnLoopCase(unittest.TestCase):
     """A scripted endpoint plus the tool state E1 pins, for driving `run_turn`.
 
