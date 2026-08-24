@@ -439,6 +439,13 @@ def client_version(path: str | None = None) -> str:
     return found.group(1) if found else ""
 
 
+# THE MEMORY MARK, BAKED IN. `docs/` is not in the package: an installed
+# Crow has cli, bin, models and templates and no docs directory, so a path
+# into it would render here and nowhere else. 48x48 out of the 512x512
+# original, 1,774 bytes -- the row draws it at 17px.
+MEMORY_ICON = "data:image/png;base64,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"
+
+
 # ---------------------------------------------------------------- the page
 
 PAGE = r"""<!doctype html>
@@ -1137,12 +1144,39 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    would be a thing to switch off, and this line may not be switchable.
    THE COLOURS COME FROM THE PALETTE, never from a literal, so all three themes
    answer for it -- `--accent` is the brand value the core hands in. */
+   A RESTING STATE IS NOT A STOPPED ANIMATION. Until 2026-08-24 one gradient
+   did both jobs, so when the sweep finished it parked where `forwards` left
+   it: a bright middle between two transparent ends, which reads as two tiles
+   rather than one row. The row now rests on a FLAT fill and the sweep is a
+   layer of its own that fades to nothing. */
 .memnote{font-size:11.5px;white-space:pre-wrap;color:var(--accent);
-  padding:3px 8px;border-radius:6px;border:1px solid transparent;
-  background:linear-gradient(90deg,transparent 0%,color-mix(in srgb,var(--accent) 22%,transparent) 50%,transparent 100%);
+  display:flex;align-items:center;gap:7px;
+  padding:7px 10px;border-radius:6px;border:1px solid transparent;
+  position:relative;overflow:hidden;
+  background-color:color-mix(in srgb,var(--accent) 13%,transparent);
+  animation:memglow 1.6s ease-out 1 forwards}
+/* THE MOVING LAYER, and it leaves nothing behind. */
+.memnote::before{content:"";position:absolute;inset:0;pointer-events:none;
+  background-image:linear-gradient(90deg,transparent 0%,color-mix(in srgb,var(--accent) 26%,transparent) 50%,transparent 100%);
   background-size:220% 100%;
-  animation:memsweep .9s ease-out 1 forwards, memglow 1.6s ease-out 1 forwards}
-@keyframes memsweep{from{background-position:120% 0}to{background-position:-40% 0}}
+  animation:memsweep .9s ease-out 1 forwards}
+/* THE MARK IS BAKED IN, NOT LOADED. `docs/` is not in the package -- an
+   installed Crow has cli, bin, models and templates and no docs directory at
+   all, so a path into it would work on the machine it was written on and be a
+   broken image everywhere else. */
+   IT IS A MASK, NOT A PICTURE. The file is black line art on transparent, so
+   drawn as an image it is invisible on the dark theme and wrong on the crow
+   one. As a mask it takes `currentColor`, which in this row is `--accent` --
+   the same rule the rest of this block follows: colours come from the palette,
+   never from a literal, so all three themes answer for it. */
+.memicon{flex:0 0 auto;width:17px;height:17px;position:relative;
+  background-color:currentColor;opacity:.92;
+  -webkit-mask-image:url("__MEMICON__");mask-image:url("__MEMICON__");
+  -webkit-mask-size:contain;mask-size:contain;
+  -webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;
+  -webkit-mask-position:center;mask-position:center}
+@keyframes memsweep{from{background-position:120% 0;opacity:1}
+  to{background-position:-40% 0;opacity:0}}
 @keyframes memglow{
   0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 45%,transparent)}
   35%{box-shadow:0 0 14px 2px color-mix(in srgb,var(--accent) 38%,transparent)}
@@ -1152,7 +1186,8 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    not by nothing. */
 @media (prefers-reduced-motion: reduce){
   .memnote{animation:none;
-    background:color-mix(in srgb,var(--accent) 14%,transparent)}}
+    background-color:color-mix(in srgb,var(--accent) 14%,transparent)}
+  .memnote::before{animation:none;opacity:0}}
 /* #128. THE HELD-BACK WRITES, as a tile BEHIND the composer.
    IT IS A SIBLING OF #box AND TUCKED UNDER IT -- negative margin below, extra
    padding to pay for it, and #box lifted one layer. That is what makes it read
@@ -2067,7 +2102,12 @@ const crow = {
   // gate, so this line is where a person finds out -- it glows once on arrival
   // and then sits there like any other row.
   memory(msg,n){ const t=this.turn(""); const d=document.createElement("div");
-    d.className="memnote"; d.textContent = n>1 ? msg+" ("+n+")" : msg;
+    d.className="memnote";
+    // THE MARK FIRST: it labels the row, so it reads before the sentence does.
+    const ico=document.createElement("span"); ico.className="memicon";
+    const say=document.createElement("span");
+    say.textContent = n>1 ? msg+" ("+n+")" : msg;
+    d.appendChild(ico); d.appendChild(say);
     t.appendChild(d); this.bottom(); },
 
   // THE CURSOR ALWAYS SITS LAST. Every insert goes BEFORE it, so after a tool
@@ -6993,6 +7033,7 @@ def main(argv: list[str] | None = None) -> int:
                 # single start -- and the frame is exactly the moment somebody
                 # looks at it.
                 .replace("__THEME__", current_theme())
+                .replace("__MEMICON__", MEMORY_ICON)
                 # #119. THE SAME REASON THE THEME IS STAMPED HERE: a rail that
                 # was drawn open and then folded away by a script after load
                 # would do it on every start, and that frame is the moment

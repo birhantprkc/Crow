@@ -5964,5 +5964,74 @@ class TheServerSwitchAndKeyFieldTests(unittest.TestCase):
         self.assertEqual(self.source.count("crow_core.prompt_head()"), 3)
 
 
+class TheMemoryNoteLookTests(unittest.TestCase):
+    """robin, 2026-08-24, looking at a finished turn: "das in der mitte dunkel
+    verlaufen von beiden seiten macht es zweiteilig."
+
+    THE SWEEP USED TO PARK ITSELF. One gradient did both jobs -- it was the
+    animation AND the resting background -- so when the animation finished it
+    stopped wherever `forwards` left it: a bright middle with two transparent
+    ends, which reads as two tiles rather than one row. A resting state is not
+    a stopped animation; it is its own thing, and it has to be a flat fill.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        CLOSE = chr(125)
+        self.rule = self.source[self.source.index(".memnote{"):]
+        self.rule = self.rule[:self.rule.index(CLOSE)]
+
+    def test_the_row_rests_on_a_flat_fill(self):
+        """POSITIVE. What is left after the sweep is one colour across the whole
+        row, so nothing about it reads as a seam in the middle."""
+        self.assertIn("background-color", self.rule)
+        self.assertNotIn("linear-gradient", self.rule)
+
+    def test_the_sweep_leaves_nothing_behind(self):
+        """NEGATIVE PROBE against the actual defect: the moving layer has to be
+        GONE at the end, not merely parked off-centre. If a later hand drops the
+        fade, this goes red."""
+        CLOSE = chr(125)
+        keys = self.source[self.source.index("@keyframes memsweep{"):]
+        keys = keys[:keys.index(CLOSE + CLOSE) + 2]
+        self.assertIn("opacity:0", keys.replace(" ", ""))
+
+    def test_the_icon_is_embedded_and_not_a_path(self):
+        """docs/ IS NOT IN THE PACKAGE. An installed Crow has cli, bin, models
+        and templates and no docs directory at all, so a path into it would be
+        a broken image on every machine except this one -- and it would work
+        here, which is the way that defect survives review."""
+        self.assertIn("data:image/png;base64,", self.source)
+        icons = self.source[self.source.index(".memicon"):]
+        self.assertNotIn("docs/images", icons[:400])
+
+    def test_the_mark_takes_its_colour_from_the_palette(self):
+        """THE FILE IS BLACK LINE ART ON TRANSPARENT. Drawn as an image it is
+        invisible on the dark theme and wrong on the crow one -- and it would
+        look right in exactly one of the three, which is how that defect gets
+        shipped. As a mask it takes currentColor, and the row colour IS the
+        accent the core hands in."""
+        CLOSE = chr(125)
+        rule = self.source[self.source.index(".memicon{"):]
+        rule = rule[:rule.index(CLOSE)]
+        self.assertIn("mask-image", rule)
+        self.assertIn("currentColor", rule)
+        self.assertNotIn("background-image", rule)
+
+    def test_the_icon_sits_before_the_text(self):
+        """It is a label for the row, not a decoration after it."""
+        js = self.source[self.source.index("  memory(msg,n){"):]
+        js = js[:js.index("  tail(){")]
+        self.assertLess(js.index("memicon"), js.index("textContent"))
+
+    def test_the_reduced_motion_row_is_flat_too(self):
+        """A reader who asked for no motion still gets a visible row, and it
+        must not be the parked gradient either -- that was the whole complaint."""
+        CLOSE = chr(125)
+        quiet = self.source[self.source.index("@media (prefers-reduced-motion: reduce)"):]
+        quiet = quiet[:quiet.index(CLOSE + CLOSE) + 2]
+        self.assertNotIn("linear-gradient", quiet)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
