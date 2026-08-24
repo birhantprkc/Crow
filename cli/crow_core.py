@@ -6307,6 +6307,14 @@ def strip_tag_characters(text: str) -> str:
     return "".join(out)
 
 
+# THE LARGEST `maxLength` A TOOL SCHEMA MAY CARRY INTO A REQUEST. Measured
+# against llama-server on 2026-08-24: an array whose items declare 1024
+# compiles, 2083 answers 400 "failed to parse grammar" and takes the whole
+# turn with it. The value is a ceiling for the grammar builder, not an opinion
+# about what a server may describe.
+MCP_MAX_STRING = 1024
+
+
 def _mcp_clean(value):
     """Strip tag characters everywhere in a stored schema, not only the surface.
 
@@ -6318,8 +6326,27 @@ def _mcp_clean(value):
     if isinstance(value, list):
         return [_mcp_clean(v) for v in value]
     if isinstance(value, dict):
-        return {(strip_tag_characters(k) if isinstance(k, str) else k): _mcp_clean(v)
-                for k, v in value.items()}
+        out = {(strip_tag_characters(k) if isinstance(k, str) else k): _mcp_clean(v)
+               for k, v in value.items()}
+        # AND THE ONE BOUND THE ENGINE CANNOT COMPILE. llama.cpp turns
+        # `maxLength` into a bounded repetition; inside an array -- itself a
+        # repetition -- the expansion outgrows its grammar parser and the
+        # server answers 400 "failed to parse grammar". That kills the WHOLE
+        # request, so one oversized bound in one tool of one server takes every
+        # tool in every chat off the air. Measured on 2026-08-24: 1024 inside
+        # an array compiles, 2083 does not.
+        #
+        # THE SHAPE IS CAPPED, NOT THE SERVER. No name is listed here and no
+        # tool is dropped -- `maxLength` constrains generation and not meaning,
+        # so lowering it costs nothing a caller can observe, and every
+        # declaration still travels.
+        if "maxLength" in out:
+            bound = out["maxLength"]
+            if isinstance(bound, bool) or not isinstance(bound, int):
+                out.pop("maxLength")
+            elif bound > MCP_MAX_STRING:
+                out["maxLength"] = MCP_MAX_STRING
+        return out
     return value
 
 
@@ -6968,6 +6995,15 @@ class McpServer:
             sending["Authorization"] = "%s %s" % (
                 "Bearer" if kind.lower() == "bearer" else kind,
                 token["access_token"])
+        # LAYER 1c: a key typed into the sheet, UNDER both of the others. A
+        # server that finished the browser leg has already said which credential
+        # it wants, so the token wins; and a hand-written `Authorization` in the
+        # block wins over this the same way it wins over the token -- checked by
+        # name rather than by dictionary key, because casing is not a second
+        # header.
+        elif mcp_key_for(self.name) and not _mcp_header_named(
+                self.block.get("headers"), "Authorization"):
+            sending["Authorization"] = "Bearer " + mcp_key_for(self.name)
         configured = self.block.get("headers")
         if isinstance(configured, dict):
             sending.update({str(k): _mcp_expand(v) for k, v in configured.items()})
@@ -7895,6 +7931,60 @@ def mcp_token_for(name: str) -> dict:
     return record if isinstance(record, dict) else {}
 
 
+def mcp_key_for(name: str) -> str:
+    """The static key somebody typed into the sheet, or the empty string.
+
+    IT LIVES IN THE TOKEN STORE, NOT IN `mcp.json`, and that is a decision
+    rather than a filing preference. The configuration is the file that gets
+    copied to another machine, attached to an issue and read out loud in a
+    screenshot -- on robin's install it carries 565,729 characters of schema
+    and nothing worth hiding. The token store is the one with 0o600 on it.
+    """
+    key = mcp_token_for(name).get("api_key")
+    return key if isinstance(key, str) else ""
+
+
+def mcp_key_set(name: str, key: str) -> "str | None":
+    """Keep a static key for one server, or forget it when the field is cleared.
+
+    AN EMPTY FIELD MEANS FORGET, not "store nothing": a record left behind with
+    `api_key: ""` is a credential the next reader has to reason about, and the
+    sheet would still show a server as having one.
+    """
+    doc = mcp_token_doc()
+    servers = doc.get("servers")
+    if not isinstance(servers, dict):
+        servers = {}
+        doc["servers"] = servers
+    record = servers.get(name)
+    if not isinstance(record, dict):
+        record = {}
+    text = str(key or "").strip()
+    if text:
+        record["api_key"] = text
+        servers[name] = record
+    else:
+        record.pop("api_key", None)
+        if record:
+            servers[name] = record
+        else:
+            servers.pop(name, None)
+    return mcp_token_write(doc)
+
+
+def _mcp_header_named(headers, name: str) -> bool:
+    """Does this block already carry that header, under ANY spelling?
+
+    HTTP header names are case-insensitive and Python dictionaries are not.
+    Merging on the literal key would leave `Authorization` and `authorization`
+    side by side in one request and let the far end decide which it believes.
+    """
+    if not isinstance(headers, dict):
+        return False
+    wanted = name.lower()
+    return any(str(k).lower() == wanted for k in headers)
+
+
 def mcp_token_drop(name: str) -> None:
     """Forget a server's credentials. Called when the server is removed.
 
@@ -8472,6 +8562,47 @@ def mcp_write(doc: dict) -> "str | None":
     return None
 
 
+def set_mcp_enabled(name: str, enabled: bool) -> bool:
+    """Flip one server on or off, keeping everything else in the file.
+
+    THE SHEET COULD READ THIS STATE AND NOT WRITE IT, which is how robin ended
+    up locked out of his own server on 2026-08-24: the row said "(switched
+    off)", offered `ask again` and `remove`, and the only way back was a text
+    editor in %LOCALAPPDATA%. A state a program can enter and not leave is not
+    a setting, it is a trap.
+
+    ON IS THE ABSENCE OF THE KEY, not `enabled: true`. That is the shape a
+    server has the day it is added, and one state with two spellings is a state
+    every later reader has to know twice.
+
+    IT REWRITES THE FILE rather than keeping a second list, for the same reason
+    `set_skill_enabled` does: the switch in the sheet and a person editing the
+    file by hand are the same act, and there must be no third place that can
+    disagree with either.
+    """
+    doc, problems = mcp_doc()
+    if problems:
+        return False
+    servers = doc.get("servers")
+    if not isinstance(servers, dict):
+        return False
+    block = servers.get(name)
+    if not isinstance(block, dict):
+        return False
+    if (block.get("enabled", True) is not False) == bool(enabled):
+        return False
+    if enabled:
+        block.pop("enabled", None)
+    else:
+        block["enabled"] = False
+    if mcp_write(doc):
+        return False
+    # THE PROMPT HEAD MOVES WITH IT, in this call rather than at the next start.
+    # A switch whose effect waits for a restart is one the user flips twice.
+    mcp_apply()
+    return True
+
+
 def mcp_add_server(name: str, block: dict) -> "tuple[dict | None, str | None]":
     """Ask a server once what it offers, and write the answer down.
 
@@ -8694,6 +8825,11 @@ def mcp_view() -> dict:
                         "args": [str(a) for a in (block.get("args") or [])],
                         "url": str(block.get("url") or ""),
                         "enabled": block.get("enabled", True) is not False,
+                        # WHETHER, NEVER WHAT. The sheet has to show that a key
+                        # is stored so nobody types a second one on top of it;
+                        # the value belongs to the token store, and this
+                        # structure goes to a page that ends up in screenshots.
+                        "key": bool(mcp_key_for(name)),
                         "cost": _mcp_cost(taken),
                         "tools": tools})
     return {"file": MCP_FILE, "classes": list(MCP_TOOL_CLASSES),

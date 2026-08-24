@@ -5890,5 +5890,79 @@ class TheSuiteTouchesNoRealConfigurationTests(unittest.TestCase):
                          + "\n  ".join(offenders))
 
 
+class TheServerSwitchAndKeyFieldTests(unittest.TestCase):
+    """The sheet gets the two controls it was missing, and where they may sit.
+
+    robin, 2026-08-24: "es muss automatisch funktionieren, der user soll nicht
+    erst in den configs rumwuehlen." He had switched a server off, found no way
+    back, and the answer was a text editor in %LOCALAPPDATA%.
+
+    THEY GO IN THE BODY, NOT IN THE HEAD, and that is forced rather than
+    chosen. `test_a_server_folds_away` counts exactly two `stopPropagation()`
+    across `drawMcpServer`, because every control in the head has to stop a
+    click from folding the row away. The body is a sibling of the head, so a
+    click in it never reaches the fold and needs no third one -- which is why
+    this feature does not touch that case at all.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.js = self.source[self.source.index("  drawMcpServer(box,sv,classes){"):
+                              self.source.index("  mcpRow(sv,t,classes){")]
+
+    def test_the_sheet_can_switch_a_server_on_again(self):
+        """POSITIVE. The state was readable and unwritable; a row that shows
+        `(switched off)` and offers no way back is a trap, not a setting."""
+        self.assertIn("toggleServer", self.js)
+        self.assertIn("sw", self.js)
+
+    def test_the_switch_does_not_touch_the_fold(self):
+        """NEGATIVE PROBE, and the reason the controls sit where they do. If a
+        later hand moves them into the head, this goes red here rather than in
+        somebody else's case."""
+        self.assertEqual(self.js.count("stopPropagation()"), 2)
+        head = self.js[:self.js.index("const tools=document.createElement")]
+        self.assertNotIn("toggleServer", head)
+        self.assertNotIn("serverKey", head)
+
+    def test_the_key_field_is_a_mask(self):
+        """A key is shoulder-surfable and screenshots travel. The field shows
+        that something is stored, never what."""
+        self.assertIn("password", self.js)
+
+    def test_only_an_http_server_offers_a_key_field(self):
+        """NEGATIVE PROBE. A stdio server is a local subprocess with no headers
+        at all -- a field there would take a secret and drop it on the floor.
+        The reference says the same: on stdio the key is ignored."""
+        self.assertIn("if(sv.url)", self.js)
+        self.assertLess(self.js.index("if(sv.url)"), self.js.index("password"),
+                        "the key field is built before anything checks for a URL")
+
+    def test_the_bridge_passes_both_through_to_the_core(self):
+        """The page owns no state. Both controls end in `crow_core`, which is
+        where the file and the token store are."""
+        self.assertIn("def toggle_server(", self.source)
+        self.assertIn("crow_core.set_mcp_enabled(", self.source)
+        self.assertIn("def set_server_key(", self.source)
+        self.assertIn("crow_core.mcp_key_set(", self.source)
+
+    def test_switching_a_server_does_not_move_the_pinned_head(self):
+        """THE DIFFERENCE FROM THE SKILL SWITCH, and it is a category, not an
+        omission. A skill is text INSIDE the pinned head, so flipping one must
+        move the pin. A servers tools are declarations that travel BESIDE the
+        head and are rebuilt by mcp_apply. Re-pinning here would rewrite a head
+        that did not change and charge a full prefill for it.
+
+        THE COUNT IS THE GUARD. Another case fixes the number of places that
+        compose the head; this one names why a server switch is not allowed to
+        become one of them.
+        """
+        body = self.source[self.source.index("    def toggle_server("):]
+        body = body[:body.index(chr(10) + "    def ", 10)]
+        self.assertNotIn("prompt_head", body)
+        self.assertNotIn("repin_memory", body)
+        self.assertEqual(self.source.count("crow_core.prompt_head()"), 3)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

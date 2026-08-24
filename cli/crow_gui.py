@@ -1010,6 +1010,17 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   transition:transform .15s ease,background .15s ease}
 .sw.on{background:color-mix(in srgb,var(--accent) 40%,transparent)}
 .sw.on::after{transform:translateX(15px);background:var(--accent)}
+/* THE SERVER BAR, first thing inside an unfolded server. It carries the two
+   controls the head has no room for: the head is where every button has to
+   stop its click from folding the row away, and the case that guards the fold
+   counts exactly two of those. */
+.mcpbar{display:flex;gap:9px;align-items:center;padding:9px 0 11px;
+  border-bottom:1px solid var(--line);margin-bottom:7px}
+.swlabel{font-size:11px;color:var(--dim);white-space:nowrap}
+.mcpkey{font:inherit;font-size:12px;font-family:var(--mono);flex:1;
+  min-width:0;margin-left:auto;color:var(--text);background:var(--raised);
+  border:1px solid var(--line);border-radius:6px;padding:6px 9px}
+.mcpkey:focus{outline:none;border-color:var(--accent)}
 /* #129. THE MCP CHECKLIST, AND ITS TWO COLUMNS ARE THE WHOLE STAGE. A switch
    says whether a tool is taken at all; the segment beside it says what Crow
    treats it as, which is what decides whether a release level stops and asks.
@@ -2177,6 +2188,33 @@ const crow = {
       if(now) this.mcpOpen.add(sv.name); else this.mcpOpen.delete(sv.name);
       head.classList.toggle("open",now); tools.classList.toggle("open",now); };
     box.appendChild(head);
+    // THE TWO CONTROLS LIVE IN THE BODY, and that is forced rather than
+    // chosen. Every button in the head has to stop its click from folding the
+    // row away, and the case that guards the fold counts exactly two of those.
+    // The body is a SIBLING of the head, so a click here never reaches the
+    // fold and needs no third one.
+    const bar=document.createElement("div"); bar.className="mcpbar";
+    const sw=document.createElement("button");
+    sw.className="sw"+(sv.enabled?" on":"");
+    sw.title=sv.enabled?"its tools are in the prompt":"not in the prompt";
+    const what=document.createElement("span"); what.className="swlabel";
+    what.textContent=sv.enabled?"in the prompt":"switched off";
+    sw.onclick=()=>this.toggleServer(sv.name,sw,what);
+    bar.appendChild(sw); bar.appendChild(what);
+    // A KEY IS AN HTTP IDEA. A stdio server is a local subprocess that carries
+    // no headers at all, so a field there would take a secret and drop it on
+    // the floor -- the same thing the reference says about stdio transports.
+    if(sv.url){
+      const key=document.createElement("input");
+      key.type="password"; key.className="mcpkey";
+      key.placeholder=sv.key?"key stored":"api key";
+      key.title="sent as Authorization: Bearer, unless the server has a token "
+               +"or mcp.json sets that header itself";
+      // ON COMMIT, NOT ON EVERY KEYSTROKE, and the box is emptied afterwards:
+      // what is stored is never read back into the page.
+      key.onchange=()=>{ this.setServerKey(sv.name,key.value,key); };
+      bar.appendChild(key); }
+    tools.appendChild(bar);
     if(!sv.tools.length){
       const p=document.createElement("p");
       p.className="empty"; p.textContent="It offered nothing.";
@@ -2266,6 +2304,24 @@ const crow = {
     row.classList.toggle("off",!on);
     sw.title=on?"in the prompt":"not in the prompt";
     pywebview.api.toggle_skill(name,on);
+  },
+  // THE SHEET IS REDRAWN AFTERWARDS, unlike toggleSkill. A server's tools are
+  // worth hundreds of thousands of characters, and the row prints that number
+  // -- painting the switch and leaving a stale "0 chars" beside it is the one
+  // way this control could lie about what it just did.
+  toggleServer(name,sw,label){
+    const on=!sw.classList.contains("on");
+    sw.classList.toggle("on",on);
+    sw.title=on?"its tools are in the prompt":"not in the prompt";
+    label.textContent=on?"in the prompt":"switched off";
+    pywebview.api.toggle_server(name,on).then(()=>this.drawMcp());
+  },
+  setServerKey(name,value,field){
+    // EMPTIED EITHER WAY. A stored key is never read back into the page, so an
+    // untouched field showing dots would be the page inventing a value it does
+    // not have.
+    pywebview.api.set_server_key(name,value).then(()=>{
+      field.value=""; this.drawMcp(); });
   },
   closeSettings(){ $("#settings").hidden=true; },
   // THE BACKDROP CLOSES, THE SHEET DOES NOT. Without the target test a click on
@@ -6410,6 +6466,33 @@ class Api:
 
     def mcp_remove(self, name: str) -> str:
         return crow_core.mcp_remove_server(name) or ""
+
+    def toggle_server(self, name: str, enabled: bool) -> bool:
+        """Put a server's tools on the table or take them off.
+
+        IT DOES NOT RE-PIN, AND THAT IS THE DIFFERENCE FROM `toggle_skill`. A
+        skill is text inside the pinned head, so flipping one has to move the
+        pin or the running chat keeps a head that no longer matches the file. A
+        server's tools are not in the head at all -- they are the declarations
+        `mcp_apply` rebuilds, which travel in the request beside it. Re-pinning
+        here would rewrite a head that did not change, and charge a full prefill
+        for the privilege.
+
+        WHAT THE USER SEES INSTEAD is the row's own character count, which the
+        sheet redraws after this returns. That number IS the cost, and it is
+        already on screen.
+        """
+        return crow_core.set_mcp_enabled(name, bool(enabled))
+
+    def set_server_key(self, name: str, value: str) -> str:
+        """Keep a static key for one HTTP server, or forget it when cleared.
+
+        IT GOES TO THE TOKEN STORE, NOT TO `mcp.json`. robin decided that on
+        2026-08-24, and the reference agrees: Hermes writes keys to `.env` and
+        leaves the configuration carrying references. The configuration is the
+        file people copy; the token store is the one with 0o600 on it.
+        """
+        return crow_core.mcp_key_set(name, value) or ""
 
     # THE MODEL PAGE AND THE KEY PAGE. Thin passes to `crow_core` for the reason
     # the MCP block above is: which endpoint a turn goes to is not a window

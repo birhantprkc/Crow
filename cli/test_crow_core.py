@@ -8316,5 +8316,256 @@ class TheUpdateIsRunFromTheWindowTests(unittest.TestCase):
             self.assertEqual(fh.read(), "# install")
 
 
+class TheServerSwitchAndTheStoredKeyTests(unittest.TestCase):
+    """The two controls the MCP sheet was missing, and the order they merge in.
+
+    robin, 2026-08-24, locked out of his own server: the sheet LABELS a
+    switched-off server ("(switched off)", 0 chars) and offers no way back --
+    `ask again` and `remove` are the whole row. `enabled` is read by `mcp_view`
+    and honoured by the prompt head, but nothing in the window and nothing in
+    `/mcp` ever WROTE it, so the only way out was a text editor in
+    %LOCALAPPDATA%. A state a program can enter and not leave is not a setting.
+
+    THE KEY LIVES APART FROM THE CONFIGURATION, and that is robin's decision,
+    not a detail. `mcp.json` holds 565,729 characters of schema on his machine
+    and gets copied, backed up and pasted into issues; a secret in it travels
+    with every copy. It goes to the token store beside the OAuth tokens.
+
+    THE THREE LAYERS ARE TESTED AS AN ORDER, not as three features. Hermes
+    states the same rule for its identity header: an explicit entry in the
+    server's own `headers` wins over anything the client supplies for it.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-mcp-switch-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._real_mcp = crow_core.MCP_FILE
+        self._real_tok = crow_core.MCP_TOKEN_FILE
+        self.addCleanup(self._restore)
+        crow_core.MCP_FILE = os.path.join(self.dir, "mcp.json")
+        crow_core.MCP_TOKEN_FILE = os.path.join(self.dir, "mcp_tokens.json")
+        crow_core.mcp_apply()
+
+    def _restore(self) -> None:
+        crow_core.MCP_FILE = self._real_mcp
+        crow_core.MCP_TOKEN_FILE = self._real_tok
+        crow_core.mcp_apply()
+
+    def _config(self, **over) -> dict:
+        block = {"url": "https://mcp.example.test/mcp",
+                 "schema": {"tools": [
+                     {"name": "look", "description": "Look at something.",
+                      "inputSchema": {"type": "object", "properties": {}}}]},
+                 "tools": {"look": "reading"}}
+        block.update(over)
+        return {"servers": {"remote": block}}
+
+    def _write(self, doc: dict) -> list:
+        with open(crow_core.MCP_FILE, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        return crow_core.mcp_apply()
+
+    def _stored(self) -> dict:
+        with open(crow_core.MCP_FILE, encoding="utf-8") as fh:
+            return json.load(fh)["servers"]["remote"]
+
+    def _text(self, path: str) -> str:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def _seen(self, name: str = "remote") -> dict:
+        for server in crow_core.mcp_view()["servers"]:
+            if server["name"] == name:
+                return server
+        self.fail("%r is not in the view" % name)
+
+    # ---------- the switch ----------
+
+    def test_a_server_can_be_switched_off_and_the_view_agrees(self):
+        """OFF IS A COST OF ZERO, not a missing server. Its tools stay known and
+        stay counted; what changes is that none of them reach the prompt."""
+        self._write(self._config())
+        self.assertTrue(crow_core.set_mcp_enabled("remote", False))
+        self.assertIs(self._stored()["enabled"], False)
+        seen = self._seen()
+        self.assertFalse(seen["enabled"])
+        self.assertEqual(seen["cost"], 0)
+        self.assertEqual(len(seen["tools"]), 1)
+
+    def test_switching_it_on_again_leaves_no_enabled_key_behind(self):
+        """ON IS THE ABSENCE OF THE KEY, because that is the shape a server has
+        the day it is added. Writing `true` would leave two spellings of one
+        state in circulation, and every later reader has to know both."""
+        self._write(self._config(enabled=False))
+        self.assertTrue(crow_core.set_mcp_enabled("remote", True))
+        self.assertNotIn("enabled", self._stored())
+        self.assertTrue(self._seen()["enabled"])
+        self.assertGreater(self._seen()["cost"], 0)
+
+    def test_the_switch_survives_a_reread(self):
+        """THE PERSISTENCE CONTRACT, not a write check. `set_mcp_enabled` is the
+        producer, `mcp_apply` reading the file back off disk is the consumer,
+        and a commit that tests only the first half is the one that ships a
+        state nobody can load."""
+        self._write(self._config())
+        crow_core.set_mcp_enabled("remote", False)
+        crow_core.mcp_apply()
+        self.assertFalse(self._seen()["enabled"])
+        self.assertEqual(self._seen()["cost"], 0)
+
+    def test_a_server_already_in_that_state_does_not_rewrite_the_file(self):
+        """NEGATIVE PROBE. A switch that reports movement it did not make turns
+        its caller into a liar -- the sheet would announce the prompt cost of a
+        change that never happened."""
+        self._write(self._config(enabled=False))
+        before = self._text(crow_core.MCP_FILE)
+        self.assertFalse(crow_core.set_mcp_enabled("remote", False))
+        self.assertEqual(self._text(crow_core.MCP_FILE), before)
+
+    def test_an_unknown_server_is_refused(self):
+        """NEGATIVE PROBE. A typo must not create a block. A configuration that
+        grows a server nobody added is worse than an error."""
+        self._write(self._config())
+        self.assertFalse(crow_core.set_mcp_enabled("nosuch", False))
+        with open(crow_core.MCP_FILE, encoding="utf-8") as fh:
+            self.assertEqual(list(json.load(fh)["servers"]), ["remote"])
+
+    # ---------- the stored key ----------
+
+    def _server(self, **over):
+        block = {"url": "https://mcp.example.test/mcp"}
+        block.update(over)
+        return crow_core.McpServer("remote", block)
+
+    def test_a_stored_key_rides_as_a_bearer_header(self):
+        self.assertIsNone(crow_core.mcp_key_set("remote", "k-abc"))
+        self.assertEqual(crow_core.mcp_key_for("remote"), "k-abc")
+        self.assertEqual(self._server()._headers()["Authorization"],
+                         "Bearer k-abc")
+
+    def test_an_oauth_token_beats_the_stored_key(self):
+        """NEGATIVE PROBE. A server that completed the browser leg has already
+        said which credential it wants. Sending the typed one instead would
+        refuse a grant that was issued."""
+        crow_core.mcp_key_set("remote", "k-abc")
+        crow_core.mcp_token_write({"servers": {"remote": {
+            "access_token": "t-xyz", "token_type": "Bearer"}}})
+        self.assertEqual(self._server()._headers()["Authorization"],
+                         "Bearer t-xyz")
+
+    def test_a_configured_authorisation_beats_the_stored_key_in_any_casing(self):
+        """NEGATIVE PROBE, and the rule the reference states outright: what
+        somebody typed into `mcp.json` wins. CASING IS NOT A DIFFERENT HEADER --
+        merging on the literal key would send two of them and let the far end
+        choose which one it believes."""
+        crow_core.mcp_key_set("remote", "k-abc")
+        for spelling in ("Authorization", "authorization", "AUTHORIZATION"):
+            with self.subTest(spelling=spelling):
+                sent = self._server(headers={spelling: "Custom mine"})._headers()
+                got = [v for k, v in sent.items() if k.lower() == "authorization"]
+                self.assertEqual(got, ["Custom mine"])
+
+    def test_no_stored_key_sends_no_authorisation(self):
+        """NEGATIVE PROBE. Without it the case above proves nothing: a header
+        that is always there passes a test that only checks it is there."""
+        self.assertEqual(crow_core.mcp_key_for("remote"), "")
+        self.assertNotIn("Authorization", self._server()._headers())
+
+    def test_the_view_says_whether_a_key_is_stored_but_never_what(self):
+        """A BOOLEAN IS THE WHOLE TRUTH THE SHEET NEEDS. The field has to show
+        that something is stored so nobody types a second one; the value itself
+        has no business in a structure that is handed to a page, and a page ends
+        up in screenshots. The existing comment on the row says the same about
+        `headers`: a token never reaches a view."""
+        self._write(self._config())
+        crow_core.mcp_key_set("remote", "k-secret-abc")
+        self.assertTrue(self._seen()["key"])
+        self.assertNotIn("k-secret-abc", json.dumps(crow_core.mcp_view()))
+
+    def test_a_server_without_a_key_says_so(self):
+        """NEGATIVE PROBE. Without it the case above passes on a field that is
+        hard-wired to true."""
+        self._write(self._config())
+        self.assertFalse(self._seen()["key"])
+
+    def test_the_key_never_lands_in_the_configuration_file(self):
+        """robin's decision, checked at the source instead of promised in a
+        comment. `mcp.json` is the file that gets copied around; the token store
+        is the one that does not."""
+        self._write(self._config())
+        crow_core.mcp_key_set("remote", "k-secret-abc")
+        crow_core.set_mcp_enabled("remote", False)
+        self.assertNotIn("k-secret-abc", self._text(crow_core.MCP_FILE))
+        self.assertIn("k-secret-abc", self._text(crow_core.MCP_TOKEN_FILE))
+
+
+class TheGrammarSafeSchemaTests(unittest.TestCase):
+    """A tool schema must be one the local engine can build a grammar from.
+
+    MEASURED against the running server on 2026-08-24, one variable per row:
+
+        string,  maxLength 2083                  -> 200
+        array of string, no maxLength            -> 200
+        array of string, items.maxLength 1024    -> 200
+        array of string, items.maxLength 2083    -> 400 failed to parse grammar
+
+    llama.cpp turns `maxLength` into a bounded repetition. Inside an array --
+    itself a repetition -- the expansion outgrows what its grammar parser
+    accepts, and the WHOLE request dies: not that one tool, every tool, in
+    every chat. One server in robin's catalogue carried the shape in one of its
+    73 tools, and it took the client off the air.
+
+    NO SERVER IS NAMED ANYWHERE, and no tool is dropped. The bound is a property
+    of the shape, so it is applied to every schema alike, and all 75
+    declarations still travel. `maxLength` constrains generation, not meaning:
+    lowering it costs nothing a caller can observe.
+    """
+
+    def _clean(self, props: dict) -> dict:
+        return crow_core._mcp_clean(props)
+
+    def test_a_string_in_an_array_is_bounded(self):
+        got = self._clean({"urls": {"type": "array", "items": {
+            "type": "string", "maxLength": 2083, "format": "uri"}}})
+        self.assertEqual(got["urls"]["items"]["maxLength"],
+                         crow_core.MCP_MAX_STRING)
+        self.assertEqual(got["urls"]["items"]["format"], "uri")
+
+    def test_a_bare_string_is_bounded_too(self):
+        got = self._clean({"u": {"type": "string", "maxLength": 9999}})
+        self.assertEqual(got["u"]["maxLength"], crow_core.MCP_MAX_STRING)
+
+    def test_a_bound_that_already_fits_is_left_alone(self):
+        """NEGATIVE PROBE. A cap that rewrites everything would hide the fact
+        that it rewrites anything -- and would quietly widen schemas that were
+        deliberately tight."""
+        got = self._clean({"u": {"type": "string", "maxLength": 12}})
+        self.assertEqual(got["u"]["maxLength"], 12)
+
+    def test_nothing_else_in_the_schema_moves(self):
+        """NEGATIVE PROBE. What the server described is information the model
+        needs; only the one bound that the engine cannot compile is touched."""
+        got = self._clean({"n": {"type": "integer", "minimum": 1,
+                                 "maximum": 20, "description": "How many."},
+                           "a": {"type": "string", "enum": ["9:16", "1:1"]}})
+        self.assertEqual(got["n"], {"type": "integer", "minimum": 1,
+                                    "maximum": 20, "description": "How many."})
+        self.assertEqual(got["a"]["enum"], ["9:16", "1:1"])
+
+    def test_the_bound_reaches_a_nested_schema(self):
+        """The shape hides at any depth: an object in an array in an object."""
+        got = self._clean({"outer": {"type": "array", "items": {
+            "type": "object", "properties": {"inner": {"type": "array",
+            "items": {"type": "string", "maxLength": 5000}}}}}})
+        deep = got["outer"]["items"]["properties"]["inner"]["items"]
+        self.assertEqual(deep["maxLength"], crow_core.MCP_MAX_STRING)
+
+    def test_a_bound_that_is_not_a_number_is_dropped(self):
+        """NEGATIVE PROBE. A server may send anything. `maxLength: "lots"` must
+        not reach the engine and must not raise here either."""
+        got = self._clean({"u": {"type": "string", "maxLength": "lots"}})
+        self.assertNotIn("maxLength", got["u"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
