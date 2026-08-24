@@ -3,6 +3,68 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 1.2.1 — 2026-08-24
+
+5 commits. A tool filter that does not lock out tomorrow's tools, a level menu that
+stopped growing with the table, two CSS comments that had voided the rules behind
+them, and the documentation split out of a 966-line README.
+
+### MCP tools
+
+| | |
+|---|---|
+| Adding a server | writes **no** filter at all. It used to write every offered tool name into `tools.include`, which was a photograph of that minute — the 74th tool a server grew afterwards matched nothing and was unreachable, with no error anywhere |
+| Clearing a tick | writes `tools.exclude`. It names the refusal and leaves the rest of the server open, including what it has not offered yet |
+| An `include` listing every offered name | is dropped on the next refresh. A positive list that admits everything is not a filter. A hand-written glob is never touched |
+| Unchanged | `include` still wins over `exclude`, both still take globs, and `classes` stays empty — a tool that arrives on its own arrives in the strictest class and is asked for at `manual` and `allowedit` |
+
+### The level menu
+
+`mode_description()` now lives in the core and both surfaces read it. It names the
+built-in tools and **counts** the rest:
+
+```
+asks before edit_file, run_command, write_file and 93 MCP tools
+```
+
+It was built by joining every name that asks — written separately in the terminal
+and in the window, both the same wrong way. That reads well for twelve built-ins
+and became ninety lines with one MCP server attached. Cloudflare's API server
+reports around 3,300 tools, so there is no size at which listing starts working
+again.
+
+### A server that stopped answering
+
+| | |
+|---|---|
+| The window | now says `start llama-server first, then retry.` under the error. The terminal had said it since #114; the window never did, so `[WinError 10061]` read as a permission refusal |
+| Where it lives | `failure_line()` in the core, by exception **type**. A failed boot and an HTTP 400 do not get it |
+| Default endpoint | `:8082`, Qwen's port. It was `:8081` — 0731's, and the only one until a second model arrived. A client started with nothing running named a port that had not been served in weeks |
+
+### The memory row
+
+Two comments in the `#122` block were closed one `*/` too early, so the prose
+behind them was parsed as a selector — and CSS discards the rule that follows one
+it cannot read. `.memnote` went, then `.memicon`. The row arrived grey, flat and
+without its mark. A checker now walks the stylesheet's comments and fails on a
+`*/` outside one.
+
+### Documentation
+
+`README.md` went from 966 lines to 247 — requirements, install, start, operating
+point, screenshots. Everything else moved to [`docs/`](docs/): 19 pages under
+`reference/`, `user-guide/`, `measurements/` and `developer-guide/`, the last two
+of which describe the four modules and the five checkers for the first time.
+
+`check_operating_point` reads `README.md` as raw text, so the nine flags under
+*Operating point* stayed where they are — noted in `docs/developer-guide/testing.md`
+so the next move does not trip over it.
+
+### Suite
+
+1408 cases, up from 1390. `check_shared_core` 64 of 64 — three new entries, because
+the level sentence had been written twice and the manifest could not see it.
+
 ## 1.2.0 — 2026-08-23
 
 3 commits. A rail you can drag, air around the chat, the voice drawn as a line, and a
