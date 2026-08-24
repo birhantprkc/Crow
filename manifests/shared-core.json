@@ -274,6 +274,21 @@
     "reasoning_for_chat("
    ],
    "why": "#116's third state. A level bound under one model is not necessarily one the next takes -- `max` is fine for 0731 and raises against unsloth's template -- so a stored value outside this model's list is treated as never chosen AND said. Two surfaces with two answers here is a chat that silently stopped doing what its own setting says. It also owns the rule that the invalid value is NOT written back: the user may return to the model it was valid for."
+  },
+  {
+   "name": "mode_description",
+   "kind": "def",
+   "why": "The line that says what a level holds back. Both surfaces built it themselves until 2026-08-24, and both built it the same wrong way -- joining every name that asks. That is readable for twelve built-ins and becomes ninety lines the moment an MCP server arrives; robin hit it with higgsfield's 73. A second copy would drift the moment one surface learns to count and the other does not."
+  },
+  {
+   "name": "Unreachable",
+   "kind": "class",
+   "why": "Nothing answered at the endpoint, as a TYPE rather than a text match on 'cannot reach'. It decides who gets told to start the server, so a surface that re-derived it from the message would hand that advice to a failed boot or a refused schema -- the distinction ServerBootError already exists for, one step further down."
+  },
+  {
+   "name": "failure_line",
+   "kind": "def",
+   "why": "What a person reads when a turn died. Measured 2026-08-24: the advice was first written into the window's `except CrowError`, three cases went green, and the live window still printed the bare WinError -- `run_turn` reports a failed turn through `turn_failed` and never raises it, so that `except` is the rarer door. Two surfaces deciding this separately is how one of them ends up silent again."
   }
  ],
  "wordings": [
@@ -381,6 +396,11 @@
    "id": "the reasoning cost line",
    "text": "the level changes the head of every prompt -- the next turn pays a full prefill",
    "why": "#116. The value lands in chat_template_kwargs, so it is rendered into the HEAD of the prompt: byte 0 moves and the whole cached prefix stops matching. At 200k that is minutes, and it is said BEFORE the change the way #115 announces the lost context before the switch."
+  },
+  {
+   "id": "the server is not answering",
+   "text": "start llama-server first, then retry.",
+   "why": "Measured 2026-08-24: a turn died with [WinError 10061] and robin read it as a permission refusal -- 'Zugriff verweigert trotz auto' -- while the llama-server had been ended in the Task Manager. The terminal had printed this sentence since #114 and the window never did. It belongs to Unreachable alone: under a boot that failed it is false, and under every failure it is noise."
   }
  ]
 }

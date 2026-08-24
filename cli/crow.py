@@ -1191,9 +1191,7 @@ def switch_mode(line: str, mode: str) -> tuple[str, str]:
         crow_core.forget_approvals()
         dropped = f"\n{DIM}standing approvals dropped{RESET}"
 
-    asks = [t for t in sorted(crow_core.TOOL_IMPL)
-            if crow_core.needs_approval(t, mode)]
-    what = f"asks before {', '.join(asks)}" if asks else "every tool runs unasked"
+    what = crow_core.mode_description(mode)
     return mode, f"mode {mode} -- {what}{dropped}\n"
 
 
@@ -1712,7 +1710,7 @@ def repl(args: argparse.Namespace) -> int:
         status = check_endpoint(args.base_url)
     except CrowError as exc:
         print(f"crow: {exc}", file=sys.stderr)
-        print("crow: start llama-server first, then retry.", file=sys.stderr)
+        print(f"crow: {crow_core.SERVER_DOWN_HINT}", file=sys.stderr)
         reset_background()
         return 2
 

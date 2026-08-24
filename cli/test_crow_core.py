@@ -1048,6 +1048,59 @@ class TurnLoopCase(unittest.TestCase):
                          why or "the prefix announces calls nothing answers")
 
 
+class TheTurnThatFoundNothingListeningTests(TurnLoopCase):
+    """What a turn says when the endpoint is not answering at all.
+
+    ITS OWN CLASS BECAUSE ITS DOOR IS ITS OWN: everything else here scripts a
+    reply, this one refuses the connection before a reply exists.
+    """
+
+    def _dies_with(self, exc):
+        """Let the transport fail the way the network fails, and report back."""
+        def dead(url, body, api_key, timeout):
+            raise exc
+        crow_core._post_stream = dead
+        self.turn(self.conversation())
+        return [e[1] for e in self.events.log if e[0] == "failed"]
+
+    def test_a_server_that_is_not_there_says_what_to_do(self):
+        """FOUND LIVE 2026-08-24, AND THE FIRST FIX MISSED IT. The advice was
+        added to the window's `except CrowError`, three GUI cases went green,
+        and the live run still printed the bare WinError.
+
+        WHY: `run_turn` does not RAISE this. It catches `CrowError` and reports
+        through `turn_failed`, so nothing ever reaches that `except`. The three
+        cases had been driving a double that raised -- they measured the double,
+        which is the failure this class's own docstring warns about.
+
+        Here the transport is the only door, so the real loop runs.
+        """
+        said = self._dies_with(crow_core.Unreachable(
+            "cannot reach http://127.0.0.1:8082/v1/chat/completions: "
+            "[WinError 10061]"))
+        self.assertTrue(said, "a turn against a dead server said nothing")
+        self.assertIn(crow_core.SERVER_DOWN_HINT, said[-1])
+        self.assertIn("cannot reach", said[-1])
+
+    def test_an_ordinary_failure_gets_no_such_advice(self):
+        """NEGATIVE, and the reason `Unreachable` is a type: told to start a
+        server, somebody debugging a refused schema looks in the wrong place."""
+        said = self._dies_with(crow_core.CrowError(
+            "HTTP 400 from http://127.0.0.1:8082/v1/chat/completions: "
+            "failed to parse grammar"))
+        self.assertTrue(said)
+        self.assertNotIn(crow_core.SERVER_DOWN_HINT, said[-1])
+
+    def test_a_boot_that_failed_is_not_told_to_boot(self):
+        """NEGATIVE for the class boundary. `ServerBootError` IS a `CrowError`,
+        so a text match would hand the advice to the one caller that already
+        tried exactly that -- crow_core.py:823 gave it its own class for this."""
+        said = self._dies_with(crow_core.ServerBootError(
+            "llama-server exited with 1 before it was ready."))
+        self.assertTrue(said)
+        self.assertNotIn(crow_core.SERVER_DOWN_HINT, said[-1])
+
+
 class UnanswerableCallsTests(TurnLoopCase):
     """Rule (a): calls that will never run are not appended.
 
@@ -5899,6 +5952,113 @@ class TheElicitationSchemaTests(unittest.TestCase):
         self.assertEqual(crow_core.elicit_view(), [])
 
 
+class TheDefaultEndpointTests(unittest.TestCase):
+    """Which port a client talks to when nothing told it otherwise."""
+
+    def test_the_default_is_the_port_the_default_model_listens_on(self):
+        """robin, 2026-08-24: "Neue base url soll doch aber Qwen sein".
+
+        THE NUMBER IS NOT SPELLED OUT HERE, it is read from the manifest that
+        also builds the server command line. A test asserting `8082` would agree
+        with the code and with nothing else -- and the failure it exists to
+        prevent is exactly the two drifting apart: a window that talked to 8081
+        while the server came up on 8082 ends in "start llama-server first"
+        about a server that is running, which crow_core.py:927 calls the most
+        confusing shape a success can take.
+        """
+        port = crow_core.server_port("qwen35-q4-k-xl")
+        self.assertIsNotNone(port, "the manifest stopped declaring Qwen's port")
+        self.assertIn(":%d/" % port, crow_core.DEFAULT_BASE_URL)
+
+    def test_the_other_model_is_still_bootable(self):
+        """NEGATIVE: moving the default may not remove the second model. Both
+        keys stay in the table and `/model` still reaches either."""
+        self.assertIn("operating-point", crow_core.bootable_models())
+        self.assertIn("qwen35-q4-k-xl", crow_core.bootable_models())
+        self.assertEqual(crow_core.server_port("operating-point"), 8081)
+
+
+class TheLevelLineTests(unittest.TestCase):
+    """robin, 2026-08-24: the level menu behind `auto` had become ninety lines.
+
+    IT WAS BUILT BY JOINING EVERY NAME THAT ASKS, in both surfaces separately,
+    and that works right up to the first MCP server -- higgsfield contributes
+    73 tools, so a control meant for choosing became a wall to scroll past.
+    The tools themselves were never the problem; spelling them out was.
+    """
+
+    def setUp(self) -> None:
+        # THE REAL mcp.json IS NOT THIS TEST'S BUSINESS. `crow_core` loads it at
+        # import, so without this the table already holds robin's 75 and the
+        # counts below would measure his machine instead of the function.
+        self.dir = tempfile.mkdtemp(prefix="crow-level-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._real = crow_core.MCP_FILE
+        self.addCleanup(self._restore)
+        crow_core.MCP_FILE = os.path.join(self.dir, "mcp.json")
+        crow_core.mcp_apply()
+
+    def _restore(self) -> None:
+        crow_core.forget_mcp_servers()
+        crow_core.MCP_FILE = self._real
+        crow_core.mcp_apply()
+
+    def _serve(self, count: int) -> list:
+        """`count` tools from a server, taken back out afterwards."""
+        added = []
+        for i in range(count):
+            name = "mcp_srv_tool%03d" % i
+            crow_core.TOOL_IMPL[name] = lambda **_kw: ""
+            added.append(name)
+        self.addCleanup(
+            lambda: [crow_core.TOOL_IMPL.pop(n, None) for n in added])
+        return added
+
+    def test_the_built_ins_are_named_and_the_served_ones_are_counted(self):
+        self._serve(73)
+        line = crow_core.mode_description("manual")
+        self.assertIn("write_file", line)
+        self.assertIn("run_command", line)
+        self.assertIn("73 MCP tools", line)
+
+    def test_no_served_tool_name_ever_reaches_the_line(self):
+        """THE WHOLE POINT, and the assertion that would have caught this on the
+        day the first server was connected."""
+        for name in self._serve(200):
+            self.assertNotIn(name, crow_core.mode_description("manual"))
+
+    def test_the_line_does_not_grow_with_the_table(self):
+        """Cloudflare's API server reports around 3,300 tools. A line that grows
+        by a name each time has no size at which it starts working again -- so
+        what is measured here is that it does not grow at all."""
+        self._serve(3)
+        short = crow_core.mode_description("manual")
+        self._serve(3000)
+        long = crow_core.mode_description("manual")
+        self.assertLess(len(long) - len(short), 5,
+                        "the line grew with the table: %r -> %r" % (short, long))
+
+    def test_a_table_with_no_served_tools_says_nothing_about_them(self):
+        """NEGATIVE: the counted half appears only when there is something to
+        count. "and 0 MCP tools" would be a sentence about an absence."""
+        line = crow_core.mode_description("manual")
+        self.assertIn("write_file", line)
+        self.assertNotIn("MCP", line)
+
+    def test_one_served_tool_is_singular(self):
+        self._serve(1)
+        line = crow_core.mode_description("manual")
+        self.assertIn("1 MCP tool", line)
+        self.assertNotIn("1 MCP tools", line)
+
+    def test_the_level_that_asks_nothing_still_says_so(self):
+        """NEGATIVE for the empty case: `auto` has no list, and a level whose
+        description was an empty string would read as a rendering fault."""
+        self._serve(50)
+        self.assertEqual(crow_core.mode_description("auto"),
+                         "every tool runs unasked")
+
+
 class TheChecklistTests(unittest.TestCase):
     """E4: the hint proposes, the person disposes, and the file remembers which.
 
@@ -6008,8 +6168,11 @@ class TheChecklistTests(unittest.TestCase):
         stored = self._doc()["servers"]["fake"]
         self.assertEqual([t["name"] for t in stored["schema"]["tools"]][:2],
                          ["echo", "boom"])
-        self.assertEqual(stored["tools"]["include"],
-                         sorted(t["name"] for t in stored["schema"]["tools"]))
+        # NO FILTER IS THE OPEN STATE, and writing one that lists every name
+        # would be a snapshot of today's catalogue: robin, 2026-08-24, "wenn ich
+        # 'n neuen MCP Server hinzufuege und da neue Tools mit beisein, dann
+        # muessen die auch funktionieren". A stored list cannot say that.
+        self.assertNotIn("include", stored.get("tools") or {})
         self.assertIn("mcp_fake_echo", self._names())
         self.assertNotIn("classes", stored)
         self.assertTrue(crow_core.needs_approval("mcp_fake_echo", "manual"))
@@ -6078,8 +6241,47 @@ class TheChecklistTests(unittest.TestCase):
         self.assertIn("mcp_fake_echo", self._names())
         crow_core.mcp_confirm("fake", {"echo": {"included": False, "class": "reading"}})
         self.assertNotIn("mcp_fake_echo", self._names())
-        self.assertNotIn("echo", self._doc()["servers"]["fake"]["tools"]["include"])
-        self.assertIn("boom", self._doc()["servers"]["fake"]["tools"]["include"])
+        # THE REFUSAL IS NAMED, NOT THE SURVIVORS. Rebuilding an `include` out
+        # of what was left would close the server against its own future -- the
+        # tool it grows tomorrow matches nothing in a list written today.
+        stored = self._doc()["servers"]["fake"]["tools"]
+        self.assertIn("echo", stored["exclude"])
+        self.assertNotIn("boom", stored.get("exclude") or [])
+        self.assertNotIn("include", stored)
+
+    def test_a_tool_the_server_adds_later_arrives_by_itself(self):
+        """THE WHOLE POINT OF THE OPEN STATE, asked for by robin on 2026-08-24.
+        A server is not the set of tools it had on the day somebody added it.
+        Measured against the shape that failed: higgsfield stored all 73 names,
+        so its seventy-fourth would have matched nothing and been unreachable
+        with no error anywhere -- the same total-instead-of-gradual failure the
+        oversized `maxLength` had."""
+        crow_core.mcp_add_server("fake", self._block())
+        doc = self._doc()
+        doc["servers"]["fake"]["schema"]["tools"].append(
+            {"name": "grown", "description": "Arrived after the checklist.",
+             "inputSchema": {"type": "object", "properties": {}}})
+        with open(crow_core.MCP_FILE, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        crow_core.mcp_apply()
+        self.assertIn("mcp_fake_grown", self._names())
+
+    def test_unticking_one_does_not_shut_out_what_comes_later(self):
+        """NEGATIVE for the line above, and the reason `exclude` is the form:
+        it names what was refused and therefore holds back exactly that. The
+        positive list would have been rebuilt from the survivors and closed the
+        door behind them."""
+        crow_core.mcp_add_server("fake", self._block())
+        crow_core.mcp_confirm("fake", {"echo": {"included": False}})
+        doc = self._doc()
+        doc["servers"]["fake"]["schema"]["tools"].append(
+            {"name": "grown", "description": "Arrived after the checklist.",
+             "inputSchema": {"type": "object", "properties": {}}})
+        with open(crow_core.MCP_FILE, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        crow_core.mcp_apply()
+        self.assertIn("mcp_fake_grown", self._names())
+        self.assertNotIn("mcp_fake_echo", self._names())
 
     def test_a_class_crow_does_not_have_is_refused_at_the_door(self):
         crow_core.mcp_add_server("fake", self._block())

@@ -2429,6 +2429,49 @@ class TheThemeAndTheSettingsSheetTests(unittest.TestCase):
         self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
         self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
 
+    def test_a_failure_can_be_more_than_one_line(self):
+        """`failure_line` puts the advice on a second line, and a rule without
+        `white-space` renders that newline as a space -- seen live 2026-08-24:
+        "...die Verbindung verweigerte start llama-server first, then retry."
+        The sentence arrived and read as part of the error."""
+        import re
+        m = re.search(r"\.fail\{([^}]*)\}", self.css)
+        self.assertTrue(m, "the .fail rule is gone")
+        self.assertIn("white-space", m.group(1),
+                      "a two-line failure collapses into one: %s" % m.group(1))
+
+    def test_no_prose_escapes_a_css_comment(self):
+        """FOUND IN THE WINDOW, 2026-08-24: the memory row arrived grey, flat and
+        without its mark. Two comments in the #122 block were closed one `*/` too
+        early, so the prose behind them became a selector -- and CSS discards the
+        rule that follows a selector it cannot parse. `.memnote` went once,
+        `.memicon` went once, and nothing anywhere reported it.
+
+        SAME FAMILY AS THE BRACKET a `.Replace()` ate on the same day, which
+        voided every rule after `.scrim`: CSS fails silently and downward, so the
+        damage is never where the typo is. A comment that closes early is not a
+        typo a reader catches -- the text keeps reading like a comment.
+        """
+        css, i, plain = self.css, 0, []
+        while i < len(css):
+            if css.startswith("/*", i):
+                j = css.find("*/", i + 2)
+                self.assertGreater(j, 0, "a CSS comment is never closed")
+                i = j + 2
+                continue
+            j = css.find("/*", i)
+            j = len(css) if j < 0 else j
+            plain.append((i, css[i:j]))
+            i = j
+        for pos, chunk in plain:
+            k = chunk.find("*/")
+            if k >= 0:
+                line = css[:pos + k].count("\n") + 1
+                self.fail("a `*/` sits outside a comment at CSS line %d -- the "
+                          "prose before it is parsed as a selector and the rule "
+                          "after it is thrown away:\n...%s"
+                          % (line, chunk[max(0, k - 160):k + 2]))
+
     def test_no_rule_carries_a_colour_of_its_own(self):
         """THE ONE THAT KEEPS A LIGHT MODE POSSIBLE, and it is a negative probe
         because this breaks by ADDING: one new rule with `color:#cfdaea` in it is
@@ -5413,6 +5456,59 @@ class TheRemoteEndpointTests(ApiCase):
              mock.patch.object(crow_gui, "fetch_model_name", lambda *a, **k: "Q.gguf"):
             api._model_command(["qwen"])
         self.assertEqual(crow_core.provider_active(), crow_core.LOCAL_PROVIDER)
+
+
+class TheServerGoneMidSessionTests(ApiCase):
+    """robin, 2026-08-24: a turn died with `[WinError 10061]` and he reported it
+    as "Zugriff verweigert trotz auto" -- a permission refusal. It was neither
+    that nor the tools: the llama-server had been ended in the Task Manager,
+    which is why nothing in the event log recorded a crash.
+
+    THE SENTENCE THAT WOULD HAVE SAID SO ALREADY EXISTED and only the terminal
+    printed it. `grep "start llama-server"` found it in cli/crow.py and not once
+    in cli/crow_gui.py, so the window showed the raw WinError and no way out.
+    """
+
+    def _dies_with(self, exc):
+        api = self.api()
+
+        def _boom(*_a, **_k):
+            raise exc
+
+        with mock.patch.object(crow_gui, "run_turn", _boom):
+            api._run("was ist los")
+        return [m["t"] for m in self.drained(api) if m.get("k") == "fail"]
+
+    def test_a_server_that_stopped_answering_says_what_to_do(self):
+        said = self._dies_with(crow_core.Unreachable(
+            "cannot reach http://127.0.0.1:8082/v1/chat/completions: "
+            "[WinError 10061]"))
+        self.assertTrue(said, "a turn against a dead server said nothing at all")
+        self.assertIn(crow_core.SERVER_DOWN_HINT, said[-1])
+        # THE CAUSE SURVIVES THE ADVICE. Replacing the WinError with the hint
+        # would hide which endpoint was silent, and the port is the one detail
+        # that separates "server is down" from "wrong port configured".
+        self.assertIn("cannot reach", said[-1])
+
+    def test_a_failure_that_is_not_the_server_gets_no_such_advice(self):
+        """NEGATIVE, and the reason `Unreachable` is a type rather than a text
+        match: told to start a server, somebody debugging a refused schema goes
+        looking in the wrong place entirely."""
+        said = self._dies_with(crow_core.CrowError(
+            "HTTP 400 from http://127.0.0.1:8082/v1/chat/completions: "
+            "failed to parse grammar"))
+        self.assertTrue(said, "an ordinary failure said nothing at all")
+        self.assertNotIn(crow_core.SERVER_DOWN_HINT, said[-1])
+
+    def test_a_boot_that_failed_is_not_told_to_boot(self):
+        """NEGATIVE for the class boundary itself. `ServerBootError` IS a
+        `CrowError`, so a check written as `except CrowError` would hand the
+        advice to the one caller that already tried exactly that and failed --
+        the distinction crow_core.py:823 gave it its own class for."""
+        said = self._dies_with(crow_core.ServerBootError(
+            "llama-server exited with 1 before it was ready."))
+        self.assertTrue(said)
+        self.assertNotIn(crow_core.SERVER_DOWN_HINT, said[-1])
 
 
 class TheFormattedAnswerTests(ApiCase):

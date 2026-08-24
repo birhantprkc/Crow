@@ -1170,8 +1170,18 @@ class RavenTests(unittest.TestCase):
 
 class ParserTests(unittest.TestCase):
     def test_defaults_point_at_the_local_endpoint(self):
+        """THE NUMBER IS NOT SPELLED OUT HERE ANY MORE. It said 8081 until
+        2026-08-24, which was 0731's port and the only one until a second model
+        arrived on 8082 -- the default stayed behind, so a client started with
+        nothing running named a port nobody had served in weeks. Read from the
+        manifest that also builds the server command line, the two cannot drift
+        apart again, and drifting apart is the actual failure: a window talking
+        to one port while the server came up on the other ends in "start
+        llama-server first" about a server that is running."""
         args = crow.build_parser().parse_args([])
-        self.assertEqual(args.base_url, "http://127.0.0.1:8081/v1")
+        self.assertEqual(args.base_url, crow_core.DEFAULT_BASE_URL)
+        self.assertIn(":%d/" % crow_core.server_port("qwen35-q4-k-xl"),
+                      args.base_url)
         self.assertEqual(args.model, "crow")
 
     def test_default_temperature_is_not_greedy(self):

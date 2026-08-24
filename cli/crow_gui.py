@@ -984,7 +984,11 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 .cost{margin-top:11px;font-size:10.5px;color:var(--dimmer);
   border-top:1px dashed var(--line);padding-top:7px;overflow-x:auto;
   white-space:nowrap}
-.fail{color:var(--bad);font-size:11.5px;margin-top:8px}
+.fail{color:var(--bad);font-size:11.5px;margin-top:8px;
+  /* `failure_line` puts advice on a second line. Without this the
+     newline renders as a space and the advice reads as part of the
+     error -- seen live 2026-08-24. */
+  white-space:pre-wrap}
 /* PRE-WRAP, NOT NORMAL. A note is not always one sentence: /help and /tools
    build a column with their own line breaks and their own padding, and the
    default collapsed all of it into a paragraph -- one run-on line of eight
@@ -1143,7 +1147,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    is left afterwards is a quiet accent-tinted row. A glow that kept pulsing
    would be a thing to switch off, and this line may not be switchable.
    THE COLOURS COME FROM THE PALETTE, never from a literal, so all three themes
-   answer for it -- `--accent` is the brand value the core hands in. */
+   answer for it -- `--accent` is the brand value the core hands in.
    A RESTING STATE IS NOT A STOPPED ANIMATION. Until 2026-08-24 one gradient
    did both jobs, so when the sweep finished it parked where `forwards` left
    it: a bright middle between two transparent ends, which reads as two tiles
@@ -1163,7 +1167,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 /* THE MARK IS BAKED IN, NOT LOADED. `docs/` is not in the package -- an
    installed Crow has cli, bin, models and templates and no docs directory at
    all, so a path into it would work on the machine it was written on and be a
-   broken image everywhere else. */
+   broken image everywhere else.
    IT IS A MASK, NOT A PICTURE. The file is black line art on transparent, so
    drawn as an image it is invisible on the dark theme and wrong on the crow
    one. As a mask it takes `currentColor`, which in this row is `--accent` --
@@ -5406,14 +5410,8 @@ class Api:
         HTML would be a second copy of the levels, and the one that goes stale
         is the one the user reads.
         """
-        out = []
-        for name in crow_core.MODES:
-            asks = [t for t in sorted(crow_core.TOOL_IMPL)
-                    if crow_core.needs_approval(t, name)]
-            out.append({"name": name,
-                        "what": ("asks before " + ", ".join(asks)) if asks
-                                else "every tool runs unasked"})
-        return out
+        return [{"name": name, "what": crow_core.mode_description(name)}
+                for name in crow_core.MODES]
 
     def answer_memory(self, yes: bool) -> None:
         """#128. The user answered the held-back writes. Yes writes, no drops.
@@ -6876,7 +6874,11 @@ class Api:
                 approve=self._ask_page,
                 events=events)
         except CrowError as exc:
-            self.push({"k": "fail", "t": str(exc)})
+            # THE SENTENCE IS THE CORE'S, not a second copy of the rule. This
+            # `except` is the rarer door -- `run_turn` reports a failed turn
+            # through `turn_failed` and only escapes as an exception when it
+            # fails outside the loop -- and both doors have to read alike.
+            self.push({"k": "fail", "t": crow_core.failure_line(exc)})
             self.push({"k": "idle"})
             return
         except Exception as exc:           # noqa: BLE001 - a window survives its turns

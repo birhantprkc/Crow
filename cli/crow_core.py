@@ -81,7 +81,12 @@ from typing import Callable
 CLIENT_VERSION = ""
 
 
-DEFAULT_BASE_URL = "http://127.0.0.1:8081/v1"
+# QWEN'S PORT, NOT 0731'S. 8081 was the only one until a second model
+# arrived on 8082, and the default stayed behind -- so a client started
+# with nothing running reported 8081, a port robin has not served in
+# weeks. Both models stay bootable; this only decides where a client
+# looks first when it was told nothing and found nothing listening.
+DEFAULT_BASE_URL = "http://127.0.0.1:8082/v1"
 DEFAULT_MODEL = "crow"
 
 
@@ -818,6 +823,48 @@ SERVER_FLAGS = (
 # package that ships its own template must not be overtaken by the repo's.
 CHAT_TEMPLATES = (os.path.join("templates", "0731-chat-template.jinja"),
                   os.path.join("manifests", "0731-chat-template.jinja"))
+
+
+# THE ONE SENTENCE A CLIENT WITH NOTHING TO TALK TO SAYS, written here so both
+# surfaces say it. `[WinError 10061]` alone reads like a permission refusal --
+# robin reported exactly that on 2026-08-24 ("Zugriff verweigert trotz auto")
+# while the real cause was a llama-server ended in the Task Manager. The error
+# names what failed; this names what to do about it.
+SERVER_DOWN_HINT = "start llama-server first, then retry."
+
+
+class Unreachable(CrowError):
+    """Nothing answered at the endpoint. NOT a refusal, and not a boot failure.
+
+    ITS OWN CLASS FOR THE SAME REASON `ServerBootError` HAS ONE, one step
+    further down: a client that found nothing listening is told to start the
+    server, a client whose start FAILED must not be, and everything else --
+    a bad schema, a refused tool -- must not be either. Advice printed under
+    every failure is advice nobody reads.
+
+    A `CrowError` still, so every `except CrowError` that already handled this
+    path keeps handling it.
+    """
+
+
+def failure_line(exc: BaseException) -> str:
+    """What a person reads when a turn died, advice included where it fits.
+
+    HERE AND NOT IN A SURFACE, and that distinction cost a round on 2026-08-24.
+    The advice was first added to the window's `except CrowError` -- three cases
+    went green and the live window still printed the bare WinError, because
+    `run_turn` does not RAISE this. It catches `CrowError` and reports through
+    `turn_failed`, so the surface's `except` is never reached at all.
+
+    BY TYPE, NEVER BY MATCHING THE TEXT. `ServerBootError` is a `CrowError` too
+    and must NOT get this sentence: it belongs to a caller that tried to start a
+    server and failed, and telling them to start one is the least useful thing
+    that could be said to them.
+    """
+    said = str(exc)
+    if isinstance(exc, Unreachable):
+        return "%s\n%s" % (said, SERVER_DOWN_HINT)
+    return said
 
 
 class ServerBootError(CrowError):
@@ -2851,7 +2898,7 @@ def _post_stream(url: str, body: dict, api_key: str, timeout: float,
         detail = exc.read().decode("utf-8", "replace")[:500]
         raise CrowError(f"HTTP {exc.code} from {url}: {detail}") from exc
     except urllib.error.URLError as exc:
-        raise CrowError(f"cannot reach {url}: {exc.reason}") from exc
+        raise Unreachable(f"cannot reach {url}: {exc.reason}") from exc
 
     lines: "queue.Queue" = queue.Queue(maxsize=256)
     _EOF = object()
@@ -6467,6 +6514,27 @@ def _mcp_listed(name: str, patterns) -> bool:
     return False
 
 
+def _mcp_names_all(patterns, offered) -> bool:
+    """Is this positive list just every name the server offered, spelled out?
+
+    THE GENERATED FULL LIST IS NOT A FILTER, it is a photograph of the day it
+    was written -- and the tool the server grows tomorrow matches nothing in it.
+    Removing it restores the open state, which is what makes growth work at all.
+
+    A HAND-WRITTEN GLOB IS NEVER THIS. `["*"]` also lets everything through
+    today, but somebody typed it on purpose and it keeps letting things through
+    tomorrow; deleting it would be an edit nobody asked for. So only a list of
+    exact names that covers the whole offer counts.
+    """
+    patterns = list(patterns or ())
+    offered = set(offered or ())
+    if not patterns or not offered:
+        return False
+    if any(_mcp_pattern(p) for p in patterns):
+        return False
+    return offered <= set(patterns)
+
+
 def mcp_doc(path: str | None = None) -> "tuple[dict, list[str]]":
     """The configuration, and why it is not usable when it is not.
 
@@ -8662,10 +8730,24 @@ def mcp_add_server(name: str, block: dict) -> "tuple[dict | None, str | None]":
     # A HAND-WRITTEN GLOB SURVIVES A REFRESH. It matches no name in `offered`,
     # so a filter that only kept known names would quietly delete the one line
     # somebody wrote to keep 3,000 tools out.
-    include = ([t for t in (kept_tools.get("include") or [])
-                if t in offered or _mcp_pattern(t)]
-               if known_before else sorted(offered))
-    stored["tools"] = dict(kept_tools, include=sorted(include))
+    # A NEW SERVER GETS NO FILTER AT ALL, and that is the whole of robin's
+    # 2026-08-24 requirement: "wenn ich 'n neuen MCP Server hinzufuege und da
+    # neue Tools mit beisein, dann muessen die auch funktionieren". Writing
+    # every offered name here made the catalogue of that minute permanent --
+    # higgsfield stored 73 and could never have shown a 74th.
+    #
+    # WHAT KEEPS IT SAFE IS STILL THE OTHER COLUMN. `classes` stays empty, so
+    # `needs_approval` answers `executing` for a name it has not heard of: a
+    # tool that arrives on its own arrives into the strictest class, not into
+    # a free pass.
+    tools_block = dict(kept_tools)
+    include = [t for t in (kept_tools.get("include") or [])
+               if t in offered or _mcp_pattern(t)] if known_before else []
+    if include and not _mcp_names_all(include, offered):
+        tools_block["include"] = sorted(include)
+    else:
+        tools_block.pop("include", None)
+    stored["tools"] = tools_block
     classes = {t: c for t, c in kept_classes.items()
                if t in offered and c in MCP_TOOL_CLASSES}
     if classes:
@@ -8715,21 +8797,43 @@ def mcp_confirm(name: str, choices: dict) -> "str | None":
     kept = block.get("tools") if isinstance(block.get("tools"), dict) else {}
     include = [t for t in (kept.get("include") or [])
                if t in offered or _mcp_pattern(t)]
+    exclude = list(kept.get("exclude") or [])
+    # WHICH LIST CARRIES THE DECISION DEPENDS ON WHICH ONE IS REALLY THERE.
+    # A narrowing `include` somebody wrote by hand keeps deciding -- it wins
+    # over `exclude` in `mcp_catalog` and editing the other one would be a
+    # control that does nothing. Everywhere else the refusal goes into
+    # `exclude`, because that names what was turned down and leaves the rest
+    # of the server -- including what it has not offered yet -- alone.
+    narrowing = bool(include) and not _mcp_names_all(include, offered)
     classes = dict(block.get("classes") or {}) if isinstance(
         block.get("classes"), dict) else {}
     for tool, choice in choices.items():
         choice = choice or {}
         if choice.get("included"):
-            if tool not in include:
+            if tool in exclude:
+                exclude.remove(tool)
+            if narrowing and tool not in include:
                 include.append(tool)
-        elif tool in include:
-            include.remove(tool)
+        elif narrowing:
+            if tool in include:
+                include.remove(tool)
+        elif tool not in exclude:
+            exclude.append(tool)
         if "class" in choice:
             if choice.get("class"):
                 classes[tool] = choice["class"]
             else:
                 classes.pop(tool, None)
-    block["tools"] = dict(kept, include=sorted(include))
+    tools_block = dict(kept)
+    if narrowing and include:
+        tools_block["include"] = sorted(include)
+    else:
+        tools_block.pop("include", None)
+    if exclude:
+        tools_block["exclude"] = sorted(exclude)
+    else:
+        tools_block.pop("exclude", None)
+    block["tools"] = tools_block
     if classes:
         block["classes"] = classes
     else:
@@ -8976,6 +9080,37 @@ def needs_approval(name: str, mode: str) -> bool:
     guessing "safe" for it is the one guess with a cost.
     """
     return TOOL_CLASS.get(name, "executing") in MODE_ASKS.get(mode, ())
+
+
+def mode_description(mode: str) -> str:
+    """What a level holds back, in a line that does NOT grow with the table.
+
+    WRITTEN ONCE FOR BOTH SURFACES. Until 2026-08-24 the terminal and the window
+    each built this sentence themselves, and both built it the same way: join
+    every name that asks. That reads well for twelve built-in tools and breaks
+    the moment a server arrives -- higgsfield contributes 73, so the window's
+    level menu became ninety lines with no way to scan it, and the terminal
+    printed the same wall on one line.
+
+    THE BUILT-INS ARE NAMED AND THE REST IS COUNTED, which is the only shape
+    that stays readable at any size. A person recognises `write_file`; nobody
+    recognises the 41st name of a server they connected last week, and the
+    place that lists those per tool -- with a switch beside each -- is the MCP
+    sheet. Cloudflare's API server reports around 3,300 tools, so a menu that
+    spells names out has no size at which it starts working again.
+    """
+    asks = [t for t in sorted(TOOL_IMPL) if needs_approval(t, mode)]
+    if not asks:
+        return "every tool runs unasked"
+    named = [t for t in asks if not t.startswith("mcp_")]
+    served = len(asks) - len(named)
+    counted = "%d MCP tool%s" % (served, "" if served == 1 else "s") if served else ""
+    head = ", ".join(named)
+    if head and counted:
+        what = "%s and %s" % (head, counted)
+    else:
+        what = head or counted
+    return "asks before %s" % what
 
 
 # STANDING APPROVALS, per session and never written to disk. #88 point 3:
@@ -10029,7 +10164,7 @@ def run_turn(
                 events=events.reply_events(),
             )
         except CrowError as exc:
-            events.turn_failed(str(exc))
+            events.turn_failed(failure_line(exc))
             stopped = True
             break
         except KeyboardInterrupt:
