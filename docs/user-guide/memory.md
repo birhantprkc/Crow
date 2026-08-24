@@ -50,7 +50,7 @@ The review never writes on its own. What it wants to keep is staged and shown be
 and it stays there until you answer.
 
 <div align="center">
-<img src="docs/images/memory-consolidation.png" alt="Memory Consolidation: the staged writes behind the composer, +2 gained and -0 lost" width="900">
+<img src="../images/memory-consolidation.png" alt="Memory Consolidation: the staged writes behind the composer, +2 gained and -0 lost" width="900">
 </div>
 
 | | |

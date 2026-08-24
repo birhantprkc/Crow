@@ -396,6 +396,18 @@ def rail_open() -> bool:
     return read_settings().get("rail_open") is not False
 
 
+def code_open() -> bool:
+    """Is the code panel unfolded? False for anything this build does not have.
+
+    THE OPPOSITE DEFAULT TO THE RAIL, and the difference is what each one holds.
+    The rail carries the chats, which exist before the first turn. This carries
+    what a tool is writing, which does not -- so a pane that opens on every start
+    would take 280 px to show an empty box. The button in the title bar is what
+    makes it findable instead.
+    """
+    return read_settings().get("code_open") is True
+
+
 def open_projects() -> dict:
     """Which project rows are unfolded, by path. Absent means unfolded.
 
@@ -427,6 +439,24 @@ def rail_width_setting() -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return RAIL_DEFAULT
     return int(value) if RAIL_MIN <= value <= RAIL_MAX else RAIL_DEFAULT
+
+
+# DIE GRENZEN DES CODE-PANELS, gespiegelt zur Rail und aus demselben Grund in
+# Python geklemmt: der Wert kommt aus einer Maus. Weiter als die Rail, weil hier
+# Code steht und eine Zeile Python bei 260 Pixeln dreimal umbricht.
+CODE_MIN, CODE_MAX, CODE_DEFAULT = 260, 720, 380
+
+
+def code_width_setting() -> int:
+    """Die gespeicherte Breite des Code-Panels, oder die Vorgabe.
+
+    Dieselbe Regel wie bei der Rail: ein Wert ausserhalb der Grenzen wird zur
+    Vorgabe und nicht zur Grenze, weil er dann nicht aus dieser Geste stammt.
+    """
+    value = read_settings().get("code_width")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return CODE_DEFAULT
+    return int(value) if CODE_MIN <= value <= CODE_MAX else CODE_DEFAULT
 
 
 def client_version(path: str | None = None) -> str:
@@ -576,7 +606,13 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
    a word with a hole in it. */
 #mark{font-weight:700;letter-spacing:.22em;font-size:11.5px;color:var(--mark);pointer-events:none}
 #mark span{color:var(--mark-o)}
-#wbtns{margin-left:auto;display:flex;-webkit-app-region:no-drag}
+/* #138. DER FREIE PLATZ WIRD EINEN PLATZ FRUEHER VERTEILT. Der Code-Knopf
+   gehoert nach robins Vorgabe links neben die Fensterknoepfe, also traegt ER
+   das `auto` und `#wbtns` folgt ihm dicht. Zweimal `auto` nebeneinander waere
+   falsch: Flex teilt den Rest dann gleichmaessig und schoebe den Knopf in die
+   Mitte der Leiste. */
+#codetoggle{margin-left:auto}
+#wbtns{display:flex;-webkit-app-region:no-drag}
 /* The buttons sit inside the drag region, so they opt out of it again --
    without this a click on 'close' starts a drag instead of closing. */
 .wb{width:42px;height:33px;display:grid;place-items:center;color:var(--dimmer);
@@ -672,6 +708,44 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 /* WAEHREND DES ZIEHENS OHNE UEBERGANG. Die Rail blendet ihre Breite sonst mit
    .16s ein, und das macht aus einer Geste ein Nachlaufen. */
 #rail.dragging{transition:none}
+
+/* -- code panel (#138) --------------------------------------------------- */
+/* DIE RAIL GESPIEGELT. Jede Regel hier hat ihre Zwillingsregel links, und wo
+   sie abweicht, steht der Grund daneben. */
+#code{width:var(--codew,__CODEW__px);flex:none;background:var(--rail);
+  display:flex;flex-direction:column;min-height:0;overflow:hidden}
+#codegrip{flex:none;width:5px;margin:0 -2px;z-index:3;cursor:col-resize;
+  background:transparent;transition:background .12s ease}
+#codegrip:hover,#codegrip.on{background:var(--bevel)}
+#code.dragging{transition:none}
+#code{transition:width .16s ease}
+body[data-code="shut"] #code{width:0;overflow:hidden}
+/* DER GRIFF GEHT MIT. Ein Anfasser an einer Flaeche von null Pixeln ist ein
+   Streifen, der nichts bewegt -- und er saesse genau auf der Kante, die das
+   geschlossene Panel gerade sauber macht. */
+body[data-code="shut"] #codegrip{display:none}
+#codehead{display:flex;align-items:center;gap:8px;padding:0 12px;
+  min-height:var(--barh);flex:none}
+#codehead h2{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.13em;
+  text-transform:uppercase;color:var(--dimmer)}
+#codehead .n{color:var(--dimmer);font-size:11px;font-variant-numeric:tabular-nums}
+#codecopy{margin-left:auto;font:inherit;font-size:11px;color:var(--dim);
+  background:transparent;border:1px solid var(--line);border-radius:6px;
+  padding:2px 9px;cursor:pointer}
+#codecopy:hover{border-color:var(--bevel);color:var(--accent)}
+#codebody{overflow-y:auto;padding:0 8px 10px;flex:1;min-height:0}
+/* #138. EIN BLOCK JE AUFRUF. Dieselbe Sprache wie ein Codeblock in der Antwort
+   -- Rahmen, Kopfzeile, Monospace -- weil es dasselbe ist: Text, den ein Modell
+   schreibt und den jemand lesen will. */
+.cw{margin:8px 0 0;border:1px solid var(--line);border-radius:8px;
+  background:var(--bg);overflow:hidden}
+.cwh{padding:5px 9px;font-size:10.5px;font-weight:600;letter-spacing:.06em;
+  color:var(--dimmer);border-bottom:1px solid var(--line)}
+/* UMBRECHEND UND NICHT SCROLLEND. Eine Zeile JSON ist tausend Zeichen lang; ein
+   waagerechter Balken je Block macht aus dem Mitlesen ein Schieben. */
+.cwp{margin:0;padding:8px 9px;font-family:var(--mono);font-size:11px;
+  line-height:1.5;white-space:pre-wrap;word-break:break-word;
+  color:var(--text-faint);max-height:none}
 #railhead{display:flex;align-items:center;padding:0 12px;min-height:var(--barh)}
 #railhead h2{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.13em;
   text-transform:uppercase;color:var(--dimmer)}
@@ -753,10 +827,10 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 body[data-rail="shut"] #rail{width:0;overflow:hidden}
 /* IN THE TITLE BAR, so it survives the rail it hides. It is the one control
    that must not live in the thing it folds away. */
-#railtoggle{font:inherit;color:var(--dimmer);background:transparent;
+#railtoggle,#codetoggle{font:inherit;color:var(--dimmer);background:transparent;
   border:1px solid transparent;border-radius:6px;cursor:pointer;
   display:flex;align-items:center;padding:3px 5px;margin-right:2px}
-#railtoggle:hover{color:var(--accent);border-color:var(--bevel)}
+#railtoggle:hover,#codetoggle:hover{color:var(--accent);border-color:var(--bevel)}
 
 /* A PROJECT ROW IS NOT A CHAT ROW, and the difference has to survive a glance:
    it is a heading you can fold, so it carries a caret and a count and never the
@@ -810,7 +884,14 @@ body[data-rail="shut"] #rail{width:0;overflow:hidden}
    cut away to, and `overflow:hidden` is what stops the flow's own background
    from squaring it off again at the first scroll. */
 #main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;
-  background:var(--bg);border-top-left-radius:12px;overflow:hidden;
+  background:var(--bg);border-top-left-radius:12px;
+  /* #138. DIE ZWEITE KANTE, gespiegelt. Sie gehoert #main und nicht dem
+     Panel: die Chatspalte ist das Blatt, das vor den Seitenflaechen liegt,
+     und sie hat eine Ecke auf jeder Seite, sobald es beide gibt. Der Radius
+     bleibt auch bei geschlossenem Panel stehen -- dahinter liegt dann der
+     Fensterhintergrund, und eine Ecke, die beim Zuklappen aufspringt, macht
+     aus dem Falten eine Formaenderung. */
+  border-top-right-radius:12px;overflow:hidden;
   position:relative}
 /* #125. THE STATUS BAR IS GONE, not hidden. Both chips it carried moved into
    the settings sheet -- the connection with its address, and the tool switch --
@@ -932,10 +1013,13 @@ details.think[open] .caret{transform:rotate(90deg)}
 /* THE SAME GROUND AS THE USER'S BUBBLE, and by the same tokens rather than by
    a matching literal: `--raised` and `--line` are defined once per palette, so
    the tile follows the skin that is on instead of following one that was. */
-#toolcalls{position:absolute;top:28px;right:36px;z-index:2;width:max-content;
-  max-width:min(620px,44vw);border:1px solid var(--line);border-radius:12px;
-  background:var(--raised);box-shadow:0 8px 24px var(--shadow);
-  font-size:11.5px;overflow:hidden}
+/* #138. IM PANEL, NICHT MEHR UEBER DEM CHAT. Als Kachel schwebte sie absolut
+   ueber der Leseflaeche und musste sich auf 44vw begrenzen, um sie nicht zu
+   verdecken. In einer eigenen Spalte verdeckt sie nichts, also nimmt sie die
+   volle Breite und traegt weder Schatten noch eigene Ecke -- beides war die
+   Sprache eines Elements, das ueber etwas anderem liegt. */
+#toolcalls{width:100%;border:1px solid var(--line);border-radius:8px;
+  background:var(--raised);font-size:11.5px;overflow:hidden}
 #toolcalls .tchd{display:flex;align-items:center;gap:9px;padding:7px 12px;
   cursor:pointer;user-select:none}
 #toolcalls .tct{font-weight:600;color:var(--text-soft)}
@@ -943,8 +1027,7 @@ details.think[open] .caret{transform:rotate(90deg)}
 #toolcalls .tcx{margin-left:auto;color:var(--dimmer);font-size:15px;
   line-height:1;width:11px;text-align:center}
 #toolcalls.shut .tcbody{display:none}
-#toolcalls .tcbody{border-top:1px solid var(--line);padding:8px;
-  max-height:56vh;overflow:auto}
+#toolcalls .tcbody{border-top:1px solid var(--line);padding:8px}
 #toolcalls .tool{margin:0 0 6px}
 /* INSIDE THE TILE THE ARGUMENTS ARE THE POINT, so they are not clipped -- the
    tile grew to fit them. In the flow they were one line of a column that had
@@ -971,6 +1054,16 @@ details.think[open] .caret{transform:rotate(90deg)}
   background:var(--panel);border-bottom:1px solid var(--line);font-size:11.5px}
 .code .lang{color:var(--dimmer);font-size:10.5px;letter-spacing:.06em;
   text-transform:uppercase}
+/* robin, 2026-08-24: lange Bloecke sind klappbar. Die Zeilenzahl steht neben
+   der Sprache und sagt zugeklappt, wieviel darunter liegt -- eine Falte ohne
+   Etikett ist eine Kiste. */
+.code .n{color:var(--dimmer);font-size:10.5px}
+.code.foldable .hd{cursor:pointer;user-select:none}
+.code.foldable .hd:hover .lang,.code.foldable .hd:hover .n{color:var(--accent)}
+/* DER KOPF BLEIBT, der Rumpf geht. Ein Block, der ganz verschwindet, nimmt den
+   Weg zurueck mit sich. */
+.code.shut pre{display:none}
+.code.shut{border-style:dashed}
 .copy{margin-left:auto;font:inherit;font-size:11px;color:var(--dimmer);
   background:transparent;border:1px solid var(--line);border-radius:5px;
   padding:1.5px 9px;cursor:pointer}
@@ -1571,7 +1664,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    `levels` and `groups` are measured for the model that ANSWERED the probe, so they describe one
    model and no other. Hanging them under the row that would boot 17 GB would be inventing them
    for a model nobody has asked a question -- and #116's rule is that nothing is invented. */
-</style></head><body data-rail="__RAIL__">
+</style></head><body data-rail="__RAIL__" data-code="__CODE__">
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
   <!-- #119. LEFT OF THE WORDMARK, and it has to live in the TITLE BAR rather
@@ -1593,6 +1686,23 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
       <button onclick="crow.openSettings()">Settings</button>
     </div>
   </div>
+  <!-- #138. LINKS VON DEN FENSTERKNOEPFEN, aus dem Grund, den #119 fuer den
+       Rail-Knopf aufgeschrieben hat: ein Knopf im Panel geht mit dem Panel weg,
+       und dann gibt es keinen Weg zurueck. Das Zeichen ist robins Terminal-Marke
+       aus dem Noun Project, aber NACHGEZEICHNET statt eingebettet -- die Datei
+       besteht aus gefuellten Pfaden ohne jeden Strich, und `stroke-width` haette
+       dort nichts, worauf es wirken koennte. Als Striche traegt es dieselbe 1.6
+       wie der Rail-Knopf daneben, nimmt `currentColor` wie alles hier, und
+       braucht keine Namensnennung. Derselbe Rahmen wie links, nur ist innen ein
+       Prompt statt einer Spalte. -->
+  <button id="codetoggle" class="pywebview-no-drag" onclick="crow.toggleCode()"
+          title="Show or hide the code panel">
+    <svg viewBox="0 0 20 20" width="15" height="15" fill="none"
+         stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
+         stroke-linejoin="round" aria-hidden="true">
+      <rect x="2.5" y="4" width="15" height="12" rx="2"></rect>
+      <path d="M6.2 8.6 8.6 11 6.2 13.4"></path>
+      <line x1="10.8" y1="13.4" x2="14" y2="13.4"></line></svg></button>
   <div id="wbtns" class="pywebview-no-drag">
     <div class="wb" onclick="pywebview.api.minimise()">&#8211;</div>
     <div class="wb" onclick="pywebview.api.maximise()">&#9633;</div>
@@ -1756,16 +1866,6 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
          one tile, per chat, always present so there is somewhere to look even
          before the first call. ABSOLUTE, so it does not scroll away from the
          reader who wants it. -->
-    <div id="toolcalls" class="shut">
-      <div class="tchd" onclick="crow.toolsToggle()">
-        <span class="tct">Tool-Calls</span><span class="tcn"></span>
-        <span class="tcx">+</span>
-      </div>
-      <div class="tcbody">
-        <div id="tclist"></div>
-        <button class="tcclear" onclick="crow.toolsClear(event)">clear</button>
-      </div>
-    </div>
     <div id="flow"></div>
     <div id="composer">
       <div id="pendbar" hidden onclick="crow.pendToggle(event)"></div>
@@ -1808,6 +1908,31 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
       </div>
     </div>
   </div>
+  <!-- #138. Der Griff zwischen Chat und Code, gespiegelt zu #railgrip und aus
+       demselben Grund ein eigenes Element. -->
+  <div id="codegrip" onmousedown="crow.codeDrag(event)" title="drag to resize"></div>
+  <!-- #138. DAS CODE-PANEL. Es haelt, was ein Werkzeug gerade schreibt, und die
+       Liste der Aufrufe -- eine Flaeche, nicht zwei: die Aufrufe SIND der Index
+       zu dem, was hier steht, und nebeneinander waeren beide schmaler. -->
+  <aside id="code">
+    <div id="codehead">
+      <h2>Code</h2><span class="n"></span>
+      <button id="codecopy" onclick="crow.codeCopy(event)"
+              title="copy what is shown">copy</button>
+    </div>
+    <div id="codebody">
+      <div id="toolcalls" class="shut">
+        <div class="tchd" onclick="crow.toolsToggle()">
+          <span class="tct">Tool-Calls</span><span class="tcn"></span>
+          <span class="tcx">+</span>
+        </div>
+        <div class="tcbody">
+          <div id="tclist"></div>
+          <button class="tcclear" onclick="crow.toolsClear(event)">clear</button>
+        </div>
+      </div>
+    </div>
+  </aside>
 </div>
 
 <script>
@@ -1974,14 +2099,26 @@ const crow = {
     this.say=null; this.fenceLang=lang||"code";
     const d=document.createElement("div"); d.className="code";
     d.innerHTML='<div class="hd"><span class="lang"></span>'+
+      '<span class="n"></span>'+
       '<button class="copy">copy</button></div><pre></pre>';
     d.querySelector(".lang").textContent=this.fenceLang;
     const pre=d.querySelector("pre"), btn=d.querySelector(".copy");
+    // #138 / robin 2026-08-24. DER KOPF IST DIE FALTE, und er bleibt sichtbar,
+    // wenn der Rumpf weg ist -- sonst ist der Weg zurueck weg. Die Falte wird
+    // erst beim Schliessen freigeschaltet (`.foldable`), weil vorher niemand
+    // weiss, wie lang der Block wird; hier haengt nur der Griff schon bereit.
+    d.querySelector(".hd").onclick=()=>{
+      if(d.classList.contains("foldable")) d.classList.toggle("shut"); };
     // THROUGH PYTHON, NOT navigator.clipboard. The page is handed to WebView2 as
     // HTML rather than served over https, so it is not a secure context and the
     // async clipboard API silently refuses -- the button said "copied" over an
     // empty clipboard, which is worse than a button that does nothing.
-    btn.onclick=()=>{ if(!pre.textContent){ btn.textContent="empty"; return; }
+    btn.onclick=(ev)=>{
+      // NICHT DURCHBLUBBERN LASSEN. Der Knopf sitzt im Kopf, und der Kopf ist
+      // die Falte -- dieselbe Stelle, an der die Werkzeug-Kachel schon einmal
+      // weggeklappt hat, was gerade geleert wurde.
+      ev.stopPropagation();
+      if(!pre.textContent){ btn.textContent="empty"; return; }
       pywebview.api.copy(pre.textContent).then(ok=>{
         btn.textContent = ok ? "copied" : "failed";
         btn.classList.toggle("done", !!ok);
@@ -1992,10 +2129,30 @@ const crow = {
     if(!closed && this.fence){ const n=document.createElement("div");
       n.className="note"; n.textContent="… the block was never closed";
       this.col.insertBefore(n,this.cursor); }
+    // robin, 2026-08-24: ab funfzehn Zeilen klappbar. ERST HIER, weil die
+    // Laenge vorher nicht feststeht -- ein Block, der beim dritten Zeichen
+    // einen Klappknopf bekaeme, haette ihn oft umsonst.
+    //
+    // FREIGESCHALTET, NICHT ZUGEKLAPPT. Wer zusieht, wie etwas geschrieben
+    // wird, will es sehen; ihm den Inhalt im Moment des Fertigwerdens
+    // wegzunehmen waere die Umkehrung dessen, wofuer die Falte da ist.
+    if(this.fence){
+      const box=this.fence.closest(".code");
+      const lines=(this.fence.textContent.match(/\n/g)||[]).length+1;
+      if(box && lines>=15){
+        box.classList.add("foldable");
+        const n=box.querySelector(".n");
+        if(n) n.textContent=lines+" lines";
+      }
+    }
     this.fence=null;
   },
 
+  // #138. EIN LAUFENDER AUFRUF SCHLIESST SEINEN BLOCK. Ab hier sind die
+  // Argumente vollstaendig -- was jetzt noch kaeme, gehoert zur naechsten Runde.
   tool(name,args){
+    this.live=null;
+    const n=$("#codehead .n"); if(n) n.textContent="";
     const d=document.createElement("div"); d.className="tool";
     d.innerHTML='<div class="hd"><span class="ico">&#9679;</span>'+
       '<span class="name"></span><span class="arg"></span>'+
@@ -2019,6 +2176,42 @@ const crow = {
       const p=document.createElement("p");
       p.className="empty"; p.textContent="Nothing called yet.";
       $("#tclist").appendChild(p); } },
+
+  // #138. WAS GERADE GESCHRIEBEN WIRD, im Panel rechts.
+  //
+  // EIN BLOCK JE AUFRUF, und `index` ist der Schluessel: zwei Aufrufe in einer
+  // Runde teilen sich den Strom und waeren sonst ein Reissverschluss aus zwei
+  // Dateien. Die Karte wird geleert, sobald ein Aufruf LAEUFT (`tool`), denn
+  // dann ist die Runde fertig und die naechste faengt bei index 0 wieder an.
+  toolArg(i,name,piece){
+    if(!this.live) this.live={};
+    let box=this.live[i];
+    if(!box || box.dataset.nm!==name){
+      const body=$("#codebody");
+      box=document.createElement("div"); box.className="cw"; box.dataset.nm=name;
+      const hd=document.createElement("div"); hd.className="cwh";
+      hd.textContent=name;
+      const pre=document.createElement("pre"); pre.className="cwp";
+      box.appendChild(hd); box.appendChild(pre);
+      body.appendChild(box);
+      this.live[i]=box;
+      // NUR WENN DAS PANEL OFFEN IST. Es aufzureissen, weil ein Werkzeug
+      // laeuft, waere eine Entscheidung, die der Leser getroffen hat und die
+      // ihm hier wieder abgenommen wuerde.
+      if(document.body.dataset.code!=="shut") box.scrollIntoView({block:"end"});
+    }
+    const pre=box.querySelector(".cwp");
+    pre.textContent += piece;
+    if(document.body.dataset.code!=="shut"){
+      const body=$("#codebody");
+      // AM ENDE BLEIBEN, ABER NUR WENN JEMAND DORT WAR. Wer hochgescrollt hat,
+      // liest etwas -- ihn zurueckzuziehen ist die haerteste Art, ihn dabei zu
+      // stoeren. Vier Pixel Spiel gegen Rundung.
+      const atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+      if(atEnd) body.scrollTop = body.scrollHeight;
+    }
+    const n=$("#codehead .n");
+    if(n) n.textContent = Object.keys(this.live).length ? "writing" : ""; },
 
   toolsToggle(){
     const box=$("#toolcalls"), shut=box.classList.toggle("shut");
@@ -2760,6 +2953,26 @@ const crow = {
       grip.classList.remove("on"); rail.classList.remove("dragging");
       pywebview.api.rail_width(Math.round(
         rail.getBoundingClientRect().width)); };
+    document.addEventListener("mousemove",move);
+    document.addEventListener("mouseup",up); },
+
+  // #138. GESPIEGELT: die Rail misst von ihrer linken Kante nach rechts, das
+  // Panel von seiner rechten Kante nach links. Sonst ist es dieselbe Geste, und
+  // die Grenzen sind auch hier zweimal da -- in der Seite und in Python.
+  codeDrag(ev){
+    ev.preventDefault();
+    const panel=$("#code"), grip=$("#codegrip");
+    grip.classList.add("on"); panel.classList.add("dragging");
+    const right=panel.getBoundingClientRect().right;
+    const move=e=>{
+      const w=Math.max(260,Math.min(720,Math.round(right-e.clientX)));
+      document.documentElement.style.setProperty("--codew",w+"px"); };
+    const up=()=>{
+      document.removeEventListener("mousemove",move);
+      document.removeEventListener("mouseup",up);
+      grip.classList.remove("on"); panel.classList.remove("dragging");
+      pywebview.api.code_width(Math.round(
+        panel.getBoundingClientRect().width)); };
     document.addEventListener("mousemove",move);
     document.addEventListener("mouseup",up); },
 
@@ -3568,6 +3781,33 @@ const crow = {
     el.dataset.rail=open ? "shut" : "open";
     pywebview.api.set_rail_open(!open); },
 
+  // #138. DASSELBE FUER RECHTS. Eigene Methode statt eines Parameters: die
+  // beiden Panels teilen ihr Aussehen und sonst nichts -- verschiedene Grenzen,
+  // verschiedene Vorgabe, verschiedene Einstellung.
+  toggleCode(){ const el=document.body;
+    const open=el.dataset.code!=="shut";
+    el.dataset.code=open ? "shut" : "open";
+    pywebview.api.set_code_open(!open); },
+
+  // WAS DA STEHT, IN DIE ZWISCHENABLAGE. `innerText` und nicht `textContent`:
+  // das eine liefert, was zu sehen ist, das andere auch den Inhalt von allem,
+  // was gerade zugeklappt ist -- und kopiert wird, worauf jemand sieht.
+  codeCopy(ev){
+    ev.stopPropagation();
+    const body=$("#codebody"), btn=$("#codecopy");
+    // UEBER PYTHON, NICHT UEBER DIE SEITE. Die Seite ist als HTML geladen und
+    // damit kein sicherer Kontext -- `navigator.clipboard` lehnt dort ab, ohne
+    // zu werfen, und der Knopf saegte "copied" ueber eine leere Ablage. Dieselbe
+    // Naht, die der Knopf am Codeblock schon nimmt.
+    // `innerText` und nicht `textContent`: das eine liefert, was zu sehen ist,
+    // das andere auch den Inhalt von allem, was gerade zugeklappt ist.
+    const text = body ? body.innerText.trim() : "";
+    if(!text){ btn.textContent="empty";
+      setTimeout(()=>{btn.textContent="copy";},1400); return; }
+    pywebview.api.copy(text).then(ok=>{
+      btn.textContent = ok ? "copied" : "failed";
+      setTimeout(()=>{btn.textContent="copy";},1400); }); },
+
   toggleProject(path,open){ pywebview.api.set_project_open(path,open); },
 
   // THE ARCHIVE IS A DRAWER, shut by default. It holds what the user put out of
@@ -3669,6 +3909,7 @@ const crow = {
       case "cost": this.cost(e.line,e.share); this.ctx(e.tokens,e.n_ctx); break;
       case "note": this.note(e.t); break;
       case "memory": this.memory(e.t,e.n); break;
+      case "toolarg": this.toolArg(e.i,e.name,e.t); break;
       case "alarm": this.alarm(e.t); break;
       case "fail": this.fail(e.t); break;
       case "live":
@@ -3996,6 +4237,72 @@ def shell_buttons(title: str) -> bool:
 
 # ---------------------------------------------------------------- the bridge
 
+_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f",
+            '"': '"', "\\": "\\", "/": "/"}
+
+
+class Unescaper:
+    """JSON-String-Escapes entfalten, waehrend der Text noch stroemt.
+
+    #138. Was ueber die Leitung kommt, ist ein JSON-String und nicht Quelltext:
+    `\\n` sind zwei Zeichen, `\\"` sind zwei Zeichen. robin am 2026-08-24, als das
+    Mitlesen zum ersten Mal lief -- lesbar, aber muehsam.
+
+    SPRACHUNABHAENGIG OHNE ZUTUN. Die Escapes gehoeren dem Transport, nicht der
+    Sprache; `\\n` sieht in Python, SVG, Rust und Bash gleich aus. "Fuer alle
+    Programmiersprachen" ist deshalb keine Arbeit, sondern die Eigenschaft
+    dieser Schicht.
+
+    ZEICHENWEISE UND NICHT DURCH ERSETZEN. Wer erst `\\n` durch einen Umbruch
+    ersetzt und danach `\\\\` durch einen Backslash, macht aus `C:\\\\new` einen
+    Zeilenumbruch -- und trifft damit genau die Zeichenketten, die einen
+    Backslash MEINEN: Windows-Pfade, regulaere Ausdruecke, LaTeX.
+
+    EIN OBJEKT UND KEINE FUNKTION, weil ein `\\` das letzte Zeichen eines
+    Fragments sein kann und sein Partner im naechsten kommt. Der Rest wartet
+    hier, bis er vollstaendig ist. Ein unbekanntes Escape (`\\d` aus einem
+    regulaeren Ausdruck) bleibt unangetastet: es zu schlucken hiesse, den
+    Ausdruck still zu aendern.
+    """
+
+    def __init__(self) -> None:
+        self._rest = ""
+
+    def feed(self, piece: str) -> str:
+        text, self._rest = self._rest + (piece or ""), ""
+        out, i, n = [], 0, len(text)
+        while i < n:
+            ch = text[i]
+            if ch != "\\":
+                out.append(ch)
+                i += 1
+                continue
+            if i + 1 >= n:                      # Backslash am Rand: warten
+                self._rest = text[i:]
+                break
+            nxt = text[i + 1]
+            if nxt in _ESCAPES:
+                out.append(_ESCAPES[nxt])
+                i += 2
+                continue
+            if nxt == "u":
+                if i + 6 > n:                   # \uXX... noch nicht ganz da
+                    self._rest = text[i:]
+                    break
+                hexes = text[i + 2:i + 6]
+                try:
+                    out.append(chr(int(hexes, 16)))
+                except ValueError:
+                    out.append(ch)              # kein gueltiges \u: stehen lassen
+                    i += 1
+                    continue
+                i += 6
+                continue
+            out.append(ch)                      # unbekannt: unangetastet
+            i += 1
+        return "".join(out)
+
+
 class Sink(ReplyEvents, FenceEvents):
     """The core's reply callbacks, turned into messages for the page.
 
@@ -4135,6 +4442,25 @@ class Sink(ReplyEvents, FenceEvents):
 
     def reasoning_finished(self) -> None:
         self._put({"k": "think_close"})
+
+    def tool_arguments(self, index: int, name: str, piece: str) -> None:
+        """#138. Ein Stueck der Argumente, sofort weitergereicht.
+
+        OHNE `_tick`. Der Zaehler misst, was das Modell fuer die ANTWORT
+        erzeugt; Werkzeugargumente in dieselbe Rate zu werfen liesse sie
+        springen, sobald ein `write_file` anfaengt -- und die Rate ist genau
+        das, woran jemand ablesen will, ob es noch laeuft.
+        """
+        # EIN ENTFALTER JE AUFRUF. Zwei Aufrufe einer Runde teilen sich den
+        # Strom; ein gemeinsamer Puffer schoebe das haengende Zeichen des einen
+        # in den anderen.
+        if not hasattr(self, "_folds"):
+            self._folds = {}
+        fold = self._folds.get(index)
+        if fold is None:
+            fold = self._folds[index] = Unescaper()
+        self._put({"k": "toolarg", "i": index, "name": name,
+                   "t": fold.feed(piece)})
 
 
 class Turn(TurnEvents):
@@ -6711,6 +7037,35 @@ class Api:
         doc["rail_open"] = bool(open_)
         return write_settings(doc)
 
+    def set_code_open(self, open_: bool) -> bool:
+        """#138. Remember whether the code panel is folded away.
+
+        Written here, read by `code_open`, and stamped onto the element before
+        the page is handed over -- the same three steps the rail takes, for the
+        reason `set_rail_open` writes out above.
+        """
+        doc = read_settings()
+        doc["code_open"] = bool(open_)
+        return write_settings(doc)
+
+    def code_width(self, px) -> bool:
+        """#138. Remember how wide the code panel is. False when refused.
+
+        CLAMPED AGAIN HERE, and that is not belt and braces: the page clamps a
+        live gesture, this clamps what gets WRITTEN. A number that arrives out of
+        bounds did not come from the grip, and storing it would hand the next
+        start a panel nobody dragged.
+        """
+        try:
+            width = int(px)
+        except (TypeError, ValueError):
+            return False
+        if width < CODE_MIN or width > CODE_MAX:
+            return False
+        doc = read_settings()
+        doc["code_width"] = width
+        return write_settings(doc)
+
     def set_project_open(self, path: str, open_: bool) -> bool:
         """Remember one project row folded. Read back by `open_projects`.
 
@@ -7041,6 +7396,8 @@ def main(argv: list[str] | None = None) -> int:
                 # would do it on every start, and that frame is the moment
                 # somebody is looking at the window.
                 .replace("__RAIL__", "open" if rail_open() else "shut")
+                .replace("__CODE__", "open" if code_open() else "shut")
+                .replace("__CODEW__", str(code_width_setting()))
                 .replace("__MARKDARK__", mark_svg("dark"))
                 .replace("__MARKLIGHT__", mark_svg("light")))
 

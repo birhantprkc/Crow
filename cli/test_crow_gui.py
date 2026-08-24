@@ -3490,9 +3490,17 @@ class TheRailDrawsTheGroupsTests(unittest.TestCase):
         """The theme's rule, for the same reason: a rail drawn open and folded
         by a script after load would do it on every start, and that frame is
         exactly when somebody is looking at the window."""
-        self.assertIn('<body data-rail="__RAIL__">', self.source)
+        # DIE ZUSAGE, NICHT DIE GANZE ZEILE. Sie stand als vollstaendiges
+        # `<body ...>` hier und wurde rot, als das Code-Panel sein eigenes
+        # Attribut danebenstellte -- an einer Ergaenzung, die genau dieselbe
+        # Regel befolgt. Geprueft wird jetzt, dass jedes Panel seinen Stand
+        # gestempelt bekommt, bevor die Seite uebergeben wird.
+        self.assertIn('<body data-rail="__RAIL__"', self.source)
+        self.assertIn('data-code="__CODE__"', self.source)
         self.assertIn('.replace("__RAIL__"', self.source)
+        self.assertIn('.replace("__CODE__"', self.source)
         self.assertIn('body[data-rail="shut"] #rail{width:0', self.css)
+        self.assertIn('body[data-code="shut"] #code{width:0', self.css)
 
     def test_a_folded_project_draws_no_rows_rather_than_hidden_ones(self):
         """Rows built and then hidden stay in the tree, and the fast path that
@@ -4639,10 +4647,15 @@ class ToolCallsLeaveTheReadingColumnTests(unittest.TestCase):
         # lies about what pressing it will do.
         self.assertIn('shut ? "+"', js)
 
-    def test_open_it_is_as_wide_as_its_widest_row(self):
-        """A tool line is a path plus arguments. A fixed width would ellipsis
-        away the half that says which file, which is the half worth reading."""
-        self.assertIn("width:max-content", self._rule("#toolcalls{"))
+    def test_the_panel_gives_the_width_and_the_row_uses_all_of_it(self):
+        """A tool line is a path plus arguments, and the half that says which
+        file is the half worth reading -- so it is still never clipped.
+
+        WHAT CHANGED ON 2026-08-24 is where the width comes from. As a tile
+        floating over the chat it had to grow to its widest row and stop at
+        44vw, or it covered what somebody was reading. In a column of its own it
+        covers nothing, so the column decides and the row takes all of it."""
+        self.assertIn("width:100%", self._rule("#toolcalls{"))
         self.assertIn("overflow:visible", self._rule("#toolcalls .tool .arg{"))
 
     def test_it_wears_the_bubble_of_whichever_skin_is_on(self):
@@ -4660,14 +4673,22 @@ class ToolCallsLeaveTheReadingColumnTests(unittest.TestCase):
         self.assertFalse(_re.findall(r"#[0-9a-fA-F]{3,6}", tile),
                          "the tile names a colour of its own")
 
-    def test_it_sits_clear_of_the_edge(self):
-        """It was 14 and 18 px off the corner and read as stuck to it."""
-        import re as _re
+    def test_the_list_lives_in_the_panel_and_not_over_the_chat(self):
+        """It used to float: absolute, 28 px down and 36 px in from the corner,
+        because anything less read as stuck to it. robin asked on 2026-08-24 for
+        the calls to move into the code panel -- so there is no corner to clear
+        any more, and the case that guarded the distance now guards the move.
+
+        THE POINT IS THE SAME ONE #131 MADE: tool rows do not belong in the
+        reading column. Floating over it was one answer; a column beside it is
+        the better one, because it stops covering the thing it was keeping out
+        of the way."""
         tile = self._rule("#toolcalls{")
-        top = int(_re.search(r"top:(\d+)px", tile).group(1))
-        right = int(_re.search(r"right:(\d+)px", tile).group(1))
-        self.assertGreaterEqual(top, 24)
-        self.assertGreaterEqual(right, 30)
+        self.assertNotIn("position:absolute", tile)
+        panel = self.source[self.source.index('<aside id="code"'):]
+        panel = panel[:panel.index("</aside>")]
+        self.assertIn('id="toolcalls"', panel,
+                      "the call list did not move into the code panel")
 
     def test_clearing_does_not_also_fold_the_tile_away(self):
         """NEGATIVE, and the trap the memory tile already hit: the button sits
@@ -5942,6 +5963,295 @@ class TheRailIsDraggableTests(ApiCase):
         self.assertIn("padding-inline", rule)
         self.assertIn("scrollbar-gutter:stable", rule)
 
+
+
+class TheCodePanelTests(unittest.TestCase):
+    """#138. The pane on the right: what is being written, while it is written.
+
+    IT IS THE RAIL MIRRORED, and that is the whole design brief robin gave. Every
+    rule here has a twin on the left -- clamp, grip, fold, rounded seam -- and the
+    ones that differ do so for a reason each case names.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+        self.dir = tempfile.mkdtemp(prefix="crow-code-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._real = crow_gui.SETTINGS_FILE
+        self.addCleanup(setattr, crow_gui, "SETTINGS_FILE", self._real)
+        crow_gui.SETTINGS_FILE = os.path.join(self.dir, "settings.json")
+
+    def _settings(self, doc):
+        with open(crow_gui.SETTINGS_FILE, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+
+    # ---- what the window remembers
+
+    def test_the_panel_is_shut_until_somebody_opens_it(self):
+        """THE OPPOSITE DEFAULT TO THE RAIL, and the difference is the content.
+        The rail holds the chats, which exist before the first turn; this holds
+        what a tool is writing, which does not. A pane that opens empty on every
+        start takes 280 px to say nothing."""
+        self.assertFalse(crow_gui.code_open())
+
+    def test_the_remembered_state_is_read_back(self):
+        self._settings({"code_open": True})
+        self.assertTrue(crow_gui.code_open())
+
+    def test_a_width_outside_the_clamp_becomes_the_default(self):
+        """NEGATIVE, and the rail's reason applies unchanged: a value out of
+        bounds did not come from this gesture, so pulling it to the boundary
+        would be a decision nobody made."""
+        self._settings({"code_width": 9000})
+        self.assertEqual(crow_gui.code_width_setting(), crow_gui.CODE_DEFAULT)
+        self._settings({"code_width": crow_gui.CODE_MIN})
+        self.assertEqual(crow_gui.code_width_setting(), crow_gui.CODE_MIN)
+
+    def test_a_width_that_is_not_a_number_becomes_the_default(self):
+        for junk in (True, "420", None, [420]):
+            self._settings({"code_width": junk})
+            self.assertEqual(crow_gui.code_width_setting(), crow_gui.CODE_DEFAULT,
+                             "%r was taken as a width" % (junk,))
+
+    # ---- what the page carries
+
+    def test_the_page_carries_the_panel_its_grip_and_its_button(self):
+        for want in ('id="code"', 'id="codegrip"', 'id="codetoggle"'):
+            self.assertIn(want, self.source, "%s is missing from the page" % want)
+
+    def test_the_rounded_seam_is_mirrored(self):
+        """robin: "selbe abgerundete Kante wie beim chat panel nur gespiegelt".
+        The seam is #main's, not the panel's -- the chat column is the thing with
+        the corner, and it has one on each side once both panels exist."""
+        import re
+        m = re.search(r"#main\{([^}]*)\}", self.css)
+        self.assertTrue(m, "#main lost its rule")
+        body = m.group(1)
+        self.assertIn("border-top-left-radius:12px", body)
+        self.assertIn("border-top-right-radius:12px", body)
+
+    def test_the_toggle_sits_in_the_title_bar(self):
+        """#119's reason, unchanged: a button inside the panel goes away with the
+        panel, and then there is no way back."""
+        bar = self.source[self.source.index('<div id="bar"'):]
+        bar = bar[:bar.index("</div>\n\n<div id=\"settings\"")] if "</div>\n\n<div id=\"settings\"" in bar else bar[:4000]
+        self.assertIn('id="codetoggle"', bar)
+
+    def test_the_toggle_is_drawn_at_the_rail_icons_weight(self):
+        """robin asked for the stroke weight of the chat-panel icon. The Noun
+        Project file is filled paths with no stroke at all, so it is redrawn as
+        strokes rather than embedded -- which also settles the attribution, and
+        docs/ is not shipped anyway."""
+        start = self.source.index('id="codetoggle"')
+        svg = self.source[start:start + 700]
+        self.assertIn('stroke-width="1.6"', svg)
+        self.assertIn('stroke="currentColor"', svg)
+        # NICHT DER NAME, SONDERN DER STEMPEL. Woher das Zeichen stammt, darf im
+        # Kommentar stehen -- was nicht mitreisen darf, sind die beiden <text>-
+        # Elemente der Datei, die die Namensnennung ins Bild schreiben und die
+        # viewBox auf 0 0 100 125 strecken.
+        self.assertNotIn("Created by Focus", self.source)
+        self.assertNotIn("<text", svg)
+
+    def test_the_tool_calls_live_inside_the_panel(self):
+        """robin: "Tools wandern mit in den Code Panel". Not a second surface
+        beside it -- the log and the live view are one pane."""
+        panel = self.source[self.source.index('<aside id="code"'):]
+        panel = panel[:panel.index("</aside>")]
+        self.assertIn('id="toolcalls"', panel)
+
+    def test_a_tool_row_still_folds(self):
+        """robin: "Tools bleiben weiterhin auf und zu klappbar". Folding the PANEL
+        and folding a ROW are two controls, and the move may not eat one."""
+        self.assertIn("toolsToggle()", self.source)
+        self.assertIn("#toolcalls.shut .tcbody", self.css)
+
+    def test_the_code_can_be_copied(self):
+        """robin: "Code soll ebenfalls kopierbar sein" -- the affordance answers
+        already have."""
+        panel_css = self.css[self.css.index("#code{"):]
+        self.assertIn("copy", self.source[self.source.index('<aside id="code"'):
+                                          self.source.index('<aside id="code"') + 3000])
+
+    def test_a_fragment_reaches_the_page_as_its_own_message(self):
+        """#138. Der Kern meldet jedes Stueck; das Fenster reicht es weiter und
+        haengt es an den Block dieses Aufrufs."""
+        seen = []
+        sink = crow_gui.Sink(seen.append)
+        sink.tool_arguments(0, "write_file", '{"path": "a.py"')
+        sink.tool_arguments(0, "write_file", ', "content": "x"}')
+        args = [m for m in seen if m.get("k") == "toolarg"]
+        self.assertEqual([m["t"] for m in args],
+                         ['{"path": "a.py"', ', "content": "x"}'])
+        self.assertEqual({m["name"] for m in args}, {"write_file"})
+        self.assertEqual({m["i"] for m in args}, {0})
+
+    def test_the_fragment_does_not_move_the_rate(self):
+        """NEGATIV: `_tick` zaehlt, was fuer die ANTWORT erzeugt wird. Ein
+        `write_file` mit hinein zu rechnen liesse die Rate springen, sobald ein
+        Werkzeug schreibt -- und die Rate ist das, woran jemand abliest, ob es
+        noch laeuft."""
+        seen = []
+        sink = crow_gui.Sink(seen.append)
+        sink.tool_arguments(0, "write_file", "x" * 500)
+        self.assertEqual([m for m in seen if m.get("k") == "live"], [])
+
+    def test_the_page_draws_the_fragment_into_the_panel(self):
+        self.assertIn('case "toolarg"', self.source)
+        self.assertIn("toolArg(i,name,piece)", self.source)
+        self.assertIn(".cwp{", self.css)
+
+    def test_a_running_call_closes_its_block(self):
+        """Ab `tool` sind die Argumente vollstaendig. Ohne das Schliessen liefe
+        die naechste Runde in denselben Block -- sie faengt wieder bei index 0
+        an."""
+        js = self.source[self.source.index("  tool(name,args){"):]
+        self.assertIn("this.live=null", js[:400])
+
+    def test_the_shut_panel_takes_no_width(self):
+        """The rail's rule mirrored: shut means zero, not narrow."""
+        self.assertIn('body[data-code="shut"] #code', self.css)
+
+
+class TheEscapesAreUnfoldedWhileTheyStreamTests(unittest.TestCase):
+    """#138. Was ueber die Leitung kommt, ist ein JSON-String -- nicht Quelltext.
+
+    robin am 2026-08-24, nachdem das Mitlesen lief: da stand `\\"svg xmlns=\\"http`
+    und `\\n` als zwei Zeichen. Lesbar, aber muehsam. Entfaltet ist es der Text,
+    den das Werkzeug wirklich schreibt.
+
+    SPRACHUNABHAENGIG, UND ZWAR OHNE ZUTUN: die Escapes gehoeren dem Transport,
+    nicht der Sprache. `\\n` sieht in Python, SVG, Rust und Bash gleich aus, also
+    deckt ein Entfalter alle ab -- robins "fuer alle programmiersprachen" ist
+    hier kein Aufwand, sondern die Eigenschaft der Schicht.
+
+    UEBER FRAGMENTGRENZEN HINWEG, was der eigentliche Grund fuer den Zustand ist:
+    ein `\\` kann das letzte Zeichen eines Stuecks sein und sein `n` im naechsten.
+    """
+
+    def _fold(self, *pieces):
+        u = crow_gui.Unescaper()
+        return "".join(u.feed(p) for p in pieces)
+
+    def test_the_common_escapes_become_what_they_mean(self):
+        self.assertEqual(self._fold(r'a\nb'), "a\nb")
+        self.assertEqual(self._fold(r'a\tb'), "a\tb")
+        self.assertEqual(self._fold(r'say \"hi\"'), 'say "hi"')
+        self.assertEqual(self._fold(r'a\rb'), "a\rb")
+
+    def test_an_escaped_backslash_does_not_become_a_newline(self):
+        """DIE WICHTIGSTE NEGATIVPROBE. `\\\\n` ist ein Backslash gefolgt von n --
+        ein Windows-Pfad, ein regulaerer Ausdruck, ein LaTeX-Befehl. Wer erst
+        `\\n` ersetzt und dann `\\\\`, macht daraus einen Umbruch und zerstoert
+        genau die Zeichenketten, die einen Backslash meinen."""
+        # VIER BACKSLASHES SIND ZWEI, ZWEI SIND EINER -- und keiner davon ist
+        # ein Umbruch. Genau daran scheitert die Ersetzungs-Variante.
+        B = chr(92)
+        self.assertEqual(self._fold('C:' + B * 2 + 'new'), 'C:' + B + 'new')
+        self.assertEqual(self._fold('C:' + B * 4 + 'new'), 'C:' + B * 2 + 'new')
+        self.assertEqual(self._fold(B * 4 + 't'), B * 2 + 't')
+        self.assertNotIn(chr(10), self._fold('C:' + B * 2 + 'new'))
+
+    def test_a_backslash_at_the_edge_waits_for_its_partner(self):
+        """Der Grund, warum das ein Objekt ist und keine Funktion."""
+        self.assertEqual(self._fold("a\\", "nb"), "a\nb")
+        self.assertEqual(self._fold("x\\", '"y'), 'x"y')
+
+    def test_a_unicode_escape_is_folded_even_when_it_is_split(self):
+        self.assertEqual(self._fold(r'\u00e4'), "\u00e4")
+        self.assertEqual(self._fold(r'\u00', "e4"), "\u00e4")
+        self.assertEqual(self._fold("\\", "u", "00", "e4"), "\u00e4")
+
+    def test_an_unknown_escape_is_left_alone(self):
+        """NEGATIV: `\\d` ist in JSON nicht definiert, in einem regulaeren
+        Ausdruck aber alltaeglich. Es zu schlucken hiesse, den Ausdruck still zu
+        aendern."""
+        self.assertEqual(self._fold(r'\d+'), r'\d+')
+        self.assertEqual(self._fold(r'\q'), r'\q')
+
+    def test_text_without_escapes_passes_through_untouched(self):
+        self.assertEqual(self._fold("def go():", " pass"), "def go(): pass")
+
+    def test_two_calls_do_not_share_a_pending_backslash(self):
+        """NEGATIV fuer den Zustand: zwei Aufrufe in einer Runde teilen sich den
+        Strom. Ein gemeinsamer Puffer schoebe das Zeichen des einen in den
+        anderen."""
+        seen = []
+        sink = crow_gui.Sink(seen.append)
+        sink.tool_arguments(0, "write_file", "a\\")
+        sink.tool_arguments(1, "read_file", "b")
+        sink.tool_arguments(0, "write_file", "nc")
+        said = {m["i"]: "" for m in seen if m.get("k") == "toolarg"}
+        for m in seen:
+            if m.get("k") == "toolarg":
+                said[m["i"]] += m["t"]
+        self.assertEqual(said[0], "a\nc")
+        self.assertEqual(said[1], "b")
+
+    def test_the_sink_hands_the_page_the_folded_text(self):
+        seen = []
+        sink = crow_gui.Sink(seen.append)
+        sink.tool_arguments(0, "write_file", r'{"content": "line\nline"}')
+        said = [m["t"] for m in seen if m.get("k") == "toolarg"]
+        self.assertEqual(said, ['{"content": "line\nline"}'])
+
+
+class ALongCodeBlockFoldsAwayTests(unittest.TestCase):
+    """robin, 2026-08-24: "ab 15 Zeilen, koennen wir den codeblock dort auf und
+    zuklappbar machen".
+
+    WARUM EINE SCHWELLE UND NICHT IMMER. Ein Block von drei Zeilen ist kuerzer
+    als der Kopf, den ein Klappknopf ihm gaebe -- die Falte waere teurer als der
+    Inhalt. Ab funfzehn Zeilen schiebt er die Antwort darunter aus dem Bild, und
+    genau dort faengt das Wegklappen an, etwas wert zu sein.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+
+    def test_the_threshold_is_fifteen_lines(self):
+        js = self.source[self.source.index("  codeClose(closed){"):]
+        js = js[:js.index("\n  },") + 4]
+        self.assertIn("15", js, "die Schwelle steht nicht im Schliesser")
+
+    def test_a_shut_block_hides_its_body_and_not_its_head(self):
+        """Der Kopf bleibt stehen, sonst ist der Weg zurueck weg -- dieselbe
+        Regel, die der Rail-Knopf in der Titelleiste befolgt."""
+        self.assertIn(".code.shut pre", self.css)
+        rule = self.css[self.css.index(".code.shut pre"):]
+        rule = rule[:rule.index("}") + 1]
+        self.assertIn("display:none", rule)
+        self.assertNotIn(".code.shut .hd{display:none", self.css)
+
+    def test_the_head_is_what_gets_clicked(self):
+        js = self.source[self.source.index("  codeOpen(lang){"):]
+        js = js[:js.index("\n  codeClose")]
+        self.assertIn('querySelector(".hd")', js)
+
+    def test_copying_does_not_also_fold_the_block(self):
+        """NEGATIV, und die Falle, in die die Werkzeug-Kachel schon einmal
+        gelaufen ist: der Knopf sitzt IM Kopf, also blubbert sein Klick ohne
+        `stopPropagation` bis zur Falte hoch und klappt weg, was gerade kopiert
+        wurde."""
+        js = self.source[self.source.index("  codeOpen(lang){"):]
+        js = js[:js.index("\n  codeClose")]
+        copy_at = js.index("btn.onclick")
+        self.assertIn("stopPropagation", js[copy_at:copy_at + 400])
+
+    def test_a_short_block_gets_no_fold_at_all(self):
+        """NEGATIV fuer die Schwelle: unter funfzehn Zeilen bleibt der Block,
+        was er war. Eine Falte, die immer da ist, ist ein Knopf, der meistens
+        nichts loest."""
+        js = self.source[self.source.index("  codeClose(closed){"):]
+        js = js[:js.index("\n  },") + 4]
+        self.assertIn("foldable", js)
+
+    def test_the_count_is_shown_where_the_language_is(self):
+        """Zugeklappt sagt der Kopf, wie viel darunter liegt -- sonst ist die
+        Falte eine Kiste ohne Etikett."""
+        self.assertIn(".code .n{", self.css)
 
 
 class TheSuiteTouchesNoRealConfigurationTests(unittest.TestCase):
