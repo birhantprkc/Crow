@@ -1,5 +1,7 @@
 <div align="center">
-  
+
+<img src="docs/images/og-dark.png" alt="Crow: the wordmark and composer over the window answering about its own release" width="880">
+
 <h1>CROW</h1>
 
 <h3>Qwen3.8-27B at 200k context on one GPU.</h3>
