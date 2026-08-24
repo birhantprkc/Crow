@@ -6106,8 +6106,12 @@ class TheCodePanelTests(unittest.TestCase):
         """Ab `tool` sind die Argumente vollstaendig. Ohne das Schliessen liefe
         die naechste Runde in denselben Block -- sie faengt wieder bei index 0
         an."""
+        # DER GANZE RUMPF, nicht die ersten 400 Zeichen. Das Fenster war
+        # willkuerlich und wurde rot, als das Einfaerben davor einzog -- an
+        # einer Ergaenzung, die genau das tut, was der Fall verlangt.
         js = self.source[self.source.index("  tool(name,args){"):]
-        self.assertIn("this.live=null", js[:400])
+        js = js[:js.index(chr(10) + "  toolsToggle(){")]
+        self.assertIn("this.live=null", js)
 
     def test_the_shut_panel_takes_no_width(self):
         """The rail's rule mirrored: shut means zero, not narrow."""
@@ -6252,6 +6256,184 @@ class ALongCodeBlockFoldsAwayTests(unittest.TestCase):
         """Zugeklappt sagt der Kopf, wie viel darunter liegt -- sonst ist die
         Falte eine Kiste ohne Etikett."""
         self.assertIn(".code .n{", self.css)
+
+
+def _node() -> "str | None":
+    """Node, falls die Maschine eins hat. Sonst None."""
+    import shutil
+    return shutil.which("node")
+
+
+class TheHighlighterTests(unittest.TestCase):
+    """#138. Farbe je Sprache, und der Tokenisierer wird AUSGEFUEHRT.
+
+    WARUM NICHT NUR DER QUELLTEXT GEPRUEFT WIRD. Jeder andere Fall in dieser
+    Datei liest die Seite als Text, und fuer Regeln und Struktur reicht das. Ein
+    Tokenisierer ist Logik: er kann jede Zeichenkette im Quelltext tragen und
+    trotzdem den falschen Bereich faerben. Node ist auf dieser Maschine da, also
+    laeuft er hier wirklich.
+
+    UEBERSPRUNGEN, WO KEIN NODE IST -- eine ausgelieferte Crow braucht keins,
+    und ein Fall, der auf fremder Platte rot waere, wuerde ueberlesen.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.node = _node()
+        cls.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def _hl(self, code, lang):
+        """Den Tokenisierer aus der Seite schneiden und in Node fahren."""
+        import subprocess, json as _json
+        start = self.source.index("const HL = {")
+        end = self.source.index("\n};", start) + 3
+        js = self.source[start:end]
+        prog = (js + "\nconst out = HL.parse(" + _json.dumps(code) + "," +
+                _json.dumps(lang) + ");\nconsole.log(JSON.stringify(out));\n")
+        done = subprocess.run([self.node, "-e", prog], capture_output=True,
+                              text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return _json.loads(done.stdout)
+
+    def _classes(self, code, lang):
+        return {cls for cls, _text in self._hl(code, lang) if cls}
+
+    def _text(self, code, lang):
+        return "".join(text for _cls, text in self._hl(code, lang))
+
+    # ---- die Eigenschaft, an der alles haengt
+
+    def test_nothing_is_lost_and_nothing_is_invented(self):
+        """DIE WICHTIGSTE. Ein Tokenisierer, der Zeichen verschluckt oder
+        verdoppelt, faerbt nicht -- er aendert den Code. Und was hier
+        durchlaeuft, ist Quelltext, den jemand kopieren wird."""
+        if not self.node:
+            self.skipTest("kein node auf dieser Maschine")
+        NL = chr(10)
+        for lang, code in (
+            ("python", 'def go(n):\n    # zaehlt\n    return "x" * n  # hoch'),
+            ("json", '{"a": [1, 2.5, true, null], "b": "text"}'),
+            ("javascript", 'const x = `a${b}c`; // hi\n/* weg */ let y = 0x1f;'),
+            ("html", '<div class="a">text</div><!-- weg -->'),
+            ("css", '.a { color: #fff; /* weg */ }'),
+            ("bash", 'echo "hi" # weg'),
+            ("cpp", "#include <iostream>" + NL +
+                    "int main(){ /* weg */ return 0; } // hi"),
+            ("java", 'class A { void go(){ String s = "x"; } } // hi'),
+            ("go", 'func main() { s := "x" // hi' + NL + " }"),
+            ("rust", 'fn main() { let s = "x"; /* weg */ }'),
+            ("csharp", "var x = 1; // hi"),
+            ("", "kein highlight hier"),
+        ):
+            self.assertEqual(self._text(code, lang), code, "%s hat den Text veraendert" % lang)
+
+    def test_an_unknown_language_is_one_plain_run(self):
+        """NEGATIV: was niemand kennt, wird nicht geraten. Falsche Farbe ist
+        schlechter als keine -- sie behauptet eine Struktur, die es nicht gibt."""
+        if not self.node:
+            self.skipTest("kein node auf dieser Maschine")
+        self.assertEqual(self._classes("def go(): pass", "brainfuck"), set())
+
+    # ---- je Sprache das, was zaehlt
+
+    def test_python_marks_comment_string_keyword_and_number(self):
+        if not self.node:
+            self.skipTest("kein node auf dieser Maschine")
+        got = self._classes('def go():\n    return "x", 42  # hi', "python")
+        self.assertIn("k", got); self.assertIn("s", got)
+        self.assertIn("n", got); self.assertIn("c", got)
+
+    def test_a_hash_inside_a_string_is_not_a_comment(self):
+        """NEGATIV, und der Fehler, den jeder naive Tokenisierer macht: `#` in
+        einer Zeichenkette faerbt sonst den Rest der Zeile als Kommentar."""
+        if not self.node:
+            self.skipTest("kein node auf dieser Maschine")
+        spans = self._hl('url = "http://x/#anchor"  # echt', "python")
+        comments = [t for c, t in spans if c == "c"]
+        self.assertEqual(len(comments), 1, spans)
+        self.assertIn("echt", comments[0])
+        self.assertNotIn("anchor", comments[0])
+
+    def test_a_quote_inside_a_comment_does_not_open_a_string(self):
+        """NEGATIV in die andere Richtung: ein Apostroph in `# don't` liesse
+        sonst den Rest der Datei als Zeichenkette erscheinen."""
+        if not self.node:
+            self.skipTest("kein node auf dieser Maschine")
+        spans = self._hl("# don't\nx = 1", "python")
+        self.assertIn("n", {c for c, _t in spans})
+
+    def test_json_keys_and_values_are_told_apart(self):
+        if not self.node:
+            self.skipTest("kein node auf dieser Maschine")
+        got = self._classes('{"path": "a.py", "n": 12, "ok": true}', "json")
+        self.assertIn("s", got); self.assertIn("n", got); self.assertIn("k", got)
+
+    def test_html_marks_tags_and_attributes(self):
+        if not self.node:
+            self.skipTest("kein node auf dieser Maschine")
+        got = self._classes('<svg width="10"><path d="M0 0"/></svg>', "html")
+        self.assertIn("t", got); self.assertIn("s", got)
+
+    def test_the_c_family_shares_one_rule_set(self):
+        """robin, 2026-08-24: "fuer alle programmiersprachen". Einen Satz je
+        Sprache zu schreiben endet nie -- aber C, C++, Java, C#, Go, Rust, PHP,
+        Swift und Kotlin teilen sich `//`, `/* */`, Zeichenketten und Zahlen.
+        Ein Satz deckt sie alle, und was er nicht kennt, faerbt er nicht."""
+        if not self.node:
+            self.skipTest("kein node auf dieser Maschine")
+        NL = chr(10)
+        got = self._classes(
+            "#include <cmath>" + NL +
+            "int main(){ // los" + NL +
+            "  double x = 3.14; /* weg */" + NL +
+            "  return 0;" + NL + "}", "cpp")
+        self.assertIn("c", got); self.assertIn("k", got); self.assertIn("n", got)
+
+    def test_every_c_like_label_finds_that_set(self):
+        if not self.node:
+            self.skipTest("kein node auf dieser Maschine")
+        import subprocess, json as _json
+        start = self.source.index("const HL = {")
+        end = self.source.index(chr(10) + "};", start) + 3
+        js = self.source[start:end]
+        labels = ["c", "cpp", "cc", "cxx", "h", "hpp", "java", "cs", "csharp",
+                  "go", "golang", "rust", "rs", "php", "swift", "kt", "kotlin"]
+        prog = (js + "\nconsole.log(JSON.stringify(" +
+                _json.dumps(labels) + ".map(l => HL.lang(l))));")
+        done = subprocess.run([self.node, "-e", prog], capture_output=True,
+                              text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        got = _json.loads(done.stdout)
+        for label, key in zip(labels, got):
+            self.assertEqual(key, "clike", "%s landet bei %r" % (label, key))
+
+    def test_the_language_label_is_taken_loosely(self):
+        """`py`, `Python`, `PYTHON` und `python3` meinen dasselbe -- ein Modell
+        schreibt in die Fence, was ihm einfaellt."""
+        if not self.node:
+            self.skipTest("kein node auf dieser Maschine")
+        for label in ("py", "Python", "PYTHON", "python3"):
+            self.assertIn("k", self._classes("def go(): pass", label), label)
+
+    # ---- wie es in die Seite kommt
+
+    def test_the_page_paints_only_finished_blocks(self):
+        """Waehrend des Stroems bleibt es einfarbig: ein halber String faerbt den
+        Rest des Blocks, und die Farbe spraenge bei jedem Fragment um."""
+        js = self.source[self.source.index("  codeClose(closed){"):]
+        js = js[:js.index("\n  },") + 4]
+        self.assertIn("paint", js)
+
+    def test_every_colour_comes_from_the_palette(self):
+        """Die Regel des Hauses: keine Farbe im Quelltext, sonst kann ein Theme
+        sie nicht erreichen."""
+        import re
+        css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+        block = re.findall(r"\.hl-[a-z]\{[^}]*\}", css)
+        self.assertTrue(block, "es gibt keine Highlight-Regeln")
+        for rule in block:
+            self.assertFalse(re.findall(r"#[0-9a-fA-F]{3,6}", rule),
+                             "eine Highlight-Regel nennt eine eigene Farbe: %s" % rule)
 
 
 class TheSuiteTouchesNoRealConfigurationTests(unittest.TestCase):

@@ -1069,6 +1069,14 @@ details.think[open] .caret{transform:rotate(90deg)}
   padding:1.5px 9px;cursor:pointer}
 .copy:hover{border-color:var(--bevel);color:var(--accent)}
 .copy.done{color:var(--ok);border-color:rgba(78,201,143,.4)}
+/* #138. DIE FARBEN KOMMEN AUS DER PALETTE, nie aus einem Literal -- die Regel,
+   die alle drei Themes am Leben haelt. Vier Klassen reichen: was erklaert,
+   was Text ist, was zaehlt, was Struktur ist. */
+.hl-c{color:var(--dimmer);font-style:italic}
+.hl-s{color:var(--ok)}
+.hl-n{color:var(--model)}
+.hl-k{color:var(--accent)}
+.hl-t{color:var(--accent)}
 .code pre{margin:0;padding:11px 13px;overflow-x:auto;font-size:12px;
   line-height:1.6;color:var(--code);user-select:text;font-family:var(--mono)}
 /* Anything that names a path, a flag or a symbol is code and keeps the mono
@@ -1939,6 +1947,134 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 const $ = s => document.querySelector(s);
 const flow = $("#flow"), input = $("#in"), go = $("#go"), box = $("#box");
 
+// #138. FARBE JE SPRACHE, eingebettet und ohne Abhaengigkeit.
+//
+// WARUM NICHT highlight.js. Die Seite laedt nichts von aussen -- Crow wird
+// offline installiert und redet mit einem lokalen Server. Eine Bibliothek
+// muesste also mitreisen: rund 30 kB minifiziert fuer eine Handvoll Sprachen,
+// dazu ihre Lizenz und ihre Aktualisierungen, in einer Datei, die sonst aus
+// lesbaren Zeilen besteht. Fuer das, was hier gebraucht wird -- Kommentar,
+// Zeichenkette, Zahl, Schluesselwort -- sind es achtzig Zeilen.
+//
+// EINE ZUSAMMENGESETZTE REGEX UND NICHT ZEICHENWEISE. Ein `slice` je Zeichen
+// waere quadratisch; ein Block von 37 kB, wie ihn robins Landingpage erzeugt
+// hat, braeuchte damit Milliarden Zeichenkopien. So laeuft es einmal durch.
+//
+// DIE REIHENFOLGE IST DIE ENTSCHEIDUNG: Kommentar und Zeichenkette stehen vorn,
+// also gewinnt, was zuerst beginnt. Ein `#` in einer URL faerbt damit nicht den
+// Rest der Zeile, und ein Apostroph in `# don't` oeffnet keine Zeichenkette.
+//
+// NUR NICHT-EINFANGENDE GRUPPEN in den Teilen, sonst verschieben sich die
+// Indizes, an denen die Klasse abgelesen wird.
+const HL = {
+  alias: {py:"python", python3:"python", js:"javascript", jsx:"javascript",
+          ts:"javascript", tsx:"javascript", typescript:"javascript",
+          node:"javascript", xml:"html", svg:"html", htm:"html",
+          sh:"bash", shell:"bash", zsh:"bash", console:"bash",
+          ps1:"bash", powershell:"bash", pwsh:"bash", bat:"bash", cmd:"bash",
+          yml:"yaml", scss:"css", less:"css",
+          c:"clike", cpp:"clike", cc:"clike", cxx:"clike", h:"clike",
+          hpp:"clike", hxx:"clike", java:"clike", cs:"clike",
+          csharp:"clike", go:"clike", golang:"clike", rust:"clike",
+          rs:"clike", php:"clike", swift:"clike", kt:"clike",
+          kotlin:"clike", scala:"clike", dart:"clike", groovy:"clike",
+          objc:"clike", m:"clike", mm:"clike"},
+
+  parts: {
+    python: [["#[^\\n]*", "c"],
+             ["[\"']{3}[\s\S]*?[\"']{3}", "s"],
+             ["\"(?:\\\\.|[^\"\\\\\\n])*\"|'(?:\\\\.|[^'\\\\\\n])*'", "s"],
+             ["\\b(?:def|class|return|if|elif|else|for|while|import|from|as|with|try|except|finally|raise|lambda|yield|and|or|not|in|is|None|True|False|pass|break|continue|global|nonlocal|assert|del|async|await|self)\\b", "k"],
+             ["\\b(?:0[xXbBoO][0-9a-fA-F_]+|\\d[\\d_]*(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)\\b", "n"]],
+    javascript: [["//[^\\n]*|/\\*[\\s\\S]*?\\*/", "c"],
+             ["`(?:\\\\.|[^`\\\\])*`|\"(?:\\\\.|[^\"\\\\\\n])*\"|'(?:\\\\.|[^'\\\\\\n])*'", "s"],
+             ["\\b(?:const|let|var|function|return|if|else|for|while|of|in|new|class|extends|import|export|from|default|async|await|try|catch|finally|throw|typeof|instanceof|null|undefined|true|false|this|switch|case|break|continue|do|delete|yield)\\b", "k"],
+             ["\\b(?:0[xXbBoO][0-9a-fA-F_]+|\\d[\\d_]*(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)\\b", "n"]],
+    json: [["\"(?:\\\\.|[^\"\\\\])*\"", "s"],
+             ["\\b(?:true|false|null)\\b", "k"],
+             ["-?\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b", "n"]],
+    html: [["<!--[\\s\\S]*?-->", "c"],
+             ["\"(?:[^\"]*)\"|'(?:[^']*)'", "s"],
+             ["</?[A-Za-z][\\w:-]*|/?>", "t"],
+             ["\\b(?:\\d+(?:\\.\\d+)?)\\b", "n"]],
+    css: [["/\\*[\\s\\S]*?\\*/", "c"],
+             ["\"(?:[^\"]*)\"|'(?:[^']*)'", "s"],
+             ["#[0-9a-fA-F]{3,8}\\b|\\b\\d+(?:\\.\\d+)?(?:px|em|rem|%|vh|vw|s|ms|deg)?\\b", "n"],
+             ["@[a-z-]+|\\b(?:important|inherit|initial|unset|none|auto)\\b", "k"]],
+    bash: [["#[^\\n]*", "c"],
+             ["\"(?:\\\\.|[^\"\\\\])*\"|'(?:[^'])*'", "s"],
+             ["\\$[A-Za-z_][\\w]*|\\$\\{[^}]*\\}", "k"],
+             ["\\b(?:if|then|else|elif|fi|for|in|do|done|while|case|esac|function|return|export|local|echo|cd|exit|param|foreach)\\b", "k"],
+             ["\\b\\d+\\b", "n"]],
+    // EIN SATZ FUER DIE GANZE C-FAMILIE. robin am 2026-08-24: "fuer alle
+    // programmiersprachen". Einen Satz je Sprache zu schreiben endet nie -- aber
+    // C, C++, Java, C#, Go, Rust, PHP, Swift, Kotlin und Dart teilen sich `//`,
+    // `/* */`, Zeichenketten und Zahlen, und die Schluesselwoerter darunter sind
+    // die Schnittmenge, die in allen dasselbe bedeutet. Was nur eine davon kennt,
+    // bleibt ungefaerbt: lieber kein Wort markiert als das falsche.
+    clike: [["//[^\\n]*|/\\*[\\s\\S]*?\\*/", "c"],
+             ["\"(?:\\\\.|[^\"\\\\\\n])*\"|'(?:\\\\.|[^'\\\\\\n])*'", "s"],
+             ["^\\s*#\\s*[a-z]+", "k"],
+             ["\\b(?:auto|bool|break|case|catch|char|class|const|continue|default|delete|do|double|else|enum|extern|false|final|float|fn|for|func|go|goto|if|impl|import|inline|int|interface|let|long|mut|namespace|new|nil|null|nullptr|package|private|protected|public|pub|return|short|signed|sizeof|static|struct|switch|template|this|throw|true|try|type|typedef|typename|union|unsigned|use|using|var|virtual|void|while)\\b", "k"],
+             ["\\b(?:0[xXbB][0-9a-fA-F_]+|\\d[\\d_]*(?:\\.\\d+)?(?:[eE][+-]?\\d+)?[fFlLuU]*)\\b", "n"]],
+    yaml: [["#[^\\n]*", "c"],
+             ["\"(?:[^\"]*)\"|'(?:[^']*)'", "s"],
+             ["\\b(?:true|false|null|yes|no)\\b", "k"],
+             ["\\b\\d+(?:\\.\\d+)?\\b", "n"]],
+  },
+
+  built: {},
+
+  // EIN ETIKETT WIRD LOCKER GENOMMEN. Ein Modell schreibt in die Fence, was ihm
+  // einfaellt -- `py`, `Python`, `PYTHON`, `python3` meinen dasselbe.
+  lang(name){
+    const key=String(name||"").toLowerCase().replace(/[^a-z0-9]/g,"");
+    return this.parts[key] ? key : (this.alias[key]||"");
+  },
+
+  rules(key){
+    if(this.built[key]) return this.built[key];
+    const parts=this.parts[key];
+    if(!parts) return null;
+    const re=new RegExp(parts.map(p=>"("+p[0]+")").join("|"),"g");
+    return (this.built[key]={re:re, cls:parts.map(p=>p[1])});
+  },
+
+  parse(code, lang){
+    const key=this.lang(lang), built=key && this.rules(key);
+    // WAS NIEMAND KENNT, WIRD NICHT GERATEN. Falsche Farbe ist schlechter als
+    // keine: sie behauptet eine Struktur, die es nicht gibt.
+    if(!built) return [["", code]];
+    const out=[]; let last=0, m;
+    built.re.lastIndex=0;
+    while((m=built.re.exec(code))){
+      if(!m[0]){ built.re.lastIndex++; continue; }
+      if(m.index>last) out.push(["", code.slice(last,m.index)]);
+      let cls="";
+      for(let i=0;i<built.cls.length;i++){ if(m[i+1]!==undefined){ cls=built.cls[i]; break; } }
+      out.push([cls, m[0]]);
+      last=built.re.lastIndex;
+    }
+    if(last<code.length) out.push(["", code.slice(last)]);
+    return out;
+  },
+
+  // NUR AUF EINEN FERTIGEN BLOCK. Waehrend des Stroems ist jede zweite
+  // Zeichenkette offen, und die Farbe spraenge bei jedem Fragment um.
+  paint(pre, lang){
+    const code=pre.textContent;
+    if(!code) return;
+    const spans=this.parse(code, lang);
+    if(spans.length<2) return;
+    pre.textContent="";
+    spans.forEach(([cls,text])=>{
+      if(!cls){ pre.appendChild(document.createTextNode(text)); return; }
+      const el=document.createElement("span");
+      el.className="hl-"+cls; el.textContent=text;
+      pre.appendChild(el); });
+  }
+};
+
 const crow = {
   running:false, col:null, say:null, think:null, fence:null, fenceLang:"",
   cursor:null, blocks:[],
@@ -2137,6 +2273,7 @@ const crow = {
     // wird, will es sehen; ihm den Inhalt im Moment des Fertigwerdens
     // wegzunehmen waere die Umkehrung dessen, wofuer die Falte da ist.
     if(this.fence){
+      HL.paint(this.fence, this.fenceLang);
       const box=this.fence.closest(".code");
       const lines=(this.fence.textContent.match(/\n/g)||[]).length+1;
       if(box && lines>=15){
@@ -2151,6 +2288,12 @@ const crow = {
   // #138. EIN LAUFENDER AUFRUF SCHLIESST SEINEN BLOCK. Ab hier sind die
   // Argumente vollstaendig -- was jetzt noch kaeme, gehoert zur naechsten Runde.
   tool(name,args){
+    // #138. Der Block im Panel ist fertig, sobald der Aufruf laeuft -- ab hier
+    // darf er Farbe bekommen. Die Sprache steht im Pfad, den das Werkzeug
+    // schreibt; ohne erkennbare Endung bleibt es einfarbig.
+    if(this.live){ Object.keys(this.live).forEach(i=>{
+      const pre=this.live[i].querySelector(".cwp");
+      if(pre) HL.paint(pre, this.langOf(pre.textContent)); }); }
     this.live=null;
     const n=$("#codehead .n"); if(n) n.textContent="";
     const d=document.createElement("div"); d.className="tool";
@@ -2212,6 +2355,15 @@ const crow = {
     }
     const n=$("#codehead .n");
     if(n) n.textContent = Object.keys(this.live).length ? "writing" : ""; },
+
+  // DIE SPRACHE STEHT IM PFAD, den das Werkzeug gerade schreibt. Kein Raten
+  // aus dem Inhalt: eine falsch erkannte Sprache faerbt Struktur, die es nicht
+  // gibt, und das ist schlechter als grau.
+  langOf(text){
+    const m=String(text||"").match(/"path"\s*:\s*"([^"]+)"/);
+    if(!m) return "";
+    const dot=m[1].lastIndexOf(".");
+    return dot<0 ? "" : m[1].slice(dot+1); },
 
   toolsToggle(){
     const box=$("#toolcalls"), shut=box.classList.toggle("shut");
