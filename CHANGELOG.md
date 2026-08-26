@@ -3,6 +3,72 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 1.3.0 — 2026-08-26
+
+4 commits. A dropped MCP connection is retried instead of reported as a dead server,
+the code panel stops showing JSON envelopes, and a line typed while the memory
+review runs is queued rather than dropped.
+
+### A dropped connection is not a dead server
+
+Measured 2026-08-24, five `initialize` posts three seconds apart per server:
+`huggingface.co` answered **3 of 5** while six other servers answered 5 of 5. Two
+runs with different `User-Agent` values produced the same pattern, so the drop
+belongs to the far end. Live afterwards: **5 of 5**, three rounds needing a repeat;
+context7 5 of 5 with no repeat at all.
+
+| | |
+|---|---|
+| Retried | `initialize`, `tools/list`, `notifications/*` — up to 3 attempts, 0.25 s apart. One attempt reaches 60 %, two 84 %, three 94 % |
+| Sent once | **`tools/call`**, and anything not named above. Nothing on the wire says whether a call it got no answer to ran, MCP has no idempotency key, and a repeat of a write is a second write |
+| Never retried | connection refused, and any timeout. Nothing listens on a refused port; a server that spent the whole budget once will spend it again |
+| Documented in | [MCP over HTTP](docs/user-guide/mcp-http.md) |
+
+The ticket proposed retrying a `tools/call` that failed *before* anything was sent.
+That line is not buildable: `urllib` wraps everything up to **and including** the
+send in `URLError`, so connect and send are indistinguishable from outside.
+
+### The code panel
+
+It showed the JSON envelope of every call — `{"query":"C++ reference"}` beside
+`{"command":"where node npx"}` — and the source a turn wrote was one of them,
+told apart by nothing.
+
+| | |
+|---|---|
+| Tool calls | one fold for the group and one **per call**. Open a call for its `arguments` and, under them, its `result` — 4,000 characters, the remainder counted |
+| A failed call | marked on its head, not only inside it |
+| Program code | its own section, from `write_file` and `edit_file` only. The head is the **path**, the body the content |
+| `read_file` | deliberately absent. Crow reads far more than it changes |
+| `clear all` | empties both halves and survives a restart |
+| Start width | half the space beside the rail. A dragged width is a decision and is never overridden |
+
+`tool_result(name, result)` is new on the seam, beside `tool_finished` rather than
+widening it. The whole result travels; how much fits on a screen is the screen's
+decision — the window shows 4,000 characters, the terminal shows nothing and says
+so in a docstring.
+
+### A line typed during the memory review
+
+| | |
+|---|---|
+| Was | drawn into the transcript by the page, then dropped by `send`. The same question stood there twice and only the second ran |
+| Cause | `idle` is pushed **before** the review since 1.0.0, and the review runs on the same worker. The window said free while `send` said busy |
+| Now | queued. The composer says `queued -- the memory review is finishing` and the turn starts by itself |
+
+### The composer
+
+The send arrow stood beside the frame rather than in it. A flex child carries
+`min-width:auto` and does not shrink below its content, and every child of that
+row also carried `white-space:nowrap` — so none gave way and the overflow fell on
+the last element. What gives way now is ordered: the hint, then the model chip,
+then the context figure. The buttons never do.
+
+### Suite
+
+**1501**, up from 1463: `test_crow` 418, `test_crow_core` 618, `test_crow_gui` 465.
+`check_shared_core` 64/64, `check_operating_point` 6/6.
+
 ## 1.2.1 — 2026-08-24
 
 5 commits. A tool filter that does not lock out tomorrow's tools, a level menu that
