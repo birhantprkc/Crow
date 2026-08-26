@@ -10038,6 +10038,21 @@ class TurnEvents:
         not its first line: how much of it fits on a screen is the screen's
         decision."""
 
+    def tool_result(self, name: str, result: str) -> None:
+        """What the call answered -- EVERY call, not only the failed ones.
+
+        ADDITIVE RATHER THAN A WIDER `tool_finished`, and the reason is the
+        seam. `tool_finished` is implemented by both surfaces and pinned by the
+        cases; growing its signature would move every one of them to serve one
+        reader. A surface that does not want the answer simply does not
+        implement this.
+
+        THE WHOLE RESULT, like `tool_failed` and for the same reason: how much
+        of it fits on a screen is the screen's decision. A window showing four
+        thousand characters and a terminal showing one line are then two
+        answers to that question rather than two different truths.
+        """
+
     def boundary_escaped(self, name: str, refused: list[str]) -> None:
         """A shell command ran in a turn where the boundary refused a write (#98).
 
@@ -10379,6 +10394,13 @@ def run_turn(
             failed = errored and not declined
             cost.add_tool(took, failed, declined)
             events.tool_finished(call["name"], took, repeated)
+            # BESIDE `tool_finished`, NOT INSIDE IT. The duration and the answer
+            # are read by different surfaces -- a terminal wants the clock, a
+            # panel wants the text -- and a `tool_failed` below already proves
+            # the answer may travel this seam. Fires for a declined call too:
+            # `DECLINED` is what the model was told, so it is what the screen
+            # has to be able to show.
+            events.tool_result(call["name"], result)
             # #98: THE USER HEARS THIS FROM CROW, NOT FROM THE MODEL'S APOLOGY.
             # In the measured turn the only notice that the working area had been
             # left came from the model itself, after the fact, phrased as a

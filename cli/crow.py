@@ -933,6 +933,22 @@ class TerminalTurnEvents(TurnEvents):
     def tool_failed(self, name: str, result: str) -> None:
         print(f"{DIM}    {result.splitlines()[0]}{RESET}", file=self._out)
 
+    def tool_result(self, name: str, result: str) -> None:
+        """DELIBERATELY SILENT, and that is a decision rather than an omission.
+
+        The answer of a call is written for the MODEL. A terminal that printed
+        it would put a file it just read, or a page it just fetched, between the
+        question and the answer -- the very shape #131 took out of the window,
+        and here it would arrive with no tile to move it into.
+
+        What a reader needs from a call the terminal already prints: its name
+        before it runs, its clock after, and the first line of a failure through
+        `tool_failed`. This method exists so that stays a decision somebody made
+        -- `test_every_event_of_the_core_has_a_line_here` is what turns an
+        unimplemented event into a red case instead of a line that quietly
+        stopped appearing.
+        """
+
     def boundary_escaped(self, name: str, refused: list[str]) -> None:
         """#98: the one line in this class that is NOT dim, and that is the point.
 

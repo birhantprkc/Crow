@@ -923,6 +923,9 @@ class _TurnRecorder(crow_core.TurnEvents):
     def tool_failed(self, name, result):
         self.log.append(("tool_failed", name, result))
 
+    def tool_result(self, name, result):
+        self.log.append(("tool_result", name, result))
+
     def tools_finished(self):
         self.log.append(("tools_done",))
 
@@ -1795,6 +1798,65 @@ class DeclineIsNotAFailureTests(TurnLoopCase):
         talk = self.conversation()
         self.turn(talk, mode="manual", approve=lambda n, a: "no")
         self.assertPrefixIsWhole(talk)
+
+
+class TheAnswerReachesTheSurfaceTests(TurnLoopCase):
+    """The panel can only draw what the seam carries, and it carried nothing.
+
+    `tool_started` handed over the arguments and `tool_finished` the clock, so a
+    surface knew a call had run and how long it took -- and not one character of
+    what it answered. `tool_failed` was the single exception, which is why the
+    old panel could only ever show JSON envelopes: the answers were never
+    offered to it.
+
+    THESE CASES RUN THE REAL LOOP. A double for the tool would make them a test
+    of the double, and the question here is whether `run_tools` fires the event
+    at all.
+    """
+
+    def _one_call(self, tool="list_dir", args=None):
+        self.serve([{"content": "looking"},
+                    _call_delta(tool, json.dumps(args or {"path": "."}))])
+        self.serve([{"content": "done"}])
+        return self.turn(self.conversation(), mode="auto")
+
+    def _results(self):
+        return [entry for entry in self.events.log if entry[0] == "tool_result"]
+
+    def test_the_answer_of_a_call_that_worked_reaches_the_surface(self):
+        """THE POSITIVE PROBE. A successful call said nothing to any surface
+        before this, and a panel cannot draw what it is not told."""
+        self._one_call()
+        results = self._results()
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][1], "list_dir")
+        self.assertTrue(results[0][2].strip(),
+                        "an empty result would make the event useless")
+
+    def test_the_whole_answer_travels_not_a_first_line(self):
+        """THE SEAM DOES NOT DECIDE HOW MUCH FITS. `tool_failed` already says so
+        in its own docstring, and two rules for the same question in one seam is
+        how a terminal and a window end up disagreeing about what was said.
+        The window's own limit is a window decision and lives there.
+        """
+        long_path = "x" * 300
+        self._one_call("read_file", {"path": long_path})
+        said = self._results()[0][2]
+        self.assertIn("error: ", said)
+        self.assertGreater(len(said), 120,
+                           "a result clipped in the core cannot be un-clipped")
+
+    def test_a_declined_call_hands_over_what_the_model_was_told(self):
+        """NEGATIVE PROBE for "every call": a refusal is not a call that did not
+        happen. The model was handed `DECLINED`, so the screen has to be able to
+        show the same sentence rather than an empty block."""
+        self.serve([{"content": "on it"},
+                    _call_delta("write_file", json.dumps({"path": "x", "content": "y"}))])
+        self.serve([{"content": "done"}])
+        self.turn(self.conversation(), mode="manual", approve=lambda n, a: "no")
+        results = self._results()
+        self.assertEqual(len(results), 1)
+        self.assertIn(crow_core.DECLINED, results[0][2])
 
 
 class TurnStateTests(TurnLoopCase):

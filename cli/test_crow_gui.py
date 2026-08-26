@@ -4624,8 +4624,13 @@ class ToolCallsLeaveTheReadingColumnTests(unittest.TestCase):
         return found[:found.index(chr(125))]
 
     def test_a_tool_row_is_appended_to_the_tile_and_not_to_the_turn(self):
-        js = self.source[self.source.index("  tool(name,args){"):
-                         self.source.index("  toolsCount(){")]
+        # DIE VERANKERUNG OHNE DIE KLAMMER, damit sie eine Parameterliste
+        # ueberlebt: `tool` nahm `(name,args)` und nimmt seit #138b auch die
+        # rohen Argumente. Das Ende ist die Funktion, die DIREKT folgt -- gegen
+        # `toolsCount` waere der Ausschnitt inzwischen vier Funktionen zu gross
+        # und faende `$("#tclist")` auch dort, wo dieser Fall nicht hinsieht.
+        js = self.source[self.source.index("  tool(name,args"):
+                         self.source.index("  codeFinish(name,raw){")]
         self.assertIn('$("#tclist")', js)
         self.assertNotIn("this.col.insertBefore", js)
 
@@ -5965,6 +5970,136 @@ class TheRailIsDraggableTests(ApiCase):
 
 
 
+class ThePanelSeparatesCodeFromCallsTests(unittest.TestCase):
+    """#138b. Es war ein Werkzeug-Panel geworden, und das war nie gewollt.
+
+    robins Befund am 2026-08-26, an seinem eigenen Screenshot: unter `CODE`
+    standen elf Kaesten, und in jedem lag die JSON-Huelle eines Aufrufs --
+    `{"query":"C++ reference documentation","count":6}` neben
+    `{"command":"where node npx"}`. Der Quelltext, den derselbe Zug geschrieben
+    hatte, war einer davon und in nichts unterschieden.
+
+    DREI TRENNUNGEN MACHEN DARAUS WIEDER EIN CODE-PANEL: Programmcode bekommt
+    einen eigenen Abschnitt, ein Aufruf klappt einzeln statt neunzig auf einmal,
+    und was er ANTWORTETE steht in einem eigenen Block unter dem, was er bekam.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+
+    # ---- was ueber die Naht geht
+
+    def test_a_long_answer_is_capped_before_it_reaches_the_page(self):
+        """POSITIV. Der Kern reicht die ganze Antwort herueber; hier wird
+        geschnitten, weil hier der Bildschirm ist."""
+        seen = []
+        crow_gui.Turn(seen.append).tool_result("read_file", "x" * 10000)
+        said = [m for m in seen if m.get("k") == "toolres"][0]
+        self.assertEqual(len(said["t"]), crow_gui.TOOL_RESULT_SHOWN)
+        self.assertEqual(said["cut"], 10000 - crow_gui.TOOL_RESULT_SHOWN)
+
+    def test_a_short_answer_is_not_reported_as_cut(self):
+        """NEGATIV zum obigen. Ein `cut`, das immer eine Zahl traegt, waere eine
+        Zeile, die unter jeder Antwort steht und nichts mehr bedeutet."""
+        seen = []
+        crow_gui.Turn(seen.append).tool_result("list_dir", "two files")
+        said = [m for m in seen if m.get("k") == "toolres"][0]
+        self.assertEqual(said["cut"], 0)
+        self.assertEqual(said["t"], "two files")
+
+    def test_the_seam_marks_code_without_withholding_anything(self):
+        """DIE NAHT SORTIERT NICHT AUS, sie etikettiert.
+
+        Der Filter sass hier zuerst als `return`, und
+        `test_two_calls_do_not_share_a_pending_backslash` wurde rot -- sein
+        zweiter Aufruf ist ein `read_file`. Er hatte aus einem groesseren Grund
+        recht als seinem eigenen: eine Naht, die nach Werkzeugnamen wegwirft,
+        nimmt jeder kuenftigen Ansicht dieselbe Entscheidung ab.
+        """
+        seen = []
+        sink = crow_gui.Sink(seen.append)
+        sink.tool_arguments(0, "write_file", '{"path":"a.py"}')
+        sink.tool_arguments(1, "web_search", '{"query":"x"}')
+        said = [m for m in seen if m.get("k") == "toolarg"]
+        self.assertEqual([m["code"] for m in said], [True, False])
+        self.assertEqual(len(said), 2, "beide Stroeme gehen hinueber")
+
+    def test_reading_a_file_is_not_program_code(self):
+        """NEGATIV fuer die Liste. Crow liest viel, was es nicht aendert, und ein
+        Abschnitt voller fremder Dateien beantwortet die Frage nicht mehr, fuer
+        die er da ist."""
+        self.assertEqual(crow_gui.CODE_TOOLS, ("write_file", "edit_file"))
+        self.assertNotIn("read_file", crow_gui.CODE_TOOLS)
+        self.assertNotIn("run_command", crow_gui.CODE_TOOLS)
+
+    # ---- was die Seite daraus macht
+
+    def test_the_page_draws_a_block_only_for_code(self):
+        js = self.source[self.source.index("  toolArg(i,name,piece"):]
+        js = js[:js.index(chr(10) + "  langOf(text){")]
+        self.assertIn("if(!code) return;", js)
+        self.assertIn('$("#cflist")', js)
+
+    def test_program_code_has_its_own_section_and_hides_when_empty(self):
+        """Eine Ueberschrift ueber einer leeren Flaeche behauptet einen Inhalt."""
+        self.assertIn('id="codefiles"', self.source)
+        self.assertIn('<section id="codefiles" hidden>', self.source)
+        self.assertIn("#codefiles[hidden]{display:none}", self.css)
+
+    def test_the_call_list_stays_above_the_code_that_grows(self):
+        """robins Entscheidung am 2026-08-26, und sie hat einen Grund, der sich
+        nicht von selbst wieder einstellt: die Klappe ist der INDEX. Andersherum
+        gebaut schob sie jede geschriebene Datei weiter nach unten, und ein
+        Index, den man suchen muss, ist keiner."""
+        body = self.source[self.source.index('<div id="codebody">'):]
+        body = body[:body.index("</aside>")]
+        self.assertLess(body.index('id="toolcalls"'), body.index('id="codefiles"'),
+                        "die Aufrufliste steht ueber dem Quelltext")
+
+    def test_a_row_folds_on_its_own_and_catches_its_click(self):
+        """Die Falle vom 2026-08-22, hier vorweggenommen: ein Klick, der bis zum
+        Gruppenkopf blubbert, faltet genau das weg, was er oeffnen sollte."""
+        self.assertIn("#toolcalls .tool.shut .tbody{display:none}", self.css)
+        js = self.source[self.source.index('d.querySelector(".hd").addEventListener'):]
+        js = js[:js.index("this.openCall=d;")]
+        self.assertIn("ev.stopPropagation();", js)
+        self.assertIn('d.classList.toggle("shut")', js)
+
+    def test_the_answer_gets_its_own_block_under_the_arguments(self):
+        """Beides in einem Kasten war die Form, die aus dem Panel eine JSON-Wand
+        gemacht hat: was hineinging und was herauskam sahen gleich aus."""
+        js = self.source[self.source.index("  toolRes(name,text,cut){"):]
+        js = js[:js.index("this.openCall=null;")]
+        self.assertIn('wrap.className="tsec res"', js)
+        self.assertIn('head.textContent = bad ? "error" : "result"', js)
+        self.assertIn("#toolcalls .res .tsp{", self.css)
+
+    def test_a_failed_call_is_marked_on_the_head_not_only_inside(self):
+        """Sonst muesste man neunzig Zeilen aufklappen, um den einen zu finden,
+        der der Grund war."""
+        self.assertIn("#toolcalls .tool.bad .ico{", self.css)
+        self.assertIn('if(bad) row.classList.add("bad");', self.source)
+
+    def test_clearing_takes_both_halves_and_the_watermark(self):
+        """"Den gesamten Verlauf loeschen" heisst beides. Zwei Knoepfe an zwei
+        Stellen waeren zwei halbe Antworten."""
+        js = self.source[self.source.index("  codeWipe(e){"):]
+        js = js[:js.index("},")]
+        self.assertIn("this.codeReset();", js)
+        self.assertIn('$("#tclist").textContent="";', js)
+        self.assertIn("pywebview.api.tools_cleared();", js)
+
+    def test_clearing_drops_the_pointer_to_the_boxes_it_removed(self):
+        """NEGATIV, und unsichtbar wenn es fehlt: `this.live` zeigt nach dem
+        Leeren auf Elemente, die in keinem Dokument mehr stehen. Ein laufender
+        Strom haenge Zeichen an sie an, ohne dass irgendwo etwas erscheint."""
+        js = self.source[self.source.index("  codeReset(){"):]
+        js = js[:js.index("},")]
+        self.assertIn("this.live=null;", js)
+        self.assertIn("this.openCall=null;", js)
+
+
 class TheCodePanelTests(unittest.TestCase):
     """#138. The pane on the right: what is being written, while it is written.
 
@@ -6099,7 +6234,11 @@ class TheCodePanelTests(unittest.TestCase):
 
     def test_the_page_draws_the_fragment_into_the_panel(self):
         self.assertIn('case "toolarg"', self.source)
-        self.assertIn("toolArg(i,name,piece)", self.source)
+        # OHNE DIE SCHLIESSENDE KLAMMER, aus demselben Grund wie bei `tool`:
+        # die Funktion nimmt seit #138b mit, ob dieser Aufruf Programmcode
+        # schreibt. Der Fall fragt, ob die Seite das Fragment zeichnet, nicht
+        # wieviele Parameter sie dafuer entgegennimmt.
+        self.assertIn("toolArg(i,name,piece", self.source)
         self.assertIn(".cwp{", self.css)
 
     def test_a_running_call_closes_its_block(self):
@@ -6109,8 +6248,13 @@ class TheCodePanelTests(unittest.TestCase):
         # DER GANZE RUMPF, nicht die ersten 400 Zeichen. Das Fenster war
         # willkuerlich und wurde rot, als das Einfaerben davor einzog -- an
         # einer Ergaenzung, die genau das tut, was der Fall verlangt.
-        js = self.source[self.source.index("  tool(name,args){"):]
-        js = js[:js.index(chr(10) + "  toolsToggle(){")]
+        #
+        # SEIT #138b ENDET ER AN `codeFinish` STATT AN `toolsToggle`. Zwischen
+        # den beiden liegen jetzt vier Funktionen, und eine davon setzt
+        # `this.live=null` ebenfalls -- gegen `toolsToggle` waere der Fall
+        # gruen geblieben, ohne noch etwas ueber `tool` auszusagen.
+        js = self.source[self.source.index("  tool(name,args"):]
+        js = js[:js.index(chr(10) + "  codeFinish(name,raw){")]
         self.assertIn("this.live=null", js)
 
     def test_the_shut_panel_takes_no_width(self):

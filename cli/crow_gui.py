@@ -446,6 +446,23 @@ def rail_width_setting() -> int:
 # Code steht und eine Zeile Python bei 260 Pixeln dreimal umbricht.
 CODE_MIN, CODE_MAX, CODE_DEFAULT = 260, 720, 380
 
+# WIEVIEL EINER ANTWORT DAS PANEL ZEIGT. Der Kern reicht sie ganz herueber --
+# `tool_result` sagt im eigenen Docstring, dass die Menge eine Entscheidung des
+# Bildschirms ist -- und HIER ist dieser Bildschirm. Ein `read_file` ueber eine
+# grosse Datei oder ein `fetch_url` auf eine lange Seite legte sonst Megabyte in
+# eine Seite, die den ganzen Verlauf einer Sitzung haelt.
+#
+# GILT JEDEM WERKZEUG GLEICH. Kein Name steht in dieser Regel, so wie kein
+# Servername im MCP-Filter steht.
+TOOL_RESULT_SHOWN = 4000
+
+# WELCHE WERKZEUGE PROGRAMMCODE SCHREIBEN, und damit die einzigen, die im
+# oberen Abschnitt des Panels landen. `read_file` steht bewusst nicht hier:
+# Crow liest viel, was es nicht aendert, und ein Abschnitt "Programmcode" voller
+# fremder Dateien beantwortet die Frage nicht mehr, fuer die er da ist --
+# was hat dieser Zug an meinem Programm geaendert.
+CODE_TOOLS = ("write_file", "edit_file")
+
 
 def code_width_setting() -> int:
     """Die gespeicherte Breite des Code-Panels, oder die Vorgabe.
@@ -733,7 +750,21 @@ body[data-code="shut"] #codegrip{display:none}
   background:transparent;border:1px solid var(--line);border-radius:6px;
   padding:2px 9px;cursor:pointer}
 #codecopy:hover{border-color:var(--bevel);color:var(--accent)}
+/* #138b. `margin-left:auto` WANDERT AUF DEN ERSTEN DER BEIDEN, sonst schoeben
+   sich zwei Knoepfe je einmal nach rechts und der Abstand zwischen ihnen
+   waere der ganze Rest der Leiste. */
+#codewipe{margin-left:auto;font:inherit;font-size:11px;color:var(--dimmer);
+  background:transparent;border:1px solid var(--line);border-radius:6px;
+  padding:2px 9px;cursor:pointer}
+#codewipe:hover{border-color:var(--bevel);color:var(--text-hover)}
+#codecopy{margin-left:0}
 #codebody{overflow-y:auto;padding:0 8px 10px;flex:1;min-height:0}
+/* #138b. DER QUELLTEXT UNTER EIGENEM NAMEN, damit der Abschnitt beantwortet,
+   wofuer er da ist. Versteckt, solange nichts geschrieben wurde -- eine
+   Ueberschrift ueber einer leeren Flaeche behauptet einen Inhalt. */
+#codefiles[hidden]{display:none}
+#codefiles .cfh{font-size:10px;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--dimmer);padding:8px 2px 0}
 /* #138. EIN BLOCK JE AUFRUF. Dieselbe Sprache wie ein Codeblock in der Antwort
    -- Rahmen, Kopfzeile, Monospace -- weil es dasselbe ist: Text, den ein Modell
    schreibt und den jemand lesen will. */
@@ -1038,6 +1069,32 @@ details.think[open] .caret{transform:rotate(90deg)}
   border:1px solid var(--line);color:var(--dimmer)}
 #toolcalls .tcclear:hover{border-color:var(--bevel);color:var(--text-hover)}
 #toolcalls .empty{margin:0;padding:2px 4px}
+
+/* #138b. JEDE ZEILE IST IHRE EIGENE KLAPPE. Der Kopf bleibt eine Zeile -- er
+   ist der Index -- und alles, was Platz braucht, liegt darunter und nur dann,
+   wenn jemand danach gefragt hat. */
+#toolcalls .tool{border:1px solid transparent;border-radius:6px}
+#toolcalls .tool .hd{cursor:pointer;user-select:none}
+#toolcalls .tool:not(.shut){border-color:var(--line);background:var(--panel)}
+#toolcalls .tool.shut .tbody{display:none}
+#toolcalls .tool .tx{margin-left:6px;color:var(--dimmer);width:9px;
+  text-align:center;flex:none}
+/* EIN FEHLGESCHLAGENER AUFRUF TRAEGT ES AM KOPF, nicht erst im Rumpf: sonst
+   muesste man neunzig Zeilen aufklappen, um den einen zu finden, der der
+   Grund war. */
+#toolcalls .tool.bad .ico{color:var(--bad,#e06c75)}
+#toolcalls .tbody{padding:2px 8px 8px}
+#toolcalls .tsec{margin-top:6px}
+#toolcalls .tsh{font-size:10px;letter-spacing:.04em;text-transform:uppercase;
+  color:var(--dimmer);margin-bottom:3px}
+/* DIE ANTWORT IN EINEM EIGENEN BLOCK, abgesetzt gegen die Argumente. Beides
+   in einem Kasten war die Form, die aus dem Panel eine JSON-Wand gemacht hat:
+   was hineinging und was herauskam sahen gleich aus. */
+#toolcalls .tsp{margin:0;padding:6px 8px;border-radius:5px;background:var(--rail);
+  border:1px solid var(--line);white-space:pre-wrap;word-break:break-word;
+  max-height:260px;overflow:auto;font-size:11px;line-height:1.45}
+#toolcalls .res .tsp{background:var(--raised)}
+#toolcalls .tsmore{font-size:10px;color:var(--dimmer);margin-top:3px}
 
 .tool{margin:11px 0;border:1px solid var(--line);border-radius:8px;
   background:var(--panel);overflow:hidden}
@@ -1925,10 +1982,21 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   <aside id="code">
     <div id="codehead">
       <h2>Code</h2><span class="n"></span>
+      <!-- #138b. LEERT ALLES, was in diesem Panel steht -- Quelltext UND
+           Aufrufe. Der `clear` in der Gruppe leert nur die Aufrufe; wer den
+           Verlauf loswerden will, meint beides und soll dafuer nicht zweimal
+           an zwei Stellen klicken. -->
+      <button id="codewipe" onclick="crow.codeWipe(event)"
+              title="clear everything in this panel">clear all</button>
       <button id="codecopy" onclick="crow.codeCopy(event)"
               title="copy what is shown">copy</button>
     </div>
     <div id="codebody">
+      <!-- #138b. DIE AUFRUFE ZUERST, DER QUELLTEXT DARUNTER, und die
+           Reihenfolge ist eine Entscheidung von robin am 2026-08-26.
+           Umgekehrt gebaut wanderte die Klappe mit jeder geschriebenen Datei
+           weiter nach unten: sie ist der INDEX, und ein Index, den man suchen
+           muss, ist keiner. Der Quelltext ist das Lange und darf wachsen. -->
       <div id="toolcalls" class="shut">
         <div class="tchd" onclick="crow.toolsToggle()">
           <span class="tct">Tool-Calls</span><span class="tcn"></span>
@@ -1939,6 +2007,14 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
           <button class="tcclear" onclick="crow.toolsClear(event)">clear</button>
         </div>
       </div>
+      <!-- #138b. UNTER EIGENEM NAMEN. Vorher lagen die Bloecke jedes Werkzeugs
+           hier, `web_search` neben `write_file`, und das Panel beantwortete
+           nicht mehr die Frage, wofuer es da ist: was hat dieser Zug an meinem
+           Programm geaendert. -->
+      <section id="codefiles" hidden>
+        <div class="cfh">Program code</div>
+        <div id="cflist"></div>
+      </section>
     </div>
   </aside>
 </div>
@@ -2287,30 +2363,134 @@ const crow = {
 
   // #138. EIN LAUFENDER AUFRUF SCHLIESST SEINEN BLOCK. Ab hier sind die
   // Argumente vollstaendig -- was jetzt noch kaeme, gehoert zur naechsten Runde.
-  tool(name,args){
+  tool(name,args,raw,code){
     // #138. Der Block im Panel ist fertig, sobald der Aufruf laeuft -- ab hier
     // darf er Farbe bekommen. Die Sprache steht im Pfad, den das Werkzeug
     // schreibt; ohne erkennbare Endung bleibt es einfarbig.
-    if(this.live){ Object.keys(this.live).forEach(i=>{
-      const pre=this.live[i].querySelector(".cwp");
-      if(pre) HL.paint(pre, this.langOf(pre.textContent)); }); }
+    //
+    // #138b. UND AB HIER STEHT DER REINE INHALT DARIN, nicht die Huelle.
+    // Waehrend des Stroms ist das JSON unvollstaendig und nicht zu zerlegen --
+    // deshalb laeuft es roh durch, damit man mitlesen kann, und wird genau
+    // hier ersetzt, wo die Argumente zum ersten Mal ganz sind.
+    if(this.live) this.codeFinish(name,raw);
     this.live=null;
     const n=$("#codehead .n"); if(n) n.textContent="";
-    const d=document.createElement("div"); d.className="tool";
+    const d=document.createElement("div"); d.className="tool shut";
     d.innerHTML='<div class="hd"><span class="ico">&#9679;</span>'+
       '<span class="name"></span><span class="arg"></span>'+
-      '<span class="note"></span></div>';
+      '<span class="note"></span><span class="tx">+</span></div>'+
+      '<div class="tbody"></div>';
     d.querySelector(".note").textContent =
       this.execute ? "ran" : "shown, not run";
     d.querySelector(".name").textContent=name;
     d.querySelector(".arg").textContent=args||"";
+    // #138b. JEDE ZEILE KLAPPT FUER SICH. Vorher klappte nur die ganze Gruppe,
+    // und "aufklappen" hiess: neunzig Zeilen auf einmal, von denen eine die
+    // gesuchte war.
+    //
+    // DER KLICK WIRD GEFANGEN. Der Rumpf ist ein Geschwister des Gruppenkopfes
+    // und blubbert heute an keinen Handler -- aber `.tcbody` einen zu geben ist
+    // eine Zeile, und dann faltete ein Klick auf eine Zeile die ganze Gruppe
+    // weg. Dieselbe Falle, die die Memory-Kachel am 2026-08-22 getroffen hat.
+    d.querySelector(".hd").addEventListener("click", ev=>{
+      ev.stopPropagation();
+      const shut=d.classList.toggle("shut");
+      d.querySelector(".tx").textContent = shut ? "+" : "−"; });
     // #131. INTO THE TILE, NOT INTO THE COLUMN. A 24-round turn used to put 24
     // of these between the question and the answer.
     const list=$("#tclist");
     const empty=list.querySelector(".empty"); if(empty) empty.remove();
     list.appendChild(d); this.toolsCount();
+    // DIE ARGUMENTE IN VOLLER LAENGE, in den Rumpf. Die Kopfzeile traegt die
+    // gekuerzte Fassung, weil sie eine Zeile ist; wer aufklappt, will das,
+    // was das Werkzeug wirklich bekommen hat.
+    if(raw) this.toolArgBlock(d, name, raw);
+    // DER OFFENE AUFRUF, an den Uhr und Antwort gehen. Die drei Ereignisse
+    // kommen je Aufruf in dieser Reihenfolge ueber die Naht, also ist der
+    // zuletzt angelegte immer der gemeinte. `tools_reported` legt Zeilen an,
+    // die nie ein Ergebnis bekommen -- die naechste `tool` ueberschreibt sie,
+    // und keine fremde Antwort landet in einer fremden Zeile.
+    this.openCall=d;
     this.tail();
   },
+
+  // #138b. Der Strom war die Huelle, dies ist der Inhalt.
+  //
+  // DIE ERSTE NOCH OFFENE BOX DIESES NAMENS, nicht irgendeine: zwei
+  // `write_file` in einer Runde kommen in derselben Reihenfolge an, in der
+  // ihre Bloecke angelegt wurden, also trifft die Reihenfolge zu. Eine Box,
+  // die schon ihren Inhalt hat, wird nie ein zweites Mal ueberschrieben --
+  // sonst traegt die zweite Datei den Text der ersten.
+  codeFinish(name,raw){
+    const boxes=Object.keys(this.live).map(i=>this.live[i])
+      .filter(b=>b && b.dataset.nm===name && b.dataset.done!=="1");
+    const box=boxes[0];
+    if(!box){ Object.keys(this.live).forEach(i=>{
+      const p=this.live[i] && this.live[i].querySelector(".cwp");
+      if(p) HL.paint(p, this.langOf(p.textContent)); }); return; }
+    const pre=box.querySelector(".cwp");
+    let lang="";
+    try{
+      const got=JSON.parse(raw||"{}");
+      // `content` schreibt eine Datei, `new` aendert eine. Beides ist der
+      // Text, der nachher auf der Platte steht -- `old` ist es nicht und
+      // gehoert deshalb in die Argumente der Aufrufzeile, nicht hierher.
+      const body = (got.content!==undefined) ? got.content : got.new;
+      if(typeof body==="string" && pre) pre.textContent=body;
+      if(got.path){
+        const head=box.querySelector(".cwh");
+        if(head) head.textContent=got.path;
+        const dot=String(got.path).lastIndexOf(".");
+        if(dot>=0) lang=String(got.path).slice(dot+1); }
+    }catch(err){ /* unvollstaendig oder nicht JSON: der rohe Strom bleibt */ }
+    box.dataset.done="1";
+    if(pre) HL.paint(pre, lang || this.langOf(pre.textContent)); },
+
+  // #138b. Die Argumente als Block, mit Farbe wo es sich lohnt.
+  //
+  // JSON IST DIE SPRACHE DIESES BLOCKS, immer -- die Argumente eines Werkzeugs
+  // sind ein JSON-Objekt, egal welches Werkzeug. Das ist der eine Fall, in dem
+  // die Sprache nicht geraten werden muss.
+  toolArgBlock(row, name, raw){
+    const wrap=document.createElement("div"); wrap.className="tsec";
+    const head=document.createElement("div"); head.className="tsh";
+    head.textContent="arguments";
+    const pre=document.createElement("pre"); pre.className="tsp";
+    let shown=raw;
+    try{ shown=JSON.stringify(JSON.parse(raw),null,2); }catch(err){ shown=raw; }
+    pre.textContent=shown;
+    HL.paint(pre,"json");
+    wrap.appendChild(head); wrap.appendChild(pre);
+    row.querySelector(".tbody").appendChild(wrap); },
+
+  toolEnd(name,seconds,repeated){
+    const row=this.openCall;
+    if(!row || row.querySelector(".name").textContent!==name) return;
+    const note=row.querySelector(".note");
+    // DIE UHR NUR, WENN SIE ETWAS SAGT. Unter einer Zehntelsekunde ist "0.0s"
+    // Laerm; dieselbe Grenze, die das Terminal seit #70 zieht.
+    const parts=[];
+    if(repeated) parts.push("repeat");
+    if(seconds>=0.1) parts.push(seconds.toFixed(1)+"s");
+    if(parts.length) note.textContent=parts.join(" · "); },
+
+  toolRes(name,text,cut){
+    const row=this.openCall;
+    if(!row || row.querySelector(".name").textContent!==name) return;
+    const bad=String(text||"").startsWith("error: ");
+    if(bad) row.classList.add("bad");
+    const wrap=document.createElement("div"); wrap.className="tsec res";
+    const head=document.createElement("div"); head.className="tsh";
+    head.textContent = bad ? "error" : "result";
+    const pre=document.createElement("pre"); pre.className="tsp";
+    pre.textContent = text || "(nothing)";
+    wrap.appendChild(head); wrap.appendChild(pre);
+    if(cut>0){
+      const more=document.createElement("div"); more.className="tsmore";
+      more.textContent = cut.toLocaleString() + " more characters not shown";
+      wrap.appendChild(more); }
+    row.querySelector(".tbody").appendChild(wrap);
+    this.openCall=null; },
 
   toolsCount(){
     const n=$("#tclist").querySelectorAll(".tool").length;
@@ -2326,11 +2506,17 @@ const crow = {
   // Runde teilen sich den Strom und waeren sonst ein Reissverschluss aus zwei
   // Dateien. Die Karte wird geleert, sobald ein Aufruf LAEUFT (`tool`), denn
   // dann ist die Runde fertig und die naechste faengt bei index 0 wieder an.
-  toolArg(i,name,piece){
+  toolArg(i,name,piece,code){
+    // #138b. NUR WAS PROGRAMMCODE SCHREIBT bekommt hier einen Block. Vorher
+    // legte JEDES Werkzeug einen an, und ein `web_search` stellte seine
+    // JSON-Huelle neben den Quelltext -- so wurde aus dem Code-Panel ein
+    // Werkzeug-Panel. Ein `run_command` gehoert in die Liste der Aufrufe.
+    if(!code) return;
     if(!this.live) this.live={};
     let box=this.live[i];
     if(!box || box.dataset.nm!==name){
-      const body=$("#codebody");
+      const body=$("#cflist");
+      $("#codefiles").hidden=false;
       box=document.createElement("div"); box.className="cw"; box.dataset.nm=name;
       const hd=document.createElement("div"); hd.className="cwh";
       hd.textContent=name;
@@ -2387,7 +2573,32 @@ const crow = {
     $("#tclist").textContent="";
     $("#toolcalls").classList.add("shut");
     $("#toolcalls .tcx").textContent="+";
+    this.codeReset();
     this.toolsCount(); },
+
+  // #138b. Der Quelltext-Abschnitt, geleert und wieder versteckt.
+  //
+  // `this.live` MUSS MIT. Es zeigt auf Boxen, die es nach dem Leeren nicht
+  // mehr gibt; ein laufender Strom haenge sonst Zeichen an ein Element, das
+  // in keinem Dokument mehr steht -- sichtbar waere davon nichts, und genau
+  // deshalb faende man es nie.
+  codeReset(){
+    $("#cflist").textContent="";
+    $("#codefiles").hidden=true;
+    this.live=null;
+    this.openCall=null;
+    const n=$("#codehead .n"); if(n) n.textContent=""; },
+
+  // #138b. Alles im Panel, in einem Griff.
+  codeWipe(e){
+    if(e) e.stopPropagation();
+    this.codeReset();
+    $("#tclist").textContent="";
+    this.toolsCount();
+    // DERSELBE WASSERSTAND WIE BEIM `clear` DER GRUPPE. Ohne ihn holt der
+    // Chat seine Werkzeugzeilen beim naechsten Start aus dem Verlauf zurueck
+    // -- gefunden, nachdem robin das Fenster neu gestartet hatte.
+    pywebview.api.tools_cleared(); },
 
   cost(line,share){
     if(this.cursor){ this.cursor.remove(); this.cursor=null; }
@@ -4057,11 +4268,13 @@ const crow = {
       case "update": this.updated(e); break;
       case "voice": this.voice(e); break;
       case "code_close": this.codeClose(e.closed); break;
-      case "tool": this.tool(e.name,e.args); break;
+      case "tool": this.tool(e.name,e.args,e.raw,e.code); break;
+      case "toolend": this.toolEnd(e.name,e.s,e.rep); break;
+      case "toolres": this.toolRes(e.name,e.t,e.cut); break;
       case "cost": this.cost(e.line,e.share); this.ctx(e.tokens,e.n_ctx); break;
       case "note": this.note(e.t); break;
       case "memory": this.memory(e.t,e.n); break;
-      case "toolarg": this.toolArg(e.i,e.name,e.t); break;
+      case "toolarg": this.toolArg(e.i,e.name,e.t,e.code); break;
       case "alarm": this.alarm(e.t); break;
       case "fail": this.fail(e.t); break;
       case "live":
@@ -4611,7 +4824,17 @@ class Sink(ReplyEvents, FenceEvents):
         fold = self._folds.get(index)
         if fold is None:
             fold = self._folds[index] = Unescaper()
+        # OB DARAUS PROGRAMMCODE WIRD, sagt die Naht -- ZEIGEN entscheidet die
+        # Seite. Der Filter sass hier zuerst als `return`, und
+        # `test_two_calls_do_not_share_a_pending_backslash` hat es gefangen:
+        # ein Fall mit `read_file` als zweitem Aufruf bekam keinen Strom mehr.
+        # Er hatte recht aus einem groesseren Grund als seinem eigenen -- eine
+        # Naht, die nach Werkzeugnamen aussortiert, nimmt jeder kuenftigen
+        # Ansicht die Moeglichkeit, denselben Strom anders zu zeigen. Dieselbe
+        # Regel wie bei `tool_result`: hinueber geht alles, der Bildschirm
+        # entscheidet.
         self._put({"k": "toolarg", "i": index, "name": name,
+                   "code": name in CODE_TOOLS,
                    "t": fold.feed(piece)})
 
 
@@ -4665,8 +4888,41 @@ class Turn(TurnEvents):
                         "that prefill was the whole history"})
 
     def tool_started(self, name: str, arguments: str) -> None:
+        # DIE ROHEN ARGUMENTE REISEN MIT, nicht nur die gekuerzte Zeile. Die
+        # Zeile ist der Kopf einer Klappe; was darin steht, wenn jemand sie
+        # oeffnet, ist das, was das Werkzeug wirklich bekommen hat.
         self._put({"k": "tool", "name": name,
-                   "args": crow_core.format_tool_args(arguments)})
+                   "args": crow_core.format_tool_args(arguments),
+                   "raw": arguments or "",
+                   "code": name in CODE_TOOLS})
+
+    def tool_finished(self, name: str, seconds: float, repeated: bool) -> None:
+        """#138b. Die Uhr an die Klappe, die der Aufruf schon hat.
+
+        DAS FENSTER HAT DIESE ZEILE VORHER NICHT ABGEHOERT. Sie stand nur im
+        Terminal, und im Panel sah ein Aufruf, der zwei Minuten lief, aus wie
+        einer, der sofort zurueckkam.
+        """
+        self._put({"k": "toolend", "name": name,
+                   "s": round(float(seconds), 2), "rep": bool(repeated)})
+
+    def tool_result(self, name: str, result: str) -> None:
+        """#138b. Was der Aufruf geantwortet hat, gedeckelt fuer den Bildschirm.
+
+        HIER WIRD GESCHNITTEN, NICHT IM KERN. Die Naht traegt die ganze Antwort
+        und ueberlaesst dem Bildschirm, wieviel davon passt -- das Terminal
+        zeigt eine Zeile, dieses Fenster viertausend Zeichen, und beide sind
+        Antworten auf dieselbe Frage statt zwei verschiedene Wahrheiten.
+        """
+        said = str(result or "")
+        cut = len(said) - TOOL_RESULT_SHOWN
+        self._put({"k": "toolres", "name": name,
+                   "t": said[:TOOL_RESULT_SHOWN],
+                   # DIE ZAHL, NICHT NUR EIN ZEICHEN. Drei Punkte sagen, dass
+                   # etwas fehlt; sie sagen nicht, ob es zwei Zeilen oder zwei
+                   # Megabyte sind, und das ist der Unterschied zwischen
+                   # "gleich zu Ende gelesen" und "hier steht ein Bruchteil".
+                   "cut": cut if cut > 0 else 0})
 
     def boundary_escaped(self, name: str, refused: list) -> None:
         """#98, and it is drawn in `auto`'s own colour rather than as a note.
