@@ -1475,17 +1475,24 @@ class SlashCommandsReachTheWindowTests(ApiCase):
         Stop with nothing behind it."""
         self.assertIs(self.api().send("/help"), False)
 
-    def test_a_line_mid_turn_reports_no_turn_either(self):
-        """The other way to start nothing. The page keeps a second line out on
-        its own, but this is what lets it unlock if it ever gets that wrong."""
+    def test_a_line_mid_turn_starts_no_second_turn(self):
+        """The other way to start nothing, and since #138c it is the ONLY thing
+        this case still claims.
+
+        WHAT IS PROTECTED IS THE THREAD, not the return value. A line typed mid
+        turn used to be dropped and reported as `False`; robin chose on
+        2026-08-26 to have it QUEUED instead, because the memory review keeps
+        the worker alive after the window has already said idle -- and a line
+        typed in that gap vanished from a transcript it was already drawn into.
+
+        So `True` now means "accepted" rather than "started", and the invariant
+        that matters is checked directly: one worker, never two.
+        """
         api = self.api()
-
-        class _Busy:
-            def is_alive(self):
-                return True
-
-        api._worker = _Busy()
-        self.assertIs(api.send("hello"), False)
+        api._busy = True
+        self.assertIs(api.send("hello"), True)
+        self.assertEqual(api._queued, "hello")
+        self.assertIsNone(api._worker, "no second thread was started")
 
     def test_an_ordinary_message_reports_that_one_did(self):
         """POSITIVE CONTROL. Without it the rule could be "always return False",
@@ -6763,6 +6770,239 @@ class TheMemoryNoteLookTests(unittest.TestCase):
         quiet = self.source[self.source.index("@media (prefers-reduced-motion: reduce)"):]
         quiet = quiet[:quiet.index(CLOSE + CLOSE) + 2]
         self.assertNotIn("linear-gradient", quiet)
+
+
+class TheCodePanelStartsBesideTheChatTests(unittest.TestCase):
+    """#138c. robin, 2026-08-26: "aktuell sieht das müll aus".
+
+    Das Panel startete auf festen 380 px und die Lesespalte bekam den Rest --
+    was immer der war. Auf seinem Fenster war das eine Spalte, in die der
+    Composer nicht mehr hineinpasste. Zwei gleich breite Spalten sind die
+    Aufteilung, die er meint.
+
+    NUR SOLANGE NIEMAND GEZOGEN HAT. Eine gespeicherte Breite ist eine
+    Entscheidung, und eine Seite, die sie beim Start ueberschreibt, nimmt sie
+    bei jedem Start erneut zurueck.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self._real = crow_gui.read_settings
+        self.addCleanup(setattr, crow_gui, "read_settings", self._real)
+
+    def _settings(self, **values):
+        crow_gui.read_settings = lambda: values
+
+    def test_an_untouched_width_is_not_a_choice(self):
+        self._settings()
+        self.assertFalse(crow_gui.code_width_chosen())
+
+    def test_a_dragged_width_is_a_choice_and_survives(self):
+        """POSITIV fuer die Gegenrichtung: wer gezogen hat, behaelt es."""
+        self._settings(code_width=520)
+        self.assertTrue(crow_gui.code_width_chosen())
+        self.assertEqual(crow_gui.code_width_setting(), 520)
+
+    def test_a_width_outside_the_grips_range_is_no_choice_either(self):
+        """NEGATIV. Ein Wert, den die Maus nie erzeugen konnte, stammt nicht aus
+        dieser Geste -- dieselbe Regel, die `code_width_setting` schon zieht."""
+        self._settings(code_width=5000)
+        self.assertFalse(crow_gui.code_width_chosen())
+        self._settings(code_width=True)
+        self.assertFalse(crow_gui.code_width_chosen())
+
+    def test_the_page_is_told_which_of_the_two_it_is(self):
+        self.assertIn('data-codeauto="__CODEAUTO__"', self.source)
+        self.assertIn('.replace("__CODEAUTO__", "0" if code_width_chosen() else "1")',
+                      self.source)
+
+    def test_the_start_width_is_clamped_like_the_grip(self):
+        """Ein Startwert ausserhalb der Grenzen waere einer, den die Geste nie
+        erzeugen koennte, und der erste Zupfer am Griff liesse das Panel
+        springen."""
+        js = self.source[self.source.index("function codeWidthToFit(){"):]
+        js = js[:js.index("codeWidthToFit();")]
+        self.assertIn('document.body.dataset.codeauto!=="1"', js)
+        self.assertIn("Math.max(260,Math.min(720,half))", js)
+        self.assertIn("window.innerWidth-taken", js)
+
+
+class NothingSticksOutOfTheComposerTests(unittest.TestCase):
+    """#138c. robin, 2026-08-26: "die Icons gucken immer noch ausserhalb der
+    Eingabemaske" -- der Sendepfeil stand rechts NEBEN dem Rahmen.
+
+    ES WAR NIE DIE PANEL-BREITE, auch wenn es danach aussah und mit einer
+    breiteren Spalte verschwand. Ein Flex-Kind traegt `min-width:auto` und
+    schrumpft deshalb nicht unter die Breite seines Inhalts; jedes Kind dieser
+    Reihe traegt zusaetzlich `white-space:nowrap`. Also gab keines nach, die
+    Summe blieb breiter als die Zeile, und der Ueberlauf fiel auf das letzte
+    Element. Eine breitere Spalte verdeckt das, sie behebt es nicht.
+    """
+
+    def setUp(self) -> None:
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = source[source.index("<style>"):source.index("</style>")]
+
+    def _rule(self, selector: str) -> str:
+        found = self.css[self.css.index(selector):]
+        return found[:found.index(chr(125))]
+
+    def test_the_row_may_shrink_at_all(self):
+        """`min-width:0` ist die Zeile, ohne die alles andere wirkungslos ist:
+        ein Flex-Kind mit `min-width:auto` schrumpft nie unter seinen Inhalt."""
+        self.assertIn("min-width:0", self._rule("#foot{"))
+        self.assertIn("min-width:0", self._rule("#acts{"))
+
+    def test_the_buttons_never_give_way(self):
+        """Sie sind das Angeklickte. Ein halber Knopf ist schlimmer als ein
+        gekuerztes Wort, und ein Knopf, der bei jeder Fensterbreite eine andere
+        Groesse hat, ist ein Ziel, das man suchen muss."""
+        self.assertIn("flex:none",
+                      self._rule("#acts>#rootwrap,#acts>#modewrap,#acts>#mic,#acts>#go{"))
+
+    def test_what_gives_way_gives_way_in_order(self):
+        """NEGATIV zur Regel darueber: gaebe NICHTS nach, waere `min-width:0`
+        eine Erlaubnis ohne Nutzer und die Reihe liefe weiter ueber."""
+        for selector in ("#hint{", "#ctx{", "#modelwrap{"):
+            self.assertIn("min-width:0", self._rule(selector),
+                          "%s muss nachgeben koennen" % selector)
+        self.assertIn("flex:0 1 auto", self._rule("#hint{"))
+
+    def test_the_long_chip_is_clipped_in_both_halves(self):
+        """Der Chip ist ein `inline-flex` aus Modellname UND Grad. Eine Regel
+        nur auf `b` haette den laengeren der beiden ungekuerzt gelassen."""
+        self.assertIn("text-overflow:ellipsis", self._rule("#model>*{"))
+
+    def test_the_row_does_not_wrap(self):
+        """"Das darf sich nicht verschieben" war die zweite Haelfte der Ansage:
+        ein Umbruch macht die Maske hoeher, sobald ein Chip nicht passt, und
+        bewegt alles darueber."""
+        self.assertNotIn("flex-wrap", self._rule("#foot{"))
+
+
+class ALineTypedDuringTheReviewIsNotLostTests(ApiCase):
+    """robin, 2026-08-26, with the screenshot: the same question stood in the
+    chat TWICE, `Memory updated (2)` between the two, and only the second one
+    ran.
+
+    THE CAUSE IS NOT THE MEMORY BAR, it is the order #122 established on
+    2026-08-21 -- for a good reason that stays good. `_run` pushes `idle` and
+    THEN reviews, so nobody waits for a review to read their answer. But the
+    review runs on the SAME worker thread, so for its whole duration the window
+    says free while `send` says busy:
+
+        self.push({"k": "idle"})        # composer unlocked, no Stop
+        crow_core.review_turn(...)      # same thread, still alive
+
+        if self._worker and self._worker.is_alive():
+            return False                # ... and the line is dropped
+
+    `go()` draws the typed line BEFORE `send` answers, so a dropped line does
+    not vanish quietly -- it sits in the transcript looking sent.
+    """
+
+    def _api(self):
+        api = self.api()
+        api.push = lambda message: api._seen.append(message)
+        api._seen = []
+        return api
+
+    def test_a_line_typed_while_the_review_runs_is_kept(self):
+        """POSITIV. Angenommen statt verworfen, und `True` heisst hier
+        "angenommen" -- die Seite laesst ihre Sperre stehen, was stimmt: es
+        laeuft etwas, und danach laeuft die Zeile."""
+        api = self._api()
+        api._busy = True
+        self.assertTrue(api.send("und noch eine frage"))
+        self.assertEqual(api._queued, "und noch eine frage")
+
+    def test_an_idle_window_queues_nothing(self):
+        """NEGATIV zum obigen: ohne laufenden Zug gibt es nichts zu puffern, und
+        ein Puffer, der sich immer fuellt, waere ein Zug, der nie startet."""
+        api = self._api()
+        started = api.send("die erste frage")
+        self.assertTrue(started)
+        self.assertIsNone(api._queued)
+        self.assertTrue(api._busy)
+
+    def test_a_slash_command_is_answered_not_queued(self):
+        """NEGATIV fuer die Unterscheidung, die `send` schon traf und behalten
+        muss: `False` heisst hier "beantwortet, nichts zu starten" und nicht
+        "abgewiesen". Ein `/tools` in den Puffer zu legen hiesse, es nach dem
+        Review ein zweites Mal zu beantworten."""
+        api = self._api()
+        api._busy = True
+        self.assertFalse(api.send("/tools"))
+        self.assertIsNone(api._queued)
+
+    def test_the_worker_takes_the_queued_line_when_it_finishes(self):
+        """Der Uebergang. `_run` ist hier ein Double -- es IST die Schicht
+        darunter; geprueft wird die Schleife, die es fuehrt."""
+        api = self._api()
+        ran = []
+        api._run = ran.append
+        api._busy = True
+        api._queued = "zweite"
+        api._pump("erste")
+        self.assertEqual(ran, ["erste", "zweite"])
+        self.assertFalse(api._busy)
+        self.assertIsNone(api._queued)
+
+    def test_the_worker_stops_holding_the_flag_when_a_turn_throws(self):
+        """NEGATIV, und die teuerste Variante wenn sie fehlt: ein Zug, der
+        wirft, liesse `_busy` stehen. Das Fenster nimmt danach jede Zeile an
+        und faehrt keine einzige mehr -- eine Sperre, die nur ein Neustart
+        loest."""
+        api = self._api()
+
+        def boom(_text):
+            raise RuntimeError("der Zug ist gestorben")
+
+        api._run = boom
+        api._busy = True
+        with self.assertRaises(RuntimeError):
+            api._pump("erste")
+        self.assertFalse(api._busy)
+        self.assertIsNone(api._queued)
+
+    def test_the_waiting_line_says_what_it_waits_for(self):
+        """Sonst stuende der Composer auf `Stop` fuer einen Nachlauf, den der
+        Leser nie angestossen hat, und seine Frage laege sichtbar im Verlauf,
+        ohne dass sich etwas bewegt -- dieselbe Lage wie der Fehler, nur mit
+        gesperrtem Knopf."""
+        api = self._api()
+        api._busy = True
+        api.send("noch eine")
+        self.assertEqual([m["k"] for m in api._seen], ["queued"])
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.assertIn('case "queued": this.queuedLine();', source)
+        self.assertIn("the memory review is finishing", source)
+
+    def test_the_page_is_told_when_the_wait_is_over(self):
+        """NEGATIV zum obigen: ohne diese Meldung bliebe der Wartehinweis ueber
+        dem ganzen gepufferten Zug stehen und behauptete ein Warten, das laengst
+        laeuft."""
+        api = self._api()
+        ran = []
+        api._run = ran.append
+        api._busy = True
+        api._queued = "zweite"
+        api._pump("erste")
+        self.assertEqual([m["k"] for m in api._seen], ["busy"])
+        self.assertIn('case "busy": this.busy();',
+                      (HERE / "crow_gui.py").read_text(encoding="utf-8"))
+
+    def test_the_worker_clears_the_flag_under_the_same_lock_that_queues(self):
+        """DAS RENNEN, und es ist von aussen nie zu sehen. Endet der Worker
+        ausserhalb des Locks, gibt es ein Fenster, in dem `send` puffert,
+        nachdem niemand mehr liest -- die Zeile waere weg, und zwar genau die
+        eine, auf die jemand gewartet hat."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        pump = source[source.index("    def _pump(self"):]
+        pump = pump[:pump.index(chr(10) + "    def ")]
+        self.assertIn("with self._queue_lock:", pump)
+        held = pump[pump.index("with self._queue_lock:"):]
+        self.assertIn("self._busy = False", held)
 
 
 if __name__ == "__main__":

@@ -61,6 +61,7 @@ and it stays there until you answer.
 | `discard` | nothing is written |
 | No answer | the entries expire after 300 s and are dropped. **Nothing is ever written by a timer** |
 | New chat | the questions go with it |
+| Typing while it runs | the line is **queued**, not dropped. The composer says `queued -- the memory review is finishing` and the turn starts by itself |
 | Off | `--no-memory-approval`, and then the review writes unasked as it did before 1.0.0 |
 
 It keeps breathing while it waits, because a question is still true until it is answered. The line

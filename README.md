@@ -181,8 +181,8 @@ release level, the working directory and dictation.
 <img src="docs/images/CrowToolCallsAndTraceInChat.png" alt="A turn with the trace open and the tool-call panel listing what ran" width="920">
 </div>
 
-A turn with its trace open and the tool-call panel on the right. Every call is listed with its
-arguments and what it did.
+A turn with its trace open and the code panel on the right. Calls fold one at a time into their
+arguments and their result; the source a turn writes stands under them, under its own path.
 
 <div align="center">
 <img src="docs/images/CrowVoiceInput.png" alt="The composer while dictating, with the voice line in the input row" width="920">

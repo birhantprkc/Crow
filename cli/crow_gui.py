@@ -476,6 +476,22 @@ def code_width_setting() -> int:
     return int(value) if CODE_MIN <= value <= CODE_MAX else CODE_DEFAULT
 
 
+def code_width_chosen() -> bool:
+    """Ob jemand die Breite je gezogen hat.
+
+    #138c. DER UNTERSCHIED ZWISCHEN "380" UND "NIE GEWAEHLT" war nirgends zu
+    sehen, und deshalb startete das Panel auf einer festen Pixelzahl neben einer
+    Chat-Spalte beliebiger Breite. Auf robins Fenster ergab das am 2026-08-26
+    eine Lesespalte, in die der Composer nicht mehr passte.
+    Eine gezogene Breite ist eine Entscheidung und bleibt unangetastet; eine
+    nie gezogene ist keine, und die Seite darf sie am Platz ausrichten.
+    """
+    value = read_settings().get("code_width")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return CODE_MIN <= value <= CODE_MAX
+
+
 def client_version(path: str | None = None) -> str:
     """The client version, read out of cli/crow.py. "" when unreadable."""
     try:
@@ -1530,9 +1546,39 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 #in{flex:1;background:transparent;border:0;outline:0;resize:none;color:var(--text);
   font:inherit;font-size:13px;line-height:1.5;max-height:140px;user-select:text}
 #in::placeholder{color:var(--dimmer)}
+/* #138c. NICHTS RAGT AUS DER MASKE, UND ZWAR BEI JEDER BREITE.
+   robin, 2026-08-26: "die Icons gucken immer noch ausserhalb der Eingabemaske".
+   Der Pfeil stand rechts NEBEN dem Rahmen statt darin.
+
+   DAS IST KEINE FRAGE DER PANEL-BREITE GEWESEN, auch wenn es so aussah. Ein
+   Flex-Kind hat `min-width:auto` und schrumpft deshalb NICHT unter die Breite
+   seines Inhalts; jedes Kind hier traegt zusaetzlich `white-space:nowrap`. Also
+   schrumpfte keines, die Summe blieb breiter als die Zeile, und der Ueberlauf
+   fiel auf das letzte Element -- `#go`. Eine breitere Spalte haette das nur
+   zufaellig verdeckt und beim naechsten schmalen Fenster wieder gezeigt.
+
+   WER NACHGIBT, IST EINE RANGFOLGE UND KEINE ZUFAELLIGKEIT: zuerst der Hinweis
+   (blosser Text), dann der Modell-Chip (der laengste, "Qwen3.8-27B high
+   (default)"), dann die Kontextzahl. Die Knoepfe geben NIE nach -- sie sind
+   das, was angeklickt wird, und ein halber Knopf ist schlimmer als ein
+   gekuerztes Wort.
+
+   KEIN `flex-wrap`. Umbrechen wuerde die Maske hoeher machen, sobald ein Chip
+   nicht passt -- und "das darf sich nicht verschieben" war die zweite Haelfte
+   der Ansage. */
 #foot{display:flex;align-items:center;gap:10px;margin-top:9px;font-size:11px;
-  color:var(--dimmer)}
-#ctx{font-size:11.5px;white-space:nowrap}
+  color:var(--dimmer);min-width:0}
+#ctx{font-size:11.5px;white-space:nowrap;min-width:0;overflow:hidden;
+  text-overflow:ellipsis;flex:0 1 auto}
+#modelwrap{min-width:0;flex:0 1 auto;display:inline-flex}
+/* JEDES KIND, NICHT NUR DAS ERSTE. Der Chip ist ein `inline-flex` aus zwei
+   Teilen -- dem Modellnamen und dem Grad dahinter -- und eine Regel nur auf
+   `b` haette den laengeren der beiden ungekuerzt gelassen.
+   DIE REGEL FUER `#model` SELBST STEHT WEITER UNTEN, bei seiner Form. Eine
+   zweite `#model{...}` hier war die naheliegende Stelle und die falsche:
+   `test_the_chip_borrows_the_shape_of_its_new_neighbours` liest die ERSTE
+   Regel dieses Selektors und fand statt der Pillenform zwei Zeilen Flexbox. */
+#model>*{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #ctx .fill{color:var(--ok)} #ctx .fill.w{color:var(--warn)} #ctx .fill.b{color:var(--bad)}
 #ctx .rest{color:var(--dimmer)}
 #ctx .n{color:var(--dim);margin-left:5px}
@@ -1544,10 +1590,20 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    each would be the fix that goes stale the first time a font-size moves --
    `stretch` is the initial value of align-items for a reason: the row gets ONE
    height, from its tallest control, and the rest adopt it. */
-#acts{margin-left:auto;display:flex;gap:8px;align-items:stretch}
+#acts{margin-left:auto;display:flex;gap:8px;align-items:stretch;
+  min-width:0;flex:0 1 auto}
+/* #138c. DIE KNOEPFE GEBEN NICHT NACH. Sie sind das Angeklickte, und ein
+   halber Knopf ist schlimmer als ein gekuerztes Wort -- also schrumpft in
+   dieser Reihe nur der Hinweis. */
+#acts>#rootwrap,#acts>#modewrap,#acts>#mic,#acts>#go{flex:none}
 /* CENTRED, NOT STRETCHED: it is a bare word with no border to line up, and a
    stretched span puts its text at the top of the box instead of on the row. */
-#hint{color:var(--dimmer);font-size:10.5px;align-self:center}
+#hint{color:var(--dimmer);font-size:10.5px;align-self:center;
+  /* #138c. GIBT ALS ERSTES NACH, bis auf null. Er sagt "read timeout 600 s"
+     oder worauf eine gepufferte Zeile wartet -- entbehrlich neben einem Knopf,
+     den jemand treffen muss. */
+  min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
 /* A FLEX BOX SO THE GLYPH STAYS ON THE CENTRE LINE once #acts stretches this
    button past its own line box. Left as a plain button it would grow at the
    bottom and the arrow would ride high in it. */
@@ -1691,7 +1747,10 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    row of pills; this control now stands in the composer beside #root and #mode, and the rule the
    microphone was built under applies unchanged: a neighbour with its own radius and padding
    reads as an accident. Same 6px, same 3px/11px, same 11.5px as the two on the other side. */
-#model{border-radius:6px;padding:3px 11px;font-size:11.5px;gap:0}
+#model{border-radius:6px;padding:3px 11px;font-size:11.5px;gap:0;
+  /* #138c. DER LAENGSTE TEXT DER REIHE gibt nach, damit die Knoepfe rechts
+     nicht aus der Maske gedraengt werden. */
+  min-width:0;overflow:hidden}
 /* THE LEVEL IS DIMMER THAN THE MODEL because it is the setting, not the subject -- the same
    split #modelmenu draws between a model row and the level rows under it. */
 #model .lvl{color:var(--dimmer)}
@@ -1729,7 +1788,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    `levels` and `groups` are measured for the model that ANSWERED the probe, so they describe one
    model and no other. Hanging them under the row that would boot 17 GB would be inventing them
    for a model nobody has asked a question -- and #116's rule is that nothing is invented. */
-</style></head><body data-rail="__RAIL__" data-code="__CODE__">
+</style></head><body data-rail="__RAIL__" data-code="__CODE__" data-codeauto="__CODEAUTO__">
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
   <!-- #119. LEFT OF THE WORDMARK, and it has to live in the TITLE BAR rather
@@ -3499,6 +3558,18 @@ const crow = {
     $("#turnstate").textContent="…";
     $("#hint").textContent="read timeout __TIMEOUT__ s"; },
 
+  // #138c. Die Zeile ist angenommen und wartet -- auf den Memory-Nachlauf, der
+  // nach `idle` noch auf demselben Thread laeuft.
+  //
+  // GESAGT WIRD ES, WEIL SONST NICHTS ES SAGT. Ohne diese Zeile stuende der
+  // Composer auf `Stop` fuer etwas, das der Leser nie angestossen hat, und
+  // seine Frage laege sichtbar im Verlauf, ohne dass sich etwas bewegt --
+  // dieselbe Lage wie der Fehler, nur mit gesperrtem Knopf.
+  queuedLine(){ this.running=true; go.textContent="■ Stop";
+    go.classList.add("stop");
+    $("#turnstate").textContent="…";
+    $("#hint").textContent="queued -- the memory review is finishing"; },
+
   // THE LOCK IS SYNCHRONOUS, THE PAINT IS NOT, and that split is what the
   // bridge is for. Every pywebview.api.* call resolves a promise once the
   // Python side returns, and only that side knows whether a turn started or the
@@ -4286,6 +4357,8 @@ const crow = {
       case "mic": this.micState(e); break;
       case "drop": this.dropped(e.paths); break;
       case "idle": this.idle(); break;
+      case "busy": this.busy(); break;
+      case "queued": this.queuedLine(); break;
     }
   }
 };
@@ -4409,6 +4482,30 @@ window.addEventListener("contextmenu",e=>{
 // is what makes it a place to look rather than something that appears once and
 // is missed.
 crow.toolsCount();
+// #138c. EINE NIE GEZOGENE PANEL-BREITE RICHTET SICH AM PLATZ AUS.
+//
+// Vorher startete das Panel auf festen 380 px neben einer Chat-Spalte, die den
+// Rest bekam -- was immer der war. robin am 2026-08-26: die Lesespalte war so
+// schmal, dass der Composer nicht mehr hineinpasste. Die Haelfte des Platzes
+// NEBEN der Rail ist die Aufteilung, die er meint: zwei gleich breite Spalten.
+//
+// NUR WENN NIEMAND GEZOGEN HAT. Eine gespeicherte Breite ist eine Entscheidung
+// und wird hier nicht ueberstimmt -- Python stempelt `data-codeauto`, weil nur
+// dort der Unterschied zwischen "380" und "nie gewaehlt" bekannt ist.
+//
+// GEKLEMMT WIE DIE GESTE. Dieselben 260 und 720, die `codeDrag` zieht: ein
+// Startwert ausserhalb der Grenzen waere einer, den die Maus nie erzeugen
+// koennte, und der erste Zupfer am Griff liesse das Panel springen.
+function codeWidthToFit(){
+  if(document.body.dataset.codeauto!=="1") return;
+  if(document.body.dataset.code==="shut") return;
+  const rail=$("#rail");
+  const taken=rail ? rail.getBoundingClientRect().width : 0;
+  const half=Math.round((window.innerWidth-taken)/2);
+  document.documentElement.style.setProperty(
+    "--codew", Math.max(260,Math.min(720,half))+"px"); }
+codeWidthToFit();
+
 window.addEventListener("pywebviewready",()=>{ pywebview.api.ready(); input.focus(); });
 </script></body></html>
 """
@@ -5023,6 +5120,21 @@ class Api:
         self._promised_warm = False
         self._rolled = False
         self._worker: threading.Thread | None = None
+        # #138c. EINE ZEILE, DIE WAEHREND DES NACHLAUFS GETIPPT WURDE.
+        #
+        # `_busy` IST NICHT `_worker.is_alive()`, und der Unterschied ist der
+        # Grund, dass es dieses Feld gibt: ein Thread lebt nach seinem `return`
+        # noch einen Moment, und in genau diesem Moment landete eine Zeile in
+        # einem Puffer, den niemand mehr liest. Der Worker loescht dieses Flag
+        # UNTER demselben Lock, unter dem `send` puffert.
+        #
+        # DIE ANDEREN PRUEFER BLEIBEN BEI `is_alive`. Sie fragen "darf ich das
+        # jetzt tun" -- Modell wechseln, Ordner wechseln -- und waehrend eines
+        # Nachlaufs lautet die Antwort weiter nein. Nur das Senden ist anders:
+        # eine Zeile kann warten, ein Modellwechsel nicht.
+        self._busy = False
+        self._queued: str | None = None
+        self._queue_lock = threading.Lock()
         # ONE INSTALLER AT A TIME. Two of them writing the same
         # directory is the one way an update leaves a broken copy.
         self._updating = False
@@ -6076,15 +6188,35 @@ class Api:
             if answer:
                 self.push({"k": "note", "t": answer})
             return False
-        # A LINE ARRIVING MID-TURN IS ALSO NOT A NEW TURN. The page keeps a
-        # second one out on its own, but saying so here is what lets it unlock
-        # if it ever gets that wrong -- the guard belongs to the half that knows.
-        if self._worker and self._worker.is_alive():
-            return False
-        INTERRUPT.clear()
-        self._worker = threading.Thread(target=self._run, args=(text,), daemon=True)
-        self._worker.start()
-        return True
+        # #138c. EINE ZEILE MITTEN IM ZUG WIRD GEHALTEN, NICHT VERWORFEN.
+        #
+        # Vorher stand hier `return False`, und das war richtig, solange der
+        # Worker nur den Zug fuhr: die Seite haelt selbst eine zweite Zeile
+        # zurueck, solange sie `Stop` zeigt. Seit #122 zeigt sie das aber NICHT
+        # mehr die ganze Zeit -- `_run` meldet `idle` und faehrt danach den
+        # Memory-Nachlauf auf demselben Thread. In diesem Fenster sagt die Seite
+        # frei und diese Zeile sagte besetzt, und die Zeile fiel dazwischen.
+        #
+        # SIE FIEL AUCH NICHT STILL: `go()` malt die getippte Zeile, BEVOR es
+        # hier ankommt. robin sah am 2026-08-26 dieselbe Frage zweimal im
+        # Verlauf, `Memory updated (2)` dazwischen, und nur die zweite lief.
+        #
+        # `True` HEISST HIER "ANGENOMMEN", nicht "gestartet". Die Seite laesst
+        # ihre Sperre stehen, und das stimmt: es laeuft etwas, und danach laeuft
+        # diese Zeile. Der Hinweis darunter sagt, worauf gewartet wird -- ein
+        # `Stop` ohne Erklaerung waere ein Knopf fuer einen Nachlauf, den
+        # niemand gemeint hat.
+        with self._queue_lock:
+            if self._busy:
+                self._queued = text
+                self.push({"k": "queued"})
+                return True
+            self._busy = True
+            INTERRUPT.clear()
+            self._worker = threading.Thread(target=self._pump, args=(text,),
+                                            daemon=True)
+            self._worker.start()
+            return True
 
     def stop(self) -> None:
         INTERRUPT.set()
@@ -7562,6 +7694,43 @@ class Api:
 
     # -- the turn ----------------------------------------------------------
 
+    def _pump(self, text: str) -> None:
+        """#138c. Ein Zug nach dem anderen, auf einem Thread.
+
+        DIE SCHLEIFE IST DER GANZE MECHANISMUS. `_run` endet erst nach dem
+        Memory-Nachlauf; was in dieser Zeit getippt wurde, liegt in `_queued`
+        und wird hier gefahren, statt eine zweite Taste zu brauchen.
+
+        DAS FLAG FAELLT UNTER DEM LOCK, und das ist die tragende Zeile. Faende
+        `send` den Puffer frei, nachdem diese Schleife ihn zuletzt gelesen hat,
+        aber bevor sie sich abmeldet, dann legte es eine Zeile in einen Puffer,
+        den niemand mehr liest -- von aussen ununterscheidbar von dem Fehler,
+        den das hier behebt.
+
+        UND ER FAELLT AUCH, WENN ES KRACHT. Ein Zug, der wirft, liesse das Flag
+        sonst stehen; das Fenster naehme danach jede Zeile an und fuehre keine
+        einzige mehr, und nur ein Neustart loeste das.
+        """
+        try:
+            while True:
+                self._run(text)
+                with self._queue_lock:
+                    text, self._queued = self._queued, None
+                    if text is None:
+                        self._busy = False
+                        return
+                INTERRUPT.clear()
+                # DIE SEITE ERFAEHRT, DASS DAS WARTEN VORBEI IST. Sie steht
+                # seit `send` auf gesperrt, aber mit dem Wartehinweis darunter;
+                # ohne diese Zeile bliebe er ueber dem ganzen Zug stehen und
+                # behauptete ein Warten, das laengst laeuft.
+                self.push({"k": "busy"})
+        except BaseException:
+            with self._queue_lock:
+                self._busy = False
+                self._queued = None
+            raise
+
     def _run(self, text: str) -> None:
         # #121. THE LAST LINE OF DEFENCE FOR THE PIN, and it is here because
         # `_probe` has three ways to return before it reaches its own pin: the
@@ -7806,6 +7975,7 @@ def main(argv: list[str] | None = None) -> int:
                 .replace("__RAIL__", "open" if rail_open() else "shut")
                 .replace("__CODE__", "open" if code_open() else "shut")
                 .replace("__CODEW__", str(code_width_setting()))
+                .replace("__CODEAUTO__", "0" if code_width_chosen() else "1")
                 .replace("__MARKDARK__", mark_svg("dark"))
                 .replace("__MARKLIGHT__", mark_svg("light")))
 
