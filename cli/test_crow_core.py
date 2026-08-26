@@ -42,7 +42,9 @@ import json
 import os
 import re
 import shutil
+import socket
 import socketserver
+import struct
 import subprocess
 import sys
 import tempfile
@@ -4801,6 +4803,22 @@ class _FakeHttpMcp(http.server.BaseHTTPRequestHandler):
                                  "error": {"code": -32601,
                                            "message": "Method not found"}})
 
+        # THE CALL HAS LANDED, and this counter is the only witness to that.
+        # Everything past this line is the server having DONE the thing, so a
+        # second delivery is a second execution -- which is the entire reason
+        # `tools/call` is not repeatable.
+        #
+        # `.get` RATHER THAN `[...]`: this handler is the base class of
+        # `_GuardedHttpMcp` too, and those stages build their own `state`
+        # without this key. A bare `+=` raised `KeyError` inside the handler,
+        # which socketserver turns into a closed connection -- so three OAuth
+        # cases failed with `RemoteDisconnected` and pointed at the transport.
+        state["calls"] = state.get("calls", 0) + 1
+        if state.get("drop_after", 0) > 0:
+            state["drop_after"] -= 1
+            self.close_connection = True
+            return _slam(self.connection)
+
         params = message.get("params") or {}
         name = params.get("name")
         if state["mode"] == "slowcall":
@@ -4831,12 +4849,41 @@ class _FakeHttpMcp(http.server.BaseHTTPRequestHandler):
                       "result": {"content": [{"type": "text", "text": body}]}})
 
 
+def _slam(connection) -> None:
+    """Close so the peer sees a RESET rather than an orderly goodbye.
+
+    `SO_LINGER` WITH A ZERO TIMEOUT IS THE WHOLE TRICK. A plain `close` sends
+    FIN, which urllib reads as an empty answer; this sends RST, which is what
+    `WinError 10054` is and therefore the only shape worth testing against.
+    """
+    try:
+        connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                              struct.pack("hh", 1, 0))
+        connection.close()
+    except OSError:
+        pass
+
+
 class _QuietHttpServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     block_on_close = False
 
     def handle_error(self, request, client_address):
         pass                 # a client that timed out and left is the test, not a fault
+
+    def verify_request(self, request, client_address):
+        """Drop the connection BEFORE the request is read -- the safe half.
+
+        NOTHING REACHED THE HANDLER, so nothing this server does could have run.
+        That is the state a retry is allowed to repeat, and it is the one
+        huggingface produced 2 times in 5 on 2026-08-24.
+        """
+        state = getattr(self, "state", None) or {}
+        if state.get("drop_before", 0) > 0:
+            state["drop_before"] -= 1
+            _slam(request)
+            return False
+        return True
 
 
 class TheHttpConnectionTests(unittest.TestCase):
@@ -4861,7 +4908,8 @@ class TheHttpConnectionTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.state = {"mode": "sse", "seen": [], "deleted": [], "session": None,
                       "minted": 0, "expired": False, "client_said": None,
-                      "answered": threading.Event(), "stop": threading.Event()}
+                      "answered": threading.Event(), "stop": threading.Event(),
+                      "drop_before": 0, "drop_after": 0, "calls": 0}
         self.server = _QuietHttpServer(("127.0.0.1", 0), _FakeHttpMcp)
         self.server.state = self.state
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -5234,6 +5282,97 @@ class TheHttpConnectionTests(unittest.TestCase):
         self.assertIsNotNone(self._live())
         self._configure(headers={"Authorization": "Bearer two"})
         self.assertIsNone(self._live())
+
+    # ---- #139: a connection that dropped once is not a broken server -------
+
+    def _count_posts(self) -> list:
+        """Count attempts at the TRANSPORT, delegating to the real one.
+
+        A SPY, NOT A DOUBLE. It appends an integer and calls the original, so
+        the layer under test is untouched. Standing a fake `urlopen` in here
+        instead would pin what the fake does with `ECONNREFUSED` rather than
+        what urllib does with it -- and urllib is the half that decides, since
+        it is the one that wraps a refusal in `URLError`.
+        """
+        tries: list = []
+        real = urllib.request.urlopen
+
+        def counting(*args, **kw):
+            tries.append(1)
+            return real(*args, **kw)
+
+        urllib.request.urlopen = counting
+        self.addCleanup(setattr, urllib.request, "urlopen", real)
+        return tries
+
+    def test_a_connection_dropped_before_the_request_lands_is_tried_again(self):
+        """THE POSITIVE PROBE. Measured 2026-08-24: `https://huggingface.co/mcp`
+        answered 3 of 5 `initialize` posts three seconds apart, the other six
+        servers 5 of 5, with the User-Agent held constant across two runs. The
+        sheet reported it unreachable, and the retry that made it work was
+        performed by robin -- pressing Add a second time.
+        """
+        self._configure()
+        self.state["drop_before"] = 1
+        self.assertIn("you said: hello", self._call("echo", '{"text": "hello"}'))
+
+    def test_a_server_that_keeps_dropping_still_fails(self):
+        """THE NEGATIVE PROBE for the one above. The same path with the drops
+        never running out has to end in a sentence somebody can read, not in a
+        loop -- a retry that cannot give up is worse than no retry at all.
+        """
+        self._configure()
+        self.state["drop_before"] = 99
+        self.assertIn("could not be reached", self._call("echo", '{"text": "x"}'))
+
+    def test_a_tool_call_is_never_delivered_twice_after_a_drop(self):
+        """THE LINE THIS TICKET IS ABOUT, and the reason it is a decision
+        rather than a number.
+
+        The connection dies AFTER the call landed, so this server may already
+        have done the thing. MCP has no idempotency key, nothing on the wire
+        distinguishes "never arrived" from "arrived and ran", and a second
+        delivery would be a second execution of somebody's write. So the count
+        the server saw is 1, and the turn is told the truth instead.
+        """
+        self._configure()
+        self.state["drop_after"] = 1
+        said = self._call("echo", '{"text": "hello"}')
+        self.assertEqual(self.state["calls"], 1)
+        self.assertIn("could not be reached", said)
+
+    def test_nothing_listening_fails_on_the_first_attempt(self):
+        """`ECONNREFUSED` IS AN ANSWER, not a dropped connection.
+
+        Nothing is on that port; asking twice more cannot change it, and the
+        `start llama-server first, then retry.` sentence exists for exactly
+        this state. Retrying it would put a delay in front of the one failure
+        that is already understood.
+        """
+        spare = socket.socket()
+        spare.bind(("127.0.0.1", 0))
+        dead = spare.getsockname()[1]
+        spare.close()
+        tries = self._count_posts()
+        self._configure(url="http://127.0.0.1:%d/mcp" % dead)
+        said = self._call("echo", '{"text": "x"}')
+        self.assertEqual(len(tries), 1)
+        self.assertIn("could not be reached", said)
+
+    def test_a_repeated_post_carries_the_message_again_not_a_stale_request(self):
+        """A retry rebuilds the request rather than replaying the object.
+
+        THE HEADERS ARE NOT CONSTANT ACROSS ATTEMPTS. `_headers` mints the
+        `Authorization` from whatever the token store holds AT THE TIME, and a
+        `Request` built before a refresh would carry the credential that just
+        expired. Rebuilding costs a dict; replaying costs a 401 nobody can
+        explain.
+        """
+        self._configure(headers={"X-Crow-Case": "139"})
+        self.state["drop_before"] = 1
+        self._call("echo", '{"text": "hello"}')
+        self.assertTrue(self.state["seen"])
+        self.assertEqual(self.state["seen"][0].get("X-Crow-Case"), "139")
 
 
 # --------------------------------------------------------------- E5b ------

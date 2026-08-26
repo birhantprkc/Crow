@@ -6781,6 +6781,27 @@ MCP_STDERR_LINES = 20
 # THE NORMAL CASE, not the exception.
 MCP_ACCEPT = "application/json, text/event-stream"
 
+# HOW OFTEN A DROPPED POST IS SENT AGAIN, and what the repetition buys.
+# Measured 2026-08-24, five `initialize` posts three seconds apart per server:
+# `huggingface.co` answered 3 of 5 while six other servers answered 5 of 5, and
+# two runs with different User-Agents produced the same pattern, so the drop is
+# the far end's rather than this client's. At that rate one attempt reaches
+# 60 %, two 84 %, three 94 %.
+MCP_TRIES = 3
+
+# Between attempts. SHORT ON PURPOSE: a server that is really gone still has to
+# fail while somebody is looking at the screen, and the failure this covers is a
+# connection that died instantly rather than one that is busy.
+MCP_RETRY_PAUSE = 0.25
+
+# WHICH MESSAGES MAY BE SENT TWICE -- a list of what may, never a list of what
+# may not. Nothing on the wire tells a client whether a request it got no answer
+# to was executed, so "can this run twice" has to be answered when a method is
+# ADDED rather than inherited by it. `tools/call` is the one that acts on
+# somebody's behalf, and it is deliberately absent: MCP has no idempotency key,
+# and a repeat of a write is a second write.
+MCP_REPEATABLE = ("initialize", "tools/list")
+
 # How much of an HTTP failure body is kept. A 401 explains itself in its first
 # line and in nobody's second page, and the whole of an error page would push
 # every other line out of the deque that has to carry it.
@@ -6843,6 +6864,44 @@ def _mcp_seconds(value, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return seconds if seconds > 0 else default
+
+
+def _mcp_repeatable(message: dict) -> bool:
+    """Whether this message may go out a second time.
+
+    A NOTIFICATION IS SAFE BY ITS SHAPE, not by its name: it carries no id, the
+    specification forbids an answer to it, and the only one Crow sends says the
+    handshake is done. Everything else has to be listed by hand, and anything
+    unlisted -- `tools/call` today, whatever is built next -- gets one attempt.
+    """
+    method = str(message.get("method") or "")
+    return method in MCP_REPEATABLE or method.startswith("notifications/")
+
+
+def _mcp_dropped(exc: BaseException) -> bool:
+    """Whether the connection died, as opposed to the far end deciding something.
+
+    A REFUSAL IS AN ANSWER AND A TIMEOUT IS A DECISION, so neither is repeated.
+    Nothing is listening on a refused port and asking again cannot change that
+    -- it is the state `start llama-server first, then retry.` exists for -- and
+    a server that spent the whole budget once will spend it again, so a retry
+    there only doubles a wait somebody is already sitting through. What is left
+    is the class that answered 3 times in 5: a reset, a name that did not
+    resolve this second, a socket closed mid-flight.
+
+    THE REASON HAS TO BE UNWRAPPED. Measured 2026-08-26 against urllib on this
+    machine: a refusal arrives as `URLError(reason=ConnectionRefusedError)`, a
+    name failure as `URLError(reason=gaierror)`, and a reset while the answer is
+    being read as a BARE `ConnectionResetError` -- urllib wraps what failed up
+    to and including the send, and lets the read throw for itself. Matching on
+    `URLError` alone would put the refusal in the same bucket as the drop.
+    """
+    inner = getattr(exc, "reason", None)
+    if not isinstance(inner, BaseException):
+        inner = exc
+    if isinstance(inner, (ConnectionRefusedError, TimeoutError)):
+        return False
+    return isinstance(inner, OSError)
 
 
 class McpServer:
@@ -7123,23 +7182,37 @@ class McpServer:
             problem = mcp_refresh_token(self.name)
             if problem:
                 return "the MCP server %r needs authorising again: %s" % (self.name, problem)
-        request = urllib.request.Request(
-            self.endpoint, data=json.dumps(message).encode("utf-8"),
-            headers=self._headers(), method="POST")
-        try:
-            resp = urllib.request.urlopen(request, timeout=timeout)
-        except urllib.error.HTTPError as exc:
-            return self._refused(exc, message, timeout)
-        except (OSError, ValueError) as exc:
-            self._said("%s: %s" % (exc.__class__.__name__, exc))
-            return self._gone("could not be reached")
-        # THE SESSION IS ASSIGNED ONCE, AT INITIALISATION, and taken only while
-        # there is none. A server that puts a different id on a later answer is
-        # not renaming the session, it is a proxy answering for somebody else.
-        given = resp.headers.get("Mcp-Session-Id")
-        if given and not self.session:
-            self.session = str(given).strip()
-        return self._take(resp)
+        # ONE ATTEMPT UNLESS THE MESSAGE SAYS OTHERWISE. A server that drops a
+        # connection is not a server that is down, and treating the two the same
+        # is what made a far end answering 3 times in 5 look broken 40 % of the
+        # time -- to somebody who then goes and debugs a working server.
+        tries = max(1, MCP_TRIES) if _mcp_repeatable(message) else 1
+        for attempt in range(1, tries + 1):
+            # REBUILT EVERY ATTEMPT RATHER THAN REPLAYED. `_headers` mints the
+            # `Authorization` from the token store as it stands NOW, and a
+            # request assembled before a refresh carries the credential that
+            # just expired. Rebuilding costs a dict.
+            request = urllib.request.Request(
+                self.endpoint, data=json.dumps(message).encode("utf-8"),
+                headers=self._headers(), method="POST")
+            try:
+                resp = urllib.request.urlopen(request, timeout=timeout)
+            except urllib.error.HTTPError as exc:
+                return self._refused(exc, message, timeout)
+            except (OSError, ValueError) as exc:
+                if attempt < tries and _mcp_dropped(exc):
+                    time.sleep(MCP_RETRY_PAUSE)
+                    continue
+                self._said("%s: %s" % (exc.__class__.__name__, exc))
+                return self._gone("could not be reached")
+            # THE SESSION IS ASSIGNED ONCE, AT INITIALISATION, and taken only
+            # while there is none. A server that puts a different id on a later
+            # answer is not renaming the session, it is a proxy answering for
+            # somebody else.
+            given = resp.headers.get("Mcp-Session-Id")
+            if given and not self.session:
+                self.session = str(given).strip()
+            return self._take(resp)
 
     def _refused(self, exc, message: dict, timeout: float) -> "str | None":
         """A status that is not 2xx -- and the one of them that is not a failure.

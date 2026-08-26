@@ -13,6 +13,7 @@ a `command` does not.
 | Notification · client response | `202`, empty body, nothing enqueued |
 | Session | `Mcp-Session-Id` off the `initialize` response where the server sets one, then on every request. **No id is a valid state**, not a fault |
 | `404` on a session | expiry. The session is dropped, `initialize` runs again, the call is retried **once** |
+| Dropped connection | up to **3 attempts**, 0.25 s apart, for `initialize`, `tools/list` and `notifications/*`. **`tools/call` is sent once**, and a refusal or a timeout is never repeated — see below |
 | Close | `HTTP DELETE` with the session id. `405` and any other refusal are ignored |
 | Server → client requests | arrive on the open stream, answered by a separate `POST` |
 
@@ -29,6 +30,30 @@ Three layers. Later ones overwrite earlier ones.
 `MCP-Protocol-Version` is sent only after `initialize` has come back, never on it.
 
 `headers` is not in `mcp_view()` and appears in no listing, no sheet and no log.
+
+## Dropped connections
+
+A connection that dies is not a server that is down, and the two are reported differently.
+
+| | |
+|---|---|
+| Repeated | `initialize`, `tools/list`, `notifications/*` — up to 3 attempts, 0.25 s apart |
+| Sent once | **`tools/call`**, and anything not named above |
+| Never repeated | connection refused, and any timeout — on any message |
+
+**Why `tools/call` is not repeated.** Nothing on the wire tells a client whether a call it got no
+answer to was executed. If the connection died after the request was written, the server may have
+run it already, and MCP has no idempotency key to recognise the repeat by. A second attempt at a
+tool that writes something would write it twice, so the turn is told the call failed instead.
+
+**Why a refusal is not repeated.** Nothing is listening on that port; asking twice more cannot
+change it, and it is the state the `start llama-server first, then retry.` sentence exists for.
+A timeout is left alone for the same kind of reason — a server that spent the whole budget once
+will spend it again, and repeating only doubles a wait somebody is sitting through.
+
+Measured 2026-08-24, five `initialize` posts three seconds apart per server: one server answered
+3 of 5 while six others answered 5 of 5, and two runs with different `User-Agent` values produced
+the same pattern. At a 60 % rate one attempt reaches 60 %, two 84 %, three 94 %.
 
 ## Adding one
 
