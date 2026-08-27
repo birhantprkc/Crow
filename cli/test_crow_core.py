@@ -9281,5 +9281,331 @@ class TheProjectorReachesTheCommandLineTests(unittest.TestCase):
                          "mmproj-F16.gguf")
 
 
+class TheModelDelegatesSubtasksTests(unittest.TestCase):
+    """#143 E1. `delegate` returns at once, the work runs on a thread against a
+    remote spot, `collect` blocks until it is back -- and none of it may touch
+    the state of the turn that spawned it.
+
+    THE TRANSPORT IS THE REBOUND MODULE GLOBAL, the same single door
+    `ReplySeamTests` names. The spot is a rebound `delegate_target`, because
+    what is under test here is the machinery and not the resolution -- the
+    resolution has its own cases below, against a document."""
+
+    SPOT = {"provider": "openrouter", "label": "OpenRouter", "remote": True,
+            "base_url": "http://x/v1", "model": "unit/model:free",
+            "api_key": "k", "headers": {}, "transport": crow_core.TRANSPORT_CHAT,
+            "routing": {}, "sticky": False, "filter": False, "params": []}
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-delegate-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._real = (crow_core._post_stream, crow_core.delegate_target,
+                      crow_core.SESSION_DIR)
+        self.addCleanup(self._restore)
+        crow_core.SESSION_DIR = os.path.join(self.dir, "session")
+        crow_core.delegate_target = lambda doc=None: (dict(self.SPOT), None)
+        self.bodies: list = []
+        self.gates: list = []
+        crow_core.forget_subtasks()
+        crow_core.INTERRUPT.clear()
+
+    def _restore(self) -> None:
+        for gate in self.gates:      # a blocked fake thread outliving its test
+            gate.set()               # would hold the next test's registry
+        (crow_core._post_stream, crow_core.delegate_target,
+         crow_core.SESSION_DIR) = self._real
+        crow_core.forget_subtasks()
+        crow_core.INTERRUPT.clear()
+
+    def _serve(self, text: str = "RESULT", gate: "threading.Event | None" = None,
+               fail: "str | None" = None) -> None:
+        chunks = [json.dumps({"choices": [{"delta": {"content": text}}]}),
+                  json.dumps({"choices": [],
+                              "timings": {"predicted_n": 5, "prompt_n": 11}})]
+
+        def fake(url, body, key, timeout, extra=None):
+            if gate is not None:
+                gate.wait(10)
+            self.bodies.append(body)
+            if fail:
+                raise crow_core.CrowError(fail)
+            for chunk in chunks:
+                yield chunk
+
+        crow_core._post_stream = fake
+
+    def _wait_settled(self, ident: str) -> None:
+        thread = crow_core.SUBTASKS[ident].thread
+        thread.join(10)
+        self.assertFalse(thread.is_alive(), "the subtask thread never finished")
+
+    # ---- the three are part of the shipped table
+
+    def test_the_three_are_built_in_and_survive_the_mcp_rebuild(self):
+        builtin = [t["function"]["name"] for t in crow_core.BUILTIN_TOOLS]
+        for name in ("delegate", "subtasks", "collect"):
+            self.assertIn(name, builtin)
+            self.assertIn(name, crow_core.TOOL_IMPL)
+        self.assertEqual(crow_core.TOOL_CLASS["delegate"], "network")
+        self.assertEqual(crow_core.TOOL_CLASS["subtasks"], "reading")
+        self.assertEqual(crow_core.TOOL_CLASS["collect"], "reading")
+        # The rebuild drops everything above the built-in floor and only
+        # `mcp_`-prefixed registry names; the three must still stand after.
+        crow_core.mcp_apply()
+        for name in ("delegate", "subtasks", "collect"):
+            self.assertIn(name, crow_core.TOOL_IMPL)
+            self.assertIn(name, [t["function"]["name"] for t in crow_core.TOOLS])
+
+    # ---- delegate returns first, the work finishes later
+
+    def test_delegate_returns_before_the_subtask_finishes(self):
+        gate = threading.Event()
+        self.gates.append(gate)
+        self._serve("THE ANSWER", gate=gate)
+        answer = crow_core.tool_delegate(task="count the pandas")
+        self.assertIn("d1", answer)
+        self.assertIn("running", answer)
+        self.assertEqual(crow_core.SUBTASKS["d1"].status, "running")
+        gate.set()
+        collected = crow_core.tool_collect(id="d1")
+        self.assertIn("THE ANSWER", collected)
+        self.assertIn("d1", collected)
+        self.assertFalse(collected.startswith("error: "))
+        sub = crow_core.SUBTASKS["d1"]
+        self.assertEqual(sub.status, "done")
+        self.assertEqual(sub.tokens, 16)      # prompt_n 11 + predicted_n 5
+        self.assertTrue(sub.collected)
+
+    def test_collect_all_returns_every_uncollected_subtask_once(self):
+        self._serve("ONE OF TWO")
+        crow_core.tool_delegate(task="first")
+        crow_core.tool_delegate(task="second")
+        self._wait_settled("d1")
+        self._wait_settled("d2")
+        collected = crow_core.tool_collect()
+        self.assertIn("d1", collected)
+        self.assertIn("d2", collected)
+        again = crow_core.tool_collect()
+        self.assertIn("already collected", again)
+
+    # ---- the refusals, spelled out (negative probes)
+
+    def test_the_refusals_are_sentences_with_a_next_step(self):
+        self.assertEqual(crow_core.tool_delegate(task="  "),
+                         "error: delegate needs a task")
+        self.assertTrue(crow_core.tool_collect()
+                        .startswith("error: nothing delegated"))
+        self._serve()
+        crow_core.tool_delegate(task="exists")
+        self._wait_settled("d1")
+        self.assertTrue(crow_core.tool_collect(id="d9")
+                        .startswith("error: no subtask d9"))
+
+    def test_a_spot_problem_is_the_delegate_answer(self):
+        crow_core.delegate_target = lambda doc=None: (None, "no key anywhere")
+        self.assertEqual(crow_core.tool_delegate(task="x"),
+                         "error: no key anywhere")
+
+    # ---- the request a subtask sends
+
+    def test_the_subtask_request_declares_no_tools_and_carries_the_context(self):
+        self._serve()
+        crow_core.tool_delegate(task="the ask", context="the background")
+        self._wait_settled("d1")
+        body = self.bodies[0]
+        self.assertNotIn("tools", body)
+        self.assertEqual(body["model"], "unit/model:free")
+        self.assertEqual(body["max_tokens"], crow_core.REMOTE_MAX_TOKENS)
+        self.assertEqual(len(body["messages"]), 1)
+        self.assertEqual(body["messages"][0]["role"], "user")
+        self.assertEqual(body["messages"][0]["content"],
+                         "the background\n\nthe ask")
+        # NEGATIVE: an ordinary turn still declares the module list -- absence
+        # is the subtask's property, not a new default.
+        conversation = crow_core.Conversation()
+        conversation.append("user", "hi")
+        crow_core.stream_reply(conversation, base_url="http://x/v1",
+                               model="m", api_key="k", temperature=0.0,
+                               timeout=1.0)
+        self.assertIs(self.bodies[-1]["tools"], crow_core.TOOLS)
+
+    # ---- the race the parameter exists for
+
+    def test_the_parent_turn_state_survives_a_subtask(self):
+        crow_core._READ.add("the-parents-read-permission")
+        try:
+            self._serve()
+            crow_core.tool_delegate(task="beside the turn")
+            self._wait_settled("d1")
+            self.assertIn("the-parents-read-permission", crow_core._READ)
+            self.assertEqual(crow_core.SUBTASKS["d1"].status, "done")
+            # NEGATIVE: a turn that OWNS the state still clears it -- the guard
+            # protects the parent, it does not switch the clearing off.
+            conversation = crow_core.Conversation()
+            conversation.append("user", "hi")
+            crow_core.run_turn(conversation, base_url="http://x/v1", model="m",
+                               api_key="k", temperature=0.0, top_p=1.0,
+                               min_p=0.0, timeout=1.0)
+            self.assertFalse(crow_core._READ)
+        finally:
+            crow_core._READ.clear()
+
+    def test_a_subtask_stops_on_the_flag_but_leaves_it_standing(self):
+        self._serve()
+        crow_core.INTERRUPT.set()
+        crow_core.tool_delegate(task="doomed")
+        self._wait_settled("d1")
+        self.assertTrue(crow_core.INTERRUPT.is_set(),
+                        "the subtask consumed a Ctrl+C that belongs to the "
+                        "turn the user is watching")
+        self.assertEqual(crow_core.SUBTASKS["d1"].status, "interrupted")
+        crow_core.INTERRUPT.clear()
+        answer = crow_core.tool_collect()
+        self.assertTrue(answer.startswith("error: "))
+        self.assertIn("interrupted", answer)
+
+    def test_a_remote_usage_block_counts_where_timings_are_absent(self):
+        """MEASURED 2026-08-27 live over OpenRouter: a remote endpoint sends
+        `usage.total_tokens` and no llama.cpp timings split, so a subtask that
+        only read the split counted 0 tok. The split still wins when both
+        arrive -- it is the finer answer."""
+        chunks = [json.dumps({"choices": [{"delta": {"content": "X"}}]}),
+                  json.dumps({"choices": [], "usage": {"total_tokens": 371}})]
+
+        def fake(url, body, key, timeout, extra=None):
+            for chunk in chunks:
+                yield chunk
+
+        crow_core._post_stream = fake
+        crow_core.tool_delegate(task="count me")
+        self._wait_settled("d1")
+        self.assertEqual(crow_core.SUBTASKS["d1"].tokens, 371)
+        self.assertIn("371 tok", crow_core.tool_collect())
+
+    # ---- a failing endpoint is a sentence, not a hang
+
+    def test_a_429_comes_back_as_the_sentence(self):
+        self._serve(fail="HTTP 429 -- rate limited upstream")
+        crow_core.tool_delegate(task="throttled")
+        self._wait_settled("d1")
+        answer = crow_core.tool_collect()
+        self.assertTrue(answer.startswith("error: "))
+        self.assertIn("429", answer)
+        self.assertEqual(crow_core.SUBTASKS["d1"].status, "failed")
+
+    # ---- the transcript in the rail's folder
+
+    def test_a_finished_subtask_writes_its_chat_file_and_a_failed_one_does_not(self):
+        self._serve("WRITTEN DOWN")
+        crow_core.tool_delegate(task="write me\nsecond line")
+        self._wait_settled("d1")
+        sub = crow_core.SUBTASKS["d1"]
+        self.assertTrue(sub.transcript, "a finished subtask left no transcript")
+        names = os.listdir(crow_core.SESSION_DIR)
+        self.assertEqual(len(names), 1)
+        self.assertTrue(names[0].startswith("chat-"))
+        self.assertIn("-sub-d1", names[0])
+        with open(sub.transcript, encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertEqual((data.get("crow_subtask") or {}).get("id"), "d1")
+        self.assertEqual(data.get("crow_title"), "write me")
+        self.assertEqual(len(data.get("messages") or []), 2)
+        # NEGATIVE: a failed subtask leaves the folder alone -- a chat file
+        # holding only the question is noise in the rail.
+        self._serve(fail="HTTP 500")
+        crow_core.tool_delegate(task="dies")
+        self._wait_settled("d2")
+        self.assertEqual(crow_core.SUBTASKS["d2"].transcript, "")
+        self.assertEqual(len(os.listdir(crow_core.SESSION_DIR)), 1)
+
+
+class TheDelegateSpotTests(unittest.TestCase):
+    """#143 E1, the resolution half: where a subtask goes, decided against the
+    providers document -- free by default, never the local slot, and every
+    refusal a sentence."""
+
+    DOC = {"active": "local",
+           "catalog": {"openrouter": {"fetched": 1, "models": [
+               {"id": "tiny/model:free", "context": 8192, "params": []},
+               {"id": "big/model:free", "context": 131072, "params": []},
+               {"id": "paid/model", "context": 200000, "params": []}]}}}
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-spot-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._real = (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE,
+                      crow_core.PROVIDER_TOKEN_FILE)
+        self.addCleanup(self._restore)
+        crow_core.PROVIDERS_FILE = os.path.join(self.dir, "providers.json")
+        crow_core.PROVIDER_KEYS_FILE = os.path.join(self.dir, "provider_keys.json")
+        crow_core.PROVIDER_TOKEN_FILE = os.path.join(self.dir, "provider_tokens.json")
+        with open(crow_core.PROVIDER_KEYS_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"openrouter": "sk-or-unit"}, fh)
+
+    def _restore(self) -> None:
+        (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE,
+         crow_core.PROVIDER_TOKEN_FILE) = self._real
+
+    def test_the_default_is_the_largest_free_model_in_the_catalogue(self):
+        spot, problem = crow_core.delegate_target(dict(self.DOC))
+        self.assertIsNone(problem)
+        self.assertEqual(spot["model"], "big/model:free")
+        self.assertEqual(spot["provider"], "openrouter")
+        self.assertTrue(spot["remote"])
+        self.assertEqual(spot["api_key"], "sk-or-unit")
+
+    def test_the_users_own_free_pick_outranks_the_biggest(self):
+        doc = dict(self.DOC)
+        doc["model"] = {"openrouter": "tiny/model:free"}
+        spot, problem = crow_core.delegate_target(doc)
+        self.assertIsNone(problem)
+        self.assertEqual(spot["model"], "tiny/model:free")
+
+    def test_a_paid_pick_is_not_a_free_default(self):
+        """NEGATIVE for `free first`: the user's active pick being paid must
+        not silently become the delegate spot -- nothing is billed without a
+        word, and the word is the `delegate` block, not the pick."""
+        doc = dict(self.DOC)
+        doc["model"] = {"openrouter": "paid/model"}
+        spot, problem = crow_core.delegate_target(doc)
+        self.assertIsNone(problem)
+        self.assertEqual(spot["model"], "big/model:free")
+
+    def test_the_spoken_word_may_name_a_paid_model(self):
+        doc = dict(self.DOC)
+        doc["delegate"] = {"provider": "openrouter", "model": "paid/model"}
+        spot, problem = crow_core.delegate_target(doc)
+        self.assertIsNone(problem)
+        self.assertEqual(spot["model"], "paid/model")
+
+    def test_the_local_slot_is_refused_even_when_written_into_the_file(self):
+        doc = dict(self.DOC)
+        doc["delegate"] = {"provider": "local", "model": "whatever"}
+        spot, problem = crow_core.delegate_target(doc)
+        self.assertIsNone(spot)
+        self.assertIn("local slot", problem)
+
+    def test_an_empty_catalogue_and_a_missing_key_are_both_sentences(self):
+        spot, problem = crow_core.delegate_target({})
+        self.assertIsNone(spot)
+        self.assertIn("no free", problem)
+        with open(crow_core.PROVIDER_KEYS_FILE, "w", encoding="utf-8") as fh:
+            json.dump({}, fh)
+        spot, problem = crow_core.delegate_target(dict(self.DOC))
+        self.assertIsNone(spot)
+        self.assertIn("no key", problem)
+
+    def test_the_setting_is_written_read_back_and_clearable(self):
+        self.assertIsNone(crow_core.delegate_target_set("openrouter",
+                                                        "big/model:free"))
+        self.assertEqual(crow_core.provider_doc().get("delegate"),
+                         {"provider": "openrouter", "model": "big/model:free"})
+        self.assertIsNone(crow_core.delegate_target_set(None))
+        self.assertNotIn("delegate", crow_core.provider_doc())
+        self.assertIn("local slot", crow_core.delegate_target_set("local", "x"))
+        self.assertIn("needs a model", crow_core.delegate_target_set("openrouter"))
+        self.assertIn("no provider", crow_core.delegate_target_set("nowhere", "x"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

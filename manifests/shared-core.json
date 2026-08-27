@@ -90,6 +90,21 @@
    "why": "#123. The FTS5 index is derived from the chat files, so it must be built by whoever can see all of them -- which is the core, not a surface. A second builder in the window would index a different set the first time either side changed where a chat is written."
   },
   {
+   "name": "tool_delegate",
+   "kind": "def",
+   "why": "#143. The fan-out is one registry in one process: a surface that started its own threads would race the core's on the delegate spot, the subtask ids and the transcript folder. The rule it enforces -- the local slot is never a delegation target -- is a core rule, not a window preference."
+  },
+  {
+   "name": "tool_subtasks",
+   "kind": "def",
+   "why": "#143. The listing reads the same registry `delegate` writes; a surface with its own idea of subtask state would show running where the core says done."
+  },
+  {
+   "name": "tool_collect",
+   "kind": "def",
+   "why": "#143. The blocking wait owns the two doors out -- the INTERRUPT flag it must never consume and the deadline that turns a stalled provider into a sentence. Two waiters would be two answers to who gets the Ctrl+C."
+  },
+  {
    "name": "TOOL_IMPL",
    "kind": "binding",
    "why": "The name-to-function table. It is a dict rather than a def, which is why the manifest needs a kind at all: hanging a def predicate on it would declare it and check nothing. A second table is how one surface ends up offering six tools and the other seven."

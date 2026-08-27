@@ -636,13 +636,47 @@ TOOLS = [
          "limit": {"type": "integer",
                    "description": f"How many messages, default {SEARCH_HITS}."}},
         ["query"]),
+    # #143. THE DESCRIPTION IS THE FAN-OUT INSTRUCTION -- it is the only place
+    # the model learns that delegating and collecting are two separate moments,
+    # and that the parallelism lives BETWEEN them. A description that does not
+    # say "delegate everything first, collect once" produces the serial pattern:
+    # delegate, collect, delegate, collect -- which waits exactly as long as
+    # doing the work itself.
+    _fn("delegate",
+        "Hand one task to a separate model and keep working. Returns at once "
+        "with an id; the work runs beside this conversation, on a remote model "
+        "-- never on this machine's server. The subtask sees NOTHING of this "
+        "conversation and has no tools: put everything it needs into task and "
+        "context, and give it work that is text in, text out -- research over "
+        "its own knowledge, summarising, drafting, judging. Fan out every "
+        "delegate first, keep working, then collect once at the end; results "
+        "come back only through collect.",
+        {"task": dict(_STR, description="What the subtask is to do, complete "
+                                        "in itself."),
+         "context": dict(_STR, description="Background it needs -- it cannot "
+                                           "see this conversation or ask "
+                                           "follow-up questions.")},
+        ["task"]),
+    _fn("subtasks",
+        "Where every delegated subtask of this session stands: running or "
+        "finished, seconds, tokens. Costs nothing and waits for nothing -- "
+        "check it between delegating and collecting.",
+        {}, []),
+    _fn("collect",
+        "Wait for delegated subtasks and return their results. Pass an id "
+        "from delegate, or 'all' for every subtask not collected yet. It "
+        "blocks until they finish, so delegate everything first and collect "
+        "once.",
+        {"id": dict(_STR, description="An id from delegate, or 'all'.")},
+        []),
 ]
 
-# THE TWELVE AS SHIPPED, AND THE FLOOR EVERY LATER ENTRY SITS ON. `TOOLS` grows
-# from `mcp.json` at import (see MCP_FILE), and it grows IN PLACE because
-# `crow.py` binds the value rather than the name. Keeping the built-ins under a
-# second name is what lets that rebuild be idempotent: drop everything above the
-# floor, then add. A count would do the same job and say nothing about why.
+# THE BUILT-INS AS SHIPPED -- twelve until #143 added the delegation three --
+# AND THE FLOOR EVERY LATER ENTRY SITS ON. `TOOLS` grows from `mcp.json` at
+# import (see MCP_FILE), and it grows IN PLACE because `crow.py` binds the value
+# rather than the name. Keeping the built-ins under a second name is what lets
+# that rebuild be idempotent: drop everything above the floor, then add. A count
+# would do the same job and say nothing about why.
 BUILTIN_TOOLS = tuple(TOOLS)
 
 
@@ -3720,6 +3754,13 @@ def stream_reply(
     # WHAT THIS ENDPOINT ALONE UNDERSTANDS, from `turn_routing`. None is the
     # local case and the case of every direct connection: nothing extra travels.
     routing: "dict | None" = None,
+    # #143. FALSE MEANS THE REQUEST DECLARES NO TOOLS AT ALL -- the delegation
+    # subtask's case, and only that case. Every rule about always sending
+    # `tools` is a rule about THIS machine's template and its prompt cache; a
+    # subtask runs remote, on a fresh conversation, and declaring tools to a
+    # model that must not use any invites the call this client would then have
+    # to refuse.
+    send_tools: bool = True,
     events: "ReplyEvents | None" = None,
 ) -> tuple[str, str, dict]:
     """Stream one assistant turn. Returns (text, reasoning, timings).
@@ -3770,7 +3811,6 @@ def stream_reply(
     body = {
         "model": model,
         "messages": conversation.payload(),
-        "tools": TOOLS,
         "temperature": temperature,
         # Sent explicitly rather than trusted to the server default: 0731's card
         # runs its agentic benchmarks at top_p 0.95, its generation_config.json
@@ -3790,6 +3830,12 @@ def stream_reply(
         # to the final chunk. Ignored by endpoints that do not know it.
         "timings_per_token": True,
     }
+    # THE KEY IS ABSENT, NOT EMPTY, when a subtask declines tools: `[]` is a
+    # declaration too -- this model's template renders it, and a remote endpoint
+    # may refuse it -- while an absent key is byte-identical to a client that
+    # never had tools. Every ordinary turn still sends the module list.
+    if send_tools:
+        body["tools"] = TOOLS
     if max_tokens:
         body["max_tokens"] = max_tokens
     if top_k is not None:
@@ -6442,6 +6488,14 @@ TOOL_CLASS = {
     # client owns, never the user's work. The reasoning is written out above.
     "skill": "memory",
     "session_search": "reading",
+    # #143. `delegate` is `network` by the class's own definition -- the task
+    # text leaves this machine and a stranger's text comes back. `collect` and
+    # `subtasks` are `reading`: they touch nothing but this process's own
+    # registry -- the network round trip already happened on the delegate
+    # thread, and classing the hand-over as network would gate the wrong call.
+    "delegate": "network",
+    "subtasks": "reading",
+    "collect": "reading",
 }
 
 # Which classes stop and ask, per level. A class not named here runs.
@@ -10381,6 +10435,18 @@ def run_turn(
     max_tokens: "int | None" = None,
     remote: bool = False,
     routing: "dict | None" = None,
+    # #143. Threaded through to `stream_reply`: False means the subtask case --
+    # no tools declared at all. See the parameter there for why `[]` would not do.
+    send_tools: bool = True,
+    # #143. TRUE FOR EVERY TURN A USER RUNS, FALSE ONLY ON A DELEGATION THREAD.
+    # The per-turn state this loop clears -- `_READ`, `_SEEN`, `_REFUSED`,
+    # `_MANDATED`, and the INTERRUPT flag -- is module state, owned by the ONE
+    # turn a surface runs at a time. A subtask's `run_turn` rides beside that
+    # turn on its own thread: clearing here would wipe the read-permissions of
+    # the turn that spawned it mid-round, and consuming the INTERRUPT flag would
+    # swallow a Ctrl+C meant for the turn the user is watching. A subtask still
+    # STOPS on the flag -- it just leaves it standing for its owner.
+    owns_turn_state: bool = True,
     events: "TurnEvents | None" = None,
 ) -> TurnResult:
     """Run one USER turn to its end: however many tool rounds it takes.
@@ -10441,17 +10507,21 @@ def run_turn(
     # happened before the user typed again. That is a false alarm, and a false
     # alarm on a marker is worse than no marker -- it is the one failure mode
     # that trains the reader to skip the line.
-    _READ.clear()
-    _SEEN.clear()
-    _REFUSED.clear()
-    # NOT CLEARED -- REBUILT, and from the conversation rather than this turn's
-    # line. The user's addresses accumulate: a path named two turns ago is still
-    # the place the user asked for, and forgetting it would start refusing in the
-    # middle of the very task that named it. It happens here rather than in the
-    # surfaces because a client that forgot to build the list would silently
-    # refuse everything its user typed -- the failure #98 already recorded once.
-    _MANDATED.clear()
-    _MANDATED.update(mandated_paths(conversation))
+    # #143: ONLY THE TURN THAT OWNS THE STATE CLEARS IT. A delegation thread
+    # runs no tools -- none are declared on it -- so it needs none of the four,
+    # and touching them from a second thread is the race the parameter names.
+    if owns_turn_state:
+        _READ.clear()
+        _SEEN.clear()
+        _REFUSED.clear()
+        # NOT CLEARED -- REBUILT, and from the conversation rather than this turn's
+        # line. The user's addresses accumulate: a path named two turns ago is still
+        # the place the user asked for, and forgetting it would start refusing in the
+        # middle of the very task that named it. It happens here rather than in the
+        # surfaces because a client that forgot to build the list would silently
+        # refuse everything its user typed -- the failure #98 already recorded once.
+        _MANDATED.clear()
+        _MANDATED.update(mandated_paths(conversation))
     stopped = False
     cost = TurnCost()
     budget = max_tool_rounds
@@ -10478,6 +10548,7 @@ def run_turn(
                 max_tokens=max_tokens,
                 remote=remote,
                 routing=routing,
+                send_tools=send_tools,
                 events=events.reply_events(),
             )
         except CrowError as exc:
@@ -10494,8 +10565,13 @@ def run_turn(
 
         # The generator returns quietly on an interrupt rather than raising,
         # so the flag is what tells a stopped turn from a finished one.
+        # #143: A SUBTASK STOPS ON THE FLAG BUT DOES NOT CONSUME IT. The flag
+        # belongs to the turn the user is watching; a delegation thread that
+        # cleared it first would race that turn's own check and swallow the
+        # only Ctrl+C there is.
         if INTERRUPT.is_set():
-            INTERRUPT.clear()
+            if owns_turn_state:
+                INTERRUPT.clear()
             events.turn_interrupted()
             stopped = True
             break
@@ -12080,3 +12156,453 @@ def install_font(verbose: bool = False) -> int:
             # font Windows then cannot find, and it fails silently.
             winreg.SetValueEx(k, f"{FONT_FAMILY} ({name})", 0, winreg.REG_SZ, dst)
     return 0 if done else 1
+
+
+# ---------------------------------------------------------------- #143 -----
+# DELEGATION, STAGE E1. A subtask is a TOOL CALL in the ordinary loop, not a
+# window construct: `delegate` returns at once with an id and starts a thread
+# running `run_turn` against a REMOTE spot on a fresh `Conversation`; `collect`
+# is an ordinary slow tool call that blocks until the named subtasks finish.
+# The parallelism lives BETWEEN the two calls; the sequential tool loop above
+# is untouched, and `delegate`/`collect` sit in the parent's history as normal
+# tool rows, so a restart replays them like any other call.
+#
+# THE LOCAL SLOT IS NEVER A DELEGATION TARGET. The llama-server on this box is
+# `-np 1` with a warm cache on one prefix -- parallelism is bought at a
+# provider, not taken from the card. `delegate_target` refuses `local` even
+# when somebody writes it into the file, because every aliasing of that rule
+# pays with a halved window and a cold cache -- the exact capital this client
+# lives on.
+#
+# SUBTASKS HAVE NO TOOLS IN v1, and that is a decided scope: text in, text
+# out. Executing tools for a remote free model would be a stranger with hands
+# on this machine; whether the release levels ever open that door is its own
+# decision, not a default. The request therefore declares no tools at all --
+# see `send_tools` on `stream_reply` -- and runs `execute_tools=False` behind
+# it, so even a model that hallucinates a call gets it reported, never run.
+#
+# THE REGISTRY IS THIS PROCESS'S MEMORY, NOT THE SESSION'S. Ids and results
+# live here; a restart replays the delegate/collect ROWS out of the history but
+# cannot re-enter the threads behind them, so `collect` after a restart answers
+# "no subtask" honestly rather than pretending to remember.
+
+# One subtask stream may read this long, and one collect call waits at most
+# this long before reporting where things stand instead of hanging -- a 429
+# or a stalled provider becomes a sentence, never a frozen turn.
+SUBTASK_TIMEOUT = 600.0
+COLLECT_TIMEOUT = 600.0
+_COLLECT_SLICE = 0.25
+
+# A guard against the runaway fan-out, not a budget: free-tier providers
+# throttle, and a hundred threads against one 429-happy endpoint is a hundred
+# sentences nobody asked for.
+SUBTASK_LIMIT = 16
+
+# The delegate spot defaults to the broker because it is the one provider with
+# a free tier to point at. WHICH free model is never written in code: it is
+# whatever the catalogue on disk declares -- the user's own pick when that is
+# already free, else the free entry with the largest declared window, a
+# criterion a test can hold. No catalogue, no default -- the sentence says so.
+DELEGATE_PROVIDER_DEFAULT = "openrouter"
+FREE_MODEL_SUFFIX = ":free"
+
+# What the rail may show for a subtask before anybody names it -- the same
+# width the window gives a chat title.
+SUBTASK_TITLE_MAX = 52
+
+
+def _free_model_for(name: str, doc: "dict | None" = None) -> str:
+    """The free model the default spot means, or "" when there is none.
+
+    THE USER'S OWN PICK WINS WHEN IT IS FREE: they chose it, and choosing a
+    different free model over it would be taste. Otherwise the catalogue's
+    free entry with the largest declared window -- measurable, so a test can
+    pin the rule -- and "" when the catalogue is empty or lists nothing free.
+    """
+    picked = provider_model_for(name, doc)
+    if picked.endswith(FREE_MODEL_SUFFIX):
+        return picked
+    free = [m for m in provider_models(name, doc)
+            if str(m.get("id") or "").endswith(FREE_MODEL_SUFFIX)]
+    if not free:
+        return ""
+    return str(max(free, key=lambda m: int(m.get("context") or 0)).get("id"))
+
+
+def delegate_target(doc: "dict | None" = None) -> "tuple[dict | None, str | None]":
+    """Where a subtask goes: `(spot, None)` or `(None, why not)`.
+
+    THE SAME SHAPE `provider_endpoint` RETURNS and always the remote branch of
+    it, because the local slot is refused above everything else. The setting is
+    `providers.json`'s `delegate` block -- `{"provider": ..., "model": ...}` --
+    and its absence means the free default, not an error: nothing is billed
+    without a word, so the default must be a model that bills nothing.
+    """
+    if doc is None:
+        doc = provider_doc()
+    block = doc.get("delegate") if isinstance(doc.get("delegate"), dict) else {}
+    name = str(block.get("provider") or "") or DELEGATE_PROVIDER_DEFAULT
+    if name == LOCAL_PROVIDER:
+        return None, ("the local slot is never a delegation target -- "
+                      "parallelism is bought at a provider, not from the card")
+    spec = PROVIDERS.get(name)
+    if spec is None:
+        return None, "no provider named %r for the delegate spot" % name
+    model = str(block.get("model") or "") or _free_model_for(name, doc)
+    if not model:
+        return None, ("no delegate spot: no free %s model in the catalogue -- "
+                      "set one, or refresh the model list" % spec["label"])
+    credential, kind, problem = provider_credential(name)
+    if problem:
+        return None, problem
+    if not credential and spec.get("needs_key"):
+        return None, ("%s has no key and no sign-in -- the delegate spot "
+                      "needs one" % spec["label"])
+    return ({"provider": name, "label": spec["label"], "remote": True,
+             "base_url": spec["base_url"], "model": model,
+             "api_key": credential,
+             "headers": provider_headers(name, kind, credential),
+             "transport": spec.get("transport") or TRANSPORT_CHAT,
+             "routing": _routing_copy(spec.get("routing") or {}),
+             "sticky": bool(spec.get("sticky")),
+             "filter": bool(spec.get("filter")),
+             "params": provider_params(name, model, doc)}, None)
+
+
+def delegate_target_set(provider: "str | None", model: str = "") -> "str | None":
+    """Pin or clear the delegate spot. The reason it failed, or None.
+
+    CLEARING RESTORES THE FREE DEFAULT rather than switching delegation off:
+    off is not a state the mechanism has -- a spot that cannot be resolved
+    already answers every `delegate` with its sentence.
+    """
+    doc = provider_doc()
+    if not provider:
+        doc.pop("delegate", None)
+        return provider_write(doc)
+    if provider == LOCAL_PROVIDER:
+        return ("the local slot is never a delegation target -- "
+                "parallelism is bought at a provider, not from the card")
+    if provider not in PROVIDERS:
+        return "no provider named %r" % provider
+    if not model:
+        return "the delegate spot needs a model"
+    doc["delegate"] = {"provider": provider, "model": model}
+    return provider_write(doc)
+
+
+class Subtask:
+    """One delegated task: what was asked, who ran it, what came back.
+
+    `status` MOVES EXACTLY ONCE, from "running" to one of "done", "failed" or
+    "interrupted", and it moves LAST -- after the result, the clock and the
+    failure text are in place -- so a reader that sees the final state sees
+    the whole record. Waiting is done on the THREAD, never by polling status:
+    the thread's end is the fact, the status is the report.
+    """
+
+    def __init__(self, ident: str, task: str, context: str, spot: dict) -> None:
+        self.ident = ident
+        self.task = task
+        self.context = context
+        self.model = spot["model"]
+        self.label = spot["label"]
+        self.status = "running"
+        self.result = ""
+        self.failure = ""
+        self.started = time.monotonic()
+        self.seconds = 0.0
+        self.prompt_tokens = 0
+        self.reply_tokens = 0
+        # The endpoint's own `usage.total_tokens`. A remote endpoint reports
+        # THIS and not llama.cpp's timings split -- measured live 2026-08-27,
+        # nemotron over OpenRouter: prompt_n/predicted_n absent, total 199 --
+        # so without it every remote subtask would count 0 tok.
+        self.usage_tokens = 0
+        self.transcript = ""
+        self.collected = False
+        self.thread: "threading.Thread | None" = None
+
+    @property
+    def tokens(self) -> int:
+        """The split when the endpoint gave one, its own total otherwise."""
+        split = self.prompt_tokens + self.reply_tokens
+        return split if split else self.usage_tokens
+
+    def clock(self) -> float:
+        """Seconds so far for a running subtask, the final figure after."""
+        if self.status == "running":
+            return time.monotonic() - self.started
+        return self.seconds
+
+    def head(self, limit: int = SUBTASK_TITLE_MAX) -> str:
+        lines = self.task.strip().splitlines()
+        return (lines[0] if lines else "")[:limit]
+
+
+# The registry and its lock. The dict preserves delegation order, which is the
+# order every listing shows.
+SUBTASKS: "dict[str, Subtask]" = {}
+_SUBTASK_LOCK = threading.Lock()
+_SUBTASK_SEQ = 0
+
+
+def forget_subtasks() -> None:
+    """Tests, and a surface that starts a fresh session over this process.
+
+    THE THREADS ARE NOT JOINED. They are daemons on their own conversations;
+    a hung stream must not hang a caller that only wants a clean registry, and
+    a finished one has nothing left to do.
+    """
+    global _SUBTASK_SEQ
+    with _SUBTASK_LOCK:
+        SUBTASKS.clear()
+        _SUBTASK_SEQ = 0
+
+
+class _SubtaskEvents(TurnEvents):
+    """The silent sink, plus the two facts the registry needs afterwards."""
+
+    def __init__(self) -> None:
+        self.failed = ""
+        self.interrupted = False
+
+    def turn_failed(self, message: str) -> None:
+        self.failed = message
+
+    def turn_interrupted(self) -> None:
+        self.interrupted = True
+
+
+def _subtask_prompt(task: str, context: str) -> str:
+    """Context above, ask below: the last thing a model reads is the ask."""
+    if not context.strip():
+        return task
+    return "%s\n\n%s" % (context.rstrip(), task)
+
+
+def _subtask_close(sub: Subtask, status: str, failure: str = "") -> None:
+    """The one place a subtask's record is finished. Status moves LAST."""
+    sub.seconds = time.monotonic() - sub.started
+    sub.failure = failure
+    sub.status = status
+
+
+def _subtask_transcript(sub: Subtask, conversation: Conversation,
+                        spot: dict, context_tokens: int) -> str:
+    """Write the subtask's own chat file, or "" when that failed.
+
+    ONE WRITER PER FILE: this runs on the subtask's own thread, on a path no
+    other writer can land on because the id is in the name. It is a
+    `chat-*.json` in the session folder -- the exact place and prefix the rail
+    lists -- so a finished subtask appears there without anybody indexing it,
+    and E2 can tell it from an ordinary chat by the `crow_subtask` block.
+
+    WRITTEN THROUGH `save_session`, never by hand: that function owns the
+    format key, the gate and the fingerprint. The two keys added afterwards
+    ride on the rule the save itself states -- a reader takes the keys it
+    knows and ignores the rest -- and the read-back at the end is the same
+    contract `provider_write` keeps: a writer that never reads has only proved
+    that `json.dump` did not raise.
+    """
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    path = os.path.join(SESSION_DIR, "chat-%s-sub-%s.json" % (stamp, sub.ident))
+    extra = 2
+    while os.path.exists(path):
+        path = os.path.join(SESSION_DIR, "chat-%s-sub-%s-%d.json"
+                            % (stamp, sub.ident, extra))
+        extra += 1
+    try:
+        os.makedirs(SESSION_DIR, exist_ok=True)
+        if save_session(conversation, spot["base_url"], context_tokens,
+                        path=path, with_kv=False, model=spot["model"]) is None:
+            return ""
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        data["crow_title"] = sub.head()
+        data["crow_subtask"] = {"id": sub.ident, "task": sub.task,
+                                "model": spot["model"],
+                                "seconds": round(time.monotonic() - sub.started, 1),
+                                "tokens": sub.tokens}
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        with open(path, encoding="utf-8") as fh:
+            written = json.load(fh)
+        if (written.get("crow_subtask") or {}).get("id") != sub.ident:
+            return ""
+    except Exception:  # noqa: BLE001 - a lost transcript must not lose the result
+        return ""
+    return path
+
+
+def _run_subtask(sub: Subtask, spot: dict) -> None:
+    """The whole life of one subtask, on its own thread.
+
+    EVERYTHING ENDS IN `_subtask_close`. A thread that dies with an exception
+    leaves a subtask "running" forever and a `collect` waiting on a corpse;
+    catching everything and writing the record is what makes the registry a
+    place `collect` can trust.
+
+    `owns_turn_state=False` IS THE WHOLE REASON THIS MAY RUN BESIDE A TURN:
+    the parent's read-permissions and its Ctrl+C flag stay the parent's. See
+    the parameter on `run_turn`.
+    """
+    events = _SubtaskEvents()
+    conversation = Conversation()
+    conversation.append("user", _subtask_prompt(sub.task, sub.context))
+    try:
+        sampling = sampling_for(spot["model"])
+        turn = run_turn(
+            conversation, base_url=spot["base_url"], model=spot["model"],
+            api_key=spot["api_key"],
+            temperature=sampling["temperature"], top_p=sampling["top_p"],
+            min_p=sampling["min_p"], top_k=sampling.get("top_k"),
+            reasoning_effort=None, timeout=SUBTASK_TIMEOUT,
+            extra_headers=spot.get("headers") or None,
+            transport=spot.get("transport") or TRANSPORT_CHAT,
+            max_tokens=REMOTE_MAX_TOKENS, remote=True,
+            routing=turn_routing(spot, None),
+            execute_tools=False, send_tools=False, owns_turn_state=False,
+            events=events)
+    except Exception as exc:  # noqa: BLE001 - a thread must not die silently
+        _subtask_close(sub, "failed", "%s: %s" % (type(exc).__name__, exc))
+        return
+    reply = ""
+    for message in reversed(conversation.payload()):
+        if message.get("role") == "assistant":
+            reply = message_text(message.get("content") or "")
+            break
+    sub.prompt_tokens = turn.cost.prefilled
+    sub.reply_tokens = turn.cost.decoded
+    sub.usage_tokens = turn.context_tokens
+    if events.interrupted:
+        _subtask_close(sub, "interrupted", "interrupted")
+        return
+    if turn.stopped or not reply.strip():
+        _subtask_close(sub, "failed", events.failed or "the model answered nothing")
+        return
+    sub.result = reply
+    sub.transcript = _subtask_transcript(sub, conversation, spot,
+                                         turn.context_tokens)
+    _subtask_close(sub, "done")
+
+
+def tool_delegate(task: str = "", context: str = "", **_) -> str:
+    global _SUBTASK_SEQ
+    task = (task or "").strip()
+    if not task:
+        return "error: delegate needs a task"
+    spot, problem = delegate_target()
+    if problem:
+        return "error: %s" % problem
+    with _SUBTASK_LOCK:
+        running = sum(1 for s in SUBTASKS.values() if s.status == "running")
+        if running >= SUBTASK_LIMIT:
+            return ("error: %d subtasks are already running -- collect before "
+                    "delegating more" % SUBTASK_LIMIT)
+        _SUBTASK_SEQ += 1
+        ident = "d%d" % _SUBTASK_SEQ
+        sub = Subtask(ident, task, (context or "").strip(), spot)
+        SUBTASKS[ident] = sub
+    # STARTED OUTSIDE THE LOCK: the thread's first act is network I/O, and
+    # nothing it touches needs the registry lock to be held for it.
+    thread = threading.Thread(target=_run_subtask, args=(sub, spot), daemon=True)
+    sub.thread = thread
+    thread.start()
+    return ("%s delegated to %s -- running. It sees only what you sent. "
+            "collect('%s') or collect('all') returns the result; subtasks() "
+            "shows where things stand." % (ident, spot["model"], ident))
+
+
+def tool_subtasks(**_) -> str:
+    with _SUBTASK_LOCK:
+        subs = list(SUBTASKS.values())
+    if not subs:
+        return "nothing delegated in this session"
+    lines = []
+    for sub in subs:
+        state = sub.status + (", collected" if sub.collected else "")
+        # ASCII on purpose, like the cost line: a tool result is printed on
+        # whatever console the terminal has, and cp1252 turns a middle dot
+        # into mojibake.
+        lines.append("%s %s | %s | %.1f s | %s tok -- %s"
+                     % (sub.ident, state, sub.model, sub.clock(),
+                        format(sub.tokens, ","), sub.head()))
+    return "\n".join(lines)
+
+
+def _collect_wait(picked: "list[Subtask]") -> "str | None":
+    """Wait for the named subtasks, or say why the waiting stopped.
+
+    A POLLING JOIN, NOT A BARE ONE, for two doors out that a blocked call must
+    keep open: the INTERRUPT flag -- checked, NEVER cleared, it belongs to the
+    turn this call runs inside -- and the deadline that turns a stalled
+    provider into a sentence instead of a frozen turn. Ctrl+C lands here as
+    KeyboardInterrupt when the process gets the signal mid-join; it is
+    answered, not re-raised, because a tool result is recoverable and a killed
+    turn costs the whole prefix.
+    """
+    deadline = time.monotonic() + COLLECT_TIMEOUT
+    for sub in picked:
+        thread = sub.thread
+        while thread is not None and thread.is_alive():
+            if INTERRUPT.is_set():
+                return ("error: interrupted while waiting -- the subtasks run "
+                        "on; collect again for what is still out")
+            if time.monotonic() >= deadline:
+                return ("error: still running after %.0f s -- subtasks() shows "
+                        "the state; collect again to keep waiting"
+                        % COLLECT_TIMEOUT)
+            try:
+                thread.join(_COLLECT_SLICE)
+            except KeyboardInterrupt:
+                return ("error: interrupted while waiting -- the subtasks run "
+                        "on; collect again for what is still out")
+    return None
+
+
+def tool_collect(id: str = "all", **_) -> str:
+    wanted = (id or "all").strip()
+    with _SUBTASK_LOCK:
+        subs = list(SUBTASKS.values())
+    if not subs:
+        return "error: nothing delegated -- call delegate first"
+    if wanted == "all":
+        picked = [s for s in subs if not s.collected]
+        if not picked:
+            return "every subtask is already collected -- subtasks() lists them"
+    else:
+        with _SUBTASK_LOCK:
+            sub = SUBTASKS.get(wanted)
+        if sub is None:
+            return ("error: no subtask %s -- subtasks() lists what there is"
+                    % wanted)
+        picked = [sub]
+    problem = _collect_wait(picked)
+    if problem:
+        return problem
+    parts = []
+    for sub in picked:
+        sub.collected = True
+        if sub.status == "done":
+            parts.append("== %s | %s | %.1f s | %s tok\n%s"
+                         % (sub.ident, sub.model, sub.seconds,
+                            format(sub.tokens, ","), sub.result.strip()))
+        else:
+            parts.append("== %s %s after %.1f s -- %s"
+                         % (sub.ident, sub.status, sub.seconds, sub.failure))
+    out = "\n\n".join(parts)
+    # THE PREFIX IS THE MODEL'S RECOVERY SIGNAL, so it is earned only when
+    # there is nothing to work with: one result among failures is a result.
+    if not any(s.status == "done" for s in picked):
+        return "error: " + out
+    return out
+
+
+# EVERY DECLARED NAME GETS AN IMPLEMENTATION -- the sentence `mcp_apply`
+# carries. Late, because the implementations need `run_turn` and the provider
+# registry above; `mcp_apply` deletes only `mcp_`-prefixed names on a rebuild,
+# so these three survive every one of them.
+TOOL_IMPL.update({"delegate": tool_delegate,
+                  "subtasks": tool_subtasks,
+                  "collect": tool_collect})
