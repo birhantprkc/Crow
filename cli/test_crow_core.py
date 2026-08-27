@@ -9493,6 +9493,58 @@ class TheModelDelegatesSubtasksTests(unittest.TestCase):
         self.assertIn("429", answer)
         self.assertEqual(crow_core.SUBTASKS["d1"].status, "failed")
 
+    # ---- #143 E2: Stop reaches the subtasks, and the view feeds the window
+
+    def test_stop_reaches_a_running_subtask_and_only_a_running_one(self):
+        """`cancel_subtasks` marks what runs; the thread then drops the
+        result, writes no transcript and closes the record as interrupted.
+        NEGATIVE half: one that finished before Stop keeps everything --
+        rewriting a finished subtask would be fiction."""
+        self._serve("TOO LATE")
+        crow_core.tool_delegate(task="finishes first")
+        self._wait_settled("d1")
+        gate = threading.Event()
+        self.gates.append(gate)
+        self._serve("DROPPED", gate=gate)
+        crow_core.tool_delegate(task="gets stopped")
+        self.assertEqual(crow_core.cancel_subtasks(), 1)
+        gate.set()
+        self._wait_settled("d2")
+        done, killed = crow_core.SUBTASKS["d1"], crow_core.SUBTASKS["d2"]
+        self.assertEqual(done.status, "done")
+        self.assertEqual(done.result.strip(), "TOO LATE")
+        self.assertEqual(killed.status, "interrupted")
+        self.assertEqual(killed.result, "")
+        self.assertEqual(killed.transcript, "")
+        shelf = os.path.join(crow_core.SESSION_DIR, "subtasks")
+        self.assertEqual(len(os.listdir(shelf)), 1)
+
+    def test_the_view_is_what_a_window_draws(self):
+        """`subtask_view` carries the result for a finished subtask, the
+        failure sentence for a dead one, and nothing while it runs."""
+        gate = threading.Event()
+        self.gates.append(gate)
+        self._serve("VIEWED", gate=gate)
+        crow_core.tool_delegate(task="alpha\nsecond line")
+        row = crow_core.subtask_view()[0]
+        self.assertEqual((row["i"], row["st"], row["res"]),
+                         ("d1", "running", ""))
+        self.assertEqual(row["task"], "alpha")
+        self.assertTrue(crow_core.subtasks_running())
+        gate.set()
+        self._wait_settled("d1")
+        row = crow_core.subtask_view()[0]
+        self.assertEqual(row["st"], "done")
+        self.assertIn("VIEWED", row["res"])
+        self.assertTrue(row["path"])
+        self.assertFalse(crow_core.subtasks_running())
+        self._serve(fail="HTTP 500 boom")
+        crow_core.tool_delegate(task="dies")
+        self._wait_settled("d2")
+        row = [r for r in crow_core.subtask_view() if r["i"] == "d2"][0]
+        self.assertEqual(row["st"], "failed")
+        self.assertIn("500", row["res"])
+
     # ---- the transcript in the rail's folder
 
     def test_a_finished_subtask_writes_its_chat_file_and_a_failed_one_does_not(self):
@@ -9501,22 +9553,29 @@ class TheModelDelegatesSubtasksTests(unittest.TestCase):
         self._wait_settled("d1")
         sub = crow_core.SUBTASKS["d1"]
         self.assertTrue(sub.transcript, "a finished subtask left no transcript")
-        names = os.listdir(crow_core.SESSION_DIR)
+        shelf = os.path.join(crow_core.SESSION_DIR, "subtasks")
+        names = os.listdir(shelf)
         self.assertEqual(len(names), 1)
         self.assertTrue(names[0].startswith("chat-"))
         self.assertIn("-sub-d1", names[0])
+        # NEGATIVE, robins Wurzelchat-Regel vom 2026-08-27: the transcript
+        # never lies flat in the session folder, because everything flat named
+        # `chat-*.json` IS a root chat to the rail.
+        flat = [n for n in os.listdir(crow_core.SESSION_DIR)
+                if n.startswith("chat-")]
+        self.assertEqual(flat, [])
         with open(sub.transcript, encoding="utf-8") as fh:
             data = json.load(fh)
         self.assertEqual((data.get("crow_subtask") or {}).get("id"), "d1")
         self.assertEqual(data.get("crow_title"), "write me")
         self.assertEqual(len(data.get("messages") or []), 2)
-        # NEGATIVE: a failed subtask leaves the folder alone -- a chat file
-        # holding only the question is noise in the rail.
+        # NEGATIVE: a failed subtask leaves the shelf alone -- a chat file
+        # holding only the question is noise.
         self._serve(fail="HTTP 500")
         crow_core.tool_delegate(task="dies")
         self._wait_settled("d2")
         self.assertEqual(crow_core.SUBTASKS["d2"].transcript, "")
-        self.assertEqual(len(os.listdir(crow_core.SESSION_DIR)), 1)
+        self.assertEqual(len(os.listdir(shelf)), 1)
 
 
 class TheDelegateSpotTests(unittest.TestCase):

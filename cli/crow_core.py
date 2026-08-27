@@ -12321,6 +12321,11 @@ class Subtask:
         self.usage_tokens = 0
         self.transcript = ""
         self.collected = False
+        # #143 E2. Set by `cancel_subtasks` when the user presses Stop. The
+        # stream cannot be torn out from under its thread, so the mark is a
+        # promise about the RECORD: whatever the network still delivers is
+        # dropped, the status ends "interrupted", no transcript is written.
+        self.cancelled = False
         self.thread: "threading.Thread | None" = None
 
     @property
@@ -12393,10 +12398,16 @@ def _subtask_transcript(sub: Subtask, conversation: Conversation,
     """Write the subtask's own chat file, or "" when that failed.
 
     ONE WRITER PER FILE: this runs on the subtask's own thread, on a path no
-    other writer can land on because the id is in the name. It is a
-    `chat-*.json` in the session folder -- the exact place and prefix the rail
-    lists -- so a finished subtask appears there without anybody indexing it,
-    and E2 can tell it from an ordinary chat by the `crow_subtask` block.
+    other writer can land on because the id is in the name.
+
+    IN ITS OWN SHELF, `subtasks/` UNDER THE SESSION FOLDER, AND NEVER FLAT.
+    robin, 2026-08-27, at the window: "Subtasks bekommen keinen eigenen
+    Wurzelchat, nur Subchats unter dem jeweiligen Wurzelchat". The rail lists
+    every flat `chat-*.json` as a root chat, so a transcript written there IS
+    a root chat, drawn twice and openable as a live conversation -- measured
+    tonight as exactly that structure break. The subfolder is invisible to
+    the chat listing; the transcript is reached through the subtask rows and
+    nothing else.
 
     WRITTEN THROUGH `save_session`, never by hand: that function owns the
     format key, the gate and the fingerprint. The two keys added afterwards
@@ -12405,15 +12416,16 @@ def _subtask_transcript(sub: Subtask, conversation: Conversation,
     contract `provider_write` keeps: a writer that never reads has only proved
     that `json.dump` did not raise.
     """
+    shelf = os.path.join(SESSION_DIR, "subtasks")
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    path = os.path.join(SESSION_DIR, "chat-%s-sub-%s.json" % (stamp, sub.ident))
+    path = os.path.join(shelf, "chat-%s-sub-%s.json" % (stamp, sub.ident))
     extra = 2
     while os.path.exists(path):
-        path = os.path.join(SESSION_DIR, "chat-%s-sub-%s-%d.json"
+        path = os.path.join(shelf, "chat-%s-sub-%s-%d.json"
                             % (stamp, sub.ident, extra))
         extra += 1
     try:
-        os.makedirs(SESSION_DIR, exist_ok=True)
+        os.makedirs(shelf, exist_ok=True)
         if save_session(conversation, spot["base_url"], context_tokens,
                         path=path, with_kv=False, model=spot["model"]) is None:
             return ""
@@ -12466,6 +12478,12 @@ def _run_subtask(sub: Subtask, spot: dict) -> None:
             events=events)
     except Exception as exc:  # noqa: BLE001 - a thread must not die silently
         _subtask_close(sub, "failed", "%s: %s" % (type(exc).__name__, exc))
+        return
+    # #143 E2: A CANCELLED SUBTASK DELIVERS NOTHING. The user pressed Stop
+    # while this ran; whatever the endpoint still returned is dropped here,
+    # before the result or a transcript could make it look alive.
+    if sub.cancelled:
+        _subtask_close(sub, "interrupted", "stopped by the user")
         return
     reply = ""
     for message in reversed(conversation.payload()):
@@ -12597,6 +12615,58 @@ def tool_collect(id: str = "all", **_) -> str:
     if not any(s.status == "done" for s in picked):
         return "error: " + out
     return out
+
+
+def subtask_view() -> "list[dict]":
+    """What a surface draws for the delegation state, one dict per subtask.
+
+    THE REGISTRY SPEAKS ONCE, HERE. The window's cards, its rail children and
+    its chip all read this list; a surface with its own idea of subtask state
+    would show running where the registry says done. `res` is the RESULT for a
+    finished subtask and the FAILURE SENTENCE for a dead one -- both are what
+    the reader needs behind the fold -- and empty while it runs.
+    """
+    with _SUBTASK_LOCK:
+        subs = list(SUBTASKS.values())
+    out = []
+    for sub in subs:
+        if sub.status == "done":
+            res = sub.result
+        elif sub.status == "running":
+            res = ""
+        else:
+            res = sub.failure
+        out.append({"i": sub.ident, "task": sub.head(), "model": sub.model,
+                    "st": sub.status, "s": round(sub.clock(), 1),
+                    "tok": sub.tokens, "res": res, "path": sub.transcript,
+                    "collected": sub.collected})
+    return out
+
+
+def subtasks_running() -> bool:
+    """Whether anything delegated is still out."""
+    with _SUBTASK_LOCK:
+        return any(s.status == "running" for s in SUBTASKS.values())
+
+
+def cancel_subtasks() -> int:
+    """Stop reaches the subtasks too (#143 E2). Returns how many were marked.
+
+    THE MARK IS THE KILL, NOT THE THREAD'S DEATH. A stream blocked in a socket
+    read cannot be interrupted from outside; what CAN be promised is that a
+    cancelled subtask delivers nothing -- `_run_subtask` drops the result,
+    writes no transcript and closes the record as "interrupted". Only running
+    subtasks are marked: one that finished before Stop was pressed DID finish,
+    and rewriting that would be fiction.
+    """
+    marked = 0
+    with _SUBTASK_LOCK:
+        subs = list(SUBTASKS.values())
+    for sub in subs:
+        if sub.status == "running":
+            sub.cancelled = True
+            marked += 1
+    return marked
 
 
 # EVERY DECLARED NAME GETS AN IMPLEMENTATION -- the sentence `mcp_apply`

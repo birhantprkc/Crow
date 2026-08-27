@@ -449,7 +449,10 @@ def rail_width_setting() -> int:
 # Zug stand auf exakt 260. Der Vorgaenger (380, dann #138c "halbe Flaeche")
 # entschied die Startbreite fuer ihn und lag zweimal daneben; wer mehr Panel
 # will, zieht den Griff, und DIESE Entscheidung bleibt gespeichert.
-CODE_MIN, CODE_MAX, CODE_DEFAULT = 260, 720, 260
+# CODE_MAX war 720; robin am 2026-08-27: "Codepanel maximale Breite -15%" --
+# 720 * 0,85 = 612. Die Seite klemmt dieselbe Geste ein zweites Mal, siehe
+# codeDrag; beide Kopien tragen denselben Wert.
+CODE_MIN, CODE_MAX, CODE_DEFAULT = 260, 612, 260
 
 # WIEVIEL EINER ANTWORT DAS PANEL ZEIGT. Der Kern reicht sie ganz herueber --
 # `tool_result` sagt im eigenen Docstring, dass die Menge eine Entscheidung des
@@ -521,6 +524,10 @@ PAGE = r"""<!doctype html>
   --dim:#a3a3a6; --dimmer:#6f6f73;
   --ok:#4ec98f; --warn:#e3b341; --bad:#f0655a;
   --gold:#e5c04b; --bad-text:#ffd9d4;
+  /* #143. Delegation is its own channel and wears the logo cyan -- cards, rail
+     children and the chip all draw from this ONE name. Written once, in the
+     base palette: the themed roots inherit it, so every theme carries it. */
+  --sub:#39c6d8;
   --mark:var(--text-hi); --mark-o:var(--text-hi);
   --text:#ffffff; --text-strong:#ffffff; --text-soft:#c9c9cc;
   --text-faint:#9a9a9e; --text-hi:#ffffff; --text-hover:#ffffff;
@@ -570,6 +577,9 @@ PAGE = r"""<!doctype html>
   --dim:#5b6472; --dimmer:#8b93a1;
   --ok:#12855a; --warn:#8a6400; --bad:#c0362b;
   --gold:#8a6400; --bad-text:#8c241b;
+  /* #143. The delegation channel, darkened the way every accent is here:
+     the logo cyan reads as haze on white. */
+  --sub:#0e7a8a;
   --mark:var(--text-hi); --mark-o:var(--text-hi);
   --text:#1a1c1f; --text-strong:#0f1114; --text-soft:#3f4550;
   --text-faint:#6b7280; --text-hi:#0f1114; --text-hover:#1a1c1f;
@@ -592,6 +602,8 @@ PAGE = r"""<!doctype html>
   --dim:#6d7b95; --dimmer:#4a566d;
   --ok:#4ec98f; --warn:#e3b341; --bad:#f0655a;
   --gold:#e5c04b; --bad-text:#ffd9d4;
+  /* #143. The logo cyan at home: this theme is the wordmark's own ground. */
+  --sub:#39c6d8;
   --mark:var(--accent); --mark-o:var(--bevel);
   --text:#cfdaea; --text-strong:#e8eef8; --text-soft:#a9bad3;
   --text-faint:#9fb0c9; --text-hi:#ffffff; --text-hover:#c8d4e8;
@@ -925,14 +937,15 @@ body[data-rail="shut"] #rail{width:0;overflow:hidden}
    it. `#body` carries the rail colour so there is something for the corner to
    cut away to, and `overflow:hidden` is what stops the flow's own background
    from squaring it off again at the first scroll. */
-/* DIE MINDESTBREITE DER MASKE, robin am 2026-08-27: die Icons duerfen NIEMALS
-   rechts aus der Eingabemaske ragen. Unter ~380 px traegt die Composer-Zeile
-   ihre unschrumpfbaren Knoepfe (#138c) nicht mehr; dieser Wert ist die harte
-   Grenze, gegen die das PANEL nachgibt (min-width:0 dort). Zusammen mit
-   min_size=(760, 520) geht die Rechnung in jedem Zustand auf:
-   236 Rail + 380 Chat = 616 < 760. Nicht wieder auf 0 senken -- min-width:0
-   hier war die Erlaubnis, den Composer zu quetschen. */
-#main{flex:1;display:flex;flex-direction:column;min-width:380px;min-height:0;
+/* DIE MINDESTBREITE DER MASKE, robin am 2026-08-27, zweite und endgueltige
+   Ansage am Abend: "DIE CHATEINGABEMASKE DARF NIEMALS KLEINER WERDEN ALS IN
+   SCREENSHOT 2." Dort trug die Chatspalte ~570 px -- Modell-Chip ungekuerzt,
+   alle Knoepfe innen. 380 liess den Chip abschneiden, sobald ein gezogenes
+   Code-Panel drueckte; 560 ist die Grenze, gegen die das PANEL nachgibt
+   (min-width:0 dort). Die Fenster-Mindestbreite unten haelt die Rechnung im
+   SCHLIMMSTEN Zustand: RAIL_MAX 520 + 560 Chat + 50 Spalten-Chrome = 1130.
+   Ein Fall prueft beide Zahlen gegeneinander -- keine darf allein wandern. */
+#main{flex:1;display:flex;flex-direction:column;min-width:560px;min-height:0;
   background:var(--bg);border-top-left-radius:12px;
   /* #138. DIE ZWEITE KANTE, gespiegelt. Sie gehoert #main und nicht dem
      Panel: die Chatspalte ist das Blatt, das vor den Seitenflaechen liegt,
@@ -1801,6 +1814,71 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    `levels` and `groups` are measured for the model that ANSWERED the probe, so they describe one
    model and no other. Hanging them under the row that would boot 17 GB would be inventing them
    for a model nobody has asked a question -- and #116's rule is that nothing is invented. */
+/* ---- #143 delegation. One card per subtask in the flow, a child row per
+   subtask in the rail, one chip over the composer -- all fed by the same
+   `subs` snapshot, all in the --sub channel, and VISIBLE FROM THE START:
+   the running state is the one that must be seen, not the finished one. */
+.subcard{border:1px solid var(--line);border-left:3px solid var(--sub);border-radius:10px;
+  background:var(--panel);padding:10px 14px;margin:0 0 10px;max-width:760px}
+.subcard .shead{display:flex;align-items:center;gap:9px;font-size:12.5px;flex-wrap:wrap}
+.subcard .glyph{color:var(--sub);font-weight:700}
+.subcard .sname{font-family:var(--mono);font-size:11.5px;color:var(--dim)}
+.subcard .stask{margin:5px 0 0;font-size:13px;color:var(--text-soft);white-space:pre-wrap}
+.subcard .sstat{margin-left:auto;display:flex;align-items:center;gap:7px;
+  font-family:var(--mono);font-size:11px;color:var(--dimmer)}
+.subcard .sstat .okword{color:var(--ok)}
+.subcard .sstat .badword{color:var(--bad)}
+.subcard details{margin-top:8px;border-top:1px solid var(--line);padding-top:8px}
+.subcard summary{cursor:pointer;font-size:12px;color:var(--dim);list-style:none}
+.subcard summary::before{content:"\25B8 ";color:var(--dimmer)}
+.subcard details[open] summary::before{content:"\25BE "}
+.subcard .sresult{font-size:12.5px;color:var(--text-soft);margin-top:8px;white-space:pre-wrap;
+  border-left:2px solid var(--line);padding-left:12px;overflow-wrap:anywhere}
+/* Its own dot class: `.dot` already belongs to the mode chip, and a shared
+   name would hand the pulse to a control that must not breathe. */
+.sdot{width:7px;height:7px;border-radius:50%;flex:none}
+.sdot.run{background:var(--sub);animation:subpulse 1.2s ease-in-out infinite}
+.sdot.ok{background:var(--ok)}
+.sdot.bad{background:var(--bad)}
+@keyframes subpulse{0%,100%{opacity:1}50%{opacity:.25}}
+.subchat{display:flex;align-items:center;gap:7px;margin:1px 0 1px 18px;padding:4px 8px;
+  width:calc(100% - 18px);background:none;border:0;border-left:1px solid var(--line);
+  border-radius:0 6px 6px 0;font:inherit;font-size:11.5px;color:var(--dim);
+  text-align:left;cursor:default}
+.subchat[data-open]{cursor:pointer}
+.subchat:hover{background:var(--panel)}
+.subchat .glyph{color:var(--sub);font-weight:600}
+/* THE TASK IS THE ROW'S SUBJECT and keeps the space: measured 2026-08-27 in
+   the 236px rail, an unclamped mono model slug ate the whole line and the
+   title rendered as nothing. The model may truncate; the task may not vanish. */
+.subchat .stitle{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  flex:1 1 auto;min-width:0}
+.subchat .who{color:var(--dimmer);font-family:var(--mono);font-size:10.5px;
+  margin-left:auto;flex:0 1 auto;max-width:38%;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+#subwrap{position:relative;display:inline-flex}
+#subwrap[hidden]{display:none}
+/* robin, 2026-08-27: ohne AKTIVE Subtasks zeigt der Chip 0 und traegt den
+   gedimmten Rahmen jedes ruhenden Chips; hell (--sub) plus blinkender Punkt
+   NUR solange etwas laeuft. Der Zustand ist die Klasse `live`. */
+#subchip{cursor:pointer;display:inline-flex;gap:6px;align-items:center}
+#subchip.live{border-color:var(--sub);color:var(--sub)}
+#submenu{position:absolute;bottom:calc(100% + 8px);left:0;width:280px;
+  background:var(--panel);border:1px solid var(--line);border-radius:9px;
+  padding:5px;box-shadow:0 10px 26px var(--shadow);z-index:40}
+#submenu[hidden]{display:none}
+#submenu .row{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:6px;
+  font-size:12px;color:var(--text-soft);width:100%;background:none;border:0;
+  font:inherit;text-align:left;cursor:default}
+#submenu .row[data-open]{cursor:pointer}
+#submenu .row:hover{background:var(--hover)}
+#submenu .row .stitle{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#submenu .row .who{margin-left:auto;font-family:var(--mono);font-size:10.5px;
+  color:var(--dimmer);flex:none}
+#submenu .hint{font-size:10.5px;color:var(--dimmer);padding:5px 9px 3px;
+  border-top:1px solid var(--line);margin-top:3px}
+.cost .subshare{color:var(--sub)}
+.tool.sub .ico{color:var(--sub)}
 </style></head><body data-rail="__RAIL__" data-code="__CODE__">
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
@@ -2024,6 +2102,12 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
           <span class="chipwrap" id="modelwrap"><span class="chip pick" id="model" hidden
                 onclick="crow.modelMenu()" title="model and thinking level"></span>
             <div id="modelmenu" hidden></div></span>
+          <!-- #143. The subtask chip: beside the model chip, visible as soon
+               as anything was delegated, pulsing while anything runs. Click
+               opens the list; a finished row jumps into its child chat. -->
+          <span class="chipwrap" id="subwrap" hidden><span class="chip" id="subchip"
+                onclick="crow.subsMenu()" title="delegated subtasks"></span>
+            <div id="submenu" hidden></div></span>
           <span id="turnstate"></span>
           <div id="acts"><span id="hint"></span>
             <div id="rootwrap">
@@ -2473,6 +2557,10 @@ const crow = {
       this.execute ? "ran" : "shown, not run";
     d.querySelector(".name").textContent=name;
     d.querySelector(".arg").textContent=args||"";
+    // #143. The delegation calls wear their own glyph and channel, so a fan-out
+    // is readable in the panel without opening a single row.
+    if(name==="delegate"||name==="collect"||name==="subtasks"){
+      d.classList.add("sub"); d.querySelector(".ico").textContent="⑂"; }
     // #138b. JEDE ZEILE KLAPPT FUER SICH. Vorher klappte nur die ganze Gruppe,
     // und "aufklappen" hiess: neunzig Zeilen auf einmal, von denen eine die
     // gesuchte war.
@@ -2689,7 +2777,7 @@ const crow = {
     // -- gefunden, nachdem robin das Fenster neu gestartet hatte.
     pywebview.api.tools_cleared(); },
 
-  cost(line,share){
+  cost(line,share,sub){
     if(this.cursor){ this.cursor.remove(); this.cursor=null; }
     // THE SAME NUMBER ON EVERY BLOCK IS CORRECT, because the number is the TURN's and the label
     // says so. It was not until #117: the turn object kept the LAST ROUND's ratio, and this loop
@@ -2704,7 +2792,14 @@ const crow = {
           el.parentNode.appendChild(s);} });
     }
     if(line){ const d=document.createElement("div"); d.className="cost";
-      d.textContent=line; this.col.appendChild(d); }
+      // #143. The delegation share rides the cost line in its own channel:
+      // the closing bracket moves into the coloured span so the share sits
+      // INSIDE the brackets, exactly as the agreed mockup draws it.
+      if(sub){ d.textContent=line.replace(/\]$/," | ");
+        const s=document.createElement("span"); s.className="subshare";
+        s.textContent=sub+"]"; d.appendChild(s); }
+      else d.textContent=line;
+      this.col.appendChild(d); }
     this.bottom();
   },
 
@@ -3417,7 +3512,7 @@ const crow = {
     grip.classList.add("on"); panel.classList.add("dragging");
     const right=panel.getBoundingClientRect().right;
     const move=e=>{
-      const w=Math.max(260,Math.min(720,Math.round(right-e.clientX)));
+      const w=Math.max(260,Math.min(612,Math.round(right-e.clientX)));
       document.documentElement.style.setProperty("--codew",w+"px"); };
     const up=()=>{
       document.removeEventListener("mousemove",move);
@@ -4174,6 +4269,170 @@ const crow = {
   // ONE ROW, DRAWN THE SAME WAY WHEREVER IT SITS. A chat under a project and a
   // chat below them are the same thing to a reader and to a click, so they are
   // the same builder -- the indent is a class, not a second implementation.
+  // ---- #143 delegation. ONE snapshot feeds three drawings: the cards in the
+  // flow, the child rows in the rail, the chip over the composer. Everything
+  // is drawn from `items` and nothing keeps its own idea of subtask state --
+  // the registry in the core speaks once, through `subtask_view`.
+  subs(items){
+    this.subItems=items||[];
+    this.subItems.forEach(it=>this.subCard(it));
+    this.subChip(this.subItems);
+    this.subMenuDraw(this.subItems);
+    this.subRail();
+    // A jump that had to open the parent chat first lands here, one snapshot
+    // later, when the replayed cards exist again.
+    if(this.subPending){
+      const d=flow.querySelector('.subcard[data-sub="'
+        +CSS.escape(this.subPending)+'"]');
+      if(d){ d.scrollIntoView({behavior:"smooth",block:"center"});
+        this.subPending=null; }
+    }
+  },
+
+  // The status words, written once for the card and the menu. TOKEN COUNTS
+  // ONLY -- no money figure anywhere on a subtask, robin's call 2026-08-27.
+  subStat(it){
+    const tok=(it.tok||0).toLocaleString("en-US")+" tok";
+    if(it.st==="running") return "running · "+Math.round(it.s)+" s · "+tok;
+    if(it.st==="done")    return "✓ done · "+tok;
+    return "✗ "+it.st+" · "+Math.round(it.s)+" s";
+  },
+
+  // A card exists FROM THE MOMENT delegate runs -- the running state is the
+  // one that must be seen -- and is then updated in place, never rebuilt, so
+  // an open result fold survives every tick.
+  subCard(it){
+    let d=flow.querySelector('.subcard[data-sub="'+CSS.escape(it.i)+'"]');
+    if(!d){
+      // ONLY THE OPEN CHAT'S OWN SUBTASKS GET A CARD. Python computes `here`
+      // from parent and open chat in the same breath -- the page comparing
+      // its own cached copy was the frame that drew no card at all.
+      if(!it.here) return;
+      d=document.createElement("div"); d.className="subcard"; d.dataset.sub=it.i;
+      d.innerHTML='<div class="shead"><span class="glyph">⑂</span>'
+        +'<span class="dlabel"></span><span class="sname"></span>'
+        +'<span class="sstat"></span></div><div class="stask"></div>';
+      d.querySelector(".dlabel").textContent="delegate · "+it.i;
+      d.querySelector(".sname").textContent=it.model||"";
+      d.querySelector(".stask").textContent=it.task||"";
+      // INTO THE FLOW, NEVER INTO A ROUND'S COLUMN. A card appended to
+      // `this.col` folded away with its round the moment the next one began
+      // -- robin, 2026-08-27: "die sollen bleiben". `fold()` only ever moves
+      // the round element it tracks, so an own `.turn` wrapper is safe from
+      // it -- and it is WHAT ALIGNS THE CARD TO THE CHAT: same centred
+      // column, same padding as every other block ("jetzt nur noch an den
+      // chat ausrichten").
+      const wrap=document.createElement("div"); wrap.className="turn subrow";
+      wrap.appendChild(d); flow.appendChild(wrap); this.bottom();
+    }
+    const stat=d.querySelector(".sstat");
+    if(it.st==="running"){
+      stat.innerHTML='<span class="sdot run"></span><span></span>';
+      stat.lastChild.textContent=this.subStat(it);
+    } else if(it.st==="done"){
+      stat.innerHTML='<span class="okword"></span>';
+      stat.firstChild.textContent=this.subStat(it);
+    } else {
+      stat.innerHTML='<span class="badword"></span>';
+      stat.firstChild.textContent=this.subStat(it);
+    }
+    if(it.st!=="running" && it.res && !d.querySelector("details")){
+      const det=document.createElement("details"); det.open=true;
+      det.innerHTML='<summary></summary><div class="sresult"></div>';
+      det.querySelector("summary").textContent = it.st==="done"
+        ? "collect · result, "+(it.tok||0).toLocaleString("en-US")+" tok"
+        : it.st;
+      det.querySelector(".sresult").textContent=it.res;
+      d.appendChild(det);
+    }
+  },
+
+  subChip(items){
+    const wrap=$("#subwrap"), chip=$("#subchip");
+    if(!wrap||!chip) return;
+    if(!items.length){ wrap.hidden=true; return; }
+    wrap.hidden=false;
+    // THE NUMBER IS THE ACTIVE COUNT, NOT THE TOTAL -- robin, 2026-08-27:
+    // with nothing running the chip reads 0 and rests in the dim frame; the
+    // bright border and the pulsing dot belong to a live fan-out alone.
+    const running=items.filter(x=>x.st==="running").length;
+    chip.classList.toggle("live", running>0);
+    chip.innerHTML="";
+    if(running){ const dot=document.createElement("span");
+      dot.className="sdot run"; chip.appendChild(dot); }
+    chip.appendChild(document.createTextNode("⑂ "+running));
+  },
+
+  subsMenu(){ const m=$("#submenu"); if(m) m.hidden=!m.hidden; },
+
+  subMenuDraw(items){
+    const m=$("#submenu"); if(!m) return;
+    m.innerHTML="";
+    items.forEach(it=>{
+      const r=document.createElement("button"); r.className="row";
+      const dot=document.createElement("span");
+      dot.className="sdot "+(it.st==="running"?"run":it.st==="done"?"ok":"bad");
+      r.appendChild(dot);
+      const t=document.createElement("span"); t.className="stitle";
+      t.textContent=it.task||""; r.appendChild(t);
+      const w=document.createElement("span"); w.className="who";
+      w.textContent=it.model||""; r.appendChild(w);
+      r.dataset.open="1";
+      r.onclick=()=>{ m.hidden=true; crow.subJump(it.i); };
+      m.appendChild(r); });
+    const h=document.createElement("div"); h.className="hint";
+    h.textContent="click a row to jump to its card"; m.appendChild(h);
+  },
+
+  // The rail's child rows: each subtask hangs FIXED under the chat that
+  // spawned it -- robin, 2026-08-27: "diese duerfen niemals mitwandern". A
+  // parent of "" means THE LIVE CHAT WITHOUT A FILE and nothing else; there
+  // is deliberately no fallback to the active row, because that fallback was
+  // the wandering: open a subtask, and every child re-hung under it. A parent
+  // row that is not drawn simply keeps its children undrawn.
+  subRail(){
+    document.querySelectorAll("#sessions .subchat").forEach(x=>x.remove());
+    const items=this.subItems||[]; if(!items.length) return;
+    const box=$("#sessions"); if(!box) return;
+    const groups={};
+    items.forEach(it=>{ const key=it.parent||"";
+      (groups[key]=groups[key]||[]).push(it); });
+    Object.keys(groups).forEach(parent=>{
+      const row=parent
+        ? box.querySelector('[data-path="'+CSS.escape(parent)+'"]')
+        : box.querySelector(".sess:not([data-path])");
+      if(!row) return;
+      groups[parent].slice().reverse().forEach(it=>{
+        const b=document.createElement("button"); b.className="subchat";
+        const g=document.createElement("span"); g.className="glyph";
+        g.textContent="⑂"; b.appendChild(g);
+        const dot=document.createElement("span");
+        dot.className="sdot "+(it.st==="running"?"run":it.st==="done"?"ok":"bad");
+        b.appendChild(dot);
+        const t=document.createElement("span"); t.className="stitle";
+        t.textContent=it.task||""; b.appendChild(t);
+        const w=document.createElement("span"); w.className="who";
+        w.textContent=it.model||""; b.appendChild(w);
+        // A SUBCHAT IS NEVER OPENED AS A CHAT. Opening one made it the live
+        // conversation, put the real chat aside and re-hung every child --
+        // the exact break robin filmed. The click goes to the CARD, which
+        // already holds the task, the clock and the folded result.
+        b.dataset.open="1"; b.title="jump to its card";
+        b.onclick=()=>crow.subJump(it.i);
+        row.after(b); });
+    });
+  },
+
+  subJump(i){
+    const d=flow.querySelector('.subcard[data-sub="'+CSS.escape(i)+'"]');
+    if(d){ d.scrollIntoView({behavior:"smooth",block:"center"}); return; }
+    // No card in this flow: the subtask belongs to another chat. Open THAT
+    // chat -- the parent, never the subtask itself -- and finish the jump
+    // when the replayed snapshot has drawn its cards.
+    const it=(this.subItems||[]).find(x=>x.i===i);
+    if(it && it.parent){ this.subPending=i; crow.open(it.parent); }
+  },
+
   chatRow(r,inproj){ const b=document.createElement("button");
     b.className=(r.active ? "sess on" : "sess")+(inproj ? " inproj" : "");
     if(r.path) b.dataset.path=r.path;   // what the mark is moved by, below
@@ -4207,6 +4466,9 @@ const crow = {
     const title=e.title, meta=e.meta, rollovers=e.rollovers, unsaved=e.unsaved;
     this.projects=e.projects||[];
     this.liveRoot=e.live_root||"";
+    // #143. The rail payload carries the subtasks, so a redraw cannot lose
+    // their rows; the ticker's own event updates the same list between rails.
+    if(e.subs!==undefined) this.subItems=e.subs||[];
     const box=$("#sessions");
     // SAME CHATS, SAME ORDER -> MOVE THE MARK, DO NOT REBUILD. Every update used
     // to throw the list away and remake it, so a click exchanged every node under
@@ -4229,6 +4491,7 @@ const crow = {
         // that is a chat you cannot click.
         b.onclick=()=>crow.open(r.path);
         b.title="open · right-click for more"; });
+      this.subRail();
       return;
     }
     box.dataset.shape=shape;
@@ -4269,6 +4532,7 @@ const crow = {
         h.id="railsep"; h.textContent="Chats"; box.appendChild(h); }
       loose.forEach(r=>box.appendChild(rowFor(r)));
     }
+    this.subRail();
   },
 
   // #119. THE EMPTY SPACE IS A TARGET TOO. Right-clicking the list where no chat
@@ -4409,7 +4673,8 @@ const crow = {
       case "tool": this.tool(e.name,e.args,e.raw,e.code); break;
       case "toolend": this.toolEnd(e.name,e.s,e.rep); break;
       case "toolres": this.toolRes(e.name,e.t,e.cut); break;
-      case "cost": this.cost(e.line,e.share); this.ctx(e.tokens,e.n_ctx); break;
+      case "cost": this.cost(e.line,e.share,e.sub); this.ctx(e.tokens,e.n_ctx); break;
+      case "subs": this.subs(e.items); break;
       case "note": this.note(e.t); break;
       case "chips": this.stageRender(e.c); break;
       case "memory": this.memory(e.t,e.n); break;
@@ -4533,7 +4798,8 @@ new ResizeObserver(fitFlow).observe(composer);
 // `mousedown` RATHER THAN `click`, unchanged from what was here: the panel is gone before
 // whatever sits under it does its work, and a row inside a panel is caught by its own wrapper.
 const DISMISS = [["#helpwrap","#helpmenu"], ["#modelwrap","#modelmenu"],
-                 ["#modewrap","#modemenu"], ["#rootwrap","#rootmenu"]];
+                 ["#modewrap","#modemenu"], ["#rootwrap","#rootmenu"],
+                 ["#subwrap","#submenu"]];
 window.addEventListener("mousedown",e=>{
   if(!e.target.closest("#menu")) crow.closeMenu();
   DISMISS.forEach(pair => {
@@ -5193,6 +5459,12 @@ class Api:
         self._busy = False
         self._queued: str | None = None
         self._queue_lock = threading.Lock()
+        # #143 E2. WHICH CHAT SPAWNED WHICH SUBTASK, recorded the first time an
+        # ident is seen -- during the spawning turn, so the chat live at that
+        # moment is the parent. "" is the live chat without a file. And the last
+        # snapshot signature, so the ticker pushes on change instead of forever.
+        self._sub_parent: dict = {}
+        self._subs_sig = "[]"
         # ONE INSTALLER AT A TIME. Two of them writing the same
         # directory is the one way an update leaves a broken copy.
         self._updating = False
@@ -6302,7 +6574,11 @@ class Api:
             return True
 
     def stop(self) -> None:
+        # #143 E2: STOP REACHES THE SUBTASKS TOO. The flag stops the local
+        # turn; the cancel promises the record -- whatever a subtask's stream
+        # still delivers is dropped and its card ends "interrupted".
         INTERRUPT.set()
+        crow_core.cancel_subtasks()
 
     # ------------------------------------------------------------ #142 images
 
@@ -6469,6 +6745,12 @@ class Api:
         self._conversation.reset()
         self._current_path = None
         self._current_title = None
+        # #143. The fresh chat needs a fresh delegation frame at once: without
+        # this push the page kept the previous chat's `here` values and drew
+        # no card for anything delegated in here -- measured 2026-08-27 as a
+        # fan-out with rail rows and no cards. Same drop `open()` does.
+        self._subs_sig = ""
+        self._push_subs()
         # #119 OVERTURNS #101's ANSWER FOR THIS ONE EVENT. A new chat used to
         # start from the template in roots.json; robin, on the built window:
         # "ein neuer Chat soll immer wurzellos sein".
@@ -6578,6 +6860,10 @@ class Api:
         if not path:
             return (False, None)
         self._current_path = path
+        # #143. The live chat just gained its file: every subtask it spawned
+        # while it had none follows it there, or their rows would fall off the
+        # rail the moment their parent stops being "the live chat".
+        self._sub_adopt("", path)
         return (True, path)
 
     def _stamp(self, path: str, pointer: bool = False) -> None:
@@ -6775,6 +7061,13 @@ class Api:
         # second entry beside it.
         self._persist_live()
         self._reload_rail()
+        # #143. THE CARDS ARE PART OF THE REPLAY. They are drawn from the
+        # registry, not from the history, so a reopened chat came back without
+        # them and a subtask row had nothing to jump to -- robin, 2026-08-27:
+        # "Ich kann die Subtasks nicht mehr anklicken." The signature is
+        # dropped so the push fires even though nothing changed.
+        self._subs_sig = ""
+        self._push_subs()
         self.push({"k": "cost", "line": "", "share": None,
                    "tokens": self._context_tokens, "n_ctx": self._n_ctx})
 
@@ -6910,6 +7203,9 @@ class Api:
                    # the project it belongs to before it has a file.
                    "projects": self._projects(),
                    "live_root": crow_core.get_root() or "",
+                   # #143. The subtasks ride the rail payload, so a redraw can
+                   # never lose their rows to a repaint the ticker missed.
+                   "subs": self._subs_items(),
                    "foot": os.path.basename(self._current_path)
                    if self._current_path else ""})
 
@@ -7013,6 +7309,8 @@ class Api:
             # next launch, and a second one is written beside the moved original.
             self._current_path = target
             self._stamp(SESSION_FILE, pointer=True)
+        # #143. And the subtask parents move with it, by the same rule.
+        self._sub_adopt(path, target)
         back = os.path.basename(os.path.dirname(target)) != self.ARCHIVE_DIR
         self.push({"k": "note",
                    "t": ("restored: %s" if back else "archived: %s")
@@ -7825,6 +8123,85 @@ class Api:
             pass
         self._window.destroy()
 
+    # -- #143 E2: the delegation snapshot ----------------------------------
+
+    def _sub_adopt(self, old: str, new: str) -> None:
+        """The parent stamp follows the chat's FILE, so a child can never lose
+        its root. "" adopts only "" -- the live chat gaining its first file --
+        and a real path matches by absolute path, for the archive move that
+        relocates a chat. Nothing else is touched: a child re-hung under
+        whatever is active was the wandering robin filmed on 2026-08-27.
+        """
+        for ident, parent in list(self._sub_parent.items()):
+            if old == "":
+                if parent == "":
+                    self._sub_parent[ident] = new
+            elif parent and os.path.abspath(parent) == os.path.abspath(old):
+                self._sub_parent[ident] = new
+
+    def _subs_items(self) -> list:
+        """The core's subtask snapshot, dressed for the page.
+
+        THE PARENT IS STAMPED AT FIRST SIGHT. A subtask is spawned by the chat
+        that is live while its `delegate` runs, and that is the only moment
+        anybody can say so -- recorded here, kept in `_sub_parent`, unchanged
+        by every later chat switch. "" is the live chat without a file. The
+        result is clipped to what the panel already shows for a tool answer:
+        the full text is in the transcript, one click away.
+        """
+        items = []
+        for row in crow_core.subtask_view():
+            parent = self._sub_parent.setdefault(row["i"],
+                                                 self._current_path or "")
+            if row["res"]:
+                row["res"] = row["res"][:TOOL_RESULT_SHOWN]
+            row["parent"] = parent
+            # WHETHER THE CARD BELONGS IN THE OPEN FLOW, decided HERE and on
+            # every snapshot anew. The page used to compare its own cached
+            # `live` against `parent` -- two values frozen on two sides of the
+            # seam at two different moments, and the mismatch drew no card at
+            # all in a fresh chat (robin, 2026-08-27, screenshot 2). One side
+            # computing both in the same breath cannot drift, and a wrong
+            # frame heals on the next tick.
+            row["here"] = parent == (self._current_path or "")
+            items.append(row)
+        return items
+
+    def _push_subs(self) -> None:
+        """One `subs` event per CHANGE, never per tick. The signature carries
+        the clock's whole second, so a running subtask updates about once a
+        second and a settled registry is silent."""
+        items = self._subs_items()
+        # `here` is in the signature: a chat switch flips it without touching
+        # state or clock, and the page must hear about exactly that.
+        sig = json.dumps([[r["i"], r["st"], int(r["s"]), r["tok"],
+                           bool(r["path"]), r["here"]] for r in items])
+        if sig != self._subs_sig:
+            self._subs_sig = sig
+            self.push({"k": "subs", "items": items})
+
+    def _subs_ticker(self, stopped: "threading.Event") -> None:
+        """Beside the turn, because the turn thread is the one that blocks in
+        `collect`. It keeps ticking after the turn while anything still runs --
+        a subtask that survives an interrupt keeps its card breathing -- and
+        returns once the turn is over and the registry is quiet."""
+        while True:
+            self._push_subs()
+            if stopped.is_set() and not crow_core.subtasks_running():
+                return
+            time.sleep(0.8)
+
+    def _sub_share(self, before: "set") -> str:
+        """The cost line's delegation share: THIS turn's subtasks, by token
+        count and nothing else -- no money figure, robin's call 2026-08-27."""
+        turn = [r for r in crow_core.subtask_view() if r["i"] not in before]
+        if not turn:
+            return ""
+        remote = sum(r["tok"] for r in turn)
+        noun = "subtask" if len(turn) == 1 else "subtasks"
+        return "⑂ %d %s · %s tok remote" % (len(turn), noun,
+                                            format(remote, ","))
+
     # -- the turn ----------------------------------------------------------
 
     def _pump(self, text: str) -> None:
@@ -7928,6 +8305,14 @@ class Api:
                                          "Model" % spot["label"]})
             self.push({"k": "idle"})
             return
+        # #143 E2. THE TICKER RUNS BESIDE THE TURN, because the turn thread is
+        # the one that blocks in `collect` -- nothing else could draw a card
+        # while it waits. What was in the registry BEFORE the turn is kept so
+        # the cost line can name exactly this turn's delegation share.
+        sub_before = set(crow_core.SUBTASKS)
+        sub_stop = threading.Event()
+        threading.Thread(target=self._subs_ticker, args=(sub_stop,),
+                         daemon=True).start()
         try:
             result = run_turn(
                 self._conversation, base_url=spot["base_url"],
@@ -7965,6 +8350,10 @@ class Api:
             self.push({"k": "fail", "t": "%s: %s" % (type(exc).__name__, exc)})
             self.push({"k": "idle"})
             return
+        finally:
+            # The ticker outlives the turn only while something still runs --
+            # a subtask that survives an interrupt keeps its card breathing.
+            sub_stop.set()
 
         self._context_tokens = getattr(result, "context_tokens", self._context_tokens)
         self._promised_warm = getattr(result, "promised_warm", self._promised_warm)
@@ -7973,7 +8362,9 @@ class Api:
         line = cost.line() if cost is not None and getattr(cost, "rounds", 0) else ""
         self.push({"k": "cost", "line": "[" + line + "]" if line else "",
                    "share": events.share, "tokens": self._context_tokens,
-                   "n_ctx": self._n_ctx})
+                   "n_ctx": self._n_ctx,
+                   # #143. This turn's delegation share, token counts only.
+                   "sub": self._sub_share(sub_before) if line else ""})
         self._persist_live()
         # THE RAIL FOLLOWS THE TURN. A chat that had just been given its first
         # message went on calling itself "new chat" until something else
@@ -8134,9 +8525,14 @@ def main(argv: list[str] | None = None) -> int:
     # FRAMELESS, because the title bar is part of the design: the caption is
     # drawn in the page with the wordmark in it, the way the mockup shows it.
     title = "CROW %s" % (client_version() or "")
+    # DIE MINDESTBREITE IST DIE GARANTIE DER MASKE (robin, 2026-08-27, "zum
+    # 10000000x"): selbst mit der Rail am Anschlag (RAIL_MAX 520) und jedem
+    # erlaubten Code-Panel bleibt der Chatspalte ihr min-width von 560 --
+    # 520 + 560 + 50 Spalten-Chrome = 1130. Das Code-Panel hat KEIN hartes
+    # Minimum (min-width:0), es gibt zuerst nach; die Maske nie.
     window = webview.create_window(
         title, html=page, js_api=api,
-        width=1180, height=800, min_size=(760, 520), frameless=True,
+        width=1180, height=800, min_size=(1130, 520), frameless=True,
         easy_drag=False, background_color=theme_bg(current_theme()))
     api._window = window
     threading.Thread(target=api.pump, daemon=True).start()

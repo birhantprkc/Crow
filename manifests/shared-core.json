@@ -105,6 +105,16 @@
    "why": "#143. The blocking wait owns the two doors out -- the INTERRUPT flag it must never consume and the deadline that turns a stalled provider into a sentence. Two waiters would be two answers to who gets the Ctrl+C."
   },
   {
+   "name": "subtask_view",
+   "kind": "def",
+   "why": "#143 E2. The one list every surface draws the delegation state from -- cards, rail children and the chip all read it. A surface with its own idea of subtask state shows running where the registry says done."
+  },
+  {
+   "name": "cancel_subtasks",
+   "kind": "def",
+   "why": "#143 E2. Stop reaches the subtasks through this and nothing else: the mark promises the record -- result dropped, no transcript, status interrupted -- because a socket read cannot be torn out from under its thread."
+  },
+  {
    "name": "TOOL_IMPL",
    "kind": "binding",
    "why": "The name-to-function table. It is a dict rather than a def, which is why the manifest needs a kind at all: hanging a def predicate on it would declare it and check nothing. A second table is how one surface ends up offering six tools and the other seven."

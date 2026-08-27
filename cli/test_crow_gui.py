@@ -6834,7 +6834,11 @@ class TheCodePanelStartsNarrowTests(unittest.TestCase):
         self.assertIn("min-width:0", code)
         self.assertIn("flex:0 1 auto", code)
         self.assertNotIn("flex:none", code)
-        self.assertIn("min-width:380px", self._rule("#main{"))
+        # 380 -> 560 am Abend des 2026-08-27, robins Ansage in Grossbuchstaben:
+        # die Maske darf NIE unter das Screenshot-2-Mass fallen. Der alte Wert
+        # liess den Modell-Chip abschneiden, sobald ein gezogenes Code-Panel
+        # drueckte.
+        self.assertIn("min-width:560px", self._rule("#main{"))
 
 
 class NothingSticksOutOfTheComposerTests(unittest.TestCase):
@@ -7105,6 +7109,313 @@ class AnImageIsAnAttachmentTests(ApiCase):
         self.assertEqual([m for m in api._conversation.payload()
                           if m.get("role") == "user"], [])
         self.assertEqual(api._staged_images, [])
+
+
+class TheWindowNeverStarvesTheComposerTests(unittest.TestCase):
+    """robin, 2026-08-27, in Grossbuchstaben und zum wiederholten Mal: die
+    Chateingabemaske darf NIEMALS kleiner werden als sein Referenz-Screenshot,
+    und die FENSTER-Mindestgroesse hat das zu garantieren. Die Garantie ist
+    eine Rechnung ueber drei Zahlen, und dieser Fall haelt sie zusammen:
+    keine darf allein wandern."""
+
+    CHROME = 50          # Spalten-Paddings und Raender, siehe den Kommentar am Fenster
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):
+                               self.source.index("</style>")]
+
+    def _main_min(self) -> int:
+        rule = self.css[self.css.index("#main{"):]
+        rule = rule[:rule.index(chr(125))]
+        return int(re.search(r"min-width:(\d+)px", rule).group(1))
+
+    def _window_min(self) -> int:
+        return int(re.search(r"min_size=\((\d+),", self.source).group(1))
+
+    def test_the_mask_keeps_the_screenshot_width(self):
+        self.assertEqual(self._main_min(), 560)
+
+    def test_the_window_cannot_be_shrunk_into_the_bug(self):
+        """Selbst mit der Rail am Anschlag und jedem erlaubten Code-Panel
+        bleibt der Chatspalte ihr Minimum: Fensterminimum >= RAIL_MAX + Maske
+        + Chrome. Das Code-Panel steht NICHT in der Summe, weil es als
+        einziges nachgeben darf (min-width:0)."""
+        self.assertGreaterEqual(
+            self._window_min(),
+            crow_gui.RAIL_MAX + self._main_min() + self.CHROME)
+        self.assertEqual(self._window_min(), 1130)
+
+    def test_the_code_panel_is_still_the_one_that_yields(self):
+        """NEGATIV: die Garantie oben gilt nur, solange das Panel nachgeben
+        KANN. Ein hartes Minimum dort machte die Summe zur Luege."""
+        rule = self.css[self.css.index("#code{"):]
+        rule = rule[:rule.index(chr(125))]
+        self.assertIn("min-width:0", rule)
+
+
+class TheDelegationWearsTheMockupTests(unittest.TestCase):
+    """#143 E2. robin, 2026-08-27, mit dem Mockup daneben: "so soll es
+    aussehen" -- eine Karte je Subtask im Fluss, Kind-Zeilen in der Rail, der
+    ⑂-Chip ueber dem Composer, alles im --sub-Kanal und SICHTBAR AB START.
+    Diese Faelle halten die Seite gegen das abgenommene Mockup."""
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):
+                               self.source.index("</style>")]
+
+    def _rule(self, selector: str) -> str:
+        found = self.css[self.css.index(selector):]
+        return found[:found.index(chr(125))]
+
+    def test_the_channel_is_one_palette_name(self):
+        """Das Logo-Cyan steht EINMAL in der Basispalette; jede Regel zeigt
+        mit var() darauf -- die Palettenregel der Seite gilt auch hier."""
+        self.assertIn("--sub:#39c6d8", self.css)
+        self.assertIn("border-left:3px solid var(--sub)",
+                      self._rule(".subcard{"))
+        run = self._rule(".sdot.run{")
+        self.assertIn("var(--sub)", run)
+        self.assertIn("animation:subpulse", run)
+        self.assertIn(".cost .subshare{color:var(--sub)", self.css)
+
+    def test_the_dot_is_its_own_class(self):
+        """NEGATIV: `.dot` gehoert dem Mode-Chip, und der darf nicht atmen.
+        Ein geteilter Klassenname haette dem Level-Punkt den Puls gegeben."""
+        self.assertNotIn("animation", self._rule("#mode .dot{"))
+        self.assertIn(".sdot.run", self.css)
+
+    def test_card_chip_menu_and_rail_child_exist(self):
+        for piece in ('case "subs": this.subs(e.items); break;',
+                      'id="subwrap"', 'id="subchip"', 'id="submenu"',
+                      "subCard(it){", "subRail(){", "subMenuDraw(items){",
+                      "subJump(i){", '"delegate · "+it.i',
+                      'textContent="click a row to jump to its card"'):
+            self.assertIn(piece, self.source)
+
+    def test_a_subchat_is_fixed_to_its_root_and_never_a_chat_itself(self):
+        """robins Struktur-Regeln vom 2026-08-27, alle drei als Waechter:
+        die Kinder haengen FIX am Wurzelchat (kein Fallback auf die aktive
+        Zeile -- der Fallback WAR das Mitwandern), ein Klick oeffnet NIE einen
+        Subtask als Chat (das kaperte den Live-Chat), und "" heisst exakt die
+        dateilose Live-Zeile."""
+        block = self.source[self.source.index("subRail(){"):
+                            self.source.index("subJump(i){")]
+        self.assertIn('.sess:not([data-path])', block)
+        self.assertNotIn('.sess.on', block)
+        whole = self.source[self.source.index("subs(items){"):
+                            self.source.index("chatRow(r,inproj){")]
+        # NIE der Subtask selbst als Chat -- sein Transkriptpfad darf nirgends
+        # geoeffnet werden. Der WURZELCHAT (it.parent) ist der einzige Pfad,
+        # den der Delegations-Block oeffnen darf: das ist der Sprung-Fallback.
+        self.assertNotIn("crow.open(it.path", whole)
+        for opened in re.findall(r"crow\.open\(([^)]*)\)", whole):
+            self.assertEqual(opened, "it.parent")
+        self.assertIn("crow.subJump(it.i)", whole)
+
+    def test_the_cards_stay_and_survive_a_reopen(self):
+        """robins zwei Nachbefunde vom 2026-08-27: (1) "die sollen bleiben" --
+        eine Karte haengt im FLUSS, nie in der Rundenspalte, die der Trace
+        faltet; (2) "ich kann die Subtasks nicht mehr anklicken" -- nach dem
+        Oeffnen eines Chats werden die Karten aus der Registry nachgezeichnet
+        (Signatur fallengelassen), NUR fuer den offenen Chat, und ein Klick
+        ohne Karte oeffnet erst den Wurzelchat und springt dann nach."""
+        card = self.source[self.source.index("subCard(it){"):
+                           self.source.index("subChip(items){")]
+        # An den Chat ausgerichtet: der Wrapper traegt DIESELBE Spaltenklasse
+        # wie jeder Block -- keine zweite Geometrie, die driften kann.
+        self.assertIn('wrap.className="turn subrow"', card)
+        self.assertIn("flow.appendChild(wrap)", card)
+        self.assertNotIn("col.appendChild", card)
+        # `here` entscheidet, und PYTHON rechnet es -- die Seite verglich
+        # zuvor ihre eigene live-Kopie gegen parent, zwei eingefrorene Werte,
+        # und ein frischer Chat blieb ohne jede Karte (Screenshot 2).
+        self.assertIn("if(!it.here) return;", card)
+        self.assertNotIn("subLive", card)
+        opened = self.source[self.source.index("def open(self, path"):]
+        opened = opened[:opened.index("ARCHIVE_DIR")]
+        self.assertIn('self._subs_sig = ""', opened)
+        self.assertIn("self._push_subs()", opened)
+        # Und der new-Flow pusht denselben frischen Rahmen wie open().
+        fresh = self.source[self.source.index("def reset(self)"):]
+        fresh = fresh[:fresh.index("def ", 10)]
+        self.assertIn('self._subs_sig = ""', fresh)
+        self.assertIn("self._push_subs()", fresh)
+        self.assertIn("this.subPending=i; crow.open(it.parent);", self.source)
+
+    def test_the_transcript_shelf_is_not_the_chat_folder(self):
+        """NEGATIV auf der Kern-Seite, hier verankert, weil das Fenster der
+        Leidtragende ist: der Schreiber zielt auf `subtasks/` und nie flach in
+        den Session-Ordner, den `_archives` als Wurzelchats liest."""
+        core = (HERE / "crow_core.py").read_text(encoding="utf-8")
+        self.assertIn('os.path.join(SESSION_DIR, "subtasks")', core)
+
+    def test_visible_from_the_start(self):
+        """robins Abnahmekriterium: der Subtask ist zu sehen, sobald er
+        STARTET. Die Karte entsteht fuer den running-Zustand mit pulsierendem
+        Punkt, und der Ticker laeuft NEBEN dem Zug -- sonst koennte niemand
+        zeichnen, waehrend `collect` blockiert."""
+        self.assertIn('if(it.st==="running"){', self.source)
+        self.assertIn('<span class="sdot run"></span>', self.source)
+        self.assertIn("threading.Thread(target=self._subs_ticker",
+                      self.source)
+
+    def test_both_rail_paths_keep_the_children(self):
+        """Der schnelle Rail-Pfad (Marke verschieben) und der Neubau muessen
+        beide die Kind-Zeilen nachziehen, und `subs()` selbst ist der dritte
+        Zeichner -- genau drei Aufrufe, keiner mehr, keiner weniger."""
+        self.assertEqual(self.source.count("this.subRail();"), 3)
+
+    def test_stop_reaches_the_subtasks(self):
+        block = self.source[self.source.index("def stop(self)"):]
+        block = block[:block.index("def ", 10)]
+        self.assertIn("crow_core.cancel_subtasks()", block)
+
+    def test_no_money_figure_on_a_subtask(self):
+        """NEGATIV, robins Entscheid vom 2026-08-27: nur Tokenzahlen an
+        Subtasks, nirgends ein Geldbetrag."""
+        block = self.source[self.source.index("subStat(it){"):
+                            self.source.index("subChip(items){")]
+        self.assertIn("tok", block)
+        for sign in ("€", "EUR", "$", "USD"):
+            self.assertNotIn(sign, block)
+
+    def test_the_chip_rests_at_zero_and_glows_only_live(self):
+        """robin, 2026-08-27: ohne aktive Subtasks zeigt der Chip 0 im
+        gedimmten Rahmen; hell umrandet plus blinkender Punkt NUR mit
+        laufenden. Die Zahl ist die der AKTIVEN, nie die Gesamtsumme."""
+        base = self.css[self.css.index("#subchip{"):]
+        base = base[:base.index(chr(125))]
+        self.assertNotIn("var(--sub)", base)
+        live = self.css[self.css.index("#subchip.live{"):]
+        live = live[:live.index(chr(125))]
+        self.assertIn("var(--sub)", live)
+        chip = self.source[self.source.index("subChip(items){"):
+                           self.source.index("subsMenu(){")]
+        self.assertIn('chip.classList.toggle("live", running>0)', chip)
+        self.assertIn('"⑂ "+running', chip)
+        self.assertNotIn("items.length))", chip)
+
+    def test_the_cost_line_carries_the_share_in_channel(self):
+        self.assertIn('case "cost": this.cost(e.line,e.share,e.sub);',
+                      self.source)
+        self.assertIn('s.className="subshare"', self.source)
+        self.assertIn('name==="delegate"||name==="collect"||name==="subtasks"',
+                      self.source)
+
+
+class TheWindowWatchesTheSubtasksTests(ApiCase):
+    """#143 E2, die Python-Haelfte: der Ticker, die Eltern-Stempelung, der
+    Kostenanteil und Stop -- alles gegen die echte Registry im Kern."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        crow_core.forget_subtasks()
+        self.addCleanup(crow_core.forget_subtasks)
+
+    def _seed(self, ident: str, status: str = "done", result: str = "RES",
+              task: str = "the task", tokens: int = 7,
+              transcript: str = "") -> "crow_core.Subtask":
+        sub = crow_core.Subtask(ident, task, "",
+                                {"model": "unit/m:free", "label": "OpenRouter"})
+        sub.status = status
+        sub.result = result if status == "done" else ""
+        sub.failure = "" if status in ("done", "running") else result
+        sub.usage_tokens = tokens
+        sub.transcript = transcript
+        crow_core.SUBTASKS[ident] = sub
+        return sub
+
+    def test_stop_cancels_what_runs(self):
+        api = self.api()
+        sub = self._seed("d1", status="running")
+        api.stop()
+        self.assertTrue(sub.cancelled)
+        self.assertTrue(crow_core.INTERRUPT.is_set())
+
+    def test_the_parent_is_stamped_at_first_sight(self):
+        """Der Chat, der beim ersten Anblick live ist, bleibt der Eltern-Chat
+        -- ein spaeterer Wechsel schreibt ihn NICHT um. NEGATIV-Haelfte: ein
+        neuer Subtask unter dem neuen Chat bekommt den neuen Pfad."""
+        api = self.api()
+        self._seed("d1", status="running")
+        self.assertEqual(api._subs_items()[0]["parent"], "")
+        api._current_path = "C:\\somewhere\\chat-x.json"
+        self.assertEqual(api._subs_items()[0]["parent"], "")
+        self._seed("d2", status="running")
+        rows = {r["i"]: r for r in api._subs_items()}
+        self.assertEqual(rows["d2"]["parent"], "C:\\somewhere\\chat-x.json")
+        # `here` haengt am OFFENEN Chat und wird je Schnappschuss neu
+        # gerechnet: d2 gehoert in diesen Fluss, d1 nicht mehr -- und nach
+        # einem Wechsel zurueck dreht es sich, ohne dass jemand etwas stempelt.
+        self.assertFalse(rows["d1"]["here"])
+        self.assertTrue(rows["d2"]["here"])
+        api._current_path = None
+        rows = {r["i"]: r for r in api._subs_items()}
+        self.assertTrue(rows["d1"]["here"])
+        self.assertFalse(rows["d2"]["here"])
+
+    def test_the_result_is_clipped_for_the_page(self):
+        api = self.api()
+        self._seed("d1", result="x" * (crow_gui.TOOL_RESULT_SHOWN + 1000))
+        row = api._subs_items()[0]
+        self.assertEqual(len(row["res"]), crow_gui.TOOL_RESULT_SHOWN)
+
+    def test_the_ticker_pushes_on_change_and_is_quiet_when_settled(self):
+        """Direkt aufgerufen, mit gesetztem Stopper: eine Runde. Ohne
+        Aenderung sagt sie nichts; mit einer neuen Zeile genau ein Event."""
+        api = self.api()
+        stopper = threading.Event()
+        stopper.set()
+        api._subs_ticker(stopper)
+        self.assertEqual([m for m in self.drained(api)
+                          if m.get("k") == "subs"], [])
+        self._seed("d1")
+        api._subs_ticker(stopper)
+        events = [m for m in self.drained(api) if m.get("k") == "subs"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["items"][0]["i"], "d1")
+
+    def test_the_cost_share_names_this_turns_subtasks_only(self):
+        api = self.api()
+        self._seed("d1", tokens=1809)
+        self._seed("d2", tokens=7)
+        self.assertEqual(api._sub_share(set()),
+                         "⑂ 2 subtasks · 1,816 tok remote")
+        self.assertEqual(api._sub_share({"d1"}),
+                         "⑂ 1 subtask · 7 tok remote")
+        self.assertEqual(api._sub_share({"d1", "d2"}), "")
+
+    def test_the_rail_carries_the_subs(self):
+        api = self.api()
+        self._seed("d1", transcript="C:\\x\\chat-1-sub-d1.json")
+        api._reload_rail()
+        rails = [m for m in self.drained(api) if m.get("k") == "rail"]
+        self.assertTrue(rails)
+        subs = rails[-1].get("subs") or []
+        self.assertEqual(subs[0]["i"], "d1")
+        self.assertEqual(subs[0]["path"], "C:\\x\\chat-1-sub-d1.json")
+
+    def test_the_parent_follows_the_chats_file(self):
+        """robin: "die Subtasks sind fix zum Wurzelchat". Der Stempel folgt
+        der DATEI des Chats: die Live-"" wird beim Beiseitelegen zum neuen
+        Pfad, ein Archiv-Umzug zieht per Pfadgleichheit nach -- und NEGATIV:
+        ein fremder Eltern-Pfad bleibt bei beidem unberuehrt."""
+        api = self.api()
+        self._seed("d1", status="running")
+        self._seed("d2", status="running")
+        api._subs_items()
+        api._sub_parent["d2"] = "C:\\other\\chat-z.json"
+        api._sub_adopt("", "C:\\x\\chat-a.json")
+        self.assertEqual(api._sub_parent["d1"], "C:\\x\\chat-a.json")
+        self.assertEqual(api._sub_parent["d2"], "C:\\other\\chat-z.json")
+        api._sub_adopt("C:\\x\\chat-a.json", "C:\\x\\archiv\\chat-a.json")
+        self.assertEqual(api._sub_parent["d1"], "C:\\x\\archiv\\chat-a.json")
+        self.assertEqual(api._sub_parent["d2"], "C:\\other\\chat-z.json")
+        block = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        leave = block[block.index("path = self._archive()"):]
+        self.assertIn('self._sub_adopt("", path)', leave[:600])
 
 
 if __name__ == "__main__":
