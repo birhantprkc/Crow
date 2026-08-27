@@ -1020,6 +1020,7 @@ HELP = """commands:
   /model         the model that is up, /model <key> restarts on another one
   /reasoning     this chat's thinking level, /reasoning <level>|off to set it
   /thoughts      show the model's reasoning as it arrives, or hide it again
+  /image         hold an image for the next line, /image <path>
   /reset         drop the context (costs a full re-prefill)
   /context       message count in the current context
   /exit, /quit   leave
@@ -1051,7 +1052,8 @@ class SlashResult(NamedTuple):
 
 def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
               context_tokens: int, n_ctx: int, rollover_at: float,
-              session: bool = True, args=None, sampling: dict | None = None) -> SlashResult:
+              session: bool = True, args=None, sampling: dict | None = None,
+              staged_images: "list | None" = None) -> SlashResult:
     """Every slash command except the two that leave. Prints its own output.
 
     OUT OF repl() BECAUSE THE SUITE ASKED, and it asked for a reason worth
@@ -1092,6 +1094,31 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
         print("the model's reasoning is shown as it arrives.\n" if show_reasoning
               else "the model's reasoning is hidden again -- "
                    "the bird carries the state.\n")
+        return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
+
+    if line == "/image" or line.startswith("/image "):
+        # #142, the terminal's way in -- drag and drop does not exist here, so
+        # the path IS the gesture. The image rides the NEXT ordinary line; the
+        # list is repl()'s and is appended in place, because SlashResult is
+        # four names out on purpose (see its docstring) and a fifth for one
+        # command is the growth it exists to refuse.
+        rest = line[len("/image"):].strip().strip('"')
+        if staged_images is None:
+            print("staging is not wired here -- this surface passed no list.\n")
+            return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
+        if not rest:
+            print(("staged: " + ", ".join(s["name"] for s in staged_images) +
+                   " -- sends with the next line\n") if staged_images else
+                  "no image staged -- /image <path> holds one for the next line\n")
+            return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
+        try:
+            part = crow_core.image_part(rest)
+        except CrowError as exc:
+            print(f"{exc}\n")
+            return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
+        staged_images.append({"part": part, "name": os.path.basename(rest)})
+        print(f"staged {os.path.basename(rest)} -- sends with the next line "
+              f"({len(staged_images)} held)\n")
         return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
 
     if line == "/mode" or line.startswith("/mode "):
@@ -1685,6 +1712,29 @@ def resume_into(conversation: "crow_core.Conversation", args: argparse.Namespace
     return 0, False
 
 
+def spend_staged(line: str, staged_images: list, base_url: str):
+    """#142: the images /image held ride THIS line. The content to append, or
+    None when the line must not run.
+
+    REFUSED BEFORE ANYTHING IS BUILT, and out of repl() because that function
+    is capped at one job: the refusal is /props' answer over `refuse_images`
+    -- never a model list in this client -- and it fires before the append, so
+    a blind server leaves the history untouched and the image cannot ride the
+    next, unrelated line. The stage empties either way: spent on success,
+    cleared with the printed sentence on refusal.
+    """
+    if staged_images:
+        refuse = crow_core.refuse_images(base_url)
+        if refuse:
+            print(refuse + "\n")
+            staged_images.clear()
+            return None
+    content = crow_core.user_content(line,
+                                     [s["part"] for s in staged_images])
+    staged_images.clear()
+    return content
+
+
 def repl(args: argparse.Namespace) -> int:
     enable_ansi()
     install_interrupt_handler()
@@ -1768,6 +1818,7 @@ def repl(args: argparse.Namespace) -> int:
         reset_background()
         return 2
     context_tokens, promised_warm = resumed
+    staged_images: list = []   # #142: held by /image, spent by spend_staged
 
     def leave() -> int:
         if getattr(args, "session", True):
@@ -1803,7 +1854,8 @@ def repl(args: argparse.Namespace) -> int:
                           show_reasoning=show_reasoning,
                           context_tokens=context_tokens, n_ctx=n_ctx,
                           rollover_at=args.rollover_at, session=args.session,
-                          args=args, sampling=sampling)
+                          args=args, sampling=sampling,
+                          staged_images=staged_images)
         mode, show_reasoning = slash.mode, slash.show_reasoning
         context_tokens, n_ctx = slash.context_tokens, slash.n_ctx
         if slash.handled:
@@ -1823,7 +1875,13 @@ def repl(args: argparse.Namespace) -> int:
                 context_tokens = 0
                 rolled = True
         if not rolled:
-            conversation.append("user", line)
+            content = spend_staged(line, staged_images, args.base_url)
+            if content is None:
+                continue
+            conversation.append("user", content)
+        elif staged_images:
+            print(f"{DIM}the staged image stays held -- the rollover carried "
+                  f"only the text; it rides your next line{RESET}\n")
         print()
         # Cleared per turn: an interrupt from the PREVIOUS turn must not kill
         # the next one before it starts.

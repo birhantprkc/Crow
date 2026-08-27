@@ -1179,6 +1179,30 @@ def server_model_path(base_url: str, timeout: float = 3.0) -> str | None:
     return str(doc.get("model_path") or "") or None
 
 
+def refuse_images(base_url: str, timeout: float = 3.0) -> "str | None":
+    """The sentence when images must not be sent, or None when they may.
+
+    ASKED, NOT LISTED (#142): whether a server can see is the server's answer
+    over /props -- `modalities.vision` -- never a table of model names in this
+    client. Three answers, three meanings: vision true sends; vision false is
+    the one refusal, with the sentence; and NO answer (a remote provider, or
+    nothing listening) sends as-is -- a provider speaks for itself, and a dead
+    server is the turn's own error, not this function's.
+    """
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[: -len("/v1")]
+    try:
+        with urllib.request.urlopen(root + "/props", timeout=timeout) as resp:
+            doc = json.loads(resp.read().decode("utf-8")) or {}
+    except Exception:
+        return None
+    modalities = doc.get("modalities")
+    if isinstance(modalities, dict) and not modalities.get("vision"):
+        return BLIND_SERVER_HINT
+    return None
+
+
 def start_server(key: str, base_url: str, install: str | None = None,
                  wait_s: float = 600.0, log: Callable[[str], None] | None = None) -> str:
     """Bring `key` up and return the path the server reports. Or raise.
@@ -1763,7 +1787,9 @@ def write_transcript(conversation: "Conversation", path: str) -> int:
     out = []
     for message in conversation.payload():
         role = message.get("role", "?")
-        body = (message.get("content") or "").strip()
+        # #142: a user turn may carry blocks. The transcript takes the words;
+        # an image in an archive would be a base64 wall nobody reads.
+        body = message_text(message.get("content") or "").strip()
         out.append(f"## {role}")
         if body:
             out.append(body)
@@ -2418,6 +2444,101 @@ def install_interrupt_handler() -> None:
         pass
 
 
+# ------------------------------------------------------------------- images
+
+# #142, stage two: how an image gets INTO a message. The measured half sits in
+# the manifest note beside servers.qwen35-q4-k-xl.mmproj -- one image is
+# (w/32)*(h/32) tokens after the server's own resize, capped at 4,096.
+#
+# THE SHAPE IS THE WIRE'S SHAPE. A user message with images carries OpenAI
+# content blocks -- {"type":"text"} plus {"type":"image_url"} with a data URL --
+# because that is what llama-server reads, what session.json can hold without a
+# second file, and what a restart replays like any other line. The same rule
+# tool_calls follow: history IS the wire form, translated only at the Anthropic
+# seam.
+IMAGE_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+}
+
+# The sentence a blind server answers with, written once for both surfaces.
+# The server's own 500 says the same thing a layer lower; this one fires
+# BEFORE a request is built, because /props already knows.
+BLIND_SERVER_HINT = ("this server cannot see -- it was started without "
+                     "--mmproj. Add the projector to its line (see "
+                     "docs/reference/server-flags.md), restart, and send the "
+                     "image again.")
+
+
+def image_part(path: str) -> dict:
+    """One image file as the content block the wire takes. Or raise.
+
+    NOTHING SILENT (#142): an extension the table above does not know is a
+    refusal naming the table, not a guess at a MIME type -- and the bytes
+    travel exactly as they are on disk. No resize, no recompression: the
+    server does its own preprocessing and caps an image at --image-max-tokens,
+    so what Crow sends is what the user dropped.
+    """
+    import base64
+    ext = os.path.splitext(path)[1].lower()
+    mime = IMAGE_TYPES.get(ext)
+    if mime is None:
+        raise CrowError("not an image this client sends: %s. It sends: %s"
+                        % (os.path.basename(path) or path,
+                           " ".join(sorted(IMAGE_TYPES))))
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise CrowError("cannot read image %s: %s" % (path, exc))
+    if not raw:
+        raise CrowError("image %s is empty" % path)
+    return {"type": "image_url",
+            "image_url": {"url": "data:%s;base64,%s"
+                          % (mime, base64.b64encode(raw).decode("ascii"))}}
+
+
+def user_content(text: str, images: "list[dict] | None" = None):
+    """What a user message carries: the bare string, or blocks when images ride.
+
+    THE STRING IS THE CONTRACT. A turn without an image must be byte-identical
+    on the wire to what every release before #142 sent, so this returns the
+    text UNCHANGED unless an image is attached -- a lone text block would
+    tokenise the same and still say something new to every reader of
+    session.json.
+    """
+    if not images:
+        return text
+    return [{"type": "text", "text": text}] + list(images)
+
+
+def message_text(content) -> str:
+    """The words of a message whose content may be blocks.
+
+    For every reader that wants text -- the window title, the transcript, the
+    memory review -- and must not care whether an image rode along. A bare
+    string comes back as itself, so pre-#142 histories cost nothing.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join((part.get("text") or "") for part in content
+                         if isinstance(part, dict) and part.get("type") == "text")
+    return ""
+
+
+def message_images(content) -> list:
+    """The image blocks of a message; [] for a bare string."""
+    if isinstance(content, list):
+        return [part for part in content
+                if isinstance(part, dict) and part.get("type") == "image_url"]
+    return []
+
+
 class Conversation:
     """The message list. Append-only by construction -- see module docstring.
 
@@ -2571,9 +2692,12 @@ class Conversation:
             else:
                 self._messages.insert(0, {"role": "system", "content": self._system})
 
-    def append(self, role: str, content: str, reasoning: str | None = None,
+    def append(self, role: str, content: "str | list", reasoning: str | None = None,
                tool_calls: list[dict] | None = None,
                tool_call_id: str | None = None) -> None:
+        # `content` is a LIST exactly when a user turn carries images (#142) --
+        # the OpenAI block shape from user_content(). Everything else stays the
+        # bare string it always was.
         message = {"role": role, "content": content}
         # Absent rather than empty: a turn that produced no reasoning has to
         # serialise exactly as it did before this field existed.
@@ -2773,6 +2897,29 @@ def anthropic_messages(payload: list) -> "tuple[str, list]":
             # here: an interrupted reply that produced nothing.
             if blocks:
                 out.append({"role": "assistant", "content": blocks})
+            continue
+        if isinstance(content, list):
+            # #142. A user turn with images: the text block moves as text, and
+            # every image_url block becomes Anthropic's image/source shape --
+            # the data URL split back into media_type and payload. A URL that
+            # is not a data URL is dropped rather than sent broken: image_part
+            # is the only builder and it never writes another kind.
+            blocks = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "image_url":
+                    url = (part.get("image_url") or {}).get("url") or ""
+                    head, sep, data = url.partition(";base64,")
+                    if sep and head.startswith("data:"):
+                        blocks.append({"type": "image",
+                                       "source": {"type": "base64",
+                                                  "media_type": head[len("data:"):],
+                                                  "data": data}})
+                elif part.get("type") == "text" and part.get("text"):
+                    blocks.append({"type": "text", "text": part["text"]})
+            if blocks:
+                out.append({"role": "user", "content": blocks})
             continue
         if content:
             out.append({"role": "user", "content": content})
@@ -5210,7 +5357,8 @@ def sync_index(db_path: str | None = None,
                 continue
             title = (data.get("crow_title") or os.path.basename(path)).strip()
             for i, message in enumerate(data.get("messages") or []):
-                body = (message.get("content") or "").strip()
+                # #142: blocks index by their words, not their base64.
+                body = message_text(message.get("content") or "").strip()
                 role = message.get("role") or ""
                 # The system message is the HEAD, not something anybody said.
                 # Indexing it would answer every search with the same prompt.
@@ -5347,7 +5495,7 @@ def mandated_paths(conversation: "Conversation") -> set[str]:
     for message in conversation.payload():
         if message.get("role") != "user":
             continue
-        for hit in _PATH_IN_TEXT.findall(message.get("content") or ""):
+        for hit in _PATH_IN_TEXT.findall(message_text(message.get("content") or "")):
             hit = hit.rstrip(".,;:!?\"')")
             if hit:
                 found.add(_resolve(hit))
@@ -9223,7 +9371,7 @@ atexit.register(forget_mcp_servers)
 # `crow.py` keeps the prose of `HELP` and is pinned against this tuple; the
 # window reads the tuple directly. Neither owns the other.
 SLASH_COMMANDS = ("/help", "/tools", "/mcp", "/mode", "/model", "/reasoning",
-                  "/thoughts", "/reset", "/context", "/exit", "/quit")
+                  "/thoughts", "/image", "/reset", "/context", "/exit", "/quit")
 
 
 def needs_approval(name: str, mode: str) -> bool:

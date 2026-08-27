@@ -4491,6 +4491,113 @@ class TheTerminalAnswersMcpItselfTests(unittest.TestCase):
         self.assertIn(crow_core.mcp_command([]), said)
 
 
+class TheImageCommandTests(unittest.TestCase):
+    """#142 in the terminal. Drag and drop does not exist here, so the path IS
+    the gesture: /image holds one, the next ordinary line spends it."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-image-cli-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def _png(self, name="shot.png"):
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + b"c" * 16)
+        return path
+
+    def _slash(self, line, staged):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = crow.run_slash(line, conversation=crow.Conversation("SYS"),
+                                    mode="auto", show_reasoning=False,
+                                    context_tokens=0, n_ctx=200000,
+                                    rollover_at=0.9, session=False,
+                                    staged_images=staged)
+        return result, out.getvalue()
+
+    def test_a_path_is_staged_and_named(self):
+        staged = []
+        result, said = self._slash("/image %s" % self._png(), staged)
+        self.assertTrue(result.handled)
+        self.assertEqual([s["name"] for s in staged], ["shot.png"])
+        self.assertIn("sends with the next line", said)
+
+    def test_a_quoted_path_with_a_space_survives(self):
+        """A Windows path with a space is the normal case -- the handler takes
+        the rest of the line, not parts[1]."""
+        spaced = os.path.join(self.dir, "with space")
+        os.makedirs(spaced)
+        path = os.path.join(spaced, "a b.png")
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + b"c" * 16)
+        staged = []
+        self._slash('/image "%s"' % path, staged)
+        self.assertEqual([s["name"] for s in staged], ["a b.png"])
+
+    def test_a_wrong_extension_is_refused_in_place(self):
+        """NEGATIVE PROBE: image_part's sentence, printed here, nothing held."""
+        path = os.path.join(self.dir, "notes.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        staged = []
+        result, said = self._slash("/image %s" % path, staged)
+        self.assertTrue(result.handled)
+        self.assertEqual(staged, [])
+        self.assertIn(".png", said)
+
+    def test_bare_image_says_what_is_held(self):
+        staged = [{"part": {}, "name": "held.png"}]
+        result, said = self._slash("/image", staged)
+        self.assertTrue(result.handled)
+        self.assertIn("held.png", said)
+        self.assertEqual(len(staged), 1)
+
+    def test_the_next_line_spends_the_stage_before_the_append(self):
+        """The order IS the safety: refuse_images before user_content inside
+        spend_staged, and repl appends only what spend_staged returned -- a
+        blind server leaves the history untouched, same rule as the window's
+        gate."""
+        spend = inspect.getsource(crow.spend_staged)
+        self.assertLess(spend.index("crow_core.refuse_images"),
+                        spend.index("crow_core.user_content"))
+        loop = inspect.getsource(crow.repl)
+        called = loop.index("spend_staged(line")
+        append = loop.index('conversation.append("user", content)')
+        self.assertLess(called, append)
+
+    def test_a_refusal_returns_none_and_clears(self):
+        """NEGATIVE PROBE against a live refusal: a /props that answers
+        vision false makes spend_staged print the sentence, clear the stage
+        and return None -- and with nothing staged the same server is no
+        obstacle at all."""
+        import http.server
+        import threading
+
+        class Props(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"modalities": {"vision": false}}')
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Props)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = "http://127.0.0.1:%d/v1" % server.server_address[1]
+        staged = [{"part": crow_core.image_part(self._png()), "name": "shot.png"}]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            content = crow.spend_staged("what is this", staged, base)
+        self.assertIsNone(content)
+        self.assertEqual(staged, [])
+        self.assertIn("--mmproj", out.getvalue())
+        self.assertEqual(crow.spend_staged("hello", [], base), "hello")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

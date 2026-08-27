@@ -7005,5 +7005,97 @@ class ALineTypedDuringTheReviewIsNotLostTests(ApiCase):
         self.assertIn("self._busy = False", held)
 
 
+class AnImageIsAnAttachmentTests(ApiCase):
+    """#142 in the window: a dropped image becomes a chip, rides the next send,
+    and comes back after a restart. The wire half lives in test_crow_core; here
+    is the seam the page drives -- stage, unstage, refuse, replay."""
+
+    def _png(self, name="shot.png"):
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + b"i" * 16)
+        return path
+
+    def test_stage_returns_the_chip_and_holds_the_part(self):
+        api = self.api()
+        out = api.stage_image(self._png())
+        self.assertEqual(len(out["chips"]), 1)
+        self.assertEqual(out["chips"][0]["name"], "shot.png")
+        self.assertTrue(out["chips"][0]["url"]
+                        .startswith("data:image/png;base64,"))
+
+    def test_unstage_removes_and_returns_the_rest(self):
+        api = self.api()
+        api.stage_image(self._png("a.png"))
+        api.stage_image(self._png("b.png"))
+        out = api.unstage_image(0)
+        self.assertEqual([c["name"] for c in out["chips"]], ["b.png"])
+
+    def test_a_refused_file_is_a_note_and_no_chip(self):
+        """NEGATIVE PROBE: a .txt drop says image_part's sentence and stages
+        nothing -- the old path-in-the-composer behaviour is for the page to
+        keep, not this seam."""
+        api = self.api()
+        path = os.path.join(self.dir, "notes.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        out = api.stage_image(path)
+        self.assertEqual(out["chips"], [])
+        self.assertIn("note", [e.get("k") for e in self.drained(api)])
+
+    def test_the_replay_carries_the_image_back(self):
+        """The ticket's 'still there after a restart', at the seam the page
+        reads: a replayed user turn with blocks pushes its words AND its
+        images."""
+        api = self.api()
+        content = crow_core.user_content(
+            "what is this", [crow_core.image_part(self._png())])
+        api._replay([{"role": "user", "content": content},
+                     {"role": "assistant", "content": "a raven"}])
+        user = next(e for e in self.drained(api) if e.get("k") == "user")
+        self.assertEqual(user["t"], "what is this")
+        self.assertEqual(len(user["i"]), 1)
+        self.assertTrue(user["i"][0].startswith("data:image/png;base64,"))
+
+    def test_a_plain_replay_pushes_no_image_key(self):
+        """NEGATIVE: an old chat replays exactly as before -- no `i` key."""
+        api = self.api()
+        api._replay([{"role": "user", "content": "hello"}])
+        user = next(e for e in self.drained(api) if e.get("k") == "user")
+        self.assertNotIn("i", user)
+
+    def test_a_blind_server_refuses_before_the_history(self):
+        """The gate runs BEFORE the append. After the refusal the conversation
+        holds no user line and the stage is empty -- a refused image must not
+        ride the next, unrelated send."""
+        import http.server
+
+        class Props(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"modalities": {"vision": false}}')
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Props)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        api = self.api("--base-url",
+                       "http://127.0.0.1:%d/v1" % server.server_address[1])
+        api.stage_image(self._png())
+        api._run("what is this")
+        events = self.drained(api)
+        fails = [e for e in events if e.get("k") == "fail"]
+        self.assertTrue(fails, "no fail pushed: %r" % [e.get("k") for e in events])
+        self.assertIn("--mmproj", fails[0]["t"])
+        self.assertEqual([m for m in api._conversation.payload()
+                          if m.get("role") == "user"], [])
+        self.assertEqual(api._staged_images, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

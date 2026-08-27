@@ -9052,6 +9052,148 @@ class TheGrammarSafeSchemaTests(unittest.TestCase):
         self.assertNotIn("maxLength", got["u"])
 
 
+class AnImageRidesTheMessageTests(unittest.TestCase):
+    """#142, stage two: what an image turns a user message into, and what it
+    must NOT turn anything else into. Measured first (2026-08-27): one image is
+    (w/32)*(h/32)+2 tokens, so the wire shape below is the cheap part -- the
+    contract is that a turn WITHOUT an image stays byte-identical."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-image-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def _png(self, name="img.png"):
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+        return path
+
+    def test_without_images_the_content_is_the_string_itself(self):
+        """THE CONTRACT: identity, not equality. A lone text block would
+        tokenise the same and still change every reader of session.json."""
+        self.assertIs(crow_core.user_content("hello"), "hello")
+        self.assertIs(crow_core.user_content("hello", []), "hello")
+
+    def test_an_image_becomes_a_data_url_block(self):
+        import base64
+        part = crow_core.image_part(self._png())
+        self.assertEqual(part["type"], "image_url")
+        url = part["image_url"]["url"]
+        self.assertTrue(url.startswith("data:image/png;base64,"))
+        self.assertTrue(base64.b64decode(url.split(",", 1)[1])
+                        .startswith(b"\x89PNG"))
+
+    def test_an_unknown_extension_is_refused_with_the_table(self):
+        """NEGATIVE PROBE. A .txt is a refusal naming what IS sent, not a
+        guessed MIME type."""
+        path = os.path.join(self.dir, "notes.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        with self.assertRaises(crow_core.CrowError) as caught:
+            crow_core.image_part(path)
+        self.assertIn(".png", str(caught.exception))
+
+    def test_message_text_reads_both_shapes(self):
+        content = crow_core.user_content("look at this",
+                                         [crow_core.image_part(self._png())])
+        self.assertEqual(crow_core.message_text(content), "look at this")
+        self.assertEqual(crow_core.message_text("plain"), "plain")
+        self.assertEqual(len(crow_core.message_images(content)), 1)
+        self.assertEqual(crow_core.message_images("plain"), [])
+
+    def test_the_anthropic_seam_splits_the_data_url(self):
+        """The other dialect names image blocks differently: image/source with
+        media_type and payload apart. The translation is the seam's job, the
+        history stays in the wire shape run_turn sends."""
+        content = crow_core.user_content("what is this",
+                                         [crow_core.image_part(self._png())])
+        _, out = crow_core.anthropic_messages([{"role": "user", "content": content}])
+        self.assertEqual(len(out), 1)
+        blocks = out[0]["content"]
+        kinds = [b["type"] for b in blocks]
+        self.assertEqual(kinds, ["text", "image"])
+        self.assertEqual(blocks[1]["source"]["media_type"], "image/png")
+        self.assertNotIn("data:", blocks[1]["source"]["data"])
+
+    def test_a_plain_history_translates_exactly_as_before(self):
+        """NEGATIVE PROBE for the seam: no image anywhere means the user turn
+        stays the bare string it was in every release before #142."""
+        _, out = crow_core.anthropic_messages([{"role": "user", "content": "hi"}])
+        self.assertEqual(out, [{"role": "user", "content": "hi"}])
+
+    def test_an_image_survives_save_and_load(self):
+        """The ticket's own warning -- 'this is the part that will hurt'. The
+        blocks are JSON like everything else in the history, so a restart
+        replays them; this pins that no writer flattens them on the way."""
+        conv = crow_core.Conversation(system="s")
+        content = crow_core.user_content("look",
+                                         [crow_core.image_part(self._png())])
+        conv.append("user", content)
+        conv.append("assistant", "a raven")
+        path = os.path.join(self.dir, "session.json")
+        said = crow_core.save_session(conv, "http://127.0.0.1:9/v1", 7,
+                                      path=path, with_kv=False)
+        self.assertIsNotNone(said)
+        loaded = crow_core.load_session("http://127.0.0.1:9/v1", system="s",
+                                        path=path, with_kv=False)
+        self.assertIsNotNone(loaded)
+        messages, _, _ = loaded
+        user = [m for m in messages if m.get("role") == "user"]
+        self.assertEqual(user[0]["content"], content)
+
+    def test_the_transcript_takes_the_words_not_the_base64(self):
+        """The rollover archive on a conversation with an image must neither
+        crash on .strip() nor dump a base64 wall into the file."""
+        conv = crow_core.Conversation(system="s")
+        conv.append("user", crow_core.user_content(
+            "look", [crow_core.image_part(self._png())]))
+        conv.append("assistant", "a raven")
+        path = os.path.join(self.dir, "archive.md")
+        crow_core.write_transcript(conv, path)
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("look", text)
+        self.assertNotIn("base64", text)
+
+
+class ABlindServerRefusesImagesTests(unittest.TestCase):
+    """#142: asked, not listed. Whether a server can see is /props' answer."""
+
+    def _serve(self, payload_bytes):
+        import http.server
+        class Props(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(payload_bytes)
+            def log_message(self, *args):
+                pass
+        server = http.server.HTTPServer(("127.0.0.1", 0), Props)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return "http://127.0.0.1:%d/v1" % server.server_address[1]
+
+    def test_vision_false_is_the_one_refusal(self):
+        base = self._serve(b'{"modalities": {"vision": false}}')
+        self.assertEqual(crow_core.refuse_images(base),
+                         crow_core.BLIND_SERVER_HINT)
+
+    def test_vision_true_sends(self):
+        base = self._serve(b'{"modalities": {"vision": true}}')
+        self.assertIsNone(crow_core.refuse_images(base))
+
+    def test_no_answer_sends_as_is(self):
+        """NEGATIVE PROBE twice over: a server with no modalities key (an older
+        build) and an address with nothing listening both send -- a remote
+        provider answers for itself, and a dead server is the turn's error."""
+        base = self._serve(b'{"model_path": "x"}')
+        self.assertIsNone(crow_core.refuse_images(base))
+        self.assertIsNone(crow_core.refuse_images("http://127.0.0.1:9/v1",
+                                                  timeout=0.3))
+
+
 class TheProjectorReachesTheCommandLineTests(unittest.TestCase):
     """#142, stage one: `servers.<key>.mmproj` is the whole vision switch.
 

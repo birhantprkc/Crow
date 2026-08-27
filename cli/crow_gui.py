@@ -1543,6 +1543,17 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    in; the turn above already carries it where it says something. The gap
    went with it -- one child has nothing to be spaced from. */
 #line{display:flex;position:relative;align-items:flex-start}
+/* #142: staged images in the composer, and a sent one in the transcript. */
+#stage{display:flex;gap:6px;flex-wrap:wrap;padding:8px 8px 0}
+#stage .imgchip{position:relative}
+#stage .imgchip img{height:46px;border-radius:6px;display:block;
+  border:1px solid var(--bevel)}
+#stage .imgchip button{position:absolute;top:-6px;right:-6px;width:16px;
+  height:16px;line-height:14px;padding:0;border-radius:50%;font-size:11px;
+  border:1px solid var(--bevel);background:var(--panel);color:inherit;
+  cursor:pointer}
+.you img.sent{display:block;max-width:min(320px,70%);border-radius:8px;
+  margin-top:6px;border:1px solid var(--bevel)}
 #in{flex:1;background:transparent;border:0;outline:0;resize:none;color:var(--text);
   font:inherit;font-size:13px;line-height:1.5;max-height:140px;user-select:text}
 #in::placeholder{color:var(--dimmer)}
@@ -1994,6 +2005,9 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
     <div id="composer">
       <div id="pendbar" hidden onclick="crow.pendToggle(event)"></div>
       <div id="box">
+        <!-- #142. One chip per staged image, drawn from what stage_image
+             returns. Hidden while empty so the composer keeps its height. -->
+        <div id="stage" hidden></div>
         <div id="line"><textarea id="in" rows="1"
             placeholder="Message, or /tools for what the model can call"></textarea>
           <div id="voice" hidden></div></div>
@@ -2247,6 +2261,20 @@ const crow = {
     const t=this.turn(""); t.innerHTML=
       '<div class="you"><div class="txt"></div></div>';
     t.querySelector(".txt").textContent=text; this.bottom();
+  },
+
+  // #142. A SEPARATE CALL, NOT A SECOND PARAMETER: four cases anchor the whole
+  // `user(text){` signature, and the same lesson is already written into
+  // v1.3.0's tool_result -- a new seam lands BESIDE an anchored one. The image
+  // is IN the transcript, or somebody sends a picture they cannot see; same
+  // renderer live and restored.
+  userImages(urls){
+    if(!urls || !urls.length){ return; }
+    const you=[...document.querySelectorAll(".you")].pop();
+    if(!you){ return; }
+    urls.forEach(u=>{ const im=document.createElement("img");
+      im.className="sent"; im.src=u; you.appendChild(im); });
+    this.bottom();
   },
 
   // #131. VARIANT A (robin, 2026-08-22). A 24-round turn put 24 rounds of
@@ -3543,10 +3571,42 @@ const crow = {
   dropped(paths){
     this.dragging(false);
     if(!paths || !paths.length){ return; }
+    // #142. AN IMAGE IS AN ATTACHMENT, NOT A PATH IN THE COMPOSER. The path
+    // goes straight back to the Python side (which had it first -- see the
+    // drop comment above) and a chip comes back; the model gets the pixels,
+    // not a filename `read_file` cannot open as words. Everything else keeps
+    // the old behaviour: the path lands in the input for the model to read.
+    const img=/\.(png|jpe?g|gif|webp|bmp)$/i;
+    // The strip redraws through the "chips" event the Python side pushes --
+    // the same channel /image uses, so there is exactly one renderer call.
+    paths.filter(p=>img.test(p)).forEach(p=>pywebview.api.stage_image(p));
+    paths=paths.filter(p=>!img.test(p));
+    if(!paths.length){ return; }
     // QUOTED WHEN IT HAS TO BE. A Windows path with a space in it is the normal
     // case, not the exception, and an unquoted one is two arguments to whatever
     // reads the line next.
     this.attach(paths.map(p => /\s/.test(p) ? '"'+p+'"' : p).join(" "));
+  },
+
+  // #142. The chip strip is REDRAWN WHOLE from what the Python side returns --
+  // both stage calls hand the full list back, so there is no index to drift
+  // when a middle chip is removed.
+  stageRender(chips){
+    const s=$("#stage"); if(!s){ return; }
+    s.innerHTML="";
+    (chips||[]).forEach((c,i)=>{
+      const w=document.createElement("span"); w.className="imgchip";
+      const im=document.createElement("img"); im.src=c.url; im.title=c.name;
+      const x=document.createElement("button"); x.textContent="×";
+      x.title="remove "+c.name;
+      x.onclick=()=>pywebview.api.unstage_image(i);
+      w.appendChild(im); w.appendChild(x); s.appendChild(w);
+    });
+    s.hidden=!(chips&&chips.length);
+  },
+
+  stagedUrls(){
+    return [...document.querySelectorAll("#stage img")].map(i=>i.src);
   },
 
   idle(){ this.running=false; go.textContent="↑"; go.classList.remove("stop");
@@ -3585,6 +3645,11 @@ const crow = {
     const text=input.value.trim(); if(!text) return;
     input.value=""; input.style.height="auto";
     this.user(text);
+    // #142. The staged images travel with THIS line: drawn into it here,
+    // consumed by the Python side in the same send. The strip empties either
+    // way -- accepted or refused, what was drawn is what was spent.
+    this.userImages(this.stagedUrls());
+    this.stageRender([]);
     // #130. AFTER the typed line, before the call: the tile belongs under the
     // command it is about, and the answer to `/mcp add` waits for it.
     if(/^\/mcp\s+add\s+\S/i.test(text)) this.installBar();
@@ -4328,7 +4393,7 @@ const crow = {
       // the last answer would read as broken on the one above it.
       case "thoughts": document.querySelectorAll("details.think")
         .forEach(d=>{ d.open=e.open; }); break;
-      case "user": this.user(e.t); break;
+      case "user": this.user(e.t); if(e.i) this.userImages(e.i); break;
       case "start": this.start(); break;
       case "think_open": this.thinkOpen(); break;
       case "think": this.thinkText(e.t); break;
@@ -4344,6 +4409,7 @@ const crow = {
       case "toolres": this.toolRes(e.name,e.t,e.cut); break;
       case "cost": this.cost(e.line,e.share); this.ctx(e.tokens,e.n_ctx); break;
       case "note": this.note(e.t); break;
+      case "chips": this.stageRender(e.c); break;
       case "memory": this.memory(e.t,e.n); break;
       case "toolarg": this.toolArg(e.i,e.name,e.t,e.code); break;
       case "alarm": this.alarm(e.t); break;
@@ -5102,6 +5168,12 @@ class Api:
         self._conversation = Conversation(args.system)
         self._context_tokens = 0
         self._n_ctx = 0
+        # #142. Images dropped and not yet sent. They ride the NEXT send: the
+        # page shows a chip per entry, and `_run` folds them into the user
+        # message through `user_content`. Held here and not in the page because
+        # the page never sees the path -- and consumed on send, accepted or
+        # refused, so a stale image cannot ride a later, unrelated line.
+        self._staged_images: list = []
         # What /props last said the server has open. Kept beside _n_ctx and for
         # the same reason: both are answers from the endpoint that the session
         # path needs later, and asking twice would be two answers to one
@@ -5654,7 +5726,9 @@ class Api:
         """
         for message in messages or []:
             if message.get("role") == "user":
-                first = (message.get("content") or "").strip().splitlines()
+                # #142: blocks title by their words, like everywhere else.
+                first = crow_core.message_text(
+                    message.get("content") or "").strip().splitlines()
                 if first and first[0]:
                     return first[0][:cls.TITLE_MAX]
         return None
@@ -5914,6 +5988,7 @@ class Api:
         "/model": "the model that is up; /model <key> restarts on another one.",
         "/reasoning": "this chat's thinking level; /reasoning <level>|off to set it.",
         "/thoughts": "fold the reasoning blocks open, or closed again.",
+        "/image": "hold an image for the next line; /image <path>, or drop one.",
         "/reset": "drop the context. The chat stays where it is.",
         "/context": "how much of the window the conversation is using.",
         "/exit": "close the window.",
@@ -5971,8 +6046,30 @@ class Api:
             return self._reasoning_command(parts[1:])
         if word == "/thoughts":
             return self._fold_thoughts()
+        if word == "/image":
+            # THE REST OF THE LINE, NOT parts[1]: a Windows path with a space
+            # is the normal case, and split() has already cut it in two.
+            return self._image_command(stripped[len("/image"):].strip())
         self.close()          # /exit, /quit
         return "closing."
+
+    def _image_command(self, rest: str) -> str:
+        """`/image <path>` stages like a drop does; bare `/image` says what is
+        held. The window's own way in stays the drop -- this exists so the
+        SHARED command answers in both surfaces (#99 is the case where one
+        surface was forgotten)."""
+        rest = rest.strip().strip('"')
+        if not rest:
+            chips = self._image_chips()
+            if not chips:
+                return "no image staged -- drop one into the window, or /image <path>"
+            return "staged: " + ", ".join(c["name"] for c in chips) + \
+                   " -- sends with the next line"
+        before = len(self._staged_images)
+        self.stage_image(rest)
+        if len(self._staged_images) == before:
+            return ""          # refused; stage_image already pushed the note
+        return "staged %s -- sends with the next line" % os.path.basename(rest)
 
     # -- what each one actually does ----------------------------------------
 
@@ -6220,6 +6317,46 @@ class Api:
 
     def stop(self) -> None:
         INTERRUPT.set()
+
+    # ------------------------------------------------------------ #142 images
+
+    def stage_image(self, path: str) -> dict:
+        """Read one dropped image and hold it for the next send.
+
+        THE PAGE NEVER SEES THE BYTES ON DISK, only what comes back here:
+        name and data URL for the chip. A refusal (wrong extension, unreadable
+        file) is pushed as a note and the chips stay as they were -- the same
+        sentence `image_part` writes, said where the drop happened.
+        """
+        try:
+            part = crow_core.image_part(path)
+        except crow_core.CrowError as exc:
+            self.push({"k": "note", "t": str(exc)})
+            return {"chips": self._image_chips()}
+        self._staged_images.append({"part": part,
+                                    "name": os.path.basename(path)})
+        # PUSHED AS WELL AS RETURNED: a drop reads the return value, but
+        # `/image <path>` goes through slash_answer, which returns a sentence
+        # -- the strip learns about its chip through this event either way.
+        self.push({"k": "chips", "c": self._image_chips()})
+        return {"chips": self._image_chips()}
+
+    def unstage_image(self, index) -> dict:
+        """Drop one staged image, from its chip. Out-of-range is a no-op: the
+        page redraws from what returns, so a stale click cannot desync it."""
+        try:
+            self._staged_images.pop(int(index))
+        except (IndexError, ValueError, TypeError):
+            pass
+        self.push({"k": "chips", "c": self._image_chips()})
+        return {"chips": self._image_chips()}
+
+    def _image_chips(self) -> list:
+        """What the page draws: one {name, url} per staged image, in order.
+        The list IS the protocol -- both stage calls return it whole, so the
+        page rerenders instead of tracking indices that shift on removal."""
+        return [{"name": s["name"], "url": s["part"]["image_url"]["url"]}
+                for s in self._staged_images]
 
     def set_tools(self, on: bool) -> None:
         """Switch tool execution, from the chip. Never mid-turn.
@@ -6683,8 +6820,18 @@ class Api:
             role = message.get("role")
             body = (message.get("content") or "")
             if role == "user":
-                if body.strip():
-                    self.push({"k": "user", "t": body})
+                # #142. A restored turn may carry blocks: the words go back as
+                # the line, the images go back as images -- the ticket's "the
+                # same image is still there after a restart".
+                words = crow_core.message_text(body)
+                urls = [u for u in
+                        (((p.get("image_url") or {}).get("url") or "")
+                         for p in crow_core.message_images(body)) if u]
+                if words.strip() or urls:
+                    entry = {"k": "user", "t": words}
+                    if urls:
+                        entry["i"] = urls
+                    self.push(entry)
                 continue
             if role != "assistant":
                 continue
@@ -7748,6 +7895,21 @@ class Api:
         # guard is what keeps this from reaching past a pin already taken.
         if self._conversation.memory is None:
             self._pin_memory(self._current_path)
+        # #142. STAGED IMAGES ARE CONSUMED HERE, ACCEPTED OR REFUSED, and the
+        # gate runs BEFORE the append: a refused image must never enter the
+        # history, or it rides the next, unrelated line. Refusal is /props'
+        # answer (`refuse_images`), asked only of a local server -- a remote
+        # provider answers for itself, with its own error, on its own bill.
+        staged, self._staged_images = self._staged_images, []
+        if staged:
+            early = self._endpoint()
+            refuse = (None if early["remote"]
+                      else crow_core.refuse_images(early["base_url"]))
+            if refuse:
+                self.push({"k": "fail", "t": refuse})
+                self.push({"k": "idle"})
+                return
+            text = crow_core.user_content(text, [s["part"] for s in staged])
         self._conversation.append("user", text)
         # THE RAIL LEARNS THE CHAT EXISTS NOW, NOT AFTER THE TURN. Every other
         # caller of `_reload_rail` ends something, so an entry kept "new chat ·
