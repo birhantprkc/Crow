@@ -9052,5 +9052,92 @@ class TheGrammarSafeSchemaTests(unittest.TestCase):
         self.assertNotIn("maxLength", got["u"])
 
 
+class TheProjectorReachesTheCommandLineTests(unittest.TestCase):
+    """#142, stage one: `servers.<key>.mmproj` is the whole vision switch.
+
+    MEASURED 2026-08-27 before any of this was built: with the flag the same
+    GGUF answers `/props` with `modalities.vision: true`, without it the model
+    is text-only and nothing on the machine says so. The manifest field is the
+    switch; these cases pin the three ways it can go -- declared and present,
+    declared and missing, not declared at all.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-mmproj-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        # The two trees server_command resolves against: the measurement
+        # machine's model root, and an install.
+        self.root = os.path.join(self.dir, "lab-models")
+        self.install = os.path.join(self.dir, "install")
+        os.makedirs(os.path.join(self.root, "qq"))
+        os.makedirs(os.path.join(self.install, "bin"))
+        self._touch(os.path.join(self.root, "qq", "model.gguf"))
+        self._touch(os.path.join(self.install, "bin", "llama-server.exe"))
+
+    def _touch(self, path):
+        with open(path, "wb") as fh:
+            fh.write(b"")
+
+    def _manifest(self, line_extra=None):
+        line = {"port": 8099}
+        line.update(line_extra or {})
+        return {
+            "models": {"_root": self.root,
+                       "entries": {"m": {"path": "qq/model.gguf"}}},
+            "servers": {"m": line},
+        }
+
+    def test_a_declared_projector_reaches_the_argv(self):
+        """The field becomes `--mmproj <resolved path>`, not the raw relative
+        value -- a relative path in argv would depend on the caller's cwd."""
+        self._touch(os.path.join(self.root, "qq", "mmproj.gguf"))
+        argv = crow_core.server_command(
+            "m", self._manifest({"mmproj": "qq/mmproj.gguf"}), self.install)
+        self.assertIn("--mmproj", argv)
+        given = argv[argv.index("--mmproj") + 1]
+        self.assertEqual(os.path.normpath(given),
+                         os.path.normpath(os.path.join(self.root, "qq", "mmproj.gguf")))
+
+    def test_a_missing_projector_drops_the_flag_and_nothing_else(self):
+        """Declared but not on disk boots the text model every release before
+        #142 shipped -- the argv must be BYTE-IDENTICAL to one whose line never
+        declared a projector. The sentence about it belongs to start_server,
+        not to the command line."""
+        with_missing = crow_core.server_command(
+            "m", self._manifest({"mmproj": "qq/not-downloaded.gguf"}), self.install)
+        undeclared = crow_core.server_command(
+            "m", self._manifest(), self.install)
+        self.assertNotIn("--mmproj", with_missing)
+        self.assertEqual(with_missing, undeclared)
+
+    def test_a_line_without_mmproj_stays_what_it_was(self):
+        """NEGATIVE PROBE for the switch itself: no field, no flag -- 0731 must
+        not grow a projector because Qwen got one."""
+        argv = crow_core.server_command("m", self._manifest(), self.install)
+        self.assertNotIn("--mmproj", argv)
+        self.assertEqual(crow_core.projector_candidates("m", self._manifest(),
+                                                        self.install), [])
+
+    def test_the_projector_resolves_like_the_model(self):
+        """Same two roots, same relative-then-basename order as
+        model_candidates -- the projector sits beside its GGUF in both trees,
+        and a second resolution rule would drift from the first."""
+        got = crow_core.projector_candidates(
+            "m", self._manifest({"mmproj": "qq/mmproj.gguf"}), self.install)
+        want = [os.path.normpath(os.path.join(self.root, "qq", "mmproj.gguf")),
+                os.path.normpath(os.path.join(self.root, "mmproj.gguf")),
+                os.path.normpath(os.path.join(self.install, "models", "qq", "mmproj.gguf")),
+                os.path.normpath(os.path.join(self.install, "models", "mmproj.gguf"))]
+        self.assertEqual(got, want)
+
+    def test_the_shipped_manifest_declares_qwen_vision(self):
+        """The real manifest, not a fixture, same pattern as the port test
+        above: the failure this exists to catch is the field quietly leaving
+        the shipped table while the code still supports it."""
+        line = (crow_core._manifest().get("servers") or {}).get("qwen35-q4-k-xl") or {}
+        self.assertEqual(os.path.basename(str(line.get("mmproj") or "")),
+                         "mmproj-F16.gguf")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

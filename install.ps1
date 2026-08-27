@@ -1620,13 +1620,19 @@ Write-Host "       Qwen3.8-27B, quantised by unsloth to UD-Q4_K_XL" -ForegroundC
 Write-Host "       https://huggingface.co/unsloth/Qwen3.8-27B-GGUF" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "    hf download unsloth/Qwen3.8-27B-GGUF --include '*UD-Q4_K_XL*' --local-dir $InstallTo\models\qwen38-gguf" -ForegroundColor White
+# A SECOND LINE BECAUSE THE GLOB ABOVE DOES NOT CATCH IT. mmproj-F16.gguf is the
+# vision projector (#142) -- without it the server boots the same model as a
+# text-only one, silently. Found on 2026-08-27 when the measurement had to fetch
+# the file the documented download had never brought.
+Write-Host "    hf download unsloth/Qwen3.8-27B-GGUF mmproj-F16.gguf --local-dir $InstallTo\models\qwen38-gguf" -ForegroundColor White
 Write-Host ""
 # Measured 2026-08-07 on the other model, and it is the same tool: when hf cannot
 # reach the repository it prints a tick and returns the local directory. Failure
 # that looks like success is worth one line here, because the next thing the user
 # does is start a server against nothing.
 Write-Host "     If that finishes suspiciously fast, check that one file of" -ForegroundColor DarkGray
-Write-Host "     17,559,178,144 B arrived -- hf reports success even when it reached nothing." -ForegroundColor DarkGray
+Write-Host "     17,559,178,144 B and one of 927,607,488 B arrived -- hf reports success" -ForegroundColor DarkGray
+Write-Host "     even when it reached nothing." -ForegroundColor DarkGray
 Write-Host ""
 # -ctk/-ctv q8_0 and not f16: measured 2026-08-20, f16 KV leaves 332.8 MiB of the
 # card free, a third of the 924 MiB at which this project has documented losses
@@ -1636,6 +1642,9 @@ Write-Host ""
 Write-Host "  2. Then start the server, and the client in a second terminal:" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "    $InstallTo\bin\llama-server.exe -m $InstallTo\models\qwen38-gguf\Qwen3.8-27B-UD-Q4_K_XL.gguf ``" -ForegroundColor White
+# NOT ON THE LAST LINE, same rule as --slot-save-path below: the value is a path
+# and a path at the closing quote reaches the checker with the quote glued on.
+Write-Host "      --mmproj $InstallTo\models\qwen38-gguf\mmproj-F16.gguf ``" -ForegroundColor White
 Write-Host "      --port 8082 -c 200000 -ctk q8_0 -ctv q8_0 -ngl 99 -np 1 ``" -ForegroundColor White
 # --slot-save-path IS NOT ON THE LAST LINE, and that is not layout. The checker
 # reads this file as text and captures the path with \S+, so a value ending at

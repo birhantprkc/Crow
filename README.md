@@ -54,6 +54,7 @@
 | Quant | `UD-Q4_K_XL`, Unsloth, imatrix 1,251 chunks |
 | Context | `-c 200000`, one slot (`-np 1`) |
 | KV | `q8_0` / `q8_0`, 6,647.00 MiB measured against 6,645.8 predicted |
+| Vision | `--mmproj mmproj-F16.gguf`, 927,607,488 B; +1,124 MiB VRAM, text prefill unchanged |
 | Speculation | `--spec-type draft-mtp`, head ships in the GGUF |
 | GPU | RTX 5090, 32,607 MiB. 26,140 MiB in use |
 | Build | llama.cpp server `1c3c967` |
@@ -89,10 +90,12 @@ Model, separately:
 
 ```powershell
 hf download unsloth/Qwen3.8-27B-GGUF --include "*UD-Q4_K_XL*" --local-dir $env:LOCALAPPDATA\Crow\models\qwen38-gguf
+hf download unsloth/Qwen3.8-27B-GGUF mmproj-F16.gguf --local-dir $env:LOCALAPPDATA\Crow\models\qwen38-gguf
 ```
 
-Check that one file of 17,559,178,144 B arrived. `hf` prints `✓ Downloaded` even when it could not
-reach the repository.
+Check that one file of 17,559,178,144 B and one of 927,607,488 B arrived. `hf` prints `✓ Downloaded`
+even when it could not reach the repository. The second file is the vision projector (#142) — the
+`--include` glob of the first line does not catch it. Without it the server starts as a text model.
 
 ---
 
@@ -103,6 +106,7 @@ reach the repository.
 ```powershell
 $env:LOCALAPPDATA\Crow\bin\llama-server.exe `
   -m $env:LOCALAPPDATA\Crow\models\qwen38-gguf\Qwen3.8-27B-UD-Q4_K_XL.gguf `
+  --mmproj $env:LOCALAPPDATA\Crow\models\qwen38-gguf\mmproj-F16.gguf `
   --port 8082 -c 200000 -ctk q8_0 -ctv q8_0 -ngl 99 -np 1 --jinja `
   --slot-save-path $env:LOCALAPPDATA\Crow\session `
   --spec-type draft-mtp

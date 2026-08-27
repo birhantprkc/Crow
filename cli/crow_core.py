@@ -811,6 +811,11 @@ SERVER_FLAGS = (
     ("moe_stream_io_threads", "--moe-stream-io-threads"),
     ("moe_stream_direct", "--moe-stream-direct"),
     ("moe_stream_l2", "--moe-stream-l2"),
+    # The value is a path RELATIVE TO THE MODEL ROOTS, like models.entries.path,
+    # because the projector lives beside its GGUF and both trees spell the root
+    # differently. Resolved through projector_candidates where slot_save_path's
+    # <install> trick would not work -- see the special case in server_command.
+    ("mmproj", "--mmproj"),
     # LAST, and that is a statement about the README and not about the server: this list is the
     # order the printed line is checked in, so a flag appended here is a flag appended there.
     ("spec_type", "--spec-type"),
@@ -900,6 +905,37 @@ def model_candidates(key: str, manifest: dict | None = None,
     rel = (entry.get("path") or "").replace("/", os.sep)
     if not rel:
         return []
+    base = os.path.basename(rel)
+    out = []
+    for root in ((models.get("_root") or "").replace("/", os.sep),
+                 os.path.join(install or INSTALL_ROOT, "models")):
+        if not root:
+            continue
+        for tail in (rel, base):
+            path = os.path.normpath(os.path.join(root, tail))
+            if path not in out:
+                out.append(path)
+    return out
+
+
+def projector_candidates(key: str, manifest: dict | None = None,
+                         install: str | None = None) -> list[str]:
+    """Every path this build would accept as the projector for `key`, in order.
+
+    Empty when the server line declares no `mmproj`, which is what every model
+    before #142 does -- an empty list is "this model is text-only by design",
+    not an error. The resolution is model_candidates' exactly: the same two
+    roots, the same relative-then-basename order, for the same reason -- the
+    measurement machine's tree and an install spell the root differently, and
+    the projector sits beside its GGUF in both.
+    """
+    manifest = manifest if manifest is not None else _manifest()
+    line = (manifest.get("servers") or {}).get(key)
+    rel = (line.get("mmproj") or "") if isinstance(line, dict) else ""
+    rel = str(rel).replace("/", os.sep)
+    if not rel:
+        return []
+    models = manifest.get("models") or {}
     base = os.path.basename(rel)
     out = []
     for root in ((models.get("_root") or "").replace("/", os.sep),
@@ -1021,6 +1057,17 @@ def server_command(key: str, manifest: dict | None = None,
             continue
         elif name == "slot_save_path":
             argv += [flag, str(value).replace("<install>", install).replace("/", os.sep)]
+        elif name == "mmproj":
+            # MISSING IS A DOWNGRADE, NOT A REFUSAL. The GGUF above raises when
+            # absent because without it there is no server at all; without the
+            # projector there is the text model every release before #142
+            # shipped. So the flag is dropped and the server boots text-only --
+            # start_server says so out loud, and /props carries
+            # `modalities.vision: false` for anyone who asks later.
+            found = next((p for p in projector_candidates(key, manifest, install)
+                          if os.path.isfile(p)), None)
+            if found is not None:
+                argv += [flag, found]
         else:
             argv += [flag, str(value)]
     return argv
@@ -1180,6 +1227,14 @@ def start_server(key: str, base_url: str, install: str | None = None,
             % (pid, served_model(line) or "an unreadable command line"))
 
     argv = server_command(key, None, install)
+    # SAID BEFORE THE BOOT, NOT DISCOVERED AFTER IT. A declared projector whose
+    # file is missing boots a working text model (server_command drops the
+    # flag), which is exactly the silent shape #142 exists to end -- a vision
+    # model nobody notices is blind. One sentence here is the difference.
+    wanted = projector_candidates(key, None, install)
+    if wanted and "--mmproj" not in argv:
+        say("projector not on disk -- starting text-only. Tried: %s"
+            % ", ".join(wanted))
     # THE SLOT DIRECTORY IS MADE, NOT ASSUMED, and the server is the one that
     # taught this: `--slot-save-path` REFUSES a path that is not an existing
     # directory -- "error while handling argument", exit 1, before a single

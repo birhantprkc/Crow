@@ -71,6 +71,10 @@ FLAG_SPECS = [
     # session directory as "refuses". A checker that reads the comment explaining
     # a flag instead of the flag is the failure this whole stage is about.
     ("slot_save_path", r"--slot-save-path\s+(\S*[\\/%$]\S*)", "path"),
+    # #142. Same path-shaped demand as slot_save_path, for the same reason: a
+    # plain \S+ would read the prose explaining the flag instead of the flag.
+    # Only the leaf is compared -- every copy spells the models root differently.
+    ("mmproj", r"--mmproj\s+(\S*[\\/%$]\S*)", "path"),
     # #117: the value IS compared, unlike moe_stream_l2's. `draft-mtp` and
     # `draft-dspark` are different speculators against different models, and the
     # measured difference between them is a factor of two in one direction and
@@ -151,6 +155,8 @@ def expected(server):
     # that must not have it, and failing the correct copy.
     if "slot_save_path" in want:
         want["slot_save_path"] = want["slot_save_path"].replace("\\", "/").split("/")[-1]
+    if "mmproj" in want:
+        want["mmproj"] = want["mmproj"].replace("\\", "/").split("/")[-1]
     # The manifest records 32 because that is what this machine gets. install.ps1
     # computes it from the detected RAM, so a copy is correct as long as the flag
     # is there at all. Comparing the number would make the check fail on every

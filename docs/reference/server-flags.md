@@ -8,5 +8,6 @@
 | `-ngl` | `99` | 16.35 GiB fits on the card whole |
 | `--jinja` | on | without it llama.cpp uses its built-in template and the reasoning replay is dropped |
 | `--slot-save-path` | `<install>\session` | the server refuses to start against a path that does not exist |
+| `--mmproj` | `models\qwen38-gguf\mmproj-F16.gguf` | the vision projector (#142). Without it the same GGUF is a text model and `/props` says `vision: false`. Costs 1,124 MiB VRAM, leaves text prefill unchanged. One image is `(w/32)*(h/32)` tokens after resize, capped at 4,096 (`--image-max-tokens` moves the cap) |
 | `--spec-type` | `draft-mtp` | the model's own MTP head. 1.85x decode, measured |
 | `--spec-draft-n-max` | `3` (default) | measured, see below |
