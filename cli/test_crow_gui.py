@@ -6772,59 +6772,69 @@ class TheMemoryNoteLookTests(unittest.TestCase):
         self.assertNotIn("linear-gradient", quiet)
 
 
-class TheCodePanelStartsBesideTheChatTests(unittest.TestCase):
-    """#138c. robin, 2026-08-26: "aktuell sieht das müll aus".
+class TheCodePanelStartsNarrowTests(unittest.TestCase):
+    """robin, 2026-08-27: "der codepanel ist viel zu breit. Default werte bitte
+    wie in Screenshot 2! die Icons duerfen niemals aus der chateingabemaske
+    rausgucken rechts."
 
-    Das Panel startete auf festen 380 px und die Lesespalte bekam den Rest --
-    was immer der war. Auf seinem Fenster war das eine Spalte, in die der
-    Composer nicht mehr hineinpasste. Zwei gleich breite Spalten sind die
-    Aufteilung, die er meint.
-
-    NUR SOLANGE NIEMAND GEZOGEN HAT. Eine gespeicherte Breite ist eine
-    Entscheidung, und eine Seite, die sie beim Start ueberschreibt, nimmt sie
-    bei jedem Start erneut zurueck.
+    DAS ERSETZT #138c's HALBE FLAECHE. Die Automatik vom 2026-08-26 richtete
+    eine nie gezogene Breite am Platz aus -- und war am naechsten Neustart auf
+    demselben Fenster der zu breite Start, neben dem die Icons wieder
+    herausstanden. Sein gespeicherter Zug stand auf exakt 260: die Vorgabe IST
+    das Minimum, und mehr Panel ist eine Geste am Griff, keine Rechnung der
+    Seite. Dass der Composer bei KEINER Breite ueberlaeuft, haelt seitdem das
+    Layout: das Panel gibt nach, die Chatspalte traegt die Mindestbreite.
     """
 
     def setUp(self) -> None:
         self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
         self._real = crow_gui.read_settings
         self.addCleanup(setattr, crow_gui, "read_settings", self._real)
 
     def _settings(self, **values):
         crow_gui.read_settings = lambda: values
 
-    def test_an_untouched_width_is_not_a_choice(self):
-        self._settings()
-        self.assertFalse(crow_gui.code_width_chosen())
+    def _rule(self, selector: str) -> str:
+        found = self.css[self.css.index(selector):]
+        return found[:found.index(chr(125))]
 
-    def test_a_dragged_width_is_a_choice_and_survives(self):
-        """POSITIV fuer die Gegenrichtung: wer gezogen hat, behaelt es."""
+    def test_the_default_is_the_minimum_robin_chose(self):
+        self.assertEqual(crow_gui.CODE_DEFAULT, 260)
+        self.assertEqual(crow_gui.CODE_DEFAULT, crow_gui.CODE_MIN)
+        self._settings()
+        self.assertEqual(crow_gui.code_width_setting(), 260)
+
+    def test_no_start_width_automation_remains(self):
+        """NEGATIV-WAECHTER gegen den Wiedereinbau: weder die halbe-Flaeche-
+        Funktion noch ihr Stempel duerfen zurueckkommen -- der Start ist die
+        gespeicherte Breite oder die Vorgabe, nie eine Rechnung."""
+        self.assertNotIn("codeWidthToFit", self.source)
+        self.assertNotIn("codeauto", self.source)
+
+    def test_a_dragged_width_survives_the_restart(self):
+        """Eine gezogene Breite ist eine Entscheidung und bleibt."""
         self._settings(code_width=520)
-        self.assertTrue(crow_gui.code_width_chosen())
         self.assertEqual(crow_gui.code_width_setting(), 520)
 
-    def test_a_width_outside_the_grips_range_is_no_choice_either(self):
-        """NEGATIV. Ein Wert, den die Maus nie erzeugen konnte, stammt nicht aus
-        dieser Geste -- dieselbe Regel, die `code_width_setting` schon zieht."""
+    def test_a_width_outside_the_grips_range_falls_back(self):
+        """NEGATIV: ein Wert, den die Maus nie erzeugen konnte, wird zur
+        Vorgabe und nicht zur Grenze."""
         self._settings(code_width=5000)
-        self.assertFalse(crow_gui.code_width_chosen())
+        self.assertEqual(crow_gui.code_width_setting(), 260)
         self._settings(code_width=True)
-        self.assertFalse(crow_gui.code_width_chosen())
+        self.assertEqual(crow_gui.code_width_setting(), 260)
 
-    def test_the_page_is_told_which_of_the_two_it_is(self):
-        self.assertIn('data-codeauto="__CODEAUTO__"', self.source)
-        self.assertIn('.replace("__CODEAUTO__", "0" if code_width_chosen() else "1")',
-                      self.source)
-
-    def test_the_start_width_is_clamped_like_the_grip(self):
-        """Ein Startwert ausserhalb der Grenzen waere einer, den die Geste nie
-        erzeugen koennte, und der erste Zupfer am Griff liesse das Panel
-        springen."""
-        js = self.source[self.source.index("function codeWidthToFit(){"):]
-        js = js[:js.index("codeWidthToFit();")]
-        self.assertIn('document.body.dataset.codeauto!=="1"', js)
-        self.assertIn("Math.max(260,Math.min(720,half))", js)
-        self.assertIn("window.innerWidth-taken", js)
+    def test_the_panel_gives_way_before_the_composer(self):
+        """Die Garantie hinter "niemals rausgucken": #138c laesst die Knoepfe
+        nicht nachgeben (mit Grund), also muss das PANEL nachgeben koennen --
+        und die Chatspalte traegt die Mindestbreite, unter der die Knopfreihe
+        nicht mehr passt. `flex:none` hier waere der alte Ueberlauf."""
+        code = self._rule("#code{")
+        self.assertIn("min-width:0", code)
+        self.assertIn("flex:0 1 auto", code)
+        self.assertNotIn("flex:none", code)
+        self.assertIn("min-width:380px", self._rule("#main{"))
 
 
 class NothingSticksOutOfTheComposerTests(unittest.TestCase):

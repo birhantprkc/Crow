@@ -442,9 +442,14 @@ def rail_width_setting() -> int:
 
 
 # DIE GRENZEN DES CODE-PANELS, gespiegelt zur Rail und aus demselben Grund in
-# Python geklemmt: der Wert kommt aus einer Maus. Weiter als die Rail, weil hier
-# Code steht und eine Zeile Python bei 260 Pixeln dreimal umbricht.
-CODE_MIN, CODE_MAX, CODE_DEFAULT = 260, 720, 380
+# Python geklemmt: der Wert kommt aus einer Maus.
+#
+# DIE VORGABE IST DAS MINIMUM, robin am 2026-08-27: "der codepanel ist viel zu
+# breit. Default werte bitte wie in Screenshot 2" -- und sein gespeicherter
+# Zug stand auf exakt 260. Der Vorgaenger (380, dann #138c "halbe Flaeche")
+# entschied die Startbreite fuer ihn und lag zweimal daneben; wer mehr Panel
+# will, zieht den Griff, und DIESE Entscheidung bleibt gespeichert.
+CODE_MIN, CODE_MAX, CODE_DEFAULT = 260, 720, 260
 
 # WIEVIEL EINER ANTWORT DAS PANEL ZEIGT. Der Kern reicht sie ganz herueber --
 # `tool_result` sagt im eigenen Docstring, dass die Menge eine Entscheidung des
@@ -474,22 +479,6 @@ def code_width_setting() -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return CODE_DEFAULT
     return int(value) if CODE_MIN <= value <= CODE_MAX else CODE_DEFAULT
-
-
-def code_width_chosen() -> bool:
-    """Ob jemand die Breite je gezogen hat.
-
-    #138c. DER UNTERSCHIED ZWISCHEN "380" UND "NIE GEWAEHLT" war nirgends zu
-    sehen, und deshalb startete das Panel auf einer festen Pixelzahl neben einer
-    Chat-Spalte beliebiger Breite. Auf robins Fenster ergab das am 2026-08-26
-    eine Lesespalte, in die der Composer nicht mehr passte.
-    Eine gezogene Breite ist eine Entscheidung und bleibt unangetastet; eine
-    nie gezogene ist keine, und die Seite darf sie am Platz ausrichten.
-    """
-    value = read_settings().get("code_width")
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return False
-    return CODE_MIN <= value <= CODE_MAX
 
 
 def client_version(path: str | None = None) -> str:
@@ -745,7 +734,13 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 /* -- code panel (#138) --------------------------------------------------- */
 /* DIE RAIL GESPIEGELT. Jede Regel hier hat ihre Zwillingsregel links, und wo
    sie abweicht, steht der Grund daneben. */
-#code{width:var(--codew,__CODEW__px);flex:none;background:var(--rail);
+/* DAS PANEL GIBT NACH, NIE DER COMPOSER. robin, 2026-08-27: "die Icons
+   duerfen niemals aus der chateingabemaske rausgucken rechts". Die Knoepfe
+   geben nicht nach (#138c, mit Grund), also muss es das Panel: `min-width:0`
+   statt `flex:none`, damit die Mindestbreite von #main gewinnt, wenn Fenster,
+   Rail und gezogene Panelbreite zusammen nicht passen. `width` bleibt die
+   Wunschbreite; gequetscht wird nur, was nicht hineinpasst. */
+#code{width:var(--codew,__CODEW__px);flex:0 1 auto;min-width:0;background:var(--rail);
   display:flex;flex-direction:column;min-height:0;overflow:hidden}
 #codegrip{flex:none;width:5px;margin:0 -2px;z-index:3;cursor:col-resize;
   background:transparent;transition:background .12s ease}
@@ -930,7 +925,14 @@ body[data-rail="shut"] #rail{width:0;overflow:hidden}
    it. `#body` carries the rail colour so there is something for the corner to
    cut away to, and `overflow:hidden` is what stops the flow's own background
    from squaring it off again at the first scroll. */
-#main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0;
+/* DIE MINDESTBREITE DER MASKE, robin am 2026-08-27: die Icons duerfen NIEMALS
+   rechts aus der Eingabemaske ragen. Unter ~380 px traegt die Composer-Zeile
+   ihre unschrumpfbaren Knoepfe (#138c) nicht mehr; dieser Wert ist die harte
+   Grenze, gegen die das PANEL nachgibt (min-width:0 dort). Zusammen mit
+   min_size=(760, 520) geht die Rechnung in jedem Zustand auf:
+   236 Rail + 380 Chat = 616 < 760. Nicht wieder auf 0 senken -- min-width:0
+   hier war die Erlaubnis, den Composer zu quetschen. */
+#main{flex:1;display:flex;flex-direction:column;min-width:380px;min-height:0;
   background:var(--bg);border-top-left-radius:12px;
   /* #138. DIE ZWEITE KANTE, gespiegelt. Sie gehoert #main und nicht dem
      Panel: die Chatspalte ist das Blatt, das vor den Seitenflaechen liegt,
@@ -1799,7 +1801,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    `levels` and `groups` are measured for the model that ANSWERED the probe, so they describe one
    model and no other. Hanging them under the row that would boot 17 GB would be inventing them
    for a model nobody has asked a question -- and #116's rule is that nothing is invented. */
-</style></head><body data-rail="__RAIL__" data-code="__CODE__" data-codeauto="__CODEAUTO__">
+</style></head><body data-rail="__RAIL__" data-code="__CODE__">
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
   <!-- #119. LEFT OF THE WORDMARK, and it has to live in the TITLE BAR rather
@@ -4548,29 +4550,13 @@ window.addEventListener("contextmenu",e=>{
 // is what makes it a place to look rather than something that appears once and
 // is missed.
 crow.toolsCount();
-// #138c. EINE NIE GEZOGENE PANEL-BREITE RICHTET SICH AM PLATZ AUS.
-//
-// Vorher startete das Panel auf festen 380 px neben einer Chat-Spalte, die den
-// Rest bekam -- was immer der war. robin am 2026-08-26: die Lesespalte war so
-// schmal, dass der Composer nicht mehr hineinpasste. Die Haelfte des Platzes
-// NEBEN der Rail ist die Aufteilung, die er meint: zwei gleich breite Spalten.
-//
-// NUR WENN NIEMAND GEZOGEN HAT. Eine gespeicherte Breite ist eine Entscheidung
-// und wird hier nicht ueberstimmt -- Python stempelt `data-codeauto`, weil nur
-// dort der Unterschied zwischen "380" und "nie gewaehlt" bekannt ist.
-//
-// GEKLEMMT WIE DIE GESTE. Dieselben 260 und 720, die `codeDrag` zieht: ein
-// Startwert ausserhalb der Grenzen waere einer, den die Maus nie erzeugen
-// koennte, und der erste Zupfer am Griff liesse das Panel springen.
-function codeWidthToFit(){
-  if(document.body.dataset.codeauto!=="1") return;
-  if(document.body.dataset.code==="shut") return;
-  const rail=$("#rail");
-  const taken=rail ? rail.getBoundingClientRect().width : 0;
-  const half=Math.round((window.innerWidth-taken)/2);
-  document.documentElement.style.setProperty(
-    "--codew", Math.max(260,Math.min(720,half))+"px"); }
-codeWidthToFit();
+// KEINE STARTBREITEN-AUTOMATIK MEHR. #138c richtete eine nie gezogene Breite
+// an der halben Flaeche aus -- auf robins Fenster am 2026-08-27 war genau das
+// der zu breite Start, und die Icons standen wieder neben der Maske. Seine
+// Ansage ersetzt das Feature: die Vorgabe ist CODE_DEFAULT (das Minimum), und
+// wer mehr Panel will, zieht den Griff einmal. Dass der Composer bei KEINER
+// Breite ueberlaeuft, garantiert seitdem das Layout selbst: #code gibt nach
+// (min-width:0), #main traegt die Mindestbreite der Maske.
 
 window.addEventListener("pywebviewready",()=>{ pywebview.api.ready(); input.focus(); });
 </script></body></html>
@@ -8137,7 +8123,6 @@ def main(argv: list[str] | None = None) -> int:
                 .replace("__RAIL__", "open" if rail_open() else "shut")
                 .replace("__CODE__", "open" if code_open() else "shut")
                 .replace("__CODEW__", str(code_width_setting()))
-                .replace("__CODEAUTO__", "0" if code_width_chosen() else "1")
                 .replace("__MARKDARK__", mark_svg("dark"))
                 .replace("__MARKLIGHT__", mark_svg("light")))
 
