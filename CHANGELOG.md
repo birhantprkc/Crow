@@ -3,6 +3,66 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 1.5.0 — 2026-08-29
+
+2 commits. The harness wave: approvals that persist and cover every path of a command,
+opt-in budgets, delegate favourites with health-aware fallback, a rollover that carries
+the user's own words, one nudge for a silent close, one retry for a broken stream — and
+a window that reboots its own dead server. Qwen3.8-27B stays the default operating point.
+
+### Approvals ask once and stick (#144)
+
+`run_command` on paths outside the working directory asks at every release level — one
+card, every outside path named, and an approval covers ALL outside paths of the command.
+`always` lands in `%LOCALAPPDATA%\Crow\approvals.json` and survives the restart. An
+obfuscated path does not ask: the gate is a question, not a sandbox.
+
+### Budgets, retry cap, incident memory (#145)
+
+`turn_token_budget` and `subtask_max_tokens` — settings.json keys and terminal flags,
+both opt-in; a spent budget forces the answer with the round-budget protocol. The fourth
+identical failing tool call is refused before it runs. Refusals and caps reach the memory
+review as incidents.
+
+### Favourites and fallback (#146, #148)
+
+Three delegate favourites over the whole catalogue, tried in order before the free
+default — a paid favourite is the user's explicit pick on their own key, and what nobody
+chose never falls onto a bill. A spot that failed this session is skipped, the card says
+`fell back from`, and the dead upstream's 404 class is retryable.
+
+### Rollover carries the user's words (#147)
+
+The note that crosses the cut now carries the user's own lines verbatim, and the context
+readout resets the moment the roll happens instead of rounds later at turn end.
+
+### /verify (#149)
+
+The conversation's writes go to the checker spot with review instructions; `collect`
+returns the verdict. User-triggered on purpose — a maker that may skip its own checker
+will.
+
+### One nudge, one retry (#150, #151)
+
+A reasoning-only close gets ONE nudge for visible text; a second silence becomes an
+incident. A mid-turn stream reset (the 10054 class) is retried ONCE on the intact
+prefix — never for hard errors, never twice.
+
+### Self-healing
+
+A server the window itself booted is remembered in `booted.json`, across window
+restarts; dies it mid-session, the turn reboots it — `booting it again (n/3)`, three per
+turn, then honestly red with the boot's own exit code. HTTP 503 `Loading model` is
+waited out once per turn. Every boot writes `runs\llama-server-<port>.{out,err}.log`.
+
+### Window
+
+OpenRouter on its own settings page, and the page routes no turn — the default is always
+the machine; turns leave it only through the Model page. Subtasks persist per chat
+(`session\subtasks-registry.json`) and a deleted chat takes them along. The stream pulls
+only who IS at the end (80 px). The running card's amber bar sits exactly like the
+finished one's.
+
 ## 1.4.0 — 2026-08-28
 
 7 commits. Crow delegates: subtasks fan out to remote spots while the local slot keeps
