@@ -3,6 +3,60 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 1.4.0 — 2026-08-28
+
+7 commits. Crow delegates: subtasks fan out to remote spots while the local slot keeps
+running, from the model's tools and from the user's own `/delegate` — also mid-turn. A
+third operating point runs a 125B by hybrid offload, measured to its ceiling. Images ride
+the message on both surfaces, and the composer's width has a floor.
+
+### Delegation (#143)
+
+Parallelism is bought at a provider, not from the card. Three tools — `delegate`,
+`subtasks`, `collect` — and the same pair as slash commands on both surfaces; the local
+slot is refused as a target, hard. Cards in the flow, `⑂` children under the root chat,
+a subtask is never opened as a chat. Stop cancels the subtasks with the turn.
+
+| | |
+|---|---|
+| live acceptance | two subtasks delegated and collected beside a running turn, 0 € on the free pool |
+| the free pool | shared and empty at US primetime (`upstream_provider_shared_pool`): a spot is pinned only after answering twice in a row AND carrying a real delegation |
+| remote accounting | remote endpoints send `usage`, not llama timings — `usage_tokens` counts them |
+| the last defect | the page's Stop gate ate slash lines mid-turn: `/delegate` killed the running turn it was meant to run beside. Found in the first live minute, fixed same day — only the delegation pair passes the gate, the stop gesture is unchanged |
+
+### A third operating point: Qwen3.8-Flash-Next by hybrid offload (#140)
+
+73.45 GiB against 32 GiB of card: experts of the first 40 of 48 layers in system RAM.
+`-c 200000 -b 4096 -ub 4096 -ncmoe 40 --fit off --load-mode none -ctk q8_0 -ctv q8_0`
+on the PR #27742 engine — a server line may now name its own `binary`.
+
+| conditions: 31,979-token cold turns, 10-boot series, driver 616.56 | |
+|---|---|
+| prefill | **964.8 tok/s** mean (949.99–981.03) |
+| decode | **28.61 tok/s** mean (27.01–29.37); window practice at 7–17k depth: 32–33 |
+| VRAM / RAM | 28.4 GiB (4.2 free) / ~46.6 of 63.38 GiB |
+| boots | 10 of 10 |
+
+`--load-mode none` is the finding: mmap at the RAM ceiling reads the NVMe into every
+token — identical lines spread 19–31 tok/s until the experts sit in anonymous memory.
+The decode ceiling is measured, not guessed: MTP head absent from the GGUF, ngram nets
+−2 %, a 27B drafter halves decode at 0.775 acceptance, threads optimal at auto-24. The
+newer PR head is 3–6 % faster and fails warmup 11 of 19 — build 439 ships the line.
+Full tables: [measurements](docs/measurements/README.md), raw rows on #140.
+
+### Vision, second half (#142)
+
+The vision switch is one manifest field (`mmproj`), its copies enforced by the checker,
+and an image rides the message the same way on both surfaces: chips above the input,
+transcript and restart survive, a server without `--mmproj` refuses with a sentence
+before anything is sent.
+
+### The composer has a floor
+
+`#main` never falls under 560 px, the window under 1130×520 — no combination of rail,
+panel and window can push the mask below the reference. A dragged panel width is still
+a decision and is never overridden.
+
 ## 1.3.0 — 2026-08-26
 
 4 commits. A dropped MCP connection is retried instead of reported as a dead server,

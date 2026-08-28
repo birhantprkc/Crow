@@ -10,7 +10,7 @@
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
-<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-1.3.0-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
+<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-1.4.0-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
 <a href="#requirements"><img src="https://img.shields.io/badge/platform-Windows%20x64%20%C2%B7%20CUDA-555555?style=flat-square&logo=nvidia&logoColor=76b900&labelColor=000000" alt="Platform"></a>
 <a href="cli/crow.py"><img src="https://img.shields.io/badge/client-Python%20stdlib%20only-555555?style=flat-square&logo=python&logoColor=ffd43b&labelColor=000000" alt="Python"></a>
 <a href="https://huggingface.co/unsloth/Qwen3.8-27B-GGUF"><img src="https://img.shields.io/badge/model-Qwen3.8--27B-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
@@ -146,6 +146,7 @@ Configuration, features and measurements live under [`docs/`](docs/).
 | [Remote models](docs/user-guide/remote-models.md) | subscriptions, dialects, routing |
 | [Window](docs/user-guide/window.md) | the GUI |
 | [Measurements](docs/measurements/README.md) | every number with its conditions |
+| [Second and third model](docs/second-model.md) | DeepSeek 0731 and Qwen3.8-Flash-Next, each with its measured line |
 | [Architecture](docs/developer-guide/architecture.md) | the four modules and the core/surface split |
 | [Testing](docs/developer-guide/testing.md) | three suites, five checkers, the manifest |
 | [Repo](docs/developer-guide/repo.md) | layout |
@@ -157,7 +158,9 @@ MIT. See [LICENSE](LICENSE).
 
 Model: [Qwen](https://huggingface.co/Qwen/Qwen3.8-27B) (Apache-2.0). Quantisation by
 [Unsloth](https://huggingface.co/unsloth). Engine:
-[llama.cpp](https://github.com/ggml-org/llama.cpp).
+[llama.cpp](https://github.com/ggml-org/llama.cpp). The optional third model,
+Qwen3.8-Flash-Next, is licensed qwen-community-1.0 — read it before redistributing;
+Crow does not ship the weights.
 
 Earlier READMEs: [v0.5.1, Qwen-first](docs/README-v0.5.1-qwen.md) ·
 [v0.5.1, the one before it](docs/README-v0.5.1-deepseek.md).
