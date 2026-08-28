@@ -71,6 +71,14 @@ FLAG_SPECS = [
     # an absolute lab path (the PR #27742 engine) no install can normalise.
     ("binary", r"(llama-server(?:\.exe)?)", "flag"),
     ("jinja", r"(--jinja)\b", "flag"),
+    # 2026-08-28 night: the NVIDIA compute cache ate every boot of the
+    # flash-next binary (CUDA 303 at the first MUL_MAT, reboot-resistant),
+    # and the fix is a process env var. The manifest's `env` today means
+    # exactly this one variable; the regex takes the PowerShell spelling
+    # ($env:CUDA_CACHE_DISABLE = "1", backticked or not) and the plain one.
+    # The day a second variable joins, this spec learns it -- an env key
+    # nobody can match would turn every copy red.
+    ("env", r'CUDA_CACHE_DISABLE\s*=\s*[`"]*1', "flag"),
     ("moe_stream", r"(--moe-stream)(?![-\w])", "flag"),
     ("moe_stream_cache", r"--moe-stream-cache\s+(\S+)", "str"),
     ("moe_stream_io_threads", r"--moe-stream-io-threads\s+(\d+)", "int"),
@@ -133,7 +141,17 @@ def command_regions(text):
         # region can never merge two command lines into one that satisfies the
         # manifest with halves of both.
         end = min(s + REGION_CHARS, starts[i + 1] if i + 1 < len(starts) else len(text))
-        out.append(text[s:end])
+        # 2026-08-28 night: an operating point may carry an env PRELUDE
+        # ($env:CUDA_CACHE_DISABLE = "1"), and execution order puts it ON THE
+        # LINE(S) ABOVE the binary. The region reaches exactly two lines back
+        # from the anchor -- far enough for the prelude, near enough that the
+        # 2026-08-10 lesson holds: prose that merely QUOTES a value stays out.
+        back = text.rfind("\n", 0, s)
+        if back != -1:
+            back = text.rfind("\n", 0, back)
+        if back != -1:
+            back = text.rfind("\n", 0, back)
+        out.append(text[back + 1:end])
     return out
 
 
@@ -185,6 +203,10 @@ def expected(server):
     # (an absolute lab path) is one machine's business, not every copy's.
     if "binary" in want:
         want["binary"] = True
+    # 2026-08-28 night: env is a dict in the manifest; WHICH variable it must
+    # be is asserted by the FLAG_SPECS regex, so here only presence counts.
+    if "env" in want:
+        want["env"] = True
     return want
 
 

@@ -13,3 +13,13 @@
 | `--show-reasoning` | off | stream the reasoning. `/thoughts` toggles it |
 | `--no-session` | off | do not resume the last session, do not save this one |
 | temperature / top_p / min_p | `1.0` / `0.95` / `0.01` | written once, in `cli/crow_core.py` |
+
+## #145 — the terminal's budget flags
+
+| flag | default | what |
+|---|---|---|
+| `--turn-token-budget N` | `0` (off) | decoded tokens one turn may spend before it is told to answer |
+| `--subtask-max-tokens N` | `0` (= 8192) | output cap for one delegated subtask |
+
+The retry cap needs no flag: the fourth identical failing call to an uncached tool is refused
+before it runs, always.

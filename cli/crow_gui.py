@@ -1823,15 +1823,43 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 .subcard .shead{display:flex;align-items:center;gap:9px;font-size:12.5px;flex-wrap:wrap}
 .subcard .glyph{color:var(--sub);font-weight:700}
 .subcard .sname{font-family:var(--mono);font-size:11.5px;color:var(--dim)}
+/* robins letzte Kartenform 2026-08-29: klassische Kopfzeile, Task darunter;
+   der Output bleibt zu, die KARTE ist die Klickflaeche. */
 .subcard .stask{margin:5px 0 0;font-size:13px;color:var(--text-soft);white-space:pre-wrap}
+.subcard.can{cursor:pointer}
 .subcard .sstat{margin-left:auto;display:flex;align-items:center;gap:7px;
   font-family:var(--mono);font-size:11px;color:var(--dimmer)}
 .subcard .sstat .okword{color:var(--ok)}
 .subcard .sstat .badword{color:var(--bad)}
-.subcard details{margin-top:8px;border-top:1px solid var(--line);padding-top:8px}
-.subcard summary{cursor:pointer;font-size:12px;color:var(--dim);list-style:none}
-.subcard summary::before{content:"\25B8 ";color:var(--dimmer)}
-.subcard details[open] summary::before{content:"\25BE "}
+/* robins finale Fassung 2026-08-28 nachts: KEINE Flaechenanimation -- die
+   Karte steht still, nur ihr linker Balken lebt: ein Bernstein-Verlauf
+   (--warn, die Palette in allen drei Themes), der von oben nach unten
+   durchatmet. Der Verlauf ist kachelbar (hell-dunkel-hell), darum wandert
+   die Position nahtlos. Fertig faellt die Klasse und der stille --sub-Rand
+   der Basisregel steht wieder.
+   Nachtrag 2026-08-29: der Balken sitzt EXAKT wie dieser Done-Rand. Als
+   freistehender 3px-Streifen voller Hoehe stand er an den Ecken ueber die
+   Kontur (ein 10px-Radius kollabiert bei 3px Breite auf 3px); darum spannt
+   das Pseudo jetzt die ganze Kartenkontur auf und eine Mask zeigt nur die
+   linke Randspalte -- gleiche Silhouette, gleiche Spitzen wie der echte
+   Rand. pointer-events:none, denn die Karte selbst ist die Klickflaeche. */
+.subcard.run{position:relative;border-left-color:transparent}
+.subcard.run::before{content:"";position:absolute;
+  top:-1px;right:-1px;bottom:-1px;left:-3px;
+  border-radius:10px;pointer-events:none;
+  background:linear-gradient(180deg,
+    color-mix(in srgb,var(--warn) 90%,transparent) 0%,
+    color-mix(in srgb,var(--warn) 20%,transparent) 50%,
+    color-mix(in srgb,var(--warn) 90%,transparent) 100%);
+  background-size:100% 300%;
+  -webkit-mask:linear-gradient(90deg,#000 3px,transparent 3px);
+  mask:linear-gradient(90deg,#000 3px,transparent 3px);
+  animation:subflow 2.6s ease-in-out infinite}
+@keyframes subflow{0%{background-position:0 0}100%{background-position:0 300%}}
+/* Motion off: der Balken steht bernstein, die Aussage bleibt. */
+@media (prefers-reduced-motion: reduce){
+  .subcard.run::before{animation:none;
+    background:color-mix(in srgb,var(--warn) 60%,transparent)}}
 .subcard .sresult{font-size:12.5px;color:var(--text-soft);margin-top:8px;white-space:pre-wrap;
   border-left:2px solid var(--line);padding-left:12px;overflow-wrap:anywhere}
 /* Its own dot class: `.dot` already belongs to the mode chip, and a shared
@@ -1938,6 +1966,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
         <button data-cat="server" onclick="crow.settingsCat('server')">Server</button>
         <button data-cat="mcp" onclick="crow.settingsCat('mcp')">MCPs</button>
         <button data-cat="model" onclick="crow.settingsCat('model')">Model</button>
+        <button data-cat="openrouter" onclick="crow.settingsCat('openrouter')">OpenRouter</button>
         <button data-cat="subs" onclick="crow.settingsCat('subs')">Subscriptions</button>
         <button data-cat="keys" onclick="crow.settingsCat('keys')">API Keys</button>
         <button data-cat="about" onclick="crow.settingsCat('about')">About</button>
@@ -2003,6 +2032,18 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
           <div class="foldbody open" id="modbody"></div>
           <p class="mcpsaid" id="provsaid"></p>
           <p class="mcpcost" id="provnote"></p>
+        </section>
+        <!-- robins Korrektur vom 2026-08-28: der Broker KOMPLETT raus aus der
+             Model-Seite, auf eine eigene. Sein Schalter parkt nichts anderes:
+             die Maschine antwortet weiter, waehrend die Delegation hier
+             konfiguriert wird -- beide laufen parallel. -->
+        <section data-cat="openrouter" hidden>
+          <h3>OpenRouter</h3>
+          <p class="shint">The broker, on its own page. Its switch moves no
+             turn — the machine keeps answering while delegation uses what is
+             set here.</p>
+          <div id="orbody"></div>
+          <p class="mcpsaid" id="orsaid"></p>
         </section>
         <section data-cat="subs" hidden>
           <h3>Subscriptions</h3>
@@ -2346,7 +2387,7 @@ const crow = {
     this.endTrace();
     const t=this.turn(""); t.innerHTML=
       '<div class="you"><div class="txt"></div></div>';
-    t.querySelector(".txt").textContent=text; this.bottom();
+    t.querySelector(".txt").textContent=text; this.bottom(true);
   },
 
   // #142. A SEPARATE CALL, NOT A SECOND PARAMETER: four cases anchor the whole
@@ -2858,7 +2899,14 @@ const crow = {
   // row or a code frame it has to be moved back to the end -- otherwise it is
   // stranded above whatever arrived next, blinking in the middle of the answer.
   tail(){ if(this.cursor && this.col) this.col.appendChild(this.cursor); },
-  bottom(){ this.tail(); flow.scrollTop=flow.scrollHeight; },
+  // robins Regel vom 2026-08-28 nachts: USERSCROLL > ALLES. Waehrend Crow
+  // streamte, zog jeder Chunk die Sicht ans Ende -- hochscrollen war
+  // unmoeglich. Angeheftet ist nur, wer unten IST (80px Toleranz); wer
+  // hochscrollt, loest sich, wer ans Ende zurueckkehrt, heftet wieder.
+  // Nur die eigene Nachricht erzwingt das Ende (bottom(true)).
+  atBottom(){ return flow.scrollHeight-flow.scrollTop-flow.clientHeight<80; },
+  bottom(force){ this.tail();
+    if(force||this.atBottom()) flow.scrollTop=flow.scrollHeight; },
 
   // THE SWITCH IS THE CHIP, not a start-up flag. A decision the user has to
   // spell on the command line every time is a decision they stop making; one
@@ -3330,10 +3378,14 @@ const crow = {
     pywebview.api.provider_view().then(view => {
       this.provView=view;
       const box=$("#provbody"); box.textContent="";
-      view.providers.forEach(p => box.appendChild(this.provRow(p,view.active)));
+      // robins Korrektur 2026-08-28: der Broker wird auf seiner EIGENEN Seite
+      // gezeichnet, KOMPLETT raus aus der Model-Seite.
+      view.providers.filter(p => p.name!=="openrouter")
+        .forEach(p => box.appendChild(this.provRow(p,view.active)));
       const on=view.providers.find(p => p.name===view.active) || null;
       $("#provcount").textContent=on?on.label:"";
       this.drawModels(view);
+      this.drawOpenRouter(view);
       this.drawKeys(view);
       // THE ONE LINE A REMOTE ENDPOINT OWES, and only where it is true. Under
       // the local server it is absent rather than negated: a screen that says
@@ -3360,11 +3412,114 @@ const crow = {
     row.appendChild(text); row.appendChild(sw);
     return row; },
 
+  // robins Regel vom 2026-08-28, in ihrer dritten und letzten Form: der
+  // Broker hat seine EIGENE Seite, und DIE SEITE ROUTET GAR NICHTS. Default
+  // ist immer lokal, bis der User auf der Model-Seite etwas anderes waehlt --
+  // der Schalter parkt nur das Subsystem (Delegation, Katalog, Favoriten),
+  // der Picker konfiguriert, und keine Zeile hier bewegt einen Turn. Die
+  // Turns-Zeile der Zwischenfassung erlebte robin als "automatisch" und flog
+  // am selben Abend wieder raus. #148s Dropdowns: GANZER Katalog, ein
+  // bezahlter Favorit ist Nutzerwahl.
+  drawOpenRouter(view){
+    const box=$("#orbody"); if(!box) return; box.textContent="";
+    const p=view.providers.find(x => x.name==="openrouter");
+    if(!p) return;
+    const lit=view.openrouter_on!==false;
+    const r=document.createElement("div"); r.className="srow"+(lit?"":" off");
+    const t=document.createElement("div"); t.className="stext";
+    const n=document.createElement("div"); n.className="sname";
+    n.textContent="OpenRouter";
+    const d=document.createElement("div"); d.className="sdesc";
+    const held=p.has_key||p.signed_in||p.borrowing;
+    d.textContent=p.blurb+(p.needs_key&&!held?"  ·  needs a key or a sign-in":"");
+    t.appendChild(n); t.appendChild(d);
+    const osw=document.createElement("button");
+    osw.className="sw"+(lit?" on":""); osw.id="orsw";
+    osw.title=lit?"in operation":"parked";
+    osw.onclick=()=>this.orSwitch(!lit);
+    r.appendChild(t); r.appendChild(osw); box.appendChild(r);
+    const all=(p.models||[]);
+    const favs=view.delegate_favorites||[];
+    const cfg=document.createElement("div"); cfg.className="orcfg";
+    const head=document.createElement("p"); head.className="mcpcost";
+    head.textContent="Delegate favourites — tried in this order; unset means the free default:";
+    cfg.appendChild(head);
+    for(let i=0;i<3;i++){
+      const fsel=document.createElement("select");
+      fsel.className="msel favsel";
+      const none=document.createElement("option");
+      none.value=""; none.textContent="— favourite "+(i+1)+" —";
+      fsel.appendChild(none);
+      all.forEach(m => {
+        const o=document.createElement("option");
+        o.value=m.id; o.textContent=m.id;
+        if(m.id===favs[i]) o.selected=true;
+        fsel.appendChild(o); });
+      fsel.onchange=()=>{
+        const picked=[...cfg.querySelectorAll(".favsel")]
+          .map(s => s.value).filter(Boolean);
+        pywebview.api.delegate_favorites_set(picked).then(
+          why => { if(why) this.note(why); else this.drawProviders(); }); };
+      cfg.appendChild(fsel); }
+    if(!all.length){
+      const q=document.createElement("p"); q.className="empty";
+      q.textContent="No model list yet — add the OpenRouter key, the list follows it.";
+      cfg.appendChild(q); }
+    box.appendChild(cfg);
+    // The picker CONFIGURES, it does not route: a free pick here is what the
+    // delegate default reads, and the Turns row is the only mover. Slugs are
+    // drawn by value and textContent, the #119 rule verbatim.
+    const mods=document.createElement("div"); mods.className="orcfg";
+    if(all.length){
+      const mh=document.createElement("p"); mh.className="mcpcost";
+      mh.textContent="Model — "+(p.count||all.length)+" in the catalogue:";
+      mods.appendChild(mh);
+      const sel=document.createElement("select"); sel.className="msel";
+      const none=document.createElement("option");
+      none.value=""; none.textContent="— pick a model —";
+      if(!p.model) none.selected=true;
+      sel.appendChild(none);
+      all.forEach(m => {
+        const o=document.createElement("option");
+        o.value=m.id; o.textContent=m.id;
+        if(m.id===p.model) o.selected=true;
+        sel.appendChild(o); });
+      sel.onchange=()=>this.orModel(sel.value);
+      mods.appendChild(sel);
+      const ctx=document.createElement("p"); ctx.className="mcpcost";
+      const mrow=all.find(m => m.id===p.model);
+      ctx.textContent=!p.model ? ""
+        : (mrow&&mrow.context ? mrow.context.toLocaleString("en-US")+" tokens declared"
+                              : "no context declared — the bar stays off");
+      mods.appendChild(ctx); }
+    const again=document.createElement("div"); again.className="keyrow";
+    const slug=document.createElement("input");
+    slug.placeholder=p.model||"model id, as the provider lists it";
+    slug.onkeydown=(e)=>{ if(e.key==="Enter"&&slug.value.trim())
+      this.orModel(slug.value.trim()); };
+    const use=document.createElement("button");
+    use.textContent="Use"; use.onclick=()=>{ if(slug.value.trim())
+      this.orModel(slug.value.trim()); };
+    const b=document.createElement("button");
+    b.textContent=all.length?"ask again":"ask for the list";
+    b.onclick=()=>this.orAsk();
+    again.appendChild(slug); again.appendChild(use); again.appendChild(b);
+    mods.appendChild(again);
+    box.appendChild(mods); },
+
   drawModels(view){
     const box=$("#modbody"); box.textContent="";
     const p=view.providers.find(x => x.name===view.active);
     $("#modcount").textContent="";
     if(!p) return;
+    if(p.name==="openrouter"){
+      // KOMPLETT raus (robin, 2026-08-28): the broker's picker lives on its
+      // own page, and no page routes turns there any more. This state is a
+      // leftover file or a core-level pick; the fold says the way home that
+      // exists -- the chip's local boot writes the provider back.
+      const q=document.createElement("p"); q.className="empty";
+      q.textContent="Turns go to OpenRouter — booting a local model on the chip brings them home.";
+      box.appendChild(q); return; }
     if(!p.listable){
       // THE LOCAL SERVER IS NOT ASKED WHAT IT COULD SERVE. It has one model
       // open and /props says which, so a picker here would offer a choice the
@@ -3481,6 +3636,23 @@ const crow = {
     $("#provsaid").textContent="asking …";
     pywebview.api.provider_refresh(name).then(said => {
       $("#provsaid").textContent=said||""; this.drawProviders(); }); },
+
+  // The broker page's doors. Said-lines land on ITS page, not the Model
+  // page's -- two pages sharing one mouth would blame the wrong one.
+  orSwitch(on){
+    $("#orsaid").textContent="";
+    pywebview.api.openrouter_set(on).then(said => {
+      $("#orsaid").textContent=said||""; this.drawProviders(); }); },
+
+  orModel(slug){
+    $("#orsaid").textContent="";
+    pywebview.api.provider_model_set("openrouter",slug).then(said => {
+      $("#orsaid").textContent=said||""; this.drawProviders(); }); },
+
+  orAsk(){
+    $("#orsaid").textContent="asking …";
+    pywebview.api.provider_refresh("openrouter").then(said => {
+      $("#orsaid").textContent=said||""; this.drawProviders(); }); },
 
   railDrag(ev){
     // AUF document UND NICHT AUF DEM GRIFF. Die Maus verlaesst fuenf Pixel in
@@ -4327,6 +4499,9 @@ const crow = {
       // its own cached copy was the frame that drew no card at all.
       if(!it.here) return;
       d=document.createElement("div"); d.className="subcard"; d.dataset.sub=it.i;
+      // robins letzte Kartenform 2026-08-29: die klassische Kopfzeile --
+      // ⑂ delegate · dN, Modell, Status rechts -- und der Task darunter.
+      // Der volle Output bleibt ZU; die Karte selbst ist die Klickflaeche.
       d.innerHTML='<div class="shead"><span class="glyph">⑂</span>'
         +'<span class="dlabel"></span><span class="sname"></span>'
         +'<span class="sstat"></span></div><div class="stask"></div>';
@@ -4343,6 +4518,9 @@ const crow = {
       const wrap=document.createElement("div"); wrap.className="turn subrow";
       wrap.appendChild(d); flow.appendChild(wrap); this.bottom();
     }
+    // robins letzte Fassung 2026-08-28: die LAUFENDE Karte atmet als Zeile;
+    // fertig steht sie still. Die Klasse traegt den Zustand, das CSS den Atem.
+    d.classList.toggle("run", it.st==="running");
     const stat=d.querySelector(".sstat");
     if(it.st==="running"){
       stat.innerHTML='<span class="sdot run"></span><span></span>';
@@ -4354,14 +4532,15 @@ const crow = {
       stat.innerHTML='<span class="badword"></span>';
       stat.firstChild.textContent=this.subStat(it);
     }
-    if(it.st!=="running" && it.res && !d.querySelector("details")){
-      const det=document.createElement("details"); det.open=true;
-      det.innerHTML='<summary></summary><div class="sresult"></div>';
-      det.querySelector("summary").textContent = it.st==="done"
-        ? "collect · result, "+(it.tok||0).toLocaleString("en-US")+" tok"
-        : it.st;
-      det.querySelector(".sresult").textContent=it.res;
-      d.appendChild(det);
+    if(it.st!=="running" && it.res && !d.querySelector(".sresult")){
+      // ZU PER DEFAULT (robin, 2026-08-28): der Hauptchat zeigt die Karte,
+      // der volle Output wohnt hinter dem Klick auf sie. Fuer den ganzen
+      // Text gibt es KEINEN Subtask-Chat; dieser eine Ort ist es.
+      const res=document.createElement("div"); res.className="sresult";
+      res.hidden=true; res.textContent=it.res;
+      d.appendChild(res);
+      d.classList.add("can"); d.title="click for the result";
+      d.onclick=()=>{ res.hidden=!res.hidden; };
     }
   },
 
@@ -4496,8 +4675,14 @@ const crow = {
     // that, folding a project or moving a chat into one would land on the fast
     // path and change nothing on screen -- the list would be right in Python and
     // stale in the window, which is the worst of the three possible states.
-    const shape=(rollovers||[]).map(r=>(r.path||"")+">"+(r.root||"")).join("\n")
-      +"|"+(unsaved?"live":"")+"|"+this.liveRoot
+    // DIE TITEL GEHOEREN IN DIE SHAPE (robin, 2026-08-28 abends): der Name
+    // eines geloeschten Chats stand weiter in der Rail, bis ein Rename kam --
+    // eine reine Titelaenderung landete auf dem Schnellpfad und bewegte kein
+    // Pixel; erst der Rename baute neu, weil er den PFAD bewegt. Das meta
+    // bleibt draussen: es aendert sich jede Runde, und die shape existiert,
+    // damit nicht jede Runde die Liste neu baut.
+    const shape=(rollovers||[]).map(r=>(r.path||"")+">"+(r.root||"")+">"+(r.title||"")).join("\n")
+      +"|"+(unsaved?"live>"+title:"")+"|"+this.liveRoot
       +"|"+this.projects.map(p=>p.path+(p.open?"+":"-")).join("\n");
     if(box.dataset.shape===shape){
       (rollovers||[]).forEach(r=>{ if(!r.path) return;
@@ -4692,6 +4877,7 @@ const crow = {
       case "toolend": this.toolEnd(e.name,e.s,e.rep); break;
       case "toolres": this.toolRes(e.name,e.t,e.cut); break;
       case "cost": this.cost(e.line,e.share,e.sub); this.ctx(e.tokens,e.n_ctx); break;
+      case "ctx": this.ctx(e.tokens,e.n_ctx); break;
       case "subs": this.subs(e.items); break;
       case "note": this.note(e.t); break;
       case "chips": this.stageRender(e.c); break;
@@ -5303,6 +5489,12 @@ class Turn(TurnEvents):
     def turn_failed(self, message: str) -> None:
         self._put({"k": "fail", "t": message})
 
+    def turn_note(self, message: str) -> None:
+        # 2026-08-28: der Selbstheilungs-Reboot spricht waehrend der ~70 s
+        # sichtbar ("stopping/starting/server ready") -- ein stiller Haenger
+        # saehe exakt aus wie der Absturz, den er gerade repariert.
+        self._put({"k": "note", "t": message})
+
     def turn_interrupted(self) -> None:
         self._put({"k": "fail",
                    "t": crow_core.ABORT_NOTE})
@@ -5371,7 +5563,8 @@ class Turn(TurnEvents):
                             "and %s ran anyway" % (path, name)})
         self._put({"k": "note",
                    "t": "write_file and edit_file stay inside the root; "
-                        "run_command is not bounded by it"})
+                        "an outside path named in run_command asks first (#144) -- "
+                        "this one was released, or not named plainly"})
 
     def tools_reported(self, calls: list) -> None:
         for call in calls or []:
@@ -5380,6 +5573,12 @@ class Turn(TurnEvents):
     def rolled_over(self, tokens: int, path: str) -> None:
         self._put({"k": "note", "t": "rolled over at %d tokens -> %s"
                                      % (tokens, os.path.basename(path))})
+        # robins Live-Test 2026-08-29: unten links stand bis zum Turn-Ende der
+        # Fuellstand von VOR dem Roll. Der Kern zaehlt ab dem Roll von 0, also
+        # geht dieselbe Zahl sofort an die Seite -- als EIGENES Ereignis, nicht
+        # als `cost`: cost() raeumt den Stream-Cursor ab, und der Turn laeuft
+        # noch. Das Turn-Ende schreibt danach den echten neuen Fuellstand.
+        self._put({"k": "ctx", "tokens": 0, "n_ctx": 0})
 
     def memory_saved(self, what: list) -> None:
         """#122. Its OWN kind, not a `note`, and the page draws it with a glow.
@@ -6268,6 +6467,8 @@ class Api:
         "/delegate": "hand a task to the remote subtask model; /delegate <task>. "
                      "The local turn keeps running.",
         "/subtasks": "where every delegated subtask stands.",
+        "/verify": "delegate this conversation's changes to the checker spot; "
+                   "collect fetches the verdict.",
         "/reset": "drop the context. The chat stays where it is.",
         "/context": "how much of the window the conversation is using.",
         "/exit": "close the window.",
@@ -6336,6 +6537,12 @@ class Api:
             return self._delegate_command(stripped[len("/delegate"):].strip())
         if word == "/subtasks":
             return crow_core.tool_subtasks()
+        # #149. Same answer as the terminal's, word for word; the watcher
+        # afterwards keeps the card breathing outside a turn, like /delegate's.
+        if word == "/verify":
+            answer = crow_core.verify_start(self._conversation)
+            self._sub_watch()
+            return answer
         self.close()          # /exit, /quit
         return "closing."
 
@@ -7417,6 +7624,9 @@ class Api:
             return False
         if self._current_path:
             return False
+        # Discarding the live chat discards its subtasks with it -- the same
+        # rule delete_chat keeps, for the chat that never had a file.
+        self._drop_chat_subtasks("")
         self._conversation.reset()
         self._current_title = None
         self._context_tokens = 0
@@ -7439,6 +7649,11 @@ class Api:
         except Exception:                  # noqa: BLE001
             self.push({"k": "fail", "t": "deleting failed"})
             return False
+        # robin, 2026-08-28 abends: der geloeschte Chat nimmt seine Subtasks
+        # mit -- Registry, Rail-Zeilen, Chip und Transkripte. BEFORE the
+        # open-branch below clears `_current_path`: unstamped rows still
+        # stamp to the chat they were spawned in.
+        self._drop_chat_subtasks(path)
         if self._current_path and os.path.abspath(path) == os.path.abspath(
                 self._current_path):
             # THE OPEN CHAT WAS THE ONE DELETED, so it is dropped rather than
@@ -7934,6 +8149,33 @@ class Api:
             return ""
         return crow_core.provider_refresh(name) or ""
 
+    def delegate_favorites_set(self, models=None) -> str:
+        """#148: store the three delegate favourites. The refusal, or ""."""
+        return crow_core.delegate_favorites_set(models or []) or ""
+
+    def openrouter_set(self, on) -> str:
+        """Park or unpark the broker (its own page, 2026-08-28). Refusal or "".
+
+        ON NEVER MOVES A TURN -- robins Regel: no endpoint change, so it is
+        allowed mid-turn and the machine keeps answering. OFF while turns sit
+        on the broker IS an endpoint change and walks `provider_pick`'s road:
+        refused mid-turn, both lines said, the chat emptied -- and refused
+        WHOLE, so a blocked park leaves the flag standing.
+        """
+        if not on and crow_core.provider_active() == "openrouter":
+            said = self.provider_pick(crow_core.LOCAL_PROVIDER, None)
+            if said:
+                return said
+        return crow_core.openrouter_set(bool(on)) or ""
+
+    def provider_model_set(self, name: str, slug: str = "") -> str:
+        """Remember a provider's slug WITHOUT routing turns. Refusal, or "".
+
+        The broker page writes through this: a free pick is what the delegate
+        default reads, and `provider_pick` stays the only mover of turns.
+        """
+        return crow_core.provider_model_set(name, slug or "") or ""
+
     def provider_refresh(self, name: str) -> str:
         """Ask a provider for its model list again. The problem, or ""."""
         return crow_core.provider_refresh(name) or ""
@@ -8201,6 +8443,20 @@ class Api:
             elif parent and os.path.abspath(parent) == os.path.abspath(old):
                 self._sub_parent[ident] = new
 
+    def _drop_chat_subtasks(self, parent: str) -> None:
+        """#143-Nachtrag (robin, 2026-08-28 abends): ein geloeschter Chat
+        nimmt seine Subtasks mit. Unstamped rows are stamped first, the way
+        `_subs_items` would, so a delete before the first tick loses nothing
+        to timing; "" is the live chat without a file, as everywhere."""
+        for row in crow_core.subtask_view():
+            self._sub_parent.setdefault(row["i"], self._current_path or "")
+        want = os.path.abspath(parent) if parent else ""
+        idents = [i for i, par in list(self._sub_parent.items())
+                  if (os.path.abspath(par) if par else "") == want]
+        crow_core.drop_subtasks(idents)
+        for ident in idents:
+            self._sub_parent.pop(ident, None)
+
     def _subs_items(self) -> list:
         """The core's subtask snapshot, dressed for the page.
 
@@ -8213,8 +8469,14 @@ class Api:
         """
         items = []
         for row in crow_core.subtask_view():
-            parent = self._sub_parent.setdefault(row["i"],
-                                                 self._current_path or "")
+            parent = self._sub_parent.setdefault(
+                # 2026-08-28 spaetnachts: der Record bringt seinen Eltern-Chat
+                # aus der Registry-Datei mit -- erst wenn er keinen hat, ist
+                # es ein frisch gespawnter des offenen Chats.
+                row["i"], row.get("parent") or (self._current_path or ""))
+            # Und der Stempel wandert zurueck in den Record und auf die
+            # Platte -- idempotent, heilt je Tick (Umzug, Umbenennung).
+            crow_core.subtask_parent_set(row["i"], parent)
             if row["res"]:
                 row["res"] = row["res"][:TOOL_RESULT_SHOWN]
             row["parent"] = parent
@@ -8265,6 +8527,20 @@ class Api:
                                             format(remote, ","))
 
     # -- the turn ----------------------------------------------------------
+
+    def _token_budget(self) -> int:
+        """#145: the turn's token cap from settings.json, and the subtask cap
+        set on the way past. Read per turn, so the sheet needs no restart;
+        nonsense reads as 0, and 0 is off -- the caps are opt-in."""
+        doc = read_settings()
+        try:
+            crow_core.subtask_budget_set(int(doc.get("subtask_max_tokens") or 0))
+        except (TypeError, ValueError):
+            crow_core.subtask_budget_set(0)
+        try:
+            return max(0, int(doc.get("turn_token_budget") or 0))
+        except (TypeError, ValueError):
+            return 0
 
     def _pump(self, text: str) -> None:
         """#138c. Ein Zug nach dem anderen, auf einem Thread.
@@ -8399,6 +8675,11 @@ class Api:
                 rolled=self._rolled, execute_tools=self._args.execute_tools,
                 mode=getattr(self._args, "mode", DEFAULT_MODE),
                 approve=self._ask_page,
+                # #145: the two opt-in caps, read from settings.json per turn so
+                # a change in the sheet holds without a restart. The subtask cap
+                # is module state like the root -- a delegation starts deep
+                # inside the turn where no argument can reach it.
+                token_budget=self._token_budget(),
                 events=events)
         except CrowError as exc:
             # THE SENTENCE IS THE CORE'S, not a second copy of the rule. This
@@ -8475,6 +8756,7 @@ class Api:
                 temperature=sampling["temperature"], top_p=sampling["top_p"],
                 min_p=sampling["min_p"], top_k=sampling.get("top_k"),
                 reasoning_effort=self._reasoning,
+                incidents=result.incidents,
                 gate=getattr(self._args, "memory_approval",
                              crow_core.MEMORY_APPROVAL_DEFAULT),
                 events=events)

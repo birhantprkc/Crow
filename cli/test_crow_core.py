@@ -1076,6 +1076,17 @@ class TurnLoopCase(unittest.TestCase):
         crow_core._SEEN.clear()
         crow_core.SESSION_DIR = self.sessions
         crow_core.INTERRUPT.clear()
+        # 2026-08-28: "always" schreibt jetzt nach APPROVALS_FILE -- die Suite
+        # bekommt ihre eigene Datei, nie die echte unter %LOCALAPPDATA%.
+        self.addCleanup(setattr, crow_core, "APPROVALS_FILE",
+                        crow_core.APPROVALS_FILE)
+        self.addCleanup(setattr, crow_core, "_STORED_APPROVALS", None)
+        crow_core.APPROVALS_FILE = os.path.join(self.dir, "approvals.json")
+        crow_core._STORED_APPROVALS = None
+        # Und die Boot-Registry: nie die echte Datei, nie robins Live-Server.
+        self.addCleanup(setattr, crow_core, "BOOTED_FILE",
+                        crow_core.BOOTED_FILE)
+        crow_core.BOOTED_FILE = os.path.join(self.dir, "booted.json")
 
         # Every round the endpoint is scripted to answer with, and every body it
         # was asked with. The bodies are the prefix as the server saw it.
@@ -1707,13 +1718,1217 @@ class ReleaseLevelTests(TurnLoopCase):
         self.assertIsNone(crow_core.approval_scope("read_file",
                                                    json.dumps({"path": "x"})))
 
-    def test_forget_approvals_empties_the_memory(self):
+
+class ThinkOnlyCloseTests(TurnLoopCase):
+    """#150: a reasoning model can close the turn inside its own head -- found
+    live on 2026-08-28, ten rounds into a skill, thinking share 100 %, nothing
+    on screen. One nudge per turn; a second silence ends it as an incident."""
+
+    def test_a_silent_close_is_nudged_into_speaking(self):
+        self.serve([{"reasoning_content": "all inside the head"}])
+        self.serve([{"content": "the visible answer"}])
+        talk = self.conversation()
+        result = self.turn(talk)
+        text = " ".join(crow_core.message_text(m.get("content") or "")
+                        for m in talk.payload() if m.get("role") == "user")
+        self.assertIn("only reasoning", text, "no nudge was sent")
+        last = [m for m in talk.payload() if m.get("role") == "assistant"][-1]
+        self.assertIn("the visible answer",
+                      crow_core.message_text(last.get("content") or ""))
+        self.assertEqual(result.incidents, [])
+
+    def test_a_normal_answer_is_not_nudged(self):
+        """POSITIVE CONTROL -- and the nudge must not fire on an ordinary
+        reasoning-plus-answer round."""
+        self.serve([{"reasoning_content": "hmm"}, {"content": "done"}])
+        talk = self.conversation()
+        self.turn(talk)
+        text = " ".join(crow_core.message_text(m.get("content") or "")
+                        for m in talk.payload() if m.get("role") == "user")
+        self.assertNotIn("only reasoning", text)
+
+    def test_a_second_silence_ends_the_turn_as_an_incident(self):
+        self.serve([{"reasoning_content": "head only"}])
+        self.serve([{"reasoning_content": "still head only"}])
+        talk = self.conversation()
+        result = self.turn(talk)
+        self.assertTrue(any("no visible answer" in i for i in result.incidents),
+                        "the silent close left no incident")
+
+
+class BrokenStreamRetryTests(TurnLoopCase):
+    """#151: a broken stream is not yet a broken turn -- sixteen rounds and
+    7m28s died live on one [WinError 10054]. Nothing was appended for the
+    broken round, so one re-request rides the intact prefix. Once per turn."""
+
+    def test_one_reset_is_retried_and_the_turn_survives(self):
+        self.serve([{"content": "half a"}],
+                   raises=crow_core.CrowError(
+                       "stream broke: [WinError 10054] connection reset"))
+        self.serve([{"content": "the whole answer"}])
+        talk = self.conversation()
+        result = self.turn(talk)
+        self.assertFalse(result.stopped, "the retry did not save the turn")
+        last = [m for m in talk.payload() if m.get("role") == "assistant"][-1]
+        self.assertIn("the whole answer",
+                      crow_core.message_text(last.get("content") or ""))
+        self.assertTrue(any("retry recovered" in i for i in result.incidents))
+
+    def test_a_second_break_in_one_turn_fails_honestly(self):
+        broke = crow_core.CrowError("stream broke: [WinError 10054] reset")
+        self.serve([{"content": "x"}], raises=broke)
+        self.serve([{"content": "y"}], raises=broke)
+        talk = self.conversation()
+        result = self.turn(talk)
+        self.assertTrue(result.stopped, "two breaks were papered over")
+
+    def test_a_hard_error_is_not_retried(self):
+        """NEGATIVE CONTROL: a schema refusal fails identically on a retry,
+        and retrying it would just say the same thing slower."""
+        self.serve([{"content": "x"}],
+                   raises=crow_core.CrowError("the request body was rejected"))
+        talk = self.conversation()
+        result = self.turn(talk)
+        self.assertTrue(result.stopped)
+        self.assertEqual(len(self.bodies), 1, "the hard error was re-sent")
+
+
+class RolloverCarryTests(unittest.TestCase):
+    """#147: measured on the code -- the cut reset to a note plus the line
+    just typed, so a rule from turn 2 was gone at 180k. The user's SHORT
+    lines ride across verbatim; pastes and protocol notes do not."""
+
+    def _roll(self, talk, carry=None):
+        path = os.path.join(tempfile.mkdtemp(prefix="crow-roll-"), "arch.json")
+        self.addCleanup(shutil.rmtree, os.path.dirname(path), True)
+        got = crow_core.roll_over(talk, "http://127.0.0.1:1/v1", 180000,
+                                  carry=carry, path=path)
+        self.assertIsNotNone(got, "nothing was archived")
+        return crow_core.message_text(talk.payload()[-1]["content"])
+
+    def test_a_turn_two_rule_survives_the_cut(self):
+        talk = crow_core.Conversation()
+        talk.append("user", "start")
+        talk.append("assistant", "ok")
+        talk.append("user", "never touch billing code")
+        talk.append("assistant", "noted")
+        first = self._roll(talk, carry="continue please")
+        self.assertIn("never touch billing code", first)
+        self.assertIn("continue please", first)
+
+    def test_pastes_and_protocol_notes_stay_behind(self):
+        talk = crow_core.Conversation()
+        talk.append("user", "rule one stays")
+        talk.append("user", "x" * 900)
+        talk.append("user", "[The tool budget for this turn is spent -- note]")
+        talk.append("assistant", "ok")
+        first = self._roll(talk)
+        self.assertIn("rule one stays", first)
+        self.assertNotIn("x" * 200, first)
+        self.assertNotIn("tool budget", first.split("carried across")[-1])
+        self.assertIn("more in the transcript", first)
+
+    def test_the_carry_line_is_not_doubled(self):
+        talk = crow_core.Conversation()
+        talk.append("user", "the question")
+        talk.append("assistant", "ok")
+        first = self._roll(talk, carry="the question")
+        self.assertEqual(first.count("the question"), 1)
+
+
+class SpotFallbackTests(unittest.TestCase):
+    """#146: the pin ritual as code. A retryable failure marks the spot dead
+    for the session and the subtask falls to the next FREE spot; a hard
+    failure stays where it failed -- it would fail identically anywhere."""
+
+    A = {"provider": "openrouter", "label": "OpenRouter", "remote": True,
+         "base_url": "http://x/v1", "model": "unit/alpha:free",
+         "api_key": "k", "headers": {}, "transport": crow_core.TRANSPORT_CHAT,
+         "routing": {}, "sticky": False, "filter": False, "params": []}
+    B = dict(A, model="unit/beta:free")
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-spot-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._real = (crow_core._post_stream, crow_core.delegate_target,
+                      crow_core.delegate_fallbacks, crow_core.SESSION_DIR)
+        self.addCleanup(self._restore)
+        crow_core.SESSION_DIR = os.path.join(self.dir, "session")
+        crow_core.delegate_target = lambda doc=None: (dict(self.A), None)
+        crow_core.delegate_fallbacks = lambda spot, doc=None: [dict(self.B)]
+        self.calls = 0
+        crow_core.forget_subtasks()
+        crow_core.forget_spot_health()
+        crow_core.INTERRUPT.clear()
+
+    def _restore(self) -> None:
+        (crow_core._post_stream, crow_core.delegate_target,
+         crow_core.delegate_fallbacks, crow_core.SESSION_DIR) = self._real
+        crow_core.forget_subtasks()
+        crow_core.forget_spot_health()
+        crow_core.INTERRUPT.clear()
+
+    def _serve_then_fail_first(self, fail: str, text: str = "SAVED BY B") -> None:
+        chunks = [json.dumps({"choices": [{"delta": {"content": text}}]}),
+                  json.dumps({"choices": [],
+                              "timings": {"predicted_n": 5, "prompt_n": 11}})]
+
+        def fake(url, body, key, timeout, extra=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise crow_core.CrowError(fail)
+            for chunk in chunks:
+                yield chunk
+
+        crow_core._post_stream = fake
+
+    def _settle(self, ident: str = "d1") -> None:
+        crow_core.SUBTASKS[ident].thread.join(10)
+
+    def test_a_retryable_failure_falls_to_the_next_free_spot(self):
+        self._serve_then_fail_first("429 upstream_provider_shared_pool")
+        crow_core.tool_delegate(task="haiku")
+        self._settle()
+        sub = crow_core.SUBTASKS["d1"]
+        self.assertEqual(sub.status, "done")
+        self.assertEqual(sub.model, "unit/beta:free")
+        self.assertIn("SAVED BY B", sub.result)
+        self.assertIn("fell back from unit/alpha:free", sub.failure)
+        self.assertIn("unit/alpha:free", crow_core._SPOT_DEAD)
+
+    def test_a_hard_failure_does_not_wander(self):
+        """NEGATIVE CONTROL: a schema error would fail identically anywhere,
+        and a fallback would just spend a second spot on it."""
+        self._serve_then_fail_first("the request body was rejected: schema")
+        crow_core.tool_delegate(task="haiku")
+        self._settle()
+        sub = crow_core.SUBTASKS["d1"]
+        self.assertEqual(sub.status, "failed")
+        self.assertEqual(sub.model, "unit/alpha:free")
+        self.assertEqual(self.calls, 1, "a hard failure was retried")
+        self.assertNotIn("unit/alpha:free", crow_core._SPOT_DEAD)
+
+    def test_the_default_pick_skips_a_dead_spot(self):
+        doc = {"catalog": {"openrouter": {"models": [
+            {"id": "unit/huge:free", "context": 1000000},
+            {"id": "unit/small:free", "context": 8000},
+        ]}}}
+        self.assertEqual(crow_core._free_model_for("openrouter", doc),
+                         "unit/huge:free")
+        crow_core._SPOT_DEAD["unit/huge:free"] = "429"
+        self.assertEqual(crow_core._free_model_for("openrouter", doc),
+                         "unit/small:free",
+                         "the dead spot was offered again")
+
+    def _talk_with_writes(self):
+        def call(name, args):
+            return {"id": "c", "name": name, "arguments": json.dumps(args)}
+        talk = crow_core.Conversation()
+        talk.append("user", "build it")
+        talk.append("assistant", "on it", tool_calls=[
+            call("write_file", {"path": "a.py", "content": "OLD A"}),
+            call("read_file", {"path": "x.py"})])
+        talk.append("assistant", "more", tool_calls=[
+            call("edit_file", {"path": "a.py", "old": "OLD", "new": "NEW"}),
+            call("write_file", {"path": "b.py", "content": "B BODY"})])
+        return talk
+
+    def test_verify_material_carries_writes_and_edits_only(self):
+        """#149: the checker reads what CHANGED -- reads stay out, the edit
+        carries its replacement, and a path is one block."""
+        material = crow_core.verify_material(self._talk_with_writes())
+        self.assertIn("=== a.py ===", material)
+        self.assertIn("=== b.py ===", material)
+        self.assertIn("B BODY", material)
+        self.assertIn("with:\nNEW", material)
+        self.assertNotIn("x.py", material)
+
+    def test_verify_starts_a_subtask_with_review_instructions(self):
+        self._serve_then_fail_first("never used", text="VERDICT: fine")
+        self.calls = 1                      # skip the failing first call
+        answer = crow_core.verify_start(self._talk_with_writes())
+        self.assertIn("d1", answer)
+        crow_core.SUBTASKS["d1"].thread.join(10)
+        sub = crow_core.SUBTASKS["d1"]
+        self.assertTrue(sub.task.startswith(crow_core.VERIFY_PROMPT[:40]))
+        self.assertIn("=== a.py ===", sub.task)
+        self.assertEqual(sub.status, "done")
+
+    def test_verify_with_nothing_written_says_so(self):
+        talk = crow_core.Conversation()
+        talk.append("user", "hello")
+        self.assertEqual(crow_core.verify_start(talk),
+                         "nothing to verify -- this conversation has written no file")
+
+    def test_a_dead_pick_yields_like_a_dead_favourite(self):
+        """robins Live-Befund 2026-08-28 spaetabends: der Pick stand auf dem
+        toten nemotron, und JEDE neue Delegation lief wieder dorthin -- der
+        Pick las das Gesundheitsmemo als einziger nicht. Dead pick: the next
+        rule speaks, exactly like a dead favourite."""
+        crow_core.forget_spot_health()
+        self.addCleanup(crow_core.forget_spot_health)
+        doc = {"model": {"openrouter": "unit/picked:free"},
+               "catalog": {"openrouter": {"models": [
+                   {"id": "unit/picked:free", "context": 1000},
+                   {"id": "unit/fav:free", "context": 500},
+               ]}}, "delegate_favorites": ["unit/fav:free"]}
+        self.assertEqual(crow_core._free_model_for("openrouter", doc),
+                         "unit/picked:free")
+        crow_core._SPOT_DEAD["unit/picked:free"] = "404"
+        self.assertEqual(crow_core._free_model_for("openrouter", doc),
+                         "unit/fav:free",
+                         "the dead pick was resolved again")
+
+    def test_a_broken_upstream_is_a_second_spots_business(self):
+        """Die Nacht der vier nemotron-Karten: HTTP 404 "Provider returned
+        error" (Upstream tot, durchgereicht) und "No endpoints found ..."
+        sind Krankheiten DIESES Spots -- der naechste antwortet. Ein nackter
+        404 bleibt nicht-retryable: eine Adresse, die ueberall 404 ist, ist
+        keine Spot-Frage."""
+        self.assertTrue(crow_core._spot_retryable(
+            'HTTP 404 from https://openrouter.ai/api/v1/chat/completions: '
+            '{"error":{"message":"Provider returned error","code":404,'
+            '"metadata":{"raw":"","provider_name":"Nvidia"}}}'))
+        self.assertTrue(crow_core._spot_retryable(
+            'HTTP 404: {"error":{"message":"No endpoints found that can '
+            'handle the requested parameters."}}'))
+        self.assertFalse(crow_core._spot_retryable(
+            "HTTP 404 from https://x/v1/chat/completions: Not Found"))
+        self.assertFalse(crow_core._spot_retryable("the schema refused it"))
+
+    def test_a_favourite_beats_the_largest_window(self):
+        """#148: the person's pick over the biggest number -- the biggest
+        number was the dead provider. Dead favourite: the next rule speaks."""
+        doc = {"catalog": {"openrouter": {"models": [
+            {"id": "unit/huge:free", "context": 1000000},
+            {"id": "unit/fav:free", "context": 8000},
+        ]}}, "delegate_favorites": ["unit/fav:free"]}
+        self.assertEqual(crow_core._free_model_for("openrouter", doc),
+                         "unit/fav:free")
+        crow_core._SPOT_DEAD["unit/fav:free"] = "429"
+        self.assertEqual(crow_core._free_model_for("openrouter", doc),
+                         "unit/huge:free")
+
+    def test_favourites_lead_the_fallback_chain_in_their_order(self):
+        real_cred = crow_core.provider_credential
+        crow_core.provider_credential = lambda name: ("k", "key", None)
+        self.addCleanup(setattr, crow_core, "provider_credential", real_cred)
+        fallbacks = self._real[2]
+        doc = {"catalog": {"openrouter": {"models": [
+            {"id": "unit/huge:free", "context": 900000},
+            {"id": "unit/fav2:free", "context": 8000},
+            {"id": "unit/fav1:free", "context": 4000},
+        ]}}, "delegate_favorites": ["unit/fav1:free", "unit/fav2:free"]}
+        spots = fallbacks(dict(self.A), doc)
+        self.assertEqual([s["model"] for s in spots],
+                         ["unit/fav1:free", "unit/fav2:free", "unit/huge:free"])
+
+    def test_favourites_write_at_most_three_and_clear(self):
+        store: dict = {}
+        real = (crow_core.provider_doc, crow_core.provider_write)
+        crow_core.provider_doc = lambda path=None: store
+        crow_core.provider_write = lambda doc: None
+        self.addCleanup(lambda: setattr(crow_core, "provider_doc", real[0]))
+        self.addCleanup(lambda: setattr(crow_core, "provider_write", real[1]))
+        crow_core.delegate_favorites_set(["a:free", "b:free", "c:free", "d:free"])
+        self.assertEqual(store["delegate_favorites"],
+                         ["a:free", "b:free", "c:free"])
+        self.assertEqual(crow_core.delegate_favorites(store),
+                         ["a:free", "b:free", "c:free"])
+        crow_core.delegate_favorites_set([])
+        self.assertNotIn("delegate_favorites", store)
+
+    def test_setting_favourites_unseats_a_stale_pin(self):
+        """robins Live-Befund vom 2026-08-28 spaetabends: drei Favoriten
+        standen in der Oberflaeche, die Delegation nahm weiter den
+        unsichtbaren Pin vom 27.08. Wer Favoriten setzt, sagt die Reihenfolge
+        an -- ein Pin, den keine Seite zeigt, weicht ihnen, statt sie stumm
+        zu schlagen."""
+        store: dict = {"delegate": {"provider": "openrouter",
+                                    "model": "unit/pinned:free"}}
+        real = (crow_core.provider_doc, crow_core.provider_write)
+        crow_core.provider_doc = lambda path=None: store
+        crow_core.provider_write = lambda doc, path=None: None
+        self.addCleanup(lambda: setattr(crow_core, "provider_doc", real[0]))
+        self.addCleanup(lambda: setattr(crow_core, "provider_write", real[1]))
+        crow_core.delegate_favorites_set(["unit/fav:free"])
+        self.assertNotIn("delegate", store,
+                         "the invisible pin still outranks the favourites")
+        # DIE NEGATIVHAELFTE: clearing favourites orders nothing about the
+        # pin -- there is no ordering left for it to contradict.
+        store["delegate"] = {"provider": "openrouter", "model": "unit/p2:free"}
+        crow_core.delegate_favorites_set([])
+        self.assertIn("delegate", store)
+
+    def test_fallbacks_bill_nobody_who_chose_nothing(self):
+        """robins correction on #148: a PAID favourite rides the chain -- the
+        user's own pick on their own key. A paid model NOBODY chose does not:
+        what falls forward for free stays free."""
+        real_cred = crow_core.provider_credential
+        crow_core.provider_credential = lambda name: ("k", "key", None)
+        self.addCleanup(setattr, crow_core, "provider_credential", real_cred)
+        fallbacks = self._real[2]        # the unpatched function
+        doc = {"catalog": {"openrouter": {"models": [
+            {"id": "unit/alpha:free", "context": 500000},
+            {"id": "unit/paid", "context": 900000},
+            {"id": "unit/paidfav", "context": 100000},
+            {"id": "unit/dead:free", "context": 400000},
+            {"id": "unit/next:free", "context": 300000},
+        ]}}, "delegate_favorites": ["unit/paidfav"]}
+        crow_core._SPOT_DEAD["unit/dead:free"] = "429"
+        spots = fallbacks(dict(self.A), doc)
+        self.assertEqual([s["model"] for s in spots],
+                         ["unit/paidfav", "unit/next:free"])
+
+    def test_a_paid_favourite_wins_the_default_pick(self):
+        doc = {"catalog": {"openrouter": {"models": [
+            {"id": "unit/huge:free", "context": 1000000},
+            {"id": "unit/paidfav", "context": 8000},
+        ]}}, "delegate_favorites": ["unit/paidfav"]}
+        self.assertEqual(crow_core._free_model_for("openrouter", doc),
+                         "unit/paidfav")
+        crow_core._SPOT_DEAD["unit/paidfav"] = "timeout"
+        self.assertEqual(crow_core._free_model_for("openrouter", doc),
+                         "unit/huge:free",
+                         "a dead paid favourite must yield to the free default")
+
+
+class TheOpenRouterSwitchTests(unittest.TestCase):
+    """robins Regel vom 2026-08-28, woertlich genommen: Aktiviert man
+    OpenRouter, schaltet sich lokal NICHT ab -- beide laufen parallel. The
+    switch parks the broker or unparks it; it never routes a turn."""
+
+    def setUp(self) -> None:
+        self.store: dict = {}
+        self._real = (crow_core.provider_doc, crow_core.provider_write,
+                      crow_core.provider_key_for)
+        crow_core.provider_doc = lambda path=None: self.store
+        crow_core.provider_write = lambda doc, path=None: None
+        crow_core.provider_key_for = lambda name, path=None: "unit-key"
+        self.addCleanup(self._restore)
+
+    def _restore(self) -> None:
+        (crow_core.provider_doc, crow_core.provider_write,
+         crow_core.provider_key_for) = self._real
+
+    def test_switching_on_moves_no_turn(self):
+        """THE RULE ITSELF: on touches the flag and nothing else -- the
+        machine keeps answering turns while the broker comes up."""
+        self.store.update({"active": "local", "openrouter_on": False})
+        self.assertIsNone(crow_core.openrouter_set(True))
+        self.assertEqual(self.store.get("active"), "local")
+        self.assertTrue(crow_core.openrouter_on(self.store))
+        self.assertNotIn("openrouter_on", self.store,
+                         "absent IS on -- the file stays clean")
+
+    def test_switching_off_brings_turns_home(self):
+        """The one direction that may move turns, and it moves them HOME:
+        a parked broker cannot keep them, and the machine is always there."""
+        self.store.update({"active": "openrouter"})
+        self.assertIsNone(crow_core.openrouter_set(False))
+        self.assertEqual(self.store.get("active"), crow_core.LOCAL_PROVIDER)
+        self.assertFalse(crow_core.openrouter_on(self.store))
+
+    def test_the_switch_is_on_unless_somebody_turned_it_off(self):
+        """Absent means on: every providers.json written before this build
+        keeps delegating exactly as it did."""
+        self.assertTrue(crow_core.openrouter_on({}))
+        self.assertFalse(crow_core.openrouter_on({"openrouter_on": False}))
+        # A hand-edited file naming the parked broker as active: turns are
+        # home, through the same fallback a removed provider takes.
+        self.assertEqual(
+            crow_core.provider_active({"active": "openrouter",
+                                       "openrouter_on": False}),
+            crow_core.LOCAL_PROVIDER)
+
+    def test_a_parked_broker_refuses_delegation_and_names_the_switch(self):
+        real = crow_core.provider_credential
+        crow_core.provider_credential = lambda name: ("k", "key", None)
+        self.addCleanup(setattr, crow_core, "provider_credential", real)
+        doc = {"openrouter_on": False, "catalog": {"openrouter": {"models": [
+            {"id": "unit/x:free", "context": 1000}]}}}
+        spot, why = crow_core.delegate_target(doc)
+        self.assertIsNone(spot)
+        self.assertIn("switched off", why)
+        self.assertIn("OpenRouter page", why)
+        # THE POSITIVE HALF: the same doc with the switch on resolves.
+        doc.pop("openrouter_on")
+        spot, why = crow_core.delegate_target(doc)
+        self.assertIsNone(why)
+        self.assertEqual(spot["model"], "unit/x:free")
+
+    def test_a_parked_broker_refuses_the_turn_pick(self):
+        self.store.update({"openrouter_on": False})
+        said = crow_core.provider_pick("openrouter", "a/b") or ""
+        self.assertIn("switched off", said)
+        self.assertNotEqual(self.store.get("active"), "openrouter")
+        self.store.pop("openrouter_on")
+        self.assertIsNone(crow_core.provider_pick("openrouter", "a/b"))
+        self.assertEqual(self.store.get("active"), "openrouter")
+
+    def test_the_core_offers_no_turns_overlay(self):
+        """robins dritter Brueller, 2026-08-28 abends: die Broker-Seite routet
+        GAR NICHTS -- default ist immer lokal, bis der User auf der Model-Seite
+        etwas anderes waehlt. The overlay that let the broker page carry turns
+        is gone whole: no reader, no writer, no half-alive flag in the file."""
+        self.assertFalse(hasattr(crow_core, "openrouter_turns"))
+        self.assertFalse(hasattr(crow_core, "openrouter_turns_set"))
+        # A flag left behind by the one build that wrote it routes nothing.
+        self.assertEqual(crow_core.provider_active(
+            {"active": "local", "openrouter_turns": True}), "local")
+
+    def test_a_model_pick_is_not_a_turn_pick(self):
+        """The broker page writes the slug; where a turn goes is another
+        control's answer. #148's one-switch lesson, held for the picker."""
+        self.store.update({"active": "local"})
+        self.assertIsNone(crow_core.provider_model_set("openrouter", "a/b"))
+        self.assertEqual(self.store["model"]["openrouter"], "a/b")
+        self.assertEqual(self.store.get("active"), "local")
+        self.assertIsNone(crow_core.provider_model_set("openrouter", ""))
+        self.assertNotIn("openrouter", self.store.get("model") or {})
+        self.assertIn("no provider",
+                      crow_core.provider_model_set("nowhere", "y") or "")
+
+
+class AnAlwaysOutlivesTheChatTests(unittest.TestCase):
+    """robins Ansage vom 2026-08-28 spaetabends: Crow merkte sich
+    Zugriffsentscheidungen nicht sitzungsuebergreifend -- dieselben
+    Vault-Pfade jede Sitzung neu freigeben nervt. "from now on" steht jetzt
+    neben providers.json auf Platte und traegt Chatwechsel wie Neustart."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-approvals-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(setattr, crow_core, "APPROVALS_FILE",
+                        crow_core.APPROVALS_FILE)
+        self.addCleanup(setattr, crow_core, "_STORED_APPROVALS", None)
+        self.addCleanup(crow_core._ALLOWED.clear)
+        crow_core.APPROVALS_FILE = os.path.join(self.dir, "approvals.json")
+        crow_core._STORED_APPROVALS = None
+        crow_core._ALLOWED.clear()
+
+    def test_an_always_survives_chat_and_restart(self):
+        args = json.dumps({"command": "git status"})
+        self.assertIsNotNone(crow_core.remember("run_command", args))
+        crow_core.forget_approvals()
+        self.assertTrue(crow_core.remembered("run_command", args),
+                        "the always died with the chat")
+        # Prozessneustart: Session-Set leer, Cache kalt -- die Datei traegt.
+        crow_core._ALLOWED.clear()
+        crow_core._STORED_APPROVALS = None
+        self.assertTrue(crow_core.remembered("run_command", args),
+                        "the always died with the process")
+        with open(crow_core.APPROVALS_FILE, encoding="utf-8") as fh:
+            self.assertIn("git", fh.read())
+
+    def test_a_broken_store_reads_as_empty_and_heals_on_the_next_yes(self):
+        """Die kaputte Convenience reisst das Tor nicht um (read_root_mode's
+        rule): unlesbares JSON heisst leer, und das naechste "always"
+        schreibt die Datei wieder gesund."""
+        with open(crow_core.APPROVALS_FILE, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        crow_core._STORED_APPROVALS = None
+        args = json.dumps({"command": "git status"})
+        self.assertFalse(crow_core.remembered("run_command", args))
+        crow_core.remember("run_command", args)
+        crow_core._STORED_APPROVALS = None
+        self.assertTrue(crow_core.remembered("run_command", args))
+
+
+class TheTurnRebootsItsOwnDeadServerTests(TurnLoopCase):
+    """robins Abend vom 2026-08-28 in einem Satz: der selbst gebootete Server
+    beendet sich unter Last still mit Exit 1, und jeder Tod riss den Lauf rot
+    ab. Crow ist der Booter: EIN Neustart des EIGENEN Servers und EIN
+    weiterer Versuch auf intaktem Prefix je Turn -- fremde Server nie."""
+
+    class _Dead:
+        def poll(self):
+            return 1
+
+    def test_a_dead_own_boot_is_rebooted_once_and_the_turn_continues(self):
+        crow_core._BOOTED[8082] = (self._Dead(),
+                                   os.path.join(self.dir, "e.log"),
+                                   "unit", "http://127.0.0.1:8082/v1", None)
+        self.addCleanup(crow_core._BOOTED.clear)
+        booted = []
+        real_boot = crow_core.start_server
+        crow_core.start_server = lambda key, url, install=None, log=None: (
+            booted.append((key, url)) or "X.gguf")
+        self.addCleanup(setattr, crow_core, "start_server", real_boot)
+        real_sr = crow_core.stream_reply
+        self.addCleanup(setattr, crow_core, "stream_reply", real_sr)
+        state = {"n": 0}
+
+        def flaky(*a, **k):
+            if state["n"] == 0:
+                state["n"] += 1
+                raise crow_core.Unreachable(
+                    "cannot reach http://127.0.0.1:8082/v1/chat/completions: "
+                    "[WinError 10061] verweigerte")
+            return real_sr(*a, **k)
+
+        crow_core.stream_reply = flaky
+        self.serve([{"content": "done"}])
+        talk = self.conversation()
+        result = self.turn(talk, base_url="http://127.0.0.1:8082/v1")
+        self.assertFalse(result.stopped, "the turn died instead of rebooting")
+        self.assertEqual(booted, [("unit", "http://127.0.0.1:8082/v1")])
+
+    def test_the_reboot_survives_a_window_restart(self):
+        """DAS LOCH DER NACHT: robin startete das Fenster neu (auf meine
+        Ansage), der laufende Server verwaiste, und der naechste Tod traf
+        ein Fenster ohne Boot-Registry -- keine Zeile, kein Reboot. Die
+        Datei traegt den Boot jetzt ueber den Neustart: das frische Fenster
+        belebt den Crow-gebooteten Server wieder, ohne Exit-Code-Erfindung."""
+        crow_core._BOOTED.clear()
+        with open(crow_core.BOOTED_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"format": 1, "booted": {"8082": {
+                "key": "unit", "base_url": "http://127.0.0.1:8082/v1",
+                "install": None, "err": "e.log"}}}, fh)
+        booted = []
+        real_boot = crow_core.start_server
+        crow_core.start_server = lambda key, url, install=None, log=None: (
+            booted.append((key, url)) or "X.gguf")
+        self.addCleanup(setattr, crow_core, "start_server", real_boot)
+        real_sr = crow_core.stream_reply
+        self.addCleanup(setattr, crow_core, "stream_reply", real_sr)
+        state = {"n": 0}
+
+        def flaky(*a, **k):
+            if state["n"] == 0:
+                state["n"] += 1
+                raise crow_core.Unreachable(
+                    "cannot reach http://127.0.0.1:8082/v1/chat/completions: "
+                    "[WinError 10061] verweigerte")
+            return real_sr(*a, **k)
+
+        crow_core.stream_reply = flaky
+        self.serve([{"content": "done"}])
+        talk = self.conversation()
+        result = self.turn(talk, base_url="http://127.0.0.1:8082/v1")
+        self.assertFalse(result.stopped,
+                         "the orphaned boot was not revived")
+        self.assertEqual(booted, [("unit", "http://127.0.0.1:8082/v1")])
+
+    def test_serial_deaths_get_three_reboots_and_the_fourth_ends_red(self):
+        """Die Nacht der Serien-Tode: EIN Reboot je Turn liess den zweiten
+        Tod im selben langen Turn rot enden, waehrend der Heiler daneben
+        stand. Drei je Turn; der vierte endet ehrlich rot."""
+        crow_core._BOOTED.clear()
+        with open(crow_core.BOOTED_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"format": 1, "booted": {"8082": {
+                "key": "unit", "base_url": "http://127.0.0.1:8082/v1",
+                "install": None, "err": "e.log"}}}, fh)
+        booted = []
+        real_boot = crow_core.start_server
+        crow_core.start_server = lambda key, url, install=None, log=None: (
+            booted.append(key) or "X.gguf")
+        self.addCleanup(setattr, crow_core, "start_server", real_boot)
+        real_sr = crow_core.stream_reply
+        self.addCleanup(setattr, crow_core, "stream_reply", real_sr)
+
+        def dying(*a, **k):
+            raise crow_core.Unreachable(
+                "cannot reach http://127.0.0.1:8082/v1/chat/completions: x")
+
+        crow_core.stream_reply = dying
+        talk = self.conversation()
+        result = self.turn(talk, base_url="http://127.0.0.1:8082/v1")
+        self.assertTrue(result.stopped)
+        self.assertEqual(len(booted), 3, "the cap is three reboots per turn")
+
+    def test_a_loading_server_is_waited_for_instead_of_dying_on_503(self):
+        """Ein Zug, der den frisch bootenden eigenen Server trifft, bekommt
+        HTTP 503 "Loading model" -- das ist der Boot, kein Fehler: einmal je
+        Turn ausharren, bis er antwortet, dann weiterlaufen."""
+        crow_core._BOOTED.clear()
+        with open(crow_core.BOOTED_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"format": 1, "booted": {"8082": {
+                "key": "unit", "base_url": "http://127.0.0.1:8082/v1",
+                "install": None, "err": "e.log"}}}, fh)
+        real_sr = crow_core.stream_reply
+        self.addCleanup(setattr, crow_core, "stream_reply", real_sr)
+        state = {"n": 0}
+
+        def loading(*a, **k):
+            if state["n"] == 0:
+                state["n"] += 1
+                raise crow_core.CrowError(
+                    'HTTP 503 from http://127.0.0.1:8082/v1/chat/completions:'
+                    ' {"error":{"message":"Loading model",'
+                    '"type":"unavailable_error","code":503}}')
+            return real_sr(*a, **k)
+
+        crow_core.stream_reply = loading
+        real_smp = crow_core.server_model_path
+        crow_core.server_model_path = lambda *a, **k: "X.gguf"
+        self.addCleanup(setattr, crow_core, "server_model_path", real_smp)
+        self.serve([{"content": "done"}])
+        talk = self.conversation()
+        result = self.turn(talk, base_url="http://127.0.0.1:8082/v1")
+        self.assertFalse(result.stopped, "the loading wait did not carry")
+
+    def test_a_foreign_server_is_never_rebooted(self):
+        """NEGATIV, und der Satz ist Programm: ein Server, den dieses Fenster
+        nicht gebootet hat, ist die Entscheidung von jemand anderem -- der
+        Turn endet rot wie bisher, nichts wird gestartet."""
+        crow_core._BOOTED.clear()
+        booted = []
+        real_boot = crow_core.start_server
+        crow_core.start_server = lambda *a, **k: booted.append(a) or "X.gguf"
+        self.addCleanup(setattr, crow_core, "start_server", real_boot)
+        real_sr = crow_core.stream_reply
+        self.addCleanup(setattr, crow_core, "stream_reply", real_sr)
+
+        def refuse(*a, **k):
+            raise crow_core.Unreachable(
+                "cannot reach http://127.0.0.1:8082/v1/chat/completions: x")
+
+        crow_core.stream_reply = refuse
+        talk = self.conversation()
+        result = self.turn(talk, base_url="http://127.0.0.1:8082/v1")
+        self.assertTrue(result.stopped)
+        self.assertEqual(booted, [], "somebody rebooted a foreign server")
+
+
+class TheSubtasksOutliveTheProcessTests(TurnLoopCase):
+    """robins Ansage vom 2026-08-28 spaetnachts: delegierte Aufgaben
+    ueberleben den Crow-Neustart, solange ihr Chat lebt -- geloescht wird
+    mit dem Chat, nicht mit dem Prozess. Running wird beim Laden ehrlich
+    "interrupted": der Thread dieses Prozesses existiert nicht mehr."""
+
+    def setUp(self):
+        super().setUp()
+        crow_core.forget_subtasks()
+        self.addCleanup(crow_core.forget_subtasks)
+        self.addCleanup(setattr, crow_core, "_SUBTASKS_RECALLED", True)
+
+    def _seed(self, status="done", result="R"):
+        sub = crow_core.Subtask("d3", "write things", "",
+                                {"model": "unit/m:free", "label": "L"})
+        sub.status = status
+        sub.result = result
+        sub.parent = "C:/chats/chat-a.json"
+        with crow_core._SUBTASK_LOCK:
+            crow_core.SUBTASKS["d3"] = sub
+        crow_core._subtask_persist()
+
+    def test_a_finished_subtask_survives_the_restart(self):
+        self._seed()
+        crow_core.forget_subtasks()              # der Neustart
+        self.assertEqual(crow_core.subtasks_recall(), 1)
+        row = crow_core.subtask_view()[0]
+        self.assertEqual(row["i"], "d3")
+        self.assertEqual(row["st"], "done")
+        self.assertEqual(row["res"], "R")
+        self.assertEqual(row["parent"], "C:/chats/chat-a.json")
+        # Der Zaehler laeuft OBERHALB der geladenen Nummern weiter --
+        # sonst kollidiert das naechste d3 mit dem geladenen.
+        self.assertGreaterEqual(crow_core._SUBTASK_SEQ, 3)
+
+    def test_a_running_subtask_comes_back_interrupted(self):
+        """Ehrlich statt Puls ohne Arbeiter: der Prozess, der es fuhr, ist
+        weg -- die Karte sagt das, statt weiter zu atmen."""
+        self._seed(status="running")
+        crow_core.forget_subtasks()
+        crow_core.subtasks_recall()
+        row = crow_core.subtask_view()[0]
+        self.assertEqual(row["st"], "interrupted")
+        self.assertIn("closed", row["res"])
+
+    def test_dropping_takes_the_file_along(self):
+        """Der Chat-Loeschpfad raeumt auch die Platte: was drop_subtasks
+        nimmt, kommt nach dem naechsten Start nicht wieder."""
+        self._seed()
+        crow_core.drop_subtasks(["d3"])
+        crow_core.forget_subtasks()
+        self.assertEqual(crow_core.subtasks_recall(), 0)
+
+    def test_the_registry_recalls_itself_lazily(self):
+        """Jede Oberflaeche, die auf die Registry schaut oder zugreift,
+        findet die geladenen Eintraege -- ohne eigenen Init-Hook."""
+        self._seed()
+        crow_core.forget_subtasks()
+        crow_core._SUBTASKS_RECALLED = False     # frischer Prozess
+        self.assertEqual([r["i"] for r in crow_core.subtask_view()], ["d3"])
+
+
+class TheBootLeavesItsTraceTests(unittest.TestCase):
+    """robins Ansage vom 2026-08-28 abends: ein Crow-Boot schreibt seine
+    Spuren nach runs\\llama-server-<port>.{out,err}.log. Vorher lag der Log
+    unter einem Zufallsnamen in %TEMP%, und der Absturz des Tages (0xc0000409
+    mitten im Decode) war nur ueber das Windows-Ereignisprotokoll zu finden."""
+
+    def setUp(self) -> None:
+        self.cwd = tempfile.mkdtemp(prefix="crow-boot-")
+        before = os.getcwd()
+        os.chdir(self.cwd)
+        self.addCleanup(os.chdir, before)
+        self.addCleanup(shutil.rmtree, self.cwd, True)
+        self.addCleanup(setattr, crow_core, "BOOTED_FILE",
+                        crow_core.BOOTED_FILE)
+        self.addCleanup(crow_core._BOOTED.clear)
+        crow_core.BOOTED_FILE = os.path.join(self.cwd, "booted.json")
+        self._real = (crow_core.subprocess.Popen, crow_core.running_servers,
+                      crow_core.server_command, crow_core.projector_candidates,
+                      crow_core.server_model_path, crow_core.time.sleep)
+        self.addCleanup(self._restore)
+
+    def _restore(self) -> None:
+        (crow_core.subprocess.Popen, crow_core.running_servers,
+         crow_core.server_command, crow_core.projector_candidates,
+         crow_core.server_model_path, crow_core.time.sleep) = self._real
+
+    def test_the_boot_writes_the_runs_pair(self):
+        seen = {}
+
+        class _Proc:
+            def poll(self):
+                return None
+
+            def kill(self):
+                pass
+
+        def fake_popen(argv, stdout=None, stderr=None, **kw):
+            seen["out"] = getattr(stdout, "name", None)
+            seen["err"] = getattr(stderr, "name", None)
+            return _Proc()
+
+        answers = iter([None, None, "X.gguf"])
+        crow_core.subprocess.Popen = fake_popen
+        crow_core.running_servers = lambda: []
+        crow_core.server_command = lambda *a, **k: ["llama-server.exe"]
+        crow_core.projector_candidates = lambda *a, **k: []
+        crow_core.server_model_path = lambda *a, **k: next(answers)
+        crow_core.time.sleep = lambda s: None
+        path = crow_core.start_server("unit", "http://127.0.0.1:8082/v1")
+        self.assertEqual(path, "X.gguf")
+        want_out = os.path.join(self.cwd, "runs", "llama-server-8082.out.log")
+        want_err = os.path.join(self.cwd, "runs", "llama-server-8082.err.log")
+        self.assertEqual(seen["out"], want_out)
+        self.assertEqual(seen["err"], want_err)
+        self.assertTrue(os.path.isfile(want_out), "the out log was not created")
+        self.assertTrue(os.path.isfile(want_err), "the err log was not created")
+
+    def test_the_boot_carries_the_operating_points_env(self):
+        """2026-08-28 nachts: der NVIDIA-Treibercache frass jeden Boot dieses
+        Binaries (CUDA 303 beim ersten MUL_MAT, reboot-resistent) und war
+        weg, sobald der Prozess den Platten-Cache nicht anfasst. Ein
+        Betriebspunkt traegt solche Prozess-Umgebung jetzt selbst; der Boot
+        reicht sie dem Serverprozess ERGAENZEND -- und nur ihm."""
+        seen = {}
+
+        class _Proc:
+            def poll(self):
+                return None
+
+            def kill(self):
+                pass
+
+        def fake_popen(argv, stdout=None, stderr=None, env=None, **kw):
+            seen["env"] = env
+            return _Proc()
+
+        answers = iter([None, None, "X.gguf"])
+        crow_core.subprocess.Popen = fake_popen
+        crow_core.running_servers = lambda: []
+        crow_core.server_command = lambda *a, **k: ["llama-server.exe"]
+        crow_core.projector_candidates = lambda *a, **k: []
+        crow_core.server_model_path = lambda *a, **k: next(answers)
+        crow_core.time.sleep = lambda s: None
+        real_env = crow_core.server_env
+        crow_core.server_env = lambda key: {"CUDA_CACHE_DISABLE": "1"}
+        self.addCleanup(setattr, crow_core, "server_env", real_env)
+        crow_core.start_server("unit", "http://127.0.0.1:8082/v1")
+        self.assertEqual(seen["env"]["CUDA_CACHE_DISABLE"], "1")
+        self.assertIn("PATH", seen["env"],
+                      "die Umgebung wurde ersetzt statt ergaenzt")
+
+    def test_a_point_without_env_boots_with_the_plain_environment(self):
+        """NEGATIV: kein env im Betriebspunkt -> normale Vererbung (None),
+        kein leerer Umgebungs-Ersatz, der PATH und CUDA_HOME verlieren wuerde."""
+        seen = {}
+
+        class _Proc:
+            def poll(self):
+                return None
+
+            def kill(self):
+                pass
+
+        def fake_popen(argv, stdout=None, stderr=None, env=None, **kw):
+            seen["env"] = env
+            return _Proc()
+
+        answers = iter([None, None, "X.gguf"])
+        crow_core.subprocess.Popen = fake_popen
+        crow_core.running_servers = lambda: []
+        crow_core.server_command = lambda *a, **k: ["llama-server.exe"]
+        crow_core.projector_candidates = lambda *a, **k: []
+        crow_core.server_model_path = lambda *a, **k: next(answers)
+        crow_core.time.sleep = lambda s: None
+        real_env = crow_core.server_env
+        crow_core.server_env = lambda key: {}
+        self.addCleanup(setattr, crow_core, "server_env", real_env)
+        crow_core.start_server("unit", "http://127.0.0.1:8082/v1")
+        self.assertIsNone(seen["env"])
+
+    def test_the_flash_next_point_carries_no_env_any_more(self):
+        """GEDREHT in derselben Nacht: CUDA_CACHE_DISABLE=1 wurde GEMESSEN
+        SCHLIMMER (Betriebstode Stundentakt -> Minutentakt: ohne Cache trifft
+        jeder frische Kernel-Shape den wuerfelnden Treiber-JIT). Der Punkt
+        bootet wieder mit Cache; die Mechanik (server_env) bleibt gebaut."""
+        self.assertEqual(crow_core.server_env("flash-next-q2-k-xl"), {})
+
+    def test_a_gone_boot_names_its_exit_code_in_the_red_line(self):
+        """2026-08-28, drei stille Servertode ohne jeden Windows-Fussabdruck:
+        die eine Zahl, die ein abort() von einer Beendigung von aussen trennt,
+        ist der EXIT-CODE -- und nur das Fenster, das den Prozess gebootet
+        hat, kann ihn lesen. Er steht dann in der roten Zeile und im runs-Log
+        des Ports, einmal je Boot."""
+        seen = {}
+
+        class _Proc:
+            code = None
+
+            def poll(self):
+                return self.code
+
+            def kill(self):
+                pass
+
+        def fake_popen(argv, stdout=None, stderr=None, **kw):
+            p = _Proc()
+            seen["proc"] = p
+            seen["err"] = getattr(stderr, "name", None)
+            return p
+
+        answers = iter([None, None, "X.gguf"])
+        crow_core.subprocess.Popen = fake_popen
+        crow_core.running_servers = lambda: []
+        crow_core.server_command = lambda *a, **k: ["llama-server.exe"]
+        crow_core.projector_candidates = lambda *a, **k: []
+        crow_core.server_model_path = lambda *a, **k: next(answers)
+        crow_core.time.sleep = lambda s: None
+        self.addCleanup(crow_core._BOOTED.clear)
+        self.addCleanup(crow_core._BOOTED_NOTED.clear)
+        crow_core.start_server("unit", "http://127.0.0.1:8082/v1")
+        self.assertIsNone(crow_core.booted_exit(8082), "alive is not an exit")
+        seen["proc"].code = 3221226505          # 0xC0000409, the 16:12 class
+        self.assertEqual(crow_core.booted_exit(8082), 3221226505)
+        said = crow_core.failure_line(crow_core.Unreachable(
+            "cannot reach http://127.0.0.1:8082/v1/chat/completions: "
+            "[WinError 10061] verweigert"))
+        self.assertIn(crow_core.SERVER_DOWN_HINT, said)
+        self.assertIn("exited with code 3221226505 (0xC0000409)", said)
+        # Im Log des Ports, und nur EINMAL je Boot -- der zweite rote Fehler
+        # schreibt keine zweite Zeile.
+        crow_core.failure_line(crow_core.Unreachable(
+            "cannot reach http://127.0.0.1:8082/v1/chat/completions: x"))
+        with open(seen["err"], encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(text.count("exited with code 3221226505"), 1)
+
+    def test_a_foreign_server_keeps_the_bare_hint(self):
+        """NEGATIV: ein Server, den dieses Fenster nie gebootet hat, bekommt
+        keine erfundene Zahl -- die rote Zeile bleibt die alte."""
+        crow_core._BOOTED.clear()
+        said = crow_core.failure_line(crow_core.Unreachable(
+            "cannot reach http://127.0.0.1:9999/v1/chat/completions: x"))
+        self.assertIn(crow_core.SERVER_DOWN_HINT, said)
+        self.assertNotIn("exited with code", said)
+
+
+class RunCommandBoundaryTests(unittest.TestCase):
+    """#144: the working area bounds the writers, and run_command walked past
+    it -- seen live on 2026-08-28, when a refused write came back through the
+    shell and the trace could only report it afterwards.
+
+    A GUARDRAIL, NOT A SANDBOX. Path-like tokens in the command line are
+    classified against the root; obfuscation is out of scope by declaration.
+    #92's old objection ("a path check reads as protection nobody has") is
+    answered by the shape: an outside path ASKS, it does not promise."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp())
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(crow_core.forget_approvals)
+        self.addCleanup(shutil.rmtree, self.root, True)
+        # 2026-08-28: "always" schreibt nach APPROVALS_FILE -- eigene Datei,
+        # nie die echte unter %LOCALAPPDATA%.
+        self.addCleanup(setattr, crow_core, "APPROVALS_FILE",
+                        crow_core.APPROVALS_FILE)
+        self.addCleanup(setattr, crow_core, "_STORED_APPROVALS", None)
+        crow_core.APPROVALS_FILE = os.path.join(self.root, "approvals.json")
+        crow_core._STORED_APPROVALS = None
+
+    def args(self, command, **kw):
+        return json.dumps({"command": command, **kw})
+
+    def test_an_always_covers_every_outside_path_of_the_command(self):
+        """robins Live-Bild vom 2026-08-28 nachts: ein Kommando nannte Chrome,
+        Edge UND Firefox -- gemerkt wurde nur der erste Pfad, die naechste
+        Frage las sich als Vergessen. Und die Gegenrichtung war ein LOCH: ein
+        Kommando, dessen erster Pfad freigegeben war, ritt jeden weiteren
+        fremden Pfad huckepack durch die Freigabe."""
+        a = self.args(r'dir "C:\crow-unit-alpha" & dir "C:\crow-unit-beta"')
+        crow_core.remember("run_command", a)
+        self.assertTrue(crow_core.remembered("run_command", a))
+        self.assertTrue(
+            crow_core.remembered("run_command",
+                                 self.args(r'dir "C:\crow-unit-beta"')),
+            "the second path was not remembered")
+        # DIE NEGATIVHAELFTE: der freigegebene erste Pfad traegt keinen
+        # fremden zweiten durch.
+        self.assertFalse(
+            crow_core.remembered(
+                "run_command",
+                self.args(r'dir "C:\crow-unit-alpha" & del "C:\crow-unit-gamma\x"')),
+            "a foreign path rode through on the first")
+
+    def test_an_outside_path_is_found_and_named(self):
+        hits = crow_core.run_command_boundary(self.args(r"type C:\Windows\system.ini"))
+        self.assertTrue(hits, "an absolute path outside the root went unseen")
+        self.assertIn("windows", hits[0].lower())
+
+    def test_inside_and_pathless_commands_pass(self):
+        """POSITIVE CONTROLS -- without them the rule could be 'flag everything'."""
+        inside = os.path.join(self.root, "x.txt")
+        self.assertEqual(crow_core.run_command_boundary(self.args('type "%s"' % inside)), [])
+        self.assertEqual(crow_core.run_command_boundary(self.args("git status")), [])
+
+    def test_without_a_root_nothing_is_flagged(self):
+        crow_core.set_root(None)
+        self.assertEqual(crow_core.run_command_boundary(self.args(r"del C:\anything")), [])
+
+    def test_a_relative_escape_counts_as_outside(self):
+        hits = crow_core.run_command_boundary(self.args(r"type ..\secret.txt"))
+        self.assertTrue(hits, "..\\ resolved inside the root it walks out of")
+
+    def test_a_url_is_not_a_drive(self):
+        """robins Frage aus dem Lernkit-Lauf, 2026-08-28 abends: auto fragte
+        vor einem python -c mit einer localhost-URL. The bare-drive token
+        matched the `p:` INSIDE `http://` and invented drive P: -- a URL is
+        not a filesystem path, and a gate that asks about phantoms teaches
+        people to wave everything through."""
+        cmd = ("python -c \"import requests; r=requests.get("
+               "'http://127.0.0.1:8082/v1/models',timeout=10)\"")
+        self.assertEqual(crow_core.run_command_boundary(self.args(cmd)), [])
+        self.assertEqual(crow_core.run_command_boundary(
+            self.args("curl https://openrouter.ai/api/v1/models")), [])
+        # THE POSITIVE CONTROL SURVIVES: a real drive path still asks.
+        self.assertTrue(crow_core.run_command_boundary(
+            self.args(r"type C:\Windows\system.ini")))
+
+    def test_the_cwd_argument_is_classified_too(self):
+        hits = crow_core.run_command_boundary(self.args("git status", cwd="C:\\"))
+        self.assertTrue(hits, "an outside cwd is an outside path")
+
+    def test_an_env_prefixed_path_resolves_before_the_verdict(self):
+        hits = crow_core.run_command_boundary(self.args(r"type %WINDIR%\system.ini"))
+        self.assertTrue(hits, "%WINDIR% expanded to nothing the check could see")
+
+    def test_outside_widens_the_scope_from_program_to_path(self):
+        s = crow_core.approval_scope("run_command", self.args(r"copy C:\alpha\b.txt ."))
+        self.assertEqual(s[0], "outside")
+        self.assertEqual(
+            crow_core.approval_scope("run_command", self.args("copy x.txt y.txt")),
+            ("executing", "copy"),
+            "an inside command must keep the program scope of #88")
+
+    def test_an_always_for_one_outside_path_releases_no_other(self):
+        a = self.args(r"type C:\alpha\x.txt")
+        b = self.args(r"type C:\beta\y.txt")
+        crow_core.remember("run_command", a)
+        self.assertTrue(crow_core.remembered("run_command", a))
+        self.assertFalse(crow_core.remembered("run_command", b),
+                         "one yes widened to a second directory")
+
+    def test_a_standing_program_approval_covers_no_outside_call(self):
+        crow_core.remember("run_command", self.args("type x.txt"))
+        self.assertFalse(
+            crow_core.remembered("run_command", self.args(r"type C:\alpha\x.txt")),
+            "an 'always for type' released an outside path")
+
+    def test_the_refusal_is_structured_and_names_the_path(self):
+        text = crow_core.declined_outside([r"C:\alpha\x.txt"])
+        self.assertTrue(text.startswith("error: "),
+                        "a refusal the model cannot parse is a dead end, #88")
+        self.assertIn(r"C:\alpha\x.txt", text)
+
+
+class RunCommandBoundaryTurnTests(TurnLoopCase):
+    """The loop half of #144: at `auto`, where nothing else asks, an outside
+    path in run_command does -- and a no comes back structured."""
+
+    def setUp(self):
+        super().setUp()
+        crow_core.set_root(self.work)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(crow_core.forget_approvals)
+
+    def _one_command(self, command, mode="auto", answer="no"):
+        self.asked = []
+
+        def approve(name, args):
+            self.asked.append(name)
+            return answer
+
+        self.serve([{"content": "on it"},
+                    _call_delta("run_command", json.dumps({"command": command}))])
+        self.serve([{"content": "done"}])
+        talk = self.conversation()
+        self.turn(talk, mode=mode, approve=approve)
+        return talk
+
+    def test_an_outside_command_asks_at_auto(self):
+        self._one_command(r"type C:\Windows\system.ini")
+        self.assertEqual(self.asked, ["run_command"],
+                         "auto ran an outside command without a question")
+
+    def test_an_inside_command_at_auto_still_asks_nobody(self):
+        self._one_command("git status")
+        self.assertEqual(self.asked, [], "the guard widened auto into allowedit")
+
+    def test_the_declined_outside_answer_reaches_the_model(self):
+        talk = self._one_command(r"type C:\Windows\system.ini", answer="no")
+        tools = [m for m in talk.payload() if m.get("role") == "tool"]
+        self.assertTrue(tools and tools[-1]["content"].startswith("error: "))
+        self.assertIn("Windows", tools[-1]["content"])
+
+    def test_a_user_named_outside_path_asks_nobody(self):
+        """#98's rule carries over: what the USER spelled out is a mandate, not
+        an escape. A question for the path the user just typed would make the
+        guard the annoyance #92 predicted."""
+        self.asked = []
+
+        def approve(name, args):
+            self.asked.append(name)
+            return "no"
+
+        self.serve([{"content": "on it"},
+                    _call_delta("run_command",
+                                json.dumps({"command": r"type C:\Windows\system.ini"}))])
+        self.serve([{"content": "done"}])
+        talk = self.conversation(r"please run: type C:\Windows\system.ini")
+        self.turn(talk, mode="auto", approve=approve)
+        self.assertEqual(self.asked, [],
+                         "the guard asked about the path the user named")
+
+
+class TurnBudgetTests(TurnLoopCase):
+    """#145: the operational caps of the harness table -- a token budget for
+    the turn and a retry cap for one identical failing call. The round budget
+    at MAX_TOOL_ROUNDS existed; these are its two missing siblings."""
+
+    def test_a_spent_token_budget_forces_the_answer(self):
+        self.serve([{"content": "digging"},
+                    _call_delta("list_dir", json.dumps({"path": self.work}))],
+                   timings={"predicted_n": 500})
+        self.serve([{"content": "still digging"},
+                    _call_delta("list_dir", json.dumps({"path": self.work}))],
+                   timings={"predicted_n": 500})
+        self.serve([{"content": "done"}])
+        talk = self.conversation()
+        self.turn(talk, token_budget=100)
+        text = " ".join(m.get("content") or "" for m in talk.payload()
+                        if m.get("role") == "user")
+        self.assertIn("token budget", text.lower(),
+                      "nothing told the model its tokens were spent")
+
+    def test_without_a_budget_nothing_changes(self):
+        """POSITIVE CONTROL: 0 stays what every release up to now meant."""
+        self.serve([{"content": "one round"},
+                    _call_delta("list_dir", json.dumps({"path": self.work}))],
+                   timings={"predicted_n": 500})
+        self.serve([{"content": "done"}])
+        talk = self.conversation()
+        self.turn(talk)
+        text = " ".join(m.get("content") or "" for m in talk.payload()
+                        if m.get("role") == "user")
+        self.assertNotIn("token budget", text.lower())
+
+    def test_the_same_failing_call_is_capped(self):
+        """Four identical failing calls to a NEVER_CACHED tool: three run and
+        fail, the fourth is refused BEFORE it runs -- the 40-retry invoice,
+        capped. The cached tools cannot loop this way at all: `_SEEN` answers
+        their repeats, which is why the cap's target is exactly the exemption
+        list."""
+        bad = json.dumps({"command": ""})
+        for _ in range(4):
+            self.serve([{"content": "try"}, _call_delta("run_command", bad)])
+        self.serve([{"content": "done"}])
+        talk = self.conversation()
+        self.turn(talk)
+        tools = [m["content"] for m in talk.payload() if m.get("role") == "tool"]
+        self.assertEqual(len(tools), 4)
+        self.assertIn("will not be run again", tools[3])
+        self.assertNotIn("will not be run again", tools[2],
+                         "the cap fired a round early")
+
+    def test_incidents_carry_the_turn_failures_to_the_review(self):
+        """#145's feedback half: the loop's failures leave the turn as text,
+        and the review question names them -- half of these never appear in
+        the conversation as words the reviewer would notice."""
+        bad = json.dumps({"command": ""})
+        for _ in range(4):
+            self.serve([{"content": "try"}, _call_delta("run_command", bad)])
+        self.serve([{"content": "done"}])
+        result = self.turn(self.conversation())
+        self.assertTrue(any("capped" in i for i in result.incidents),
+                        "the capped retry left no incident")
+        question = crow_core.review_question(result.incidents)
+        self.assertIn("capped", question)
+        self.assertIn("incidents", question)
+
+    def test_a_clean_turn_reports_no_incidents(self):
+        """POSITIVE CONTROL, and the question stays byte-identical without
+        them -- the review's prompt-cache argument depends on it."""
+        self.serve([{"content": "done"}])
+        result = self.turn(self.conversation())
+        self.assertEqual(result.incidents, [])
+        self.assertEqual(crow_core.review_question([]),
+                         crow_core.MEMORY_REVIEW_PROMPT)
+
+    def test_the_subtask_budget_clamps_to_the_default(self):
+        """#145's delegation half: a surface sets it once, nonsense means the
+        default -- a broken settings value must never mean 'unlimited'."""
+        self.addCleanup(crow_core.subtask_budget_set, 0)
+        crow_core.subtask_budget_set(512)
+        self.assertEqual(crow_core.subtask_max_tokens(), 512)
+        crow_core.subtask_budget_set(0)
+        self.assertEqual(crow_core.subtask_max_tokens(), crow_core.REMOTE_MAX_TOKENS)
+        crow_core.subtask_budget_set(-5)
+        self.assertEqual(crow_core.subtask_max_tokens(), crow_core.REMOTE_MAX_TOKENS)
+        crow_core.subtask_budget_set(None)
+        self.assertEqual(crow_core.subtask_max_tokens(), crow_core.REMOTE_MAX_TOKENS)
+
+    def test_a_changed_argument_resets_nothing_it_should_not(self):
+        """POSITIVE CONTROL: a DIFFERENT call is not the same mistake."""
+        a = json.dumps({"command": "", "try": "a"})
+        b = json.dumps({"command": "", "try": "b"})
+        for args in (a, b, a, b):
+            self.serve([{"content": "try"}, _call_delta("run_command", args)])
+        self.serve([{"content": "done"}])
+        talk = self.conversation()
+        self.turn(talk)
+        tools = [m["content"] for m in talk.payload() if m.get("role") == "tool"]
+        self.assertEqual(len(tools), 4)
+        self.assertTrue(all("will not be run again" not in t for t in tools))
+
+    def test_forget_approvals_ends_the_chat_not_the_standing_store(self):
+        """ANGEPASST 2026-08-28 spaetabends auf robins Ansage: "and from now
+        on" heisst AB JETZT, nicht "bis zum naechsten Chat". forget_approvals
+        raeumt die Sitzung; die geschriebene Entscheidung steht in
+        APPROVALS_FILE und traegt den naechsten Chat."""
         crow_core.remember("run_command", json.dumps({"command": "git status"}))
         self.assertTrue(crow_core.remembered("run_command",
                                              json.dumps({"command": "git log"})))
         crow_core.forget_approvals()
-        self.assertFalse(crow_core.remembered("run_command",
-                                              json.dumps({"command": "git log"})))
+        self.assertTrue(crow_core.remembered("run_command",
+                                             json.dumps({"command": "git log"})),
+                        "the written always died with the chat")
 
 
 class DeclineIsNotAFailureTests(TurnLoopCase):

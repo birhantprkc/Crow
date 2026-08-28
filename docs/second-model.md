@@ -93,6 +93,13 @@ the newer PR head `eaf9376` fails its own warmup 11 of 19 times. License is
       --fit off --load-mode none -np 1 `
       --jinja
 
+No env prelude: `CUDA_CACHE_DISABLE=1` stood here for three hours on
+2026-08-28 night and was measured WORSE -- without the driver cache every
+fresh kernel shape hits the driver JIT, and this machine's JIT is what rolls
+CUDA 303. The corrupt cache that killed boots that evening was set aside
+(`ComputeCache.korrupt-2026-08-28`); a fresh cache boots and serves without
+any flag. The manifest's `_env_history` carries the numbers.
+
 ## Numbers (2026-08-28, build 439, driver 616.56, 10-boot series)
 
 | | |

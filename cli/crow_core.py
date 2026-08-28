@@ -912,7 +912,18 @@ def failure_line(exc: BaseException) -> str:
     """
     said = str(exc)
     if isinstance(exc, Unreachable):
-        return "%s\n%s" % (said, SERVER_DOWN_HINT)
+        said = "%s\n%s" % (said, SERVER_DOWN_HINT)
+        # 2026-08-28, vier Servertode an einem Abend, drei ohne jeden
+        # Windows-Fussabdruck: wo die rote Zeile entsteht, wird der eigene
+        # Boot befragt. Sein Exit-Code steht dann IM Satz und einmal im
+        # runs-Log des Ports -- die Zahl, die abort von aussen-beendet trennt.
+        hit = re.search(r"//[^/:\s]+:(\d+)", said)
+        code = booted_exit(int(hit.group(1))) if hit else None
+        if code is not None:
+            line = ("the server this window booted exited with code %d (0x%08X)"
+                    % (code, code & 0xFFFFFFFF))
+            _note_exit_once(int(hit.group(1)), line)
+            said = "%s\n%s" % (said, line)
     return said
 
 
@@ -1259,6 +1270,104 @@ def refuse_images(base_url: str, timeout: float = 3.0) -> "str | None":
     return None
 
 
+# 2026-08-28, drei stille Servertode ohne jeden Windows-Fussabdruck (kein
+# Ereignis, kein WER-Report, der Log endet mitten im Betrieb): die eine Zahl,
+# die ein abort() im Prozess von einer Beendigung von aussen trennt, ist der
+# EXIT-CODE -- und nur der Prozess, der den Server gebootet hat, kann ihn
+# lesen. Je Port der letzte eigene Boot samt seinem err-Log; `failure_line`
+# fragt beim "cannot reach" nach und schreibt die Zeile EINMAL in den Log.
+_BOOTED: "dict[int, tuple]" = {}
+_BOOTED_NOTED: "set[int]" = set()
+
+# UND AUF PLATTE, nicht nur im Prozess -- das Loch der Nacht: robin startete
+# das Fenster neu (auf meine eigene Ansage), damit verwaiste der laufende
+# Server, und der naechste Tod traf ein Fenster, das "seinen" Boot nicht mehr
+# kannte -- keine Exit-Zeile, kein Reboot, roter Abbruch wie eh. Die Datei
+# merkt sich je Port, DASS Crow ihn gebootet hat und womit; damit darf jedes
+# spaetere Crow-Fenster denselben Server wiederbeleben. Der Exit-Code bleibt
+# ehrlich dem Prozess vorbehalten, der das Handle hielt.
+#
+# Die Konstante selbst steht unten neben PROVIDERS_FILE: SESSION_DIR ist an
+# dieser Stelle der Datei noch nicht gebunden, gelesen wird sie zur Laufzeit.
+
+
+def _booted_persist() -> None:
+    """Write the boot registry down, tolerant like every convenience file."""
+    doc = {str(port): {"key": e[2], "base_url": e[3], "install": e[4],
+                       "err": e[1]}
+           for port, e in _BOOTED.items()}
+    try:
+        with open(BOOTED_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"format": 1, "booted": doc}, fh, indent=1,
+                      ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def booted_entry(port: "int | None") -> "dict | None":
+    """What Crow knows about its own boot on `port`: from this process, else
+    from the file an earlier window wrote. None for a foreign server."""
+    if not port:
+        return None
+    entry = _BOOTED.get(port)
+    if entry is not None:
+        return {"key": entry[2], "base_url": entry[3], "install": entry[4]}
+    try:
+        with open(BOOTED_FILE, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        found = (raw.get("booted") or {}).get(str(port))
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(found, dict) or not found.get("key"):
+        return None
+    return {"key": str(found["key"]), "base_url": str(found.get("base_url") or ""),
+            "install": found.get("install")}
+
+
+def booted_exit(port: int) -> "int | None":
+    """Exit code of the server THIS process booted on `port`; None while it
+    lives, and None for a server somebody else started -- no invented number."""
+    entry = _BOOTED.get(port)
+    if entry is None:
+        return None
+    return entry[0].poll()
+
+
+def _note_exit_once(port: int, line: str) -> None:
+    """Append the death line to the port's boot log, once per boot."""
+    entry = _BOOTED.get(port)
+    if entry is None or port in _BOOTED_NOTED:
+        return
+    _BOOTED_NOTED.add(port)
+    try:
+        with open(entry[1], "a", encoding="utf-8") as fh:
+            fh.write("crow: %s\n" % line)
+    except OSError:
+        pass
+
+
+def reboot_booted(port: "int | None",
+                  log: Callable[[str], None] | None = None) -> "str | None":
+    """Boot the dead server THIS process started on `port` again, or None.
+
+    None for a port nobody here booted, for a server still alive, and for a
+    reboot that failed -- the caller then fails exactly as it always did.
+    ONLY THE OWN BOOT IS EVER RESTARTED: a foreign server is somebody else's
+    decision, and starting a second one beside it overbooks the card.
+    """
+    entry = _BOOTED.get(port) if port else None
+    if entry is not None and entry[0].poll() is None:
+        return None                      # still alive: nothing to reboot
+    known = booted_entry(port)
+    if known is None:
+        return None
+    try:
+        return start_server(known["key"], known["base_url"],
+                            install=known["install"], log=log)
+    except CrowError:
+        return None
+
+
 def start_server(key: str, base_url: str, install: str | None = None,
                  wait_s: float = 600.0, log: Callable[[str], None] | None = None) -> str:
     """Bring `key` up and return the path the server reports. Or raise.
@@ -1331,18 +1440,41 @@ def start_server(key: str, base_url: str, install: str | None = None,
             # sentence for it here would compete with the real one.
             pass
     say("starting %s" % os.path.basename(argv[0]))
-    errfile = tempfile.NamedTemporaryFile(prefix="crow-server-", suffix=".log",
-                                          delete=False, mode="w", encoding="utf-8")
-    errfile.close()
-    with open(errfile.name, "w", encoding="utf-8") as sink:
-        proc = subprocess.Popen(argv, stdout=sink, stderr=subprocess.STDOUT)
+    # robins Ansage vom 2026-08-28 abends: die Spuren eines Crow-Boots liegen
+    # in runs\llama-server-<port>.{out,err}.log -- der Konvention, in der die
+    # B5-Starts schon schreiben -- statt unter einem Zufallsnamen in %TEMP%,
+    # den nach einem Absturz niemand findet (der 0xc0000409 dieses Abends
+    # stand nur im Ereignisprotokoll). stdout und stderr getrennt wie dort;
+    # je Boot neu geschrieben: der letzte Lauf je Port ist der untersuchte.
+    port = urllib.parse.urlsplit(base_url).port or 0
+    runs_dir = os.path.join(os.getcwd(), "runs")
+    os.makedirs(runs_dir, exist_ok=True)
+    out_path = os.path.join(runs_dir, "llama-server-%s.out.log" % port)
+    err_path = os.path.join(runs_dir, "llama-server-%s.err.log" % port)
+    # Der Betriebspunkt darf seinem Prozess Umgebung mitgeben (server_env,
+    # 2026-08-28: CUDA_CACHE_DISABLE gegen den korrupten Treibercache) --
+    # ERGAENZEND zur eigenen, nie als Ersatz: ein leerer env-Parameter
+    # verloere PATH und CUDA-Pfade.
+    overlay = server_env(key)
+    boot_env = {**os.environ, **overlay} if overlay else None
+    with open(out_path, "w", encoding="utf-8") as out_sink, \
+         open(err_path, "w", encoding="utf-8") as err_sink:
+        proc = subprocess.Popen(argv, stdout=out_sink, stderr=err_sink,
+                                env=boot_env)
+    # Der Booter behaelt seinen Prozess: ein spaeterer stiller Tod hat dann
+    # einen ablesbaren Exit-Code -- und mit key und Adresse daneben kann
+    # `reboot_booted` denselben Server noch einmal starten. Ein frischer
+    # Boot re-armiert die Log-Notiz.
+    _BOOTED[port] = (proc, err_path, key, base_url, install)
+    _BOOTED_NOTED.discard(port)
+    _booted_persist()
 
     deadline = time.monotonic() + wait_s
     while time.monotonic() < deadline:
         code = proc.poll()
         if code is not None:
             raise ServerBootError("llama-server exited with %s before it was ready.\n%s"
-                                  % (code, _tail(errfile.name)))
+                                  % (code, _tail(err_path)))
         path = server_model_path(base_url, timeout=2.0)
         if path is not None:
             say("server ready: %s" % path)
@@ -1351,7 +1483,7 @@ def start_server(key: str, base_url: str, install: str | None = None,
 
     proc.kill()
     raise ServerBootError("llama-server did not answer within %.0f s.\n%s"
-                          % (wait_s, _tail(errfile.name)))
+                          % (wait_s, _tail(err_path)))
 
 
 # The one sentence a model switch costs, written here so both surfaces say it.
@@ -1361,6 +1493,23 @@ def start_server(key: str, base_url: str, install: str | None = None,
 # live switch is out of scope for #115 and stays out until M5 says what a
 # re-prefill of one costs.
 MODEL_SWITCH_NOTE = "the context went with the old server -- the next turn pays a full prefill"
+
+
+def server_env(key: str) -> dict:
+    """Env vars this operating point wants on its server process, {} for none.
+
+    2026-08-28 nachts: der NVIDIA-Treibercache frass jeden Boot des
+    Flash-Next-Binaries -- CUDA error 303 ("shared object initialization
+    failed") beim ersten MUL_MAT, jeder Versuch, reboot-resistent -- und war
+    weg, sobald der Prozess den Platten-Cache nicht anfasst
+    (CUDA_CACHE_DISABLE=1). Ein Betriebspunkt traegt solche Umgebung selbst,
+    im Manifest neben seinen Flags; NUR der Serverprozess bekommt sie.
+    """
+    spec = (_manifest().get("servers") or {}).get(key) or {}
+    env = spec.get("env")
+    if not isinstance(env, dict):
+        return {}
+    return {str(k): str(v) for k, v in env.items()}
 
 
 def stop_servers(log: Callable[[str], None] | None = None) -> int:
@@ -2211,6 +2360,37 @@ BUDGET_SPENT = (
 # line it had never read and described the contents of one that is blank. Asking
 # for "what you found" invites a model with nothing to find to invent something;
 # naming the failure is cheaper than hoping.
+
+# #145. THE ROUND BUDGET'S TWO SIBLINGS, from the harness table of 2026-08-28:
+# a turn can spend its rounds slowly and its tokens fast, and neither cap can
+# stand in for the other. TOKEN_BUDGET_SPENT follows BUDGET_SPENT's protocol
+# for the same reason it exists at all.
+TOKEN_BUDGET_SPENT = (
+    "[The token budget for this turn is spent -- no further calls will be run. "
+    "Answer now, and report ONLY what is actually present in this conversation "
+    "as a tool result. If you ran nothing, say you ran nothing. Then name what "
+    "you did not get to. Do not ask for another tool.]"
+)
+
+# One identical call, failing over and over, is the loop that turns a task
+# into an invoice. Three is enough to prove the arguments are wrong; the
+# fourth is refused before it runs, with a sentence that says what to change.
+RETRY_CAP = 3
+
+
+def retry_capped(name: str) -> str:
+    return ("error: %s failed %d times with these exact arguments -- this "
+            "exact call will not be run again this turn. Change the arguments "
+            "or the approach." % (name, RETRY_CAP))
+
+
+# #150: the sentence that turns a silent close into a visible answer. Sent at
+# most once per turn -- see the nudge in the loop.
+THINK_ONLY_NUDGE = (
+    "[Your last message contained only reasoning -- nothing visible was said. "
+    "State your answer now, outside the thinking block, in plain text. Do not "
+    "call a tool.]"
+)
 #
 # Whether it works is UNMEASURED, and no test here can settle it: this is a
 # prompt, and only a live run against a real model shows whether it holds. What
@@ -2223,8 +2403,46 @@ ROLLOVER_NOTE = (
     "for where things stood.\n"
     "{where}"
     "Full record, for `crow --resume`: {path}\n"
+    "{spoken}"
     "This conversation starts here.]"
 )
+
+# #147. WHAT THE CUT USED TO EAT: the user's own short lines. Measured on the
+# code, not guessed -- `roll_over` resets to a note plus the line just typed,
+# so a rule stated in turn 2 ("never touch billing code") was gone at 180k and
+# the next tool call could break it. The user's SHORT messages ride across the
+# cut verbatim: rules are short and early, pasted logs are long and excluded,
+# and nothing is summarised -- a summary is where constraints die.
+SPOKEN_CARRY_CHARS = 300      # per message: longer is a paste, not a rule
+SPOKEN_CARRY_COUNT = 12       # earliest first: rules live early
+SPOKEN_CARRY_HEAD = "The user's own words so far, carried across the cut:\n"
+
+
+def _spoken_carry(conversation: "Conversation", carry: "str | None") -> str:
+    """The {spoken} block of ROLLOVER_NOTE, or "" when nothing qualifies."""
+    lines: list[str] = []
+    skipped = 0
+    for message in conversation.payload():
+        if message.get("role") != "user":
+            continue
+        text = message_text(message.get("content") or "").strip()
+        # Protocol notes -- budget spent, an earlier rollover -- speak in
+        # brackets and are Crow's own words, not the user's.
+        if not text or text.startswith("["):
+            continue
+        if carry and text == carry.strip():
+            continue                      # re-appended whole anyway
+        if len(text) > SPOKEN_CARRY_CHARS:
+            skipped += 1
+            continue
+        if len(lines) < SPOKEN_CARRY_COUNT:
+            lines.append("- " + " ".join(text.split()))
+        else:
+            skipped += 1
+    if not lines:
+        return ""
+    tail = ("- (+%d more in the transcript)\n" % skipped) if skipped else ""
+    return SPOKEN_CARRY_HEAD + "\n".join(lines) + "\n" + tail
 
 
 def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
@@ -2254,10 +2472,12 @@ def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
     lines = write_transcript(conversation, transcript)
     where = recent_paths(conversation)
 
+    spoken = _spoken_carry(conversation, carry)
     conversation.reset()
     note = ROLLOVER_NOTE.format(
         tokens=context_tokens, path=path, transcript=transcript, lines=lines,
-        where=f"Last worked on: {', '.join(where)}\n" if where else "")
+        where=f"Last worked on: {', '.join(where)}\n" if where else "",
+        spoken=spoken)
     # ONE message, not two. Consecutive turns of the same role are merged or
     # rejected depending on the chat template, and neither is a thing to find
     # out at 180k tokens.
@@ -2832,6 +3052,20 @@ TRANSPORT_MESSAGES = "anthropic_messages"
 # NOT SENT LOCALLY. A cap here would cut long answers the local server is happy
 # to finish, and no measurement asked for one.
 REMOTE_MAX_TOKENS = 8192
+
+# #145: the delegation half of the budget table. Module state like _ROOT, set
+# once by the surface at boot; 0 or less falls back to REMOTE_MAX_TOKENS, so a
+# broken settings value can only ever mean "the default", never "unlimited".
+_SUBTASK_MAX: int = 0
+
+
+def subtask_budget_set(n: "int | None") -> None:
+    global _SUBTASK_MAX
+    _SUBTASK_MAX = int(n) if isinstance(n, (int, float)) and int(n) > 0 else 0
+
+
+def subtask_max_tokens() -> int:
+    return _SUBTASK_MAX or REMOTE_MAX_TOKENS
 ANTHROPIC_MAX_TOKENS = REMOTE_MAX_TOKENS
 
 # NOT SENT ON THIS TRANSPORT: temperature, top_p, top_k. They are REMOVED on the
@@ -4244,11 +4478,17 @@ def _key(path: str) -> str:
 # WRITES ONLY, and both halves of that are robin's decision of 2026-08-14
 # recorded on #92. `read_file` stays unbounded, because a read boundary makes the
 # model blind to its own installation -- a real use -- and a read destroys
-# nothing. `run_command` is NOT covered either: a `cwd` inside the root says
-# nothing about what the command does, `cd /d C:\ && del ...` being one shell
-# line, so a path check there would read as protection nobody has. It stands on
-# #88's `executing` class instead. The cost of that is named rather than hidden:
-# at `auto`, `run_command` is unbounded.
+# nothing.
+#
+# `run_command` JOINED THE BOUNDARY ON 2026-08-28 (#144) -- as a question, not
+# a wall. #92 kept it out because a path check "reads as protection nobody
+# has": one shell line can hide anything, and that objection still stands
+# against a BLOCK. #144 does not build one. Path-like tokens in the command
+# are classified against the root, and an OUTSIDE hit ASKS -- at every level,
+# auto included. A question cannot over-promise: an obfuscated path simply
+# does not ask, which is exactly the old behaviour, while the honest-mistake
+# class (the live window case of 2026-08-28: a refused write came back through
+# the shell in plain sight) meets a question instead of silence.
 ROOT_MARKER = ".crow"
 ROOT_FILE = "root.json"
 
@@ -4291,6 +4531,79 @@ def _inside(root: str, path: str) -> bool:
     here = os.path.normcase(_resolve(root)).rstrip(os.sep)
     there = os.path.normcase(_resolve(path))
     return there == here or there.startswith(here + os.sep)
+
+
+# #144. The tokens the guard can see: drive-absolute (bare or quoted), UNC,
+# %VAR%-prefixed, and ..\ escapes. A bare relative name is NOT a token -- it
+# resolves inside the cwd by construction, and flagging it would turn every
+# `copy a.txt b.txt` into a question.
+#
+# THE BARE DRIVE MUST NOT START MID-WORD. Seen live 2026-08-28 (robins Frage
+# im Lernkit-Lauf): `http://127.0.0.1:8082/v1/models` matched at the `p:` of
+# its scheme and invented drive P:, so a python -c with a URL asked at auto.
+# A URL is not a filesystem path; the lookbehind keeps the token to word
+# starts, and a real `C:\...` after a space, quote or `=` still matches.
+_PATH_TOKENS = re.compile(
+    r'"([A-Za-z]:[\\/][^"]*)"'
+    r"|'([A-Za-z]:[\\/][^']*)'"
+    r'|(?<![A-Za-z0-9])([A-Za-z]:[\\/][^\s"\';|&<>]*)'
+    r'|(\\\\[^\s"\';|&<>]+)'
+    r'|(%[A-Za-z_][A-Za-z0-9_]*%[\\/][^\s"\';|&<>]*)'
+    r'|(\.\.[\\/][^\s"\';|&<>]*)'
+)
+
+
+def command_outside_paths(command: str, cwd: str | None = None) -> list[str]:
+    """The outside paths one command names, resolved -- [] without a root.
+
+    The `cwd` argument counts like a named path, and it is also the base a
+    `..\\` escape resolves against (the root, when no cwd is given). An
+    environment variable that does not expand stays OUTSIDE: the safe
+    direction for a case nobody resolved, same rule as approval_scope's None.
+    """
+    root = get_root()
+    if not root:
+        return []
+    base = cwd or root
+    out: list[str] = []
+
+    def note(raw: str) -> None:
+        cand = os.path.expandvars(raw)
+        if "%" in cand:
+            if raw not in out:
+                out.append(raw)
+            return
+        if not os.path.isabs(cand) and not re.match(r"^[A-Za-z]:", cand):
+            cand = os.path.join(base, cand)
+        if not _inside(root, cand):
+            hit = _resolve(cand)
+            if hit not in out:
+                out.append(hit)
+
+    if isinstance(cwd, str) and cwd:
+        note(cwd)
+    for groups in _PATH_TOKENS.findall(command or ""):
+        tok = next((g for g in groups if g), "")
+        if tok:
+            note(tok.rstrip(".,;"))
+    return out
+
+
+def run_command_boundary(arguments: str) -> list[str]:
+    """#144's question for one tool call, from its raw arguments.
+
+    [] when the arguments do not parse -- approval_scope answers None for the
+    same case, so an unparseable call keeps asking through the generic path."""
+    try:
+        args = json.loads(arguments or "{}")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(args, dict):
+        return []
+    command = args.get("command")
+    cwd = args.get("cwd")
+    return command_outside_paths(command if isinstance(command, str) else "",
+                                 cwd if isinstance(cwd, str) and cwd else None)
 
 
 def root_file(root: str) -> str:
@@ -6550,6 +6863,15 @@ DEFAULT_MODE = "auto"
 # broken prefix for every later turn of the session. The model can read this
 # line and try something else; it cannot read a turn that ended.
 DECLINED = "error: declined by the user"
+
+
+def declined_outside(paths: "list[str]") -> str:
+    """#144: the refusal with its reason attached, so the model's next try can
+    stay inside instead of guessing why the shell went quiet. Both surfaces
+    show tool results verbatim, which is what keeps this ONE sentence."""
+    shown = ", ".join(paths[:3])
+    return ("error: declined by the user -- the command names %s, which is "
+            "not under the working area %s" % (shown, get_root() or ""))
 
 
 # ---------------------------------------------------------------- E2 ------
@@ -9451,7 +9773,7 @@ atexit.register(forget_mcp_servers)
 # with no turn and no slot involved -- which is why both surfaces may answer
 # them even while a local turn is running.
 SLASH_COMMANDS = ("/help", "/tools", "/mcp", "/mode", "/model", "/reasoning",
-                  "/thoughts", "/image", "/delegate", "/subtasks",
+                  "/thoughts", "/image", "/delegate", "/subtasks", "/verify",
                   "/reset", "/context", "/exit", "/quit")
 
 
@@ -9532,6 +9854,13 @@ def approval_scope(name: str, arguments: str) -> tuple[str, str] | None:
         command = args.get("command")
         if not isinstance(command, str) or not command.strip():
             return None
+        # #144: an outside path narrows the key to the PATH, so an "always"
+        # for `git` can never release `git` pointed outside the area -- and an
+        # "always" for one outside path releases that path, not the program.
+        cwd = args.get("cwd")
+        outside = command_outside_paths(command, cwd if isinstance(cwd, str) and cwd else None)
+        if outside:
+            return ("outside", os.path.normcase(outside[0]))
         # The program, not the line: `git status` and `git log` share a key,
         # `git` and `rm` do not.
         return ("executing", command.split()[0].lower())
@@ -9539,18 +9868,106 @@ def approval_scope(name: str, arguments: str) -> tuple[str, str] | None:
     return None
 
 
-def remembered(name: str, arguments: str) -> bool:
-    """Has this session already said "always" for something covering this call?"""
+# robins Ansage vom 2026-08-28 spaetabends: "allowed, and from now on" hiess
+# bis hierher "bis zum naechsten Chat" -- die Freigaben lebten im Prozess-Set
+# und starben mit jedem /reset, jedem neuen Chat und jedem Fensterstart, und
+# robin gab dieselben Vault-Pfade jede Sitzung neu frei. AB JETZT heisst
+# "from now on" genau das: jede "always"-Entscheidung wird neben
+# providers.json abgelegt und gilt, bis jemand sie aus der Datei nimmt.
+#
+# NUR WAS DER NUTZER KLICKTE steht darin: ein Scope entsteht ausschliesslich
+# aus einer beantworteten Frage-Karte, und verschleierte Pfade haben keinen
+# Scope (approval_scope: None) und landen nie hier. Die Datei ist von Hand
+# editierbares JSON; eine unlesbare Datei liest sich als LEER und reisst das
+# Tor nicht mit um -- read_root_mode's rule. Eine Dauer-Freigabe loeschen
+# heisst: ihre Zeile aus der Datei nehmen.
+APPROVALS_FILE = os.path.join(os.path.dirname(SESSION_DIR), "approvals.json")
+_STORED_APPROVALS: "set[tuple[str, str]] | None" = None
+
+
+def _approvals_stored() -> "set[tuple[str, str]]":
+    """The standing approvals: loaded once per process, refreshed on write."""
+    global _STORED_APPROVALS
+    if _STORED_APPROVALS is None:
+        found: "set[tuple[str, str]]" = set()
+        try:
+            with open(APPROVALS_FILE, encoding="utf-8") as fh:
+                raw = json.load(fh)
+            for pair in (raw.get("allowed") or []):
+                if isinstance(pair, list) and len(pair) == 2:
+                    found.add((str(pair[0]), str(pair[1])))
+        except (OSError, ValueError, AttributeError):
+            found = set()
+        _STORED_APPROVALS = found
+    return _STORED_APPROVALS
+
+
+def _approval_scopes(name: str, arguments: str) -> "list[tuple[str, str]] | None":
+    """Every scope one call touches -- run_command with N outside paths has N.
+
+    robins Live-Bild vom 2026-08-28 nachts: ein Kommando nannte Chrome, Edge
+    UND Firefox, gemerkt wurde nur der erste Pfad -- die naechste Frage las
+    sich als Vergessen. Und die Gegenrichtung war ein LOCH: remembered prüfte
+    nur den ersten Pfad, ein fremder zweiter ritt auf dessen Freigabe durch.
+    Eine Freigabe deckt ab jetzt ALLE Pfade der gezeigten Karte, und verlangt
+    wird sie fuer jeden einzeln.
+    """
     scope = approval_scope(name, arguments)
-    return scope is not None and scope in _ALLOWED
+    if scope is None:
+        return None
+    if name == "run_command" and scope[0] == "outside":
+        try:
+            args = json.loads(arguments or "{}")
+        except json.JSONDecodeError:
+            return [scope]
+        command = args.get("command") if isinstance(args, dict) else ""
+        cwd = args.get("cwd") if isinstance(args, dict) else None
+        outside = command_outside_paths(
+            command if isinstance(command, str) else "",
+            cwd if isinstance(cwd, str) and cwd else None)
+        if outside:
+            return [("outside", os.path.normcase(p)) for p in outside]
+    return [scope]
+
+
+def remembered(name: str, arguments: str) -> bool:
+    """Has the user said "always" for something covering this call -- in this
+    chat, or written down in any earlier one (the standing store). EVERY
+    scope the call touches must be covered; one released path carries no
+    foreign second one through."""
+    scopes = _approval_scopes(name, arguments)
+    if not scopes:
+        return False
+    stored = _approvals_stored()
+    return all(s in _ALLOWED or s in stored for s in scopes)
 
 
 def remember(name: str, arguments: str) -> tuple[str, str] | None:
-    """Record an "always" for this call's scope. Returns what was recorded."""
-    scope = approval_scope(name, arguments)
-    if scope is not None:
+    """Record an "always" for every scope this call touches. Returns the
+    first one -- the card's label -- or None for a call nobody can remember.
+
+    WRITTEN THROUGH TO DISK (2026-08-28): "from now on" outlives the chat and
+    the process, not just the turn -- see APPROVALS_FILE above. A write that
+    fails leaves the session release standing, so the turn still proceeds.
+    """
+    scopes = _approval_scopes(name, arguments)
+    if not scopes:
+        return None
+    stored = _approvals_stored()
+    fresh = False
+    for scope in scopes:
         _ALLOWED.add(scope)
-    return scope
+        if scope not in stored:
+            stored.add(scope)
+            fresh = True
+    if fresh:
+        try:
+            with open(APPROVALS_FILE, "w", encoding="utf-8") as fh:
+                json.dump({"format": 1, "allowed": sorted(stored)}, fh,
+                          indent=1, ensure_ascii=False)
+        except OSError:
+            pass
+    return scopes[0]
 
 
 def forget_approvals() -> None:
@@ -9562,6 +9979,10 @@ def forget_approvals() -> None:
     directory they released four rounds ago, mid-turn, for a reason invisible
     from where they sit. `/reset` and the window's new-chat button are the
     places a session actually ends, and they are what call this.
+
+    THE STANDING STORE STAYS (2026-08-28, robins Ansage): dropping a chat ends
+    the chat, not the user's written "from now on" decisions -- those live in
+    APPROVALS_FILE until somebody removes them there.
     """
     _ALLOWED.clear()
     # #128: THE STAGED MEMORY WRITES GO WITH THEM, from in here rather than
@@ -10139,6 +10560,23 @@ MEMORY_REVIEW_PROMPT = (
 )
 
 
+def review_question(incidents: "list[str] | None" = None) -> str:
+    """#145: the review's question, with this turn's failures attached.
+
+    The article's CONSTRAINTS.md pattern on Crow's own store: a decline, a
+    capped retry or a spent budget is exactly the 'trap that cost time' the
+    prompt already asks for -- but the review reads the CONVERSATION, and half
+    of these incidents never appear in it as text the model would notice. So
+    they are named in the question. Text, one line each, nothing to parse."""
+    if not incidents:
+        return MEMORY_REVIEW_PROMPT
+    lines = "\n".join("- " + i for i in incidents[:8])
+    return (MEMORY_REVIEW_PROMPT
+            + "\nThis turn also recorded these incidents:\n" + lines
+            + "\nAn incident that will repeat without a remembered rule is a "
+              "trap worth one line; a one-off is not.")
+
+
 def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                 api_key: str, temperature: float, top_p: float, min_p: float,
                 top_k: int | None = None, reasoning_effort: str | None = None,
@@ -10148,6 +10586,7 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                 max_tokens: "int | None" = None,
                 remote: bool = False,
                 routing: "dict | None" = None,
+                incidents: "list[str] | None" = None,
                 events: "TurnEvents | None" = None) -> "list[str]":
     """Ask once whether this turn left anything worth keeping. Returns what was saved.
 
@@ -10174,7 +10613,7 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
     if len(conversation) < 2:
         return []
     messages = conversation.payload() + [{"role": "user",
-                                          "content": MEMORY_REVIEW_PROMPT}]
+                                          "content": review_question(incidents)}]
     body = {"model": model, "messages": messages, "tools": TOOLS, "stream": False,
             "temperature": temperature, "top_p": top_p, "min_p": min_p}
     if max_tokens:
@@ -10403,7 +10842,8 @@ class TurnResult:
     """
 
     def __init__(self, *, cost: TurnCost, context_tokens: int, promised_warm: bool,
-                 rolled: bool, stopped: bool, reported: list[dict]) -> None:
+                 rolled: bool, stopped: bool, reported: list[dict],
+                 incidents: "list[str] | None" = None) -> None:
         self.cost = cost
         self.context_tokens = context_tokens
         self.promised_warm = promised_warm
@@ -10415,6 +10855,10 @@ class TurnResult:
         # Only ever non-empty with execute_tools=False: the calls that were
         # reported instead of run.
         self.reported = reported
+        # #145's feedback half: what went WRONG this turn, one line each --
+        # declines, outside asks, capped retries, spent budgets. The memory
+        # review reads these; a failure nobody feeds forward repeats.
+        self.incidents = incidents or []
 
 
 def run_turn(
@@ -10443,6 +10887,10 @@ def run_turn(
     n_ctx: int = 0,
     rollover_at: float = ROLLOVER_AT,
     max_tool_rounds: int = MAX_TOOL_ROUNDS,
+    # #145: decoded tokens this turn may spend. 0 is off, and off is what every
+    # release up to 1.4.0 meant -- the cap is opt-in, the article's bank-vs-
+    # hackathon warning taken at its word.
+    token_budget: int = 0,
     promised_warm: bool = False,
     rolled: bool = False,
     execute_tools: bool = True,
@@ -10552,11 +11000,35 @@ def run_turn(
     stopped = False
     cost = TurnCost()
     budget = max_tool_rounds
+    # #145: identical failing calls, counted by their exact (name, arguments).
+    # A different argument is a different attempt, and only FAILURES count --
+    # a slow success repeated on purpose is the model's business.
+    failures: dict[tuple, int] = {}
+    # #98-Nachtrag (robin, 2026-08-28 abends): which refused paths this turn
+    # has ALREADY ANNOUNCED. One refused path and a dozen shell calls papered
+    # the chat with the same warning -- a line that is always there is a line
+    # nobody reads. Per turn like `_REFUSED` itself.
+    escapes_said: set[str] = set()
+    # #145's feedback half: one line per thing that went wrong or was decided,
+    # handed to the memory review through TurnResult. Text, not structures --
+    # the only reader is a prompt.
+    incidents: list[str] = []
     reported: list[dict] = []
     # One iteration past the budget, for the forced answer. It is not a tool
     # round -- its calls are discarded -- so it does not quietly hand out a
     # round more than was asked for.
     forced = False
+    # #150: the one visible-answer nudge this turn may spend.
+    nudged = False
+    # #151: the one broken-stream retry this turn may spend.
+    stream_retried = False
+    # 2026-08-28 spaetnachts: Serien-Tode. EIN Reboot je Turn reichte nicht --
+    # der zweite Tod im selben langen Lernkit-Turn endete rot, waehrend der
+    # Heiler daneben stand. Drei je Turn; der vierte endet ehrlich rot. Und
+    # ein Zug, der einen frisch bootenden Server trifft (HTTP 503 "Loading
+    # model"), wartet ihn EINMAL aus, statt am Boot zu sterben.
+    reboots = 0
+    waited_ready = False
     for round_no in range(budget + 2):
         try:
             reply, reasoning, timings = stream_reply(
@@ -10579,6 +11051,69 @@ def run_turn(
                 events=events.reply_events(),
             )
         except CrowError as exc:
+            # #151. A BROKEN STREAM IS NOT YET A BROKEN TURN. Found live on
+            # 2026-08-28: sixteen rounds and 7m28s of work died on one
+            # `[WinError 10054]` mid-round. Nothing has been appended for this
+            # round -- the exception path runs before the append -- so the
+            # prefix is intact and ONE re-request costs a cached prefill, not
+            # the turn. Once per turn; a server that is actually gone refuses
+            # the retry too, and that failure is then reported as before.
+            said = str(exc).lower()
+            # 2026-08-28 spaetabends, robins Abend in einem Satz: der Server,
+            # den dieses Fenster selbst gebootet hat, beendet sich unter Last
+            # still mit Exit 1 -- und jeder Tod riss den Lauf rot ab, fuenf
+            # Laeufe an einem Abend. Crow ist der Booter: EIN Neustart des
+            # EIGENEN Servers und EIN weiterer Versuch auf intaktem Prefix je
+            # Turn (die Ausnahme laeuft vor dem Append, wie beim #151-Retry).
+            # Fremde Server werden NIE gebootet -- deren Fehlen endet rot wie
+            # bisher, und ein zweiter Tod im selben Turn auch.
+            if not remote:
+                note = getattr(events, "turn_note", lambda _t: None)
+                port = urllib.parse.urlsplit(base_url).port
+                # Auch der Boot eines FRUEHEREN Crow-Fensters zaehlt (die
+                # Datei traegt ihn) -- das Fenster-Neustart-Loch der Nacht.
+                # Nur der Exit-Code bleibt dem Handle-Halter vorbehalten.
+                known = booted_entry(port) if port else None
+                if (isinstance(exc, Unreachable) and known is not None
+                        and reboots < 3):
+                    reboots += 1
+                    code = booted_exit(port)
+                    note("the crow-booted server on port %s is gone%s -- "
+                         "booting it again (%d/3)"
+                         % (port, " (exit code %d, 0x%08X)"
+                            % (code, code & 0xFFFFFFFF) if code is not None
+                            else "", reboots))
+                    if reboot_booted(port, log=note) is not None:
+                        incidents.append(
+                            "the local server died mid-turn%s; reboot %d "
+                            "recovered the turn"
+                            % (" with exit code %d" % code
+                               if code is not None else "", reboots))
+                        continue
+                if (known is not None and not waited_ready
+                        and "503" in said and "loading model" in said):
+                    # Der Boot ist kein Fehler: einmal je Turn ausharren,
+                    # bis der eigene Server antwortet, dann weitermachen.
+                    waited_ready = True
+                    note("the server on port %s is still loading -- waiting"
+                         % port)
+                    load_deadline = time.monotonic() + 240.0
+                    ready = False
+                    while time.monotonic() < load_deadline:
+                        if server_model_path(base_url, timeout=2.0) is not None:
+                            ready = True
+                            break
+                        time.sleep(2.0)
+                    if ready:
+                        continue
+            if (not stream_retried
+                    and any(m in said for m in ("10054", "connection", "reset",
+                                                "stream broke", "broken"))):
+                stream_retried = True
+                incidents.append("the stream broke mid-round and one retry "
+                                 "recovered the turn: %s" % str(exc)[:120])
+                time.sleep(2.0)
+                continue
             events.turn_failed(failure_line(exc))
             stopped = True
             break
@@ -10643,6 +11178,21 @@ def run_turn(
             break
 
         if forced or not calls:
+            # #150. A REASONING MODEL CAN CLOSE THE TURN INSIDE ITS OWN HEAD:
+            # the final round carries reasoning and an empty `content`, and on
+            # screen the turn "just stops" -- found live on 2026-08-28, ten
+            # rounds into a skill, thinking share 100 %. ONE nudge, ONCE per
+            # turn: the model is told to say it visibly. If the second attempt
+            # is silent too, the turn ends and the incident says so -- looping
+            # on a model that will not speak would spend the window on nothing.
+            if (not calls and not forced and not nudged
+                    and not (reply or "").strip() and (reasoning or "").strip()):
+                nudged = True
+                conversation.append("user", THINK_ONLY_NUDGE)
+                continue
+            if not (reply or "").strip() and not stopped:
+                incidents.append("the turn ended with no visible answer"
+                                 + (" despite the nudge" if nudged else ""))
             break
 
         # THE BUDGET BUYS TOOL ROUNDS, NOT THE TURN. Until 2026-08-10 this
@@ -10655,6 +11205,19 @@ def run_turn(
         if round_no >= budget:
             events.budget_spent(budget)
             conversation.append("user", BUDGET_SPENT)
+            forced = True
+            continue
+        # #145: same protocol, other meter. `cost.decoded` holds the rounds
+        # already streamed, so the check reads last round's total -- a budget
+        # of N refuses the round AFTER the one that crossed it, which is the
+        # round-budget's own shape. The event rides a getattr because every
+        # surface predates it; the message to the model is the load-bearing
+        # half either way.
+        if token_budget and cost.decoded >= token_budget:
+            getattr(events, "token_budget_spent", lambda n: None)(token_budget)
+            conversation.append("user", TOKEN_BUDGET_SPENT)
+            incidents.append("the turn token budget of %d was spent before the "
+                             "task finished" % token_budget)
             forced = True
             continue
         for call in calls:
@@ -10672,7 +11235,18 @@ def run_turn(
             # None means nobody can be asked, which is the same answer as "no"
             # for anything the level holds back.
             declined = False
-            if (needs_approval(call["name"], mode)
+            # #144: an outside path in a run_command asks at EVERY level --
+            # auto included, which is the level the live case ran at. The
+            # question and the memory of a yes ride the existing seam:
+            # approval_scope already answers ("outside", path) for these.
+            # #98's mandate carries over: a path the USER spelled out is not
+            # asked about -- the guard protects the inattentive user from the
+            # model, never from their own typed address.
+            outside = (run_command_boundary(call["arguments"])
+                       if call["name"] == "run_command" else [])
+            outside = [p for p in outside
+                       if not any(_inside(m, p) for m in _MANDATED)]
+            if ((needs_approval(call["name"], mode) or outside)
                     and not remembered(call["name"], call["arguments"])):
                 answer = "no"
                 if approve is not None:
@@ -10681,12 +11255,26 @@ def run_turn(
                     remember(call["name"], call["arguments"])
                 elif answer != "yes":
                     declined = True
+                if outside:
+                    incidents.append(
+                        ("the user %s run_command for %s, outside the working "
+                         "area") % ("declined" if answer not in ("yes", "always")
+                                    else "released", ", ".join(outside[:2])))
 
             if declined:
                 # A REFUSAL IS A RESULT. Same shape as a failed call: the text
                 # goes back as the tool message, the round continues, and the
                 # prefix stays valid for every later turn. #88 point 1.
-                result, repeated = DECLINED, False
+                result, repeated = (declined_outside(outside) if outside
+                                    else DECLINED), False
+                if not outside:
+                    incidents.append("the user declined %s(%s)"
+                                     % (call["name"], call["arguments"][:80]))
+            elif failures.get((call["name"], call["arguments"]), 0) >= RETRY_CAP:
+                # #145: the fourth identical failure is refused BEFORE it runs.
+                result, repeated = retry_capped(call["name"]), False
+                incidents.append("%s failed %d times with identical arguments "
+                                 "and was capped" % (call["name"], RETRY_CAP))
             else:
                 result, repeated = run_tool_cached(call["name"], call["arguments"])
             took = time.monotonic() - started
@@ -10698,6 +11286,9 @@ def run_turn(
             # second, and one predicate could not say so.
             errored = result.startswith("error: ")
             failed = errored and not declined
+            if failed:
+                key = (call["name"], call["arguments"])
+                failures[key] = failures.get(key, 0) + 1
             cost.add_tool(took, failed, declined)
             events.tool_finished(call["name"], took, repeated)
             # BESIDE `tool_finished`, NOT INSIDE IT. The duration and the answer
@@ -10721,7 +11312,14 @@ def run_turn(
             # own terms still reached the shell, and that is the fact being
             # reported.
             if not declined and escaped_the_working_area(call["name"]):
-                events.boundary_escaped(call["name"], sorted(_REFUSED))
+                # ONCE PER PATH, NOT PER CALL: the mark is a rare-event
+                # report, and repeating it with unchanged content per shell
+                # call trains the reader to skip it. A call that names
+                # nothing new says nothing; a fresh refusal speaks again.
+                fresh = sorted(p for p in _REFUSED if p not in escapes_said)
+                if fresh:
+                    escapes_said.update(fresh)
+                    events.boundary_escaped(call["name"], fresh)
             # A FAILED CALL STAYS ON SCREEN even once the model has recovered from it (#70).
             # It is not the user's problem to solve, but it is the reason the turn took longer
             # than it looks like it should have, and a turn that hides its retries reads as
@@ -10761,7 +11359,7 @@ def run_turn(
 
     return TurnResult(cost=cost, context_tokens=context_tokens,
                       promised_warm=promised_warm, rolled=rolled,
-                      stopped=stopped, reported=reported)
+                      stopped=stopped, reported=reported, incidents=incidents)
 
 
 # ----------------------------------------------------------- remote models
@@ -10792,6 +11390,10 @@ def run_turn(
 # written before it exists reads back as "did not say", which is the answer
 # that asks for no filter. Same rule `context` already follows with 0.
 PROVIDERS_FILE = os.path.join(os.path.dirname(SESSION_DIR), "providers.json")
+
+# Die Boot-Registry der Nacht vom 2026-08-28 -- der Kommentar steht bei
+# `_BOOTED`, die Konstante hier, weil SESSION_DIR erst hier gebunden ist.
+BOOTED_FILE = os.path.join(os.path.dirname(SESSION_DIR), "booted.json")
 
 # THE KEYS ARE NOT IN IT, and the reason is the one MCP_TOKEN_FILE already
 # carries: `providers.json` is drawn by a sheet, pasted into bug reports and
@@ -11182,6 +11784,11 @@ def provider_pick(name: str, model: "str | None" = None) -> "str | None":
     """
     if name not in PROVIDERS:
         return "no provider called %s" % name
+    # THE SWITCH IS THE OUTER DOOR: a parked broker refuses the turn pick
+    # before the key question is even asked, and the sentence names the one
+    # control that changes the answer.
+    if name == "openrouter" and not openrouter_on():
+        return OPENROUTER_OFF_NOTE
     # A LOGIN COUNTS AS A KEY. Refusing a provider somebody just signed in to,
     # because the key box beside it is empty, would be the sheet answering a
     # question nobody asked.
@@ -11192,15 +11799,70 @@ def provider_pick(name: str, model: "str | None" = None) -> "str | None":
     doc = provider_doc()
     doc["active"] = name
     if model is not None:
-        picked = doc.get("model")
-        if not isinstance(picked, dict):
-            picked = {}
-        model = (model or "").strip()
-        if model:
-            picked[name] = model
-        else:
-            picked.pop(name, None)
-        doc["model"] = picked
+        _model_into(doc, name, model)
+    return provider_write(doc)
+
+
+def _model_into(doc: dict, name: str, model: str) -> None:
+    """Write one provider's slug into the doc, or clear it with ""."""
+    picked = doc.get("model")
+    if not isinstance(picked, dict):
+        picked = {}
+    model = (model or "").strip()
+    if model:
+        picked[name] = model
+    else:
+        picked.pop(name, None)
+    doc["model"] = picked
+
+
+def provider_model_set(name: str, model: str) -> "str | None":
+    """Remember a provider's slug WITHOUT routing turns there. Problem or None.
+
+    THE BROKER PAGE WRITES THROUGH THIS: picking a model there configures the
+    subsystem -- a free pick is what the delegate default reads -- and where a
+    turn goes is a different control's answer. `provider_pick` remains the one
+    mover of turns; a second one would be a second answer to the same question.
+    """
+    if name not in PROVIDERS:
+        return "no provider called %s" % name
+    doc = provider_doc()
+    _model_into(doc, name, model)
+    return provider_write(doc)
+
+
+# robins Regel vom 2026-08-28, aus dem laufenden Fenster heraus angesagt:
+# Aktiviert man OpenRouter, darf sich lokal NICHT abschalten -- beide laufen
+# parallel. The broker got its own page in the sheet for exactly this reason:
+# its switch says whether the SUBSYSTEM is in operation -- delegation,
+# catalogue, favourites -- and never where a turn goes.
+#
+# ABSENT MEANS ON: every providers.json written before this build keeps
+# delegating exactly as it did, and the file stays clean until somebody parks.
+OPENROUTER_OFF_NOTE = ("OpenRouter is switched off -- the OpenRouter page in "
+                       "Settings turns it back on")
+
+
+def openrouter_on(doc: "dict | None" = None) -> bool:
+    """Whether the broker is in operation. Absent means on."""
+    doc = provider_doc() if doc is None else doc
+    return doc.get("openrouter_on") is not False
+
+
+def openrouter_set(on: bool) -> "str | None":
+    """Park or unpark the broker. The problem, or None.
+
+    ON MOVES NO TURN -- that is the whole rule. OFF is the one direction that
+    may touch `active`, and it only brings turns home: a parked broker cannot
+    keep them, and the machine is always there.
+    """
+    doc = provider_doc()
+    if on:
+        doc.pop("openrouter_on", None)
+    else:
+        doc["openrouter_on"] = False
+        if doc.get("active") == "openrouter":
+            doc["active"] = LOCAL_PROVIDER
     return provider_write(doc)
 
 
@@ -11209,10 +11871,19 @@ def provider_active(doc: "dict | None" = None) -> str:
 
     A file naming a provider that was removed is not an error worth a message:
     it is a value this build does not have, and the answer to that is the one it
-    does have -- the machine, which is always there.
+    does have -- the machine, which is always there. A file naming the PARKED
+    broker takes the same road home: off means off, however the file got there.
+
+    THERE IS NO TURNS OVERLAY -- robins dritter Brueller vom 2026-08-28 abends
+    zog den zweiten zurueck: die Broker-Seite routet GAR NICHTS, default ist
+    immer lokal, bis der User auf der Model-Seite etwas anderes waehlt. An
+    `openrouter_turns` key the one build that had one may have left in the
+    file is an unknown key like any other: read by nobody, routing nothing.
     """
     doc = provider_doc() if doc is None else doc
     name = doc.get("active")
+    if name == "openrouter" and not openrouter_on(doc):
+        return LOCAL_PROVIDER
     return name if name in PROVIDERS else LOCAL_PROVIDER
 
 
@@ -11416,6 +12087,10 @@ def provider_view() -> dict:
                      "model": provider_model_for(name, doc), "count": len(models)})
     return {"active": provider_active(doc), "providers": rows,
             "subscriptions": provider_subscriptions(),
+            # #148: what the favourites dropdowns preselect.
+            "delegate_favorites": delegate_favorites(doc),
+            # The broker page's switch state (2026-08-28). Absent means on.
+            "openrouter_on": openrouter_on(doc),
             "file": PROVIDERS_FILE, "note": REMOTE_ENDPOINT_NOTE}
 
 
@@ -12247,10 +12922,25 @@ def _free_model_for(name: str, doc: "dict | None" = None) -> str:
     pin the rule -- and "" when the catalogue is empty or lists nothing free.
     """
     picked = provider_model_for(name, doc)
-    if picked.endswith(FREE_MODEL_SUFFIX):
+    # THE PICK READS THE HEALTH MEMO TOO (2026-08-28 spaetabends): it was the
+    # one rung that did not, so every fresh delegation resolved straight back
+    # to the dead pick and paid one failure before the chain could speak.
+    if picked.endswith(FREE_MODEL_SUFFIX) and picked not in _SPOT_DEAD:
         return picked
+    # #148: a favourite the person picked beats the largest window, in the
+    # person's order -- PAID INCLUDED, robins correction of 2026-08-28: a
+    # billed favourite is the user's explicit choice on their own key. Only
+    # what nobody chose stays free. The health memo (#146) speaks first.
+    catalogue = {str(m.get("id")) for m in provider_models(name, doc)}
+    for fav in delegate_favorites(doc):
+        if fav in catalogue and fav not in _SPOT_DEAD:
+            return fav
+    # #146: the health memo speaks at resolution time -- the largest declared
+    # window was the dead provider, and a session that has seen a spot fail
+    # does not offer it again.
     free = [m for m in provider_models(name, doc)
-            if str(m.get("id") or "").endswith(FREE_MODEL_SUFFIX)]
+            if str(m.get("id") or "").endswith(FREE_MODEL_SUFFIX)
+            and str(m.get("id")) not in _SPOT_DEAD]
     if not free:
         return ""
     return str(max(free, key=lambda m: int(m.get("context") or 0)).get("id"))
@@ -12275,6 +12965,10 @@ def delegate_target(doc: "dict | None" = None) -> "tuple[dict | None, str | None
     spec = PROVIDERS.get(name)
     if spec is None:
         return None, "no provider named %r for the delegate spot" % name
+    # THE SWITCH SPEAKS BEFORE THE SPOT RESOLVES (2026-08-28): a parked broker
+    # answers with the control that unparks it, not with a model list.
+    if name == "openrouter" and not openrouter_on(doc):
+        return None, OPENROUTER_OFF_NOTE
     model = str(block.get("model") or "") or _free_model_for(name, doc)
     if not model:
         return None, ("no delegate spot: no free %s model in the catalogue -- "
@@ -12294,6 +12988,38 @@ def delegate_target(doc: "dict | None" = None) -> "tuple[dict | None, str | None
              "sticky": bool(spec.get("sticky")),
              "filter": bool(spec.get("filter")),
              "params": provider_params(name, model, doc)}, None)
+
+
+# #148. THREE FAVOURITES, DEFAULT FREE. robin's parked routing ask of
+# 2026-08-27: the free default used to be "largest declared window", and the
+# largest declared window was the dead provider. Favourites are picked by a
+# person, tried in THEIR order, and skipped while the health memo says dead --
+# the resolution below stays measurable, so a test can pin the rule.
+def delegate_favorites(doc: "dict | None" = None) -> "list[str]":
+    doc = provider_doc() if doc is None else doc
+    favs = doc.get("delegate_favorites")
+    if not isinstance(favs, list):
+        return []
+    return [str(m).strip() for m in favs
+            if isinstance(m, str) and str(m).strip()][:3]
+
+
+def delegate_favorites_set(models: "list | None") -> "str | None":
+    """Write the favourites, at most three. The reason it failed, or None."""
+    doc = provider_doc()
+    clean = [str(m).strip() for m in (models or [])
+             if isinstance(m, str) and str(m).strip()][:3]
+    if clean:
+        doc["delegate_favorites"] = clean
+        # robins Live-Befund 2026-08-28 spaetabends: drei Favoriten standen
+        # in der Oberflaeche, die Delegation nahm weiter den unsichtbaren Pin
+        # vom 27.08. Wer Favoriten setzt, sagt die Reihenfolge an -- ein Pin,
+        # den keine Seite mehr zeigt, weicht ihnen, statt sie stumm zu
+        # schlagen. Clearing favourites orders nothing and unseats nothing.
+        doc.pop("delegate", None)
+    else:
+        doc.pop("delegate_favorites", None)
+    return provider_write(doc)
 
 
 def delegate_target_set(provider: "str | None", model: str = "") -> "str | None":
@@ -12353,6 +13079,9 @@ class Subtask:
         # promise about the RECORD: whatever the network still delivers is
         # dropped, the status ends "interrupted", no transcript is written.
         self.cancelled = False
+        # 2026-08-28 spaetnachts: der Chat, der diese Aufgabe delegiert hat --
+        # vom Fenster gestampt, mit persistiert; "" ist der dateilose Live-Chat.
+        self.parent = ""
         self.thread: "threading.Thread | None" = None
 
     @property
@@ -12392,6 +13121,136 @@ def forget_subtasks() -> None:
         _SUBTASK_SEQ = 0
 
 
+# robins Ansage vom 2026-08-28 spaetnachts: delegierte Aufgaben ueberleben
+# den Crow-Neustart, solange ihr Chat lebt. Die Registry bleibt das
+# Prozessgedaechtnis der THREADS; ihre RECORDS liegen zusaetzlich auf Platte
+# im Subtask-Regal der Session und kommen im naechsten Prozess zurueck --
+# running ehrlich als "interrupted", denn der Arbeiter ist weg. Geloescht
+# wird mit dem CHAT: drop_subtasks raeumt die Datei mit.
+_SUBTASKS_RECALLED = False
+
+
+def _subtask_registry_path() -> str:
+    # Zur Laufzeit gebaut: SESSION_DIR wird von Suiten umgebogen, und eine
+    # beim Import gefrorene Konstante schriebe an den echten Ort. NEBEN dem
+    # Regal, nicht darin: `subtasks/` gehoert den Transkripten allein -- zwei
+    # Bestandsfaelle zaehlen dessen Dateien, und die Registry ist keins.
+    return os.path.join(SESSION_DIR, "subtasks-registry.json")
+
+
+def _subtask_persist() -> None:
+    """Write the records down. Tolerant like every convenience file."""
+    with _SUBTASK_LOCK:
+        subs = list(SUBTASKS.values())
+    rows = [{"ident": s.ident, "task": s.task, "model": s.model,
+             "label": s.label, "status": s.status, "result": s.result,
+             "failure": s.failure, "seconds": round(s.clock(), 1),
+             "prompt_tokens": s.prompt_tokens, "reply_tokens": s.reply_tokens,
+             "usage_tokens": s.usage_tokens, "transcript": s.transcript,
+             "collected": s.collected, "parent": getattr(s, "parent", "")}
+            for s in subs]
+    path = _subtask_registry_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"format": 1, "subtasks": rows}, fh, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def subtasks_recall() -> int:
+    """Load what an earlier process delegated. Returns how many came back.
+
+    RUNNING WIRD EHRLICH "interrupted": der Thread dieses Prozesses existiert
+    nicht mehr, und ein geladenes "running" waere ein Puls, hinter dem niemand
+    arbeitet. Der Zaehler laeuft OBERHALB der geladenen Nummern weiter, sonst
+    kollidiert das naechste d1 mit dem geladenen d1.
+    """
+    global _SUBTASK_SEQ
+    try:
+        with open(_subtask_registry_path(), encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return 0
+    loaded = 0
+    with _SUBTASK_LOCK:
+        for row in (raw.get("subtasks") or []):
+            if not isinstance(row, dict):
+                continue
+            ident = str(row.get("ident") or "")
+            if not ident or ident in SUBTASKS:
+                continue
+            sub = Subtask(ident, str(row.get("task") or ""), "",
+                          {"model": str(row.get("model") or ""),
+                           "label": str(row.get("label") or "")})
+            sub.status = str(row.get("status") or "failed")
+            sub.result = str(row.get("result") or "")
+            sub.failure = str(row.get("failure") or "")
+            sub.seconds = float(row.get("seconds") or 0.0)
+            sub.prompt_tokens = int(row.get("prompt_tokens") or 0)
+            sub.reply_tokens = int(row.get("reply_tokens") or 0)
+            sub.usage_tokens = int(row.get("usage_tokens") or 0)
+            sub.transcript = str(row.get("transcript") or "")
+            sub.collected = bool(row.get("collected"))
+            sub.parent = str(row.get("parent") or "")
+            if sub.status == "running":
+                sub.status = "interrupted"
+                sub.failure = "crow was closed while it ran"
+            m = re.match(r"d(\d+)$", ident)
+            if m:
+                _SUBTASK_SEQ = max(_SUBTASK_SEQ, int(m.group(1)))
+            SUBTASKS[ident] = sub
+            loaded += 1
+    return loaded
+
+
+def _ensure_subtasks_recalled() -> None:
+    """Lazy, once per process: every surface that looks gets the recall --
+    kein Init-Hook je Oberflaeche, der vergessen werden kann."""
+    global _SUBTASKS_RECALLED
+    if not _SUBTASKS_RECALLED:
+        _SUBTASKS_RECALLED = True
+        subtasks_recall()
+
+
+def subtask_parent_set(ident: str, parent: str) -> None:
+    """The window's parent stamp, written through to the record and the disk.
+    Idempotent -- the tick calls it on every snapshot and it writes only on
+    change, the self-healing shape the here-flag already has."""
+    with _SUBTASK_LOCK:
+        sub = SUBTASKS.get(ident)
+        if sub is None or getattr(sub, "parent", "") == parent:
+            return
+        sub.parent = parent
+    _subtask_persist()
+
+
+def drop_subtasks(idents: "list[str]") -> int:
+    """A deleted chat takes its subtasks along (robin, 2026-08-28 abends).
+
+    The records leave the registry, so no listing, chip or rail row shows
+    them again. A still-running one is CANCELLED first -- the thread cannot
+    be torn out of its socket, but the mark is the promise about the record:
+    whatever the network still delivers is dropped and no transcript is
+    written. A transcript already on disk goes with the chat it belonged to;
+    a path that is already gone is not an error worth a sentence.
+    """
+    with _SUBTASK_LOCK:
+        subs = [SUBTASKS.pop(i) for i in list(idents) if i in SUBTASKS]
+    for sub in subs:
+        if sub.status == "running":
+            sub.cancelled = True
+        if sub.transcript:
+            try:
+                os.remove(sub.transcript)
+            except OSError:
+                pass
+    # Der Chat-Loeschpfad raeumt die Platte mit: was hier geht, kommt nach
+    # dem naechsten Start nicht wieder (robins Ansage, 2026-08-28 spaetnachts).
+    _subtask_persist()
+    return len(subs)
+
+
 class _SubtaskEvents(TurnEvents):
     """The silent sink, plus the two facts the registry needs afterwards."""
 
@@ -12418,6 +13277,9 @@ def _subtask_close(sub: Subtask, status: str, failure: str = "") -> None:
     sub.seconds = time.monotonic() - sub.started
     sub.failure = failure
     sub.status = status
+    # Jeder Endzustand geht auf die Platte -- die Registry-Datei traegt die
+    # Records ueber den Prozess hinaus (2026-08-28 spaetnachts).
+    _subtask_persist()
 
 
 def _subtask_transcript(sub: Subtask, conversation: Conversation,
@@ -12474,13 +13336,84 @@ def _subtask_transcript(sub: Subtask, conversation: Conversation,
     return path
 
 
-def _run_subtask(sub: Subtask, spot: dict) -> None:
-    """The whole life of one subtask, on its own thread.
+# #146. THE SPOT HEALTH MEMO, session-lifetime like the approval store: a spot
+# that failed retryably is not offered again until the process restarts. This
+# is the pin ritual of 2026-08-27 lifted into code -- one answer proves
+# nothing, and the largest declared window was the dead provider.
+_SPOT_DEAD: dict[str, str] = {}
 
-    EVERYTHING ENDS IN `_subtask_close`. A thread that dies with an exception
-    leaves a subtask "running" forever and a `collect` waiting on a corpse;
-    catching everything and writing the record is what makes the registry a
-    place `collect` can trust.
+
+def forget_spot_health() -> None:
+    _SPOT_DEAD.clear()
+
+
+# The failure classes worth a second spot. Everything else -- a schema error,
+# a refusal, an interrupt -- would fail identically anywhere.
+#
+# THE TWO 404 PHRASES ARE MEASURED, 2026-08-28 spaetabends: the dead Nvidia
+# upstream answered HTTP 404 "Provider returned error" (a passthrough -- the
+# upstream is sick, not the request) and "No endpoints found that can handle
+# the requested parameters" (nobody serves THIS model right now). Both are
+# this spot's sickness; the next spot answers. A BARE 404 stays
+# non-retryable: an address every spot would 404 on is not a spot question.
+_RETRYABLE = ("429", "shared_pool", "timed out", "timeout", "answered nothing",
+              "temporarily", "connection", "unavailable", "502", "503",
+              "provider returned error", "no endpoints found")
+
+
+def _spot_retryable(detail: str) -> bool:
+    low = (detail or "").lower()
+    return any(m in low for m in _RETRYABLE)
+
+
+def delegate_fallbacks(spot: dict, doc: "dict | None" = None) -> "list[dict]":
+    """The next spots behind `spot`, same provider: favourites first (paid
+    included -- the user's own pick on their own key, #148), then FREE models
+    by declared window. Excludes the spot itself and everything the health
+    memo has marked. What nobody chose never falls forward onto a bill.
+    """
+    if doc is None:
+        doc = provider_doc()
+    name = str(spot.get("provider") or "")
+    spec = PROVIDERS.get(name)
+    if spec is None:
+        return []
+    skip = {spot.get("model")} | set(_SPOT_DEAD)
+    # #148, robins correction: favourites lead the chain in the person's order
+    # and MAY be paid -- their own pick on their own key. Behind them only
+    # FREE models follow, by declared window: what nobody chose must not fall
+    # forward onto a bill.
+    favs = delegate_favorites(doc)
+    rank = {f: i for i, f in enumerate(favs)}
+    free = [m for m in provider_models(name, doc)
+            if str(m.get("id") or "") not in skip
+            and (str(m.get("id")) in rank
+                 or str(m.get("id") or "").endswith(FREE_MODEL_SUFFIX))]
+    free.sort(key=lambda m: (rank.get(str(m.get("id")), len(favs)),
+                             -int(m.get("context") or 0)))
+    # Assembled HERE, not through delegate_target: that function answers "where
+    # does the next delegation go" and tests rebind it to say so -- a fallback
+    # list built by calling it would collapse onto whatever it was pinned to.
+    credential, kind, problem = provider_credential(name)
+    if problem or (not credential and spec.get("needs_key")):
+        return []
+    out = []
+    for m in free:
+        mid = str(m.get("id"))
+        out.append({"provider": name, "label": spec["label"], "remote": True,
+                    "base_url": spec["base_url"], "model": mid,
+                    "api_key": credential,
+                    "headers": provider_headers(name, kind, credential),
+                    "transport": spec.get("transport") or TRANSPORT_CHAT,
+                    "routing": _routing_copy(spec.get("routing") or {}),
+                    "sticky": bool(spec.get("sticky")),
+                    "filter": bool(spec.get("filter")),
+                    "params": provider_params(name, mid, doc)})
+    return out
+
+
+def _subtask_attempt(sub: Subtask, spot: dict) -> "tuple[str, str]":
+    """One try on one spot. Returns (state, detail); "done" set sub.result.
 
     `owns_turn_state=False` IS THE WHOLE REASON THIS MAY RUN BESIDE A TURN:
     the parent's read-permissions and its Ctrl+C flag stay the parent's. See
@@ -12499,19 +13432,17 @@ def _run_subtask(sub: Subtask, spot: dict) -> None:
             reasoning_effort=None, timeout=SUBTASK_TIMEOUT,
             extra_headers=spot.get("headers") or None,
             transport=spot.get("transport") or TRANSPORT_CHAT,
-            max_tokens=REMOTE_MAX_TOKENS, remote=True,
+            max_tokens=subtask_max_tokens(), remote=True,
             routing=turn_routing(spot, None),
             execute_tools=False, send_tools=False, owns_turn_state=False,
             events=events)
     except Exception as exc:  # noqa: BLE001 - a thread must not die silently
-        _subtask_close(sub, "failed", "%s: %s" % (type(exc).__name__, exc))
-        return
+        return "failed", "%s: %s" % (type(exc).__name__, exc)
     # #143 E2: A CANCELLED SUBTASK DELIVERS NOTHING. The user pressed Stop
     # while this ran; whatever the endpoint still returned is dropped here,
     # before the result or a transcript could make it look alive.
     if sub.cancelled:
-        _subtask_close(sub, "interrupted", "stopped by the user")
-        return
+        return "interrupted", "stopped by the user"
     reply = ""
     for message in reversed(conversation.payload()):
         if message.get("role") == "assistant":
@@ -12521,19 +13452,131 @@ def _run_subtask(sub: Subtask, spot: dict) -> None:
     sub.reply_tokens = turn.cost.decoded
     sub.usage_tokens = turn.context_tokens
     if events.interrupted:
-        _subtask_close(sub, "interrupted", "interrupted")
-        return
+        return "interrupted", "interrupted"
     if turn.stopped or not reply.strip():
-        _subtask_close(sub, "failed", events.failed or "the model answered nothing")
-        return
+        return "failed", (events.failed or "the model answered nothing")
     sub.result = reply
     sub.transcript = _subtask_transcript(sub, conversation, spot,
                                          turn.context_tokens)
-    _subtask_close(sub, "done")
+    return "done", ""
+
+
+def _run_subtask(sub: Subtask, spot: dict) -> None:
+    """The whole life of one subtask, on its own thread.
+
+    EVERYTHING ENDS IN `_subtask_close`. A thread that dies with an exception
+    leaves a subtask "running" forever and a `collect` waiting on a corpse;
+    catching everything and writing the record is what makes the registry a
+    place `collect` can trust.
+
+    #146: A RETRYABLE FAILURE FALLS TO THE NEXT FREE SPOT, at most three
+    attempts, and the record says where it landed -- a card that silently
+    swapped its model would be a spot nobody can trust twice. The health memo
+    keeps the dead spot out of every later resolution this session.
+    """
+    current = spot
+    detail = ""
+    tried: list[str] = []
+    for attempt in range(3):
+        state, detail = _subtask_attempt(sub, current)
+        if state == "done":
+            # The fallback note survives a good landing: a card that says
+            # where its result CAME from is the whole point of not swapping
+            # models silently.
+            _subtask_close(sub, "done", sub.failure)
+            return
+        if state == "interrupted" or not _spot_retryable(detail):
+            _subtask_close(sub, state, detail)
+            return
+        _SPOT_DEAD[str(current.get("model"))] = detail
+        tried.append(str(current.get("model")))
+        nxt = delegate_fallbacks(current)
+        if not nxt or sub.cancelled:
+            break
+        current = nxt[0]
+        sub.model = current["model"]
+        sub.label = current["label"]
+        sub.failure = "fell back from %s (%s)" % (tried[-1], detail)
+    _subtask_close(sub, "failed",
+                   "%s -- tried %s" % (detail, ", ".join(tried) or "one spot"))
+
+
+# #149. THE MAKER IS NOT THE CHECKER. A model grading its own diff approves
+# it; a second pass with other instructions catches what the first talked
+# itself into. Crow's checker is bought where its parallelism is bought: the
+# verification rides `delegate`, so the local slot stays the maker and the
+# remote spot reads with fresh eyes. User-triggered (/verify) -- a maker that
+# may skip its own checker will.
+VERIFY_PROMPT = (
+    "Review the following changes with fresh eyes; you did not write them. "
+    "Name concrete defects -- wrong logic, broken edge cases, a change that "
+    "contradicts its own stated intent -- each with its file and the line or "
+    "snippet. If nothing is wrong, say so in one sentence. Do not restate the "
+    "code, do not praise it.\n\n")
+
+VERIFY_MATERIAL_CHARS = 40000
+
+
+def verify_material(conversation: "Conversation") -> str:
+    """What this conversation wrote, per path, newest first -- "" if nothing.
+
+    Built from the conversation's own tool calls, because that is the one
+    record both surfaces share: `write_file` carries whole files, `edit_file`
+    carries the replacement. Reads are deliberately absent -- the checker
+    reviews what CHANGED.
+    """
+    blocks: dict[str, list[str]] = {}
+    order: list[str] = []
+    for message in conversation.payload():
+        if message.get("role") != "assistant":
+            continue
+        for call in message.get("tool_calls") or []:
+            fn = (call.get("function") or {})
+            name = fn.get("name")
+            if name not in ("write_file", "edit_file"):
+                continue
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                continue
+            path = str(args.get("path") or "")
+            if not path:
+                continue
+            if name == "write_file":
+                blocks[path] = ["[written whole]\n" + str(args.get("content") or "")]
+            else:
+                blocks.setdefault(path, []).append(
+                    "[edit] replaced:\n%s\nwith:\n%s"
+                    % (str(args.get("old") or ""), str(args.get("new") or "")))
+            if path not in order:
+                order.append(path)
+    if not order:
+        return ""
+    out = []
+    for path in order:
+        out.append("=== %s ===\n%s" % (path, "\n".join(blocks[path])))
+    material = "\n\n".join(out)
+    if len(material) > VERIFY_MATERIAL_CHARS:
+        material = material[:VERIFY_MATERIAL_CHARS] + "\n[... cut at %d chars]" % VERIFY_MATERIAL_CHARS
+    return material
+
+
+def verify_start(conversation: "Conversation") -> str:
+    """`/verify`: delegate this conversation's changes to the checker spot.
+
+    The answer is `delegate`'s own, word for word -- both surfaces say one
+    sentence, and `collect` fetches the verdict like any subtask's."""
+    material = verify_material(conversation)
+    if not material:
+        return "nothing to verify -- this conversation has written no file"
+    return tool_delegate(task=VERIFY_PROMPT + material)
 
 
 def tool_delegate(task: str = "", context: str = "", **_) -> str:
     global _SUBTASK_SEQ
+    # Vor der ersten Nummernvergabe: die geladenen Nummern zaehlen mit,
+    # sonst kollidiert das frische d1 mit dem gestrigen.
+    _ensure_subtasks_recalled()
     task = (task or "").strip()
     if not task:
         return "error: delegate needs a task"
@@ -12554,12 +13597,16 @@ def tool_delegate(task: str = "", context: str = "", **_) -> str:
     thread = threading.Thread(target=_run_subtask, args=(sub, spot), daemon=True)
     sub.thread = thread
     thread.start()
+    # Auch der Start steht auf Platte: stirbt Crow mitten im Lauf, kommt der
+    # Record als ehrliches "interrupted" zurueck statt gar nicht.
+    _subtask_persist()
     return ("%s delegated to %s -- running. It sees only what you sent. "
             "collect('%s') or collect('all') returns the result; subtasks() "
             "shows where things stand." % (ident, spot["model"], ident))
 
 
 def tool_subtasks(**_) -> str:
+    _ensure_subtasks_recalled()
     with _SUBTASK_LOCK:
         subs = list(SUBTASKS.values())
     if not subs:
@@ -12607,6 +13654,7 @@ def _collect_wait(picked: "list[Subtask]") -> "str | None":
 
 
 def tool_collect(id: str = "all", **_) -> str:
+    _ensure_subtasks_recalled()
     wanted = (id or "all").strip()
     with _SUBTASK_LOCK:
         subs = list(SUBTASKS.values())
@@ -12636,6 +13684,8 @@ def tool_collect(id: str = "all", **_) -> str:
         else:
             parts.append("== %s %s after %.1f s -- %s"
                          % (sub.ident, sub.status, sub.seconds, sub.failure))
+    # `collected` ist Teil des Records und ueberlebt mit ihm.
+    _subtask_persist()
     out = "\n\n".join(parts)
     # THE PREFIX IS THE MODEL'S RECOVERY SIGNAL, so it is earned only when
     # there is nothing to work with: one result among failures is a result.
@@ -12653,6 +13703,7 @@ def subtask_view() -> "list[dict]":
     finished subtask and the FAILURE SENTENCE for a dead one -- both are what
     the reader needs behind the fold -- and empty while it runs.
     """
+    _ensure_subtasks_recalled()
     with _SUBTASK_LOCK:
         subs = list(SUBTASKS.values())
     out = []
@@ -12666,7 +13717,10 @@ def subtask_view() -> "list[dict]":
         out.append({"i": sub.ident, "task": sub.head(), "model": sub.model,
                     "st": sub.status, "s": round(sub.clock(), 1),
                     "tok": sub.tokens, "res": res, "path": sub.transcript,
-                    "collected": sub.collected})
+                    "collected": sub.collected,
+                    # 2026-08-28 spaetnachts: der Eltern-Chat reist im Record
+                    # mit, damit die Rail nach einem Neustart weiss, wohin.
+                    "parent": getattr(sub, "parent", "")})
     return out
 
 

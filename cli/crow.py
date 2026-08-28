@@ -962,7 +962,8 @@ class TerminalTurnEvents(TurnEvents):
             print(f"{YELLOW}  ! the working area was refused for {path}, "
                   f"and {name} ran anyway{RESET}", file=self._out)
         print(f"{DIM}    write_file and edit_file stay inside the root; "
-              f"run_command is not bounded by it{RESET}", file=self._out)
+              f"an outside path named in run_command asks first (#144) -- "
+              f"this one was released, or not named plainly{RESET}", file=self._out)
 
     def tools_finished(self) -> None:
         print("", file=self._out)
@@ -1022,6 +1023,7 @@ HELP = """commands:
   /thoughts      show the model's reasoning as it arrives, or hide it again
   /image         hold an image for the next line, /image <path>
   /delegate      hand a task to the remote subtask model, /delegate <task>
+  /verify        delegate this conversation's changes to the checker spot
   /subtasks      where every delegated subtask stands
   /reset         drop the context (costs a full re-prefill)
   /context       message count in the current context
@@ -1100,6 +1102,13 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
 
     if line == "/subtasks":
         print(crow_core.tool_subtasks() + "\n")
+        return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
+
+    # #149. The maker is not the checker: the conversation's own writes go to
+    # the delegate spot with review instructions. The answer is the tool's,
+    # word for word -- both surfaces describe one verification identically.
+    if line == "/verify":
+        print(crow_core.verify_start(conversation) + "\n")
         return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
 
     if line == "/thoughts":
@@ -1924,7 +1933,7 @@ def repl(args: argparse.Namespace) -> int:
             context_tokens=context_tokens,
             n_ctx=n_ctx,
             rollover_at=args.rollover_at,
-            max_tool_rounds=args.max_tool_rounds,
+            max_tool_rounds=args.max_tool_rounds, token_budget=args.turn_token_budget,
             promised_warm=promised_warm,
             rolled=rolled,
             execute_tools=getattr(args, "run_tools", True),
@@ -1963,7 +1972,7 @@ def repl(args: argparse.Namespace) -> int:
             crow_core.review_turn(
                 conversation, base_url=args.base_url, model=args.model,
                 api_key=args.api_key, **sampling,
-                reasoning_effort=args.reasoning_effort,
+                reasoning_effort=args.reasoning_effort, incidents=turn.incidents,
                 gate=getattr(args, "memory_approval",
                              crow_core.MEMORY_APPROVAL_DEFAULT),
                 events=TerminalTurnEvents(rounds=args.rounds,
@@ -2250,6 +2259,15 @@ def build_parser() -> argparse.ArgumentParser:
                         default=MAX_TOOL_ROUNDS, metavar="N",
                         help="how many tool rounds one turn may take before it stops"
                              f" (default: {MAX_TOOL_ROUNDS}, 0 answers without running any)")
+    # #145: the round budget's two siblings, opt-in like every cap here.
+    parser.add_argument("--turn-token-budget", dest="turn_token_budget", type=int,
+                        default=0, metavar="N",
+                        help="decoded tokens one turn may spend before it is told to"
+                             " answer (default: 0, off)")
+    parser.add_argument("--subtask-max-tokens", dest="subtask_max_tokens", type=int,
+                        default=0, metavar="N",
+                        help="output cap for one delegated subtask"
+                             f" (default: {crow_core.REMOTE_MAX_TOKENS})")
     # THE OPERATING MODE E5 ADDED, AND IT IS NOT --max-tool-rounds 0.
     #
     # That one still runs the loop: the budget is spent on the first round, the
@@ -2341,6 +2359,9 @@ def main(argv: list[str] | None = None) -> int:
     # the top, because `crow_core` reads the name at call time and the MCP call
     # that triggers it happens deep inside a turn.
     crow_core.ELICIT_ANNOUNCE = elicit_prompt
+    # #145: once, like set_root -- a subtask starts deep inside a turn where no
+    # flag can reach it.
+    crow_core.subtask_budget_set(args.subtask_max_tokens)
     # #114, and BEFORE repl(): the loop's first act is to check the endpoint,
     # and there is no point checking one this line is about to bring up.
     problem = boot_if_asked(args)

@@ -26,4 +26,19 @@ while a turn is running](../user-guide/window.md).
 
 Reading never asks, at any level.
 
+### Outside paths ask (#144)
+
+`run_command` touching paths outside the working directory asks first, at every release
+level — one card, every outside path named. An approval covers ALL outside paths of that
+command, not just the first; `always` is kept in `%LOCALAPPDATA%\Crow\approvals.json` and
+survives the restart. Directories the conversation was pointed at pass without asking.
+An obfuscated path does not ask — the gate is a question, not a sandbox.
+
 ---
+
+### /verify (#149)
+
+The maker is not the checker. `/verify` (both surfaces) assembles what this conversation
+wrote — `write_file` whole, `edit_file` as replaced/with, reads deliberately absent — and
+delegates it to the remote spot with review instructions; `collect` fetches the verdict.
+User-triggered on purpose: a maker that may skip its own checker will.

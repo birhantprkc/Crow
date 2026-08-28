@@ -84,6 +84,14 @@ crow_core.PROVIDER_KEYS_FILE = os.path.join(tempfile.gettempdir(),
                                             "crow-suite-has-no-provider", "keys.json")
 crow_core.PROVIDER_TOKEN_FILE = os.path.join(tempfile.gettempdir(),
                                              "crow-suite-has-no-provider", "tokens.json")
+# 2026-08-28: die Dauer-Freigaben ("always") schreiben nach APPROVALS_FILE --
+# dieselbe Regel, gefunden vom Waechter unten am Abend ihrer Einfuehrung.
+crow_core.APPROVALS_FILE = os.path.join(tempfile.gettempdir(),
+                                        "crow-suite-has-no-provider", "approvals.json")
+# Und die Boot-Registry aus derselben Nacht: eine Suite, die die echte Datei
+# laese, koennte robins LIVE-Server "wiederbeleben" -- nie.
+crow_core.BOOTED_FILE = os.path.join(tempfile.gettempdir(),
+                                     "crow-suite-has-no-provider", "booted.json")
 
 # UND DIE BEIDEN, DIE HIER BIS ZUM 2026-08-23 GEFEHLT HABEN. Ein Fall schrieb
 # einen erfundenen API-Schluessel in robins ECHTE `mcp_tokens.json`, ein
@@ -606,6 +614,38 @@ class TheCostLineCarriesTheShareTests(ApiCase):
         crow_gui.Turn(collected.append).round_finished(
             {"_reasoning_chars": 1, "_content_chars": 1})
         self.assertEqual([m["k"] for m in collected], [])
+
+
+# ------------------------------------------- the counter after a rollover ----
+
+
+class TheCounterFollowsTheRolloverTests(unittest.TestCase):
+    """robins Live-Test 2026-08-29: der Rollover griff, aber unten links stand
+    bis zum Turn-Ende -- Runden spaeter -- der Fuellstand von VOR dem Roll.
+    Der Kern zaehlt ab dem Roll von 0; dieselbe Zahl gehoert im selben Moment
+    auf die Seite."""
+
+    def test_the_roll_note_travels_with_a_counter_reset(self):
+        """POSITIV: `rolled_over` schiebt neben der Notiz ein eigenes
+        ctx-Ereignis mit tokens 0. NEGATIV im selben Zug: NICHT als `cost` --
+        `cost()` raeumt den Stream-Cursor ab, und der Turn laeuft noch."""
+        collected: list[dict] = []
+        crow_gui.Turn(collected.append).rolled_over(187333, "rollover-x.json")
+        kinds = [m["k"] for m in collected]
+        self.assertIn("note", kinds)
+        self.assertIn("ctx", kinds)
+        self.assertNotIn("cost", kinds,
+                         "cost mid-turn nimmt den Stream-Cursor mit")
+        self.assertEqual(collected[kinds.index("ctx")]["tokens"], 0)
+
+    def test_the_page_has_a_case_for_the_new_kind(self):
+        """Die Falle hinter #117: ein Ereignis ohne Seiten-Fall faellt durch
+        den Switch und sieht trotzdem geliefert aus. Der Switch kennt `ctx`
+        und fuehrt es auf dieselbe Anzeige wie das Turn-Ende."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        sw = source[source.index('case "cost"'):]
+        sw = sw[:sw.index('case "subs"')]
+        self.assertIn('case "ctx": this.ctx(e.tokens,e.n_ctx); break;', sw)
 
 
 # ----------------------------------------------------------- the rail --------
@@ -1149,7 +1189,9 @@ class SlashCommandsReachTheWindowTests(ApiCase):
     # -- what /reset means, which is the whole reason this was rebuilt --------
 
     def test_reset_drops_the_context(self):
-        """The TERMINAL's meaning: `conversation.reset()` and the releases go."""
+        """The TERMINAL's meaning: `conversation.reset()`; the context goes.
+        ANGEPASST 2026-08-28 spaetabends auf robins Ansage: die geschriebene
+        Dauer-Freigabe ("always") ueberlebt den Reset -- nur der Chat endet."""
         api = self.windowed()
         # THE BASELINE IS NOT ZERO: a Conversation carries its system message,
         # and `reset()` keeps it. Comparing against 0 would fail on a correct
@@ -1157,12 +1199,18 @@ class SlashCommandsReachTheWindowTests(ApiCase):
         empty = len(api._conversation)
         api._conversation.append("user", "something")
         api._context_tokens = 4321
+        self.addCleanup(setattr, crow_core, "APPROVALS_FILE",
+                        crow_core.APPROVALS_FILE)
+        self.addCleanup(setattr, crow_core, "_STORED_APPROVALS", None)
+        crow_core.APPROVALS_FILE = os.path.join(self.dir, "approvals.json")
+        crow_core._STORED_APPROVALS = None
         crow_core.remember("write_file", json.dumps({"path": "x"}))
         api.slash_answer("/reset")
         self.assertEqual(len(api._conversation), empty)
         self.assertEqual(api._context_tokens, 0)
-        self.assertFalse(crow_core.remembered("write_file",
-                                              json.dumps({"path": "x"})))
+        self.assertTrue(crow_core.remembered("write_file",
+                                             json.dumps({"path": "x"})),
+                        "the written always died with the chat")
 
     def test_reset_does_NOT_archive_the_chat(self):
         """THE CASE THIS WHOLE REBUILD IS FOR.
@@ -4101,9 +4149,11 @@ class TheRibbonAndTheChatRunIntoOneTests(unittest.TestCase):
         self.assertEqual(buttons, panes)
         # MOVED, NOT WIDENED (2026-08-22): `providers` was the "Coming soon"
         # placeholder and is now two built pages, Model and API Keys. The set is
-        # still exact, so a seventh button with a six-name list is still red.
-        self.assertEqual(buttons, {"look", "skills", "server", "mcp",
-                                   "model", "subs", "keys", "about"})
+        # still exact, so a tenth button with a nine-name list is still red.
+        # WIDENED BY ONE (2026-08-28, robins Ansage): the broker moved out of
+        # the Model page onto its own -- `openrouter` is a category now.
+        self.assertEqual(buttons, {"look", "skills", "server", "mcp", "model",
+                                   "openrouter", "subs", "keys", "about"})
         self.assertIn("b.dataset.cat===name", self.source)
         self.assertNotIn('["look","skills"', self.source,
                          "the positional list is back")
@@ -5511,6 +5561,373 @@ class TheRemoteEndpointTests(ApiCase):
              mock.patch.object(crow_gui, "fetch_model_name", lambda *a, **k: "Q.gguf"):
             api._model_command(["qwen"])
         self.assertEqual(crow_core.provider_active(), crow_core.LOCAL_PROVIDER)
+
+
+class TheOpenRouterPageTests(ApiCase):
+    """robins Korrektur vom 2026-08-28: der Broker verlaesst die Model-Seite
+    auf eine eigene, und sein Schalter parkt nichts anderes -- Maschine und
+    Broker laufen parallel, was die Delegation von Anfang an tut."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._prov = (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE,
+                      crow_core.PROVIDER_TOKEN_FILE)
+        self.addCleanup(self._restore_prov)
+        crow_core.PROVIDERS_FILE = os.path.join(self.dir, "providers.json")
+        crow_core.PROVIDER_KEYS_FILE = os.path.join(self.dir, "provider_keys.json")
+        crow_core.PROVIDER_TOKEN_FILE = os.path.join(self.dir, "provider_tokens.json")
+
+    def _restore_prov(self) -> None:
+        (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE,
+         crow_core.PROVIDER_TOKEN_FILE) = self._prov
+
+    def broker(self, model: str = "z-ai/glm-5.2:free") -> None:
+        """Key and catalogue on disk, and NO pick: turns stay on the machine."""
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        doc = crow_core.provider_doc()
+        doc["catalog"] = {"openrouter": {"fetched": 1, "models": [
+            {"id": model, "name": model, "context": 131072}]}}
+        crow_core.provider_write(doc)
+
+    def test_the_broker_has_its_own_page(self):
+        """A section nobody can open, or a switch calling a method that is not
+        there, is the page-level defect shape the sheet tests already pin."""
+        page = crow_gui.PAGE
+        self.assertEqual(page.count('data-cat="openrouter"'), 2,
+                         "nav button and section, keyed the #126 way")
+        for hook in ("crow.settingsCat('openrouter')", 'id="orbody"',
+                     'id="orsaid"', "drawOpenRouter(", "openrouter_set(",
+                     "provider_model_set("):
+            self.assertIn(hook, page, hook)
+        for method in ("openrouter_set", "provider_model_set"):
+            self.assertTrue(callable(getattr(crow_gui.Api, method, None)),
+                            method)
+
+    def test_the_broker_page_routes_no_turn(self):
+        """robins dritter Brueller, 2026-08-28 abends: die Broker-Seite routet
+        GAR NICHTS. Default ist immer lokal, bis der User auf der Model-Seite
+        etwas anderes waehlt -- so the page's whole JS holds no door that
+        moves a turn, and the Api offers none for it to call."""
+        page = crow_gui.PAGE
+        broker = page[page.index("  drawOpenRouter(view){"):]
+        broker = broker[:broker.index("\n  drawModels")]
+        for door in ("provider_pick(", "orTurns", "openrouter_turns"):
+            self.assertNotIn(door, broker, door)
+        self.assertIsNone(getattr(crow_gui.Api, "openrouter_turns_set", None))
+        self.assertNotIn("openrouter_turns_set(", page)
+
+    def test_the_model_page_lost_the_broker(self):
+        """KOMPLETT raus, robins Wort: the provider rows are drawn without
+        openrouter, provRow builds no favourites any more, and the model fold
+        points at the broker's own page when turns go there."""
+        page = crow_gui.PAGE
+        rows = page[page.index("  provRow(p,active){"):]
+        rows = rows[:rows.index("\n  drawOpenRouter")]
+        self.assertNotIn("favsel", rows)
+        self.assertNotIn("orcfg", rows)
+        draw = page[page.index("  drawProviders(){"):]
+        draw = draw[:draw.index("\n  provRow")]
+        self.assertIn('p.name!=="openrouter"', draw)
+        self.assertIn("drawOpenRouter(", draw)
+        broker = page[page.index("  drawOpenRouter(view){"):]
+        broker = broker[:broker.index("\n  drawModels")]
+        self.assertIn("favsel", broker)
+        models = page[page.index("  drawModels(view){"):]
+        models = models[:models.index("\n  drawKeys")]
+        self.assertIn("Turns go to OpenRouter", models)
+
+    def test_switching_the_broker_on_leaves_the_machine_answering(self):
+        """DER BRUELLER SELBST: on is a flag, not a route."""
+        self.broker()
+        api = self.api()
+        self.assertEqual(api.openrouter_set(True), "")
+        self.assertEqual(crow_core.provider_active(), crow_core.LOCAL_PROVIDER)
+        self.assertFalse(api._endpoint()["remote"])
+
+    def test_the_view_carries_the_switch_state(self):
+        self.broker()
+        api = self.api()
+        self.assertTrue(api.provider_view()["openrouter_on"])
+        self.assertEqual(api.openrouter_set(False), "")
+        self.assertFalse(api.provider_view()["openrouter_on"])
+
+    def test_parking_the_broker_walks_the_provider_road_home(self):
+        """Turns sitting ON the broker come home the loud way: the same two
+        lines and the same emptied chat `provider_pick` owes every switch."""
+        self.broker()
+        api = self.api()
+        self.assertEqual(api.provider_pick("openrouter", "z-ai/glm-5.2:free"),
+                         "")
+        api._conversation.append("user", "hello")
+        self.drained(api)
+        with mock.patch.object(crow_gui, "check_endpoint", lambda *a, **k: "ok"), \
+             mock.patch.object(crow_gui, "fetch_n_ctx", lambda *a, **k: 0), \
+             mock.patch.object(crow_gui, "fetch_model_name", lambda *a, **k: ""):
+            self.assertEqual(api.openrouter_set(False), "")
+        self.assertEqual(crow_core.provider_active(), crow_core.LOCAL_PROVIDER)
+        notes = [m["t"] for m in self.drained(api) if m.get("k") == "note"]
+        self.assertIn(crow_core.MODEL_SWITCH_NOTE, notes)
+        self.assertNotIn("hello", json.dumps(api._conversation.payload()))
+        self.assertFalse(api.provider_view()["openrouter_on"])
+
+    def test_the_broker_switch_respects_a_running_turn_only_when_it_must(self):
+        """ON changes no endpoint, so a running turn is no reason to refuse --
+        that IS the parallel operation. OFF while turns sit on the broker is
+        an endpoint change: refused mid-turn, and refused whole."""
+        self.broker()
+        api = self.api()
+        api._worker = _AliveWorker()
+        self.assertEqual(api.openrouter_set(True), "")
+        api._worker = None
+        self.assertEqual(api.provider_pick("openrouter", "z-ai/glm-5.2:free"),
+                         "")
+        api._worker = _AliveWorker()
+        self.assertIn("mid-turn", api.openrouter_set(False))
+        self.assertEqual(crow_core.provider_active(), "openrouter")
+        self.assertTrue(api.provider_view()["openrouter_on"],
+                        "a refused park must not half-happen")
+
+    def test_a_model_picked_on_the_broker_page_moves_no_turn(self):
+        self.broker()
+        api = self.api()
+        self.assertEqual(api.provider_model_set("openrouter", "unit/x"), "")
+        self.assertEqual(crow_core.provider_active(), crow_core.LOCAL_PROVIDER)
+        self.assertEqual(crow_core.provider_model_for("openrouter"), "unit/x")
+
+    def test_everything_on_the_broker_page_leaves_the_turns_local(self):
+        """robins dritter Brueller, end to end: work the WHOLE page -- switch
+        off, switch on, favourites, model pick -- and the turn endpoint never
+        leaves the machine. Default ist lokal, bis der User auf der
+        Model-Seite etwas anderes waehlt."""
+        self.broker()
+        api = self.api()
+        self.assertEqual(api.openrouter_set(False), "")
+        self.assertEqual(api.openrouter_set(True), "")
+        self.assertEqual(api.delegate_favorites_set(["z-ai/glm-5.2:free"]), "")
+        self.assertEqual(api.provider_model_set("openrouter",
+                                                "z-ai/glm-5.2:free"), "")
+        self.assertEqual(crow_core.provider_active(), crow_core.LOCAL_PROVIDER)
+        self.assertFalse(api._endpoint()["remote"])
+
+
+class TheSubtaskCardBreathesAndKeepsItsResultShutTests(unittest.TestCase):
+    """robins Ansage vom 2026-08-28 spaetabends, letzte Fassung: das Ergebnis
+    eines Subtasks gehoert NICHT offen in den Hauptchat -- der collect-Fold
+    startet ZU und bleibt aufklappbar -- und eine LAUFENDE Karte atmet als
+    Zeile im --sub-Kanal; fertig steht sie still. Kein Subtask-Chat und die
+    Rail-Kinder samt Sprung: beides pinnen die Mockup-Faelle daneben."""
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):
+                               self.source.index("</style>")]
+
+    def _card(self) -> str:
+        card = self.source[self.source.index("  subCard(it){"):]
+        return card[:card.index("\n  subChip")]
+
+    def test_the_result_hides_behind_the_card(self):
+        """robins letzte Kartenform 2026-08-29: klassische Kopfzeile
+        (delegate · dN, Modell, Status rechts), Task darunter -- und der
+        volle Output bleibt ZU, die Karte selbst ist die Klickflaeche."""
+        card = self._card()
+        self.assertIn("res.hidden=true", card)
+        self.assertNotIn("<summary>", card, "der alte Fold ist zurueck")
+        self.assertNotIn("Click to Expand", card,
+                         "die Expand-Zeile der Zwischenfassung ist zurueck")
+        head = card[card.index('<div class="shead">'):
+                    card.index('<div class="stask">')]
+        self.assertLess(head.index("dlabel"), head.index("sname"))
+        self.assertLess(head.index("sname"), head.index("sstat"))
+        self.assertIn('d.classList.add("can")', card)
+
+    def test_a_running_card_breathes_amber_on_its_left_bar_only(self):
+        """robins finale Fassung 2026-08-28 nachts: KEINE Flaechenanimation
+        auf der Karte -- nur der linke Balken atmet, ein Bernstein-Verlauf
+        (--warn), der von oben nach unten wandert; fertig steht alles still."""
+        self.assertIn('classList.toggle("run"', self._card())
+        self.assertNotIn("subbreathe", self.css,
+                         "das Opacity-Flackern ist zurueck")
+        rule = self.css[self.css.index(".subcard.run{"):]
+        rule = rule[:rule.index(chr(125))]
+        self.assertNotIn("animation", rule,
+                         "die Kartenflaeche animiert wieder")
+        self.assertIn("border-left-color:transparent", rule)
+        bar = self.css[self.css.index(".subcard.run::before{"):]
+        bar = bar[:bar.index(chr(125))]
+        self.assertIn("linear-gradient(180deg", bar)
+        self.assertIn("var(--warn)", bar)
+        self.assertIn("subflow", bar)
+        self.assertIn("infinite", bar)
+        self.assertIn("@keyframes subflow", self.css)
+
+    def test_the_running_bar_sits_exactly_like_the_done_bar(self):
+        """robins Ansage 2026-08-29: der Bernstein-Balken einer laufenden
+        Karte sitzt EXAKT wie der stille --sub-Rand der fertigen. Als
+        freistehender 3px-Streifen voller Hoehe stand er an den Ecken
+        ueber die Kontur (sein 10px-Radius kollabiert bei 3px Breite);
+        jetzt spannt er die ganze Kartenkontur auf, traegt deren Radius
+        und zeigt per Mask nur die linke Randspalte -- klickdurchlaessig,
+        denn die Karte selbst ist die Klickflaeche."""
+        bar = self.css[self.css.index(".subcard.run::before{"):]
+        bar = bar[:bar.index(chr(125))]
+        self.assertIn("right:-1px", bar,
+                      "der Balken endet wieder vor der Kartenkontur")
+        self.assertIn("border-radius:10px;", bar,
+                      "der Balken traegt nicht den Radius der Karte")
+        self.assertNotIn("border-radius:10px 0 0 10px", bar,
+                         "die freistehende Streifenform ist zurueck")
+        self.assertIn("mask:linear-gradient(90deg", bar,
+                      "ohne Mask malt der Verlauf die ganze Karte an")
+        self.assertIn("pointer-events:none", bar,
+                      "der Balken frisst den Kartenklick")
+        self.assertNotIn("width:3px", bar,
+                         "der 3px-Streifen mit Eigenbreite ist zurueck")
+
+
+class TheSubtasksSurviveTheWindowRestartTests(ApiCase):
+    """robins Ansage vom 2026-08-28 spaetnachts, die GUI-Haelfte: nach dem
+    Fensterneustart haengen die ⑂-Zeilen wieder unter ihrem Chat und die
+    Karten kennen ihren Eltern-Pfad -- aus der Registry-Datei, nicht aus dem
+    Prozessgedaechtnis."""
+
+    def test_recalled_children_hang_under_their_chat(self):
+        crow_core.forget_subtasks()
+        self.addCleanup(crow_core.forget_subtasks)
+        self.addCleanup(setattr, crow_core, "_SUBTASKS_RECALLED", True)
+        sub = crow_core.Subtask("d7", "ein task", "",
+                                {"model": "unit/m:free", "label": "L"})
+        sub.status = "done"
+        sub.result = "R"
+        sub.parent = "C:/x/chat-1.json"
+        with crow_core._SUBTASK_LOCK:
+            crow_core.SUBTASKS["d7"] = sub
+        crow_core._subtask_persist()
+        crow_core.forget_subtasks()
+        crow_core._SUBTASKS_RECALLED = False     # das neue Fenster
+        api = self.api()
+        items = api._subs_items()
+        self.assertEqual([i["i"] for i in items], ["d7"])
+        self.assertEqual(items[0]["parent"], "C:/x/chat-1.json",
+                         "der Eltern-Pfad kam nicht aus der Registry")
+        self.assertFalse(items[0]["here"])
+
+
+class TheUserScrollOutranksTheStreamTests(unittest.TestCase):
+    """robins Regel vom 2026-08-28 nachts: USERSCROLL > ALLES. Waehrend Crow
+    schreibt oder denkt, zog jeder Chunk die Sicht ans Ende -- hochscrollen
+    war unmoeglich. Angeheftet ist nur, wer unten IST; die eigene Nachricht
+    erzwingt das Ende weiterhin."""
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def test_bottom_asks_before_it_pulls(self):
+        self.assertIn("atBottom(){", self.source)
+        self.assertIn("force||this.atBottom()", self.source)
+
+    def test_the_users_own_send_still_lands_at_the_end(self):
+        self.assertIn("this.bottom(true)", self.source,
+                      "nichts erzwingt das Ende mehr, auch die eigene "
+                      "Nachricht nicht")
+
+
+class ADeletedChatTakesItsSubtasksAlongTests(ApiCase):
+    """robin, 2026-08-28 abends, aus dem Lernkit-Lauf heraus: geloeschte
+    Chats liessen ihre Subtasks stehen, und der alte Name stand in der Rail,
+    bis ein Rename kam. Zwei Haelften: die Registry erfuhr vom Loeschen
+    nichts, und der Rail-Schnellpfad verglich eine shape ohne Titel."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        crow_core.forget_subtasks()
+        self.addCleanup(crow_core.forget_subtasks)
+
+    def _seed(self, ident: str, status: str = "done",
+              transcript: str = "") -> "crow_core.Subtask":
+        sub = crow_core.Subtask(ident, "the task", "",
+                                {"model": "unit/m:free", "label": "OpenRouter"})
+        sub.status = status
+        sub.result = "RES" if status == "done" else ""
+        sub.transcript = transcript
+        crow_core.SUBTASKS[ident] = sub
+        return sub
+
+    def _saved_chat(self, name: str = "chat-a.json") -> str:
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "hallo")
+        talk.append("assistant", "ok")
+        path = os.path.join(self.dir, name)
+        crow_core.save_session(talk, "http://127.0.0.1:1/v1", 5, path=path,
+                               with_kv=False)
+        return path
+
+    def test_deleting_a_chat_drops_its_subtasks(self):
+        api = self.api()
+        path = self._saved_chat()
+        api._current_path = path
+        sub = self._seed("d1", transcript=os.path.join(self.dir, "t1.json"))
+        with open(sub.transcript, "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        api._subs_items()                     # stamps d1 to the open chat
+        self.assertTrue(api.delete_chat(path))
+        self.assertEqual(crow_core.subtask_view(), [])
+        self.assertNotIn("d1", api._sub_parent)
+        self.assertFalse(os.path.exists(sub.transcript),
+                         "the transcript outlived its chat")
+
+    def test_another_chats_subtasks_survive_the_delete(self):
+        """DIE POSITIVPROBE: geloescht wird EIN Chat, nicht die Delegation."""
+        api = self.api()
+        gone = self._saved_chat("chat-a.json")
+        kept = self._saved_chat("chat-b.json")
+        api._current_path = kept
+        self._seed("d1")
+        api._subs_items()                     # d1 belongs to chat-b
+        self.assertTrue(api.delete_chat(gone))
+        self.assertEqual([r["i"] for r in crow_core.subtask_view()], ["d1"])
+
+    def test_a_running_subtask_is_cancelled_by_the_delete(self):
+        """Der Faden ist nicht toetbar; das Versprechen ist der RECORD:
+        cancelled gesetzt, kein Transkript mehr, nichts mehr gelistet."""
+        api = self.api()
+        path = self._saved_chat()
+        api._current_path = path
+        sub = self._seed("d1", status="running")
+        api._subs_items()
+        self.assertTrue(api.delete_chat(path))
+        self.assertTrue(sub.cancelled)
+        self.assertEqual(crow_core.subtask_view(), [])
+
+    def test_discarding_the_live_chat_drops_its_subtasks_too(self):
+        api = self.api()
+        self._seed("d1")
+        api._subs_items()                     # parent "" -- the live chat
+        self.assertTrue(api.discard_live())
+        self.assertEqual(crow_core.subtask_view(), [])
+
+    def test_the_rail_after_the_delete_names_nothing_old(self):
+        """Python-Haelfte des Namens-Bugs: nach dem Loeschen des offenen Chats
+        traegt die Rail-Payload den alten Titel nirgends mehr."""
+        api = self.api()
+        path = self._saved_chat()
+        api._current_path = path
+        api._current_title = "der alte name"
+        self.assertTrue(api.delete_chat(path))
+        rails = [m for m in self.drained(api) if m.get("k") == "rail"]
+        self.assertTrue(rails)
+        self.assertNotIn("der alte name", json.dumps(rails[-1]))
+        self.assertEqual(rails[-1]["title"], "new chat")
+
+    def test_a_title_change_repaints_the_rail(self):
+        """JS-Haelfte: der Schnellpfad verglich eine shape ohne Titel -- eine
+        reine Titelaenderung bewegte kein Pixel, erst ein Rename (neuer Pfad)
+        baute neu. Die Titel gehoeren in die shape, der live-Titel mit."""
+        page = crow_gui.PAGE
+        shape = page[page.index("const shape="):]
+        shape = shape[:shape.index("if(box.dataset.shape")]
+        self.assertIn("r.title", shape)
+        self.assertIn('"live>"+title', shape)
 
 
 class TheServerGoneMidSessionTests(ApiCase):

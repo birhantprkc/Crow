@@ -3,9 +3,13 @@
 `Settings → API Keys`, paste the key, then `Settings → Model`. The catalogue is fetched when the key
 lands and on `ask again`. Nothing is asked of a provider while a window opens.
 
+OpenRouter has its own page instead: switch, delegate favourites and model pick. **The page routes
+no turn** — its switch runs the broker for delegation while the machine keeps answering, in
+parallel. The default is always the machine; turns leave it only through the Model page.
+
 | file | |
 |---|---|
-| `%LOCALAPPDATA%\Crow\providers.json` | active provider, model per provider, catalogue |
+| `%LOCALAPPDATA%\Crow\providers.json` | active provider, model per provider, catalogue, favourites, the broker switch |
 | `%LOCALAPPDATA%\Crow\provider_keys.json` | keys, `0600`, read by no view |
 | `%LOCALAPPDATA%\Crow\provider_tokens.json` | logins, `0600`, read by no view |
 

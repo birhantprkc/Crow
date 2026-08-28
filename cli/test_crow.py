@@ -3874,6 +3874,28 @@ class TheWorkingAreaIsNotASandboxTests(ToolLayerCase):
         self.assertEqual(marks.marks, [])
         self.assertTrue(os.path.exists(inside))       # and it really was written
 
+    def test_the_mark_is_said_once_per_path_and_not_per_call(self):
+        """robins Lernkit-Lauf, 2026-08-28 abends: EIN verweigerter Pfad, ein
+        Dutzend Harness-Aufrufe, und der Chat war mit derselben Warnung
+        tapeziert -- eine Zeile, die immer da ist, liest niemand. Every
+        refused path is announced exactly ONCE a turn; a later call that
+        names nothing new says nothing, and a NEW refusal speaks again with
+        only the new path."""
+        talk = crow.Conversation("SYS")
+        second = os.path.join(self.dir, "zweite.txt")
+        self.serve([self._writes_outside()])
+        self.serve([self._runs("echo eins")])
+        self.serve([self._runs("echo zwei")])
+        self.serve([_tool_call_delta("write_file",
+                                     json.dumps({"path": second, "content": "x"}))])
+        self.serve([self._runs("echo drei")])
+        self.serve([{"content": "done"}])
+        marks = self.turn(talk, _MarkRecorder())
+        self.assertEqual(len(marks.marks), 2,
+                         "the same refusal was announced per call")
+        self.assertEqual(marks.marks[0][1], [os.path.realpath(self.outside)])
+        self.assertEqual(marks.marks[1][1], [os.path.realpath(second)])
+
     def test_the_mark_does_not_survive_into_the_next_turn(self):
         """A false alarm on a rare-event marker is the one failure that trains
         the reader to skip the line. `_REFUSED` is cleared with `_READ` and

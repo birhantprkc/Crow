@@ -2,17 +2,20 @@
 
 ## Suites
 
-Run from `cli/`. Counts measured 2026-08-26.
+Run from `cli/`, one file per interpreter — each suite's preamble owns the sandbox
+redirect, and a combined run leaves the isolation guards red. Counts measured 2026-08-29.
 
 ```
-python -m unittest test_crow test_crow_core test_crow_gui
+python -m unittest test_crow
+python -m unittest test_crow_core
+python -m unittest test_crow_gui
 ```
 
 | | cases | covers |
 |---|---|---|
-| `test_crow.py` | 418 | the terminal client |
-| `test_crow_core.py` | 618 | the shared core |
-| `test_crow_gui.py` | 465 | the window's API and page |
+| `test_crow.py` | 427 | the terminal client |
+| `test_crow_core.py` | 724 | the shared core |
+| `test_crow_gui.py` | 520 | the window's API and page |
 
 No test writes into a real installation. `test_crow_gui.py` carries a case that
 walks every path constant in both modules and rejects any pointing into
