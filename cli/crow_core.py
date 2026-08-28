@@ -833,9 +833,19 @@ INSTALL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(MANIFEST_PATH)))
 SERVER_FLAGS = (
     ("port", "--port"),
     ("ctx", "-c"),
+    ("batch", "-b"),
+    ("ubatch", "-ub"),
     ("cache_type_k", "-ctk"),
     ("cache_type_v", "-ctv"),
     ("ngl", "-ngl"),
+    # Hybrid offload (#140): experts of the first N layers stay in system RAM,
+    # --fit off keeps the manifest's placement authoritative, and --load-mode
+    # none loads them as anonymous memory -- mmap at the RAM ceiling reads the
+    # NVMe into every token (measured 2026-08-28, 19-31 tok/s spread on
+    # identical lines).
+    ("ncmoe", "-ncmoe"),
+    ("fit", "--fit"),
+    ("load_mode", "--load-mode"),
     ("parallel", "-np"),
     ("jinja", "--jinja"),
     ("slot_save_path", "--slot-save-path"),
@@ -1067,9 +1077,21 @@ def server_command(key: str, manifest: dict | None = None,
         raise ServerBootError("model %r is not on disk. Tried: %s"
                               % (key, ", ".join(tried) or "nothing -- the table has no path"))
 
-    binary, looked = server_binary(install)
-    if binary is None:
-        raise ServerBootError("no llama-server to run. Tried: %s" % ", ".join(looked))
+    # A line may name its own binary: a model whose architecture only exists in
+    # a lab engine (#140, qwen4exp needs the PR build) points there, and absent
+    # the key the packaged binary resolves as it always has. Absolute, and its
+    # absence is ITS OWN error -- falling back to a binary that cannot load the
+    # architecture would boot a server that dies one step later with less to say.
+    binary = line.get("binary")
+    if binary:
+        binary = os.path.normpath(str(binary))
+        if not os.path.isfile(binary):
+            raise ServerBootError("model %r names its own server binary and it is "
+                                  "not on disk: %s" % (key, binary))
+    else:
+        binary, looked = server_binary(install)
+        if binary is None:
+            raise ServerBootError("no llama-server to run. Tried: %s" % ", ".join(looked))
 
     argv = [binary, "-m", gguf]
     for name, flag in SERVER_FLAGS:

@@ -54,6 +54,22 @@ FLAG_SPECS = [
     # backstop if a later pair of models ever declares the same flags.
     ("cache_type_k", r"-ctk\s+(\S+)", "str"),
     ("cache_type_v", r"-ctv\s+(\S+)", "str"),
+    # #140. The hybrid-offload trio and its batch sizes. ncmoe carries the
+    # lookbehind because --spec-draft-ncmoe embeds the same letters, and a
+    # checker that reads the draft flag as the placement flag calls the wrong
+    # line right. fit and load_mode ARE value-compared: `off` keeps the
+    # manifest's placement authoritative, and `none` is the whole #140 finding
+    # -- mmap at the RAM ceiling reads the NVMe into every token.
+    ("batch", r"-b\s+(\d+)", "int"),
+    ("ubatch", r"-ub\s+(\d+)", "int"),
+    ("ncmoe", r"(?<![-\w])-ncmoe\s+(\d+)", "int"),
+    ("fit", r"--fit\s+(\S+)", "str"),
+    ("load_mode", r"--load-mode\s+(\S+)", "str"),
+    # #140. The region ANCHORS on this token, so finding the region is what its
+    # presence means -- the check exists so the manifest key is not silently
+    # unmatchable. WHICH build answers is the manifest's business: the value is
+    # an absolute lab path (the PR #27742 engine) no install can normalise.
+    ("binary", r"(llama-server(?:\.exe)?)", "flag"),
     ("jinja", r"(--jinja)\b", "flag"),
     ("moe_stream", r"(--moe-stream)(?![-\w])", "flag"),
     ("moe_stream_cache", r"--moe-stream-cache\s+(\S+)", "str"),
@@ -165,6 +181,10 @@ def expected(server):
         want["moe_stream_l2"] = True
     if "chat_template_file" in want:
         want["chat_template_file"] = True
+    # #140: like moe_stream_l2 -- the flag's presence is checkable, its value
+    # (an absolute lab path) is one machine's business, not every copy's.
+    if "binary" in want:
+        want["binary"] = True
     return want
 
 

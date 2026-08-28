@@ -70,6 +70,15 @@
         "role": "the second model, #103. Single file, 17,559,178,144 B, 866 tensors, GGUF v3, arch qwen35, model type 27B, apache-2.0, Unsloth. Header and config.json agreed character for character on 2026-08-20 (#104). MOVED UNDER _root ON 2026-08-21, and #104 measured it in Downloads: same file, byte count re-read after the move, and every model this table names now lives under one root. The interim entry spelled the path with '..' segments, which worked and read like an exception; the file moved instead so there is no exception to read. NOTE that _needs below is the server line #106 measured, and the model directory 'qwen38-gguf' was already there from the aborted HuggingFace download",
         "_needs": "-c 200000 -ctk q8_0 -ctv q8_0 -ngl 99 -np 1 -- q8_0 KV because f16 left 332.8 MiB of headroom against the 924 MiB this file documents as the loss threshold (#106)"
       },
+      "flash-next-q2-k-xl": {
+        "path": "qwen-next-gguf/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf",
+        "present": true,
+        "sampling": {"min_p": 0.0, "top_k": 20},
+        "_sampling_note": "The card's thinking mode: temperature 1.0 and top_p 0.95 come from the global block unchanged, min_p 0.0 and top_k 20 override it -- the same override the 27B carries, and the one every #140 measurement ran with.",
+        "role": "the third model, #140. arch qwen4exp: 48 layers, 512 experts per layer, 10 active, full attention every 4th layer, a shared expert per layer (stays on GPU under -ncmoe -- LLM_FFN_EXPS_REGEX matches _exps, not _shexp). 3 shards, 73.45 GiB total, byte-verified 2026-08-28 (shard 3: 28,878,402,944 B). License is qwen-community-1.0, NOT apache-2.0 like the 27B -- a ship decision reads the license first. No MTP head: no nextn in any shard header (positive control: the same scan finds nextn_predict_layers in the 27B), and no MTP sidecar in unsloth's repo.",
+        "_needs": "-c 200000 -b 4096 -ub 4096 -ncmoe 40 --fit off --load-mode none -ctk q8_0 -ctv q8_0 -np 1 on the qwen4exp engine (servers entry names the binary) -- the #140 champion line, 10-boot series 10/10 on build 439 under driver 616.56",
+        "_reasoning_note": "UNMEASURED. No reasoning_levels on purpose: the union fallback applies, and what the embedded template accepts has not been probed via /apply-template. The 27B precedent (#108) is that one offered level can be fatal -- measure before offering."
+      },
       "q2-k-xl": {
         "path": "UD-Q2_K_XL/DeepSeek-V4-Flash-UD-Q2_K_XL-00001-of-00003.gguf",
         "present": false,
@@ -139,6 +148,27 @@
       "_why_no_chat_template_file": "Unlike 0731, this GGUF's embedded template is the one to use -- unsloth's. #108 measured it: reasoning_effort low/medium/high are accepted, max and none throw, and high, xhigh and the unset case render byte-identically (sha256 a83d85ce715f), so there are three real steps and not four.",
       "_why_port_8082": "8081 is the client's default and 0731's port. The two models are alternatives, not a pair, but they were measured side by side and every raw run under runs/2026-08-20/ carries 8082 -- so a client pointed here needs --base-url http://127.0.0.1:8082/v1. Changing it would orphan those runs.",
       "_not_measured": "Decode at a full window: the 71.05 tok/s figure comes from a 16-token prompt at an EMPTY context and is not an operating value. Prefill is 3,163.9 / 3,236.4 / 3,020.5 tok/s at 4,028 / 16,006 / 32,012 tokens -- already not linear, so do not extrapolate to 200k. Crow never reaches 200k anyway: ROLLOVER_AT = 0.9 in cli/crow_core.py cuts at 180,000."
+    },
+
+    "flash-next-q2-k-xl": {
+      "port": 8083,
+      "ctx": 200000,
+      "batch": 4096,
+      "ubatch": 4096,
+      "cache_type_k": "q8_0",
+      "cache_type_v": "q8_0",
+      "ncmoe": 40,
+      "fit": "off",
+      "load_mode": "none",
+      "parallel": 1,
+      "jinja": true,
+      "binary": "C:/Users/robin/dev/crow-lab/wt-qwen-next/build-qn/bin/Release/llama-server.exe",
+      "_why_binary": "arch qwen4exp exists only in llama.cpp PR #27742; the shipped engine cannot load it. Build 439 (250b614) is the named one BY MEASUREMENT: the newer PR head eaf9376 (build 453) is 3-6 % faster when it boots and fails the warmup 11 of 19 times -- CUDA 'shared object initialization failed', uniform signature, A/B under identical driver 616.56 on 2026-08-28 (439: 13/13). A LAB ARTIFACT, not shipped -- this entry exists so the operating point can be tested from the repo; shipping it is the open product decision on #140, license gate included.",
+      "_why_port_8083": "8081 is 0731's port, 8082 the 27B's. Every raw run of the #140 series (crow-lab/runs/2026-08-28-flash-next/, 60+ rows) carries 8083; changing it would orphan them.",
+      "_why_load_mode_none": "mmap at the RAM ceiling reads the NVMe into every token: all eight grid rows ran at 63.03-63.19 of 63.38 GiB RAM with tg_3s dips 24 -> 3.8 tok/s, identical configs spread 19-31 tok/s on page-cache luck, and the build itself warns at boot. With none, CPU experts sit in anonymous memory (~47 GiB, 16 free) and two runs of the same line differ by 0.16 % prefill / 0.1 % decode. The price moves into the boot: ~68 s instead of ~13 s, paid once.",
+      "_why_ncmoe_40": "The stable optimum of the #140 sweep. Fewer CPU layers ride the VRAM edge: at >= ~31.9 GiB used the prefill collapses 941 -> 135-250 and nc32/200k/lm-none dies in the first turn (2 of 2). nc24 boots into WDDM spill at 2.70-3.40 tok/s decode. The decode curve nc36-nc40 is flat; the ceiling is the 40 GPU<->CPU transitions per token, not DDR5 bandwidth (naive ceiling ~78 tok/s, measured ~36 % of it).",
+      "_measured": "2026-08-28, driver 616.56, build 439, 10-boot series with a 31,979-token cold turn each: 10/10 boots, prefill 964.8 tok/s mean (949.99-981.03), decode 28.61 mean (27.01-29.37), VRAM 28.4 GiB after the turn (4.2 free), RAM ~46.6 GiB, load-to-health 62.3-84.8 s. Against the 27B operating point (123.05 / 2,262.96): decode x0.23, prefill x0.43. Raw rows: crow-lab/runs/2026-08-28-flash-next/results.csv; the three measurement comments sit on #140.",
+      "_not_measured": "This exact Crow shape (-np 1 AND --jinja AND q8 KV in one line) pending the boot check below; the embedded chat template against golden vectors and tool turns; reasoning levels via /apply-template; slot save with the hybrid's recurrent state -- slot_save_path is OMITTED on purpose until someone measures that a linear-attention state survives a save/restore; speculation: MTP head absent, ngram net -2 %, a 27B drafter halves decode at 0.775 acceptance (no small Qwen3.8 GGUF exists to draft with)."
     }
   },
 

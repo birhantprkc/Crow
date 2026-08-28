@@ -1754,6 +1754,29 @@ Write-Host ""
 Write-Host "    python $InstallTo\cli\crow.py" -ForegroundColor White
 Write-Host ""
 
+# THE THIRD MODEL (#140), PRINTED AND NOT FETCHED, same rule as the second: an
+# uncopied line is a stale line the day somebody needs it. This one is honest
+# about being a lab line -- arch qwen4exp exists only in llama.cpp PR #27742,
+# so the command starts the MEASURED lab build (439, 250b614) by absolute path.
+# The shipped bin\llama-server.exe cannot load the architecture, and the newer
+# PR head fails its own warmup 11 of 19 times (A/B measured 2026-08-28).
+# 10-boot series under driver 616.56: prefill 964.8 tok/s mean, decode 28.61
+# mean, VRAM 28.4 GiB after a 31,979-token turn. Flags match
+# manifests/operating-point.json servers.flash-next-q2-k-xl.
+Write-Host "  Third model, Qwen3.8-Flash-Next (#140) -- 73.45 GiB in 3 shards, lab engine:" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "    hf download unsloth/Qwen3.8-Flash-Next-GGUF --include '*UD-Q2_K_XL*' --local-dir $InstallTo\models\qwen-next-gguf" -ForegroundColor White
+Write-Host ""
+Write-Host "    C:\Users\robin\dev\crow-lab\wt-qwen-next\build-qn\bin\Release\llama-server.exe ``" -ForegroundColor White
+Write-Host "      -m $InstallTo\models\qwen-next-gguf\UD-Q2_K_XL\Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf ``" -ForegroundColor White
+Write-Host "      --port 8083 -c 200000 -b 4096 -ub 4096 ``" -ForegroundColor White
+Write-Host "      -ctk q8_0 -ctv q8_0 -ncmoe 40 ``" -ForegroundColor White
+Write-Host "      --fit off --load-mode none -np 1 ``" -ForegroundColor White
+Write-Host "      --jinja" -ForegroundColor White
+Write-Host ""
+Write-Host "    python $InstallTo\cli\crow.py --base-url http://127.0.0.1:8083/v1" -ForegroundColor White
+Write-Host ""
+
 # The last screen is the only place these four commands appear -- the model, the
 # server, and one start line per client -- and a console that was opened for the
 # install closes with it. So the run ends on a keypress rather than on its own --

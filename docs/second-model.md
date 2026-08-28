@@ -77,3 +77,34 @@ The terminal client defaults to `:8081`. The window reads the port off the runni
 |---|---|
 | this model under `--spec-type` | never run to completion |
 | the host RAM tier's effect | flag present, contribution unseparated |
+
+## Third model: Qwen3.8-Flash-Next (#140)
+
+73.45 GiB in 3 shards, `UD-Q2_K_XL`, arch `qwen4exp` — 48 layers, 512 experts per
+layer, 10 active, a shared expert per layer. Runs ONLY on the PR #27742 engine
+(lab build 439, `250b614`); the shipped binary cannot load the architecture, and
+the newer PR head `eaf9376` fails its own warmup 11 of 19 times. License is
+`qwen-community-1.0`, not apache-2.0.
+
+    C:\Users\robin\dev\crow-lab\wt-qwen-next\build-qn\bin\Release\llama-server.exe `
+      -m <models>\qwen-next-gguf\UD-Q2_K_XL\Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf `
+      --port 8083 -c 200000 -b 4096 -ub 4096 `
+      -ctk q8_0 -ctv q8_0 -ncmoe 40 `
+      --fit off --load-mode none -np 1 `
+      --jinja
+
+## Numbers (2026-08-28, build 439, driver 616.56, 10-boot series)
+
+| | |
+|---|---|
+| prefill, 31,979 tokens cold | 964.8 tok/s mean of 10 (949.99–981.03) |
+| decode | 28.61 tok/s mean of 10 (27.01–29.37) |
+| VRAM after the turn | 28.4 GiB, 4.2 free |
+| RAM | ~46.6 of 63.38 GiB |
+| boots | 10/10 |
+
+`--load-mode none` is the row that matters: mmap at the RAM ceiling reads the
+NVMe into every token — identical lines spread 19–31 tok/s on page-cache luck
+until the CPU experts sit in anonymous memory. Speculation buys nothing here:
+the GGUF ships no MTP head, ngram nets −2 %, and a 27B drafter halves decode at
+0.775 acceptance. Details: the three measurement comments on #140.
