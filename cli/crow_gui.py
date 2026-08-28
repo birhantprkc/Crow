@@ -3738,8 +3738,26 @@ const crow = {
   // second click out during the round trip, and that window is real even when
   // it is short. The BUTTON only becomes Stop if there is something to stop.
   // A rejected call unlocks too -- an api that threw leaves no turn running.
-  go(){ if(this.running){ pywebview.api.stop(); return; }
-    const text=input.value.trim(); if(!text) return;
+  // #143 E3, SECOND HALF. send() answers slash lines ahead of the busy buffer
+  // -- but go()'s gate turned EVERY submit during a turn into a stop, so the
+  // line never got there: robin typed /delegate mid-turn on 2026-08-28 and
+  // the RUNNING TURN died. Its own method rather than a branch in go(), so
+  // the ordinary path keeps its shape (the install-tile order is pinned on
+  // go()'s first occurrences). The composer stays on Stop either way: the
+  // LOCAL turn is what the button is about, and it is still running behind
+  // the slash answer.
+  fanout(text){
+    input.value=""; input.style.height="auto";
+    this.user(text);
+    pywebview.api.send(text).then(()=>this.busy(), ()=>this.busy()); },
+
+  // Only the delegation pair passes the gate -- a /reset or /model through it
+  // would yank state under a running pump -- and the stop gesture (button,
+  // plain line, Escape) stays exactly what it was.
+  go(){ const text=input.value.trim();
+    if(this.running && /^\/(delegate|subtasks)\b/i.test(text)){ this.fanout(text); return; }
+    if(this.running){ pywebview.api.stop(); return; }
+    if(!text) return;
     input.value=""; input.style.height="auto";
     this.user(text);
     // #142. The staged images travel with THIS line: drawn into it here,
@@ -6247,6 +6265,9 @@ class Api:
         "/reasoning": "this chat's thinking level; /reasoning <level>|off to set it.",
         "/thoughts": "fold the reasoning blocks open, or closed again.",
         "/image": "hold an image for the next line; /image <path>, or drop one.",
+        "/delegate": "hand a task to the remote subtask model; /delegate <task>. "
+                     "The local turn keeps running.",
+        "/subtasks": "where every delegated subtask stands.",
         "/reset": "drop the context. The chat stays where it is.",
         "/context": "how much of the window the conversation is using.",
         "/exit": "close the window.",
@@ -6308,8 +6329,49 @@ class Api:
             # THE REST OF THE LINE, NOT parts[1]: a Windows path with a space
             # is the normal case, and split() has already cut it in two.
             return self._image_command(stripped[len("/image"):].strip())
+        # #143 E3. Answered BEFORE the busy buffer by construction -- slash
+        # commands run ahead of it in send() -- which is the whole feature:
+        # the user starts a second session while the local turn is running.
+        if word == "/delegate":
+            return self._delegate_command(stripped[len("/delegate"):].strip())
+        if word == "/subtasks":
+            return crow_core.tool_subtasks()
         self.close()          # /exit, /quit
         return "closing."
+
+    def _delegate_command(self, task: str) -> str:
+        """`/delegate <task>`: the user's own fan-out, no model in the loop.
+
+        THE ANSWER IS THE TOOL'S, word for word -- terminal and window may not
+        describe one delegation differently. The watcher afterwards is what
+        draws the card: outside a turn no ticker is running, and a card nobody
+        updates would freeze on "running" forever.
+        """
+        if not task:
+            return "what should it do? /delegate <task>"
+        answer = crow_core.tool_delegate(task=task)
+        self._sub_watch()
+        return answer
+
+    def _sub_watch(self) -> None:
+        """An idle-time ticker: keeps the cards breathing when a delegation
+        runs OUTSIDE a turn. During a turn `_pump`'s own ticker is already
+        up -- and it keeps running past the turn while anything is out -- so
+        this starts nothing beside it; the signature guard would swallow
+        duplicate pushes anyway, this just spares the thread."""
+        if self._busy:
+            return
+        self._push_subs()
+        if not crow_core.subtasks_running():
+            return
+
+        def watch() -> None:
+            while crow_core.subtasks_running():
+                self._push_subs()
+                time.sleep(0.8)
+            self._push_subs()
+
+        threading.Thread(target=watch, daemon=True).start()
 
     def _image_command(self, rest: str) -> str:
         """`/image <path>` stages like a drop does; bare `/image` says what is

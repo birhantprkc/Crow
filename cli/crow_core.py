@@ -9424,8 +9424,13 @@ atexit.register(forget_mcp_servers)
 #
 # `crow.py` keeps the prose of `HELP` and is pinned against this tuple; the
 # window reads the tuple directly. Neither owns the other.
+# #143 E3 added /delegate and /subtasks: the USER starts a second session on
+# the remote subtask model, straight from the composer or the terminal line,
+# with no turn and no slot involved -- which is why both surfaces may answer
+# them even while a local turn is running.
 SLASH_COMMANDS = ("/help", "/tools", "/mcp", "/mode", "/model", "/reasoning",
-                  "/thoughts", "/image", "/reset", "/context", "/exit", "/quit")
+                  "/thoughts", "/image", "/delegate", "/subtasks",
+                  "/reset", "/context", "/exit", "/quit")
 
 
 def needs_approval(name: str, mode: str) -> bool:

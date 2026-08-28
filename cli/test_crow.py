@@ -4598,6 +4598,63 @@ class TheImageCommandTests(unittest.TestCase):
         self.assertEqual(crow.spend_staged("hello", [], base), "hello")
 
 
+class TheUserDelegatesFromTheTerminalTests(unittest.TestCase):
+    """#143 E3, Terminal-Haelfte: /delegate ist die NUTZER-eigene zweite
+    Session am Remote-Spot -- kein Modell im Spiel, kein Turn, kein Slot.
+    Die Antwort ist Wort fuer Wort die des Tools, damit Terminal und Fenster
+    eine Delegation nie verschieden beschreiben."""
+
+    SPOT = {"provider": "openrouter", "label": "OpenRouter", "remote": True,
+            "base_url": "http://x/v1", "model": "unit/model:free",
+            "api_key": "k", "headers": {}, "transport": crow_core.TRANSPORT_CHAT,
+            "routing": {}, "sticky": False, "filter": False, "params": []}
+
+    def setUp(self) -> None:
+        self._real = (crow_core._post_stream, crow_core.delegate_target)
+        self.addCleanup(self._restore)
+        crow_core.delegate_target = lambda doc=None: (dict(self.SPOT), None)
+        crow_core.forget_subtasks()
+
+    def _restore(self) -> None:
+        crow_core._post_stream, crow_core.delegate_target = self._real
+        crow_core.forget_subtasks()
+
+    def _serve(self, text: str = "OK") -> None:
+        chunks = [json.dumps({"choices": [{"delta": {"content": text}}]}),
+                  json.dumps({"choices": [],
+                              "timings": {"predicted_n": 3, "prompt_n": 5}})]
+
+        def fake(url, body, key, timeout, extra=None):
+            for chunk in chunks:
+                yield chunk
+
+        crow_core._post_stream = fake
+
+    def _slash(self, line: str):
+        return crow.run_slash(line, conversation=crow_core.Conversation(),
+                              mode="auto", show_reasoning=False,
+                              context_tokens=0, n_ctx=0, rollover_at=0.9,
+                              session=False)
+
+    def test_delegate_starts_a_subtask_and_subtasks_lists_it(self):
+        self._serve("OK")
+        result = self._slash("/delegate say ok")
+        self.assertTrue(result.handled)
+        self.assertIn("d1", crow_core.SUBTASKS)
+        thread = crow_core.SUBTASKS["d1"].thread
+        thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(crow_core.SUBTASKS["d1"].status, "done")
+        self.assertTrue(self._slash("/subtasks").handled)
+
+    def test_the_bare_line_asks_and_starts_nothing(self):
+        """NEGATIV: /delegate ohne Aufgabe startet keinen Thread -- die
+        Rueckfrage ist die ganze Antwort."""
+        result = self._slash("/delegate")
+        self.assertTrue(result.handled)
+        self.assertEqual(dict(crow_core.SUBTASKS), {})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

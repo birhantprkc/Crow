@@ -1516,6 +1516,28 @@ class SlashCommandsReachTheWindowTests(ApiCase):
         # busy() may no longer be called on the way in -- that IS the defect.
         self.assertNotIn("this.user(text); this.busy()", crow_gui.PAGE)
 
+    def test_a_delegate_line_mid_turn_is_sent_not_stopped(self):
+        """#143 E3, THE HALF THE PYTHON CASES CANNOT REACH. `send()` answers
+        slash lines ahead of the busy buffer -- and the page's own gate turned
+        every submit during a turn into `stop()`, so the line never arrived:
+        robin typed `/delegate` mid-turn on 2026-08-28 and the RUNNING TURN
+        died. The gate has to let the delegation pair through, and it has to
+        sit BEFORE the stop call it guards.
+
+        ONLY the delegation pair: a `/reset` or `/model` through this gate
+        would yank state under a running pump. The stop gesture itself is the
+        negative control below -- a plain line mid-turn still stops.
+        """
+        gate = "/^\\/(delegate|subtasks)\\b/i.test(text)"
+        self.assertIn(gate, crow_gui.PAGE)
+        stop = "pywebview.api.stop(); return;"
+        self.assertIn(stop, crow_gui.PAGE)
+        self.assertLess(crow_gui.PAGE.index(gate), crow_gui.PAGE.index(stop),
+                        "the bypass must be checked before the stop gesture")
+        # The composer stays on Stop either way: the LOCAL turn is what the
+        # button is about, and it is still running behind the slash answer.
+        self.assertIn("then(()=>this.busy(), ()=>this.busy())", crow_gui.PAGE)
+
 
 class TheSeamToThePageTests(unittest.TestCase):
     """Python speaks, the page listens, and nothing checks that they agree.
@@ -7416,6 +7438,91 @@ class TheWindowWatchesTheSubtasksTests(ApiCase):
         block = (HERE / "crow_gui.py").read_text(encoding="utf-8")
         leave = block[block.index("path = self._archive()"):]
         self.assertIn('self._sub_adopt("", path)', leave[:600])
+
+
+class TheUserDelegatesFromTheComposerTests(ApiCase):
+    """#143 E3, Fenster-Haelfte: die /delegate-Zeile wirkt SOFORT, auch
+    waehrend der lokale Zug laeuft -- slash_answer steht in send() VOR dem
+    Busy-Puffer -- und ein Leerlauf-Waechter haelt die Karte am Atmen, wenn
+    ausserhalb eines Turns delegiert wird."""
+
+    SPOT = {"provider": "openrouter", "label": "OpenRouter", "remote": True,
+            "base_url": "http://x/v1", "model": "unit/model:free",
+            "api_key": "k", "headers": {}, "transport": crow_core.TRANSPORT_CHAT,
+            "routing": {}, "sticky": False, "filter": False, "params": []}
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._real_target = crow_core.delegate_target
+        crow_core.delegate_target = lambda doc=None: (dict(self.SPOT), None)
+        crow_core.forget_subtasks()
+        self.addCleanup(self._put_back)
+
+    def _put_back(self) -> None:
+        crow_core.delegate_target = self._real_target
+        crow_core.forget_subtasks()
+
+    def _serve(self, text: str = "OK",
+               gate: "threading.Event | None" = None) -> None:
+        chunks = [json.dumps({"choices": [{"delta": {"content": text}}]}),
+                  json.dumps({"choices": [],
+                              "timings": {"predicted_n": 3, "prompt_n": 5}})]
+
+        def fake(url, body, key, timeout, extra=None):
+            if gate is not None:
+                gate.wait(10)
+            for chunk in chunks:
+                yield chunk
+
+        crow_core._post_stream = fake
+
+    def test_the_line_starts_mid_turn_and_a_plain_line_still_buffers(self):
+        api = self.api()
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self._serve("OK", gate=gate)
+        api._busy = True                      # der lokale Zug laeuft
+        started = api.send("/delegate write a haiku")
+        self.assertFalse(started, "a delegation is not a turn")
+        self.assertIn("d1", crow_core.SUBTASKS)
+        notes = [m["t"] for m in self.drained(api) if m.get("k") == "note"]
+        self.assertTrue(any("d1" in t for t in notes))
+        # NEGATIV: die NORMALE Zeile mitten im Zug wird weiter gepuffert --
+        # der Vorrang gilt der Slash-Zeile, nicht jedem Text.
+        api.send("plain question")
+        self.assertEqual(api._queued, "plain question")
+        self.assertEqual(len(crow_core.SUBTASKS), 1)
+        gate.set()
+        crow_core.SUBTASKS["d1"].thread.join(10)
+
+    def test_the_bare_line_asks_for_a_task(self):
+        api = self.api()
+        api.send("/delegate")
+        notes = [m["t"] for m in self.drained(api) if m.get("k") == "note"]
+        self.assertIn("what should it do? /delegate <task>", notes)
+        self.assertEqual(dict(crow_core.SUBTASKS), {})
+
+    def test_the_idle_watcher_pushes_until_quiet_and_subtasks_answers(self):
+        api = self.api()
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self._serve("DONE", gate=gate)
+        api.send("/delegate quick one")       # kein Turn -> der Waechter tickt
+        gate.set()
+        crow_core.SUBTASKS["d1"].thread.join(10)
+        deadline = time.monotonic() + 5
+        seen_done = False
+        while time.monotonic() < deadline and not seen_done:
+            for m in self.drained(api):
+                if m.get("k") == "subs" and any(
+                        i["i"] == "d1" and i["st"] == "done"
+                        for i in m.get("items") or []):
+                    seen_done = True
+            time.sleep(0.1)
+        self.assertTrue(seen_done, "no subs push carried the finished state")
+        api.send("/subtasks")
+        notes = [m["t"] for m in self.drained(api) if m.get("k") == "note"]
+        self.assertTrue(any("d1" in t for t in notes))
 
 
 if __name__ == "__main__":

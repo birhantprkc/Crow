@@ -1021,6 +1021,8 @@ HELP = """commands:
   /reasoning     this chat's thinking level, /reasoning <level>|off to set it
   /thoughts      show the model's reasoning as it arrives, or hide it again
   /image         hold an image for the next line, /image <path>
+  /delegate      hand a task to the remote subtask model, /delegate <task>
+  /subtasks      where every delegated subtask stands
   /reset         drop the context (costs a full re-prefill)
   /context       message count in the current context
   /exit, /quit   leave
@@ -1082,6 +1084,22 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
     if line == "/mcp" or line.startswith("/mcp "):
         print(crow_core.mcp_command(line.split()[1:]))
         print()
+        return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
+
+    # #143 E3. THE USER'S OWN FAN-OUT, no model in the loop: the whole answer
+    # is the core's tool implementation, so the terminal and the window cannot
+    # describe one delegation differently. No turn starts and no slot is
+    # touched -- the thread runs beside whatever else is happening.
+    if line == "/delegate" or line.startswith("/delegate "):
+        task = line[len("/delegate"):].strip()
+        if not task:
+            print("what should it do? /delegate <task>\n")
+        else:
+            print(crow_core.tool_delegate(task=task) + "\n")
+        return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
+
+    if line == "/subtasks":
+        print(crow_core.tool_subtasks() + "\n")
         return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
 
     if line == "/thoughts":
