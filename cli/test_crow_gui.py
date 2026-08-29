@@ -822,6 +822,22 @@ class TheSecondRolloverFiresTests(ApiCase):
         self.assertEqual(seen.get("digest"), "DIGEST-TEXT")
 
 
+class APastedScreenshotBecomesAChipTests(unittest.TestCase):
+    """robins Frage 2026-08-29 nachmittags ('wieso geht vision auf einmal
+    nicht mehr'): Ctrl+V schrieb das Bild nach pastes\\ und haengte den
+    PFAD als Text an den Composer -- die Route stammt von VOR #142. Ein
+    Paste-Bild geht jetzt denselben Weg wie ein gedropptes: Chip, Vision,
+    Transcript."""
+
+    def test_the_paste_listener_feeds_the_drop_route(self):
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        block = source[source.index('document.addEventListener("paste"'):]
+        block = block[:block.index("});") + 3]
+        self.assertIn("crow.dropped([", block)
+        self.assertNotIn("crow.attach(", block,
+                         "der Pfad landet wieder als Text im Composer")
+
+
 class ARolloverArchiveIsNotTitledByTheNoteTests(unittest.TestCase):
     """#153: ein Rollover-Archiv traegt keinen crow_title, also betitelt die
     Rail es nach der ersten User-Zeile -- und die IST die vorige
@@ -2900,17 +2916,18 @@ class TheDropAndThePasteTests(unittest.TestCase):
 
     def test_a_path_with_a_space_is_quoted(self):
         """A Windows path with a space in it is the normal case. Unquoted it is
-        two arguments to whatever reads the line next."""
-        for caller in ("this.attach(paths.map(", "crow.attach(/"):
-            self.assertIn(caller, self.code)
+        two arguments to whatever reads the line next. Der PASTE-Zweig quotet
+        seit robins Vision-Ansage 2026-08-29 nichts mehr -- ein Paste-Bild ist
+        ein Chip-Drop, siehe APastedScreenshotBecomesAChipTests."""
+        self.assertIn("this.attach(paths.map(", self.code)
         self.assertEqual(self.code.count('+p+'), 1, "the drop path is not quoted")
-        self.assertIn("'\"'+path+'\"'", self.code, "the pasted path is not quoted")
 
     def test_one_place_writes_into_the_box(self):
-        """Three callers -- dictation, drop, paste -- and one `attach`. Three
-        copies of the same four lines would drift the day one of them is fixed."""
+        """Two callers -- dictation and non-image drop -- and one `attach`.
+        Copies of the same four lines would drift the day one of them is
+        fixed. Paste speist seit 2026-08-29 die Drop-Route statt attach."""
         self.assertEqual(self.code.count("  attach(text){"), 1)
-        for caller in ("this.attach(e.text)", "this.attach(paths.map(", "crow.attach(/"):
+        for caller in ("this.attach(e.text)", "this.attach(paths.map("):
             self.assertIn(caller, self.code, "%s does not go through attach" % caller)
 
     # -- what Python has to do ---------------------------------------------

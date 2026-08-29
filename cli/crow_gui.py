@@ -4934,8 +4934,11 @@ document.addEventListener("paste", e => {
   const types = dt ? Array.prototype.slice.call(dt.types || []) : [];
   if(types.indexOf("text/plain") !== -1) return;
   e.preventDefault();
+  // robins Frage 2026-08-29 ("wieso geht vision nicht mehr"): der Pfad als
+  // Text war die Route von VOR #142. Ein Paste-Bild ist ein Bild -- es geht
+  // denselben Weg wie ein gedropptes: Chip, Vision, Transcript.
   pywebview.api.paste_clipboard().then(path => {
-    if(path) crow.attach(/\s/.test(path) ? '"'+path+'"' : path);
+    if(path) crow.dropped([path]);
   });
 });
 
