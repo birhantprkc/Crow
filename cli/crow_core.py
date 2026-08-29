@@ -2404,8 +2404,37 @@ ROLLOVER_NOTE = (
     "{where}"
     "Full record, for `crow --resume`: {path}\n"
     "{spoken}"
+    "{digest}"
     "This conversation starts here.]"
 )
+
+# #154. DIE VERDICHTUNG VOR DEM SCHNITT. In dem Moment, in dem der Roll
+# ansteht, liegt der volle Praefix noch warm im Server-Cache -- EINE kurze
+# Frage kostet ihren Prompt und den Decode des Digests, kein 180k-Prefill.
+# Nach conversation.reset() ist dieselbe Frage unmoeglich. Der Digest ist
+# Modelltext und wird als solcher gekennzeichnet, nicht als Fakt; robins
+# woertliche Zeilen (#147) bleiben unangetastet daneben.
+ROLLOVER_DIGEST_DEFAULT = 400
+ROLLOVER_DIGEST_TOKENS = ROLLOVER_DIGEST_DEFAULT   # 0 schaltet den Digest ab
+DIGEST_HEAD = ("What the model itself noted before the cut "
+               "(its own words, unverified):\n")
+DIGEST_ASK = (
+    "[This conversation is about to be archived and reset. For the fresh "
+    "context that follows, state in plain text: the current state, the "
+    "decisions taken with their reasons, and the concrete open steps. "
+    "No tool calls. Be dense -- every line must still be true after the cut.]")
+
+
+def rollover_digest_set(tokens) -> None:
+    """The window reads settings.json per turn, the terminal sets its flag
+    once; both land here. None restores the default, nonsense reads as the
+    default too -- 0 is the only way to switch the digest off."""
+    global ROLLOVER_DIGEST_TOKENS
+    try:
+        ROLLOVER_DIGEST_TOKENS = (ROLLOVER_DIGEST_DEFAULT if tokens is None
+                                  else max(0, int(tokens)))
+    except (TypeError, ValueError):
+        ROLLOVER_DIGEST_TOKENS = ROLLOVER_DIGEST_DEFAULT
 
 # #147. WHAT THE CUT USED TO EAT: the user's own short lines. Measured on the
 # code, not guessed -- `roll_over` resets to a note plus the line just typed,
@@ -2445,8 +2474,75 @@ def _spoken_carry(conversation: "Conversation", carry: "str | None") -> str:
     return SPOKEN_CARRY_HEAD + "\n".join(lines) + "\n" + tail
 
 
+def rollover_digest(conversation: "Conversation", *, base_url: str,
+                    # Sampling ist PFLICHT, wie bei review_turn: Defaults hier
+                    # waeren die zweite Kopie der drei Konstanten, und der
+                    # Betriebspunkt-Checker zaehlt sie einmal je Kerndatei.
+                    temperature: float, top_p: float, min_p: float,
+                    model: "str | None" = None, api_key: str = "",
+                    top_k: "int | None" = None,
+                    reasoning_effort: "str | None" = None,
+                    timeout: float = 120.0,
+                    extra_headers: "dict | None" = None,
+                    # None, nicht TRANSPORT_CHAT: die Konstante ist an dieser
+                    # Stelle des Moduls noch nicht definiert -- Defaults werten
+                    # bei der Definition aus, nicht beim Aufruf.
+                    transport: "str | None" = None,
+                    remote: bool = False,
+                    routing: "dict | None" = None) -> str:
+    """#154. One short question on the still-warm prefix, BEFORE the cut.
+
+    A sibling of `review_turn`, and it keeps the same three promises: the
+    question and the answer never enter the conversation, the body speaks
+    the exact dialect of the turn it interrupts -- `tools` included, because
+    a body without them renders the template differently and BREAKS the
+    warm prefix this call exists to exploit -- and IT NEVER RAISES. A digest
+    that failed is "", and the roll proceeds exactly as without one.
+    """
+    if ROLLOVER_DIGEST_TOKENS <= 0 or len(conversation) < 2:
+        return ""
+    transport = transport or TRANSPORT_CHAT
+    messages = conversation.payload() + [{"role": "user", "content": DIGEST_ASK}]
+    body = {"messages": messages, "tools": TOOLS, "stream": False,
+            "temperature": temperature, "top_p": top_p, "min_p": min_p,
+            "max_tokens": ROLLOVER_DIGEST_TOKENS}
+    if model:
+        body["model"] = model
+    if top_k is not None:
+        body["top_k"] = top_k
+    if reasoning_effort:
+        body["chat_template_kwargs"] = {"reasoning_effort": reasoning_effort}
+    if routing and transport != TRANSPORT_MESSAGES:
+        body.update(routing)
+    if remote:
+        remote_body(body)
+    if transport == TRANSPORT_MESSAGES:
+        body = anthropic_body(body)
+        url = f"{base_url.rstrip('/')}/messages"
+    else:
+        url = f"{base_url.rstrip('/')}/chat/completions"
+    try:
+        request = urllib.request.Request(
+            url, data=json.dumps(body).encode("utf-8"), method="POST",
+            headers=dict(_stream_headers(api_key, extra_headers),
+                         **{"Accept": "application/json"}))
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            answer = json.loads(resp.read().decode("utf-8") or "{}")
+        if transport == TRANSPORT_MESSAGES:
+            text = "".join(block.get("text") or ""
+                           for block in answer.get("content") or []
+                           if block.get("type") == "text")
+        else:
+            text = ((answer.get("choices") or [{}])[0]
+                    .get("message", {}).get("content") or "")
+    except Exception:              # noqa: BLE001 - Beifang, nie der Roll selbst
+        return ""
+    return text.strip()
+
+
 def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
-              carry: str | None = None, path: str | None = None) -> str | None:
+              carry: str | None = None, path: str | None = None,
+              digest: str = "") -> str | None:
     """Archive the conversation, empty it, and open the fresh one.
 
     Append-only is not broken here and this is the reason it is allowed: nothing
@@ -2477,7 +2573,11 @@ def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
     note = ROLLOVER_NOTE.format(
         tokens=context_tokens, path=path, transcript=transcript, lines=lines,
         where=f"Last worked on: {', '.join(where)}\n" if where else "",
-        spoken=spoken)
+        spoken=spoken,
+        # #154: als Modelltext gekennzeichnet, nie als Fakt -- und ein leerer
+        # Digest laesst keine Ueberschrift zurueck, die wie "geprueft und
+        # nichts gewesen" laese.
+        digest=(DIGEST_HEAD + digest.strip() + "\n") if digest.strip() else "")
     # ONE message, not two. Consecutive turns of the same role are merged or
     # rejected depending on the chat template, and neither is a thing to find
     # out at 180k tokens.
@@ -11351,7 +11451,15 @@ def run_turn(
                 events.rollover_refused()
                 stopped = True
                 break
-            archived = roll_over(conversation, base_url, context_tokens, carry=carry)
+            # #154: VOR roll_over, solange der volle Praefix noch warm im
+            # Server-Cache liegt -- danach ist dieselbe Frage ein 180k-Prefill.
+            digest = rollover_digest(
+                conversation, base_url=base_url, model=model, api_key=api_key,
+                temperature=temperature, top_p=top_p, min_p=min_p, top_k=top_k,
+                reasoning_effort=reasoning_effort, extra_headers=extra_headers,
+                transport=transport, remote=remote, routing=routing)
+            archived = roll_over(conversation, base_url, context_tokens,
+                                 carry=carry, digest=digest)
             if archived:
                 events.rolled_over(context_tokens, archived)
                 context_tokens = 0

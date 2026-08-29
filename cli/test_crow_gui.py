@@ -732,7 +732,8 @@ class TheSecondRolloverFiresTests(ApiCase):
         self._provider()
         rolls, seen = [], {}
 
-        def fake_roll(conversation, base_url, context_tokens, carry=None):
+        def fake_roll(conversation, base_url, context_tokens, carry=None,
+                      digest=""):
             rolls.append((context_tokens, carry))
             conversation.reset()
             conversation.append("user", "note\n\n" + (carry or ""))
@@ -765,7 +766,8 @@ class TheSecondRolloverFiresTests(ApiCase):
         self._provider()
         rolls, seen = [], {}
 
-        def fake_roll(conversation, base_url, context_tokens, carry=None):
+        def fake_roll(conversation, base_url, context_tokens, carry=None,
+                      digest=""):
             rolls.append(context_tokens)
             return "never"
 
@@ -786,6 +788,39 @@ class TheSecondRolloverFiresTests(ApiCase):
         self.assertEqual(rolls, [])
         self.assertIs(seen.get("rolled"), False)
 
+    def test_the_pre_turn_roll_carries_the_digest(self):
+        """#154: der Digest entsteht VOR roll_over -- auf dem noch vollen
+        Praefix, mit dem Spot des Turns -- und reist als digest= in die
+        Note."""
+        self._provider()
+        seen = {}
+
+        def fake_digest(conversation, **kw):
+            return "DIGEST-TEXT"
+
+        def fake_roll(conversation, base_url, context_tokens, carry=None,
+                      digest=""):
+            seen["digest"] = digest
+            conversation.reset()
+            conversation.append("user", "note\n\n" + (carry or ""))
+            return os.path.join(crow_core.SESSION_DIR, "rollover-fake.json")
+
+        def fake_run(conversation, **kw):
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost="", context_tokens=9,
+                                        promised_warm=False, rolled=True,
+                                        stopped=False, reported=True)
+
+        api = self.api()
+        api._n_ctx = 200192
+        api._context_tokens = 190000
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "roll_over", fake_roll), \
+             mock.patch.object(crow_core, "rollover_digest", fake_digest), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
+            api._run("weiter im Text")
+        self.assertEqual(seen.get("digest"), "DIGEST-TEXT")
+
 
 class ARolloverArchiveIsNotTitledByTheNoteTests(unittest.TestCase):
     """#153: ein Rollover-Archiv traegt keinen crow_title, also betitelt die
@@ -796,7 +831,7 @@ class ARolloverArchiveIsNotTitledByTheNoteTests(unittest.TestCase):
     def _note() -> str:
         return crow_core.ROLLOVER_NOTE.format(
             tokens=180858, path="rollover-x.json", transcript="rollover-x.md",
-            lines=12, where="", spoken="")
+            lines=12, where="", spoken="", digest="")
 
     def test_the_note_line_does_not_become_the_title(self):
         messages = [

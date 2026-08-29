@@ -20,12 +20,13 @@ when its `crow_root` points there, and nothing else records it.
 
 ---
 
-## #145/#148 — budgets and favourites
+## #145/#148/#154 — budgets, favourites, digest
 
 | key | default | what |
 |---|---|---|
 | `turn_token_budget` | `0` (off) | decoded tokens one window turn may spend; spent forces the answer, same protocol as the round budget |
 | `subtask_max_tokens` | `0` (= `REMOTE_MAX_TOKENS`, 8192) | output cap per delegated subtask; nonsense clamps to the default, never to unlimited |
+| `rollover_digest_tokens` | `400` | cap for the model's own digest in the rollover note, asked on the still-warm prefix before the cut; `0` switches it off (#154) |
 
 The delegate favourites live in `providers.json` (`delegate_favorites`), not here — set them
 from the OpenRouter page of the settings sheet.

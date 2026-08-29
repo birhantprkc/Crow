@@ -141,6 +141,8 @@ from crow_core import (  # noqa: F401 -- re-exported for the CLI and its suite
     session_format_problem,
     SessionFormatError,
     set_root,
+    rollover_digest,
+    rollover_digest_set,
     should_roll,
     SLOT_FILE,
     start_update_check,
@@ -1762,6 +1764,19 @@ def spend_staged(line: str, staged_images: list, base_url: str):
     return content
 
 
+def _roll_with_digest(conversation, args, loaded, sampling, context_tokens, line):
+    """#154 vor dem Schnitt: erst der Digest auf dem noch warmen Praefix --
+    danach waere dieselbe Frage ein voller Prefill -- dann der Roll. Ein
+    Modulhelfer, kein repl-Block: repl() traegt einen Zeilendeckel, und
+    schon der Digest-Call allein sprengte ihn."""
+    digest = rollover_digest(
+        conversation, base_url=args.base_url, model=loaded or None,
+        temperature=sampling["temperature"], top_p=sampling["top_p"],
+        min_p=sampling["min_p"], top_k=sampling.get("top_k"))
+    return roll_over(conversation, args.base_url, context_tokens,
+                     carry=line, digest=digest)
+
+
 def repl(args: argparse.Namespace) -> int:
     enable_ansi()
     install_interrupt_handler()
@@ -1818,6 +1833,7 @@ def repl(args: argparse.Namespace) -> int:
     sampling = sampling_for_run(args, loaded)          # #112, and it can refuse
     if sampling is None:
         return 2
+    rollover_digest_set(args.rollover_digest_tokens)   # #154, None ist der Default
     # The repository used to be printed here. It sits beside the wordmark now,
     # under the commands, so the endpoint block is the endpoint and the model.
     print("")
@@ -1892,7 +1908,7 @@ def repl(args: argparse.Namespace) -> int:
         # instead of being the last thing in a file nobody reads.
         rolled = False
         if should_roll(context_tokens, n_ctx, args.rollover_at):
-            archived = roll_over(conversation, args.base_url, context_tokens, carry=line)
+            archived = _roll_with_digest(conversation, args, loaded, sampling, context_tokens, line)
             if archived:
                 # Printed while context_tokens still HOLDS the number. Zeroing
                 # first and interpolating after is how this reads "archived at
@@ -2234,6 +2250,11 @@ def build_parser() -> argparse.ArgumentParser:
                         metavar="SHARE",
                         help="archive the conversation and start a fresh one at this share of"
                              f" the window, 0 to switch it off (default: {ROLLOVER_AT})")
+    parser.add_argument("--rollover-digest-tokens", dest="rollover_digest_tokens",
+                        type=int, default=None, metavar="N",
+                        help="token cap for the model's own digest in the rollover note,"
+                             " asked on the still-warm prefix before the cut; 0 switches"
+                             " it off (default: %d)" % crow_core.ROLLOVER_DIGEST_DEFAULT)
     # NOT REMOVED, MOVED BEHIND A SWITCH (#70). The per-round line is the instrument this loop was
     # built with -- it is what showed the prefix holding round by round. Deleting it would cost the
     # next person debugging the cache the only view they had; leaving it on cost every user twelve

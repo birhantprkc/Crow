@@ -10886,5 +10886,121 @@ class TheDelegateSpotTests(unittest.TestCase):
         self.assertIn("no provider", crow_core.delegate_target_set("nowhere", "x"))
 
 
+class TheRolloverCarriesADigestTests(unittest.TestCase):
+    """#154: vor dem Schnitt ist der volle Praefix noch warm im Server-Cache
+    -- EIN kurzer Zug holt eine Verdichtung der Etappe, nach dem reset() ist
+    es unmoeglich. Der Digest reitet die Note als markierter Modelltext;
+    ein Fehlschlag blockiert den Roll nie."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-digest-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._paths = (crow_core.SESSION_DIR, crow_core.SESSION_FILE)
+        crow_core.SESSION_DIR = self.dir
+        crow_core.SESSION_FILE = os.path.join(self.dir, "session.json")
+        self.addCleanup(self._restore_paths)
+        self.addCleanup(crow_core.rollover_digest_set,
+                        crow_core.ROLLOVER_DIGEST_TOKENS)
+
+    def _restore_paths(self) -> None:
+        (crow_core.SESSION_DIR, crow_core.SESSION_FILE) = self._paths
+
+    @staticmethod
+    def _conversation():
+        conversation = crow_core.Conversation("SYS", memory="")
+        conversation.append("user", "frage")
+        conversation.append("assistant", "antwort")
+        return conversation
+
+    def _serve(self, content: str = "STATE", raise_: bool = False) -> dict:
+        seen: dict = {}
+
+        class _Resp:
+            def read(self_inner):
+                return json.dumps(
+                    {"choices": [{"message": {"content": content}}]}).encode()
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+        def fake(request, timeout=None):
+            if raise_:
+                raise OSError("down")
+            seen["body"] = json.loads(request.data.decode("utf-8"))
+            seen["url"] = request.full_url
+            return _Resp()
+
+        real = crow_core.urllib.request.urlopen
+        crow_core.urllib.request.urlopen = fake
+        self.addCleanup(setattr, crow_core.urllib.request, "urlopen", real)
+        return seen
+
+    def test_the_digest_asks_once_on_the_warm_prefix(self):
+        """POSITIV: payload plus EINE Frage, tools im Body (ohne sie rendert
+        das Template anders und der warme Praefix bricht), max_tokens ist der
+        Cap -- und die Konversation bleibt unangetastet."""
+        seen = self._serve("STATE: Runde 2 offen")
+        conversation = self._conversation()
+        before = conversation.payload()
+        out = crow_core.rollover_digest(
+            conversation, base_url="http://127.0.0.1:1/v1",
+            temperature=1.0, top_p=0.95, min_p=0.01,
+            model="crow", api_key="k")
+        self.assertEqual(out, "STATE: Runde 2 offen")
+        self.assertEqual(seen["body"]["messages"][-1]["content"],
+                         crow_core.DIGEST_ASK)
+        self.assertEqual(seen["body"]["tools"], crow_core.TOOLS,
+                         "ohne tools bricht der warme Praefix")
+        self.assertEqual(seen["body"]["max_tokens"],
+                         crow_core.ROLLOVER_DIGEST_TOKENS)
+        self.assertFalse(seen["body"]["stream"])
+        self.assertEqual(conversation.payload(), before)
+
+    def test_a_cap_of_zero_sends_nothing(self):
+        """NEGATIV: 0 ist aus -- kein Request, keine Wartezeit am Schnitt."""
+        seen = self._serve()
+        crow_core.rollover_digest_set(0)
+        self.assertEqual(crow_core.rollover_digest(
+            self._conversation(), base_url="http://127.0.0.1:1/v1",
+            temperature=1.0, top_p=0.95, min_p=0.01), "")
+        self.assertNotIn("body", seen)
+
+    def test_a_failed_digest_is_empty_and_never_raises(self):
+        """NEGATIV: der Digest ist Beifang -- stirbt er, rollt der Roll exakt
+        wie heute."""
+        self._serve(raise_=True)
+        self.assertEqual(crow_core.rollover_digest(
+            self._conversation(), base_url="http://127.0.0.1:1/v1",
+            temperature=1.0, top_p=0.95, min_p=0.01), "")
+
+    def test_the_note_carries_the_digest_as_marked_model_text(self):
+        """Der Block ist als Modelltext gekennzeichnet und steht VOR dem
+        Schlusssatz; robins woertliche Zeilen (#147) bleiben daneben."""
+        conversation = self._conversation()
+        path = os.path.join(self.dir, "rollover-digest.json")
+        out = crow_core.roll_over(conversation, "http://127.0.0.1:1/v1", 1000,
+                                  carry="weiter", path=path,
+                                  digest="STATE: Runde 2 offen")
+        self.assertEqual(out, path)
+        note = crow_core.message_text(conversation.payload()[-1]["content"])
+        self.assertIn(crow_core.DIGEST_HEAD, note)
+        self.assertIn("STATE: Runde 2 offen", note)
+        self.assertLess(note.index("STATE: Runde 2 offen"),
+                        note.index("This conversation starts here.]"))
+
+    def test_an_empty_digest_leaves_no_header_behind(self):
+        """NEGATIV: ohne Digest keine Ueberschrift -- ein leerer Block laese
+        sich wie 'geprueft und nichts gewesen'."""
+        conversation = self._conversation()
+        path = os.path.join(self.dir, "rollover-empty.json")
+        crow_core.roll_over(conversation, "http://127.0.0.1:1/v1", 1000,
+                            carry="weiter", path=path, digest="")
+        note = crow_core.message_text(conversation.payload()[-1]["content"])
+        self.assertNotIn(crow_core.DIGEST_HEAD, note)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

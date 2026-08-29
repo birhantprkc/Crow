@@ -5,6 +5,7 @@
 | `--base-url` | `http://127.0.0.1:8082/v1` | Qwen's port. 0731 listens on `:8081` |
 | `--reasoning-effort` | unset | per chat via `/reasoning`. Levels come from the manifest |
 | `--rollover-at` | `0.9` | archive and start fresh at this share of the window. `0` disables |
+| `--rollover-digest-tokens N` | `400` | cap for the model's own digest in the rollover note, asked on the still-warm prefix before the cut. `0` disables (#154) |
 | `--max-tool-rounds` | `24` | `0` answers without running any tool |
 | `--mode` | `auto` | `manual` asks before writing and executing, `allowedit` before executing |
 | `--no-review` | off | stop the model saving memories and skills after a turn |

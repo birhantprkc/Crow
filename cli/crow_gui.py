@@ -8551,6 +8551,9 @@ class Api:
             crow_core.subtask_budget_set(int(doc.get("subtask_max_tokens") or 0))
         except (TypeError, ValueError):
             crow_core.subtask_budget_set(0)
+        # #154: der Digest-Cap, gleiche Tuer -- fehlt der Schluessel, gilt der
+        # Kern-Default; 0 schaltet ab. Der Setter frisst Unsinn selbst.
+        crow_core.rollover_digest_set(doc.get("rollover_digest_tokens"))
         try:
             return max(0, int(doc.get("turn_token_budget") or 0))
         except (TypeError, ValueError):
@@ -8608,9 +8611,21 @@ class Api:
         rolled = False
         if crow_core.should_roll(self._context_tokens, self._n_ctx,
                                  crow_core.ROLLOVER_AT):
+            spot0 = self._endpoint()
+            sampling0 = crow_core.sampling_for(self._model)
+            # #154: VOR roll_over, auf dem noch warmen Praefix.
+            digest = crow_core.rollover_digest(
+                self._conversation, base_url=spot0["base_url"],
+                model=spot0["model"], api_key=spot0["api_key"],
+                temperature=sampling0["temperature"], top_p=sampling0["top_p"],
+                min_p=sampling0["min_p"], top_k=sampling0.get("top_k"),
+                reasoning_effort=self._reasoning,
+                extra_headers=spot0.get("headers") or None,
+                transport=spot0.get("transport") or crow_core.TRANSPORT_CHAT,
+                remote=spot0["remote"])
             archived = crow_core.roll_over(
-                self._conversation, self._endpoint()["base_url"],
-                self._context_tokens, carry=text)
+                self._conversation, spot0["base_url"],
+                self._context_tokens, carry=text, digest=digest)
             if archived:
                 events.rolled_over(self._context_tokens, archived)
                 self._context_tokens = 0
