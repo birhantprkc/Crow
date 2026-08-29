@@ -15,7 +15,7 @@ python -m unittest test_crow_gui
 |---|---|---|
 | `test_crow.py` | 427 | the terminal client |
 | `test_crow_core.py` | 724 | the shared core |
-| `test_crow_gui.py` | 520 | the window's API and page |
+| `test_crow_gui.py` | 526 | the window's API and page |
 
 No test writes into a real installation. `test_crow_gui.py` carries a case that
 walks every path constant in both modules and rejects any pointing into

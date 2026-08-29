@@ -5580,6 +5580,14 @@ class Turn(TurnEvents):
         # noch. Das Turn-Ende schreibt danach den echten neuen Fuellstand.
         self._put({"k": "ctx", "tokens": 0, "n_ctx": 0})
 
+    def rollover_refused(self) -> None:
+        # #152: die Verweigerung war ein No-op der Basisklasse -- der Turn
+        # endete wortlos, und robin sah nur Zuege, die "einfach aufhoerten".
+        # Ehrlich rot, mit Grund.
+        self._put({"k": "fail",
+                   "t": "rollover already spent this turn -- "
+                        "stopping before the context wall"})
+
     def memory_saved(self, what: list) -> None:
         """#122. Its OWN kind, not a `note`, and the page draws it with a glow.
 
@@ -5659,7 +5667,6 @@ class Api:
         # is the model's answer, not this window's.
         self._reasoning: str | None = None
         self._promised_warm = False
-        self._rolled = False
         self._worker: threading.Thread | None = None
         # #138c. EINE ZEILE, DIE WAEHREND DES NACHLAUFS GETIPPT WURDE.
         #
@@ -6199,12 +6206,19 @@ class Api:
         before anyone names it -- and it is read the same way whether the
         conversation is on disk or still in the window.
         """
+        # #153: die Rollover-Note ist die erste User-Zeile jeder Fortsetzung
+        # und jedes Folge-Archivs -- als Titel gelesen sieht das Archiv aus
+        # wie "die ganze Session", direkt neben dem offenen Chat. Das Praefix
+        # kommt aus dem Kern-Template, keine zweite Kopie des Wortlauts.
+        note = crow_core.ROLLOVER_NOTE.split("{", 1)[0]
         for message in messages or []:
             if message.get("role") == "user":
                 # #142: blocks title by their words, like everywhere else.
                 first = crow_core.message_text(
                     message.get("content") or "").strip().splitlines()
                 if first and first[0]:
+                    if first[0].startswith(note):
+                        continue
                     return first[0][:cls.TITLE_MAX]
         return None
 
@@ -8580,6 +8594,30 @@ class Api:
             raise
 
     def _run(self, text: str) -> None:
+        # #152, zweiter Akt -- robins Retest: der Kern prueft `should_roll`
+        # erst am ENDE einer Runde. Eine Session, die schon UEBER der
+        # Schwelle steht (die RT-Session: 200,2k von 200.192), scheitert
+        # aber an der ERSTEN Anfrage (HTTP 400 exceed_context_size) und
+        # erreicht den Check nie -- der Roll war unerreichbar. Wie repl()
+        # rollt das Fenster deshalb VOR dem Turn: das Archiv ist eine
+        # vollstaendige Konversation, und die getippte Zeile eroeffnet als
+        # carry die neue -- darum unten KEIN zweites Append. Der Sink
+        # existiert schon hier, damit der Roll dieselbe Notiz und dasselbe
+        # Zaehler-Reset bekommt wie ein Mid-Turn-Roll.
+        events = Turn(self.push)
+        rolled = False
+        if crow_core.should_roll(self._context_tokens, self._n_ctx,
+                                 crow_core.ROLLOVER_AT):
+            archived = crow_core.roll_over(
+                self._conversation, self._endpoint()["base_url"],
+                self._context_tokens, carry=text)
+            if archived:
+                events.rolled_over(self._context_tokens, archived)
+                self._context_tokens = 0
+                # Der neue Prefix hat keinen warmen Slot -- das Versprechen
+                # waere eine Luege, die der naechste Turn bezahlt.
+                self._promised_warm = False
+                rolled = True
         # #121. THE LAST LINE OF DEFENCE FOR THE PIN, and it is here because
         # `_probe` has three ways to return before it reaches its own pin: the
         # endpoint would not answer, `--no-session`, or the session file could
@@ -8601,23 +8639,26 @@ class Api:
         # history, or it rides the next, unrelated line. Refusal is /props'
         # answer (`refuse_images`), asked only of a local server -- a remote
         # provider answers for itself, with its own error, on its own bill.
-        staged, self._staged_images = self._staged_images, []
-        if staged:
-            early = self._endpoint()
-            refuse = (None if early["remote"]
-                      else crow_core.refuse_images(early["base_url"]))
-            if refuse:
-                self.push({"k": "fail", "t": refuse})
-                self.push({"k": "idle"})
-                return
-            text = crow_core.user_content(text, [s["part"] for s in staged])
-        self._conversation.append("user", text)
+        # Bei einem Vor-Turn-Roll reiste die Zeile schon als carry; gestagte
+        # Bilder bleiben dann STEHEN (Chips sichtbar) und reiten die naechste
+        # Zeile -- nichts verfaellt still.
+        if not rolled:
+            staged, self._staged_images = self._staged_images, []
+            if staged:
+                early = self._endpoint()
+                refuse = (None if early["remote"]
+                          else crow_core.refuse_images(early["base_url"]))
+                if refuse:
+                    self.push({"k": "fail", "t": refuse})
+                    self.push({"k": "idle"})
+                    return
+                text = crow_core.user_content(text, [s["part"] for s in staged])
+            self._conversation.append("user", text)
         # THE RAIL LEARNS THE CHAT EXISTS NOW, NOT AFTER THE TURN. Every other
         # caller of `_reload_rail` ends something, so an entry kept "new chat ·
         # no turn yet" beside a running turn. The title is the first user line,
         # knowable exactly here.
         self._reload_rail()
-        events = Turn(self.push)
         # #112: RESOLVED PER TURN, NOT PER LAUNCH, and per model rather than
         # per client. `self._model` is what /props last reported; the core turns
         # that into the model's own four numbers, or into the three constants
@@ -8672,7 +8713,11 @@ class Api:
                 reasoning_effort=self._reasoning,
                 timeout=READ_TIMEOUT_S, context_tokens=self._context_tokens,
                 n_ctx=self._n_ctx, promised_warm=self._promised_warm,
-                rolled=self._rolled, execute_tools=self._args.execute_tools,
+                # #152: frisch je Turn, gesetzt allein vom Vor-Turn-Roll oben
+                # -- nie aus Session-Zustand: als Dauer-True verweigerte der
+                # Ein-Turn-Waechter jeden ZWEITEN Rollover der Sitzung,
+                # stumm, bis der Server bei n_ctx ablehnte.
+                rolled=rolled, execute_tools=self._args.execute_tools,
                 mode=getattr(self._args, "mode", DEFAULT_MODE),
                 approve=self._ask_page,
                 # #145: the two opt-in caps, read from settings.json per turn so
@@ -8700,7 +8745,6 @@ class Api:
 
         self._context_tokens = getattr(result, "context_tokens", self._context_tokens)
         self._promised_warm = getattr(result, "promised_warm", self._promised_warm)
-        self._rolled = getattr(result, "rolled", self._rolled)
         cost = getattr(result, "cost", None)
         line = cost.line() if cost is not None and getattr(cost, "rounds", 0) else ""
         self.push({"k": "cost", "line": "[" + line + "]" if line else "",

@@ -648,6 +648,170 @@ class TheCounterFollowsTheRolloverTests(unittest.TestCase):
         self.assertIn('case "ctx": this.ctx(e.tokens,e.n_ctx); break;', sw)
 
 
+class TheSecondRolloverFiresTests(ApiCase):
+    """#152, robins Live-Nacht 2026-08-29: der erste Rollover griff, danach
+    verweigerte jeder Folgeturn den naechsten Roll -- stumm -- bis der Server
+    bei 200.235 > 200.192 Token die Anfrage ablehnte. `rolled` ist der
+    Ein-Turn-Waechter des Kerns ("zweimal in einem Turn heisst: die Frage
+    passt nicht"); das Fenster hatte ihn zum Session-Dauerzustand gemacht."""
+
+    def setUp(self) -> None:
+        # Dasselbe Provider-Umbiegen wie TheRemoteEndpointTests: ohne es
+        # schreibt der Fall in die Modul-Sandbox mit FESTEM Pfad, und jeder
+        # spaetere Lauf findet einen gewaehlten Provider vor, wo "leer"
+        # versprochen ist -- gefunden am 401 des Bild-Falls, 2026-08-29.
+        super().setUp()
+        self._prov = (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE,
+                      crow_core.PROVIDER_TOKEN_FILE)
+        self.addCleanup(self._restore_prov)
+        crow_core.PROVIDERS_FILE = os.path.join(self.dir, "providers.json")
+        crow_core.PROVIDER_KEYS_FILE = os.path.join(self.dir, "provider_keys.json")
+        crow_core.PROVIDER_TOKEN_FILE = os.path.join(self.dir, "provider_tokens.json")
+
+    def _restore_prov(self) -> None:
+        (crow_core.PROVIDERS_FILE, crow_core.PROVIDER_KEYS_FILE,
+         crow_core.PROVIDER_TOKEN_FILE) = self._prov
+
+    def test_every_turn_starts_with_a_fresh_rolled_flag(self):
+        """POSITIV: auch NACH einem Turn, der rollte (result.rolled=True),
+        geht der naechste Turn mit rolled=False hinein -- wie repl() es je
+        Zeile frisch setzt."""
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        doc = crow_core.provider_doc()
+        doc["catalog"] = {"openrouter": {"fetched": 1, "models": [
+            {"id": "z-ai/glm-5.2:free", "name": "glm", "context": 131072}]}}
+        crow_core.provider_write(doc)
+        self.assertIsNone(crow_core.provider_pick("openrouter", "z-ai/glm-5.2:free"))
+        flags = []
+
+        def fake_run(conversation, **kw):
+            flags.append(kw["rolled"])
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost="", context_tokens=9,
+                                        promised_warm=False, rolled=True,
+                                        stopped=False, reported=True)
+
+        api = self.api()
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
+            api._conversation.append("user", "erste Frage")
+            api._run("erste Frage")
+            api._conversation.append("user", "zweite Frage")
+            api._run("zweite Frage")
+        self.assertEqual(flags, [False, False],
+                         "der Ein-Turn-Waechter reist als Session-Zustand")
+
+    def test_a_refused_rollover_is_visible_in_the_flow(self):
+        """NEGATIV zur alten Lage: die Verweigerung war ein No-op der
+        Basisklasse -- der Turn endete wortlos. Jetzt steht eine rote Zeile,
+        die den Grund nennt."""
+        collected: list[dict] = []
+        crow_gui.Turn(collected.append).rollover_refused()
+        self.assertEqual([m["k"] for m in collected], ["fail"])
+        self.assertIn("rollover", collected[0]["t"])
+
+    def _provider(self) -> None:
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        doc = crow_core.provider_doc()
+        doc["catalog"] = {"openrouter": {"fetched": 1, "models": [
+            {"id": "z-ai/glm-5.2:free", "name": "glm", "context": 131072}]}}
+        crow_core.provider_write(doc)
+        self.assertIsNone(crow_core.provider_pick("openrouter", "z-ai/glm-5.2:free"))
+
+    def test_a_session_past_the_threshold_rolls_before_the_first_request(self):
+        """robins Retest 2026-08-29: die RT-Session stand bei 200,2k von
+        200.192 -- UEBER der Wand. Der Kern prueft erst am RUNDEN-Ende, die
+        erste Anfrage scheiterte aber am Server (HTTP 400 exceed_context_size)
+        -- der Roll war unerreichbar, die Session tot. Wie repl() rollt das
+        Fenster jetzt VOR dem Turn: das Archiv ist vollstaendig, die getippte
+        Zeile eroeffnet als carry den neuen Kontext, der Turn geht mit
+        context_tokens 0 und rolled=True hinein."""
+        self._provider()
+        rolls, seen = [], {}
+
+        def fake_roll(conversation, base_url, context_tokens, carry=None):
+            rolls.append((context_tokens, carry))
+            conversation.reset()
+            conversation.append("user", "note\n\n" + (carry or ""))
+            return os.path.join(crow_core.SESSION_DIR, "rollover-fake.json")
+
+        def fake_run(conversation, **kw):
+            seen.update(kw)
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost="", context_tokens=9,
+                                        promised_warm=False, rolled=True,
+                                        stopped=False, reported=True)
+
+        api = self.api()
+        api._n_ctx = 200192
+        api._context_tokens = 190000
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "roll_over", fake_roll), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
+            api._run("weiter im Text")
+        self.assertEqual(rolls, [(190000, "weiter im Text")])
+        self.assertIs(seen.get("rolled"), True)
+        self.assertEqual(seen.get("context_tokens"), 0)
+        notes = [m["t"] for m in self.drained(api) if m.get("k") == "note"]
+        self.assertTrue(any("rolled over at 190000" in t for t in notes),
+                        "der Roll blieb unsichtbar: %r" % notes)
+
+    def test_a_session_under_the_threshold_does_not_roll_before_the_turn(self):
+        """NEGATIV: unter der Schwelle kein Vor-Turn-Roll -- die Zeile wird
+        normal angehaengt und der Turn startet mit rolled=False."""
+        self._provider()
+        rolls, seen = [], {}
+
+        def fake_roll(conversation, base_url, context_tokens, carry=None):
+            rolls.append(context_tokens)
+            return "never"
+
+        def fake_run(conversation, **kw):
+            seen.update(kw)
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost="", context_tokens=9,
+                                        promised_warm=False, rolled=False,
+                                        stopped=False, reported=True)
+
+        api = self.api()
+        api._n_ctx = 200192
+        api._context_tokens = 1000
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "roll_over", fake_roll), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
+            api._run("weiter im Text")
+        self.assertEqual(rolls, [])
+        self.assertIs(seen.get("rolled"), False)
+
+
+class ARolloverArchiveIsNotTitledByTheNoteTests(unittest.TestCase):
+    """#153: ein Rollover-Archiv traegt keinen crow_title, also betitelt die
+    Rail es nach der ersten User-Zeile -- und die IST die vorige
+    Rollover-Note. Zwei Zeilen, die beide wie "die Session" lesen."""
+
+    @staticmethod
+    def _note() -> str:
+        return crow_core.ROLLOVER_NOTE.format(
+            tokens=180858, path="rollover-x.json", transcript="rollover-x.md",
+            lines=12, where="", spoken="")
+
+    def test_the_note_line_does_not_become_the_title(self):
+        messages = [
+            {"role": "system", "content": "You are Crow."},
+            {"role": "user", "content": self._note() + "\n\nweiter gehts"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "Zeta-Labor weiterbauen"},
+        ]
+        self.assertEqual(crow_gui.Api._first_line(messages),
+                         "Zeta-Labor weiterbauen")
+
+    def test_a_file_of_only_the_note_falls_back_to_no_title(self):
+        """NEGATIV: besteht ein Archiv nur aus der Note, bleibt der
+        Dateiname-Fallback von `_entry_of` zustaendig -- kein Erfinden."""
+        messages = [{"role": "user", "content": self._note()}]
+        self.assertIsNone(crow_gui.Api._first_line(messages))
+
+
 # ----------------------------------------------------------- the rail --------
 
 class _ArchivesIntoTheLiveSession(crow_gui.Api):
