@@ -3,6 +3,21 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 1.6.1 — 2026-08-29
+
+### No child process may wait for a keystroke
+
+Found live within the hour of 1.6.0. The model ran `Invoke-WebRequest` without
+`-UseBasicParsing`; PowerShell 5.1 raises a confirmation for that and raises it **on
+the console**, not through the pipes `run_command` reads. The child had inherited the
+window's terminal as stdin and waited for a keypress nobody knew about — the turn
+stood still for 8m55s with nothing on screen to say why, and only the cost line's
+`waited` field showed it afterwards.
+
+stdin is `DEVNULL` now. Any such prompt reads EOF, the call ends at once, and what
+the program says comes back as an ordinary tool result the model can read and work
+around. In this program questions go through the approval card, nowhere else.
+
 ## 1.6.0 — 2026-08-29
 
 Git is a tool group of its own, the account connects over the device flow, and the
