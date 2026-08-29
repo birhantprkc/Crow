@@ -1496,10 +1496,38 @@ def start_server(key: str, base_url: str, install: str | None = None,
     # verloere PATH und CUDA-Pfade.
     overlay = server_env(key)
     boot_env = {**os.environ, **overlay} if overlay else None
+    # DER SERVER GEHOERT NICHT ZUR KONSOLE, DIE IHN GEBOREN HAT (#158).
+    #
+    # DIE WURZEL DER STILLEN TODE, gefunden 2026-08-29 abends nach zwei Tagen
+    # Verdacht auf Treiber und CUDA. Ohne diese Flags erbt llama-server die
+    # Konsole UND die Prozessgruppe des Fensters, und Windows schickt
+    # CTRL_C_EVENT an JEDEN Prozess einer Gruppe. Ein Strg+C im Terminal, aus
+    # dem das Fenster gestartet wurde -- ein abgebrochenes `Get-Content -Wait`,
+    # ein beendeter Messlauf -- traf damit auch den Server.
+    #
+    # UND DORT SIEHT ES AUS WIE NICHTS: llama.cpps signal_handler
+    # (tools/server/server.cpp) faehrt sauber herunter, der Prozess endet mit
+    # Code 1, es gibt keine Fehlerzeile, keinen WER-Eintrag und keinen Dump --
+    # genau das Bild, das als "stille Exit-1-Klasse" seit dem 2026-08-28 in den
+    # Uebergaben steht und das nacheinander dem Treiber-JIT, dem ComputeCache
+    # und dem PR-Build angelastet wurde. Keiner von denen war es.
+    #
+    # CREATE_NEW_PROCESS_GROUP nimmt ihn aus der Signalgruppe, CREATE_NO_WINDOW
+    # aus der Konsole -- die zweite Haelfte zaehlt fuer CTRL_CLOSE_EVENT, das
+    # eine geschlossene Konsole an ihre Anhaenger schickt. Beides gilt nur auf
+    # Windows; anderswo bleibt der Aufruf, wie er war.
+    #
+    # WAS DAS NICHT BRICHT: `stop_servers` toetet ueber taskkill /PID, nicht
+    # ueber ein Signal, und `proc.kill()` ruft TerminateProcess -- beide
+    # erreichen einen Prozess in eigener Gruppe unveraendert.
+    flags = 0
+    if sys.platform == "win32":
+        flags = (subprocess.CREATE_NEW_PROCESS_GROUP
+                 | getattr(subprocess, "CREATE_NO_WINDOW", 0))
     with open(out_path, "w", encoding="utf-8") as out_sink, \
          open(err_path, "w", encoding="utf-8") as err_sink:
         proc = subprocess.Popen(argv, stdout=out_sink, stderr=err_sink,
-                                env=boot_env)
+                                env=boot_env, creationflags=flags)
     # Der Booter behaelt seinen Prozess: ein spaeterer stiller Tod hat dann
     # einen ablesbaren Exit-Code -- und mit key und Adresse daneben kann
     # `reboot_booted` denselben Server noch einmal starten. Ein frischer
@@ -2520,7 +2548,6 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
                     temperature: float, top_p: float, min_p: float,
                     model: "str | None" = None, api_key: str = "",
                     top_k: "int | None" = None,
-                    reasoning_effort: "str | None" = None,
                     timeout: float = 120.0,
                     extra_headers: "dict | None" = None,
                     # None, nicht TRANSPORT_CHAT: die Konstante ist an dieser
@@ -2537,6 +2564,9 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
     a body without them renders the template differently and BREAKS the
     warm prefix this call exists to exploit -- and IT NEVER RAISES. A digest
     that failed is "", and the roll proceeds exactly as without one.
+
+    #157: the leg does NOT think, and it carries no
+    `reasoning_effort` -- the measured reason sits with the body.
     """
     if ROLLOVER_DIGEST_TOKENS <= 0 or len(conversation) < 2:
         return ""
@@ -2549,8 +2579,6 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
         body["model"] = model
     if top_k is not None:
         body["top_k"] = top_k
-    if reasoning_effort:
-        body["chat_template_kwargs"] = {"reasoning_effort": reasoning_effort}
     if routing and transport != TRANSPORT_MESSAGES:
         body.update(routing)
     if remote:
@@ -2559,6 +2587,21 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
         body = anthropic_body(body)
         url = f"{base_url.rstrip('/')}/messages"
     else:
+        # #157: DIE DIGEST-LEGE DENKT NICHT. Gemessen 2026-08-29 am
+        # laufenden 8082 (Qwen3.8-27B), eine Variable je Arm,
+        # max_tokens 400: mit dem Chat-Default `high` frisst das
+        # Reasoning das gesamte Budget -- 400/400 Tokens, 0 Zeichen
+        # Content -- und der Roll lief live still ohne Digest. Das
+        # Modell denkt auf JEDEM Level (low: 1006 Zeichen, die
+        # Antwort trotzdem finish-length), also heilt keine
+        # niedrigere Stufe, und reasoning_content zu ernten ist
+        # Lalltext, nicht Antwort. `enable_thinking: false` ist der
+        # Hebel: Antwort vollstaendig in 87/400 Tokens, finish stop,
+        # Reasoning 0. Templates ohne den Schalter lassen unbekannte
+        # Kwarg still fallen (gemessen: `no_think` wirkte nicht) --
+        # der Kwarg ist dort inert, und nur der chat_completions-
+        # Dialekt spricht sie an.
+        body["chat_template_kwargs"] = {"enable_thinking": False}
         url = f"{base_url.rstrip('/')}/chat/completions"
     try:
         request = urllib.request.Request(
@@ -12191,7 +12234,7 @@ def run_turn(
             digest = rollover_digest(
                 conversation, base_url=base_url, model=model, api_key=api_key,
                 temperature=temperature, top_p=top_p, min_p=min_p, top_k=top_k,
-                reasoning_effort=reasoning_effort, extra_headers=extra_headers,
+                extra_headers=extra_headers,
                 transport=transport, remote=remote, routing=routing)
             archived = roll_over(conversation, base_url, context_tokens,
                                  carry=carry, digest=digest)
