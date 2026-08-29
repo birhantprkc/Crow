@@ -1,9 +1,10 @@
 ## Tools
 
-15 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured.
+21 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured.
 
 `read_file` `write_file` `edit_file` `list_dir` `find_files` `search_text` `run_command`
-`web_search` `fetch_url` `memory` `skill` `session_search` `delegate` `subtasks` `collect`.
+`web_search` `fetch_url` `memory` `skill` `session_search` `delegate` `subtasks` `collect`
+`git_status` `git_diff` `git_log` `git_commit` `git_push` `github_connect`.
 
 ### Delegation (#143)
 
@@ -25,6 +26,28 @@ while a turn is running](../user-guide/window.md).
 | `manual` | writing and executing |
 
 Reading never asks, at any level.
+
+### Git (#156)
+
+`git_status` `git_diff` `git_log` read; `git_commit` `git_push` write. All five run a
+fixed argument list **without a shell** — a branch or path that looks like an option
+stays data — against the repository the working directory is bound to.
+
+`git_commit` stages exactly the paths it is given: no `-a`, no `.`. `git_push` uses
+git's own credentials on this machine; the GitHub token below is for the account, not
+for the push.
+
+| | |
+|---|---|
+| asks | `git_commit` and `git_push`, **at every release level, `auto` included** |
+| `always` | impossible for those two — they have no approval scope, so no answer makes the next one silent |
+| release level | cannot release them: they are not in the level table at all |
+
+`github_connect` runs the OAuth **device flow**: it returns the code immediately and
+polls in the background — the browser leg takes minutes and no tool call may hold the
+turn that long. The token lands in `provider_keys.json`, owner-only, and is never
+handed to a surface; what a surface shows is the login name. Needs a client id, see
+[the window's git panel](../user-guide/window.md).
 
 ### Outside paths ask (#144)
 

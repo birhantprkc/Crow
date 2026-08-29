@@ -531,6 +531,45 @@ TOOLS = [
         f"Killed after {COMMAND_TIMEOUT}s.",
         {"command": dict(_STR, description="The command line."),
          "cwd": dict(_STR, description="Working directory.")}, ["command"]),
+    # #156. GIT AS ITS OWN GROUP, NOT AS SHELL LINES. A `git push` through
+    # run_command is one more "executing" ask with no context; these five carry
+    # branch, paths and counts, run a fixed argv with no shell -- and the two
+    # that move history ask at EVERY level (TOOL_CLASS and ALWAYS_ASKS say how).
+    _fn("git_status",
+        "The repository under the working area: current branch, ahead/behind "
+        "its upstream, every changed file, and the +/- line totals. Read-only; "
+        "start here before any commit.",
+        {}, []),
+    _fn("git_diff",
+        "The uncommitted changes as a unified diff -- working tree and index "
+        "against HEAD. Read-only.",
+        {"path": dict(_STR, description="Limit the diff to one file or directory."),
+         "staged": {"type": "boolean",
+                    "description": "Only what is already staged for commit."}}, []),
+    _fn("git_log",
+        "The last commits, newest first: hash, date, subject, author.",
+        {"count": {"type": "integer",
+                   "description": "How many, default 10, at most 50."}}, []),
+    _fn("git_commit",
+        "Stage the named paths and commit them with the message. Asks the user "
+        "first, at every release level. Paths are staged exactly as named -- "
+        "nothing else is swept in.",
+        {"message": dict(_STR, description="The commit message."),
+         "paths": {"type": "array", "items": {"type": "string"},
+                   "description": "Files to stage for this commit. Omit to "
+                                  "commit what is already staged."}},
+        ["message"]),
+    _fn("git_push",
+        "Push a branch to its remote. This leaves the machine, so it asks the "
+        "user at every release level, every single time.",
+        {"remote": dict(_STR, description="Remote name, default origin."),
+         "branch": dict(_STR, description="Branch, default the current one.")}, []),
+    _fn("github_connect",
+        "Connect the user's GitHub account over the OAuth device flow: hand "
+        "them a code for github.com/login/device, keep polling in the "
+        "background, and store the token owner-only next to the provider keys "
+        "once they authorize. Needs github_client_id in providers.json.",
+        {}, []),
     # #96. THE WORDING IS THE INSTRUCTION -- this is the only place the model is
     # told that finding a link is not the job. A description that merely says
     # "search the web" produces a turn that hands the user three URLs, which is
@@ -6333,6 +6372,610 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
     return _clip(f"[exit {done.returncode}]\n{out}".rstrip())
 
 
+# ---------------------------------------------------------------- #156 -----
+# GIT AS A GROUP OF ITS OWN, AND WHY IT IS NOT `run_command "git ..."`.
+#
+# Git already worked through the shell. What it did NOT do is carry any of what
+# a person needs to decide: the approval card said `git push origin main` and
+# nothing about which branch, how far ahead, or what is in it. And an "always
+# for git" -- one click, one program key -- released `git push` for good, which
+# is the exact opposite of robins Ansage vom 2026-08-29: PUSH NUR AUF MEINE
+# ANSAGE.
+#
+# So the five below run a FIXED ARGV WITH NO SHELL (`shell=False`, a list), read
+# the repository the working area is bound to, and hand the surfaces structured
+# data rather than a wall of stdout. `git_commit` and `git_push` sit in classes
+# that no release level releases and no "always" can remember.
+#
+# WHAT THIS DOES NOT DO: it does not authenticate the push. The device-flow
+# token below connects the ACCOUNT -- identity, and whatever the API needs later
+# -- while pushing keeps using git's own credential helper on this machine, the
+# same one that worked before Crow existed. Putting a token on a git command
+# line would publish it to every process list on the box for the length of the
+# call, and that is a worse trade than a push that says "authentication failed".
+GIT_TIMEOUT = 60
+GIT_LOG_DEFAULT = 10
+GIT_LOG_MAX = 50
+
+GIT_EVENTS_KEEP = 200
+
+
+def git_events_file() -> str:
+    """Where Crow's own git events are written -- next to approvals.json.
+
+    A FUNCTION AND NOT A CONSTANT, deliberately. Every module-level path here is
+    computed at import, and the suite redirects `SESSION_DIR` before it imports
+    anything so that no test can write into the real installation. A constant
+    derived from it at import time would freeze whichever value existed first;
+    read through a call, this follows the redirect -- and robins Regel "kein
+    Testlauf schreibt in %LOCALAPPDATA%\\Crow" holds without anybody having to
+    remember to add a name to a list.
+    """
+    return os.path.join(os.path.dirname(SESSION_DIR), "git_events.json")
+
+
+def _git_run(args: "list[str]", repo: str) -> "tuple[int, str, str]":
+    """One git call. `(exit code, stdout, stderr)`; code 127 means no git.
+
+    NO SHELL, EVER. The argument list goes to the process as it stands, so a
+    branch called `--upload-pack=...` or a path with a space is data and not
+    syntax. This is the difference the whole group exists for.
+    """
+    import subprocess
+
+    try:
+        done = subprocess.run(["git"] + list(args), cwd=repo, timeout=GIT_TIMEOUT,
+                              capture_output=True, text=True, errors="replace")
+    except FileNotFoundError:
+        return 127, "", "git was not found on this machine"
+    except subprocess.TimeoutExpired:
+        return 124, "", f"git exceeded {GIT_TIMEOUT}s and was killed"
+    except OSError as exc:
+        return 126, "", str(exc)
+    return done.returncode, done.stdout or "", done.stderr or ""
+
+
+def git_repo(path: "str | None" = None) -> "tuple[str | None, str]":
+    """`(repository root, problem)` for the bound working area.
+
+    THE WORKING AREA DECIDES, not the process's cwd. The window's cwd is
+    whatever the shortcut handed it -- the same reason `adopt_root` exists --
+    and a git group that operated on that would commit in whichever directory
+    the launcher happened to sit in.
+    """
+    start = path or get_root()
+    if not start:
+        return None, "no working directory is bound -- pick a folder first"
+    if not os.path.isdir(start):
+        return None, f"the working directory does not exist: {start}"
+    code, out, err = _git_run(["rev-parse", "--show-toplevel"], start)
+    if code == 127:
+        return None, "git was not found on this machine"
+    if code != 0:
+        return None, f"{start} is not inside a git repository"
+    top = out.strip()
+    return (top or start), ""
+
+
+def _git_numstat(repo: str, staged: bool = False) -> "dict[str, tuple[int, int]]":
+    """Added/removed lines per path. A binary file reports (0, 0).
+
+    `-z` and NUL splitting: a path with a newline in it is legal on both
+    platforms this runs on, and the line-based form would read it as two files.
+    """
+    args = ["diff", "--numstat", "-z"] + (["--cached"] if staged else [])
+    code, out, _ = _git_run(args, repo)
+    if code != 0:
+        return {}
+    counts: "dict[str, tuple[int, int]]" = {}
+    fields = out.split("\0")
+    i = 0
+    while i < len(fields):
+        row = fields[i]
+        i += 1
+        if not row.strip():
+            continue
+        parts = row.split("\t")
+        if len(parts) < 3:
+            continue
+        plus, minus, path = parts[0], parts[1], parts[2]
+        # A rename arrives as `plus<TAB>minus<TAB><NUL>old<NUL>new`: the third
+        # field is empty and the two names follow as their own records.
+        if path == "" and i + 1 < len(fields):
+            path = fields[i + 1]
+            i += 2
+        counts[path] = (0 if plus == "-" else int(plus or 0),
+                        0 if minus == "-" else int(minus or 0))
+    return counts
+
+
+def git_status_data(path: "str | None" = None) -> dict:
+    """Branch, upstream distance and every changed file, as data.
+
+    `--porcelain=v2 --branch -z` because it is the format git PROMISES not to
+    change; `git status` in its human form is explicitly not for parsing, and
+    the short form drops the ahead/behind counts the panel shows.
+    """
+    repo, problem = git_repo(path)
+    if not repo:
+        return {"ok": False, "problem": problem, "repo": "", "branch": "",
+                "upstream": "", "ahead": 0, "behind": 0, "files": [],
+                "plus": 0, "minus": 0}
+    code, out, err = _git_run(
+        ["status", "--porcelain=v2", "--branch", "-z"], repo)
+    if code != 0:
+        return {"ok": False, "problem": (err or "git status failed").strip(),
+                "repo": repo, "branch": "", "upstream": "", "ahead": 0,
+                "behind": 0, "files": [], "plus": 0, "minus": 0}
+
+    unstaged = _git_numstat(repo, staged=False)
+    staged = _git_numstat(repo, staged=True)
+    branch = upstream = ""
+    ahead = behind = 0
+    files: "list[dict]" = []
+    records = out.split("\0")
+    i = 0
+    while i < len(records):
+        rec = records[i]
+        i += 1
+        if not rec:
+            continue
+        if rec.startswith("# branch.head "):
+            branch = rec[len("# branch.head "):].strip()
+        elif rec.startswith("# branch.upstream "):
+            upstream = rec[len("# branch.upstream "):].strip()
+        elif rec.startswith("# branch.ab "):
+            for piece in rec[len("# branch.ab "):].split():
+                try:
+                    if piece.startswith("+"):
+                        ahead = int(piece[1:])
+                    elif piece.startswith("-"):
+                        behind = int(piece[1:])
+                except ValueError:
+                    pass
+        elif rec.startswith("1 ") or rec.startswith("2 "):
+            parts = rec.split(" ", 8)
+            if len(parts) < 9:
+                continue
+            xy, name = parts[1], parts[8]
+            if rec.startswith("2 "):
+                # Renamed: the old path is the record that follows.
+                name = name.split("\t")[0]
+                i += 1
+            plus, minus = unstaged.get(name, staged.get(name, (0, 0)))
+            files.append({"st": _git_letter(xy), "path": name,
+                          "plus": plus, "minus": minus,
+                          "staged": xy[0] not in ".?"})
+        elif rec.startswith("u "):
+            parts = rec.split(" ", 10)
+            if len(parts) >= 11:
+                files.append({"st": "U", "path": parts[10], "plus": 0,
+                              "minus": 0, "staged": False})
+        elif rec.startswith("? "):
+            files.append({"st": "?", "path": rec[2:], "plus": 0, "minus": 0,
+                          "staged": False})
+
+    total_plus = sum(f["plus"] for f in files)
+    total_minus = sum(f["minus"] for f in files)
+    return {"ok": True, "problem": "", "repo": repo, "branch": branch,
+            "upstream": upstream, "ahead": ahead, "behind": behind,
+            "files": files, "plus": total_plus, "minus": total_minus}
+
+
+def _git_letter(xy: str) -> str:
+    """One letter for a two-character porcelain code -- the panel's column.
+
+    The staged half wins when both moved: a file added and then edited reads as
+    `A`, because what the next commit carries is the addition.
+    """
+    for ch in (xy[:1] or "."), (xy[1:2] or "."):
+        if ch not in (".", "?"):
+            return ch
+    return "?"
+
+
+def git_log_data(count: int = GIT_LOG_DEFAULT, path: "str | None" = None) -> dict:
+    """The last commits as data, newest first, with merges marked.
+
+    THE SEPARATOR IS A UNIT SEPARATOR, not a comma or a pipe: a commit subject
+    may contain any of those, and a format that a subject can break is a format
+    that reports somebody else's words as a field.
+    """
+    repo, problem = git_repo(path)
+    if not repo:
+        return {"ok": False, "problem": problem, "rows": []}
+    count = max(1, min(int(count or GIT_LOG_DEFAULT), GIT_LOG_MAX))
+    code, out, err = _git_run(
+        ["log", "-n", str(count), "--date=iso-strict",
+         "--pretty=format:%h\x1f%ad\x1f%an\x1f%p\x1f%s"], repo)
+    if code != 0:
+        # An empty repository is not a failure, it is a repository with no
+        # commits -- and a panel that shows a red error for it is wrong.
+        if "does not have any commits" in (err or "").lower():
+            return {"ok": True, "problem": "", "rows": []}
+        return {"ok": False, "problem": (err or "git log failed").strip(), "rows": []}
+    rows = []
+    for line in out.splitlines():
+        parts = line.split("\x1f")
+        if len(parts) < 5:
+            continue
+        sha, when, who, parents, subject = parts[:5]
+        rows.append({"kind": "merge" if len(parents.split()) > 1 else "commit",
+                     "sha": sha, "at": when, "who": who, "text": subject})
+    return {"ok": True, "problem": "", "rows": rows}
+
+
+def git_events(limit: int = GIT_EVENTS_KEEP) -> list:
+    """What Crow itself did -- pushes, connects. Unreadable reads as empty.
+
+    Same rule as the approvals store: a broken convenience file must never take
+    a working panel down with it.
+    """
+    try:
+        with open(git_events_file(), encoding="utf-8") as fh:
+            doc = json.load(fh)
+        rows = doc.get("events") or []
+    except (OSError, ValueError, AttributeError):
+        return []
+    good = [r for r in rows if isinstance(r, dict) and r.get("kind")]
+    return good[-limit:]
+
+
+def git_event_add(kind: str, text: str) -> None:
+    """Record one event of Crow's own. Failure to write is not failure to act."""
+    rows = git_events()
+    rows.append({"kind": str(kind), "text": str(text),
+                 "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+    target = git_events_file()
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as fh:
+            json.dump({"format": 1, "events": rows[-GIT_EVENTS_KEEP:]}, fh,
+                      indent=1, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def git_history(count: int = GIT_LOG_DEFAULT, path: "str | None" = None) -> dict:
+    """The panel's history: the repository's log AND what Crow performed.
+
+    TWO SOURCES, NAMED AS SUCH. Commits and merges come out of `git log`, which
+    is the truth and cannot drift. Pushes and connects are not in any log, so
+    they come from Crow's own record -- and nothing invents a row: a fork
+    appears the day something forks, not as a placeholder.
+    """
+    log = git_log_data(count, path)
+    rows = list(log.get("rows") or [])
+    rows.extend(r for r in git_events() if r.get("kind") not in ("commit", "merge"))
+    rows.sort(key=lambda r: str(r.get("at") or ""), reverse=True)
+    return {"ok": log.get("ok", False), "problem": log.get("problem", ""),
+            "rows": rows[:max(1, min(int(count or GIT_LOG_DEFAULT), GIT_LOG_MAX))]}
+
+
+def tool_git_status(**_) -> str:
+    data = git_status_data()
+    if not data["ok"]:
+        return "error: " + data["problem"]
+    head = data["branch"] or "(detached)"
+    if data["upstream"]:
+        head += f" vs {data['upstream']}"
+        if data["ahead"] or data["behind"]:
+            head += f" (ahead {data['ahead']}, behind {data['behind']})"
+    if not data["files"]:
+        return f"{head}\nnothing to commit, working tree clean"
+    lines = [head, f"{len(data['files'])} changed, "
+                   f"+{data['plus']} -{data['minus']}"]
+    for f in data["files"]:
+        mark = "staged" if f["staged"] else "unstaged"
+        lines.append(f"  {f['st']} {f['path']}  +{f['plus']} -{f['minus']}  [{mark}]")
+    return _clip("\n".join(lines))
+
+
+def tool_git_diff(path: str = "", staged: bool = False, **_) -> str:
+    repo, problem = git_repo()
+    if not repo:
+        return "error: " + problem
+    args = ["diff"] + (["--cached"] if staged else [])
+    if path:
+        # `--` so a path that looks like an option stays a path.
+        args += ["--", path]
+    code, out, err = _git_run(args, repo)
+    if code != 0:
+        return "error: " + (err or "git diff failed").strip()
+    return _clip(out.strip() or "no uncommitted changes")
+
+
+def tool_git_log(count: int = GIT_LOG_DEFAULT, **_) -> str:
+    data = git_log_data(count)
+    if not data["ok"]:
+        return "error: " + data["problem"]
+    if not data["rows"]:
+        return "no commits yet"
+    return _clip("\n".join(
+        f"{r['sha']}  {r['at'][:16]}  {r['who']}  {r['text']}"
+        + ("  [merge]" if r["kind"] == "merge" else "")
+        for r in data["rows"]))
+
+
+def tool_git_commit(message: str = "", paths=None, **_) -> str:
+    """Stage exactly what was named, then commit.
+
+    NO `-a`, AND NO `.`. The model names the paths, and those are the paths that
+    are staged -- a commit that swept in whatever else was dirty would be a
+    commit the user approved the message of and not the contents.
+    """
+    message = (message or "").strip()
+    if not message:
+        return "error: git_commit needs a 'message'"
+    repo, problem = git_repo()
+    if not repo:
+        return "error: " + problem
+    if paths:
+        if isinstance(paths, str):
+            paths = [paths]
+        code, _out, err = _git_run(["add", "--"] + [str(p) for p in paths], repo)
+        if code != 0:
+            return "error: could not stage: " + (err or "").strip()
+    # THE MESSAGE GOES IN AS ONE ARGUMENT, never through a shell: PS 5.1 broke a
+    # here-string on a line that began with `--` on 2026-08-29 and git read the
+    # subject as an option. With `shell=False` there is no line to break.
+    code, out, err = _git_run(["commit", "-m", message], repo)
+    if code != 0:
+        text = (out + err).strip()
+        if "nothing to commit" in text.lower():
+            return "error: nothing staged to commit"
+        return "error: " + (text or "git commit failed")
+    sha = ""
+    ok, head, _e = _git_run(["rev-parse", "--short", "HEAD"], repo)
+    if ok == 0:
+        sha = head.strip()
+    return _clip(f"committed {sha}\n{out.strip()}")
+
+
+def tool_git_push(remote: str = "", branch: str = "", **_) -> str:
+    """Push one branch. Asked for at every level -- see ALWAYS_ASKS."""
+    repo, problem = git_repo()
+    if not repo:
+        return "error: " + problem
+    remote = (remote or "origin").strip()
+    if not branch:
+        code, out, _e = _git_run(["rev-parse", "--abbrev-ref", "HEAD"], repo)
+        branch = out.strip() if code == 0 else ""
+    if not branch or branch == "HEAD":
+        return "error: no branch to push -- HEAD is detached, name one"
+    code, out, err = _git_run(["push", remote, branch], repo)
+    text = (out + err).strip()
+    if code != 0:
+        return "error: " + (text or "git push failed")
+    git_event_add("push", f"pushed {branch} to {remote}")
+    return _clip(f"pushed {branch} to {remote}\n{text}")
+
+
+# ---------------------------------------------------------------- #156 -----
+# GITHUB, OVER THE DEVICE FLOW.
+#
+# THE DEVICE FLOW AND NOT THE WEB FLOW, because there is no redirect target
+# here: Crow is a local window, not a site with a callback URL, and the web flow
+# would need a client SECRET shipped to every installation -- which is a secret
+# in name only. The device flow needs the client id alone, the user types an
+# eight-character code on github.com, and nothing confidential ever lives in the
+# package.
+#
+# WHAT IS STORED: the access token, through the same writer the provider keys
+# use -- one file, owner-only where the platform means it, read back after the
+# write. The token is never handed to a surface; `github_account` answers with
+# the login name, which is what a person needs to see.
+GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code"
+GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
+GITHUB_API_USER = "https://api.github.com/user"
+GITHUB_SCOPE = "repo read:user"
+GITHUB_KEY_NAME = "github"
+GITHUB_CLIENT_ID_KEY = "github_client_id"
+# CROWS EIGENE OAUTH-APP, die einzige, die es je braucht -- eine App fuer das
+# PROGRAMM, nicht eine je Repository und nicht eine je Nutzer. Sie steht hier
+# im Klartext, weil sie beim Device Flow keine Geheimnis-Eigenschaft hat: wer
+# sie kennt, kann damit nur eine Codeseite bei GitHub aufmachen, die der Nutzer
+# in seinem eigenen Browser bestaetigen muesste. Leer heisst: noch nicht
+# registriert -- dann sagt `github_connect` das, statt einen Fehler von GitHub
+# durchzureichen.
+GITHUB_CLIENT_ID_SHIPPED = ""
+# ONE ENTRY, BECAUSE THE TOKEN DOES NOT EXPIRE. robins Entscheid 2026-08-29:
+# die OAuth-App wird OHNE "Expire user access tokens" registriert -- ein Konto,
+# das man einmal verbindet, bleibt verbunden. Das ist auch GitHubs Vorgabe fuer
+# OAuth-Apps; das Ablaufen ist die Option, die man ankreuzt.
+#
+# WER DEN HAKEN DOCH SETZT, muss das hier wissen: die Antwort traegt dann
+# zusaetzlich `refresh_token` und `expires_in` (8 h), beides wird hier NICHT
+# gespeichert, und die Verbindung endet nach acht Stunden -- sichtbar als
+# "not connected" im Panel. Der Weg zurueck ist ein neuer `github_connect`.
+# GitHub's own default when it names none, and the floor for our polling: the
+# server answers `slow_down` if we ask faster, and answering that by asking
+# again immediately is how an app gets its device flow rate-limited off.
+GITHUB_POLL_MIN = 5
+GITHUB_DEVICE_TIMEOUT = 20
+
+
+def _github_post(url: str, fields: dict, timeout: float = GITHUB_DEVICE_TIMEOUT) -> dict:
+    """POST form-encoded, read JSON back. `{"error": ...}` on any failure.
+
+    `Accept: application/json` is not optional -- without it GitHub answers
+    these two endpoints in `application/x-www-form-urlencoded`, and a parser
+    written against the documented JSON gets a string it cannot read.
+    """
+    data = urllib.parse.urlencode(fields).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": f"Crow/{CLIENT_VERSION or 'dev'} (+{REPO_URL})"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read(64_000).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        return {"error": f"github answered HTTP {exc.code} {exc.reason}"}
+    except urllib.error.URLError as exc:
+        return {"error": f"could not reach github: {exc.reason}"}
+    except (TimeoutError, OSError, ValueError) as exc:
+        return {"error": f"github did not answer: {exc}"}
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return {"error": "github answered something that is not JSON"}
+    return doc if isinstance(doc, dict) else {"error": "unexpected answer from github"}
+
+
+def github_client_id() -> str:
+    """The OAuth app's client id: Crow's own, unless somebody names another.
+
+    IT SHIPS WITH THE PROGRAM, and that is the correction of 2026-08-29. It
+    stood in `providers.json` first, which made every user register their own
+    OAuth app before they could connect an account -- a setup step no other
+    client asks for, and robin said so: "die brauchen nicht fuer jedes repo
+    eine app". They do not, and neither does anyone here.
+    THE ID IS NOT A SECRET. The device flow has none: authorisation happens on
+    github.com, in the user's own browser, against a code they typed. That is
+    exactly why the flow exists for installed software, and why `gh` and its
+    kind carry their client id in the open too. What is confidential is the
+    TOKEN, and that one is minted per user and never leaves this machine.
+    The two overrides below are for somebody running their own OAuth app --
+    a fork, an enterprise, a test app. Order is deliberate: what a person put
+    in a file beats what the environment says, and both beat the shipped one.
+    """
+    doc = provider_doc()
+    value = doc.get(GITHUB_CLIENT_ID_KEY)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return ((os.environ.get("CROW_GITHUB_CLIENT_ID") or "").strip()
+            or GITHUB_CLIENT_ID_SHIPPED)
+
+
+def github_token() -> str:
+    return provider_key_for(GITHUB_KEY_NAME)
+
+
+def github_account(timeout: float = GITHUB_DEVICE_TIMEOUT) -> str:
+    """The connected login, or "". Asks GitHub; a stored login would go stale."""
+    token = github_token()
+    if not token:
+        return ""
+    req = urllib.request.Request(GITHUB_API_USER, headers={
+        "Accept": "application/vnd.github+json",
+        "Authorization": "Bearer " + token,
+        "User-Agent": f"Crow/{CLIENT_VERSION or 'dev'} (+{REPO_URL})"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            doc = json.loads(resp.read(64_000).decode("utf-8", errors="replace"))
+    except Exception:                      # noqa: BLE001 - offline is not connected
+        return ""
+    login = doc.get("login") if isinstance(doc, dict) else ""
+    return login if isinstance(login, str) else ""
+
+
+def github_device_start() -> dict:
+    """Ask GitHub for a user code. `{"error": ...}` or the code to display."""
+    client = github_client_id()
+    if not client:
+        return {"error": "no github_client_id in providers.json -- register an "
+                         "OAuth app with the device flow enabled and put its "
+                         "client id there"}
+    doc = _github_post(GITHUB_DEVICE_CODE_URL,
+                       {"client_id": client, "scope": GITHUB_SCOPE})
+    if doc.get("error"):
+        return {"error": str(doc.get("error_description") or doc["error"])}
+    if not doc.get("device_code") or not doc.get("user_code"):
+        return {"error": "github did not return a device code"}
+    return {"device_code": doc["device_code"], "user_code": doc["user_code"],
+            "verification_uri": doc.get("verification_uri")
+                                or "https://github.com/login/device",
+            "interval": max(int(doc.get("interval") or GITHUB_POLL_MIN),
+                            GITHUB_POLL_MIN),
+            "expires_in": int(doc.get("expires_in") or 900)}
+
+
+def github_device_poll(device_code: str, interval: int, expires_in: int,
+                       stop=None) -> "tuple[str, str]":
+    """Poll until authorized, refused or expired. `(token, problem)`.
+
+    `slow_down` ADDS TO THE INTERVAL AND IS NOT AN ERROR -- GitHub says five
+    seconds more, and an app that keeps its old cadence after being told that is
+    the one that gets shut off. `stop` is a callable the window sets when the
+    user cancels; it is checked between sleeps, never inside the request.
+    """
+    client = github_client_id()
+    if not client:
+        return "", "no github_client_id in providers.json"
+    deadline = time.monotonic() + max(30, int(expires_in or 900))
+    wait = max(int(interval or GITHUB_POLL_MIN), GITHUB_POLL_MIN)
+    while time.monotonic() < deadline:
+        if stop is not None and stop():
+            return "", "cancelled"
+        time.sleep(wait)
+        if stop is not None and stop():
+            return "", "cancelled"
+        doc = _github_post(GITHUB_TOKEN_URL, {
+            "client_id": client, "device_code": device_code,
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code"})
+        token = doc.get("access_token")
+        if isinstance(token, str) and token:
+            return token, ""
+        kind = str(doc.get("error") or "")
+        if kind == "authorization_pending":
+            continue
+        if kind == "slow_down":
+            wait += 5
+            continue
+        if kind == "access_denied":
+            return "", "the request was declined on github.com"
+        if kind == "expired_token":
+            return "", "the code expired before it was entered"
+        if kind:
+            return "", str(doc.get("error_description") or kind)
+    return "", "the code expired before it was entered"
+
+
+def github_store_token(token: str) -> str:
+    """Write the token and read it back. The login, or "" when it did not hold."""
+    if provider_key_set(GITHUB_KEY_NAME, token):
+        return ""
+    login = github_account()
+    git_event_add("connect", "connected github as %s" % (login or "an account"))
+    return login
+
+
+def github_disconnect() -> None:
+    """Forget the token. The account stays connected on github.com until the
+    user revokes the app there -- and saying so is `github_disconnect`'s job in
+    whichever surface calls it, because a client cannot revoke it for them."""
+    provider_key_set(GITHUB_KEY_NAME, "")
+
+
+def tool_github_connect(**_) -> str:
+    """Start the device flow and hand the code back. Polling runs behind it.
+
+    THE TOOL DOES NOT BLOCK FOR FIFTEEN MINUTES. The user has to leave this
+    window, open a browser and type eight characters; a tool call that held the
+    turn for that would hold the model, the slot and the screen. It returns the
+    code immediately and a thread waits for the authorization.
+    """
+    login = github_account()
+    if login:
+        return f"already connected as {login}"
+    started = github_device_start()
+    if started.get("error"):
+        return "error: " + started["error"]
+
+    def _wait() -> None:
+        token, _problem = github_device_poll(
+            started["device_code"], started["interval"], started["expires_in"])
+        if token:
+            github_store_token(token)
+
+    threading.Thread(target=_wait, daemon=True).start()
+    return (f"enter {started['user_code']} at {started['verification_uri']} to "
+            f"connect the account. The code is good for "
+            f"{started['expires_in'] // 60} minutes; this window stores the "
+            f"token once it is authorized.")
+
+
 # ---------------------------------------------------------------- #96 ------
 # WEB RESEARCH: THE MODEL SEARCHES AND READS, THE USER GETS AN ANSWER.
 #
@@ -6884,6 +7527,12 @@ TOOL_IMPL = {
     "find_files": tool_find_files,
     "search_text": tool_search_text,
     "run_command": tool_run_command,
+    "git_status": tool_git_status,
+    "git_diff": tool_git_diff,
+    "git_log": tool_git_log,
+    "git_commit": tool_git_commit,
+    "git_push": tool_git_push,
+    "github_connect": tool_github_connect,
     "web_search": tool_web_search,
     "fetch_url": tool_fetch_url,
     "memory": tool_memory,
@@ -6941,6 +7590,29 @@ TOOL_CLASS = {
     "delegate": "network",
     "subtasks": "reading",
     "collect": "reading",
+    # #156. GIT IN THREE CLASSES, and the split is the whole safety design.
+    #
+    # The three that only LOOK are `reading`: they run a fixed argv with no
+    # shell, touch nothing, and by the rule argued out above no level asks
+    # before a read. Classing them `executing` would put a question in front of
+    # `git status`, which is the protection-nobody-keeps-on failure again.
+    #
+    # `git_commit` and `git_push` get classes of their OWN rather than joining
+    # `executing`, because `executing` is a class that `auto` releases -- and
+    # robins Ansage vom 2026-08-29 is that a push asks at EVERY level, always.
+    # These two names are what `ALWAYS_ASKS` reads; they appear in no row of
+    # MODE_ASKS, so no level can release them, and `approval_scope` answers
+    # None for both, so no "always" can remember them either.
+    "git_status": "reading",
+    "git_diff": "reading",
+    "git_log": "reading",
+    "git_commit": "history",
+    "git_push": "publish",
+    # The device flow opens a browser leg and stores a token; it reaches the
+    # network and it writes a file this client owns. `network` is the honest
+    # half -- the user asked for it by asking, and the code is useless without
+    # them typing it on github.com.
+    "github_connect": "network",
 }
 
 # Which classes stop and ask, per level. A class not named here runs.
@@ -6958,6 +7630,26 @@ MODE_ASKS = {
     "allowedit": ("executing",),
     "auto": (),
 }
+
+# #156. TWO CLASSES NO LEVEL RELEASES -- and they are NOT rows in the table
+# above, for the reason #144's outside-path guard is not one either. The table
+# answers "what does this LEVEL hold back", and the answer for `auto` is still
+# honestly "nothing": a level is a dial the user turns, and every position of it
+# means what it says. `history` and `publish` are not on the dial at all.
+#
+# WHAT THEY ARE INSTEAD: two acts that ask every single time, whatever the dial
+# reads -- a commit writes the project's history, a push leaves the machine.
+# robins Ansage vom 2026-08-29, wörtlich: PUSH NUR AUF MEINE ANSAGE. Being
+# outside the table is what makes that true and keeps it true: no level can be
+# switched to release them, and `approval_scope` answers None for both, so no
+# "always" can remember them either. Two independent locks, neither of which is
+# a setting.
+ALWAYS_ASKS = frozenset({"history", "publish"})
+
+
+def always_asks(name: str) -> bool:
+    """Does this tool ask at EVERY level, `auto` included? #156."""
+    return TOOL_CLASS.get(name, "") in ALWAYS_ASKS
 MODES = tuple(MODE_ASKS)
 
 # AUTO IS THE DEFAULT BECAUSE IT IS WHAT THIS CLIENT ALREADY DID. Every release
@@ -9943,6 +10635,12 @@ def approval_scope(name: str, arguments: str) -> tuple[str, str] | None:
     command. The narrower the key, the less an "always" can widen into `auto`
     by accident -- which is the failure #88 asks for a test against.
 
+    #156: `git_commit` AND `git_push` HAVE NO SCOPE, and that absence is the
+    feature. None means `remembered` is always False and `remember` records
+    nothing, so the two calls that write history and leave the machine ask
+    every single time -- there is no answer a user can give that makes the
+    next one silent. The card for them therefore shows no "always" button.
+
     None means this call cannot be remembered at all: unparseable arguments, a
     missing path, an empty command. Then every occurrence asks again, which is
     the safe direction for a case nobody has thought about.
@@ -10527,7 +11225,15 @@ _SEEN: dict[tuple, str] = {}
 # able to answer "no duplicate" the second time, and `remove` then `add` of one
 # entry are two identical calls with two different correct answers. Answering
 # the second from the first would turn a correction into a silent no-op.
-NEVER_CACHED = frozenset({"run_command", "memory", "skill"})
+# #156: EVERY GIT CALL IS `run_command`'S CASE. The repository moves BECAUSE of
+# the calls in this list -- status, commit, status again is the ordinary shape
+# of one turn, and answering the second status from the first would report the
+# working tree as it stood before the commit the model just made. `github_connect`
+# is here for the same reason in time rather than in state: the answer changes
+# the moment somebody types the code on github.com.
+NEVER_CACHED = frozenset({"run_command", "memory", "skill",
+                          "git_status", "git_diff", "git_log",
+                          "git_commit", "git_push", "github_connect"})
 READ_GATED = frozenset({"write_file", "edit_file"})
 
 
@@ -11356,7 +12062,11 @@ def run_turn(
                        if call["name"] == "run_command" else [])
             outside = [p for p in outside
                        if not any(_inside(m, p) for m in _MANDATED)]
-            if ((needs_approval(call["name"], mode) or outside)
+            # #156: `git_commit` and `git_push` join `outside` here rather than
+            # in MODE_ASKS -- see ALWAYS_ASKS for why the level table is the
+            # wrong place. `remembered` cannot release them: they have no scope.
+            if ((needs_approval(call["name"], mode) or outside
+                 or always_asks(call["name"]))
                     and not remembered(call["name"], call["arguments"])):
                 answer = "no"
                 if approve is not None:

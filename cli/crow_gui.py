@@ -408,6 +408,18 @@ def code_open() -> bool:
     return read_settings().get("code_open") is True
 
 
+def git_open() -> bool:
+    """Is the git panel unfolded? False for anything this build does not have.
+
+    #156, and the same default as the code panel for the same reason: it shows
+    the state of a repository, and most folders are not one. A pane that opened
+    on every start would greet half the users with "no repository here". The
+    octocat in the title bar is what makes it findable -- and, because there is
+    no cross in the panel, also what folds it away again.
+    """
+    return read_settings().get("git_open") is True
+
+
 def open_projects() -> dict:
     """Which project rows are unfolded, by path. Absent means unfolded.
 
@@ -752,54 +764,186 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
    statt `flex:none`, damit die Mindestbreite von #main gewinnt, wenn Fenster,
    Rail und gezogene Panelbreite zusammen nicht passen. `width` bleibt die
    Wunschbreite; gequetscht wird nur, was nicht hineinpasst. */
-#code{width:var(--codew,__CODEW__px);flex:0 1 auto;min-width:0;background:var(--rail);
-  display:flex;flex-direction:column;min-height:0;overflow:hidden}
+/* #156. EINE SPALTE, ZWEI PANELS. Bis hierher WAR `#code` die Spalte: es trug
+   die Breite, den Griff und die Falte. Mit einem zweiten Panel geht das nicht
+   mehr -- robins Ansage vom 2026-08-29: beide offen heisst uebereinander, eins
+   zugeklappt heisst, das andere hat die Flaeche allein. Das ist genau eine
+   Flexspalte, und die Breite gehoert ab jetzt IHR: der Griff zieht eine Kante
+   und nicht ein Panel, und `code_width` misst weiter dasselbe Rechteck.
+   Die Panels darin teilen sich die Hoehe zu gleichen Teilen (`flex:1 1 0`) --
+   nicht nach Inhalt, denn sonst schoebe eine wachsende Werkzeugliste das
+   Git-Panel aus dem Bild, waehrend man hineinsieht. */
+#side{width:var(--codew,__CODEW__px);flex:0 1 auto;min-width:0;
+  display:flex;flex-direction:column;min-height:0;background:var(--rail);
+  transition:width .16s ease}
+#side.dragging{transition:none}
+/* DIE ZUSAGE DES PANELS BLEIBT SEINE EIGENE. `min-width:0` und `flex:0 1 auto`
+   stehen weiter hier, wo #138c sie hingeschrieben hat: das Panel gibt nach,
+   bevor die Eingabemaske es tut. Dass es jetzt in einer Spalte liegt, aendert
+   daran nichts -- die Spalte traegt dieselbe Regel eine Ebene hoeher. */
+#code{width:auto;flex:0 1 auto;min-width:0;min-height:0;background:var(--rail);
+  display:flex;flex-direction:column;overflow:hidden}
+#git{width:auto;flex:0 1 auto;min-width:0;min-height:0;background:var(--rail);
+  display:flex;flex-direction:column;overflow:hidden}
+/* DIE HOEHE TEILEN SIE SICH GLEICH, und das steht als eigene Regel da, damit
+   die beiden Zusagen darueber unberuehrt bleiben. Nicht nach Inhalt: eine
+   wachsende Werkzeugliste schoebe das Git-Panel sonst aus dem Bild, waehrend
+   jemand hineinsieht. */
+#side > aside{flex:1 1 0}
+/* Die Fuge zwischen beiden, und NUR wenn beide da sind: eine Linie ueber einem
+   Panel, das allein steht, waere ein Rand zum Fensterhintergrund. */
+body:not([data-code="shut"]) #git{border-top:1px solid var(--line)}
 #codegrip{flex:none;width:5px;margin:0 -2px;z-index:3;cursor:col-resize;
   background:transparent;transition:background .12s ease}
 #codegrip:hover,#codegrip.on{background:var(--bevel)}
-#code.dragging{transition:none}
-#code{transition:width .16s ease}
-body[data-code="shut"] #code{width:0;overflow:hidden}
+/* ZUGEKLAPPT HEISST WEG UND NICHT NUR NULL BREIT. Die Breite bleibt stehen --
+   sie ist die Zusage, gegen die #138 geschrieben ist --, aber in einer Spalte
+   bekaeme ein Element von null Breite weiterhin seinen halben Hoehenanteil,
+   und das offene Panel haette die Haelfte seiner Flaeche an etwas Unsichtbares
+   verloren. Also beides. */
+body[data-code="shut"] #code{width:0;overflow:hidden;display:none}
+body[data-git="shut"] #git{width:0;overflow:hidden;display:none}
+/* Erst wenn BEIDE zu sind, faellt die Spalte selbst zusammen. */
+body[data-code="shut"][data-git="shut"] #side{width:0;overflow:hidden}
 /* DER GRIFF GEHT MIT. Ein Anfasser an einer Flaeche von null Pixeln ist ein
    Streifen, der nichts bewegt -- und er saesse genau auf der Kante, die das
    geschlossene Panel gerade sauber macht. */
-body[data-code="shut"] #codegrip{display:none}
+body[data-code="shut"][data-git="shut"] #codegrip{display:none}
 #codehead{display:flex;align-items:center;gap:8px;padding:0 12px;
   min-height:var(--barh);flex:none}
 #codehead h2{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.13em;
   text-transform:uppercase;color:var(--dimmer)}
 #codehead .n{color:var(--dimmer);font-size:11px;font-variant-numeric:tabular-nums}
-#codecopy{margin-left:auto;font:inherit;font-size:11px;color:var(--dim);
-  background:transparent;border:1px solid var(--line);border-radius:6px;
-  padding:2px 9px;cursor:pointer}
-#codecopy:hover{border-color:var(--bevel);color:var(--accent)}
-/* #138b. `margin-left:auto` WANDERT AUF DEN ERSTEN DER BEIDEN, sonst schoeben
-   sich zwei Knoepfe je einmal nach rechts und der Abstand zwischen ihnen
-   waere der ganze Rest der Leiste. */
+/* #156. `copy` IM KOPF IST WEG, ersatzlos -- robins Ansage vom 2026-08-29:
+   "die copy funktion aus dem Header zaehlt global fuer alles (das ist doof)".
+   Sie kopierte den sichtbaren Text des ganzen Panels, also Aufrufliste und
+   Quelltext in einem Block, und wer einen Codeblock wollte, bekam alles. Der
+   Knopf sitzt jetzt an jedem Block (`.cwcopy`), wo er weiss, was er meint.
+   `clear all` bleibt allein im Kopf: es MEINT alles, das ist sein Zweck. */
 #codewipe{margin-left:auto;font:inherit;font-size:11px;color:var(--dimmer);
   background:transparent;border:1px solid var(--line);border-radius:6px;
   padding:2px 9px;cursor:pointer}
 #codewipe:hover{border-color:var(--bevel);color:var(--text-hover)}
-#codecopy{margin-left:0}
 #codebody{overflow-y:auto;padding:0 8px 10px;flex:1;min-height:0}
 /* #138b. DER QUELLTEXT UNTER EIGENEM NAMEN, damit der Abschnitt beantwortet,
    wofuer er da ist. Versteckt, solange nichts geschrieben wurde -- eine
    Ueberschrift ueber einer leeren Flaeche behauptet einen Inhalt. */
 #codefiles[hidden]{display:none}
-#codefiles .cfh{font-size:10px;letter-spacing:.13em;text-transform:uppercase;
-  color:var(--dimmer);padding:8px 2px 0}
+/* #156. DERSELBE KLAPPKOPF WIE DIE AUFRUFE. Vorher war "Program code" eine
+   Ueberschrift ueber einer Liste, die nur wachsen konnte -- robins Ansage vom
+   2026-08-29: eine Gruppe, die sich zuklappen laesst, wie Tool-Calls. Damit
+   traegt das Panel zwei gleiche Klappen statt einer Klappe und einer Zeile,
+   und der Zaehler sagt, wie viele Bloecke darin liegen. */
+#codefiles.shut .cfbody{display:none}
 /* #138. EIN BLOCK JE AUFRUF. Dieselbe Sprache wie ein Codeblock in der Antwort
    -- Rahmen, Kopfzeile, Monospace -- weil es dasselbe ist: Text, den ein Modell
    schreibt und den jemand lesen will. */
 .cw{margin:8px 0 0;border:1px solid var(--line);border-radius:8px;
   background:var(--bg);overflow:hidden}
-.cwh{padding:5px 9px;font-size:10.5px;font-weight:600;letter-spacing:.06em;
+/* #156. Der Pfad und sein eigener Kopierknopf in einer Zeile. */
+.cwh{display:flex;align-items:center;gap:8px;
+  padding:5px 6px 5px 9px;font-size:10.5px;font-weight:600;letter-spacing:.06em;
   color:var(--dimmer);border-bottom:1px solid var(--line)}
+.cwh .cwn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+/* JE BLOCK EINER, und er zeigt nur, was ueber ihm steht. Dieselbe Form wie der
+   Knopf am Codeblock im Chat (.copy), damit dasselbe Ding gleich aussieht. */
+.cwcopy{margin-left:auto;flex:none;font:inherit;font-family:var(--ui);
+  font-size:10.5px;font-weight:400;letter-spacing:0;color:var(--dim);
+  background:transparent;border:1px solid var(--line);border-radius:5px;
+  padding:1px 8px;cursor:pointer}
+.cwcopy:hover{border-color:var(--bevel);color:var(--accent)}
+.cwcopy.done{color:var(--ok);border-color:rgba(78,201,143,.4)}
 /* UMBRECHEND UND NICHT SCROLLEND. Eine Zeile JSON ist tausend Zeichen lang; ein
    waagerechter Balken je Block macht aus dem Mitlesen ein Schieben. */
 .cwp{margin:0;padding:8px 9px;font-family:var(--mono);font-size:11px;
   line-height:1.5;white-space:pre-wrap;word-break:break-word;
   color:var(--text-faint);max-height:none}
+
+/* -- #156: das Git-Panel ------------------------------------------------- */
+/* ES BORGT SICH NICHTS, ES IST DASSELBE. Kopf wie `#codehead`, Klappgruppen wie
+   `.tchd`, Rail wie `#code` -- robins Ansage: "gleich vom design und rail her
+   dem Code Panel". Eigene Regeln stehen hier nur, wo das Git-Panel etwas hat,
+   das das Code-Panel nicht kennt: Dateizeilen, +/-, die Historie. */
+#githead{display:flex;align-items:center;gap:8px;padding:0 12px;
+  min-height:var(--barh);flex:none}
+#githead h2{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.13em;
+  text-transform:uppercase;color:var(--dimmer)}
+/* DER ANGEMELDETE ACCOUNT, sonst nichts. Kein Token, keine Mail -- der Name ist
+   das, was jemand wiedererkennt, und alles Weitere waere ein Geheimnis auf dem
+   Bildschirm. */
+#gituser{margin-left:auto;font-family:var(--mono);font-size:11px;
+  color:var(--dimmer);cursor:pointer;background:transparent;border:0;
+  padding:2px 4px}
+#gituser:hover{color:var(--accent)}
+#gituser.off{color:var(--dimmer)}
+#gitbody{overflow-y:auto;padding:0 8px 10px;flex:1;min-height:0}
+.gitgrp{margin-top:8px}
+.gitgrp.shut .gbody{display:none}
+/* +/- IN DER KOPFZEILE, weil die Summe die Frage ist, mit der man hinsieht:
+   wie viel ist offen. Tabellenziffern, damit sie beim Tippen nicht wandern. */
+.gplus{color:var(--ok);font-variant-numeric:tabular-nums}
+.gminus{color:var(--bad);font-variant-numeric:tabular-nums}
+/* Der Zaehler steht neben dem Namen, nicht an ihm: `History12` war eine Zahl,
+   die wie eine Endung aussah (robin, 2026-08-29). Der Abstand kommt aus dem
+   `gap` der Kopfzeile, diese Regel gibt ihm nur seine Schrift. */
+.gitgrp .gcount{font-family:var(--mono);font-size:11px;color:var(--dimmer);
+  font-variant-numeric:tabular-nums}
+.gline{display:flex;align-items:center;gap:8px;padding:3px 8px;
+  font-family:var(--mono);font-size:11px;color:var(--dim)}
+/* EIN BUCHSTABE, EINE FARBE, und die Spalte ist fest breit: M, A, D und ? unter
+   einander gelesen sind eine Liste, nebeneinander verrutscht sind sie Text. */
+.gline .gst{flex:none;width:9px;text-align:center;font-weight:700}
+.gst-M{color:var(--warn)}
+.gst-A{color:var(--ok)}
+.gst-D{color:var(--bad)}
+.gst-R{color:var(--sub)}
+.gst-U{color:var(--bad)}
+.gst-\?{color:var(--dimmer)}
+/* DER PFAD KUERZT VORNE. Ein Dateiname am Ende ist das, was identifiziert;
+   `direction:rtl` schneidet deshalb links ab statt rechts. `unicode-bidi`
+   haelt die Zeichen in ihrer Reihenfolge -- ohne das wandert ein Slash. */
+.gline .gpath{flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;
+  text-overflow:ellipsis;direction:rtl;unicode-bidi:plaintext;text-align:left}
+.gline .gnum{flex:none;font-size:10.5px;color:var(--dimmer)}
+.gline.gsub{padding-left:20px}
+.grow{display:flex;align-items:baseline;gap:8px;padding:4px 8px;font-size:11.5px;
+  color:var(--dim)}
+/* JE EREIGNIS SEIN ZEICHEN, und die Farbe sagt die Art: ein Commit ist der
+   ruhige Normalfall, ein Push verlaesst die Maschine (Akzent), ein Merge ist
+   der Delegations-Kanal, ein Fork der warnende Sonderfall. */
+.grow .gy{flex:none;width:13px;text-align:center;font-weight:700}
+.gy-commit{color:var(--dimmer)}
+.gy-push{color:var(--accent)}
+.gy-merge{color:var(--sub)}
+.gy-fork{color:var(--warn)}
+.gy-connect{color:var(--ok)}
+.grow .gsha{font-family:var(--mono);font-size:10.5px;color:var(--dimmer);flex:none}
+.grow .gtext{flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;
+  text-overflow:ellipsis}
+.grow .gat{flex:none;font-family:var(--mono);font-size:10.5px;color:var(--dimmer)}
+/* EIN ZUSTAND, DER NICHTS BEHAUPTET. Kein Repo, kein Ordner, keine Commits --
+   drei verschiedene Saetze, und keiner davon ist ein Fehler in Rot. */
+.gnone{padding:10px 10px;font-size:11.5px;color:var(--dimmer)}
+.gitgrp .gact{font:inherit;font-size:11px;color:var(--dim);background:transparent;
+  border:1px solid var(--line);border-radius:6px;padding:2px 10px;cursor:pointer;
+  margin:2px 8px 4px}
+.gitgrp .gact:hover{border-color:var(--bevel);color:var(--accent)}
+/* Die Commit-Zeile: Nachricht und Knopf, dieselbe Form wie die Schluesselzeile
+   auf der Einstellungsseite -- ein Feld, das man abschickt. */
+/* Die Liste steht ueber der Zeile, mit Luft dazwischen: erst was mitgeht,
+   dann wie es heisst. */
+#gitstaged{margin-bottom:7px}
+.gcommit{display:flex;gap:7px;align-items:center}
+.gcommit input{font:inherit;font-size:11.5px;flex:1;min-width:0;
+  background:var(--bg);border:1px solid var(--line);border-radius:6px;
+  padding:5px 9px;color:var(--text-soft)}
+.gcommit input:focus{outline:none;border-color:var(--accent)}
+.gcommit button{font:inherit;font-size:11px;cursor:pointer;padding:5px 12px;
+  background:transparent;border:1px solid var(--line);border-radius:6px;
+  color:var(--dim)}
+.gcommit button:hover:not([disabled]){border-color:var(--bevel);color:var(--accent)}
+.gcommit button[disabled]{color:var(--dimmer);cursor:default}
+
 #railhead{display:flex;align-items:center;padding:0 12px;min-height:var(--barh)}
 #railhead h2{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.13em;
   text-transform:uppercase;color:var(--dimmer)}
@@ -881,10 +1025,18 @@ body[data-code="shut"] #codegrip{display:none}
 body[data-rail="shut"] #rail{width:0;overflow:hidden}
 /* IN THE TITLE BAR, so it survives the rail it hides. It is the one control
    that must not live in the thing it folds away. */
-#railtoggle,#codetoggle{font:inherit;color:var(--dimmer);background:transparent;
-  border:1px solid transparent;border-radius:6px;cursor:pointer;
-  display:flex;align-items:center;padding:3px 5px;margin-right:2px}
-#railtoggle:hover,#codetoggle:hover{color:var(--accent);border-color:var(--bevel)}
+#railtoggle,#codetoggle,#gittoggle{font:inherit;color:var(--dimmer);
+  background:transparent;border:1px solid transparent;border-radius:6px;
+  cursor:pointer;display:flex;align-items:center;padding:3px 5px;margin-right:2px}
+#railtoggle:hover,#codetoggle:hover,#gittoggle:hover{color:var(--accent);
+  border-color:var(--bevel)}
+/* #156. DER KNOPF SAGT, OB DAS PANEL STEHT. Mit zwei Panels an einer Leiste ist
+   das keine Verzierung mehr, sondern die Antwort auf "wo ist mein Git-Panel
+   hin" -- und weil das Wegklicken NUR hier geht (robins Ansage: kein zweites
+   Kreuz im Panel), muss der Rueckweg sichtbar sein. */
+body:not([data-code="shut"]) #codetoggle,
+body:not([data-git="shut"]) #gittoggle{color:var(--accent);
+  background:color-mix(in srgb,var(--accent) 12%,transparent)}
 
 /* A PROJECT ROW IS NOT A CHAT ROW, and the difference has to survive a glance:
    it is a heading you can fold, so it carries a caret and a count and never the
@@ -1100,6 +1252,44 @@ details.think[open] .caret{transform:rotate(90deg)}
   border:1px solid var(--line);color:var(--dimmer)}
 #toolcalls .tcclear:hover{border-color:var(--bevel);color:var(--text-hover)}
 #toolcalls .empty{margin:0;padding:2px 4px}
+
+/* #156. DIESELBE KACHEL FUER JEDE KLAPPE, und das ist robins Ansage vom
+   2026-08-29: "sollen so ein panel haben wie Tool-Calls mit diesem Grau
+   hinterlegten". Bis hierher gehoerte die Form EINEM Element -- jede Regel
+   oben haengt an `#toolcalls` --, und die zwei neuen Klappen standen deshalb
+   nackt daneben. Die Regeln stehen hier ein zweites Mal statt oben umgeschrieben
+   zu werden, weil die Kachel der Aufrufliste eine abgenommene Form ist und ein
+   Umbau an ihr die Gruppe waere, die niemand angefasst haben wollte. */
+/* DAS GRAU GEHOERT DER TITELZEILE, NICHT DER FLAECHE (robin, 2026-08-29, mit
+   dem Mockup daneben). Aufgeklappt war die ganze Gruppe hell, und damit lasen
+   sich fuenfzehn Dateizeilen als ein einziger Kasten -- der Kopf ist der
+   Griff, der Inhalt ist der Inhalt, und nur einer von beiden darf sich
+   abheben. `#toolcalls` bleibt, wie es ist: dort IST die Kachel die Kachel. */
+#codefiles,.gitgrp{width:100%;border:1px solid var(--line);border-radius:8px;
+  background:transparent;font-size:11.5px;overflow:hidden;margin-top:8px}
+#codefiles .tchd,.gitgrp .tchd{display:flex;align-items:center;gap:9px;
+  padding:7px 12px;cursor:pointer;user-select:none;background:var(--raised)}
+#codefiles .tct,.gitgrp .tct{font-weight:600;color:var(--text-soft)}
+#codefiles .tcn,.gitgrp .tcn{color:var(--dimmer);
+  font-variant-numeric:tabular-nums}
+#codefiles .tcx,.gitgrp .tcx{margin-left:auto;color:var(--dimmer);font-size:15px;
+  line-height:1;width:11px;text-align:center}
+/* DIE FUGE UNTER DEM KOPF, wie bei den Aufrufen: sie trennt den Index von dem,
+   was er indiziert, und ohne sie sitzt die erste Zeile am Titel. */
+#codefiles .cfbody,.gitgrp .gbody{border-top:1px solid var(--line);padding:8px}
+/* AUF EINER LINIE, NICHT AUF EINER MITTE (robin, 2026-08-29, zweimal: "selbe
+   hoehe die werte wie values"). Der Name ist die Schrift der Oberflaeche, der
+   Wert daneben Monospace und eine halbe Stufe kleiner -- zwei Kaesten, die
+   `align-items:center` in ihrer MITTE ausrichtet, worauf die Buchstaben
+   verschieden hoch sitzen. Auf der Grundlinie sitzen sie da, wo das Auge eine
+   Zeile erwartet.
+   HIER UND NICHT OBEN BEI DEN GIT-REGELN: dort stand sie zuerst und wurde von
+   der Kachelzeile darueber ueberschrieben -- gleiche Spezifitaet, spaeter im
+   Blatt gewinnt. Sie muss HINTER der Regel stehen, die sie korrigiert.
+   Nur das Klappzeichen bleibt mittig: ein Symbol hat keine Grundlinie, an der
+   es haengen koennte. */
+.gitgrp .tchd{align-items:baseline}
+.gitgrp .tcx{align-self:center}
 
 /* #138b. JEDE ZEILE IST IHRE EIGENE KLAPPE. Der Kopf bleibt eine Zeile -- er
    ist der Index -- und alles, was Platz braucht, liegt darunter und nur dann,
@@ -1692,6 +1882,23 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 .askrow button.always em{font-style:normal;color:var(--accent)}
 .askrow button:hover{border-color:var(--bevel)}
 .askdone{color:var(--dimmer);font-size:11px}
+/* #156. DIE GERAETEFREIGABE TRAEGT DEN AKZENT, NICHT DAS GOLD. Gold heisst in
+   diesem Fenster "ich halte etwas zurueck und frage dich" -- eine Karte, die
+   nur einen Code zeigt, haelt nichts zurueck. Dieselbe Form, andere Farbe. */
+.ghcard{border-color:color-mix(in srgb,var(--accent) 40%,transparent);
+  background:color-mix(in srgb,var(--accent) 5%,transparent)}
+.ghcard .asktop b{color:var(--accent)}
+.ghwhat{margin-top:7px;font-size:12.5px;color:var(--text-soft)}
+/* DER CODE IST DAS EINZIGE, WAS ABGETIPPT WIRD -- also ist er das Groesste auf
+   der Karte, mit Sperrung, damit acht Zeichen acht Zeichen bleiben. */
+.ghcode{display:inline-block;margin:10px 0 2px;font-family:var(--mono);
+  font-size:21px;letter-spacing:4px;color:var(--text-strong);
+  background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+  padding:9px 18px;user-select:text}
+.ghwait{display:flex;align-items:center;gap:8px;margin-top:10px;
+  font-family:var(--mono);font-size:11px;color:var(--dimmer)}
+.ghwait .sdot.bad{background:var(--bad);animation:none}
+.ghwait .sdot.ok{animation:none}
 
 /* -- #88: the release level, beside send ------------------------------- */
 /* THE COLOUR IS THE STATE. robin's three: manual white, allowedit green,
@@ -1907,7 +2114,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   border-top:1px solid var(--line);margin-top:3px}
 .cost .subshare{color:var(--sub)}
 .tool.sub .ico{color:var(--sub)}
-</style></head><body data-rail="__RAIL__" data-code="__CODE__">
+</style></head><body data-rail="__RAIL__" data-code="__CODE__" data-git="__GIT__">
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
   <!-- #119. LEFT OF THE WORDMARK, and it has to live in the TITLE BAR rather
@@ -1946,6 +2153,24 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
       <rect x="2.5" y="4" width="15" height="12" rx="2"></rect>
       <path d="M6.2 8.6 8.6 11 6.2 13.4"></path>
       <line x1="10.8" y1="13.4" x2="14" y2="13.4"></line></svg></button>
+  <!-- #156. NEBEN DEM CODE-KNOPF, aus demselben Grund wie dieser: ein Schalter
+       im Panel geht mit dem Panel weg. Das Zeichen ist GitHubs eigene Katze --
+       die Marke des Dienstes, den der Knopf verbindet, in der offiziellen
+       Pfadform und mit `currentColor` statt eigener Farbe, damit sie sich in
+       alle drei Themes und in den Aktivzustand einfuegt wie jedes andere
+       Zeichen hier. Ein gefuellter Pfad, kein Strich: `stroke-width` haette
+       daran nichts, worauf es wirken koennte. -->
+  <button id="gittoggle" class="pywebview-no-drag" onclick="crow.toggleGit()"
+          title="Show or hide the git panel">
+    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+      <path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47
+        7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01
+        1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95
+        0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6
+        0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08
+        2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54
+        1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+    </svg></button>
   <div id="wbtns" class="pywebview-no-drag">
     <div class="wb" onclick="pywebview.api.minimise()">&#8211;</div>
     <div class="wb" onclick="pywebview.api.maximise()">&#9633;</div>
@@ -2058,6 +2283,29 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
              no view reads back — what a box shows after that is a mask.</p>
           <div id="keylist"></div>
           <p class="mcpsaid" id="keysaid"></p>
+          <!-- #156. GITHUB GEHOERT HIERHER UND NICHT IN EINE DATEI. Die
+               Client-ID der OAuth-App ist die einzige Angabe, die der Device
+               Flow braucht, und sie im Quelltext suchen zu lassen ist keine
+               Einrichtung, sondern eine Zumutung -- robin, 2026-08-29. Sie ist
+               kein Geheimnis (siehe crow_core.github_client_id), darum ein
+               normales Feld und keine Passwortmaske. -->
+          <div id="ghsec">
+            <h3>GitHub</h3>
+            <p class="shint">Connect the account once; every repository it can
+               reach comes with it. The client id belongs to the OAuth app —
+               register one at github.com with <b>device flow enabled</b>, or
+               leave this alone if Crow already ships one.</p>
+            <div class="srow"><div class="stext">
+              <div class="sname">Account</div>
+              <div class="sdesc" id="ghacct">not connected</div>
+              <div class="keyrow">
+                <input id="ghid" placeholder="client id, e.g. Ov23li...">
+                <button onclick="crow.ghSaveId()">Save</button>
+                <button id="ghconnect" onclick="crow.ghConnect()">Connect</button>
+              </div>
+            </div></div>
+            <p class="mcpsaid" id="ghsaid"></p>
+          </div>
         </section>
         <section data-cat="about" hidden>
           <h3>About</h3>
@@ -2179,6 +2427,9 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   <!-- #138. DAS CODE-PANEL. Es haelt, was ein Werkzeug gerade schreibt, und die
        Liste der Aufrufe -- eine Flaeche, nicht zwei: die Aufrufe SIND der Index
        zu dem, was hier steht, und nebeneinander waeren beide schmaler. -->
+  <!-- #156. DIE SPALTE, die beide Panels haelt. Sie traegt die Breite und den
+       Griff; was darin liegt, teilt sich die Hoehe. -->
+  <div id="side">
   <aside id="code">
     <div id="codehead">
       <h2>Code</h2><span class="n"></span>
@@ -2188,8 +2439,6 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
            an zwei Stellen klicken. -->
       <button id="codewipe" onclick="crow.codeWipe(event)"
               title="clear everything in this panel">clear all</button>
-      <button id="codecopy" onclick="crow.codeCopy(event)"
-              title="copy what is shown">copy</button>
     </div>
     <div id="codebody">
       <!-- #138b. DIE AUFRUFE ZUERST, DER QUELLTEXT DARUNTER, und die
@@ -2211,12 +2460,94 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
            hier, `web_search` neben `write_file`, und das Panel beantwortete
            nicht mehr die Frage, wofuer es da ist: was hat dieser Zug an meinem
            Programm geaendert. -->
+      <!-- #156. Aus der Ueberschrift wurde eine Klappe im selben Muster wie
+           Tool-Calls darueber, mit eigenem Zaehler. -->
       <section id="codefiles" hidden>
-        <div class="cfh">Program code</div>
-        <div id="cflist"></div>
+        <div class="tchd" onclick="crow.filesToggle()">
+          <span class="tct">Program code</span><span class="tcn"></span>
+          <span class="tcx">&minus;</span>
+        </div>
+        <div class="cfbody">
+          <div id="cflist"></div>
+        </div>
+        <!-- #156. DIE FORM EINES BLOCKS STEHT IM MARKUP, nicht in einer
+             JS-Zeichenkette: der Kopierknopf ist Teil dessen, was ein Block
+             IST, und Markup, das nur im Skript existiert, ist das Markup, das
+             beim Lesen der Seite niemand findet. `toolArg` klont dies. -->
+        <template id="cwtpl">
+          <div class="cw">
+            <div class="cwh"><span class="cwn"></span>
+              <button class="cwcopy" title="copy this block">copy</button></div>
+            <pre class="cwp"></pre>
+          </div>
+        </template>
       </section>
     </div>
   </aside>
+  <!-- #156. DAS GIT-PANEL. Was der Chat als Karten zeigt -- Aenderungen, ein
+       Commit, ein Push -- steht hier als Zustand: was ist offen, auf welchem
+       Zweig, und was ist passiert. Der Chat erzaehlt den Verlauf, das Panel
+       beantwortet die Lage. -->
+  <aside id="git">
+    <div id="githead">
+      <h2>Git</h2>
+      <button id="gituser" class="off" onclick="crow.gitAccount()"
+              title="GitHub account">not connected</button>
+    </div>
+    <div id="gitbody">
+      <div class="gnone" id="gitnone">no repository in the working folder</div>
+      <section id="gitchanges" class="gitgrp" hidden>
+        <div class="tchd" onclick="crow.gitToggle('gitchanges')">
+          <span class="tct">Changes</span>
+          <span class="gcount"><span class="gplus"></span>
+            <span class="gminus"></span></span>
+          <span class="tcx">−</span>
+        </div>
+        <div class="gbody"><div id="gitfiles"></div></div>
+      </section>
+      <section id="gitbranch" class="gitgrp shut" hidden>
+        <div class="tchd" onclick="crow.gitToggle('gitbranch')">
+          <span class="tct" id="gitbranchname">—</span>
+          <span class="gcount" id="gitab"></span>
+          <span class="tcx">+</span>
+        </div>
+        <div class="gbody"><div id="gitbranches"></div></div>
+      </section>
+      <!-- #156. COMMIT ALS EIGENE GRUPPE, wie im abgenommenen Mockup. Sie
+           nimmt eine Nachricht und legt GENAU die verfolgten, geaenderten
+           Dateien ab, die darueber stehen -- kein `-a`, kein Punkt, und nichts
+           Unverfolgtes: was neu ist, will jemand bewusst hinzunehmen. -->
+      <section id="gitcommit" class="gitgrp shut" hidden>
+        <div class="tchd" onclick="crow.gitToggle('gitcommit')">
+          <span class="tct">⊸ Commit</span>
+          <span class="gcount" id="gitcn"></span>
+          <span class="tcx">+</span>
+        </div>
+        <div class="gbody">
+          <!-- #156. WELCHE DREI, robins Frage vom 2026-08-29: "WO SIN DIE 3
+               FILES". Ein Knopf, der eine Zahl nennt und die Namen verschweigt,
+               verlangt vom Nutzer, sie zu erraten -- und ausgerechnet vor dem
+               Schritt, der Geschichte schreibt. Sie stehen jetzt darin, dieselbe
+               Zeilenform wie unter Changes. -->
+          <div id="gitstaged"></div>
+          <div class="gcommit">
+            <input id="gitmsg" placeholder="commit message"
+                   onkeydown="if(event.key==='Enter')crow.gitCommit()">
+            <button id="gitdo" onclick="crow.gitCommit()">Commit</button>
+          </div>
+          <div class="gnone" id="gitcsaid"></div>
+        </div>
+      </section>
+      <section id="githist" class="gitgrp" hidden>
+        <div class="tchd" onclick="crow.gitToggle('githist')">
+          <span class="tct">History</span><span class="gcount"></span>
+          <span class="tcx">−</span>
+        </div>
+        <div class="gbody"><div id="gitrows"></div></div>
+      </section>
+    </div>
+  </aside>
+  </div>
 </div>
 
 <script>
@@ -2735,13 +3066,18 @@ const crow = {
     if(!box || box.dataset.nm!==name){
       const body=$("#cflist");
       $("#codefiles").hidden=false;
-      box=document.createElement("div"); box.className="cw"; box.dataset.nm=name;
-      const hd=document.createElement("div"); hd.className="cwh";
-      hd.textContent=name;
-      const pre=document.createElement("pre"); pre.className="cwp";
-      box.appendChild(hd); box.appendChild(pre);
+      // #156. Aus der Vorlage geklont, samt Kopierknopf. Der Name geht per
+      // textContent hinein -- ein Pfad mit spitzen Klammern ist ein Pfad und
+      // keine Auszeichnung.
+      box=$("#cwtpl").content.firstElementChild.cloneNode(true);
+      box.dataset.nm=name;
+      const nm=box.querySelector(".cwn");
+      nm.textContent=name; nm.title=name;
+      const cp=box.querySelector(".cwcopy");
+      cp.onclick=e=>crow.fileCopy(e,cp);
       body.appendChild(box);
       this.live[i]=box;
+      this.filesCount();
       // NUR WENN DAS PANEL OFFEN IST. Es aufzureissen, weil ein Werkzeug
       // laeuft, waere eine Entscheidung, die der Leser getroffen hat und die
       // ihm hier wieder abgenommen wuerde.
@@ -2803,6 +3139,12 @@ const crow = {
   codeReset(){
     $("#cflist").textContent="";
     $("#codefiles").hidden=true;
+    // #156: die Gruppe steht beim naechsten Mal wieder offen. Sie beginnt
+    // offen, weil der erste geschriebene Block das ist, wofuer das Panel da
+    // ist -- zuklappen ist die Geste dessen, der schon gelesen hat.
+    $("#codefiles").classList.remove("shut");
+    $("#codefiles .tcx").textContent="−";
+    this.filesCount();
     this.live=null;
     this.openCall=null;
     const n=$("#codehead .n"); if(n) n.textContent=""; },
@@ -2939,6 +3281,7 @@ const crow = {
       b => b.classList.toggle("on", b.dataset.theme===now));
     this.drawSkills();
     this.drawMcp();
+    this.drawGithub();
     this.drawProviders();
     this.drawSubs();
     $("#settings").hidden=false;
@@ -3622,6 +3965,41 @@ const crow = {
       $("#keysaid").textContent=said||"";
       if(!said){ this.drawProviders(); this.drawSubs(); } }); },
 
+  // #156. Der GitHub-Abschnitt der Schluesselseite: Client-ID eintragen,
+  // Konto verbinden, Konto trennen -- drei Handgriffe an einer Stelle.
+  drawGithub(){
+    pywebview.api.github_view().then(v => {
+      const id=$("#ghid"), acct=$("#ghacct"), btn=$("#ghconnect");
+      if(!id) return;
+      // DIE ID WIRD ZURUECKGELESEN, anders als ein Schluessel: sie ist kein
+      // Geheimnis, und ein leeres Feld ueber einer gesetzten ID liest sich als
+      // "noch nichts eingerichtet".
+      id.value=v.client_id||"";
+      acct.textContent = v.account ? ("connected as " + v.account)
+                                   : (v.client_id ? "not connected"
+                                                  : "no client id yet");
+      btn.textContent = v.account ? "Disconnect" : "Connect";
+      btn.disabled = !v.client_id && !v.account; }); },
+
+  ghSaveId(){
+    pywebview.api.github_client_id_set($("#ghid").value.trim()).then(said => {
+      $("#ghsaid").textContent = said || "client id stored";
+      this.drawGithub(); }); },
+
+  // EIN KNOPF, EINE WIRKUNG. Sein Text sagt, was er tut, und er liest denselben
+  // Zustand, aus dem der Text gebaut wurde -- kein Umschalter, der von etwas
+  // abhaengt, das der Beschriftung hinterherhinkt.
+  ghConnect(){
+    $("#ghsaid").textContent="";
+    if($("#ghconnect").textContent==="Disconnect"){
+      pywebview.api.github_disconnect().then(said => {
+        $("#ghsaid").textContent=said||""; this.drawGithub(); });
+      return; }
+    // DIE KARTE ERSCHEINT IM CHAT, nicht hier: der Code will gelesen und
+    // abgetippt werden, und das Blatt schliesst sich, sobald jemand hinsieht.
+    pywebview.api.github_account_click();
+    this.closeSettings(); },
+
   pickProvider(name){
     $("#provsaid").textContent="";
     pywebview.api.provider_pick(name,null).then(said => {
@@ -3680,7 +4058,9 @@ const crow = {
   // die Grenzen sind auch hier zweimal da -- in der Seite und in Python.
   codeDrag(ev){
     ev.preventDefault();
-    const panel=$("#code"), grip=$("#codegrip");
+    // #156: DIE SPALTE, nicht das Panel. Sie traegt die Breite, seit zwei
+    // Panels darin liegen -- gezogen wird eine Kante, und die gehoert beiden.
+    const panel=$("#side"), grip=$("#codegrip");
     grip.classList.add("on"); panel.classList.add("dragging");
     const right=panel.getBoundingClientRect().right;
     const move=e=>{
@@ -4190,6 +4570,66 @@ const crow = {
     d.querySelector("code").textContent=args||"";
     if(scope) d.querySelector(".always em").textContent=scope;
     flow.appendChild(d); this.bottom(); },
+
+  // #156. DIE GERAETEFREIGABE, als Karte im Verlauf.
+  //
+  // IM FLUSS UND NICHT ALS FENSTER, aus demselben Grund wie die Freigabe-Karte:
+  // sie gehoert zu dem Zug, der sie ausgeloest hat, und ein Modal verdeckte
+  // genau den Text, in dem steht, warum jemand gerade ein Konto verbindet.
+  // Der Code geht per textContent hinein -- er kommt von github.com, und was
+  // von aussen kommt, wird nie zu Auszeichnung.
+  ghCode(e){
+    const d=document.createElement("div");
+    d.className="turn ask";
+    d.innerHTML='<div class="askcard ghcard"><div class="asktop">'
+      + '<b>github</b><code>connect · device flow</code></div>'
+      + '<div class="ghwhat"></div><div class="ghcode"></div>'
+      + '<div class="askrow">'
+      + '<button class="yes" onclick="crow.ghOpen(this)">open github.com</button>'
+      + '<button onclick="crow.ghCopy(this)">copy code</button>'
+      + '<button class="no" onclick="crow.ghCancel(this)">cancel</button>'
+      + '</div><div class="ghwait"><span class="sdot run"></span>'
+      + '<span class="ghmsg">waiting for authorization</span></div></div>';
+    const card=d.querySelector(".askcard");
+    card.dataset.url=e.url||"";
+    card.querySelector(".ghwhat").textContent =
+      "Enter this code at " + (e.url||"") + " to connect your account:";
+    card.querySelector(".ghcode").textContent=e.code||"";
+    card.querySelector(".ghmsg").textContent =
+      "waiting for authorization · the code is good for "
+      + Math.round((e.expires||900)/60) + " minutes";
+    this.gh=card;
+    flow.appendChild(d); this.bottom(); },
+
+  ghOpen(btn){
+    const card=btn.closest(".askcard");
+    pywebview.api.open_url(card.dataset.url||""); },
+
+  ghCopy(btn){
+    const card=btn.closest(".askcard");
+    const text=card.querySelector(".ghcode").textContent;
+    pywebview.api.copy(text).then(ok=>{
+      btn.textContent = ok ? "copied" : "failed";
+      setTimeout(()=>{btn.textContent="copy code";},1400); }); },
+
+  ghCancel(btn){
+    pywebview.api.github_cancel();
+    this.ghDone({account:"", t:"cancelled"}); },
+
+  // FERTIG HEISST: DIE KARTE HOERT AUF ZU FRAGEN. Sie bleibt stehen -- der
+  // Verlauf soll zeigen, dass hier ein Konto verbunden wurde -- aber ihre
+  // Knoepfe und ihr Puls gehen, denn beides behauptet sonst eine offene Frage.
+  ghDone(e){
+    const card=this.gh;
+    if(card){
+      const row=card.querySelector(".askrow"); if(row) row.remove();
+      const wait=card.querySelector(".ghwait");
+      if(wait){
+        const dot=wait.querySelector(".sdot");
+        if(dot) dot.className = e.account ? "sdot ok" : "sdot bad";
+        wait.querySelector(".ghmsg").textContent = e.t || ""; }
+      this.gh=null; }
+    else if(e.t){ this.note(e.t); } },
 
   // #135. A SERVER ASKING FOR INPUT, drawn by Crow and never by the server.
   //
@@ -4757,24 +5197,183 @@ const crow = {
     el.dataset.code=open ? "shut" : "open";
     pywebview.api.set_code_open(!open); },
 
-  // WAS DA STEHT, IN DIE ZWISCHENABLAGE. `innerText` und nicht `textContent`:
-  // das eine liefert, was zu sehen ist, das andere auch den Inhalt von allem,
-  // was gerade zugeklappt ist -- und kopiert wird, worauf jemand sieht.
-  codeCopy(ev){
+  // #156. DASSELBE FUER DAS GIT-PANEL, und es ist der EINZIGE Weg, es wieder
+  // zuzumachen -- robins Ansage vom 2026-08-29: kein zweites Kreuz im Panel.
+  // Beim Aufklappen wird sofort gelesen: ein Panel, das erst beim naechsten
+  // Zug einen Stand zeigt, zeigt beim Hinsehen den von vorhin.
+  toggleGit(){ const el=document.body;
+    const open=el.dataset.git!=="shut";
+    el.dataset.git=open ? "shut" : "open";
+    pywebview.api.set_git_open(!open);
+    if(!open) this.gitRefresh(); },
+
+  // Eine Klappgruppe im Git-Panel. Dieselbe Mechanik wie `toolsToggle`.
+  gitToggle(id){
+    const box=$("#"+id); if(!box) return;
+    const shut=box.classList.toggle("shut");
+    const x=box.querySelector(".tcx"); if(x) x.textContent = shut ? "+" : "−"; },
+
+  gitRefresh(){ if(window.pywebview) pywebview.api.git_refresh(); },
+
+  // #156. DER COMMIT AUS DEM PANEL FRAGT NICHT NACH, und das ist kein Loch in
+  // der Regel, sondern ihre Kehrseite: die Freigabe-Karte schuetzt vor dem, was
+  // das MODELL tut. Hier tippt der Nutzer die Nachricht und drueckt den Knopf --
+  // ihn zu fragen, ob er das gerade wirklich wollte, ist die Nachfrage, die
+  // #98 fuer selbst getippte Pfade schon abgelehnt hat.
+  gitCommit(){
+    const msg=$("#gitmsg"), said=$("#gitcsaid");
+    const text=msg.value.trim();
+    if(!text){ said.textContent="a commit needs a message"; return; }
+    said.textContent="committing...";
+    pywebview.api.git_commit_now(text).then(answer => {
+      said.textContent=answer||"";
+      if(!(answer||"").startsWith("error")) msg.value="";
+      this.gitRefresh(); }); },
+
+  // Der Kontoknopf im Kopf: verbinden, wenn keiner da ist, sonst trennen.
+  // BEIDES GEHT UEBER DEN CHAT, nicht ueber ein Fenster im Fenster: die
+  // Geraetefreigabe ist ein Vorgang mit Code und Wartezeit, und der gehoert in
+  // den Verlauf, wo er nachlesbar bleibt -- dieselbe Regel wie bei der
+  // Freigabe-Karte.
+  gitAccount(){ pywebview.api.github_account_click(); },
+
+  // #156. Der Git-Zustand, in einem Rutsch gezeichnet. Keine Teilupdates: der
+  // Stand kommt als ein Bild aus Python, und zwei Haelften aus zwei Momenten
+  // waeren ein Panel, das sich selbst widerspricht.
+  git(state){
+    const none=$("#gitnone"), ch=$("#gitchanges"), co=$("#gitcommit"),
+          br=$("#gitbranch"), hi=$("#githist");
+    const user=$("#gituser");
+    if(user){
+      user.textContent = state.account || "not connected";
+      user.classList.toggle("off", !state.account);
+      user.title = state.account ? "click to disconnect"
+                                 : "click to connect a GitHub account"; }
+    if(!state.ok){
+      none.textContent = state.problem || "no repository in the working folder";
+      none.hidden=false; ch.hidden=true; co.hidden=true;
+      br.hidden=true; hi.hidden=true;
+      return; }
+    none.hidden=true; ch.hidden=false; co.hidden=false;
+    br.hidden=false; hi.hidden=false;
+
+    const files=$("#gitfiles"); files.textContent="";
+    (state.files||[]).forEach(f=>{
+      const row=document.createElement("div"); row.className="gline";
+      const st=document.createElement("span");
+      st.className="gst gst-"+f.st; st.textContent=f.st;
+      const p=document.createElement("span");
+      p.className="gpath"; p.textContent=f.path; p.title=f.path;
+      const n=document.createElement("span"); n.className="gnum";
+      if(f.plus||f.minus){
+        const a=document.createElement("span");
+        a.className="gplus"; a.textContent="+"+f.plus;
+        const b=document.createElement("span");
+        b.className="gminus"; b.textContent=" −"+f.minus;
+        n.appendChild(a); n.appendChild(b); }
+      row.appendChild(st); row.appendChild(p); row.appendChild(n);
+      files.appendChild(row); });
+    if(!(state.files||[]).length){
+      const row=document.createElement("div");
+      row.className="gnone"; row.textContent="working tree clean";
+      files.appendChild(row); }
+    const plus=$("#gitchanges .gplus"), minus=$("#gitchanges .gminus");
+    plus.textContent = state.plus ? "+"+state.plus : "";
+    minus.textContent = state.minus ? "−"+state.minus : "";
+
+    // WAS EIN COMMIT MITNEHMEN WUERDE: die verfolgten, geaenderten Dateien.
+    // Unverfolgtes zaehlt NICHT mit -- eine neue Datei gehoert bewusst
+    // hinzugefuegt, und ein Knopf, der sie stillschweigend mitnimmt, ist der
+    // `git add .`-Reflex, gegen den die ganze Gruppe gebaut ist.
+    const tracked=(state.files||[]).filter(f=>f.st!=="?");
+    $("#gitcn").textContent = tracked.length
+      ? (tracked.length + (tracked.length===1 ? " file" : " files")) : "nothing";
+    $("#gitdo").disabled = !tracked.length;
+    // UND WELCHE ES SIND. Dieselbe Zeilenform wie oben, damit man sie
+    // wiedererkennt statt sie zu vergleichen.
+    const staged=$("#gitstaged"); staged.textContent="";
+    tracked.forEach(f=>{
+      const row=document.createElement("div"); row.className="gline";
+      const st=document.createElement("span");
+      st.className="gst gst-"+f.st; st.textContent=f.st;
+      const p=document.createElement("span");
+      p.className="gpath"; p.textContent=f.path; p.title=f.path;
+      row.appendChild(st); row.appendChild(p); staged.appendChild(row); });
+    if(!tracked.length){
+      const row=document.createElement("div");
+      row.className="gnone"; row.textContent="nothing tracked has changed";
+      staged.appendChild(row); }
+
+    $("#gitbranchname").textContent = "⎇ " + (state.branch || "(detached)");
+    const ab=$("#gitab");
+    ab.textContent = (state.ahead||state.behind)
+      ? ("↑"+state.ahead+" ↓"+state.behind) : (state.upstream || "");
+    const list=$("#gitbranches"); list.textContent="";
+    (state.branches||[]).forEach(b=>{
+      const row=document.createElement("div"); row.className="gline gsub";
+      const st=document.createElement("span");
+      st.className="gst"; st.textContent = b===state.branch ? "•" : "";
+      const p=document.createElement("span");
+      p.className="gpath"; p.textContent=b; p.title=b;
+      row.appendChild(st); row.appendChild(p); list.appendChild(row); });
+
+    const rows=$("#gitrows"); rows.textContent="";
+    // JE EREIGNIS SEIN ZEICHEN. Die Tabelle steht hier und nicht in Python,
+    // weil sie das AUSSEHEN ist -- Python sagt, was passiert ist.
+    const GLYPH={commit:"◉", merge:"⑃", push:"⇧", fork:"⑂", connect:"◈"};
+    (state.history||[]).forEach(r=>{
+      const row=document.createElement("div"); row.className="grow";
+      const y=document.createElement("span");
+      y.className="gy gy-"+r.kind; y.textContent=GLYPH[r.kind]||"◦";
+      const sha=document.createElement("span");
+      sha.className="gsha"; sha.textContent=r.sha||"";
+      const t=document.createElement("span");
+      t.className="gtext"; t.textContent=r.text||""; t.title=r.text||"";
+      const at=document.createElement("span");
+      at.className="gat"; at.textContent=(r.at||"").slice(11,16);
+      row.appendChild(y); if(r.sha) row.appendChild(sha);
+      row.appendChild(t); row.appendChild(at);
+      rows.appendChild(row); });
+    if(!(state.history||[]).length){
+      const row=document.createElement("div");
+      row.className="gnone"; row.textContent="no commits yet";
+      rows.appendChild(row); }
+    $("#githist .gcount").textContent = (state.history||[]).length || ""; },
+
+  // #156. EIN BLOCK, EIN KNOPF. Vorher lag genau einer im Kopf des Panels und
+  // nahm den sichtbaren Text von ALLEM darin -- robins Ansage vom 2026-08-29:
+  // "man kann einzelne Code samples nicht kopieren aktuell". Dieser hier kennt
+  // seinen Block: er sitzt darin und liest den `<pre>` daneben.
+  //
+  // UEBER PYTHON, NICHT UEBER DIE SEITE. Die Seite ist als HTML geladen und
+  // damit kein sicherer Kontext -- `navigator.clipboard` lehnt dort ab, ohne zu
+  // werfen, und der Knopf sagte "copied" ueber eine leere Ablage. Dieselbe
+  // Naht, die der Knopf am Codeblock im Chat schon nimmt.
+  //
+  // `textContent` UND NICHT `innerText`: hier ist kein Zugeklapptes im Weg --
+  // es ist ein Block --, und `innerText` gaebe den umgebrochenen Text zurueck
+  // statt den geschriebenen. Kopiert wird, was das Werkzeug schrieb.
+  fileCopy(ev,btn){
     ev.stopPropagation();
-    const body=$("#codebody"), btn=$("#codecopy");
-    // UEBER PYTHON, NICHT UEBER DIE SEITE. Die Seite ist als HTML geladen und
-    // damit kein sicherer Kontext -- `navigator.clipboard` lehnt dort ab, ohne
-    // zu werfen, und der Knopf saegte "copied" ueber eine leere Ablage. Dieselbe
-    // Naht, die der Knopf am Codeblock schon nimmt.
-    // `innerText` und nicht `textContent`: das eine liefert, was zu sehen ist,
-    // das andere auch den Inhalt von allem, was gerade zugeklappt ist.
-    const text = body ? body.innerText.trim() : "";
+    const box=btn.closest(".cw"), pre=box && box.querySelector(".cwp");
+    const text = pre ? pre.textContent : "";
     if(!text){ btn.textContent="empty";
       setTimeout(()=>{btn.textContent="copy";},1400); return; }
     pywebview.api.copy(text).then(ok=>{
       btn.textContent = ok ? "copied" : "failed";
-      setTimeout(()=>{btn.textContent="copy";},1400); }); },
+      btn.classList.toggle("done", !!ok);
+      setTimeout(()=>{btn.textContent="copy";
+                      btn.classList.remove("done");},1400); }); },
+
+  // #156. Die Quelltext-Gruppe auf- und zuklappen, wie Tool-Calls darueber.
+  filesToggle(){
+    const box=$("#codefiles"), shut=box.classList.toggle("shut");
+    $("#codefiles .tcx").textContent = shut ? "+" : "−"; },
+
+  // Wie viele Bloecke die Gruppe haelt -- der Zaehler neben ihrem Namen.
+  filesCount(){
+    const n=$("#codefiles .tcn");
+    if(n) n.textContent = $("#cflist").childElementCount || ""; },
 
   toggleProject(path,open){ pywebview.api.set_project_open(path,open); },
 
@@ -4891,6 +5490,10 @@ const crow = {
         break;
       case "pend": this.pendState(e.items); break;
       case "elicit": this.elicit(e.ask); break;
+      // #156: der Git-Zustand als ein Bild, die Geraetefreigabe als Karte.
+      case "git": this.git(e.state); break;
+      case "ghcode": this.ghCode(e); break;
+      case "ghdone": this.ghDone(e); break;
       case "mic": this.micState(e); break;
       case "drop": this.dropped(e.paths); break;
       case "idle": this.idle(); break;
@@ -5463,9 +6066,14 @@ class Sink(ReplyEvents, FenceEvents):
 class Turn(TurnEvents):
     """The core's turn callbacks. Every one of them ends up on the screen."""
 
-    def __init__(self, put) -> None:
+    def __init__(self, put, git_reload=None) -> None:
         self._put = put
         self._sink = Sink(put)
+        # #156. WAS DAS PANEL NACHLESEN LAESST, oder None. Ein Callable und
+        # keine Api-Referenz: dieses Objekt schreibt in eine Warteschlange und
+        # weiss sonst nichts vom Fenster -- so bleibt es in der Suite baubar,
+        # wo es kein Fenster gibt.
+        self._git_reload = git_reload
         # THE REASONING'S SHARE OF THE TURN, KEPT RATHER THAN PUSHED. It used
         # to leave here as `{"k": "_round"}` -- a message the page has no case
         # for, so it fell through the switch and was gone, while the cost line
@@ -5533,6 +6141,13 @@ class Turn(TurnEvents):
         """
         self._put({"k": "toolend", "name": name,
                    "s": round(float(seconds), 2), "rep": bool(repeated)})
+        # #156. NACH EINEM GIT-AUFRUF STIMMT DAS PANEL NICHT MEHR. Ein Commit
+        # leert die Liste der Aenderungen, ein Push nimmt das "ahead" weg -- und
+        # ein Panel, das den Stand von vor dem Zug zeigt, ist schlimmer als
+        # eines, das nichts zeigt. Der Anstoss kommt von hier, weil dies die
+        # Stelle ist, die WEISS, dass ein git-Werkzeug gerade fertig wurde.
+        if name.startswith("git") and self._git_reload is not None:
+            self._git_reload()
 
     def tool_result(self, name: str, result: str) -> None:
         """#138b. Was der Aufruf geantwortet hat, gedeckelt fuer den Bildschirm.
@@ -5700,6 +6315,10 @@ class Api:
         # in flight, because the loop that asks is the one that blocks.
         self._asked = threading.Event()
         self._answer = "no"
+        # #156. The device-flow poller reads this between sleeps; the card's
+        # cancel button sets it. A plain flag and not an Event, because nobody
+        # waits on it -- the thread checks it and gives up.
+        self._github_cancel = False
         self._restore: tuple | None = None
         # WHICH FILE THE OPEN CHAT ALREADY HAS, or None while it has none.
         #
@@ -5806,6 +6425,10 @@ class Api:
         self._args.mode = mode
         self.push({"k": "mode", "name": mode, "modes": self.mode_menu()})
         self.push_root()
+        # #156: der Git-Stand, sobald die Arbeitsflaeche steht -- und auf einem
+        # eigenen Faden, weil `git status` auf einer kalten Platte dauert und
+        # der erste Blick auf das Fenster nicht darauf warten darf.
+        self.git_refresh()
         threading.Thread(target=self._probe, daemon=True).start()
 
     # ---- #92: the working directory ------------------------------------
@@ -8340,6 +8963,161 @@ class Api:
         doc["code_open"] = bool(open_)
         return write_settings(doc)
 
+    def set_git_open(self, open_: bool) -> bool:
+        """#156. Remember whether the git panel is folded away.
+
+        Same three steps as the rail and the code panel: written here, read by
+        `git_open`, stamped onto the element before the page is handed over.
+        """
+        doc = read_settings()
+        doc["git_open"] = bool(open_)
+        return write_settings(doc)
+
+    def git_refresh(self) -> None:
+        """Read the repository and push the whole state to the panel.
+
+        ON A THREAD, because every line of it is a `git` process and the bridge
+        thread is what draws. A repository on a slow disk would otherwise freeze
+        the window for as long as `git status` takes -- and the panel exists to
+        be glanced at, which means it may never be the reason nothing moves.
+        """
+        threading.Thread(target=self._git_push_state, daemon=True).start()
+
+    def _git_state(self) -> dict:
+        """One picture of the repository, or the reason there is none."""
+        data = crow_core.git_status_data()
+        state = {"ok": bool(data.get("ok")), "problem": data.get("problem", ""),
+                 "branch": data.get("branch", ""),
+                 "upstream": data.get("upstream", ""),
+                 "ahead": data.get("ahead", 0), "behind": data.get("behind", 0),
+                 "files": data.get("files", []), "plus": data.get("plus", 0),
+                 "minus": data.get("minus", 0), "branches": [], "history": [],
+                 # THE LOGIN, NEVER THE TOKEN. `github_account` asks GitHub, so
+                 # a revoked authorisation shows as disconnected rather than as
+                 # a name this window remembers being told once.
+                 "account": crow_core.github_account() if crow_core.github_token()
+                            else ""}
+        if not state["ok"]:
+            return state
+        state["history"] = crow_core.git_history(12).get("rows", [])
+        repo, _problem = crow_core.git_repo()
+        if repo:
+            code, out, _err = crow_core._git_run(
+                ["branch", "--format=%(refname:short)"], repo)
+            if code == 0:
+                state["branches"] = [b.strip() for b in out.splitlines() if b.strip()]
+        return state
+
+    def _git_push_state(self) -> None:
+        self.push({"k": "git", "state": self._git_state()})
+
+    def git_commit_now(self, message: str) -> str:
+        """#156. The panel's Commit button. What it says, or the reason not.
+
+        IT NAMES THE PATHS, one by one, out of the state the panel just drew --
+        the same list the user is looking at. `tool_git_commit` then stages
+        exactly those. Nothing untracked rides along: a file git has never seen
+        is one somebody has to add on purpose, and a button that swept it in
+        would be `git add .` wearing a different label.
+
+        NO APPROVAL CARD HERE. The gate exists for calls the MODEL makes; this
+        message was typed by the person clicking the button, and #98 already
+        settled that a client does not interrogate the user about their own
+        typed input.
+        """
+        text = (message or "").strip()
+        if not text:
+            return "a commit needs a message"
+        data = crow_core.git_status_data()
+        if not data.get("ok"):
+            return "error: " + data.get("problem", "no repository")
+        paths = [f["path"] for f in data.get("files", []) if f.get("st") != "?"]
+        if not paths:
+            return "nothing tracked has changed"
+        out = crow_core.tool_git_commit(message=text, paths=paths)
+        self._git_push_state()
+        return out.splitlines()[0] if out else ""
+
+    def github_view(self) -> dict:
+        """#156. What the GitHub section of the key page shows.
+
+        THE CLIENT ID GOES BACK OUT, unlike a provider key. It is not a secret
+        -- the device flow has none -- so a field that could not show what is
+        stored would be a field nobody can check.
+        """
+        return {"client_id": crow_core.github_client_id(),
+                "account": crow_core.github_account() if crow_core.github_token()
+                           else ""}
+
+    def github_client_id_set(self, value: str) -> str:
+        """Store the OAuth app's client id. The refusal, or ""."""
+        doc = crow_core.provider_doc()
+        text = (value or "").strip()
+        if text:
+            doc[crow_core.GITHUB_CLIENT_ID_KEY] = text
+        else:
+            doc.pop(crow_core.GITHUB_CLIENT_ID_KEY, None)
+        return crow_core.provider_write(doc) or ""
+
+    def github_account_click(self) -> None:
+        """The account button in the panel head. It only ever CONNECTS.
+
+        IT WAS A TOGGLE FOR ONE EVENING, and that evening it cost robin his
+        token: the head still read "not connected" from before the flow ran, he
+        clicked it to connect, and the toggle -- reading the stored token rather
+        than the stale label -- disconnected instead. A control whose action
+        depends on state the label may be lagging behind is a control that does
+        the opposite of what it says, and no refresh rate fixes that.
+        SO DISCONNECT LIVES WHERE IT CANNOT SURPRISE: on the key page, on a
+        button whose text IS the action. Here, a click on a connected account
+        just says who it is.
+        """
+        if crow_core.github_token():
+            login = crow_core.github_account()
+            self.push({"k": "note",
+                       "t": "connected as %s -- Settings, API Keys is where "
+                            "this is disconnected" % (login or "an account")})
+            self._git_push_state()
+            return
+        self.github_connect()
+
+    def github_disconnect(self) -> str:
+        """The key page's Disconnect. Says the half a client cannot do."""
+        crow_core.github_disconnect()
+        self._git_push_state()
+        return ("disconnected here -- revoke the app on github.com to end it "
+                "there too")
+
+    def github_connect(self) -> None:
+        """Start the device flow and put the code in the chat as a card."""
+        started = crow_core.github_device_start()
+        if started.get("error"):
+            self.push({"k": "fail", "t": started["error"]})
+            return
+        self._github_cancel = False
+        self.push({"k": "ghcode", "code": started["user_code"],
+                   "url": started["verification_uri"],
+                   "expires": started["expires_in"]})
+
+        def _wait() -> None:
+            token, problem = crow_core.github_device_poll(
+                started["device_code"], started["interval"],
+                started["expires_in"], stop=lambda: self._github_cancel)
+            if token:
+                login = crow_core.github_store_token(token)
+                self.push({"k": "ghdone", "account": login or "",
+                           "t": "connected as %s" % login if login
+                                else "connected, but github did not name the account"})
+            else:
+                self.push({"k": "ghdone", "account": "", "t": problem})
+            self._git_push_state()
+
+        threading.Thread(target=_wait, daemon=True).start()
+
+    def github_cancel(self) -> None:
+        """The card's cancel button. The poller checks this between sleeps."""
+        self._github_cancel = True
+
     def code_width(self, px) -> bool:
         """#138. Remember how wide the code panel is. False when refused.
 
@@ -8610,7 +9388,7 @@ class Api:
         # carry die neue -- darum unten KEIN zweites Append. Der Sink
         # existiert schon hier, damit der Roll dieselbe Notiz und dasselbe
         # Zaehler-Reset bekommt wie ein Mid-Turn-Roll.
-        events = Turn(self.push)
+        events = Turn(self.push, git_reload=self.git_refresh)
         rolled = False
         if crow_core.should_roll(self._context_tokens, self._n_ctx,
                                  crow_core.ROLLOVER_AT):
@@ -8919,6 +9697,9 @@ def main(argv: list[str] | None = None) -> int:
                 # somebody is looking at the window.
                 .replace("__RAIL__", "open" if rail_open() else "shut")
                 .replace("__CODE__", "open" if code_open() else "shut")
+                # #156: dieselbe Regel wie fuer Rail und Code -- der Zustand
+                # steht auf dem Element, bevor die Seite uebergeben wird.
+                .replace("__GIT__", "open" if git_open() else "shut")
                 .replace("__CODEW__", str(code_width_setting()))
                 .replace("__MARKDARK__", mark_svg("dark"))
                 .replace("__MARKLIGHT__", mark_svg("light")))

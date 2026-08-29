@@ -13,7 +13,9 @@
 | Rail | chats grouped by project, archive, fold state remembered |
 | Code panel | on the right, mirrored from the rail: dragged between 260 and 720, folded from the title bar, width and state remembered. Starts at half the space beside the rail until somebody drags it once |
 | Tool calls | top of the panel, one fold for the group and one per call. Open a call for its `arguments` and, under them, its `result` — 4,000 characters, the remainder counted. A failed call is marked on its head |
-| Program code | under the calls, from `write_file` and `edit_file` only. The head is the **path**, the body the content — no JSON envelope. Readable while it is being written; the envelope is replaced once the arguments are whole |
+| Program code | under the calls, from `write_file` and `edit_file` only. Its own fold with a count, like the calls above it. The head of each block is the **path**, the body the content — no JSON envelope. Readable while it is being written; the envelope is replaced once the arguments are whole |
+| `copy` per block | in the head of every code block, beside the path — it copies **that** block. The panel head has no `copy`: one button for calls and source together copied both to whoever wanted one of them (#156) |
+| Git panel | under the code panel, same shape and same folds. Toggled by the octocat in the title bar — that button is also the only way to close it, as it is for the code panel. Both open share the height; one closed leaves the other the whole column (#156) |
 | `clear all` | empties both halves and stays empty across a restart. The group's own `clear` takes the calls only |
 | Code blocks | language, line count and `copy`. Fifteen lines or more can be folded away |
 | Images | drop `.png .jpg .jpeg .gif .webp .bmp` into the window, paste a screenshot (Ctrl+V), or `/image <path>`: a chip per image above the input, `×` removes one. They ride the next line, appear in the transcript, and are still there after a restart. Needs a server started with `--mmproj` — one without it refuses with a sentence before anything is sent. The bytes travel unresized; the server caps an image at 4,096 tokens (`--image-max-tokens`). Any other dropped file keeps the old behaviour: its path lands in the input for the model to `read_file` |
@@ -28,5 +30,39 @@
 | Persistent subtasks | cards and `⑂` rows come back after a window restart (`session\subtasks-registry.json`): `running` becomes `interrupted`, numbering continues, deleting a chat deletes its subtasks |
 | Scroll | the stream pulls to the end only for who IS at the end (80 px); scrolled up, nothing yanks you back — your own message does |
 | Rollover | past 0.9 of the window the next line rolls BEFORE the turn — the archive is a complete conversation, your line opens the new context as carry. Mid-turn the roll happens at a round boundary, once per turn; a refused second roll is a red line, and the readout resets the moment a roll happens (#152). The note carries the model's own digest of the leg — asked on the still-warm prefix, marked as unverified model text, capped by `rollover_digest_tokens` (`0` off, #154) |
+
+---
+
+## Git panel (#156)
+
+The octocat in the title bar opens it, and closes it again — there is no cross in
+the panel, for the reason the code panel has none: a control inside the thing it
+folds away leaves no way back.
+
+| group | what it shows |
+|---|---|
+| Changes | branch against its upstream, every changed file with its status letter and `+`/`−`, the totals in the head. Untracked files are listed and counted separately — they are never swept into a commit |
+| `⎇ <branch>` | the current branch, ahead/behind in the head, every local branch in the body |
+| `⊸ Commit` | the tracked, changed files **by name**, a message field, and the button. It stages exactly those paths — no `-a`, no `.` |
+| History | `◉` commit · `⑃` merge · `⇧` push · `⑂` fork · `◈` connect. Commits and merges come out of `git log`; pushes and connects out of Crow's own record (`%LOCALAPPDATA%\Crow\git_events.json`) — nothing is invented, a fork appears the day one happens |
+
+The repository is the one the **working directory** is bound to, never the process's
+cwd. No folder bound, or the folder is not a repository: the panel says so and shows
+nothing else.
+
+### Connecting GitHub
+
+Settings → API Keys → GitHub. The client id belongs to an OAuth app **with device
+flow enabled** and is not a secret — the device flow has none, which is why it may
+be shipped or typed in plain. `Connect` puts a code in the chat; enter it at
+github.com/login/device and the token is stored owner-only beside the provider keys
+(`provider_keys.json`). One app covers every repository the account can reach.
+
+`Disconnect` sits on that same page, and only there: the account button in the
+panel head **only connects**. As a toggle it once read a stale label and
+disconnected the account somebody was trying to connect.
+
+**Pushing uses git's own credentials**, not that token — a token on a git command
+line would be readable in the process list for the length of the call.
 
 ---
