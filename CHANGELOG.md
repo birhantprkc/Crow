@@ -3,6 +3,29 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 1.5.1 — 2026-08-29
+
+2 commits. Bugfix release: the window's rollover, live-tested on a session stuck at
+200.2k of 200,192 — it rolled and continued.
+
+### The second rollover fires (#152)
+
+Three defects behind one symptom. The window persisted the core's per-turn `rolled`
+guard across turns — after the first rollover every later one was refused; the refusal
+was a base-class no-op, so turns just ended wordlessly; and a session already past the
+threshold failed its FIRST request at the server (HTTP 400 exceed_context_size) before
+the end-of-round check could ever roll. Fixed: the flag is fresh per turn, a refused
+roll is a red line with its reason, and the window rolls BEFORE the turn like the
+terminal — the archive is a complete conversation, the typed line opens the new context
+as carry, staged images stay put.
+
+### A rollover archive is not titled by the note (#153)
+
+An archive carries no title of its own and was titled by its first user line — which IS
+the previous rollover note, so the rail read as the same session twice. The title now
+skips note lines and takes the next real user line; on disk nothing was ever duplicated
+(archive and continuation verified distinct, pointer intact).
+
 ## 1.5.0 — 2026-08-29
 
 2 commits. The harness wave: approvals that persist and cover every path of a command,
