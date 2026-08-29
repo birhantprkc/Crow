@@ -34,6 +34,7 @@ Standard library only, same as everything else here.
 from __future__ import annotations
 
 import ast
+import atexit
 import http.server
 import importlib.util
 import inspect
@@ -72,8 +73,16 @@ import crow_core   # noqa: E402
 # treats "no file" as the empty configuration, and that is the state the twelve
 # built-in tools are the whole table in. Cases that WANT a configuration rebind
 # `MCP_FILE` themselves and put it back.
-crow_core.MCP_FILE = os.path.join(tempfile.gettempdir(),
-                                  "crow-suite-has-no-mcp", "mcp.json")
+#
+# #155: UNTER EINEM JE PROZESS FRISCHEN ORDNER, NIE UNTER EINEM FESTEN NAMEN.
+# Die festen %TEMP%-Namen ueberlebten den Prozess: was ein Lauf durch die
+# vollen Pfade schrieb, fand der naechste als "leere" Konfiguration vor --
+# am 2026-08-29 zweimal bezahlt (HTTP 401 im Bild-Fall, d1-Leiche im
+# Delegations-Fall). mkdtemp ist leer per Konstruktion, atexit raeumt ab,
+# und zwei parallele Laeufe teilen keinen Pfad mehr.
+_SANDBOX = tempfile.mkdtemp(prefix="crow-suite-")
+atexit.register(shutil.rmtree, _SANDBOX, True)
+crow_core.MCP_FILE = os.path.join(_SANDBOX, "has-no-mcp", "mcp.json")
 crow_core.mcp_apply()
 
 # THE SAME RULE FOR THE PROVIDER FILES (#130 again). `provider_active` reads
@@ -82,18 +91,14 @@ crow_core.mcp_apply()
 # same case on a fresh install -- and the one that broke would be the one about
 # where a turn goes. A path whose parent does not exist is the empty
 # configuration, which is the state the local server is the only endpoint in.
-crow_core.PROVIDERS_FILE = os.path.join(tempfile.gettempdir(),
-                                        "crow-suite-has-no-provider", "providers.json")
-crow_core.PROVIDER_KEYS_FILE = os.path.join(tempfile.gettempdir(),
-                                            "crow-suite-has-no-provider", "keys.json")
-crow_core.PROVIDER_TOKEN_FILE = os.path.join(tempfile.gettempdir(),
-                                             "crow-suite-has-no-provider", "tokens.json")
+crow_core.PROVIDERS_FILE = os.path.join(_SANDBOX, "has-no-provider", "providers.json")
+crow_core.PROVIDER_KEYS_FILE = os.path.join(_SANDBOX, "has-no-provider", "keys.json")
+crow_core.PROVIDER_TOKEN_FILE = os.path.join(_SANDBOX, "has-no-provider", "tokens.json")
 
 # DIE TOKEN-DATEI DES MCP-TEILS, aus demselben Grund und bis zum 2026-08-23
 # vergessen: sie liegt neben den anderen unter %LOCALAPPDATA%\\Crow und wird
 # vom laufenden Client gelesen.
-crow_core.MCP_TOKEN_FILE = os.path.join(tempfile.gettempdir(),
-                                        "crow-suite-has-no-mcp", "mcp_tokens.json")
+crow_core.MCP_TOKEN_FILE = os.path.join(_SANDBOX, "has-no-mcp", "mcp_tokens.json")
 
 # UND DER REST DES VERZEICHNISSES, gefunden am 2026-08-23 vom Waechter weiter
 # unten, nachdem zwei Faelle in robins laufende Installation geschrieben hatten.
@@ -106,7 +111,7 @@ crow_core.MCP_TOKEN_FILE = os.path.join(tempfile.gettempdir(),
 # behandelt "keine Datei" als leeren Zustand, und das ist der Zustand, gegen den
 # diese Suite gedacht ist. Faelle, die Inhalt WOLLEN, biegen selbst um und legen
 # ihn an.
-_NOWHERE = os.path.join(tempfile.gettempdir(), "crow-suite-has-no-install")
+_NOWHERE = os.path.join(_SANDBOX, "has-no-install")
 crow_core.INDEX_PATH = os.path.join(_NOWHERE, "index.db")
 crow_core.ROOTS_FILE = os.path.join(_NOWHERE, "roots.json")
 crow_core.SESSION_DIR = os.path.join(_NOWHERE, "session")

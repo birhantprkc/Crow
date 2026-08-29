@@ -9,6 +9,7 @@ guards regresses -- a suite that cannot go red proves nothing.
 
 from __future__ import annotations
 
+import atexit
 import builtins
 import contextlib
 import inspect
@@ -42,9 +43,34 @@ import crow_core  # noqa: E402
 # treats "no file" as the empty configuration, and that is the state the twelve
 # built-in tools are the whole table in. Cases that WANT a configuration rebind
 # `MCP_FILE` themselves and put it back.
-crow_core.MCP_FILE = os.path.join(tempfile.gettempdir(),
-                                  "crow-suite-has-no-mcp", "mcp.json")
+#
+# #155: UNTER EINEM JE PROZESS FRISCHEN ORDNER, NIE UNTER EINEM FESTEN NAMEN.
+# Die festen %TEMP%-Namen ueberlebten den Prozess: was ein Lauf durch die
+# vollen Pfade schrieb, fand der naechste als "leere" Konfiguration vor --
+# am 2026-08-29 zweimal bezahlt (HTTP 401 im Bild-Fall, d1-Leiche im
+# Delegations-Fall). mkdtemp ist leer per Konstruktion, atexit raeumt ab,
+# und zwei parallele Laeufe teilen keinen Pfad mehr.
+_SANDBOX = tempfile.mkdtemp(prefix="crow-suite-")
+atexit.register(shutil.rmtree, _SANDBOX, True)
+crow_core.MCP_FILE = os.path.join(_SANDBOX, "has-no-mcp", "mcp.json")
 crow_core.mcp_apply()
+
+# UND DIE INSTALLATIONS-PFADE, wie core- und gui-Suite sie seit dem 2026-08-23
+# umbiegen -- HIER fehlte der Block. Bezahlt am 2026-08-29: der Delegations-
+# Fall las robins ECHTE subtasks-registry.json (d1-Leiche, thread=None, der
+# frische Subtask hiess d2) und schrieb sie beim Aufraeumen zurueck -- die
+# Suite stand auf der laufenden Installation. `crow.py` re-exportiert
+# SESSION_DIR/SESSION_FILE/ROOTS_FILE by VALUE, darum BEIDE Bindungen.
+_NOWHERE = os.path.join(_SANDBOX, "has-no-install")
+crow_core.INDEX_PATH = os.path.join(_NOWHERE, "index.db")
+crow_core.ROOTS_FILE = os.path.join(_NOWHERE, "roots.json")
+crow_core.SESSION_DIR = os.path.join(_NOWHERE, "session")
+crow_core.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
+crow_core.SKILLS_DIR = os.path.join(_NOWHERE, "skills")
+crow_core.USER_PATH = os.path.join(_NOWHERE, "USER.md")
+crow.ROOTS_FILE = crow_core.ROOTS_FILE
+crow.SESSION_DIR = crow_core.SESSION_DIR
+crow.SESSION_FILE = crow_core.SESSION_FILE
 
 # THE PALETTE IS PINNED FOR THIS WHOLE MODULE (#102), and a red suite on robin's
 # machine is why. `crow_core._TTY` is decided ONCE, at import, out of
