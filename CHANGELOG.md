@@ -3,6 +3,43 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 1.5.2 — 2026-08-29
+
+5 commits. The rollover note carries the model's own digest of the leg, a pasted
+screenshot becomes a vision chip, and two phantom classes died: `\x` escapes read
+as UNC paths, and suite sandboxes that leaked state across runs.
+
+### The note digests the leg before the cut (#154)
+
+One question to the same spot BEFORE `conversation.reset()`, while the full prefix
+is still warm in the server's cache -- state, decisions taken, open steps ride the
+note as marked, unverified model text next to the user's verbatim lines (#147).
+`tools` stay in the body: without them the template renders differently and the
+warm prefix breaks. A failed or slow digest is "" and the roll proceeds unchanged.
+`rollover_digest_tokens` (settings.json) / `--rollover-digest-tokens`, default
+400, `0` switches it off.
+
+### A pasted screenshot is a chip
+
+Ctrl+V wrote the image to `pastes\` and attached the PATH as text -- the route
+predates #142. A pasted image now takes the drop route: chip, vision, transcript.
+
+### `\\name` without a share is not a UNC path
+
+A Select-String pattern containing the escape `n\xe4chste` was read as UNC path
+`\\xe4chste`, and the approval card asked always-for a phantom. Both path
+scanners now require `\\host\share` and a word-start lookbehind -- the same one
+that killed the phantom `P:` drive.
+
+### Suite sandboxes leak no state across runs (#155)
+
+Fixed `%TEMP%` names made one run's leftovers the next run's "empty"
+configuration (an HTTP 401 in the image case, a `d1` corpse in the delegate
+case) -- and `test_crow.py` never had the isolation block at all: it ran on the
+REAL installation and wrote suite data into the live subtask registry.
+Per-process `mkdtemp` + `atexit` everywhere; acceptance is each suite green
+twice back to back with no manual cleanup between runs.
+
 ## 1.5.1 — 2026-08-29
 
 2 commits. Bugfix release: the window's rollover, live-tested on a session stuck at
