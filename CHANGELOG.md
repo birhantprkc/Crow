@@ -3,6 +3,60 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 1.6.0 — 2026-08-29
+
+Git is a tool group of its own, the account connects over the device flow, and the
+window grew a git panel beside the code panel. Suites 427 / 731 / 528, checkers
+8/8 and 75/75.
+
+### Git as six tools, not as shell lines (#156)
+
+`git_status` `git_diff` `git_log` `git_commit` `git_push` `github_connect`. All five
+git calls run a **fixed argument list without a shell** — a branch or a path that
+looks like an option stays data, and a commit message beginning with `--` cannot be
+read as one. They operate on the repository the WORKING DIRECTORY is bound to, never
+on the process's cwd.
+
+`git_commit` stages exactly the paths it is given: no `-a`, no `.`. `git_push` uses
+git's own credentials on this machine — a token on a git command line would be
+readable in every process list for the length of the call.
+
+**`git_commit` and `git_push` ask at EVERY release level, `auto` included**, and no
+`always` can silence them: both are outside the level table (`ALWAYS_ASKS`) and have
+no approval scope, so neither a switched level nor a remembered answer releases them.
+Two independent locks, neither of which is a setting.
+
+### GitHub over the device flow
+
+`github_connect` returns the eight-character code immediately and polls in the
+background — the browser leg takes minutes, and a tool call may not hold the turn for
+that. The token is stored owner-only beside the provider keys and never handed to a
+surface; what a surface shows is the login. The client id is not a secret (the device
+flow has none), so it may be shipped or typed on the key page. One app covers every
+repository the account can reach.
+
+### The git panel (#156)
+
+Under the code panel, same shape and same folds, toggled by the octocat in the title
+bar — the only way to close it, as it is for the code panel. Both open share the
+height; one closed leaves the other the whole column. Changes with per-file `+`/`−`,
+the branch and its upstream, a Commit group that lists the files it would take by
+name, and a History that marks `◉` commit, `⑃` merge, `⇧` push, `⑂` fork, `◈` connect.
+Commits and merges come from `git log`, pushes and connects from Crow's own record —
+nothing is invented.
+
+The account button in the panel head **only connects**. It was a toggle for one
+evening, and that evening it read a stale label and disconnected an account somebody
+was trying to connect; `Disconnect` now lives on the key page, on a button whose text
+is the action.
+
+### `copy` sits on the block, not on the panel
+
+The panel head's `copy` took the visible text of everything in it — calls and source
+in one blob — so whoever wanted one code block got all of them. Every block carries
+its own now, and `Program code` became a fold with a count like the calls above it.
+`clear all` stays alone in the head: it means everything, which is its job.
+
 ## 1.5.2 — 2026-08-29
 
 5 commits. The rollover note carries the model's own digest of the leg, a pasted
