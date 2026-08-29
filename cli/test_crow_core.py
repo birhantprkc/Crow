@@ -2726,6 +2726,31 @@ class RunCommandBoundaryTests(unittest.TestCase):
         self.assertTrue(crow_core.run_command_boundary(
             self.args(r"type C:\Windows\system.ini")))
 
+    def test_an_escape_sequence_is_not_a_unc_path(self):
+        """robins Live-Fund 2026-08-29 nachmittags: das Modell schrieb
+        'n\\\\xe4chste' (ein Escape fuer 'naechste') in ein Select-String-
+        Muster, der UNC-Zweig las '\\\\xe4chste' als Serverpfad, und die
+        Karte bot 'always for \\\\xe4chste' an. Ein \\\\name ohne Share ist
+        kein Pfad, und mitten im Wort beginnt keiner -- dieselbe Regel, die
+        dem Laufwerks-Zweig schon das Phantom-P: austrieb."""
+        cmd = ("powershell -Command \"Select-String -Pattern "
+               "'Dokumentation|docs|n\\\\xe4chste|next step' x.md\"")
+        self.assertEqual(crow_core.run_command_boundary(self.args(cmd)), [])
+        # DIE POSITIVKONTROLLE UEBERLEBT: ein echter UNC-Pfad fragt weiter.
+        self.assertTrue(crow_core.run_command_boundary(
+            self.args(r"type \\server\share\secret.txt")))
+
+    def test_an_escape_sequence_grants_no_mandate(self):
+        """Dieselbe Haertung fuer die Gegenrichtung: ein \\\\x-Escape in
+        robins eigener Nachricht darf keine Freigabe erzeugen, ein echter
+        UNC-Pfad weiterhin schon."""
+        conversation = crow_core.Conversation("SYS", memory="")
+        conversation.append("user", "suche nach 'n\\\\xe4chste' im Text")
+        self.assertEqual(crow_core.mandated_paths(conversation), set())
+        conversation.append("user", r"du darfst nach \\server\share schreiben")
+        self.assertTrue(any("server" in p for p in
+                            crow_core.mandated_paths(conversation)))
+
     def test_the_cwd_argument_is_classified_too(self):
         hits = crow_core.run_command_boundary(self.args("git status", cwd="C:\\"))
         self.assertTrue(hits, "an outside cwd is an outside path")

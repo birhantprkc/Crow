@@ -4647,7 +4647,12 @@ _PATH_TOKENS = re.compile(
     r'"([A-Za-z]:[\\/][^"]*)"'
     r"|'([A-Za-z]:[\\/][^']*)'"
     r'|(?<![A-Za-z0-9])([A-Za-z]:[\\/][^\s"\';|&<>]*)'
-    r'|(\\\\[^\s"\';|&<>]+)'
+    # robins Live-Fund 2026-08-29: 'n\\xe4chste' (ein Escape fuer "naechste")
+    # in einem Select-String-Muster wurde als UNC-Pfad \\xe4chste gelesen und
+    # die Karte fragte fuer ein Phantom. Ein \\name ohne Share ist kein Pfad
+    # (\\host\share ist die kleinste echte Form), und mitten im Wort beginnt
+    # keiner -- dasselbe Lookbehind wie am Laufwerks-Zweig.
+    r'|(?<![A-Za-z0-9])(\\\\[^\s"\';|&<>\\/]+[\\/][^\s"\';|&<>]*)'
     r'|(%[A-Za-z_][A-Za-z0-9_]*%[\\/][^\s"\';|&<>]*)'
     r'|(\.\.[\\/][^\s"\';|&<>]*)'
 )
@@ -5962,7 +5967,12 @@ _MANDATED: set[str] = set()
 # can resolve, and guessing a directory out of a noun is how a release rule
 # begins releasing places nobody named. That limit is real and it is the price
 # of not guessing -- naming the path releases it.
-_PATH_IN_TEXT = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\)[^\s\"'<>|]*")
+# Der UNC-Zweig verlangt \\host\share und ein Wortanfangs-Lookbehind -- die
+# gleiche Haertung wie in _PATH_TOKENS (robins \\xe4chste-Phantom, 2026-08-29):
+# ein \\x-Escape in zitiertem Code darf kein Mandat erzeugen.
+_PATH_IN_TEXT = re.compile(
+    r"(?:[A-Za-z]:[\\/][^\s\"'<>|]*"
+    r"|(?<![A-Za-z0-9])\\\\[^\s\"'<>|\\/]+[\\/][^\s\"'<>|]*)")
 
 
 def mandated_paths(conversation: "Conversation") -> set[str]:
