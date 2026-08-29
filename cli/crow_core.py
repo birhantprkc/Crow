@@ -6362,7 +6362,22 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
     env = {k: v for k, v in os.environ.items()
            if not any(s in k.upper() for s in ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"))}
     try:
+        # DAS KIND BEKOMMT KEINE TASTATUR (2026-08-29, live gefunden). Ein
+        # `Invoke-WebRequest` ohne `-UseBasicParsing` stellt in PS 5.1 eine
+        # Sicherheitsrueckfrage -- und die erschien in dem Terminal, aus dem
+        # das FENSTER gestartet war, wo niemand sie erwartet und robin sie erst
+        # nach Minuten fand. Der Zug stand still, ohne dass irgendwo etwas
+        # dazu stand: die Frage ging an die Konsole, nicht durch die Rohre,
+        # die hier abgehoert werden.
+        #
+        # MIT DEVNULL LIEST JEDE ABFRAGE EOF und der Aufruf endet sofort mit
+        # dem, was das Programm dann sagt -- ein Ergebnis, das das Modell lesen
+        # und beim naechsten Versuch vermeiden kann. Ein Werkzeug, das auf eine
+        # Eingabe wartet, die es nicht geben kann, ist ein Werkzeug, das haengt;
+        # gefragt wird in diesem Programm ueber die Freigabe-Karte, nirgends
+        # sonst.
         done = subprocess.run(command, shell=True, cwd=cwd, env=env, timeout=COMMAND_TIMEOUT,
+                              stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, errors="replace")
     except subprocess.TimeoutExpired:
         return f"error: command exceeded {COMMAND_TIMEOUT}s and was killed: {command}"
