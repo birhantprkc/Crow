@@ -9400,7 +9400,6 @@ class Api:
                 model=spot0["model"], api_key=spot0["api_key"],
                 temperature=sampling0["temperature"], top_p=sampling0["top_p"],
                 min_p=sampling0["min_p"], top_k=sampling0.get("top_k"),
-                reasoning_effort=self._reasoning,
                 extra_headers=spot0.get("headers") or None,
                 transport=spot0.get("transport") or crow_core.TRANSPORT_CHAT,
                 remote=spot0["remote"])

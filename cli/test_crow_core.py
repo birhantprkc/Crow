@@ -10982,7 +10982,22 @@ class TheRolloverCarriesADigestTests(unittest.TestCase):
         self.assertEqual(seen["body"]["max_tokens"],
                          crow_core.ROLLOVER_DIGEST_TOKENS)
         self.assertFalse(seen["body"]["stream"])
+        self.assertEqual(seen["body"]["chat_template_kwargs"],
+                         {"enable_thinking": False},
+                         "#157: die Lege denkt nicht, gemessen")
         self.assertEqual(conversation.payload(), before)
+
+    def test_the_messages_dialect_carries_no_template_kwargs(self):
+        """#157 NEGATIV: der Thinking-Schalter ist ein chat_completions-
+        Dialekt -- der Anthropic-Body darf keinen llama.cpp-Kwarg tragen,
+        den er nicht verstehen wuerde."""
+        seen = self._serve()
+        crow_core.rollover_digest(
+            self._conversation(), base_url="http://127.0.0.1:1/v1",
+            temperature=1.0, top_p=0.95, min_p=0.01,
+            transport=crow_core.TRANSPORT_MESSAGES)
+        self.assertTrue(seen["url"].endswith("/messages"))
+        self.assertNotIn("chat_template_kwargs", seen["body"])
 
     def test_a_cap_of_zero_sends_nothing(self):
         """NEGATIV: 0 ist aus -- kein Request, keine Wartezeit am Schnitt."""
