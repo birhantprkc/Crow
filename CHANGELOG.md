@@ -3,6 +3,90 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 1.7.0 — 2026-08-30
+
+The third model gets a faster engine, and two checker suites that had been red
+for weeks can go red again on purpose.
+
+### Flash-Next decodes 11.7 % faster: the pin carries PR #27992 (#159)
+
+qwen4exp's PLE n-gram embedding called `get_prev_tokens()` on every graph build,
+and at the pin that walked **every used cell** of the KV cache testing up to
+`LLAMA_MAX_SEQ = 256` sequence bits — once per decoded token, on the critical
+path. PR #27992 indexes `(seq, pos)` cells instead.
+
+The engine measured its own cost before any throughput number was read. Under
+the PR's `verify` mode at 31,979 tokens of depth: **scan 4450.6 µs against index
+14.8 µs, 0 mismatches over 250 calls.**
+
+Measured on the shipped binary, three rounds interleaved against a same-session
+control, one 31,979-token cold turn per boot:
+
+| | control | pin + #27992 |
+|---|---|---|
+| prefill | 964.92 (936.31–981.07) | 970.44 (941.07–985.32) |
+| decode | 29.05 (28.49–29.84) | **32.44 (31.06–33.20)** |
+
+**+11.7 % decode with no overlap between the ranges; prefill flat at +0.6 %** —
+the change is decode-side, as claimed. Per-token saving 3.59 ms.
+
+**The gain is proportional to context depth**, because the scan is `O(n_kv)`:
+about 3 % at the ten-task gate's few-hundred-token depth, +11.7 % at 31,979
+tokens, larger and unmeasured at the 200k window. Correctness twice: the PR's own
+unit test (9,480 lookups, 0 failures) and the live mismatch count above. The
+ten-task gate is 10/10 twice with token counts **byte-identical** to the control —
+an engine-only change cannot move what the model writes, and that is measured
+rather than assumed.
+
+**It is a draft PR** whose author notes it charges every other architecture a
+little for qwen4exp's benefit. If it is rejected upstream, drop the patch: the
+binary key falls back to the bare pin, which measured 959.81 / 28.60 over ten
+boots.
+
+**Interleaved on purpose.** This machine drifted −5.0 % prefill and −5.5 % decode
+within one day — larger than the effect and enough to flip its sign. Three times
+on 2026-08-30 a control from another session would have produced the wrong
+verdict. No arm is compared against a control from another session.
+
+### Two checker suites had been red for weeks, and hid the next regression
+
+`test_check_operating_point.py` went red on 2026-08-21 and stayed red through
+**ten releases**. `test_check_shared_core.py` failed 18 of its 19 cases. Both
+checkers were green on the real repository the whole time — what was broken was
+the half that proves they can go red at all.
+
+The damage is not hypothetical. The comment above `QWEN_LINE` says in as many
+words: *"It moves again when a third model key lands, and somebody should have to
+look."* The third model key landed with #140 and nobody looked, **because the
+suite was already red**. Three regressions had accumulated behind the first one.
+
+Repaired: the fixtures now carry the vision switch, the third model's line, a
+helper entry, and the blank lines every real document has between two command
+lines. Two real defects in the checkers came out with them:
+
+- **A file the caller names and that is not there is an error, not a miss.**
+  Making the document rule "at least one live page prints this key correctly" was
+  right, but it also swallowed `--extra`: a mistyped path passed silently as long
+  as some other page carried the line.
+- **`command_regions` clamps backward now, for the same reason it clamps
+  forward.** A region stops at the next anchor so it cannot merge two command
+  lines; nothing stopped it reaching back into the previous one, and since the
+  two-line lookback for the env prelude landed, two commands one blank line apart
+  were enough for the second to read the first one's `--port`. A correct document
+  reported as drifted.
+
+### Also
+
+- `manifests/operating-point.json` records the reasoning levels this model
+  actually accepts as unmeasured no longer: `max`, `minimal` and an explicit
+  `off` return HTTP 500, and `UNSET` renders byte-identically to `high` (#160)
+- the MTP head is not absent from Flash-Next — the checkpoint carries it and
+  mainline's converter opts out; a small Qwen3.8 GGUF now exists too. Speculation
+  stays dead for a better reason: verifying N drafted tokens reads the *union* of
+  the experts they select, 19.8 of 512 at N=2 against 10 for a single token
+- suites 427 / 732 / 528; checkers `check_operating_point` 8/8,
+  `check_shared_core` 75/75, and their suites 17/17 and 19/19
+
 ## 1.6.2 — 2026-08-30
 
 Three roots closed in one night: the silent server deaths, the empty rollover
