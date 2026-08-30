@@ -1763,14 +1763,22 @@ Write-Host ""
 # THE COMMIT IS PINNED ON PURPOSE: b10687, one day younger, dies with
 # 'MUL_MAT failed' during warmup, because #27880 hoists the PLE embedding into
 # one shared graph split and that breaks under -ncmoe (A/B measured 2026-08-30).
-# 10-boot series on the merge commit: 10/10 clean, prefill 959.81 tok/s mean,
-# decode 28.60, VRAM 27,988 MiB after a 31,979-token turn -- inside the spreads
-# of build 439. Flags match manifests/operating-point.json.
-Write-Host "  Third model, Qwen3.8-Flash-Next (#140) -- 73.45 GiB in 3 shards, mainline 6c84c7d5d:" -ForegroundColor DarkGray
+# AND THE PIN CARRIES ONE PATCH: PR #27992 alone, which indexes (seq,pos) cells so
+# qwen4exp's PLE n-gram lookup stops scanning every used KV cell once per decoded
+# token. Measured 2026-08-30 on this exact line, three rounds interleaved against a
+# same-session control: decode 32.44 tok/s mean (31.06-33.20) against 29.05, i.e.
+# +11.7 % with no overlap; prefill 970.44 against 964.92, i.e. flat. The gain is
+# proportional to context depth -- about 3 % at a few hundred tokens, +11.7 % at
+# 31,979 -- because the scan is O(n_kv). Correctness twice: the PR's unit test
+# (9,480 lookups, 0 failures) and 0 mismatches over 250 calls in the live engine.
+# IT IS A DRAFT PR. If it is rejected upstream, drop the patch and the line points
+# back at wt-merge\build-merge, which measured 959.81 / 28.60 over ten boots.
+# Flags match manifests/operating-point.json.
+Write-Host "  Third model, Qwen3.8-Flash-Next (#140) -- 73.45 GiB in 3 shards, mainline 6c84c7d5d + PR #27992:" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "    hf download unsloth/Qwen3.8-Flash-Next-GGUF --include '*UD-Q2_K_XL*' --local-dir $InstallTo\models\qwen-next-gguf" -ForegroundColor White
 Write-Host ""
-Write-Host "    C:\Users\robin\dev\crow-lab\wt-merge\build-merge\bin\Release\llama-server.exe ``" -ForegroundColor White
+Write-Host "    C:\Users\robin\dev\crow-lab\wt-27992\build-27992\bin\Release\llama-server.exe ``" -ForegroundColor White
 Write-Host "      -m $InstallTo\models\qwen-next-gguf\UD-Q2_K_XL\Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf ``" -ForegroundColor White
 Write-Host "      --port 8083 -c 200000 -b 4096 -ub 4096 ``" -ForegroundColor White
 Write-Host "      -ctk q8_0 -ctv q8_0 -ncmoe 40 ``" -ForegroundColor White

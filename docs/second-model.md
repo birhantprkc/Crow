@@ -94,13 +94,42 @@ by per-layer weights -- and under `-ncmoe` those weights sit on the CPU. Measure
 2026-08-30 under one variable: `6c84c7d5d` runs, `6fe749801` aborts. The pin moves
 when that is fixed upstream, not when a newer tag appears.
 
-Ten boots on the merge commit, one 31,979-token turn each on a cold cache:
+Ten boots on the bare merge commit, one 31,979-token turn each on a cold cache:
 **10/10 clean, prefill 959.81 tok/s mean (945.67-995.29), decode 28.60
 (27.31-29.74), VRAM 27,988 MiB, load 71.8 s** -- inside the spreads of build 439
 on both figures. Raw rows:
 `crow-lab/runs/2026-08-30-merge-qwen4exp/boot-series.csv`.
 
-    C:\Users\robin\dev\crow-lab\wt-merge\build-merge\bin\Release\llama-server.exe `
+**The pin carries one patch: PR #27992.** qwen4exp's PLE n-gram embedding called
+`get_prev_tokens()` on every graph build, and that walked *every* used cell of the
+KV cache testing up to 256 sequence bits -- once per decoded token, on the critical
+path. The PR indexes `(seq, pos)` cells instead. The engine measured its own cost
+under the PR's `verify` mode at this depth: **scan 4450.6 us against index 14.8 us**,
+0 mismatches over 250 calls.
+
+Measured 2026-08-30 on the shipped binary, three rounds **interleaved against a
+same-session control**: **decode 32.44 tok/s mean (31.06-33.20) against 29.05, i.e.
++11.7 % with no overlap between the ranges; prefill 970.44 against 964.92, i.e.
+flat.** Per-token saving 3.59 ms. Raw rows:
+`crow-lab/runs/2026-08-30-levers-159/levers.csv`.
+
+**The gain is proportional to context depth**, because the scan is `O(n_kv)`: about
+3 % at the ten-task gate's few-hundred-token depth, +11.7 % at 31,979 tokens, larger
+and unmeasured at the 200k window. Correctness twice: the PR's own unit test (9,480
+lookups, 0 failures) and 0 live mismatches; the ten-task gate is 10/10 twice with
+token counts byte-identical to the control, so the change cannot move what the model
+writes.
+
+**It is a draft PR** whose author notes it charges every other architecture a little
+for qwen4exp's benefit. If it is rejected upstream, drop the patch and the line falls
+back to the bare pin above.
+
+*Interleaved on purpose.* This machine drifted -5.0 % prefill and -5.5 % decode
+within one day -- larger than the effect and enough to flip its sign. On 2026-08-30
+a control from another session would have produced the wrong verdict three times
+over. No arm is compared against a control from another session.
+
+    C:\Users\robin\dev\crow-lab\wt-27992\build-27992\bin\Release\llama-server.exe `
       -m <models>\qwen-next-gguf\UD-Q2_K_XL\Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf `
       --port 8083 -c 200000 -b 4096 -ub 4096 `
       -ctk q8_0 -ctv q8_0 -ncmoe 40 `
