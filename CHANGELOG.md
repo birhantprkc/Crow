@@ -3,6 +3,62 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 1.6.2 — 2026-08-30
+
+Three roots closed in one night: the silent server deaths, the empty rollover
+digest, and the fork the third model needed.
+
+### The silent server deaths were a console signal (#158)
+
+The class that had been blamed on the driver JIT, the compute cache and the PR
+build since 2026-08-28. WER LocalDumps were armed and the next death left **no
+dump**; the boot log ended on a completed turn (`release ... n_tokens = 169987`)
+with no error line; Crow reported exit code 1 (0x00000001), an ordinary return
+value rather than an NTSTATUS; and neither `stop_servers` nor `proc.kill()` had
+run. No crash, no fault, no killer — the process ended itself, in order.
+
+The only `exit(1)` reachable at runtime in llama.cpp's server sits in its
+`signal_handler`. `start_server` spawned the server with no `creationflags`, so
+it inherited the console **and the process group** of the window — and Windows
+delivers `CTRL_C_EVENT` to every process in a group. Every Ctrl+C in the terminal
+the window was started from reached the server too.
+
+`CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` now. Neither stop path is
+affected: `taskkill /PID` and `TerminateProcess` reach a process in its own
+group unchanged.
+
+### The rollover digest was thinking instead of answering (#157)
+
+Measured against the running 27B, one variable per arm, `max_tokens 400`: with
+the chat default `high` the reasoning ate the entire budget — 400/400 tokens,
+**0 characters of content** — which is why a roll produced a note with no digest
+block. The model thinks at every level, so no lower step heals it.
+`chat_template_kwargs: {"enable_thinking": false}` lands the answer complete in
+87 of 400 tokens. Templates that do not know the kwarg drop it silently, and the
+Anthropic dialect never carries it. The digest leg only; the level a turn runs
+at is untouched.
+
+### Qwen3.8-Flash-Next no longer needs a fork (#140)
+
+PR #27742 merged into mainline llama.cpp on 2026-08-29. Ten boots on the merge
+commit `6c84c7d5d`, one 31,979-token turn each on a cold cache: **10/10 clean,
+prefill 959.81 tok/s mean, decode 28.60, VRAM 27,988 MiB** — inside the spreads
+of the lab build on both figures.
+
+**The commit is pinned, not the tag.** `b10687`, a day younger, aborts during
+warmup with `ggml_cuda_compute_forward: MUL_MAT failed`. The only `qwen4exp`
+change between them is #27880 "reduce number of graph splits", which hoists the
+PLE embedding into one shared split and then multiplies it by per-layer weights
+— and under `-ncmoe` those weights are on the CPU. The pin moves when that is
+fixed upstream, not when a newer tag appears.
+
+### Also
+
+- `run_command` gives its child no keyboard (stdin `DEVNULL`): a PowerShell
+  confirmation on the console once stalled a turn for 8m55s with nothing on
+  screen to say why
+- README counted 15 tools; there are 21 since the git group
+
 ## 1.6.1 — 2026-08-29
 
 ### No child process may wait for a keystroke
