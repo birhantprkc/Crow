@@ -4487,6 +4487,102 @@ class TheReasoningLevelBelongsToTheChatTests(unittest.TestCase):
         self.assertEqual(sent["chat_template_kwargs"], {"reasoning_effort": "high"})
 
 
+class TheShippedManifestOffersOnlyMeasuredLevelsTests(unittest.TestCase):
+    """#160. What the menu OFFERS, held against what the model was measured to take.
+
+    THE DEFECT THIS GUARDS IS NOT HYPOTHETICAL. Until 2026-08-30 the flash-next entry
+    carried no `reasoning_levels`, so the union fallback applied and Crow offered `max`
+    on a model that answers `max` with HTTP 500. The entry's own note had predicted it
+    ("one offered level can be fatal -- measure before offering") and deferred the
+    probe; the probe was run through /apply-template against the shipped operating
+    point and it is fatal.
+
+    WHAT THIS SUITE CAN AND CANNOT SAY. It cannot ask a server anything, so it cannot
+    prove `max` still kills the turn -- that is the live negative control, run against
+    a running server. What it CAN hold is the shape: an entry that names its levels,
+    a grouping that names only levels that entry offers, and the union fallback still
+    reaching models nobody has measured. Each of the three carries a case below that
+    goes red if the behaviour inverts.
+    """
+
+    FLASH_NEXT = "Qwen3.8-Flash-Next"
+
+    @staticmethod
+    def _groups_outside_levels(entries):
+        """Every (key, level) where a group names something the entry does not offer.
+
+        `off` is exempt BY DEFINITION and not by exception: it means "send no key at
+        all", so it is never a member of the offered list -- it is the name for which
+        of the real steps the absent key lands on. See reasoning_groups_for.
+        """
+        bad = []
+        for key, entry in (entries or {}).items():
+            levels = set((entry or {}).get("reasoning_levels") or ())
+            if not levels:
+                continue
+            for group in (entry or {}).get("reasoning_groups") or ():
+                for level in group:
+                    if level != "off" and level not in levels:
+                        bad.append((key, level))
+        return bad
+
+    def _entries(self):
+        entries = ((crow_core._manifest().get("models") or {}).get("entries") or {})
+        self.assertTrue(entries, "the shipped manifest has no model entries")
+        return entries
+
+    def test_flash_next_does_not_offer_the_level_that_returns_500(self):
+        """Measured 2026-08-30 (#160): max, minimal and an explicit off all HTTP 500."""
+        self.assertNotIn("max", crow_core.reasoning_levels_for(self.FLASH_NEXT))
+
+    def test_flash_next_names_its_levels_instead_of_taking_the_union(self):
+        """The absence of `max` has to come from a MEASUREMENT, not from a shorter
+        union. If these two were ever equal the case above would pass for the wrong
+        reason -- it would be asserting something about every model at once."""
+        levels = crow_core.reasoning_levels_for(self.FLASH_NEXT)
+        self.assertEqual(levels, ("low", "medium", "high"))
+        self.assertNotEqual(levels, crow_core.REASONING_LEVELS)
+
+    def test_an_unmeasured_model_still_gets_the_union(self):
+        """NEGATIVE PROOF for the case above: the fallback is not what was fixed.
+        A model this repo has never probed must still see every level the parser
+        accepts -- narrowing THAT would be a claim nobody measured."""
+        self.assertEqual(crow_core.reasoning_levels_for("Some-Model-Nobody-Measured"),
+                         crow_core.REASONING_LEVELS)
+
+    def test_off_is_a_member_of_highs_group_on_flash_next(self):
+        """Measured: UNSET and `high` render byte-identically (1be9942ae3ae, 299 chars).
+        So an Off row is only honest as high's group, never as a fourth state."""
+        groups = crow_core.reasoning_groups_for(self.FLASH_NEXT)
+        group = crow_core.reasoning_group_of("off", groups)
+        self.assertEqual(group, ("off", "high"))
+        self.assertEqual(crow_core.reasoning_row_name(group), "high")
+
+    def test_moving_between_flash_next_groups_is_told_apart(self):
+        """The grouping has to be able to say BOTH things. off -> high moves no byte
+        and must stay silent; low -> medium crosses a group and must warn. A grouping
+        that answered the same either way would be decoration."""
+        groups = crow_core.reasoning_groups_for(self.FLASH_NEXT)
+        self.assertFalse(crow_core.reasoning_change_rerenders("off", "high", groups))
+        self.assertTrue(crow_core.reasoning_change_rerenders("low", "medium", groups))
+
+    def test_no_entry_groups_a_level_it_does_not_offer(self):
+        """Across the WHOLE shipped table, not just flash-next: a group naming a level
+        the menu never shows is a row the window cannot render."""
+        self.assertEqual(self._groups_outside_levels(self._entries()), [])
+
+    def test_that_same_check_goes_red_on_a_grouping_that_lies(self):
+        """THE COUNTER-PROBE, and it is the one that matters. The case above passed on
+        2026-08-30 against a table with one entry that had no levels at all -- a check
+        that cannot go red would have passed there too, and #159's lesson is exactly
+        that: a checker unable to fail hides the next regression rather than catching
+        it."""
+        broken = {"flash-next-q2-k-xl": {"reasoning_levels": ["low", "medium", "high"],
+                                         "reasoning_groups": [["off", "high"], ["max"]]}}
+        self.assertEqual(self._groups_outside_levels(broken),
+                         [("flash-next-q2-k-xl", "max")])
+
+
 class TheTerminalAnswersMcpItselfTests(unittest.TestCase):
     """#129. The terminal runs `/mcp`, it does not point at the window.
 
