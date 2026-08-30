@@ -1755,19 +1755,22 @@ Write-Host "    python $InstallTo\cli\crow.py" -ForegroundColor White
 Write-Host ""
 
 # THE THIRD MODEL (#140), PRINTED AND NOT FETCHED, same rule as the second: an
-# uncopied line is a stale line the day somebody needs it. This one is honest
-# about being a lab line -- arch qwen4exp exists only in llama.cpp PR #27742,
-# so the command starts the MEASURED lab build (439, 250b614) by absolute path.
-# The shipped bin\llama-server.exe cannot load the architecture, and the newer
-# PR head fails its own warmup 11 of 19 times (A/B measured 2026-08-28).
-# 10-boot series under driver 616.56: prefill 964.8 tok/s mean, decode 28.61
-# mean, VRAM 28.4 GiB after a 31,979-token turn. Flags match
-# manifests/operating-point.json servers.flash-next-q2-k-xl.
-Write-Host "  Third model, Qwen3.8-Flash-Next (#140) -- 73.45 GiB in 3 shards, lab engine:" -ForegroundColor DarkGray
+# uncopied line is a stale line the day somebody needs it. Still a LOCAL build
+# by absolute path, but NO LONGER A FORK: PR #27742 merged into mainline on
+# 2026-08-29, and this command names that merge commit (6c84c7d5d). The SHIPPED
+# bin\llama-server.exe still cannot load the architecture -- it is b10269 from
+# 2026-08-06 -- which is why the line points elsewhere at all.
+# THE COMMIT IS PINNED ON PURPOSE: b10687, one day younger, dies with
+# 'MUL_MAT failed' during warmup, because #27880 hoists the PLE embedding into
+# one shared graph split and that breaks under -ncmoe (A/B measured 2026-08-30).
+# 10-boot series on the merge commit: 10/10 clean, prefill 959.81 tok/s mean,
+# decode 28.60, VRAM 27,988 MiB after a 31,979-token turn -- inside the spreads
+# of build 439. Flags match manifests/operating-point.json.
+Write-Host "  Third model, Qwen3.8-Flash-Next (#140) -- 73.45 GiB in 3 shards, mainline 6c84c7d5d:" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "    hf download unsloth/Qwen3.8-Flash-Next-GGUF --include '*UD-Q2_K_XL*' --local-dir $InstallTo\models\qwen-next-gguf" -ForegroundColor White
 Write-Host ""
-Write-Host "    C:\Users\robin\dev\crow-lab\wt-qwen-next\build-qn\bin\Release\llama-server.exe ``" -ForegroundColor White
+Write-Host "    C:\Users\robin\dev\crow-lab\wt-merge\build-merge\bin\Release\llama-server.exe ``" -ForegroundColor White
 Write-Host "      -m $InstallTo\models\qwen-next-gguf\UD-Q2_K_XL\Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf ``" -ForegroundColor White
 Write-Host "      --port 8083 -c 200000 -b 4096 -ub 4096 ``" -ForegroundColor White
 Write-Host "      -ctk q8_0 -ctv q8_0 -ncmoe 40 ``" -ForegroundColor White

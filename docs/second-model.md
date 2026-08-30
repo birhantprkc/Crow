@@ -81,12 +81,26 @@ The terminal client defaults to `:8081`. The window reads the port off the runni
 ## Third model: Qwen3.8-Flash-Next (#140)
 
 73.45 GiB in 3 shards, `UD-Q2_K_XL`, arch `qwen4exp` — 48 layers, 512 experts per
-layer, 10 active, a shared expert per layer. Runs ONLY on the PR #27742 engine
-(lab build 439, `250b614`); the shipped binary cannot load the architecture, and
-the newer PR head `eaf9376` fails its own warmup 11 of 19 times. License is
-`qwen-community-1.0`, not apache-2.0.
+layer, 10 active, a shared expert per layer. **No fork any more:** PR #27742
+merged into mainline llama.cpp on 2026-08-29, and the line below runs that merge
+commit, `6c84c7d5d`. The shipped binary still cannot load it -- that one is
+`b10269` from 2026-08-06. License is `qwen-community-1.0`, not apache-2.0.
 
-    C:\Users\robin\dev\crow-lab\wt-qwen-next\build-qn\bin\Release\llama-server.exe `
+**The commit is pinned, not the tag.** `b10687`, one day younger, aborts during
+warmup with `ggml_cuda_compute_forward: MUL_MAT failed`. The only `qwen4exp`
+change between the two is #27880 "reduce number of graph splits", which hoists
+the PLE embedding out of the layers into one shared split and then multiplies it
+by per-layer weights -- and under `-ncmoe` those weights sit on the CPU. Measured
+2026-08-30 under one variable: `6c84c7d5d` runs, `6fe749801` aborts. The pin moves
+when that is fixed upstream, not when a newer tag appears.
+
+Ten boots on the merge commit, one 31,979-token turn each on a cold cache:
+**10/10 clean, prefill 959.81 tok/s mean (945.67-995.29), decode 28.60
+(27.31-29.74), VRAM 27,988 MiB, load 71.8 s** -- inside the spreads of build 439
+on both figures. Raw rows:
+`crow-lab/runs/2026-08-30-merge-qwen4exp/boot-series.csv`.
+
+    C:\Users\robin\dev\crow-lab\wt-merge\build-merge\bin\Release\llama-server.exe `
       -m <models>\qwen-next-gguf\UD-Q2_K_XL\Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf `
       --port 8083 -c 200000 -b 4096 -ub 4096 `
       -ctk q8_0 -ctv q8_0 -ncmoe 40 `
