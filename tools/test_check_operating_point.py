@@ -66,6 +66,9 @@ QWEN_LINE = (
     "llama-server.exe -m %LOCALAPPDATA%\\Crow\\models\\qwen38-gguf\\x.gguf "
     "--port 8082 -c 200000 -ctk q8_0 -ctv q8_0 -ngl 99 -np 1 --jinja "
     "--slot-save-path %LOCALAPPDATA%\\Crow\\session "
+    # 02f8d1d put the vision switch into the manifest as one field, and this mirror
+    # never grew it -- so this key had been failing on 'mmproj: missing' ever since.
+    "--mmproj qwen38-gguf/mmproj-F16.gguf "
     # #117. THIS LINE IS A MIRROR, and it went red the moment the real one grew a flag: the
     # fixture is synthetic but the MANIFEST it is checked against is the real file on disk, so
     # every flag the manifest starts demanding has to appear here too. That is the point of the
@@ -73,6 +76,29 @@ QWEN_LINE = (
     "--spec-type draft-mtp\n"
 )
 
+
+# THE THIRD LINE, and the comment above said it would be needed: 'It moves again when
+# a third model key lands, and somebody should have to look.' The key landed with #140
+# (d7f3bf8) and nobody looked, because this suite was ALREADY red: e1bda23 broke case 10
+# on 2026-08-21, and 02f8d1d broke the counting cases after it. A red suite hides the
+# NEXT regression, which is the whole reason this file exists.
+#
+# Flags, and no others: this model declares NO -ngl, NO slot-save-path and NO template
+# file, and it is the only one carrying -b/-ub/-ncmoe/--fit/--load-mode. That asymmetry
+# is what stops any of the three regions from satisfying another one's key.
+# The real documents never put two command lines next to each other: install.ps1 has
+# Write-Host "" between them, README.md and docs/second-model.md have blank lines and
+# prose. command_regions reaches TWO LINES BACK from its anchor (2026-08-28, for the
+# env prelude), so an adjacent previous command lands inside the next one's region and
+# extract() takes ITS --port. Two blank lines is what the real files have and what the
+# lookback needs; with one, the reach still lands on the previous command.
+BLANK = "\n\n"
+
+FLASH_LINE = (
+    "llama-server.exe -m %LOCALAPPDATA%\\Crow\\models\\qwen-next-gguf\\x.gguf "
+    "--port 8083 -c 200000 -b 4096 -ub 4096 -ctk q8_0 -ctv q8_0 "
+    "-ncmoe 40 --fit off --load-mode none -np 1 --jinja\n"
+)
 
 def run(repo, extra=None):
     cmd = [sys.executable, TOOL, "--repo", repo]
@@ -129,8 +155,10 @@ def client_source(sampling, keys=None, body_keys=None, prose=False):
     return "".join(out)
 
 
-def fixture(tmp, readme=None, install=None, manifest_patch=None, client=None, gui=None):
+def fixture(tmp, readme=None, install=None, manifest_patch=None, client=None,
+            gui=None, sep=None):
     """A minimal repo the checker can be pointed at."""
+    gap = BLANK if sep is None else sep
     root = os.path.join(tmp, "repo")
     os.makedirs(os.path.join(root, "manifests"), exist_ok=True)
     os.makedirs(os.path.join(root, "cli"), exist_ok=True)
@@ -142,10 +170,12 @@ def fixture(tmp, readme=None, install=None, manifest_patch=None, client=None, gu
     ver = src["version"]
     with open(os.path.join(root, "README.md"), "w", encoding="utf-8") as fh:
         fh.write("version-%s-brightgreen\n\n```\n%s%s```\n"
-                 % (ver, readme if readme is not None else GOOD_LINE, QWEN_LINE))
+                 % (ver, readme if readme is not None else GOOD_LINE,
+                    gap + QWEN_LINE + gap + FLASH_LINE))
     with open(os.path.join(root, "install.ps1"), "w", encoding="utf-8") as fh:
         fh.write('param([string] $Version = "%s")\n%s%s'
-                 % (ver, install if install is not None else GOOD_LINE, QWEN_LINE))
+                 % (ver, install if install is not None else GOOD_LINE,
+                    gap + QWEN_LINE + gap + FLASH_LINE))
     with open(os.path.join(root, "cli", "crow.py"), "w", encoding="utf-8") as fh:
         fh.write('VERSION = "%s"\n' % ver)
         fh.write(client_source(src["sampling"]) if client is None else client)
@@ -171,7 +201,7 @@ def main():
         # 1 - positive control on a fixture, so a red real repo cannot mask a
         #     checker that says no to everything.
         code, out = run(fixture(tmp, ))
-        check("1 a repo that agrees passes", code == 0 and "6 of 6" in out, out.strip()[-200:])
+        check("1 a repo that agrees passes", code == 0 and "8 of 8" in out, out.strip()[-200:])
         shutil.rmtree(os.path.join(tmp, "repo"))
 
         # 2 - a changed value must be named, not just counted.
@@ -293,7 +323,7 @@ def main():
         #      applied to the rule that counts - a sentence is not a copy.
         code, out = run(fixture(tmp, client=client_source(samp, prose=True)))
         check("14 prose quoting the value is not a second copy",
-              code == 0 and "6 of 6" in out, out.strip()[-300:])
+              code == 0 and "8 of 8" in out, out.strip()[-300:])
         shutil.rmtree(os.path.join(tmp, "repo"))
 
         # 15 - written exactly once, but in the wrong file. "Exactly one" alone
@@ -311,6 +341,23 @@ def main():
         code, out = run(fixture(tmp, client=""))
         check("16 a value written nowhere is an error, not a skip",
               code == 1 and "written nowhere" in out, out.strip()[-300:])
+
+        # 17 - COMMAND LINES THAT SIT CLOSE TOGETHER STILL BELONG TO THEMSELVES.
+        #      command_regions clamps FORWARD -- a region stops at the next anchor,
+        #      'so a long region can never merge two command lines into one that
+        #      satisfies the manifest with halves of both'. It did NOT clamp
+        #      BACKWARD: since 2026-08-28 the region reaches two lines above its
+        #      anchor for the env prelude, and with one blank line between commands
+        #      that reach lands on the PREVIOUS one. extract() then takes the first
+        #      --port it sees, so key two reads key one's port and the document is
+        #      reported as drifted while it is correct.
+        #
+        #      One blank line, not zero: a document with none is not a shape any of
+        #      the real files take, but one is -- and one was enough to break it.
+        code, out = run(fixture(tmp, sep="\n"))
+        check("17 commands one blank line apart do not borrow each other's flags",
+              code == 0 and "8 of 8" in out, out.strip()[-300:])
+        shutil.rmtree(os.path.join(tmp, "repo"))
 
     print()
     print("RESULT: PASS - the drift checker can go red, and does not go red at prose"

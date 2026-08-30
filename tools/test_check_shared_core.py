@@ -111,6 +111,25 @@ class Window:
 '''
 
 
+# A HELPER, AND THE FIXTURE HAD NONE. 4167434 (#103) gave the checker a sixth
+# manifest key, `helpers`, for cli/crow_voice.py -- a file held to the definition
+# and import predicates but NOT to the user-entry one. The manifest here never grew
+# it, so every case died at SetupError('the manifest is missing helpers') before it
+# reached its own assertion. Sixteen negative controls reported nothing for weeks.
+#
+# It imports a declared name BY NAME and uses it, which is what makes it exercise
+# predicate (3) for helpers rather than merely existing. It defines nothing the
+# manifest declares, so (1) and (2) stay satisfied, and it carries no wording.
+HELPER = '''"""A helper: it owns one narrow thing and is never a client of the turn."""
+
+from crow_core import tool_write_file
+
+
+def save_transcript(path, text):
+    return tool_write_file(path, text)
+'''
+
+
 def manifest(surfaces=None):
     """The hand-written manifest, in the shape the real one has."""
     surfaces = surfaces if surfaces is not None else ["cli/crow.py", "gui/crow_gui.py"]
@@ -130,13 +149,19 @@ def manifest(surfaces=None):
             {"name": "run_turn", "kind": "def", "user_entry": True,
              "evidence": ["run_turn("], "why": "the tool loop"},
         ],
+        "helpers": [
+            {"path": "cli/crow_helper.py", "label": "helper",
+             "why": "a fixture helper -- held to the definition and import "
+                    "predicates, left out of the user-entry one"},
+        ],
         "wordings": [
             {"id": WORDING_ID, "text": REFUSAL, "why": "the first refusal with teeth"},
         ],
     }
 
 
-def fixture(tmp, core=None, cli=None, gui=None, man=None, drop_gui=False):
+def fixture(tmp, core=None, cli=None, gui=None, man=None, drop_gui=False,
+            helper=None):
     """A minimal repository the checker can be pointed at."""
     root = os.path.join(tmp, "repo")
     os.makedirs(os.path.join(root, "manifests"), exist_ok=True)
@@ -147,6 +172,8 @@ def fixture(tmp, core=None, cli=None, gui=None, man=None, drop_gui=False):
         json.dump(src, fh, indent=1)
     with open(os.path.join(root, "cli", "crow_core.py"), "w", encoding="utf-8") as fh:
         fh.write(CORE if core is None else core)
+    with open(os.path.join(root, "cli", "crow_helper.py"), "w", encoding="utf-8") as fh:
+        fh.write(HELPER if helper is None else helper)
     with open(os.path.join(root, "cli", "crow.py"), "w", encoding="utf-8") as fh:
         fh.write(CLI if cli is None else cli)
     if not drop_gui:

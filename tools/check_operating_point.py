@@ -146,12 +146,28 @@ def command_regions(text):
         # LINE(S) ABOVE the binary. The region reaches exactly two lines back
         # from the anchor -- far enough for the prelude, near enough that the
         # 2026-08-10 lesson holds: prose that merely QUOTES a value stays out.
-        back = text.rfind("\n", 0, s)
+        # AND IT CLAMPS BACKWARD FOR THE SAME REASON IT CLAMPS FORWARD.
+        #
+        # The forward stop above exists so a region can never swallow the NEXT
+        # command. Until 2026-08-30 there was no stop in the other direction, so a
+        # region could swallow the PREVIOUS one instead -- and extract() takes the
+        # first match, so the earlier command's --port won. Two documents one blank
+        # line apart were enough: key two read key one's port and a correct file was
+        # reported as drifted. Test 17 is that shape.
+        #
+        # The floor is the line AFTER the previous anchor's line, so the two-line
+        # reach can still find an env prelude that sits between two commands, and
+        # can no longer find the command itself.
+        floor = 0
+        if i > 0:
+            nl = text.find("\n", starts[i - 1])
+            floor = starts[i - 1] if nl == -1 else nl + 1
+        back = text.rfind("\n", floor, s)
         if back != -1:
-            back = text.rfind("\n", 0, back)
+            back = text.rfind("\n", floor, back)
         if back != -1:
-            back = text.rfind("\n", 0, back)
-        out.append(text[back + 1:end])
+            back = text.rfind("\n", floor, back)
+        out.append(text[(back + 1) if back != -1 else floor:end])
     return out
 
 
@@ -562,6 +578,27 @@ def main(argv):
 
     failed = 0
     checked = 0
+
+    # A FILE THE CALLER NAMED AND THAT IS NOT THERE IS AN ERROR, NOT A MISS.
+    #
+    # e1bda23 made the document rule 'at least one live page prints this key
+    # correctly', which is right: the checker should not decide what a page is
+    # about. But it also put --extra files into that same list, and a missing entry
+    # there became a mere miss -- so `--extra nope.md` passed silently as long as
+    # some other page carried the line. A mistyped path then reads as agreement,
+    # which is the shape of 'passing by having nothing to read'.
+    #
+    # The two rules are about different things: which PAGE carries a line is a
+    # question about documents, whether a file the caller EXPLICITLY named exists is
+    # a question about the invocation. Only the second one is checked here.
+    for e in args.extra:
+        checked += 1
+        where = '--extra [%s]' % os.path.basename(e)
+        if os.path.exists(e):
+            print('  OK       %-34s is on disk' % where)
+        else:
+            failed += 1
+            print('  FAILED   %-34s does not exist' % where)
 
     label, path = installer
     for key, want in wants:
