@@ -112,6 +112,19 @@ $env:LOCALAPPDATA\Crow\bin\llama-server.exe `
   --spec-type draft-mtp
 ```
 
+Qwen3.8-Flash-Next, the third model, runs on 8083 with a hybrid offload line of its own:
+
+```powershell
+$env:LOCALAPPDATA\Crow\bin\llama-server.exe `
+  -m $env:LOCALAPPDATA\Crow\models\qwen-next-gguf\UD-Q2_K_XL\Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf `
+  --port 8083 -c 200000 -b 4096 -ub 4096 -ctk q8_0 -ctv q8_0 `
+  -ncmoe 40 --fit off --load-mode none -np 1 --jinja
+```
+
+`--load-mode none` is what makes it reproducible: the expert weights are read once at boot
+(about a minute) instead of being paged off the disk during the turn. The window starts either
+model from the model menu, which also records the boot so a later window can revive the server.
+
 ### Clients
 
 ```powershell
