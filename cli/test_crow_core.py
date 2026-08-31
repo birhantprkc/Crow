@@ -11908,5 +11908,125 @@ class StorePathsGetNoStandingApprovalTests(unittest.TestCase):
         self.assertNotIn(("outside", r"c:\crow-unit-store\test runs"), got)
 
 
+class _Said:
+    """Die kleinste Unterhaltung, die `mandated_paths` lesen kann."""
+
+    def __init__(self, *texts):
+        self._texts = texts
+
+    def payload(self):
+        return [{"role": "user", "content": t} for t in self._texts]
+
+
+class AmbiguousPathsInProseTests(unittest.TestCase):
+    """#179. Ein Pfad mit Leerzeichen wird abgeschnitten, und beide Haelften
+    des Ergebnisses sind falsch.
+
+    LIVE AM 2026-08-31: robin tippte
+    `C:\\Users\\robin\\Desktop\\Test runs schreib dort mal bitte ein hello world`.
+    `_PATH_IN_TEXT` endet am ersten Leerzeichen, also blieb
+    `C:\\Users\\robin\\Desktop\\Test` uebrig.
+
+      ZU WENIG: der genannte Ordner galt als nicht genannt, und die Ablehnung
+      sagte "Nobody asked for this location" -- zu einem Nutzer, der ihn gerade
+      getippt hatte.
+      ZU VIEL: der Rest ist kein toter Text. `...\\Desktop\\Test` ist auf dieser
+      Maschine ein echtes Verzeichnis -- der ELTERNORDNER des gebundenen
+      Arbeitsbereichs -- und wurde damit still freigegeben.
+    """
+
+    def setUp(self):
+        self.dir = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(crow_core._AMBIGUOUS.clear)
+        # Der kurze Ordner EXISTIERT -- das ist es, was die Ueber-Freigabe
+        # gefaehrlich macht. Ohne ihn traefe die Regel ins Leere und der Fall
+        # bewiese nichts.
+        self.kurz = os.path.join(self.dir, "Test")
+        os.makedirs(self.kurz)
+
+    def mandates(self, *texts):
+        return crow_core.mandated_paths(_Said(*texts))
+
+    # -- die Ueber-Freigabe -------------------------------------------------
+
+    def test_a_prefix_cut_at_a_space_releases_nothing(self):
+        got = self.mandates("%s\\Test runs schreib dort bitte ein hello world rein"
+                            % self.dir)
+        self.assertNotIn(os.path.realpath(self.kurz), got,
+                         "der abgeschnittene Anfang gab ein echtes Verzeichnis frei")
+        self.assertEqual(got, set(), "es wurde ueberhaupt etwas freigegeben")
+
+    def test_the_dropped_prefix_is_remembered_as_named(self):
+        self.mandates("%s\\Test runs schreib dort bitte etwas rein" % self.dir)
+        self.assertTrue(crow_core.named_but_ambiguous(
+            os.path.join(self.dir, "Test runs", "hello.py")))
+        # NEGATIVPROBE: ein Pfad, der nichts mit dem verworfenen zu tun hat.
+        self.assertFalse(crow_core.named_but_ambiguous(r"C:\crow-unit-nowhere\x"))
+
+    # -- die beiden Wege, es eindeutig zu machen ----------------------------
+
+    def test_a_quoted_path_releases_itself_whole(self):
+        got = self.mandates('schreib bitte in "%s\\Test runs" eine Datei' % self.dir)
+        self.assertIn(os.path.realpath(os.path.join(self.dir, "Test runs")), got)
+        self.assertNotIn(os.path.realpath(self.kurz), got,
+                         "der zitierte Pfad gab zusaetzlich sein Praefix frei")
+
+    def test_an_existing_folder_is_grown_over_the_space(self):
+        """Die Platte ist der einzige Zeuge, den es hier gibt: existiert der
+        laengere Pfad, ist die Frage ohne Raten beantwortet."""
+        os.makedirs(os.path.join(self.dir, "Test runs"))
+        got = self.mandates("%s\\Test runs schreib dort bitte etwas rein" % self.dir)
+        self.assertIn(os.path.realpath(os.path.join(self.dir, "Test runs")), got)
+        self.assertNotIn(os.path.realpath(self.kurz), got)
+
+    def test_the_longest_existing_extension_wins(self):
+        """`Test` und `Test runs neu` existieren beide -- gemeint ist der laengere."""
+        os.makedirs(os.path.join(self.dir, "Test runs neu"))
+        got = self.mandates("%s\\Test runs neu und dann weiter" % self.dir)
+        self.assertIn(os.path.realpath(os.path.join(self.dir, "Test runs neu")), got)
+
+    # -- die Gegenproben ----------------------------------------------------
+
+    def test_a_path_without_spaces_is_untouched(self):
+        """POSITIVKONTROLLE. Ohne sie waere die Regel 'gib nie etwas frei'."""
+        got = self.mandates("%s bitte dort arbeiten" % self.kurz)
+        self.assertIn(os.path.realpath(self.kurz), got)
+
+    def test_a_path_at_the_end_of_a_message_is_untouched(self):
+        """POSITIVKONTROLLE. Nichts folgt, also ist nichts abgeschnitten."""
+        self.assertIn(os.path.realpath(self.kurz),
+                      self.mandates("schreib bitte nach %s" % self.kurz))
+        self.assertIn(os.path.realpath(self.kurz),
+                      self.mandates("schreib bitte nach %s." % self.kurz))
+
+    def test_only_user_messages_count(self):
+        """NEGATIVPROBE, und die aelteste Regel hier: was das MODELL schreibt,
+        ist kein Mandat."""
+        said = _Said("nichts")
+        said.payload = lambda: [{"role": "assistant", "content": self.kurz}]
+        self.assertEqual(crow_core.mandated_paths(said), set())
+
+    def test_a_word_is_not_a_path(self):
+        """NEGATIVPROBE. Ohne Trenner ist es ein Wort, kein Ort."""
+        self.assertEqual(self.mandates("leg das auf den Desktop"), set())
+
+    def test_prose_after_the_path_releases_it_a_name_does_not(self):
+        """DIE EINE STELLE, AN DER GERATEN WIRD -- in beiden Richtungen, damit
+        sichtbar bleibt, dass sie zwei Antworten geben kann.
+
+        Beide Zeilen sind fuer den Code identisch aufgebaut: existierender
+        Ordner, Leerzeichen, Wort. Nur das Woerterbuch trennt sie.
+        """
+        prosa = self.mandates("%s und dann noch das Log dazu" % self.kurz)
+        self.assertIn(os.path.realpath(self.kurz), prosa,
+                      "eine gewoehnliche Satzfortsetzung hat die Freigabe gekostet")
+        weiter = self.mandates("%s runs schreib dort etwas rein" % self.kurz)
+        self.assertEqual(weiter, set(),
+                         "ein Wort, das kein Prosawort ist, galt trotzdem als Satzende")
+        self.assertTrue(crow_core.named_but_ambiguous(
+            os.path.join(self.dir, "Test runs", "x.txt")))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

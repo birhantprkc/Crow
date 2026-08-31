@@ -6414,6 +6414,176 @@ _PATH_IN_TEXT = re.compile(
     r"|(?<![A-Za-z0-9])\\\\[^\s\"'<>|\\/]+[\\/][^\s\"'<>|]*)")
 
 
+# #179. EIN ZITIERTER PFAD IST DER EINZIGE, DER SICH SELBST BEGRENZT. Prosa tut
+# das nicht: `C:\a\b c d` kann ein Pfad sein oder ein Pfad und drei Woerter, und
+# die Zeichenkette allein entscheidet das nie. Anfuehrungszeichen entscheiden es,
+# kosten den Nutzer zwei Zeichen und sind die einzige Angabe, bei der Crow nicht
+# raet.
+_QUOTED_PATH = re.compile(
+    r"[\"']((?:[A-Za-z]:[\\/]|(?<![A-Za-z0-9])\\\\[^\"'<>|\\/]+[\\/])[^\"'<>|\r\n]*)[\"']")
+
+# Wie weit ueber Leerzeichen hinweg verlaengert wird, bevor aufgegeben wird.
+# Sechs Woerter sind mehr als jeder Ordnername auf dieser Maschine und wenig
+# genug, dass ein Satz nicht Wort fuer Wort gegen die Platte geprueft wird.
+_MANDATE_WORDS = 6
+
+# #179. WAS VERWORFEN WURDE, WEIL ES MEHRDEUTIG WAR. Ohne diese Spur sagt die
+# Ablehnung "niemand hat diesen Ort genannt" zu einem Nutzer, der ihn gerade
+# getippt hat -- der Satz, den man am wenigsten bestreiten kann, und hier war er
+# falsch (2026-08-31, live). Gesammelt wird der abgeschnittene Anfang, nicht der
+# ganze Satz: er reicht, um die Ablehnung zu erkennen, und traegt keinen
+# Gespraechstext in eine Fehlermeldung.
+_AMBIGUOUS: set[str] = set()
+
+
+def _extend_over_spaces(base: str, rest: str) -> "str | None":
+    """`base` um Woerter aus `rest` verlaengern, solange es das auf der Platte gibt.
+
+    DIE PLATTE IST DER EINZIGE ZEUGE, DEN ES HIER GIBT. `C:\\Users\\x\\Test runs`
+    und `C:\\Users\\x\\Test` sind beide plausibel; existiert genau eines davon,
+    ist die Frage beantwortet, ohne zu raten. Existiert keines -- der Ordner ist
+    geloescht oder soll erst angelegt werden --, antwortet diese Funktion None,
+    und der Aufrufer verwirft lieber, als das kuerzere freizugeben.
+
+    Der LAENGSTE Treffer gewinnt, nicht der erste: `Test` und `Test runs` koennen
+    beide existieren, und gemeint war dann der laengere.
+    """
+    words = rest.split()[:_MANDATE_WORDS]
+    best = None
+    grown = base
+    for word in words:
+        grown = grown + " " + word
+        if os.path.exists(grown):
+            best = grown
+    return best
+
+
+def _mandates_in(text: str) -> "list[str]":
+    """Die Orte, die EINE Nutzernachricht freigibt -- und die, die sie nicht freigibt.
+
+    DREI FAELLE, UND DER DRITTE IST DER GRUND FUER #179:
+
+      zitiert            eindeutig, wird ganz genommen
+      ohne Leerzeichen   eindeutig, wird ganz genommen
+      abgeschnitten      MEHRDEUTIG -- verlaengern, sonst verwerfen
+
+    Warum verwerfen und nicht das Kuerzere nehmen: der abgeschnittene Anfang ist
+    kein toter Text. `C:\\Users\\robin\\Desktop\\Test runs` ergibt
+    `C:\\Users\\robin\\Desktop\\Test`, und das ist auf dieser Maschine ein ECHTES
+    Verzeichnis -- der Elternordner des gebundenen Arbeitsbereichs. Eine Regel,
+    die das freigibt, gibt einen Ort frei, den niemand genannt hat, waehrend sie
+    den genannten verweigert. Beide Richtungen falsch, aus einem Treffer
+    (gemessen 2026-08-31).
+    """
+    out: "list[str]" = []
+    spans: "list[tuple[int, int]]" = []
+    for hit in _QUOTED_PATH.finditer(text):
+        spans.append(hit.span())
+        got = hit.group(1).strip()
+        if got:
+            out.append(got)
+    for hit in _PATH_IN_TEXT.finditer(text):
+        if any(a <= hit.start() and hit.end() <= b for a, b in spans):
+            continue                      # steht schon zitiert in der Liste
+        base = hit.group(0).rstrip(".,;:!?\"')")
+        if not base:
+            continue
+        rest = text[hit.end():]
+        if not rest[:1].isspace() or not rest.strip():
+            out.append(base)              # nichts folgt: nicht abgeschnitten
+            continue
+        longer = _extend_over_spaces(base, rest)
+        if longer:
+            out.append(longer)
+        elif _prose_follows(rest):
+            out.append(base)
+        else:
+            _AMBIGUOUS.add(_resolve(base))
+    return out
+
+
+# #179. DIE EINE STELLE, AN DER HIER GERATEN WIRD, und sie steht als Liste da,
+# damit man ihr beim Raten zusehen kann. Zwei Zeilen sehen fuer den Code gleich
+# aus:
+#
+#   ...\Desktop\Test runs schreib dort mal bitte     "runs" gehoert zum Pfad
+#   ...\foo\bar und dann noch das Log dazu           "und" ist Prosa
+#
+# Ein existierender Ordner, ein Leerzeichen, ein Wort -- und die Platte
+# entscheidet nur, wenn es den laengeren Ordner gibt. Gibt es ihn nicht, ist es
+# aus dem Text UNENTSCHEIDBAR, und dann entscheidet dieses Woerterbuch: ein
+# Prosawort gibt den kurzen Pfad frei, alles andere gilt als Fortsetzung und
+# gibt gar nichts frei.
+#
+# WAS SIE FALSCH MACHT, und das ist der Preis: ein Ordner namens `Data files`
+# endet auf einem Wort, das hier steht, und wird darum als Prosa gelesen. Der
+# Fehler geht in die stille Richtung -- deshalb steht daneben immer der
+# Ausweg, der nicht raet: Anfuehrungszeichen.
+_PROSE_AFTER_PATH = frozenset("""
+und oder aber bitte danke dann dort dorthin da dahin hier rein hinein drin darin
+mal noch auch schon nur eben halt ist war sind soll sollst sollte kannst kann
+koenntest mach mache machst schreib schreibe schreibst leg lege legst
+erstell erstelle lies liest lesen speicher speichere kopier kopiere verschieb
+verschiebe loesch loesche pack packe fuer in im ins auf nach
+mit von vom zum zur zu als das die der den dem des ein eine einen einem eines
+ordner datei dateien verzeichnis anlegen ablegen abspeichern
+schreiben legen machen arbeiten speichern kopieren verschieben loeschen
+packen nutzen benutzen verwenden sichern suchen schauen pruefen testen
+starten oeffnen loeschen reinschreiben hinschreiben
+and or but please thanks then there here into inside within write writes writing
+create creates read reads put puts make makes save saves saving copy copies move
+moves delete deletes it is was are be should can could would to in on at with
+from the a an file files folder folders directory
+reading copying moving deleting working looking checking testing opening storing
+store stores look looks check checks open opens creating putting making
+""".split())
+
+
+def _prose_follows(rest: str) -> bool:
+    """Liest sich das erste Wort nach dem Leerzeichen wie Prosa, nicht wie Pfad?
+
+    Nur diese eine Frage, und nur fuer den Fall, in dem die Platte keine Antwort
+    hatte. Die Entscheidung, die daran haengt, ist immer "freigeben oder
+    nachfragen" -- nie "ausfuehren oder nicht".
+    """
+    words = rest.split()
+    if not words:
+        return True
+    return _folded(words[0].strip(".,;:!?\"')(")) in _PROSE_AFTER_PATH
+
+
+# Umlaute werden beim NACHSCHLAGEN gefaltet, nicht in der Liste geschrieben.
+# Zwei Gruende, und der zweite ist der wichtigere: der Fensterpruefer verlangt
+# ASCII in Zeichenketten (eine Regel fuer NUTZERTEXTE, die ein Woerterbuch nicht
+# unterscheiden kann) -- und robin tippt mal `fuer`, mal `für`. Beides trifft
+# denselben Eintrag, wenn hier gefaltet wird, und nur dann.
+_FOLD = {0xE4: "ae", 0xF6: "oe", 0xFC: "ue", 0xDF: "ss",
+         0xC4: "Ae", 0xD6: "Oe", 0xDC: "Ue"}
+
+
+def _folded(word: str) -> str:
+    return word.translate(_FOLD).lower()
+
+
+def named_but_ambiguous(path: str) -> bool:
+    """Faengt ein verworfenes Praefix diesen Pfad? Dann wurde er GENANNT.
+
+    Nur fuer die Ablehnung: sie darf einem Nutzer nicht sagen, niemand habe den
+    Ort genannt, wenn er ihn getippt hat und nur das Leerzeichen im Weg stand.
+
+    TEXTVERGLEICH, NICHT PFADVERGLEICH, und das ist hier der ganze Punkt: das
+    verworfene Stueck ist eine ABSCHNEIDUNG, kein Elternordner.
+    `...\\Desktop\\Test` liegt nicht ueber `...\\Desktop\\Test runs` -- `_inside`
+    sagt dazu voellig zu Recht Nein, und darum waere es die falsche Frage. Der
+    gemeinte Pfad beginnt mit dem verworfenen Stueck als ZEICHENKETTE.
+
+    Dass damit auch `...\\Testament\\x` gefangen wird, ist hingenommen: an dieser
+    Antwort haengt der Wortlaut einer Ablehnung, nie ihr Ausgang.
+    """
+    here = os.path.normcase(_resolve(path))
+    return any(here.startswith(os.path.normcase(prefix)) for prefix in _AMBIGUOUS)
+
+
 def mandated_paths(conversation: "Conversation") -> set[str]:
     """Every location the USER spelled out in this conversation, resolved.
 
@@ -6422,10 +6592,15 @@ def mandated_paths(conversation: "Conversation") -> set[str]:
     permission by mentioning a path would be no rule at all.
     """
     found: set[str] = set()
+    # #179. WAS VERWORFEN WURDE, GILT NUR FUER DIESEN AUFBAU. Die Menge wird
+    # jeden Zug neu gefuellt wie `_MANDATED` selbst -- ein Praefix aus einer
+    # Nachricht, die inzwischen aus dem Kontext gerollt ist, darf keine
+    # Ablehnung von heute erklaeren.
+    _AMBIGUOUS.clear()
     for message in conversation.payload():
         if message.get("role") != "user":
             continue
-        for hit in _PATH_IN_TEXT.findall(message_text(message.get("content") or "")):
+        for hit in _mandates_in(message_text(message.get("content") or "")):
             hit = hit.rstrip(".,;:!?\"')")
             if hit:
                 found.add(_resolve(hit))
@@ -6464,13 +6639,24 @@ def _outside_root(path: str) -> str | None:
         return None
     resolved = _resolve(path)
     _REFUSED.add(resolved)
+    # #179. DER SATZ, DEN NIEMAND BESTREITEN KANN, DARF NICHT FALSCH SEIN. Am
+    # 2026-08-31 bekam robin "Nobody asked for this location" fuer einen Ordner,
+    # den er in derselben Nachricht getippt hatte -- der Pfad trug ein
+    # Leerzeichen und wurde beim Einlesen verworfen. Eine Ablehnung, die dem
+    # Nutzer sein eigenes Fenster bestreitet, ist schlimmer als eine Ablehnung.
+    if named_but_ambiguous(resolved):
+        why = ("A path near this one WAS named in this conversation, but it "
+               "carries a space and could not be told apart from a shorter "
+               "directory that also exists. Ask the user to put the path in "
+               "quotes -- a quoted path releases itself.")
+    else:
+        why = ("Nobody asked for this location -- it is neither in the working "
+               "directory nor named anywhere in this conversation by the user. Do not "
+               "reach it by other means either. Write inside the root, or ask for the "
+               "path you need and let the user name it.")
     return (f"error: refusing to write outside the working directory.\n"
             f"  root: {_ROOT}\n"
-            f"  path: {resolved}\n"
-            f"Nobody asked for this location -- it is neither in the working "
-            f"directory nor named anywhere in this conversation by the user. Do not "
-            f"reach it by other means either. Write inside the root, or ask for the "
-            f"path you need and let the user name it.")
+            f"  path: {resolved}\n" + why)
 
 
 def escaped_the_working_area(name: str) -> bool:
