@@ -420,6 +420,17 @@ def git_open() -> bool:
     return read_settings().get("git_open") is True
 
 
+def browser_open() -> bool:
+    """Is the browser panel unfolded? False for anything this build does not have.
+
+    #175, and the same default as its two neighbours for the same reason: a panel
+    that opens on every start costs 280 px to show an empty page. The globe in the
+    title bar is what makes it findable, and -- because there is no cross in the
+    panel -- also what folds it away again.
+    """
+    return read_settings().get("browser_open") is True
+
+
 def open_projects() -> dict:
     """Which project rows are unfolded, by path. Absent means unfolded.
 
@@ -785,10 +796,16 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
   display:flex;flex-direction:column;overflow:hidden}
 /* DAS GIT-PANEL IST AUS DIESER SPALTE AUSGEZOGEN und liegt jetzt im
    Chatfenster unter dem Zielpanel -- seine Regeln stehen dort, bei `#panels`.
-   Hier bleibt eine Spalte mit einem Panel darin: Breite, Griff und Falte
-   gehoerten immer IHR und nie dem Panel, also aendert der Auszug daran
-   nichts. */
+   An seiner Stelle steht seit #175 der Browser: die Spalte traegt weiter
+   Breite, Griff und Falte, und die Panels darin teilen sich die Hoehe zu
+   gleichen Teilen. Nicht nach Inhalt -- eine wachsende Aufrufliste schoebe den
+   Browser sonst aus dem Bild, waehrend jemand hineinsieht. */
+#browser{width:auto;flex:0 1 auto;min-width:0;min-height:0;background:var(--rail);
+  display:flex;flex-direction:column;overflow:hidden}
 #side > aside{flex:1 1 0}
+/* Die Fuge zwischen beiden, und NUR wenn beide da sind: eine Linie ueber einem
+   Panel, das allein steht, waere ein Rand zum Fensterhintergrund. */
+body:not([data-code="shut"]) #browser{border-top:1px solid var(--line)}
 #codegrip{flex:none;width:5px;margin:0 -2px;z-index:3;cursor:col-resize;
   background:transparent;transition:background .12s ease}
 #codegrip:hover,#codegrip.on{background:var(--bevel)}
@@ -798,13 +815,13 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
    und das offene Panel haette die Haelfte seiner Flaeche an etwas Unsichtbares
    verloren. Also beides. */
 body[data-code="shut"] #code{width:0;overflow:hidden;display:none}
-/* Nur noch ein Panel in der Spalte, also faellt sie mit ihm zusammen. Das
-   Verstecken des Git-Panels steht bei ihm, weil es hier nichts mehr traegt. */
-body[data-code="shut"] #side{width:0;overflow:hidden}
+body[data-browser="shut"] #browser{width:0;overflow:hidden;display:none}
+/* Erst wenn BEIDE zu sind, faellt die Spalte selbst zusammen. */
+body[data-code="shut"][data-browser="shut"] #side{width:0;overflow:hidden}
 /* DER GRIFF GEHT MIT. Ein Anfasser an einer Flaeche von null Pixeln ist ein
    Streifen, der nichts bewegt -- und er saesse genau auf der Kante, die das
    geschlossene Panel gerade sauber macht. */
-body[data-code="shut"] #codegrip{display:none}
+body[data-code="shut"][data-browser="shut"] #codegrip{display:none}
 #codehead{display:flex;align-items:center;gap:8px;padding:0 12px;
   min-height:var(--barh);flex:none}
 #codehead h2{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.13em;
@@ -854,6 +871,60 @@ body[data-code="shut"] #codegrip{display:none}
 .cwp{margin:0;padding:8px 9px;font-family:var(--mono);font-size:11px;
   line-height:1.5;white-space:pre-wrap;word-break:break-word;
   color:var(--text-faint);max-height:none}
+
+/* -- #175: das Browser-Panel --------------------------------------------- */
+/* KOPF WIE `#codehead`, RAIL WIE `#code` -- robins Ansage: "aufbau identisch
+   mit code panel". Eigene Regeln stehen hier nur, wo der Browser etwas hat, das
+   das Code-Panel nicht kennt: Reiter, eine Adresszeile, und die Flaeche, in der
+   eine fremde Seite steht. */
+#brhead{display:flex;align-items:center;gap:8px;padding:0 12px;
+  min-height:var(--barh);flex:none}
+#brhead h2{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.13em;
+  text-transform:uppercase;color:var(--dimmer)}
+#brnew{margin-left:auto;font:inherit;font-size:13px;line-height:1;
+  color:var(--dimmer);background:transparent;border:1px solid var(--line);
+  border-radius:6px;padding:1px 8px 3px;cursor:pointer}
+#brnew:hover{border-color:var(--bevel);color:var(--accent)}
+/* DIE REITER SCROLLEN WAAGERECHT UND SCHRUMPFEN NICHT INS UNLESBARE. Ein
+   Reiter, der auf drei Zeichen zusammenfaellt, ist kein Reiter mehr, sondern
+   ein Knopf ohne Aufschrift. */
+#brtabs{display:flex;gap:4px;padding:0 8px 6px;overflow-x:auto;flex:none;
+  scrollbar-width:none}
+#brtabs::-webkit-scrollbar{display:none}
+.brtab{display:flex;align-items:center;gap:6px;flex:0 0 auto;max-width:150px;
+  font:inherit;font-size:11px;color:var(--dim);background:transparent;
+  border:1px solid var(--line);border-radius:6px;padding:3px 6px 3px 9px;
+  cursor:pointer}
+.brtab.on{background:var(--raised);color:var(--text);border-color:var(--bevel)}
+.brtab .t{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.brtab .x{flex:none;color:var(--dimmer);padding:0 2px}
+.brtab .x:hover{color:var(--bad)}
+#brbar{display:flex;align-items:center;gap:5px;padding:0 8px 7px;flex:none}
+.brnav{font:inherit;font-size:12px;line-height:1;color:var(--dimmer);
+  background:transparent;border:1px solid var(--line);border-radius:6px;
+  padding:3px 7px;cursor:pointer}
+.brnav:hover{border-color:var(--bevel);color:var(--accent)}
+#brurl{flex:1;min-width:0;font:inherit;font-size:11.5px;font-family:var(--mono);
+  background:var(--bg);border:1px solid var(--line);border-radius:6px;
+  padding:4px 9px;color:var(--text-soft)}
+#brurl:focus{outline:none;border-color:var(--accent)}
+/* WEISS ERST, WENN ETWAS DASTEHT. Eine fremde Seite bringt ihren eigenen
+   Hintergrund mit; steht sie auf unserem dunklen, blitzt bei jedem Wechsel der
+   Rahmen durch, und eine Seite ohne eigenen Grund erscheint als Loch. Ein
+   LEERER Reiter hat aber keine fremde Seite -- er ist unser eigenes Panel, und
+   ein weisses Rechteck darin ist ein Fremdkoerper zwischen Titelleiste und
+   Rail (robin, 2026-08-31). Also traegt die Flaeche `--rail` wie die Leiste
+   darueber, und das Weiss kommt mit der ersten geladenen Adresse. */
+#brbody{flex:1;min-height:0;position:relative;background:var(--rail)}
+.brframe{position:absolute;inset:0;width:100%;height:100%;border:0;
+  background:transparent}
+.brframe[data-loaded]{background:#fff}
+.brframe[hidden]{display:none}
+/* Was dasteht, bevor jemand eine Adresse getippt hat -- und was dasteht, wenn
+   eine Seite das Einbetten verweigert. Beides ist kein Fehler in Rot. */
+#brnone{position:absolute;inset:0;display:flex;align-items:center;
+  justify-content:center;padding:0 24px;text-align:center;font-size:11.5px;
+  color:var(--dimmer);background:var(--rail)}
 
 /* -- #156: das Git-Panel ------------------------------------------------- */
 /* ES BORGT SICH NICHTS, ES IST DASSELBE -- nur ist das "Dasselbe" jetzt das
@@ -1155,16 +1226,17 @@ body[data-git="shut"] #git{display:none}
 body[data-rail="shut"] #rail{width:0;overflow:hidden}
 /* IN THE TITLE BAR, so it survives the rail it hides. It is the one control
    that must not live in the thing it folds away. */
-#railtoggle,#codetoggle,#gittoggle{font:inherit;color:var(--dimmer);
+#railtoggle,#codetoggle,#gittoggle,#browsertoggle{font:inherit;color:var(--dimmer);
   background:transparent;border:1px solid transparent;border-radius:6px;
   cursor:pointer;display:flex;align-items:center;padding:3px 5px;margin-right:2px}
-#railtoggle:hover,#codetoggle:hover,#gittoggle:hover{color:var(--accent);
-  border-color:var(--bevel)}
+#railtoggle:hover,#codetoggle:hover,#gittoggle:hover,
+#browsertoggle:hover{color:var(--accent);border-color:var(--bevel)}
 /* #156. DER KNOPF SAGT, OB DAS PANEL STEHT. Mit zwei Panels an einer Leiste ist
    das keine Verzierung mehr, sondern die Antwort auf "wo ist mein Git-Panel
    hin" -- und weil das Wegklicken NUR hier geht (robins Ansage: kein zweites
    Kreuz im Panel), muss der Rueckweg sichtbar sein. */
 body:not([data-code="shut"]) #codetoggle,
+body:not([data-browser="shut"]) #browsertoggle,
 body:not([data-git="shut"]) #gittoggle{color:var(--accent);
   background:color-mix(in srgb,var(--accent) 12%,transparent)}
 
@@ -2260,7 +2332,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   border-top:1px solid var(--line);margin-top:3px}
 .cost .subshare{color:var(--sub)}
 .tool.sub .ico{color:var(--sub)}
-</style></head><body data-rail="__RAIL__" data-code="__CODE__" data-git="__GIT__">
+</style></head><body data-rail="__RAIL__" data-code="__CODE__" data-git="__GIT__" data-browser="__BROWSER__">
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
   <!-- #119. LEFT OF THE WORDMARK, and it has to live in the TITLE BAR rather
@@ -2317,6 +2389,18 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
         2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54
         1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
     </svg></button>
+  <!-- #175. NEBEN DEN BEIDEN ANDEREN, aus demselben Grund: ein Schalter im
+       Panel geht mit dem Panel weg. Ein Globus, gezeichnet statt eingebettet --
+       Kreis, Aequator, ein Meridian: die kleinste Form, die aus einem Kreis eine
+       Weltkugel macht. Dieselbe 1.6 Strichstaerke und `currentColor` wie die
+       Nachbarn, damit die drei eine Reihe sind und nicht drei Zeichen. -->
+  <button id="browsertoggle" class="pywebview-no-drag" onclick="crow.toggleBrowser()"
+          title="Show or hide the browser panel">
+    <svg viewBox="0 0 20 20" width="15" height="15" fill="none"
+         stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+      <circle cx="10" cy="10" r="7.2"></circle>
+      <line x1="2.8" y1="10" x2="17.2" y2="10"></line>
+      <ellipse cx="10" cy="10" rx="3.1" ry="7.2"></ellipse></svg></button>
   <div id="wbtns" class="pywebview-no-drag">
     <div class="wb" onclick="pywebview.api.minimise()">&#8211;</div>
     <div class="wb" onclick="pywebview.api.maximise()">&#9633;</div>
@@ -2709,6 +2793,31 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
         </template>
       </section>
     </div>
+  </aside>
+  <!-- #175. DER BROWSER, gebaut wie das Code-Panel daneben: derselbe Kopf,
+       dieselbe Spalte, dieselbe Falte. Er ist eine OBERFLAECHE und nicht nur ein
+       Werkzeug hinter dem Modell -- was der Nutzer hier sieht, ist dieselbe
+       Webview, aus der ein spaeteres `render_page` seinen Frame nimmt.
+       IFRAMES, UND DAS IST EINE GRENZE UND KEINE WAHL: ein Panel IM Fenster kann
+       nichts anderes einbetten. Eine Seite mit `X-Frame-Options: DENY` oder
+       `frame-ancestors 'none'` bleibt deshalb leer -- das trifft Google, GitHub
+       und einiges mehr, und es trifft NICHT den Fall, um den es hier geht: eine
+       lokale Datei oder ein localhost-Bau, den das Modell gerade geschrieben
+       hat. -->
+  <aside id="browser">
+    <div id="brhead">
+      <h2>Browser</h2>
+      <button id="brnew" onclick="crow.brNew()" title="new tab">+</button>
+    </div>
+    <div id="brtabs"></div>
+    <div id="brbar">
+      <button class="brnav" onclick="crow.brBack()" title="back">&#8249;</button>
+      <button class="brnav" onclick="crow.brForward()" title="forward">&#8250;</button>
+      <button class="brnav" onclick="crow.brReload()" title="reload">&#8635;</button>
+      <input id="brurl" placeholder="address, or a path"
+             onkeydown="if(event.key==='Enter')crow.brGo(this.value)">
+    </div>
+    <div id="brbody"></div>
   </aside>
   </div>
 </div>
@@ -5631,6 +5740,122 @@ const crow = {
     el.dataset.code=open ? "shut" : "open";
     pywebview.api.set_code_open(!open); },
 
+  // #175. DASSELBE FUER DEN BROWSER. Eigene Methode statt eines Parameters,
+  // aus dem Grund, den `toggleCode` darueber nennt: die Panels teilen ihr
+  // Aussehen und sonst nichts. Beim Aufklappen bekommt ein leerer Browser
+  // seinen ersten Reiter -- ein Panel, in dem man erst auf `+` klicken muss,
+  // um irgendwas tun zu koennen, hat einen Schritt zu viel.
+  toggleBrowser(){ const el=document.body;
+    const open=el.dataset.browser!=="shut";
+    el.dataset.browser=open ? "shut" : "open";
+    pywebview.api.set_browser_open(!open);
+    if(!open && !this.tabs.length) this.brNew(); },
+
+  // -- #175: die Reiter ----------------------------------------------------
+  //
+  // JE REITER SEIN EIGENES IFRAME, und es bleibt stehen, wenn man wegschaltet.
+  // Ein einziges Iframe, dessen `src` beim Wechsel umgesetzt wird, laedt jede
+  // Seite neu, sobald jemand kurz nachsieht, was im anderen Reiter stand --
+  // und verliert dabei alles, was auf ihr getippt war.
+  //
+  // DIE HISTORIE FUEHREN WIR SELBST, je Reiter eine Liste. `history.back()` auf
+  // dem Iframe waere der naheliegende Weg und wirft bei einer fremden Seite
+  // eine Cross-Origin-Ausnahme -- dieselbe Grenze, die uns auch den Titel der
+  // Seite verwehrt, weshalb der Reiter den HOSTNAMEN traegt.
+  tabs: [], tabOn: 0, tabSeq: 0,
+
+  brNew(url){
+    const id=++this.tabSeq;
+    this.tabs.push({id:id, hist:[], at:-1});
+    const f=document.createElement("iframe");
+    f.className="brframe"; f.dataset.tab=id;
+    $("#brbody").appendChild(f);
+    this.tabOn=id;
+    this.brDraw();
+    if(url) this.brGo(url); else $("#brurl").focus();
+  },
+
+  brTab(id){ return this.tabs.find(t=>t.id===id) || null; },
+
+  brSelect(id){ this.tabOn=id; this.brDraw();
+    const t=this.brTab(id);
+    $("#brurl").value = t && t.at>=0 ? t.hist[t.at] : ""; },
+
+  brClose(id, ev){
+    if(ev) ev.stopPropagation();
+    const i=this.tabs.findIndex(t=>t.id===id);
+    if(i<0) return;
+    this.tabs.splice(i,1);
+    const f=$("#brbody").querySelector('.brframe[data-tab="'+id+'"]');
+    if(f) f.remove();
+    // DER NACHBAR UEBERNIMMT, nicht immer der erste: wer den dritten von fuenf
+    // schliesst, sieht danach den dritten, so wie in jedem anderen Browser.
+    if(this.tabOn===id) this.tabOn = this.tabs.length
+      ? (this.tabs[Math.min(i, this.tabs.length-1)].id) : 0;
+    this.brDraw();
+    const t=this.brTab(this.tabOn);
+    $("#brurl").value = t && t.at>=0 ? t.hist[t.at] : ""; },
+
+  // DER NAME IST DER HOSTNAME, weil der Titel hinter der Cross-Origin-Grenze
+  // liegt. Bei einer Datei-URL ist es der Dateiname -- `file:///` hat keinen
+  // Host, und "file" auf fuenf Reitern unterscheidet nichts.
+  brName(url){
+    if(!url) return "new tab";
+    try{ const u=new URL(url);
+      if(u.protocol==="file:"){
+        const p=u.pathname.split("/").filter(Boolean);
+        return decodeURIComponent(p[p.length-1] || "file"); }
+      return u.hostname || url;
+    }catch(e){ return url; } },
+
+  brDraw(){
+    const strip=$("#brtabs"); strip.textContent="";
+    this.tabs.forEach(t => {
+      const b=document.createElement("div");
+      b.className="brtab"+(t.id===this.tabOn ? " on" : "");
+      b.onclick=()=>this.brSelect(t.id);
+      const name=document.createElement("span"); name.className="t";
+      name.textContent=this.brName(t.at>=0 ? t.hist[t.at] : "");
+      const x=document.createElement("span"); x.className="x";
+      x.textContent="\u00d7"; x.title="close this tab";
+      x.onclick=ev=>this.brClose(t.id, ev);
+      b.append(name, x); strip.appendChild(b); });
+    $("#brbody").querySelectorAll(".brframe").forEach(f => {
+      f.hidden = (Number(f.dataset.tab) !== this.tabOn); });
+    const none=$("#brnone"); if(none) none.remove();
+    if(!this.tabs.length){
+      const d=document.createElement("div"); d.id="brnone";
+      d.textContent="no tab open -- press + for one";
+      $("#brbody").appendChild(d); } },
+
+  // EINE ADRESSE ODER EIN PFAD. Was wie ein Windows-Pfad aussieht, wird zu
+  // `file:///` gemacht: robin tippt einen Pfad, wenn er einen Bau ansehen will,
+  // und "C:\..." in eine Adresszeile zu tippen ist die haeufigere Geste als
+  // `file:///C:/...` auszuschreiben.
+  brGo(raw){
+    const t=this.brTab(this.tabOn); if(!t) return;
+    let url=(raw||"").trim(); if(!url) return;
+    if(/^[a-zA-Z]:[\\/]/.test(url)) url="file:///"+url.replace(/\\/g,"/");
+    else if(!/^[a-z][a-z0-9+.-]*:/i.test(url)) url="https://"+url;
+    t.hist=t.hist.slice(0, t.at+1); t.hist.push(url); t.at=t.hist.length-1;
+    this.brShow(t, url); },
+
+  brShow(t, url){
+    const f=$("#brbody").querySelector('.brframe[data-tab="'+t.id+'"]');
+    // DAS WEISS KOMMT MIT DER ERSTEN ADRESSE, nicht mit dem Reiter: bis dahin
+    // ist die Flaeche unser eigenes Panel und traegt dessen Farbe.
+    if(f){ f.dataset.loaded="1"; f.src=url; }
+    $("#brurl").value=url;
+    this.brDraw(); },
+
+  brBack(){ const t=this.brTab(this.tabOn);
+    if(t && t.at>0){ t.at--; this.brShow(t, t.hist[t.at]); } },
+  brForward(){ const t=this.brTab(this.tabOn);
+    if(t && t.at < t.hist.length-1){ t.at++; this.brShow(t, t.hist[t.at]); } },
+  brReload(){ const t=this.brTab(this.tabOn);
+    if(t && t.at>=0){ const f=$("#brbody").querySelector('.brframe[data-tab="'+t.id+'"]');
+      if(f) f.src=f.src; } },
+
   // #156. DASSELBE FUER DAS GIT-PANEL, und es ist der EINZIGE Weg, es wieder
   // zuzumachen -- robins Ansage vom 2026-08-29: kein zweites Kreuz im Panel.
   // Beim Aufklappen wird sofort gelesen: ein Panel, das erst beim naechsten
@@ -6068,6 +6293,11 @@ window.addEventListener("contextmenu",e=>{
 // is what makes it a place to look rather than something that appears once and
 // is missed.
 crow.toolsCount();
+// #175. DASSELBE FUER DEN BROWSER: das Panel steht beim Start schon offen, wenn
+// es beim letzten Mal offen war, und ein Panel ohne einen einzigen Reiter muss
+// sagen, wie man einen bekommt. `brDraw` zeichnet genau das, wenn die Liste
+// leer ist -- und nichts, sobald sie es nicht mehr ist.
+crow.brDraw();
 // KEINE STARTBREITEN-AUTOMATIK MEHR. #138c richtete eine nie gezogene Breite
 // an der halben Flaeche aus -- auf robins Fenster am 2026-08-27 war genau das
 // der zu breite Start, und die Icons standen wieder neben der Maske. Seine
@@ -9962,6 +10192,13 @@ class Api:
         doc["code_open"] = bool(open_)
         return write_settings(doc)
 
+    def set_browser_open(self, open_: bool) -> bool:
+        """#175. Remember whether the browser panel is folded away."""
+        doc = read_settings()
+        doc["browser_open"] = bool(open_)
+        write_settings(doc)
+        return bool(open_)
+
     def set_git_open(self, open_: bool) -> bool:
         """#156. Remember whether the git panel is folded away.
 
@@ -10779,6 +11016,7 @@ def main(argv: list[str] | None = None) -> int:
                 # #156: dieselbe Regel wie fuer Rail und Code -- der Zustand
                 # steht auf dem Element, bevor die Seite uebergeben wird.
                 .replace("__GIT__", "open" if git_open() else "shut")
+                .replace("__BROWSER__", "open" if browser_open() else "shut")
                 .replace("__CODEW__", str(code_width_setting()))
                 .replace("__MARKDARK__", mark_svg("dark"))
                 .replace("__MARKLIGHT__", mark_svg("light")))
