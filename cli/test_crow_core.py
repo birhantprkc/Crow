@@ -11813,5 +11813,100 @@ class RelativePathsResolveInTheWorkingAreaTests(unittest.TestCase):
         self.assertIn("refusing to write outside", out)
 
 
+class StorePathsGetNoStandingApprovalTests(unittest.TestCase):
+    """#178. Ein Pfad, den das Modell aus einem Speicher liest, wird nicht
+    dauerhaft freigegeben.
+
+    LIVE AM 2026-08-31: der Schritt hiess "write a file only in this folder",
+    und der erste Versuch war ein `run_command` nach
+    `C:\\Users\\robin\\Desktop\\Test runs` -- ein Pfad aus dem USER-PROFIL im
+    Systemprompt. Die Karte fragte, die Antwort war "und ab jetzt immer", und
+    der Pfad stand in `approvals.json`, bis er von Hand entfernt wurde.
+
+    Die Freigabe fuer die Sitzung bleibt: das Modell greift nach solchen Pfaden
+    aus guten Gruenden, und eine Karte, die man gar nicht beantworten kann, ist
+    eine Wand mitten in der Arbeit.
+    """
+
+    def setUp(self):
+        self.dir = os.path.realpath(tempfile.mkdtemp())
+        # OHNE GEBUNDENEN ROOT MARKIERT DIE GRENZE NICHTS -- dann liefert
+        # `approval_scope` ("executing", "dir") statt eines Aussenpfads, und
+        # die Faelle hier prueften eine Regel, die gar nicht angesprungen ist.
+        self.root = os.path.join(self.dir, "work")
+        os.makedirs(self.root)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(crow_core.forget_approvals)
+        self.addCleanup(setattr, crow_core, "APPROVALS_FILE",
+                        crow_core.APPROVALS_FILE)
+        self.addCleanup(setattr, crow_core, "USER_PATH", crow_core.USER_PATH)
+        self.addCleanup(setattr, crow_core, "_STORED_APPROVALS", None)
+        crow_core.APPROVALS_FILE = os.path.join(self.dir, "approvals.json")
+        crow_core.USER_PATH = os.path.join(self.dir, "USER.md")
+        crow_core._STORED_APPROVALS = None
+        with open(crow_core.USER_PATH, "w", encoding="utf-8") as fh:
+            fh.write("- LP-50 lives in C:\\crow-unit-store\\Test runs\n")
+
+    def args(self, command, **kw):
+        return json.dumps({"command": command, **kw})
+
+    def stored(self):
+        try:
+            with open(crow_core.APPROVALS_FILE, encoding="utf-8") as fh:
+                return {tuple(p) for p in json.load(fh).get("allowed") or []}
+        except (OSError, ValueError):
+            return set()
+
+    def test_a_store_path_is_released_for_the_session_only(self):
+        a = self.args(r'dir "C:\crow-unit-store\Test runs"')
+        self.assertIsNotNone(crow_core.remember("run_command", a),
+                             "die Karte konnte gar nicht beantwortet werden")
+        self.assertTrue(crow_core.remembered("run_command", a),
+                        "die Sitzungsfreigabe fehlt")
+        self.assertEqual(self.stored(), set(),
+                         "ein Speicherpfad wurde dauerhaft festgeschrieben")
+
+    def test_a_derived_path_is_still_written_down(self):
+        """POSITIVKONTROLLE. Ohne sie waere die Regel 'nie etwas merken', und
+        robin gaebe Chrome und die Vault-Pfade jede Sitzung neu frei."""
+        a = self.args(r'dir "C:\crow-unit-elsewhere\build"')
+        self.assertIsNotNone(crow_core.remember("run_command", a))
+        self.assertTrue(crow_core.remembered("run_command", a))
+        self.assertIn(("outside", r"c:\crow-unit-elsewhere\build"), self.stored())
+
+    def test_the_predicate_sees_the_profile_and_answers_no_for_a_stranger(self):
+        self.assertTrue(crow_core.scope_from_a_store(
+            ("outside", r"C:\crow-unit-store\Test runs")))
+        self.assertFalse(crow_core.scope_from_a_store(
+            ("outside", r"C:\crow-unit-elsewhere\build")))
+        # NEGATIVPROBEN: was kein Aussenpfad ist, geht die Regel nichts an.
+        self.assertFalse(crow_core.scope_from_a_store(("executing", "git")))
+        self.assertFalse(crow_core.scope_from_a_store(("writing", r"c:\x")))
+        self.assertFalse(crow_core.scope_from_a_store(None))
+        self.assertFalse(crow_core.scope_from_a_store(("outside", "")))
+
+    def test_an_unreadable_store_does_not_take_the_gate_down(self):
+        """NEGATIVPROBE. Ein fehlender Speicher heisst 'kein Speicherpfad',
+        nicht 'keine Freigabe mehr' -- read_store's Regel, eine Ebene hoeher."""
+        os.remove(crow_core.USER_PATH)
+        self.assertFalse(crow_core.scope_from_a_store(
+            ("outside", r"C:\crow-unit-store\Test runs")))
+        a = self.args(r'dir "C:\crow-unit-store\Test runs"')
+        crow_core.remember("run_command", a)
+        self.assertIn(("outside", r"c:\crow-unit-store\test runs"), self.stored())
+
+    def test_one_store_path_does_not_hold_back_a_second_derived_one(self):
+        """Ein Kommando mit zwei Aussenpfaden: der aus dem Speicher bleibt
+        ungeschrieben, der andere wird gemerkt. Sonst zoege ein Speicherpfad
+        jede Freigabe seines Kommandos mit sich."""
+        a = self.args(r'dir "C:\crow-unit-store\Test runs" & dir "C:\crow-unit-other\x"')
+        crow_core.remember("run_command", a)
+        got = self.stored()
+        self.assertIn(("outside", r"c:\crow-unit-other\x"), got)
+        self.assertNotIn(("outside", r"c:\crow-unit-store\test runs"), got)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

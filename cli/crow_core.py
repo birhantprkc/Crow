@@ -11281,6 +11281,56 @@ def _approval_scopes(name: str, arguments: str) -> "list[tuple[str, str]] | None
     return [scope]
 
 
+def scope_from_a_store(scope: "tuple[str, str] | None") -> bool:
+    """Did the assistant read this outside path out of a store, not derive it?
+
+    #178, seen live 2026-08-31. For a step whose own text said "write a file
+    only in this folder", the model's first attempt was a `run_command` into
+    `C:\\Users\\robin\\Desktop\\Test runs` -- a path out of the USER PROFILE
+    block of the system prompt, named by nobody in the chat. The card asked, the
+    answer was "and from now on", and the path stood in approvals.json for good.
+
+    A PATH THE USER TYPED NEVER REACHES A CARD. `mandated_paths` reads user
+    messages only, `run_command_boundary` filters what it finds, so every
+    outside path on a card was picked by the assistant. What separates the
+    ordinary case from this one is therefore not who typed it, but WHERE THE
+    ASSISTANT GOT IT: a path derived from the work at hand is a guess that
+    happens once, a path read out of a store is a standing invitation that comes
+    back in every single turn -- and a permanent answer to it is a permanent
+    answer to a question the model will keep asking.
+
+    So a store path stays releasable for the session and is never written down.
+    Refusing it outright would be the wrong trade: the model does reach for
+    those paths for good reasons, and a card that cannot be answered at all
+    turns into a wall in the middle of somebody's work.
+
+    THE MATCH IS A SUBSTRING, AND THAT IS DELIBERATE UNTIL #179 IS FIXED. The
+    precise rule would be to pull the paths out of the entry and ask `_inside`,
+    so that a store path releases itself and what is under it and nothing else.
+    Measured 2026-08-31 against the live profile: `_PATH_IN_TEXT` ends a path at
+    the first space, so the entry `LP-50-Auftrag (C:\\Users\\robin\\Desktop\\Test
+    runs)` yields `C:\\Users\\robin\\Desktop\\Test`, and `_inside` on that answers
+    False for the very path this rule exists to catch. The precise version would
+    silently switch the protection off.
+
+    The price of the substring is over-reach in one direction: a PARENT of a
+    store path (`C:\\Users\\robin\\Desktop`) matches too and is likewise not
+    written down. That errs toward asking again rather than toward a standing
+    release, so it is the safe side of the trade -- but it is a side, not the
+    intended rule, and it goes away with #179.
+    """
+    if not scope or scope[0] != "outside" or not scope[1]:
+        return False
+    where = os.path.normcase(scope[1])
+    for path in (USER_PATH, memory_path()):
+        if not path:
+            continue
+        for entry in read_store(path):
+            if where in os.path.normcase(entry):
+                return True
+    return False
+
+
 def remembered(name: str, arguments: str) -> bool:
     """Has the user said "always" for something covering this call -- in this
     chat, or written down in any earlier one (the standing store). EVERY
@@ -11308,6 +11358,13 @@ def remember(name: str, arguments: str) -> tuple[str, str] | None:
     fresh = False
     for scope in scopes:
         _ALLOWED.add(scope)
+        # #178. DIE SITZUNG JA, DIE PLATTE NEIN, fuer einen Pfad, den das Modell
+        # aus einem Speicher gelesen hat -- siehe `scope_from_a_store`. Getrennt
+        # wird hier und nicht schon in `_approval_scopes`, weil ein Kommando
+        # beide Sorten nennen kann und der Speicherpfad dann die Freigabe des
+        # anderen nicht mitnehmen darf.
+        if scope_from_a_store(scope):
+            continue
         if scope not in stored:
             stored.add(scope)
             fresh = True
