@@ -1570,8 +1570,14 @@ class ReleaseLevelTests(TurnLoopCase):
         asks = {m: sorted(t for t in crow_core.TOOL_IMPL
                           if crow_core.needs_approval(t, m))
                 for m in crow_core.MODES}
-        self.assertEqual(asks["manual"], ["edit_file", "run_command", "write_file"])
-        self.assertEqual(asks["allowedit"], ["run_command"])
+        # `render_page` seit 2.0.0 (#175): es startet einen Browser und legt
+        # eine Datei an, also `executing` wie `run_command` -- und es ERSETZT
+        # genau die run_command-Zeilen, mit denen das Modell sich vorher einen
+        # Browser gebaut hat. Es hier nicht zu fuehren hiesse, einen Prozess
+        # ohne Nachfrage zu starten, wo vorher gefragt wurde.
+        self.assertEqual(asks["manual"],
+                         ["edit_file", "render_page", "run_command", "write_file"])
+        self.assertEqual(asks["allowedit"], ["render_page", "run_command"])
         self.assertEqual(asks["auto"], [])
 
     def test_an_unknown_tool_is_treated_as_the_strictest_class(self):
@@ -7594,9 +7600,18 @@ class TheDefaultEndpointTests(unittest.TestCase):
         about a server that is running, which crow_core.py:927 calls the most
         confusing shape a success can take.
         """
-        port = crow_core.server_port("qwen35-q4-k-xl")
-        self.assertIsNotNone(port, "the manifest stopped declaring Qwen's port")
+        # 2.0.0: der Standard ist Flash-Next, nicht mehr der 27B. robins
+        # Ansage vom 2026-08-24 ("Neue base url soll doch aber Qwen sein") ist
+        # damit ersetzt; der SINN des Falls bleibt und ist der eigentliche
+        # Punkt -- die Vorgabe wird aus dem Manifest gelesen, das auch die
+        # Serverzeile baut, damit die beiden nicht auseinanderlaufen koennen.
+        port = crow_core.server_port("flash-next-q2-k-xl")
+        self.assertIsNotNone(port, "the manifest stopped declaring Flash-Next's port")
         self.assertIn(":%d/" % port, crow_core.DEFAULT_BASE_URL)
+        # NEGATIVPROBE: der zweite Betriebspunkt ist NICHT die Vorgabe, sonst
+        # gruesst dieser Fall jede beliebige Portzahl.
+        self.assertNotIn(":%d/" % crow_core.server_port("qwen35-q4-k-xl"),
+                         crow_core.DEFAULT_BASE_URL)
 
     def test_the_other_model_is_still_bootable(self):
         """NEGATIVE: moving the default may not remove the second model. Both

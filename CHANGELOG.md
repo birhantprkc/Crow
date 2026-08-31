@@ -3,6 +3,139 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 2.0.0 — 2026-08-31
+
+Flash-Next becomes the default operating point, the model gets eyes, and the window gets a
+browser. Major, because `DEFAULT_BASE_URL` moves from 8082 to 8083: a client started with
+nothing and told nothing now looks for a different server.
+
+### The default operating point is Qwen3.8-Flash-Next (#140, #159)
+
+`DEFAULT_BASE_URL` is `http://127.0.0.1:8083/v1`. Qwen3.8-27B stays shipped, measured and
+bootable as the second operating point on 8082; DeepSeek 0731 stays where it was.
+
+| | Flash-Next `UD-Q2_K_XL` | 27B `UD-Q4_K_XL` |
+|---|---|---|
+| on disk | 73.45 GiB, 3 shards | 16.35 GiB, one file |
+| VRAM | 27,707 MiB | 26,140 MiB |
+| decode | 32.44 tok/s (31.06–33.20) | 123.05 / 133.18 tok/s |
+| prefill | 970.44 tok/s (941.07–985.32) | 2,262.96 tok/s |
+| engine | local pin `6c84c7d5d` + PR #27992 | packaged `b10269` |
+| licence | `qwen-community-1.0` | Apache-2.0 |
+
+Flash-Next conditions: 2026-08-30, driver 616.56, one 31,979-token cold turn per boot, three
+rounds interleaved against a same-session control (964.92 / 29.05). **Not measured:** decode at
+a full 200k window.
+
+**The engine is a local build.** `qwen4exp` exists in llama.cpp only from PR #27742 and the
+packaged `b10269` cannot load it. On the bare pin without #27992 the numbers are 959.81 / 28.60
+over ten boots.
+
+### `read_image`: the model can look at a picture (#170)
+
+Vision ran in one direction. A person could hand an image in — `/image`, a drop, Ctrl+V — and
+everything the model produced itself was invisible to it. Seen live 2026-08-30: it began
+decoding PNG bytes in node to get pixel statistics instead of an answer.
+
+| | |
+|---|---|
+| class | `reading` |
+| wire | the tool message's content becomes `[{text}, {image_url}]` — the block a pasted image travels as. `server-common.cpp` converts `image_url` parts **regardless of the message's role**, so the next round sees it the way `/image` shows one |
+| boundary | `_rooted`, like every other reader (#177) |
+| no projector | `refuse_images` is asked **before** the block is attached: a picture sent to a blind server is an HTTP 500 that costs the whole turn |
+
+Flash-Next gets its projector: `mmproj-F16.gguf`, 904,004,000 B, from the ROOT of
+`unsloth/Qwen3.8-Flash-Next-GGUF` — a download filtered to the quant folder misses it.
+
+Accepted live: asked about a Hugging Face card, the model named the `huggingface.co` watermark
+and the browser hover box, both of which exist only in the pixels. **Not measured:** the
+projector's VRAM cost on a line already at the card edge under `-ncmoe 40`.
+
+### A browser panel, and it is not an iframe (#175)
+
+The model used to build a browser out of shell commands. Measured during one stall in the
+2026-08-30 voxel run: **19 chrome processes, the oldest two hours old, one with 7,511 s of CPU**,
+llama-server idle, the window silent. Three stalls in that run, each needing a person to kill
+processes by hand.
+
+A globe in the title bar opens a panel built like the code panel — tabs, an address bar, per-tab
+history. Behind it is a **second frameless WebView2** laid over the panel rectangle, not an
+iframe: `X-Frame-Options: DENY` and `frame-ancestors 'none'` refuse embedding, and that is
+claude.ai, github.com and google.com. A window is top-level, so neither header applies. Measured
+2026-08-31: in an iframe only example.com loaded; in the pane all of them do.
+
+`render_page(path)` gives the model the same thing, supervised:
+
+| case | wall clock | result |
+|---|---|---|
+| page settling at 300 ms, `wait_ms=1500` | 0.5 s | screenshot shows the settled text |
+| page settling at 3 s, `wait_ms=6000` | 0.5 s | not killed |
+| endless `fetch`, `wait_ms=1200` | 9.3 s | ends itself, names the timeout, no screenshot |
+
+It owns its child: `proc.kill()` on its own handle, never a name and never a process list — the
+#158 lesson, paid once when a sweep took robin's own test server with it. Its own
+`--user-data-dir` per run, because without one Chrome hands the job to a running instance and
+returns exit 0 with nothing. stdout and stderr go to files, because `communicate()` hangs on
+Windows after a kill when a grandchild holds the pipe.
+
+The result opens as a tab showing the **screenshot**, not the live page: the page can have
+changed since the model looked.
+
+### The git panel moved into the chat (#173)
+
+Out of the side column, under the goal panel, as one flex column — a goal that starts or ends
+moves it with no JavaScript, because a hidden goal panel takes no space. The pair gets 70 % of
+the chat height where the goal alone had 60 %.
+
+### Notes and cards stay where they happened (#173)
+
+Every mark carries `at`, the number of messages that stood before it, stamped at one place in
+`Api.push`; `_replay` threads them back in rather than appending them. The rollover note, which
+marks where the context was cut, no longer claims the cut was just now.
+
+The approval card was left behind by `fold()`: the `Trace` element is created at the flow's end
+*at that moment* and every later round is pulled into it, so a card hanging off the flow ended up
+below everything. It now hangs off the round that asked.
+
+### A turn's bill outlives the cut (#171)
+
+`timings` beside the messages, one record per turn, numbers only — `clean_timings` keeps the
+rendered line out, because a sentence is the one thing that cannot be evaluated afterwards. A run
+that rolled over can be read turn by turn from the archives.
+
+### Thinking is capped per request (#176)
+
+`reasoning_budget` 1024 for `flash-next-q2-k-xl`, from the manifest. It is a **brake, not a
+saving**: measured at a single prompt it turned one 7,870-token block and 352.0 s into 116.3 s,
+and in goal mode it does nothing at all, because nobody there writes a long block — ten blocks of
+181 down to 14. Four interleaved goal runs at 128 came out *slower* (73.8 s against 65.4 s) and
+thought *more*. 1024 never fires in goal mode (largest block over four runs: 324) and catches the
+runaway block in ordinary chat. **Do not lower it** — that experiment has been run.
+
+Three levers against the thinking share were tested and all three are dead: the reasoning level
+(`none` is the most expensive of four — 3.6× time, 1.8× tokens), the verification sentence in the
+nudge (2.3 tokens on 10,500 — 0.02 %, against a spread of s = 2,315), and the cap above.
+
+### Fixes
+
+| | |
+|---|---|
+| #177 | relative paths resolved against the launcher, not the bound folder. `_ROOT` was a fence and never a ground: four goal runs did "read a file only in this folder" outside that folder, and every checker was green |
+| #178 | an approval for a path out of the user profile was written down as if the user had named it |
+| #179 | a user-named path with a space in it was refused, and its truncated prefix released a different folder |
+| #172 | a tool call that never returns now shows its own clock |
+| #168 | a step worked on again no longer keeps its green tick |
+| #169 | tokens per step were counted once per turn while steps were ticked several times inside one |
+| #174 | the goal header's total did not survive a rollover |
+| #161–#165 | goal mode: the store, the panel, the engine, concurrent operation |
+
+### Not built
+
+- **No lower thinking cap than 1024.** Four runs show 128 costs.
+- **No `min_p` change** against the occasional Chinese token at 2-bit. It leaves the model card's
+  sampling, against which every #140 measurement was taken.
+- **No sweep by process name**, anywhere.
+
 ## 1.7.0 — 2026-08-30
 
 The third model gets a faster engine, and two checker suites that had been red

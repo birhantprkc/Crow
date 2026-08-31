@@ -50,7 +50,7 @@ A local package is never deleted afterwards; a downloaded one is.
 #>
 [CmdletBinding()]
 param(
-    [string] $Version   = "1.7.0",
+    [string] $Version   = "2.0.0",
     [string] $InstallTo = "$env:LOCALAPPDATA\Crow",
     [string] $SourceUrl = "",
     [switch] $Force,
@@ -1790,7 +1790,10 @@ Write-Host "      --fit off --load-mode none -np 1 ``" -ForegroundColor White
 Write-Host "      --mmproj $InstallTo\models\qwen-next-gguf\mmproj-F16.gguf ``" -ForegroundColor White
 Write-Host "      --jinja" -ForegroundColor White
 Write-Host ""
-Write-Host "    python $InstallTo\cli\crow.py --base-url http://127.0.0.1:8083/v1" -ForegroundColor White
+# DER STANDARD BRAUCHT KEIN --base-url MEHR, seit 2.0.0 zeigt DEFAULT_BASE_URL
+# auf 8083. Eine Zeile, die den Standard noch einmal ausschreibt, liest sich wie
+# eine Bedingung.
+Write-Host "    python $InstallTo\cli\crow.py" -ForegroundColor White
 Write-Host ""
 
 # The last screen is the only place these four commands appear -- the model, the

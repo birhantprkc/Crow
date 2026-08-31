@@ -1,11 +1,37 @@
 ## Tools
 
-22 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured.
+23 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured.
 
-`read_file` `read_image` `write_file` `edit_file` `list_dir` `find_files` `search_text`
-`run_command` `web_search` `fetch_url` `memory` `skill` `session_search` `delegate`
-`subtasks` `collect` `git_status` `git_diff` `git_log` `git_commit` `git_push`
+`read_file` `read_image` `render_page` `write_file` `edit_file` `list_dir` `find_files`
+`search_text` `run_command` `web_search` `fetch_url` `memory` `skill` `session_search`
+`delegate` `subtasks` `collect` `git_status` `git_diff` `git_log` `git_commit` `git_push`
 `github_connect`.
+
+### `render_page` (#175)
+
+`render_page(path, wait_ms=4000, width=1280, height=800)` — a page in a browser Crow owns.
+
+| | |
+|---|---|
+| class | `executing` — it starts a process and writes a file |
+| browser | Chrome, then Edge; every candidate resolved through environment variables |
+| target | a file in the working area, or an `http(s)` URL |
+| output | `<root>/.crow/renders/render-<stamp>.png`, plus the console lines from stderr |
+| isolation | its own `--user-data-dir` per run. Without it Chrome hands the job to a running instance and returns exit 0 with no screenshot |
+| caps | `--virtual-time-budget` in the page, `wait_ms/1000 + 8 s` on the process |
+| kill | `proc.kill()` on its own handle. Never by name, never a process list (#158) |
+| pipes | none. stdout and stderr go to a file: `communicate()` hangs on Windows after a kill when a grandchild holds the write end |
+
+Measured 2026-08-31, Chrome 151.0.7922.175:
+
+| case | wall clock | result |
+|---|---|---|
+| page settling at 300 ms, `wait_ms=1500` | 0.5 s | screenshot shows the settled text |
+| page settling at 3 s, `wait_ms=6000` | 0.5 s | not killed; the virtual clock runs the page forward |
+| endless `fetch`, `wait_ms=1200` | 9.3 s | `error: the browser wrote no screenshot (timed out after 1200 ms and was stopped)` |
+
+`--run-all-compositor-stages-before-draw` does **not** rescue the hanging page. The result opens
+as a tab in the [browser panel](../user-guide/browser.md).
 
 ### `read_image` (#170)
 

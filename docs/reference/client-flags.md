@@ -2,7 +2,7 @@
 
 | flag | default | |
 |---|---|---|
-| `--base-url` | `http://127.0.0.1:8082/v1` | Qwen's port. 0731 listens on `:8081` |
+| `--base-url` | `http://127.0.0.1:8083/v1` | Flash-Next's port, the default since 2.0.0. The 27B listens on `:8082`, 0731 on `:8081` |
 | `--reasoning-effort` | unset | per chat via `/reasoning`. Levels come from the manifest |
 | `--reasoning-budget N` | the model's | cap the thinking per request; per chat via `/budget`, `/budget off` lifts it. The default comes from the manifest, so nothing has to be typed. Carries its own end-of-thinking message -- a cap without one cuts the answer in half (#176) |
 | `--rollover-at` | `0.9` | archive and start fresh at this share of the window. `0` disables |

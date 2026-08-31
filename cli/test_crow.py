@@ -1214,7 +1214,8 @@ class ParserTests(unittest.TestCase):
         llama-server first" about a server that is running."""
         args = crow.build_parser().parse_args([])
         self.assertEqual(args.base_url, crow_core.DEFAULT_BASE_URL)
-        self.assertIn(":%d/" % crow_core.server_port("qwen35-q4-k-xl"),
+        # 2.0.0: Flash-Next ist der Standard-Betriebspunkt.
+        self.assertIn(":%d/" % crow_core.server_port("flash-next-q2-k-xl"),
                       args.base_url)
         self.assertEqual(args.model, "crow")
 

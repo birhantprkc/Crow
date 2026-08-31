@@ -9,7 +9,7 @@ The [README](../README.md) covers requirements, install and start. Everything el
 | [Server flags](reference/server-flags.md) | what `llama-server` is started with |
 | [Client flags](reference/client-flags.md) | what `crow` and the window take |
 | [Reasoning levels](reference/reasoning-levels.md) | `low`, `medium`, `high`, `off` |
-| [Tools](reference/tools.md) | the twelve built in |
+| [Tools](reference/tools.md) | the twenty-three built in -- `read_image` and `render_page` among them |
 | [Settings](reference/settings.md) | `settings.json` |
 | [mcp.json](reference/mcp-json.md) | every key, both transports |
 
@@ -23,6 +23,7 @@ The [README](../README.md) covers requirements, install and start. Everything el
 | [MCP servers](user-guide/mcp.md) | stdio, elicitation, commands |
 | [MCP over HTTP](user-guide/mcp-http.md) | headers, OAuth |
 | [Remote models](user-guide/remote-models.md) | subscriptions, dialects, routing |
+| [Browser panel](user-guide/browser.md) | tabs, the address bar, `render_page` |
 | [Window](user-guide/window.md) | the GUI |
 
 ## Measurements

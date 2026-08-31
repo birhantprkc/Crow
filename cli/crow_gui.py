@@ -10303,7 +10303,7 @@ class Api:
     # die Seite meldet das CSS-Rechteck, Python legt die Fensterecke darauf.
     # Das Hauptfenster ist rahmenlos, also ist seine Ecke zugleich die Ecke der
     # Zeichenflaeche; ein Titelbalken haette hier einen Versatz erzwungen.
-    def _pane(self):
+    def _pane(self) -> "object":
         """Die Scheibe, beim ersten Gebrauch erzeugt. Nie im Voraus.
 
         DER IMPORT STEHT HIER DRIN, weil er in dieser Datei nirgends oben

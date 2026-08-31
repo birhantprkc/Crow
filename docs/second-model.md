@@ -1,7 +1,9 @@
-# Second model — DeepSeek-V4-Flash-0731
+# The other models — DeepSeek-V4-Flash-0731
 
-Not the operating point. [`../README.md`](../README.md) is Qwen3.8-27B; this page is the other
-server `install.ps1` sets up, kept current because the installer starts it.
+Not the operating point. Since 2.0.0 that is **Qwen3.8-Flash-Next** on `:8083`
+([`../README.md`](../README.md)); **Qwen3.8-27B** on `:8082` is the second one and has its own
+table there. This page is the third server `install.ps1` sets up, kept current because the
+installer starts it.
 
 | | |
 |---|---|

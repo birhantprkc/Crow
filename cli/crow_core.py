@@ -81,12 +81,15 @@ from typing import Callable
 CLIENT_VERSION = ""
 
 
-# QWEN'S PORT, NOT 0731'S. 8081 was the only one until a second model
-# arrived on 8082, and the default stayed behind -- so a client started
-# with nothing running reported 8081, a port robin has not served in
-# weeks. Both models stay bootable; this only decides where a client
-# looks first when it was told nothing and found nothing listening.
-DEFAULT_BASE_URL = "http://127.0.0.1:8082/v1"
+# FLASH-NEXT'S PORT SINCE 2.0.0, and the default has moved twice for the same
+# reason both times: it names the model this client is actually run with. 8081
+# was 0731's and the only one; 8082 became the 27B's; 8083 is Flash-Next, which
+# is the operating point every measurement since #140 has been taken at and the
+# only one of the three that can see (#170).
+# ALL THREE STAY BOOTABLE. This decides one thing: where a client looks first
+# when it was told nothing and found nothing listening. `--base-url` overrides
+# it, and `--serve <key>` names the model directly.
+DEFAULT_BASE_URL = "http://127.0.0.1:8083/v1"
 DEFAULT_MODEL = "crow"
 
 

@@ -1,12 +1,12 @@
 # Architecture
 
-Four modules under `cli/`. Line counts measured 2026-08-26.
+Four modules under `cli/`. Line counts measured 2026-08-31.
 
 | | lines | holds |
 |---|---|---|
-| `crow_core.py` | 11879 | every rule both surfaces obey: tools, the turn loop, memory, skills, MCP, remote providers, sessions |
-| `crow_gui.py` | 8031 | the window. Page, pywebview API, and nothing a rule depends on |
-| `crow.py` | 2290 | the terminal client. Screen, slash commands, `VERSION` |
+| `crow_core.py` | 16407 | every rule both surfaces obey: tools, the turn loop, memory, skills, MCP, remote providers, sessions |
+| `crow_gui.py` | 11353 | the window. Page, pywebview API, the browser pane, and nothing a rule depends on |
+| `crow.py` | 2488 | the terminal client. Screen, slash commands, `VERSION` |
 | `crow_voice.py` | 238 | dictation: microphone and recogniser only |
 
 ## The split

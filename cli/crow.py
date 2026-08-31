@@ -182,7 +182,7 @@ from crow_core import (  # noqa: F401 -- re-exported for the CLI and its suite
 # one line the README documents. tools/pack-release.ps1:254 reads the same
 # pattern to stamp the package, and tools/check_operating_point.py holds it
 # against manifests/operating-point.json.
-VERSION = "1.7.0"
+VERSION = "2.0.0"
 
 # The core carries no version of its own -- the owner of the literal hands it
 # over. Three places in there need one: the session file's `version` field, the
@@ -950,6 +950,15 @@ class TerminalTurnEvents(TurnEvents):
         unimplemented event into a red case instead of a line that quietly
         stopped appearing.
         """
+
+    def page_rendered(self, url: str, shot: str) -> None:
+        """#175: `render_page` came back with a picture.
+
+        DAS TERMINAL HAT KEIN PANEL, also nennt es den Pfad. Ohne diese Zeile
+        faellt das Ereignis hier lautlos zu Boden -- und der Fall in
+        `test_every_event_of_the_core_has_a_line_here` ist genau dafuer da.
+        """
+        print(f"{DIM}    rendered {url} -> {shot}{RESET}", file=self._out)
 
     def boundary_escaped(self, name: str, refused: list[str]) -> None:
         """#98: the one line in this class that is NOT dim, and that is the point.
