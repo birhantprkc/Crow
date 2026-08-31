@@ -733,7 +733,7 @@ class TheSecondRolloverFiresTests(ApiCase):
         rolls, seen = [], {}
 
         def fake_roll(conversation, base_url, context_tokens, carry=None,
-                      digest=""):
+                      digest="", **_):
             rolls.append((context_tokens, carry))
             conversation.reset()
             conversation.append("user", "note\n\n" + (carry or ""))
@@ -767,7 +767,7 @@ class TheSecondRolloverFiresTests(ApiCase):
         rolls, seen = [], {}
 
         def fake_roll(conversation, base_url, context_tokens, carry=None,
-                      digest=""):
+                      digest="", **_):
             rolls.append(context_tokens)
             return "never"
 
@@ -799,7 +799,7 @@ class TheSecondRolloverFiresTests(ApiCase):
             return "DIGEST-TEXT"
 
         def fake_roll(conversation, base_url, context_tokens, carry=None,
-                      digest=""):
+                      digest="", **_):
             seen["digest"] = digest
             conversation.reset()
             conversation.append("user", "note\n\n" + (carry or ""))
@@ -4957,9 +4957,19 @@ class ToolCallsLeaveTheReadingColumnTests(unittest.TestCase):
         WHAT CHANGED ON 2026-08-24 is where the width comes from. As a tile
         floating over the chat it had to grow to its widest row and stop at
         44vw, or it covered what somebody was reading. In a column of its own it
-        covers nothing, so the column decides and the row takes all of it."""
+        covers nothing, so the column decides and the row takes all of it.
+
+        WHAT CHANGED ON 2026-08-31 (#176 acceptance) is WHERE the argument is.
+        robin took it out of the headline -- it is arbitrarily long and pushed
+        the elapsed-time clock out of the row -- so it now stands once, in full,
+        in the opened call. The rule this case guards moved with it: the block
+        wraps and breaks rather than clipping, which is the same promise the old
+        `#toolcalls .tool .arg{overflow:visible}` made about the headline. A case
+        left pointing at the dead rule would be green about nothing."""
         self.assertIn("width:100%", self._rule("#toolcalls{"))
-        self.assertIn("overflow:visible", self._rule("#toolcalls .tool .arg{"))
+        block = self._rule("#toolcalls .tsp{")
+        self.assertIn("white-space:pre-wrap", block)
+        self.assertIn("word-break:break-word", block)
 
     def test_it_wears_the_bubble_of_whichever_skin_is_on(self):
         """robin, 2026-08-22. NOT a literal that matches today's dark bubble --
@@ -7660,7 +7670,12 @@ class ALineTypedDuringTheReviewIsNotLostTests(ApiCase):
         api._busy = True
         api._queued = "zweite"
         api._pump("erste")
-        self.assertEqual([m["k"] for m in api._seen], ["busy"])
+        # #162: `rail` STEHT SEIT DEM 2026-08-31 DAHINTER, und exakt statt `in`,
+        # damit dieser Fall weiter sagt, WAS die Seite hoert. Der Rail-Redraw
+        # kam, weil `_run` die Rail eine Zeile zu frueh zeichnet -- da steht
+        # `_busy` noch auf True -- und danach niemand mehr zeichnete: die Kachel
+        # behielt ihre Amber-Marke, obwohl der Zug durch war.
+        self.assertEqual([m["k"] for m in api._seen], ["busy", "rail"])
         self.assertIn('case "busy": this.busy();',
                       (HERE / "crow_gui.py").read_text(encoding="utf-8"))
 
@@ -8159,6 +8174,896 @@ class TheUserDelegatesFromTheComposerTests(ApiCase):
         api.send("/subtasks")
         notes = [m["t"] for m in self.drained(api) if m.get("k") == "note"]
         self.assertTrue(any("d1" in t for t in notes))
+
+
+class _TheWindowBefore162(crow_gui.Api):
+    """The window as it stood before #162, runnable beside the fixed one.
+
+    Two behaviours, both restored exactly: `open` and `reset` refused outright
+    while a turn ran, and `push` stamped nothing because there was only ever one
+    chat to push into. The cases at the bottom of the class below run against
+    this and require the opposite outcome -- without them "the view switched"
+    would be a sentence about a window nobody could have broken.
+    """
+
+    def open(self, path: str) -> None:
+        if self._worker and self._worker.is_alive():
+            return
+        super().open(path)
+
+    def reset(self) -> None:
+        if self._worker and self._worker.is_alive():
+            return
+        super().reset()
+
+    def push(self, message: dict) -> None:
+        self._out.put(message)
+
+
+class TheViewIsNotTheTurnTests(ApiCase):
+    """#162. Reading another chat while one is being worked on.
+
+    THE DEFECT THIS REPLACES was not a bug, it was a wall: `open` and `reset`
+    began with `if self._worker.is_alive(): return`, so a running turn owned the
+    whole window. That is right for the MODEL -- one slot, `-np 1`, settled in
+    #143 -- and wrong for the surface, because reading costs the server nothing.
+
+    THE ONE THING THAT MUST NEVER HAPPEN is the worker losing the conversation
+    it started with. Every positive below is followed by the predicate that
+    catches exactly that.
+    """
+
+    def busy(self, api):
+        """A turn that is running, seen from the bridge thread.
+
+        A REAL THREAD, not a stub with `is_alive`, because the code under test
+        also asks whether the CALLER is that thread. A stub would answer the
+        first question and make the second unanswerable.
+        """
+        gate = threading.Event()
+        worker = threading.Thread(target=gate.wait, daemon=True)
+        worker.start()
+        self.addCleanup(gate.set)
+        api._worker = worker
+        api._busy = True
+        return gate
+
+    # -- looking somewhere else -------------------------------------------
+
+    def test_another_chat_can_be_opened_while_a_turn_runs(self):
+        """POSITIVE. The file is drawn, and the view says where it is."""
+        api = self.api()
+        self.a_chat(api, "the chat being worked on")
+        ok, other = api._leave()
+        self.assertTrue(ok)
+        api._conversation.reset()
+        api._current_path = None
+        self.a_chat(api, "the chat that is running", "half an answer")
+        self.drained(api)
+        self.busy(api)
+
+        api.open(other)
+        seen = self.drained(api)
+        self.assertEqual(api._view_path, other)
+        views = [m for m in seen if m.get("k") == "viewing"]
+        self.assertTrue(views, "nothing told the page where it is standing")
+        self.assertFalse(views[-1]["live"])
+        self.assertEqual(views[-1]["running"], "the chat that is running")
+
+    def test_the_running_conversation_is_not_handed_over(self):
+        """THE LOAD-BEARING NEGATIVE. Looking must not swap what the worker
+        writes into -- that is the one failure this design exists to prevent,
+        and it would be invisible until the turn ended in the wrong chat."""
+        api = self.api()
+        self.a_chat(api, "the chat being worked on")
+        ok, other = api._leave()
+        self.assertTrue(ok)
+        api._conversation.reset()
+        api._current_path = None
+        self.a_chat(api, "the chat that is running", "half an answer")
+        running, path = api._conversation, api._current_path
+        self.busy(api)
+
+        api.open(other)
+        self.assertIs(api._conversation, running,
+                      "the view swapped the conversation out from under the turn")
+        self.assertEqual(api._current_path, path)
+        self.assertIn("half an answer",
+                      [m.get("content") for m in running.payload()])
+
+    def test_without_a_turn_the_same_click_really_switches(self):
+        """COUNTER-PROBE to both cases above: if the click never switched, they
+        would pass on a window in which chats simply do not open."""
+        api = self.api()
+        self.a_chat(api, "the other chat")
+        ok, other = api._leave()
+        self.assertTrue(ok)
+        api._conversation.reset()
+        api._current_path = None
+        self.a_chat(api, "this chat")
+        before = api._conversation
+
+        api.open(other)
+        self.assertIsNot(api._conversation, before, "nothing was switched")
+        self.assertIsNone(api._view_path)
+
+    def test_a_new_chat_during_a_turn_is_a_view_not_a_file(self):
+        """`reset` mid-turn empties the pane and leaves the running chat alone.
+        No file is written: an empty chat nobody used would be a row in the rail
+        for one click."""
+        api = self.api()
+        self.a_chat(api, "the chat that is running")
+        running = api._conversation
+        self.busy(api)
+
+        api.reset()
+        self.assertEqual(api._view_path, "")
+        self.assertIs(api._conversation, running)
+        views = [m for m in self.drained(api) if m.get("k") == "viewing"]
+        self.assertTrue(views and not views[-1]["live"])
+
+    # -- what the background turn says -------------------------------------
+
+    def test_what_the_worker_says_while_the_view_is_elsewhere_is_stamped(self):
+        """POSITIVE. The stamp comes from the SENDER, not from the message type,
+        so no call site has to know about it and a new one cannot forget."""
+        api = self.api()
+        api._view_path = "somewhere/else.json"
+        api._worker = threading.current_thread()      # we ARE the worker now
+        api.push({"k": "text", "t": "belongs to the other chat"})
+        self.assertTrue(self.drained(api)[-1].get("bg"))
+
+    def test_the_same_message_is_not_stamped_when_the_view_is_the_turn(self):
+        """NEGATIVE HALF. Stamping everything would empty the pane of the chat
+        being watched -- the page drops what carries the mark."""
+        api = self.api()
+        api._view_path = None
+        api._worker = threading.current_thread()
+        api.push({"k": "text", "t": "belongs right here"})
+        self.assertNotIn("bg", self.drained(api)[-1])
+
+    def test_the_bridge_thread_is_never_stamped(self):
+        """The other half of the same rule: a note the user's own click produced
+        belongs on screen even while a turn runs elsewhere."""
+        api = self.api()
+        api._view_path = "somewhere/else.json"
+        self.busy(api)                                 # worker is NOT this thread
+        api.push({"k": "note", "t": "answered right here"})
+        self.assertNotIn("bg", self.drained(api)[-1])
+
+    # -- typing while looking elsewhere ------------------------------------
+
+    def test_a_line_typed_elsewhere_remembers_which_chat_it_meant(self):
+        """Without the target the line would run in the chat that happens to be
+        computing -- from the outside indistinguishable from a misclick."""
+        api = self.api()
+        api._view_path = "other.json"
+        self.busy(api)
+        self.assertTrue(api.send("for the other chat"))
+        self.assertEqual(api._queued, "for the other chat")
+        self.assertEqual(api._queued_to, "other.json")
+        self.assertIn("queued", self.kinds(api))
+
+    def test_a_line_typed_in_the_running_chat_carries_no_target(self):
+        """COUNTER-PROBE: the target is a fact about where it was typed, not a
+        constant. `None` is what makes `_pump` keep running where it is."""
+        api = self.api()
+        api._view_path = None
+        self.busy(api)
+        self.assertTrue(api.send("for this chat"))
+        self.assertEqual(api._queued, "for this chat")
+        self.assertIsNone(api._queued_to)
+
+    # -- coming back --------------------------------------------------------
+
+    def test_returning_draws_what_the_turn_produced_while_unwatched(self):
+        """FROM THE CONVERSATION, NOT FROM DISK. The file is older than the chat
+        while a turn is in flight, so a reader off disk would miss exactly the
+        answers that arrived during the look away."""
+        api = self.api()
+        self.a_chat(api, "the running chat", "the first answer")
+        api._view_path = "elsewhere.json"
+        api._conversation.append("assistant", "arrived while looking away")
+        self.drained(api)
+
+        api.view_live()
+        seen = self.drained(api)
+        self.assertIsNone(api._view_path)
+        text = "".join(m.get("t", "") for m in seen if m.get("k") == "text")
+        self.assertIn("arrived while looking away", text)
+        views = [m for m in seen if m.get("k") == "viewing"]
+        self.assertTrue(views and views[-1]["live"])
+
+    def test_returning_from_the_live_chat_is_a_no_op(self):
+        """NEGATIVE HALF: redrawing on every click would clear and repaint the
+        pane for nothing, and a half-streamed answer would flicker."""
+        api = self.api()
+        self.a_chat(api, "the running chat")
+        self.drained(api)
+        api.view_live()
+        self.assertEqual(self.drained(api), [])
+
+    # -- the handover between two turns ------------------------------------
+
+    def test_the_handover_switches_where_the_wall_would_have_refused(self):
+        """`_pump` runs in the worker, so `open` sees a live thread. Without the
+        flag it would refuse the very switch it was asked to make."""
+        api = self.api()
+        self.a_chat(api, "the target chat")
+        ok, target = api._leave()
+        self.assertTrue(ok)
+        api._conversation.reset()
+        api._current_path = None
+        self.a_chat(api, "the chat that just finished")
+        api._worker = threading.current_thread()
+
+        api._hand_over(target)
+        self.assertIsNone(api._view_path)
+        self.assertFalse(api._switching, "the flag outlived the handover")
+        self.assertEqual(api._current_path, target)
+        self.assertIn("the target chat",
+                      [m.get("content") for m in api._conversation.payload()],
+                      "the window switched to a chat without its content")
+
+    def test_the_flag_falls_even_when_the_handover_throws(self):
+        """A flag left standing would leave every later click able to pull the
+        conversation out from under a running turn -- the failure this whole
+        class is written against, arrived at from the other side."""
+        api = self.api()
+        api._worker = threading.current_thread()
+        with mock.patch.object(type(api), "reset",
+                               side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                api._hand_over("")
+        self.assertFalse(api._switching)
+
+    # -- what the rail says while the two are different --------------------
+
+    def two_chats(self, api):
+        """A saved chat, and a second one live in the window. Returns the path
+        of the saved one."""
+        self.a_chat(api, "the chat on disk")
+        ok, saved = api._leave()
+        self.assertTrue(ok)
+        api._conversation.reset()
+        api._current_path = None
+        self.a_chat(api, "the chat that is running")
+        self.drained(api)
+        return saved
+
+    def row(self, api, path):
+        entry = self.rail(api)
+        rows = [r for r in entry["rollovers"] if r.get("path") == path]
+        self.assertTrue(rows, "the chat is not in the rail")
+        return rows[0]
+
+    def test_the_mark_follows_the_eye_not_the_turn(self):
+        """robin, 2026-08-30: the old chat stayed lit while another was open.
+        `active` meant "where the work is"; it has to mean "where I am"."""
+        api = self.api()
+        saved = self.two_chats(api)
+        self.busy(api)
+        api.open(saved)
+
+        api._reload_rail()
+        # ONE READ, because draining empties the queue -- a second `rail()`
+        # would report "never drawn" about a rail that was.
+        entry = self.rail(api)
+        mine = [r for r in entry["rollovers"] if r.get("path") == saved]
+        self.assertTrue(mine and mine[0]["active"],
+                        "the chat being read is not marked")
+        self.assertFalse(entry["live_active"],
+                         "the running chat is still marked as the open one")
+
+    def test_the_running_chat_is_marked_as_running_not_as_open(self):
+        """The two facts are separate on purpose: one is where the eye is, the
+        other is where the work is, and during a look away they differ."""
+        api = self.api()
+        saved = self.two_chats(api)
+        self.busy(api)
+        api.open(saved)
+
+        api._reload_rail()
+        rail = self.rail(api)
+        self.assertTrue(rail["live_running"], "nothing says where the work is")
+        mine = [r for r in rail["rollovers"] if r.get("path") == saved]
+        self.assertTrue(mine)
+        self.assertFalse(mine[0]["running"],
+                         "the chat being read is claimed to be running")
+
+    def test_without_a_turn_nothing_claims_to_be_running(self):
+        """COUNTER-PROBE: a flag that is always true marks nothing. `_busy` is
+        what makes it a statement rather than decoration."""
+        api = self.api()
+        self.two_chats(api)
+        api._reload_rail()
+        self.assertFalse(self.rail(api)["live_running"])
+
+    def test_a_turn_that_ends_unwatched_leaves_a_mark_that_reading_clears(self):
+        """The whole point of not jumping: the finished chat has to be able to
+        say so from the rail, and stop saying it once it has been read."""
+        api = self.api()
+        saved = self.two_chats(api)
+        api._view_path = saved
+        api._mark_done(api._current_path)          # the live chat, no file
+        self.assertTrue(self.rail(api)["live_done"])
+
+        api.view_live()
+        api._reload_rail()
+        self.assertFalse(self.rail(api)["live_done"],
+                         "the mark outlived the reading")
+
+    def test_a_chat_being_read_is_never_also_marked_done(self):
+        """NEGATIVE HALF. Both marks draw a bar in the same place; a chat that
+        is open and finished would draw two, and the amber one would read as
+        'unread' over something being read."""
+        api = self.api()
+        saved = self.two_chats(api)
+        api._done_paths.add(saved)
+        api._view_path = saved
+        api._reload_rail()
+        row = self.row(api, saved)
+        self.assertTrue(row["active"])
+        self.assertTrue(row["done"], "python still reports the fact")
+        # The page is what resolves it, and the rule lives in one place.
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.assertIn('r.done && !r.active ? " done" : ""', source)
+
+    # -- the counter belongs to the chat on screen -------------------------
+
+    def test_looking_at_another_chat_shows_that_chat_s_context(self):
+        """robin, 2026-08-30: the counter was blank while reading another chat.
+        Its own pushes were dropped as background, and nothing put the numbers
+        of the chat actually on screen in their place."""
+        api = self.api()
+        saved = self.two_chats(api)
+        api._context_tokens = 4321                 # the RUNNING chat's number
+        self.busy(api)
+
+        api.open(saved)
+        costs = [m for m in self.drained(api) if m.get("k") == "cost"]
+        self.assertTrue(costs, "no counter was drawn for the chat being read")
+        self.assertNotEqual(costs[-1]["tokens"], 4321,
+                            "the counter still shows the running chat")
+
+    def test_a_new_chat_during_a_turn_shows_an_empty_counter(self):
+        """A fresh chat has no context, and saying otherwise would be a number
+        about a conversation that does not exist yet."""
+        api = self.api()
+        self.a_chat(api, "the chat that is running")
+        api._context_tokens = 4321
+        self.busy(api)
+
+        api.reset()
+        costs = [m for m in self.drained(api) if m.get("k") == "cost"]
+        self.assertTrue(costs)
+        self.assertEqual(costs[-1]["tokens"], 0)
+
+    # -- the handover does not move the eye --------------------------------
+
+    def test_the_handover_leaves_the_reader_where_they_are(self):
+        """robin, 2026-08-30: no automatic switch when a turn finishes. The
+        queued line runs in ITS chat; the view stays in the one being read."""
+        api = self.api()
+        target = self.two_chats(api)
+        elsewhere = os.path.join(self.dir, "chat-elsewhere.json")
+        crow_core.save_session(api._conversation, "http://127.0.0.1:1/v1", 0,
+                               path=elsewhere)
+        api._view_path = elsewhere                 # the reader is over here
+        api._worker = threading.current_thread()
+
+        api._hand_over(target)
+        self.assertEqual(api._view_path, elsewhere,
+                         "the window pulled the reader into the finished chat")
+        self.assertEqual(api._current_path, target,
+                         "the line would have run in the wrong chat")
+
+    def test_the_handover_does_follow_when_the_reader_is_at_the_target(self):
+        """COUNTER-PROBE, and it is the ordinary case: the line was typed in
+        the chat being read, so after the switch the reader is simply there."""
+        api = self.api()
+        target = self.two_chats(api)
+        api._view_path = target
+        api._worker = threading.current_thread()
+
+        api._hand_over(target)
+        self.assertIsNone(api._view_path)
+        views = [m for m in self.drained(api) if m.get("k") == "viewing"]
+        self.assertTrue(views and views[-1]["live"])
+
+    # -- what is nachgezogen once the turn is over -------------------------
+
+    def test_the_bar_stops_claiming_a_turn_that_has_finished(self):
+        """robin, 2026-08-30 abends: `still running` stood over a turn that was
+        long done. The bar was set when the look away happened and never again,
+        so it was a memory rather than a reading."""
+        api = self.api()
+        saved = self.two_chats(api)
+        self.busy(api)
+        api.open(saved)
+        self.assertTrue([m for m in self.drained(api)
+                         if m.get("k") == "viewing"][-1]["running"])
+
+        api._busy = False                     # the turn ends
+        api._mark_done(api._current_path)
+        views = [m for m in self.drained(api) if m.get("k") == "viewing"]
+        self.assertTrue(views, "the finished turn told the bar nothing")
+        self.assertIsNone(views[-1]["running"],
+                          "the bar still names a chat that is not running")
+
+    def test_a_real_switch_after_the_turn_clears_the_unread_mark(self):
+        """The mark was dropped only on the LOOK paths. Once the turn is over a
+        rail click is an ordinary switch -- and that one kept the amber bar on a
+        chat the user was reading."""
+        api = self.api()
+        saved = self.two_chats(api)
+        api._done_paths.add(saved)
+        api.open(saved)                       # no worker: the real switch
+        self.assertNotIn(saved, api._done_paths,
+                         "the chat stays marked unread after being read")
+
+    def test_a_real_switch_after_the_turn_says_where_it_is(self):
+        """Same path, the other half: the bar has to disappear, not linger over
+        a chat that is now simply the open one."""
+        api = self.api()
+        saved = self.two_chats(api)
+        api._view_path = saved                # was a look, the turn has ended
+        api.open(saved)
+        views = [m for m in self.drained(api) if m.get("k") == "viewing"]
+        self.assertTrue(views and views[-1]["live"],
+                        "the bar survived the switch it was about")
+
+    # -- the cost line of a turn nobody watched ----------------------------
+
+    def test_the_cost_line_of_a_background_turn_comes_back_with_the_chat(self):
+        """robin, 2026-08-30: the numbers were gone. The line is not part of the
+        conversation, so `_replay` cannot redraw it -- and it had been dropped
+        as background while it was pushed."""
+        api = self.api()
+        saved = self.two_chats(api)
+        api._current_path = saved             # the turn ran in the saved chat
+        api.push({"k": "cost", "line": "[9 rounds | 384 tok @ 22.1 tok/s]",
+                  "share": None, "tokens": 7100, "n_ctx": 200000})
+        self.drained(api)
+        api._current_path = None
+
+        self.busy(api)
+        api.open(saved)
+        costs = [m for m in self.drained(api) if m.get("k") == "cost"]
+        self.assertTrue(costs)
+        self.assertIn("22.1 tok/s", costs[-1]["line"],
+                      "the chat came back without the numbers it cost")
+
+    def test_a_chat_with_no_remembered_line_shows_none_rather_than_anothers(self):
+        """NEGATIVE HALF. A chat whose turn ran in an earlier session has no
+        remembered line, and showing the previous chat's numbers there would be
+        worse than showing none -- it would be wrong and look right."""
+        api = self.api()
+        saved = self.two_chats(api)
+        api._last_cost[""] = {"line": "[belongs to the live chat]",
+                              "share": None}
+        self.busy(api)
+        api.open(saved)
+        costs = [m for m in self.drained(api) if m.get("k") == "cost"]
+        self.assertTrue(costs)
+        self.assertEqual(costs[-1]["line"], "",
+                         "another chat's cost line was shown")
+
+    # -- the window that had the wall, run beside the one that does not -----
+
+    def test_the_old_window_refuses_the_click_these_cases_require(self):
+        """THE PROOF THAT THE POSITIVES MEASURE SOMETHING. Same setup, same
+        click, the pre-#162 behaviour restored -- and the view does not move.
+        If this passed as well, "another chat can be opened while a turn runs"
+        would be true of every version ever shipped."""
+        api = self.api(klass=_TheWindowBefore162)
+        self.a_chat(api, "the other chat")
+        ok, other = api._leave()
+        self.assertTrue(ok)
+        api._conversation.reset()
+        api._current_path = None
+        self.a_chat(api, "the chat that is running")
+        self.drained(api)
+        self.busy(api)
+
+        api.open(other)
+        self.assertIsNone(api._view_path, "the old window moved the view")
+        self.assertEqual([m for m in self.drained(api)
+                          if m.get("k") == "viewing"], [],
+                         "the old window told the page where it was standing")
+
+    def test_the_old_window_stamps_nothing_and_would_write_into_the_view(self):
+        """The other half of the wall. Without the stamp the background turn's
+        text reaches whatever chat is open -- silently, and only visible as
+        somebody else's answer appearing in the chat being read."""
+        api = self.api(klass=_TheWindowBefore162)
+        api._view_path = "somewhere/else.json"
+        api._worker = threading.current_thread()
+        api.push({"k": "text", "t": "belongs to the other chat"})
+        self.assertNotIn("bg", self.drained(api)[-1],
+                         "the old window stamped -- then the fix changed nothing")
+
+
+class AnOutstandingToolCallSaysSoTests(unittest.TestCase):
+    """#172. Ein Aufruf, der nicht zurueckkommt, hielt den Lauf still an.
+
+    GEMESSEN WAEHREND EINER BLOCKADE am 2026-08-30: 19 Chrome-Prozesse, der
+    aelteste zwei Stunden alt, einer mit 7.511 s CPU, llama-server idle
+    (`release: stop processing`), das Fenster stumm -- letzte Nachricht ein
+    Gedanke, danach nichts. Kein Spinner, keine Notiz, keine Zahl. Von aussen
+    sah eine Zweistundenblockade aus wie zwei Stunden harte Arbeit, und geloest
+    hat es erst, dass robin die Prozesse von Hand abgeraeumt hat.
+
+    DIE ZIELUHR HALF NICHT: sie zaehlt den Schritt, nicht das Werkzeug.
+
+    AM QUELLTEXT GEPRUEFT, weil die Seite hier keine ist -- dieselbe Form, die
+    diese Suite fuer Seiten-Regeln seit jeher benutzt.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def test_the_open_call_gets_a_clock_when_it_starts(self):
+        self.assertTrue("this.toolClock(d);" in self.source,
+                        "der offene Aufruf bekommt keine Uhr")
+        self.assertTrue("this.toolTick=setInterval(draw, 1000);" in self.source,
+                        "die Uhr laeuft nicht in der Seite weiter")
+
+    def test_the_clock_leaves_the_composer_bar_alone(self):
+        """robin, 2026-08-31: "die tok/s wird unten in der Chateingabe nicht mehr
+        angezeigt". Der erste Versuch schrieb die Werkzeuguhr in `#turnstate` --
+        dasselbe Feld, das die Tokenrate des laufenden Zuges traegt. Zwei
+        Schreiber auf einem Feld sind keine zwei Auskuenfte, sondern eine
+        verlorene: die Uhr ueberschrieb die Rate im Sekundentakt und liess nach
+        `toolend` den Stand eines fertigen Aufrufs stehen."""
+        i = self.source.index("toolClock(row){")
+        j = self.source.index("toolClockStop(){", i)
+        self.assertNotIn("#turnstate", self.source[i:j],
+                         "die Uhr schreibt wieder in die Leiste der Tokenrate")
+
+    def test_three_ways_out_stop_the_clock(self):
+        """GEGENPROBE, und sie ist die eigentliche Falle: eine Kachel, die nach
+        dem Zug weitertickt, behauptet einen laufenden Aufruf. `toolend` ist der
+        Normalfall, `idle` faengt Abbruch und Fehlschlag."""
+        stops = self.source.count("this.toolClockStop();")
+        self.assertGreaterEqual(stops, 3,
+                                "nicht jeder Ausgang stoppt die Uhr: %d" % stops)
+        self.assertTrue("toolClockStop(){" in self.source)
+
+    def test_a_call_too_fast_for_a_number_leaves_none(self):
+        """GEGENPROBE, und robin hat sie beim ersten Blick gefunden: die Uhr
+        schrieb `0m 00s` in eine Zeile, in der vorher nichts stand. Unter einer
+        Zehntelsekunde ist eine Zahl Laerm -- dieselbe Grenze, die das Terminal
+        seit #70 zieht -- und wer die Zeile beschreibt, muss sie auch raeumen."""
+        self.assertTrue(
+            'note.textContent = parts.length ? parts.join(" · ") : "";'
+            in self.source,
+            "eine zu schnelle Antwort laesst die Uhr stehen")
+
+    def test_nothing_sweeps_processes_by_name(self):
+        """DIE ANDERE NEGATIVHAELFTE, woertlich aus dem Ticket: kein Abraeumen
+        nach Prozessnamen. #158 hat das einmal gekostet -- ein Messskript raeumte
+        'jeden llama-server' ab und nahm robins Testserver mit."""
+        for forbidden in ("taskkill /IM", "taskkill /im", "pkill ", "killall "):
+            self.assertFalse(forbidden in self.source,
+                             "das Fenster raeumt nach Namen ab: %r" % forbidden)
+
+
+class TheRailLetsGoWhenTheTurnIsOverTests(ApiCase):
+    """robin, 2026-08-31: "Die Chat-Kachel zeigt weiterhin aktiver turn mit der
+    Amber-Animation, obwohl der Turn durch ist."
+
+    DIE RAIL WURDE EINE ZEILE ZU FRUEH GEZEICHNET. `_run` zeichnet sie am
+    Zugende -- da steht `_busy` noch auf True, weil erst `_pump` entscheidet, ob
+    ein zweiter Zug folgt. Danach fiel das Flag, und niemand zeichnete nochmal.
+    """
+
+    def _provider(self) -> None:
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        doc = crow_core.provider_doc()
+        doc["catalog"] = {"openrouter": {"fetched": 1, "models": [
+            {"id": "z-ai/glm-5.2:free", "name": "glm", "context": 131072}]}}
+        crow_core.provider_write(doc)
+        self.assertIsNone(crow_core.provider_pick("openrouter", "z-ai/glm-5.2:free"))
+
+    def test_the_last_rail_of_a_turn_says_it_is_no_longer_running(self):
+        self._provider()
+        api = self.api()
+
+        def fake_run(conversation, **kw):
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost=crow_core.TurnCost(),
+                                        context_tokens=9, promised_warm=False,
+                                        rolled=False, stopped=False,
+                                        reported=True)
+
+        api._busy = True
+        api._conversation.append("user", "eine Frage")
+        with mock.patch.object(crow_gui, "run_turn", fake_run),              mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
+            api._pump("eine Frage")
+        rails = [m for m in self.drained(api) if m.get("k") == "rail"]
+        self.assertTrue(rails, "die Rail wurde nie gezeichnet")
+        self.assertFalse(rails[-1]["live_running"],
+                         "die letzte Rail des Zuges behauptet, es laufe noch")
+        self.assertFalse(api._busy)
+
+
+class TheTurnBillsRideWithTheChatTests(ApiCase):
+    """#171. Was ein Zug gekostet hat, ueberlebt jetzt den Schnitt.
+
+    DER LAUF, DER ES ZEIGTE: 5h52m, ein Rollover bei 181.501 Token -- und mit
+    dem Schnitt war die Zeile des ersten Zuges weg, desjenigen mit dem Plan und
+    dem groessten Block Reasoning.
+    """
+
+    def _provider(self) -> None:
+        """Ein Endpunkt, den `_run` aufloesen kann -- dieselbe Vorbereitung wie
+        in den Rollover-Faellen weiter oben."""
+        crow_core.provider_key_set("openrouter", "not-a-real-key-0123456789")
+        doc = crow_core.provider_doc()
+        doc["catalog"] = {"openrouter": {"fetched": 1, "models": [
+            {"id": "z-ai/glm-5.2:free", "name": "glm", "context": 131072}]}}
+        crow_core.provider_write(doc)
+        self.assertIsNone(crow_core.provider_pick("openrouter", "z-ai/glm-5.2:free"))
+
+    def a_cost(self):
+        cost = crow_core.TurnCost()
+        cost.add_round({"predicted_n": 200, "prompt_n": 1000,
+                        "predicted_ms": 10000.0, "prompt_ms": 2000.0,
+                        "_client_total_s": 12.0, "_cached_tokens": 900})
+        return cost
+
+    def test_a_finished_turn_leaves_its_bill_in_the_band(self):
+        """Und mit `at`, damit ein Auswerter sie im Archiv den Zuegen zuordnen
+        kann -- ohne das ist eine Bilanz eine Zahl ohne Zug."""
+        self._provider()
+        api = self.api()
+        cost = self.a_cost()
+
+        def fake_run(conversation, **kw):
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost=cost, context_tokens=9,
+                                        promised_warm=False, rolled=False,
+                                        stopped=False, reported=True)
+
+        api._conversation.append("user", "eine Frage")
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
+            api._run("eine Frage")
+        self.assertEqual(len(api._timings), 1)
+        self.assertEqual(api._timings[0]["decoded"], 200)
+        self.assertEqual(api._timings[0]["decode_rate"], 20.0)
+        self.assertEqual(api._timings[0]["at"], len(api._conversation))
+
+    def test_a_turn_with_no_rounds_leaves_none(self):
+        """GEGENPROBE: an derselben Bedingung wie die Zeile. Ein Zug, der nie
+        eine Runde hatte, hinterlaesst keine Bilanz -- eine leere waere ein Zug,
+        der nichts gekostet hat."""
+        self._provider()
+        api = self.api()
+
+        def fake_run(conversation, **kw):
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost=crow_core.TurnCost(),
+                                        context_tokens=9, promised_warm=False,
+                                        rolled=False, stopped=False,
+                                        reported=True)
+
+        api._conversation.append("user", "eine Frage")
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
+            api._run("eine Frage")
+        self.assertEqual(api._timings, [])
+
+    def test_the_band_goes_into_the_archive_and_the_new_context_starts_empty(self):
+        """Die Bilanzen gehoeren zu dem Kontext, der weggelegt wird. Bleiben sie
+        stehen, zeigen ihre Positionen auf Nachrichten, die es nicht mehr gibt."""
+        self._provider()
+        api = self.api()
+        api._notes = [{"k": "note", "t": "vor dem Schnitt", "at": 1}]
+        api._timings = [{"rounds": 3, "decoded": 111, "at": 1}]
+        handed = {}
+
+        def fake_roll(conversation, base_url, context_tokens, carry=None,
+                      digest="", notes=None, timings=None, **_):
+            handed["notes"] = list(notes or [])
+            handed["timings"] = list(timings or [])
+            conversation.reset()
+            conversation.append("user", "note\n\n" + (carry or ""))
+            return os.path.join(crow_core.SESSION_DIR, "rollover-fake.json")
+
+        def fake_run(conversation, **kw):
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost=crow_core.TurnCost(),
+                                        context_tokens=9, promised_warm=False,
+                                        rolled=True, stopped=False,
+                                        reported=True)
+
+        api._n_ctx = 200192
+        api._context_tokens = 190000
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "roll_over", fake_roll), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
+            api._run("weiter im Text")
+        self.assertEqual([n["t"] for n in handed["notes"]], ["vor dem Schnitt"])
+        self.assertEqual([t["decoded"] for t in handed["timings"]], [111])
+        self.assertEqual(api._timings, [], "die Bilanzen des alten Kontexts blieben stehen")
+        self.assertEqual([n.get("t") for n in api._notes],
+                         ["rolled over at 190000 tokens -> rollover-fake.json"],
+                         "nach dem Schnitt steht die Rollover-Notiz als erste Marke")
+
+
+class MarksStayWhereTheyHappenedTests(ApiCase):
+    """#173. Die Rollover-Notiz stand unter allem, was nach dem Schnitt lief --
+    und sagte damit das Gegenteil ihrer eigenen Aussage.
+
+    DREI WEGE, EINE REIHENFOLGE: live gezeichnet, aus `payload()` neu gezeichnet
+    (Zurueckwechseln waehrend eines Zuges) und von Platte gelesen. Wenn die drei
+    auseinanderlaufen, ist genau das der Fehler, gegen den `_replay` gebaut ist.
+    """
+
+    def a_chat(self, api):
+        """Zwei Zuege mit einer Marke dazwischen, wie sie live entsteht."""
+        api._conversation.append("user", "first")
+        api._conversation.append("assistant", "answer one")
+        api.push({"k": "note", "t": "rolled over at 181501 tokens"})
+        api._conversation.append("user", "second")
+        api._conversation.append("assistant", "answer two")
+
+    def order(self, api) -> list:
+        """Die gezeichnete Folge, auf das reduziert, was eine Position hat."""
+        return [m["k"] for m in self.drained(api)
+                if m.get("k") in ("user", "note")]
+
+    def test_a_mark_is_recorded_with_the_number_of_messages_before_it(self):
+        """DIE ZAHL WIRD NICHT GERATEN: sie zaehlt dieselben Nachrichten, die
+        `payload()` liefert -- den System-Prompt eingeschlossen, sonst laege
+        jede Marke eines Chats mit Systemzeile um eins daneben."""
+        api = self.api()
+        api._conversation.append("user", "first")
+        api._conversation.append("assistant", "answer one")
+        standing = len(api._conversation)
+        api.push({"k": "note", "t": "rolled over at 181501 tokens"})
+        self.assertEqual(api._notes,
+                         [{"k": "note", "t": "rolled over at 181501 tokens",
+                           "at": standing}])
+        self.assertEqual(standing, len(api._conversation.payload()))
+
+    def test_the_mark_is_drawn_between_the_turn_before_it_and_the_one_after(self):
+        """Der Fehler war, dass sie ans Ende rutschte: `note` NACH dem zweiten
+        `user` statt davor."""
+        api = self.api()
+        self.a_chat(api)
+        self.drained(api)              # was live lief, interessiert hier nicht
+        api._replay(api._conversation.payload(), api._notes)
+        self.assertEqual(self.order(api), ["user", "note", "user"])
+
+    def test_a_chat_read_back_from_disk_draws_them_in_the_same_places(self):
+        """Der Fall aus dem Ticket: sonst haben Wiedergabe und Live-Weg zwei
+        verschiedene Reihenfolgen, und das ist der Fehler, den `_replay`
+        ueberhaupt verhindern soll."""
+        api = self.api()
+        self.a_chat(api)
+        path = os.path.join(self.dir, "chat-marks.json")
+        crow_core.save_session(api._conversation, "http://127.0.0.1:1/v1", 7,
+                               path=path, with_kv=False, notes=api._notes)
+        self.drained(api)
+        api._replay(api._conversation.payload(), api._notes)
+        live = self.order(api)
+        restored = crow_core.load_session("http://127.0.0.1:1/v1", None, path,
+                                          with_kv=False)
+        self.assertIsNotNone(restored)
+        api._replay(restored[0], crow_core.session_notes(path))
+        self.assertEqual(self.order(api), live)
+
+    def test_drawing_them_again_does_not_double_the_band(self):
+        """`push` schreibt jede Marke mit -- ohne die Sperre waechst das Band bei
+        jedem Zurueckwechseln, und beim dritten Blick stuenden acht Notizen da,
+        wo eine passiert ist."""
+        api = self.api()
+        self.a_chat(api)
+        before = list(api._notes)
+        api._replay(api._conversation.payload(), api._notes)
+        api._replay(api._conversation.payload(), api._notes)
+        self.assertEqual(api._notes, before)
+
+    def test_a_mark_never_reaches_the_message_list(self):
+        """NEGATIVHAELFTE: im Nachrichtenband laese das Modell seine eigene
+        Rollover-Notiz als robins Worte, und `_spoken_carry` truege sie ueber
+        den naechsten Schnitt."""
+        api = self.api()
+        self.a_chat(api)
+        self.assertNotIn("rolled over at 181501 tokens",
+                         json.dumps(api._conversation.payload()))
+
+
+class TheGoalPanelShowsTheGoalsOwnCostTests(ApiCase):
+    """#174, #168. Was im Kopf des Panels steht, woher es kommt, und was ein
+    Schritt anzeigt, an dem wieder gearbeitet wird.
+
+    DAS PANEL HATTE BIS HIER KEINEN EINZIGEN FALL. Es war live erprobt, und
+    genau die zwei Zahlen, die live falsch waren -- die Kopfsumme und der gruene
+    Haken auf einem laufenden Schritt --, haette ein Fall hier gefangen.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Modulzustand, wie in der Kernsuite: ohne das Zuruecksetzen traegt der
+        # naechste Fall den Zaehlerstand dieses hier.
+        self.addCleanup(crow_core.goal_tokens_mark, crow_core.GOAL_TOKENS_NOW)
+        crow_core.goal_tokens_mark(0)
+
+    def panel(self, api) -> dict:
+        """Die letzte Ziel-Nachricht an die Seite."""
+        said = [m for m in self.drained(api) if m.get("k") == "goal"]
+        self.assertTrue(said, "the page was never told about the goal")
+        return said[-1]["goal"]
+
+    def test_the_panel_carries_the_goals_own_total_not_the_column(self):
+        """Live standen 256K im Kopf und 255.758 in der Spalte -- dieselbe
+        falsche Zahl zweimal. Der Kopf traegt jetzt, was das Ziel gekostet hat,
+        einschliesslich dessen, was zwischen zwei Schritten passiert."""
+        api = self.api()
+        crow_core.goal_start("Ship it", ["read", "write"], now=1000.0)
+        crow_core.goal_tokens_seen(1000)
+        crow_core.goal_step_begin(0, now=1000.0)
+        crow_core.goal_tokens_seen(1400)
+        crow_core.goal_step_end(0, now=1010.0)
+        crow_core.goal_tokens_seen(9000)
+        api.push_goal(force=True)
+        goal = self.panel(api)
+        self.assertEqual(goal["tokens"], 9000)
+        self.assertEqual(sum(s["tokens"] for s in goal["steps"]), 400,
+                         "the column changed -- then the head is not the point")
+
+    def test_the_page_reads_that_number_instead_of_summing_the_column(self):
+        """NEGATIVPROBE AM QUELLTEXT: solange die Seite die Spalte selbst
+        aufsummiert, ist die Zahl im Nutzlastfeld daneben wirkungslos."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        # DER TREFFER WIRD ALS WAHRHEITSWERT GEPRUEFT, nicht mit assertIn: eine
+        # gescheiterte Textsuche druckt sonst die ganze Datei in den Bericht.
+        self.assertTrue("const tok=g.tokens||0" in source,
+                        "the head no longer reads the goal's own total")
+        self.assertFalse("reduce((a,s)=>a+(s.tokens||0),0)" in source,
+                         "the page still adds the step column up itself")
+
+    def test_delegated_tokens_reach_the_page_beside_the_local_ones(self):
+        """#169. Getrennte Felder, damit die Seite sie getrennt zeichnen KANN --
+        in einem Feld addiert waere die Entscheidung schon hier gefallen."""
+        api = self.api()
+        crow_core.goal_start("Ship it", ["read", "write"], now=1000.0)
+        crow_core.goal_step_begin(0, now=1000.0)
+        crow_core.goal_delegated_seen(18400)
+        crow_core.goal_step_end(0, now=1010.0)
+        api.push_goal(force=True)
+        goal = self.panel(api)
+        self.assertEqual(goal["delegated"], 18400)
+        self.assertEqual(goal["tokens"], 0)
+        self.assertEqual(goal["steps"][0]["delegated"], 18400)
+        self.assertEqual(goal["steps"][0]["tokens"], 0)
+
+    def test_a_reopened_step_reaches_the_page_as_running(self):
+        """#168. Der gruene Haken blieb den ganzen Zug ueber stehen, waehrend
+        Crow den Meilenstein neu baute."""
+        api = self.api()
+        crow_core.goal_start("Ship it", ["read", "write"], now=1000.0)
+        crow_core.goal_step_begin(0, now=1000.0)
+        crow_core.goal_step_end(0, now=1010.0)
+        api.push_goal(force=True)
+        self.assertEqual(self.panel(api)["steps"][0]["status"], "done")
+        crow_core.goal_step_begin(0, now=1020.0)
+        api.push_goal(force=True)
+        goal = self.panel(api)
+        self.assertEqual(goal["steps"][0]["status"], "running")
+        self.assertEqual(goal["done"], 0, "the counter kept a taken-back tick")
+
+    def test_no_goal_no_panel(self):
+        """GEGENPROBE: ein Kasten mit `0/0` waere eine Anzeige ueber etwas, das
+        es nicht gibt (robin, 2026-08-30)."""
+        api = self.api()
+        api.push_goal(force=True)
+        said = [m for m in self.drained(api) if m.get("k") == "goal"]
+        self.assertEqual([m["goal"] for m in said], [None])
 
 
 if __name__ == "__main__":

@@ -53,8 +53,13 @@ FLASH_PATH = _ENTRIES["flash-next-q2-k-xl"]["path"]
 # What a healthy flash-next answers: three distinct renderings, the unset case on
 # top of `high`, and everything else refused. Values are the rendered prompt; the
 # tool hashes them itself, so any two distinct strings make two distinct groups.
+# #176: `none` GEHOERT DAZU, SEIT DAS MANIFEST ES ANBIETET. Der gesunde Server
+# ist der, der genau die Stufen rendert, die der Eintrag nennt -- fehlt eine, ist
+# nicht die Sonde falsch, sondern diese Tabelle veraltet. Eigener Text, weil
+# `none` gemessen als einzige Stufe mit nichts sonst Bytes teilt (101 Zeichen
+# gegen high 299, low 228, medium 90).
 HEALTHY = {None: "HIGH-TEXT", "high": "HIGH-TEXT", "low": "LOW-TEXT",
-           "medium": "MEDIUM-TEXT"}
+           "medium": "MEDIUM-TEXT", "none": "NONE-TEXT"}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -75,7 +80,12 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"] or 0)))
-        level = (body.get("chat_template_kwargs") or {}).get("reasoning_effort")
+        # #176: DIESELBE TUER WIE DER ECHTE SERVER. Er liest das OBERSTE Feld
+        # (`tools/server/server-common.cpp:1323`) und faengt dort `none` ab; die
+        # kwargs gehen an jinja vorbei. Solange dieses Double die kwargs las,
+        # ahmte es einen Server nach, den es nicht gibt -- und deckte damit genau
+        # den Fehler, den die Sonde finden soll.
+        level = body.get("reasoning_effort")
         if level not in self.table:
             self.send_error(500)
             return

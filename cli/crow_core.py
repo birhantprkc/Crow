@@ -102,8 +102,18 @@ DEFAULT_MODEL = "crow"
 DEFAULT_SYSTEM = (
     "You are Crow, a local coding assistant. You have tools to read, write, "
     "search and run commands -- look instead of guessing paths. "
-    "Always reply in the same language the user wrote in."
+    "Always reply in the same language the user wrote in. "
+    # #165, gemessen am 2026-08-30: in der Werkzeugbeschreibung allein wurde
+    # `goal_set` NICHT gerufen -- das Modell plante im Kopf und arbeitete los.
+    # Der Kopf ist der eine Ort, den es sicher liest.
+    "For any task needing more than a couple of turns, call goal_set FIRST "
+    "with the whole plan, then work it step by step with goal_step."
 )
+# #165: DER GOAL-SATZ STEHT NICHT HIER, und der Test daneben ist der Grund --
+# dieser Prompt ist Byte 0 jedes Praefixes und darf 200 Zeichen nicht
+# ueberschreiten. Er steht stattdessen in der Beschreibung von `goal_set`, die
+# ohnehin bei jeder Anfrage mitreist: dieselbe Anweisung, kein zusaetzliches
+# Byte im Kopf.
 
 
 # Sent with every request, and the reason is the prompt cache rather than the
@@ -400,7 +410,10 @@ def reasoning_levels_for(model: str | None) -> tuple[str, ...]:
 
 # The union, for the parser. Not a claim that every level works on every model:
 # that is what reasoning_levels_for answers, once there is a model to ask about.
-REASONING_LEVELS = ("low", "medium", "high", "max")
+# `none` STEHT HIER, SEIT ES ERREICHBAR IST (#176): der Server faengt es am
+# obersten Feld ab und schaltet das Denken aus. Bis dahin war es kein Wert,
+# sondern das Fehlen des Schluessels -- und ueber die kwargs-Tuer ein HTTP 500.
+REASONING_LEVELS = ("none", "low", "medium", "high", "max")
 
 
 def reasoning_groups_for(model: str | None) -> tuple[tuple[str, ...], ...]:
@@ -708,6 +721,37 @@ TOOLS = [
         "once.",
         {"id": dict(_STR, description="An id from delegate, or 'all'.")},
         []),
+    # #165. WIE DAS MODELL SEINEN EIGENEN PLAN FUEHRT. Zwei Werkzeuge und nicht
+    # eines: den Plan SCHREIBEN ist ein seltener Vorgang mit hohem Preis (er
+    # bewegt den Prompt-Kopf), einen Schritt ABHAKEN ist haeufig und gratis.
+    # Ein gemeinsames Werkzeug haette beide gleich teuer gemacht.
+    _fn("goal_set",
+        "Use Goals to manage complex work with continuous planning, execution "
+        "and verification. Write the plan BEFORE starting: a short title and "
+        "the steps, in order. Use this at the beginning of any task that needs "
+        "more than a couple of turns -- you do not have to be asked. Once a "
+        "plan is set, work it step by step without stopping, and call "
+        "goal_step as you go. The plan survives a context rollover and a "
+        "restart, so it is what you come back to when the conversation above "
+        "has been cut. Replaces any earlier plan.",
+        {"title": dict(_STR, description="Short name for the whole job."),
+         "steps": {"type": "array", "items": _STR,
+                   "description": "The steps, in the order they will be done. "
+                                  "Each one a single verifiable piece of work."}},
+        ["title", "steps"]),
+    _fn("goal_step",
+        "Move one step of the plan. Call it with 'running' before you start a "
+        "step and with 'done' once you have VERIFIED it -- not when you think "
+        "it should work. Use 'failed' with a reason when it cannot be finished; "
+        "a failed step may be started again later. Costs nothing and does not "
+        "move the prompt head.",
+        {"step": {"type": "integer",
+                  "description": "1-based number of the step, as listed by "
+                                 "goal_set."},
+         "status": dict(_STR, description="running, done or failed."),
+         "note": dict(_STR, description="For done: what proves it. For failed: "
+                                        "why.")},
+        ["step", "status"]),
 ]
 
 # THE BUILT-INS AS SHIPPED -- twelve until #143 added the delegation three --
@@ -1407,6 +1451,30 @@ def reboot_booted(port: "int | None",
         return None
 
 
+def _keep_previous_log(path: str) -> "str | None":
+    """Move an existing log aside as `.prev.log`. Returns where, or None.
+
+    EINE GENERATION, KEINE ROTATION (#166). Die Frage, die ein Servertod
+    aufwirft, betrifft immer den Lauf, der gerade geendet hat -- nie den
+    davor. Zehn Generationen brauechten eine Groessengrenze, eine Aufraeumregel
+    und eine Entscheidung, wann geloescht wird; fuer eine Antwort, die nie
+    weiter als eine Datei zurueckreicht.
+
+    TOLERANT WIE JEDE BEQUEMLICHKEITSDATEI: schlaegt das Umbenennen fehl --
+    ein Leser haelt die Datei offen, die Platte ist voll --, dann wird wie
+    bisher ueberschrieben. Ein Boot, der an seinem eigenen Logarchiv
+    scheitert, waere der schlechtere Tausch.
+    """
+    if not os.path.isfile(path):
+        return None
+    keep = path[:-4] + ".prev.log" if path.endswith(".log") else path + ".prev"
+    try:
+        os.replace(path, keep)            # replace, nicht rename: ueberschreibt
+        return keep                       # die vorige Generation ohne Fehler
+    except OSError:
+        return None
+
+
 def start_server(key: str, base_url: str, install: str | None = None,
                  wait_s: float = 600.0, log: Callable[[str], None] | None = None) -> str:
     """Bring `key` up and return the path the server reports. Or raise.
@@ -1524,6 +1592,18 @@ def start_server(key: str, base_url: str, install: str | None = None,
     if sys.platform == "win32":
         flags = (subprocess.CREATE_NEW_PROCESS_GROUP
                  | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    # #166. EINE GENERATION BLEIBT STEHEN. Bis hier wurde je Boot neu
+    # geschrieben, und fuer einen von Hand gestarteten Server ist das richtig:
+    # der letzte Lauf ist der untersuchte. Fuer einen, den Crow SELBST neu
+    # bootet, ist es genau verkehrt herum -- der interessante Lauf ist der, der
+    # gerade gestorben ist, und der Reboot war das Ereignis, das ihn ueberschrieb.
+    #
+    # Bezahlt am 2026-08-30: pid 25388 verschwand, 32024 bootete um 17:57:49,
+    # und das err-Log war danach 1.075 Byte gross und begann beim Boot. Kein
+    # Dump, kein Ereignis, kein Log -- die Todesursache war nicht mehr
+    # feststellbar, obwohl jede Zeile davon einmal existiert hat.
+    for sink_path in (out_path, err_path):
+        _keep_previous_log(sink_path)
     with open(out_path, "w", encoding="utf-8") as out_sink, \
          open(err_path, "w", encoding="utf-8") as err_sink:
         proc = subprocess.Popen(argv, stdout=out_sink, stderr=err_sink,
@@ -1851,6 +1931,37 @@ def resume_cold_note(path: str | None = None, model: str | None = None) -> str:
 SESSION_REASONING_KEY = "reasoning"
 SESSION_TOOLS_CLEARED_KEY = "tools_cleared"
 
+# #173. DIE MARKEN IM VERLAUF -- Rollover-Notiz, `Memory updated`, Moduswechsel.
+# Sie sind KEINE Nachrichten und duerfen es nicht werden: im Nachrichtenband
+# stuenden sie als robins Worte im naechsten Prompt. Sie sind auch keine reine
+# Bildschirmausgabe, denn dann waren sie beim naechsten Oeffnen weg und jede
+# spaeter gezeichnete rutschte unter alles, was nach ihr passiert war -- die
+# Rollover-Notiz behauptete damit das Gegenteil ihrer Aussage. Jede Marke traegt
+# deshalb `at`: wieviele Nachrichten vor ihr standen. Fehlt der Schluessel, hat
+# der Chat keine -- wahr fuer jede Datei, die vor diesem Build geschrieben wurde.
+SESSION_NOTES_KEY = "notes"
+
+# Was ueberhaupt eine Marke ist. Drei Arten, und alle drei zeichnen eine eigene
+# Zeile in den Verlauf; alles andere gehoert zu einem Zug (Kostenzeile, Werkzeug)
+# oder zum Fensterzustand und wird beim Zeichnen ohnehin neu erzeugt.
+SESSION_NOTE_KINDS = ("note", "memory", "alarm")
+# Kein Band ohne Grenze: ein Chat, der stundenlang Moduswechsel sammelt, soll
+# seine Datei nicht damit fuellen. Die aeltesten fallen zuerst.
+SESSION_NOTES_MAX = 400
+
+# #171. WAS EIN ZUG GEKOSTET HAT, als Zahlen und mit dem Chat gespeichert.
+# Die Timing-Zeile war bis hier reine Bildschirmausgabe: sie ist keine Nachricht,
+# also nahm `roll_over` sie nicht mit, und nach dem Schnitt waren die Zahlen jedes
+# Zuges davor weg. Aus dem Serverlog sind sie nicht zu rekonstruieren -- 266
+# `print_timing`-Zeilen ohne Zugmarker, und eine Werkzeugpause ist so lang wie
+# eine Zugpause, also ist jede Aufteilung geraten. Ein mehrstuendiger Lauf war
+# damit hinterher nicht auswertbar, und hinterher ist genau, wann jemand es will.
+#
+# UND NICHT IN DIE NACHRICHTENLISTE, aus demselben Grund wie die Marken: dort
+# laese das Modell seinen eigenen Durchsatz als robins Worte.
+SESSION_TIMINGS_KEY = "timings"
+SESSION_TIMINGS_MAX = 2000
+
 # #121. THE PINNED MEMORY HEAD, and it is the same kind of fact as the two
 # above: something about THIS CHAT rather than about this run. Absent means
 # "never pinned" -- every chat file on disk today is in that state, and it must
@@ -2141,7 +2252,9 @@ def save_session(conversation: "Conversation", base_url: str, context_tokens: in
                  path: str | None = None, with_kv: bool = True,
                  pretty: bool = False, model: str | None = None,
                  reasoning: str | None = None,
-                 tools_cleared: int = 0) -> str | None:
+                 tools_cleared: int = 0,
+                 notes: "list | None" = None,
+                 timings: "list | None" = None) -> str | None:
     """Write the session so the next start does not pay for it again.
 
     TWO HALVES, AND NEITHER IS ENOUGH ALONE. The server holds the KV cache; the
@@ -2184,6 +2297,8 @@ def save_session(conversation: "Conversation", base_url: str, context_tokens: in
     if problem is not None:
         raise SessionFormatError(path, problem)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    marks = clean_notes(notes)
+    bills = clean_timings(timings)
     saved_kv = False
     kv_tokens = 0
     if with_kv:
@@ -2241,7 +2356,13 @@ def save_session(conversation: "Conversation", base_url: str, context_tokens: in
                    # nothing was ever cleared, which is true of every file
                    # written before this build.
                    **({SESSION_TOOLS_CLEARED_KEY: tools_cleared}
-                      if tools_cleared else {})},
+                      if tools_cleared else {}),
+                   # #173: DIE MARKEN, wenn es welche gibt. Absent heisst "keine",
+                   # was auf jede Datei vor diesem Build zutrifft.
+                   **({SESSION_NOTES_KEY: marks} if marks else {}),
+                   # #171: eine Bilanz je Zug. Absent heisst "keine", was auf
+                   # jede Datei vor diesem Build zutrifft.
+                   **({SESSION_TIMINGS_KEY: bills} if bills else {})},
                   fh, indent=1 if pretty else None)
 
     if saved_kv:
@@ -2253,6 +2374,92 @@ def save_session(conversation: "Conversation", base_url: str, context_tokens: in
            "messages only: the server runs without --slot-save-path, so the next"
            " start pays a prefill")
     return f"session saved -- {len(conversation)} messages ({why})"
+
+
+def clean_notes(notes: "list | None") -> list:
+    """Die Marken in der Form, in der sie auf Platte duerfen.
+
+    GEFILTERT UND NICHT VERTRAUT, weil sie aus dem Fenster kommen und dort aus
+    ueber dreissig Aufrufstellen: eine Marke ohne `k` oder mit einem Typ, den die
+    Seite nicht zeichnet, waere eine Zeile, die beim Wiederoeffnen verschwindet.
+    Und `at` ist eine Position, keine Meinung -- ohne sie gibt es keinen Ort.
+    """
+    out = []
+    for note in (notes or []):
+        if not isinstance(note, dict):
+            continue
+        kind = note.get("k")
+        if kind not in SESSION_NOTE_KINDS:
+            continue
+        keep = {"k": kind, "at": max(0, int(note.get("at") or 0)),
+                "t": str(note.get("t") or "")}
+        # `memory` traegt eine Zahl, die anderen nicht -- mitgeschrieben nur,
+        # wenn sie da ist, damit die Zeile beim Zeichnen dieselbe bleibt.
+        if isinstance(note.get("n"), int):
+            keep["n"] = note["n"]
+        out.append(keep)
+    return out[-SESSION_NOTES_MAX:]
+
+
+def clean_timings(timings: "list | None") -> list:
+    """Die Zugbilanzen in der Form, in der sie auf Platte duerfen.
+
+    ZAHLEN UND NICHTS SONST. Ein Satz Text hier waere die gerenderte Zeile noch
+    einmal, und die ist genau das, was sich nicht auswerten laesst.
+    """
+    fields = ("rounds", "decoded", "prefilled", "tool_calls", "tool_errors",
+              "tool_declined", "cached", "cached_of", "at")
+    reals = ("decode_s", "prefill_s", "model_s", "tool_s", "waited_s",
+             "decode_rate", "prefill_rate")
+    out = []
+    for turn in (timings or []):
+        if not isinstance(turn, dict):
+            continue
+        keep = {}
+        for name in fields:
+            if isinstance(turn.get(name), int):
+                keep[name] = turn[name]
+        for name in reals:
+            if isinstance(turn.get(name), (int, float)):
+                keep[name] = round(float(turn[name]), 3)
+        if isinstance(turn.get("finish"), str) and turn["finish"]:
+            keep["finish"] = turn["finish"]
+        # EIN ZUG OHNE RUNDEN IST KEIN ZUG. Eine leere Bilanz im Archiv liest
+        # sich wie ein Zug, der nichts gekostet hat -- dieselbe Luege wie die
+        # stille 0 in der Tokenspalte.
+        if keep.get("rounds"):
+            out.append(keep)
+    return out[-SESSION_TIMINGS_MAX:]
+
+
+def _session_list(path: "str | None", key: str, clean) -> list:
+    """Eine Liste, die mit dem Chat gespeichert wird -- Marken oder Bilanzen.
+
+    EINE STELLE FUER BEIDE, weil beide dieselbe Frage beantworten: was gehoert
+    zu diesem Chat, ist aber keine Nachricht. Zwei Leser waeren zwei Meinungen
+    darueber, was eine kaputte Datei bedeutet.
+    """
+    try:
+        with open(path or SESSION_FILE, encoding="utf-8") as fh:
+            value = json.load(fh).get(key)
+    except (OSError, ValueError, AttributeError):
+        return []
+    return clean(value if isinstance(value, list) else [])
+
+
+def session_notes(path: str | None = None) -> list:
+    """Die Marken dieses Chats, in der Reihenfolge, in der sie passiert sind.
+
+    AUS DER DATEI DES CHATS, wie der Werkzeug-Wasserstand daneben: sie gehoeren
+    dem Chat und nicht dem Fenster, also werden sie beim Wechseln gelesen statt
+    aus dem mitgeschleppt, der gerade geschlossen wurde.
+    """
+    return _session_list(path, SESSION_NOTES_KEY, clean_notes)
+
+
+def session_timings(path: str | None = None) -> list:
+    """Was jeder Zug dieses Chats gekostet hat, aeltester zuerst (#171)."""
+    return _session_list(path, SESSION_TIMINGS_KEY, clean_timings)
 
 
 def session_tools_cleared(path: str | None = None) -> int:
@@ -2455,9 +2662,16 @@ def retry_capped(name: str) -> str:
 # most once per turn -- see the nudge in the loop.
 THINK_ONLY_NUDGE = (
     "[Your last message contained only reasoning -- nothing visible was said. "
-    "State your answer now, outside the thinking block, in plain text. Do not "
-    "call a tool.]"
+    "Act now, outside the thinking block: say something in plain text, or make "
+    "the tool call you were planning. Do not think again without doing one of "
+    "the two.]"
 )
+# #165, gemessen am 2026-08-30: der Satz hiess "Do not call a tool", und genau
+# das las das Modell woertlich -- "right now I should state the answer in plain
+# text and not call any tools" stand in seinem Denktext, waehrend es gerade
+# `goal_set` rufen wollte. Der Stups gegen das endlose Denken hatte damit den
+# ersten Werkzeugaufruf eines Ziels zuverlaessig verhindert. Was er verhindern
+# soll, ist eine ZWEITE Denkrunde ohne Ergebnis -- nicht das Handeln.
 #
 # Whether it works is UNMEASURED, and no test here can settle it: this is a
 # prompt, and only a live run against a real model shows whether it holds. What
@@ -2622,9 +2836,29 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
     return text.strip()
 
 
+def repin_head(conversation: "Conversation", root: "str | None" = None) -> bool:
+    """Den Kopf dieses Chats nach einem Schnitt wieder setzen. True, wenn er sich
+    bewegt hat.
+
+    #163. WARUM UEBERHAUPT WIEDER: `roll_over` ruft `conversation.reset()`, und
+    das laesst den Pin fallen. Fuer einen NEUEN Chat ist das richtig -- er hat
+    noch keine Grenze --, aber ein Rollover ist derselbe Chat mit kuerzerem
+    Gedaechtnis. Ohne diese Zeile beginnt die zweite Haelfte einer Sitzung ohne
+    das Gedaechtnis, die Faehigkeiten und das Ziel, die ihre erste hatte.
+
+    KOSTET AN DIESER STELLE NICHTS: der Praefix ist nach dem Schnitt ohnehin
+    vollstaendig entwertet, der naechste Zug zahlt seinen Prefill mit oder ohne
+    Kopf. Der Rollover ist damit der einzige Moment, an dem ein Kopf gratis
+    bewegt werden kann -- ueberall sonst ist es die Rechnung, die
+    `MEMORY_COST_NOTE` ansagt.
+    """
+    return conversation.repin_memory(prompt_head(root))
+
+
 def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
               carry: str | None = None, path: str | None = None,
-              digest: str = "") -> str | None:
+              digest: str = "", notes: "list | None" = None,
+              timings: "list | None" = None) -> str | None:
     """Archive the conversation, empty it, and open the fresh one.
 
     Append-only is not broken here and this is the reason it is allowed: nothing
@@ -2641,8 +2875,12 @@ def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
     Returns the archive path, or None when there was nothing worth archiving.
     """
     path = path or rollover_path()
+    # #173: DIE MARKEN GEHEN INS ARCHIV MIT. Sie gehoeren zu dem Kontext, der
+    # hier weggelegt wird -- der neue faengt ohne sie an, sonst zeigte er die
+    # Rollover-Notiz eines Gespraechs, das er nicht mehr enthaelt.
     if save_session(conversation, base_url, context_tokens, path=path,
-                    with_kv=False, pretty=True) is None:
+                    with_kv=False, pretty=True, notes=notes,
+                    timings=timings) is None:
         return None
 
     # Both before the reset: afterwards there is nothing left to read them from.
@@ -2652,6 +2890,15 @@ def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
 
     spoken = _spoken_carry(conversation, carry)
     conversation.reset()
+    # #163. DEN KOPF SETZT DER AUFRUFER WIEDER, NICHT DIESE FUNKTION -- und das
+    # ist keine Bequemlichkeit, sondern die Zustaendigkeit: was oben steht,
+    # haengt an der Wurzel dieses Chats, und die kennt hier niemand. `repin_head`
+    # ist der eine Weg dorthin, den beide Oberflaechen gehen.
+    #
+    # `reset()` laesst den Pin fallen -- richtig fuer einen NEUEN Chat, der noch
+    # keine Grenze hat -- aber ein Rollover ist derselbe Chat mit kuerzerem
+    # Gedaechtnis: Gedaechtnis, Faehigkeiten und Ziel gelten danach unveraendert
+    # weiter.
     note = ROLLOVER_NOTE.format(
         tokens=context_tokens, path=path, transcript=transcript, lines=lines,
         where=f"Last worked on: {', '.join(where)}\n" if where else "",
@@ -3255,7 +3502,8 @@ ANTHROPIC_MAX_TOKENS = REMOTE_MAX_TOKENS
 # local server needs all three. The sampling triple is llama-server's, the same
 # way the slot and the prefix cache are.
 _ANTHROPIC_DROPS = ("temperature", "top_p", "min_p", "top_k",
-                    "chat_template_kwargs", "timings_per_token", "stream_options")
+                    "chat_template_kwargs", "reasoning_effort",
+                    "timings_per_token", "stream_options")
 
 # NOT SENT AWAY FROM HOME, and the list is SHORTER than the one above: a remote
 # OpenAI-shaped endpoint takes the sampling pair that Anthropic refuses. What
@@ -3272,7 +3520,16 @@ _ANTHROPIC_DROPS = ("temperature", "top_p", "min_p", "top_k",
 # left that 404 exactly where it was. A field 265 of 337 tool-capable models do
 # not implement buys nothing out there and costs everything the day anybody
 # asks for completeness.
-_REMOTE_DROPS = ("min_p", "timings_per_token", "chat_template_kwargs")
+#
+# `reasoning_effort` KAM AM 2026-08-31 DAZU (#176), und zwar damit hier NICHTS
+# passiert: die Stufe reiste bis dahin in `chat_template_kwargs` und wurde mit
+# ihm gestrichen, also hat noch nie ein entfernter Zug sie getragen. Seit sie am
+# obersten Feld haengt, muesste sie ohne diesen Eintrag plotzlich mitfahren --
+# eine Verhaltensaenderung, die niemand angefordert hat, auf genau dem Weg, der
+# den 404 oben erzeugt hat. Ob ein entferntes Modell eine Stufe bekommen SOLL,
+# ist eine eigene Entscheidung und keine Nebenwirkung eines Tuerwechsels.
+_REMOTE_DROPS = ("min_p", "timings_per_token", "chat_template_kwargs",
+                 "reasoning_effort")
 
 # WHAT IS LEFT, AND IT IS SPLIT BECAUSE ONE HALF IS NEGOTIABLE AND THE OTHER IS
 # NOT. `provider.require_parameters` asks a broker to route only to upstreams
@@ -4299,10 +4556,26 @@ def stream_reply(
         # off, low and high all render sha256 fb2ba7d332bc there and only max differs. What an
         # absent key means is per model and belongs in the manifest -- see reasoning_groups_for.
         #
-        # The value lands in the TEMPLATE, not the sampler -- whether it took
-        # effect is visible only in the rendered prompt, which is why E11's
-        # counter-probe compares /apply-template output and not this body.
-        body["chat_template_kwargs"] = {"reasoning_effort": reasoning_effort}
+        # ZWEI TUEREN, UND BIS ZUM 2026-08-31 KANNTE CROW NUR DIE FALSCHE (#176).
+        # `chat_template_kwargs.reasoning_effort` geht direkt an jinja. Das OBERSTE
+        # Feld geht vorher durch den Server, und dort steht der eine Fall, den die
+        # andere Tuer nicht hat: `none` setzt `enable_thinking = false` und loescht
+        # den Schluessel (`tools/server/server-common.cpp:1323`). Ueber die kwargs
+        # ist `none` bloss eine unbekannte Stufe und das Template antwortet mit
+        # HTTP 500 -- so gemessen in #160, und deshalb sagte dessen Befund nichts
+        # ueber den Schalter.
+        #
+        # GEMESSEN, DASS DER WECHSEL SONST NICHTS BEWEGT (8083, /apply-template,
+        # 2026-08-31): low 9c5b77752e84, medium 53c9e1a9cf6e, high 1be9942ae3ae --
+        # ueber beide Tueren derselbe sha; `max`, `minimal` und `off` bleiben auf
+        # beiden toedlich. Die obere Tuer ist die echte Obermenge, also die einzige.
+        # Der Server legt einen nicht-`none`-Wert selbst wieder in die kwargs, also
+        # bleibt der Prompt-Cache jedes bestehenden Chats unberuehrt.
+        #
+        # Der Wert landet im TEMPLATE, nicht im Sampler -- ob er gegriffen hat,
+        # sieht man nur am gerenderten Prompt, weshalb die Sonde /apply-template
+        # vergleicht und nicht diesen Koerper.
+        body["reasoning_effort"] = reasoning_effort
     # EXTRA FIELDS THE ENDPOINT ITSELF ASKED FOR, and only on the dialect that
     # knows them. `turn_routing` decides what they are; this is where they land.
     # Empty for the machine and for every direct connection, which is every turn
@@ -4595,6 +4868,43 @@ class TurnCost:
         if self.finish == "length":
             bits.append(CUT_OFF_NOTE)
         return " | ".join(bits)
+
+    def record(self) -> dict:
+        """#171. Dieselbe Bilanz als Zahlen, fuer das Archiv.
+
+        NEBEN `line()` UND NICHT STATT DESSEN. Die Zeile ist fuer einen
+        Menschen, der gerade zusieht; ein Auswerter, der sie hinterher wieder
+        zerlegen muesste, bekaeme aus `1,234 tok @ 21.11 tok/s` mehr Regex als
+        Zahl. Beide lesen dieselben Felder, also koennen sie nicht auseinander-
+        laufen.
+
+        DIE RATEN STEHEN DABEI, obwohl sie Quotienten sind: das Archiv wird
+        gelesen, nicht gerechnet, und sie werden in DIESEM Aufruf gebildet -- es
+        gibt keinen Moment, in dem sie und ihre Nenner verschieden alt waeren.
+        Ohne Nenner gibt es keine Rate, dann fehlt sie, statt 0.0 zu behaupten.
+        """
+        out = {"rounds": self.rounds,
+               "decoded": self.decoded, "prefilled": self.prefilled,
+               "decode_s": round(self.decode_s, 3),
+               "prefill_s": round(self.prefill_s, 3),
+               # DER UNTERSCHIED IST DER PUNKT (siehe oben): `model_s` zaehlt,
+               # was das Modell gerechnet hat, `waited_s` die Wanduhr des Zuges,
+               # und dazwischen liegen die Werkzeuge.
+               "model_s": round(self.model_s, 3),
+               "tool_s": round(self.tool_s, 3),
+               "waited_s": round(time.monotonic() - self.started, 3),
+               "tool_calls": self.tool_calls,
+               "tool_errors": self.tool_errors,
+               "tool_declined": self.tool_declined}
+        if self.decoded and self.decode_s > 0:
+            out["decode_rate"] = round(self.decoded / self.decode_s, 2)
+        if self.prefilled and self.prefill_s > 0:
+            out["prefill_rate"] = round(self.prefilled / self.prefill_s, 2)
+        if self.cached is not None:
+            out["cached"], out["cached_of"] = self.cached, self.cached_of
+        if self.finish:
+            out["finish"] = self.finish
+        return out
 
 
 # Read-before-write, and it BLOCKS rather than warns. #10 measured hermes-agent
@@ -5682,8 +5992,14 @@ def prompt_head(root: "str | None" = None) -> str:
 
     ORDER IS FIXED: what is TRUE before what to DO. Not a preference -- it is
     part of the prefix, and a sortable head is two caches.
+
+    #163: DAS ZIEL STEHT ZULETZT, und das folgt derselben Ordnung. Gedaechtnis
+    ist, was gilt; Faehigkeiten sind, was geht; das Ziel ist, was jetzt getan
+    wird -- das Fluechtigste von dreien und deshalb hinten, wo eine Aenderung
+    den kuerzesten Praefix entwertet. Es traegt nur den PLAN: der Stand steht in
+    `goal.json`, weil ein Haken hier einen vollen Prefill kosten wuerde.
     """
-    parts = [p for p in (memory_block(root), skill_block()) if p]
+    parts = [p for p in (memory_block(root), skill_block(), goal_block()) if p]
     return "\n\n".join(parts)
 
 
@@ -7648,6 +7964,12 @@ TOOL_CLASS = {
     "delegate": "network",
     "subtasks": "reading",
     "collect": "reading",
+    # #165. DER PLAN IST `reading`, und das ist eine Entscheidung ueber den
+    # Automatismus: ein Ziel-Modus, der bei jedem Schritt nach Erlaubnis fragt,
+    # laeuft nicht durch. Beide schreiben ausschliesslich in `goal.json` im
+    # Sitzungsverzeichnis -- keine Datei des Nutzers, kein Prozess, kein Netz.
+    "goal_set": "reading",
+    "goal_step": "reading",
     # #156. GIT IN THREE CLASSES, and the split is the whole safety design.
     #
     # The three that only LOOK are `reading`: they run a fixed argv with no
@@ -10634,7 +10956,115 @@ atexit.register(forget_mcp_servers)
 # them even while a local turn is running.
 SLASH_COMMANDS = ("/help", "/tools", "/mcp", "/mode", "/model", "/reasoning",
                   "/thoughts", "/image", "/delegate", "/subtasks", "/verify",
-                  "/reset", "/context", "/exit", "/quit")
+                  "/goal", "/reset", "/context", "/exit", "/quit")
+
+
+def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
+    """`/goal` zeigt, `/goal <Zeilen>` setzt, `/goal off` loescht.
+
+    (Satz, Ziel, geaendert) -- dieselbe Form wie `reasoning_command`, damit beide
+    Oberflaechen dasselbe Wort gleich beantworten.
+
+    DER TITEL IST DIE ERSTE ZEILE, die Schritte sind die folgenden. Einzeilig
+    getippt trennt `|`, weil ein Terminal keine zweite Zeile hergibt.
+
+    EIN ZIEL OHNE SCHRITTE WIRD ABGELEHNT statt angelegt: der Zaehler waere 0/0
+    und der Kopf traege eine Ueberschrift, an der nichts haengt.
+    """
+    text = (argument or "").strip()
+    if not text:
+        said = goal_summary()
+        return (said or "no goal. `/goal <title>` then one step per line, "
+                        "or `title | step | step`.", goal_load(), False)
+    if text.lower() in ("off", "clear", "done"):
+        if goal_load() is None:
+            return ("no goal to clear.", None, False)
+        goal_write(None)
+        return ("goal cleared.", None, True)
+    lines = [p.strip() for p in text.splitlines() if p.strip()]
+    if len(lines) == 1:
+        lines = [p.strip() for p in lines[0].split("|") if p.strip()]
+    if len(lines) < 2:
+        return ("a goal needs steps: `/goal <title>` then one step per line, "
+                "or `title | step | step`.", goal_load(), False)
+    goal = goal_start(lines[0], lines[1:])
+    if goal is None:
+        return ("that is not a goal I can hold.", goal_load(), False)
+    # DIE KOSTEN STEHEN VOR DER TAT, wie bei jeder Kopfaenderung: das Ziel geht
+    # in den gepinnten Block, also zahlt der naechste Zug einen vollen Prefill.
+    return ("goal: %s -- %d steps.\n%s"
+            % (goal["title"], len(goal["steps"]), GOAL_COST_NOTE), goal, True)
+
+
+GOAL_COST_NOTE = ("the goal goes into the head of every prompt -- "
+                  "the next turn pays a full prefill")
+
+
+def tool_goal_set(title: str, steps: "list | None" = None) -> str:
+    """#165. Das Modell schreibt seinen eigenen Plan. Gibt JSON zurueck.
+
+    OHNE ZWEITE MEINUNG UEBER DEN INHALT: was ein guter Plan ist, entscheidet
+    das Modell. Was hier geprueft wird, ist nur, ob es ueberhaupt einer ist --
+    ein Titel und mindestens zwei Schritte. Ein einziger Schritt ist kein Plan,
+    sondern die Aufgabe noch einmal.
+    """
+    clean = [str(s).strip() for s in (steps or []) if str(s).strip()]
+    if len(clean) < 2:
+        return json.dumps({"ok": False,
+                           "error": "a plan needs at least two steps"})
+    goal = goal_start(str(title or "").strip() or "the task", clean)
+    if goal is None:
+        return json.dumps({"ok": False, "error": "could not write the plan"})
+    return json.dumps({"ok": True, "title": goal["title"],
+                       "steps": len(goal["steps"]),
+                       "next": 1, "first": goal["steps"][0]["text"]})
+
+
+def tool_goal_step(step: int, status: str, note: str = "") -> str:
+    """#165. Einen Schritt bewegen. Gibt JSON mit dem naechsten offenen zurueck.
+
+    DIE ANTWORT NENNT DEN NAECHSTEN SCHRITT, und das ist der Motor selbst: das
+    Modell bekommt nach jedem Haken gesagt, was als Naechstes ansteht, ohne
+    danach fragen zu muessen.
+
+    EINS-BASIERT NACH AUSSEN, weil der Plan so aufgezaehlt wird, wie ein Mensch
+    ihn liest -- und weil das Modell die Nummer aus genau dieser Liste abliest.
+    """
+    try:
+        index = int(step) - 1
+    except (TypeError, ValueError):
+        return json.dumps({"ok": False, "error": "step must be a number"})
+    state = str(status or "").strip().lower()
+    if state == GOAL_RUNNING:
+        goal = goal_step_begin(index)
+    elif state in (GOAL_DONE, GOAL_FAILED):
+        goal = goal_step_end(index, ok=(state == GOAL_DONE), note=note)
+    else:
+        return json.dumps({"ok": False,
+                           "error": "status must be running, done or failed"})
+    if goal is None:
+        return json.dumps({"ok": False,
+                           "error": "no such step, or it is already done, or "
+                                    "another step is still running"})
+    done, total = goal_counts(goal)
+    nxt = goal_next_open(goal)
+    return json.dumps({"ok": True, "done": done, "total": total,
+                       "complete": goal.get("status") == GOAL_DONE,
+                       "next_step": None if nxt is None else nxt + 1,
+                       "next": None if nxt is None else goal["steps"][nxt]["text"]})
+
+
+def goal_next_open(goal: "dict | None" = None) -> "int | None":
+    """Der erste Schritt, der noch Arbeit ist -- laufend, offen oder gescheitert.
+    None, wenn nichts mehr aussteht. Das ist die Frage, die der Motor nach jedem
+    Zug stellt."""
+    goal = goal if goal is not None else goal_load()
+    if not goal:
+        return None
+    for n, step in enumerate(goal.get("steps") or []):
+        if step.get("status") != GOAL_DONE:
+            return n
+    return None
 
 
 def needs_approval(name: str, mode: str) -> bool:
@@ -11495,7 +11925,9 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
     if top_k is not None:
         body["top_k"] = top_k
     if reasoning_effort:
-        body["chat_template_kwargs"] = {"reasoning_effort": reasoning_effort}
+        # #176: dieselbe Tuer wie der Zug, aus demselben Grund. Ein Nachlauf, der
+        # eine andere Tuer benutzt, waere ein zweiter Prompt-Stil im selben Chat.
+        body["reasoning_effort"] = reasoning_effort
     # AND IT CARRIES THE SAME ROUTING KEY AS THE TURN IT FOLLOWS. Same chat, own
     # body, nobody watching -- without this it is a second session inside the
     # first, answered by whichever upstream happened to be cheapest that second.
@@ -11796,6 +12228,21 @@ def run_turn(
     # swallow a Ctrl+C meant for the turn the user is watching. A subtask still
     # STOPS on the flag -- it just leaves it standing for its owner.
     owns_turn_state: bool = True,
+    # #173. DIE MARKENLISTE DES AUFRUFERS, oder None. Sie wird hier nicht
+    # gefuehrt -- der Kern zeichnet nichts --, aber ein Rollover MITTEN in einem
+    # Zug legt den Kontext weg, zu dem sie gehoert: sie geht ins Archiv mit und
+    # wird geleert. Ohne das saessen die Marken danach ueber einem Gespraech, in
+    # dem sie nie passiert sind, und zeigten auf Nachrichten, die es nicht gibt.
+    notes: "list | None" = None,
+    # #171. DIE ZUGBILANZEN DES AUFRUFERS, aus demselben Grund wie `notes`
+    # daneben: sie gehoeren zu dem Kontext, den ein Rollover weglegt.
+    #
+    # `bills` UND NICHT `timings`, und der Name ist der ganze Grund: `timings`
+    # heisst in dieser Schleife seit jeher das Zeitdiktionar EINER Runde. Als
+    # Parameter gleichen Namens hat es dieses hier ueberdeckt, und `del
+    # timings[:]` traf die Runde statt das Band -- vier Faelle rot, alle im
+    # Rollover.
+    bills: "list | None" = None,
     events: "TurnEvents | None" = None,
 ) -> TurnResult:
     """Run one USER turn to its end: however many tool rounds it takes.
@@ -11827,6 +12274,13 @@ def run_turn(
     """
     if events is None:
         events = TurnEvents()
+
+    # #169. WO DER ZUG AUFSETZT, ohne es dem Ziel anzurechnen. Ein Zug auf einem
+    # wiederhergestellten Chat findet dort Tiefe vor, die niemand jetzt ausgibt;
+    # ohne diese Marke verbuchte die erste Runde den ganzen Chat als Wachstum des
+    # Ziels. Gesetzt wird hier, weil hier der Stand bekannt ist -- und weil ein
+    # `goal_set` MITTEN in diesem Zug sonst von 0 aus zaehlte.
+    goal_tokens_mark(context_tokens)
 
     # THE TOOL LOOP. Everything is appended, never inserted: the assistant
     # turn with its calls, then one `tool` message per call, then the next
@@ -11964,10 +12418,25 @@ def run_turn(
                             % (" with exit code %d" % code
                                if code is not None else "", reboots))
                         continue
-                if (known is not None and not waited_ready
+                if (not waited_ready
                         and "503" in said and "loading model" in said):
                     # Der Boot ist kein Fehler: einmal je Turn ausharren,
-                    # bis der eigene Server antwortet, dann weitermachen.
+                    # bis der Server antwortet, dann weitermachen.
+                    #
+                    # #167. OHNE DIE EIGENTUMSFRAGE, und das ist der Fix: hier
+                    # stand `known is not None`, also "nur warten, wenn ICH den
+                    # gebootet habe". Fuer den REBOOT ist das richtig -- einen
+                    # fremden Server neu zu starten ist die Entscheidung eines
+                    # anderen. Fuers WARTEN ist es sinnlos: ein ladender Server
+                    # laedt, egal wer ihn gestartet hat, und Warten kostet
+                    # niemanden etwas.
+                    #
+                    # Bezahlt am 2026-08-30 abends: `booted.json` kannte den
+                    # Betriebspunkt-Port 8083 nicht, also war `known` None, also
+                    # lief dieser Zweig nicht -- und ein 26-Runden-Zug starb an
+                    # einem Server, der 72 s spaeter bereit war. Die Bedingung
+                    # verknuepfte zwei Fragen, von denen nur eine hierher
+                    # gehoert.
                     waited_ready = True
                     note("the server on port %s is still loading -- waiting"
                          % port)
@@ -12028,6 +12497,11 @@ def run_turn(
         conversation.append("assistant", reply, reasoning,
                             tool_calls=None if unanswerable else calls)
         context_tokens = next_context_tokens(context_tokens, timings)
+        # #169. JE RUNDE, NICHT JE ZUG. Ein Zug mit 27 Runden hakte neun Schritte
+        # ab, waehrend der Zielspeicher noch den Stand des vorigen Zuges trug --
+        # drei Schritte lasen 0, der vierte trug alles. Dies ist dieselbe Zahl,
+        # die die Kostenzeile eine Zeile spaeter aufsummiert, nur eher gemeldet.
+        goal_tokens_seen(context_tokens)
         cost.add_round(timings)
         events.round_finished(timings)
 
@@ -12236,9 +12710,20 @@ def run_turn(
                 temperature=temperature, top_p=top_p, min_p=min_p, top_k=top_k,
                 extra_headers=extra_headers,
                 transport=transport, remote=remote, routing=routing)
+            # #173: DIE MARKEN DES SCHREIBERS, wenn er welche fuehrt. Sie sind
+            # eine Liste, die dem Aufrufer gehoert -- sie wandert ins Archiv und
+            # wird DANN geleert, weil ihre Positionen Nachrichten zaehlen, die
+            # es nach dem Schnitt nicht mehr gibt.
             archived = roll_over(conversation, base_url, context_tokens,
-                                 carry=carry, digest=digest)
+                                 carry=carry, digest=digest, notes=notes,
+                                 timings=bills)
+            # #163: der Kopf gilt weiter -- Gedaechtnis, Faehigkeiten, Ziel.
+            repin_head(conversation, get_root())
             if archived:
+                if notes is not None:
+                    del notes[:]
+                if bills is not None:
+                    del bills[:]
                 events.rolled_over(context_tokens, archived)
                 context_tokens = 0
                 rolled = True
@@ -14163,6 +14648,11 @@ def _subtask_close(sub: Subtask, status: str, failure: str = "") -> None:
     sub.seconds = time.monotonic() - sub.started
     sub.failure = failure
     sub.status = status
+    # #169. WAS AUF EINEM FREMDEN SPOT AUSGEGEBEN WURDE, dem laufenden Schritt
+    # zugeschlagen -- getrennt von den lokalen Token, nie in dieselbe Summe.
+    # Hier, weil dies die eine Stelle ist, an der ein Subtask endet, egal auf
+    # welchem der drei Wege.
+    goal_delegated_seen(sub.tokens)
     # Jeder Endzustand geht auf die Platte -- die Registry-Datei traegt die
     # Records ueber den Prozess hinaus (2026-08-28 spaetnachts).
     _subtask_persist()
@@ -14642,4 +15132,459 @@ def cancel_subtasks() -> int:
 # so these three survive every one of them.
 TOOL_IMPL.update({"delegate": tool_delegate,
                   "subtasks": tool_subtasks,
-                  "collect": tool_collect})
+                  "collect": tool_collect,
+                  "goal_set": tool_goal_set,
+                  "goal_step": tool_goal_step})
+
+
+# ---------------------------------------------------------------- #163 -----
+#
+# DER ZIELSPEICHER. Ein Ziel ist ein Titel und eine Liste von Schritten, und es
+# muss VIER Dinge ueberleben, von denen jedes einen anderen Speicher ausschliesst:
+#
+#   Rollover      `roll_over` ruft `conversation.reset()` -- Nachrichten weg, Pin
+#                 weg. Alles, was nur in der Conversation steht, ist beim ersten
+#                 Schnitt fort.
+#   Serverneustart und Fensterneustart -- alles im Prozess ist fort.
+#   Neue Sitzung  ein frisches Fenster weiss nichts von einem Ziel, das laeuft.
+#   Chat geloescht  das Ziel gehoert dem NUTZER, nicht dem Chat, in dem es getippt
+#                 wurde.
+#
+# WARUM NICHT DIE SUBTASK-REGISTRY, obwohl ihre Satzform genau passt (status,
+# seconds, prompt_tokens, reply_tokens, transcript): sie sagt von sich selbst,
+# sie sei "this process's memory, not the session's", und `drop_subtasks` raeumt
+# sie MIT dem Chat ab. Beide Lebensdauern sind genau die, die hier nicht sein
+# duerfen. Die FORM ist uebernommen, der Ort nicht.
+#
+# DER FORTSCHRITT STEHT NICHT IM KOPF, und das ist die teuerste Regel hier.
+# Titel und Schrittliste gehoeren in den gepinnten Block, damit das Modell weiss,
+# worauf es hinarbeitet. Ein Haken daran waere eine Kopfaenderung, und die kostet
+# einen vollen Prefill -- gemessen am 2026-08-30 bei 8k Tiefe als `cached 0/7,923`,
+# bei 200k sind das Minuten. Fuenf Schritte waeren fuenf volle Prefills. Also:
+# der Kopf traegt den PLAN, die Datei traegt den STAND.
+#
+# DIE UHR IST WANDUHR, NICHT `monotonic`. Sie springt bei einer Zeitumstellung,
+# und das ist der kleinere Preis: `monotonic` zaehlt ab Prozessstart und waere
+# nach genau dem Neustart wertlos, den dieser Speicher ueberleben soll.
+
+GOAL_FORMAT = 1
+
+# Was ein Schritt sein kann. `running` ist der eine Zustand, den nur EIN Schritt
+# gleichzeitig tragen darf -- der lokale Server hat einen Slot (#143), also gibt
+# es keine zwei gleichzeitig laufenden Schritte, und ein Speicher, der das
+# zuliesse, beschriebe eine Maschine, die es nicht gibt.
+GOAL_OPEN, GOAL_RUNNING, GOAL_DONE, GOAL_FAILED = ("open", "running",
+                                                   "done", "failed")
+GOAL_STEP_STATES = (GOAL_OPEN, GOAL_RUNNING, GOAL_DONE, GOAL_FAILED)
+
+
+# WIEVIEL KONTEXT GERADE STEHT. Gemeldet von der Runde, die ihn gerade gelesen
+# hat -- derselbe Wert, den die Kostenzeile zeigt (`usage.total_tokens`, seit
+# #60). 0 heisst "niemand hat es gesagt", und dann bleibt die Tokenspalte eines
+# Schritts leer statt falsch.
+GOAL_TOKENS_NOW = 0
+
+# LESEN, AENDERN, SCHREIBEN IST DREI SCHRITTE, und zwei Threads tun es. Der Zug
+# bucht je Runde, und eine Delegation bucht aus IHREM Thread, wenn sie
+# zurueckkommt -- ohne diese Sperre ueberschreibt der spaetere Schreiber den
+# frueheren, und die verlorene Buchung ist genau die, die niemand vermisst.
+_GOAL_LOCK = threading.Lock()
+
+
+def goal_tokens_mark(total: int) -> None:
+    """Den Zaehler setzen, OHNE die Differenz zu verbuchen.
+
+    DER UNTERSCHIED ZU `goal_tokens_seen` IST DER GANZE PUNKT: ein Zug, der auf
+    einem wiederhergestellten Chat aufsetzt, findet dort 50k vor, die niemand in
+    diesem Moment ausgegeben hat. Wer die als Wachstum verbucht, schreibt einem
+    Ziel den ganzen Chat an, in dem es gesetzt wurde. Gesetzt wird deshalb am
+    ANFANG eines Zuges, verbucht wird nach jeder Runde.
+    """
+    global GOAL_TOKENS_NOW
+    GOAL_TOKENS_NOW = max(0, int(total or 0))
+
+
+def goal_tokens_seen(total: int, now: "float | None" = None) -> None:
+    """Der Kontextstand nach einer RUNDE, und was er das Ziel gekostet hat.
+
+    JE RUNDE, NICHT JE ZUG -- das ist #169. Der Wert erreichte den Speicher
+    einmal am Zugende, abgehakt wird aber mehrfach INNERHALB eines Zuges (der
+    Lauf vom 2026-08-30 machte 27 Runden in einem Zug). Zur Hakenzeit stand
+    deshalb noch der Stand des VORIGEN Zuges: die ersten Schritte differenzierten
+    gegen 0 und lasen 0, der erste Haken nach einer Zuggrenze verschluckte alles.
+
+    DER SPRUNG NACH UNTEN IST KEIN FEHLER, SONDERN EIN NEUER KONTEXT. Nach einem
+    Rollover faengt der absolute Zaehler wieder klein an; die neue Tiefe ist
+    frisch prefillt, also IST sie Ausgabe. `spent` waechst dadurch monoton weiter
+    und ueberlebt den Schnitt -- das ist die Zahl, die #174 im Kopf verlangt, und
+    sie ist nicht die Summe der Schrittspalte.
+    """
+    global GOAL_TOKENS_NOW
+    total = max(0, int(total or 0))
+    before, GOAL_TOKENS_NOW = GOAL_TOKENS_NOW, total
+    grew = total - before if total >= before else total
+    if grew <= 0:
+        return
+    with _GOAL_LOCK:
+        goal = goal_load()
+        if goal is None:
+            return
+        goal["spent"] = int(goal.get("spent") or 0) + grew
+        # DIE ERSTE RUNDE IST DER ANFANG. Frueher gibt es kein Lebenszeichen:
+        # zwischen `/goal` und dem ersten Zug passiert nichts als Tippen.
+        _goal_begun(goal, float(now if now is not None else time.time()))
+        goal_write(goal)
+
+
+def goal_delegated_seen(tokens: int) -> None:
+    """Was eine Delegation gekostet hat, auf dem Schritt, der gerade laeuft.
+
+    GETRENNT GEFUEHRT UND NICHT ADDIERT, und das ist die Entscheidung, die #169
+    verlangt: das sind die Token eines FREMDEN Anbieters auf einem fremden Spot.
+    In die lokale Summe gemischt waere der Kopf eine Zahl ueber zwei Dinge, und
+    niemand koennte sie mehr gegen die Kostenzeile halten.
+
+    DIE DRITTE ANTWORT WAR DIE SCHLECHTESTE: eine stille 0. So standen M1.1 bis
+    M1.3 am 2026-08-30 im Panel -- drei delegierte Schritte, achtzehn Minuten,
+    "0 tok", und das liest sich wie "hat nichts gekostet".
+
+    LAEUFT KEIN SCHRITT, zaehlt es trotzdem beim Ziel: eine Delegation, die
+    zwischen zwei Schritten zurueckkommt, hat stattgefunden.
+    """
+    tokens = max(0, int(tokens or 0))
+    if tokens <= 0:
+        return
+    with _GOAL_LOCK:
+        goal = goal_load()
+        if goal is None:
+            return
+        goal["delegated"] = int(goal.get("delegated") or 0) + tokens
+        for step in goal.get("steps") or []:
+            if step.get("status") == GOAL_RUNNING:
+                step["delegated"] = int(step.get("delegated") or 0) + tokens
+                break
+        goal_write(goal)
+
+
+def goal_context_tokens() -> int:
+    return GOAL_TOKENS_NOW
+
+
+def goal_spent(goal: "dict | None" = None) -> int:
+    """Was dieses Ziel gekostet hat, ueber jeden Kontext hinweg, in dem es lebte.
+
+    NICHT DIE SUMME DER SCHRITTE (#174): der Kopf las bis hier die Spalte auf,
+    erbte damit jeden Fehler darin und liess alles weg, was zwischen zwei
+    Schritten passiert -- Nachdenken, Werkzeuge, der Rollover selbst.
+    """
+    goal = goal if goal is not None else goal_load()
+    return int((goal or {}).get("spent") or 0)
+
+
+def goal_delegated(goal: "dict | None" = None) -> int:
+    """Die Token, die dieses Ziel auf fremden Spots ausgegeben hat."""
+    goal = goal if goal is not None else goal_load()
+    return int((goal or {}).get("delegated") or 0)
+
+
+def goal_path() -> str:
+    """Wo das Ziel liegt. Zur Laufzeit gebaut, wie die Subtask-Registry: die
+    Suiten biegen `SESSION_DIR` um, und eine beim Import gefrorene Konstante
+    schriebe in die echte Installation."""
+    return os.path.join(SESSION_DIR, "goal.json")
+
+
+def goal_load() -> "dict | None":
+    """Das aktive Ziel, oder None.
+
+    TOLERANT WIE JEDE BEQUEMLICHKEITSDATEI, mit einer Ausnahme: eine Datei, die
+    da ist und nicht gelesen werden kann, ist NICHT dasselbe wie kein Ziel. Sie
+    wird trotzdem als None beantwortet -- ein Fenster, das wegen eines kaputten
+    JSON nicht startet, waere der schlechtere Tausch --, und `goal_broken` sagt
+    dem Aufrufer, dass er nicht "kein Ziel" gelesen hat, sondern "unlesbar".
+    """
+    try:
+        with open(goal_path(), encoding="utf-8-sig") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    goal = (raw or {}).get("goal")
+    if not isinstance(goal, dict) or not goal.get("steps"):
+        return None
+    return goal
+
+
+def goal_broken() -> bool:
+    """Die Datei existiert und ist kein lesbares Ziel. Fuer den einen Fall, in
+    dem "kein Ziel" und "kaputtes Ziel" verschieden beantwortet werden muessen:
+    ein Ziel stillschweigend zu verlieren ist schlimmer als es zu melden."""
+    if not os.path.isfile(goal_path()):
+        return False
+    return goal_load() is None
+
+
+def goal_write(goal: "dict | None") -> None:
+    """Das Ziel auf Platte. `None` loescht es.
+
+    GESCHRIEBEN WIRD UEBER EINE TEMPDATEI, weil dieser Speicher als einziger
+    einen Prozesstod ueberleben SOLL: ein halb geschriebenes goal.json waere
+    genau in dem Moment unlesbar, fuer den es existiert. `os.replace` ist auf
+    Windows atomar innerhalb desselben Volumes.
+    """
+    path = goal_path()
+    if goal is None:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"format": GOAL_FORMAT, "goal": goal}, fh, indent=1,
+                      ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def goal_start(title: str, steps: "list[str]",
+               now: "float | None" = None) -> "dict | None":
+    """Ein neues Ziel. Ersetzt ein laufendes -- eines zur Zeit.
+
+    LEERE SCHRITTE SIND KEIN ZIEL. Ein Titel ohne Plan waere eine Ueberschrift,
+    an der die Anzeige einen Zaehler `0/0` haengt und der Motor nichts zu tun
+    findet; None sagt das, statt eine Datei anzulegen, die niemand fuellen kann.
+    """
+    title = (title or "").strip()
+    clean = [str(s).strip() for s in (steps or []) if str(s).strip()]
+    if not title or not clean:
+        return None
+    started = float(now if now is not None else time.time())
+    goal = {"title": title,
+            "created": started,
+            # WANN ZULETZT ETWAS PASSIERTE, und wieviel Kontext da stand. Beides
+            # gemessen am 2026-08-30 gebraucht: das Modell ruft `goal_step` fast
+            # immer nur mit `done`, nie mit `running` -- ohne einen Startpunkt
+            # war jede Dauer 0 und jede Tokenzahl 0. Crow misst deshalb selbst,
+            # von Uebergang zu Uebergang, statt sich auf eine Meldung zu
+            # verlassen, die das Modell nicht abgibt.
+            "last_at": started,
+            # WANN CROW ANGEFANGEN HAT, und das ist NICHT, wann der Plan
+            # geschrieben wurde. Zwischen `/goal` und der Zeile, die die Arbeit
+            # anstoesst, liegt Tippzeit -- die lief bis hier in der Zielhur mit
+            # und in der Dauer des ersten Schritts gleich mit (robin,
+            # 2026-08-31). None heisst: noch kein Lebenszeichen, Uhr auf 0.
+            "started": None,
+            # WAS DAS ZIEL BISHER GEKOSTET HAT, und der Stand davon beim letzten
+            # Uebergang. Zwei Zahlen und nicht der absolute Kontextzaehler, weil
+            # der beim Rollover auf null faellt: eine Differenz ueber den Schnitt
+            # hinweg waere negativ und damit 0 (#174).
+            "spent": 0,
+            "last_spent": 0,
+            # WAS AUF FREMDEN SPOTS AUSGEGEBEN WURDE, getrennt gefuehrt (#169).
+            "delegated": 0,
+            "status": GOAL_OPEN,
+            "steps": [{"text": text, "status": GOAL_OPEN, "started": None,
+                       "started_tokens": None,
+                       "seconds": 0.0, "tokens": 0, "delegated": 0,
+                       "note": ""}
+                      for text in clean]}
+    goal_write(goal)
+    return goal
+
+
+def _goal_begun(goal: dict, at: float) -> None:
+    """Das erste Lebenszeichen setzt die Uhr in Gang, einmal.
+
+    ZWEI DINGE AUF EINMAL, und das zweite ist der eigentliche Fehler: `last_at`
+    war die Anlegezeit, also bekam der erste Schritt die Tippzeit als Dauer
+    angerechnet, wenn er ohne `running` gemeldet wurde. Beide Uhren fangen dort
+    an, wo die Arbeit anfaengt.
+    """
+    if goal.get("started"):
+        return
+    goal["started"] = at
+    goal["last_at"] = at
+
+
+def goal_step_begin(index: int, now: "float | None" = None) -> "dict | None":
+    """Schritt `index` laeuft ab jetzt. Das Ziel danach, oder None.
+
+    NUR EIN LAUFENDER SCHRITT, und das bleibt so: zwei laufende Schritte waeren
+    zwei Uhren auf demselben Slot (der lokale Server hat einen), und die Summe
+    waere doppelt so gross wie die Zeit, die vergangen ist. Ein `begin` auf einen
+    anderen Schritt LEHNT deshalb nicht mehr ab, sondern PARKT den laufenden:
+    seine Uhr und seine Token werden gebucht, er faellt auf `open` zurueck. Das
+    Ablehnen war die Falle -- der Motor stoesst den naechsten Schritt selbst an,
+    also lief immer einer, und jeder Versuch des Modells, woanders weiterzu-
+    arbeiten, verpuffte still.
+
+    ERLEDIGT DARF WIEDER AUFGEHEN (#168). Live gesehen am 2026-08-30: ein
+    delegierter Task lieferte Unbrauchbares, Crow baute den Meilenstein neu -- und
+    das Panel trug den ganzen Zug ueber den gruenen Haken. Schlimmer als die
+    Anzeige ist die Wiederaufnahme: der Speicher ist nach einem Rollover der
+    einzige Beleg, wo die Arbeit steht, und der Motor nimmt den ersten Schritt,
+    der nicht `done` ist -- er uebersprang also genau die Arbeit, die lief.
+    Aufgemacht wird NUR auf diesen Aufruf hin, nie aus einer Vermutung heraus.
+    """
+    with _GOAL_LOCK:
+        goal = goal_load()
+        if goal is None or not 0 <= index < len(goal["steps"]):
+            return None
+        at = float(now if now is not None else time.time())
+        _goal_begun(goal, at)
+        spent = int(goal.get("spent") or 0)
+        for n, other in enumerate(goal["steps"]):
+            if n != index and other["status"] == GOAL_RUNNING:
+                _goal_close_window(goal, other, at, spent)
+                other["status"] = GOAL_OPEN
+        step = goal["steps"][index]
+        # DER ZAEHLER GEHT ZURUECK, WENN EIN HAKEN ZURUECKGENOMMEN WIRD, und mit
+        # ihm der Zustand des Ziels: "Complete" darf nicht stehen bleiben,
+        # waehrend an einem Schritt gearbeitet wird.
+        if step["status"] == GOAL_DONE:
+            goal["status"] = GOAL_OPEN
+        step["status"] = GOAL_RUNNING
+        # DIE SEKUNDEN BLEIBEN STEHEN, die Uhr faengt neu an: `goal_step_end`
+        # addiert, also traegt ein wieder aufgemachter Schritt am Ende beide
+        # Strecken. Dasselbe fuer die Token.
+        step["started"] = at
+        step["started_tokens"] = spent
+        goal["last_at"], goal["last_spent"] = at, spent
+        goal_write(goal)
+        return goal
+
+
+def _goal_close_window(goal: dict, step: dict, at: float, spent: int,
+                       tokens: int = 0) -> None:
+    """Die Strecke eines Schritts abrechnen: Uhr und Token dazu, Marken weg.
+
+    EINE STELLE FUER BEIDE WEGE -- ein Schritt endet (`done`/`failed`) oder wird
+    geparkt, weil woanders weitergearbeitet wird. Rechnete jeder Weg selbst, waere
+    genau der geparkte Fall der, den jemand vergisst, und seine Zeit landete beim
+    naechsten Schritt.
+    """
+    began = step.get("started")
+    if began is None:
+        began = float(goal.get("last_at") or at)
+    step["seconds"] = round(float(step.get("seconds") or 0.0)
+                            + max(0.0, at - float(began)), 1)
+    began_tok = step.get("started_tokens")
+    if began_tok is None:
+        began_tok = int(goal.get("last_spent") or 0)
+    grew = max(0, spent - int(began_tok))
+    step["tokens"] = int(step.get("tokens") or 0) + (max(0, int(tokens or 0))
+                                                    or grew)
+    step["started"] = None
+    step["started_tokens"] = None
+
+
+def goal_step_end(index: int, ok: bool = True, tokens: int = 0,
+                  note: str = "", now: "float | None" = None) -> "dict | None":
+    """Schritt `index` ist fertig oder gescheitert. Das Ziel danach, oder None.
+
+    DIE SEKUNDEN WERDEN ADDIERT, nicht gesetzt: ein Schritt, der nach einem
+    Fehlschlag erneut laeuft, hat zweimal Zeit gekostet, und die Summe ist die
+    ehrliche Zahl. Ohne `started` -- ein Schritt, der ohne `begin` beendet wird,
+    etwa nach einem Neustart mitten drin -- bleibt sie stehen, statt aus einem
+    fehlenden Anfang eine Dauer zu erfinden.
+    """
+    with _GOAL_LOCK:
+        goal = goal_load()
+        if goal is None or not 0 <= index < len(goal["steps"]):
+            return None
+        step = goal["steps"][index]
+        end = float(now if now is not None else time.time())
+        _goal_begun(goal, end)
+        # DER ANFANG IST DER LETZTE UEBERGANG, wenn der Schritt nie `running`
+        # war. Das ist der Normalfall: das Modell meldet fast nur `done`. Die
+        # Zeit seit dem vorigen Schritt IST die Zeit, die dieser gekostet hat --
+        # alles dazwischen war seine Arbeit. Fuer die Token gilt dasselbe,
+        # gemessen an `spent` und nicht am absoluten Kontextzaehler: der faellt
+        # beim Rollover auf null, und eine Differenz ueber den Schnitt hinweg
+        # waere 0 (#169).
+        spent = int(goal.get("spent") or 0)
+        _goal_close_window(goal, step, end, spent, tokens=tokens)
+        goal["last_at"], goal["last_spent"] = end, spent
+        step["status"] = GOAL_DONE if ok else GOAL_FAILED
+        step["note"] = str(note or "")[:400]
+        # FERTIG IST DAS ZIEL ERST, WENN KEIN SCHRITT MEHR OFFEN IST -- ein
+        # gescheiterter zaehlt nicht als erledigt, sonst hiesse "Complete" hier
+        # "es wird nichts mehr passieren" statt "es ist geschafft".
+        if all(s["status"] == GOAL_DONE for s in goal["steps"]):
+            goal["status"] = GOAL_DONE
+        goal_write(goal)
+        return goal
+
+
+def goal_counts(goal: "dict | None" = None) -> "tuple[int, int]":
+    """(erledigt, gesamt) -- der Zaehler, den der Kopf der Anzeige traegt."""
+    goal = goal if goal is not None else goal_load()
+    if not goal:
+        return (0, 0)
+    steps = goal.get("steps") or []
+    return (sum(1 for s in steps if s.get("status") == GOAL_DONE), len(steps))
+
+
+def goal_seconds(goal: "dict | None" = None,
+                 now: "float | None" = None) -> float:
+    """Verstrichene Zeit des ZIELS, Wanduhr seit dem ersten Lebenszeichen.
+
+    NICHT DIE SUMME DER SCHRITTE, und der Unterschied ist der Punkt: zwischen
+    zwei Schritten wird nachgedacht, geschrieben und gewartet, und ein Ziel, das
+    nur seine Schritte zaehlt, behauptet, diese Zeit sei nicht vergangen. Dieselbe
+    Regel, der die Zeile eines Zuges seit jeher folgt.
+    """
+    goal = goal if goal is not None else goal_load()
+    if not goal:
+        return 0.0
+    # NICHT SEIT `created`: der Plan kann lange dastehen, bevor jemand die
+    # Zeile tippt, die ihn anstoesst. Ohne Anfang ist die Uhr 0 und nicht "seit
+    # dem Anlegen" -- 0 ist wahr, das andere waere eine erfundene Dauer.
+    started = float(goal.get("started") or 0.0)
+    if not started:
+        return 0.0
+    return max(0.0, float(now if now is not None else time.time()) - started)
+
+
+GOAL_HEAD_NOTE = ("This goal outlives a context rollover: if the conversation "
+                  "above was cut, the plan below still stands.")
+
+
+def goal_block(goal: "dict | None" = None) -> "str | None":
+    """Der Text, der in den gepinnten Kopf gehoert. None, wenn es kein Ziel gibt.
+
+    OHNE JEDEN STAND, und das ist keine Sparsamkeit, sondern die Rechnung: der
+    Block ist Teil des Prompt-Kopfes, und jede Aenderung daran kostet einen
+    vollen Prefill. Ein abgehakter Schritt im Text waere ein Prefill je Schritt.
+    Was das Modell hier braucht, ist der PLAN; wo es steht, sagt ihm der Zug.
+    """
+    goal = goal if goal is not None else goal_load()
+    if not goal:
+        return None
+    lines = ["Active goal: %s" % goal["title"], "Steps:"]
+    lines += ["%d. %s" % (n, s["text"])
+              for n, s in enumerate(goal.get("steps") or [], 1)]
+    lines.append(GOAL_HEAD_NOTE)
+    return "\n".join(lines)
+
+
+def goal_summary(goal: "dict | None" = None,
+                 now: "float | None" = None) -> "str | None":
+    """Eine Zeile fuer ein Fenster, das gerade erst aufgeht: welches Ziel laeuft
+    und wie weit es ist. Der #163-Punkt "eine neue Sitzung verweist auf das
+    aktive Ziel" -- ohne das ist ein laufendes Ziel unsichtbar, bis jemand
+    zufaellig danach fragt."""
+    goal = goal if goal is not None else goal_load()
+    if not goal:
+        return None
+    done, total = goal_counts(goal)
+    return "goal: %s -- %d/%d, %s" % (
+        goal["title"], done, total,
+        "complete" if goal.get("status") == GOAL_DONE
+        else "%d min so far" % int(goal_seconds(goal, now) // 60))

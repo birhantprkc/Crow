@@ -76,7 +76,19 @@ def render_over_http(base, timeout=60.0):
     def render(level):
         payload = {"messages": MESSAGES}
         if level is not None:
-            payload["chat_template_kwargs"] = {"reasoning_effort": level}
+            # #176. DURCH DIE TUER, DIE CROW BENUTZT, und das war der Fehler
+            # dieser Sonde bis zum 2026-08-31: sie schickte jede Stufe nach
+            # `chat_template_kwargs`, wo sie direkt an jinja geht. Der Server
+            # faengt aber das OBERSTE Feld ab und schaltet fuer `none` das Denken
+            # aus (`tools/server/server-common.cpp:1323`) -- ueber die kwargs ist
+            # `none` eine unbekannte Stufe und quittiert mit HTTP 500. Die Sonde
+            # meldete den funktionierenden Schalter also als toedlich, und #160
+            # hat ihn deshalb aus dem Menue genommen.
+            #
+            # GEMESSEN, DASS DER WECHSEL SONST NICHTS BEWEGT: low, medium und
+            # high rendern ueber beide Tueren denselben sha; max, minimal und ein
+            # explizites off bleiben auf beiden HTTP 500.
+            payload["reasoning_effort"] = level
         req = urllib.request.Request(base.rstrip("/") + "/apply-template",
                                      data=json.dumps(payload).encode("utf-8"),
                                      headers={"Content-Type": "application/json"})

@@ -2373,6 +2373,47 @@ class TheTurnRebootsItsOwnDeadServerTests(TurnLoopCase):
         result = self.turn(talk, base_url="http://127.0.0.1:8082/v1")
         self.assertFalse(result.stopped, "the loading wait did not carry")
 
+    def test_the_wait_does_not_ask_who_booted_the_server(self):
+        """#167, und der Fall ist live bezahlt worden. Die Bedingung hier hiess
+        `known is not None` -- warten nur fuer den EIGENEN Boot. Am 2026-08-30
+        kannte `booted.json` den Betriebspunkt-Port nicht, also lief der Zweig
+        nicht, und ein 26-Runden-Zug starb an einem Server, der 72 s spaeter
+        bereit war.
+
+        DIE EIGENTUMSFRAGE GEHOERT ZUM REBOOT, NICHT ZUM WARTEN: einen fremden
+        Server neu zu starten ist die Entscheidung eines anderen (der Fall
+        darunter haelt das fest), aber ein ladender Server laedt, egal wer ihn
+        gestartet hat, und Warten kostet niemanden etwas.
+        """
+        crow_core._BOOTED.clear()
+        # KEIN EINTRAG. Die Registry ist leer, nicht falsch -- genau der Zustand
+        # der Maschine an dem Abend.
+        with open(crow_core.BOOTED_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"format": 1, "booted": {}}, fh)
+        real_sr = crow_core.stream_reply
+        self.addCleanup(setattr, crow_core, "stream_reply", real_sr)
+        state = {"n": 0}
+
+        def loading(*a, **k):
+            if state["n"] == 0:
+                state["n"] += 1
+                raise crow_core.CrowError(
+                    'HTTP 503 from http://127.0.0.1:8083/v1/chat/completions:'
+                    ' {"error":{"message":"Loading model",'
+                    '"type":"unavailable_error","code":503}}')
+            return real_sr(*a, **k)
+
+        crow_core.stream_reply = loading
+        real_smp = crow_core.server_model_path
+        crow_core.server_model_path = lambda *a, **k: "X.gguf"
+        self.addCleanup(setattr, crow_core, "server_model_path", real_smp)
+        self.serve([{"content": "done"}])
+        talk = self.conversation()
+        result = self.turn(talk, base_url="http://127.0.0.1:8083/v1")
+        self.assertFalse(result.stopped,
+                         "the turn still dies on a boot nobody in this process "
+                         "started -- which is every boot after a window restart")
+
     def test_a_foreign_server_is_never_rebooted(self):
         """NEGATIV, und der Satz ist Programm: ein Server, den dieses Fenster
         nicht gebootet hat, ist die Entscheidung von jemand anderem -- der
@@ -2514,6 +2555,65 @@ class TheBootLeavesItsTraceTests(unittest.TestCase):
         self.assertEqual(seen["err"], want_err)
         self.assertTrue(os.path.isfile(want_out), "the out log was not created")
         self.assertTrue(os.path.isfile(want_err), "the err log was not created")
+
+    def _boot(self, port: str = "8082") -> None:
+        """Ein Boot mit einem Prozess, der lebt. Alles Fremde ist ersetzt."""
+        class _Proc:
+            def poll(self):
+                return None
+
+            def kill(self):
+                pass
+
+        answers = iter([None, "X.gguf"])
+        crow_core.subprocess.Popen = lambda argv, **kw: _Proc()
+        crow_core.running_servers = lambda: []
+        crow_core.server_command = lambda *a, **k: ["llama-server.exe"]
+        crow_core.projector_candidates = lambda *a, **k: []
+        crow_core.server_model_path = lambda *a, **k: next(answers)
+        crow_core.time.sleep = lambda s: None
+        crow_core._BOOTED.clear()
+        crow_core.start_server("unit", "http://127.0.0.1:%s/v1" % port)
+
+    def test_a_second_boot_keeps_the_previous_log(self):
+        """#166. Die Todesursache steht IM Log des Gestorbenen, und bis heute
+        war der Reboot genau das Ereignis, das ihn ueberschrieb. Bezahlt am
+        2026-08-30: kein Dump, kein Ereignis, und das err-Log begann beim
+        Boot des Nachfolgers."""
+        err = os.path.join(self.cwd, "runs", "llama-server-8082.err.log")
+        self._boot()
+        with open(err, "w", encoding="utf-8") as fh:
+            fh.write("the line that says why it died\n")
+
+        self._boot()
+        keep = err[:-4] + ".prev.log"
+        self.assertTrue(os.path.isfile(keep), "the previous log is gone")
+        with open(keep, encoding="utf-8") as fh:
+            self.assertIn("why it died", fh.read())
+
+    def test_the_current_log_is_the_new_run_and_not_the_old_one(self):
+        """NEGATIVPROBE. Ein Umbenennen, das die alte Datei stehen liesse, waere
+        von aussen nicht zu unterscheiden -- bis jemand den falschen Lauf liest
+        und eine Ursache findet, die zwei Boots alt ist."""
+        err = os.path.join(self.cwd, "runs", "llama-server-8082.err.log")
+        self._boot()
+        with open(err, "w", encoding="utf-8") as fh:
+            fh.write("the older run\n")
+
+        self._boot()
+        with open(err, encoding="utf-8") as fh:
+            self.assertNotIn("the older run", fh.read(),
+                             "the live log still carries the previous run")
+
+    def test_the_first_boot_has_nothing_to_keep_and_does_not_care(self):
+        """Der Normalfall auf einer frischen Maschine: keine Datei, kein
+        Umbenennen, kein Fehler. Ein Boot, der an seinem eigenen Logarchiv
+        scheitert, waere der schlechtere Tausch."""
+        self.assertIsNone(crow_core._keep_previous_log(
+            os.path.join(self.cwd, "runs", "nothing-here.err.log")))
+        self._boot()
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.cwd, "runs", "llama-server-8082.err.log")))
 
     def test_the_boot_carries_the_operating_points_env(self):
         """2026-08-28 nachts: der NVIDIA-Treibercache frass jeden Boot dieses
@@ -9653,8 +9753,13 @@ class TheLocalOnlyFieldsStayHomeTests(unittest.TestCase):
         sent = self._turn_body()
         self.assertEqual(sent["min_p"], 0.01)
         self.assertTrue(sent["timings_per_token"])
-        self.assertEqual(sent["chat_template_kwargs"],
-                         {"reasoning_effort": "high"})
+        # #176: AM OBERSTEN FELD, und die zweite Zeile haelt die Tuer fest. Der
+        # Server faengt nur dort `none` ab; in `chat_template_kwargs` ist es eine
+        # unbekannte Stufe und quittiert mit HTTP 500. Ein Rueckfall auf die alte
+        # Tuer sieht aus wie eine Umformatierung und nimmt den Schalter wieder
+        # vom Netz -- deshalb steht hier beides.
+        self.assertEqual(sent["reasoning_effort"], "high")
+        self.assertNotIn("chat_template_kwargs", sent)
 
     def test_the_unasked_pass_drops_them_too(self):
         """POSITIVE for the sender nobody watches. `review_turn` builds its own
@@ -9669,8 +9774,10 @@ class TheLocalOnlyFieldsStayHomeTests(unittest.TestCase):
         """NEGATIVE for the same sender."""
         sent = self._review_body()
         self.assertEqual(sent["min_p"], 0.01)
-        self.assertEqual(sent["chat_template_kwargs"],
-                         {"reasoning_effort": "high"})
+        # #176, siehe oben: derselbe Weg fuer den Nachlauf. Zwei Tueren im selben
+        # Chat waeren zwei Prompt-Stile.
+        self.assertEqual(sent["reasoning_effort"], "high")
+        self.assertNotIn("chat_template_kwargs", sent)
 
 
 
@@ -11040,6 +11147,559 @@ class TheRolloverCarriesADigestTests(unittest.TestCase):
                             carry="weiter", path=path, digest="")
         note = crow_core.message_text(conversation.payload()[-1]["content"])
         self.assertNotIn(crow_core.DIGEST_HEAD, note)
+
+
+class ATurnsBillOutlivesTheCutTests(unittest.TestCase):
+    """#171. Die Timing-Zeile war reine Bildschirmausgabe.
+
+    SIE IST KEINE NACHRICHT, also nahm `roll_over` sie nicht mit, und nach dem
+    Schnitt waren die Zahlen jedes Zuges davor weg. Aus dem Serverlog sind sie
+    nicht zu rekonstruieren: 266 `print_timing`-Zeilen ohne Zugmarker, und eine
+    Werkzeugpause ist so lang wie eine Zugpause -- jede Aufteilung ist geraten.
+    Ein mehrstuendiger Lauf war damit hinterher nicht auswertbar, und hinterher
+    ist genau, wann jemand es will.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-bills-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, "chat.json")
+
+    def a_cost(self):
+        cost = crow_core.TurnCost()
+        cost.add_round({"predicted_n": 200, "prompt_n": 1000,
+                        "predicted_ms": 10000.0, "prompt_ms": 2000.0,
+                        "_client_total_s": 12.0, "_cached_tokens": 900,
+                        "_finish_reason": "stop"})
+        cost.add_tool(3.5, False)
+        return cost
+
+    def test_the_bill_carries_the_numbers_the_line_shows(self):
+        """BEIDE LESEN DIESELBEN FELDER, also koennen sie nicht auseinander-
+        laufen. Der Fall haelt das fest, indem er dieselbe Zahl in beiden
+        sucht -- ein Auswerter, der `20.00 tok/s` aus Text zurueckgewinnen
+        muesste, bekaeme mehr Regex als Zahl."""
+        cost = self.a_cost()
+        line, bill = cost.line(), cost.record()
+        self.assertEqual(bill["rounds"], 1)
+        self.assertEqual(bill["decoded"], 200)
+        self.assertEqual(bill["prefilled"], 1000)
+        self.assertEqual(bill["decode_rate"], 20.0)
+        self.assertEqual(bill["prefill_rate"], 500.0)
+        self.assertEqual(bill["cached"], 900)
+        self.assertEqual(bill["cached_of"], 1900)
+        self.assertEqual(bill["tool_calls"], 1)
+        self.assertEqual(bill["tool_s"], 3.5)
+        self.assertEqual(bill["finish"], "stop")
+        self.assertIn("20.00 tok/s", line)
+        self.assertIn("cached 900/1,900", line)
+
+    def test_a_rate_without_its_denominator_is_absent_not_zero(self):
+        """GEGENPROBE: ein Server, der keine Zeit meldet, hat keine Rate -- und
+        `0.0` waere eine Behauptung ueber einen Durchsatz, den niemand gemessen
+        hat."""
+        cost = crow_core.TurnCost()
+        cost.add_round({"predicted_n": 200, "prompt_n": 1000})
+        bill = cost.record()
+        self.assertNotIn("decode_rate", bill)
+        self.assertNotIn("prefill_rate", bill)
+        self.assertEqual(bill["decoded"], 200)
+
+    def test_a_turn_without_rounds_has_no_bill(self):
+        """Eine leere Bilanz im Archiv laese sich wie ein Zug, der nichts
+        gekostet hat -- dieselbe Luege wie eine stille 0 in der Tokenspalte."""
+        self.assertEqual(crow_core.clean_timings(
+            [{"rounds": 0, "decoded": 0}, "not a dict",
+             {"rounds": 2, "decoded": 7}]),
+            [{"rounds": 2, "decoded": 7}])
+
+    def test_the_bills_survive_the_file_and_the_cut(self):
+        """Der Fall aus dem Ticket: nach dem Rollover ist der Zug, der den Plan
+        traegt, aus dem Archiv heraus noch auswertbar."""
+        conversation = crow_core.Conversation(None)
+        conversation.append("user", "one")
+        conversation.append("assistant", "two")
+        bills = [dict(self.a_cost().record(), at=2)]
+        got = crow_core.roll_over(conversation, "http://127.0.0.1:1/v1", 1000,
+                                  path=self.path, timings=bills)
+        self.assertEqual(got, self.path)
+        back = crow_core.session_timings(self.path)
+        self.assertEqual(len(back), 1)
+        self.assertEqual(back[0]["decoded"], 200)
+        self.assertEqual(back[0]["at"], 2)
+
+    def test_no_bill_becomes_a_message(self):
+        """DIE NEGATIVHAELFTE, und sie ist die wichtigere: in der
+        Nachrichtenliste laese das Modell seinen eigenen Durchsatz als robins
+        Worte, und `_spoken_carry` truege ihn ueber den naechsten Schnitt."""
+        conversation = crow_core.Conversation(None)
+        conversation.append("user", "one")
+        crow_core.roll_over(conversation, "http://127.0.0.1:1/v1", 1000,
+                            path=self.path,
+                            timings=[{"rounds": 1, "decoded": 123456}])
+        self.assertNotIn("123456", json.dumps(conversation.payload()),
+                         "a turn's bill became a message")
+
+
+class MarksKeepTheirPlaceInTheChatTests(unittest.TestCase):
+    """#173. Eine Marke im Verlauf -- die Rollover-Notiz, `Memory updated`, ein
+    Moduswechsel -- ist WEDER eine Nachricht NOCH reine Bildschirmausgabe.
+
+    ALS NACHRICHT waere sie im naechsten Prompt robins eigenes Wort, und
+    `_spoken_carry` schleppte sie ueber den naechsten Schnitt. ALS AUSGABE war
+    sie beim naechsten Oeffnen weg, und jede spaeter gezeichnete rutschte unter
+    alles, was nach ihr passiert war -- die Rollover-Notiz, deren ganze Aussage
+    "alles darueber ist ein anderer Kontext" lautet, behauptete unten gelesen
+    das Gegenteil.
+
+    Also: ein drittes Band, das mit dem Chat gespeichert wird und je Marke
+    traegt, wieviele Nachrichten vor ihr standen.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-marks-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, "chat.json")
+
+    def a_chat(self, notes=None):
+        conversation = crow_core.Conversation(None)
+        conversation.append("user", "one")
+        conversation.append("assistant", "two")
+        crow_core.save_session(conversation, "http://127.0.0.1:1/v1", 42,
+                               path=self.path, with_kv=False, notes=notes)
+        return conversation
+
+    def test_the_marks_survive_the_file(self):
+        """Der Fall, den es vor diesem Ticket nicht gab: eine Notiz, die einen
+        Neustart uebersteht."""
+        self.a_chat([{"k": "note", "at": 1, "t": "rolled over"},
+                     {"k": "memory", "at": 2, "t": "Memory updated", "n": 3}])
+        self.assertEqual(
+            crow_core.session_notes(self.path),
+            [{"k": "note", "at": 1, "t": "rolled over"},
+             {"k": "memory", "at": 2, "t": "Memory updated", "n": 3}])
+
+    def test_a_chat_without_marks_writes_no_key(self):
+        """GEGENPROBE, und sie schuetzt jede Datei auf Platte: fehlt der
+        Schluessel, hat der Chat keine Marken -- was auf alles zutrifft, was vor
+        diesem Build geschrieben wurde. Ein leeres `[]` waere eine Behauptung
+        ueber einen Chat, der nie gefragt wurde."""
+        self.a_chat()
+        with open(self.path, encoding="utf-8") as fh:
+            self.assertNotIn(crow_core.SESSION_NOTES_KEY, json.load(fh))
+        self.assertEqual(crow_core.session_notes(self.path), [])
+
+    def test_only_the_kinds_the_page_draws_as_a_row_are_kept(self):
+        """Sie kommen aus ueber dreissig Aufrufstellen im Fenster. Eine Art, die
+        die Seite nicht als eigene Zeile zeichnet, waere eine Marke, die beim
+        Wiederoeffnen verschwindet -- also genau der Fehler noch einmal."""
+        kept = crow_core.clean_notes([
+            {"k": "note", "at": 2, "t": "a"},
+            {"k": "cost", "at": 2, "t": "belongs to a turn"},
+            {"k": "text", "at": 3, "t": "an answer"},
+            "not a dict",
+            {"k": "alarm", "t": "no place given"},
+        ])
+        self.assertEqual([n["k"] for n in kept], ["note", "alarm"])
+        self.assertEqual(kept[1]["at"], 0, "a mark without a place got one")
+
+    def test_a_rollover_puts_the_marks_into_the_archive(self):
+        """Sie gehoeren zu dem Kontext, der weggelegt wird. Der neue faengt ohne
+        sie an -- sonst zeigte er die Rollover-Notiz eines Gespraechs, das er
+        nicht mehr enthaelt."""
+        conversation = crow_core.Conversation(None)
+        conversation.append("user", "one")
+        conversation.append("assistant", "two")
+        got = crow_core.roll_over(conversation, "http://127.0.0.1:1/v1", 1000,
+                                  path=self.path,
+                                  notes=[{"k": "note", "at": 1,
+                                          "t": "before the cut"}])
+        self.assertEqual(got, self.path)
+        self.assertEqual([n["t"] for n in crow_core.session_notes(self.path)],
+                         ["before the cut"])
+
+    def test_no_mark_becomes_a_message(self):
+        """DIE NEGATIVHAELFTE, und sie ist die wichtigere: im Nachrichtenband
+        laese das Modell seine eigene Rollover-Notiz als robins Worte."""
+        conversation = crow_core.Conversation(None)
+        conversation.append("user", "one")
+        crow_core.roll_over(conversation, "http://127.0.0.1:1/v1", 1000,
+                            path=self.path,
+                            notes=[{"k": "note", "at": 1, "t": "MARKER-TEXT"}])
+        self.assertNotIn("MARKER-TEXT", json.dumps(conversation.payload()),
+                         "a mark became a message and comes back as a user line")
+
+
+class TheGoalOutlivesEverythingTests(unittest.TestCase):
+    """#163. Der Zielspeicher, und die vier Lebensdauern, die er ueberstehen muss.
+
+    JEDE DAVON SCHLIESST EINEN ANDEREN SPEICHER AUS, und deshalb ist jede ein
+    eigener Fall statt eines gemeinsamen "es wird gespeichert":
+
+      Rollover      alles in der Conversation ist beim ersten Schnitt fort
+      Neustart      alles im Prozess ist fort
+      Neue Sitzung  ein frisches Fenster weiss nichts
+      Chat geloescht  das Ziel gehoert dem Nutzer, nicht dem Chat
+
+    DIE UHR WIRD IMMER MITGEGEBEN. Ein Fall, der `time.time()` liest, misst die
+    Laune der Maschine mit -- und bei Sekundenbruchteilen ist das der Unterschied
+    zwischen gruen und rot an einem langsamen Tag.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-goal-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._before = crow_core.SESSION_DIR
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", self._before)
+        crow_core.SESSION_DIR = self.dir
+
+    def a_goal(self, now: float = 1000.0):
+        return crow_core.goal_start(
+            "Ship the thing", ["read the code", "write it", "prove it"], now=now)
+
+    # -- was ein Ziel ist ---------------------------------------------------
+
+    def test_a_goal_is_written_and_read_back(self):
+        self.a_goal()
+        goal = crow_core.goal_load()
+        self.assertEqual(goal["title"], "Ship the thing")
+        self.assertEqual([s["text"] for s in goal["steps"]],
+                         ["read the code", "write it", "prove it"])
+        self.assertEqual(crow_core.goal_counts(goal), (0, 3))
+
+    def test_a_title_without_steps_is_not_a_goal(self):
+        """NEGATIVPROBE: eine Ueberschrift ohne Plan waere ein Zaehler `0/0` und
+        ein Motor ohne Arbeit. Kein Ziel ist die ehrlichere Antwort als eine
+        Datei, die niemand fuellen kann."""
+        self.assertIsNone(crow_core.goal_start("Ship the thing", []))
+        self.assertIsNone(crow_core.goal_start("", ["do it"]))
+        self.assertIsNone(crow_core.goal_load())
+        self.assertFalse(os.path.isfile(crow_core.goal_path()))
+
+    # -- die Uhr und die Token ---------------------------------------------
+
+    def test_a_step_carries_its_own_wall_clock_and_tokens(self):
+        self.a_goal()
+        crow_core.goal_step_begin(0, now=100.0)
+        goal = crow_core.goal_step_end(0, tokens=512, now=142.5)
+        step = goal["steps"][0]
+        self.assertEqual(step["status"], "done")
+        self.assertEqual(step["seconds"], 42.5)
+        self.assertEqual(step["tokens"], 512)
+
+    def test_a_retried_step_adds_its_time_instead_of_replacing_it(self):
+        """Ein Schritt, der nach einem Fehlschlag erneut laeuft, hat zweimal Zeit
+        gekostet. Die Summe ist die ehrliche Zahl -- die zweite Dauer allein
+        waere eine Behauptung ueber einen Versuch, den es gab."""
+        self.a_goal()
+        crow_core.goal_step_begin(0, now=100.0)
+        crow_core.goal_step_end(0, ok=False, tokens=10, now=110.0)
+        crow_core.goal_step_begin(0, now=200.0)
+        goal = crow_core.goal_step_end(0, tokens=5, now=230.0)
+        self.assertEqual(goal["steps"][0]["seconds"], 40.0)
+        self.assertEqual(goal["steps"][0]["tokens"], 15)
+
+    # -- der Kopf traegt den Plan, nicht den Stand --------------------------
+
+    def test_ticking_a_step_does_not_move_the_head_by_one_byte(self):
+        """DIE TEUERSTE REGEL DIESES TICKETS, und sie ist mechanisch pruefbar.
+        Der Block ist Teil des Prompt-Kopfes; eine Aenderung daran kostet einen
+        vollen Prefill -- am 2026-08-30 bei 8k Tiefe als `cached 0/7,923`
+        gemessen, bei 200k sind das Minuten. Fuenf Haken waeren fuenf Prefills.
+        """
+        self.a_goal()
+        before = crow_core.goal_block()
+        crow_core.goal_step_begin(0, now=100.0)
+        crow_core.goal_step_end(0, tokens=999, now=200.0)
+        self.assertEqual(crow_core.goal_block(), before,
+                         "a tick moved the head -- that is a full prefill per step")
+
+    def test_the_head_block_does_change_when_the_plan_does(self):
+        """GEGENPROBE: ein Block, der sich NIE aendert, waere kein Plan, sondern
+        eine Konstante. Ein neues Ziel muss ankommen."""
+        self.a_goal()
+        before = crow_core.goal_block()
+        crow_core.goal_start("Something else", ["one step"], now=2000.0)
+        self.assertNotEqual(crow_core.goal_block(), before)
+
+    def test_the_prompt_head_carries_the_goal_and_nothing_without_one(self):
+        """Der Weg vom Speicher in den Prompt, und die Gegenprobe daneben."""
+        self.assertNotIn("Active goal", crow_core.prompt_head())
+        self.a_goal()
+        self.assertIn("Ship the thing", crow_core.prompt_head())
+
+    # -- die vier Lebensdauern ---------------------------------------------
+
+    def test_it_survives_a_rollover(self):
+        """Der Schnitt leert die Conversation und laesst den Pin fallen. Das Ziel
+        steht danach wieder im Kopf, der hinausgeht."""
+        self.a_goal()
+        talk = crow_core.Conversation("SYSTEM")
+        talk.append("user", "a question")
+        talk.append("assistant", "an answer")
+        with tempfile.TemporaryDirectory() as tmp:
+            crow_core.roll_over(talk, "http://127.0.0.1:1/v1", 100,
+                                carry="the next line",
+                                path=os.path.join(tmp, "rollover.json"))
+            crow_core.repin_head(talk)
+        system = [m for m in talk.payload() if m["role"] == "system"]
+        self.assertTrue(system, "the cut left no system message at all")
+        self.assertIn("Ship the thing", system[0]["content"],
+                      "the goal did not survive the cut")
+
+    def test_a_rollover_without_a_head_leaves_the_old_behaviour(self):
+        """GEGENPROBE, und sie schuetzt jeden bestehenden Aufrufer: ohne `head`
+        pinnt der Schnitt nichts, genau wie vor #163."""
+        self.a_goal()
+        talk = crow_core.Conversation("SYSTEM")
+        talk.append("user", "a question")
+        with tempfile.TemporaryDirectory() as tmp:
+            crow_core.roll_over(talk, "http://127.0.0.1:1/v1", 100,
+                                path=os.path.join(tmp, "rollover.json"))
+        system = [m for m in talk.payload() if m["role"] == "system"]
+        self.assertNotIn("Active goal", system[0]["content"] if system else "")
+
+    def test_it_survives_a_restart(self):
+        """Nichts im Prozess ueberlebt einen Neustart. Der Fall ahmt genau das
+        nach: der Speicher wird nur ueber die Datei wiedergefunden."""
+        self.a_goal()
+        crow_core.goal_step_begin(0, now=100.0)
+        crow_core.goal_step_end(0, tokens=64, now=160.0)
+        # Ein "neuer Prozess": nichts als der Pfad bleibt.
+        goal = crow_core.goal_load()
+        self.assertEqual(goal["steps"][0]["seconds"], 60.0)
+        self.assertEqual(goal["steps"][0]["tokens"], 64)
+        self.assertEqual(crow_core.goal_counts(goal), (1, 3))
+
+    def test_a_new_session_is_pointed_at_the_running_goal(self):
+        """Ein Ziel, das laeuft und das niemand erwaehnt, ist unsichtbar, bis
+        jemand zufaellig danach fragt."""
+        self.a_goal(now=1000.0)
+        crow_core.goal_step_begin(0, now=1000.0)
+        crow_core.goal_step_end(0, now=1060.0)
+        said = crow_core.goal_summary(now=1000.0 + 3 * 60)
+        self.assertIn("Ship the thing", said)
+        self.assertIn("1/3", said)
+
+    def test_it_does_not_live_in_the_chat_that_was_typed_in(self):
+        """Der vierte Fall, und der ist der Grund, warum die Subtask-Registry
+        nicht der Ort ist: `drop_subtasks` raeumt SIE mit dem Chat ab. Das Ziel
+        liegt neben den Chats, nicht in einem."""
+        self.a_goal()
+        chat = os.path.join(self.dir, "chat-2026.json")
+        with open(chat, "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        os.remove(chat)
+        self.assertIsNotNone(crow_core.goal_load(),
+                             "the goal died with a chat it does not belong to")
+
+    # -- die Datei selbst ---------------------------------------------------
+
+    def test_an_unreadable_file_reads_as_no_goal_but_says_it_is_broken(self):
+        """Ein Ziel stillschweigend zu verlieren ist schlimmer, als es zu melden
+        -- deshalb zwei Antworten. Mit der Gegenprobe: nichts da ist nicht kaputt."""
+        self.assertFalse(crow_core.goal_broken())
+        self.a_goal()
+        with open(crow_core.goal_path(), "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        self.assertIsNone(crow_core.goal_load())
+        self.assertTrue(crow_core.goal_broken())
+
+    # -- was ein Schritt gekostet hat (#169, #174, #168) ---------------------
+
+    def counter(self, start: int = 0) -> None:
+        """Den Modulzaehler auf einen bekannten Stand, und danach zurueck.
+
+        ER IST MODULZUSTAND, und ohne das Zuruecksetzen traegt der naechste Fall
+        den Rest dieses hier -- dieselbe Regel, der die Uhr in dieser Klasse
+        folgt: was von aussen kommt, wird mitgegeben statt gelesen.
+        """
+        self.addCleanup(crow_core.goal_tokens_mark, crow_core.GOAL_TOKENS_NOW)
+        crow_core.goal_tokens_mark(start)
+
+    def test_the_counter_reaches_the_store_every_round_not_once_a_turn(self):
+        """#169. Der Fall, der live drei Nullen und eine 99.409 erzeugt hat:
+        mehrere Haken in EINEM Zug, waehrend der Stand nur am Zugende gemeldet
+        wurde. Jeder Schritt bekommt hier die Strecke, die auf ihn faellt."""
+        self.counter()
+        self.a_goal()
+        crow_core.goal_tokens_seen(1000)
+        crow_core.goal_step_begin(0, now=100.0)
+        crow_core.goal_tokens_seen(1400)
+        crow_core.goal_step_end(0, now=110.0)
+        crow_core.goal_tokens_seen(1900)
+        crow_core.goal_step_begin(1, now=110.0)
+        crow_core.goal_tokens_seen(2500)
+        goal = crow_core.goal_step_end(1, now=120.0)
+        self.assertEqual(goal["steps"][0]["tokens"], 400)
+        self.assertEqual(goal["steps"][1]["tokens"], 600)
+        self.assertEqual(goal["steps"][2]["tokens"], 0,
+                         "a step that has not run yet was charged")
+
+    def test_the_mark_sets_the_counter_without_charging_the_goal(self):
+        """Die Negativprobe zum Zaehler: ein Zug, der auf einem wiederher-
+        gestellten Chat aufsetzt, findet dort Tiefe vor, die niemand jetzt
+        ausgibt. Ohne diese Trennung schriebe das Ziel sich den ganzen Chat an."""
+        self.counter()
+        self.a_goal()
+        crow_core.goal_tokens_mark(50000)
+        self.assertEqual(crow_core.goal_spent(), 0)
+        crow_core.goal_tokens_seen(50400)
+        self.assertEqual(crow_core.goal_spent(), 400)
+
+    def test_what_the_goal_cost_survives_the_cut(self):
+        """#174. Nach dem Rollover faengt der absolute Zaehler klein an. Die
+        neue Tiefe ist frisch prefillt, also IST sie Ausgabe -- und die Summe
+        des Ziels laeuft darueber hinweg weiter, statt auf 0 zu fallen."""
+        self.counter()
+        self.a_goal()
+        crow_core.goal_tokens_seen(100000)
+        crow_core.goal_tokens_seen(12000)
+        crow_core.goal_tokens_seen(15000)
+        self.assertEqual(crow_core.goal_spent(), 115000)
+
+    def test_the_head_total_is_not_the_sum_of_the_column(self):
+        """#174. Zwischen zwei Schritten wird nachgedacht, delegiert und
+        gewartet. Ein Kopf, der die Spalte aufsummiert, behauptet, das habe
+        nichts gekostet -- live standen 256K im Kopf und 255.758 in der Spalte,
+        und beide waren dieselbe falsche Zahl."""
+        self.counter()
+        self.a_goal()
+        crow_core.goal_tokens_seen(1000)
+        crow_core.goal_step_begin(0, now=100.0)
+        crow_core.goal_tokens_seen(1400)
+        crow_core.goal_step_end(0, now=110.0)
+        crow_core.goal_tokens_seen(9000)
+        goal = crow_core.goal_load()
+        self.assertEqual(sum(s["tokens"] for s in goal["steps"]), 400)
+        self.assertEqual(crow_core.goal_spent(goal), 9000)
+
+    def test_a_delegated_step_says_what_it_cost_somewhere_else(self):
+        """#169, zweite Haelfte, und sie ist eine Entscheidung: fremde Token
+        werden GEFUEHRT, aber nicht in die lokale Spalte gemischt. Von den drei
+        moeglichen Antworten -- addieren, trennen, verschweigen -- luegt nur die
+        dritte, und genau die stand live da: `M1.1 18m 41s · 0 tok`."""
+        self.counter()
+        self.a_goal()
+        crow_core.goal_step_begin(0, now=100.0)
+        crow_core.goal_delegated_seen(18400)
+        goal = crow_core.goal_step_end(0, now=200.0)
+        self.assertEqual(goal["steps"][0]["delegated"], 18400)
+        self.assertEqual(goal["steps"][0]["tokens"], 0,
+                         "a remote provider's tokens landed in the local column")
+        self.assertEqual(crow_core.goal_delegated(goal), 18400)
+        self.assertEqual(crow_core.goal_spent(goal), 0,
+                         "the local total grew from a remote spot")
+
+    def test_a_delegation_that_lands_between_two_steps_is_not_lost(self):
+        """Sie hat stattgefunden, also zaehlt sie beim Ziel -- nur eben bei
+        keinem Schritt. Der stille Verlust waere dieselbe Luege eine Ebene
+        hoeher."""
+        self.counter()
+        self.a_goal()
+        crow_core.goal_delegated_seen(500)
+        self.assertEqual(crow_core.goal_delegated(), 500)
+        self.assertEqual([s["delegated"] for s in crow_core.goal_load()["steps"]],
+                         [0, 0, 0])
+
+    # -- ein Schritt, an dem wieder gearbeitet wird (#168) -------------------
+
+    def test_a_done_step_reopens_when_the_model_says_it_runs_again(self):
+        """#168. Live: ein delegierter Task lieferte Unbrauchbares, Crow baute
+        den Meilenstein neu -- und das Panel trug den ganzen Zug ueber den
+        gruenen Haken, waehrend der Zaehler 3/16 sagte und zwei davon stimmten."""
+        self.counter()
+        self.a_goal()
+        crow_core.goal_step_begin(0, now=100.0)
+        crow_core.goal_step_end(0, now=160.0)
+        self.assertEqual(crow_core.goal_counts(), (1, 3))
+        goal = crow_core.goal_step_begin(0, now=200.0)
+        self.assertIsNotNone(goal, "a step being worked on again was refused")
+        self.assertEqual(goal["steps"][0]["status"], crow_core.GOAL_RUNNING)
+        self.assertEqual(crow_core.goal_counts(goal), (0, 3),
+                         "the counter kept a tick that was taken back")
+
+    def test_the_second_stretch_is_added_to_the_first(self):
+        """Die Zeit des ersten Anlaufs bleibt stehen, die des zweiten kommt
+        obendrauf -- ein Schritt, der zweimal gemacht wurde, hat zweimal
+        gekostet, und die Summe ist die ehrliche Zahl."""
+        self.counter()
+        self.a_goal()
+        crow_core.goal_step_begin(0, now=100.0)
+        crow_core.goal_step_end(0, now=160.0)
+        crow_core.goal_step_begin(0, now=200.0)
+        crow_core.goal_tokens_seen(700)
+        goal = crow_core.goal_step_end(0, now=230.0)
+        self.assertEqual(goal["steps"][0]["seconds"], 90.0)
+        self.assertEqual(goal["steps"][0]["tokens"], 700)
+
+    def test_a_complete_goal_is_open_again_once_a_step_reopens(self):
+        """"Complete" darf nicht stehen bleiben, waehrend an einem Schritt
+        gearbeitet wird -- sonst liest die Wiederaufnahme nach einem Rollover
+        einen Zustand, den es nie gab."""
+        self.counter()
+        crow_core.goal_start("Two", ["one", "two"], now=1000.0)
+        crow_core.goal_step_end(0, now=1010.0)
+        goal = crow_core.goal_step_end(1, now=1020.0)
+        self.assertEqual(goal["status"], crow_core.GOAL_DONE)
+        goal = crow_core.goal_step_begin(1, now=1030.0)
+        self.assertEqual(goal["status"], crow_core.GOAL_OPEN)
+        self.assertEqual(crow_core.goal_counts(goal), (1, 2))
+
+    def test_nothing_but_that_call_reopens_a_step(self):
+        """Die Negativhaelfte zu #168: weder ein Haken woanders, noch eine
+        Tokenmeldung, noch ein Parken macht einen erledigten Schritt wieder auf.
+        Aufgemacht wird nur, weil das Modell sagt, dass es daran arbeitet."""
+        self.counter()
+        self.a_goal()
+        crow_core.goal_step_begin(0, now=100.0)
+        crow_core.goal_step_end(0, now=110.0)
+        crow_core.goal_step_begin(1, now=120.0)
+        crow_core.goal_tokens_seen(4242)
+        crow_core.goal_step_begin(2, now=130.0)
+        crow_core.goal_step_end(2, now=140.0)
+        self.assertEqual(crow_core.goal_load()["steps"][0]["status"],
+                         crow_core.GOAL_DONE)
+
+    def test_beginning_elsewhere_parks_the_running_step_instead_of_refusing(self):
+        """Der Motor stoesst den naechsten Schritt selbst an, also laeuft immer
+        einer -- ein `begin` woanders wurde damit IMMER abgelehnt, und jeder
+        Versuch des Modells, an einer anderen Stelle weiterzuarbeiten, verpuffte
+        still. Geparkt heisst: die Strecke wird gebucht, der Schritt faellt auf
+        offen zurueck, und es laeuft weiterhin genau einer."""
+        self.counter()
+        self.a_goal()
+        crow_core.goal_step_begin(1, now=100.0)
+        crow_core.goal_tokens_seen(300)
+        goal = crow_core.goal_step_begin(0, now=145.0)
+        self.assertIsNotNone(goal, "the model could not move to another step")
+        self.assertEqual(goal["steps"][1]["status"], crow_core.GOAL_OPEN)
+        self.assertEqual(goal["steps"][1]["seconds"], 45.0)
+        self.assertEqual(goal["steps"][1]["tokens"], 300,
+                         "the parked step's tokens landed on its successor")
+        self.assertEqual(goal["steps"][0]["status"], crow_core.GOAL_RUNNING)
+        self.assertEqual(sum(1 for s in goal["steps"]
+                             if s["status"] == crow_core.GOAL_RUNNING), 1,
+                         "two clocks on one slot")
+
+    # -- das Kommando -------------------------------------------------------
+
+    def test_the_command_sets_a_goal_and_refuses_one_without_steps(self):
+        """`/goal` in beiden Oberflaechen, mit der Gegenprobe daneben: ein Titel
+        ohne Plan ist kein Ziel."""
+        said, goal, changed = crow_core.goal_command("Ship it | read | write")
+        self.assertTrue(changed)
+        self.assertEqual(crow_core.goal_counts(goal), (0, 2))
+        self.assertIn(crow_core.GOAL_COST_NOTE, said)
+        _said, _goal, changed = crow_core.goal_command("Just a title")
+        self.assertFalse(changed, "a title with no steps became a goal")
+
+    def test_the_command_clears_the_goal(self):
+        crow_core.goal_command("Ship it | read | write")
+        _said, goal, changed = crow_core.goal_command("off")
+        self.assertTrue(changed)
+        self.assertIsNone(goal)
+        self.assertIsNone(crow_core.goal_load())
 
 
 if __name__ == "__main__":

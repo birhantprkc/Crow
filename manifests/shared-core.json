@@ -135,6 +135,16 @@
    "why": "#143. The blocking wait owns the two doors out -- the INTERRUPT flag it must never consume and the deadline that turns a stalled provider into a sentence. Two waiters would be two answers to who gets the Ctrl+C."
   },
   {
+   "name": "tool_goal_set",
+   "kind": "def",
+   "why": "#165. The plan the model writes for itself. One writer, because goal.json is the one record that outlives a rollover, a reboot and a new session (#163): a second surface writing its own shape there would hand the recovery a file it cannot read."
+  },
+  {
+   "name": "tool_goal_step",
+   "kind": "def",
+   "why": "#165. The one door that moves a step, and since #168 the one that reopens a finished one. Two implementations would be two answers to what a tick means -- and the engine picks the first step that is not done, so a second answer sends it past the work that is running."
+  },
+  {
    "name": "subtask_view",
    "kind": "def",
    "why": "#143 E2. The one list every surface draws the delegation state from -- cards, rail children and the chip all read it. A surface with its own idea of subtask state shows running where the registry says done."

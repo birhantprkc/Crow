@@ -465,18 +465,26 @@ class StreamReplyTests(unittest.TestCase):
         self._run([{"content": "hi"}], min_p=0.01)
         self.assertEqual(self.sent_body.get("min_p"), 0.01)
 
-    def test_reasoning_effort_rides_as_template_kwargs(self):
-        """The effort level lands in the template, and ONLY when asked for.
+    def test_reasoning_effort_rides_at_the_top_level(self):
+        """The effort level lands at the TOP LEVEL, and ONLY when asked for.
 
-        Sent: chat_template_kwargs carries exactly the key. Not sent: the field
-        is absent entirely -- the template treats missing as "low", and an
-        empty dict would still change the request against every client that
-        predates the switch."""
+        UMBENANNT AM 2026-08-31 (#176), und der alte Name war der Punkt: die
+        Stufe reiste in `chat_template_kwargs` und ging damit direkt an jinja.
+        Der Server faengt aber das oberste Feld ab und schaltet dort fuer `none`
+        das Denken aus (`tools/server/server-common.cpp:1323`) -- ueber die alte
+        Tuer ist `none` eine unbekannte Stufe und quittiert mit HTTP 500. Ein
+        Fall, der die alte Tuer festhaelt, haelt den Schalter vom Netz.
+
+        Gemessen, dass der Wechsel sonst nichts bewegt: low, medium und high
+        rendern ueber beide Tueren denselben sha.
+
+        Not sent: the field is absent entirely -- an empty value would still
+        change the request against every client that predates the switch."""
         self._run([{"content": "hi"}], reasoning_effort="max")
-        self.assertEqual(self.sent_body.get("chat_template_kwargs"),
-                         {"reasoning_effort": "max"})
-        self._run([{"content": "hi"}])
+        self.assertEqual(self.sent_body.get("reasoning_effort"), "max")
         self.assertNotIn("chat_template_kwargs", self.sent_body)
+        self._run([{"content": "hi"}])
+        self.assertNotIn("reasoning_effort", self.sent_body)
 
     def test_the_request_carries_tools(self):
         """Without them this model's template drops a replayed reasoning field
@@ -1244,7 +1252,12 @@ class ParserTests(unittest.TestCase):
     def test_default_system_is_one_line(self):
         """It is prefilled on every cold start; keep it cheap."""
         self.assertNotIn("\n", crow.DEFAULT_SYSTEM)
-        self.assertLess(len(crow.DEFAULT_SYSTEM), 200)
+        # #165 hob die Grenze von 200 auf 340: die Goal-Anweisung MUSS im Kopf
+        # stehen. Am 2026-08-30 gemessen -- in der Werkzeugbeschreibung allein
+        # rief das Modell `goal_set` nicht, es plante im Kopf und legte los.
+        # Die Grenze bleibt eine Grenze: dieser Prompt ist Byte 0 jedes
+        # Praefixes und wird bei jedem Kaltstart prefilled.
+        self.assertLess(len(crow.DEFAULT_SYSTEM), 340)
 
 
 class EndpointFailureTests(unittest.TestCase):
@@ -4484,7 +4497,11 @@ class TheReasoningLevelBelongsToTheChatTests(unittest.TestCase):
             crow_core.stream_reply(self._talk(), base_url="http://x/v1",
                                    model="crow", api_key="k", temperature=1.0,
                                    reasoning_effort="high", timeout=1.0)
-        self.assertEqual(sent["chat_template_kwargs"], {"reasoning_effort": "high"})
+        # #176: am OBERSTEN Feld, und die zweite Zeile haelt die Tuer fest --
+        # der Server faengt nur dort `none` ab, in `chat_template_kwargs` ist es
+        # eine unbekannte Stufe und quittiert mit HTTP 500.
+        self.assertEqual(sent["reasoning_effort"], "high")
+        self.assertNotIn("chat_template_kwargs", sent)
 
 
 class TheShippedManifestOffersOnlyMeasuredLevelsTests(unittest.TestCase):
@@ -4540,7 +4557,12 @@ class TheShippedManifestOffersOnlyMeasuredLevelsTests(unittest.TestCase):
         union. If these two were ever equal the case above would pass for the wrong
         reason -- it would be asserting something about every model at once."""
         levels = crow_core.reasoning_levels_for(self.FLASH_NEXT)
-        self.assertEqual(levels, ("low", "medium", "high"))
+        # #176: `none` kam am 2026-08-31 dazu, gemessen ueber die obere Tuer --
+        # 39f762404680, 101 Zeichen, mit haltender Negativprobe (max, minimal und
+        # ein explizites off weiterhin HTTP 500). Die Zeile darunter ist der
+        # eigentliche Zweck dieses Falls und bleibt unberuehrt: die Liste kommt
+        # aus einer Messung und nicht aus der Union.
+        self.assertEqual(levels, ("none", "low", "medium", "high"))
         self.assertNotEqual(levels, crow_core.REASONING_LEVELS)
 
     def test_an_unmeasured_model_still_gets_the_union(self):

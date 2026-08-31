@@ -959,6 +959,105 @@ body[data-code="shut"][data-git="shut"] #codegrip{display:none}
 .sess.on .t{color:var(--model)}
 .sess.on::before{content:"";position:absolute;left:2px;top:8px;bottom:8px;
   width:2px;background:var(--accent);border-radius:2px}
+/* -- #164: das Zielpanel ------------------------------------------------- */
+#goalpanel{position:absolute;top:14px;right:16px;z-index:5;width:290px;
+  max-height:60%;overflow:auto;background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;box-shadow:0 6px 24px var(--shadow);font-size:11.5px}
+#goalpanel[hidden]{display:none}
+/* DREI ZONEN MIT LUFT DAZWISCHEN, nach robins Vorlage: Kopfzeile mit Status,
+   dann das Ziel selbst mit Zeichen und Kennzahlen, dann die Liste. Die alte
+   Fassung presste alles in eine Zeile -- Zeichen, Wort, Uhr, Zaehler -- und war
+   damit eine Statusleiste, keine Anzeige. */
+#goalpanel .gh{display:flex;align-items:center;gap:8px;padding:13px 15px 11px;
+  cursor:pointer}
+#goalpanel .gh b{color:var(--text-faint);font-weight:600;letter-spacing:.2px}
+#goalpanel .gh .st{margin-left:auto;color:var(--dimmer)}
+#goalpanel .gh .st.ok{color:var(--ok)}
+#goalpanel .gx{background:none;border:0;color:var(--dimmer);font:inherit;
+  font-size:16px;line-height:1;padding:0 0 0 4px;cursor:pointer}
+#goalpanel .gx:hover{color:var(--bad)}
+/* DAS ZIEL IST DIE UEBERSCHRIFT, nicht eine Zeile unter dem Wort "Goal": es
+   bricht um, statt abgeschnitten zu werden, und traegt das Zeichen neben sich. */
+#goalpanel .gt{display:flex;gap:9px;align-items:flex-start;padding:0 15px 7px}
+#goalpanel .gi{color:var(--accent);flex:none;margin-top:1px;display:flex}
+#goalpanel .gt .tx{color:var(--text);font-weight:600;font-size:13px;
+  line-height:1.35;min-width:0;overflow-wrap:anywhere}
+/* EINE ZEILE FUER ALLE DREI ZAHLEN, mittig getrennt: Fortschritt, Uhr, Token.
+   Getrennt verteilt waren sie drei Zahlen an drei Orten, und keine davon las
+   sich als Aussage ueber dasselbe Ziel. */
+#goalpanel .gm{padding:0 15px 13px;color:var(--dimmer);
+  font-variant-numeric:tabular-nums}
+#goalpanel .gp{padding:11px 15px 6px;color:var(--dim);font-weight:600;
+  border-top:1px solid var(--line-soft)}
+#goalpanel ol{list-style:none;margin:0;padding:0 15px 13px}
+/* #174: LUFT ZWISCHEN DEN ZEILEN, WEIL SIE UMBRECHEN. Bei 6px und einer
+   einzeiligen Vorlage sah das Raster richtig aus; ein Schritt, der vier Zeilen
+   braucht (M6.2 im Lauf vom 2026-08-30), klebte an seinem Nachbarn, und die
+   Kostenzeile darunter gehoerte optisch schon zum naechsten. Der Abstand nach
+   unten ist groesser als der nach oben: so bleibt die Kostenzeile bei IHREM
+   Schritt. `min-width:0` und `overflow-wrap` sind das, was einen langen Pfad
+   ohne Leerzeichen umbrechen laesst, statt das Panel zu sprengen. */
+#goalpanel li{display:flex;gap:9px;padding:7px 0 9px;align-items:flex-start;
+  color:var(--text-faint);line-height:1.45}
+#goalpanel li>span:last-child{min-width:0;overflow-wrap:anywhere}
+#goalpanel li .m{flex:none;margin-top:2px;display:flex;color:var(--dimmer)}
+/* ERLEDIGT WIRD DURCHGESTRICHEN UND GRUEN, LAUFEND AMBER -- dieselben zwei
+   Farben, die die Rail fuer laufend und fertig benutzt, damit ein Blick von
+   dort hierher nichts umlernen muss. */
+#goalpanel li.done{color:var(--dimmer)}
+/* #174: DER STRICH IST EIN HINWEIS, KEIN BALKEN. In der Standarddicke lag er
+   bei 11,5px mitten auf den Buchstaben und machte einen erledigten Schritt
+   unlesbar -- man sah, DASS etwas fertig ist, aber nicht mehr, was. Duenn und in
+   der Linienfarbe bleibt beides. */
+#goalpanel li.done .t{text-decoration:line-through;
+  text-decoration-thickness:1px;text-decoration-color:var(--dimmer);
+  text-underline-offset:0}
+#goalpanel li.done .m{color:var(--ok)}
+#goalpanel li.running .m{color:var(--warn)}
+#goalpanel li.running .t{color:var(--text)}
+#goalpanel li.failed .m{color:var(--bad)}
+#goalpanel li.open .t{color:var(--text-faint)}
+#goalpanel li.done,#goalpanel li.failed{cursor:pointer}
+/* #174: DIE KOSTENZEILE HAENGT AN IHREM SCHRITT. Sie sass mit 3px so dicht
+   unter dem Text, dass sie bei einem umgebrochenen Schritt wie dessen fuenfte
+   Zeile aussah; mit Luft darueber und einem eigenen Ton ist sie eine Fussnote. */
+#goalpanel .cost{display:block;color:var(--dimmer);font-size:10.5px;
+  margin-top:5px;opacity:.85;font-variant-numeric:tabular-nums;
+  letter-spacing:.2px}
+/* ZUGEKLAPPT BLEIBT, WORUM ES GEHT: Titel, Zaehler, Uhr, Token. Weg ist nur die
+   Liste. Ein Kasten, der zugeklappt nur noch das Wort "Goal" zeigt, ist kein
+   eingeklapptes Ziel -- er ist gar keine Anzeige mehr. */
+#goalpanel.shut .gp,#goalpanel.shut ol{display:none}
+#goalpanel.shut .gm{padding-bottom:13px}
+
+/* -- #162: ein Zug, der laeuft, waehrend man woanders steht ---------------- */
+/* AM RAND UND NICHT AUF DER FLAECHE, und dafuer ein eigenes Element: `::before`
+   traegt den Balken der offenen Zeile, `::after` die Einrueckungslinie eines
+   Chats im Projekt. Ein dritter Zustand haette einem der beiden seinen Platz
+   genommen -- sichtbar erst bei einem laufenden Chat INNERHALB eines Projekts,
+   also genau dort, wo es niemand sucht.
+   Die Maske ist, was daraus eine Umrandung macht: der Verlauf fuellt das ganze
+   Feld, und ausgestanzt bleibt nur der 1 px breite Rahmen. */
+.sess .edge{position:absolute;inset:0;border-radius:6px;padding:1px;
+  pointer-events:none;opacity:0;
+  background:linear-gradient(135deg,transparent 30%,var(--warn) 50%,transparent 70%);
+  background-size:300% 300%;
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;mask:linear-gradient(#000 0 0) content-box,
+  linear-gradient(#000 0 0);mask-composite:exclude}
+/* SEICHT, WEIL SIE MINUTEN LAUFEN KANN. Eine Rail mit einem hellen Lauflicht
+   neben dem Text, in dem gerade jemand liest, ist nach dem zweiten Zug das
+   Erste, was abgeschaltet wird. */
+.sess.running .edge{opacity:.55;animation:sessedge 3.2s linear infinite}
+@keyframes sessedge{from{background-position:0% 0%}to{background-position:100% 100%}}
+/* FERTIG UND UNGELESEN: derselbe Balken wie bei der offenen Zeile, in Amber.
+   Die Form ist dieselbe, damit sie ohne Erklaerung gelesen wird -- nur die
+   Farbe sagt, dass hier etwas wartet statt hier zu sein. `done` wird nur
+   gesetzt, solange die Zeile NICHT die offene ist, also kollidieren die beiden
+   ::before-Regeln nicht. */
+.sess.done::before{content:"";position:absolute;left:2px;top:8px;bottom:8px;
+  width:2px;background:var(--warn);border-radius:2px}
+.sess.done .t{color:var(--text-soft)}
 .sess .t{font-size:12px;color:var(--text-faint);display:block;white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis}
 .sess .s{font-size:10.5px;color:var(--dimmer);display:block;margin-top:1px}
@@ -1246,7 +1345,6 @@ details.think[open] .caret{transform:rotate(90deg)}
 /* INSIDE THE TILE THE ARGUMENTS ARE THE POINT, so they are not clipped -- the
    tile grew to fit them. In the flow they were one line of a column that had
    other things to show. */
-#toolcalls .tool .arg{overflow:visible;text-overflow:clip}
 #toolcalls .tcclear{font:inherit;font-size:10.5px;cursor:pointer;
   border-radius:5px;padding:2px 9px;background:transparent;
   border:1px solid var(--line);color:var(--dimmer)}
@@ -1321,11 +1419,17 @@ details.think[open] .caret{transform:rotate(90deg)}
   background:var(--panel);overflow:hidden}
 .tool .hd{display:flex;align-items:center;gap:9px;padding:6px 11px;
   font-size:11.5px}
-.tool .ico{color:var(--warn);font-size:9px}
-.tool .name{color:var(--text-soft)}
-.tool .arg{color:var(--dimmer);overflow:hidden;text-overflow:ellipsis;
-  white-space:nowrap}
-.tool .note{margin-left:auto;color:var(--dimmer);white-space:nowrap}
+.tool .ico{color:var(--warn);font-size:9px;flex:none}
+.tool .name{color:var(--text-soft);flex:none}
+.tool .note{margin-left:auto;color:var(--dimmer);white-space:nowrap;
+  flex:none;padding-left:6px}
+.tool .tx{flex:none}
+/* #172: EIN AUFRUF, DER LAEUFT, SAGT ES. Bis hier sah ein Aufruf, der nach zwei
+   Stunden noch nicht zurueck war, aus wie einer, der sofort fertig wurde -- von
+   aussen war ein Haenger von harter Arbeit nicht zu unterscheiden. Amber ist
+   dieselbe Farbe, die der laufende Schritt im Zielpanel traegt. */
+.tool.run .note{color:var(--warn);font-variant-numeric:tabular-nums}
+.tool.run .ico{color:var(--warn)}
 .code{margin:12px 0;border:1px solid var(--line);border-radius:8px;
   background:var(--code-bg);overflow:hidden}
 .code .hd{display:flex;align-items:center;gap:8px;padding:6px 8px 6px 12px;
@@ -1603,6 +1707,17 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   background-size:220% 100%,auto;
   animation:pendsweep 2.6s ease-in-out infinite, pendglow 2.6s ease-in-out infinite}
 #pendbar[hidden]{display:none}
+/* #162. RUHIG, NICHT ALARMIEREND: ein Blick in einen anderen Chat ist ein
+   normaler Zustand, kein Fehler. Deshalb der gedaempfte Rahmen und keine
+   Animation -- die gehoert #pendbar, wo wirklich etwas wartet. */
+#viewbar{max-width:900px;margin:0 auto -14px;padding:9px 13px 22px;
+  border:1px solid var(--line);border-radius:10px;background:var(--raised);
+  color:var(--dim);font-size:11.5px;display:flex;align-items:center;gap:10px}
+#viewbar[hidden]{display:none}
+#viewbar b{color:var(--text);font-weight:600}
+#viewbar button{margin-left:auto;background:none;border:1px solid var(--line);
+  border-radius:7px;color:var(--accent);font:inherit;padding:2px 9px;cursor:pointer}
+#viewbar button:hover{border-color:var(--accent)}
 #pendbar .top{display:flex;align-items:center;gap:10px}
 #pendbar .title{font-weight:600}
 #pendbar .plus{color:var(--ok);font-variant-numeric:tabular-nums}
@@ -2370,8 +2485,20 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
          one tile, per chat, always present so there is somewhere to look even
          before the first call. ABSOLUTE, so it does not scroll away from the
          reader who wants it. -->
+    <!-- #164. DAS ZIEL, oben rechts IM Chatfenster und nicht als dritte Spalte
+         daneben: es gehoert zu dem Gespraech, in dem es gesetzt wurde, und eine
+         eigene Spalte haette es zu einem Moebel gemacht, das immer da ist.
+         ABSOLUT wie die Tool-Kachel, damit es dem Leser nicht wegscrollt.
+         VERSTECKT OHNE ZIEL (robin, 2026-08-30): kein leerer Rahmen. -->
+    <div id="goalpanel" hidden></div>
     <div id="flow"></div>
     <div id="composer">
+      <!-- #162. WO MAN STEHT, WENN ES NICHT DER LAUFENDE CHAT IST. Ein Blick in
+           einen anderen Chat waehrend eines Zuges sieht sonst genauso aus wie
+           ein Wechsel, und die naechste Zeile liefe fuer den Leser ueberraschend
+           woanders. Der Knopf ist der Rueckweg -- der laufende Chat hat oft
+           keine Datei, also fuehrt kein Rail-Klick dorthin. -->
+      <div id="viewbar" hidden></div>
       <div id="pendbar" hidden onclick="crow.pendToggle(event)"></div>
       <div id="box">
         <!-- #142. One chip per staged image, drawn from what stage_image
@@ -2922,13 +3049,17 @@ const crow = {
     const n=$("#codehead .n"); if(n) n.textContent="";
     const d=document.createElement("div"); d.className="tool shut";
     d.innerHTML='<div class="hd"><span class="ico">&#9679;</span>'+
-      '<span class="name"></span><span class="arg"></span>'+
+      '<span class="name"></span>'+
       '<span class="note"></span><span class="tx">+</span></div>'+
       '<div class="tbody"></div>';
     d.querySelector(".note").textContent =
       this.execute ? "ran" : "shown, not run";
     d.querySelector(".name").textContent=name;
-    d.querySelector(".arg").textContent=args||"";
+    // #172, robin 2026-08-31: DER BEFEHL GEHOERT IN DEN AUFGEKLAPPTEN AUFRUF,
+    // NICHT IN DIE KOPFZEILE. Er ist beliebig lang, also drueckte er die Uhr aus
+    // der Zeile oder ueber sie -- und beim Aufklappen steht er ohnehin
+    // vollstaendig da, einmal. Die Kopfzeile traegt jetzt nur, was immer kurz
+    // ist: Name, Uhr, Aufklapper.
     // #143. The delegation calls wear their own glyph and channel, so a fan-out
     // is readable in the panel without opening a single row.
     if(name==="delegate"||name==="collect"||name==="subtasks"){
@@ -2954,13 +3085,44 @@ const crow = {
     // gekuerzte Fassung, weil sie eine Zeile ist; wer aufklappt, will das,
     // was das Werkzeug wirklich bekommen hat.
     if(raw) this.toolArgBlock(d, name, raw);
+    else if(args) this.toolArgBlock(d, name, args);
     // DER OFFENE AUFRUF, an den Uhr und Antwort gehen. Die drei Ereignisse
     // kommen je Aufruf in dieser Reihenfolge ueber die Naht, also ist der
     // zuletzt angelegte immer der gemeinte. `tools_reported` legt Zeilen an,
     // die nie ein Ergebnis bekommen -- die naechste `tool` ueberschreibt sie,
     // und keine fremde Antwort landet in einer fremden Zeile.
     this.openCall=d;
+    // #172. DIE UHR LAEUFT AB JETZT, IN DER SEITE. Gemessen am 2026-08-30: ein
+    // `run_command`, das detached startete, kam nie zurueck; das Fenster zeigte
+    // einen Gedanken und danach nichts -- kein Spinner, keine Notiz, keine Zahl.
+    // Geloest hat es erst, dass robin die Prozesse von Hand abgeraeumt hat, und
+    // NICHTS auf dem Schirm sagte, dass das noetig war. Die Zieluhr half nicht:
+    // sie zaehlt den Schritt, nicht das Werkzeug.
+    this.toolClock(d);
     this.tail();
+  },
+
+  // #172. EIN OFFENER AUFRUF UND SEINE VERSTRICHENE ZEIT, an der Kachel.
+  //
+  // NICHT IN DER LEISTE UEBER DER EINGABE, und das war der erste Versuch: dort
+  // steht die Tokenrate des laufenden Zuges, und zwei Schreiber auf einem Feld
+  // sind keine zwei Auskuenfte, sondern eine verlorene. Die Uhr ueberschrieb die
+  // Rate im Sekundentakt und liess nach `toolend` den Stand eines fertigen
+  // Aufrufs stehen (robin, 2026-08-31: "die tok/s wird unten nicht mehr
+  // angezeigt"). Wer beides will, braucht ein zweites Feld, nicht dasselbe.
+  toolClock(row){
+    this.toolClockStop();
+    const at=Date.now();
+    const note=row.querySelector(".note");
+    row.classList.add("run");
+    const draw=()=>{ note.textContent=this.clock((Date.now()-at)/1000); };
+    draw();
+    this.toolTick=setInterval(draw, 1000);
+  },
+
+  toolClockStop(){
+    if(this.toolTick){ clearInterval(this.toolTick); this.toolTick=null; }
+    document.querySelectorAll(".tool.run").forEach(t=>t.classList.remove("run"));
   },
 
   // #138b. Der Strom war die Huelle, dies ist der Inhalt.
@@ -3013,6 +3175,10 @@ const crow = {
     row.querySelector(".tbody").appendChild(wrap); },
 
   toolEnd(name,seconds,repeated){
+    // #172: DER AUFRUF IST ZURUECK -- die Uhr der Seite hoert auf, und was
+    // stehen bleibt, ist die Zahl des Kerns. Vor dem `return` unten, weil auch
+    // eine Antwort, die keine Zeile findet, das Ticken beendet.
+    this.toolClockStop();
     const row=this.openCall;
     if(!row || row.querySelector(".name").textContent!==name) return;
     const note=row.querySelector(".note");
@@ -3021,7 +3187,11 @@ const crow = {
     const parts=[];
     if(repeated) parts.push("repeat");
     if(seconds>=0.1) parts.push(seconds.toFixed(1)+"s");
-    if(parts.length) note.textContent=parts.join(" · "); },
+    // #172: UND SONST WIRD SIE GELEERT. Bis hier stand hier nie etwas, wenn ein
+    // Aufruf zu schnell war, um eine Zahl zu verdienen -- seit die Uhr laeuft,
+    // steht dort `0m 00s`, und genau das ist der Laerm, den die Grenze oben
+    // verhindern soll. Gefunden von robin beim ersten Blick, 2026-08-31.
+    note.textContent = parts.length ? parts.join(" · ") : ""; },
 
   toolRes(name,text,cut){
     const row=this.openCall;
@@ -4259,6 +4429,9 @@ const crow = {
   },
 
   idle(){ this.running=false; go.textContent="↑"; go.classList.remove("stop");
+    // #172: auch ein Zug, der scheitert oder abgebrochen wird, laesst keine
+    // tickende Kachel zurueck -- sie behauptete sonst einen laufenden Aufruf.
+    this.toolClockStop();
     $("#turnstate").textContent=""; $("#hint").textContent="";
     document.querySelectorAll(".cursor").forEach(c=>c.remove());
     this.cursor=null; },
@@ -4274,10 +4447,183 @@ const crow = {
   // Composer auf `Stop` fuer etwas, das der Leser nie angestossen hat, und
   // seine Frage laege sichtbar im Verlauf, ohne dass sich etwas bewegt --
   // dieselbe Lage wie der Fehler, nur mit gesperrtem Knopf.
+  // #162. DER GRUND FUER DAS WARTEN IST NICHT IMMER DERSELBE. Ein Nachlauf ist
+  // Sekunden, ein fremder Zug kann Minuten sein -- und wer die Zeile in einem
+  // anderen Chat getippt hat, muss lesen koennen, dass sie DORT laeuft.
+  //
+  // AUS DEM EIGENEN ZUSTAND, NICHT AUS DER NACHRICHT: die Seite weiss seit
+  // `viewBar`, wo sie steht. Ein Feld im Push waere dieselbe Tatsache ein
+  // zweites Mal, und zwei Fassungen einer Tatsache koennen sich widersprechen.
   queuedLine(){ this.running=true; go.textContent="■ Stop";
     go.classList.add("stop");
     $("#turnstate").textContent="…";
-    $("#hint").textContent="queued -- the memory review is finishing"; },
+    $("#hint").textContent = this.viewingOther
+      ? "queued for this chat -- it runs when the other turn is done"
+      : "queued -- the memory review is finishing"; },
+
+  // #164. DAS ZIELPANEL. Ohne Ziel bleibt es weg -- kein leerer Rahmen.
+  //
+  // JEDER TEXT UEBER textContent, weil Titel und Schritte vom Nutzer kommen und
+  // ueber die Datei laufen: dieselbe Regel, der die Rail und das Modellmenue
+  // folgen, seit ein Projektname `'); doSomething('` heissen darf.
+  goalPanel(g){ const p=$("#goalpanel");
+    if(!g){ p.hidden=true; p.textContent=""; this.goal=null; return; }
+    this.goal=g;
+    const shut=p.classList.contains("shut");
+    p.textContent=""; p.className=shut ? "shut" : "";
+
+    clearInterval(this.goalTick);
+    (this.stepTicks||[]).forEach(clearInterval); this.stepTicks=[];
+    const done=g.status==="done";
+
+    // ZONE 1: die Kopfzeile. Nur das Wort und der Zustand -- alles Weitere hat
+    // seinen eigenen Platz darunter.
+    const head=document.createElement("div"); head.className="gh";
+    head.onclick=()=>{ p.classList.toggle("shut"); };
+    const label=document.createElement("b"); label.textContent="Goal";
+    const st=document.createElement("span");
+    st.className="st"+(done ? " ok" : "");
+    st.textContent=done ? "Complete" : "";
+    const shutBtn=document.createElement("button"); shutBtn.className="gx";
+    shutBtn.textContent="×"; shutBtn.title="close this goal";
+    shutBtn.onclick=ev=>{ ev.stopPropagation(); pywebview.api.close_goal(); };
+    head.append(label, st, shutBtn);
+
+    // ZONE 2: das Ziel selbst, mit dem Zeichen daneben. Es bricht um.
+    const title=document.createElement("div"); title.className="gt";
+    const mark=document.createElement("span"); mark.className="gi";
+    mark.innerHTML=this.svgGoal();
+    const tt=document.createElement("span"); tt.className="tx";
+    tt.textContent=g.title;
+    title.append(mark, tt);
+
+    // ZONE 3: die drei Zahlen in EINER Zeile -- Fortschritt, Uhr, Token.
+    // #164: DIE UHR LAEUFT IN DER SEITE WEITER, nicht mit den Pushes: gezeichnet
+    // wird nur, wenn ein Werkzeug einen Schritt bewegt, und dazwischen liegen
+    // Minuten. Die Zahl stand deshalb still, waehrend das Ziel lief.
+    // #174: DIE ZAHL KOMMT AUS DEM SPEICHER, sie wird hier nicht mehr aus der
+    // Spalte aufsummiert. Die Summe der Schritte war zweimal falsch: sie erbte
+    // deren Fehler (#169), und sie liess alles weg, was zwischen zwei Schritten
+    // passiert -- Nachdenken, Werkzeuge, den Rollover selbst.
+    const meta=document.createElement("div"); meta.className="gm";
+    const tok=g.tokens||0, deleg=g.delegated||0;
+    const base=g.seconds||0, at=Date.now();
+    // #169: DIE DELEGIERTEN STEHEN DANEBEN, nicht drin. Sie sind auf einem
+    // anderen Anbieter ausgegeben; addiert waere die Zahl eine ueber zwei Dinge.
+    const drawMeta=x=>g.done+"/"+g.total+" · "+this.clock(x)
+                      +" · "+this.tokShort(tok)+" tokens"
+                      +(deleg ? " · "+this.tokShort(deleg)+" delegated" : "");
+    meta.textContent=drawMeta(base);
+    // #164: NUR WENN CROW ANGEFANGEN HAT. Ein Plan, der dasteht und auf die
+    // Zeile wartet, die ihn anstoesst, hat noch keine Dauer -- und eine Uhr, die
+    // ab dem Tippen laeuft, misst das Tippen (robin, 2026-08-31).
+    if(!done && g.begun) this.goalTick=setInterval(()=>{
+      if(!document.body.contains(meta)){ clearInterval(this.goalTick); return; }
+      meta.textContent=drawMeta(base+(Date.now()-at)/1000); }, 1000);
+
+    const prog=document.createElement("div"); prog.className="gp";
+    prog.textContent="Progress";
+
+    const list=document.createElement("ol");
+    (g.steps||[]).forEach((s,i)=>{
+      const li=document.createElement("li"); li.className=s.status;
+      const mark=document.createElement("span"); mark.className="m";
+      mark.innerHTML=this.svgStep(s.status);
+      const body=document.createElement("span");
+      const t=document.createElement("span"); t.className="t";
+      t.textContent=s.text; body.append(t);
+      // #164: KLICK AUF EINEN SCHRITT ZEIGT, WAS ER GEKOSTET HAT. Ein fertiger
+      // nennt seine Wanduhr und seine Token, ein laufender dasselbe bis jetzt.
+      if(s.status!=="open"){
+        const c=document.createElement("span"); c.className="cost";
+        // #164. DER LAUFENDE SCHRITT ZEIGT SEINE UHR OFFEN UND LIVE. Ein Schritt,
+        // der arbeitet, ist das Einzige, was gerade passiert -- ihn erst auf
+        // Klick preiszugeben hiesse, die einzige Zahl zu verstecken, die sich
+        // bewegt. Fertige bleiben zugeklappt: dort ist die Zahl ein Nachschlag.
+        const run=s.status==="running";
+        c.hidden=!run;
+        const sbase=s.seconds||0, sat=Date.now();
+        // NUR ZEIT UND TOKEN. Die Notiz des Modells stand hier auch und war ein
+        // Pfad quer durch die Zeile -- die Zeile beantwortet "was hat das
+        // gekostet", nicht "was hat es dazu gesagt".
+        // #169: EIN DELEGIERTER SCHRITT SAGT ES. Drei Schritte standen live auf
+        // "0 tok", weil ihre Arbeit auf einem fremden Spot lief -- das las sich
+        // wie "hat nichts gekostet". Die Zahl steht daneben, nicht darin.
+        const sdel=s.delegated||0;
+        // #169: DER LAUFENDE SCHRITT ZEIGT GEBUCHTES PLUS LAUFENDES, genau wie
+        // die Uhr daneben (`sbase + verstrichen`). Nur die laufende Strecke
+        // waere bei einem wieder aufgemachten Schritt (#168) ein Ruecksprung:
+        // seine erste Strecke ist bereits gebucht und gehoert ihm weiter.
+        const stok = (s.status==="running" && s.at!=null)
+          ? (s.tokens||0) + Math.max(0, (g.tokens||0) - s.at) : (s.tokens||0);
+        const draw=x=>this.clock(x)+" · "+stok+" tok"
+                      +(sdel ? " · "+this.tokShort(sdel)+" delegated" : "");
+        c.textContent=draw(sbase);
+        if(run){ this.stepTicks.push(setInterval(()=>{
+          if(!document.body.contains(c)) return;
+          c.textContent=draw(sbase+(Date.now()-sat)/1000); }, 1000)); }
+        body.append(c);
+        li.onclick=()=>{ if(!run) c.hidden=!c.hidden; }; }
+      li.append(mark, body); list.append(li); });
+
+    p.append(head, title, meta, prog, list);
+    p.hidden=false; },
+
+  // #164. DIE ZEICHEN, inline statt als Datei: die Seite ist eine einzige
+  // Zeichenkette, und ein Bild daneben waere etwas, das beim Packen fehlen kann.
+  // `currentColor` ueberall, damit sie dem Zustand und dem Theme folgen.
+  svgGoal(){ return '<svg viewBox="0 0 24 24" width="15" height="15" fill="none"'
+    +' stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/>'
+    +'<path d="M10.5 8.2l5.4 3.8-5.4 3.8z" fill="currentColor" stroke="none"/>'
+    +'</svg>'; },
+
+  // Ein Ring je Zustand: mit Haken, mit Punkt, mit Kreuz, oder leer.
+  svgStep(state){ const o='<svg viewBox="0 0 24 24" width="14" height="14"'
+    +' fill="none" stroke="currentColor" stroke-width="2"'
+    +' stroke-linecap="round" stroke-linejoin="round">';
+    if(state==="done") return o+'<circle cx="12" cy="12" r="9"/>'
+      +'<path d="M8 12.4l2.7 2.6L16 9.6"/></svg>';
+    if(state==="running") return o+'<circle cx="12" cy="12" r="9"/>'
+      +'<circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none"/></svg>';
+    if(state==="failed") return o+'<circle cx="12" cy="12" r="9"/>'
+      +'<path d="M9 9l6 6M15 9l-6 6"/></svg>';
+    return o+'<circle cx="12" cy="12" r="9"/></svg>'; },
+
+  // 89K statt 89234: im Kopf einer Anzeige zaehlt die Groessenordnung.
+  tokShort(n){ n=n||0;
+    return n>=1000 ? (n/1000).toFixed(n>=10000 ? 0 : 1).replace(/\.0$/,"")+"K"
+                   : String(n); },
+
+  // m:ss bis eine Stunde, danach h:mm:ss. Tabellenziffern stehen still.
+  clock(sec){ sec=Math.max(0,Math.round(sec||0));
+    const s=sec%60, m=Math.floor(sec/60)%60, h=Math.floor(sec/3600);
+    const two=x=>String(x).padStart(2,"0");
+    return h ? h+":"+two(m)+":"+two(s) : m+"m "+two(s)+"s"; },
+
+  // #162. WO MAN STEHT. Leer heisst: im laufenden Chat, also nichts zu sagen.
+  viewBar(e){ const b=$("#viewbar");
+    if(e.live){ b.hidden=true; b.textContent=""; this.viewingOther=false; return; }
+    this.viewingOther=true;
+    b.textContent="";
+    const what=document.createElement("span");
+    // TEXTCONTENT, WEIL BEIDE NAMEN VON PLATTE KOMMEN -- dieselbe Regel, der die
+    // Rail und das Modellmenue folgen.
+    what.append("viewing ");
+    const here=document.createElement("b"); here.textContent=e.title||"new chat";
+    what.append(here);
+    // KEIN LAUFENDER ZUG, KEIN SATZ DARUEBER. `running` ist leer, sobald nichts
+    // mehr rechnet -- und ein "still running" ueber einem fertigen Zug ist die
+    // Falschauskunft, die robin am 2026-08-30 gefunden hat. Der Name des Chats,
+    // in dem zuletzt gearbeitet wurde, ist keine Aussage ueber jetzt.
+    if(e.running){
+      what.append(" — still running: ");
+      const there=document.createElement("b"); there.textContent=e.running;
+      what.append(there); }
+    const back=document.createElement("button");
+    back.textContent="back to it";
+    back.onclick=()=>pywebview.api.view_live();
+    b.append(what, back);
+    b.hidden=false; },
 
   // THE LOCK IS SYNCHRONOUS, THE PAINT IS NOT, and that split is what the
   // bridge is for. Every pywebview.api.* call resolves a promise once the
@@ -4308,7 +4654,11 @@ const crow = {
   // plain line, Escape) stays exactly what it was.
   go(){ const text=input.value.trim();
     if(this.running && /^\/(delegate|subtasks)\b/i.test(text)){ this.fanout(text); return; }
-    if(this.running){ pywebview.api.stop(); return; }
+    // #162. IN EINER FREMDEN ANSICHT IST DER KNOPF KEIN STOP. Der laufende Zug
+    // gehoert einem anderen Chat; ihn von hier aus abzubrechen waere ein Stop
+    // fuer etwas, das gar nicht auf dem Schirm steht. Getippt wird fuer DIESEN
+    // Chat, und die Zeile wird eingereiht.
+    if(this.running && !this.viewingOther){ pywebview.api.stop(); return; }
     if(!text) return;
     input.value=""; input.style.height="auto";
     this.user(text);
@@ -4725,8 +5075,13 @@ const crow = {
   // clear had already happened -- so clicking the chat you are reading emptied
   // the window. The side that knows whether it will replay is the side that
   // clears, and it does, on the queue, in order.
-  reset(){ if(this.running) return; pywebview.api.reset(); },
-  open(path){ if(this.running) return; pywebview.api.open(path); },
+  // #162. DIE SPERRE FAELLT HIER GANZ, statt hier UND drueben zu stehen. Die
+  // Python-Seite entscheidet, ob ein Klick ein Wechsel ist oder ein Blick --
+  // sie ist die einzige, die weiss, ob ein Zug laeuft und welcher Chat ihm
+  // gehoert. Eine zweite Meinung in der Seite waere die Sorte Kopie, die beim
+  // ersten Sonderfall auseinanderlaeuft.
+  reset(){ pywebview.api.reset(); },
+  open(path){ pywebview.api.open(path); },
 
   // RIGHT-CLICK ON A CHAT. Three things a list of saved conversations has to
   // offer, and none of them is reachable from a left click: rename it, put it
@@ -5070,10 +5425,24 @@ const crow = {
     if(it && it.parent){ this.subPending=i; crow.open(it.parent); }
   },
 
+  // #162. DREI MARKEN, DIE SICH NICHT AUSSCHLIESSEN. `on` heisst "hier bin
+  // ich", `running` heisst "hier rechnet etwas, waehrend ich woanders bin",
+  // `done` heisst "hier ist etwas fertig geworden, das ich noch nicht gesehen
+  // habe". Ein Chat kann laufen UND angesehen sein, deshalb ist es eine Liste
+  // von Klassen und keine Kette von else.
+  rowMarks(r){ return (r.active ? " on" : "")
+    + (r.running ? " running" : "")
+    + (r.done && !r.active ? " done" : ""); },
+
   chatRow(r,inproj){ const b=document.createElement("button");
-    b.className=(r.active ? "sess on" : "sess")+(inproj ? " inproj" : "");
+    b.className="sess"+this.rowMarks(r)+(inproj ? " inproj" : "");
     if(r.path) b.dataset.path=r.path;   // what the mark is moved by, below
-    b.innerHTML='<span class="t"></span><span class="s"></span>';
+    // #162: das Randlicht ist ein eigenes Kind, siehe `.sess .edge`. Es ist
+    // immer da und immer unsichtbar, bis `running` es einschaltet -- ein
+    // Element, das erst beim Start des Zuges entstuende, koennte der
+    // Schnellpfad der Rail nicht erreichen.
+    b.innerHTML='<span class="edge"></span><span class="t"></span>'
+               +'<span class="s"></span>';
     b.querySelector(".t").textContent=r.title || r;
     b.querySelector(".s").textContent=r.meta || "";
     b.title="open · right-click for more";
@@ -5125,10 +5494,20 @@ const crow = {
       +"|"+(unsaved?"live>"+title:"")+"|"+this.liveRoot
       +"|"+this.projects.map(p=>p.path+(p.open?"+":"-")).join("\n");
     if(box.dataset.shape===shape){
+      // #162. DIE LIVE-ZEILE HAT KEINEN PFAD und wurde deshalb vom Schnellpfad
+      // nie angefasst -- richtig, solange sie immer die markierte war. Jetzt
+      // wandert die Marke von ihr weg, sobald man woanders hinsieht, und ohne
+      // diese Zeile bliebe sie hell stehen.
+      const lv=box.querySelector('.sess:not([data-path])');
+      if(lv){ lv.classList.toggle("on", e.live_active!==false);
+        lv.classList.toggle("running", !!e.live_running);
+        lv.classList.toggle("done", !!e.live_done && e.live_active===false); }
       (rollovers||[]).forEach(r=>{ if(!r.path) return;
         const b=box.querySelector('[data-path="'+CSS.escape(r.path)+'"]');
         if(!b) return;
         b.classList.toggle("on", !!r.active);
+        b.classList.toggle("running", !!r.running);
+        b.classList.toggle("done", !!r.done && !r.active);
         // THE HANDLER MOVES WITH THE MARK. Toggling the class alone left the
         // entry that was active at the first draw without one, forever -- and
         // that is a chat you cannot click.
@@ -5145,7 +5524,11 @@ const crow = {
     // with no turn in it. It goes under its project like any other, because a
     // new chat started inside one belongs there from its first line -- not from
     // its first save.
-    const live=unsaved ? {path:null,title:title,meta:meta,active:true,
+    // #162: `active` KOMMT JETZT AUS PYTHON. Fest verdrahtet war es richtig,
+    // solange der laufende Chat immer der sichtbare war.
+    const live=unsaved ? {path:null,title:title,meta:meta,
+                          active:e.live_active!==false,
+                          running:!!e.live_running, done:!!e.live_done,
                           root:this.liveRoot} : null;
     const all=(rollovers||[]).slice();
     const rowFor=r=>{
@@ -5402,6 +5785,12 @@ const crow = {
 
   on(msg){
     const e=typeof msg==="string" ? JSON.parse(msg) : msg;
+    // #162. WAS EIN HINTERGRUNDZUG SAGT, WIRD VERWORFEN -- nicht gepuffert. Der
+    // Verlauf des laufenden Chats wird beim Zurueckwechseln aus seiner
+    // Conversation neu gezeichnet, also waere ein Puffer hier eine zweite
+    // Fassung desselben Textes, und die beiden koennten sich widersprechen.
+    // Der Stempel kommt aus `push`, nicht aus dem Nachrichtentyp.
+    if(e.bg) return;
     switch(e.k){
       case "up": $("#dot").className="up"; $("#state").textContent="connected";
         // #115: kept on the page rather than asked for when the menu opens, so
@@ -5499,6 +5888,8 @@ const crow = {
       case "idle": this.idle(); break;
       case "busy": this.busy(); break;
       case "queued": this.queuedLine(); break;
+      case "viewing": this.viewBar(e); break;
+      case "goal": this.goalPanel(e.goal); break;
     }
   }
 };
@@ -6066,9 +6457,11 @@ class Sink(ReplyEvents, FenceEvents):
 class Turn(TurnEvents):
     """The core's turn callbacks. Every one of them ends up on the screen."""
 
-    def __init__(self, put, git_reload=None) -> None:
+    def __init__(self, put, git_reload=None, goal_reload=None) -> None:
         self._put = put
         self._sink = Sink(put)
+        # #165: dasselbe Muster wie `git_reload` -- ein Callable, kein Fenster.
+        self._goal_reload = goal_reload
         # #156. WAS DAS PANEL NACHLESEN LAESST, oder None. Ein Callable und
         # keine Api-Referenz: dieses Objekt schreibt in eine Warteschlange und
         # weiss sonst nichts vom Fenster -- so bleibt es in der Suite baubar,
@@ -6157,6 +6550,12 @@ class Turn(TurnEvents):
         zeigt eine Zeile, dieses Fenster viertausend Zeichen, und beide sind
         Antworten auf dieselbe Frage statt zwei verschiedene Wahrheiten.
         """
+        # #165. DAS PANEL FOLGT DEM WERKZEUG, nicht dem Zugende. Es hing bis
+        # hier an `_pump`, also erschien ein Plan erst, wenn der Zug fertig war
+        # -- bei einem Zug mit 24 Runden Minuten spaeter, und robin sah ihn
+        # zuerst beim Beenden. Der Aufruf IST das Ereignis.
+        if name in ("goal_set", "goal_step") and self._goal_reload:
+            self._goal_reload()
         said = str(result or "")
         cut = len(said) - TOOL_RESULT_SHOWN
         self._put({"k": "toolres", "name": name,
@@ -6300,7 +6699,85 @@ class Api:
         # eine Zeile kann warten, ein Modellwechsel nicht.
         self._busy = False
         self._queued: str | None = None
+        # #162. WOHIN DIE GEPUFFERTE ZEILE GEHOERT, neben dem Puffer und nicht
+        # in ihm: `_queued` ist der Text, den #138c dort ablegt, und sechs
+        # Faelle beschreiben ihn als Text. Das Ziel ist eine zweite Tatsache
+        # ueber dieselbe Zeile, keine Erweiterung der ersten -- ein Tupel haette
+        # jede dieser Beschreibungen falsch gemacht, ohne dass sich am
+        # Verhalten etwas geaendert haette.
+        self._queued_to: str | None = None
         self._queue_lock = threading.Lock()
+        # #162. WELCHER CHAT ANGEZEIGT WIRD, WENN ES NICHT DER LAUFENDE IST.
+        #
+        # `None` heisst: die Ansicht zeigt den Chat, in dem gearbeitet wird --
+        # der Normalfall, und bis hierher der einzige. Ein Pfad heisst: waehrend
+        # eines Zuges wurde woanders hingeschaut; `_conversation` gehoert dann
+        # weiter dem Worker und wird NICHT getauscht. "" ist der leere neue
+        # Chat, den es noch nicht auf Platte gibt.
+        #
+        # WARUM UEBERHAUPT ZWEI ZUSTAENDE. Bis heute war die Antwort auf "waehrend
+        # eines Zuges" ueberall dasselbe `return` -- 18 Stellen. Das ist fuer das
+        # Modell richtig (`-np 1`, ein Slot, #143) und fuer die OBERFLAECHE falsch:
+        # lesen kostet den Server nichts. Getrennt wird deshalb die Ansicht, nie
+        # der Zug.
+        self._view_path: str | None = None
+        # #162. WELCHE CHATS FERTIG GEWORDEN SIND, WAEHREND NIEMAND HINSAH.
+        #
+        # Ein Zug, der im Hintergrund endet, hat sonst keinen Ort, an dem er das
+        # sagen koennte: seine Ausgabe wird verworfen, und in den Chat zu
+        # springen ist genau das, was der Nutzer nicht will. Der Eintrag faellt,
+        # sobald jemand den Chat ansieht -- eine Marke, die nach dem Hinsehen
+        # stehen bliebe, waere eine Meldung ueber etwas laengst Gelesenes.
+        #
+        # "" IST DER LAUFENDE CHAT OHNE DATEI, dieselbe Schreibweise, die die
+        # Subtask-Zuordnung fuer den ungespeicherten Chat benutzt.
+        self._done_paths: set[str] = set()
+        # #162. DIE LETZTE KOSTENZEILE JE CHAT.
+        #
+        # Sie ist kein Teil des Gespraechs -- `_replay` zeichnet Nachrichten,
+        # und die Zeile `[26 rounds | 20,688 tok @ 32.34 tok/s ...]` ist keine.
+        # Solange ein Zug im sichtbaren Chat lief, brauchte sie deshalb nie
+        # gemerkt zu werden. Lief er im Hintergrund, wurde sie verworfen wie
+        # jede andere Ausgabe, und beim Zurueckwechseln war sie fort: der Chat
+        # zeigte seine Antwort und daneben keine einzige Zahl darueber, was sie
+        # gekostet hat.
+        self._last_cost: dict[str, dict] = {}
+        # #173. DIE MARKEN DES OFFENEN CHATS, jede mit der Zahl der Nachrichten,
+        # die vor ihr standen. Sie sind keine Nachrichten -- im Nachrichtenband
+        # laese das Modell die Rollover-Notiz als robins Worte -- und sie sind
+        # auch keine reine Bildschirmausgabe: bis hier waren sie beim naechsten
+        # Oeffnen weg, und jede spaeter gezeichnete rutschte unter alles, was
+        # nach ihr passiert war. Die Rollover-Notiz sagte damit das Gegenteil
+        # ihrer Aussage: unten gelesen behauptet sie, der Schnitt sei gerade
+        # eben gewesen.
+        self._notes: list[dict] = []
+        # #171. WAS JEDER ZUG DIESES CHATS GEKOSTET HAT, als Zahlen. Dieselbe
+        # Bauart wie das Band darueber und aus demselben Grund: die Timing-Zeile
+        # war reine Bildschirmausgabe, also nahm der Rollover sie nicht mit, und
+        # nach dem Schnitt war die Bilanz jedes Zuges davor weg. Aus dem
+        # Serverlog ist sie nicht zu rekonstruieren -- die Zeilen dort tragen
+        # keinen Zugmarker, und eine Werkzeugpause sieht aus wie eine Zugpause.
+        self._timings: list[dict] = []
+        # Waehrend `_replay` laeuft, wird NICHT mitgeschrieben: die Marken gehen
+        # denselben Weg durch `push` wie beim ersten Mal, und ohne diese Sperre
+        # verdoppelte sich das Band bei jedem Zurueckwechseln.
+        self._replaying = False
+        # #165. WIE VIELE ZUEGE DER MOTOR SCHON VON SELBST GEFAHREN HAT.
+        # Zurueckgesetzt, sobald jemand tippt: eine Zeile von robin ist der
+        # Beweis, dass ein Mensch zusieht, und das ist es, was der Deckel
+        # eigentlich absichert.
+        self._goal_turns = 0
+        # KEIN ZIEL IST DER BEKANNTE ANFANGSZUSTAND, nicht "noch nichts
+        # gesehen": die Seite startet ohne Panel, also hat ein `goal: null`
+        # beim ersten Zug niemandem etwas zu sagen.
+        self._goal_sig = ""
+        # #162. DER UEBERGANG ZWISCHEN ZWEI ZUEGEN, und nur der. `_pump` wechselt
+        # den Chat, wenn die gepufferte Zeile einen anderen meint -- an dieser
+        # Stelle ist der vorige Zug fertig und der naechste nicht gestartet, der
+        # Thread lebt aber noch. Ohne dieses Flag wuerden `open` und `reset` mit
+        # ihrem eigenen `is_alive`-Test genau den Wechsel verweigern, den sie
+        # gerade ausfuehren sollen.
+        self._switching = False
         # #143 E2. WHICH CHAT SPAWNED WHICH SUBTASK, recorded the first time an
         # ident is seen -- during the spawning turn, so the chat live at that
         # moment is the parent. "" is the live chat without a file. And the last
@@ -6351,6 +6828,40 @@ class Api:
     # -- outward -----------------------------------------------------------
 
     def push(self, message: dict) -> None:
+        # #162. WAS DER LAUFENDE ZUG SAGT, GEHOERT IN SEINEN CHAT -- nicht in
+        # den, der gerade offen ist. Der Absender entscheidet das, nicht der
+        # Nachrichtentyp: kommt der Aufruf aus dem Worker-Thread, gehoert er zum
+        # laufenden Chat. Damit muss keine der ueber hundert Aufrufstellen etwas
+        # davon wissen, und eine neue kann es nicht vergessen.
+        #
+        # DIE SEITE VERWIRFT SIE, statt sie zu puffern: der Verlauf des
+        # laufenden Chats wird beim Zurueckwechseln aus `payload()` neu
+        # gezeichnet, also waere ein Puffer eine zweite Wahrheit ueber
+        # denselben Text.
+        # DIE RAIL IST DIE AUSNAHME, weil sie als einzige Nachricht ueber ALLE
+        # Chats spricht statt ueber den einen, der gerade redet: sie traegt seit
+        # #162 selbst, welcher angesehen wird, welcher rechnet und welcher fertig
+        # ist. Sie zu verwerfen hiesse, dass ein Hintergrundzug seine eigene
+        # Fertigmeldung nicht zustellen kann.
+        # DIE KOSTENZEILE WIRD IM VORBEIGEHEN GEMERKT, an derselben Stelle, an
+        # der auch der Hintergrundstempel faellt -- so kann keine Quelle sie
+        # vergessen, und die Zuordnung zum Chat ist die des ABSENDERS, nicht die
+        # der Ansicht.
+        if message.get("k") == "cost" and message.get("line"):
+            self._last_cost[self._current_path or ""] = dict(message)
+        # #173. AN DERSELBEN STELLE WIE DER HINTERGRUNDSTEMPEL, aus demselben
+        # Grund: ueber dreissig Stellen pushen Notizen, und eine neue kann nicht
+        # vergessen, sich einzutragen. `at` ist die Zahl der Nachrichten vor der
+        # Marke -- das ist ihr Ort, und er gilt auch nach einem Neustart, weil
+        # die Nachrichten selbst gespeichert werden.
+        if (not self._replaying
+                and message.get("k") in crow_core.SESSION_NOTE_KINDS):
+            self._notes.append(dict(message, at=len(self._conversation)))
+            del self._notes[:-crow_core.SESSION_NOTES_MAX]
+        if (message.get("k") != "rail"
+                and self._view_path is not None
+                and threading.current_thread() is self._worker):
+            message = dict(message, bg=True)
         self._out.put(message)
 
     def announce_elicit(self, asks: list) -> None:
@@ -6785,6 +7296,73 @@ class Api:
 
     ARCHIVE_PREFIX = "chat-"
 
+    @staticmethod
+    def _same(one: "str | None", other: "str | None") -> bool:
+        """Zwei Chatpfade, die dieselbe Datei meinen. Leer ist nie gleich leer:
+        `""` steht fuer den Chat ohne Datei, und zwei davon gibt es nicht."""
+        return bool(one and other
+                    and os.path.abspath(one) == os.path.abspath(other))
+
+    def _viewed_path(self) -> "str | None":
+        """Die Datei, die auf dem Schirm steht -- nicht die, die rechnet.
+
+        `_view_path is None` heisst: die Ansicht ist der laufende Chat, also
+        gilt dessen Pfad. `""` heisst: ein neuer, leerer Chat ohne Datei, und
+        dann ist keine Datei aktiv.
+        """
+        return self._current_path if self._view_path is None else (
+            self._view_path or None)
+
+    def _push_cost_for(self, path: "str | None", tokens: int) -> None:
+        """Der Zaehler dieses Chats, mit seiner letzten Kostenzeile, falls es
+        eine gibt.
+
+        DIE ZEILE IST NICHT IMMER DA, und das ist kein Mangel: ein Chat, dessen
+        Zug in einer frueheren Sitzung lief, hat keine gemerkte. Dann steht dort
+        nichts -- besser als die Zahlen eines anderen Chats, was der Zustand vor
+        dieser Zeile war.
+        """
+        kept = self._last_cost.get(path or "")
+        self.push({"k": "cost",
+                   "line": (kept or {}).get("line", ""),
+                   "share": (kept or {}).get("share"),
+                   "tokens": tokens, "n_ctx": self._n_ctx})
+
+    def _say_where(self) -> None:
+        """Was die Leiste ueber der Eingabe sagt, aus dem aktuellen Zustand.
+
+        EIN ORT, WEIL SIE SONST STEHENBLEIBT. Sie wurde beim Hinsehen gesetzt
+        und nie wieder -- also behauptete sie "still running" ueber einen Zug,
+        der laengst fertig war (robin, 2026-08-30). Jeder Zustandswechsel, der
+        sie betrifft, ruft jetzt hierher, und sie liest, statt sich zu merken.
+        """
+        if self._view_path is None:
+            self.push({"k": "viewing", "live": True,
+                       "title": self._live_title(), "running": None})
+            return
+        title = ("new chat" if not self._view_path else
+                 (self._stored_title(self._view_path)
+                  or os.path.basename(self._view_path)))
+        self.push({"k": "viewing", "live": False, "title": title,
+                   # LEER, WENN NICHTS MEHR LAEUFT. Der Name des Chats, in dem
+                   # zuletzt gearbeitet wurde, ist keine Auskunft ueber jetzt.
+                   "running": self._live_title() if self._busy else None})
+
+    def _mark_done(self, path: "str | None") -> None:
+        """Ein Zug ist fertig geworden, waehrend jemand woanders hinsah.
+
+        DIE MARKE STATT DES SPRUNGS. In den Chat zu wechseln waere die
+        naheliegende Meldung und die falsche: sie nimmt dem Nutzer den Chat weg,
+        in dem er gerade schreibt. Die Rail sagt es stattdessen leise.
+        """
+        self._done_paths.add(path or "")
+        self._reload_rail()
+        # UND DIE LEISTE SAGT ES AUCH. Sie stand seit dem Hinsehen auf
+        # "still running"; ohne diese Zeile behauptet sie das weiter, waehrend
+        # die Rail daneben schon fertig meldet -- zwei Auskuenfte, eine davon
+        # falsch, und der Leser weiss nicht welche.
+        self._say_where()
+
     def _archives(self) -> list:
         """Every kept conversation, newest first, with something to read.
 
@@ -6813,9 +7391,21 @@ class Api:
             # live slot. The duplicate that filter guarded against cannot happen
             # now: the page draws the live slot only for a chat with no file.
             entry = self._entry_of(path, name)
-            entry["active"] = bool(
-                self._current_path and os.path.abspath(path) == os.path.abspath(
-                    self._current_path))
+            # #162. DREI ZUSTAENDE, DIE BIS HIER EINER WAREN.
+            #
+            # `active` hiess "der Chat, in dem gearbeitet wird" -- und das war
+            # dasselbe wie "der Chat, den man sieht", solange ein Zug das Fenster
+            # sperrte. Seit man waehrend eines Zuges woanders hinsehen kann, sind
+            # es zwei Tatsachen, und die Markierung gehoert an die ANSICHT: der
+            # Balken sagt "hier bin ich", nicht "hier rechnet etwas".
+            #
+            # `running` und `done` sagen das andere, und zwar getrennt, weil sie
+            # verschiedene Dinge bedeuten: das eine laeuft noch, das andere ist
+            # fertig und ungelesen.
+            entry["active"] = self._same(path, self._viewed_path())
+            entry["running"] = (bool(self._busy)
+                                and self._same(path, self._current_path))
+            entry["done"] = any(self._same(path, d) for d in self._done_paths)
             out.append(entry)
             if len(out) >= 12:
                 break
@@ -7034,12 +7624,18 @@ class Api:
             return
         messages, tokens, kv = restored
         self._tools_cleared = crow_core.session_tools_cleared()
+        # #173: DIE MARKEN KOMMEN MIT DEM CHAT ZURUECK. Ohne sie faengt jedes
+        # Fenster ohne die Rollover-Notiz an, die sagt, wo der Kontext geschnitten
+        # wurde -- und der Neustart mitten in einem langen Lauf ist genau der
+        # Moment, in dem jemand danach sucht.
+        self._notes = crow_core.session_notes()
+        self._timings = crow_core.session_timings()      # #171
         self._conversation.restore(messages)
         self._context_tokens, self._promised_warm = tokens, kv
         # An empty restored chat is still an empty chat; `turn()` takes the line
         # back off the moment `_replay` puts a row in.
         self._hello()
-        self._replay(messages)
+        self._replay(messages, self._notes)
         self._reload_rail()
         # #101: THE RESTORED CHAT BRINGS ITS OWN BOUNDARY, and this is the second
         # of the two bindings a launch does. `ready()` has already bound the
@@ -7102,6 +7698,8 @@ class Api:
         "/mode": "the release level; /mode manual|allowedit|auto to switch.",
         "/model": "the model that is up; /model <key> restarts on another one.",
         "/reasoning": "this chat's thinking level; /reasoning <level>|off to set it.",
+        "/goal": "set the goal this chat works towards; /goal <title> then one "
+                 "step per line, or `title | step | step`. /goal off clears it.",
         "/thoughts": "fold the reasoning blocks open, or closed again.",
         "/image": "hold an image for the next line; /image <path>, or drop one.",
         "/delegate": "hand a task to the remote subtask model; /delegate <task>. "
@@ -7164,6 +7762,10 @@ class Api:
             return self._model_command(parts[1:])
         if word == "/reasoning":
             return self._reasoning_command(parts[1:])
+        if word == "/goal":
+            # DER REST DER ZEILE, NICHT parts[1:]: der Titel und die Schritte
+            # sind Prosa mit Leerzeichen, und `split()` hat sie schon zerlegt.
+            return self._goal_command(stripped[len("/goal"):].strip())
         if word == "/thoughts":
             return self._fold_thoughts()
         if word == "/image":
@@ -7253,6 +7855,8 @@ class Api:
         self._conversation.reset()
         crow_core.forget_approvals()   # #88: the chat goes, its releases go
         self._tools_cleared = 0        # #131: and so do the dismissed rows
+        self._notes = []               # #173: und die Marken des alten Kontexts
+        self._timings = []             # #171: und die Bilanzen seiner Zuege
         self._context_tokens = 0
         self._promised_warm = False
         # AND IT LETS GO OF THE FILE THE CHAT CAME FROM. A conversation opened
@@ -7364,6 +7968,8 @@ class Api:
         self._conversation.reset()
         crow_core.forget_approvals()
         self._tools_cleared = 0        # #131: an empty chat has dismissed nothing
+        self._notes = []               # #173
+        self._timings = []             # #171
         self._context_tokens = 0
         self._promised_warm = False
         self._args.base_url = url
@@ -7411,6 +8017,151 @@ class Api:
                        "groups": [list(g)
                                   for g in crow_core.reasoning_groups_for(self._model)]})
         return said
+
+    def _goal_command(self, rest: str) -> str:
+        """`/goal` im Fenster: derselbe Kern, dazu der Kopf und das Panel.
+
+        NICHT ZWEI ENTSCHEIDUNGEN: was ein Ziel ist, entscheidet
+        `crow_core.goal_command` -- hier haengt nur, was ein Fenster mehr hat
+        als ein Terminal: der gepinnte Kopf muss dem neuen Ziel folgen, und die
+        Seite muss es zeichnen.
+        """
+        said, goal, changed = crow_core.goal_command(rest)
+        if changed:
+            # DER KOPF FOLGT SOFORT. Ohne das stuende das Ziel in der Datei und
+            # nicht im Prompt -- das Modell wuesste bis zum naechsten Rollover
+            # nichts davon.
+            self._conversation.repin_memory(
+                crow_core.prompt_head(crow_core.get_root()))
+            self.push_goal(force=True)
+        return said
+
+    # #165. WIE VIELE ZUEGE EIN ZIEL OHNE EINE MENSCHLICHE ZEILE FAHREN DARF.
+    # Nicht als Budget gedacht, sondern als Reissleine: `MAX_TOOL_ROUNDS` (24)
+    # begrenzt EINEN Zug, und ein Ziel besteht aus vielen. Ohne eine zweite
+    # Grenze ist ein Plan, der im Kreis laeuft, ein Fenster, das die Nacht
+    # durcharbeitet. 60 ist grosszuegig fuer einen echten Plan und weit unter
+    # dem, was ein Kreis in einer Stunde schafft.
+    GOAL_TURN_CAP = 60
+
+    def _goal_nudge(self) -> "str | None":
+        """Die Zeile, die den naechsten Schritt anstoesst. None, wenn Schluss ist.
+
+        VIER GRUENDE AUFZUHOEREN, und jeder einzelne muss greifen, sonst laeuft
+        ein Ziel bis zum Kontextende weiter:
+
+          kein Ziel          nichts zu tun
+          kein offener Schritt   fertig, und das Panel sagt Complete
+          Stop gedrueckt     robins Wille schlaegt jeden Plan
+          der Deckel         ein Plan, der nach so vielen Zuegen nicht fertig
+                             ist, laeuft im Kreis -- und ein Kreis ohne Grenze
+                             ist ein Fenster, das den Rechner die Nacht ueber
+                             beschaeftigt
+
+        DER TEXT IST EINE ANWEISUNG AN DAS MODELL, keine Nutzerzeile: er steht
+        in eckigen Klammern wie die Rollover-Notiz, damit `_spoken_carry` ihn
+        beim naechsten Schnitt NICHT als robins eigene Worte mitnimmt.
+        """
+        if crow_core.INTERRUPT.is_set():
+            return None
+        goal = crow_core.goal_load()
+        if not goal or goal.get("status") == crow_core.GOAL_DONE:
+            return None
+        nxt = crow_core.goal_next_open(goal)
+        if nxt is None:
+            return None
+        self._goal_turns += 1
+        if self._goal_turns > self.GOAL_TURN_CAP:
+            self.push({"k": "note",
+                       "t": "goal mode stopped after %d turns -- %d of %d steps "
+                            "done. `/goal` shows where it stands."
+                            % (self.GOAL_TURN_CAP,
+                               crow_core.goal_counts(goal)[0], len(goal["steps"]))})
+            return None
+        # #165. DER ANGESTOSSENE SCHRITT LAEUFT AB JETZT, und das setzt Crow,
+        # nicht das Modell. Gemessen am 2026-08-30: `goal_step` wird praktisch
+        # nur mit `done` gerufen -- ein Schritt, der gerade bearbeitet wird und
+        # ehrlicherweise noch nicht fertig ist, blieb deshalb als offener Kreis
+        # stehen, waehrend das Panel minutenlang stillstand. Wer den naechsten
+        # Schritt anstoesst, weiss auch, dass er ab jetzt laeuft.
+        if goal["steps"][nxt]["status"] != crow_core.GOAL_RUNNING:
+            crow_core.goal_step_begin(nxt)
+            self.push_goal()
+        done, total = crow_core.goal_counts(goal)
+        return ("[Goal mode. %d of %d steps done. Next is step %d: %s\n"
+                "Do it now. Call goal_step with 'done' only once you have "
+                "verified it, then continue with the step after that. If it "
+                "cannot be done, call goal_step with 'failed' and say why.]"
+                % (done, total, nxt + 1, goal["steps"][nxt]["text"]))
+
+    def close_goal(self) -> None:
+        """Das Ziel wegraeumen. Das Gegenstueck zum Setzen, im Panel selbst.
+
+        Ein Ziel ueberlebt Rollover, Neustart und neue Sitzung -- genau deshalb
+        braucht es einen Weg heraus, der nicht `/goal off` heisst: was bleibt,
+        bis jemand es beendet, muss dort beendet werden koennen, wo es steht.
+        """
+        crow_core.goal_write(None)
+        self._goal_turns = 0
+        self.push_goal(force=True)
+        self._conversation.repin_memory(
+            crow_core.prompt_head(crow_core.get_root()))
+
+    def push_goal(self, force: bool = False) -> None:
+        """Was die Seite ueber das Ziel wissen muss. Ohne Ziel: nichts.
+
+        KEIN LEERER RAHMEN (robin, 2026-08-30): das Panel erscheint nur, wenn
+        ein Ziel gesetzt wurde -- ein Kasten mit `0/0` waere eine Anzeige ueber
+        etwas, das es nicht gibt.
+
+        NUR BEI AENDERUNG, wie die Subtask-Karten: der Motor ruft das nach JEDEM
+        Zug, und die meisten Zuege bewegen keinen Schritt. Eine Nachricht je Zug,
+        die nichts sagt, ist der Grund, warum `_subs_sig` existiert. `force`
+        zeichnet trotzdem -- fuer die Wege, die die ganze Seite neu aufbauen und
+        bei denen die alte Signatur nichts mehr ueber den Bildschirm aussagt.
+        """
+        goal = crow_core.goal_load()
+        sig = json.dumps(goal, sort_keys=True) if goal else ""
+        if not force and sig == getattr(self, "_goal_sig", None):
+            return
+        self._goal_sig = sig
+        if not goal:
+            self.push({"k": "goal", "goal": None})
+            return
+        done, total = crow_core.goal_counts(goal)
+        self.push({"k": "goal", "goal": {
+            "title": goal["title"],
+            "status": goal.get("status") or "open",
+            "done": done, "total": total,
+            "seconds": round(crow_core.goal_seconds(goal), 1),
+            # OB DIE UHR UEBERHAUPT LAEUFT. Die Seite tickt selbst weiter (#164),
+            # sonst stuende sie zwischen zwei Schritten still -- aber sie tat es
+            # auch VOR dem ersten Zug, also lief sie ab `/goal` statt ab der
+            # Arbeit. Der Kern liefert dafuer die 0 richtig; was fehlte, war der
+            # Seite zu sagen, dass sie noch nicht anfangen darf.
+            "begun": goal.get("started") is not None,
+            # #174. DIE EIGENE SUMME DES ZIELS, nicht die der Schrittspalte. Die
+            # Seite rechnete sie bis hier selbst zusammen und erbte damit jeden
+            # Fehler der Spalte -- und alles, was zwischen zwei Schritten
+            # passiert, fehlte darin. Diese Zahl ueberlebt den Rollover.
+            "tokens": crow_core.goal_spent(goal),
+            # #169. FREMDE TOKEN NEBEN DEN EIGENEN, nie in derselben Summe: eine
+            # Delegation gibt sie auf einem anderen Anbieter aus. Eine stille 0
+            # dort war die schlechteste Antwort -- sie las sich wie "kostenlos".
+            "delegated": crow_core.goal_delegated(goal),
+            "steps": [{"text": s["text"], "status": s["status"],
+                       "seconds": s.get("seconds") or 0.0,
+                       "tokens": s.get("tokens") or 0,
+                       # #169. WO DAS FENSTER DIESES SCHRITTS ANFING, damit die
+                       # Seite bei einem LAUFENDEN Schritt die Strecke bis jetzt
+                       # zeigen kann. Ohne das stand dort `0 tok`, solange er
+                       # arbeitete -- die Uhr lief und die Zahl nicht, und eine
+                       # 0 neben einer laufenden Uhr ist genau die Aussage, die
+                       # dieses Ticket abschafft.
+                       "at": s.get("started_tokens"),
+                       "delegated": s.get("delegated") or 0,
+                       "note": s.get("note") or ""}
+                      for s in goal["steps"]]}})
 
     def _fold_thoughts(self) -> str:
         """`/thoughts`: the window renders reasoning always, folded.
@@ -7472,9 +8223,20 @@ class Api:
         # niemand gemeint hat.
         with self._queue_lock:
             if self._busy:
-                self._queued = text
+                # #162. DIE ZEILE MERKT SICH IHREN CHAT. Bis hier war der Puffer
+                # nur Text, weil es nur einen Chat geben konnte; wer jetzt in
+                # einer anderen Ansicht tippt, meint diesen Chat und nicht den,
+                # der gerade rechnet. Ohne das Ziel liefe die Zeile im falschen
+                # Gespraech und waere von aussen nicht von einem Versehen zu
+                # unterscheiden.
+                self._queued, self._queued_to = text, self._view_path
                 self.push({"k": "queued"})
                 return True
+            # #165: EINE GETIPPTE ZEILE SETZT DEN MOTOR-ZAEHLER ZURUECK. Der
+            # Deckel sichert gegen einen Plan, der ohne Aufsicht im Kreis
+            # laeuft -- und eine Zeile von robin ist der Beweis, dass jemand
+            # zusieht.
+            self._goal_turns = 0
             self._busy = True
             INTERRUPT.clear()
             self._worker = threading.Thread(target=self._pump, args=(text,),
@@ -7641,8 +8403,24 @@ class Api:
         conversation, so a failed write leaves the user with the chat they had
         rather than with neither.
         """
-        if self._worker and self._worker.is_alive():
+        # #162. EIN NEUER CHAT WAEHREND EINES ZUGES IST EINE ANSICHT, KEIN
+        # WECHSEL. Der laufende Chat bleibt, wo er ist; die leere Flaeche ist
+        # das, was hier entsteht. Angelegt wird er erst, wenn eine Zeile dafuer
+        # laeuft -- ein leerer Chat, den niemand benutzt hat, waere sonst eine
+        # Datei im Regal fuer einen Klick.
+        if not self._switching and self._worker and self._worker.is_alive():
+            self._view_path = ""
+            self.push({"k": "clear"})
+            self._hello()
+            self._say_where()
+            # Ein leerer Chat hat keinen Kontext, und das muss dastehen: der
+            # Zaehler des laufenden Chats waere hier eine Zahl ueber ein
+            # Gespraech, das es noch nicht gibt.
+            self.push({"k": "cost", "line": "", "share": None,
+                       "tokens": 0, "n_ctx": self._n_ctx})
+            self._reload_rail()
             return
+        self._view_path = None
         ok, kept = self._leave()
         if not ok:
             self.push({"k": "fail",
@@ -7680,6 +8458,8 @@ class Api:
         # gets is the profile and a line saying there is no project -- until the
         # user moves it into one, which re-pins through `_bind_root`.
         self._pin_memory(None)
+        self._notes = []              # #173: ein neuer Chat hat keine Marken
+        self._timings = []            # #171: und keine Zuege
         self._context_tokens = 0
         self._promised_warm = False
         self.push({"k": "clear"})     # the page no longer guesses; see crow.reset
@@ -7690,6 +8470,9 @@ class Api:
         # archive file next to it -- the same chat twice, from one click.
         self._forget_live()
         self._reload_rail()
+        # #162: derselbe Nachtrag wie in `open` -- ein neuer Chat ist keine
+        # Ansicht mehr, also darf die Leiste nicht stehenbleiben.
+        self._say_where()
         self.push({"k": "cost", "line": "", "share": None, "tokens": 0,
                    "n_ctx": self._n_ctx})
 
@@ -7731,7 +8514,10 @@ class Api:
             os.makedirs(folder, exist_ok=True)
             save_session(self._conversation, self._args.base_url,
                          self._context_tokens, path=path, with_kv=False,
-                         tools_cleared=self._tools_cleared)
+                         tools_cleared=self._tools_cleared,
+                         # #173/#171: Marken und Bilanzen gehoeren dem Chat,
+                         # also gehen sie mit ihm in seine Datei.
+                         notes=self._notes, timings=self._timings)
             # #101: FOR A NAMED EMPTY CHAT THE CORE WROTE NOTHING, and the
             # read-back below would then fail and report the chat as unsaveable.
             # `_stamp` creates it from the metadata -- the same door #100 opened
@@ -7887,7 +8673,11 @@ class Api:
                          self._context_tokens,
                          with_kv=with_kv and not spot["remote"],
                          model=self._model, reasoning=self._reasoning,
-                         tools_cleared=self._tools_cleared)
+                         tools_cleared=self._tools_cleared,
+                         # #173/#171: je Zug mitgeschrieben, wie die Nachrichten
+                         # -- ein Fensterneustart mitten in einem langen Lauf ist
+                         # genau der Fall, fuer den die Baender existieren.
+                         notes=self._notes, timings=self._timings)
         except Exception:                  # noqa: BLE001 - a turn survives it
             return
         self._stamp(SESSION_FILE, pointer=True)
@@ -7908,8 +8698,23 @@ class Api:
 
     def open(self, path: str) -> None:
         """Load an archived conversation back into the window."""
-        if self._worker and self._worker.is_alive():
+        # #162. WAEHREND EINES ZUGES WIRD GESCHAUT, NICHT GEWECHSELT. Bis hier
+        # stand ein `return`: der Chat war eine Wand, solange gearbeitet wurde.
+        # Der Zug behaelt seine Conversation, die Ansicht bekommt die Datei --
+        # und weil `_leave` dabei nicht laeuft, kann ein Blick den laufenden
+        # Chat auch nicht halb auf Platte schreiben.
+        if not self._switching and self._worker and self._worker.is_alive():
+            if self._current_path and os.path.abspath(path) == os.path.abspath(
+                    self._current_path):
+                self.view_live()
+            else:
+                self._view_other(path)
             return
+        # ZURUECK AUS EINER FREMDEN ANSICHT. Der Zug ist vorbei, also ist der
+        # Blick wieder ein Wechsel -- aber `_current_path` zeigt noch auf den
+        # Chat, in dem gearbeitet wurde, und ohne diese Zeile vergliche die
+        # naechste ihn mit sich selbst und taete gar nichts.
+        self._view_path = None
         if self._current_path and os.path.abspath(path) == os.path.abspath(
                 self._current_path):
             return
@@ -7961,9 +8766,14 @@ class Api:
         # #131. THE WATERMARK BELONGS TO THE CHAT, so it is read from the chat's
         # own file rather than carried over from the one just closed.
         self._tools_cleared = crow_core.session_tools_cleared(path)
+        # #173. DIE MARKEN GEHOEREN DEM CHAT, aus demselben Grund wie der
+        # Wasserstand darueber: aus seiner Datei gelesen, nicht aus dem
+        # mitgeschleppt, der gerade geschlossen wurde.
+        self._notes = crow_core.session_notes(path)
+        self._timings = crow_core.session_timings(path)  # #171
         self.push({"k": "clear"})     # the page no longer guesses; see crow.open
         self._hello()
-        self._replay(messages)
+        self._replay(messages, self._notes)
         # SESSION.JSON FOLLOWS THE SWITCH AT ONCE. Still pointing at the chat
         # just closed, a window shut before the next turn would come back up
         # holding it -- and list the chat the user was actually reading as a
@@ -7977,8 +8787,132 @@ class Api:
         # dropped so the push fires even though nothing changed.
         self._subs_sig = ""
         self._push_subs()
-        self.push({"k": "cost", "line": "", "share": None,
-                   "tokens": self._context_tokens, "n_ctx": self._n_ctx})
+        # #162. AUCH DER ECHTE WECHSEL RAEUMT DIE MARKE WEG UND SAGT, WO MAN
+        # STEHT. Beides fehlte, und beides faellt genau dann auf, wenn der Zug
+        # vorbei ist: dann ist ein Rail-Klick kein Blick mehr, sondern geht
+        # durch diese Methode -- und die kannte weder `_done_paths` noch die
+        # Leiste. Der gelesene Chat blieb amber, und ueber ihm stand weiter
+        # "still running" (robin, 2026-08-30 abends).
+        self._done_paths.discard(path)
+        self._say_where()
+        self._push_cost_for(path, self._context_tokens)
+
+    # ------------------------------------------------------- #162 die Ansicht
+    #
+    # DIE ANSICHT IST NICHT DER ZUG. Beide Methoden hier fassen `_conversation`,
+    # `_current_path`, `_context_tokens` und die Wurzel NICHT an -- sie zeichnen
+    # nur, was auf Platte steht oder was der Worker gerade im Speicher hat. Wer
+    # hier etwas bindet, gibt dem laufenden Zug den Chat unter den Fuessen weg.
+
+    def _view_other(self, path: str) -> None:
+        """Einen anderen Chat ANSEHEN, waehrend dieser hier arbeitet.
+
+        OHNE `_leave`, und das ist die tragende Auslassung: der laufende Chat
+        wird nicht geschrieben, weil er noch nicht fertig ist. Eine Datei, die
+        mitten im Zug entsteht, waere ein halber Chat mit vollem Namen.
+
+        OHNE KV UND DESHALB OHNE PIN. `load_session` braucht den zusammengesetzten
+        System-Prompt nur, um zu entscheiden, ob der gespeicherte KV noch passt --
+        und ein Blick gibt kein Slot-Versprechen ab, das der laufende Zug gerade
+        einloest. Ein dritter Leser von `session_memory` waere eine dritte Stelle,
+        die entscheidet, was der Kopf dieses Chats ist; der Kopienzaehler in der
+        Suite haelt genau das fest, und er hat recht behalten.
+        """
+        try:
+            restored = load_session(self._endpoint()["base_url"], None,
+                                    path, model=self._model, with_kv=False)
+        except Exception as exc:           # noqa: BLE001
+            self.push({"k": "fail", "t": "not readable: %s" % exc})
+            return
+        if not restored:
+            if not self._stored_title(path):
+                self.push({"k": "fail", "t": "empty: %s" % os.path.basename(path)})
+                return
+            restored = ([], 0, False)
+        messages, tokens = restored[0], restored[1]
+        self._view_path = path
+        # DIE MARKE FAELLT BEIM HINSEHEN, nicht beim Klicken irgendwohin: was
+        # gelesen wurde, wartet nicht mehr.
+        self._done_paths.discard(path)
+        self.push({"k": "clear"})
+        self._hello()
+        # #173: DIE MARKEN DES ANGESEHENEN CHATS, aus seiner Datei -- und NICHT
+        # in `self._notes`, das dem laufenden gehoert. Ein Blick bindet nichts.
+        self._replay(messages, crow_core.session_notes(path))
+        self._say_where()
+        # #162. DER ZAEHLER GEHOERT ZUM ANGESEHENEN CHAT. Ohne diese Zeile blieb
+        # er auf dem Stand des laufenden stehen -- oder leer, wenn dessen
+        # Meldungen als Hintergrund verworfen wurden. Beides las sich wie "dieser
+        # Chat hat keinen Kontext", und das ist bei einem Chat mit 14 Zuegen die
+        # falsche Auskunft.
+        self._push_cost_for(path, tokens)
+        self._reload_rail()
+
+    def _hand_over(self, target: str) -> None:
+        """Den Chat wechseln, weil die naechste Zeile einen anderen meint.
+
+        LAEUFT IM WORKER, ZWISCHEN ZWEI ZUEGEN. `_switching` haelt die beiden
+        Weichen offen, die sonst genau hier `is_alive()` sehen und abbrechen --
+        und es faellt im `finally`, weil ein Wechsel, der wirft, sonst ein
+        Fenster hinterliesse, in dem jeder Klick den laufenden Chat wegzieht.
+
+        DER LAUFENDE CHAT WIRD HIER GESCHRIEBEN, nicht beim Hinsehen: `open`
+        und `reset` gehen durch `_leave`, und an dieser Stelle ist sein Zug
+        wirklich fertig.
+
+        DIE ANSICHT FOLGT DEM NUTZER, NIE DEM ZUG (robin, 2026-08-30). Steht er
+        beim Ziel -- der Normalfall, weil er die Zeile dort getippt hat --, wird
+        sie zum laufenden Chat und die Leiste geht weg. Steht er inzwischen
+        woanders, bekommt er seinen Chat zurueck: der Wechsel passiert unter ihm
+        hindurch, und was er sieht, hat er selbst gewaehlt.
+        """
+        watching = self._view_path
+        self._switching = True
+        try:
+            self._view_path = None
+            if target:
+                self.open(target)
+            else:
+                self.reset()
+        finally:
+            self._switching = False
+        if watching is not None and watching != target:
+            if watching:
+                self._view_other(watching)
+            else:
+                self.reset()          # zurueck auf den leeren Chat, als Ansicht
+            return
+        # DIE LEISTE GEHT WEG, WEIL DER BLICK JETZT DER CHAT IST. Ohne diese
+        # Zeile bliebe "viewing ... still running" ueber einem Chat stehen, der
+        # gerade selbst der laufende geworden ist.
+        self._done_paths.discard(target or "")
+        self._say_where()
+
+    def view_live(self) -> None:
+        """Zurueck zu dem Chat, in dem gearbeitet wird.
+
+        AUS `payload()`, NICHT VON PLATTE. Waehrend eines Zuges ist die Datei
+        aelter als das Gespraech -- sie wird erst beim Verlassen geschrieben.
+        Von Platte zu lesen zeigte also genau die Antworten nicht, die in der
+        Zwischenzeit entstanden sind, und das ist der ganze Grund, hierher
+        zurueckzukommen.
+        """
+        if self._view_path is None:
+            return
+        self._view_path = None
+        self._done_paths.discard(self._current_path or "")
+        self.push({"k": "clear"})
+        self._hello()
+        # #173: AUS DEM BAND IM SPEICHER, nicht von Platte -- aus demselben
+        # Grund, aus dem die Nachrichten aus `payload()` kommen: die Datei ist
+        # waehrend eines Zuges aelter als das Gespraech.
+        self._replay(self._conversation.payload(), self._notes)
+        self._say_where()
+        # DIE RAIL HAT DEN ZUG NICHT MITBEKOMMEN: was er waehrend des Blicks
+        # gepusht hat, trug den Hintergrundstempel und wurde verworfen. Hier ist
+        # der erste Moment, in dem sie wieder gelten darf.
+        self._reload_rail()
+        self._push_cost_for(self._current_path, self._context_tokens)
 
     # #123 MOVED THE LITERAL, NOT THE MEANING. The search index has to walk the
     # same folder the rail is drawn from, and a second `"archiv"` typed in the
@@ -7986,7 +8920,7 @@ class Api:
     # reverse, the first time either spelling changed.
     ARCHIVE_DIR = crow_core.ARCHIVE_DIR
 
-    def _replay(self, messages: list) -> None:
+    def _replay(self, messages: list, notes: "list | None" = None) -> None:
         """Draw a restored conversation the way a live one is drawn.
 
         THROUGH THE SAME SINK, and that is the whole fix. The first version
@@ -7998,67 +8932,34 @@ class Api:
 
         One renderer for both paths means a reopened chat cannot drift from the
         one that was just typed.
+
+        #173: DIE MARKEN WERDEN EINGEFAEDELT, nicht angehaengt. Jede traegt, wie
+        viele Nachrichten vor ihr standen; gezeichnet wird sie, sobald so viele
+        gezeichnet sind. Angehaengt waeren sie eine Fussnote -- und genau das war
+        die Rollover-Notiz, die unter allem stand, was nach dem Schnitt lief.
+
+        DIE ZEILEN ZEICHNET EINE MODULFUNKTION, keine zweite Methode: diese hier
+        wird in der Suite UNGEBUNDEN auf einem Sammler aufgerufen, der nur `push`
+        kennt, und ein `self._eigene_methode(...)` waere dort ein AttributeError.
         """
-        seen = 0
-        # #131. READ ONCE, AND OPTIONAL. A chat that never cleared anything has
-        # no watermark -- the normal state, and also what a bare replay harness
-        # hands in.
-        cleared = getattr(self, "_tools_cleared", 0)
-        for message in messages:
-            role = message.get("role")
-            body = (message.get("content") or "")
-            if role == "user":
-                # #142. A restored turn may carry blocks: the words go back as
-                # the line, the images go back as images -- the ticket's "the
-                # same image is still there after a restart".
-                words = crow_core.message_text(body)
-                urls = [u for u in
-                        (((p.get("image_url") or {}).get("url") or "")
-                         for p in crow_core.message_images(body)) if u]
-                if words.strip() or urls:
-                    entry = {"k": "user", "t": words}
-                    if urls:
-                        entry["i"] = urls
-                    self.push(entry)
-                continue
-            if role != "assistant":
-                continue
-            thought = (message.get("reasoning_content") or "")
-            # #99. THE TOOL ROWS ARE PART OF THE TURN, and a turn that only
-            # called a tool has no `content` at all -- so the emptiness test has
-            # to know about them, or the whole message is skipped and the
-            # reopened chat shows two thoughts with nothing between them.
-            calls = message.get("tool_calls") or []
-            if not body.strip() and not thought.strip() and not calls:
-                continue
-            sink = Sink(self.push, live=False)
-            sink.reply_started()
-            if thought.strip():
-                sink.reasoning_started(0)
-                self.push({"k": "think", "t": thought})
-                sink.reasoning_finished()
-            if body:
-                sink.answer_text(body)
-            # After the answer, because that is the live order: the model says
-            # what it is about to do, then the calls run. Through `Turn`, which
-            # is where `tool_started` lives and where the live path draws these
-            # rows -- a second `{"k": "tool"}` written here is exactly the drift
-            # this method exists to prevent.
-            rows = Turn(self.push)
-            for call in calls:
-                # #131. A ROW THE USER DISMISSED STAYS DISMISSED. `seen` counts
-                # every call in the conversation, in order, and everything up to
-                # the watermark is drawn by nobody -- the message itself is
-                # untouched, so the model still has the call it made.
-                seen += 1
-                if seen <= cleared:
-                    continue
-                function = call.get("function") or {}
-                rows.tool_started(function.get("name") or "?",
-                                  function.get("arguments") or "")
-            sink.reply_finished()
-            self.push({"k": "cost", "line": "", "share": None,
-                       "tokens": self._context_tokens, "n_ctx": self._n_ctx})
+        marks = sorted((n for n in (notes or []) if isinstance(n, dict)),
+                       key=lambda n: int(n.get("at") or 0))
+
+        def upto(count: int) -> None:
+            """Jede Marke, die vor die (count+1)-te Nachricht gehoert."""
+            while marks and int(marks[0].get("at") or 0) <= count:
+                mark = marks.pop(0)
+                self.push({k: v for k, v in mark.items() if k != "at"})
+
+        # DIE SPERRE UM DEN GANZEN DURCHLAUF: `push` schreibt jede Marke mit,
+        # und ohne sie verdoppelte sich das Band bei jedem Zurueckwechseln.
+        self._replaying = True
+        try:
+            _replay_rows(self, messages, upto)
+            # Was nach der letzten Nachricht passiert ist, steht auch nach ihr.
+            upto(len(messages))
+        finally:
+            self._replaying = False
 
     def _archived(self) -> list:
         """What the user put away, out of .crow/archiv/. Same shape as the rest."""
@@ -8102,6 +9003,14 @@ class Api:
                    # With a file the live chat is already in the list below,
                    # marked; without one the page draws it on top. Never two.
                    "unsaved": self._current_path is None,
+                   # #162. AUCH DER CHAT OHNE DATEI IST NUR MARKIERT, WENN MAN
+                   # IHN SIEHT. Die Seite schrieb `active:true` fest hinein --
+                   # richtig, solange ein Zug das Fenster sperrte, und seitdem
+                   # der Grund dafuer, dass beim Blick in einen anderen Chat
+                   # zwei Zeilen markiert aussahen.
+                   "live_active": self._view_path is None,
+                   "live_running": bool(self._busy) and self._current_path is None,
+                   "live_done": "" in self._done_paths,
                    "rollovers": self._archives(),
                    "archived": self._archived(),
                    # #119. THE PROJECTS TRAVEL WITH THE RAIL, not on their own
@@ -8241,6 +9150,13 @@ class Api:
         know which of the two it is.
         """
         self.push({"k": "hello", "t": greeting()})
+        # #164. DAS ZIEL WIRD MITGEZEICHNET, WEIL ES NICHT ZUM CHAT GEHOERT.
+        # Jeder Weg, der die Seite neu aufbaut, geht durch hier -- Start,
+        # Chatwechsel, Blick in einen anderen Chat -- und ein Panel, das nur
+        # beim Setzen erschiene, waere nach dem ersten Wechsel weg, obwohl das
+        # Ziel weiterlaeuft. `force`, weil `clear` das Panel mit weggeraeumt hat
+        # -- die Signatur waere unveraendert und die Anzeige trotzdem leer.
+        self.push_goal(force=True)
 
     def discard_live(self) -> bool:
         """#119. Throw away the open chat that was never written. True when done.
@@ -8269,6 +9185,8 @@ class Api:
         self._drop_chat_subtasks("")
         self._conversation.reset()
         self._current_title = None
+        self._notes = []              # #173
+        self._timings = []            # #171
         self._context_tokens = 0
         self._promised_warm = False
         # SESSION.JSON GOES WITH IT, for the reason `delete_chat` states below:
@@ -8305,6 +9223,8 @@ class Api:
             self._current_path = None
             self._current_title = None
             self._conversation.reset()
+            self._notes = []          # #173
+            self._timings = []        # #171
             self._context_tokens = 0
             self._promised_warm = False
             self._forget_live()
@@ -8905,6 +9825,8 @@ class Api:
             self._conversation.reset()
             crow_core.forget_approvals()
             self._tools_cleared = 0
+            self._notes = []          # #173
+            self._timings = []        # #171
             self._context_tokens = 0
             self._promised_warm = False
         try:
@@ -9357,14 +10279,53 @@ class Api:
         sonst stehen; das Fenster naehme danach jede Zeile an und fuehre keine
         einzige mehr, und nur ein Neustart loeste das.
         """
+        stop = False
         try:
             while True:
                 self._run(text)
+                # #162. FERTIG, UND NIEMAND SAH HIN. Die Ausgabe dieses Zuges
+                # wurde verworfen, weil sie in einen Chat gehoerte, der nicht auf
+                # dem Schirm stand -- also ist die Rail der einzige Ort, an dem
+                # er sich melden kann. Ein Sprung in den Chat waere die andere
+                # Moeglichkeit und die falsche: sie nimmt dem Nutzer den Chat
+                # weg, in dem er gerade schreibt.
+                if self._view_path is not None:
+                    self._mark_done(self._current_path)
+                # #165. DAS PANEL NACH JEDEM ZUG, denn der Zug hat vielleicht
+                # gerade einen Schritt abgehakt.
+                self.push_goal()
                 with self._queue_lock:
                     text, self._queued = self._queued, None
+                    target, self._queued_to = self._queued_to, None
+                    if text is None:
+                        # #165. DER MOTOR. Eine getippte Zeile hat immer Vorrang
+                        # -- sie steht oben --, aber wenn keine wartet und der
+                        # Plan noch offene Schritte hat, faehrt Crow selbst
+                        # weiter. Das ist der ganze Unterschied zwischen einer
+                        # Liste, die jemand abarbeitet, und einem Ziel, das sich
+                        # abarbeitet.
+                        text = self._goal_nudge()
                     if text is None:
                         self._busy = False
-                        return
+                        stop = True
+                if stop:
+                    # #162. DIE RAIL ERFAEHRT VOM ENDE, UND ZWAR HIER. `_run`
+                    # zeichnet sie am Zugende -- da steht `_busy` aber noch auf
+                    # True, weil erst diese Schleife entscheidet, ob ein zweiter
+                    # Zug folgt. Danach fiel das Flag und niemand zeichnete
+                    # nochmal: die Kachel behielt ihre Amber-Marke, bis
+                    # zufaellig etwas anderes die Rail anfasste. robin,
+                    # 2026-08-31: "zeigt weiterhin aktiver turn, obwohl turn
+                    # durch". Nach dem Lock, weil ein Push kein Lock braucht.
+                    self._reload_rail()
+                    return
+                # #162. DER WECHSEL LIEGT ZWISCHEN DEN ZUEGEN, nie in einem.
+                # Hier ist der vorige fertig und der naechste noch nicht
+                # gestartet -- der einzige Punkt, an dem der Chat gewechselt
+                # werden darf, ohne einem laufenden Zug seine Conversation zu
+                # entziehen.
+                if target is not None:
+                    self._hand_over(target)
                 INTERRUPT.clear()
                 # DIE SEITE ERFAEHRT, DASS DAS WARTEN VORBEI IST. Sie steht
                 # seit `send` auf gesperrt, aber mit dem Wartehinweis darunter;
@@ -9375,6 +10336,12 @@ class Api:
             with self._queue_lock:
                 self._busy = False
                 self._queued = None
+                # #162: mit dem Text faellt auch sein Ziel. Ein Ziel ohne Zeile
+                # waere ein Wechsel, den niemand angefordert hat.
+                self._queued_to = None
+            # DERSELBE GRUND WIE OBEN, und dieser Weg braucht ihn mehr: ein Zug,
+            # der wirft, hinterliesse sonst eine Kachel, die ewig rechnet.
+            self._reload_rail()
             raise
 
     def _run(self, text: str) -> None:
@@ -9388,7 +10355,8 @@ class Api:
         # carry die neue -- darum unten KEIN zweites Append. Der Sink
         # existiert schon hier, damit der Roll dieselbe Notiz und dasselbe
         # Zaehler-Reset bekommt wie ein Mid-Turn-Roll.
-        events = Turn(self.push, git_reload=self.git_refresh)
+        events = Turn(self.push, git_reload=self.git_refresh,
+                      goal_reload=self.push_goal)
         rolled = False
         if crow_core.should_roll(self._context_tokens, self._n_ctx,
                                  crow_core.ROLLOVER_AT):
@@ -9405,8 +10373,20 @@ class Api:
                 remote=spot0["remote"])
             archived = crow_core.roll_over(
                 self._conversation, spot0["base_url"],
-                self._context_tokens, carry=text, digest=digest)
+                self._context_tokens, carry=text, digest=digest,
+                notes=self._notes, timings=self._timings)
+            # #163: derselbe Kopf, den dieser Chat vor dem Schnitt trug --
+            # Gedaechtnis, Faehigkeiten, Ziel. Ohne ihn beginnt die zweite
+            # Haelfte einer Sitzung ohne alles, was ihre erste wusste.
+            crow_core.repin_head(self._conversation, crow_core.get_root())
             if archived:
+                # #173/#171. BEIDE BAENDER GEHEN MIT INS ARCHIV UND HIER WEG --
+                # ihre Positionen zaehlen Nachrichten, und die sind soeben alle
+                # weggelegt worden. Stehengelassen saessen sie ueber einem
+                # Gespraech, in dem sie nie passiert sind. Die Rollover-Notiz
+                # unmittelbar danach ist die erste Marke des neuen Kontexts.
+                self._notes = []
+                self._timings = []
                 events.rolled_over(self._context_tokens, archived)
                 self._context_tokens = 0
                 # Der neue Prefix hat keinen warmen Slot -- das Versprechen
@@ -9502,6 +10482,11 @@ class Api:
                 # disagree about which endpoint this turn is going to.
                 remote=spot["remote"],
                 routing=routing,
+                # #173/#171. EIN ROLLOVER MITTEN IM ZUG legt den Kontext weg,
+                # zu dem Marken und Bilanzen gehoeren: `run_turn` gibt sie ins
+                # Archiv und leert die Listen -- dieselben Listen, kein Abzug.
+                notes=self._notes,
+                bills=self._timings,
                 temperature=sampling["temperature"], top_p=sampling["top_p"],
                 min_p=sampling["min_p"], top_k=sampling.get("top_k"),
                 # #116: None sends nothing, which is the "never chosen" state.
@@ -9539,9 +10524,24 @@ class Api:
             sub_stop.set()
 
         self._context_tokens = getattr(result, "context_tokens", self._context_tokens)
+        # #169: NUR DIE MARKE, nicht die Buchung. Verbucht wird je Runde in
+        # `run_turn` -- ein Zug hakt mehrere Schritte ab, und eine Meldung erst
+        # am Zugende kam fuer jeden davon zu spaet. Hier steht nur noch, wo der
+        # Zug geendet hat: nach einem Rollover ist das 0, und die naechste Runde
+        # soll dagegen messen und nicht gegen die Tiefe von davor.
+        crow_core.goal_tokens_mark(self._context_tokens)
         self._promised_warm = getattr(result, "promised_warm", self._promised_warm)
         cost = getattr(result, "cost", None)
         line = cost.line() if cost is not None and getattr(cost, "rounds", 0) else ""
+        if line:
+            # #171. DIESELBE BILANZ, DIE DIE ZEILE ZEIGT, als Zahlen ins Band --
+            # `at` sagt, nach wievielen Nachrichten der Zug endete, damit ein
+            # Auswerter sie im Archiv den Zuegen zuordnen kann. Ein Zug ohne
+            # Runden hat keine Bilanz; deshalb haengt es an derselben Bedingung
+            # wie die Zeile und nicht an einer zweiten.
+            self._timings.append(dict(cost.record(),
+                                      at=len(self._conversation)))
+            del self._timings[:-crow_core.SESSION_TIMINGS_MAX]
         self.push({"k": "cost", "line": "[" + line + "]" if line else "",
                    "share": events.share, "tokens": self._context_tokens,
                    "n_ctx": self._n_ctx,
@@ -9755,6 +10755,80 @@ def main(argv: list[str] | None = None) -> int:
     webview.start(styles, window)
     return 0
 
+
+
+def _replay_rows(api, messages: list, upto) -> None:
+    """Die Nachrichten eines wiederhergestellten Chats zeichnen.
+
+    EINE MODULFUNKTION UND KEINE METHODE, siehe `Api._replay`: `_replay` wird in
+    der Suite ungebunden auf einem Sammler aufgerufen, der nur `push` kennt.
+    `upto(n)` zeichnet die Marken, die vor die (n+1)-te Nachricht gehoeren.
+    """
+    seen = 0
+    # #131. READ ONCE, AND OPTIONAL. A chat that never cleared anything has
+    # no watermark -- the normal state, and also what a bare replay harness
+    # hands in.
+    cleared = getattr(api, "_tools_cleared", 0)
+    for index, message in enumerate(messages):
+        # #173. VOR DER NACHRICHT, NICHT DANACH: eine Marke mit `at = k` wurde
+        # gesetzt, als k Nachrichten standen -- sie gehoert also zwischen die
+        # k-te und die (k+1)-te. Auch vor uebersprungenen Nachrichten, sonst
+        # haengt sie an der naechsten gezeichneten.
+        upto(index)
+        role = message.get("role")
+        body = (message.get("content") or "")
+        if role == "user":
+            # #142. A restored turn may carry blocks: the words go back as
+            # the line, the images go back as images -- the ticket's "the
+            # same image is still there after a restart".
+            words = crow_core.message_text(body)
+            urls = [u for u in
+                    (((p.get("image_url") or {}).get("url") or "")
+                     for p in crow_core.message_images(body)) if u]
+            if words.strip() or urls:
+                entry = {"k": "user", "t": words}
+                if urls:
+                    entry["i"] = urls
+                api.push(entry)
+            continue
+        if role != "assistant":
+            continue
+        thought = (message.get("reasoning_content") or "")
+        # #99. THE TOOL ROWS ARE PART OF THE TURN, and a turn that only
+        # called a tool has no `content` at all -- so the emptiness test has
+        # to know about them, or the whole message is skipped and the
+        # reopened chat shows two thoughts with nothing between them.
+        calls = message.get("tool_calls") or []
+        if not body.strip() and not thought.strip() and not calls:
+            continue
+        sink = Sink(api.push, live=False)
+        sink.reply_started()
+        if thought.strip():
+            sink.reasoning_started(0)
+            api.push({"k": "think", "t": thought})
+            sink.reasoning_finished()
+        if body:
+            sink.answer_text(body)
+        # After the answer, because that is the live order: the model says
+        # what it is about to do, then the calls run. Through `Turn`, which
+        # is where `tool_started` lives and where the live path draws these
+        # rows -- a second `{"k": "tool"}` written here is exactly the drift
+        # this function exists to prevent.
+        rows = Turn(api.push)
+        for call in calls:
+            # #131. A ROW THE USER DISMISSED STAYS DISMISSED. `seen` counts
+            # every call in the conversation, in order, and everything up to
+            # the watermark is drawn by nobody -- the message itself is
+            # untouched, so the model still has the call it made.
+            seen += 1
+            if seen <= cleared:
+                continue
+            function = call.get("function") or {}
+            rows.tool_started(function.get("name") or "?",
+                              function.get("arguments") or "")
+        sink.reply_finished()
+        api.push({"k": "cost", "line": "", "share": None,
+                  "tokens": api._context_tokens, "n_ctx": api._n_ctx})
 
 if __name__ == "__main__":
     raise SystemExit(main())

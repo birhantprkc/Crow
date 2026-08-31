@@ -1022,6 +1022,7 @@ HELP = """commands:
   /mode          the release level, /mode manual|allowedit|auto to switch
   /model         the model that is up, /model <key> restarts on another one
   /reasoning     this chat's thinking level, /reasoning <level>|off to set it
+  /goal          the goal this chat works towards, /goal <title> | <step> | <step>
   /thoughts      show the model's reasoning as it arrives, or hide it again
   /image         hold an image for the next line, /image <path>
   /delegate      hand a task to the remote subtask model, /delegate <task>
@@ -1111,6 +1112,16 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
     # word for word -- both surfaces describe one verification identically.
     if line == "/verify":
         print(crow_core.verify_start(conversation) + "\n")
+        return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
+
+    if line == "/goal" or line.startswith("/goal "):
+        # #163. DERSELBE KERN WIE IM FENSTER, und der Kopf folgt hier genauso:
+        # ein Ziel, das nur in der Datei steht, erreicht das Modell erst beim
+        # naechsten Rollover.
+        said, _goal, changed = crow_core.goal_command(line[len("/goal"):].strip())
+        if changed:
+            conversation.repin_memory(crow_core.prompt_head(crow_core.get_root()))
+        print(said + "\n")
         return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
 
     if line == "/thoughts":
@@ -2318,6 +2329,13 @@ def build_parser() -> argparse.ArgumentParser:
                              " and executing, allowedit asks before executing, auto asks"
                              " for nothing (default, unless the working directory"
                              " remembers another)")
+    parser.add_argument("--serve", nargs="?", const="", default=None,
+                        metavar="MODEL",
+                        help="boot the local server for a model and stay out of"
+                             " the way -- the one command that gets the runs/"
+                             " log, the entry in booted.json and the process"
+                             " group that a hand-typed llama-server line does"
+                             " not. Without a name it lists what is bootable")
     parser.add_argument("--root", default=None,
                         help="the directory tool writes are confined to. States it"
                              " AND creates it: writes .crow/root.json, which is what"
@@ -2374,6 +2392,42 @@ def boot_if_asked(args: argparse.Namespace) -> str | None:
     return None
 
 
+def serve_only(key: str) -> int:
+    """`--serve`: den Server hochfahren und sonst nichts.
+
+    DER EINE BEFEHL, DER ES RICHTIG MACHT. Eine von Hand getippte
+    llama-server-Zeile laesst drei Dinge weg, die man erst vermisst, wenn etwas
+    schiefgeht: das Log unter `runs/`, den Eintrag in `booted.json` -- ohne den
+    weder die Selbstheilung noch das 503-Warten greifen (#167) -- und die eigene
+    Prozessgruppe, ohne die ein Strg+C im falschen Fenster den Server mitnimmt
+    (#158). Alle drei haengen an `start_server`, also fuehrt der Befehl dorthin.
+    """
+    bootable = crow_core.bootable_models()
+    if not key:
+        print("crow --serve <model>. Bootable:\n  " + "\n  ".join(bootable))
+        return 0
+    if key not in bootable:
+        print("crow: no model %r. Bootable:\n  %s" % (key, "\n  ".join(bootable)),
+              file=sys.stderr)
+        return 2
+    # DER PORT KOMMT AUS DER STARTZEILE SELBST, nicht aus einer zweiten Liste:
+    # was der Server bekommt und wohin der Client zeigt, ist dieselbe Zahl.
+    argv = crow_core.server_command(key)
+    port = argv[argv.index("--port") + 1] if "--port" in argv else "8082"
+    base = "http://127.0.0.1:%s/v1" % port
+    print("booting %s on %s -- this takes a minute" % (key, base))
+    try:
+        path = crow_core.start_server(key, base, log=print)
+    except crow_core.CrowError as exc:
+        print("crow: %s" % exc, file=sys.stderr)
+        return 2
+    print("up: %s" % path)
+    print("log: %s" % os.path.join(os.getcwd(), "runs",
+                                   "llama-server-%s.err.log"
+                                   % (urllib.parse.urlsplit(base).port or 0)))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     # #135. WHERE A SERVER'S QUESTION LANDS IN THE TERMINAL. Installed once, at
@@ -2383,6 +2437,8 @@ def main(argv: list[str] | None = None) -> int:
     # #145: once, like set_root -- a subtask starts deep inside a turn where no
     # flag can reach it.
     crow_core.subtask_budget_set(args.subtask_max_tokens)
+    if args.serve is not None:
+        return serve_only(args.serve)
     # #114, and BEFORE repl(): the loop's first act is to check the endpoint,
     # and there is no point checking one this line is about to bring up.
     problem = boot_if_asked(args)
