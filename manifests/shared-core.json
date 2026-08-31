@@ -40,6 +40,11 @@
    "why": "#170. The one reader that hands back an image block instead of text, and the only place that decides what counts as an image on the wire. A second copy would answer 'which formats' differently from image_part's table, and the surface with the older answer would refuse a file the other one sends."
   },
   {
+   "name": "tool_render_page",
+   "why": "#175. The only place that starts a browser, and the only one that owns the handle it kills. A second copy would sweep by name sooner or later -- that is exactly the mistake #158 paid for once -- and it would answer differently about where a render lands, which is the boundary read_image then has to obey.",
+   "kind": "def"
+  },
+  {
    "name": "tool_write_file",
    "kind": "def",
    "why": "The one tool whose drift costs data: #10 measured hermes-agent resolving read-before-write to last-write-wins in two independent code paths, one warning and one writing anyway. Two implementations here is that same defect with a different name."

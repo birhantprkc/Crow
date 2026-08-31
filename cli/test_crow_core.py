@@ -11149,6 +11149,112 @@ class TheRolloverCarriesADigestTests(unittest.TestCase):
         self.assertNotIn(crow_core.DIGEST_HEAD, note)
 
 
+class CrowOwnsTheBrowserItStartsTests(unittest.TestCase):
+    """#175. `render_page` -- und der Teil, der zaehlt, ist nicht das Bild.
+
+    Das Modell hat sich vorher aus Shell-Befehlen einen Browser gebaut: detached
+    starten, `ping` als sleep, `Start-Process` gegen die Konsole. Jeder Schritt
+    war vernuenftig und schob den Prozess weiter aus Crows Reichweite -- dreimal
+    blieb der Zug stehen, einmal mit 19 Chrome-Prozessen und 7.511 s CPU auf
+    einem davon. Die Faelle hier bewachen deshalb die Aufsicht, nicht das Bild:
+    ein eigenes Handle, ein eigenes Profil, ein eigener Deckel, und NIE ein
+    Name.
+    """
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-render-t-")
+        self.src = inspect.getsource(crow_core.tool_render_page)
+        # DER WAECHTER PRUEFT DEN CODE, NICHT DIE ERKLAERUNG. Der Docstring
+        # NENNT `taskkill /IM`, um zu sagen, dass es das hier nicht gibt -- ein
+        # Muster, das an seinem eigenen Kommentar rot wird, ist genau der
+        # Pruefer, den man nach der dritten Meldung ueberliest.
+        import textwrap as _tw
+        body = ast.parse(_tw.dedent(self.src)).body[0]
+        self.code = chr(10).join(
+            ast.unparse(n) for n in body.body
+            if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
+                    and isinstance(n.value.value, str)))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_it_is_declared_and_counted_as_executing(self):
+        """Es startet einen Prozess und legt eine Datei an. `reading` waere eine
+        Freigabe, die der Nutzer nie erteilt hat -- und es ersetzt genau die
+        run_command-Zeilen, die vorher gefragt haben."""
+        self.assertIn("render_page", crow_core.TOOL_IMPL)
+        self.assertEqual(crow_core.TOOL_CLASS.get("render_page"), "executing")
+        self.assertIn("render_page",
+                      [t["function"]["name"] for t in crow_core.TOOLS])
+
+    def test_no_page_no_call(self):
+        """NEGATIVPROBE: ein Pfad, den es nicht gibt, startet keinen Browser."""
+        said = crow_core.tool_render_page(os.path.join(self.dir, "gone.html"))
+        self.assertTrue(said.startswith("error:"), said)
+        self.assertIn("no such page", said)
+
+    def test_an_empty_argument_is_refused(self):
+        """NEGATIVPROBE, die zweite: ohne Ziel gibt es nichts zu zeichnen."""
+        self.assertTrue(crow_core.tool_render_page("   ").startswith("error:"))
+
+    def test_it_kills_its_own_child_and_never_a_name(self):
+        """DIE #158-FALLE, als Fall. Ein Messskript raeumte einmal `jeden
+        llama-server` ab und nahm robins laufenden Testserver mit. Was hier
+        stirbt, ist das Handle, das dieser Aufruf selbst gestartet hat."""
+        self.assertIn("proc.kill()", self.src)
+        for sweep in ("taskkill", "/IM", "IMAGENAME", "psutil", "process_iter"):
+            self.assertNotIn(sweep, self.code,
+                             "%r sweeps by name -- that is the #158 defect" % sweep)
+
+    def test_it_writes_to_files_and_not_to_pipes(self):
+        """`subprocess` mit `timeout` haengt auf Windows NACH dem Kill, wenn ein
+        detachiertes Enkelkind das Schreibende einer Pipe haelt -- es ruft
+        `communicate()` ein zweites Mal ohne Timeout. Ein Browser startet genau
+        solche Enkel."""
+        self.assertNotIn("subprocess.PIPE", self.src)
+        self.assertIn("subprocess.Popen", self.src)
+
+    def test_every_run_gets_its_own_profile(self):
+        """OHNE DAS PASSIERT NICHTS. Ohne `--user-data-dir` reicht Chrome den
+        Auftrag an eine laufende Instanz weiter und kehrt sofort zurueck: Exit 0,
+        kein Screenshot, und die Ursache steht nirgends."""
+        self.assertIn("--user-data-dir=", self.src)
+        self.assertIn("mkdtemp", self.src)
+        self.assertIn("rmtree", self.src)
+
+    def test_the_call_is_bounded_on_both_sides(self):
+        """Zwei Deckel, und sie sind nicht derselbe: die virtuelle Uhr gehoert
+        der SEITE, das Timeout dem PROZESS. Faellt einer weg, haengt entweder
+        der Zug oder es kommt nie ein Bild."""
+        self.assertIn("--virtual-time-budget=", self.src)
+        self.assertIn("TimeoutExpired", self.src)
+
+    def test_the_browser_is_looked_up_and_never_hard_coded(self):
+        """Eine Maschine ohne Chrome hat Edge, und ein Pfad im Quelltext ist der
+        Pfad EINER Maschine. Alle Kandidaten gehen ueber Umgebungsvariablen."""
+        for raw in crow_core.BROWSERS:
+            self.assertTrue(raw.startswith("%"), raw)
+        found = crow_core.find_browser()
+        if found is not None:
+            self.assertTrue(os.path.isfile(found), found)
+
+    def test_a_machine_without_a_browser_says_so(self):
+        """NEGATIVPROBE mit gezogenem Boden: kein Chromium, kein Aufruf, und die
+        Ablehnung nennt beide Namen statt `not found`."""
+        page = os.path.join(self.dir, "x.html")
+        with open(page, "w", encoding="utf-8") as fh:
+            fh.write("<p>hi")
+        real = crow_core.find_browser
+        crow_core.find_browser = lambda: None
+        try:
+            said = crow_core.tool_render_page(page)
+        finally:
+            crow_core.find_browser = real
+        self.assertTrue(said.startswith("error:"), said)
+        self.assertIn("Chrome", said)
+        self.assertIn("Edge", said)
+
+
 class TheModelCanLookAtAnImageTests(unittest.TestCase):
     """#170. Das Werkzeug, mit dem das Modell selbst ein Bild aufmacht.
 

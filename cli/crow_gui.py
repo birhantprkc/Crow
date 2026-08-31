@@ -476,6 +476,14 @@ def rail_width_setting() -> int:
 # 720 * 0,85 = 612. Die Seite klemmt dieselbe Geste ein zweites Mal, siehe
 # codeDrag; beide Kopien tragen denselben Wert.
 CODE_MIN, CODE_MAX, CODE_DEFAULT = 260, 612, 260
+# #175. UND EINE ZWEITE DECKE, SOBALD DER BROWSER IN DER SPALTE STEHT. Die 612
+# sind die Decke fuer ein CODE-Panel -- eine Aufrufliste und ein Quelltext
+# brauchen nicht mehr, und robin hat sie 2026-08-27 selbst auf diesen Wert
+# gezogen. Eine WEBSEITE braucht mehr: bei 612 ist jede zweite Seite in ihrem
+# Mobil-Layout. Nach oben klemmt ohnehin das Layout, nicht diese Zahl: #main
+# haelt sein `min-width:560px`, und #side gibt vorher nach (#138c). Der Wert
+# hier ist also nur die Grenze dessen, was gespeichert werden darf.
+CODE_MAX_WIDE = 4096
 
 # WIEVIEL EINER ANTWORT DAS PANEL ZEIGT. Der Kern reicht sie ganz herueber --
 # `tool_result` sagt im eigenen Docstring, dass die Menge eine Entscheidung des
@@ -908,6 +916,13 @@ body[data-code="shut"][data-browser="shut"] #codegrip{display:none}
   background:var(--bg);border:1px solid var(--line);border-radius:6px;
   padding:4px 9px;color:var(--text-soft)}
 #brurl:focus{outline:none;border-color:var(--accent)}
+/* DIE FLAECHE IST NUR NOCH DAS RECHTECK, auf dem die Scheibe liegt: das
+   zweite WebView2 zeichnet DARUEBER, nicht darin. Was hier steht, sieht man
+   also nur, solange keine Seite offen ist.
+   FRUEHER LAG HIER EIN IFRAME, und das war der Fehler: `X-Frame-Options: DENY`
+   und `frame-ancestors none` weisen einen Rahmen ab, und das sind claude.ai,
+   github.com und google.com -- die Seiten, wegen derer jemand einen Browser
+   aufmacht. Ein Fenster ist Top-Level und kennt den Header nicht. */
 /* WEISS ERST, WENN ETWAS DASTEHT. Eine fremde Seite bringt ihren eigenen
    Hintergrund mit; steht sie auf unserem dunklen, blitzt bei jedem Wechsel der
    Rahmen durch, und eine Seite ohne eigenen Grund erscheint als Loch. Ein
@@ -916,10 +931,6 @@ body[data-code="shut"][data-browser="shut"] #codegrip{display:none}
    Rail (robin, 2026-08-31). Also traegt die Flaeche `--rail` wie die Leiste
    darueber, und das Weiss kommt mit der ersten geladenen Adresse. */
 #brbody{flex:1;min-height:0;position:relative;background:var(--rail)}
-.brframe{position:absolute;inset:0;width:100%;height:100%;border:0;
-  background:transparent}
-.brframe[data-loaded]{background:#fff}
-.brframe[hidden]{display:none}
 /* Was dasteht, bevor jemand eine Adresse getippt hat -- und was dasteht, wenn
    eine Seite das Einbetten verweigert. Beides ist kein Fehler in Rot. */
 #brnone{position:absolute;inset:0;display:flex;align-items:center;
@@ -4378,8 +4389,15 @@ const crow = {
     const panel=$("#side"), grip=$("#codegrip");
     grip.classList.add("on"); panel.classList.add("dragging");
     const right=panel.getBoundingClientRect().right;
+    // #175. DIE DECKE HAENGT DAVON AB, WAS IN DER SPALTE STEHT. 612 ist die
+    // Decke fuer ein Code-Panel; steht der Browser darin, ist sie weg und es
+    // klemmt nur noch das, was der Chatspalte zusteht -- ihre 560 plus die
+    // Rail. Eine Webseite bei 612 ist eine Webseite im Mobil-Layout.
+    const wide=document.body.dataset.browser!=="shut";
+    const cap=wide ? Math.max(612, window.innerWidth-560-$("#rail").offsetWidth)
+                   : 612;
     const move=e=>{
-      const w=Math.max(260,Math.min(612,Math.round(right-e.clientX)));
+      const w=Math.max(260,Math.min(cap,Math.round(right-e.clientX)));
       document.documentElement.style.setProperty("--codew",w+"px"); };
     const up=()=>{
       document.removeEventListener("mousemove",move);
@@ -5749,7 +5767,10 @@ const crow = {
     const open=el.dataset.browser!=="shut";
     el.dataset.browser=open ? "shut" : "open";
     pywebview.api.set_browser_open(!open);
-    if(!open && !this.tabs.length) this.brNew(); },
+    if(open) return;                       // zugeklappt: `set_browser_open` versteckt
+    if(!this.tabs.length){ this.brNew(); return; }
+    const t=this.brTab(this.tabOn);
+    if(t && t.at>=0) this.brSend(t.hist[t.at]); else pywebview.api.pane_show(); },
 
   // -- #175: die Reiter ----------------------------------------------------
   //
@@ -5767,27 +5788,56 @@ const crow = {
   brNew(url){
     const id=++this.tabSeq;
     this.tabs.push({id:id, hist:[], at:-1});
-    const f=document.createElement("iframe");
-    f.className="brframe"; f.dataset.tab=id;
-    $("#brbody").appendChild(f);
     this.tabOn=id;
     this.brDraw();
-    if(url) this.brGo(url); else $("#brurl").focus();
+    if(url) this.brGo(url); else { this.brBlank(); $("#brurl").focus(); }
   },
+
+  // EIN REITER OHNE ADRESSE ZEIGT NICHTS -- und "nichts" heisst hier: die
+  // Scheibe geht weg, damit die Panelfarbe darunter sichtbar wird. Sie auf
+  // `about:blank` zu lassen waere ein weisses Rechteck im dunklen Fenster.
+  brBlank(){ if(window.pywebview) pywebview.api.pane_hide(); },
 
   brTab(id){ return this.tabs.find(t=>t.id===id) || null; },
 
+  // #175. WAS DAS MODELL ANGESEHEN HAT, IM PANEL. Es zeigt den Screenshot und
+  // nicht die Live-Seite: ein iframe kann google.com nicht einbetten, und ein
+  // leeres Tab neben einer Antwort ueber eine Seite ist schlimmer als kein Tab.
+  // Der Screenshot ist, was das Modell wirklich gesehen hat; die Adresse steht
+  // in der Zeile und laedt auf Enter live.
+  //
+  // DAS PANEL KLAPPT SICH DAFUER AUF. Ein Tab, das in einem zugeklappten Panel
+  // entsteht, ist ein Ereignis, von dem niemand erfaehrt.
+  brRendered(url, shot){
+    if(document.body.dataset.browser==="shut"){
+      document.body.dataset.browser="open";
+      pywebview.api.set_browser_open(true); }
+    const id=++this.tabSeq;
+    // DIE ECHTE ADRESSE IN DER HISTORIE, nicht der Screenshot: ein Klick auf
+    // Neu laden holt die Seite, nicht noch einmal das Bild.
+    this.tabs.push({id:id, hist:[url||""], at:0});
+    this.tabOn=id;
+    this.brDraw();
+    $("#brurl").value=url||"";
+    // DAS BILD ZUERST, weil es das ist, was das Modell gesehen hat -- die Seite
+    // kann sich seitdem geaendert haben, und dann erzaehlt der Chat von etwas
+    // anderem als der Schirm.
+    this.brSend("file:///"+String(shot||"").replace(/\\/g,"/")); },
+
+  // EINE SCHEIBE FUER ALLE REITER, also laedt ein Wechsel die Seite neu. Der
+  // ehrliche Preis dafuer, dass ueberhaupt jede Seite geht: je Reiter ein
+  // eigenes Fenster waere je Reiter ein zweites WebView2 im Speicher.
   brSelect(id){ this.tabOn=id; this.brDraw();
     const t=this.brTab(id);
-    $("#brurl").value = t && t.at>=0 ? t.hist[t.at] : ""; },
+    const url = t && t.at>=0 ? t.hist[t.at] : "";
+    $("#brurl").value=url;
+    if(url) this.brSend(url); else this.brBlank(); },
 
   brClose(id, ev){
     if(ev) ev.stopPropagation();
     const i=this.tabs.findIndex(t=>t.id===id);
     if(i<0) return;
     this.tabs.splice(i,1);
-    const f=$("#brbody").querySelector('.brframe[data-tab="'+id+'"]');
-    if(f) f.remove();
     // DER NACHBAR UEBERNIMMT, nicht immer der erste: wer den dritten von fuenf
     // schliesst, sieht danach den dritten, so wie in jedem anderen Browser.
     if(this.tabOn===id) this.tabOn = this.tabs.length
@@ -5820,8 +5870,6 @@ const crow = {
       x.textContent="\u00d7"; x.title="close this tab";
       x.onclick=ev=>this.brClose(t.id, ev);
       b.append(name, x); strip.appendChild(b); });
-    $("#brbody").querySelectorAll(".brframe").forEach(f => {
-      f.hidden = (Number(f.dataset.tab) !== this.tabOn); });
     const none=$("#brnone"); if(none) none.remove();
     if(!this.tabs.length){
       const d=document.createElement("div"); d.id="brnone";
@@ -5841,20 +5889,33 @@ const crow = {
     this.brShow(t, url); },
 
   brShow(t, url){
-    const f=$("#brbody").querySelector('.brframe[data-tab="'+t.id+'"]');
-    // DAS WEISS KOMMT MIT DER ERSTEN ADRESSE, nicht mit dem Reiter: bis dahin
-    // ist die Flaeche unser eigenes Panel und traegt dessen Farbe.
-    if(f){ f.dataset.loaded="1"; f.src=url; }
     $("#brurl").value=url;
+    this.brSend(url);
     this.brDraw(); },
+
+  // DIE GEOMETRIE ZUERST, DANN DIE ADRESSE. Umgekehrt erscheint die Scheibe
+  // einen Wimpernschlag lang an der Stelle, an der sie beim letzten Mal lag.
+  brSend(url){
+    if(!window.pywebview) return;
+    this.brPlace();
+    pywebview.api.pane_go(url); },
+
+  // DAS RECHTECK, AUF DEM DIE SCHEIBE LIEGT, in CSS-Pixeln der Seite. Python
+  // legt die Fensterecke darauf -- das Hauptfenster ist rahmenlos, also ist
+  // seine Ecke zugleich die Ecke dieser Flaeche.
+  brPlace(){
+    if(!window.pywebview) return;
+    const b=$("#brbody"); if(!b) return;
+    const r=b.getBoundingClientRect();
+    if(r.width<2 || r.height<2) return;
+    pywebview.api.pane_place(r.left, r.top, r.width, r.height); },
 
   brBack(){ const t=this.brTab(this.tabOn);
     if(t && t.at>0){ t.at--; this.brShow(t, t.hist[t.at]); } },
   brForward(){ const t=this.brTab(this.tabOn);
     if(t && t.at < t.hist.length-1){ t.at++; this.brShow(t, t.hist[t.at]); } },
   brReload(){ const t=this.brTab(this.tabOn);
-    if(t && t.at>=0){ const f=$("#brbody").querySelector('.brframe[data-tab="'+t.id+'"]');
-      if(f) f.src=f.src; } },
+    if(t && t.at>=0) this.brSend(t.hist[t.at]); },
 
   // #156. DASSELBE FUER DAS GIT-PANEL, und es ist der EINZIGE Weg, es wieder
   // zuzumachen -- robins Ansage vom 2026-08-29: kein zweites Kreuz im Panel.
@@ -6108,6 +6169,8 @@ const crow = {
       case "mode": this.modeIs(e.name, e.modes); break;
       case "root": this.rootIs(e.path, e.name, e.roots); break;
       case "ask": this.ask(e.name, e.args, e.scope); break;
+      // #175. Ein Render des Modells oeffnet sein Tab im Browser-Panel.
+      case "page": this.brRendered(e.url, e.shot); break;
       case "rail": this.rail(e);
         this.archive(e.archived||[]); break;
       // THE PAGE CLEARS ITSELF ON "new", because the click is here. A DELETE of
@@ -6298,6 +6361,11 @@ crow.toolsCount();
 // sagen, wie man einen bekommt. `brDraw` zeichnet genau das, wenn die Liste
 // leer ist -- und nichts, sobald sie es nicht mehr ist.
 crow.brDraw();
+// #175. DIE SCHEIBE FOLGT DER FLAECHE. Fenstergroesse, Code-Panel, der Griff --
+// drei Wege, auf denen sich `#brbody` verschiebt, ohne dass jemand eine Adresse
+// tippt. Ein Beobachter auf dem Element erwischt alle drei; ihn an `resize` zu
+// haengen haette die anderen zwei verpasst.
+new ResizeObserver(() => crow.brPlace()).observe($("#brbody"));
 // KEINE STARTBREITEN-AUTOMATIK MEHR. #138c richtete eine nie gezogene Breite
 // an der halben Flaeche aus -- auf robins Fenster am 2026-08-27 war genau das
 // der zu breite Start, und die Icons standen wieder neben der Maske. Seine
@@ -6847,6 +6915,18 @@ class Turn(TurnEvents):
                    # "gleich zu Ende gelesen" und "hier steht ein Bruchteil".
                    "cut": cut if cut > 0 else 0})
 
+    def page_rendered(self, url: str, shot: str) -> None:
+        """#175. Was das Modell angesehen hat, kommt ins Browser-Panel.
+
+        DER SCHIRM ZEIGT DEN SCHREENSHOT UND NICHT DIE LIVE-SEITE, und das ist
+        die ehrliche Wahl: das Panel kann nur einbetten, und google.com,
+        github.com und jede Seite mit `X-Frame-Options: DENY` blieben darin
+        leer -- ausgerechnet dann, wenn das Modell sehr wohl etwas gesehen hat.
+        Der Screenshot IST, was es gesehen hat. Die Adresse steht in der Zeile
+        darueber, ein Druck auf Enter laedt sie live.
+        """
+        self._put({"k": "page", "url": url, "shot": shot})
+
     def boundary_escaped(self, name: str, refused: list) -> None:
         """#98, and it is drawn in `auto`'s own colour rather than as a note.
 
@@ -7037,6 +7117,13 @@ class Api:
         # ihrer Aussage: unten gelesen behauptet sie, der Schnitt sei gerade
         # eben gewesen.
         self._notes: list[dict] = []
+        # #175. DIE SCHEIBE: das zweite, rahmenlose WebView2, das ueber der
+        # Panelflaeche liegt. Erst beim ersten Gebrauch erzeugt -- ein Fenster,
+        # das beim Start entsteht, kostet Speicher fuer jeden, der den Browser
+        # nie aufmacht.
+        self._browser_win = None
+        self._browser_rect = None
+        self._browser_shown = False
         # #171. WAS JEDER ZUG DIESES CHATS GEKOSTET HAT, als Zahlen. Dieselbe
         # Bauart wie das Band darueber und aus demselben Grund: die Timing-Zeile
         # war reine Bildschirmausgabe, also nahm der Rollover sie nicht mit, und
@@ -10197,7 +10284,108 @@ class Api:
         doc = read_settings()
         doc["browser_open"] = bool(open_)
         write_settings(doc)
+        if not open_:
+            self.pane_hide()
         return bool(open_)
+
+    # -- #175: die Scheibe -----------------------------------------------------
+    #
+    # EIN ECHTES ZWEITES WEBVIEW2, KEIN IFRAME, und das ist keine Vorliebe: ein
+    # eingebetteter Rahmen wird von `X-Frame-Options: DENY` und
+    # `frame-ancestors none` abgewiesen, und das sind claude.ai, github.com,
+    # google.com -- also genau die Seiten, wegen derer jemand einen Browser
+    # aufmacht. Ein Fenster ist ein TOP-LEVEL-Kontext, und dort greift keiner
+    # der beiden Header. Gemessen 2026-08-31: example.com (ohne Header) lud im
+    # iframe, claude.ai zeigte das rote Zeichen.
+    #
+    # ES SIEHT EINGEBAUT AUS, WEIL ES AUF DER FLAECHE LIEGT. Rahmenlos, immer
+    # oben, und es bekommt seine Geometrie aus dem Rechteck von `#brbody` --
+    # die Seite meldet das CSS-Rechteck, Python legt die Fensterecke darauf.
+    # Das Hauptfenster ist rahmenlos, also ist seine Ecke zugleich die Ecke der
+    # Zeichenflaeche; ein Titelbalken haette hier einen Versatz erzwungen.
+    def _pane(self):
+        """Die Scheibe, beim ersten Gebrauch erzeugt. Nie im Voraus.
+
+        DER IMPORT STEHT HIER DRIN, weil er in dieser Datei nirgends oben
+        steht: `webview` wird an drei Stellen lokal geholt. Ein Modulname, den
+        es hier nicht gibt, kostete am 2026-08-31 einen ganzen Anlauf -- der
+        NameError fiel in die pywebview-Bruecke und war damit unsichtbar, und
+        das Panel blieb einfach leer.
+        """
+        import webview
+        if self._browser_win is None:
+            self._browser_win = webview.create_window(
+                "crow-browser", url="about:blank", frameless=True,
+                easy_drag=False, hidden=True, on_top=True, focus=True,
+                width=600, height=400, background_color="#ffffff")
+        return self._browser_win
+
+    def pane_place(self, left: float, top: float,
+                   width: float, height: float) -> bool:
+        """Das Rechteck, auf dem die Scheibe liegt -- in CSS-Pixeln der Seite."""
+        self._browser_rect = (float(left), float(top),
+                              max(1.0, float(width)), max(1.0, float(height)))
+        self._pane_apply()
+        return True
+
+    def _pane_apply(self) -> None:
+        """Rechteck plus Fensterecke, auf die Scheibe geschrieben."""
+        win, rect = self._browser_win, self._browser_rect
+        if win is None or rect is None or not self._browser_shown:
+            return
+        try:
+            x = int(self._window.x + rect[0])
+            y = int(self._window.y + rect[1])
+            win.move(x, y)
+            win.resize(int(rect[2]), int(rect[3]))
+        except Exception:              # noqa: BLE001 -- ein Fenster im Aufbau
+            pass
+
+    def pane_go(self, url: str) -> str:
+        """Eine Adresse in der Scheibe. Sie erscheint, wenn sie noch weg war.
+
+        JEDER FEHLER WIRD GESAGT, und das ist die Lehre aus dem ersten Anlauf:
+        was hier scheitert, faellt sonst in die JS-Bruecke und hinterlaesst ein
+        leeres Panel ohne eine einzige Zeile darueber, warum.
+        """
+        try:
+            win = self._pane()
+            win.load_url(url)
+            if not self._browser_shown:
+                self._browser_shown = True
+                win.show()
+            self._pane_apply()
+        except Exception as exc:       # noqa: BLE001
+            self.push({"k": "note",
+                       "t": "the browser pane could not open %s: %s" % (url, exc)})
+            return "error: %s" % exc
+        return url
+
+    def pane_hide(self) -> bool:
+        """Weg, ohne zerstoert zu werden -- eine Scheibe, die neu gebaut wird,
+        verliert die Seite, auf der jemand gerade war."""
+        self._browser_shown = False
+        if self._browser_win is not None:
+            try:
+                self._browser_win.hide()
+            except Exception:          # noqa: BLE001
+                pass
+        return True
+
+    def pane_show(self) -> bool:
+        if self._browser_win is None or self._browser_shown:
+            return True
+        self._browser_shown = True
+        try:
+            self._browser_win.show()
+        except Exception:              # noqa: BLE001
+            pass
+        self._pane_apply()
+        return True
+
+    def pane_follow(self, *_) -> None:
+        """Das Hauptfenster ist gewandert oder hat die Groesse geaendert."""
+        self._pane_apply()
 
     def set_git_open(self, open_: bool) -> bool:
         """#156. Remember whether the git panel is folded away.
@@ -10366,7 +10554,11 @@ class Api:
             width = int(px)
         except (TypeError, ValueError):
             return False
-        if width < CODE_MIN or width > CODE_MAX:
+        # #175. GEGEN DIE WEITE DECKE, weil die Seite mit offenem Browser bis
+        # dorthin ziehen darf. Eine Breite, die die Maus erzeugt hat, muss
+        # gespeichert werden koennen -- sonst faellt sie beim naechsten Start
+        # auf die Vorgabe zurueck und die Geste war umsonst.
+        if width < CODE_MIN or width > CODE_MAX_WIDE:
             return False
         doc = read_settings()
         doc["code_width"] = width
@@ -11039,6 +11231,15 @@ def main(argv: list[str] | None = None) -> int:
         width=1180, height=800, min_size=(1130, 520), frameless=True,
         easy_drag=False, background_color=theme_bg(current_theme()))
     api._window = window
+    # #175. DIE SCHEIBE HAENGT AM HAUPTFENSTER: wandert es, wandert sie mit,
+    # und ein minimiertes Crow darf keine Webseite auf dem Desktop stehen
+    # lassen. Ohne diese vier Zeilen liegt sie beim ersten Verschieben neben
+    # dem Panel und sieht aus wie ein fremdes Fenster.
+    window.events.moved += api.pane_follow
+    window.events.resized += api.pane_follow
+    window.events.minimized += (lambda *_: api.pane_hide())
+    window.events.restored += (lambda *_: api.pane_show())
+    window.events.closing += (lambda *_: api.pane_hide())
     threading.Thread(target=api.pump, daemon=True).start()
     # The styles can only be set once the window exists, so this runs as the
     # start-up callback rather than beside create_window.

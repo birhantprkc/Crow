@@ -586,6 +586,17 @@ TOOLS = [
         "own work when a step says it has to look right; read_file cannot open one. "
         "Needs a model with a projector; on one without, this refuses and says so.",
         {"path": dict(_STR, description="Path to the image.")}, ["path"]),
+    _fn("render_page",
+        "Open a local page or a URL in a real browser and get back a screenshot plus the "
+        "console output. Use it to SEE what you built -- then read_image the screenshot. "
+        "Do not drive a browser through run_command; this one is supervised and always "
+        "comes back.",
+        {"path": dict(_STR, description="A file in the working area, or an http(s) URL."),
+         "wait_ms": {"type": "integer",
+                     "description": "How long the page may take to settle. Default 4000."},
+         "width": {"type": "integer", "description": "Viewport width, default 1280."},
+         "height": {"type": "integer", "description": "Viewport height, default 800."}},
+        ["path"]),
     _fn("write_file",
         "Write a file, creating directories as needed. An existing file must have been "
         "read first in this session; otherwise the call is refused.",
@@ -6915,10 +6926,189 @@ def _clip(text: str, limit: int = MAX_TOOL_BYTES) -> str:
 # Schleife, kein Stapel, den man wachsen laesst.
 _IMAGE_RIDE: "list[dict]" = []
 
+# #175. DASSELBE FUER EINEN RENDER, und aus demselben Grund: das Werkzeug hat
+# keinen Draht zum Fenster, die Schleife hat ihn. Was hier liegt, ist das Paar
+# (Adresse, Screenshot) des letzten `render_page`.
+_RENDER_RIDE: "list[tuple]" = []
+
+
+def take_render_ride() -> "tuple | None":
+    """Adresse und Screenshot des letzten `render_page`, genau einmal."""
+    return _RENDER_RIDE.pop() if _RENDER_RIDE else None
+
 
 def take_image_ride() -> "dict | None":
     """Der Bildblock des letzten `read_image`, genau einmal."""
     return _IMAGE_RIDE.pop() if _IMAGE_RIDE else None
+
+
+# #175. WO EIN BROWSER LIEGT, UND ER WIRD GESUCHT STATT GERATEN. Chrome zuerst,
+# Edge als Rueckfall: beide sind Chromium und nehmen dieselben Schalter, aber
+# Edge ist auf jedem Windows da, und ein Werkzeug, das eine Installation
+# voraussetzt, die der Nutzer nicht hat, ist ein Werkzeug, das einmal scheitert
+# und danach nie wieder gerufen wird.
+BROWSERS = (
+    r"%ProgramFiles%\Google\Chrome\Application\chrome.exe",
+    r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
+    r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe",
+    r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
+    r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe",
+)
+
+
+def find_browser() -> "str | None":
+    """The first Chromium on this machine, or None. Path only, nothing started."""
+    for raw in BROWSERS:
+        path = os.path.expandvars(raw)
+        if "%" not in path and os.path.isfile(path):
+            return path
+    return None
+
+
+def _render_dir() -> str:
+    """Where a render lands: beside MEMORY.md in the bound folder, else the session.
+
+    IT HAS TO BE INSIDE THE WORKING AREA, because the next thing that happens to
+    the file is `read_image`, and that reader obeys the boundary. A screenshot in
+    a temp folder would be a file the model is handed and then refused.
+    """
+    root = get_root()
+    base = os.path.join(root, ".crow") if root else SESSION_DIR
+    out = os.path.join(base, "renders")
+    os.makedirs(out, exist_ok=True)
+    return out
+
+
+def tool_render_page(path: str, wait_ms: int | None = None,
+                     width: int | None = None, height: int | None = None,
+                     **_) -> str:
+    """Render one page in a browser Crow owns, and hand back what it saw.
+
+    WARUM UEBERHAUPT (#175): ohne dieses Werkzeug baut sich das Modell aus
+    Shell-Befehlen einen Browser -- und genau das ist das, was Crow nicht
+    beaufsichtigen kann. Im Voxel-Lauf am 2026-08-30 blieb der Zug DREIMAL
+    stehen; waehrend einer Blockade gemessen: 19 Chrome-Prozesse, der aelteste
+    zwei Stunden alt, einer mit 7.511 s CPU, der Server im Leerlauf, das Fenster
+    stumm. Jedes Mal musste ein Mensch von Hand abraeumen. Sein Weg dorthin war
+    nicht unvernuenftig -- detached starten, `ping` als sleep, `Start-Process`
+    gegen die Konsole -- und jeder Schritt davon schob den Prozess weiter aus
+    Crows Reichweite.
+
+    ES TOETET SEIN EIGENES KIND UND NIE NACH NAMEN. Das ist die #158-Falle,
+    einmal bezahlt: ein Messskript raeumte "jeden llama-server" ab und nahm
+    robins laufenden Testserver mit. Hier gibt es ein Handle, ein Timeout und
+    `proc.kill()` darauf -- kein `taskkill /IM`, keine Prozessliste, keine
+    Namen.
+
+    UND ES SCHREIBT IN DATEIEN STATT IN PIPES. `subprocess` mit `timeout` haengt
+    auf Windows NACH dem Kill, wenn ein detachiertes Enkelkind das Schreibende
+    einer Pipe haelt: `communicate()` wird ein zweites Mal gerufen, ohne
+    Timeout. Ein Browser startet genau solche Enkel. Dateien haben dieses
+    Problem nicht.
+
+    EIN EIGENES PROFIL JE LAUF, und das ist keine Hygiene, sondern die
+    Bedingung dafuer, dass ueberhaupt etwas passiert: ohne `--user-data-dir`
+    reicht Chrome den Auftrag an eine bereits laufende Instanz weiter und kehrt
+    sofort zurueck -- mit Exit 0 und ohne Screenshot.
+    """
+    import shutil as _shutil
+    import tempfile as _tempfile
+
+    exe = find_browser()
+    if exe is None:
+        return ("error: no Chromium browser on this machine. render_page needs "
+                "Chrome or Edge; neither was found in the usual places.")
+
+    target = (path or "").strip()
+    if not target:
+        return "error: render_page needs a path or a URL"
+    if re.match(r"^https?://", target, re.I):
+        url = target
+    else:
+        target = _rooted(target)                    # #177
+        if not os.path.isfile(target):
+            return "error: no such page: %s" % target
+        url = "file:///" + target.replace(os.sep, "/")
+
+    wait = max(200, min(int(wait_ms or 4000), 60000))
+    w = max(200, min(int(width or 1280), 4096))
+    h = max(200, min(int(height or 800), 4096))
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    shot = os.path.join(_render_dir(), "render-%s.png" % stamp)
+    profile = _tempfile.mkdtemp(prefix="crow-render-")
+    log = os.path.join(profile, "browser.log")
+
+    argv = [exe, "--headless=new", "--disable-gpu", "--hide-scrollbars",
+            "--no-first-run", "--no-default-browser-check",
+            "--disable-extensions", "--mute-audio",
+            "--user-data-dir=" + profile,
+            "--window-size=%d,%d" % (w, h),
+            # DER DECKEL IST IM BROWSER UND NICHT NUR DRAUSSEN. Eine Seite, die
+            # nie fertig laedt, wuerde sonst nur vom Timeout getroffen -- und
+            # das liefert KEIN Bild. Die virtuelle Uhr laesst ihn nach dieser
+            # Zeit trotzdem zeichnen, also kommt auch von einer haengenden Seite
+            # etwas zurueck, das man ansehen kann.
+            "--virtual-time-budget=%d" % wait,
+            # Die dokumentierte Ergaenzung zur virtuellen Uhr: alle Stufen des
+            # Kompositors vor dem Zeichnen zu Ende fahren, damit ein Bild den
+            # Zustand zeigt und nicht eine halbe Ebene davon.
+            # WAS ES NICHT TUT, gemessen 2026-08-31: eine Seite mit endlosem
+            # `fetch` rettet es NICHT. Dort laeuft die virtuelle Uhr ab,
+            # gezeichnet wird nie, und was zurueckkommt, ist das Timeout mit
+            # seinem Grund -- kein Bild. Das ist der Fall, den #175 verlangt
+            # ("ends the call by itself, with a reason"), und nicht der, den es
+            # bebildert.
+            "--run-all-compositor-stages-before-draw",
+            "--enable-logging=stderr", "--log-level=0",
+            "--screenshot=" + shot, url]
+
+    flags = 0
+    if sys.platform == "win32":
+        flags = (subprocess.CREATE_NEW_PROCESS_GROUP
+                 | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    reason = "done"
+    try:
+        with open(log, "w", encoding="utf-8", errors="replace") as sink:
+            proc = subprocess.Popen(argv, stdout=sink, stderr=subprocess.STDOUT,
+                                    creationflags=flags)
+            try:
+                # Das Zeitfenster ist der Deckel der Seite plus Luft fuer Start
+                # und Schreiben -- nicht der Deckel selbst, sonst schlaegt das
+                # Timeout genau in dem Moment zu, in dem gezeichnet wird.
+                # ACHT SEKUNDEN LUFT, NICHT ZWANZIG. Der Deckel gehoert der
+                # Seite; das hier ist nur der Start des Browsers und das
+                # Schreiben der Datei. Mit 20 kostete eine haengende Seite 21 s
+                # bei einem Deckel von 1,2 -- gemessen, und das ist die Sorte
+                # Wartezeit, wegen der jemand wieder anfaengt, selbst zu
+                # basteln.
+                proc.wait(timeout=wait / 1000.0 + 8)
+            except subprocess.TimeoutExpired:
+                proc.kill()                          # SEIN Kind, nie ein Name
+                proc.wait(timeout=10)
+                reason = "timed out after %d ms and was stopped" % wait
+        console = []
+        try:
+            with open(log, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if "CONSOLE" in line or "ERROR:" in line:
+                        console.append(line.rstrip())
+        except OSError:
+            pass
+        if not os.path.isfile(shot):
+            return ("error: the browser wrote no screenshot (%s). Console:\n%s"
+                    % (reason, "\n".join(console[:20]) or "(empty)"))
+        _RENDER_RIDE.clear()
+        _RENDER_RIDE.append((url, shot))
+        said = ["%s -- %d bytes, %dx%d, %s"
+                % (shot, os.path.getsize(shot), w, h, reason),
+                "read_image it to look at the page."]
+        if console:
+            said.append("console (%d lines):" % len(console))
+            said.extend(console[:40])
+        return _clip("\n".join(said))
+    finally:
+        _shutil.rmtree(profile, ignore_errors=True)
 
 
 def tool_read_image(path: str, **_) -> str:
@@ -8360,6 +8550,7 @@ def tool_web_search(query: str = "", count: int = SEARCH_RESULTS, **_) -> str:
 TOOL_IMPL = {
     "read_file": tool_read_file,
     "read_image": tool_read_image,
+    "render_page": tool_render_page,
     "write_file": tool_write_file,
     "edit_file": tool_edit_file,
     "list_dir": tool_list_dir,
@@ -8393,6 +8584,12 @@ TOOL_CLASS = {
     # Ein Bild anzusehen zerstoert nichts und startet nichts -- es ist ein Lesen
     # wie jedes andere, nur mit anderen Augen.
     "read_image": "reading",
+    # #175. EXECUTING, obwohl es wie ein Leser klingt. Es startet einen Prozess
+    # und legt eine Datei an -- beides Dinge, die `reading` ausdruecklich nicht
+    # tut. Und es ersetzt genau die run_command-Zeilen, mit denen das Modell
+    # sich bisher einen Browser gebaut hat: dieselbe Klasse wie vorher, nur mit
+    # einem Handle daran.
+    "render_page": "executing",
     "list_dir": "reading",
     "find_files": "reading",
     "search_text": "reading",
@@ -12628,6 +12825,13 @@ class TurnEvents:
         surface can name the path instead of saying that something happened.
         """
 
+    def page_rendered(self, url: str, shot: str) -> None:
+        """`render_page` came back with a picture of `url` (#175).
+
+        Its own callback rather than a note: the surface that HAS a browser
+        shows the page there, and one that has none says nothing.
+        """
+
     def tools_finished(self) -> None:
         """Every call of this round has run and been appended."""
 
@@ -13239,6 +13443,13 @@ def run_turn(
             # Bildblock an einen Server ohne `--mmproj` ist kein Fehlversuch,
             # sondern ein HTTP 500, der den ganzen Zug kostet. Der Satz ist der
             # eine, den beide Oberflaechen schon sagen.
+            # #175. DAS FENSTER ERFAEHRT, WAS DAS MODELL ANGESEHEN HAT. Ohne
+            # das ist der Browser im Fenster leer, waehrend das Modell von
+            # einer Seite erzaehlt -- gefragt von robin am 2026-08-31: "wieso
+            # sieht man google nicht in seinem browser?".
+            page = take_render_ride()
+            if page is not None:
+                events.page_rendered(page[0], page[1])
             ride = take_image_ride()
             if ride is not None:
                 blind = refuse_images(base_url)
