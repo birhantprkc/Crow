@@ -3,6 +3,44 @@
 One user, `-np 1`, identical prompt, server restarted cold per arm, cross-checked against the
 server's own `eval time` blocks.
 
+## Decode against context depth, qwen4exp (#159)
+
+Raw rows: [`qwen4exp-depth-407.csv`](qwen4exp-depth-407.csv) — 407 requests, one
+per `slot print_timing` triple, paired with the context depth from each request's
+own `release` line.
+
+One agent run on 2026-08-30/31, 5 h 52 m, no restart. Flash-Next `UD-Q2_K_XL`,
+`-c 200000 -ncmoe 40 --fit off --load-mode none -np 1`, RTX 5090, driver 616.56,
+llama.cpp pin `6c84c7d5d` + PR #27992.
+
+| | |
+|---|---|
+| requests | 407 |
+| decode | 424,465 tokens @ 25.01 tok/s |
+| prefill | 327,878 tokens @ 415.91 tok/s |
+| model time | 4 h 55 m, 95.6 % of it decode |
+| deepest context | 183,274 tokens |
+
+```
+ms/token = 30.740 ms + 0.0898 ms per 1,000 context tokens
+r = 0.848   r2 = 0.720   n = 407   depths 9,588 - 183,274
+```
+
+| depth | n | decode |
+|---|---|---|
+| 0-30k | 63 | 31.57 tok/s |
+| 30-60k | 71 | 28.86 tok/s |
+| 60-90k | 55 | 26.40 tok/s |
+| 90-120k | 59 | 24.58 tok/s |
+| 120-150k | 68 | 23.26 tok/s |
+| 150-200k | 91 | 22.29 tok/s |
+
+At 180k the depth term is 16.2 ms of a 46.9 ms token -- 34.5 %.
+
+**25.01 tok/s is a cross-section over every depth from 10k to 183k.** It is not
+comparable to the 32.44 tok/s of the #159 A/B, which is one cold 31,979-token
+turn. Single arm: no control was run at these depths.
+
 ## Speculation
 
 | prompt | without MTP | with MTP | factor |
