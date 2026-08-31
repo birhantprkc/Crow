@@ -134,6 +134,7 @@ over. No arm is compared against a control from another session.
       --port 8083 -c 200000 -b 4096 -ub 4096 `
       -ctk q8_0 -ctv q8_0 -ncmoe 40 `
       --fit off --load-mode none -np 1 `
+      --mmproj <models>\qwen-next-gguf\mmproj-F16.gguf `
       --jinja
 
 No env prelude: `CUDA_CACHE_DISABLE=1` stood here for three hours on

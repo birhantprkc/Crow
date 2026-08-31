@@ -118,7 +118,8 @@ Qwen3.8-Flash-Next, the third model, runs on 8083 with a hybrid offload line of 
 $env:LOCALAPPDATA\Crow\bin\llama-server.exe `
   -m $env:LOCALAPPDATA\Crow\models\qwen-next-gguf\UD-Q2_K_XL\Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf `
   --port 8083 -c 200000 -b 4096 -ub 4096 -ctk q8_0 -ctv q8_0 `
-  -ncmoe 40 --fit off --load-mode none -np 1 --jinja
+  -ncmoe 40 --fit off --load-mode none -np 1 `
+  --mmproj $env:LOCALAPPDATA\Crow\models\qwen-next-gguf\mmproj-F16.gguf --jinja
 ```
 
 `--load-mode none` is what makes it reproducible: the expert weights are read once at boot

@@ -25,6 +25,7 @@ card. Every value below is the measured optimum of the 2026-08-28 sweep, not a g
 | `-b` / `-ub` | `4096` | the measured prefill batch. `-ub 2048` frees 6.3 GiB of VRAM and wins nothing |
 | `-ctk` / `-ctv` | `q8_0` | same speed, 3.2 GiB more VRAM margin than f16 |
 | `binary` (manifest key, not a flag) | lab build 439 | arch `qwen4exp` exists only in llama.cpp PR #27742; the shipped binary cannot load it. The newer PR head is 3–6 % faster and fails its own warmup 11 of 19 times — measured, not chosen |
+| `--mmproj` | `models\qwen-next-gguf\mmproj-F16.gguf` | the vision projector (#170). The same repository ships it in its ROOT, so a download filtered to the quant folder misses it. **Loading is what the sources support, not answering:** llama.cpp issue #27886 is open with three reports of missing image content. Cost on this line is unmeasured — the model already sits at the card edge under `-ncmoe 40` |
 
 964.8 tok/s prefill / 28.61 decode over a 10-boot series — conditions and the levers that
 do **not** pay (MTP, ngram, a 27B drafter) in [measurements](../measurements/README.md).

@@ -156,6 +156,8 @@
     },
 
     "flash-next-q2-k-xl": {
+      "mmproj": "qwen-next-gguf/mmproj-F16.gguf",
+      "_why_mmproj": "#170, DOWNLOADED 2026-08-31 AND NOT YET MEASURED HERE. unsloth/Qwen3.8-Flash-Next-GGUF ships mmproj-F16.gguf (904,004,000 B) and mmproj-BF16.gguf (907,542,944 B) in the repository ROOT, beside the imatrix and above the quant folders -- they were missing locally only because the download was filtered to the quant subfolder. F16 is the one named here for the reason the 27B line names it: it is the file that model runs with, so two lines do not disagree about which of the two a projector is. THE VISION PATH IS IN THE PIN: the Qwen3-VL encoder was introduced in 6c84c7d5d, which is this operating point. WHAT IS NOT MEASURED, and this is the half that decides whether it ships: that the model gives useful ANSWERS about an image. llama.cpp issue #27886 is open with three independent reports -- missing image content, an abort a third of the way through a PDF, and a load failure under Vulkan -- so \"it loads\" is the only claim the sources support. VRAM: the 27B pays 1,124 MiB for its projector and this one is 977 MiB smaller than that file, but this model already sits at the card edge under -ncmoe 40, so the cost here is its own measurement and not an inference from the other line. If the boot regresses, this key comes out: projector_candidates drops the flag when the file is absent, so removing the line is the whole rollback.",
       "port": 8083,
       "ctx": 200000,
       "batch": 4096,

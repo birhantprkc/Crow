@@ -11149,6 +11149,107 @@ class TheRolloverCarriesADigestTests(unittest.TestCase):
         self.assertNotIn(crow_core.DIGEST_HEAD, note)
 
 
+class TheModelCanLookAtAnImageTests(unittest.TestCase):
+    """#170. Das Werkzeug, mit dem das Modell selbst ein Bild aufmacht.
+
+    WARUM DIE ABLEHNUNGEN FAELLE SIND UND KEINE KOMMENTARE: `read_image` legt
+    seinen Bildblock auf einem Modulplatz ab, den die Werkzeugschleife abholt.
+    Ein Aufruf, der scheitert und trotzdem etwas liegen laesst, haengt das Bild
+    an die NAECHSTE Antwort -- an eine Zeile, die von etwas anderem spricht.
+    Das sieht man einem gruenen Lauf nicht an, also steht es hier als Fall.
+    """
+
+    # Ein echtes 1x1-PNG, eingebettet. Es hier zu ERZEUGEN hiesse, einen
+    # zweiten Encoder in den Test zu holen, und der pruefte dann sich selbst.
+    PNG_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8"
+               "BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+
+    def setUp(self) -> None:
+        import base64
+        self.dir = tempfile.mkdtemp(prefix="crow-readimage-")
+        self.png = os.path.join(self.dir, "shot.png")
+        with open(self.png, "wb") as fh:
+            fh.write(base64.b64decode(self.PNG_B64))
+        crow_core.take_image_ride()          # ein Rest aus einem anderen Fall
+
+    def tearDown(self) -> None:
+        crow_core.take_image_ride()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_the_tool_is_declared_and_reads_without_asking(self):
+        """Ein Bild anzusehen zerstoert nichts -- es ist ein Lesen wie jedes
+        andere. Stuende es in einer anderen Klasse, fragte der manuelle Modus
+        vor jedem Blick auf einen Screenshot, den das Modell selbst erzeugt
+        hat."""
+        self.assertIn("read_image", crow_core.TOOL_IMPL)
+        self.assertEqual(crow_core.TOOL_CLASS.get("read_image"), "reading")
+        names = [t["function"]["name"] for t in crow_core.TOOLS]
+        self.assertIn("read_image", names)
+
+    def test_a_picture_comes_back_as_a_block_exactly_once(self):
+        said = crow_core.tool_read_image(self.png)
+        self.assertIn("shot.png", said)
+        part = crow_core.take_image_ride()
+        self.assertIsNotNone(part, "no image was staged for the loop")
+        self.assertEqual(part["type"], "image_url")
+        self.assertTrue(part["image_url"]["url"].startswith("data:image/png;base64,"))
+        # GENAU EINMAL. Der Platz ist kein Stapel: ein zweites Abholen muss
+        # leer ausgehen, sonst reist dasselbe Bild an einer zweiten Antwort mit.
+        self.assertIsNone(crow_core.take_image_ride())
+
+    def test_a_file_that_is_not_an_image_stages_nothing(self):
+        """NEGATIVPROBE. Die Ablehnung nennt die Tabelle, nach der sie
+        entschieden hat -- und laesst nichts liegen."""
+        other = os.path.join(self.dir, "notes.txt")
+        with open(other, "w", encoding="utf-8") as fh:
+            fh.write("hello")
+        said = crow_core.tool_read_image(other)
+        self.assertTrue(said.startswith("error:"), said)
+        self.assertIn(".png", said, "the refusal has to name what it does take")
+        self.assertIsNone(crow_core.take_image_ride())
+
+    def test_a_missing_file_stages_nothing(self):
+        """NEGATIVPROBE, die zweite Haelfte: kein Bild, kein Block."""
+        said = crow_core.tool_read_image(os.path.join(self.dir, "gone.png"))
+        self.assertTrue(said.startswith("error:"), said)
+        self.assertIsNone(crow_core.take_image_ride())
+
+    def test_an_empty_file_with_the_right_name_stages_nothing(self):
+        """NEGATIVPROBE, die dritte: die Endung sagt Bild, die Datei ist leer.
+        Der Name ist keine Auskunft ueber den Inhalt, und ein leerer Datenblock
+        auf dem Draht ist ein Fehler im Server statt einer Ablehnung hier."""
+        empty = os.path.join(self.dir, "empty.png")
+        open(empty, "wb").close()
+        said = crow_core.tool_read_image(empty)
+        self.assertTrue(said.startswith("error:"), said)
+        self.assertIsNone(crow_core.take_image_ride())
+
+    def test_the_blind_server_is_asked_before_the_block_is_attached(self):
+        """DIE REIHENFOLGE IST DIE SICHERHEIT, wie bei `/image` (test_crow.py).
+        Ein Bildblock an einen Server ohne `--mmproj` ist kein Fehlversuch, den
+        das Modell in der naechsten Runde korrigiert -- es ist ein HTTP 500, und
+        der kostet den ganzen Zug. Also wird gefragt, BEVOR angehaengt wird."""
+        src = inspect.getsource(crow_core.run_turn)
+        ask = src.index("refuse_images(base_url)")
+        attach = src.index('[{"type": "text", "text": result}, ride]')
+        self.assertLess(ask, attach,
+                        "the projector is checked after the block is attached")
+
+    def test_a_bare_name_means_the_working_area(self):
+        """#177s Regel gilt hier wie fuer jeden anderen Leser: ein blosser Name
+        steht im gebundenen Ordner, nicht dort, wo das Fenster gestartet wurde.
+        Ohne das laese das Modell ein Bild an einem Ort, den niemand genannt
+        hat -- und zwar STILL, weil ein Treffer nichts meldet."""
+        before = crow_core.get_root()
+        try:
+            crow_core.set_root(self.dir)
+            said = crow_core.tool_read_image("shot.png")
+            self.assertFalse(said.startswith("error:"), said)
+            self.assertIsNotNone(crow_core.take_image_ride())
+        finally:
+            crow_core.set_root(before)
+
+
 class ATurnsBillOutlivesTheCutTests(unittest.TestCase):
     """#171. Die Timing-Zeile war reine Bildschirmausgabe.
 

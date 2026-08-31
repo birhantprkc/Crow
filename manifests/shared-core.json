@@ -35,6 +35,11 @@
    "why": "The read half of the read-before-write rule. A second implementation would populate a different _READ and the refusal would stop matching the reads that earned it."
   },
   {
+   "name": "tool_read_image",
+   "kind": "def",
+   "why": "#170. The one reader that hands back an image block instead of text, and the only place that decides what counts as an image on the wire. A second copy would answer 'which formats' differently from image_part's table, and the surface with the older answer would refuse a file the other one sends."
+  },
+  {
    "name": "tool_write_file",
    "kind": "def",
    "why": "The one tool whose drift costs data: #10 measured hermes-agent resolving read-before-write to last-write-wins in two independent code paths, one warning and one writing anyway. Two implementations here is that same defect with a different name."

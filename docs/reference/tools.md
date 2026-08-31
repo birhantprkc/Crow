@@ -1,10 +1,25 @@
 ## Tools
 
-21 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured.
+22 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured.
 
-`read_file` `write_file` `edit_file` `list_dir` `find_files` `search_text` `run_command`
-`web_search` `fetch_url` `memory` `skill` `session_search` `delegate` `subtasks` `collect`
-`git_status` `git_diff` `git_log` `git_commit` `git_push` `github_connect`.
+`read_file` `read_image` `write_file` `edit_file` `list_dir` `find_files` `search_text`
+`run_command` `web_search` `fetch_url` `memory` `skill` `session_search` `delegate`
+`subtasks` `collect` `git_status` `git_diff` `git_log` `git_commit` `git_push`
+`github_connect`.
+
+### `read_image` (#170)
+
+`read_image(path)` — the model's own way to a picture; `/image`, drop and Ctrl+V are the
+user's.
+
+| | |
+|---|---|
+| class | `reading` — asks at no level |
+| types | `.png .jpg .jpeg .gif .webp .bmp`, other extensions refused by name |
+| path | resolved against the working area, like every other reader (#177) |
+| result | tool message content becomes `[{text}, {image_url}]` — the block a pasted image travels as; the server reads it in any role |
+| no projector | `refuse_images` checks `/props` before the block is attached; without `--mmproj` the sentence comes back instead of an image (a picture to a blind server is HTTP 500, not a recoverable tool error) |
+| size | none of its own — the server caps at `--image-max-tokens` (4,096) |
 
 ### Delegation (#143)
 

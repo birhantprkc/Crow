@@ -581,6 +581,11 @@ TOOLS = [
         {"path": dict(_STR, description="Path to the file."),
          "start_line": {"type": "integer", "description": "First line, 1-based."},
          "end_line": {"type": "integer", "description": "Last line, inclusive."}}, ["path"]),
+    _fn("read_image",
+        "Look at an image file -- a screenshot, a render, a diagram. Use it to CHECK your "
+        "own work when a step says it has to look right; read_file cannot open one. "
+        "Needs a model with a projector; on one without, this refuses and says so.",
+        {"path": dict(_STR, description="Path to the image.")}, ["path"]),
     _fn("write_file",
         "Write a file, creating directories as needed. An existing file must have been "
         "read first in this session; otherwise the call is refused.",
@@ -6896,6 +6901,59 @@ def _clip(text: str, limit: int = MAX_TOOL_BYTES) -> str:
     return text[:limit] + f"\n\n[cut at {limit} bytes -- narrow the query and ask again]"
 
 
+# #170. DAS BILD REIST IM ERGEBNIS, und dafuer braucht es einen Platz zwischen
+# dem Werkzeug und der Schleife, die das Ergebnis anhaengt: `run_tool` gibt eine
+# ZEICHENKETTE zurueck, und daran haengt alles -- der Bildschirm, die Kappung
+# auf MAX_TOOL_BYTES, der Zwischenspeicher eines wiederholten Aufrufs. Ein
+# Rueckgabetyp, der manchmal eine Liste ist, haette jeden dieser Leser
+# angefasst. Also bleibt die Zeichenkette, und der Bildblock wartet hier auf die
+# eine Stelle, die ihn braucht.
+#
+# DASSELBE MUSTER WIE `_REFUSED` eine Ebene weiter unten in derselben Schleife:
+# ein Modulplatz, den der Aufruf fuellt und die Schleife leert. Genau EIN Block
+# passt hinein -- ein zweiter Aufruf ohne abgeholtes Bild ist ein Fehler in der
+# Schleife, kein Stapel, den man wachsen laesst.
+_IMAGE_RIDE: "list[dict]" = []
+
+
+def take_image_ride() -> "dict | None":
+    """Der Bildblock des letzten `read_image`, genau einmal."""
+    return _IMAGE_RIDE.pop() if _IMAGE_RIDE else None
+
+
+def tool_read_image(path: str, **_) -> str:
+    """Hand one image on the disk to the model, as an image.
+
+    WARUM ES DAS BRAUCHT (#170): Crow konnte ein Bild GEZEIGT bekommen und
+    keines ansehen. `/image` ist der Weg des NUTZERS; was das Modell selbst
+    erzeugt -- ein Screenshot, ein gerenderter Frame -- war unsichtbar, und ein
+    Zielschritt "render it and check it looks right" war damit von einem Modell
+    abzuhaken, das nicht hinsehen kann. Live gesehen am 2026-08-30: es fing an,
+    PNG-Bytes in node zu dekodieren, um Pixelstatistik statt einer Antwort auf
+    "sieht das aus wie ein Tempel" zu bekommen.
+
+    DIESELBE GRENZE WIE JEDER ANDERE LESER, und deshalb steht hier `_rooted` und
+    sonst nichts: `read_file` tut genau das (#177), und eine zweite, strengere
+    Antwort auf "wo darf gelesen werden" waere die zweite Meinung, vor der #144
+    warnt.
+
+    KEINE ZWEITE GROESSENREGEL. `image_part` schickt die Bytes, wie sie auf der
+    Platte liegen; der Server kappt selbst bei `--image-max-tokens` (4.096), und
+    eine eigene Zahl hier waere eine, die niemand nachzieht.
+    """
+    path = _rooted(path)                            # #177
+    if not os.path.isfile(path):
+        return "error: no such image: %s" % path
+    try:
+        part = image_part(path)
+    except CrowError as exc:
+        return "error: %s" % exc
+    _IMAGE_RIDE.clear()
+    _IMAGE_RIDE.append(part)
+    return "%s -- %d bytes, handed to you as an image below." % (
+        os.path.basename(path), os.path.getsize(path))
+
+
 def tool_read_file(path: str, start_line: int | None = None, end_line: int | None = None,
                    **_) -> str:
     """Read a file, or a range of its lines.
@@ -8301,6 +8359,7 @@ def tool_web_search(query: str = "", count: int = SEARCH_RESULTS, **_) -> str:
 
 TOOL_IMPL = {
     "read_file": tool_read_file,
+    "read_image": tool_read_image,
     "write_file": tool_write_file,
     "edit_file": tool_edit_file,
     "list_dir": tool_list_dir,
@@ -8331,6 +8390,9 @@ TOOL_IMPL = {
 # on, and a protection everyone turns off protects nothing".
 TOOL_CLASS = {
     "read_file": "reading",
+    # Ein Bild anzusehen zerstoert nichts und startet nichts -- es ist ein Lesen
+    # wie jedes andere, nur mit anderen Augen.
+    "read_image": "reading",
     "list_dir": "reading",
     "find_files": "reading",
     "search_text": "reading",
@@ -13164,6 +13226,31 @@ def run_turn(
             # separates them, which is all #95 asked for.
             if errored:
                 events.tool_failed(call["name"], result)
+            # #170. WENN EIN BILD MITFAEHRT, IST DER INHALT EINE LISTE. Genau
+            # die Blockform, die eine Nutzerzeile mit Bild seit #142 traegt --
+            # der Server liest sie ROLLENUNABHAENGIG (server-common.cpp, die
+            # Schleife ueber `messages` fragt nicht nach der Rolle), also sieht
+            # das Modell das Bild in der naechsten Runde so, wie `/image` es
+            # ihm zeigt. Und weil es die Wire-Form ist, ueberlebt sie
+            # session.json und einen Neustart wie jede andere Zeile.
+            #
+            # DIE BLINDE MASCHINE WIRD HIER ABGEFANGEN, nicht im Werkzeug: die
+            # Basis-URL steht in diesem Rahmen und nirgends sonst, und ein
+            # Bildblock an einen Server ohne `--mmproj` ist kein Fehlversuch,
+            # sondern ein HTTP 500, der den ganzen Zug kostet. Der Satz ist der
+            # eine, den beide Oberflaechen schon sagen.
+            ride = take_image_ride()
+            if ride is not None:
+                blind = refuse_images(base_url)
+                if blind:
+                    result = "error: " + blind
+                    events.tool_failed(call["name"], result)
+                    conversation.append("tool", result, tool_call_id=call["id"])
+                    continue
+                conversation.append(
+                    "tool", [{"type": "text", "text": result}, ride],
+                    tool_call_id=call["id"])
+                continue
             conversation.append("tool", result, tool_call_id=call["id"])
         events.tools_finished()
 
