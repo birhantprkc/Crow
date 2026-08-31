@@ -11702,5 +11702,116 @@ class TheGoalOutlivesEverythingTests(unittest.TestCase):
         self.assertIsNone(crow_core.goal_load())
 
 
+class RelativePathsResolveInTheWorkingAreaTests(unittest.TestCase):
+    """Ein blosser Name meint den Arbeitsbereich, nicht den Ort des Starters.
+
+    GEMESSEN AM 2026-08-31, VIER GOAL-LAEUFE HINTEREINANDER, jedes Mal derselbe
+    Ablauf: das Fenster war aus `C:\\Users\\robin\\dev\\Crow` gestartet, gebunden
+    war `C:\\Users\\robin\\Desktop\\test\\CROW-TESTS`.
+
+      `list_dir` ohne Pfad zeigte die CROW-QUELLE, nicht den Arbeitsbereich.
+      `read_file("LICENSE")` las die Lizenz der Quelle -- und der Schritt
+      "lies eine Datei nur in diesem Ordner" wurde als erfuellt verbucht.
+      `write_file("testlauf.txt")` wurde ABGELEHNT fuer einen Pfad, den das
+      Modell nie genannt hatte: der Waechter loeste ihn ebenfalls gegen den
+      Starter auf und sah ihn dann ausserhalb der Wurzel.
+
+    DIE STILLE HAELFTE WAR DIE TEURE. Die Ablehnung sagt sich selbst an und
+    kostet eine Runde; der Lesevorgang GELINGT am falschen Ort und sagt nichts
+    -- in Lauf 3 flog das erst zwei Schritte spaeter auf und kostete dort 53
+    Sekunden Suche, ein Drittel des ganzen Laufs.
+
+    DIE REGEL STAND SCHON IM CODE, nur nicht hier: `git_repo` sagt seit #156
+    "THE WORKING AREA DECIDES, not the process's cwd" und nimmt darum
+    `path or get_root()`. Die Datei-Werkzeuge haben diesen Satz nie bekommen.
+    """
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp())
+        self.launcher = os.path.realpath(tempfile.mkdtemp())
+        for where, what in ((self.root, "im Arbeitsbereich\n"),
+                            (self.launcher, "beim Starter\n")):
+            with open(os.path.join(where, "here.txt"), "w", encoding="utf-8") as fh:
+                fh.write(what)
+        with open(os.path.join(self.root, "nur-hier.txt"), "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.launcher, True)
+        # ZULETZT ANGEMELDET HEISST ZUERST AUSGEFUEHRT: das Arbeitsverzeichnis
+        # muss aus `launcher` heraus sein, BEVOR jemand ihn loescht -- unter
+        # Windows laesst sich das eigene cwd nicht entfernen.
+        self._cwd = os.getcwd()
+        self.addCleanup(os.chdir, self._cwd)
+        os.chdir(self.launcher)
+
+    # -- was der Fehler war -------------------------------------------------
+
+    def test_a_bare_name_is_read_from_the_working_area(self):
+        out = crow_core.tool_read_file("here.txt")
+        self.assertIn("im Arbeitsbereich", out)
+        self.assertNotIn("beim Starter", out,
+                         "read_file las beim Starter statt im Arbeitsbereich")
+
+    def test_list_dir_without_a_path_shows_the_working_area(self):
+        out = crow_core.tool_list_dir()
+        self.assertIn("nur-hier.txt", out,
+                      "list_dir ohne Pfad zeigte nicht den Arbeitsbereich")
+
+    def test_a_bare_name_is_written_into_the_working_area(self):
+        """robins Live-Bild, viermal in Folge: `write_file("testlauf.txt")` kam
+        als Ablehnung zurueck, obwohl der Name nichts ausserhalb benannte."""
+        out = crow_core.tool_write_file("testlauf.txt", "eine Zeile\n")
+        self.assertNotIn("refusing to write outside", out)
+        self.assertTrue(os.path.isfile(os.path.join(self.root, "testlauf.txt")),
+                        "die Datei landete nicht im Arbeitsbereich")
+        self.assertFalse(os.path.isfile(os.path.join(self.launcher, "testlauf.txt")),
+                         "die Datei landete beim Starter")
+
+    def test_find_and_search_start_in_the_working_area(self):
+        self.assertIn("nur-hier.txt", crow_core.tool_find_files(pattern="nur-*"))
+        self.assertIn("here.txt", crow_core.tool_search_text(pattern="Arbeitsbereich"))
+
+    def test_a_command_without_a_cwd_runs_in_the_working_area(self):
+        """Schreib-Root und Shell-Root waren nicht derselbe Ort -- genau der
+        Satz aus der Uebergabe vom 2026-08-31."""
+        out = crow_core.tool_run_command(
+            '"%s" -c "import os;print(os.getcwd())"' % sys.executable)
+        self.assertIn(os.path.normcase(self.root), os.path.normcase(out))
+        self.assertNotIn(os.path.normcase(self.launcher), os.path.normcase(out))
+
+    # -- die Gegenproben ----------------------------------------------------
+
+    def test_a_path_that_names_its_own_anchor_is_left_alone(self):
+        """NEGATIVPROBE. Wer ein Laufwerk oder eine Wurzel nennt, hat seinen
+        Bezugspunkt selbst gesetzt -- der wird nicht verschoben. `isabs` allein
+        reicht dafuer nicht: unter Python 3.13 ist weder `\\rooted` noch
+        `C:rel` absolut, und ein blosses `join` haette beide verbogen."""
+        for path in (r"C:\a\b", r"\\server\share\f", r"\rooted", "/rooted",
+                     "C:rel"):
+            self.assertEqual(crow_core._rooted(path), path,
+                             "%r wurde verschoben" % path)
+
+    def test_without_a_root_the_launcher_decides_again(self):
+        """NEGATIVPROBE. Ohne Grenze gibt es auch keinen Bezugspunkt -- dann
+        gilt wieder, was immer galt."""
+        crow_core.set_root(None)
+        self.assertEqual(crow_core._rooted("here.txt"), "here.txt")
+        self.assertIn("beim Starter", crow_core.tool_read_file("here.txt"))
+
+    def test_an_absolute_path_outside_still_reads(self):
+        """NEGATIVPROBE. Lesen war nie begrenzt und wird es hier auch nicht --
+        dieser Fix verschiebt einen Bezugspunkt, er zieht keine neue Grenze."""
+        out = crow_core.tool_read_file(os.path.join(self.launcher, "here.txt"))
+        self.assertIn("beim Starter", out)
+
+    def test_the_guard_still_refuses_an_escape(self):
+        """NEGATIVPROBE. `..\\` zeigt jetzt aus dem Arbeitsbereich heraus statt
+        aus dem Starterordner -- refused bleibt refused."""
+        out = crow_core.tool_write_file(os.path.join("..", "escaped.txt"), "x")
+        self.assertIn("refusing to write outside", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

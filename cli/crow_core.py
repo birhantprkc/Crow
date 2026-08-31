@@ -5025,6 +5025,47 @@ def _inside(root: str, path: str) -> bool:
     return there == here or there.startswith(here + os.sep)
 
 
+def _rooted(path: str) -> str:
+    """A bare name means the working area, not wherever the launcher stood.
+
+    THE RULE IS NOT NEW HERE. `git_repo` has said it since #156 -- "THE WORKING
+    AREA DECIDES, not the process's cwd" -- and takes `path or get_root()` for
+    exactly that reason. The file tools never got that sentence, and the gap is
+    the whole bug: `_ROOT` was a FENCE and never a GROUND, so every relative
+    path went on standing in the directory the window was started from.
+
+    MEASURED 2026-08-31, four goal runs in a row, window started from the Crow
+    source tree with a different folder bound:
+
+      `list_dir` with no path listed the SOURCE TREE, not the working area;
+      `read_file("LICENSE")` read the source tree's licence, and the step "read
+      a file only in this folder" was booked as done on it;
+      `write_file("testlauf.txt")` was REFUSED for a path nobody had named --
+      the guard resolved the bare name against the launcher as well, and then
+      correctly found it outside the root.
+
+    THE SILENT HALF WAS THE EXPENSIVE ONE. The refusal announces itself and
+    costs one round. The read SUCCEEDS in the wrong place and says nothing, so
+    in run 3 the mistake surfaced two steps later and cost 53 s of hunting --
+    a third of that run.
+
+    `isabs` ALONE WOULD NOT DO, measured here on Python 3.13.3: neither
+    `\\rooted` nor `C:rel` is absolute to it, and joining either onto the root
+    would bend a path that had already named its own anchor. So the question
+    asked is that one: does this path carry a drive or a leading separator of
+    its own? Then it is not ours to move.
+
+    Without a root nothing moves. No fence, no ground -- the cwd goes on
+    deciding exactly as it did before.
+    """
+    if not path or _ROOT is None:
+        return path
+    drive, rest = os.path.splitdrive(path)
+    if drive or rest[:1] in ("\\", "/"):
+        return path
+    return os.path.join(_ROOT, path)
+
+
 # #144. The tokens the guard can see: drive-absolute (bare or quoted), UNC,
 # %VAR%-prefixed, and ..\ escapes. A bare relative name is NOT a token -- it
 # resolves inside the cwd by construction, and flagging it would turn every
@@ -6515,6 +6556,7 @@ def tool_read_file(path: str, start_line: int | None = None, end_line: int | Non
     `search_text` already returns line numbers, so reading 60 lines around a hit
     turns that into seconds.
     """
+    path = _rooted(path)                            # #177
     if start_line is not None or end_line is not None:
         lo = max(1, int(start_line or 1))
         hi = int(end_line) if end_line is not None else lo + 200
@@ -6575,6 +6617,9 @@ def tool_write_file(path: str, content: str = "", **_) -> str:
     # "read it first", the model would read it successfully, and only the second
     # write would be refused -- two rounds at ~18 tok/s to deliver one refusal
     # that was knowable without any state at all.
+    path = _rooted(path)                            # #177, BEFORE the guard:
+    # the guard resolved a bare name against the launcher too, so it refused
+    # a path the model had never named. Ground first, then fence.
     outside = _outside_root(path)
     if outside:
         return outside
@@ -6598,6 +6643,7 @@ def tool_edit_file(path: str, old: str = "", new: str = "", **_) -> str:
     a model that mis-remembers whitespace. Exact match plus a uniqueness check
     fails loudly instead of guessing, which is the behaviour worth having first.
     """
+    path = _rooted(path)                            # #177
     outside = _outside_root(path)                   # #92, and before the read rule
     if outside:
         return outside
@@ -6624,6 +6670,7 @@ def tool_edit_file(path: str, old: str = "", new: str = "", **_) -> str:
 
 
 def tool_list_dir(path: str = ".", **_) -> str:
+    path = _rooted(path)                            # #177
     try:
         entries = sorted(os.listdir(path))
     except FileNotFoundError:
@@ -6650,6 +6697,7 @@ def tool_list_dir(path: str = ".", **_) -> str:
 def tool_find_files(root: str = ".", pattern: str = "*", **_) -> str:
     import fnmatch
 
+    root = _rooted(root)                            # #177
     hits, size = [], 0
     for base, dirs, files in os.walk(root):
         # Directories nobody means when they say "find the source file", and
@@ -6674,6 +6722,7 @@ def tool_search_text(root: str = ".", pattern: str = "", glob: str = "*", **_) -
 
     if not pattern:
         return "error: search_text needs a 'pattern'"
+    root = _rooted(root)                            # #177
     try:
         rx = _re.compile(pattern)
     except _re.error as exc:
@@ -6716,6 +6765,12 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
 
     if not command:
         return "error: run_command needs a 'command'"
+    # #177. THE SHELL STANDS WHERE THE WRITERS STAND. Without this the
+    # command ran in whatever directory the window was launched from -- the
+    # same split that turned `write_file("x")` into a refusal -- and #144's
+    # guard was reading a command line whose bare names it believed to
+    # "resolve inside the cwd by construction". They did. It was the wrong cwd.
+    cwd = _rooted(cwd) if cwd else get_root()
     # The child does not inherit anything that looks like a secret. It is a
     # blocklist, so it is not airtight -- it stops the accident, not an attacker.
     env = {k: v for k, v in os.environ.items()
