@@ -12028,5 +12028,309 @@ class AmbiguousPathsInProseTests(unittest.TestCase):
             os.path.join(self.dir, "Test runs", "x.txt")))
 
 
+class TheThinkingCapTravelsAsAPairTests(unittest.TestCase):
+    """#176. Der Denkdeckel reist mit seiner Einspeisung oder gar nicht.
+
+    WARUM DAS EIN PAAR IST UND KEINE ZWEI FELDER. `--reasoning-budget-message`
+    hat als Vorgabe KEINE (common/arg.cpp:3728 im gepinnten Baum), also schliesst
+    der Server den Denkblock beim Erreichen des Budgets wortlos zu und das Modell
+    schreibt weiter, wo es stand. Gemessen 2026-08-31 gegen 8083, Deckel 256, drei
+    Seeds: ohne Einspeisung kamen 2 von 3 Antworten mitten im Wort an, mit ihr
+    0 von 6 -- bei gleichem Seed und damit gleichem Schnittpunkt. Beleg dort:
+    Denken endet auf `...metadata include chat/`, Antwort beginnt mit `tokens,
+    check UI thread race...`.
+
+    NACH DEM MUSTER VON `TheLocalOnlyFieldsStayHomeTests`, mit eigenen Helfern
+    statt geliehenen: dieselbe Frage an vier Sender -- den Zug, den Nachlauf,
+    die Fremde und den zweiten Dialekt.
+    """
+
+    def _conversation(self):
+        conversation = crow_core.Conversation("be brief")
+        conversation.append("user", "hello")
+        conversation.append("assistant", "hi")
+        return conversation
+
+    # `m` IST KEIN MODELL AUS DEM MANIFEST, und das ist die Vorgabe mit Absicht:
+    # der Fall ohne Eintrag ist der Auslieferzustand jedes anderen Modells, und
+    # ein Helfer, der still das gedeckelte Modell nimmt, wuerde ihn nie pruefen.
+    SHIPPED = "Qwen3.8-Flash-Next"
+
+    def _turn_body(self, model="m", **kw) -> dict:
+        sent = {}
+
+        def fake(url, body, api_key, timeout, extra=None):
+            sent.update(body)
+            return iter(())
+
+        real, crow_core._post_stream = crow_core._post_stream, fake
+        self.addCleanup(lambda: setattr(crow_core, "_post_stream", real))
+        crow_core.stream_reply(self._conversation(),
+                               base_url="http://127.0.0.1:1/v1", model=model,
+                               api_key="k", temperature=1.0, top_p=0.95,
+                               min_p=0.01, timeout=1, **kw)
+        return sent
+
+    def _review_body(self, model="m", **kw) -> dict:
+        seen = {}
+        payload = json.dumps({"choices": [{"message": {"tool_calls": []}}],
+                              "content": []}).encode("utf-8")
+
+        class _Resp:
+            def read(self_inner):
+                return payload
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+        def fake(request, *a, **k):
+            seen.update(json.loads(request.data.decode("utf-8")))
+            return _Resp()
+
+        real = crow_core.urllib.request.urlopen
+        crow_core.urllib.request.urlopen = fake
+        self.addCleanup(setattr, crow_core.urllib.request, "urlopen", real)
+        crow_core.review_turn(self._conversation(),
+                              base_url="http://127.0.0.1:1/v1", model=model,
+                              api_key="k", temperature=1.0, top_p=0.95,
+                              min_p=0.01, timeout=1, **kw)
+        return seen
+
+    # -- was gesendet wird -------------------------------------------------
+
+    def test_a_budget_sends_the_cap_and_the_message(self):
+        sent = self._turn_body(reasoning_budget=256)
+        self.assertEqual(sent["reasoning_budget_tokens"], 256)
+        self.assertEqual(sent["reasoning_budget_message"],
+                         crow_core.REASONING_BUDGET_MESSAGE)
+
+    def test_the_first_name_is_the_one_sent(self):
+        """Der Server liest `reasoning_budget_tokens` und faellt erst danach auf
+        `thinking_budget_tokens` zurueck (server-common.cpp:1365). Beide zu
+        schicken waere eine zweite Antwort auf dieselbe Frage."""
+        sent = self._turn_body(reasoning_budget=512)
+        self.assertNotIn("thinking_budget_tokens", sent)
+
+    def test_no_budget_sends_neither_field(self):
+        """NEGATIVPROBE, und die wichtigste: ohne Deckel muss der Koerper
+        byte-gleich zu dem eines Clients sein, der dieses Feld nie kannte. Ein
+        Standardwert hier wuerde jede Messung von vor heute unvergleichbar
+        machen."""
+        sent = self._turn_body()
+        self.assertNotIn("reasoning_budget_tokens", sent)
+        self.assertNotIn("reasoning_budget_message", sent)
+
+    def test_the_message_can_be_overridden(self):
+        sent = self._turn_body(reasoning_budget=256,
+                               reasoning_budget_message="stop now.")
+        self.assertEqual(sent["reasoning_budget_message"], "stop now.")
+
+    def test_a_message_without_a_budget_is_not_sent(self):
+        """NEGATIVPROBE. Eine Einspeisung ohne Deckel wird nie ausgeloest --
+        sie mitzuschicken waere ein Feld ohne Wirkung im Koerper jedes Zuges."""
+        sent = self._turn_body(reasoning_budget_message="stop now.")
+        self.assertNotIn("reasoning_budget_message", sent)
+
+    def test_the_unasked_pass_carries_the_same_cap(self):
+        """POSITIV fuer den Sender, dem niemand zusieht. `review_turn` baut
+        seinen eigenen Koerper, also waere ein Nachlauf ohne Deckel die eine
+        Anfrage des Chats, die weiter unbegrenzt denkt."""
+        sent = self._review_body(reasoning_budget=256)
+        self.assertEqual(sent["reasoning_budget_tokens"], 256)
+        self.assertEqual(sent["reasoning_budget_message"],
+                         crow_core.REASONING_BUDGET_MESSAGE)
+
+    def test_the_unasked_pass_without_a_budget_sends_neither(self):
+        """NEGATIVPROBE fuer denselben Sender."""
+        sent = self._review_body()
+        self.assertNotIn("reasoning_budget_tokens", sent)
+        self.assertNotIn("reasoning_budget_message", sent)
+
+    def test_a_remote_turn_carries_neither(self):
+        """Die Felder sind llama.cpp-eigen. Ein Broker mit
+        `require_parameters` findet fuer sie keinen Upstream -- genau der Weg,
+        der am 2026-08-23 den 404 erzeugt hat."""
+        sent = self._turn_body(reasoning_budget=256, remote=True)
+        self.assertNotIn("reasoning_budget_tokens", sent)
+        self.assertNotIn("reasoning_budget_message", sent)
+
+    def test_the_other_dialect_carries_neither(self):
+        """`anthropic_body` baut neu statt zu streichen, also kann hier nichts
+        durchrutschen -- gepruefte Selbstverstaendlichkeit, weil der Tag, an
+        dem daraus eine Streichliste wird, sonst still vorbeigeht."""
+        out = crow_core.anthropic_body(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}],
+             "reasoning_budget_tokens": 256,
+             "reasoning_budget_message": crow_core.REASONING_BUDGET_MESSAGE})
+        self.assertNotIn("reasoning_budget_tokens", out)
+        self.assertNotIn("reasoning_budget_message", out)
+
+    # -- was das Wort beantwortet ------------------------------------------
+
+    def test_the_command_reports_sets_and_lifts(self):
+        said, budget, changed = crow_core.budget_command("", "m", None)
+        self.assertIsNone(budget)
+        self.assertFalse(changed)
+        self.assertIn("off", said)
+
+        said, budget, changed = crow_core.budget_command("256", "m", None)
+        self.assertEqual(budget, 256)
+        self.assertTrue(changed)
+        # KEINE KOSTENZEILE, und das ist der Unterschied zur Stufe: der Deckel
+        # geht in den Sampler, nicht ins Template, also bleibt der Prompt gleich.
+        self.assertIn("no prefill", said)
+
+        said, budget, changed = crow_core.budget_command("off", "m", 256)
+        self.assertEqual(budget, crow_core.BUDGET_LIFTED)
+        self.assertTrue(changed)
+
+    def test_setting_what_is_already_set_changes_nothing(self):
+        """NEGATIVPROBE. `changed` ist das Signal, das die Oberflaeche schreiben
+        laesst; ein wahres `changed` ohne Aenderung waere eine Meldung ohne Tat."""
+        said, budget, changed = crow_core.budget_command("256", "m", 256)
+        self.assertEqual(budget, 256)
+        self.assertFalse(changed)
+
+    def test_lifting_a_cap_that_is_not_there_changes_nothing(self):
+        """NEGATIVPROBE, dieselbe Frage von der anderen Seite."""
+        said, budget, changed = crow_core.budget_command("off", "m", None)
+        self.assertIsNone(budget)
+        self.assertFalse(changed)
+
+    def test_zero_is_refused_and_names_the_reason(self):
+        """0 heisst am Server "sofort aufhoeren" -- derselbe Zustand wie die
+        Stufe `none`, und die wurde als TEUERSTE von vieren gemessen (3,6x
+        Zeit, 1,8x Token). Als Zahl angeboten waere sie eine Ersparnis."""
+        said, budget, changed = crow_core.budget_command("0", "m", 256)
+        self.assertEqual(budget, 256)
+        self.assertFalse(changed)
+        self.assertIn("none", said)
+
+    def test_a_word_is_not_a_budget(self):
+        said, budget, changed = crow_core.budget_command("viel", "m", None)
+        self.assertIsNone(budget)
+        self.assertFalse(changed)
+
+    # -- die Vorgabe kommt aus dem Manifest --------------------------------
+
+    def test_the_shipped_model_brings_its_own_cap(self):
+        """Der Wert ist gemessen und steht beim Modell, nicht in einer Frage."""
+        self.assertEqual(crow_core.reasoning_budget_for(self.SHIPPED), 1024)
+        # NEGATIVPROBE: ein Modell ohne Eintrag bringt keinen Deckel mit. Einen
+        # zu raten waere genau der Fehler, den die Gruppenliste eine Ebene
+        # tiefer beschreibt.
+        self.assertIsNone(crow_core.reasoning_budget_for("m"))
+
+    def test_a_turn_on_the_shipped_model_is_capped_unasked(self):
+        """DIE EIGENTLICHE AENDERUNG. Niemand tippt etwas, und der Deckel steht.
+        Vorher war "nicht gesetzt" gleich "kein Deckel", also wurde der schlechte
+        Zustand ausgeliefert und der gute musste erraten werden."""
+        sent = self._turn_body(model=self.SHIPPED)
+        self.assertEqual(sent["reasoning_budget_tokens"], 1024)
+        self.assertEqual(sent["reasoning_budget_message"],
+                         crow_core.REASONING_BUDGET_MESSAGE)
+
+    def test_the_chat_can_still_lift_it(self):
+        """NEGATIVPROBE, und der Grund fuer den dritten Zustand: waere `off`
+        wieder `None`, holte die Aufloesung den Wert des Modells sofort zurueck
+        und der Nutzer koennte den Deckel bei genau dem Modell nicht abnehmen,
+        das einen hat."""
+        sent = self._turn_body(model=self.SHIPPED,
+                               reasoning_budget=crow_core.BUDGET_LIFTED)
+        self.assertNotIn("reasoning_budget_tokens", sent)
+        self.assertNotIn("reasoning_budget_message", sent)
+
+    def test_the_chat_can_still_override_the_number(self):
+        sent = self._turn_body(model=self.SHIPPED, reasoning_budget=256)
+        self.assertEqual(sent["reasoning_budget_tokens"], 256)
+
+    def test_the_unasked_pass_is_capped_unasked_too(self):
+        sent = self._review_body(model=self.SHIPPED)
+        self.assertEqual(sent["reasoning_budget_tokens"], 1024)
+
+    def test_a_remote_turn_on_the_shipped_name_still_carries_neither(self):
+        """Die Aufloesung passiert vor `remote_body`, also muss das Streichen
+        auch dann greifen, wenn der Deckel aus dem Manifest kam und nicht aus
+        einer Wahl."""
+        sent = self._turn_body(model=self.SHIPPED, remote=True)
+        self.assertNotIn("reasoning_budget_tokens", sent)
+        self.assertNotIn("reasoning_budget_message", sent)
+
+    def test_the_command_names_where_the_number_comes_from(self):
+        """Ein Deckel, den niemand gesetzt hat, muss sich als solcher zu
+        erkennen geben -- sonst liest der Nutzer seine eigene Wahl in einer
+        Zahl, die das Modell mitgebracht hat."""
+        said, _, _ = crow_core.budget_command("", self.SHIPPED, None)
+        self.assertIn("1024", said)
+        self.assertIn("default", said)
+        said, _, _ = crow_core.budget_command("", self.SHIPPED, 256)
+        self.assertIn("this chat", said)
+
+    def test_the_word_is_on_the_shared_list(self):
+        """Beide Oberflaechen lesen dieselbe Liste; fehlt das Wort dort, geht
+        `/budget` im Fenster als Frage an das Modell."""
+        self.assertIn("/budget", crow_core.SLASH_COMMANDS)
+
+
+class AGoalBelongsToItsFolderTests(unittest.TestCase):
+    """#176-Nebenfund, live am 2026-08-31: ein ZWEITES Fenster fing von selbst
+    an, das Ziel abzuarbeiten.
+
+    `goal_path()` gab `SESSION_DIR/goal.json` zurueck -- einen Ort fuer alle
+    Fenster. Der Motor jedes offenen Fensters liest das Ziel, also arbeiteten
+    zwei Fenster denselben Plan gleichzeitig ab, in einem Ordner, den nur eines
+    von beiden gebunden hatte. Der Lauf war damit unbrauchbar, und die Messreihe
+    dahinter auch.
+    """
+
+    def setUp(self):
+        self.dir = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(crow_core.set_root, crow_core.get_root())
+        self.a = os.path.join(self.dir, "a")
+        self.b = os.path.join(self.dir, "b")
+        for d in (self.a, self.b):
+            os.makedirs(os.path.join(d, crow_core.ROOT_MARKER))
+
+    def test_the_goal_lands_under_the_bound_folder(self):
+        crow_core.set_root(self.a)
+        self.assertEqual(
+            os.path.realpath(crow_core.goal_path()),
+            os.path.realpath(os.path.join(self.a, crow_core.ROOT_MARKER,
+                                          "goal.json")))
+
+    def test_two_folders_do_not_share_one_goal(self):
+        """DER FALL, DER DEN FEHLER GEFANGEN HAETTE. Vorher waren beide Pfade
+        gleich, also war jedes Ziel jedes Fensters."""
+        crow_core.set_root(self.a)
+        crow_core.goal_write({"title": "A", "steps": [{"text": "eins"}]})
+        crow_core.set_root(self.b)
+        self.assertIsNone(crow_core.goal_load())
+        crow_core.set_root(self.a)
+        self.assertEqual((crow_core.goal_load() or {}).get("title"), "A")
+
+    def test_writing_creates_the_marker_folder(self):
+        """Ein Ordner, der noch kein `.crow` hat, bekommt eines -- sonst waere
+        das erste Ziel in einem frischen Arbeitsbereich ein stiller Fehlschlag."""
+        fresh = os.path.join(self.dir, "fresh")
+        os.makedirs(fresh)
+        crow_core.set_root(fresh)
+        crow_core.goal_write({"title": "F", "steps": [{"text": "eins"}]})
+        self.assertTrue(os.path.isfile(
+            os.path.join(fresh, crow_core.ROOT_MARKER, "goal.json")))
+
+    def test_a_chat_without_a_folder_keeps_the_old_place(self):
+        """NEGATIVPROBE. Der wurzellose Chat (#101) ist der eine Fall, in dem es
+        keinen Ordner gibt, den man meinen koennte -- er behaelt den Ort, den
+        jede Auslieferung bis heute benutzt hat, statt einen erfundenen."""
+        crow_core.set_root(None)
+        self.assertEqual(
+            crow_core.goal_path(),
+            os.path.join(crow_core.SESSION_DIR, "goal.json"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

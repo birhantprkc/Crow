@@ -408,12 +408,74 @@ def reasoning_levels_for(model: str | None) -> tuple[str, ...]:
     return REASONING_LEVELS
 
 
+def reasoning_budget_for(model: str | None) -> "int | None":
+    """Der Denkdeckel, den DIESES Modell mitbringt. None heisst: keiner erklaert.
+
+    WARUM DAS EIN MANIFESTFELD IST UND KEINE VORGABE IN EINER FLAGGE. Gemessen
+    2026-08-31 (#176): 256, 512 und 1024 sind voneinander NICHT trennbar --
+    123,5 / 124,5 / 116,3 s bei n=3 --, waehrend deckeln gegen nicht deckeln
+    352 s gegen ~120 s ist. Ein Regler ueber einen Bereich, in dem nichts
+    unterscheidbar ist, stellt eine Frage, die niemand beantworten kann, und
+    liefert dabei den schlechten Zustand als Vorgabe aus. Was gemessen ist,
+    gehoert dorthin, wo `reasoning_levels` schon steht.
+
+    NUR FUER MODELLE, AN DENEN GEMESSEN WURDE. Ein Eintrag ohne dieses Feld
+    bleibt ungedeckelt -- das Verhalten jeder Auslieferung bis heute. Einen
+    Deckel zu raten waere genau der Fehler, den `reasoning_groups_for` eine
+    Ebene tiefer beschreibt.
+    """
+    manifest = _manifest()
+    key = model_key_for(model, manifest)
+    entry = (((manifest.get("models") or {}).get("entries") or {}).get(key)
+             or {}) if key else {}
+    value = entry.get("reasoning_budget")
+    if isinstance(value, (int, float)) and int(value) > 0:
+        return int(value)
+    return None
+
+
+# `/budget off`. NICHT `None`, und der Unterschied ist die ganze Mechanik: None
+# heisst "nicht gewaehlt" und nimmt den Wert des Modells, 0 heisst "der Nutzer
+# hat den Deckel abgenommen". Ohne zwei Zustaende waere das Abnehmen unmoeglich,
+# sobald ein Modell einen Deckel mitbringt -- derselbe dritte Zustand, den `off`
+# bei der Stufe braucht.
+BUDGET_LIFTED = 0
+
+
+def resolve_reasoning_budget(model: str | None,
+                             chosen: "int | None") -> "int | None":
+    """Was wirklich gesendet wird: die Wahl des Chats, sonst die des Modells."""
+    if chosen is None:
+        return reasoning_budget_for(model)
+    if chosen <= 0:
+        return None
+    return chosen
+
+
 # The union, for the parser. Not a claim that every level works on every model:
 # that is what reasoning_levels_for answers, once there is a model to ask about.
 # `none` STEHT HIER, SEIT ES ERREICHBAR IST (#176): der Server faengt es am
 # obersten Feld ab und schaltet das Denken aus. Bis dahin war es kein Wert,
 # sondern das Fehlen des Schluessels -- und ueber die kwargs-Tuer ein HTTP 500.
 REASONING_LEVELS = ("none", "low", "medium", "high", "max")
+
+
+# #176. WAS BEIM AUSLAUFEN DES DENKDECKELS EINGESPEIST WIRD -- und ohne das ist
+# der Deckel unbrauchbar. Der Server schliesst den Denkblock beim Erreichen des
+# Budgets einfach zu; `--reasoning-budget-message` ist die Stelle davor, und
+# seine Vorgabe ist KEINE (common/arg.cpp:3728 im gepinnten Baum). Also schreibt
+# das Modell weiter, wo es stand: gemessen am 2026-08-31 kamen 2 von 9
+# gedeckelten Antworten mitten im Wort an -- das Denken endete auf
+# `...metadata include chat/`, die Antwort begann mit `tokens, check UI thread
+# race...`. Ein Wort, vom End-Tag halbiert.
+#
+# MIT DIESEM SATZ 0 VON 6, bei gleichem Seed und damit gleichem Schnittpunkt.
+# Er ist auch die billigere Haelfte: 185,1 s auf 80,8 s, weil die gekoepften
+# Laeufe genau die davonlaufenden waren (6.377 und 9.790 Antwort-Token). Er
+# kostet sich selbst, 18 Token, und die stehen in der Denkspalte.
+REASONING_BUDGET_MESSAGE = (
+    "\n\nThat is enough analysis. I will now write the final answer "
+    "for the user.\n")
 
 
 def reasoning_groups_for(model: str | None) -> tuple[tuple[str, ...], ...]:
@@ -2152,6 +2214,75 @@ def reasoning_command(argument: str, model: str | None,
     return ("reasoning: %s%s" % (wanted, cost(current, wanted)), wanted, True)
 
 
+def budget_command(argument: str, model: str | None,
+                   current: "int | None") -> "tuple[str, int | None, bool]":
+    """`/budget`: report, or cap the thinking. Returns (what to say, budget, changed).
+
+    THE DECISION IS HERE AND THE PLUMBING IS NOT, the same split `/reasoning`
+    uses and for the same reason: both surfaces have to refuse the same typo and
+    answer the same word the same way.
+
+    IT SAYS NOTHING ABOUT A PREFILL, and that is the one place it differs from
+    `reasoning_command`. The level is rendered INTO the prompt, so changing it
+    re-renders and the note there has to warn. This lands in the sampler instead
+    (`common_sampler_reasoning_budget_force`), so the prompt is byte-identical
+    before and after -- a cap can be set mid-chat for free, and saying otherwise
+    would be a warning with nothing behind it.
+
+    `0` IS REFUSED RATHER THAN PASSED ON. The server takes it and means "end the
+    thinking immediately", which is the state `--reasoning-effort none` reaches
+    -- and #176 measured `none` as the most EXPENSIVE of four settings (3.6x the
+    time, 1.8x the tokens), because a model without a notepad replaces thinking
+    with tool calls. Offering it here as a number would offer it as a saving.
+
+    A NUMBER, NOT A LADDER OF NAMED STEPS. Measured 2026-08-31: capping at all
+    is worth ~2.8x wall clock against no cap, while 256 against 512 against 1024
+    is not separable at n=3. There is no measured step to name.
+    """
+    wanted = (argument or "").strip().lower()
+    shipped = reasoning_budget_for(model)
+    effective = resolve_reasoning_budget(model, current)
+
+    if not wanted:
+        if effective is None:
+            now = "off -- thinking runs to its own end"
+        elif current is None:
+            now = "%d tokens, this model's measured default" % effective
+        else:
+            now = "%d tokens, set for this chat" % effective
+        return ("thinking budget: %s\n"
+                "`/budget <tokens>` to cap it, `/budget off` to lift it." % now,
+                current, False)
+
+    if wanted in ("off", "none"):
+        if effective is None:
+            return ("thinking budget is already off.", current, False)
+        # 0 UND NICHT None: `None` hiesse "nicht gewaehlt" und holte den Wert des
+        # Modells sofort zurueck, also waere das Abnehmen bei jedem gedeckelten
+        # Modell wirkungslos.
+        return ("thinking budget off -- thinking runs to its own end."
+                + (" This model ships %d." % shipped if shipped else ""),
+                BUDGET_LIFTED, True)
+
+    try:
+        n = int(wanted)
+    except ValueError:
+        return ("%r is not a number of tokens. `/budget <tokens>`, or "
+                "`/budget off`." % wanted, current, False)
+
+    if n <= 0:
+        return ("a budget of 0 saves nothing -- it is the `none` level under "
+                "another name, and that one measured as the most expensive "
+                "setting of four. `/budget off` lifts the cap.",
+                current, False)
+
+    if n == effective:
+        return ("thinking budget is already %d tokens." % n, current, False)
+
+    return ("thinking budget: %d tokens. The prompt is unchanged, so this "
+            "costs no prefill." % n, n, True)
+
+
 def write_transcript(conversation: "Conversation", path: str) -> int:
     """The archive as plain text, for whoever has to read it back.
 
@@ -3503,6 +3634,7 @@ ANTHROPIC_MAX_TOKENS = REMOTE_MAX_TOKENS
 # way the slot and the prefix cache are.
 _ANTHROPIC_DROPS = ("temperature", "top_p", "min_p", "top_k",
                     "chat_template_kwargs", "reasoning_effort",
+                    "reasoning_budget_tokens", "reasoning_budget_message",
                     "timings_per_token", "stream_options")
 
 # NOT SENT AWAY FROM HOME, and the list is SHORTER than the one above: a remote
@@ -3528,8 +3660,15 @@ _ANTHROPIC_DROPS = ("temperature", "top_p", "min_p", "top_k",
 # eine Verhaltensaenderung, die niemand angefordert hat, auf genau dem Weg, der
 # den 404 oben erzeugt hat. Ob ein entferntes Modell eine Stufe bekommen SOLL,
 # ist eine eigene Entscheidung und keine Nebenwirkung eines Tuerwechsels.
+#
+# DIE BEIDEN DENKDECKEL-FELDER KAMEN AM 2026-08-31 DAZU (#176), aus demselben
+# Grund wie `reasoning_effort` eine Zeile darueber: sie sind llama.cpp-eigen,
+# der Server liest sie in `server-common.cpp:1365`, und ein Broker, den jemand
+# auf `require_parameters` stellt, findet fuer sie keinen Upstream. Ob ein
+# entferntes Modell einen Denkdeckel bekommen SOLL, ist eine eigene Frage.
 _REMOTE_DROPS = ("min_p", "timings_per_token", "chat_template_kwargs",
-                 "reasoning_effort")
+                 "reasoning_effort",
+                 "reasoning_budget_tokens", "reasoning_budget_message")
 
 # WHAT IS LEFT, AND IT IS SPLIT BECAUSE ONE HALF IS NEGOTIABLE AND THE OTHER IS
 # NOT. `provider.require_parameters` asks a broker to route only to upstreams
@@ -4432,6 +4571,11 @@ def stream_reply(
     min_p: float = MIN_P,
     top_k: int | None = None,
     reasoning_effort: str | None = None,
+    # #176. None HEISST "KEIN DECKEL", was jeder Zug bis heute war. Eine Zahl
+    # deckelt das Denken je Anfrage; die Einspeisung dazu reist immer mit, weil
+    # ein Deckel ohne sie die Antwort koepft.
+    reasoning_budget: "int | None" = None,
+    reasoning_budget_message: "str | None" = None,
     timeout: float,
     extra_headers: "dict | None" = None,
     # WHICH DIALECT THE ENDPOINT SPEAKS, and it is a parameter rather than
@@ -4576,6 +4720,27 @@ def stream_reply(
         # sieht man nur am gerenderten Prompt, weshalb die Sonde /apply-template
         # vergleicht und nicht diesen Koerper.
         body["reasoning_effort"] = reasoning_effort
+    # AUFGELOEST HIER UND NICHT AN DEN OBERFLAECHEN, weil zwei Aufloeser zwei
+    # Antworten auf dieselbe Frage waeren -- dieselbe Regel, der `transport` und
+    # `remote` folgen. Ein entferntes Modell hat keinen Manifesteintrag, bekommt
+    # also keinen Deckel, und `remote_body` nimmt ihn ohnehin wieder heraus.
+    capped = resolve_reasoning_budget(model, reasoning_budget)
+    if capped is not None:
+        # ZWEI FELDER, EINE ENTSCHEIDUNG (#176). Der Deckel ohne die Einspeisung
+        # ist gemessen schaedlich, also reisen sie zusammen oder gar nicht. Der
+        # Server liest `reasoning_budget_tokens` zuerst und faellt erst danach
+        # auf `thinking_budget_tokens` zurueck -- gesendet wird der erste Name.
+        #
+        # DER PROMPT BLEIBT BYTE-GLEICH. Anders als `reasoning_effort` geht das
+        # hier NICHT ins Template, sondern in den Sampler
+        # (`common_sampler_reasoning_budget_force`). Ein Chat, in dem der Deckel
+        # gesetzt wird, zahlt darum keinen neuen Prefill -- der einzige
+        # Unterschied zur Stufe, und der Grund, warum `budget_command` keine
+        # Kostenzeile hat.
+        body["reasoning_budget_tokens"] = capped
+        body["reasoning_budget_message"] = (
+            REASONING_BUDGET_MESSAGE if reasoning_budget_message is None
+            else reasoning_budget_message)
     # EXTRA FIELDS THE ENDPOINT ITSELF ASKED FOR, and only on the dialect that
     # knows them. `turn_routing` decides what they are; this is where they land.
     # Empty for the machine and for every direct connection, which is every turn
@@ -11196,6 +11361,7 @@ atexit.register(forget_mcp_servers)
 # with no turn and no slot involved -- which is why both surfaces may answer
 # them even while a local turn is running.
 SLASH_COMMANDS = ("/help", "/tools", "/mcp", "/mode", "/model", "/reasoning",
+                  "/budget",
                   "/thoughts", "/image", "/delegate", "/subtasks", "/verify",
                   "/goal", "/reset", "/context", "/exit", "/quit")
 
@@ -12182,6 +12348,8 @@ def review_question(incidents: "list[str] | None" = None) -> str:
 def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                 api_key: str, temperature: float, top_p: float, min_p: float,
                 top_k: int | None = None, reasoning_effort: str | None = None,
+                reasoning_budget: "int | None" = None,
+                reasoning_budget_message: "str | None" = None,
                 timeout: float = 180.0, gate: bool = False,
                 extra_headers: "dict | None" = None,
                 transport: str = TRANSPORT_CHAT,
@@ -12226,6 +12394,15 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
         # #176: dieselbe Tuer wie der Zug, aus demselben Grund. Ein Nachlauf, der
         # eine andere Tuer benutzt, waere ein zweiter Prompt-Stil im selben Chat.
         body["reasoning_effort"] = reasoning_effort
+    capped = resolve_reasoning_budget(model, reasoning_budget)
+    if capped is not None:
+        # #176: derselbe Deckel wie der Zug, aus demselben Grund wie die Stufe
+        # eine Zeile darueber. Ein Nachlauf, der ohne Deckel denkt, ist der
+        # teuerste Aufruf des Chats -- und niemand sieht ihm dabei zu.
+        body["reasoning_budget_tokens"] = capped
+        body["reasoning_budget_message"] = (
+            REASONING_BUDGET_MESSAGE if reasoning_budget_message is None
+            else reasoning_budget_message)
     # AND IT CARRIES THE SAME ROUTING KEY AS THE TURN IT FOLLOWS. Same chat, own
     # body, nobody watching -- without this it is a second session inside the
     # first, answered by whichever upstream happened to be cheapest that second.
@@ -12485,6 +12662,10 @@ def run_turn(
     # endpoint this client has ever talked to. A number here would be a literal.
     top_k: int | None = None,
     reasoning_effort: str | None = None,
+    # #176. Durchgereicht, nicht entschieden: was ein Deckel ist, sagt
+    # `budget_command`, und wo er wirkt, sagt `stream_reply`.
+    reasoning_budget: "int | None" = None,
+    reasoning_budget_message: "str | None" = None,
     timeout: float,
     carry: str | None = None,
     context_tokens: int = 0,
@@ -12667,6 +12848,8 @@ def run_turn(
                 min_p=min_p,
                 top_k=top_k,
                 reasoning_effort=reasoning_effort,
+                reasoning_budget=reasoning_budget,
+                reasoning_budget_message=reasoning_budget_message,
                 timeout=timeout,
                 extra_headers=extra_headers,
                 transport=transport,
@@ -15585,11 +15768,46 @@ def goal_delegated(goal: "dict | None" = None) -> int:
     return int((goal or {}).get("delegated") or 0)
 
 
+GOAL_FILE = "goal.json"
+
+
 def goal_path() -> str:
-    """Wo das Ziel liegt. Zur Laufzeit gebaut, wie die Subtask-Registry: die
-    Suiten biegen `SESSION_DIR` um, und eine beim Import gefrorene Konstante
-    schriebe in die echte Installation."""
-    return os.path.join(SESSION_DIR, "goal.json")
+    """Wo das Ziel liegt: im gebundenen Arbeitsbereich, NICHT global.
+
+    ROBIN, 2026-08-31, LIVE GESEHEN: ein zweites Fenster fing von selbst an,
+    ein Ziel abzuarbeiten, das in einem anderen gesetzt worden war. Der Grund
+    stand genau hier -- `SESSION_DIR/goal.json` ist EIN Ort fuer alle Fenster,
+    also liest jeder Motor dasselbe Ziel und pumpt darauf los. Zwei Fenster
+    arbeiteten denselben Plan doppelt ab, in einem Ordner, den nur eines von
+    beiden gebunden hatte.
+
+    EIN ZIEL GEHOERT ZU DER ARBEIT, FUER DIE ES GESETZT WURDE, und die Arbeit
+    ist der Ordner. Also `<root>/.crow/goal.json`, neben `MEMORY.md` und
+    `root.json` -- dieselbe Regel, der `memory_path` seit #120 folgt und die
+    `git_repo()` seit #156 als "THE WORKING AREA DECIDES" ueber sich stehen hat.
+
+    ZWEI FENSTER AUF DEMSELBEN ORDNER TEILEN ES WEITERHIN, und das ist richtig:
+    dasselbe Arbeitsgebiet ist dieselbe Arbeit. Was aufhoert, ist das Teilen
+    zwischen Ordnern, die nichts miteinander zu tun haben.
+
+    OHNE GEBUNDENEN ORDNER bleibt es, wo es war. Ein Chat, der ausdruecklich
+    keinen Ordner hat (#101), soll trotzdem ein Ziel halten koennen, und ein
+    Ersatzort waere eine Grenze, die niemand gezogen hat -- dieselbe
+    Entscheidung, die `memory_path` fuer den wurzellosen Fall trifft.
+
+    DIE FOLGE, DAMIT SIE NICHT UEBERRASCHT: wer den Ordner wechselt, waehrend
+    ein Ziel laeuft, wechselt das Ziel mit. Das ist die gemeinte Bedeutung von
+    "das Ziel gehoert zum Ordner" und kein Verlust -- das alte steht noch da,
+    wo es gesetzt wurde, und kommt mit dem Ordner zurueck.
+
+    Zur Laufzeit gebaut, wie die Subtask-Registry: die Suiten biegen
+    `SESSION_DIR` und die Wurzel um, und eine beim Import gefrorene Konstante
+    schriebe in die echte Installation.
+    """
+    root = get_root()
+    if root:
+        return os.path.join(root, ROOT_MARKER, GOAL_FILE)
+    return os.path.join(SESSION_DIR, GOAL_FILE)
 
 
 def goal_load() -> "dict | None":

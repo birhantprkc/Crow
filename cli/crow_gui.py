@@ -6683,6 +6683,11 @@ class Api:
         # session file once the model is known, because which levels are legal
         # is the model's answer, not this window's.
         self._reasoning: str | None = None
+        # #176. Der Denkdeckel, und `None` ist auch hier ein Wert: "kein
+        # Deckel", was jeder Zug bis heute war. Er wird NICHT in die Chatdatei
+        # geschrieben -- anders als die Stufe, und das ist eine Luecke mit
+        # Ansage: wer ihn setzt, hat ihn bis zum Fensterende.
+        self._budget: int | None = None
         self._promised_warm = False
         self._worker: threading.Thread | None = None
         # #138c. EINE ZEILE, DIE WAEHREND DES NACHLAUFS GETIPPT WURDE.
@@ -7698,6 +7703,8 @@ class Api:
         "/mode": "the release level; /mode manual|allowedit|auto to switch.",
         "/model": "the model that is up; /model <key> restarts on another one.",
         "/reasoning": "this chat's thinking level; /reasoning <level>|off to set it.",
+        "/budget": "cap the thinking per request; /budget <tokens>|off to set "
+                   "it. The prompt is unchanged, so it costs no prefill.",
         "/goal": "set the goal this chat works towards; /goal <title> then one "
                  "step per line, or `title | step | step`. /goal off clears it.",
         "/thoughts": "fold the reasoning blocks open, or closed again.",
@@ -7762,6 +7769,8 @@ class Api:
             return self._model_command(parts[1:])
         if word == "/reasoning":
             return self._reasoning_command(parts[1:])
+        if word == "/budget":
+            return self._budget_command(parts[1:])
         if word == "/goal":
             # DER REST DER ZEILE, NICHT parts[1:]: der Titel und die Schritte
             # sind Prosa mit Leerzeichen, und `split()` hat sie schon zerlegt.
@@ -8016,6 +8025,23 @@ class Api:
                        "levels": list(crow_core.reasoning_levels_for(self._model)),
                        "groups": [list(g)
                                   for g in crow_core.reasoning_groups_for(self._model)]})
+        return said
+
+    def _budget_command(self, rest: list) -> str:
+        """`/budget` reports, `/budget <tokens>|off` caps the thinking (#176).
+
+        NOT A SECOND IMPLEMENTATION, the same rule `_reasoning_command` follows:
+        `crow_core.budget_command` owns what a budget is, which typo is refused
+        and why 0 is not on offer.
+
+        MID-TURN IS ALLOWED, and here it is free rather than merely harmless:
+        the cap goes to the sampler and not into the prompt, so the turn in
+        flight is unaffected and the next one pays no prefill for the change.
+        """
+        said, budget, changed = crow_core.budget_command(
+            " ".join(rest), self._model, self._budget)
+        if changed:
+            self._budget = budget
         return said
 
     def _goal_command(self, rest: str) -> str:
@@ -10491,6 +10517,8 @@ class Api:
                 min_p=sampling["min_p"], top_k=sampling.get("top_k"),
                 # #116: None sends nothing, which is the "never chosen" state.
                 reasoning_effort=self._reasoning,
+                # #176: dasselbe fuer den Denkdeckel -- None schickt kein Feld.
+                reasoning_budget=self._budget,
                 timeout=READ_TIMEOUT_S, context_tokens=self._context_tokens,
                 n_ctx=self._n_ctx, promised_warm=self._promised_warm,
                 # #152: frisch je Turn, gesetzt allein vom Vor-Turn-Roll oben
@@ -10595,6 +10623,7 @@ class Api:
                 temperature=sampling["temperature"], top_p=sampling["top_p"],
                 min_p=sampling["min_p"], top_k=sampling.get("top_k"),
                 reasoning_effort=self._reasoning,
+                reasoning_budget=self._budget,
                 incidents=result.incidents,
                 gate=getattr(self._args, "memory_approval",
                              crow_core.MEMORY_APPROVAL_DEFAULT),

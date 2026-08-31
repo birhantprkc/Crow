@@ -1022,6 +1022,7 @@ HELP = """commands:
   /mode          the release level, /mode manual|allowedit|auto to switch
   /model         the model that is up, /model <key> restarts on another one
   /reasoning     this chat's thinking level, /reasoning <level>|off to set it
+  /budget        cap the thinking per request, /budget <tokens>|off
   /goal          the goal this chat works towards, /goal <title> | <step> | <step>
   /thoughts      show the model's reasoning as it arrives, or hide it again
   /image         hold an image for the next line, /image <path>
@@ -1178,6 +1179,21 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
         print(said + "\n")
         if changed and args is not None:
             args.reasoning_effort = level
+        return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
+
+    if line == "/budget" or line.startswith("/budget "):
+        # #176. Kept on `args` for the same reason the level is: it is read when
+        # the NEXT body is built, and a fifth field in SlashResult would be a
+        # name three commands never set. Unlike the level it needs no model --
+        # the cap is the sampler's, not the template's, so there is nothing to
+        # ask /props about.
+        said, budget, changed = crow_core.budget_command(
+            line[len("/budget"):],
+            fetch_model_name(args.base_url if args else DEFAULT_BASE_URL),
+            getattr(args, "reasoning_budget", None) if args else None)
+        print(said + "\n")
+        if changed and args is not None:
+            args.reasoning_budget = budget
         return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
 
     if line == "/model" or line.startswith("/model "):
@@ -1954,7 +1970,7 @@ def repl(args: argparse.Namespace) -> int:
             model=args.model,
             api_key=args.api_key,
             **sampling,
-            reasoning_effort=args.reasoning_effort,
+            reasoning_effort=args.reasoning_effort, reasoning_budget=args.reasoning_budget,
             timeout=args.timeout,
             carry=line,
             context_tokens=context_tokens,
@@ -1998,7 +2014,7 @@ def repl(args: argparse.Namespace) -> int:
             conversation.mark_reviewed(due)
             crow_core.review_turn(
                 conversation, base_url=args.base_url, model=args.model,
-                api_key=args.api_key, **sampling,
+                api_key=args.api_key, **sampling, reasoning_budget=args.reasoning_budget,
                 reasoning_effort=args.reasoning_effort, incidents=turn.incidents,
                 gate=getattr(args, "memory_approval",
                              crow_core.MEMORY_APPROVAL_DEFAULT),
@@ -2223,6 +2239,14 @@ def build_parser() -> argparse.ArgumentParser:
     # offered a level that was fatal.
     parser.add_argument("--reasoning-effort", dest="reasoning_effort",
                         choices=crow_core.REASONING_LEVELS, default=None)
+    # #176. NO `choices` AND NO CEILING: the server takes any positive count,
+    # and the measured range says nothing about where a useful one stops --
+    # 256, 512 and 1024 were not separable from each other. The one value that
+    # IS refused is 0, and `budget_command` refuses it with the reason.
+    parser.add_argument("--reasoning-budget", dest="reasoning_budget",
+                        type=int, default=None,
+                        help="cap the thinking at N tokens per request "
+                             "(default: no cap)")
     parser.add_argument("--timeout", type=float, default=1800.0,
                         help="socket timeout in seconds (default: 1800)")
     parser.add_argument("--no-font", dest="font", action="store_false",
