@@ -783,16 +783,12 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
    daran nichts -- die Spalte traegt dieselbe Regel eine Ebene hoeher. */
 #code{width:auto;flex:0 1 auto;min-width:0;min-height:0;background:var(--rail);
   display:flex;flex-direction:column;overflow:hidden}
-#git{width:auto;flex:0 1 auto;min-width:0;min-height:0;background:var(--rail);
-  display:flex;flex-direction:column;overflow:hidden}
-/* DIE HOEHE TEILEN SIE SICH GLEICH, und das steht als eigene Regel da, damit
-   die beiden Zusagen darueber unberuehrt bleiben. Nicht nach Inhalt: eine
-   wachsende Werkzeugliste schoebe das Git-Panel sonst aus dem Bild, waehrend
-   jemand hineinsieht. */
+/* DAS GIT-PANEL IST AUS DIESER SPALTE AUSGEZOGEN und liegt jetzt im
+   Chatfenster unter dem Zielpanel -- seine Regeln stehen dort, bei `#panels`.
+   Hier bleibt eine Spalte mit einem Panel darin: Breite, Griff und Falte
+   gehoerten immer IHR und nie dem Panel, also aendert der Auszug daran
+   nichts. */
 #side > aside{flex:1 1 0}
-/* Die Fuge zwischen beiden, und NUR wenn beide da sind: eine Linie ueber einem
-   Panel, das allein steht, waere ein Rand zum Fensterhintergrund. */
-body:not([data-code="shut"]) #git{border-top:1px solid var(--line)}
 #codegrip{flex:none;width:5px;margin:0 -2px;z-index:3;cursor:col-resize;
   background:transparent;transition:background .12s ease}
 #codegrip:hover,#codegrip.on{background:var(--bevel)}
@@ -802,13 +798,13 @@ body:not([data-code="shut"]) #git{border-top:1px solid var(--line)}
    und das offene Panel haette die Haelfte seiner Flaeche an etwas Unsichtbares
    verloren. Also beides. */
 body[data-code="shut"] #code{width:0;overflow:hidden;display:none}
-body[data-git="shut"] #git{width:0;overflow:hidden;display:none}
-/* Erst wenn BEIDE zu sind, faellt die Spalte selbst zusammen. */
-body[data-code="shut"][data-git="shut"] #side{width:0;overflow:hidden}
+/* Nur noch ein Panel in der Spalte, also faellt sie mit ihm zusammen. Das
+   Verstecken des Git-Panels steht bei ihm, weil es hier nichts mehr traegt. */
+body[data-code="shut"] #side{width:0;overflow:hidden}
 /* DER GRIFF GEHT MIT. Ein Anfasser an einer Flaeche von null Pixeln ist ein
    Streifen, der nichts bewegt -- und er saesse genau auf der Kante, die das
    geschlossene Panel gerade sauber macht. */
-body[data-code="shut"][data-git="shut"] #codegrip{display:none}
+body[data-code="shut"] #codegrip{display:none}
 #codehead{display:flex;align-items:center;gap:8px;padding:0 12px;
   min-height:var(--barh);flex:none}
 #codehead h2{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.13em;
@@ -860,14 +856,26 @@ body[data-code="shut"][data-git="shut"] #codegrip{display:none}
   color:var(--text-faint);max-height:none}
 
 /* -- #156: das Git-Panel ------------------------------------------------- */
-/* ES BORGT SICH NICHTS, ES IST DASSELBE. Kopf wie `#codehead`, Klappgruppen wie
-   `.tchd`, Rail wie `#code` -- robins Ansage: "gleich vom design und rail her
-   dem Code Panel". Eigene Regeln stehen hier nur, wo das Git-Panel etwas hat,
-   das das Code-Panel nicht kennt: Dateizeilen, +/-, die Historie. */
-#githead{display:flex;align-items:center;gap:8px;padding:0 12px;
-  min-height:var(--barh);flex:none}
-#githead h2{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.13em;
-  text-transform:uppercase;color:var(--dimmer)}
+/* ES BORGT SICH NICHTS, ES IST DASSELBE -- nur ist das "Dasselbe" jetzt das
+   ZIELPANEL und nicht mehr das Code-Panel. Das Git-Panel steht im Chatfenster,
+   also traegt es dort dessen Form: Karte, Rundung, Schatten, Kopf in
+   Normalschrift. Was nur IHM gehoert, steht weiter hier -- Dateizeilen, +/-,
+   die Historie -- und die Klappgruppen bleiben `.tchd`, dieselben wie drueben.
+   ORT UND BREITE KOMMEN VON `#panels`: das Panel sagt, wie es aussieht, die
+   Spalte sagt, wo es steht. */
+#git{flex:0 1 auto;min-height:0;overflow:hidden;display:flex;
+  flex-direction:column;background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;box-shadow:0 6px 24px var(--shadow);font-size:11.5px}
+/* Wegklicken geht weiter NUR ueber den Knopf in der Titelleiste (#156). */
+body[data-git="shut"] #git{display:none}
+#githead{display:flex;align-items:center;gap:8px;padding:13px 15px 9px;
+  flex:none}
+/* DER KOPF SPRICHT WIE "Goal". In Versalien und gesperrt war er die
+   Ueberschrift einer Spalte; hier steht er neben einer Karte, deren Kopf ein
+   Wort in Normalschrift ist, und zwei Schriftregeln uebereinander waeren zwei
+   Panels, die sich nicht kennen. */
+#githead h2{margin:0;font-size:11.5px;font-weight:600;letter-spacing:.2px;
+  color:var(--text-faint)}
 /* DER ANGEMELDETE ACCOUNT, sonst nichts. Kein Token, keine Mail -- der Name ist
    das, was jemand wiedererkennt, und alles Weitere waere ein Geheimnis auf dem
    Bildschirm. */
@@ -959,9 +967,32 @@ body[data-code="shut"][data-git="shut"] #codegrip{display:none}
 .sess.on .t{color:var(--model)}
 .sess.on::before{content:"";position:absolute;left:2px;top:8px;bottom:8px;
   width:2px;background:var(--accent);border-radius:2px}
+/* -- die Panelspalte im Chatfenster -------------------------------------- */
+/* ZWEI KARTEN, EINE SPALTE, UND KEINE ZEILE JAVASCRIPT DAFUER. Das Git-Panel
+   steht unter dem Zielpanel, und ein Ziel faengt an und hoert auf -- es muss
+   also wandern. Als Rechnung hiesse das, die Hoehe des Zielpanels bei jedem
+   Zeichnen und bei jeder Fenstergroesse nachzumessen; eine Flexspalte tut es
+   von selbst, weil ein verstecktes Zielpanel keinen Platz belegt. Ohne Ziel
+   sitzt das Git-Panel oben, mit Ziel darunter, und niemand rechnet.
+   DIE SPALTE FAENGT KEINE KLICKS. Sie ist hoeher als ihr Inhalt, damit ein
+   langes Ziel und eine lange Dateiliste sich die Hoehe teilen koennen statt
+   sich gegenseitig abzuschneiden -- ohne `pointer-events` waere der leere Rest
+   ein unsichtbarer Deckel ueber dem Gespraech. Die Karten nehmen ihre Klicks
+   selbst wieder an.
+   DIE HOEHE IST DIE ALTE, EINMAL: 60 % gehoerten dem Ziel allein, jetzt teilen
+   sich zwei Karten 70 % minus dem Rand -- der Abstand zur Eingabemaske bleibt
+   damit derselbe, den das Zielpanel seit #164 haelt. */
+#panels{position:absolute;top:14px;right:16px;z-index:5;width:290px;
+  height:calc(70% - 14px);display:flex;flex-direction:column;gap:10px;
+  pointer-events:none}
+#panels>*{pointer-events:auto}
+
 /* -- #164: das Zielpanel ------------------------------------------------- */
-#goalpanel{position:absolute;top:14px;right:16px;z-index:5;width:290px;
-  max-height:60%;overflow:auto;background:var(--panel);border:1px solid var(--line);
+/* ORT UND BREITE GEHOEREN `#panels`. Was hier steht, ist die Karte selbst --
+   und `min-height:0` neben `overflow:auto` ist das, was aus dem Deckel der
+   Spalte eine eigene Scrollflaeche macht statt eines abgeschnittenen Endes. */
+#goalpanel{flex:0 1 auto;min-height:0;
+  overflow:auto;background:var(--panel);border:1px solid var(--line);
   border-radius:10px;box-shadow:0 6px 24px var(--shadow);font-size:11.5px}
 #goalpanel[hidden]{display:none}
 /* DREI ZONEN MIT LUFT DAZWISCHEN, nach robins Vorlage: Kopfzeile mit Status,
@@ -2490,7 +2521,75 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
          eigene Spalte haette es zu einem Moebel gemacht, das immer da ist.
          ABSOLUT wie die Tool-Kachel, damit es dem Leser nicht wegscrollt.
          VERSTECKT OHNE ZIEL (robin, 2026-08-30): kein leerer Rahmen. -->
-    <div id="goalpanel" hidden></div>
+    <div id="panels">
+      <div id="goalpanel" hidden></div>
+      <!-- #156. DAS GIT-PANEL. Was der Chat als Karten zeigt -- Aenderungen, ein
+           Commit, ein Push -- steht hier als Zustand: was ist offen, auf welchem
+           Zweig, und was ist passiert. Der Chat erzaehlt den Verlauf, das Panel
+           beantwortet die Lage.
+           UND ES STEHT IM CHATFENSTER, unter dem Ziel: die Lage des Ordners
+           gehoert neben das, woran gerade gearbeitet wird, und nicht neben den
+           Quelltext eines einzelnen Werkzeugaufrufs. -->
+      <aside id="git">
+        <div id="githead">
+          <h2>Git tools</h2>
+          <button id="gituser" class="off" onclick="crow.gitAccount()"
+                  title="GitHub account">not connected</button>
+        </div>
+        <div id="gitbody">
+          <div class="gnone" id="gitnone">no repository in the working folder</div>
+          <section id="gitchanges" class="gitgrp" hidden>
+            <div class="tchd" onclick="crow.gitToggle('gitchanges')">
+              <span class="tct">Changes</span>
+              <span class="gcount"><span class="gplus"></span>
+                <span class="gminus"></span></span>
+              <span class="tcx">−</span>
+            </div>
+            <div class="gbody"><div id="gitfiles"></div></div>
+          </section>
+          <section id="gitbranch" class="gitgrp shut" hidden>
+            <div class="tchd" onclick="crow.gitToggle('gitbranch')">
+              <span class="tct" id="gitbranchname">—</span>
+              <span class="gcount" id="gitab"></span>
+              <span class="tcx">+</span>
+            </div>
+            <div class="gbody"><div id="gitbranches"></div></div>
+          </section>
+          <!-- #156. COMMIT ALS EIGENE GRUPPE, wie im abgenommenen Mockup. Sie
+               nimmt eine Nachricht und legt GENAU die verfolgten, geaenderten
+               Dateien ab, die darueber stehen -- kein `-a`, kein Punkt, und nichts
+               Unverfolgtes: was neu ist, will jemand bewusst hinzunehmen. -->
+          <section id="gitcommit" class="gitgrp shut" hidden>
+            <div class="tchd" onclick="crow.gitToggle('gitcommit')">
+              <span class="tct">⊸ Commit</span>
+              <span class="gcount" id="gitcn"></span>
+              <span class="tcx">+</span>
+            </div>
+            <div class="gbody">
+              <!-- #156. WELCHE DREI, robins Frage vom 2026-08-29: "WO SIN DIE 3
+                   FILES". Ein Knopf, der eine Zahl nennt und die Namen verschweigt,
+                   verlangt vom Nutzer, sie zu erraten -- und ausgerechnet vor dem
+                   Schritt, der Geschichte schreibt. Sie stehen jetzt darin, dieselbe
+                   Zeilenform wie unter Changes. -->
+              <div id="gitstaged"></div>
+              <div class="gcommit">
+                <input id="gitmsg" placeholder="commit message"
+                       onkeydown="if(event.key==='Enter')crow.gitCommit()">
+                <button id="gitdo" onclick="crow.gitCommit()">Commit</button>
+              </div>
+              <div class="gnone" id="gitcsaid"></div>
+            </div>
+          </section>
+          <section id="githist" class="gitgrp" hidden>
+            <div class="tchd" onclick="crow.gitToggle('githist')">
+              <span class="tct">History</span><span class="gcount"></span>
+              <span class="tcx">−</span>
+            </div>
+            <div class="gbody"><div id="gitrows"></div></div>
+          </section>
+        </div>
+      </aside>
+    </div>
     <div id="flow"></div>
     <div id="composer">
       <!-- #162. WO MAN STEHT, WENN ES NICHT DER LAUFENDE CHAT IST. Ein Blick in
@@ -2608,69 +2707,6 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
             <pre class="cwp"></pre>
           </div>
         </template>
-      </section>
-    </div>
-  </aside>
-  <!-- #156. DAS GIT-PANEL. Was der Chat als Karten zeigt -- Aenderungen, ein
-       Commit, ein Push -- steht hier als Zustand: was ist offen, auf welchem
-       Zweig, und was ist passiert. Der Chat erzaehlt den Verlauf, das Panel
-       beantwortet die Lage. -->
-  <aside id="git">
-    <div id="githead">
-      <h2>Git</h2>
-      <button id="gituser" class="off" onclick="crow.gitAccount()"
-              title="GitHub account">not connected</button>
-    </div>
-    <div id="gitbody">
-      <div class="gnone" id="gitnone">no repository in the working folder</div>
-      <section id="gitchanges" class="gitgrp" hidden>
-        <div class="tchd" onclick="crow.gitToggle('gitchanges')">
-          <span class="tct">Changes</span>
-          <span class="gcount"><span class="gplus"></span>
-            <span class="gminus"></span></span>
-          <span class="tcx">−</span>
-        </div>
-        <div class="gbody"><div id="gitfiles"></div></div>
-      </section>
-      <section id="gitbranch" class="gitgrp shut" hidden>
-        <div class="tchd" onclick="crow.gitToggle('gitbranch')">
-          <span class="tct" id="gitbranchname">—</span>
-          <span class="gcount" id="gitab"></span>
-          <span class="tcx">+</span>
-        </div>
-        <div class="gbody"><div id="gitbranches"></div></div>
-      </section>
-      <!-- #156. COMMIT ALS EIGENE GRUPPE, wie im abgenommenen Mockup. Sie
-           nimmt eine Nachricht und legt GENAU die verfolgten, geaenderten
-           Dateien ab, die darueber stehen -- kein `-a`, kein Punkt, und nichts
-           Unverfolgtes: was neu ist, will jemand bewusst hinzunehmen. -->
-      <section id="gitcommit" class="gitgrp shut" hidden>
-        <div class="tchd" onclick="crow.gitToggle('gitcommit')">
-          <span class="tct">⊸ Commit</span>
-          <span class="gcount" id="gitcn"></span>
-          <span class="tcx">+</span>
-        </div>
-        <div class="gbody">
-          <!-- #156. WELCHE DREI, robins Frage vom 2026-08-29: "WO SIN DIE 3
-               FILES". Ein Knopf, der eine Zahl nennt und die Namen verschweigt,
-               verlangt vom Nutzer, sie zu erraten -- und ausgerechnet vor dem
-               Schritt, der Geschichte schreibt. Sie stehen jetzt darin, dieselbe
-               Zeilenform wie unter Changes. -->
-          <div id="gitstaged"></div>
-          <div class="gcommit">
-            <input id="gitmsg" placeholder="commit message"
-                   onkeydown="if(event.key==='Enter')crow.gitCommit()">
-            <button id="gitdo" onclick="crow.gitCommit()">Commit</button>
-          </div>
-          <div class="gnone" id="gitcsaid"></div>
-        </div>
-      </section>
-      <section id="githist" class="gitgrp" hidden>
-        <div class="tchd" onclick="crow.gitToggle('githist')">
-          <span class="tct">History</span><span class="gcount"></span>
-          <span class="tcx">−</span>
-        </div>
-        <div class="gbody"><div id="gitrows"></div></div>
       </section>
     </div>
   </aside>
@@ -4906,9 +4942,24 @@ const crow = {
   // arguments come from the model and a path with a tag in it must not become
   // one. It lands in the flow rather than over it: the turn it belongs to is
   // above it, and a modal would hide the very context the answer needs.
+  // #173. DIE KARTE GEHOERT DER RUNDE, DIE GEFRAGT HAT, und nicht dem Flow.
+  //
+  // WARUM SIE VORHER ANS ENDE RUTSCHTE, und sie ist dabei nie bewegt worden:
+  // `fold()` zieht jede fertige Runde in ein `Trace`-<details>, und dieses
+  // Element entsteht beim ERSTEN Falten -- also am Ende, das der Flow in genau
+  // diesem Moment hat. Danach wandert jede weitere Runde IN den Trace, der
+  // vorne stehen bleibt und waechst. Eine Karte, die am Flow haengt, bleibt
+  // damit unter allem liegen, was spaeter in den Trace gezogen wird.
+  //
+  // ANGEHAENGT AN `this.round` reist sie mit: `fold()` verschiebt das ganze
+  // Rundenelement, die Karte inklusive, und sie steht danach genau bei dem
+  // Werkzeugaufruf, um den es ging. OHNE `turn` in der Klasse, wenn sie drin
+  // liegt -- die Randbreite kommt schon von der Runde, und zweimal ist ein
+  // Kasten, der schmaler ist als seine Nachbarn.
   ask(name, args, scope){
+    const host = (this.round && this.round.isConnected) ? this.round : null;
     const d=document.createElement("div");
-    d.className="turn ask";
+    d.className = host ? "ask" : "turn ask";
     d.innerHTML='<div class="askcard"><div class="asktop"><b></b><code></code></div>'
       + '<div class="askrow">'
       + '<button class="yes" onclick="crow.answered(this,\'yes\')">run it</button>'
@@ -4919,7 +4970,7 @@ const crow = {
     d.querySelector("b").textContent=name;
     d.querySelector("code").textContent=args||"";
     if(scope) d.querySelector(".always em").textContent=scope;
-    flow.appendChild(d); this.bottom(); },
+    (host || flow).appendChild(d); this.bottom(); },
 
   // #156. DIE GERAETEFREIGABE, als Karte im Verlauf.
   //
