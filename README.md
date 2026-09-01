@@ -61,7 +61,7 @@ Default since 2.0.0. `DEFAULT_BASE_URL` is `http://127.0.0.1:8083/v1`.
 | Architecture | `qwen4exp` MoE: 48 layers, 512 experts per layer, 10 active, full attention every 4th |
 | Quant | `UD-Q2_K_XL`, Unsloth |
 | Context | `-c 200000`, one slot (`-np 1`) |
-| Placement | `-ncmoe 40 --fit off --load-mode none`, `-b 4096 -ub 4096` |
+| Placement | `-ncmoe 30 --fit off --load-mode none`, `-b 2048 -ub 2048` |
 | KV | `q8_0` / `q8_0` |
 | Vision | `--mmproj mmproj-F16.gguf`, 904,004,000 B (#170) |
 | Reasoning | `low` `medium` `high`; `max`, `minimal` and an explicit `off` return HTTP 500 (#160) |
@@ -110,7 +110,7 @@ faster one per token and the smaller download.
 | | |
 |---|---|
 | **GPU** | NVIDIA. 32 GB for this operating point. 16 GB is the installer's floor, unmeasured |
-| **System RAM** | 32 GB for the 27B. **64 GB for Flash-Next** -- `-ncmoe 40` keeps the experts of 40 of 48 layers in system RAM |
+| **System RAM** | 32 GB for the 27B. **64 GB for Flash-Next** -- `-ncmoe 30` keeps the experts of 30 of 48 layers in system RAM |
 | **Disk** | ~2 GB for Crow, **73.45 GiB for the model** (3 shards) plus 0.9 GiB for the projector. The 27B is 16.35 GiB plus 0.9 |
 | **OS** | Windows x64 |
 | **Python** | 3.8+. Terminal client uses the standard library only |
@@ -172,8 +172,8 @@ By hand, the default operating point:
 ```powershell
 C:\path\to\your\llama-server.exe `
   -m $env:LOCALAPPDATA\Crow\models\qwen-next-gguf\UD-Q2_K_XL\Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf `
-  --port 8083 -c 200000 -b 4096 -ub 4096 -ctk q8_0 -ctv q8_0 `
-  -ncmoe 40 --fit off --load-mode none -np 1 `
+  --port 8083 -c 200000 -b 2048 -ub 2048 -ctk q8_0 -ctv q8_0 `
+  -ncmoe 30 --fit off --load-mode none -np 1 `
   --mmproj $env:LOCALAPPDATA\Crow\models\qwen-next-gguf\mmproj-F16.gguf --jinja
 ```
 

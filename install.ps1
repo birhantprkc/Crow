@@ -1784,8 +1784,8 @@ Write-Host "    hf download unsloth/Qwen3.8-Flash-Next-GGUF mmproj-F16.gguf --lo
 Write-Host ""
 Write-Host "    C:\Users\robin\dev\crow-lab\wt-27992\build-27992\bin\Release\llama-server.exe ``" -ForegroundColor White
 Write-Host "      -m $InstallTo\models\qwen-next-gguf\UD-Q2_K_XL\Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf ``" -ForegroundColor White
-Write-Host "      --port 8083 -c 200000 -b 4096 -ub 4096 ``" -ForegroundColor White
-Write-Host "      -ctk q8_0 -ctv q8_0 -ncmoe 40 ``" -ForegroundColor White
+Write-Host "      --port 8083 -c 200000 -b 2048 -ub 2048 ``" -ForegroundColor White
+Write-Host "      -ctk q8_0 -ctv q8_0 -ncmoe 30 ``" -ForegroundColor White
 Write-Host "      --fit off --load-mode none -np 1 ``" -ForegroundColor White
 Write-Host "      --mmproj $InstallTo\models\qwen-next-gguf\mmproj-F16.gguf ``" -ForegroundColor White
 Write-Host "      --jinja" -ForegroundColor White

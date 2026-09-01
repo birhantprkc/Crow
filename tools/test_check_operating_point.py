@@ -96,8 +96,8 @@ BLANK = "\n\n"
 
 FLASH_LINE = (
     "llama-server.exe -m %LOCALAPPDATA%\\Crow\\models\\qwen-next-gguf\\x.gguf "
-    "--port 8083 -c 200000 -b 4096 -ub 4096 -ctk q8_0 -ctv q8_0 "
-    "-ncmoe 40 --fit off --load-mode none -np 1 --jinja\n"
+    "--port 8083 -c 200000 -b 2048 -ub 2048 -ctk q8_0 -ctv q8_0 "
+    "-ncmoe 30 --fit off --load-mode none -np 1 --jinja\n"
 )
 
 def run(repo, extra=None):

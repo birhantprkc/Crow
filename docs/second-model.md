@@ -133,8 +133,8 @@ over. No arm is compared against a control from another session.
 
     C:\Users\robin\dev\crow-lab\wt-27992\build-27992\bin\Release\llama-server.exe `
       -m <models>\qwen-next-gguf\UD-Q2_K_XL\Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf `
-      --port 8083 -c 200000 -b 4096 -ub 4096 `
-      -ctk q8_0 -ctv q8_0 -ncmoe 40 `
+      --port 8083 -c 200000 -b 2048 -ub 2048 `
+      -ctk q8_0 -ctv q8_0 -ncmoe 30 `
       --fit off --load-mode none -np 1 `
       --mmproj <models>\qwen-next-gguf\mmproj-F16.gguf `
       --jinja
