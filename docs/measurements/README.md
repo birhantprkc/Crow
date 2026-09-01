@@ -3,6 +3,37 @@
 One user, `-np 1`, identical prompt, server restarted cold per arm, cross-checked against the
 server's own `eval time` blocks.
 
+## The engine's fixed term, Flash-Next (#159, #186)
+
+Raw rows in the lab, not in this repo: `crow-lab/runs/2026-09-01-{profile,ladder,omp,vtune,splits,
+parity,probe-27880,levers2-159,gate-27880}-…`. Every table is on Crow #159 (comments of
+2026-09-01) and the closing comment of #186. Harnesses in `crow-lab/`: `profile-159.py`,
+`ladder-159.py`, `omp-159.py`, `splits-159.py`, `parity-28040.py`, `probe-27880.py`,
+`measure-levers-159.py`, `gate-27880.py`, all with `--selftest`.
+
+Measured 2026-09-01 at `-ncmoe 30 -b/-ub 2048`, unelevated shell, six depths per boot, 200 tokens
+out, arms interleaved, fits with r² < 0.9 discarded.
+
+| | |
+|---|---|
+| decode against depth | `ms/token = 24.06 + 0.0706 per 1,000 tokens` (r² 0.93) |
+| cycles in kernel + NT sync + OpenMP runtime | **67.1 %** (VTune, attach mode; shares are the payload, absolute times are not) |
+| cycles in `ggml-cpu` | 27.8 % |
+| barrier spin | 63.1 % of CPU time per token |
+| DRAM bus | 28.157 GB/s of 84 = 33.5 %, 0.0 % of the time saturated |
+| graph splits per decoded token | `4 + 2 × ncmoe`, r² 1.0000 over seven placements; 64 at `-ncmoe 30` |
+| thread count | `ms/token = 21.66 + 65.59 / threads`, r² 0.99 — saturates |
+| `OMP_WAIT_POLICY=PASSIVE` | −16.3 % |
+| `GGML_OPENMP=OFF` (ggml threadpool) | **+4 to +6 ms per token** at 30k–140k in both rounds; first request after boot 42–70 ms; `--poll 100` worse |
+| PR #27880 on the pin | boots and serves; 62 splits; fixed term −0.99 ms in the one clean pair, inside 1.35 ms of spread |
+| PR #28040 vs #27992 | parity: +0.6 % fixed term against 1.335 ms of spread |
+
+Ceiling for a perfect implementation on this hardware: 86 tok/s (GPU work at sm 46 %). A bound,
+not a target — no lever inside the engine reaches toward it.
+
+An elevated server is ~8 % faster on this machine (42.3 / 42.9 against 39.5, same afternoon).
+Cause unmeasured. Elevated is compared only with elevated.
+
 ## Placement and ubatch, Flash-Next (#182)
 
 Full map: [`flash-next-placement.md`](flash-next-placement.md) — raw rows
@@ -23,8 +54,8 @@ cache. Three runs per arm for the verified rows.
 Confirmed from both sides: `-ncmoe 32` is worse (59.6 s), `-ncmoe 28` is worse
 (97.5 s), `-ub 1536` and `-ub 3072` are worse.
 
-**Not applied to the manifest.** The operating point still ships
-`-ncmoe 40 -b 4096 -ub 4096`.
+**Applied to the manifest 2026-09-01** (`a221259`) and shipped as the operating point in
+2.1.0. VRAM settled after load: 30,984 MiB of 32,607, 1,059 MiB left.
 
 The trap: `-ncmoe 24 -ub 1024` gives the highest decode measured (46.59, +34 %)
 and is **2.5x slower per turn** — prefill falls 62 %. Decode alone is the wrong

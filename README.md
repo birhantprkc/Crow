@@ -10,7 +10,7 @@
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
-<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-2.0.0-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
+<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-2.1.0-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
 <a href="#requirements"><img src="https://img.shields.io/badge/platform-Windows%20x64%20%C2%B7%20CUDA-555555?style=flat-square&logo=nvidia&logoColor=76b900&labelColor=000000" alt="Platform"></a>
 <a href="cli/crow.py"><img src="https://img.shields.io/badge/client-Python%20stdlib%20only-555555?style=flat-square&logo=python&logoColor=ffd43b&labelColor=000000" alt="Python"></a>
 <a href="https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF"><img src="https://img.shields.io/badge/model-Qwen3.8--Flash--Next-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
@@ -26,14 +26,14 @@
 <td align="center"><b>MoE</b><br><sub>512 experts, 10 active</sub></td>
 <td align="center"><b>200k</b><br><sub>context, one slot</sub></td>
 <td align="center"><b>73.45 GiB</b><br><sub>model on disk</sub></td>
-<td align="center"><b>27,707 MiB</b><br><sub>VRAM in use</sub></td>
-<td align="center"><b>32.44</b><br><sub>tok/s decode</sub></td>
-<td align="center"><b>970.44</b><br><sub>tok/s prefill</sub></td>
+<td align="center"><b>30,984 MiB</b><br><sub>VRAM in use</sub></td>
+<td align="center"><b>41.76</b><br><sub>tok/s decode</sub></td>
+<td align="center"><b>727.65</b><br><sub>tok/s prefill</sub></td>
 <td align="center"><b>yes</b><br><sub>vision</sub></td>
 </tr>
 </table>
 
-<sub>Decode and prefill: 2026-08-30, driver 616.56, pin <code>6c84c7d5d</code> + PR&nbsp;#27992, one 31,979-token cold turn per boot, three rounds interleaved against a same-session control (964.92&nbsp;/&nbsp;29.05). Ranges 941.07–985.32 and 31.06–33.20.</sub>
+<sub>Decode and prefill: 2026-09-01 (#182), driver 616.56, pin <code>6c84c7d5d</code>, one 33,494-token cold turn per boot, three rounds interleaved against the previous placement (539.98&nbsp;/&nbsp;35.74). Decode range 40.34–42.76. The two engine patches that followed, PR&nbsp;#28040 and PR&nbsp;#27880, were each measured at parity against this line. VRAM: settled after load, 2026-09-01.</sub>
 
 </div>
 
@@ -49,7 +49,6 @@
 | [Install](#install) | one line |
 | [Start](#start) | server, then a client |
 | [Documentation](#documentation) | everything else |
-| [Screenshots](#screenshots) | the window |
 
 ## Operating point
 
@@ -66,19 +65,31 @@ Default since 2.0.0. `DEFAULT_BASE_URL` is `http://127.0.0.1:8083/v1`.
 | Vision | `--mmproj mmproj-F16.gguf`, 904,004,000 B (#170) |
 | Reasoning | `low` `medium` `high`; `max`, `minimal` and an explicit `off` return HTTP 500 (#160) |
 | Thinking cap | `reasoning_budget` 1024 per request, from the manifest (#176) |
-| GPU | RTX 5090, 32,607 MiB. **27,707 MiB in use** |
-| Decode | **32.44 tok/s** (31.06–33.20) |
-| Prefill | **970.44 tok/s** (941.07–985.32) |
-| Build | llama.cpp pin `6c84c7d5d` (PR #27742) + PR #27992, local |
+| GPU | RTX 5090, 32,607 MiB. **30,984 MiB in use**, 1,059 MiB left |
+| Decode | **41.76 tok/s** (40.34–42.76) |
+| Prefill | **727.65 tok/s** |
+| Build | llama.cpp pin `6c84c7d5d` (PR #27742) + PR #28040 + PR #27880, local. 62 graph splits per decoded token |
 | License | `qwen-community-1.0` — not Apache-2.0 |
 | Source of truth | [`manifests/operating-point.json`](manifests/operating-point.json) |
 
-Conditions: 2026-08-30, driver 616.56, one 31,979-token cold turn per boot, three rounds
-interleaved against a same-session control (964.92 / 29.05). Not measured: decode at a full
-200k window, and the projector's VRAM cost on this line.
+Conditions: 2026-09-01, driver 616.56, one 33,494-token cold turn per boot, 200 tokens out,
+three rounds interleaved against the previous placement `-ncmoe 40 -ub 4096` (539.98 / 35.74);
+wall clock per turn 67.9 s → 51.3 s. Accepted live at 41.8 tok/s. Decode falls with context
+depth: `ms/token = 24.06 + 0.0706 per 1,000 tokens` (r² 0.93), i.e. ~41 tok/s at 30k and ~28 at
+175k. Not measured: decode at a full 200k window, and whether an image prefill fits in the
+1,059 MiB left on the card.
 
-**The engine is a local build.** The packaged `b10269` cannot load `qwen4exp` at all. Fall back
-to the bare pin and the numbers are 959.81 / 28.60 over ten boots.
+**The engine is a local build.** The packaged `b10269` cannot load `qwen4exp` at all. The pin
+carries two patches, both measured at parity or better on this line: PR #28040 (the PLE n-gram
+lookup in O(log n) instead of a scan over every used KV cell) and PR #27880 (the PLE embedding
+hoisted into the token embedding's graph split: 62 splits per decoded token instead of 64,
+−0.99 ms on the fixed term in the one clean pair, inside the 1.35 ms spread of one arm).
+
+**The engine has nothing more to give, and that is measured (#159, #186).** 67.1 % of CPU
+cycles per token are synchronization at the 62 CPU↔GPU handoffs; the RAM bus runs at 33.5 %.
+Every lever inside llama.cpp is dead by a direct measurement: bandwidth, expert cache, thread
+count, `OMP_WAIT_POLICY`, `-ncmoe` below 30, and the barrier implementation itself
+(`GGML_OPENMP=OFF` costs +4 to +6 ms per token).
 
 ---
 
@@ -181,8 +192,9 @@ C:\path\to\your\llama-server.exe `
 (about a minute) instead of being paged off the disk during the turn.
 
 **This one needs a local engine.** `qwen4exp` exists in llama.cpp only from PR #27742; the
-packaged `b10269` cannot load it. Build the pin `6c84c7d5d` and apply PR #27992 for the decode
-numbers above.
+packaged `b10269` cannot load it. Build the pin `6c84c7d5d` and apply PR #28040 (one hunk by
+hand) and PR #27880 (applies cleanly) for the line above. Do not build `b10687` or newer: it
+aborts during CUDA warmup on this card, and the cause is not attributed.
 
 The second operating point runs on the packaged engine:
 
@@ -254,87 +266,3 @@ Earlier READMEs: [v0.5.1, Qwen-first](docs/README-v0.5.1-qwen.md) ·
 <div align="center">
 <a href="https://ko-fi.com/nibor1896"><img src="https://img.shields.io/badge/support%20this%20on-ko--fi-ff5e5b?style=for-the-badge" alt="Ko-fi"></a>
 </div>
-
-
----
-
-## Screenshots
-
-Taken on the shipped build. Windows, `Qwen3.8-27B` on the local llama-server unless a shot says
-otherwise.
-
-<div align="center">
-<img src="docs/images/Crow.png" alt="Crow's empty chat: the rail on the left, the wireframe raven, the composer" width="920">
-</div>
-
-An empty chat. The rail groups chats by working directory, the composer carries the model, the
-release level, the working directory and dictation.
-
-<div align="center">
-<img src="docs/images/CrowToolCallsAndTraceInChat.png" alt="A turn with the trace open and the tool-call panel listing what ran" width="920">
-</div>
-
-A turn with its trace open and the code panel on the right. Calls fold one at a time into their
-arguments and their result; the source a turn writes stands under them, under its own path.
-
-<div align="center">
-<img src="docs/images/CrowVoiceInput.png" alt="The composer while dictating, with the voice line in the input row" width="920">
-</div>
-
-Dictation. The voice line sits in the input row and costs no height; the level scale calibrates
-itself against a running peak.
-
-### Settings
-
-<div align="center">
-<img src="docs/images/CrowModelLocal.png" alt="The Model pane with This machine selected" width="920">
-</div>
-
-Where a turn goes. `This machine` is the llama-server on this box: warm slot, no bill.
-
-<div align="center">
-<img src="docs/images/CrowModelOpen.png" alt="The Model pane with OpenRouter selected and its catalogue open" width="920">
-</div>
-
-The same pane on OpenRouter, catalogue open. The count beside it is what the provider last
-reported, read from disk rather than fetched per open.
-
-<div align="center">
-<img src="docs/images/CrowMCP.png" alt="The MCPs pane with a server folded open and a class per tool" width="920">
-</div>
-
-MCP servers. Per tool a switch and a class -- reading, writing, executing -- pre-filled from the
-server's annotations and decided by the user.
-
-<div align="center">
-<img src="docs/images/CrowSkills.png" alt="The Skills pane, one row per skill with a switch" width="920">
-</div>
-
-Skills. One row per skill; off takes it out of the prompt and leaves the file where it is.
-
-<div align="center">
-<img src="docs/images/CrowAPI.png" alt="The API Keys pane, one key per provider, shown as a mask" width="920">
-</div>
-
-API keys. One key per provider, kept in its own file that no view reads back -- what a box shows
-afterwards is a mask.
-
-### Themes
-
-<div align="center">
-<img src="docs/images/Skin13.png" alt="The dark theme" width="920">
-</div>
-
-Dark.
-
-<div align="center">
-<img src="docs/images/Skin23.png" alt="The light theme" width="920">
-</div>
-
-Light.
-
-<div align="center">
-<img src="docs/images/Skin33.png" alt="The crow theme" width="920">
-</div>
-
-Crow.

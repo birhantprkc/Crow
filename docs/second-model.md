@@ -88,13 +88,14 @@ merged into mainline llama.cpp on 2026-08-29, and the line below runs that merge
 commit, `6c84c7d5d`. The shipped binary still cannot load it -- that one is
 `b10269` from 2026-08-06. License is `qwen-community-1.0`, not apache-2.0.
 
-**The commit is pinned, not the tag.** `b10687`, one day younger, aborts during
-warmup with `ggml_cuda_compute_forward: MUL_MAT failed`. The only `qwen4exp`
-change between the two is #27880 "reduce number of graph splits", which hoists
-the PLE embedding out of the layers into one shared split and then multiplies it
-by per-layer weights -- and under `-ncmoe` those weights sit on the CPU. Measured
-2026-08-30 under one variable: `6c84c7d5d` runs, `6fe749801` aborts. The pin moves
-when that is fixed upstream, not when a newer tag appears.
+**The commit is pinned, not the tag -- and the reason changed on 2026-09-01.**
+`b10687`, one day younger, aborts during warmup with
+`ggml_cuda_compute_forward: MUL_MAT failed`. Until 2026-09-01 that was attributed
+to #27880 "reduce number of graph splits", the only `qwen4exp` change between the
+two commits. The attribution was an A/B across a full day of mainline, and it was
+wrong: #27880 isolated on this pin boots, survives the full CUDA warmup and
+serves (four boots, `crow-lab/runs/2026-09-01-probe-27880/`). What kills `b10687`
+on this card is not attributed, so the pin stays where it is.
 
 Ten boots on the bare merge commit, one 31,979-token turn each on a cold cache:
 **10/10 clean, prefill 959.81 tok/s mean (945.67-995.29), decode 28.60
@@ -102,36 +103,45 @@ Ten boots on the bare merge commit, one 31,979-token turn each on a cold cache:
 on both figures. Raw rows:
 `crow-lab/runs/2026-08-30-merge-qwen4exp/boot-series.csv`.
 
-**The pin carries one patch: PR #27992.** qwen4exp's PLE n-gram embedding called
-`get_prev_tokens()` on every graph build, and that walked *every* used cell of the
-KV cache testing up to 256 sequence bits -- once per decoded token, on the critical
-path. The PR indexes `(seq, pos)` cells instead. The engine measured its own cost
-under the PR's `verify` mode at this depth: **scan 4450.6 us against index 14.8 us**,
-0 mismatches over 250 calls.
+**The pin carries two patches.**
 
-Measured 2026-08-30 on the shipped binary, three rounds **interleaved against a
-same-session control**: **decode 32.44 tok/s mean (31.06-33.20) against 29.05, i.e.
-+11.7 % with no overlap between the ranges; prefill 970.44 against 964.92, i.e.
-flat.** Per-token saving 3.59 ms. Raw rows:
-`crow-lab/runs/2026-08-30-levers-159/levers.csv`.
+*PR #28040* -- qwen4exp's PLE n-gram embedding calls `get_prev_tokens()` on every
+graph build, and at the bare pin that walks *every* used cell of the KV cache once
+per decoded token, on the critical path. #28040 resolves it in O(log n) from the
+sequence position index. It replaced the closed draft #27992 on 2026-09-01,
+measured at parity: fixed term +0.6 % against 1.335 ms of spread inside one arm.
+Ported by hand (9 of 10 hunks), +40 -94 against the pin. The closed PR's unit
+test, ported across implementations, passes 9,480 lookups with 0 failures, and a
+deliberate off-by-one turns 3,416 of them red.
 
-**The gain is proportional to context depth**, because the scan is `O(n_kv)`: about
-3 % at the ten-task gate's few-hundred-token depth, +11.7 % at 31,979 tokens, larger
-and unmeasured at the 200k window. Correctness twice: the PR's own unit test (9,480
-lookups, 0 failures) and 0 live mismatches; the ten-task gate is 10/10 twice with
-token counts byte-identical to the control, so the change cannot move what the model
-writes.
+*PR #27880* -- hoists the PLE embedding out of the per-layer loop into the token
+embedding's graph split: **62 graph splits per decoded token instead of 64** (92
+instead of 94 in prefill). Merged upstream 2026-08-28, applied to the pin with zero
+hunks by hand. Measured 2026-09-01, four boots interleaved against the #28040-only
+binary, six depths, 200 new tokens: **fixed term 23.072 ms against 24.061 in the
+one clean pair (-0.99 ms, -4.1 %)**, against 1.354 ms of spread inside the arm --
+free and not worse; whether it is 1 ms better is below what two rounds resolve.
+Decode at 30k depth 40.96 against 40.78 tok/s. Raw rows:
+`crow-lab/runs/2026-09-01-levers2-159/`.
 
-**It is a draft PR** whose author notes it charges every other architecture a little
-for qwen4exp's benefit. If it is rejected upstream, drop the patch and the line falls
-back to the bare pin above.
+**The last lever inside the engine is dead, by a direct switch.** The same tree
+built with `GGML_OPENMP=OFF` -- ggml's own threadpool instead of `vcomp140.dll`,
+verified by the missing `OPENMP` field in `system_info` -- costs +4 to +6 ms per
+token at 30k-140k depth in both rounds and a 42-70 ms first-request warm-up;
+`--poll 100` on top is worse. With `OMP_WAIT_POLICY=PASSIVE` at -16.3 % from the
+same day, all three synchronizations available on this machine are measured and
+the default is the fastest. The fixed term of 23-24 ms per token is where this
+engine stays (#159, #186).
+
+Ten-task gate against this line, 2026-09-01, same-session control interleaved:
+10/10 in both passes on the new binary and 10/10 in both same-session control passes; completion-token counts per task identical across all four cells (518 226 304 483 632 496 354 252 384 1032); wall clock 119.7 / 116.0 s against 121.4 / 119.3 s for the control (−1.4 % / −2.8 %). Raw rows: `crow-lab/runs/2026-09-01-gate-27880/`.
 
 *Interleaved on purpose.* This machine drifted -5.0 % prefill and -5.5 % decode
 within one day -- larger than the effect and enough to flip its sign. On 2026-08-30
 a control from another session would have produced the wrong verdict three times
 over. No arm is compared against a control from another session.
 
-    C:\Users\robin\dev\crow-lab\wt-28040\build-28040\bin\Release\llama-server.exe `
+    C:\Users\robin\dev\crow-lab\wt-27880\build-27880\bin\Release\llama-server.exe `
       -m <models>\qwen-next-gguf\UD-Q2_K_XL\Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf `
       --port 8083 -c 200000 -b 2048 -ub 2048 `
       -ctk q8_0 -ctv q8_0 -ncmoe 30 `

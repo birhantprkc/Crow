@@ -50,7 +50,7 @@ A local package is never deleted afterwards; a downloaded one is.
 #>
 [CmdletBinding()]
 param(
-    [string] $Version   = "2.0.0",
+    [string] $Version   = "2.1.0",
     [string] $InstallTo = "$env:LOCALAPPDATA\Crow",
     [string] $SourceUrl = "",
     [switch] $Force,
@@ -1760,21 +1760,23 @@ Write-Host ""
 # 2026-08-29, and this command names that merge commit (6c84c7d5d). The SHIPPED
 # bin\llama-server.exe still cannot load the architecture -- it is b10269 from
 # 2026-08-06 -- which is why the line points elsewhere at all.
-# THE COMMIT IS PINNED ON PURPOSE: b10687, one day younger, dies with
-# 'MUL_MAT failed' during warmup, because #27880 hoists the PLE embedding into
-# one shared graph split and that breaks under -ncmoe (A/B measured 2026-08-30).
-# AND THE PIN CARRIES ONE PATCH: PR #27992 alone, which indexes (seq,pos) cells so
-# qwen4exp's PLE n-gram lookup stops scanning every used KV cell once per decoded
-# token. Measured 2026-08-30 on this exact line, three rounds interleaved against a
-# same-session control: decode 32.44 tok/s mean (31.06-33.20) against 29.05, i.e.
-# +11.7 % with no overlap; prefill 970.44 against 964.92, i.e. flat. The gain is
-# proportional to context depth -- about 3 % at a few hundred tokens, +11.7 % at
-# 31,979 -- because the scan is O(n_kv). Correctness twice: the PR's unit test
-# (9,480 lookups, 0 failures) and 0 mismatches over 250 calls in the live engine.
-# IT IS A DRAFT PR. If it is rejected upstream, drop the patch and the line points
-# back at wt-merge\build-merge, which measured 959.81 / 28.60 over ten boots.
+# THE PIN CARRIES TWO PATCHES, both measured 2026-09-01 on this exact line,
+# interleaved against a same-session control (Crow #159):
+#   PR #28040 -- get_prev_tokens in O(log n) from the sequence position index,
+#     instead of a scan over every used KV cell once per decoded token. It
+#     replaced the closed draft #27992 at parity: fixed term +0.6 % against
+#     1.335 ms of spread inside one arm. Ported by hand, 9 of 10 hunks.
+#   PR #27880 -- the PLE embedding hoisted out of the per-layer loop into the
+#     token embedding's graph split: 62 splits per decoded token instead of 64,
+#     -0.99 ms on the fixed term in the one clean pair, inside the 1.35 ms
+#     spread of one arm. Free and not worse. Merged upstream, applies cleanly.
+# THE COMMIT IS STILL PINNED, AND THE REASON CHANGED ON 2026-09-01: b10687, one
+# day younger, dies with 'MUL_MAT failed' during CUDA warmup. That was blamed on
+# #27880 -- wrongly: #27880 isolated on this pin boots, warms up and serves.
+# Whatever kills b10687 lives elsewhere in that day of mainline and is not
+# attributed, so the pin does not move.
 # Flags match manifests/operating-point.json.
-Write-Host "  Third model, Qwen3.8-Flash-Next (#140) -- 73.45 GiB in 3 shards, mainline 6c84c7d5d + PR #27992:" -ForegroundColor DarkGray
+Write-Host "  Third model, Qwen3.8-Flash-Next (#140) -- 73.45 GiB in 3 shards, mainline 6c84c7d5d + PR #28040 + PR #27880:" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "    hf download unsloth/Qwen3.8-Flash-Next-GGUF --include '*UD-Q2_K_XL*' --local-dir $InstallTo\models\qwen-next-gguf" -ForegroundColor White
 # THE PROJECTOR SITS IN THE REPOSITORY ROOT, not in the quant folder, so the
@@ -1782,7 +1784,7 @@ Write-Host "    hf download unsloth/Qwen3.8-Flash-Next-GGUF --include '*UD-Q2_K_
 # the same reason (#170).
 Write-Host "    hf download unsloth/Qwen3.8-Flash-Next-GGUF mmproj-F16.gguf --local-dir $InstallTo\models\qwen-next-gguf" -ForegroundColor White
 Write-Host ""
-Write-Host "    C:\Users\robin\dev\crow-lab\wt-28040\build-28040\bin\Release\llama-server.exe ``" -ForegroundColor White
+Write-Host "    C:\Users\robin\dev\crow-lab\wt-27880\build-27880\bin\Release\llama-server.exe ``" -ForegroundColor White
 Write-Host "      -m $InstallTo\models\qwen-next-gguf\UD-Q2_K_XL\Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf ``" -ForegroundColor White
 Write-Host "      --port 8083 -c 200000 -b 2048 -ub 2048 ``" -ForegroundColor White
 Write-Host "      -ctk q8_0 -ctv q8_0 -ncmoe 30 ``" -ForegroundColor White

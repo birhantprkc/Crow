@@ -3,6 +3,111 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 2.1.0 — 2026-09-01
+
+Flash-Next gets the placement it should have had, the engine gets its last two patches, and the
+question of whether the engine has more to give is closed with a number. Minor: `DEFAULT_BASE_URL`
+and every client-facing flag are unchanged; the server command line moved.
+
+### `-ncmoe 30 -b/-ub 2048`: +16.8 % decode, +34.8 % prefill, −24.4 % wall clock per turn (#182)
+
+The ubatch buffer held VRAM that expert layers can carry. At `-ub 4096` only 8 of 48 expert layers
+fit on the card; at 2048 it is 18, and every layer that moves takes 10 × 1.7883 MiB = 17.9 MiB
+per token off the RAM bus and puts it on VRAM at ~20× the bandwidth.
+
+| | `-ncmoe 40 -ub 4096` | **`-ncmoe 30 -ub 2048`** | |
+|---|---|---|---|
+| decode | 35.74 (35.13–36.11) | **41.76 (40.34–42.76)** | +16.8 %, no overlap |
+| prefill | 539.98 | **727.65** | +34.8 % |
+| wall clock per turn | 67.9 s | **51.3 s** | −24.4 % |
+
+Conditions: 2026-09-01, three interleaved runs per arm, one boot per run, one 33,494-token cold
+turn, 200 tokens out. Fenced from both sides in both dimensions: `-ncmoe 32` → 59.6 s, `28` →
+97.5 s, `-ub 1536` → 55.5 s, `3072` → 98.8 s. **Wall clock is the measure, not decode:**
+`-ncmoe 24 -ub 1024` has the highest decode ever seen here (46.59) and is 2.5× slower per turn,
+because prefill collapses to 208 and an agent prefills every round. Accepted live at 41.8 tok/s.
+
+Two notes were replaced rather than left standing. `-ub 2048` had been recorded as "wins
+nothing" (measured at `-ncmoe 40`, where VRAM was not the limit) and `-ncmoe 32` as "dies 2/2"
+(measured at `-ub 4096`, where it is). Each was true under its own conditions and each blocked
+the other. **A lever declared dead has to name which state of the other lever it was measured
+against.**
+
+VRAM at this line, settled after load: **30,984 MiB of 32,607, 1,059 MiB left**, no load peak
+above that (3 MiB over 57 samples). Not measured: whether an image prefill fits in that gigabyte.
+
+### The engine binary: two patches on the pin, and one of them was wrongly blamed (#159)
+
+**PR #27992 was closed by its own author** on 2026-09-01 — never merged, "better fix in #28040".
+The operating point had carried it as a local patch since 1.7.0. **PR #28040** replaces it: the
+same O(log n) `get_prev_tokens` lookup, 62 lines smaller, ported by hand (9 of 10 hunks).
+Measured at parity, four boots interleaved, six depths, one variable: fixed term +0.6 % against
+1.335 ms of spread inside one arm. The closed PR's unit test, ported across implementations:
+9,480 lookups, 0 failures, and a deliberate off-by-one turns 3,416 of them red.
+
+**PR #27880 runs on the pin.** Since 1.7.0 the docs said `b10687` dies during CUDA warmup
+*because of* #27880 "reduce number of graph splits". That was an A/B across a full day of
+mainline, and it was wrong: #27880 isolated on the pin (zero hunks by hand — no commit between
+the pin and the PR's parent touches its two files) boots, survives the warmup and serves, in four
+of four boots. It hoists the PLE embedding out of the per-layer loop into the token embedding's
+graph split: **62 graph splits per decoded token instead of 64**. What kills `b10687` on this
+card is not attributed; the pin does not move.
+
+| pin + #28040 + #27880 vs pin + #28040 | |
+|---|---|
+| fixed term (one clean pair) | 23.072 ms vs 24.061 — **−0.99 ms, −4.1 %** |
+| spread inside one arm | 1.354 ms |
+| decode at 30k depth | 40.96 vs 40.78 tok/s |
+| ten-task gate | **10/10 and 10/10**, control 10/10 and 10/10; token counts per task identical across all four cells; wall clock 119.7 / 116.0 s vs 121.4 / 119.3 s |
+
+Free and not worse. Whether it is 1 ms better is below what two rounds resolve. The "~52 tok/s
+if the splits halve" arithmetic of the day rested on a halving that does not happen at
+`-ncmoe 30`: 60 of the 64 splits are the CPU expert layers, and #27880 removes the other two.
+
+### The fixed term is synchronization, and nothing inside the engine moves it (#159, #186)
+
+`ms/token = 24.06 + 0.0706 per 1,000 tokens of context` (r² 0.93). Profiled with VTune,
+2026-09-01: **67.1 % of CPU cycles** per token are kernel, NT sync primitives and the OpenMP
+runtime; **27.8 %** are `ggml-cpu`; the barrier spin alone is 63.1 % of CPU time. The DRAM bus
+runs at 28.157 GB/s of 84 — 33.5 %, never the limit. Handoffs per decoded token are `4 + 2 × ncmoe`
+exactly (r² 1.0000 over seven placements).
+
+Every lever inside llama.cpp is dead by a direct measurement:
+
+| lever | result |
+|---|---|
+| RAM bandwidth | 33.5 % busy, 0.0 % of the time saturated |
+| expert cache (`--moe-stream`) | 1.16–1.89× slower per agent turn on every task; prefill decides |
+| thread count | saturates: `ms/token = 21.66 + 65.59 / threads` (r² 0.99) |
+| `OMP_WAIT_POLICY` | `ACTIVE` is the default and the optimum; `PASSIVE` costs 16.3 % |
+| `-ncmoe` below 30 | spills into WDDM |
+| the barrier implementation (`GGML_OPENMP=OFF`) | ggml's own threadpool: **+4 to +6 ms per token** at 30k–140k, plus a 42–70 ms first-request warm-up; `--poll 100` worse still |
+| split count at fixed placement (#27880) | −2 of 64, ~1 ms at the resolution floor |
+
+The ceiling for a perfect implementation on this hardware is 86 tok/s, bound by GPU work at
+sm 46 %. **It is a bound, not a target, and there is no path to it inside this engine.** An own
+*server* buys nothing: `tools/server` is 21,528 of the ~294,000 lines Crow depends on — 7 % — and
+none of the four things that blocked the project on 2026-09-01 lived in it (#186). Whether an own
+*engine* follows is #188, open, with its goals still to be set.
+
+### Fixes
+
+| | |
+|---|---|
+| #184 | `run_command` names its shell. It runs `cmd.exe` and said only "run a shell command"; on a PowerShell machine the model guessed PowerShell, failed, and fell back — one wasted call in every turn that lists a directory |
+| #185 | the GUI suite booted a real Flash-Next server once per model-menu key — 50 s and 30,984 MiB each, three orphaned servers over three runs, two of which took a live session down. The plumbing is mocked; 94.6 s → 22.3 s. Five unclosed handles in test code closed in the same pass |
+| #182 | `tools/test_check_operating_point.py` had been red since #140: the fixture never received `--mmproj`. Green again |
+
+### Not built
+
+- **No own inference engine in this release.** The decision is open on #188; the server alone
+  is 7 % of the dependency and was never in the way.
+- **No pin move to `b10687`.** It still aborts here, and the cause is now *unattributed* rather
+  than wrongly attributed.
+- **No `--tensor-read-lazy off` probe** of the `b10687` abort. The PLE table is 26.8 GiB and would
+  go resident next to the CPU experts; the question is moot on the pin.
+- **No further rounds on #27880.** Two rounds resolve 1.35 ms; the effect is at most that.
+
 ## 2.0.0 — 2026-08-31
 
 Flash-Next becomes the default operating point, the model gets eyes, and the window gets a
