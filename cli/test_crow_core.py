@@ -4499,8 +4499,10 @@ class SkillTests(_MemoryFixture):
         ignored rather than obeyed."""
         self.save(name="echt")
         path = crow_core.skill_path("echt")
-        text = open(path, encoding="utf-8").read().replace("name: echt", "name: gelogen")
-        open(path, "w", encoding="utf-8").write(text)
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read().replace("name: echt", "name: gelogen")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
         self.assertEqual(crow_core.read_skill("echt")["name"], "echt")
 
     def test_a_skill_without_a_description_is_refused(self):

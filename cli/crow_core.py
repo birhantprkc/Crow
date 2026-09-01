@@ -622,7 +622,9 @@ TOOLS = [
          "glob": dict(_STR, description="Only files matching this glob, e.g. *.py")}, ["pattern"]),
     _fn("run_command",
         f"Run a shell command locally and return its exit code and output. "
-        f"Killed after {COMMAND_TIMEOUT}s.",
+        f"Killed after {COMMAND_TIMEOUT}s. On Windows the shell is cmd.exe, not "
+        f"PowerShell -- use dir and findstr, or run "
+        f"powershell -NoProfile -Command \"...\" when you need a cmdlet.",
         {"command": dict(_STR, description="The command line."),
          "cwd": dict(_STR, description="Working directory.")}, ["command"]),
     # #156. GIT AS ITS OWN GROUP, NOT AS SHELL LINES. A `git push` through

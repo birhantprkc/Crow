@@ -4294,7 +4294,8 @@ class TheBirdTests(unittest.TestCase):
             self.skipTest("Pillow is not installed")
         import struct
 
-        raw = open(crow_gui.ICON_FILE, "rb").read()
+        with open(crow_gui.ICON_FILE, "rb") as fh:
+            raw = fh.read()
         count = struct.unpack_from("<H", raw, 4)[0]
         self.assertGreaterEqual(count, 7, "the icon lost sizes")
         for i in range(count):
