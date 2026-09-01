@@ -476,14 +476,19 @@ def _silent_server(after: int = 1) -> tuple[int, socket.socket]:
     def serve() -> None:
         try:
             conn, _ = sock.accept()
-            conn.recv(65536)
-            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
-                         b"Connection: close\r\n\r\n")
-            for i in range(after):
-                conn.sendall(json.dumps({"choices": [{"delta": {"content": "x%d" % i}}]})
-                             .encode("utf-8").join((b"data: ", b"\n\n")))
-            # and then nothing at all, until the test is done with it
-            time.sleep(30)
+            # `with`, so the accepted connection is closed when this thread is
+            # done with it (#185). Without it the socket outlived the suite and
+            # was reported twice as an unclosed ResourceWarning from
+            # threading.py -- the report names the thread, never the test.
+            with conn:
+                conn.recv(65536)
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                             b"Connection: close\r\n\r\n")
+                for i in range(after):
+                    conn.sendall(json.dumps({"choices": [{"delta": {"content": "x%d" % i}}]})
+                                 .encode("utf-8").join((b"data: ", b"\n\n")))
+                # and then nothing at all, until the test is done with it
+                time.sleep(30)
         except Exception:
             pass
 
@@ -2849,7 +2854,8 @@ class TheThemeAndTheSettingsSheetTests(unittest.TestCase):
             before = crow_gui.SETTINGS_FILE
             crow_gui.SETTINGS_FILE = os.path.join(tmp, "settings.json")
             try:
-                io.open(crow_gui.SETTINGS_FILE, "w", encoding="utf-8").write("{oh no")
+                with io.open(crow_gui.SETTINGS_FILE, "w", encoding="utf-8") as fh:
+                    fh.write("{oh no")
                 self.assertEqual(crow_gui.current_theme(), crow_gui.DEFAULT_THEME)
             finally:
                 crow_gui.SETTINGS_FILE = before
@@ -3086,13 +3092,25 @@ class TheModelMenuSurvivesASwitchTests(ApiCase):
     def test_the_key_that_comes_back_is_one_the_table_knows(self):
         """THE CONSEQUENCE THE LABELS HID. A wrong shape does not just misspell
         the row -- it puts x[0] into dataset.k, and a single letter is refused by
-        `model_command` as a typo, so the menu stops switching entirely."""
-        for key, _label in self._switched(self.api())["models"]:
-            said, _url, switched = crow_core.model_command(
-                key, "http://127.0.0.1:1/v1")
-            self.assertNotIn("no model", said,
-                             "the menu would send a key the table refuses")
-            del switched
+        `model_command` as a typo, so the menu stops switching entirely.
+
+        THE BOOT IS MOCKED, AND IT HAS TO BE (#185). `model_command` refuses a
+        typo at crow_core.py:1804 and only THEN reaches stop_servers and
+        start_server, so what this case asserts happens before either. Unmocked,
+        the loop killed whatever server was running and booted the 73.45 GiB line
+        once per menu entry -- ~50 s and 30,984 MiB of VRAM each, measured
+        2026-09-01. Two runs took robins server down without anyone noticing.
+        Mocking the plumbing leaves the assertion untouched; it only stops the
+        side effect that was never part of it.
+        """
+        with mock.patch.object(crow_core, "stop_servers", return_value=0), \
+             mock.patch.object(crow_core, "start_server", return_value="mocked"):
+            for key, _label in self._switched(self.api())["models"]:
+                said, _url, switched = crow_core.model_command(
+                    key, "http://127.0.0.1:1/v1")
+                self.assertNotIn("no model", said,
+                                 "the menu would send a key the table refuses")
+                del switched
 
     def test_a_bare_key_producer_would_be_caught(self):
         """NEGATIVE PROBE for the two above, and the guard against a THIRD
