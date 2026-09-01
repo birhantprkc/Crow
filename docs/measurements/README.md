@@ -3,6 +3,35 @@
 One user, `-np 1`, identical prompt, server restarted cold per arm, cross-checked against the
 server's own `eval time` blocks.
 
+## Placement and ubatch, Flash-Next (#182)
+
+Full map: [`flash-next-placement.md`](flash-next-placement.md) — raw rows
+[`flash-next-placement-runs.csv`](flash-next-placement-runs.jsonl), 27 runs.
+Harness: `tools/measure/try-one.py` (one run, one config) and
+`tools/measure/measure-ngram-spec.py` (interleaved series).
+
+Measured 2026-09-01, 33,494-token prompt, 200 tokens out, one boot per run, cold
+cache. Three runs per arm for the verified rows.
+
+| | operating point | **`-ncmoe 30 -b 2048 -ub 2048`** |
+|---|---|---|
+| decode | 35.74 tok/s (35.13-36.11) | **41.76 (40.34-42.76)** |
+| prefill | 539.98 tok/s | **727.65** |
+| wall clock per turn | 67.9 s | **51.3 s** |
+
+**+16.8 % decode, +34.8 % prefill, -24.4 % wall clock.** No overlap on decode.
+Confirmed from both sides: `-ncmoe 32` is worse (59.6 s), `-ncmoe 28` is worse
+(97.5 s), `-ub 1536` and `-ub 3072` are worse.
+
+**Not applied to the manifest.** The operating point still ships
+`-ncmoe 40 -b 4096 -ub 4096`.
+
+The trap: `-ncmoe 24 -ub 1024` gives the highest decode measured (46.59, +34 %)
+and is **2.5x slower per turn** — prefill falls 62 %. Decode alone is the wrong
+number for an agent that re-prefills every round.
+
+## Speculation
+
 ## Decode against context depth, qwen4exp (#159)
 
 Raw rows: [`qwen4exp-depth-407.csv`](qwen4exp-depth-407.csv) — 407 requests, one
