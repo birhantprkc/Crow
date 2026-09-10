@@ -371,15 +371,20 @@ queried in parallel; results merge round-robin by authority and every snippet is
 | item | |
 |---|---|
 | path | `%LOCALAPPDATA%\Crow\secrets.json`, next to `approvals.json` and `booted.json` |
-| format | a flat object, `{"CROW_TAVILY_KEY": "..."}` |
+| format | a flat object, `{"CROW_TAVILY_KEY": "..."}`, UTF-8, a byte order mark is tolerated |
 | permissions | `icacls <store> /inheritance:r /grant:r "<user>:(R,W)"`, set by the migration script |
 | order | `crow_core.secret(name)` reads the store first and the environment second |
 | empty entry | a key present but empty counts as not set, and the environment is read |
-| notice | one stderr line per start when a value came out of the environment. It names the variable and the store path, never the value |
-| migration | `powershell -ExecutionPolicy Bypass -File tools\migrate-secrets.ps1` |
+| unusable store | a file that is not a JSON object is named once on stderr, by path and never by content, and the environment is read |
+| notice | one stderr line per start when a value came out of the environment, and only when stderr is a console. It names the variable and the store path, never the value |
+| path override | `CROW_SECRETS_FILE` moves the store, for the reader and for the migration script alike |
+| safe first run | `powershell -ExecutionPolicy Bypass -File tools\migrate-secrets.ps1 -Names CROW_TAVILY_KEY` |
+| default `-Names` | `CROW_TAVILY_KEY`, `FISH_API_KEY`, `GEMINI_API_KEY`. Only `CROW_TAVILY_KEY` has a reader in Crow, so the other two would be parked in a file nothing reads |
+| more than one name | `-Names CROW_TAVILY_KEY,FISH_API_KEY`, comma separated, duplicates dropped |
 | dry run | add `-WhatIf`: nothing is written and nothing is removed |
-| other names | `-Names CROW_TAVILY_KEY,FISH_API_KEY` moves a list |
-| removal | the User scope entry goes only after the store has read back byte for byte |
+| `-Force` | overwrite a store entry that already holds a different value. Without it that name is REFUSED and its variable is kept |
+| removal | the User scope entry goes only after the store has read back byte for byte and `icacls` exited 0 |
+| refusals | a failed `icacls`, and an explicit `-Store` naming a different file than `CROW_SECRETS_FILE`. Both stop the run with exit code 1 and remove nothing |
 | output | names and lengths, never values |
 
 `fetch_url` takes http and https only; `file:` and `data:` are refused, so it cannot become a disk
