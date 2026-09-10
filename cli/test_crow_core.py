@@ -335,10 +335,21 @@ class TheCoreStandsAloneTests(unittest.TestCase):
         self.assertEqual(done.stdout.strip(), "False",
                          "the core pulled the client in behind it")
 
+    # THE ONLY FUNCTIONS IN THE CORE ALLOWED TO WRITE TO stderr, by name.
+    # #193 added the first one: a client that reads a secret out of the
+    # environment says so once. A second writer arrives here as a new name and
+    # not as a silent line under somebody else's transcript.
+    STDERR_EXCEPTIONS = ["_secret_note"]
+
     def test_nothing_in_the_core_writes_to_the_terminal(self):
         """The rule the whole stage is cut along: only blocks with 0 terminal
         lines moved. The two exceptions sit behind install_font(verbose=True),
-        which nothing in this repository passes."""
+        which nothing in this repository passes.
+
+        stderr IS COUNTED THE SAME WAY (#193). `print()` was never the only way
+        out of this module, and the notice that names a secret still sitting in
+        the environment proved it. That one writer is allowed and named below;
+        anything else reaching for the terminal is not."""
         lines = _source("crow_core.py").splitlines()
         printing = [n for n, line in enumerate(lines, 1)
                     if re.search(r"\bprint\(", line) and not line.lstrip().startswith("#")]
@@ -347,6 +358,17 @@ class TheCoreStandsAloneTests(unittest.TestCase):
         for n in printing:
             self.assertIn("verbose", "\n".join(lines[max(0, n - 3):n]),
                           f"the print at line {n} is not behind `verbose`")
+        owner = "<module>"
+        writing = []
+        for n, line in enumerate(lines, 1):
+            named = re.match(r"def (\w+)\(", line)
+            if named:
+                owner = named.group(1)
+            if (re.search(r"\bsys\.stderr\.write\(", line)
+                    and not line.lstrip().startswith("#")):
+                writing.append((n, owner))
+        self.assertEqual([who for _, who in writing], self.STDERR_EXCEPTIONS,
+                         f"unexpected sys.stderr.write in crow_core.py: {writing}")
 
     def test_the_module_is_prefixed_so_it_cannot_shadow_the_library(self):
         """`python <abs>\\cli\\crow.py` puts cli/ on sys.path[0]. A file called
@@ -3633,6 +3655,19 @@ class WebFetchTests(unittest.TestCase):
             self.assertIn("--moe-stream", crow_core.tool_fetch_url("https://e.org/f.txt"))
 
 
+class _Console(io.StringIO):
+    """A stderr that answers `isatty()` the way a terminal does.
+
+    #193 gates the environment notice on `sys.stderr.isatty()`, and a plain
+    StringIO answers False. A case that wants to READ that notice therefore has
+    to say it is a console; the one case that wants the silence swaps a plain
+    StringIO back in.
+    """
+
+    def isatty(self) -> bool:
+        return True
+
+
 class SecretStoreTests(unittest.TestCase):
     """#193: where a secret is read from, and what is said when it came out of
     the environment.
@@ -3654,7 +3689,7 @@ class SecretStoreTests(unittest.TestCase):
         crow_core.SECRETS_FILE = self.store
         crow_core._SECRET_SAID.clear()
         self.addCleanup(crow_core._SECRET_SAID.clear)
-        self.err = io.StringIO()
+        self.err = _Console()
         self.addCleanup(setattr, sys, "stderr", sys.stderr)
         sys.stderr = self.err
         os.environ.pop(self.NAME, None)
@@ -3740,6 +3775,53 @@ class SecretStoreTests(unittest.TestCase):
         above green."""
         self.assertIn('TAVILY_KEY = secret("CROW_TAVILY_KEY")',
                       _source("crow_core.py"))
+
+    def test_a_store_that_parses_but_is_not_an_object_is_reported(self):
+        """REVIEW 1. A list, a number or a bare string is valid JSON, so the
+        parse error never fires, and the first draft dropped the file without a
+        word: the user sees a store with the name in it and a client that
+        behaves as though the name were gone. It is the same fault as a
+        half-written file and it gets the same one line, carrying the path and
+        not the content."""
+        self._write(json.dumps([self.NAME]))
+        os.environ[self.NAME] = self.FROM_ENV
+        self.assertEqual(crow_core.secret(self.NAME), self.FROM_ENV)
+        once = self.err.getvalue()
+        self.assertEqual(crow_core.secret(self.NAME), self.FROM_ENV)
+        self.assertEqual(self.err.getvalue(), once, "the notice repeats")
+        self.assertIn(self.store, once)
+        self.assertNotIn(self.NAME + '"', once)
+        self.assertNotIn(self.FROM_ENV, once)
+        self.assertEqual(len(once.splitlines()), 2, once)
+
+    def test_a_store_with_a_byte_order_mark_is_read_and_not_reported(self):
+        """REVIEW 1. Notepad and `Set-Content -Encoding UTF8` on PowerShell 5.1
+        both put a BOM in front of the file. Read as utf-8 it reaches json.load
+        as the first character, the store reads as broken, and the reader falls
+        back to an environment the migration has just emptied: the key vanishes
+        the first time somebody edits the store by hand. utf-8-sig reads a file
+        with or without one."""
+        with io.open(self.store, "w", encoding="utf-8-sig") as fh:
+            fh.write(json.dumps({self.NAME: self.VALUE}))
+        with io.open(self.store, "rb") as fh:
+            self.assertEqual(fh.read(3), b"\xef\xbb\xbf")
+        self.assertEqual(crow_core.secret(self.NAME), self.VALUE)
+        self.assertEqual(self.err.getvalue(), "")
+
+    def test_the_environment_notice_stays_off_anything_that_is_not_a_console(self):
+        """NEGATIVE PROBE for the notice, and the point of gating it. The
+        processes whose stderr is NOT a terminal are exactly the ones that keep
+        what is written to it: a captured suite, a redirected file, a runner
+        that folds stderr into a transcript. That last one is the failure #193
+        was opened after, so a reminder about a leaked secret may not become the
+        next line in a log. The answer is unchanged; only the line is gone."""
+        sys.stderr = io.StringIO()
+        self.assertFalse(sys.stderr.isatty())
+        os.environ[self.NAME] = self.FROM_ENV
+        self.assertEqual(crow_core.secret(self.NAME), self.FROM_ENV)
+        self.assertEqual(crow_core.secret(self.NAME), self.FROM_ENV)
+        self.assertEqual(sys.stderr.getvalue(), "")
+        self.assertEqual(self.err.getvalue(), "")
 
     def test_the_store_sits_in_the_directory_the_installer_owns(self):
         """Next to approvals.json and booted.json under %LOCALAPPDATA%\\Crow.

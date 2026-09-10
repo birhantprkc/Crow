@@ -184,6 +184,41 @@ SECRETS_FILE = os.environ.get("CROW_SECRETS_FILE") or os.path.join(
 _SECRET_SAID: "set[str]" = set()
 
 
+def _secret_note(sentinel: str, line: str) -> None:
+    """One line on stderr per process and per sentinel, or nothing at all.
+
+    THE ONLY `sys.stderr.write` IN THIS FILE, and it is the named exception in
+    `test_nothing_in_the_core_writes_to_the_terminal`: everything else the core
+    has to say goes back through its caller, so a second client can render it.
+    The sentinel is the key rather than the name, because a malformed store and
+    a variable still sitting in the environment are two different reports about
+    two different things, and both are worth exactly one line.
+    """
+    if sentinel in _SECRET_SAID:
+        return
+    _SECRET_SAID.add(sentinel)
+    sys.stderr.write(line)
+
+
+def _secret_console() -> bool:
+    """True when stderr is a terminal a human is looking at.
+
+    THE NUDGE IS FOR A PERSON, NOT FOR A LOG. Every process that imports this
+    module writes the line while the variable is still in the environment, and
+    the ones that are not consoles are exactly the ones that keep it: a test
+    suite's captured stderr, a redirected file, a runner that folds stderr into
+    a transcript. That last one is the failure #193 was written after, so a
+    reminder about a leaked secret must not become the next line in a log.
+
+    It may not raise either: `sys.stderr` is None under pythonw and closed on a
+    shutting-down interpreter, and neither is a reason to fail an import.
+    """
+    try:
+        return bool(sys.stderr.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
 def _secret_stored() -> dict:
     """The store as a flat mapping. Every failure reads as "there is no store".
 
@@ -195,22 +230,31 @@ def _secret_stored() -> dict:
 
     THE MALFORMED CASE IS THE ONE WORTH A WORD, because it is the only one
     where a value the user believes is in the file is silently not being read.
-    The word carries the PATH and never the content -- a parser error that
-    quoted the line it choked on would print the key it was written to hide.
+    That covers both ways a file can be useless: bytes json cannot parse, and
+    valid json that is not an OBJECT. A list or a bare string is the shape a
+    hand-edited store ends up in, and dropping it silently is the same
+    disappearing key with a different cause. The word carries the PATH and
+    never the content -- a parser error that quoted the line it choked on would
+    print the key it was written to hide.
+
+    utf-8-sig AND NOT utf-8: Notepad and PowerShell 5.1's
+    `Set-Content -Encoding UTF8` both put a BOM in front, `json.load` calls
+    that a parse error, and the store would be reported broken the first time
+    somebody edited it by hand. utf-8-sig reads a file without one unchanged.
     """
+    bad = "crow: %s is not readable JSON, so nothing was taken from it.\n"
     try:
-        with open(SECRETS_FILE, encoding="utf-8") as fh:
+        with open(SECRETS_FILE, encoding="utf-8-sig") as fh:
             raw = json.load(fh)
     except OSError:
         return {}
     except ValueError:
-        said = "bad:%s" % SECRETS_FILE
-        if said not in _SECRET_SAID:
-            _SECRET_SAID.add(said)
-            sys.stderr.write("crow: %s is not readable JSON, so nothing was "
-                             "taken from it.\n" % SECRETS_FILE)
+        _secret_note("bad:%s" % SECRETS_FILE, bad % SECRETS_FILE)
         return {}
-    return raw if isinstance(raw, dict) else {}
+    if not isinstance(raw, dict):
+        _secret_note("bad:%s" % SECRETS_FILE, bad % SECRETS_FILE)
+        return {}
+    return raw
 
 
 def secret(name: str) -> str:
@@ -219,10 +263,10 @@ def secret(name: str) -> str:
     THE ORDER IS THE TICKET, and both sources stay because every installation
     that exists today has the variable and no file: a reader that answered ""
     there would take web search away from all of them at once. The environment
-    therefore keeps working -- and says so, once, naming the file to move the
-    value into. An entry present but EMPTY counts as "not set", so moving one
-    variable into the store cannot switch off a second one still in the
-    environment.
+    therefore keeps working -- and says so, once, on a console, naming the file
+    to move the value into. An entry present but EMPTY counts as "not set", so
+    moving one variable into the store cannot switch off a second one still in
+    the environment.
 
     THE PERMISSIONS ARE NOT CHECKED HERE. tools/migrate-secrets.ps1 sets the
     ACL when it writes the file, and that is the only place that knows it. A
@@ -234,14 +278,12 @@ def secret(name: str) -> str:
     if isinstance(found, str) and found:
         return found
     from_env = os.environ.get(name, "")
-    if from_env:
-        said = "env:%s" % name
-        if said not in _SECRET_SAID:
-            _SECRET_SAID.add(said)
-            sys.stderr.write(
-                "crow: %s was read from the environment. Move it into %s with "
-                "tools/migrate-secrets.ps1 -- every child process inherits it "
-                "where it is.\n" % (name, SECRETS_FILE))
+    if from_env and _secret_console():
+        _secret_note(
+            "env:%s" % name,
+            "crow: %s was read from the environment. Move it into %s with "
+            "tools/migrate-secrets.ps1 -- every child process inherits it "
+            "where it is.\n" % (name, SECRETS_FILE))
     return from_env
 
 
