@@ -114,6 +114,7 @@ crow_core.MCP_TOKEN_FILE = os.path.join(_SANDBOX, "has-no-mcp", "mcp_tokens.json
 _NOWHERE = os.path.join(_SANDBOX, "has-no-install")
 crow_core.INDEX_PATH = os.path.join(_NOWHERE, "index.db")
 crow_core.ROOTS_FILE = os.path.join(_NOWHERE, "roots.json")
+crow_core.SECRETS_FILE = os.path.join(_NOWHERE, "secrets.json")
 crow_core.SESSION_DIR = os.path.join(_NOWHERE, "session")
 crow_core.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
 crow_core.SKILLS_DIR = os.path.join(_NOWHERE, "skills")
@@ -3630,6 +3631,122 @@ class WebFetchTests(unittest.TestCase):
         with _Urlopen(_FakeResponse(b"--moe-stream: stream experts",
                                     ctype="text/plain")):
             self.assertIn("--moe-stream", crow_core.tool_fetch_url("https://e.org/f.txt"))
+
+
+class SecretStoreTests(unittest.TestCase):
+    """#193: where a secret is read from, and what is said when it came out of
+    the environment.
+
+    A MADE-UP NAME AND A MADE-UP VALUE, never a real key. `SECRETS_FILE` is
+    rebound to a temporary path for the length of each case, so nothing here
+    reads or writes the store the installed client uses.
+    """
+
+    NAME = "CROW_TEST_SECRET_X"
+    VALUE = "store-value-0123456789"
+    FROM_ENV = "env-value-0123456789"
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-secret-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.store = os.path.join(self.dir, "secrets.json")
+        self.addCleanup(setattr, crow_core, "SECRETS_FILE", crow_core.SECRETS_FILE)
+        crow_core.SECRETS_FILE = self.store
+        crow_core._SECRET_SAID.clear()
+        self.addCleanup(crow_core._SECRET_SAID.clear)
+        self.err = io.StringIO()
+        self.addCleanup(setattr, sys, "stderr", sys.stderr)
+        sys.stderr = self.err
+        os.environ.pop(self.NAME, None)
+        self.addCleanup(os.environ.pop, self.NAME, None)
+
+    def _write(self, text: str) -> None:
+        with io.open(self.store, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_the_store_wins_over_the_environment(self):
+        """The whole point of the ticket. Once a key is in the file, the copy
+        in the environment is dead weight rather than a second source of
+        truth -- and nothing is said, because there is nothing left to move."""
+        self._write(json.dumps({self.NAME: self.VALUE}))
+        os.environ[self.NAME] = self.FROM_ENV
+        self.assertEqual(crow_core.secret(self.NAME), self.VALUE)
+        self.assertEqual(self.err.getvalue(), "")
+
+    def test_a_missing_store_falls_back_to_the_environment(self):
+        """Every installation in existence on the day this ships has the
+        variable and no file. A reader that answered "" there would take web
+        search away from all of them at once."""
+        os.environ[self.NAME] = self.FROM_ENV
+        self.assertFalse(os.path.exists(self.store))
+        self.assertEqual(crow_core.secret(self.NAME), self.FROM_ENV)
+
+    def test_a_malformed_store_falls_back_and_names_the_file_once(self):
+        """A half-written file may not take the client down at import, and it
+        may not scroll either: the file is NAMED, its content is not, and the
+        second call adds nothing."""
+        self._write("{ this is not json")
+        os.environ[self.NAME] = self.FROM_ENV
+        self.assertEqual(crow_core.secret(self.NAME), self.FROM_ENV)
+        once = self.err.getvalue()
+        self.assertEqual(crow_core.secret(self.NAME), self.FROM_ENV)
+        self.assertEqual(self.err.getvalue(), once, "the notice repeats")
+        self.assertIn(self.store, once)
+        self.assertNotIn("this is not json", once)
+        self.assertNotIn(self.FROM_ENV, once)
+        self.assertEqual(len(once.splitlines()), 2, once)
+
+    def test_the_environment_source_is_named_once_and_without_the_value(self):
+        """The nudge that empties the environment. One line, carrying the name
+        of the variable and the path to move it to -- and never the value,
+        which is the failure this ticket was written after."""
+        os.environ[self.NAME] = self.FROM_ENV
+        self.assertEqual(crow_core.secret(self.NAME), self.FROM_ENV)
+        self.assertEqual(crow_core.secret(self.NAME), self.FROM_ENV)
+        said = self.err.getvalue()
+        self.assertEqual(len(said.splitlines()), 1, said)
+        self.assertEqual(said.count(self.NAME), 1, said)
+        self.assertIn(self.store, said)
+        self.assertNotIn(self.FROM_ENV, said)
+
+    def test_a_name_in_neither_place_is_empty_and_silent(self):
+        """NEGATIVE PROBE. "No key at all" is the state a fresh install is in
+        and it is not a fault: the tool descriptions already say what to do
+        about it, and a notice here would fire on every start for everybody."""
+        self.assertEqual(crow_core.secret(self.NAME), "")
+        self.assertEqual(self.err.getvalue(), "")
+
+    def test_an_empty_entry_in_the_store_is_not_an_answer(self):
+        """A key an editor left empty means "not set", not "set to nothing".
+        The other reading would let one moved variable silently switch off a
+        second one that is still in the environment and still working."""
+        self._write(json.dumps({self.NAME: ""}))
+        os.environ[self.NAME] = self.FROM_ENV
+        self.assertEqual(crow_core.secret(self.NAME), self.FROM_ENV)
+
+    def test_the_reader_does_not_enforce_the_permissions(self):
+        """The ACL is the migration script's job, and only its job. The file
+        below has whatever %TEMP% hands down and no `icacls` has been near it;
+        it is read all the same. A reader that refused a store whose ACL it
+        disliked would refuse the copy a user restored from a backup, at import
+        time, with no way round it."""
+        self._write(json.dumps({self.NAME: self.VALUE}))
+        self.assertEqual(crow_core.secret(self.NAME), self.VALUE)
+        self.assertNotIn("icacls", _source("crow_core.py"))
+
+    def test_the_key_the_client_actually_uses_goes_through_the_reader(self):
+        """The one call site, pinned at the source. A `secret()` that nothing
+        called would leave the environment exactly where it is and every case
+        above green."""
+        self.assertIn('TAVILY_KEY = secret("CROW_TAVILY_KEY")',
+                      _source("crow_core.py"))
+
+    def test_the_store_sits_in_the_directory_the_installer_owns(self):
+        """Next to approvals.json and booted.json under %LOCALAPPDATA%\\Crow.
+        That is the directory install.ps1 already creates and the one
+        tools/migrate-secrets.ps1 sets the ACL inside; a store anywhere else
+        would need a second owner for its permissions."""
+        self.assertIn('"Crow", "secrets.json"', _source("crow_core.py"))
 
 
 class _Backend:

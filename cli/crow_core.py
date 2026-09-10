@@ -155,6 +155,96 @@ SEARCH_RESULTS = 6
 SEARCH_HITS = 8
 SEARCH_SNIPPET = 400
 
+# WHERE A SECRET IS READ FROM, AND WHY THE ENVIRONMENT IS NOW THE FALLBACK
+# RATHER THAN THE PLACE (#193).
+#
+# Measured 2026-09-10: a measurement runner in another repository printed its
+# shell environment into a log, and CROW_TAVILY_KEY went into the log with it.
+# That is not a bug in the runner. A user environment variable is inherited by
+# every child process and dumped by every tool that prints `Env:` -- there is
+# no way to hold a key there and keep it out of somebody else's transcript.
+#
+# So the value lives in a FILE instead: %LOCALAPPDATA%\Crow\secrets.json, a flat
+# {"NAME": "value"} object next to approvals.json and booted.json, in the
+# directory install.ps1 already owns. tools/migrate-secrets.ps1 writes it, sets
+# the ACL and takes the variable out of the user scope; robin runs it once.
+#
+# CROW_SECRETS_FILE MOVES THE PATH, and the only caller that needs it is a test.
+# A suite that read the real store would answer differently on a machine where
+# the migration has run than on a fresh one, which is the rule #130 already
+# wrote down for mcp.json and providers.json.
+SECRETS_FILE = os.environ.get("CROW_SECRETS_FILE") or os.path.join(
+    os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+    "Crow", "secrets.json")
+
+# What has already been said, so a client that starts and then searches twice
+# says it ONCE. Keyed by the sentence and not by the name alone: a malformed
+# store and a variable still sitting in the environment are two different
+# reports about two different things, and both are worth exactly one line.
+_SECRET_SAID: "set[str]" = set()
+
+
+def _secret_stored() -> dict:
+    """The store as a flat mapping. Every failure reads as "there is no store".
+
+    IT MAY NOT RAISE, and that is the whole design of it: this runs at import,
+    before one line has been drawn. A missing file is the state every existing
+    installation is in on the day this ships, and an unreadable or half-written
+    one must not be the difference between a client that starts and one that
+    does not.
+
+    THE MALFORMED CASE IS THE ONE WORTH A WORD, because it is the only one
+    where a value the user believes is in the file is silently not being read.
+    The word carries the PATH and never the content -- a parser error that
+    quoted the line it choked on would print the key it was written to hide.
+    """
+    try:
+        with open(SECRETS_FILE, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except OSError:
+        return {}
+    except ValueError:
+        said = "bad:%s" % SECRETS_FILE
+        if said not in _SECRET_SAID:
+            _SECRET_SAID.add(said)
+            sys.stderr.write("crow: %s is not readable JSON, so nothing was "
+                             "taken from it.\n" % SECRETS_FILE)
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def secret(name: str) -> str:
+    """`name` out of the store first, out of the environment second, else "".
+
+    THE ORDER IS THE TICKET, and both sources stay because every installation
+    that exists today has the variable and no file: a reader that answered ""
+    there would take web search away from all of them at once. The environment
+    therefore keeps working -- and says so, once, naming the file to move the
+    value into. An entry present but EMPTY counts as "not set", so moving one
+    variable into the store cannot switch off a second one still in the
+    environment.
+
+    THE PERMISSIONS ARE NOT CHECKED HERE. tools/migrate-secrets.ps1 sets the
+    ACL when it writes the file, and that is the only place that knows it. A
+    reader that refused a store whose ACL it disliked would refuse the copy a
+    user restored from a backup, at import time, with nothing they could do
+    about it from inside the client.
+    """
+    found = _secret_stored().get(name)
+    if isinstance(found, str) and found:
+        return found
+    from_env = os.environ.get(name, "")
+    if from_env:
+        said = "env:%s" % name
+        if said not in _SECRET_SAID:
+            _SECRET_SAID.add(said)
+            sys.stderr.write(
+                "crow: %s was read from the environment. Move it into %s with "
+                "tools/migrate-secrets.ps1 -- every child process inherits it "
+                "where it is.\n" % (name, SECRETS_FILE))
+    return from_env
+
+
 # WHERE THE SEARCH RUNS, AND WHY IT IS NOT A SELF-HOSTED SERVICE BY DEFAULT.
 #
 # There is no free, keyless, reliable, general web search endpoint. Every route
@@ -186,7 +276,7 @@ SEARCH_SNIPPET = 400
 # page until `json` joins that list, which is the common first failure and gets
 # its own sentence rather than a JSONDecodeError.
 TAVILY_URL = "https://api.tavily.com/search"
-TAVILY_KEY = os.environ.get("CROW_TAVILY_KEY", "")
+TAVILY_KEY = secret("CROW_TAVILY_KEY")
 SEARXNG_URL = os.environ.get("CROW_SEARXNG_URL", "")
 
 # Per keyless source. Shorter than WEB_TIMEOUT because several run at once and
