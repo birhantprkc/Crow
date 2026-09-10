@@ -360,10 +360,27 @@ queried in parallel; results merge round-robin by authority and every snippet is
 | GitHub repositories and issues | every query |
 | Wikipedia | every query |
 
-| Variable | |
+| Setting | |
 |---|---|
-| `CROW_TAVILY_KEY` | optional. Switches to Tavily for a general web index. Free tier is 1,000 searches a month and takes no credit card |
+| `CROW_TAVILY_KEY` in the secret store | optional, and the place it belongs. Switches to Tavily for a general web index. Free tier is 1,000 searches a month and takes no credit card |
+| `CROW_TAVILY_KEY` as an environment variable | fallback, still read. Every child process inherits it and every tool that prints `Env:` prints it (#193) |
 | `CROW_SEARXNG_URL` | optional, wins over the key. Needs `json` under `search.formats` in the instance's `settings.yml` — only `html` is enabled by default |
+
+**The secret store (#193).**
+
+| item | |
+|---|---|
+| path | `%LOCALAPPDATA%\Crow\secrets.json`, next to `approvals.json` and `booted.json` |
+| format | a flat object, `{"CROW_TAVILY_KEY": "..."}` |
+| permissions | `icacls <store> /inheritance:r /grant:r "<user>:(R,W)"`, set by the migration script |
+| order | `crow_core.secret(name)` reads the store first and the environment second |
+| empty entry | a key present but empty counts as not set, and the environment is read |
+| notice | one stderr line per start when a value came out of the environment. It names the variable and the store path, never the value |
+| migration | `powershell -ExecutionPolicy Bypass -File tools\migrate-secrets.ps1` |
+| dry run | add `-WhatIf`: nothing is written and nothing is removed |
+| other names | `-Names CROW_TAVILY_KEY,FISH_API_KEY` moves a list |
+| removal | the User scope entry goes only after the store has read back byte for byte |
+| output | names and lengths, never values |
 
 `fetch_url` takes http and https only; `file:` and `data:` are refused, so it cannot become a disk
 read around the #92 boundary. Extraction runs before the 16 KB clip — clipping first keeps the
