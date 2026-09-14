@@ -137,10 +137,10 @@ Start (PowerShell, two windows; engine repo root):
 ```powershell
 # engine (from the crow-nest repo root)
 $env:CROW_PF_GEMM_B = "1"
-engine	arget_srvelease\serve.exe --port 8099 --slot-save-path decode_out\session
+engine/target_srv/release/serve.exe --port 8099 --slot-save-path decode_out/session
 
 # Crow
-python cli\crow.py --base-url http://127.0.0.1:8099/v1
+python cli/crow.py --base-url http://127.0.0.1:8099/v1
 ```
 
 ---
