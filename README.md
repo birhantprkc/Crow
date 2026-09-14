@@ -114,6 +114,36 @@ faster one per token and the smaller download.
 | Build | llama.cpp server `1c3c967` — the packaged engine runs it |
 | License | Apache-2.0 |
 
+## Third operating point (Rust)
+
+Crow runs on the crow-nest engine, the Rust engine built for this project. Since v0.2.0 (2026-09-14) its decode is faster than llama.cpp on the same machine, with identical greedy outputs; vision is served from the container itself, no projector file.
+
+| | |
+|---|---|
+| Engine | crow-nest `v0.2.0` ([repo](https://github.com/nibor1896/crow-nest), [release](https://github.com/nibor1896/crow-nest/releases/tag/v0.2.0)), Windows, own HTTP server, OpenAI-compatible |
+| Model | `CNQ4.5-M`, the project's own quant: one 104.7 GB NVFP4 container of `Qwen3.8-Flash-Next` ([package](https://huggingface.co/nibor1896/Qwen3.8-Flash-Next-CNQ4.5-M)) |
+| Context | 200,000, one slot |
+| Vision | yes, from the container's own `vit` section (no `--mmproj`, nothing extra to download) |
+| Decode | **45.1 tok/s** (22.18 ms/token) vs llama.cpp 44.9 on the same prompt; greedy ids bit-identical |
+| Prefill | 771 tok/s default, **871 tok/s** with `CROW_PF_GEMM_B=1`, vs llama.cpp 922.5 (16k reference prompt) |
+| Quality | ten-task suite unchanged (2/5/3) against the llama.cpp operating point's reading |
+| Port | 8099 |
+| GPU | RTX 5090 class (Blackwell `sm_120` required), 64 GB host RAM class, CUDA driver + NVRTC |
+
+Measured 2026-09-13/14 on one RTX 5090, F49 pair-chain methodology; sources: crow-nest issues #62 (decode) and #10 (prefill), release notes of v0.2.0.
+
+Start (PowerShell, two windows; engine repo root):
+
+```powershell
+# engine (from the crow-nest repo root)
+$env:CROW_PF_GEMM_B = "1"
+engine	arget_srvelease\serve.exe --port 8099 --slot-save-path decode_out\session
+
+# Crow
+python cli\crow.py --base-url http://127.0.0.1:8099/v1
+```
+
+---
 ---
 
 ## Requirements
