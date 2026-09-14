@@ -229,12 +229,7 @@ aborts during CUDA warmup on this card, and the cause is not attributed.
 The second operating point runs on the packaged engine:
 
 ```powershell
-$env:LOCALAPPDATA\Crow\bin\llama-server.exe `
-  -m $env:LOCALAPPDATA\Crow\models\qwen38-gguf\Qwen3.8-27B-UD-Q4_K_XL.gguf `
-  --mmproj $env:LOCALAPPDATA\Crow\models\qwen38-gguf\mmproj-F16.gguf `
-  --port 8082 -c 200000 -ctk q8_0 -ctv q8_0 -ngl 99 -np 1 --jinja `
-  --slot-save-path $env:LOCALAPPDATA\Crow\session `
-  --spec-type draft-mtp
+& "$env:LOCALAPPDATA\Crow\bin\llama-server.exe" -m "$env:LOCALAPPDATA\Crow\models\qwen38-gguf\Qwen3.8-27B-UD-Q4_K_XL.gguf" --mmproj "$env:LOCALAPPDATA\Crow\models\qwen38-gguf\mmproj-F16.gguf" --port 8082 -c 200000 -ctk q8_0 -ctv q8_0 -ngl 99 -np 1 --jinja --slot-save-path "$env:LOCALAPPDATA\Crow\session" --spec-type draft-mtp
 ```
 
 ### Clients
