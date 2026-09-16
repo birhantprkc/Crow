@@ -21,9 +21,14 @@ the desktop goes to zram, pressure crosses the limit, and oomd kills the largest
 -p MemoryHigh=<RAM − 8 GiB>` when `systemd-run` is on the PATH and the user manager's socket
 is there. Out of `app.slice`, a kill can never take a terminal; bounded, the kernel reclaims
 the server's own clean cache before anything else. Verified: a user scope accepts both
-properties and `memory.high` lands in the cgroup. Not yet measured: that the load then stays
-out of swap. `CROW_SERVER_MEMORY_HIGH` moves the bound, `CROW_SERVER_SCOPE=0` runs the bare
-process. Empty on Windows, byte-identical there.
+properties and `memory.high` lands in the cgroup. A fifth kill at 18:16 came with the scope and
+`MemoryHigh` alone: the experts were still anonymous memory in zram and the desktop still
+what got squeezed. So the Linux line now loads with `--load-mode mmap` (the experts become
+page cache the kernel drops and re-reads instead of swapping), the scope adds
+`MemorySwapMax=0` (the server's anonymous memory may not go to zram) and `MemoryMax`. Decode
+under mmap is not yet measured against the 36.7 tok/s of `none`. `CROW_SERVER_MEMORY_HIGH`
+moves the bound, `CROW_SERVER_SCOPE=0` runs the bare process. Empty on Windows, byte-identical
+there.
 
 The README's Start section names both commands per OS -- the server, then the window -- instead
 of claiming the window boots the server on its own.

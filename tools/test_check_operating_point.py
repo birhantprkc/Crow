@@ -108,7 +108,7 @@ FLASH_LINE = (
 FLASH_LINUX_LINE = (
     "$HOME/.local/share/crow/bin/llama-server -m $CROW_MODELS/x.gguf "
     "--port 8083 -c 200000 -b 2048 -ub 2048 -ctk q8_0 -ctv q8_0 "
-    "-ncmoe 31 -t 24 --fit off --load-mode none -np 1 --jinja --mmproj $CROW_MODELS/mmproj-F16.gguf\n"
+    "-ncmoe 31 -t 24 --fit off --load-mode mmap -np 1 --jinja --mmproj $CROW_MODELS/mmproj-F16.gguf\n"
 )
 
 

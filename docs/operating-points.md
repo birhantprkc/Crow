@@ -115,7 +115,7 @@ the gap to Windows is the extra CPU layer.
 ### By hand
 
 ```bash
-$HOME/.local/share/crow/bin/llama-server -m $CROW_MODELS/Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf --port 8083 -c 200000 -b 2048 -ub 2048 -ctk q8_0 -ctv q8_0 -ncmoe 31 -t 24 --fit off --load-mode none -np 1 --mmproj $CROW_MODELS/mmproj-F16.gguf --jinja
+$HOME/.local/share/crow/bin/llama-server -m $CROW_MODELS/Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf --port 8083 -c 200000 -b 2048 -ub 2048 -ctk q8_0 -ctv q8_0 -ncmoe 31 -t 24 --fit off --load-mode mmap -np 1 --mmproj $CROW_MODELS/mmproj-F16.gguf --jinja
 ```
 
 `python3 ~/.local/share/crow/tools/start-server.py flash-next-q2-k-xl` builds that line from the

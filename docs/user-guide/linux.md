@@ -164,16 +164,21 @@ crow
 The window reads the port off the running server; the model menu can switch and reboot it from
 there.
 
-**The server runs in a scope of its own.** Both starts wrap `llama-server` in
-`systemd-run --user --scope --slice=session.slice -p MemoryHigh=<RAM minus 8 GiB>` when
-`systemd-run` is on the PATH and the user manager is reachable. Measured 2026-09-16 on
+**The server runs in a scope of its own, and the experts are file-backed.** Both starts
+wrap `llama-server` in `systemd-run --user --scope --slice=session.slice -p MemorySwapMax=0
+-p MemoryHigh=<RAM − 10 GiB> -p MemoryMax=<RAM − 8 GiB>` when `systemd-run` is on the PATH
+and the user manager is reachable, and the Linux line loads with `--load-mode mmap` where
+Windows uses `none`. Measured 2026-09-16 on
 Omarchy without it: systemd-oomd (kill policy on `app.slice`, 50 % pressure for 20 s, over
 `vm.swappiness=150` and zram) killed the terminal's whole scope four times while the model
 loaded -- the server and every process that terminal had spawned, log ending at
-`loading model`. In `session.slice` oomd does not watch it, and the memory bound makes the
-kernel reclaim the server's own page cache (the second copy of the model during
-`--load-mode none`) before it touches the desktop. `CROW_SERVER_MEMORY_HIGH=48G` moves the
-bound, `CROW_SERVER_SCOPE=0` runs the bare process. The page, the tools, the memory and the browser pane are the ones [`window.md`](window.md)
+`loading model`. A fifth kill at 18:16 came with the scope alone: the ~48 GiB of experts were still anonymous
+memory, still swapped into zram, and the desktop was still what got squeezed. So: mmap makes
+the experts page-cache pages the kernel can drop and re-read from NVMe without swapping
+anything; `MemorySwapMax=0` keeps the server's remaining anonymous memory out of zram; the
+size bounds make the kernel reclaim the server's own cache before the desktop's. Decode under
+mmap is not yet measured against the 36.7 tok/s of `none`. `CROW_SERVER_MEMORY_HIGH=48G`
+moves the bound, `CROW_SERVER_SCOPE=0` runs the bare process. The page, the tools, the memory and the browser pane are the ones [`window.md`](window.md)
 describes. What Wayland makes different:
 
 **It has to be told to float.** A Wayland client may not place, size or raise its own toplevel —

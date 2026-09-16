@@ -398,24 +398,35 @@ def _mem_total_bytes(meminfo: str = "/proc/meminfo") -> int:
     return 0
 
 
-def server_memory_high(mem_total: int | None = None) -> str | None:
-    """The memory.high the server's scope gets, as a systemd size, or None.
+def server_memory_bounds(mem_total: int | None = None) -> dict:
+    """The memory properties the server's scope gets, as systemd sizes.
 
-    $CROW_SERVER_MEMORY_HIGH wins (any systemd size, e.g. `48G`; `0` or `none`
-    switches the bound off). Else the machine's RAM minus a headroom of 8 GiB
-    for everything that is not the server: at 62 GiB that is 54 GiB, above the
-    ~50 GiB the measured line keeps in anonymous memory and below the point
-    where the desktop is what gets paged. Below 16 GiB of RAM the bound is
-    pointless and None.
+    MemorySwapMax=0 always: the server's anonymous memory may not be swapped
+    or compressed into zram -- under vm.swappiness=150 that is exactly what the
+    kernel did with the experts, and a server whose weights sit in zram is the
+    freeze the desktop felt. Without swap the kernel reclaims the server's clean
+    page cache instead, and if the anonymous part truly does not fit, the kernel
+    ends the server alone inside its scope, not the desktop.
+
+    MemoryHigh = RAM minus 10 GiB, MemoryMax = RAM minus 8 GiB: at 62 GiB that is
+    52 and 54, above the ~48 GiB the measured line keeps on the CPU under
+    --load-mode none and well above the few GiB it keeps under mmap, and it
+    leaves the desktop 8 GiB before the server is throttled. Below 16 GiB of
+    RAM there is no bound to give. $CROW_SERVER_MEMORY_HIGH moves MemoryHigh
+    (any systemd size); `none` drops both size bounds, the swap cap stays.
     """
+    out = {"MemorySwapMax": "0"}
     raw = (os.environ.get("CROW_SERVER_MEMORY_HIGH") or "").strip()
-    if raw:
-        return None if raw.lower() in ("0", "none", "off") else raw
+    if raw.lower() in ("0", "none", "off"):
+        return out
     total = mem_total if mem_total is not None else _mem_total_bytes()
     gib = total // (1024 ** 3)
-    if gib < 16:
-        return None
-    return "%dG" % (gib - _SCOPE_HEADROOM_GIB)
+    if gib >= 16:
+        out["MemoryHigh"] = "%dG" % (gib - _SCOPE_HEADROOM_GIB - 2)
+        out["MemoryMax"] = "%dG" % (gib - _SCOPE_HEADROOM_GIB)
+    if raw:
+        out["MemoryHigh"] = raw
+    return out
 
 
 def user_manager_reachable(runtime_dir: str | None = None) -> bool:
@@ -453,11 +464,15 @@ def server_scope_prefix() -> list[str]:
     app.slice's pressure crosses the limit, and oomd kills the largest cgroup
     under app.slice: the terminal the server sits in.
 
-    TWO THINGS, ONE PREFIX. `--slice=session.slice` takes the server out of
+    THREE THINGS, ONE PREFIX. `--slice=session.slice` takes the server out of
     app.slice, the one cgroup oomd watches here, so a kill can never take a
-    terminal with it. `-p MemoryHigh=` bounds the server's OWN cgroup, so when
-    it crosses the bound the kernel reclaims the server's clean page cache
-    (the second copy of the model) instead of swapping the desktop. Verified
+    terminal with it. `-p MemorySwapMax=0` forbids the server's anonymous
+    memory the zram, which is where its weights went. `-p MemoryHigh=` and
+    `MemoryMax=` bound the server's OWN cgroup, so when it crosses the bound
+    the kernel reclaims the server's clean page cache instead of squeezing the
+    desktop -- and the placement's load_mode is mmap on Linux (manifest), so
+    the experts ARE that cache. The fifth kill, 18:16, came with session.slice
+    and MemoryHigh alone: the desktop was still what got squeezed. Verified
     on this machine that a user scope accepts both properties and that
     memory.high lands in the cgroup (53,687,091,200 for `50G`). Whether the
     load then stays out of swap is NOT yet measured -- the four kills above
@@ -477,9 +492,8 @@ def server_scope_prefix() -> list[str]:
     if not run or not user_manager_reachable():
         return []
     prefix = [run, "--user", "--scope", "--slice=session.slice", "--quiet"]
-    high = server_memory_high()
-    if high:
-        prefix += ["-p", "MemoryHigh=%s" % high]
+    for name, value in server_memory_bounds().items():
+        prefix += ["-p", "%s=%s" % (name, value)]
     return prefix + ["--"]
 
 
