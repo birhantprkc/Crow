@@ -29,6 +29,14 @@
 # installer that spends an hour on somebody else's file before the user has seen
 # anything work is the wrong shape. The last step prints the two commands.
 #
+# THE MODEL ROOT IS A LINK AND NOT A VARIABLE. $CROW_HOME/models is a symlink to
+# whatever tree `--models DIR` names, because <install>/models is what
+# crow_platform.models_dir() answers with nothing set -- so the window, the
+# terminal client and tools/start-server.py all read the same tree with no
+# environment at all. A CHECKOUT IS ITS OWN <install> (crow_core.INSTALL_ROOT is
+# the parent of cli/), so a checkout takes the same link of its own; the last
+# step prints that line. See link_models().
+#
 # IDEMPOTENT. Run it twice and the second run copies the same bytes, reuses the
 # venv, reuses the engine, and reports what changed underneath it since the last
 # run -- that is what $CROW_HOME/manifest.sha256 is for. It never deletes
@@ -42,14 +50,14 @@
 # USAGE
 #   bash install.sh                      from a checkout: install what is here
 #   curl -fsSL <raw>/install.sh | bash   no checkout: fetch CROW_REF (main)
-#   bash install.sh --models DIR         where the GGUFs live ($CROW_MODELS)
+#   bash install.sh --models DIR         where the GGUFs live (linked, see below)
 #   bash install.sh --voice              also faster-whisper + sounddevice
 #   bash install.sh --build-engine       build llama-server now (~20 min)
 #   bash install.sh --selftest           check this script, install nothing
 #
 # ENVIRONMENT
 #   CROW_HOME          install root, default ${XDG_DATA_HOME:-~/.local/share}/crow
-#   CROW_MODELS        model root; --models writes it into $CROW_HOME/env
+#   CROW_MODELS        override the model root for one shell; --models makes the link
 #   CROW_REF           branch or tag to fetch when there is no checkout (main)
 #   CROW_BUILD_ENGINE  1 is --build-engine
 # ---------------------------------------------------------------------------
@@ -184,6 +192,53 @@ abspath() {
         "~/"*) printf '%s\n' "$HOME/${1#\~/}" ;;
         *)   printf '%s\n' "$PWD/$1" ;;
     esac
+}
+
+# --- the model root: ONE mechanism, and it is a link ------------------------
+# IT USED TO BE A VARIABLE AND THE VARIABLE REACHED EXACTLY ONE ENTRY POINT.
+# `--models DIR` wrote `export CROW_MODELS="DIR"` into $CROW_HOME/env and only
+# the generated launcher sourced that file, so the window found the models and
+# NOTHING ELSE DID: `python3 $CROW_HOME/tools/start-server.py flash-next-q2-k-xl`
+# and `python cli/crow_gui.py` out of a checkout both answered "model is not on
+# disk" (gemessen 2026-09-16). An environment variable set in one process is not
+# a path on disk, and a path that only one of five entry points can see is the
+# same failure crow_platform.models_dir() warns about in its own docstring.
+#
+# So the installer writes the path where every entry point already looks:
+# $CROW_HOME/models, a symlink to the tree. models_dir() falls back to
+# <install>/models with no variable set at all, and install_dir() on Linux is
+# the XDG data directory whether Crow is started from the desktop entry or from
+# a checkout -- so one link answers all of them. $CROW_MODELS survives as what
+# its docstring always said it was: the override, for one shell.
+#
+# What may be done to $CROW_HOME/models, decided from the filesystem alone:
+#   link   absent, a symlink already, or an empty directory -- (re)point it
+#   keep   a real directory with files in it: that is somebody's model tree
+#   clash  anything else, i.e. a regular file -- not ours to delete either
+models_link_verdict() {
+    local link="$1"
+    # -L IS ASKED FIRST because a symlink to a directory is also -d, and a
+    # dangling one is not -e: asked in any other order, the two cases that
+    # MUST be retargeted would read as "keep" and "clash".
+    if   [ -L "$link" ];   then printf 'link\n'
+    elif [ ! -e "$link" ]; then printf 'link\n'
+    elif [ -d "$link" ];   then
+        if [ -n "$(ls -A "$link" 2>/dev/null)" ]; then printf 'keep\n'; else printf 'link\n'; fi
+    else printf 'clash\n'
+    fi
+}
+
+# Is this $CROW_HOME/env one WE wrote? Only then is it ours to delete. The three
+# lines below, in this order, and nothing else -- a user who put their own
+# exports in that file keeps every one of them and is told the file is dead,
+# because deleting what somebody else edited is not a thing an installer does.
+installer_env_p() {
+    [ -f "$1" ] || return 1
+    awk 'NR == 1 && /^# Sourced by .* before the window starts\. Written by install\.sh\.$/ { a = 1; next }
+         NR == 2 && $0 == "# Change the model root here, or re-run install.sh --models DIR." { b = 1; next }
+         NR == 3 && /^export CROW_MODELS="[^"]*"$/ { c = 1; next }
+         { extra = 1 }
+         END { exit !(a && b && c && !extra && NR == 3) }' "$1"
 }
 
 # The files this package ships, as paths relative to ROOT, sorted.
@@ -346,12 +401,29 @@ selftest() {
     printf 'print(3)\n' > "$tmp/src/cli/test_crow.py"      # must not ship
     ( cd "$tmp/src" && tar cf - . ) | ( cd "$tmp/dst" && tar xf - )
     rm -f "$tmp/dst/cli/test_crow.py"
+    # A MODEL TREE IS NOT PAYLOAD, in either direction: 73 GiB must never be
+    # sha256'd into manifest.sha256 on the way in, and the link at
+    # <install>/models must not read as drift on the way back out. Both hold
+    # because payload_paths names four directories and models is not one of
+    # them, and manifest_audit asks only about the paths the manifest lists --
+    # but an install that reports drift on every re-run is one nobody reads by
+    # the third run, so it is checked rather than reasoned about.
+    mkdir -p "$tmp/src/models" "$tmp/tree"
+    printf 'gguf\n' > "$tmp/src/models/m.gguf"
+    ln -sfn "$tmp/tree" "$tmp/dst/models"
     manifest_of "$tmp/src" > "$tmp/dst/manifest.sha256"
     check "the manifest is silent about an install nobody touched" \
           "$([ -z "$(manifest_audit "$tmp/dst" "$tmp/dst/manifest.sha256")" ] && echo 0 || echo 1)" \
           "$(manifest_audit "$tmp/dst" "$tmp/dst/manifest.sha256")"
     check "test_*.py is not in the payload" \
           "$(grep -q 'test_crow.py' "$tmp/dst/manifest.sha256" && echo 1 || echo 0)"
+    check "NEGATIVE: a models/ tree in the source is not in the payload either" \
+          "$(grep -q ' models/' "$tmp/dst/manifest.sha256" && echo 1 || echo 0)" \
+          "$(grep ' models/' "$tmp/dst/manifest.sha256" || true)"
+    check "the models link in an install is not drift on the next run" \
+          "$([ -L "$tmp/dst/models" ] \
+             && [ -z "$(manifest_audit "$tmp/dst" "$tmp/dst/manifest.sha256")" ] && echo 0 || echo 1)" \
+          "$(manifest_audit "$tmp/dst" "$tmp/dst/manifest.sha256")"
     printf 'print(99)\n' > "$tmp/dst/cli/crow_gui.py"
     rm -f "$tmp/dst/LICENSE"
     out="$(manifest_audit "$tmp/dst" "$tmp/dst/manifest.sha256")"
@@ -373,6 +445,47 @@ selftest() {
     out="$(manifest_changes "$tmp/dst/manifest.sha256" "$tmp/next2.sha256")"
     check "one new file and one edited file read '1 1'" \
           "$([ "$out" = "1 1" ] && echo 0 || echo 1)" "$out"
+
+    # The model root, driven through the real link_models over the three things
+    # that can be sitting at $CROW_HOME/models. These are locals and the globals
+    # of a run are untouched: nothing here is installed anywhere.
+    local CROW_HOME MODELS_DIR LAUNCHER
+    CROW_HOME="$tmp/home"; MODELS_DIR="$tmp/tree"; LAUNCHER="$CROW_HOME/bin/crow"
+    mkdir -p "$CROW_HOME"
+    link_models >/dev/null 2>&1
+    check "the model root is a link at <install>/models, which every entry point reads" \
+          "$([ -L "$CROW_HOME/models" ] && [ "$(readlink "$CROW_HOME/models")" = "$tmp/tree" ] \
+             && echo 0 || echo 1)" "$(ls -ld "$CROW_HOME/models" 2>&1)"
+    # -sfn AND NOT -sf: without -n the second link lands inside the first one's
+    # target and the install keeps reading the old tree.
+    mkdir -p "$tmp/tree2"; MODELS_DIR="$tmp/tree2"
+    link_models >/dev/null 2>&1
+    check "a later --models retargets that link instead of nesting one" \
+          "$([ "$(readlink "$CROW_HOME/models")" = "$tmp/tree2" ] \
+             && [ ! -e "$tmp/tree/tree2" ] && echo 0 || echo 1)" \
+          "$(readlink "$CROW_HOME/models") | $(ls -A "$tmp/tree")"
+    rm -f "$CROW_HOME/models"
+    mkdir -p "$CROW_HOME/models"; printf 'gguf\n' > "$CROW_HOME/models/m.gguf"
+    out="$(link_models 2>&1)"
+    check "NEGATIVE: a real <install>/models with files in it is kept, and the line printed" \
+          "$([ ! -L "$CROW_HOME/models" ] && [ -f "$CROW_HOME/models/m.gguf" ] \
+             && printf '%s' "$out" | grep -q 'ln -s' && echo 0 || echo 1)" "$out"
+
+    # $CROW_HOME/env: the file this script used to write is removed, because
+    # left behind it is a second model root that only the launcher can see.
+    printf '# Sourced by %s before the window starts. Written by install.sh.\n' "$LAUNCHER" > "$CROW_HOME/env"
+    printf '# Change the model root here, or re-run install.sh --models DIR.\n' >> "$CROW_HOME/env"
+    printf 'export CROW_MODELS="%s"\n' "$tmp/tree" >> "$CROW_HOME/env"
+    drop_installer_env >/dev/null 2>&1
+    check "the \$CROW_HOME/env this installer wrote is removed" \
+          "$([ ! -e "$CROW_HOME/env" ] && echo 0 || echo 1)"
+    printf '# Sourced by %s before the window starts. Written by install.sh.\n' "$LAUNCHER" > "$CROW_HOME/env"
+    printf '# Change the model root here, or re-run install.sh --models DIR.\n' >> "$CROW_HOME/env"
+    printf 'export CROW_MODELS="%s"\nexport MY_OWN_KEY=hunter2\n' "$tmp/tree" >> "$CROW_HOME/env"
+    out="$(drop_installer_env 2>&1)"
+    check "NEGATIVE: an env file with a line of the user's own is kept, and named" \
+          "$([ -f "$CROW_HOME/env" ] && grep -q MY_OWN_KEY "$CROW_HOME/env" \
+             && printf '%s' "$out" | grep -q 'left alone' && echo 0 || echo 1)" "$out"
 
     printf '\n%s%d checks, %d failed%s\n' "$B" "$((pass + fail))" "$fail" "$Z"
     [ "$fail" -eq 0 ] || return 1
@@ -614,31 +727,21 @@ install_engine() {
 
 write_launcher() {
     mkdir -p "$CROW_HOME/bin"
-    # The launcher is GENERATED and says so, because the two things it decides --
-    # which interpreter and which model root -- are decided at install time and
-    # a user who edits them here loses them on the next run. $CROW_HOME/env is
-    # the file that survives.
+    # The launcher is GENERATED and says so, because the one thing it decides --
+    # which interpreter -- is decided at install time and a user who edits it
+    # here loses the edit on the next run. IT SETS NO ENVIRONMENT AT ALL: it
+    # used to source $CROW_HOME/env for $CROW_MODELS, and that is precisely how
+    # the model root became a path only this one process could see.
     cat > "$LAUNCHER" <<EOF
 #!/usr/bin/env bash
-# Crow's window. Written by install.sh -- edit $CROW_HOME/env, not this file.
+# Crow's window. Written by install.sh -- re-run install.sh rather than edit it.
+# The model root is $CROW_HOME/models, a link; it is not set here.
 set -euo pipefail
 CROW_HOME="$CROW_HOME"
-[ -r "\$CROW_HOME/env" ] && . "\$CROW_HOME/env"
 exec "\$CROW_HOME/venv/bin/python" "\$CROW_HOME/cli/crow_gui.py" "\$@"
 EOF
     chmod +x "$LAUNCHER"
     ok "launcher at $LAUNCHER"
-
-    # $CROW_MODELS and nowhere else. crow_platform.models_dir() reads exactly
-    # this variable, and the comment there is the reason there is no second copy
-    # in a settings file: a path two places can set is a path nobody can find.
-    cat > "$CROW_HOME/env" <<EOF
-# Sourced by $LAUNCHER before the window starts. Written by install.sh.
-# Change the model root here, or re-run install.sh --models DIR.
-export CROW_MODELS="$MODELS_DIR"
-EOF
-    ok "model root: $MODELS_DIR  (\$CROW_HOME/env)"
-    [ -d "$MODELS_DIR" ] || note "it does not exist yet -- step 5 prints what to download into it"
 
     # ~/.local/bin only if it is already on the PATH. Putting a directory on
     # somebody's PATH is editing their shell profile, and this script does not
@@ -663,6 +766,75 @@ EOF
             note "~/.local/bin is not on your PATH, so no \`crow\` shortcut was made."
             note "Add it, or start the window with the full path above." ;;
     esac
+}
+
+# The model root, written where every entry point already looks: see the block
+# above models_link_verdict() for why it is a link and not a variable.
+link_models() {
+    local link="$CROW_HOME/models" verdict was=""
+
+    # The tree IS <install>/models -- nothing to point anywhere, and a link to
+    # itself is a loop that resolves to nothing.
+    if [ "$MODELS_DIR" = "$link" ]; then
+        ok "model root: $link"
+        [ -d "$MODELS_DIR" ] || note "it does not exist yet -- step 5 prints what to download into it"
+        drop_installer_env
+        return 0
+    fi
+
+    verdict="$(models_link_verdict "$link")"
+    case "$verdict" in
+        link)
+            [ -L "$link" ] && was="$(readlink "$link")"
+            # An EMPTY real directory is in the way of its own replacement --
+            # `ln` will not write over a directory. rmdir and never rm -rf: if
+            # anything appeared in it since the verdict, this fails and the
+            # directory stays, which is the only safe direction.
+            if [ ! -L "$link" ] && [ -d "$link" ]; then rmdir "$link" 2>/dev/null || true; fi
+            # -n IS NOT DECORATION. Without it `ln -sf tree link` FOLLOWS the
+            # existing link and writes the new one INSIDE the old target, i.e.
+            # ~/Projects/models/qwen3.8-flash-next/qwen3.8-flash-next -- and the
+            # install then still reads the old tree.
+            ln -sfn "$MODELS_DIR" "$link" || die "could not link $link -> $MODELS_DIR"
+            if [ -n "$was" ] && [ "$was" != "$MODELS_DIR" ]; then
+                warn "the model root of this install moved"
+                note "$link  $was  ->  $MODELS_DIR"
+            else
+                ok "model root: $link -> $MODELS_DIR"
+            fi
+            [ -d "$MODELS_DIR" ] || note "it does not exist yet -- step 5 prints what to download into it" ;;
+        keep)
+            # 73 GiB somebody put there. It is already the answer every entry
+            # point gets, so nothing is broken -- it is simply not what --models
+            # said, and the two lines that would change it are printed, not run.
+            warn "$link is a real directory with files in it -- not replaced"
+            note "Crow reads its models from there, whatever --models named. To point"
+            note "it at $MODELS_DIR instead, move it aside and link by hand:"
+            cmd "mv $link $link.old"
+            cmd "ln -s $MODELS_DIR $link" ;;
+        clash)
+            warn "$link is a file, not a directory -- not replaced"
+            note "No model resolves under it. Remove it and link the tree:"
+            cmd "ln -sfn $MODELS_DIR $link" ;;
+    esac
+    drop_installer_env
+}
+
+# $CROW_HOME/env is not written any more, and the one an earlier run wrote is
+# removed: left on disk it is a second mechanism that still works for the
+# launcher ALONE, which is the bug this replaces. Only the file we wrote,
+# matched line by line -- anything else is the user's and is kept and named.
+drop_installer_env() {
+    local envf="$CROW_HOME/env"
+    [ -e "$envf" ] || return 0
+    if installer_env_p "$envf"; then
+        rm -f "$envf"
+        ok "removed $envf -- the model root is the link, not a variable"
+    else
+        warn "$envf is not the file this installer wrote, so it was left alone"
+        note "Nothing sources it any more -- $LAUNCHER no longer does."
+        note "Whatever it exports has to move into your own shell profile."
+    fi
 }
 
 install_desktop() {
@@ -745,11 +917,14 @@ install_hyprland() {
 # both against manifests/operating-point.json; a third copy in this file would
 # be a third thing to keep in step. crow_core.server_command() builds the argv
 # from the manifest, so what is printed here cannot drift by construction.
+# NO $CROW_MODELS IS SET FOR IT. The line printed has to be the line the window
+# would run, and the window runs whatever <install>/models resolves to -- so
+# letting models_dir() fall back is what makes this an end-to-end check of the
+# link rather than a second opinion about it.
 resolved_server_line() {
-    "$CROW_HOME/venv/bin/python" - "$CROW_HOME" "$MODELS_DIR" <<'EOF' 2>/dev/null || true
+    "$CROW_HOME/venv/bin/python" - "$CROW_HOME" <<'EOF' 2>/dev/null || true
 import os, shlex, sys
-home, models = sys.argv[1], sys.argv[2]
-os.environ.setdefault("CROW_MODELS", models)
+home = sys.argv[1]
 sys.path.insert(0, os.path.join(home, "cli"))
 try:
     import crow_core
@@ -805,10 +980,32 @@ final_screen() {
 
     printf '  %sPaths%s\n' "$B" "$Z"
     note "install    $CROW_HOME"
-    note "models     $MODELS_DIR  (\$CROW_MODELS, from $CROW_HOME/env)"
+    if [ -L "$CROW_HOME/models" ]; then
+        note "models     $CROW_HOME/models -> $(readlink "$CROW_HOME/models")"
+    else
+        note "models     $CROW_HOME/models"
+    fi
     note "settings   ${XDG_CONFIG_HOME:-$HOME/.config}/crow"
     note "sessions   ${XDG_STATE_HOME:-$HOME/.local/state}/crow"
     note "boot logs  ${XDG_STATE_HOME:-$HOME/.local/state}/crow/log"
+    printf '\n'
+    if [ -L "$CROW_HOME/models" ]; then
+        note "$CROW_HOME/models is a link to your model tree; change it with"
+    else
+        note "$CROW_HOME/models is the model root every entry point reads; move it with"
+    fi
+    note "install.sh --models DIR, or point CROW_MODELS at another tree for one shell."
+    # A CHECKOUT IS ITS OWN <install>. crow_core.INSTALL_ROOT is the parent of
+    # the cli/ that is running, so `python cli/crow_gui.py` out of a clone
+    # resolves <clone>/models and never looks here. The line is printed and not
+    # run: this script does not write into somebody's git tree.
+    if [ -n "$REPO" ] && [ "$REPO" != "$CROW_HOME" ] && [ ! -e "$REPO/models" ] \
+       && [ "$MODELS_DIR" != "$REPO/models" ]; then
+        printf '\n'
+        note "Run from the checkout at $REPO, the core resolves $REPO/models"
+        note "instead -- it takes the same link:"
+        cmd "ln -s $MODELS_DIR $REPO/models"
+    fi
     printf '\n'
     note "The terminal client needs nothing but Python:  $PY $CROW_HOME/cli/crow.py"
     note "The Linux page -- paths, the float rule, the escape hatches, troubleshooting:"
@@ -906,6 +1103,7 @@ step "The runtime"
 install_venv
 [ "$WITH_ENGINE" = 1 ] && install_engine || note "engine check skipped (--no-engine)"
 write_launcher
+link_models
 install_desktop
 install_hyprland
 

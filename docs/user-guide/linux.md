@@ -9,7 +9,7 @@ Wayland, RTX 5090, driver 610.57, Python 3.14. Nothing on this page needs root.
 | Window | WebKitGTK 4.1 through PyGObject, where Windows has WebView2 |
 | Engine | built here, not downloaded: there is no Linux release asset |
 | Clipboard | `wl-clipboard`; `xclip` is the X11 fallback |
-| Models | `$CROW_MODELS`, else `<install>/models` |
+| Models | `<install>/models`, a link the installer points at your tree; `$CROW_MODELS` overrides it |
 | Source of truth | [`cli/crow_platform.py`](../../cli/crow_platform.py) — the one module that knows which OS this is |
 
 ---
@@ -28,7 +28,7 @@ bash install.sh --models ~/Projects/models/qwen3.8-flash-next
 
 | flag | |
 |---|---|
-| `--models DIR` | where the GGUFs live. Written into `$CROW_HOME/env`, which the launcher sources |
+| `--models DIR` | where the GGUFs live. Makes `$CROW_HOME/models` a link to it |
 | `--voice` | also `faster-whisper` and `sounddevice` for the composer's microphone |
 | `--build-engine` | build `llama-server` now instead of printing the line (~20 minutes) |
 | `--no-desktop` | no `.desktop` entry, no icons, no Hyprland rule |
@@ -68,7 +68,7 @@ unset, which is what the specification asks for.
 | `index.db` (session search) | `~/.local/share/crow/` | `%LOCALAPPDATA%\Crow\` |
 | `session/`, `booted.json`, `git_events.json` | `~/.local/state/crow/` | `%LOCALAPPDATA%\Crow\` |
 | `llama-server` boot logs | `~/.local/state/crow/log/` | `<cwd>\runs\` |
-| models | `$CROW_MODELS`, else `<install>/models` | `<install>\models` |
+| models | `<install>/models`, a link to the tree; `$CROW_MODELS` overrides it | `<install>\models` |
 | `llama-server` binary | `<install>/bin/`, then `PATH`, then `~/.local/share/crow/bin` | `<install>\bin\llama-server.exe` |
 | fonts | `~/.local/share/fonts/crow/` + `fc-cache` | `%LOCALAPPDATA%\Microsoft\Windows\Fonts` + winreg |
 | launcher | `$CROW_HOME/bin/crow`, symlinked into `~/.local/bin` if that is on `$PATH` | a Start-menu shortcut |
@@ -89,11 +89,28 @@ so the glob of the first walks past it. Without it the server boots the same mod
 text-only one and `read_image` refuses with a sentence. `hf` prints a tick even when it reached
 nothing — check the byte counts (73.45 GiB over three shards, 904,004,000 B for the projector).
 
-`$CROW_MODELS` is the whole mechanism and there is no second copy of it in a settings file: a
-path two places can set is a path nobody can find. The installer writes it into
-`$CROW_HOME/env`, which `$CROW_HOME/bin/crow` sources before the window starts — so a window
-launched from the desktop entry, which inherits no shell profile, finds the same tree a terminal
-does. Change it by re-running `install.sh --models DIR`, or by editing that one file.
+**`<install>/models` is a link to your model tree; change it with `install.sh --models DIR`, or
+point `CROW_MODELS` at another tree for one shell.** The link is the whole mechanism, and it is a
+link rather than a variable because a variable reaches exactly one process. `--models DIR` used to
+write `export CROW_MODELS="DIR"` into `$CROW_HOME/env` and only `$CROW_HOME/bin/crow` sourced that
+file, so the window found the tree and nothing else did — `python3 ~/.local/share/crow/tools/start-server.py
+flash-next-q2-k-xl` answered `model 'flash-next-q2-k-xl' is not on disk`. `<install>/models` is what
+`crow_platform.models_dir()` resolves to with nothing set, so a link there is read by the window,
+the terminal client and `tools/start-server.py` alike, with no environment at all. `$CROW_HOME/env`
+is no longer written, and a run removes the one an earlier run left — unless you edited it, in which
+case it is kept and named, and nothing reads it any more.
+
+**A checkout is its own `<install>`.** `crow_core.INSTALL_ROOT` is the parent of the `cli/` that is
+running, so `python cli/crow_gui.py` from a clone resolves `<clone>/models` and never looks in
+`~/.local/share/crow`. Give the clone the same link — the installer prints this line when it ran
+from one:
+
+```bash
+ln -s ~/Projects/models/qwen3.8-flash-next ~/Projects/crow/models
+```
+
+The installer never replaces a real `<install>/models` directory that has files in it: it warns and
+prints the two lines that would move it aside.
 
 The tree may be flat or nested: the core tries the manifest's path under the models root and
 then the file's basename directly under it, so both
@@ -139,10 +156,13 @@ describes. What Wayland makes different:
 
 **It has to be told to float.** A Wayland client may not place, size or raise its own toplevel —
 `gtk_window_move()` is a documented no-op, `set_keep_above()` does nothing, and a window created
-at 500×250 came up tiled at 1261×688. Crow is frameless and its layout has a hard minimum of
-1,130 px (520 rail + 560 chat + 50 column chrome), so tiled at a third of a screen the composer
-is the first thing to go. The rule ships in both Hyprland dialects, because Hyprland picks its
-parser from the config it finds:
+at 500×250 came up tiled at 1261×688. Tiled is fine -- the window takes its tile, fills the
+workspace and goes fullscreen like any Omarchy window (accepted live, 2026-09-16). The float
+rule is optional: Crow is frameless and its layout has a hard minimum of 1,130 px (520 rail +
+560 chat + 50 column chrome), so tiled at a third of a screen the composer is the first thing to
+go, and floating is the answer for that. The drag and resize grips only matter when floating.
+The rule ships in both Hyprland dialects, because Hyprland picks its parser from the config it
+finds:
 
 | your config | what `install.sh` copies | the line to add, by hand |
 |---|---|---|
@@ -198,10 +218,10 @@ bash install.sh --voice
 | The process dies before anything appears, `Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display` | WebKitGTK's DMA-BUF renderer turns on Wayland explicit sync and then commits a buffer without an acquire point; Hyprland answers with a protocol error and a protocol error kills the connection | Already handled: `cli/crow_gui.py` sets `__NV_DISABLE_EXPLICIT_SYNC=1` **at import**, before `webview` is loaded. If you start the module some other way, export it yourself |
 | The window opens and stays blank | the same renderer, one layer down | `WEBKIT_DISABLE_DMABUF_RENDERER=1 crow` — it drops the accelerated path, which is why it is not the default |
 | Anything that wants real window coordinates, or a window kept above the rest | Wayland does not offer either | `CROW_GDK_BACKEND=x11 crow` — it sets `GDK_BACKEND`, and under XWayland those work again. The app id becomes `Crow`; the shipped rule matches both spellings |
-| The window is tiled and the composer is cut off | the float rule is not loaded | add the line from the table above and `hyprctl reload` |
+| The window is tiled at a narrow width and the composer is cut off | the float rule is not loaded (it is optional) | add the line from the table above and `hyprctl reload` |
 | `crow: this window needs pywebview` | the venv is not the one the launcher points at | `bash install.sh` again — it reuses the venv and repairs the launcher |
 | `no llama-server to run. Tried: …` | the engine has not been built | `bash tools/build-llama-server.sh` |
-| `model 'flash-next-q2-k-xl' is not on disk. Tried: …` | `$CROW_MODELS` points somewhere else, or the download is not finished | the message names every path it tried; `install.sh --models DIR` rewrites the variable |
+| `model 'flash-next-q2-k-xl' is not on disk. Tried: …` | `<install>/models` points at the wrong tree, or the download is not finished | the message names every path it tried; `ls -l ~/.local/share/crow/models` says where the link goes, and `install.sh --models DIR` re-points it |
 | A generic icon, or a window the launcher cannot name | the icon cache, or a `.desktop` entry from before the app id existed | `gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor`, then log out and in |
 | `desktop-file-validate` hints about two main categories | `Categories=Development;Utility;` — the entry may appear in two menus | nothing. It is a hint, not an error |
 

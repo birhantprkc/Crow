@@ -25,7 +25,7 @@ the core. `cli/crow_core.py` calls it at 45 sites and no longer mentions `sys.pl
 | settings, secrets, skills, MCP | `%LOCALAPPDATA%\Crow\` | `~/.config/crow/` |
 | sessions, `booted.json` | `%LOCALAPPDATA%\Crow\` | `~/.local/state/crow/` |
 | server boot logs | `<cwd>\runs\` | `~/.local/state/crow/log/` |
-| models | `<install>\models` | `$CROW_MODELS`, else `<install>/models` |
+| models | `<install>\models` | `<install>/models`, a link to the tree; `$CROW_MODELS` overrides it |
 
 **Three Windows assumptions were production bugs and are fixed.** The `run_command` path
 boundary (#144) knew only `C:\`, UNC and `%VAR%` shapes and released nothing on POSIX;
@@ -75,8 +75,25 @@ elevate and to download the model. Preflight (Python, PyGObject, `wl-clipboard`,
 disk) runs before anything is fetched. It writes `$CROW_HOME/manifest.sha256` and reads it on
 the next run, so a re-run reports what moved underneath it — and the only files it removes are
 the ones the previous manifest listed and the new payload no longer ships, so `bin/`, `cuda/`,
-`src/`, `build/`, `venv/` and a model tree beside them survive. `--selftest` drives 14 checks,
+`src/`, `build/`, `venv/` and a model tree beside them survive. `--selftest` drives 25 checks,
 including the ones that must fail.
+
+**The model root is a link, because a variable reached one entry point.** `--models DIR` wrote
+`export CROW_MODELS="DIR"` into `$CROW_HOME/env`, and the generated `$CROW_HOME/bin/crow` was the
+only thing that sourced it — so the window found the tree and nothing else did: `python3
+~/.local/share/crow/tools/start-server.py flash-next-q2-k-xl` answered `model 'flash-next-q2-k-xl'
+is not on disk`. It is now `$CROW_HOME/models`, a symlink to the tree, which is exactly where
+`crow_platform.models_dir()` looks with nothing set — the fallback its own docstring describes,
+written down on disk instead of into one process's environment, and read by the window, the
+terminal client and `tools/start-server.py` alike. A checkout is its own `<install>`
+(`crow_core.INSTALL_ROOT` is the parent of `cli/`), so it takes the same link and the last step of
+the installer prints that line rather than writing into somebody's git tree. `$CROW_MODELS` is what
+that docstring always called it: the
+override, for one shell. `$CROW_HOME/env` is no longer written and a run removes the one an earlier
+run left, byte for byte or not at all — an env file with a line of the user's own in it is kept and
+named. A real `<install>/models` directory with files in it is never replaced: the installer warns
+and prints the two lines that would move it aside. The model tree is not payload and never was, so
+the link is not in `manifest.sha256` and a re-run does not report it as drift.
 
 `tools/build-llama-server.sh` builds the CUDA engine, because the Windows release asset is an
 `.exe` and there is no Linux one: llama.cpp pin `6c84c7d5d` (PR #27742, `qwen4exp`) plus PR
@@ -93,7 +110,7 @@ quote and compared `session"` against the manifest's `session`, so the README's 
 is correct, and which a human copies and runs — had been red since it was written, and the
 installer's own printed lines were laid out around the parser instead of around the reader. A
 quote is the shell's punctuation, not part of the value, and is now stripped the way the
-PowerShell line-continuation backtick already was. **8 of 8 sources agree** where it was 7.
+PowerShell line-continuation backtick already was. **8 of 8 sources agree** where it was 7; 9 of 9 with the Linux entry.
 
 ### Also
 
@@ -107,7 +124,7 @@ PowerShell line-continuation backtick already was. **8 of 8 sources agree** wher
 
 **Suites.** 1,947 cases, 0 failures: `test_crow_core` + `test_crow` 1,313 (25 of them failed on
 Linux before the seam), `test_crow_gui` 634. `check_shared_core` 79 of 79. `check_operating_point`
-8 of 8. `install.sh --selftest` 14 of 14.
+9 of 9. `install.sh --selftest` 25 of 25.
 
 **Not verified:** the pointer-driven drag and resize themselves — the bridge, the edge table and
 the GTK call are covered by the suite, but synthesising a real button press against the

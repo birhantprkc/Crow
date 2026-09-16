@@ -154,12 +154,14 @@ def models_dir(install: str | None = None) -> str:
     `$CROW_MODELS` FIRST, because a model tree is the one part of an install
     that a user moves: 80-110 GiB do not belong beside the program, and on this
     machine they live under ~/Projects/models while the install is in
-    ~/.local/share/crow. The variable is the whole mechanism -- there is no
-    second copy of it in a settings file, because a path that two places can
-    set is a path nobody can find.
+    ~/.local/share/crow. There is no copy of it in a settings file, because a
+    path that two places can set is a path nobody can find.
 
     Absent the variable this is `<install>/models`, which is exactly what
-    model_candidates has always used.
+    model_candidates has always used -- and on Linux that is where install.sh
+    puts a SYMLINK to the chosen tree, so every entry point (the window,
+    tools/start-server.py, a terminal) finds the model with no variable set.
+    The variable is the override for one shell; the link is the install.
     """
     raw = (os.environ.get("CROW_MODELS") or "").strip()
     if raw:

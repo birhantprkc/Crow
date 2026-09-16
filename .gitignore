@@ -46,3 +46,9 @@ dist/
 # rebuilt from pyproject.toml and neither is anybody else's business.
 .ruff_cache/
 *.egg-info/
+
+# The model tree, linked in for a dev checkout the same way /bin/ is: the core
+# resolves <install>/models and a checkout is its own <install>, so
+# `ln -s ~/Projects/models/qwen3.8-flash-next models` is how a clone finds the
+# 73 GiB. No trailing slash -- what is ignored is a symlink, not a directory.
+/models

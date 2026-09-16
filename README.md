@@ -260,7 +260,7 @@ Same window, same core, same manifest, the same operating point. Ported and run 
 | **Clipboard** | `wl-clipboard`; `xclip` is the X11 fallback |
 | **Install root** | `${XDG_DATA_HOME:-~/.local/share}/crow`, nothing outside `$HOME` |
 | **Settings** | `~/.config/crow`. Sessions, boots and server logs `~/.local/state/crow` |
-| **Models** | `$CROW_MODELS`, else `<install>/models` -- 73.45 GiB does not belong under `~/.local/share` |
+| **Models** | `<install>/models`, a link to the tree -- 73.45 GiB does not belong under `~/.local/share` |
 | **Engine** | built here: llama.cpp pin `6c84c7d5d` + PR #27880 + PR #28040, CUDA 13.3, `sm_120` |
 | **Full page** | [`docs/user-guide/linux.md`](docs/user-guide/linux.md) |
 
@@ -294,14 +294,23 @@ hf download unsloth/Qwen3.8-Flash-Next-GGUF mmproj-F16.gguf --local-dir ~/Projec
 ```
 
 The second line is the vision projector and the glob of the first walks past it -- the same
-warning as above, for the same reason. Then tell the core where the tree is, once:
+warning as above, for the same reason.
+
+`install.sh --models DIR` makes `$CROW_HOME/models` a **link** to that tree, and `<install>/models`
+is where the core looks when nothing is set -- so the window, the terminal client and
+`tools/start-server.py` all find it, including a window started from the desktop entry that
+inherits no shell profile. A checkout is its own `<install>`, so give it the same link (the
+installer prints this line when it ran from one):
+
+```bash
+ln -s ~/Projects/models/qwen3.8-flash-next ~/Projects/crow/models
+```
+
+To point one shell at a different tree, and for the by-hand line below:
 
 ```bash
 export CROW_MODELS=~/Projects/models/qwen3.8-flash-next
 ```
-
-`install.sh --models DIR` writes that into `$CROW_HOME/env`, which the `crow` launcher sources,
-so a window started from the desktop entry finds the same tree as a shell does.
 
 ### Engine
 
@@ -343,11 +352,12 @@ threads, 34.4 / 31.3 at `-t 8`, **36.7 / 36.2 at `-t 24`**. The Windows line's 4
 
 ### The window on Hyprland
 
-A Wayland client may not place, size or raise its own toplevel, and Crow's layout has a hard
-minimum of 1,130 px; tiled at a third of a screen the composer is the first thing to go. So the
-float rule is the compositor's to apply. `install.sh` copies it to `~/.config/hypr/crow.lua`
-(Lua config) or `~/.config/hypr/crow.conf` (ini config) and prints the one line to add -- it
-does not edit your config:
+Tiled, the window behaves like any Omarchy window: it takes its tile, fills the workspace on
+its own, goes fullscreen with the compositor's key (accepted live, 2026-09-16). The float rule
+is **optional**, for a half-width tile where the layout's 1,130 px minimum cuts the composer
+off. `install.sh` copies it to `~/.config/hypr/crow.lua` (Lua config) or
+`~/.config/hypr/crow.conf` (ini config) and prints the one line to add -- it does not edit
+your config:
 
 ```lua
 require("hypr.crow")
