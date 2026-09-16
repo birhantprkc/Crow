@@ -1,3 +1,5 @@
+[← README](../../README.md) · [Docs index](../README.md)
+
 # Window
 
 <div align="center">
@@ -16,7 +18,8 @@
 | Program code | under the calls, from `write_file` and `edit_file` only. Its own fold with a count, like the calls above it. The head of each block is the **path**, the body the content — no JSON envelope. Readable while it is being written; the envelope is replaced once the arguments are whole |
 | `copy` per block | in the head of every code block, beside the path — it copies **that** block. The panel head has no `copy`: one button for calls and source together copied both to whoever wanted one of them (#156) |
 | Git panel | in the CHAT since 2.0.0, under the goal panel — one flex column, so a goal that starts or ends moves it without a line of JavaScript. Toggled by the octocat in the title bar, still the only way to close it (#156, #173) |
-| Browser panel | a globe in the title bar, beside code and git. Tabs, an address bar, per-tab history. A second frameless WebView2 over the panel rect, not an iframe — see [browser](browser.md) (#175) |
+| Goal panel | in the chat, above the git panel: title, `done/total`, wall clock, tokens, delegated tokens, one row per step. It survives a rollover and a restart — see [goals and subagents](goals-and-subagents.md) (#161–#165) |
+| Browser panel | a globe in the title bar, beside code and git. Tabs, an address bar, per-tab history. A second frameless window over the panel rect, not an iframe — a WebView2 on Windows, a separate floating toplevel under Wayland. See [browser](browser.md) (#175) |
 | `clear all` | empties both halves and stays empty across a restart. The group's own `clear` takes the calls only |
 | Code blocks | language, line count and `copy`. Fifteen lines or more can be folded away |
 | Images | drop `.png .jpg .jpeg .gif .webp .bmp` into the window, paste a screenshot (Ctrl+V), or `/image <path>`: a chip per image above the input, `×` removes one. They ride the next line, appear in the transcript, and are still there after a restart. Needs a server started with `--mmproj` — one without it refuses with a sentence before anything is sent. The bytes travel unresized; the server caps an image at 4,096 tokens (`--image-max-tokens`). Any other dropped file keeps the old behaviour: its path lands in the input for the model to `read_file`. The model opens one itself with [`read_image`](../reference/tools.md) (#170) |
@@ -26,11 +29,33 @@
 | OpenRouter page | its own pane in Settings, and it routes no turn: the switch parks or runs the broker — delegation, catalogue, favourites — while the machine keeps answering. The default is always the machine; turns leave it only through the Model page |
 | Delegate favourites | on the OpenRouter page: three dropdowns over the whole catalogue, tried in your order before the free default — a paid favourite is your explicit pick on your own key, and what nobody chose never falls forward onto a bill. A spot that failed this session is skipped (#146, #148) |
 | Budgets | `turn_token_budget` and `subtask_max_tokens` in settings.json, both opt-in (#145); a spent token budget ends the turn with the same protocol as the round budget |
-| Self-healing | dies the server the window itself booted (`%LOCALAPPDATA%\Crow\booted.json`, kept across restarts), the turn reboots it — `booting it again (n/3)`, three per turn, then honestly red with the boot's own exit code. A server still loading (HTTP 503) is waited out once per turn |
-| Boot logs | every boot Crow starts writes `runs\llama-server-<port>.out.log` / `.err.log` under the working directory, rewritten per boot — a silent death leaves its exit code and stderr there |
-| Persistent subtasks | cards and `⑂` rows come back after a window restart (`session\subtasks-registry.json`): `running` becomes `interrupted`, numbering continues, deleting a chat deletes its subtasks |
+| Self-healing | dies the server the window itself booted (`booted.json`, kept across restarts — `%LOCALAPPDATA%\Crow\` on Windows, `~/.local/state/crow/` on Linux), the turn reboots it — `booting it again (n/3)`, three per turn, then honestly red with the boot's own exit code. A server still loading (HTTP 503) is waited out once per turn |
+| Boot logs | every boot Crow starts writes `llama-server-<port>.out.log` / `.err.log`, rewritten per boot — under `<cwd>\runs\` on Windows, `~/.local/state/crow/log/` on Linux. A silent death leaves its exit code and stderr there |
+| Persistent subtasks | cards and `⑂` rows come back after a window restart (`session/subtasks-registry.json`): `running` becomes `interrupted`, numbering continues, deleting a chat deletes its subtasks |
 | Scroll | the stream pulls to the end only for who IS at the end (80 px); scrolled up, nothing yanks you back — your own message does |
 | Rollover | past 0.9 of the window the next line rolls BEFORE the turn — the archive is a complete conversation, your line opens the new context as carry. Mid-turn the roll happens at a round boundary, once per turn; a refused second roll is a red line, and the readout resets the moment a roll happens (#152). The note carries the model's own digest of the leg — asked on the still-warm prefix, marked as unverified model text, capped by `rollover_digest_tokens` (`0` off, #154); the leg runs with thinking off, because the model's thinking would otherwise eat the cap (#157) |
+
+---
+
+## Dictation
+
+The microphone sits between the release level and the arrow. While it records, the composer is a
+live waveform:
+
+<div align="center">
+<img src="../images/CrowVoiceInput.png" alt="The composer recording: a waveform across the input, the microphone lit" width="900">
+</div>
+
+| | |
+|---|---|
+| Why Python and not the page | the window is handed to WebView2 as HTML rather than served, so it is not a secure context — `getUserMedia` is behind that same gate, and WebView2 has no recogniser of its own |
+| Model | `faster-whisper-small`, ~486 MB, multilingual. Fetched by the window on the first click, not by the installer |
+| Audio | 16 kHz mono asked of the device directly, no resampler behind it |
+| Disk | nothing. `sounddevice` fills an array and `faster-whisper` takes it directly — there is no WAV in between |
+| Optional | both imports are, like pywebview itself. Missing ones are **named** in the sentence the button answers with |
+| Linux | `bash install.sh --voice`, plus PortAudio from the distribution — see [Linux](linux.md) |
+
+It never submits by itself: the text lands in the input and you press the arrow.
 
 ---
 
@@ -45,7 +70,7 @@ folds away leaves no way back.
 | Changes | branch against its upstream, every changed file with its status letter and `+`/`−`, the totals in the head. Untracked files are listed and counted separately — they are never swept into a commit |
 | `⎇ <branch>` | the current branch, ahead/behind in the head, every local branch in the body |
 | `⊸ Commit` | the tracked, changed files **by name**, a message field, and the button. It stages exactly those paths — no `-a`, no `.` |
-| History | `◉` commit · `⑃` merge · `⇧` push · `⑂` fork · `◈` connect. Commits and merges come out of `git log`; pushes and connects out of Crow's own record (`%LOCALAPPDATA%\Crow\git_events.json`) — nothing is invented, a fork appears the day one happens |
+| History | `◉` commit · `⑃` merge · `⇧` push · `⑂` fork · `◈` connect. Commits and merges come out of `git log`; pushes and connects out of Crow's own record (`git_events.json`, beside the sessions) — nothing is invented, a fork appears the day one happens |
 
 The repository is the one the **working directory** is bound to, never the process's
 cwd. No folder bound, or the folder is not a repository: the panel says so and shows

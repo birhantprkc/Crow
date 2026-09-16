@@ -1,3 +1,5 @@
+[← README](../../README.md) · [Docs index](../README.md)
+
 # MCP over HTTP
 
 Transport `Streamable HTTP`, specification `2025-06-18`. A block with a `url` uses it; a block with
@@ -88,5 +90,5 @@ so does re-fetching a configured server; `/mcp auth <server>` repeats it on its 
 | Several `authorization_servers` | tried in the order the metadata lists them |
 | `resource` | RFC 8707. The `resource` the metadata names, checked against the endpoint's host first; the canonical URI of the endpoint where it names none. On the authorization request and the token request |
 | Transport | every endpoint must be `https`, or loopback. Anything else is refused before a token moves |
-| Tokens | `%LOCALAPPDATA%\Crow\mcp_tokens.json`, never in `mcp.json` and never in a view. `0600` where the platform means it. Dropped with the server |
+| Tokens | `mcp_tokens.json` — `%LOCALAPPDATA%\Crow\` on Windows, `~/.config/crow/` on Linux. Never in `mcp.json` and never in a view. `0600` where the platform means it. Dropped with the server |
 | Refresh | inside a tool call, silently, `60 s` before expiry and on a `401`. A browser never opens during a turn. The call fails naming `/mcp auth <server>` |

@@ -1,3 +1,5 @@
+[← README](../../README.md) · [Docs index](../README.md)
+
 ## Client flags
 
 | flag | default | |

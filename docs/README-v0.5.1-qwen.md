@@ -1,3 +1,5 @@
+[← README](../README.md) · [Docs index](README.md)
+
 <!-- ARCHIVED 2026-08-21. This is README.md as it stood at v0.5.1, Qwen-first with the
      DeepSeek server line still in it. Kept whole, images included, because a README is
      the one page that says what the project WAS at a version. Do not edit: the live one

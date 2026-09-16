@@ -1,3 +1,5 @@
+[← README](../../README.md) · [Docs index](../README.md)
+
 # Browser panel (#175)
 
 A globe in the title bar, beside the code and git buttons. That button is also the only way to
@@ -6,12 +8,16 @@ close it, as it is for its two neighbours. The open state survives a restart (`b
 
 ## What it is
 
-A **second, frameless WebView2** laid over the panel rectangle — not an iframe.
+A **second, frameless window** laid over the panel rectangle — not an iframe. On Windows that is
+a second WebView2; under Wayland a child window cannot be glued to a parent's coordinates, so it
+is a separate floating toplevel carrying the same `crow` app id, and the Hyprland float rule
+catches it too ([Linux](linux.md)).
 
 | | |
 |---|---|
 | why not an iframe | `X-Frame-Options: DENY` and `frame-ancestors 'none'` refuse embedding. Measured 2026-08-31: claude.ai, github.com and google.com stayed blank; example.com, which sends no such header, loaded |
 | why a window works | a window is a top-level browsing context. Neither header applies to one |
+| one WebView2 per tab | not built. One pane serves every tab, so switching reloads the page |
 | geometry | the page reports the CSS rect of `#brbody`; Python adds the main window's corner. The main window is frameless, so its corner is the corner of the drawing area |
 | follows | `moved`, `resized`, a `ResizeObserver` on the rect (grip, code panel), `minimized` hides, `restored` shows |
 | folded away | hidden, not destroyed — a pane rebuilt from scratch loses the page somebody was on |
@@ -24,7 +30,7 @@ A **second, frameless WebView2** laid over the panel rectangle — not an iframe
 | tab `×` | close; the neighbour takes over, not the first |
 | `‹` `›` | per-tab history, kept in a list — `history.back()` on a foreign page throws cross-origin |
 | `⟳` | reload |
-| address | a URL, a bare host (`example.com` → `https://`), or a Windows path (`C:\dir\page.html` → `file:///`) |
+| address | a URL, a bare host (`example.com` → `https://`), or a local path (`C:\dir\page.html`, `/home/you/page.html` → `file:///`) |
 | tab name | the hostname, or the file name for `file://`. The page title is cross-origin |
 
 **One pane for all tabs**, so switching reloads the page. One window per tab would be one

@@ -1,3 +1,5 @@
+[← README](../../README.md) · [Docs index](../README.md)
+
 # Flash-Next Decode: der beste Stand nach der Nacht
 
 **Kurz: `-ncmoe 30 -b 2048 -ub 2048` ist ein echter Gewinn -- +16,8 % Decode,

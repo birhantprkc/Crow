@@ -1,9 +1,11 @@
+[← README](../../README.md) · [Docs index](../README.md)
+
 # Skills
 
 Procedures the model keeps. Memory is what is **true**; a skill is what to **do**.
 
 ```
-%LOCALAPPDATA%\Crow\skills\<name>\SKILL.md
+skills/<name>/SKILL.md      under %LOCALAPPDATA%\Crow\ on Windows, ~/.config/crow/ on Linux
 ---
 name: start-llama-server
 description: When Crow needs a local LLM (port 8082). Exact flags, the wait signal, the bind trap.
@@ -20,6 +22,11 @@ enabled: true
 | Over the limit | the list says how many did not fit; it does not grow |
 | `enabled` | in the file's own frontmatter. Absent means on |
 | Written by | the same review at 0.20 / 0.50 / 0.75. One pass decides both |
+| Switched off | `Settings → Skills`, one row per skill. Off takes it out of the prompt; the file stays |
+
+<div align="center">
+<img src="../images/CrowSkills.png" alt="Settings, Skills: one row per skill with its description and a switch" width="900">
+</div>
 
 ## Creating one
 

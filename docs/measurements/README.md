@@ -1,3 +1,5 @@
+[← README](../../README.md) · [Docs index](../README.md)
+
 # Measurements
 
 One user, `-np 1`, identical prompt, server restarted cold per arm, cross-checked against the
@@ -37,7 +39,7 @@ Cause unmeasured. Elevated is compared only with elevated.
 ## Placement and ubatch, Flash-Next (#182)
 
 Full map: [`flash-next-placement.md`](flash-next-placement.md) — raw rows
-[`flash-next-placement-runs.csv`](flash-next-placement-runs.jsonl), 27 runs.
+[`flash-next-placement-runs.csv`](flash-next-placement-runs.csv), 27 runs.
 Harness: `tools/measure/try-one.py` (one run, one config) and
 `tools/measure/measure-ngram-spec.py` (interleaved series).
 

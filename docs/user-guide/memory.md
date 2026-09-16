@@ -1,11 +1,13 @@
+[← README](../../README.md) · [Docs index](../README.md)
+
 # Memory
 
 Two files. Plain text, `§` on its own line between entries, editable by hand.
 
 | path | limit | holds |
 |---|---|---|
-| `<working directory>\.crow\MEMORY.md` | 4,000 chars | this project: layout, conventions, commands, traps |
-| `%LOCALAPPDATA%\Crow\USER.md` | 1,500 chars | who you are, how you want to be worked with |
+| `<working directory>/.crow/MEMORY.md` | 4,000 chars | this project: layout, conventions, commands, traps |
+| `USER.md` — `%LOCALAPPDATA%\Crow\` on Windows, `~/.config/crow/` on Linux | 1,500 chars | who you are, how you want to be worked with |
 
 | | |
 |---|---|

@@ -1,21 +1,31 @@
+[← README](../../README.md) · [Docs index](../README.md)
+
 # Remote models
 
 `Settings → API Keys`, paste the key, then `Settings → Model`. The catalogue is fetched when the key
 lands and on `ask again`. Nothing is asked of a provider while a window opens.
 
+<div align="center">
+<img src="../images/CrowAPI.png" alt="Settings, API Keys: one key per provider, shown as a mask once saved" width="900">
+</div>
+
+A key is kept in its own file that no view reads back — what the box shows afterwards is a mask.
+
 OpenRouter has its own page instead: switch, delegate favourites and model pick. **The page routes
 no turn** — its switch runs the broker for delegation while the machine keeps answering, in
 parallel. The default is always the machine; turns leave it only through the Model page.
 
+Three files, in `%LOCALAPPDATA%\Crow\` on Windows and `~/.config/crow/` on Linux:
+
 | file | |
 |---|---|
-| `%LOCALAPPDATA%\Crow\providers.json` | active provider, model per provider, catalogue, favourites, the broker switch |
-| `%LOCALAPPDATA%\Crow\provider_keys.json` | keys, `0600`, read by no view |
-| `%LOCALAPPDATA%\Crow\provider_tokens.json` | logins, `0600`, read by no view |
+| `providers.json` | active provider, model per provider, catalogue, favourites, the broker switch |
+| `provider_keys.json` | keys, `0600`, read by no view |
+| `provider_tokens.json` | logins, `0600`, read by no view |
 
 | provider | endpoint | credential |
 |---|---|---|
-| This machine | `--base-url`, default `http://127.0.0.1:8082/v1` | none |
+| This machine | `--base-url`, default `http://127.0.0.1:8083/v1` since 2.0.0 | none |
 | OpenRouter | `https://openrouter.ai/api/v1` | `sk-or-...` |
 | Anthropic | `https://api.anthropic.com/v1` (Messages) | `sk-ant-...` or a sign-in |
 | OpenAI | `https://api.openai.com/v1` | `sk-...` or a sign-in |

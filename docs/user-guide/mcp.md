@@ -1,3 +1,5 @@
+[← README](../../README.md) · [Docs index](../README.md)
+
 # MCP servers
 
 ```
@@ -11,9 +13,16 @@
 The name comes out of the line: `filesystem`, `notekeeper`, `fetch`. A URL is named from its host:
 `context7`, and `docs.mcp.cloudflare.com` is `cloudflare_docs`.
 
+<div align="center">
+<img src="../images/CrowMCP.png" alt="Settings, MCPs: one row per server with its tool count and prompt cost, and a field to add another" width="900">
+</div>
+
+`Settings → MCPs` is the same thing with a mouse: one row per server, its tool count and what
+its declarations cost in every prompt, `ask again`, `remove`, and a field to add one.
+
 | | |
 |---|---|
-| Config | `%LOCALAPPDATA%\Crow\mcp.json`, one block per server |
+| Config | `mcp.json`, one block per server — `%LOCALAPPDATA%\Crow\` on Windows, `~/.config/crow/` on Linux |
 | Transport | `command` → stdio, `url` → [Streamable HTTP](mcp-http.md). One block is one transport, never both |
 | Protocol | `2025-06-18`. A `-32022` with `data.supported` is retried once against the highest version offered |
 | Schema | asked **once**, when the server is added, then written to disk |
