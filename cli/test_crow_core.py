@@ -13156,7 +13156,10 @@ class ThePlatformSeamAnswersForOneSystemAtATimeTests(unittest.TestCase):
         props = [prefix[i + 1] for i, a in enumerate(prefix) if a == "-p"]
         self.assertIn("MemorySwapMax=0", props)
         self.assertIn("MemoryHigh=40G", props)
-        self.assertTrue(any(p.startswith("MemoryMax=") for p in props), props)
+        # MemoryMax is derived from the machine's RAM and only above 16 GiB:
+        # ubuntu-latest reports 15 and gets none (2026-09-16, one red run).
+        big = crow_platform._mem_total_bytes() // (1024 ** 3) >= 16
+        self.assertEqual(any(p.startswith("MemoryMax=") for p in props), big, props)
         self.assertEqual(prefix[-1], "--")
 
     def test_the_user_manager_is_read_off_its_socket(self):
