@@ -38,16 +38,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-    env:
-      # THE RUNNER'S %TEMP% IS AN 8.3 SHORT NAME. On windows-latest it is
-      # C:\Users\RUNNER~1\AppData\Local\Temp, and tempfile hands that spelling
-      # to the suites while the code under test answers with the long one
-      # (runneradmin). Five working-directory tests compare the two and were
-      # red on 2026-09-16 for that reason alone; every one of them is green on
-      # a machine whose temp path has no short name. runner.temp (D:\a\_temp)
-      # has none, so the suites see the path the same way the code does.
-      TEMP: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
 
     steps:
       - uses: actions/checkout@v4
@@ -86,6 +76,17 @@ jobs:
           "$PY" -m ruff check .
 
       - name: the unit suites
+        env:
+          # THE RUNNER'S %TEMP% IS AN 8.3 SHORT NAME. On windows-latest it is
+          # C:\Users\RUNNER~1\AppData\Local\Temp, and tempfile hands that
+          # spelling to the suites while the code under test answers with the
+          # long one (runneradmin). Five working-directory tests compare the two
+          # and were red on 2026-09-16 for that reason alone; every one is green
+          # on a machine whose temp path has no short name. runner.temp
+          # (D:\a\_temp) has none. Step-level, because the runner context is
+          # not available to a job-level env (the first attempt failed to parse).
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
         run: |
           cd cli && "$PY" -m unittest $SUITES
 
