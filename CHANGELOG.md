@@ -3,6 +3,31 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 2.2.1 — unreleased
+
+### The server gets a scope of its own, because oomd took the terminal with it
+
+Measured 2026-09-16 on Omarchy, four times between 17:42 and 17:56: `llama-server` started
+from a terminal, loaded for a minute, and systemd-oomd killed the terminal's whole scope --
+34, 60, 56, 34 processes, the server and every shell and agent that terminal had spawned. The
+server's log ends at `loading model`. The mechanism: `ManagedOOMMemoryPressure=kill` on
+`app.slice` (50 % for 20 s), `vm.swappiness=150` over zram, and `--load-mode none` holding
+~48 GiB of experts in anonymous memory while the page cache holds the same bytes; on 62 GiB
+the desktop goes to zram, pressure crosses the limit, and oomd kills the largest cgroup under
+`app.slice`.
+
+`crow_platform.server_scope_prefix()` wraps the boot -- the window's and
+`tools/start-server.py`'s alike -- in `systemd-run --user --scope --slice=session.slice
+-p MemoryHigh=<RAM − 8 GiB>` when `systemd-run` is on the PATH and the user manager's socket
+is there. Out of `app.slice`, a kill can never take a terminal; bounded, the kernel reclaims
+the server's own clean cache before anything else. Verified: a user scope accepts both
+properties and `memory.high` lands in the cgroup. Not yet measured: that the load then stays
+out of swap. `CROW_SERVER_MEMORY_HIGH` moves the bound, `CROW_SERVER_SCOPE=0` runs the bare
+process. Empty on Windows, byte-identical there.
+
+The README's Start section names both commands per OS -- the server, then the window -- instead
+of claiming the window boots the server on its own.
+
 ## 2.2.0 — 2026-09-16
 
 Crow runs on Linux. Not a port of the page to a second toolkit: the same `cli/crow_gui.py`, the

@@ -13126,6 +13126,76 @@ class ThePlatformSeamAnswersForOneSystemAtATimeTests(unittest.TestCase):
             self.assertEqual(kwargs, {"start_new_session": True})
         self.assertEqual(crow_platform.spawn_kwargs(detached=False), {})
 
+    def test_the_server_gets_a_scope_of_its_own_where_the_system_has_one(self):
+        """Der oomd-Kill vom 2026-09-16: vier Mal nahm er das Terminal mit,
+        weil der Server in dessen Scope sass. Der Praefix stellt ihn in
+        session.slice mit eigener MemoryHigh; auf Windows, ohne systemd-run
+        und ohne erreichbaren User-Manager ist er leer, und
+        CROW_SERVER_SCOPE=0 schaltet ihn ab."""
+        self._env("CROW_SERVER_SCOPE", "0")
+        self.assertEqual(crow_platform.server_scope_prefix(), [])
+        self._env("CROW_SERVER_SCOPE", "")
+        self.addCleanup(setattr, crow_platform.shutil, "which", crow_platform.shutil.which)
+        crow_platform.shutil.which = lambda name: None
+        self.assertEqual(crow_platform.server_scope_prefix(), [])
+        if crow_platform.IS_WINDOWS:
+            crow_platform.shutil.which = lambda name: r"C:\\systemd-run.exe"
+            self.assertEqual(crow_platform.server_scope_prefix(), [])
+            return
+        crow_platform.shutil.which = lambda name: "/usr/bin/systemd-run"
+        self._env("XDG_RUNTIME_DIR", self.dir)  # no systemd/private socket here
+        self.assertEqual(crow_platform.server_scope_prefix(), [])
+        self.addCleanup(setattr, crow_platform, "user_manager_reachable",
+                        crow_platform.user_manager_reachable)
+        crow_platform.user_manager_reachable = lambda runtime_dir=None: True
+        self._env("CROW_SERVER_MEMORY_HIGH", "40G")
+        prefix = crow_platform.server_scope_prefix()
+        self.assertEqual(prefix[0], "/usr/bin/systemd-run")
+        self.assertIn("--scope", prefix)
+        self.assertIn("--slice=session.slice", prefix)
+        self.assertEqual(prefix[prefix.index("-p") + 1], "MemoryHigh=40G")
+        self.assertEqual(prefix[-1], "--")
+
+    def test_the_user_manager_is_read_off_its_socket(self):
+        """Kein Probelauf, eine Datei: der private Socket des User-Managers.
+        Ein Verzeichnis ohne ihn heisst nein; ein echter Socket dort heisst ja."""
+        import socket
+        self.assertFalse(crow_platform.user_manager_reachable(self.dir))
+        self.assertFalse(crow_platform.user_manager_reachable(""))
+        if crow_platform.IS_WINDOWS:
+            return
+        os.makedirs(os.path.join(self.dir, "systemd"), exist_ok=True)
+        path = os.path.join(self.dir, "systemd", "private")
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.bind(path)
+            self.assertTrue(crow_platform.user_manager_reachable(self.dir))
+
+    def test_the_memory_bound_leaves_the_desktop_its_headroom(self):
+        """62 GiB minus 8 GiB Reserve sind 54 GiB, ueber den ~50 GiB der Zeile
+        und unter dem Punkt, an dem der Desktop in den zram geht. Unter 16 GiB
+        gibt es keine Schranke, und die Variable gewinnt immer."""
+        gib = 1024 ** 3
+        self._env("CROW_SERVER_MEMORY_HIGH", "")
+        self.assertEqual(crow_platform.server_memory_high(62 * gib + 1), "54G")
+        self.assertEqual(crow_platform.server_memory_high(16 * gib), "8G")
+        self.assertIsNone(crow_platform.server_memory_high(15 * gib))
+        self._env("CROW_SERVER_MEMORY_HIGH", "48G")
+        self.assertEqual(crow_platform.server_memory_high(62 * gib), "48G")
+        self._env("CROW_SERVER_MEMORY_HIGH", "none")
+        self.assertIsNone(crow_platform.server_memory_high(62 * gib))
+
+    def test_the_scope_really_starts_a_child_here(self):
+        """Nicht nur die Liste: wenn diese Maschine einen User-Manager hat,
+        laeuft ein Kind durch den Praefix und antwortet aus session.slice."""
+        if crow_platform.IS_WINDOWS or not crow_platform.server_scope_prefix():
+            self.skipTest("no user manager reachable here")
+        self._env("CROW_SERVER_MEMORY_HIGH", "1G")
+        out = subprocess.run(crow_platform.server_scope_prefix()
+                             + ["cat", "/proc/self/cgroup"],
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("session.slice", out.stdout)
+
     def test_a_detached_child_is_ended_with_its_whole_group(self):
         """Ein echter Prozess, kein Attrappen-Handle: gestartet wie der Server
         gestartet wird, in eigener Sitzung, und danach wirklich tot. Ein Kind,

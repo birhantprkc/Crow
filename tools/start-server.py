@@ -29,6 +29,7 @@ REPO = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(REPO, "cli"))
 
 import crow_core  # noqa: E402
+import crow_platform  # noqa: E402
 
 
 def main(argv: list[str]) -> int:
@@ -88,7 +89,11 @@ def main(argv: list[str]) -> int:
     # console, so the log lands where a hand-started server's log lands and
     # Ctrl+C reaches it the same way. This process just waits and hands back
     # whatever the server exited with.
-    return subprocess.call(command)
+    # Same scope the window's boot uses (Linux: systemd-run, session.slice,
+    # MemoryHigh). Without it systemd-oomd took THIS terminal down with the
+    # server four times on 2026-09-16 -- crow_platform.server_scope_prefix
+    # carries the measurement.
+    return subprocess.call(crow_platform.server_scope_prefix() + command)
 
 
 if __name__ == "__main__":

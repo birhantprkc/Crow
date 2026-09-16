@@ -162,7 +162,18 @@ crow
 ```
 
 The window reads the port off the running server; the model menu can switch and reboot it from
-there. The page, the tools, the memory and the browser pane are the ones [`window.md`](window.md)
+there.
+
+**The server runs in a scope of its own.** Both starts wrap `llama-server` in
+`systemd-run --user --scope --slice=session.slice -p MemoryHigh=<RAM minus 8 GiB>` when
+`systemd-run` is on the PATH and the user manager is reachable. Measured 2026-09-16 on
+Omarchy without it: systemd-oomd (kill policy on `app.slice`, 50 % pressure for 20 s, over
+`vm.swappiness=150` and zram) killed the terminal's whole scope four times while the model
+loaded -- the server and every process that terminal had spawned, log ending at
+`loading model`. In `session.slice` oomd does not watch it, and the memory bound makes the
+kernel reclaim the server's own page cache (the second copy of the model during
+`--load-mode none`) before it touches the desktop. `CROW_SERVER_MEMORY_HIGH=48G` moves the
+bound, `CROW_SERVER_SCOPE=0` runs the bare process. The page, the tools, the memory and the browser pane are the ones [`window.md`](window.md)
 describes. What Wayland makes different:
 
 **It has to be told to float.** A Wayland client may not place, size or raise its own toplevel —
@@ -226,6 +237,7 @@ bash install.sh --voice
 
 | symptom | what it is | what to do |
 |---|---|---|
+| The server and the whole terminal vanish during the load, `journalctl --user` says `systemd-oomd killed N process(es)` | oomd killed the terminal's scope under memory pressure (see "The server runs in a scope of its own") | update to 2.2.1 or newer; check the start line shows `systemd-run`; if `systemd-run` is missing, install it or set `CROW_SERVER_SCOPE=0` and accept the risk |
 | The process dies before anything appears, `Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display` | WebKitGTK's DMA-BUF renderer turns on Wayland explicit sync and then commits a buffer without an acquire point; Hyprland answers with a protocol error and a protocol error kills the connection | Already handled: `cli/crow_gui.py` sets `__NV_DISABLE_EXPLICIT_SYNC=1` **at import**, before `webview` is loaded. If you start the module some other way, export it yourself |
 | The window opens and stays blank | the same renderer, one layer down | `WEBKIT_DISABLE_DMABUF_RENDERER=1 crow` — it drops the accelerated path, which is why it is not the default |
 | Anything that wants real window coordinates, or a window kept above the rest | Wayland does not offer either | `CROW_GDK_BACKEND=x11 crow` — it sets `GDK_BACKEND`, and under XWayland those work again. The app id becomes `Crow`; the shipped rule matches both spellings |

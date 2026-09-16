@@ -384,6 +384,105 @@ def spawn_kwargs(detached: bool = True) -> dict:
     return {"start_new_session": True}
 
 
+_SCOPE_HEADROOM_GIB = 8
+
+
+def _mem_total_bytes(meminfo: str = "/proc/meminfo") -> int:
+    try:
+        with open(meminfo, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def server_memory_high(mem_total: int | None = None) -> str | None:
+    """The memory.high the server's scope gets, as a systemd size, or None.
+
+    $CROW_SERVER_MEMORY_HIGH wins (any systemd size, e.g. `48G`; `0` or `none`
+    switches the bound off). Else the machine's RAM minus a headroom of 8 GiB
+    for everything that is not the server: at 62 GiB that is 54 GiB, above the
+    ~50 GiB the measured line keeps in anonymous memory and below the point
+    where the desktop is what gets paged. Below 16 GiB of RAM the bound is
+    pointless and None.
+    """
+    raw = (os.environ.get("CROW_SERVER_MEMORY_HIGH") or "").strip()
+    if raw:
+        return None if raw.lower() in ("0", "none", "off") else raw
+    total = mem_total if mem_total is not None else _mem_total_bytes()
+    gib = total // (1024 ** 3)
+    if gib < 16:
+        return None
+    return "%dG" % (gib - _SCOPE_HEADROOM_GIB)
+
+
+def user_manager_reachable(runtime_dir: str | None = None) -> bool:
+    """Can `systemd-run --user` reach the user's service manager from here?
+
+    A FILE CHECK, NOT A PROBE PROCESS. `systemd-run --user` talks to the user
+    manager over $XDG_RUNTIME_DIR/systemd/private; when that socket is there
+    the call goes through, when it is not (a container, an SSH session without
+    a session, a CI runner) it fails at once. Reading the socket's presence
+    answers the same question without starting anything -- which matters
+    because the boot is exercised in the suites with a Popen that is a fake.
+    """
+    base = runtime_dir if runtime_dir is not None else os.environ.get("XDG_RUNTIME_DIR", "")
+    if not base:
+        return False
+    try:
+        import stat
+        return stat.S_ISSOCK(os.stat(os.path.join(base, "systemd", "private")).st_mode)
+    except OSError:
+        return False
+
+
+def server_scope_prefix() -> list[str]:
+    """What to put in front of llama-server's argv so it runs in its own scope.
+
+    MEASURED 2026-09-16 ON OMARCHY, four times between 17:42 and 17:56: the
+    server was started from a terminal, loaded for a minute, and systemd-oomd
+    killed the TERMINAL'S WHOLE SCOPE -- 34, 60, 56, 34 processes, the server
+    and every shell and agent that terminal had spawned. Nothing in the
+    server's log; it ends at `loading model`. The mechanism: Omarchy runs
+    systemd-oomd with `ManagedOOMMemoryPressure=kill` on app.slice (limit 50 %
+    for 20 s), vm.swappiness is 150 over a zram swap, and `--load-mode none`
+    reads ~48 GiB of experts into anonymous memory while the same bytes sit in
+    the page cache -- on 62 GiB that transient pushes the desktop into zram,
+    app.slice's pressure crosses the limit, and oomd kills the largest cgroup
+    under app.slice: the terminal the server sits in.
+
+    TWO THINGS, ONE PREFIX. `--slice=session.slice` takes the server out of
+    app.slice, the one cgroup oomd watches here, so a kill can never take a
+    terminal with it. `-p MemoryHigh=` bounds the server's OWN cgroup, so when
+    it crosses the bound the kernel reclaims the server's clean page cache
+    (the second copy of the model) instead of swapping the desktop. Verified
+    on this machine that a user scope accepts both properties and that
+    memory.high lands in the cgroup (53,687,091,200 for `50G`). Whether the
+    load then stays out of swap is NOT yet measured -- the four kills above
+    were the last runs.
+
+    Empty on Windows, empty when systemd-run is not on PATH or the user manager
+    is not reachable (user_manager_reachable): then the server starts as
+    before, unbounded. `CROW_SERVER_SCOPE=0` switches the prefix off for a
+    measurement that wants the bare process. The Popen pid becomes
+    systemd-run's; the server is its child in the same session and process
+    group, which is what kill_pid and terminate_tree address, and
+    `systemd-run --scope` exits with the server's own exit code.
+    """
+    if IS_WINDOWS or (os.environ.get("CROW_SERVER_SCOPE") or "").strip().lower() in ("0", "off", "none"):
+        return []
+    run = shutil.which("systemd-run")
+    if not run or not user_manager_reachable():
+        return []
+    prefix = [run, "--user", "--scope", "--slice=session.slice", "--quiet"]
+    high = server_memory_high()
+    if high:
+        prefix += ["-p", "MemoryHigh=%s" % high]
+    return prefix + ["--"]
+
+
 def kill_pid(pid) -> bool:
     """Ask the process with this pid to end. True when the ask went out.
 

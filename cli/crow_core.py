@@ -1856,7 +1856,12 @@ def start_server(key: str, base_url: str, install: str | None = None,
         _keep_previous_log(sink_path)
     with open(out_path, "w", encoding="utf-8") as out_sink, \
          open(err_path, "w", encoding="utf-8") as err_sink:
-        proc = subprocess.Popen(argv, stdout=out_sink, stderr=err_sink,
+        # In its own scope where the platform has one (Linux: systemd-run,
+        # session.slice, MemoryHigh -- the oomd kill of 2026-09-16, see
+        # crow_platform.server_scope_prefix). The recorded argv stays the
+        # server's own: the prefix is how it is started, not what it is.
+        proc = subprocess.Popen(crow_platform.server_scope_prefix() + argv,
+                                stdout=out_sink, stderr=err_sink,
                                 env=boot_env, **detach)
     # Der Booter behaelt seinen Prozess: ein spaeterer stiller Tod hat dann
     # einen ablesbaren Exit-Code -- und mit key und Adresse daneben kann
