@@ -80,18 +80,31 @@ Requirements, both operating systems, updating, and where everything lands:
 
 ## Start
 
+Two terminals: the server first (it loads for about a minute), then the window.
+
+**Linux**
+
+```bash
+python3 ~/.local/share/crow/tools/start-server.py flash-next-q2-k-xl
+```
+
 ```bash
 crow
+```
+
+**Windows**
+
+```powershell
+python $env:LOCALAPPDATA\Crow\cli\crow.py --serve flash-next-q2-k-xl
 ```
 
 ```powershell
 python $env:LOCALAPPDATA\Crow\cli\crow_gui.py
 ```
 
-That is the window, and it is the client. It boots the server itself from its model menu, reads
-the port off a running one, and revives a server it started before. The by-hand server lines live
-in [operating points](docs/operating-points.md); the terminal client, `crow.py`, is still shipped
-and documented in [client flags](docs/reference/client-flags.md).
+The window is the client. It reads the port off the running server, and the model menu can
+switch and reboot it from there. The by-hand `llama-server` lines, flag for flag, live in
+[operating points](docs/operating-points.md).
 
 ## How to use Crow
 

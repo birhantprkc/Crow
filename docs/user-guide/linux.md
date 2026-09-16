@@ -146,14 +146,23 @@ abort (upstream #28403, #25060).
 
 ---
 
-## The window
+## Start
+
+The server first, in its own terminal -- it loads for about a minute and prints
+`listening on http://127.0.0.1:8083` when it is up:
+
+```bash
+python3 ~/.local/share/crow/tools/start-server.py flash-next-q2-k-xl
+```
+
+Then the window, in a second terminal:
 
 ```bash
 crow
 ```
 
-It boots the server itself, from the model menu; the terminal client is never required. The
-page, the tools, the memory and the browser pane are the ones [`window.md`](window.md)
+The window reads the port off the running server; the model menu can switch and reboot it from
+there. The page, the tools, the memory and the browser pane are the ones [`window.md`](window.md)
 describes. What Wayland makes different:
 
 **It has to be told to float.** A Wayland client may not place, size or raise its own toplevel —
