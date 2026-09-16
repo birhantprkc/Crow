@@ -3,7 +3,7 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
-## 2.2.0 — unreleased
+## 2.2.0 — 2026-09-16
 
 Crow runs on Linux. Not a port of the page to a second toolkit: the same `cli/crow_gui.py`, the
 same core, the same manifest and the same operating point, with one module between them and the
