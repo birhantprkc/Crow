@@ -1,3 +1,5 @@
+[← README](../../README.md) · [Docs index](../README.md)
+
 # Linux
 
 Same window, same core, same manifest. Ported and run on Arch (Omarchy), Hyprland 0.56.2 on
@@ -71,7 +73,7 @@ unset, which is what the specification asks for.
 | models | `<install>/models`, a link to the tree; `$CROW_MODELS` overrides it | `<install>\models` |
 | `llama-server` binary | `<install>/bin/`, then `PATH`, then `~/.local/share/crow/bin` | `<install>\bin\llama-server.exe` |
 | fonts | `~/.local/share/fonts/crow/` + `fc-cache` | `%LOCALAPPDATA%\Microsoft\Windows\Fonts` + winreg |
-| launcher | `$CROW_HOME/bin/crow`, symlinked into `~/.local/bin` if that is on `$PATH` | a Start-menu shortcut |
+| launcher | `$CROW_HOME/bin/crow`, symlinked into `~/.local/bin` if that is on `$PATH` | none — `install.ps1` prints the start line and writes nothing to the Start menu, the registry or `PATH` |
 | desktop entry | `~/.local/share/applications/crow.desktop` | — |
 | icons | `~/.local/share/icons/hicolor/<N>x<N>/apps/crow.png`, N = 16…512 | the packaged `.ico` |
 

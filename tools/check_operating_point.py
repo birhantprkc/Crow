@@ -606,10 +606,19 @@ def main(argv):
     # make those files rise and fall with the manifest -- and a document the
     # checker keeps current is not an archive, it is a second live page with a
     # misleading name.
+    # 2026-09-16: docs/second-model.md became docs/operating-points.md, and the
+    # README became a front page. The four by-hand server lines it used to print
+    # moved to that one page, which is the shape the rule above already allowed:
+    # a key must be printed correctly by AT LEAST ONE live document, and which
+    # page that is remains the documentation's business. README.md STAYS IN THE
+    # LIST and stays first -- it is the page a reader starts on, so if a server
+    # line ever comes back to it, it is held to the manifest the day it lands
+    # rather than the day somebody remembers to add it here.
     installer = ("install.ps1", os.path.join(args.repo, "install.ps1"))
     docs = [
         ("README.md", os.path.join(args.repo, "README.md")),
-        ("docs/second-model.md", os.path.join(args.repo, "docs", "second-model.md")),
+        ("docs/operating-points.md",
+         os.path.join(args.repo, "docs", "operating-points.md")),
     ]
     for e in args.extra:
         docs.append((os.path.basename(e), e))

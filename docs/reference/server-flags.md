@@ -1,3 +1,5 @@
+[← README](../../README.md) · [Docs index](../README.md)
+
 ## Server flags
 
 | flag | value | why |

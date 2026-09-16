@@ -1,13 +1,20 @@
+[← README](../../README.md) · [Docs index](../README.md)
+
 # Repo
 
 | path | |
 |---|---|
+| `cli/crow_gui.py` | the window — the client |
+| `cli/crow_core.py` | conversation, request, SSE, tool loop, memory, skills, goals, delegation, MCP, cost line |
+| `cli/crow_platform.py` | the platform seam: paths, process discovery, spawn and kill, per OS |
 | `cli/crow.py` | terminal client |
-| `cli/crow_gui.py` | window |
-| `cli/crow_core.py` | conversation, request, SSE, tool loop, memory, skills, cost line |
-| `tools/start-server.py` | model picker, becomes `llama-server` |
-| `manifests/operating-point.json` | source of truth for every command line above |
-| `tools/check_operating_point.py` | holds this file against that manifest |
-| `docs/second-model.md` | the other server `install.ps1` sets up |
+| `cli/crow_voice.py` | dictation |
+| `install.ps1` · `install.sh` | the two installers, one contract |
+| `tools/start-server.py` | model picker, becomes the inference server |
+| `tools/build-llama-server.sh` | builds the CUDA engine on Linux, where there is no release asset |
+| `manifests/operating-point.json` | source of truth for every server command line |
+| `manifests/shared-core.json` | what may exist only once, and where |
+| `tools/check_operating_point.py` | holds every written copy against that manifest |
+| `docs/operating-points.md` | the four measured lines, and the servers `install.ps1` sets up |
 
 ---

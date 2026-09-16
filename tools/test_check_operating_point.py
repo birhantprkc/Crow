@@ -87,7 +87,7 @@ QWEN_LINE = (
 # file, and it is the only one carrying -b/-ub/-ncmoe/--fit/--load-mode. That asymmetry
 # is what stops any of the three regions from satisfying another one's key.
 # The real documents never put two command lines next to each other: install.ps1 has
-# Write-Host "" between them, README.md and docs/second-model.md have blank lines and
+# Write-Host "" between them, README.md and docs/operating-points.md have blank lines and
 # prose. command_regions reaches TWO LINES BACK from its anchor (2026-08-28, for the
 # env prelude), so an adjacent previous command lands inside the next one's region and
 # extract() takes ITS --port. Two blank lines is what the real files have and what the

@@ -1,3 +1,5 @@
+[← README](../../README.md) · [Docs index](../README.md)
+
 # Crow on Linux — Implementation Plan
 
 **Status:** Implemented on branch `linux`, 2026-09-16 (P0–P3; see "Deviations" at the end) · **Date:** 2026-09-16 · **Target platform:** Linux x86_64 (Arch / omarchy / Hyprland)
@@ -18,7 +20,7 @@
 
 ### 1.1 Product shape (v2.1.0)
 
-A local-LLM **agent** with 22 built-in tools + MCP, persistent memory (SQLite), skills, a browser pane, vision, and two clients:
+A local-LLM **agent** with 25 built-in tools + MCP, persistent memory (SQLite), skills, a browser pane, vision, and two clients:
 
 | Module | Size | Role |
 |---|---|---|

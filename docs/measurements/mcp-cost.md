@@ -1,3 +1,5 @@
+[← README](../../README.md) · [Docs index](../README.md)
+
 ## Cost
 
 | | tools | chars in every prompt |

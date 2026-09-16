@@ -1,3 +1,5 @@
+[← README](../README.md) · [Docs index](README.md)
+
 <div align="center">
 
 <h1>CROW</h1>
@@ -691,8 +693,8 @@ Context is nearly free by comparison — 1,353.50 MiB of KV at `n_ctx = 200192`,
 
 ## Licence
 
-MIT, see [`LICENSE`](LICENSE). Four components carry terms this project cannot grant, listed in
-[`NOTICE`](NOTICE): `ggml-org/llama.cpp` (MIT, other copyright holders), `deepseek-ai/DeepSeek-V4-Flash`
+MIT, see [`LICENSE`](../LICENSE). Four components carry terms this project cannot grant, listed in
+[`NOTICE`](../NOTICE): `ggml-org/llama.cpp` (MIT, other copyright holders), `deepseek-ai/DeepSeek-V4-Flash`
 (MIT, fetched rather than shipped), the NVIDIA CUDA Toolkit the CUDA backend is built against, and
 Google Sans Code under the SIL Open Font License 1.1.
 

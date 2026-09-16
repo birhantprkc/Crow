@@ -1,11 +1,17 @@
+[← README](../../README.md) · [Docs index](../README.md)
+
 ## Tools
 
-23 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured.
+25 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured. `/tools` lists
+them in either surface, derived from the declarations themselves rather than written beside them.
 
 `read_file` `read_image` `render_page` `write_file` `edit_file` `list_dir` `find_files`
 `search_text` `run_command` `web_search` `fetch_url` `memory` `skill` `session_search`
-`delegate` `subtasks` `collect` `git_status` `git_diff` `git_log` `git_commit` `git_push`
-`github_connect`.
+`delegate` `subtasks` `collect` `goal_set` `goal_step` `git_status` `git_diff` `git_log`
+`git_commit` `git_push` `github_connect`.
+
+An MCP tool joins the same list as `mcp_<server>_<tool>`, above the built-ins, and carries its
+own class.
 
 ### `render_page` (#175)
 
@@ -68,6 +74,15 @@ while a turn is running](../user-guide/window.md).
 
 Reading never asks, at any level.
 
+### Goals (#165)
+
+`goal_set(title, steps)` writes the plan; `goal_step(step, status, note)` moves one step to
+`running`, `done` or `failed`. Two tools and not one, because they cost different things: the
+plan sits in the pinned head of every prompt, so writing one costs a full prefill, while ticking
+a step off writes only `<root>/.crow/goal.json` and moves no byte of the prompt. The head carries
+the plan, the file carries the state — see
+[goals and subagents](../user-guide/goals-and-subagents.md).
+
 ### Git (#156)
 
 `git_status` `git_diff` `git_log` read; `git_commit` `git_push` write. All five run a
@@ -94,8 +109,8 @@ handed to a surface; what a surface shows is the login name. Needs a client id, 
 
 `run_command` touching paths outside the working directory asks first, at every release
 level — one card, every outside path named. An approval covers ALL outside paths of that
-command, not just the first; `always` is kept in `%LOCALAPPDATA%\Crow\approvals.json` and
-survives the restart. Directories the conversation was pointed at pass without asking.
+command, not just the first; `always` is kept in `approvals.json` — under
+`%LOCALAPPDATA%\Crow\` on Windows, `~/.config/crow/` on Linux — and survives the restart. Directories the conversation was pointed at pass without asking.
 An obfuscated path does not ask — the gate is a question, not a sandbox.
 
 ---
