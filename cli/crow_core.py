@@ -67,6 +67,14 @@ import urllib.request
 from html.parser import HTMLParser
 from typing import Callable
 
+# THE ONE MODULE THAT KNOWS WHICH OPERATING SYSTEM THIS IS. Paths, process
+# discovery, spawning, killing, the shell, the browser and the font store are
+# the seven facts that differ between Windows and Linux; each of them was
+# written down where it happened to be needed, and seven scattered branches are
+# seven places to forget. They live in crow_platform.py now -- this file asks
+# and does not branch. Its module docstring carries the whole path table.
+import crow_platform
+
 # The client's version, handed over by whoever owns the literal.
 #
 # NOT DEFINED HERE -- see the module docstring: `VERSION = "0.2.0"` may only
@@ -135,6 +143,21 @@ MAX_TOOL_ROUNDS = 24
 MAX_HITS = 200
 COMMAND_TIMEOUT = 120
 
+# WHICH SHELL THE MODEL IS TALKING TO, said in the tool's own description
+# because guessing it costs a round in either direction: on Windows an `ls`
+# comes back "not recognized as an internal or external command", on Linux a
+# `dir` does the same, and the model then spends a turn finding that out.
+#
+# BOTH SENTENCES LIVE HERE, in the core, and the platform picks -- a surface
+# that wrote its own would be the drift manifests/shared-core.json exists
+# against. The Windows half is unchanged since it was written.
+SHELL_HINT = (
+    "On Windows the shell is cmd.exe, not PowerShell -- use dir and findstr, "
+    "or run powershell -NoProfile -Command \"...\" when you need a cmdlet."
+    if crow_platform.IS_WINDOWS else
+    "On Linux the shell is bash -- use ls and grep."
+)
+
 # ---- #96, web research ----------------------------------------------------
 # THE BUDGET HERE IS ROUND TRIPS, NOT REQUESTS. A fetched page is clipped to
 # MAX_TOOL_BYTES, which the comment above prices at ~4,000 tokens and ~two
@@ -168,14 +191,15 @@ SEARCH_SNIPPET = 400
 # {"NAME": "value"} object next to approvals.json and booted.json, in the
 # directory install.ps1 already owns. tools/migrate-secrets.ps1 writes it, sets
 # the ACL and takes the variable out of the user scope; robin runs it once.
+# On Linux the same file sits in ~/.config/crow, where the rest of what the
+# user configured lives -- crow_platform.config_dir() is the whole difference.
 #
 # CROW_SECRETS_FILE MOVES THE PATH, and the only caller that needs it is a test.
 # A suite that read the real store would answer differently on a machine where
 # the migration has run than on a fresh one, which is the rule #130 already
 # wrote down for mcp.json and providers.json.
 SECRETS_FILE = os.environ.get("CROW_SECRETS_FILE") or os.path.join(
-    os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
-    "Crow", "secrets.json")
+    crow_platform.config_dir(), "secrets.json")
 
 # What has already been said, so a client that starts and then searches twice
 # says it ONCE. Keyed by the sentence and not by the name alone: a malformed
@@ -754,9 +778,7 @@ TOOLS = [
          "glob": dict(_STR, description="Only files matching this glob, e.g. *.py")}, ["pattern"]),
     _fn("run_command",
         f"Run a shell command locally and return its exit code and output. "
-        f"Killed after {COMMAND_TIMEOUT}s. On Windows the shell is cmd.exe, not "
-        f"PowerShell -- use dir and findstr, or run "
-        f"powershell -NoProfile -Command \"...\" when you need a cmdlet.",
+        f"Killed after {COMMAND_TIMEOUT}s. {SHELL_HINT}",
         {"command": dict(_STR, description="The command line."),
          "cwd": dict(_STR, description="Working directory.")}, ["command"]),
     # #156. GIT AS ITS OWN GROUP, NOT AS SHELL LINES. A `git push` through
@@ -1091,7 +1113,14 @@ REPO_URL = f"https://github.com/{REPO}"
 # target and updates when its own is newer. Until 2026-08-08 that line refused a
 # non-empty target outright, so there was no route from one version to the next
 # short of deleting the directory by hand.
-UPDATE_COMMAND = f"irm https://raw.githubusercontent.com/{REPO}/main/install.ps1 | iex"
+# ON LINUX IT IS THE SAME LINE IN THE OTHER SHELL's words, and it names
+# install.sh: the two installers share one file manifest and one contract, so
+# the sentence a user copies differs only in how a script gets fetched and run.
+INSTALLER_SCRIPT = "install.ps1" if crow_platform.IS_WINDOWS else "install.sh"
+UPDATE_COMMAND = (
+    f"irm https://raw.githubusercontent.com/{REPO}/main/{INSTALLER_SCRIPT} | iex"
+    if crow_platform.IS_WINDOWS else
+    f"curl -fsSL https://raw.githubusercontent.com/{REPO}/main/{INSTALLER_SCRIPT} | bash")
 
 RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 
@@ -1248,6 +1277,12 @@ def model_candidates(key: str, manifest: dict | None = None,
     The same manifest entry cannot be right for both, so the basename is tried
     under the install root as well.
 
+    THE SECOND ROOT IS `crow_platform.models_dir()` and not literally
+    <install>\\models, because a quant is the one part of an install that moves:
+    88-110 GiB do not belong beside the program. `$CROW_MODELS` points at the
+    tree wherever it is, and where the variable is unset the answer is exactly
+    the <install>\\models this has always used.
+
     The list is RETURNED rather than reduced to the first hit, because the
     failure message has to name what was tried -- a boot that says only "not
     found" cannot tell a wrong table from a missing download.
@@ -1261,7 +1296,7 @@ def model_candidates(key: str, manifest: dict | None = None,
     base = os.path.basename(rel)
     out = []
     for root in ((models.get("_root") or "").replace("/", os.sep),
-                 os.path.join(install or INSTALL_ROOT, "models")):
+                 crow_platform.models_dir(install or INSTALL_ROOT)):
         if not root:
             continue
         for tail in (rel, base):
@@ -1292,7 +1327,7 @@ def projector_candidates(key: str, manifest: dict | None = None,
     base = os.path.basename(rel)
     out = []
     for root in ((models.get("_root") or "").replace("/", os.sep),
-                 os.path.join(install or INSTALL_ROOT, "models")):
+                 crow_platform.models_dir(install or INSTALL_ROOT)):
         if not root:
             continue
         for tail in (rel, base):
@@ -1350,17 +1385,16 @@ def server_port(key: str) -> int | None:
 
 
 def server_binary(install: str | None = None) -> tuple[str | None, list[str]]:
-    """The llama-server this build would run, and everywhere it looked."""
-    packaged = os.path.join(install or INSTALL_ROOT, "bin", "llama-server.exe")
-    tried = [packaged]
-    if os.path.isfile(packaged):
-        return packaged, tried
-    # PATH second, never first: a package that ships its own binary must not be
-    # overtaken by whatever happens to be on a developer's PATH -- that is how a
-    # measurement ends up describing a build nobody shipped.
-    found = shutil.which("llama-server") or shutil.which("llama-server.exe")
-    tried.append("PATH")
-    return found, tried
+    """The llama-server this build would run, and everywhere it looked.
+
+    The name and the search order are the platform's (`llama-server.exe` under
+    <install>\\bin on Windows; `llama-server` under <install>/bin, then PATH,
+    plus ~/.local/share/crow/bin on Linux even when the install is a checkout).
+    PATH is searched second and never first: a package that ships its own binary
+    must not be overtaken by whatever happens to be on a developer's PATH --
+    that is how a measurement ends up describing a build nobody shipped.
+    """
+    return crow_platform.find_server_binary(install or INSTALL_ROOT)
 
 
 def server_command(key: str, manifest: dict | None = None,
@@ -1392,12 +1426,20 @@ def server_command(key: str, manifest: dict | None = None,
     # absence is ITS OWN error -- falling back to a binary that cannot load the
     # architecture would boot a server that dies one step later with less to say.
     binary = line.get("binary")
-    if binary:
+    if binary and crow_platform.binary_is_for_this_os(str(binary)):
         binary = os.path.normpath(str(binary))
         if not os.path.isfile(binary):
             raise ServerBootError("model %r names its own server binary and it is "
                                   "not on disk: %s" % (key, binary))
     else:
+        # A BINARY SPELLED FOR THE OTHER PLATFORM IS NOT A STATEMENT ABOUT THIS
+        # ONE. `flash-next-q2-k-xl` names the lab build as
+        # `C:/Users/.../dev/crow-lab/.../llama-server.exe`; on Linux that
+        # string can never exist, and reading it as "the binary is missing"
+        # would refuse a boot over a fact about somebody else's machine. The
+        # same line's llama.cpp requirement still holds -- the pin and the two
+        # patches are built into the binary the search below finds -- and a
+        # build without them fails at load with llama.cpp's own words.
         binary, looked = server_binary(install)
         if binary is None:
             raise ServerBootError("no llama-server to run. Tried: %s" % ", ".join(looked))
@@ -1438,10 +1480,6 @@ def server_command(key: str, manifest: dict | None = None,
     return argv
 
 
-_PROCESS_QUERY = ("Get-CimInstance Win32_Process -Filter \"Name like 'llama-server%'\""
-                  " | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
-
-
 def running_servers(query: Callable[[], str] | None = None) -> list[tuple[str, str]]:
     """Every llama-server this machine is running, as (pid, command line).
 
@@ -1456,36 +1494,15 @@ def running_servers(query: Callable[[], str] | None = None) -> list[tuple[str, s
     on the path that starts a server, and refusing to boot because a query
     failed would trade a rare risk for a certain one. The caller says what it
     could not check.
-    """
-    if query is None:
-        argv = (["powershell", "-NoProfile", "-NonInteractive", "-Command", _PROCESS_QUERY]
-                if sys.platform == "win32" else ["ps", "-eo", "pid=,args="])
 
-        def query():
-            # stdin=DEVNULL, AND IT IS NOT TIDINESS. Without it the child
-            # inherits this process's stdin, and `powershell -Command` READS it:
-            # measured 2026-08-21, a picker that asked which model to start got
-            # EOF instead of the answer, because listing the processes had
-            # already swallowed it. Anything that asks a question after calling
-            # this would have the same hole.
-            done = subprocess.run(argv, capture_output=True, text=True,
-                                  stdin=subprocess.DEVNULL,
-                                  encoding="utf-8", errors="replace", timeout=60)
-            return done.stdout if done.returncode == 0 else ""
-    try:
-        text = query()
-    except Exception:
-        return []
-    out = []
-    for raw in (text or "").splitlines():
-        line = raw.strip()
-        if not line or "llama-server" not in line:
-            continue
-        pid, _, rest = line.partition("\t")
-        if not rest:
-            pid, _, rest = line.partition(" ")
-        out.append((pid.strip(), rest.strip()))
-    return out
+    HOW the machine is asked is the platform's business and sits in
+    crow_platform.find_servers: a PowerShell `Get-CimInstance` on Windows,
+    because there is no /proc and `tasklist` prints no command line -- and a
+    read of /proc/<pid>/cmdline on Linux, which costs no subprocess at all and
+    keeps the stdlib-only invariant that rules `psutil` out. `query` stays the
+    injection point for a caller that has its own listing.
+    """
+    return crow_platform.find_servers(query)
 
 
 _DASH_M = re.compile(r'-m\s+("([^"]+)"|(\S+))')
@@ -1768,8 +1785,13 @@ def start_server(key: str, base_url: str, install: str | None = None,
     # den nach einem Absturz niemand findet (der 0xc0000409 dieses Abends
     # stand nur im Ereignisprotokoll). stdout und stderr getrennt wie dort;
     # je Boot neu geschrieben: der letzte Lauf je Port ist der untersuchte.
+    # AUF LINUX IST DAS ARBEITSVERZEICHNIS NICHT MEHR DER ORT, an dem jemand
+    # nachsieht: das Fenster startet aus einem .desktop-Eintrag, und die cwd ist
+    # dann das Heimatverzeichnis oder `/`. Ein `runs/` dort ist Muell, und die
+    # XDG-Antwort auf "Protokolle" ist das Zustandsverzeichnis -- deshalb sagt
+    # crow_platform.log_dir(), wohin, und auf Windows sagt es weiterhin `runs\`.
     port = urllib.parse.urlsplit(base_url).port or 0
-    runs_dir = os.path.join(os.getcwd(), "runs")
+    runs_dir = crow_platform.log_dir()
     os.makedirs(runs_dir, exist_ok=True)
     out_path = os.path.join(runs_dir, "llama-server-%s.out.log" % port)
     err_path = os.path.join(runs_dir, "llama-server-%s.err.log" % port)
@@ -1797,16 +1819,19 @@ def start_server(key: str, base_url: str, install: str | None = None,
     #
     # CREATE_NEW_PROCESS_GROUP nimmt ihn aus der Signalgruppe, CREATE_NO_WINDOW
     # aus der Konsole -- die zweite Haelfte zaehlt fuer CTRL_CLOSE_EVENT, das
-    # eine geschlossene Konsole an ihre Anhaenger schickt. Beides gilt nur auf
-    # Windows; anderswo bleibt der Aufruf, wie er war.
+    # eine geschlossene Konsole an ihre Anhaenger schickt.
     #
-    # WAS DAS NICHT BRICHT: `stop_servers` toetet ueber taskkill /PID, nicht
-    # ueber ein Signal, und `proc.kill()` ruft TerminateProcess -- beide
-    # erreichen einen Prozess in eigener Gruppe unveraendert.
-    flags = 0
-    if sys.platform == "win32":
-        flags = (subprocess.CREATE_NEW_PROCESS_GROUP
-                 | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    # AUF LINUX IST `start_new_session=True` BEIDE HAELFTEN AUF EINMAL: setsid()
+    # gibt dem Server eine eigene Sitzung, also eine eigene Prozessgruppe (kein
+    # SIGINT aus dem Terminal mehr) UND kein steuerndes Terminal (kein SIGHUP,
+    # wenn das Fenster geht). Dieselbe Absicht, ein Aufruf -- welcher, sagt
+    # crow_platform.spawn_kwargs.
+    #
+    # WAS DAS NICHT BRICHT: `stop_servers` toetet ueber taskkill /PID bzw. ueber
+    # die Prozessgruppe, nicht ueber ein Signal an unsere eigene, und
+    # `proc.kill()` ruft TerminateProcess -- alle erreichen einen Prozess in
+    # eigener Gruppe unveraendert.
+    detach = crow_platform.spawn_kwargs(detached=True)
     # #166. EINE GENERATION BLEIBT STEHEN. Bis hier wurde je Boot neu
     # geschrieben, und fuer einen von Hand gestarteten Server ist das richtig:
     # der letzte Lauf ist der untersuchte. Fuer einen, den Crow SELBST neu
@@ -1822,7 +1847,7 @@ def start_server(key: str, base_url: str, install: str | None = None,
     with open(out_path, "w", encoding="utf-8") as out_sink, \
          open(err_path, "w", encoding="utf-8") as err_sink:
         proc = subprocess.Popen(argv, stdout=out_sink, stderr=err_sink,
-                                env=boot_env, creationflags=flags)
+                                env=boot_env, **detach)
     # Der Booter behaelt seinen Prozess: ein spaeterer stiller Tod hat dann
     # einen ablesbaren Exit-Code -- und mit key und Adresse daneben kann
     # `reboot_booted` denselben Server noch einmal starten. Ein frischer
@@ -1890,13 +1915,11 @@ def stop_servers(log: Callable[[str], None] | None = None) -> int:
     for pid, line in running_servers():
         say("stopping pid %s (%s)" % (pid, os.path.basename(served_model(line)) or "?"))
         try:
-            if sys.platform == "win32":
-                subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                               capture_output=True, stdin=subprocess.DEVNULL,
-                               timeout=30)
-            else:
-                os.kill(int(pid), 15)
-            asked += 1
+            # `taskkill /PID /F` on Windows, the process GROUP on Linux -- the
+            # server sits in a session of its own since it was started that way,
+            # and its own children would otherwise outlive the kill.
+            if crow_platform.kill_pid(pid):
+                asked += 1
         except Exception:
             continue
     return asked
@@ -1980,8 +2003,15 @@ def _tail(path: str, lines: int = 20) -> str:
 # Where a session is kept between runs. The messages live here; the KV state
 # lives wherever the server's --slot-save-path points, because only the server
 # can write it.
-SESSION_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
-                           "Crow", "session")
+#
+# `%LOCALAPPDATA%\Crow\session` ON WINDOWS, UNCHANGED, and the XDG state
+# directory on Linux: a session is what a run leaves behind -- it outlives the
+# process, nobody backs it up, and the specification's word for that is "state",
+# not "data" and not "config". The files the USER decided (settings, roots,
+# skills, secrets, MCP, providers) go to config_dir() instead, and the search
+# index to data_dir(); on Windows all three answer the same directory, so every
+# path on that platform is the byte it was.
+SESSION_DIR = os.path.join(crow_platform.state_dir(), "session")
 SESSION_FILE = os.path.join(SESSION_DIR, "session.json")
 SLOT_FILE = "crow-session.bin"
 
@@ -3220,19 +3250,18 @@ def post_json(url: str, body: dict, timeout: float = 30.0) -> dict:
 # new is only what a button needs and a printed line does not -- where the copy
 # on disk lives, and how to run the installer without a console.
 
-INSTALL_SCRIPT_URL = f"https://raw.githubusercontent.com/{REPO}/main/install.ps1"
+INSTALL_SCRIPT_URL = f"https://raw.githubusercontent.com/{REPO}/main/{INSTALLER_SCRIPT}"
 
 
 def install_dir() -> str:
-    """Where install.ps1 puts an installation: its own default, not a guess.
+    """Where the installer puts an installation: its own default, not a guess.
 
-    `%LOCALAPPDATA%\\Crow`, which is the installer's `$InstallTo` default and
-    the path its own documentation names. Nothing is written to Program Files,
-    so no elevation is involved anywhere in this path.
+    `%LOCALAPPDATA%\\Crow`, which is install.ps1's `$InstallTo` default and the
+    path its own documentation names; `~/.local/share/crow` on Linux, which is
+    install.sh's. Nothing is written to Program Files or under /usr on either,
+    so no elevation and no sudo is involved anywhere in this path.
     """
-    base = os.environ.get("LOCALAPPDATA") or os.path.join(
-        os.path.expanduser("~"), "AppData", "Local")
-    return os.path.join(base, "Crow")
+    return crow_platform.install_dir()
 
 
 def running_from_install(path: str = "") -> bool:
@@ -3264,9 +3293,16 @@ def update_argv(script: str) -> list:
     `-NoProfile` so a profile that prints or prompts cannot join in, and
     `-ExecutionPolicy Bypass` because a downloaded file is exactly what the
     default policy refuses.
+
+    ON LINUX IT IS `bash <script>`: install.sh's contract is
+    `install.sh [--to DIR]` with install_dir() as its default target, so an
+    update in place is the bare call, and bash is named rather than relying on
+    an executable bit a file fetched over HTTP does not have. Which of the two
+    this platform uses is crow_platform.updater_command's answer; the reason it
+    is DATA and never a call is that a window has to be able to SHOW the command
+    before it runs it.
     """
-    return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-            "-File", script, "-NoPause"]
+    return crow_platform.updater_command(script)
 
 
 def fetch_install_script(timeout: float = 20.0) -> str:
@@ -3282,7 +3318,8 @@ def fetch_install_script(timeout: float = 20.0) -> str:
         "User-Agent": f"crow/{CLIENT_VERSION}"})
     with urllib.request.urlopen(request, timeout=timeout) as resp:
         body = resp.read().decode("utf-8")
-    handle, path = tempfile.mkstemp(prefix="crow-install-", suffix=".ps1")
+    handle, path = tempfile.mkstemp(prefix="crow-install-",
+                                    suffix=os.path.splitext(INSTALLER_SCRIPT)[1])
     with os.fdopen(handle, "w", encoding="utf-8") as fh:
         fh.write(body)
     return path
@@ -5394,6 +5431,22 @@ def _rooted(path: str) -> str:
 # its scheme and invented drive P:, so a python -c with a URL asked at auto.
 # A URL is not a filesystem path; the lookbehind keeps the token to word
 # starts, and a real `C:\...` after a space, quote or `=` still matches.
+#
+# UND DIE POSIX-FORMEN, aber NUR DORT, WO ES SIE GIBT. Ein `/` am Wortanfang
+# ist auf Linux ein absoluter Pfad -- und auf Windows der Anfang eines Schalters
+# (`dir /s`, `findstr /i`), wo jede Zeile zur Frage wuerde. Deshalb haengt der
+# Zweig an der Plattform und nicht am Text.
+#
+# DAS LOOKBEHIND VERBIETET ZUSAETZLICH `:` UND `/`, was der Laufwerks-Zweig
+# nicht braucht und dieser hier schon: in `https://openrouter.ai/api/v1/models`
+# stuende sonst dreimal ein "Pfad" -- dasselbe Phantom, das `p:` aus einem
+# Schema gemacht hat, nur andersherum.
+_POSIX_PATH_TOKENS = (
+    r'|"(~?/[^"]*)"'
+    r"|'(~?/[^']*)'"
+    r'|(?<![A-Za-z0-9:/])(~?/[^\s"\';|&<>]*)'
+)
+
 _PATH_TOKENS = re.compile(
     r'"([A-Za-z]:[\\/][^"]*)"'
     r"|'([A-Za-z]:[\\/][^']*)'"
@@ -5406,6 +5459,7 @@ _PATH_TOKENS = re.compile(
     r'|(?<![A-Za-z0-9])(\\\\[^\s"\';|&<>\\/]+[\\/][^\s"\';|&<>]*)'
     r'|(%[A-Za-z_][A-Za-z0-9_]*%[\\/][^\s"\';|&<>]*)'
     r'|(\.\.[\\/][^\s"\';|&<>]*)'
+    + ("" if crow_platform.IS_WINDOWS else _POSIX_PATH_TOKENS)
 )
 
 
@@ -5429,6 +5483,10 @@ def command_outside_paths(command: str, cwd: str | None = None) -> list[str]:
             if raw not in out:
                 out.append(raw)
             return
+        # `~` ist die POSIX-Form von %USERPROFILE% und wird wie es aufgeloest.
+        # Nur wo es AM ANFANG steht: mitten im Wort ist es kein Heimatzeichen.
+        if cand.startswith("~"):
+            cand = os.path.expanduser(cand)
         if not os.path.isabs(cand) and not re.match(r"^[A-Za-z]:", cand):
             cand = os.path.join(base, cand)
         if not _inside(root, cand):
@@ -5531,7 +5589,7 @@ def get_root() -> str | None:
 # The roots picked before, so a window can offer them instead of asking for a
 # path. Beside the session rather than inside it: a session is one conversation,
 # the list of places a user works in outlives every one of them.
-ROOTS_FILE = os.path.join(os.path.dirname(SESSION_DIR), "roots.json")
+ROOTS_FILE = os.path.join(crow_platform.config_dir(), "roots.json")
 
 
 # TWO FACTS, TWO KEYS, and the split is the whole point (#92, 2026-08-15).
@@ -5861,7 +5919,7 @@ USER_CHARS = 1_500
 # Beside `roots.json` and `settings.json`, for the reason `ROOTS_FILE` already
 # gives: a session is one conversation, and who the user is outlives every one
 # of them.
-USER_PATH = os.path.join(os.path.dirname(SESSION_DIR), "USER.md")
+USER_PATH = os.path.join(crow_platform.config_dir(), "USER.md")
 
 # What separates two entries. A section sign alone on its line: it does not
 # occur inside a path, a command or a sentence the model writes, and someone
@@ -5898,7 +5956,7 @@ MEMORY_TARGETS = ("memory", "user")
 # big to always carry and perfectly useful fetched. That is also why `skill`
 # HAS a `read` action while `memory` deliberately has none.
 SKILL_FILE = "SKILL.md"
-SKILLS_DIR = os.path.join(os.path.dirname(SESSION_DIR), "skills")
+SKILLS_DIR = os.path.join(crow_platform.config_dir(), "skills")
 
 # The whole listing, however many skills exist. AN EIGHTH OF ONE TOOL READ, and
 # a cap on the LIST rather than on each entry, because the failure this bounds
@@ -6506,7 +6564,7 @@ def _too_big(entries: "list[str]", limit: int, cost: int, verb: str) -> str:
 # whether its rows are stale, and a row whose file has gone is dropped instead
 # of being answered from.
 ARCHIVE_DIR = "archiv"
-INDEX_PATH = os.path.join(os.path.dirname(SESSION_DIR), "index.db")
+INDEX_PATH = os.path.join(crow_platform.data_dir(), "index.db")
 
 
 def fts5_available() -> bool:
@@ -6727,9 +6785,17 @@ _MANDATED: set[str] = set()
 # Der UNC-Zweig verlangt \\host\share und ein Wortanfangs-Lookbehind -- die
 # gleiche Haertung wie in _PATH_TOKENS (robins \\xe4chste-Phantom, 2026-08-29):
 # ein \\x-Escape in zitiertem Code darf kein Mandat erzeugen.
+#
+# Der POSIX-Zweig gilt nur auf POSIX, aus dem Grund, den _PATH_TOKENS nennt,
+# und mit demselben erweiterten Lookbehind: ein `/` nach einem Buchstaben, einem
+# `:` oder einem `/` gehoert zu einer URL oder zu "und/oder", nie zu einem Pfad.
+_POSIX_IN_TEXT = r"|(?<![A-Za-z0-9:/])~?/[^\s\"'<>|]*"
+
 _PATH_IN_TEXT = re.compile(
     r"(?:[A-Za-z]:[\\/][^\s\"'<>|]*"
-    r"|(?<![A-Za-z0-9])\\\\[^\s\"'<>|\\/]+[\\/][^\s\"'<>|]*)")
+    r"|(?<![A-Za-z0-9])\\\\[^\s\"'<>|\\/]+[\\/][^\s\"'<>|]*"
+    + ("" if crow_platform.IS_WINDOWS else _POSIX_IN_TEXT)
+    + r")")
 
 
 # #179. EIN ZITIERTER PFAD IST DER EINZIGE, DER SICH SELBST BEGRENZT. Prosa tut
@@ -6738,7 +6804,9 @@ _PATH_IN_TEXT = re.compile(
 # kosten den Nutzer zwei Zeichen und sind die einzige Angabe, bei der Crow nicht
 # raet.
 _QUOTED_PATH = re.compile(
-    r"[\"']((?:[A-Za-z]:[\\/]|(?<![A-Za-z0-9])\\\\[^\"'<>|\\/]+[\\/])[^\"'<>|\r\n]*)[\"']")
+    r"[\"']((?:[A-Za-z]:[\\/]|(?<![A-Za-z0-9])\\\\[^\"'<>|\\/]+[\\/]"
+    + ("" if crow_platform.IS_WINDOWS else r"|~?/")
+    + r")[^\"'<>|\r\n]*)[\"']")
 
 # Wie weit ueber Leerzeichen hinweg verlaengert wird, bevor aufgegeben wird.
 # Sechs Woerter sind mehr als jeder Ordnername auf dieser Maschine und wenig
@@ -7084,22 +7152,17 @@ def take_image_ride() -> "dict | None":
 # Edge ist auf jedem Windows da, und ein Werkzeug, das eine Installation
 # voraussetzt, die der Nutzer nicht hat, ist ein Werkzeug, das einmal scheitert
 # und danach nie wieder gerufen wird.
-BROWSERS = (
-    r"%ProgramFiles%\Google\Chrome\Application\chrome.exe",
-    r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
-    r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe",
-    r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
-    r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe",
-)
+#
+# AUF LINUX GIBT ES KEINEN FESTEN ORT, den zu raten sich lohnte -- ein Browser
+# kommt aus der Distribution, aus flatpak oder aus einem Tarball --, also wird
+# ueber PATH gesucht statt ueber Pfade. Die Liste selbst und die Suche stehen in
+# crow_platform.browser_candidates; hier bleibt, was damit geschieht.
+BROWSERS = crow_platform.browser_candidates()
 
 
 def find_browser() -> "str | None":
     """The first Chromium on this machine, or None. Path only, nothing started."""
-    for raw in BROWSERS:
-        path = os.path.expandvars(raw)
-        if "%" not in path and os.path.isfile(path):
-            return path
-    return None
+    return crow_platform.find_browser_path()
 
 
 def _render_dir() -> str:
@@ -7151,11 +7214,12 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     import shutil as _shutil
     import tempfile as _tempfile
 
-    exe = find_browser()
-    if exe is None:
-        return ("error: no Chromium browser on this machine. render_page needs "
-                "Chrome or Edge; neither was found in the usual places.")
-
+    # DAS ARGUMENT ZUERST, DER BROWSER DANACH. Beides sind Fehler, aber nur
+    # einer davon gehoert dem Aufrufer: "no such page" beantwortet er, indem er
+    # den Pfad korrigiert, "no Chromium browser" gar nicht. Auf Windows steht
+    # immer ein Edge bereit, weshalb die Reihenfolge dort nie auffiel; auf einer
+    # Maschine ohne Browser verdeckte sie den Tippfehler, den das Modell haette
+    # sehen muessen.
     target = (path or "").strip()
     if not target:
         return "error: render_page needs a path or a URL"
@@ -7165,7 +7229,14 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         target = _rooted(target)                    # #177
         if not os.path.isfile(target):
             return "error: no such page: %s" % target
-        url = "file:///" + target.replace(os.sep, "/")
+        # lstrip, damit ein POSIX-Pfad nicht `file:////tmp/...` ergibt: unter
+        # Windows beginnt der Pfad mit dem Laufwerk, unter Linux mit `/`.
+        url = "file:///" + target.replace(os.sep, "/").lstrip("/")
+
+    exe = find_browser()
+    if exe is None:
+        return ("error: no Chromium browser on this machine. render_page needs "
+                "Chrome or Edge; neither was found in the usual places.")
 
     wait = max(200, min(int(wait_ms or 4000), 60000))
     w = max(200, min(int(width or 1280), 4096))
@@ -7200,15 +7271,12 @@ def tool_render_page(path: str, wait_ms: int | None = None,
             "--enable-logging=stderr", "--log-level=0",
             "--screenshot=" + shot, url]
 
-    flags = 0
-    if sys.platform == "win32":
-        flags = (subprocess.CREATE_NEW_PROCESS_GROUP
-                 | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    detach = crow_platform.spawn_kwargs(detached=True)
     reason = "done"
     try:
         with open(log, "w", encoding="utf-8", errors="replace") as sink:
             proc = subprocess.Popen(argv, stdout=sink, stderr=subprocess.STDOUT,
-                                    creationflags=flags)
+                                    **detach)
             try:
                 # Das Zeitfenster ist der Deckel der Seite plus Luft fuer Start
                 # und Schreiben -- nicht der Deckel selbst, sonst schlaegt das
@@ -7222,6 +7290,11 @@ def tool_render_page(path: str, wait_ms: int | None = None,
                 proc.wait(timeout=wait / 1000.0 + 8)
             except subprocess.TimeoutExpired:
                 proc.kill()                          # SEIN Kind, nie ein Name
+                # UND SEINE ENKEL, auf Linux: ein Chromium startet Zonen- und
+                # GPU-Prozesse, und der getoetete Anfuehrer nimmt sie nicht mit.
+                # Es ist dieselbe Regel -- die Sitzung, die DIESER Aufruf selbst
+                # aufgemacht hat, nie eine Prozessliste und nie ein Name.
+                crow_platform.terminate_tree(proc)
                 proc.wait(timeout=10)
                 reason = "timed out after %d ms and was stopped" % wait
         console = []
@@ -7526,7 +7599,15 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
         # Eingabe wartet, die es nicht geben kann, ist ein Werkzeug, das haengt;
         # gefragt wird in diesem Programm ueber die Freigabe-Karte, nirgends
         # sonst.
+        #
+        # DIE SCHALE IST DIE, DIE DEM MODELL ANGESAGT WURDE (SHELL_HINT).
+        # `shell=True` heisst auf Windows COMSPEC -- also cmd.exe, wie bisher --
+        # und auf Linux `/bin/sh`. sh ist NICHT, was in der Werkzeugbeschreibung
+        # steht, und das Modell schreibt bash (`[[`, `$'...'`). `executable`
+        # benennt sie deshalb, und nur wenn es sie wirklich gibt; auf Windows ist
+        # die Antwort None und der Aufruf bleibt Zeichen fuer Zeichen der alte.
         done = subprocess.run(command, shell=True, cwd=cwd, env=env, timeout=COMMAND_TIMEOUT,
+                              executable=crow_platform.shell_executable(),
                               stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, errors="replace")
     except subprocess.TimeoutExpired:
@@ -7574,7 +7655,10 @@ def git_events_file() -> str:
     derived from it at import time would freeze whichever value existed first;
     read through a call, this follows the redirect -- and robins Regel "kein
     Testlauf schreibt in %LOCALAPPDATA%\\Crow" holds without anybody having to
-    remember to add a name to a list.
+    remember to add a name to a list. THAT is why this one is derived from
+    `SESSION_DIR` and not from `crow_platform.state_dir()` directly -- the
+    platform answer does not follow a redirect, and both spell the same
+    directory anyway (state_dir() on Linux, %LOCALAPPDATA%\\Crow on Windows).
     """
     return os.path.join(os.path.dirname(SESSION_DIR), "git_events.json")
 
@@ -8903,7 +8987,7 @@ def declined_outside(paths: "list[str]") -> str:
 # server said and the specification calls it untrusted; `classes` is what a
 # person confirmed. A server that reports `readOnlyHint: true` tomorrow changes
 # nothing here -- the same construction as the pinned memory head.
-MCP_FILE = os.path.join(os.path.dirname(SESSION_DIR), "mcp.json")
+MCP_FILE = os.path.join(crow_platform.config_dir(), "mcp.json")
 
 # The three the checklist offers: reads / writes / executes. They are names
 # `TOOL_CLASS` already means something by, so an MCP tool hangs in the level
@@ -9397,7 +9481,7 @@ MCP_HTTP_SAID = 400
 # a refresh token in it is a credential with a rotation nobody performs. This
 # one is written by Crow alone, never read into a view, and dropped with the
 # server it belongs to.
-MCP_TOKEN_FILE = os.path.join(os.path.dirname(SESSION_DIR), "mcp_tokens.json")
+MCP_TOKEN_FILE = os.path.join(crow_platform.config_dir(), "mcp_tokens.json")
 
 # Seconds for the discovery and token calls. They are not a turn -- nothing is
 # streaming and nobody is waiting on tokens per second -- so this is short.
@@ -9429,11 +9513,25 @@ MCP_DELETE_TIMEOUT = 3.0
 # nor Node comes up; without PATHEXT a bare `npx` is not found; without TEMP the
 # npm cache has nowhere to go. An empty environment is not safety, it is a
 # server that never answers.
+#
+# AND ON LINUX IT IS WRONG IN ITS OWN WAY. Without HOME npm writes its cache to
+# `/` and dies; without the XDG variables a server that stores anything puts it
+# somewhere else than the one that asked; without DISPLAY / WAYLAND_DISPLAY /
+# XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS a server that opens a window or
+# talks to the session bus -- a browser driver, a notifier -- cannot reach the
+# session it was started from; without TERM a child that draws anything writes
+# escape sequences for a terminal nobody has. ONE LIST FOR BOTH, because a name
+# that does not exist on a platform simply never matches: `os.environ` is what
+# is filtered, not this.
 _MCP_ENV_KEEP = frozenset((
     "PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC",
-    "TEMP", "TMP", "HOME", "HOMEDRIVE", "HOMEPATH", "USERPROFILE",
+    "TEMP", "TMP", "TMPDIR", "HOME", "HOMEDRIVE", "HOMEPATH", "USERPROFILE",
     "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)",
     "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS", "LANG", "LC_ALL",
+    "LC_CTYPE", "LANGUAGE", "TERM", "SHELL", "USER", "LOGNAME",
+    "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR", "XDG_DATA_DIRS", "XDG_CONFIG_DIRS",
+    "DISPLAY", "WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS",
 ))
 
 
@@ -11980,7 +12078,7 @@ def approval_scope(name: str, arguments: str) -> tuple[str, str] | None:
 # editierbares JSON; eine unlesbare Datei liest sich als LEER und reisst das
 # Tor nicht mit um -- read_root_mode's rule. Eine Dauer-Freigabe loeschen
 # heisst: ihre Zeile aus der Datei nehmen.
-APPROVALS_FILE = os.path.join(os.path.dirname(SESSION_DIR), "approvals.json")
+APPROVALS_FILE = os.path.join(crow_platform.config_dir(), "approvals.json")
 _STORED_APPROVALS: "set[tuple[str, str]] | None" = None
 
 
@@ -13676,17 +13774,17 @@ def run_turn(
 # `params` ARRIVED AFTER THE FILE DID, and it needs no migration: a catalogue
 # written before it exists reads back as "did not say", which is the answer
 # that asks for no filter. Same rule `context` already follows with 0.
-PROVIDERS_FILE = os.path.join(os.path.dirname(SESSION_DIR), "providers.json")
+PROVIDERS_FILE = os.path.join(crow_platform.config_dir(), "providers.json")
 
 # Die Boot-Registry der Nacht vom 2026-08-28 -- der Kommentar steht bei
 # `_BOOTED`, die Konstante hier, weil SESSION_DIR erst hier gebunden ist.
-BOOTED_FILE = os.path.join(os.path.dirname(SESSION_DIR), "booted.json")
+BOOTED_FILE = os.path.join(crow_platform.state_dir(), "booted.json")
 
 # THE KEYS ARE NOT IN IT, and the reason is the one MCP_TOKEN_FILE already
 # carries: `providers.json` is drawn by a sheet, pasted into bug reports and
 # edited by hand. This one is written by Crow alone and leaves the process as a
 # mask or not at all.
-PROVIDER_KEYS_FILE = os.path.join(os.path.dirname(SESSION_DIR), "provider_keys.json")
+PROVIDER_KEYS_FILE = os.path.join(crow_platform.config_dir(), "provider_keys.json")
 
 LOCAL_PROVIDER = "local"
 
@@ -14405,7 +14503,7 @@ def provider_view() -> dict:
 # `User-Agent` -- naming yourself is not dressing up as somebody else. If that
 # is wanted it is a value a person puts in the file knowingly, not a constant
 # this file ships.
-PROVIDER_TOKEN_FILE = os.path.join(os.path.dirname(SESSION_DIR), "provider_tokens.json")
+PROVIDER_TOKEN_FILE = os.path.join(crow_platform.config_dir(), "provider_tokens.json")
 
 # Refresh this many seconds before expiry, and the reason is MCP_TOKEN_SKEW's:
 # a token valid when the request is built and stale when it arrives is the
@@ -15087,18 +15185,22 @@ def font_files() -> list[str]:
 
 def font_installed() -> list[str]:
     """Names of our font files already present in the per-user font store."""
-    target = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Fonts")
+    target = crow_platform.font_store()
     if not os.path.isdir(target):
         return []
     return [f for f in font_files() if os.path.isfile(os.path.join(target, f))]
 
 
 # THE ONE BLOCK IN HERE THAT CAN PRINT, and it is named rather than hidden: the
-# two `if verbose:` lines below are the only print() calls in this file. Nothing
-# in this repository passes verbose=True -- ensure_font() in cli/crow.py calls
+# `if verbose:` line below is the only print() call in this file. Nothing in
+# this repository passes verbose=True -- ensure_font() in cli/crow.py calls
 # install_font() bare, and the suite calls it bare -- so on every path that
-# exists today they are unreachable. A second client that wants the two messages
-# takes them as a return code, not as stdout.
+# exists today it is unreachable. A second client that wants the message takes
+# it as a return code, not as stdout.
+#
+# EINE ZEILE WENIGER SEIT DEM LINUX-PORT: die zweite sagte "font install is
+# Windows-only", und das ist nicht mehr wahr -- fontconfig hat einen
+# Benutzerspeicher wie Windows einen hat, nur ohne Registry.
 def install_font(verbose: bool = False) -> int:
     """Copy the bundled faces into the PER-USER font store and register them.
 
@@ -15108,43 +15210,23 @@ def install_font(verbose: bool = False) -> int:
 
     Per-user on purpose: HKLM and %WINDIR%\\Fonts need elevation, and a chat CLI
     has no business prompting for admin. Windows has honoured the per-user store
-    since 10 1809, and nothing outside this account is touched.
+    since 10 1809, and nothing outside this account is touched. On Linux the
+    per-user store is `~/.local/share/fonts/crow` and there is no registry --
+    fontconfig indexes the directory, and `fc-cache -f` only makes it visible
+    before the next login.
 
     What it does NOT do is select the font. No emulator lets a running program
     set its own typeface - Windows Terminal reads it from settings.json, conhost
     from the registry. Installing makes it choosable; choosing stays with the
     user, which is why the one line printed afterwards says how.
     """
-    if os.name != "nt":
-        if verbose:
-            print("font install is Windows-only; the files are in cli/fonts")
-        return 2
-
     files = font_files()
     if not files:
         if verbose:
             print(f"no font files in {FONT_DIR}")
         return 2
 
-    import shutil
-    import winreg
-
-    target = os.path.join(os.environ["LOCALAPPDATA"], "Microsoft", "Windows", "Fonts")
-    os.makedirs(target, exist_ok=True)
-    key = r"Software\Microsoft\Windows NT\CurrentVersion\Fonts"
-
-    done = 0
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as k:
-        for name in files:
-            dst = os.path.join(target, name)
-            if not os.path.isfile(dst):
-                shutil.copyfile(os.path.join(FONT_DIR, name), dst)
-                done += 1
-            # The per-user store wants the FULL PATH as the value; the machine
-            # store takes a bare filename. Writing a bare name here registers a
-            # font Windows then cannot find, and it fails silently.
-            winreg.SetValueEx(k, f"{FONT_FAMILY} ({name})", 0, winreg.REG_SZ, dst)
-    return 0 if done else 1
+    return crow_platform.install_fonts(FONT_DIR, files, FONT_FAMILY)
 
 
 # ---------------------------------------------------------------- #143 -----

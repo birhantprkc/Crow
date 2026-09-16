@@ -59,8 +59,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-import crow        # noqa: E402
-import crow_core   # noqa: E402
+import crow           # noqa: E402
+import crow_core      # noqa: E402
+import crow_platform  # noqa: E402
 
 # THE SUITE MAY NOT DEPEND ON WHAT THIS MACHINE HAS CONFIGURED (#130).
 # `crow_core` reads %LOCALAPPDATA%\Crow\mcp.json at import and appends whatever
@@ -343,7 +344,7 @@ class TheCoreStandsAloneTests(unittest.TestCase):
 
     def test_nothing_in_the_core_writes_to_the_terminal(self):
         """The rule the whole stage is cut along: only blocks with 0 terminal
-        lines moved. The two exceptions sit behind install_font(verbose=True),
+        lines moved. The one exception sits behind install_font(verbose=True),
         which nothing in this repository passes.
 
         stderr IS COUNTED THE SAME WAY (#193). `print()` was never the only way
@@ -353,7 +354,7 @@ class TheCoreStandsAloneTests(unittest.TestCase):
         lines = _source("crow_core.py").splitlines()
         printing = [n for n, line in enumerate(lines, 1)
                     if re.search(r"\bprint\(", line) and not line.lstrip().startswith("#")]
-        self.assertEqual(len(printing), 2,
+        self.assertEqual(len(printing), 1,
                          f"unexpected print() in crow_core.py at lines {printing}")
         for n in printing:
             self.assertIn("verbose", "\n".join(lines[max(0, n - 3):n]),
@@ -2540,6 +2541,14 @@ class TheBootLeavesItsTraceTests(unittest.TestCase):
         os.chdir(self.cwd)
         self.addCleanup(os.chdir, before)
         self.addCleanup(shutil.rmtree, self.cwd, True)
+        # WO DIE SPUREN LIEGEN, SAGT DIE PLATTFORM: `<cwd>\runs` auf Windows,
+        # `$XDG_STATE_HOME/crow/log` auf Linux -- dort ist das Arbeits-
+        # verzeichnis eines aus einem .desktop-Eintrag gestarteten Fensters
+        # nicht der Ort, an dem jemand nachsieht. Die Variable wird hier
+        # umgebogen, damit kein Testlauf in das echte Zustandsverzeichnis
+        # schreibt; auf Windows aendert sie nichts.
+        self.addCleanup(os.environ.pop, "XDG_STATE_HOME", None)
+        os.environ["XDG_STATE_HOME"] = self.cwd
         self.addCleanup(setattr, crow_core, "BOOTED_FILE",
                         crow_core.BOOTED_FILE)
         self.addCleanup(crow_core._BOOTED.clear)
@@ -2548,6 +2557,10 @@ class TheBootLeavesItsTraceTests(unittest.TestCase):
                       crow_core.server_command, crow_core.projector_candidates,
                       crow_core.server_model_path, crow_core.time.sleep)
         self.addCleanup(self._restore)
+
+    def log(self, name: str) -> str:
+        """Eine Logdatei des Boots, dort wo diese Plattform sie hinlegt."""
+        return os.path.join(crow_platform.log_dir(), name)
 
     def _restore(self) -> None:
         (crow_core.subprocess.Popen, crow_core.running_servers,
@@ -2578,8 +2591,8 @@ class TheBootLeavesItsTraceTests(unittest.TestCase):
         crow_core.time.sleep = lambda s: None
         path = crow_core.start_server("unit", "http://127.0.0.1:8082/v1")
         self.assertEqual(path, "X.gguf")
-        want_out = os.path.join(self.cwd, "runs", "llama-server-8082.out.log")
-        want_err = os.path.join(self.cwd, "runs", "llama-server-8082.err.log")
+        want_out = self.log("llama-server-8082.out.log")
+        want_err = self.log("llama-server-8082.err.log")
         self.assertEqual(seen["out"], want_out)
         self.assertEqual(seen["err"], want_err)
         self.assertTrue(os.path.isfile(want_out), "the out log was not created")
@@ -2609,7 +2622,7 @@ class TheBootLeavesItsTraceTests(unittest.TestCase):
         war der Reboot genau das Ereignis, das ihn ueberschrieb. Bezahlt am
         2026-08-30: kein Dump, kein Ereignis, und das err-Log begann beim
         Boot des Nachfolgers."""
-        err = os.path.join(self.cwd, "runs", "llama-server-8082.err.log")
+        err = self.log("llama-server-8082.err.log")
         self._boot()
         with open(err, "w", encoding="utf-8") as fh:
             fh.write("the line that says why it died\n")
@@ -2624,7 +2637,7 @@ class TheBootLeavesItsTraceTests(unittest.TestCase):
         """NEGATIVPROBE. Ein Umbenennen, das die alte Datei stehen liesse, waere
         von aussen nicht zu unterscheiden -- bis jemand den falschen Lauf liest
         und eine Ursache findet, die zwei Boots alt ist."""
-        err = os.path.join(self.cwd, "runs", "llama-server-8082.err.log")
+        err = self.log("llama-server-8082.err.log")
         self._boot()
         with open(err, "w", encoding="utf-8") as fh:
             fh.write("the older run\n")
@@ -2639,10 +2652,9 @@ class TheBootLeavesItsTraceTests(unittest.TestCase):
         Umbenennen, kein Fehler. Ein Boot, der an seinem eigenen Logarchiv
         scheitert, waere der schlechtere Tausch."""
         self.assertIsNone(crow_core._keep_previous_log(
-            os.path.join(self.cwd, "runs", "nothing-here.err.log")))
+            self.log("nothing-here.err.log")))
         self._boot()
-        self.assertTrue(os.path.isfile(
-            os.path.join(self.cwd, "runs", "llama-server-8082.err.log")))
+        self.assertTrue(os.path.isfile(self.log("llama-server-8082.err.log")))
 
     def test_the_boot_carries_the_operating_points_env(self):
         """2026-08-28 nachts: der NVIDIA-Treibercache frass jeden Boot dieses
@@ -2837,7 +2849,8 @@ class RunCommandBoundaryTests(unittest.TestCase):
         self.assertEqual(crow_core.run_command_boundary(self.args(r"del C:\anything")), [])
 
     def test_a_relative_escape_counts_as_outside(self):
-        hits = crow_core.run_command_boundary(self.args(r"type ..\secret.txt"))
+        hits = crow_core.run_command_boundary(
+            self.args("type ..%ssecret.txt" % os.sep))
         self.assertTrue(hits, "..\\ resolved inside the root it walks out of")
 
     def test_a_url_is_not_a_drive(self):
@@ -2865,9 +2878,13 @@ class RunCommandBoundaryTests(unittest.TestCase):
         cmd = ("powershell -Command \"Select-String -Pattern "
                "'Dokumentation|docs|n\\\\xe4chste|next step' x.md\"")
         self.assertEqual(crow_core.run_command_boundary(self.args(cmd)), [])
-        # DIE POSITIVKONTROLLE UEBERLEBT: ein echter UNC-Pfad fragt weiter.
-        self.assertTrue(crow_core.run_command_boundary(
-            self.args(r"type \\server\share\secret.txt")))
+        # DIE POSITIVKONTROLLE UEBERLEBT: ein echter UNC-Pfad fragt weiter --
+        # und UNC ist ein Windows-Begriff: unter Linux ist `\\server\share`
+        # ein gewoehnlicher relativer Dateiname INNERHALB der Wurzel, und ihn
+        # dort als Aussenpfad zu melden waere der Phantom-Fehler von oben.
+        if sys.platform == "win32":
+            self.assertTrue(crow_core.run_command_boundary(
+                self.args(r"type \\server\share\secret.txt")))
 
     def test_an_escape_sequence_grants_no_mandate(self):
         """Dieselbe Haertung fuer die Gegenrichtung: ein \\\\x-Escape in
@@ -3824,11 +3841,17 @@ class SecretStoreTests(unittest.TestCase):
         self.assertEqual(self.err.getvalue(), "")
 
     def test_the_store_sits_in_the_directory_the_installer_owns(self):
-        """Next to approvals.json and booted.json under %LOCALAPPDATA%\\Crow.
-        That is the directory install.ps1 already creates and the one
+        """Next to approvals.json and providers.json in the directory the
+        installer owns -- %LOCALAPPDATA%\\Crow on Windows, ~/.config/crow on
+        Linux. That is the directory install.ps1 already creates and the one
         tools/migrate-secrets.ps1 sets the ACL inside; a store anywhere else
-        would need a second owner for its permissions."""
-        self.assertIn('"Crow", "secrets.json"', _source("crow_core.py"))
+        would need a second owner for its permissions. ASKED OF THE SOURCE and
+        not of the value, because the suite redirects SECRETS_FILE at import."""
+        self.assertIn('crow_platform.config_dir(), "secrets.json"',
+                      _source("crow_core.py"))
+        self.assertEqual(os.path.dirname(
+            os.path.join(crow_platform.config_dir(), "secrets.json")),
+            crow_platform.config_dir())
 
 
 class _Backend:
@@ -6169,11 +6192,13 @@ class TheStdioConnectionTests(unittest.TestCase):
     def test_the_child_still_gets_what_it_needs_to_run(self):
         """NEGATIVE for the case above: an empty environment is not security, it
         is a server that cannot start. On Windows a missing SYSTEMROOT alone
-        stops Python and Node coming up at all."""
+        stops Python and Node coming up at all; on Linux it is HOME, without
+        which npm has nowhere to put its cache."""
         self._configure()
         seen = json.loads(self._call("environment"))
-        for needed in ("PATH", "SYSTEMROOT"):
-            self.assertTrue(any(k.upper() == needed for k in seen), needed)
+        needed = ("PATH", "SYSTEMROOT") if sys.platform == "win32" else ("PATH", "HOME")
+        for name in needed:
+            self.assertTrue(any(k.upper() == name for k in seen), name)
 
     def test_tag_characters_are_stripped_from_a_result(self):
         """The same filter the descriptions get, on the other direction of
@@ -7948,7 +7973,12 @@ class TheChecklistTests(unittest.TestCase):
         example starts with `npx`, so this one line decides whether any
         documented server can be started on the platform Crow ships for."""
         import stat
-        launcher = os.path.join(self.dir, "fakelauncher.cmd")
+        # `.cmd` IST DER WINDOWS-TEIL DES FALLES: dort findet `which` den
+        # Starter nur ueber PATHEXT. Auf Linux traegt ein Programm keine
+        # Endung, und eine erfundene waere ein Fall ueber nichts -- was hier
+        # geprueft wird, ist die Aufloesung ueber PATH, auf beiden Systemen.
+        launcher = os.path.join(
+            self.dir, "fakelauncher" + (".cmd" if sys.platform == "win32" else ""))
         with open(launcher, "w", encoding="utf-8") as fh:
             fh.write("@echo off" + chr(13) + chr(10))
         os.chmod(launcher, os.stat(launcher).st_mode | stat.S_IEXEC)
@@ -9212,6 +9242,7 @@ class TheRepositoryHoldsNobodysCredentialsTests(unittest.TestCase):
     """
 
     FILES = ("cli/crow_core.py", "cli/crow_gui.py", "cli/crow.py",
+             "cli/crow_platform.py",
              "cli/test_crow_core.py", "cli/test_crow_gui.py", "README.md")
 
     def _root(self) -> str:
@@ -10290,24 +10321,34 @@ class TheUpdateIsRunFromTheWindowTests(unittest.TestCase):
         downloaded and run with `-File`. And without `-NoPause` it waits for
         ENTER at the end: behind a window with no console that wait never ends,
         and the update hangs with nothing on screen to say why."""
-        argv = crow_core.update_argv(r"C:\Temp\install.ps1")
-        self.assertIn("-File", argv)
-        self.assertIn(r"C:\Temp\install.ps1", argv)
-        self.assertIn("-NoPause", argv)
+        script = r"C:\Temp\install.ps1" if sys.platform == "win32" else "/tmp/install.sh"
+        argv = crow_core.update_argv(script)
+        self.assertIn(script, argv)
         self.assertNotIn("iex", " ".join(argv))
-        self.assertLess(argv.index("-File"), argv.index(r"C:\Temp\install.ps1"))
+        if sys.platform == "win32":
+            self.assertIn("-File", argv)
+            self.assertIn("-NoPause", argv)
+            self.assertLess(argv.index("-File"), argv.index(script))
+        else:
+            # install.sh nimmt `[--to DIR]` und aktualisiert ohne Argument an
+            # Ort und Stelle; bash wird benannt, weil eine ueber HTTP geholte
+            # Datei kein Ausfuehrungsbit mitbringt.
+            self.assertEqual(argv, ["bash", script])
 
     def test_a_copy_that_runs_from_somewhere_else_is_not_the_installed_one(self):
         r"""robin runs from a checkout. An update installs into
         %LOCALAPPDATA%\Crow, which is NOT what he is looking at -- so the window
         has to be able to say which directory it is about to change."""
         root = crow_core.install_dir()
-        self.assertTrue(root.endswith("Crow"), root)
+        self.assertEqual(os.path.basename(root).lower(), "crow", root)
         self.assertTrue(crow_core.running_from_install(
             os.path.join(root, "cli", "crow_gui.py")))
-        self.assertTrue(crow_core.running_from_install(
-            os.path.join(root.upper(), "cli", "crow_gui.py")),
-            "the comparison is case sensitive on a case insensitive disk")
+        if sys.platform == "win32":
+            # Nur dort ist die Platte gleichgueltig gegen Gross- und
+            # Kleinschreibung; auf Linux sind zwei Schreibweisen zwei Orte.
+            self.assertTrue(crow_core.running_from_install(
+                os.path.join(root.upper(), "cli", "crow_gui.py")),
+                "the comparison is case sensitive on a case insensitive disk")
         self.assertFalse(crow_core.running_from_install(
             r"D:\src\Crow\cli\crow_gui.py"))
 
@@ -10344,9 +10385,12 @@ class TheUpdateIsRunFromTheWindowTests(unittest.TestCase):
 
     def test_the_script_comes_off_the_repository_and_lands_in_a_file(self):
         """The same URL install.ps1 prints when it needs to be re-run with a
-        switch, and the same one `UPDATE_COMMAND` pipes into iex."""
+        switch, and the same one `UPDATE_COMMAND` pipes into iex. ONE INSTALLER
+        PER PLATFORM and one contract: install.ps1 on Windows, install.sh on
+        Linux, and the printed line is the same line in the other shell."""
         self.assertIn(crow_core.REPO, crow_core.INSTALL_SCRIPT_URL)
-        self.assertTrue(crow_core.INSTALL_SCRIPT_URL.endswith("install.ps1"))
+        self.assertTrue(crow_core.INSTALL_SCRIPT_URL.endswith(
+            "install.ps1" if sys.platform == "win32" else "install.sh"))
         self.assertIn(crow_core.INSTALL_SCRIPT_URL, crow_core.UPDATE_COMMAND)
 
         class _Resp:
@@ -10364,7 +10408,8 @@ class TheUpdateIsRunFromTheWindowTests(unittest.TestCase):
         self.addCleanup(setattr, crow_core.urllib.request, "urlopen", real)
         path = crow_core.fetch_install_script()
         self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
-        self.assertTrue(path.endswith(".ps1"))
+        self.assertTrue(path.endswith(
+            ".ps1" if sys.platform == "win32" else ".sh"))
         with open(path, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "# install")
 
@@ -10782,7 +10827,10 @@ class TheProjectorReachesTheCommandLineTests(unittest.TestCase):
         os.makedirs(os.path.join(self.root, "qq"))
         os.makedirs(os.path.join(self.install, "bin"))
         self._touch(os.path.join(self.root, "qq", "model.gguf"))
-        self._touch(os.path.join(self.install, "bin", "llama-server.exe"))
+        # DER NAME IST DER DER PLATTFORM: `llama-server.exe` unter Windows,
+        # `llama-server` sonst -- gefunden wird, wonach server_binary sucht.
+        self._touch(os.path.join(self.install, "bin",
+                                 crow_platform.server_binary_name()))
 
     def _touch(self, path):
         with open(path, "wb") as fh:
@@ -11449,7 +11497,14 @@ class CrowOwnsTheBrowserItStartsTests(unittest.TestCase):
         """Eine Maschine ohne Chrome hat Edge, und ein Pfad im Quelltext ist der
         Pfad EINER Maschine. Alle Kandidaten gehen ueber Umgebungsvariablen."""
         for raw in crow_core.BROWSERS:
-            self.assertTrue(raw.startswith("%"), raw)
+            if sys.platform == "win32":
+                self.assertTrue(raw.startswith("%"), raw)
+            else:
+                # Auf Linux liegt kein Browser an einem festen Ort -- er kommt
+                # aus der Distribution, aus flatpak oder aus einem Tarball. Ein
+                # blosser Programmname geht ueber PATH, was dort dasselbe
+                # leistet wie `%ProgramFiles%` dort: kein Pfad im Quelltext.
+                self.assertNotIn(os.sep, raw)
         found = crow_core.find_browser()
         if found is not None:
             self.assertTrue(os.path.isfile(found), found)
@@ -12211,8 +12266,12 @@ class RelativePathsResolveInTheWorkingAreaTests(unittest.TestCase):
         Bezugspunkt selbst gesetzt -- der wird nicht verschoben. `isabs` allein
         reicht dafuer nicht: unter Python 3.13 ist weder `\\rooted` noch
         `C:rel` absolut, und ein blosses `join` haette beide verbogen."""
-        for path in (r"C:\a\b", r"\\server\share\f", r"\rooted", "/rooted",
-                     "C:rel"):
+        # Auf Linux ist weder ein Laufwerksbuchstabe noch ein Backslash ein
+        # Anker -- beides sind dort gewoehnliche Zeichen in einem Dateinamen,
+        # und `_rooted` verankert sie voellig zu Recht im Arbeitsbereich.
+        anchored = ((r"C:\a\b", r"\\server\share\f", r"\rooted", "/rooted", "C:rel")
+                    if sys.platform == "win32" else ("/rooted",))
+        for path in anchored:
             self.assertEqual(crow_core._rooted(path), path,
                              "%r wurde verschoben" % path)
 
@@ -12269,8 +12328,25 @@ class StorePathsGetNoStandingApprovalTests(unittest.TestCase):
         crow_core.APPROVALS_FILE = os.path.join(self.dir, "approvals.json")
         crow_core.USER_PATH = os.path.join(self.dir, "USER.md")
         crow_core._STORED_APPROVALS = None
+        # WAS EIN AUSSENPFAD IST, SCHREIBT SICH JE PLATTFORM ANDERS. Auf
+        # Windows ist `C:\...` einer, auf Linux ist derselbe String ein
+        # RELATIVER Name und landet in der Wurzel -- die Regel spraenge nie an.
+        # Der Fall handelt von "ausserhalb", nicht von einem Laufwerk.
+        self.store = self.outside("crow-unit-store", "Test runs")
+        self.other = self.outside("crow-unit-other", "x")
+        self.elsewhere = self.outside("crow-unit-elsewhere", "build")
         with open(crow_core.USER_PATH, "w", encoding="utf-8") as fh:
-            fh.write("- LP-50 lives in C:\\crow-unit-store\\Test runs\n")
+            fh.write("- LP-50 lives in %s\n" % self.store)
+
+    def outside(self, *parts):
+        """Ein Pfad ausserhalb der gebundenen Wurzel, in dieser Schreibweise."""
+        if sys.platform == "win32":
+            return "C:\\" + "\\".join(parts)
+        return os.path.join(self.dir, "aussen", *parts)
+
+    def kept(self, path):
+        """Wie eine Freigabe in approvals.json steht: normcase, wie remember."""
+        return ("outside", os.path.normcase(path))
 
     def args(self, command, **kw):
         return json.dumps({"command": command, **kw})
@@ -12283,7 +12359,7 @@ class StorePathsGetNoStandingApprovalTests(unittest.TestCase):
             return set()
 
     def test_a_store_path_is_released_for_the_session_only(self):
-        a = self.args(r'dir "C:\crow-unit-store\Test runs"')
+        a = self.args('dir "%s"' % self.store)
         self.assertIsNotNone(crow_core.remember("run_command", a),
                              "die Karte konnte gar nicht beantwortet werden")
         self.assertTrue(crow_core.remembered("run_command", a),
@@ -12294,16 +12370,14 @@ class StorePathsGetNoStandingApprovalTests(unittest.TestCase):
     def test_a_derived_path_is_still_written_down(self):
         """POSITIVKONTROLLE. Ohne sie waere die Regel 'nie etwas merken', und
         robin gaebe Chrome und die Vault-Pfade jede Sitzung neu frei."""
-        a = self.args(r'dir "C:\crow-unit-elsewhere\build"')
+        a = self.args('dir "%s"' % self.elsewhere)
         self.assertIsNotNone(crow_core.remember("run_command", a))
         self.assertTrue(crow_core.remembered("run_command", a))
-        self.assertIn(("outside", r"c:\crow-unit-elsewhere\build"), self.stored())
+        self.assertIn(self.kept(self.elsewhere), self.stored())
 
     def test_the_predicate_sees_the_profile_and_answers_no_for_a_stranger(self):
-        self.assertTrue(crow_core.scope_from_a_store(
-            ("outside", r"C:\crow-unit-store\Test runs")))
-        self.assertFalse(crow_core.scope_from_a_store(
-            ("outside", r"C:\crow-unit-elsewhere\build")))
+        self.assertTrue(crow_core.scope_from_a_store(("outside", self.store)))
+        self.assertFalse(crow_core.scope_from_a_store(("outside", self.elsewhere)))
         # NEGATIVPROBEN: was kein Aussenpfad ist, geht die Regel nichts an.
         self.assertFalse(crow_core.scope_from_a_store(("executing", "git")))
         self.assertFalse(crow_core.scope_from_a_store(("writing", r"c:\x")))
@@ -12314,21 +12388,20 @@ class StorePathsGetNoStandingApprovalTests(unittest.TestCase):
         """NEGATIVPROBE. Ein fehlender Speicher heisst 'kein Speicherpfad',
         nicht 'keine Freigabe mehr' -- read_store's Regel, eine Ebene hoeher."""
         os.remove(crow_core.USER_PATH)
-        self.assertFalse(crow_core.scope_from_a_store(
-            ("outside", r"C:\crow-unit-store\Test runs")))
-        a = self.args(r'dir "C:\crow-unit-store\Test runs"')
+        self.assertFalse(crow_core.scope_from_a_store(("outside", self.store)))
+        a = self.args('dir "%s"' % self.store)
         crow_core.remember("run_command", a)
-        self.assertIn(("outside", r"c:\crow-unit-store\test runs"), self.stored())
+        self.assertIn(self.kept(self.store), self.stored())
 
     def test_one_store_path_does_not_hold_back_a_second_derived_one(self):
         """Ein Kommando mit zwei Aussenpfaden: der aus dem Speicher bleibt
         ungeschrieben, der andere wird gemerkt. Sonst zoege ein Speicherpfad
         jede Freigabe seines Kommandos mit sich."""
-        a = self.args(r'dir "C:\crow-unit-store\Test runs" & dir "C:\crow-unit-other\x"')
+        a = self.args('dir "%s" & dir "%s"' % (self.store, self.other))
         crow_core.remember("run_command", a)
         got = self.stored()
-        self.assertIn(("outside", r"c:\crow-unit-other\x"), got)
-        self.assertNotIn(("outside", r"c:\crow-unit-store\test runs"), got)
+        self.assertIn(self.kept(self.other), got)
+        self.assertNotIn(self.kept(self.store), got)
 
 
 class _Said:
@@ -12368,20 +12441,27 @@ class AmbiguousPathsInProseTests(unittest.TestCase):
         self.kurz = os.path.join(self.dir, "Test")
         os.makedirs(self.kurz)
 
+    # DER TRENNER IST DER DER PLATTFORM. Die Faelle handeln von einem
+    # Leerzeichen IM Pfad, nicht von einem Backslash: mit `\` in der Mitte
+    # waere `Test runs` unter Linux ein Dateiname und kein Ordner, und die
+    # Regel, die hier geprueft wird, kaeme nie zum Zug.
+    def named(self, *parts):
+        return os.sep.join((self.dir,) + parts)
+
     def mandates(self, *texts):
         return crow_core.mandated_paths(_Said(*texts))
 
     # -- die Ueber-Freigabe -------------------------------------------------
 
     def test_a_prefix_cut_at_a_space_releases_nothing(self):
-        got = self.mandates("%s\\Test runs schreib dort bitte ein hello world rein"
-                            % self.dir)
+        got = self.mandates("%s schreib dort bitte ein hello world rein"
+                            % self.named("Test runs"))
         self.assertNotIn(os.path.realpath(self.kurz), got,
                          "der abgeschnittene Anfang gab ein echtes Verzeichnis frei")
         self.assertEqual(got, set(), "es wurde ueberhaupt etwas freigegeben")
 
     def test_the_dropped_prefix_is_remembered_as_named(self):
-        self.mandates("%s\\Test runs schreib dort bitte etwas rein" % self.dir)
+        self.mandates("%s schreib dort bitte etwas rein" % self.named("Test runs"))
         self.assertTrue(crow_core.named_but_ambiguous(
             os.path.join(self.dir, "Test runs", "hello.py")))
         # NEGATIVPROBE: ein Pfad, der nichts mit dem verworfenen zu tun hat.
@@ -12390,7 +12470,7 @@ class AmbiguousPathsInProseTests(unittest.TestCase):
     # -- die beiden Wege, es eindeutig zu machen ----------------------------
 
     def test_a_quoted_path_releases_itself_whole(self):
-        got = self.mandates('schreib bitte in "%s\\Test runs" eine Datei' % self.dir)
+        got = self.mandates('schreib bitte in "%s" eine Datei' % self.named("Test runs"))
         self.assertIn(os.path.realpath(os.path.join(self.dir, "Test runs")), got)
         self.assertNotIn(os.path.realpath(self.kurz), got,
                          "der zitierte Pfad gab zusaetzlich sein Praefix frei")
@@ -12399,14 +12479,14 @@ class AmbiguousPathsInProseTests(unittest.TestCase):
         """Die Platte ist der einzige Zeuge, den es hier gibt: existiert der
         laengere Pfad, ist die Frage ohne Raten beantwortet."""
         os.makedirs(os.path.join(self.dir, "Test runs"))
-        got = self.mandates("%s\\Test runs schreib dort bitte etwas rein" % self.dir)
+        got = self.mandates("%s schreib dort bitte etwas rein" % self.named("Test runs"))
         self.assertIn(os.path.realpath(os.path.join(self.dir, "Test runs")), got)
         self.assertNotIn(os.path.realpath(self.kurz), got)
 
     def test_the_longest_existing_extension_wins(self):
         """`Test` und `Test runs neu` existieren beide -- gemeint ist der laengere."""
         os.makedirs(os.path.join(self.dir, "Test runs neu"))
-        got = self.mandates("%s\\Test runs neu und dann weiter" % self.dir)
+        got = self.mandates("%s und dann weiter" % self.named("Test runs neu"))
         self.assertIn(os.path.realpath(os.path.join(self.dir, "Test runs neu")), got)
 
     # -- die Gegenproben ----------------------------------------------------
@@ -12753,6 +12833,573 @@ class AGoalBelongsToItsFolderTests(unittest.TestCase):
         self.assertEqual(
             crow_core.goal_path(),
             os.path.join(crow_core.SESSION_DIR, "goal.json"))
+
+
+class ThePlatformSeamAnswersForOneSystemAtATimeTests(unittest.TestCase):
+    """Der Port nach Linux, und warum er EIN Modul ist und nicht zwanzig Zweige.
+
+    Pfade, Prozesssuche, Start, Abschuss, Schale, Browser und Schriftspeicher
+    sind sieben Tatsachen ueber ein Betriebssystem. Jede stand dort, wo sie
+    gebraucht wurde; sieben verstreute Zweige sind sieben Stellen zum
+    Vergessen. Was hier geprueft wird, ist die Naht selbst: dass sie auf JEDER
+    Plattform eine Antwort gibt, und dass die Windows-Antwort dieselbe ist wie
+    vorher.
+    """
+
+    def setUp(self):
+        self.dir = os.path.realpath(tempfile.mkdtemp(prefix="crow-platform-"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _env(self, name, value):
+        """Eine Umgebungsvariable fuer die Dauer eines Falles."""
+        before = os.environ.get(name)
+        self.addCleanup(
+            lambda: os.environ.__setitem__(name, before) if before is not None
+            else os.environ.pop(name, None))
+        os.environ[name] = value
+
+    # ---- die Verzeichnisse
+
+    def test_the_xdg_variables_decide_where_everything_lives(self):
+        """Die Spezifikation sagt: gesetzt und absolut gewinnt. Ohne diesen
+        Fall waere die XDG-Unterstuetzung eine Behauptung im Kommentar."""
+        if crow_platform.IS_WINDOWS:
+            self.skipTest("XDG is not a Windows mechanism")
+        for name, call in (("XDG_DATA_HOME", crow_platform.data_dir),
+                           ("XDG_CONFIG_HOME", crow_platform.config_dir),
+                           ("XDG_STATE_HOME", crow_platform.state_dir),
+                           ("XDG_CACHE_HOME", crow_platform.cache_dir)):
+            self._env(name, os.path.join(self.dir, name.lower()))
+            self.assertEqual(call(),
+                             os.path.join(self.dir, name.lower(), "crow"), name)
+
+    def test_a_relative_xdg_value_is_not_a_base_directory(self):
+        """NEGATIVPROBE, und sie hat einen gemessenen Grund: ein relativer Wert
+        loest gegen das Arbeitsverzeichnis auf, und das ist bei einem aus einem
+        .desktop-Eintrag gestarteten Fenster irgendetwas. Die Spezifikation
+        nennt so einen Wert ungueltig; hier heisst das: wie nicht gesetzt."""
+        if crow_platform.IS_WINDOWS:
+            self.skipTest("XDG is not a Windows mechanism")
+        self._env("XDG_CONFIG_HOME", "relativ/und/falsch")
+        self.assertEqual(crow_platform.config_dir(),
+                         os.path.join(os.path.expanduser("~"), ".config", "crow"))
+
+    def test_windows_keeps_one_directory_and_linux_gets_three(self):
+        """Der Kern dieser Trennung: auf Windows IST alles %LOCALAPPDATA%\\Crow
+        -- so wie es install.ps1 seit jeher anlegt und jede Auslieferung es
+        liest --, auf Linux sind Konfiguration, Daten und Zustand drei Orte mit
+        drei Bedeutungen. Ein Port, der das umdreht, verliert die Installation
+        eines Windows-Nutzers beim Update."""
+        dirs = (crow_platform.config_dir(), crow_platform.data_dir(),
+                crow_platform.state_dir())
+        if crow_platform.IS_WINDOWS:
+            self.assertEqual(len(set(dirs)), 1, dirs)
+            self.assertTrue(dirs[0].endswith(os.path.join("", "Crow")), dirs[0])
+        else:
+            self.assertEqual(len(set(dirs)), 3, dirs)
+            for one in dirs:
+                self.assertTrue(one.endswith(os.sep + "crow"), one)
+
+    def test_the_install_root_is_the_installers_own_default(self):
+        self.assertEqual(os.path.basename(crow_platform.install_dir()).lower(),
+                         "crow")
+        if not crow_platform.IS_WINDOWS:
+            self.assertEqual(crow_platform.install_dir(),
+                             crow_platform.data_dir())
+
+    def test_the_boot_log_goes_where_somebody_would_look_for_it(self):
+        """Auf Windows neben die Laeufe, die schon dort geschrieben werden
+        (`<cwd>\\runs`, robins Ansage vom 2026-08-28); auf Linux ins
+        Zustandsverzeichnis, weil die cwd eines Fensters dort nichts ueber den
+        Ort aussagt, an dem jemand nachsieht."""
+        if crow_platform.IS_WINDOWS:
+            self.assertEqual(crow_platform.log_dir(),
+                             os.path.join(os.getcwd(), "runs"))
+        else:
+            self._env("XDG_STATE_HOME", self.dir)
+            self.assertEqual(crow_platform.log_dir(),
+                             os.path.join(self.dir, "crow", "log"))
+
+    # ---- die Modelle
+
+    def test_the_model_root_follows_crow_models(self):
+        """88-110 GiB gehoeren nicht neben das Programm. `$CROW_MODELS` ist der
+        ganze Mechanismus -- ein zweiter in einer Einstellungsdatei waere ein
+        Pfad, den niemand mehr findet."""
+        self._env("CROW_MODELS", os.path.join(self.dir, "quants"))
+        self.assertEqual(crow_platform.models_dir("/irrelevant"),
+                         os.path.join(self.dir, "quants"))
+        os.environ.pop("CROW_MODELS")
+        self.assertEqual(crow_platform.models_dir(os.path.join(self.dir, "i")),
+                         os.path.join(self.dir, "i", "models"))
+
+    def test_a_symlinked_model_tree_is_followed(self):
+        """Der Fall dieser Maschine: die Quants liegen unter ~/Projects/models,
+        das Manifest nennt den Ordner der Messmaschine, und die Bruecke ist ein
+        Symlink. Aufgeloest wird von der Platte, nicht von uns."""
+        if crow_platform.IS_WINDOWS:
+            self.skipTest("a symlink needs a privilege on Windows")
+        real = os.path.join(self.dir, "Projects", "models", "qwen3.8-flash-next")
+        os.makedirs(real)
+        link = os.path.join(self.dir, "Projects", "models", "qwen-next-gguf")
+        os.symlink(real, link)
+        self._env("CROW_MODELS", os.path.join(self.dir, "Projects", "models"))
+        with open(os.path.join(real, "shard.gguf"), "wb") as fh:
+            fh.write(b"")
+        self.assertTrue(os.path.isfile(os.path.join(
+            crow_platform.models_dir(), "qwen-next-gguf", "shard.gguf")))
+
+    # ---- der Server
+
+    def test_the_binary_is_looked_for_in_the_install_then_on_the_path(self):
+        """PATH ZWEITENS UND NIE ZUERST: ein Paket, das seine eigene Binaerdatei
+        mitbringt, darf nicht von irgendetwas auf dem PATH ueberholt werden --
+        so beschreibt eine Messung am Ende einen Build, den niemand ausliefert.
+        Die Liste wird zurueckgegeben, damit ein Fehlschlag sagen kann, wo
+        gesucht wurde."""
+        install = os.path.join(self.dir, "install")
+        os.makedirs(os.path.join(install, "bin"))
+        # Auch das zweite Verzeichnis der Suche (der XDG-bin dieser Maschine)
+        # zeigt ins Leere, sonst haengt der Fall daran, ob hier schon ein
+        # llama-server installiert ist.
+        self._env("XDG_DATA_HOME", self.dir)
+        name = crow_platform.server_binary_name()
+        self.assertEqual(name, "llama-server.exe" if crow_platform.IS_WINDOWS
+                         else "llama-server")
+        found, tried = crow_platform.find_server_binary(install)
+        self.assertEqual(tried[0], os.path.join(install, "bin", name))
+        self.assertEqual(tried[-1], "PATH")
+        binary = os.path.join(install, "bin", name)
+        with open(binary, "wb") as fh:
+            fh.write(b"")
+        found, tried = crow_platform.find_server_binary(install)
+        self.assertEqual(found, binary)
+        self.assertNotIn("PATH", tried, "the install was overtaken by the PATH")
+
+    def test_the_xdg_bin_is_searched_even_from_a_checkout(self):
+        """Der Normalfall dieser Maschine: Crow laeuft aus einem Checkout, der
+        Server liegt unter ~/.local/share/crow/bin, wo install.sh und der
+        llama.cpp-Build ihn hinlegen."""
+        if crow_platform.IS_WINDOWS:
+            self.skipTest("the XDG bin directory is a Linux answer")
+        self._env("XDG_DATA_HOME", self.dir)
+        tried = crow_platform.find_server_binary("/somewhere/else")[1]
+        self.assertIn(os.path.join(self.dir, "crow", "bin", "llama-server"), tried)
+
+    def test_a_binary_spelled_for_the_other_system_is_not_this_ones(self):
+        """#140 laest eine Zeile ihre eigene Binaerdatei nennen, und die
+        flash-next-Zeile nennt den Lab-Build als Windows-Pfad. Auf Windows ist
+        eine fehlende Datei dort IHR EIGENER Fehler; auf Linux ist derselbe
+        String ueberhaupt keine Aussage ueber diese Maschine."""
+        windows_path = "C:/Users/.../dev/crow-lab/bin/llama-server.exe"
+        posix_path = "/home/.../.local/share/crow/bin/llama-server"
+        self.assertEqual(crow_platform.binary_is_for_this_os(windows_path),
+                         crow_platform.IS_WINDOWS)
+        self.assertEqual(crow_platform.binary_is_for_this_os(posix_path),
+                         not crow_platform.IS_WINDOWS)
+        self.assertFalse(crow_platform.binary_is_for_this_os(""))
+
+    # ---- die Prozesssuche
+
+    def _proc(self, pid, args):
+        """Ein Eintrag in einem gefaelschten /proc: cmdline ist NUL-getrennt."""
+        where = os.path.join(self.dir, "proc", str(pid))
+        os.makedirs(where, exist_ok=True)
+        with open(os.path.join(where, "cmdline"), "wb") as fh:
+            fh.write(b"\0".join(a.encode("utf-8") for a in args) + b"\0")
+
+    def test_a_running_server_is_read_out_of_proc(self):
+        """Kein psutil, kein Unterprozess: vier Dateilesungen. Der Befehl wird
+        so zurueckgegeben, wie eine Kommandozeile ihn getragen haette -- mit
+        Anfuehrungszeichen um einen Pfad mit Leerzeichen, weil der Leser des
+        `-m` genau diese Form erwartet."""
+        self._proc(4242, ["/usr/bin/llama-server", "-m",
+                          "/models/Flash Next/shard.gguf", "--port", "8083"])
+        found = crow_platform.find_servers(proc_root=os.path.join(self.dir, "proc"))
+        self.assertEqual(len(found), 1, found)
+        pid, line = found[0]
+        self.assertEqual(pid, "4242")
+        self.assertEqual(crow_core.served_model(line),
+                         "/models/Flash Next/shard.gguf")
+        self.assertEqual(crow_core._DASH_PORT.search(line).group(1), "8083")
+
+    def test_what_is_not_a_server_is_not_reported(self):
+        """NEGATIVPROBEN, und die erste ist die teure: ein Messskript, das
+        `llama-server` nur ERWAEHNT, ist keiner -- der Name wird aus argv[0]
+        gelesen, dieselbe Verengung, die die Windows-Abfrage aus
+        `Name like 'llama-server%'` bekommt. Ein Kernel-Thread hat gar keine
+        Kommandozeile, und der eigene Prozess ist nie das Gesuchte."""
+        root = os.path.join(self.dir, "proc")
+        self._proc(11, ["/usr/bin/python", "measure-llama-server.py"])
+        self._proc(12, ["/usr/bin/tail", "-f", "llama-server-8083.err.log"])
+        os.makedirs(os.path.join(root, "13"), exist_ok=True)
+        with open(os.path.join(root, "13", "cmdline"), "wb") as fh:
+            fh.write(b"")
+        self._proc(os.getpid(), ["/usr/bin/llama-server", "-m", "self.gguf"])
+        os.makedirs(os.path.join(root, "acpi"), exist_ok=True)
+        self.assertEqual(crow_platform.find_servers(proc_root=root), [])
+
+    def test_an_unreadable_proc_falls_back_and_never_raises(self):
+        """Das hier laeuft auf dem Weg, der einen Server STARTET. Ein Boot, der
+        daran scheitert, dass eine Prozessliste nicht zu lesen war, taeuschte
+        ein seltenes Risiko gegen ein sicheres ein."""
+        gone = os.path.join(self.dir, "kein-proc")
+        self.assertIsNone(crow_platform._proc_servers(gone))
+        self.assertEqual(
+            crow_platform.find_servers(query=lambda: (_ for _ in ()).throw(
+                OSError("no ps here"))), [])
+
+    def test_an_injected_listing_is_parsed_in_both_shapes(self):
+        """Der Windows-Zweig liefert `<pid>\\t<zeile>`, `ps` liefert
+        `<pid> <zeile>`. Beide Trenner, ein Leser."""
+        text = ("4242\t/usr/bin/llama-server -m a.gguf --port 8083\n"
+                "  99 /usr/bin/llama-server -m b.gguf\n"
+                "17 /usr/bin/vim notes.md\n")
+        found = crow_platform.find_servers(query=lambda: text)
+        self.assertEqual([p for p, _ in found], ["4242", "99"])
+
+    # ---- Start und Abschuss
+
+    def test_the_spawn_flags_are_the_ones_this_system_needs(self):
+        """#158: ohne sie erbt der Server Konsole UND Prozessgruppe, und ein
+        Strg+C im Terminal toetet ihn mit -- als stiller Exit 1, ohne Zeile,
+        ohne Dump. Auf Linux ist setsid() beide Haelften auf einmal."""
+        kwargs = crow_platform.spawn_kwargs(detached=True)
+        if crow_platform.IS_WINDOWS:
+            self.assertIn("creationflags", kwargs)
+            self.assertTrue(kwargs["creationflags"]
+                            & subprocess.CREATE_NEW_PROCESS_GROUP)
+        else:
+            self.assertEqual(kwargs, {"start_new_session": True})
+        self.assertEqual(crow_platform.spawn_kwargs(detached=False), {})
+
+    def test_a_detached_child_is_ended_with_its_whole_group(self):
+        """Ein echter Prozess, kein Attrappen-Handle: gestartet wie der Server
+        gestartet wird, in eigener Sitzung, und danach wirklich tot. Ein Kind,
+        das den Test ueberlebt, ist genau die Leiche, die #158 gekostet hat."""
+        if crow_platform.IS_WINDOWS:
+            self.skipTest("the process group is a POSIX construct")
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                **crow_platform.spawn_kwargs(detached=True))
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        self.assertEqual(os.getpgid(proc.pid), proc.pid,
+                         "the child did not get a session of its own")
+        self.assertNotEqual(os.getpgid(proc.pid), os.getpgrp())
+        self.assertTrue(crow_platform.kill_pid(proc.pid))
+        self.assertEqual(proc.wait(timeout=10), -15)
+        # NEGATIVPROBE: ein Pid, den es nicht mehr gibt, ist kein Fehler und
+        # keine Zusage -- stop_servers zaehlt nur, was wirklich hinausging.
+        self.assertFalse(crow_platform.kill_pid(proc.pid))
+        self.assertFalse(crow_platform.kill_pid("keine zahl"))
+
+    def test_terminate_tree_takes_the_children_with_it(self):
+        """Ein Browser hinterlaesst Enkel, und der getoetete Anfuehrer nimmt sie
+        nicht mit. Gemeint ist immer die Sitzung, die DIESER Aufruf selbst
+        aufgemacht hat -- nie eine Prozessliste und nie ein Name."""
+        if crow_platform.IS_WINDOWS:
+            self.skipTest("the process group is a POSIX construct")
+        code = ("import subprocess, sys, time; "
+                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+                "time.sleep(60)")
+        proc = subprocess.Popen([sys.executable, "-c", code],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                **crow_platform.spawn_kwargs(detached=True))
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        group = os.getpgid(proc.pid)
+        time.sleep(0.5)                       # dem Enkel Zeit, geboren zu werden
+        crow_platform.terminate_tree(proc, grace=2.0)
+        proc.wait(timeout=10)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(group, 0)
+            except (ProcessLookupError, OSError):
+                return
+            time.sleep(0.05)
+        self.fail("the group outlived the call")
+
+    # ---- die Schale, der Browser, die Schrift, der Aktualisierer
+
+    def test_the_model_is_told_which_shell_it_is_talking_to(self):
+        """Ein `ls` auf Windows und ein `dir` auf Linux kosten je einen Zug.
+        BEIDE SAETZE STEHEN IM KERN, damit keine Oberflaeche ihren eigenen
+        schreibt -- und der Satz beschreibt die Schale, die wirklich laeuft."""
+        said = [t["function"]["description"] for t in crow_core.TOOLS
+                if t["function"]["name"] == "run_command"][0]
+        self.assertIn(crow_core.SHELL_HINT, said)
+        self.assertIn(crow_platform.shell_name(), crow_core.SHELL_HINT)
+        if crow_platform.IS_WINDOWS:
+            self.assertIn("dir and findstr", said)
+            self.assertIsNone(crow_platform.shell_executable())
+        else:
+            self.assertIn("ls and grep", said)
+            executable = crow_platform.shell_executable()
+            self.assertTrue(executable is None or executable.endswith("bash"))
+
+    def test_no_browser_path_names_one_machine(self):
+        """Auf Windows ueber Umgebungsvariablen, auf Linux ueber PATH -- in
+        beiden Faellen steht kein Pfad EINER Maschine im Quelltext."""
+        self.assertTrue(crow_platform.browser_candidates())
+        for raw in crow_platform.browser_candidates():
+            if crow_platform.IS_WINDOWS:
+                self.assertTrue(raw.startswith("%"), raw)
+            else:
+                self.assertNotIn(os.sep, raw)
+
+    def test_the_font_store_is_the_per_user_one(self):
+        """HKLM und %WINDIR%\\Fonts brauchen Erhoehung, /usr/share/fonts braucht
+        root -- ein Chatprogramm hat nach beidem nicht zu fragen."""
+        store = crow_platform.font_store()
+        if crow_platform.IS_WINDOWS:
+            self.assertIn("Fonts", store)
+        else:
+            self.assertEqual(store, os.path.join(
+                os.path.expanduser("~"), ".local", "share", "fonts", "crow"))
+
+    def test_the_font_install_is_a_no_op_without_a_bundle(self):
+        """NEGATIVKONTROLLE: keine Dateien, kein Erfolg -- und nichts wird
+        angelegt. Ohne sie wuerde `ensure_font` 'installiert' ueber ein leeres
+        Verzeichnis melden."""
+        self.assertEqual(crow_platform.install_fonts(self.dir, []), 2)
+
+    def test_the_updater_is_data_and_never_a_call(self):
+        """Ein Fenster muss den Befehl ZEIGEN koennen, bevor es ihn ausfuehrt --
+        deshalb ist das hier eine Liste und kein Start."""
+        argv = crow_platform.updater_command("/tmp/install.sh")
+        if crow_platform.IS_WINDOWS:
+            self.assertEqual(argv[0], "powershell")
+            self.assertIn("-NoPause", argv)
+        else:
+            self.assertEqual(argv, ["bash", "/tmp/install.sh"])
+
+    def test_the_seam_does_not_import_the_core(self):
+        """DIE RICHTUNG DER NAHT, und sie ist die Bedingung dafuer, dass beide
+        Module ueberhaupt laden: der Kern importiert die Plattform. Andersherum
+        waere es ein Kreis -- und ein Plattformmodul, das Kernnamen kennt, ist
+        ein zweiter Kern."""
+        source = _source("crow_platform.py")
+        self.assertNotIn("import crow_core", source)
+        self.assertIn("import crow_platform", _source("crow_core.py"))
+
+
+class TheShippedOperatingPointBootsOnLinuxTests(unittest.TestCase):
+    """Der gemessene Betriebspunkt, auf der anderen Plattform gestartet.
+
+    DASSELBE QUANT, DIESELBE KARTENKLASSE, DIESELBE ZEILE. Was sich zwischen
+    Windows und Linux unterscheidet, ist genau zweierlei: wo die Shards liegen
+    (`$CROW_MODELS`, weil 73 GiB nicht neben das Programm gehoeren) und welche
+    Binaerdatei sie laedt. Die Flags -- `-ncmoe 30 --fit off --load-mode none`,
+    `-b/-ub 2048`, `-ctk/-ctv q8_0`, `-c 200000`, `-np 1`, `--jinja`,
+    `--mmproj` -- sind die gemessenen und werden hier gegen das Manifest
+    gehalten, nicht neu erfunden.
+
+    WAS DIESE FAELLE NICHT BEHAUPTEN: dass der Betriebspunkt auf dieser
+    Maschine gemessen waere. Sie pruefen die ZEILE, nicht die Leistung -- und
+    `--load-mode none` ist ein llama.cpp-Schalter, dessen Vorhandensein erst
+    der Boot beantwortet, nicht das Manifest.
+    """
+
+    KEY = "flash-next-q2-k-xl"
+
+    def setUp(self):
+        self.dir = os.path.realpath(tempfile.mkdtemp(prefix="crow-linuxboot-"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.install = os.path.join(self.dir, "install")
+        self.models = os.path.join(self.dir, "Projects", "models")
+        os.makedirs(os.path.join(self.install, "bin"))
+        before = os.environ.get("CROW_MODELS")
+        self.addCleanup(
+            lambda: os.environ.__setitem__("CROW_MODELS", before)
+            if before is not None else os.environ.pop("CROW_MODELS", None))
+        os.environ["CROW_MODELS"] = self.models
+        self.line = (crow_core._manifest().get("servers") or {}).get(self.KEY) or {}
+        self.entry = ((crow_core._manifest().get("models") or {})
+                      .get("entries") or {}).get(self.KEY) or {}
+
+    def _lay_out_the_download(self):
+        """Die Shards dort, wo das Manifest sie nennt, unter models_dir()."""
+        for rel in (self.entry.get("path"), self.line.get("mmproj")):
+            path = os.path.join(self.models, *str(rel).split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(b"")
+        return os.path.join(self.models, *str(self.entry["path"]).split("/"))
+
+    def _lay_out_the_binary(self):
+        binary = os.path.join(self.install, "bin",
+                              crow_platform.server_binary_name())
+        with open(binary, "wb") as fh:
+            fh.write(b"")
+        return binary
+
+    def test_the_line_names_a_windows_binary_and_that_is_not_a_linux_fact(self):
+        """Die Voraussetzung, ohne die der naechste Fall nichts beweist: das
+        Manifest nennt den Lab-Build als Windows-Pfad (#140, der PR-Build fuer
+        qwen4exp). Auf Windows ist eine fehlende Datei dort ihr eigener Fehler;
+        hier ist derselbe String ueberhaupt keine Aussage."""
+        named = str(self.line.get("binary") or "")
+        self.assertTrue(named.endswith(".exe"), named)
+        self.assertEqual(crow_platform.binary_is_for_this_os(named),
+                         crow_platform.IS_WINDOWS)
+
+    def test_the_shards_resolve_under_the_models_directory(self):
+        """Der Download landet unter ~/Projects/models, das Manifest nennt den
+        Baum der Messmaschine, und `$CROW_MODELS` ist die Bruecke. Ohne sie
+        sagte der Boot "model is not on disk" ueber eine vorhandene Datei."""
+        shard = self._lay_out_the_download()
+        tried = crow_core.model_candidates(self.KEY, None, self.install)
+        self.assertIn(shard, tried)
+        self.assertEqual(next(p for p in tried if os.path.isfile(p)), shard)
+
+    def test_a_flat_download_still_resolves_through_the_basename(self):
+        """WIE DER DOWNLOAD DIESER MASCHINE WIRKLICH LIEGT, gemessen am
+        2026-09-16: `~/Projects/models/qwen3.8-flash-next/` traegt die Shards
+        UND mmproj-F16.gguf direkt, ohne den Quant-Unterordner, den der
+        Repository-Baum hat. Das ist genau der Fall, fuer den
+        model_candidates seit jeher den BASENAMEN als zweite Form probiert --
+        der Baum der Messmaschine und eine Installation schreiben die Wurzel
+        verschieden. `$CROW_MODELS` zeigt dann auf den Ordner selbst, und es
+        braucht weder einen Symlink noch eine Glob-Regel."""
+        flat = os.path.join(self.models, "qwen3.8-flash-next")
+        os.makedirs(flat)
+        for rel in (self.entry.get("path"), self.line.get("mmproj")):
+            with open(os.path.join(flat, os.path.basename(str(rel))), "wb") as fh:
+                fh.write(b"")
+        os.environ["CROW_MODELS"] = flat
+        binary = self._lay_out_the_binary()
+        argv = crow_core.server_command(self.KEY, None, self.install)
+        self.assertEqual(argv[0], binary)
+        self.assertEqual(argv[2], os.path.join(
+            flat, os.path.basename(str(self.entry["path"]))))
+        self.assertEqual(argv[argv.index("--mmproj") + 1],
+                         os.path.join(flat, "mmproj-F16.gguf"))
+
+    def test_the_argv_is_the_measured_line_with_this_systems_binary(self):
+        """Der ganze Boot als eine Zeile: die Binaerdatei dieser Plattform, der
+        Shard unter models_dir(), die gemessenen Flags -- und nirgends ein
+        `.exe`, weil hier keines liegt."""
+        shard = self._lay_out_the_download()
+        binary = self._lay_out_the_binary()
+        argv = crow_core.server_command(self.KEY, None, self.install)
+        self.assertEqual(argv[0], binary)
+        self.assertEqual(argv[1], "-m")
+        self.assertEqual(argv[2], shard)
+        for flag, value in (("--port", "8083"), ("-c", "200000"),
+                            ("-b", "2048"), ("-ub", "2048"),
+                            ("-ctk", "q8_0"), ("-ctv", "q8_0"),
+                            ("-ncmoe", "30"), ("--fit", "off"),
+                            ("--load-mode", "none"), ("-np", "1")):
+            self.assertIn(flag, argv)
+            self.assertEqual(argv[argv.index(flag) + 1], value, flag)
+        self.assertIn("--jinja", argv)
+        self.assertEqual(argv[argv.index("--mmproj") + 1],
+                         os.path.join(self.models,
+                                      *str(self.line["mmproj"]).split("/")))
+        if not crow_platform.IS_WINDOWS:
+            self.assertEqual([a for a in argv if a.endswith(".exe")], [])
+
+    def test_without_any_binary_the_refusal_names_where_it_looked(self):
+        """NEGATIVPROBE. "could not start" verstecke, welcher der drei Fehler es
+        war; hier steht die Suchreihenfolge in der Meldung."""
+        self._lay_out_the_download()
+        try:
+            crow_core.server_command(self.KEY, None, self.install)
+        except crow_core.ServerBootError as exc:
+            self.assertIn("no llama-server to run", str(exc))
+            self.assertIn(os.path.join(self.install, "bin",
+                                       crow_platform.server_binary_name()),
+                          str(exc))
+        else:
+            if crow_platform.find_server_binary(self.install)[0] is None:
+                self.fail("a boot with no binary anywhere did not say so")
+
+    def test_the_boot_starts_the_binary_and_records_itself(self):
+        """DER GANZE WEG, mit einem echten Kind: ein Skript, das schreibt und
+        schlaeft, steht fuer llama-server. Geprueft wird, was ein spaeteres
+        Fenster braucht -- die beiden Logs, der Eintrag in booted.json, und
+        dass der Prozess in EIGENER Sitzung laeuft, damit ein Strg+C im
+        Terminal ihn nicht mitnimmt (#158)."""
+        if crow_platform.IS_WINDOWS:
+            self.skipTest("the fake binary is a shell script")
+        shard = self._lay_out_the_download()
+        binary = os.path.join(self.install, "bin",
+                              crow_platform.server_binary_name())
+        with open(binary, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\n"
+                     "echo \"loading $2\"\n"
+                     "echo 'srv    load_model: ready' >&2\n"
+                     "sleep 60\n")
+        os.chmod(binary, 0o755)
+
+        state = os.path.join(self.dir, "state")
+        before = os.environ.get("XDG_STATE_HOME")
+        self.addCleanup(
+            lambda: os.environ.__setitem__("XDG_STATE_HOME", before)
+            if before is not None else os.environ.pop("XDG_STATE_HOME", None))
+        os.environ["XDG_STATE_HOME"] = state
+        self.addCleanup(setattr, crow_core, "BOOTED_FILE", crow_core.BOOTED_FILE)
+        crow_core.BOOTED_FILE = os.path.join(self.dir, "booted.json")
+        real = (crow_core.running_servers, crow_core.server_model_path,
+                crow_core.time.sleep)
+
+        def restore():
+            (crow_core.running_servers, crow_core.server_model_path,
+             crow_core.time.sleep) = real
+        self.addCleanup(restore)
+        self.addCleanup(crow_core._BOOTED.clear)
+        answers = iter([None, None, shard])
+        crow_core.running_servers = lambda: []
+        crow_core.server_model_path = lambda *a, **k: next(answers)
+        crow_core.time.sleep = lambda s: None
+
+        said = []
+        got = crow_core.start_server(self.KEY, "http://127.0.0.1:8083/v1",
+                                     install=self.install, log=said.append)
+        proc = crow_core._BOOTED[8083][0]
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        self.assertEqual(got, shard)
+        self.assertIsNone(proc.poll(), "the binary was not running")
+        self.assertEqual(os.getpgid(proc.pid), proc.pid,
+                         "the server shares this process's group")
+
+        logs = os.path.join(state, "crow", "log")
+        for name in ("llama-server-8083.out.log", "llama-server-8083.err.log"):
+            self.assertTrue(os.path.isfile(os.path.join(logs, name)), name)
+        # GEWARTET, NICHT GERATEN: der Boot kehrt zurueck, sobald der Server
+        # antwortet -- das Kind hat seine erste Zeile dann vielleicht noch
+        # nicht geschrieben. (`time.sleep` ist fuer den Boot gefaelscht, also
+        # wird hier das echte benutzt.)
+        sleep = real[2]
+        out_log = os.path.join(logs, "llama-server-8083.out.log")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            with open(out_log, encoding="utf-8") as fh:
+                written = fh.read()
+            if shard in written:
+                break
+            sleep(0.05)
+        self.assertIn(shard, written, "the child never saw its model")
+
+        # WAS EIN SPAETERES FENSTER LIEST: derselbe Schluessel, dieselbe
+        # Adresse, dasselbe Installationsverzeichnis -- `reboot_booted` baut
+        # daraus denselben Start noch einmal.
+        entry = crow_core.booted_entry(8083)
+        self.assertEqual(entry["key"], self.KEY)
+        self.assertEqual(entry["base_url"], "http://127.0.0.1:8083/v1")
+        self.assertEqual(entry["install"], self.install)
+        crow_core._BOOTED.clear()
+        self.assertEqual(crow_core.booted_entry(8083)["key"], self.KEY,
+                         "the file a later window reads was never written")
+
+        # UND ES STIRBT, wie stop_servers es toeten wuerde: ueber die Gruppe.
+        self.assertTrue(crow_platform.kill_pid(proc.pid))
+        self.assertIsNotNone(proc.wait(timeout=10))
 
 
 if __name__ == "__main__":

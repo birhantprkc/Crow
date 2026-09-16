@@ -23,6 +23,11 @@
  ],
  "helpers": [
   {
+   "path": "cli/crow_platform.py",
+   "label": "platform",
+   "why": "The one module that knows which operating system this is: paths (XDG on Linux, %LOCALAPPDATA% on Windows), process discovery, spawn flags, the kill, the shell, the browser list, the font store and the updater command. A HELPER and not a surface, because it is not a client of the core -- it decides nothing a user can see, it answers WHERE and HOW. It is held to the definition and import predicates like every helper: a platform file that started carrying a refusal, a wording or a release level would be a second core, and that is exactly the drift this manifest exists to catch. It may not import crow_core (the core imports IT), so a core name appearing in here is a finding rather than a wiring. The name is crow_platform and never platform: cli/ is on sys.path[0] for every client started from this directory, and cli/platform.py would shadow the standard library module of that name."
+  },
+  {
    "path": "cli/crow_voice.py",
    "label": "voice",
    "why": "Dictation: the microphone and the recogniser, and nothing else. A HELPER and not a surface, because it is not a client of the core -- it owns audio and the text that comes out of it, never a turn, a prompt or a session. It is still held to the definition and import predicates: if it ever re-decided something crow_core.py already decides, that is exactly the drift this manifest exists to catch. It lives in cli/ for the reason crow_gui.py gives -- tools/pack-release.ps1 copies cli/ as a whole and nothing else -- and beside the window because only the window can reach it: the terminal has no button to press."
