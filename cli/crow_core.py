@@ -5447,14 +5447,25 @@ def _rooted(path: str) -> str:
 # (`dir /s`, `findstr /i`), wo jede Zeile zur Frage wuerde. Deshalb haengt der
 # Zweig an der Plattform und nicht am Text.
 #
-# DAS LOOKBEHIND VERBIETET ZUSAETZLICH `:` UND `/`, was der Laufwerks-Zweig
+# DAS LOOKBEHIND VERBIETET ZUSAETZLICH `:`, `/` UND `.`, was der Laufwerks-Zweig
 # nicht braucht und dieser hier schon: in `https://openrouter.ai/api/v1/models`
 # stuende sonst dreimal ein "Pfad" -- dasselbe Phantom, das `p:` aus einem
-# Schema gemacht hat, nur andersherum.
+# Schema gemacht hat, nur andersherum. Der Punkt kam 2026-09-16 dazu: `./x` ist
+# die haeufigste Schreibweise fuer eine Datei IM Arbeitsbereich, und ohne ihn
+# las der Zweig daraus den absoluten Pfad `/x` -- jedes `bash ./bau.sh` wurde
+# zur Freigabefrage, und ein "und ab jetzt" darauf haette den echten `/x`
+# freigegeben. `../x` faengt der `..`-Zweig weiter oben, der frueher steht.
+#
+# UND `$VAR/...` IST DIE POSIX-FORM VON `%VAR%\...`, mit demselben Zweig und
+# derselben Regel: ohne ihn war `cat $HOME/.ssh/id_rsa` ueberhaupt kein Pfad
+# (das `/` steht hinter einem Buchstaben, das Lookbehind verbietet es), waehrend
+# `%USERPROFILE%\.ssh\id_rsa` drueben seit jeher gefragt hat. Eine Grenze, die
+# auf einer Plattform an einer Variablen vorbeisieht, ist keine.
 _POSIX_PATH_TOKENS = (
     r'|"(~?/[^"]*)"'
     r"|'(~?/[^']*)'"
-    r'|(?<![A-Za-z0-9:/])(~?/[^\s"\';|&<>]*)'
+    r'|(\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[\\/][^\s"\';|&<>]*)'
+    r'|(?<![A-Za-z0-9:/.])(~?/[^\s"\';|&<>]*)'
 )
 
 _PATH_TOKENS = re.compile(
@@ -5489,7 +5500,12 @@ def command_outside_paths(command: str, cwd: str | None = None) -> list[str]:
 
     def note(raw: str) -> None:
         cand = os.path.expandvars(raw)
-        if "%" in cand:
+        # EINE VARIABLE, DIE NICHT AUFGEHT, BLEIBT DRAUSSEN -- `%VAR%` hier wie
+        # dort, `$VAR` nur auf POSIX (auf Windows ist ein `$` im Pfad ein
+        # gewoehnliches Zeichen und keine Ansage). Die sichere Richtung fuer
+        # einen Fall, den niemand aufgeloest hat; dieselbe Regel, der
+        # approval_scope mit None folgt.
+        if "%" in cand or ("$" in cand and not crow_platform.IS_WINDOWS):
             if raw not in out:
                 out.append(raw)
             return
@@ -6798,8 +6814,11 @@ _MANDATED: set[str] = set()
 #
 # Der POSIX-Zweig gilt nur auf POSIX, aus dem Grund, den _PATH_TOKENS nennt,
 # und mit demselben erweiterten Lookbehind: ein `/` nach einem Buchstaben, einem
-# `:` oder einem `/` gehoert zu einer URL oder zu "und/oder", nie zu einem Pfad.
-_POSIX_IN_TEXT = r"|(?<![A-Za-z0-9:/])~?/[^\s\"'<>|]*"
+# `:`, einem `/` oder einem `.` gehoert zu einer URL, zu "und/oder" oder zu
+# `./hier` -- nie zu einem absoluten Pfad. Der Punkt aus demselben Grund wie
+# drueben: ein Mandat auf das Phantom `/x` aus `./x` waere ein Mandat auf den
+# echten `/x`.
+_POSIX_IN_TEXT = r"|(?<![A-Za-z0-9:/.])~?/[^\s\"'<>|]*"
 
 _PATH_IN_TEXT = re.compile(
     r"(?:[A-Za-z]:[\\/][^\s\"'<>|]*"

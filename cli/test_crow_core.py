@@ -2905,6 +2905,57 @@ class RunCommandBoundaryTests(unittest.TestCase):
         hits = crow_core.run_command_boundary(self.args(r"type %WINDIR%\system.ini"))
         self.assertTrue(hits, "%WINDIR% expanded to nothing the check could see")
 
+    def test_a_shell_variable_is_the_posix_form_of_percent_var(self):
+        """DIESELBE FRAGE IN DER ANDEREN SCHALE, und sie wurde bis 2026-09-16
+        nicht gestellt: `%USERPROFILE%\\.ssh\\id_rsa` fragt drueben seit jeher,
+        `$HOME/.ssh/id_rsa` fragte hier gar nicht -- das `/` steht hinter einem
+        Buchstaben, und das Lookbehind des POSIX-Zweigs verbot es dort. Eine
+        Grenze, die auf einer Plattform an einer Variablen vorbeisieht, ist
+        keine."""
+        if crow_platform.IS_WINDOWS:
+            self.skipTest("$VAR ist auf Windows kein Pfadanfang")
+        for cmd in ("cat $HOME/.ssh/id_rsa", "cat ${HOME}/.ssh/id_rsa",
+                    'cat "$HOME/.ssh/id_rsa"'):
+            self.assertTrue(crow_core.run_command_boundary(self.args(cmd)), cmd)
+        # UND EINE VARIABLE, DIE NICHT AUFGEHT, BLEIBT DRAUSSEN -- die sichere
+        # Richtung, die der %VAR%-Zweig schon nimmt. Ohne sie waere `$NIEMAND/x`
+        # ein relativer Name und damit INNERHALB der Wurzel.
+        self.assertTrue(crow_core.run_command_boundary(
+            self.args("cat $CROW_UNIT_NIEMAND/x")))
+        # GEGENPROBE: `$2` ist kein Name, und ohne `/` ist nichts ein Pfad.
+        self.assertEqual(crow_core.run_command_boundary(
+            self.args("awk '{print $2}' data.txt")), [])
+        self.assertEqual(crow_core.run_command_boundary(self.args("echo $PATH")), [])
+
+    def test_dot_slash_is_the_working_area_and_never_the_root(self):
+        """`./bau.sh` IST DIE HAEUFIGSTE SCHREIBWEISE FUER EINE DATEI IM
+        ARBEITSBEREICH, und der POSIX-Zweig las daraus bis 2026-09-16 den
+        absoluten Pfad `/bau.sh`: jedes `bash ./bau.sh` wurde zur Freigabefrage
+        fuer ein Phantom -- und ein 'und ab jetzt' darauf haette den ECHTEN
+        `/bau.sh` freigegeben."""
+        if crow_platform.IS_WINDOWS:
+            self.skipTest("der POSIX-Zweig gibt es dort nicht")
+        for cmd in ("bash ./bau.sh", "cat ./sub/x.txt", "ls ./",
+                    "python ./tools/x.py --out ./out.txt", "cat sub/./x.txt"):
+            self.assertEqual(crow_core.run_command_boundary(self.args(cmd)), [],
+                             cmd)
+        # DIE POSITIVKONTROLLEN UEBERLEBEN BEIDE: ein echter absoluter Pfad und
+        # ein `../`-Ausbruch fragen weiter.
+        self.assertTrue(crow_core.run_command_boundary(self.args("cat /etc/passwd")))
+        self.assertTrue(crow_core.run_command_boundary(self.args("cat ../x")))
+
+    def test_dot_slash_in_prose_grants_no_mandate(self):
+        """Die Gegenrichtung desselben Phantoms: ein `./notes.md` in robins
+        eigener Nachricht darf keine Freigabe fuer `/notes.md` erzeugen."""
+        if crow_platform.IS_WINDOWS:
+            self.skipTest("der POSIX-Zweig gibt es dort nicht")
+        conversation = crow_core.Conversation("SYS", memory="")
+        conversation.append("user", "schau in ./notes.md")
+        self.assertEqual(crow_core.mandated_paths(conversation), set())
+        conversation.append("user", "und dann in /etc/hosts")
+        self.assertTrue(any("/etc/hosts" in p
+                            for p in crow_core.mandated_paths(conversation)))
+
     def test_outside_widens_the_scope_from_program_to_path(self):
         s = crow_core.approval_scope("run_command", self.args(r"copy C:\alpha\b.txt ."))
         self.assertEqual(s[0], "outside")
@@ -13112,8 +13163,20 @@ class ThePlatformSeamAnswersForOneSystemAtATimeTests(unittest.TestCase):
         self.addCleanup(proc.kill)
         group = os.getpgid(proc.pid)
         time.sleep(0.5)                       # dem Enkel Zeit, geboren zu werden
+        started = time.monotonic()
         crow_platform.terminate_tree(proc, grace=2.0)
+        took = time.monotonic() - started
         proc.wait(timeout=10)
+        # SO LANGE WIE NOETIG UND KEINE SEKUNDE LAENGER. `proc.kill()` laesst
+        # eine Leiche zurueck, bis jemand auf sie wartet, und eine Leiche ist
+        # weiterhin Mitglied der Gruppe -- `killpg(group, 0)` gelingt auf ihr.
+        # Ohne das Abholen lief die Wartschleife DESHALB immer die vollen
+        # `grace` durch und eskalierte immer auf SIGKILL, obwohl das SIGTERM
+        # gereicht hatte (gemessen 2026-09-16: 5,01 s bei grace=5,0, und
+        # tool_render_page zahlt das auf jedem Zeitlimit).
+        self.assertLess(took, 2.0,
+                        "die Gnadenfrist lief ganz ab -- der Anfuehrer wurde "
+                        "nicht abgeholt, bevor die Gruppe gezaehlt wurde")
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             try:

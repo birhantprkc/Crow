@@ -443,6 +443,17 @@ def terminate_tree(proc, grace: float = 5.0) -> None:
         return
     if group == os.getpgrp():
         return                             # not detached: killing it is enough
+    # DER ANFUEHRER WIRD ABGEHOLT, BEVOR DIE GRUPPE GEZAEHLT WIRD. `proc.kill()`
+    # oben hinterlaesst eine Leiche, bis jemand auf sie wartet -- und eine
+    # Leiche ist weiterhin Mitglied der Gruppe: `killpg(group, 0)` unten gelingt
+    # auf ihr. Ohne dieses Warten lief die Schleife DESHALB immer die vollen
+    # `grace` Sekunden und eskalierte immer auf SIGKILL, auch wenn das SIGTERM
+    # die Gruppe laengst geleert hatte (gemessen 2026-09-16: 5,01 s bei
+    # grace=5,0, und tool_render_page zahlt das auf dem Zeitlimit-Weg).
+    try:
+        proc.wait(timeout=grace)
+    except Exception:                      # noqa: BLE001 - die Schleife zaehlt
+        pass
     for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, 0.0)):
         try:
             os.killpg(group, sig)

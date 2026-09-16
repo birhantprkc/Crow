@@ -297,11 +297,19 @@ def clipboard_image_posix() -> "tuple[str, bytes] | None":
     process and says exactly what the owner offers; reading `image/png` blind
     would produce empty output on a clipboard holding a JPEG and nothing would
     say why.
+
+    A TOOL THAT LISTED NOTHING HAS NOT ANSWERED, AND THE NEXT ONE IS ASKED.
+    Measured 2026-09-16: under X11 with wl-clipboard installed, `wl-paste
+    --list-types` exits 1 with "Failed to connect to a Wayland server" -- so the
+    installed-but-useless tool stood in front of xclip and image paste was dead
+    on every X11 session, which is exactly the session `CROW_GDK_BACKEND=x11`
+    makes. An EMPTY clipboard reads the same way and costs one extra process
+    that also finds nothing; a wrong answer would cost the feature.
     """
     for lister, reader in zip(_CLIPBOARD_LIST, _CLIPBOARD_READ):
         offered = _clipboard_tool(lister)
-        if offered is None:
-            continue                       # that tool is not installed
+        if not offered:
+            continue                       # not installed, or it reached no display
         types = {line.strip().lower()
                  for line in offered.decode("utf-8", "replace").splitlines()
                  if line.strip()}
@@ -10235,6 +10243,19 @@ class Api:
         clipboard that only half works is worse than one that is one process
         away. `wl-copy` FORKS AND STAYS ALIVE to own the selection, which is
         why nothing here waits for it to exit beyond the handover.
+
+        AND THAT IS WHY ITS OUTPUT IS NOT CAPTURED. With `capture_output=True`
+        the forked owner inherits the pipes and holds them open for as long as
+        it holds the selection, so `run` waits for an end-of-file that only
+        comes when somebody else copies something -- measured 2026-09-16: every
+        single copy took the full 5,01 s and ended in the timeout below, on the
+        bridge thread, on a button press. Sent to /dev/null the same call
+        returns in 0,02 s. The timeout stays as the backstop it was meant to be.
+
+        A TOOL THAT REFUSED IS NOT A COPY. `wl-copy` under X11 exits 1 with
+        "Failed to connect to a Wayland server" (measured the same day), and
+        answering True there meant the text never reached the clipboard and
+        xclip was never asked -- the same hole `clipboard_image_posix` had.
         """
         if not text:
             return False
@@ -10249,13 +10270,15 @@ class Api:
                     # timeout is SUCCESS rather than failure: wl-copy has taken
                     # the bytes by the time it stops answering, and it goes on
                     # holding the selection for as long as somebody may paste.
-                    subprocess.run(argv, input=payload, capture_output=True,
-                                   timeout=5)
+                    done = subprocess.run(argv, input=payload,
+                                          stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL, timeout=5)
                 except subprocess.TimeoutExpired:
                     return True
                 except (OSError, subprocess.SubprocessError):
                     return False
-                return True
+                if done.returncode == 0:
+                    return True
             return False
         try:
             # `import subprocess` STOOD HERE AND HAD TO GO. The module is

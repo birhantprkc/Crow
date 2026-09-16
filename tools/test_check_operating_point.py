@@ -168,7 +168,7 @@ def client_source(sampling, keys=None, body_keys=None, prose=False):
 
 
 def fixture(tmp, readme=None, install=None, manifest_patch=None, client=None,
-            gui=None, sep=None, linux_line=None):
+            gui=None, sep=None, linux_line=None, install_flash=None):
     """A minimal repo the checker can be pointed at."""
     gap = BLANK if sep is None else sep
     root = os.path.join(tmp, "repo")
@@ -188,7 +188,8 @@ def fixture(tmp, readme=None, install=None, manifest_patch=None, client=None,
     with open(os.path.join(root, "install.ps1"), "w", encoding="utf-8") as fh:
         fh.write('param([string] $Version = "%s")\n%s%s'
                  % (ver, install if install is not None else GOOD_LINE,
-                    gap + QWEN_LINE + gap + FLASH_LINE))
+                    gap + QWEN_LINE + gap
+                    + (install_flash if install_flash is not None else FLASH_LINE)))
     with open(os.path.join(root, "cli", "crow.py"), "w", encoding="utf-8") as fh:
         fh.write('VERSION = "%s"\n' % ver)
         fh.write(client_source(src["sampling"]) if client is None else client)
@@ -382,6 +383,30 @@ def main():
         code, out = run(fixture(tmp, linux_line=wrong))
         check("18 a Linux copy at the Windows placement is red",
               code != 0 and "on linux]" in out and "8 of 9" in out, out.strip()[-300:])
+        shutil.rmtree(os.path.join(tmp, "repo"))
+
+        # 19 - ONE FLAG AT A TIME, because case 18 drops two (-ncmoe 31 AND
+        #      -t 24) and a case that changes two things proves neither. `-t` is
+        #      the flag the `linux` object added, and its spec is the newest
+        #      regex in FLAG_SPECS -- a lookbehind that let `-ctk`, `-ctv` or
+        #      `--moe-stream-io-threads` match would make it green everywhere
+        #      and this case is what notices.
+        wrong = FLASH_LINUX_LINE.replace(" -t 24", "")
+        code, out = run(fixture(tmp, linux_line=wrong))
+        check("19 a Linux copy without -t is red and names threads",
+              code != 0 and "on linux]" in out and "threads: missing" in out,
+              out.strip()[-300:])
+        shutil.rmtree(os.path.join(tmp, "repo"))
+
+        # 20 - THE INSTALLER HAS ONE SHAPE AND IT IS THE WINDOWS ONE. install.ps1
+        #      starts both servers on that machine, so a flag wrong there is a
+        #      broken run. Until 2026-09-16 the installer was compared against
+        #      the Linux shape as an alternative too, so this very file -- the
+        #      Linux line pasted into install.ps1 -- read green.
+        code, out = run(fixture(tmp, install_flash=FLASH_LINUX_LINE))
+        check("20 install.ps1 at the Linux placement is red",
+              code != 0 and "install.ps1 [flash-next-q2-k-xl]" in out
+              and "ncmoe" in out, out.strip()[-400:])
         shutil.rmtree(os.path.join(tmp, "repo"))
 
     print()

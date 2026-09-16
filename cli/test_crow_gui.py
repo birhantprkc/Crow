@@ -9269,6 +9269,12 @@ class TheWindowSetsItsEnvironmentBeforeTheToolkitTests(unittest.TestCase):
         self.assertIsInstance(crow_gui.ENVIRONMENT, dict)
         if crow_platform.IS_LINUX:
             self.assertEqual(os.environ.get("__NV_DISABLE_EXPLICIT_SYNC"), "1")
+        else:
+            # DIE GEGENPROBE, damit dieser Fall drueben nicht zu
+            # `assertIsInstance(dict)` zusammenfaellt: der Import darf auf
+            # Windows NICHTS in die Umgebung schreiben -- eine GTK-Variable,
+            # die eine WebView2-Sitzung erbt, ist eine, die niemand erklaert.
+            self.assertEqual(crow_gui.ENVIRONMENT, {})
 
 
 class TheCompositorMovesTheWindowTests(unittest.TestCase):
@@ -9476,16 +9482,22 @@ class TheClipboardIsReadByAProgramTests(unittest.TestCase):
     """
 
     def _run(self, answers):
-        """`subprocess.run` durch eine Tabelle ersetzen: argv[0..] -> stdout."""
+        """`subprocess.run` durch eine Tabelle ersetzen: argv[0..] -> stdout.
+
+        Ein Eintrag darf `(argv, stdout)` oder `(argv, stdout, rc)` sein -- den
+        Rueckgabecode braucht der Fall, in dem ein installiertes Werkzeug seinen
+        Server gar nicht erreicht.
+        """
         class _Done:
-            def __init__(self, out):
-                self.stdout, self.returncode = out, 0
+            def __init__(self, out, rc=0):
+                self.stdout, self.returncode = out, rc
 
         def run(argv, **kw):
             self.seen.append(list(argv))
-            for key, out in answers:
+            for entry in answers:
+                key, out = entry[0], entry[1]
                 if argv[:len(key)] == key:
-                    return _Done(out)
+                    return _Done(out, entry[2] if len(entry) > 2 else 0)
             return _Done(b"")
         return run
 
@@ -9543,6 +9555,23 @@ class TheClipboardIsReadByAProgramTests(unittest.TestCase):
         crow_gui.shutil.which = lambda name: None
         self.assertIsNone(crow_gui.clipboard_image_posix())
 
+    def test_wl_paste_without_a_wayland_server_lets_xclip_answer(self):
+        """DIE X11-SITZUNG MIT INSTALLIERTEM wl-clipboard, und sie war bis
+        2026-09-16 tot: `wl-paste --list-types` endet dort mit 1 und "Failed to
+        connect to a Wayland server", das leere Ergebnis las sich als "diese
+        Ablage haelt kein Bild", und xclip wurde nie gefragt. Genau die Sitzung,
+        die `CROW_GDK_BACKEND=x11` herstellt."""
+        png = b"\x89PNG\r\n\x1a\n" + b"x11"
+        crow_gui.shutil.which = lambda name: "/usr/bin/" + name
+        crow_gui.subprocess.run = self._run([
+            (["wl-paste", "--list-types"], b"", 1),
+            (["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
+             b"TARGETS\nimage/png\n"),
+            (["xclip", "-selection", "clipboard", "-t", "image/png", "-o"], png)])
+        self.assertEqual(crow_gui.clipboard_image_posix(), (".png", png))
+        self.assertTrue(any(a[0] == "xclip" for a in self.seen),
+                        "wl-paste stand vor xclip und liess ihn nie zu Wort")
+
     def test_a_reader_that_hangs_is_bounded(self):
         """Das hier laeuft auf einem Tastendruck. Ein Besitzer, der nie
         antwortet, darf das Fenster nicht anhalten."""
@@ -9565,6 +9594,18 @@ class TheClipboardIsReadByAProgramTests(unittest.TestCase):
                       "        return clipboard_image_posix()", source)
 
 
+class _Done:
+    """Was `subprocess.run` zurueckgibt, so weit `copy` es anfasst.
+
+    ALS ATTRAPPE UND NICHT ALS None: der Aufrufer liest `returncode`, weil ein
+    Werkzeug, das seinen Server nicht erreicht, keine Kopie ist -- eine Attrappe,
+    die None liefert, koennte diesen Unterschied gar nicht haben.
+    """
+
+    def __init__(self, rc=0):
+        self.returncode, self.stdout, self.stderr = rc, b"", b""
+
+
 class TheCopyButtonPutsTextBackTests(ApiCase):
     """`navigator.clipboard` verweigert hier den Dienst -- die Seite wird als
     HTML uebergeben und ist damit kein sicherer Kontext, gemessen 2026-08-13.
@@ -9583,11 +9624,49 @@ class TheCopyButtonPutsTextBackTests(ApiCase):
             self.skipTest("dort schreibt `clip`, und zwar UTF-16LE")
         seen = {}
         crow_gui.shutil.which = lambda n: "/usr/bin/" + n if n == "wl-copy" else None
-        crow_gui.subprocess.run = lambda argv, **kw: seen.update(
-            argv=list(argv), payload=kw.get("input"))
+
+        def run(argv, **kw):
+            seen.update(argv=list(argv), payload=kw.get("input"), kw=kw)
+            return _Done(0)
+        crow_gui.subprocess.run = run
         self.assertTrue(self.api().copy("Krähe"))
         self.assertEqual(seen["argv"], ["wl-copy"])
         self.assertEqual(seen["payload"], "Krähe".encode("utf-8"))
+        # SEINE AUSGABE WIRD NICHT EINGEFANGEN, und das ist der ganze Grund,
+        # warum dieser Fall die Schluesselwoerter nachsieht: `wl-copy` gabelt
+        # sich und bleibt am Leben, um die Auswahl zu HALTEN -- mit
+        # `capture_output=True` erbt der Besitzer die Roehren und haelt sie
+        # offen, also wartet `run` auf ein Dateiende, das erst kommt, wenn
+        # jemand anderes etwas kopiert. Gemessen 2026-09-16: jedes Kopieren
+        # brauchte die vollen 5,01 s und endete im Zeitlimit, auf dem
+        # Bruecken-Faden, auf einen Knopfdruck; nach /dev/null sind es 0,02 s.
+        self.assertIsNot(seen["kw"].get("capture_output"), True,
+                         "die Roehren halten den gegabelten Besitzer fest")
+        self.assertEqual(seen["kw"].get("stdout"), crow_gui.subprocess.DEVNULL)
+        self.assertTrue(seen["kw"].get("timeout"), "kein Zeitlimit")
+
+    def test_a_tool_that_reached_no_server_lets_the_next_one_try(self):
+        """`wl-copy` unter X11 endet sofort mit 1 ("Failed to connect to a
+        Wayland server", gemessen 2026-09-16). True zu antworten hiess: der Text
+        erreichte die Ablage nie UND xclip wurde nie gefragt -- dasselbe Loch,
+        das der Bildleser hatte."""
+        if crow_platform.IS_WINDOWS:
+            self.skipTest("kein wl-copy auf der anderen Seite")
+        seen = []
+        crow_gui.shutil.which = lambda n: "/usr/bin/" + n
+
+        def run(argv, **kw):
+            seen.append(list(argv))
+            return _Done(1 if argv[0] == "wl-copy" else 0)
+        crow_gui.subprocess.run = run
+        self.assertTrue(self.api().copy("x"))
+        self.assertEqual([a[0] for a in seen], ["wl-copy", "xclip"])
+        # UND WENN AUCH DAS ZWEITE ABLEHNT, ist die Antwort False und keine
+        # stille Zusage.
+        seen.clear()
+        crow_gui.subprocess.run = lambda argv, **kw: (seen.append(list(argv)),
+                                                      _Done(1))[1]
+        self.assertFalse(self.api().copy("x"))
 
     def test_a_timeout_is_success_because_wl_copy_stays_alive(self):
         """wl-copy bleibt am Leben, um die Auswahl zu HALTEN. Ein Timeout heisst

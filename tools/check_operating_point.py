@@ -649,7 +649,14 @@ def main(argv):
             failed += 1
             print("  FAILED   %-34s does not exist" % where)
             continue
-        got, problems = compare(where, read(path), want, linux[key])
+        # THE INSTALLER IS HELD TO THE WINDOWS SHAPE ALONE, and no alternative
+        # is passed. install.ps1 is the file that STARTS both servers on that
+        # machine, so a flag wrong there is a broken run rather than a stale
+        # sentence -- and a second accepted shape would let its line drift to
+        # the Linux placement (-ncmoe 31 -t 24) and still read green. The Linux
+        # line has no installer copy to carry: install.sh prints the argv
+        # crow_core.server_command builds and writes none of its own down.
+        got, problems = compare(where, read(path), want)
         if problems:
             failed += 1
             print("  FAILED   %-34s %d of %d flags differ" % (where, len(problems), len(want)))

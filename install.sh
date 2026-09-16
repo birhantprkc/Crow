@@ -150,11 +150,22 @@ disk_verdict() {
 # placeholder is a template that lost it, and writing it out unsubstituted would
 # install a launcher entry whose Exec line is the literal string.
 desktop_substitute() {
-    local template="$1" launcher="$2"
+    local template="$1" launcher="$2" line
     grep -q '@CROW_LAUNCHER@' "$template" \
         || { echo "no @CROW_LAUNCHER@ in $template" >&2; return 1; }
-    # | as the separator: a path may contain / and never |.
-    sed "s|@CROW_LAUNCHER@|$launcher|g" "$template"
+    # NICHT sed, UND DAS IST DER PUNKT: der Pfad ist DATEN, und die rechte Seite
+    # eines `s|...|...|` ist es nicht. `&` heisst dort "der ganze Treffer", ein
+    # `\` leitet eine Maskierung ein, und ein `|` beendet den Ausdruck mit
+    # "unknown option to `s'". Alle drei sind ueber `--to` erreichbar, alle drei
+    # gemessen 2026-09-16: `/opt/a&b/crow` wurde zu `/opt/a@CROW_LAUNCHER@b/crow`,
+    # `/opt/a|b/crow` zu einem sed-Fehler und damit -- wegen der Umleitung an der
+    # Aufrufstelle -- zu einer LEEREN crow.desktop. Die Ersetzung in bash kennt
+    # keine dieser Sonderbedeutungen; das Anfuehrungszeichen um "$launcher"
+    # schaltet zusaetzlich `patsub_replacement` aus, das seit bash 5.2 an ist und
+    # `&` genauso liest wie sed.
+    while IFS= read -r line || [ -n "$line" ]; do
+        printf '%s\n' "${line//@CROW_LAUNCHER@/"$launcher"}"
+    done < "$template"
 }
 
 sha_of() { sha256sum "$1" | cut -d' ' -f1; }
@@ -305,6 +316,13 @@ selftest() {
     local out; out="$(desktop_substitute "$tmp/t.desktop" "/opt/x y/crow")"
     check "the .desktop template takes the launcher path" \
           "$(printf '%s' "$out" | grep -qxF 'Exec=/opt/x y/crow' && echo 0 || echo 1)" "$out"
+    # DIE DREI ZEICHEN, DIE EINE ERSETZUNG SIND UND KEIN PFAD. Solange die
+    # Substitution ueber sed lief, war jedes davon ein anderer Fehler: `&` wurde
+    # zum ganzen Treffer, `\` verschwand, `|` beendete den Ausdruck und liess
+    # eine LEERE crow.desktop zurueck. Alle drei kommen ueber `--to` herein.
+    out="$(desktop_substitute "$tmp/t.desktop" '/opt/a&b|c\d/crow')"
+    check "a launcher path with & | and a backslash survives whole" \
+          "$(printf '%s' "$out" | grep -qxF 'Exec=/opt/a&b|c\d/crow' && echo 0 || echo 1)" "$out"
     printf '[Desktop Entry]\nExec=/usr/bin/crow\n' > "$tmp/bad.desktop"
     check "NEGATIVE: a template that lost @CROW_LAUNCHER@ is refused, not shipped" \
           "$(desktop_substitute "$tmp/bad.desktop" /x >/dev/null 2>&1 && echo 1 || echo 0)"
@@ -802,7 +820,19 @@ final_screen() {
 # main
 # ---------------------------------------------------------------------------
 usage() {
-    sed -n '/^# USAGE/,/^# ---/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//;$d'
+    # DURCH EINE ROEHRE GIBT ES KEINE DATEI ZU LESEN. `${BASH_SOURCE[0]}` ist
+    # dann das Wort "bash", und `curl -fsSL <raw>/install.sh | bash -s -- --help`
+    # antwortete mit `sed: can't read bash` und gar keiner Hilfe (gemessen
+    # 2026-09-16) -- ausgerechnet auf dem Weg, den der Kopf dieser Datei als
+    # ersten nennt. DIE LISTE WIRD DESHALB NICHT EIN ZWEITES MAL HINGESCHRIEBEN:
+    # sie steht im Kopf, und von dort ist sie auch im Netz zu lesen.
+    local me="${BASH_SOURCE[0]:-}"
+    if [ -n "$me" ] && [ -f "$me" ]; then
+        sed -n '/^# USAGE/,/^# ---/p' "$me" | sed 's/^# \{0,1\}//;$d'
+        return 0
+    fi
+    printf 'install.sh: the options are in the header of the script itself --\n'
+    printf '  https://github.com/%s/blob/main/install.sh\n' "$REPO_SLUG"
 }
 
 CROW_HOME="${CROW_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/crow}"
