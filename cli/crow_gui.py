@@ -48,6 +48,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import sys
 import struct
 import subprocess
@@ -60,7 +61,62 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import crow_core  # noqa: E402
+import crow_platform  # noqa: E402
 import crow_voice  # noqa: E402
+
+
+def prepare_environment(env=None) -> dict:
+    """The variables the toolkit reads BEFORE it is imported. What was set.
+
+    THIS RUNS AT IMPORT, and that is the whole point rather than tidiness: GTK
+    and WebKitGTK read these once, when the library is loaded, and `webview` is
+    imported lazily further down this file -- so the last moment at which they
+    can still be set is the moment this module is read. A `.desktop` launcher
+    and a bare `python cli/crow_gui.py` then behave the same, which they would
+    not if the answer lived in a wrapper script.
+
+    `__NV_DISABLE_EXPLICIT_SYNC` IS NOT A NICETY, IT IS THE WINDOW. Measured on
+    the Hyprland box 2026-09-16: without it the process dies before the surface
+    ever maps, with `Gdk-Message: Error 71 (Protocol error) dispatching to
+    Wayland display`. WebKitGTK's DMA-BUF renderer turns on Wayland explicit
+    sync and then commits a buffer without an acquire point; Hyprland answers
+    with a protocol error, and a protocol error kills the connection. Three
+    workarounds fix it; this one is the only one that keeps the accelerated
+    path, so it is the one that ships.
+
+    `CROW_GDK_BACKEND` IS THE ESCAPE HATCH AND IT IS SPELLED OUT, not a guess at
+    what a user meant. Wayland is where the port lives, but under XWayland the
+    things Wayland refuses -- moving a window by coordinates, keeping one above
+    the others -- work again, and somebody debugging one of those needs a way in
+    that is not editing this file. `CROW_GDK_BACKEND=x11` sets `GDK_BACKEND`.
+
+    `setdefault` THROUGHOUT: a value the user put in the environment outranks
+    anything decided here. That is what makes the variable an escape hatch
+    rather than a second opinion.
+    """
+    env = os.environ if env is None else env
+    set_here: dict = {}
+    if not crow_platform.IS_LINUX:
+        return set_here
+
+    def put(name: str, value: str) -> None:
+        if not env.get(name):
+            env[name] = value
+            set_here[name] = value
+
+    put("__NV_DISABLE_EXPLICIT_SYNC", "1")
+    wanted = (env.get("CROW_GDK_BACKEND") or "").strip()
+    if wanted:
+        # NOT setdefault, and this one is the exception that proves the rule:
+        # GDK_BACKEND is already set in every Wayland session (`wayland,x11,*`
+        # here), so a setdefault would make CROW_GDK_BACKEND do nothing at all.
+        # The user typed the more specific variable; it wins.
+        env["GDK_BACKEND"] = wanted
+        set_here["GDK_BACKEND"] = wanted
+    return set_here
+
+
+ENVIRONMENT = prepare_environment()
 
 from crow_core import (  # noqa: E402
     BANNER_BEVEL_HEX,
@@ -115,7 +171,15 @@ READ_TIMEOUT_S = 600.0
 # be right to call a copy of it there a second decision. It sits beside
 # roots.json for the same reason roots.json sits there: it is remembered ACROSS
 # chats, so it cannot live in a chat file.
-SETTINGS_FILE = os.path.join(os.path.dirname(crow_core.SESSION_DIR), "settings.json")
+#
+# THROUGH THE SEAM, NOT OFF THE SESSION DIRECTORY. This read
+# `os.path.dirname(crow_core.SESSION_DIR)` until the Linux port, and on Windows
+# that is still the same folder -- everything lived under %LOCALAPPDATA%\Crow.
+# On Linux the session directory moved to the STATE directory, so deriving from
+# it would put what the user configured under ~/.local/state. A settings file is
+# configuration; crow_platform.config_dir() is where configuration goes, and it
+# answers %LOCALAPPDATA%\Crow on Windows unchanged.
+SETTINGS_FILE = os.path.join(crow_platform.config_dir(), "settings.json")
 THEMES = ("dark", "light", "crow")
 DEFAULT_THEME = "dark"
 
@@ -136,7 +200,12 @@ THEME_BG = {"dark": "#181818", "light": "#ffffff", "crow": CROW_BG}
 #
 # READING IS NOT BOUNDED -- the guard in the core covers `write_file` and
 # `edit_file` -- so a path here is one the model's own tools can still open.
-PASTE_DIR = os.path.join(os.path.dirname(crow_core.SESSION_DIR), "pastes")
+#
+# THE SEAM DECIDES, for the reason SETTINGS_FILE gives above -- except that a
+# pasted picture is not configuration but data somebody would miss, so it goes
+# to crow_platform.data_dir(). Windows: %LOCALAPPDATA%\Crow\pastes, the same
+# folder as before.
+PASTE_DIR = os.path.join(crow_platform.data_dir(), "pastes")
 
 # 20 MB. A screenshot is under one; anything past this is a paste nobody meant.
 PASTE_MAX_BYTES = 20 * 1024 * 1024
@@ -175,7 +244,89 @@ def dib_to_bmp(dib: bytes) -> bytes:
     return b"BM" + struct.pack("<IHHI", 14 + len(dib), 0, 0, offset) + dib
 
 
+# WHAT A PICTURE IS CALLED ON A POSIX CLIPBOARD, in the order we want it. PNG
+# first for the reason the Windows reader gives one screen down: a screenshot
+# tool already put one there, and anything rebuilt from another format is a
+# second-hand copy. BMP is last because almost nothing offers it and it is the
+# one format `dib_to_bmp` above already proves this file can hand on.
+CLIPBOARD_IMAGE_TYPES = (("image/png", ".png"), ("image/jpeg", ".jpg"),
+                         ("image/webp", ".webp"), ("image/bmp", ".bmp"))
+
+# The two readers, in order. wl-clipboard speaks `wlr-data-control`, which needs
+# NO KEYBOARD FOCUS -- measured 2026-09-16, `wl-paste -t image/png` from a
+# background process produced a valid 2562x1440 PNG while Gtk.Clipboard's own
+# `wait_for_image()` returned None on the same clipboard, focused, on the main
+# loop and off it. xclip is the X11 fallback, for a session started with
+# CROW_GDK_BACKEND=x11 or on a plain X server.
+_CLIPBOARD_LIST = (["wl-paste", "--list-types"],
+                   ["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"])
+_CLIPBOARD_READ = (["wl-paste", "-t", "%s", "--no-newline"],
+                   ["xclip", "-selection", "clipboard", "-t", "%s", "-o"])
+
+
+def _clipboard_tool(argv: list) -> "bytes | None":
+    """Run one clipboard reader. None when the tool is not on this machine.
+
+    NONE IS NOT EMPTY BYTES. "wl-paste is not installed" and "the clipboard
+    holds no picture" are different answers: the first says try the next tool,
+    the second says stop. Collapsing them would make an X11 session with no
+    wl-clipboard look like an empty clipboard forever.
+
+    A TIMEOUT ON EVERY CALL. This runs on the bridge thread, from a Ctrl+V, and
+    a clipboard tool that waits for an owner that never answers would hang the
+    window on a keystroke.
+    """
+    if not shutil.which(argv[0]):
+        return None
+    try:
+        done = subprocess.run(argv, capture_output=True, stdin=subprocess.DEVNULL,
+                              timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout if done.returncode == 0 else b""
+
+
+def clipboard_image_posix() -> "tuple[str, bytes] | None":
+    """`(suffix, bytes)` for a picture on a Wayland or X11 clipboard, else None.
+
+    THE SAME CONTRACT AS THE WINDOWS READER BELOW, and deliberately so: the page
+    asks one question through one bridge call, and which of the two answers it
+    is not something the page may ever have to know.
+
+    THE TYPES ARE ASKED FOR RATHER THAN GUESSED. `--list-types` costs one
+    process and says exactly what the owner offers; reading `image/png` blind
+    would produce empty output on a clipboard holding a JPEG and nothing would
+    say why.
+    """
+    for lister, reader in zip(_CLIPBOARD_LIST, _CLIPBOARD_READ):
+        offered = _clipboard_tool(lister)
+        if offered is None:
+            continue                       # that tool is not installed
+        types = {line.strip().lower()
+                 for line in offered.decode("utf-8", "replace").splitlines()
+                 if line.strip()}
+        for mime, suffix in CLIPBOARD_IMAGE_TYPES:
+            if mime not in types:
+                continue
+            raw = _clipboard_tool([a % mime if "%s" in a else a for a in reader])
+            if raw:
+                return suffix, raw
+        return None                        # the tool answered: no picture there
+    return None
+
+
 def clipboard_image() -> "tuple[str, bytes] | None":
+    """`(suffix, bytes)` for a picture on the clipboard, else None.
+
+    THE PLATFORM PICKS THE READER AND NOTHING ELSE CHANGES. Windows keeps the
+    ctypes path below, byte for byte; everything else asks wl-paste or xclip.
+    """
+    if not crow_platform.IS_WINDOWS:
+        return clipboard_image_posix()
+    return clipboard_image_windows()
+
+
+def clipboard_image_windows() -> "tuple[str, bytes] | None":
     """`(suffix, bytes)` for a picture on the Windows clipboard, else None.
 
     READ HERE AND NOT IN THE PAGE, and that is measured rather than preferred.
@@ -2553,9 +2704,16 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
           <p class="about">CROW <span id="aboutver"></span></p>
           <p class="mcpsaid" id="updsaid"></p>
           <button id="updbtn" hidden onclick="crow.updateRun()"></button>
+          <!-- THE DIRECTORY IS FILLED IN, NOT WRITTEN OUT. This said
+               `%LOCALAPPDATA%\Crow` until the Linux port, which is a true
+               sentence on one of the two platforms and a puzzle on the other:
+               the install root is ~/.local/share/crow there. `update_check`
+               already carries `install_dir` off crow_platform, so the one
+               place that knows says it. -->
           <p class="shint">An update replaces the installed copy under
-             %LOCALAPPDATA%\Crow. Crow keeps running the version it started
-             with, so it has to be restarted afterwards.</p>
+             <span id="updwhere">the install directory</span>. Crow keeps
+             running the version it started with, so it has to be restarted
+             afterwards.</p>
         </section>
       </div>
     </div>
@@ -2836,6 +2994,18 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 <script>
 const $ = s => document.querySelector(s);
 const flow = $("#flow"), input = $("#in"), go = $("#go"), box = $("#box");
+
+// DOES THE COMPOSITOR OWN THIS WINDOW'S FRAME? Stamped in by Python before the
+// page is handed over, the same way the theme and the rail state are, and for
+// the same reason: a question answered by a script after load is answered one
+// frame too late, and this one decides what a mousedown on the title bar does.
+//
+// TRUE ON WAYLAND, FALSE EVERYWHERE ELSE. On Windows the page computes a
+// rectangle and Python moves the window to it (`set_geometry`, and pywebview's
+// own `pywebview-drag-region` for the bar). A Wayland client has no global
+// coordinates and `gtk_window_move()` does nothing, so the mousedown is handed
+// to the compositor instead -- see `Api.begin_move` and `Api.begin_resize`.
+const NATIVEDRAG = __NATIVEDRAG__;
 
 // #138. FARBE JE SPRACHE, eingebettet und ohne Abhaengigkeit.
 //
@@ -4470,6 +4640,10 @@ const crow = {
       // press update and watch an unchanged copy.
       const where=s.installed_here?"":", and this window runs from a copy outside "
         +s.install_dir;
+      // AND THE SENTENCE ABOVE THE BUTTON LEARNS THE SAME PATH. It is the only
+      // place in this pane that names a directory, and naming the wrong one is
+      // how a reader decides the button does not apply to them.
+      if(s.install_dir) $("#updwhere").textContent=s.install_dir;
       said.textContent=(s.newer ? s.latest+" is out, this is "+s.current
                                  : s.latest+" is the newest release")+where;
       // OFFERED EITHER WAY, and the label is the difference. install.ps1
@@ -5822,7 +5996,7 @@ const crow = {
     // DAS BILD ZUERST, weil es das ist, was das Modell gesehen hat -- die Seite
     // kann sich seitdem geaendert haben, und dann erzaehlt der Chat von etwas
     // anderem als der Schirm.
-    this.brSend("file:///"+String(shot||"").replace(/\\/g,"/")); },
+    this.brSend(this.fileUrl(String(shot||""))); },
 
   // EINE SCHEIBE FUER ALLE REITER, also laedt ein Wechsel die Seite neu. Der
   // ehrliche Preis dafuer, dass ueberhaupt jede Seite geht: je Reiter ein
@@ -5876,14 +6050,27 @@ const crow = {
       d.textContent="no tab open -- press + for one";
       $("#brbody").appendChild(d); } },
 
-  // EINE ADRESSE ODER EIN PFAD. Was wie ein Windows-Pfad aussieht, wird zu
-  // `file:///` gemacht: robin tippt einen Pfad, wenn er einen Bau ansehen will,
-  // und "C:\..." in eine Adresszeile zu tippen ist die haeufigere Geste als
+  // EIN PFAD ZU EINER DATEI-ADRESSE, auf beiden Plattformen. `C:\x` wird zu
+  // `file:///C:/x`, `/home/x` zu `file:///home/x` -- die drei Schraegstriche
+  // gehoeren zur Adresse, der Pfad bringt seinen eigenen mit, und beide
+  // aneinanderzukleben ergaebe `file:////home/x`.
+  fileUrl(path){
+    const p=String(path||"").replace(/\\/g,"/");
+    return "file://" + (p.charAt(0)==="/" ? "" : "/") + p; },
+
+  // EINE ADRESSE ODER EIN PFAD. Was wie ein Pfad aussieht, wird zu `file:///`
+  // gemacht: robin tippt einen Pfad, wenn er einen Bau ansehen will, und
+  // "C:\..." in eine Adresszeile zu tippen ist die haeufigere Geste als
   // `file:///C:/...` auszuschreiben.
+  //
+  // UND EIN FUEHRENDER SCHRAEGSTRICH IST DERSELBE FALL, seit es die zweite
+  // Plattform gibt: `/srv/bau.html` traf keine der beiden Regeln und
+  // wurde zu `https:///srv/bau.html`, was nirgendwo hinfuehrt. Auf
+  // Windows tippt niemand so etwas, also nimmt die Zeile dort nichts weg.
   brGo(raw){
     const t=this.brTab(this.tabOn); if(!t) return;
     let url=(raw||"").trim(); if(!url) return;
-    if(/^[a-zA-Z]:[\\/]/.test(url)) url="file:///"+url.replace(/\\/g,"/");
+    if(/^[a-zA-Z]:[\\/]/.test(url) || url.charAt(0)==="/") url=this.fileUrl(url);
     else if(!/^[a-z][a-z0-9+.-]*:/i.test(url)) url="https://"+url;
     t.hist=t.hist.slice(0, t.at+1); t.hist.push(url); t.at=t.hist.length-1;
     this.brShow(t, url); },
@@ -6306,6 +6493,15 @@ new ResizeObserver(fitFlow).observe(composer);
     const el=document.getElementById(id);
     el.addEventListener("mousedown",e=>{
       e.preventDefault();
+      // WHERE THE COMPOSITOR OWNS THE FRAME, THE GESTURE IS HANDED OVER WHOLE.
+      // The arithmetic below computes a rectangle and asks Python to move the
+      // window there -- which is the only thing that works on Windows and the
+      // one thing a Wayland client may not do at all (no global coordinates,
+      // `gtk_window_move()` a documented no-op). `begin_resize` gives the
+      // mousedown to the compositor instead: it resizes for as long as the
+      // button is held, and there is no per-step message at all. See
+      // `Api.begin_resize`.
+      if(NATIVEDRAG){ pywebview.api.begin_resize(map[id]); return; }
       drag={edge:map[id],x:e.screenX,y:e.screenY};
       pywebview.api.geometry().then(g=>{ if(drag) drag.start=g; });
     });
@@ -6322,6 +6518,38 @@ new ResizeObserver(fitFlow).observe(composer);
                                Math.round(w),Math.round(h));
   });
   window.addEventListener("mouseup",()=>{ drag=null; });
+})();
+
+// THE TITLE BAR, WHERE THE COMPOSITOR OWNS THE FRAME. `pywebview-drag-region`
+// on #bar stays exactly where it is -- it is what moves the window on Windows
+// -- and it does nothing at all under Wayland: pywebview's own handler ends in
+// `window.move(x,y)`, which the GDK Wayland backend ignores. This is the second
+// half, and it runs only when NATIVEDRAG says so.
+(function bardrag(){
+  if(!NATIVEDRAG) return;
+  const bar=$("#bar");
+  let press=null;
+  bar.addEventListener("mousedown",e=>{
+    // THE BUTTONS OPT OUT, the same way they opt out of the drag region: a
+    // mousedown on `close` that started a window move would be a window you
+    // cannot close. `.pywebview-no-drag` is already on every control in the
+    // bar, so this asks the markup rather than keeping a second list.
+    if(e.button!==0 || e.target.closest(".pywebview-no-drag")) return;
+    press={x:e.screenX,y:e.screenY};
+  });
+  // NOT ON THE MOUSEDOWN ITSELF, AND THAT IS WHAT KEEPS THE DOUBLE-CLICK. The
+  // compositor takes the pointer the moment `xdg_toplevel.move` is sent, so a
+  // drag started on the first press swallows the second one -- and the second
+  // one is `ondblclick="pywebview.api.maximise()"` on this very element. GTK's
+  // own header bar waits for the same threshold for the same reason. Four
+  // pixels: below that a click is a click, not a drag somebody meant.
+  window.addEventListener("mousemove",e=>{
+    if(!press) return;
+    if(Math.abs(e.screenX-press.x)<4 && Math.abs(e.screenY-press.y)<4) return;
+    press=null;
+    pywebview.api.begin_move();
+  });
+  window.addEventListener("mouseup",()=>{ press=null; });
 })();
 
 // A TABLE, NOT FOUR IF-LINES. Only the chat menu and the help menu closed on a click elsewhere;
@@ -6379,7 +6607,46 @@ window.addEventListener("pywebviewready",()=>{ pywebview.api.ready(); input.focu
 """
 
 
+# THE PAGE THAT IS NEVER READ, and it exists for one line in `main`: on GTK the
+# real page has to arrive through `window.load_html()` rather than through
+# `create_window(html=...)`, or its base URI is `about:blank` and nothing on
+# disk resolves (see the comment at create_window). Something has to fill the
+# window for the few hundred milliseconds in between, and it is THE GROUND THE
+# THEME WILL PAINT rather than white -- the same rule `THEME_BG` states one
+# screen up: a window filled with one ground and repainted in another is a flash
+# of the wrong product on every start.
+PAGE_PLACEHOLDER = ('<!doctype html><html><head><meta charset="utf-8">'
+                    '<style>html,body{margin:0;height:100%;background:__BG__}'
+                    '</style></head><body></body></html>')
+
+
 ICON_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crow.ico")
+
+# THE SAME BIRD IN THE FORMAT THE OTHER PLATFORM CAN READ. `crow.ico` is a
+# Windows container and nothing on Linux opens one; `cli/icons/crow-<N>.png`
+# are its own frames, extracted byte for byte, so both platforms show the same
+# drawing rather than two that were made to look alike.
+#
+# PNG AND NOT SVG, measured 2026-09-16: this machine has no SVG gdk-pixbuf
+# loader (`/usr/lib/gdk-pixbuf-2.0/*/loaders/` has none), so everything that
+# rasterises a themed icon through GdkPixbuf -- including pywebview's own
+# `webview.start(icon=)` -- cannot open one. The two SVGs beside this file are
+# the WIREFRAME mark drawn under the greeting, a different drawing, and using
+# one as the app icon would put two birds in the product.
+ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
+ICON_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
+
+
+def icon_png(size: int = 256) -> str:
+    """The path of one PNG icon, or "" when this build does not ship it.
+
+    "" RATHER THAN A GUESS, and the caller passes it on to `webview.start`,
+    which accepts None. An icon is a decoration; a window that refused to open
+    because one was missing would be the worse failure -- the same rule
+    `mark_svg` and `set_icon` already state.
+    """
+    path = os.path.join(ICON_DIR, "crow-%d.png" % size)
+    return path if os.path.isfile(path) else ""
 
 # #127. THE BIRD UNDER THE GREETING. Two files rather than one recoloured by
 # CSS: it is a low-poly drawing with five stroke colours, and `currentColor`
@@ -6406,6 +6673,34 @@ def mark_svg(background: str) -> str:
         return ""
 
 
+def name_this_process(name: str = "crow") -> bool:
+    """Tell the toolkit what this program is called. True when it took.
+
+    ONE STRING, FOUR PLACES, and they have to be the same one: the Wayland
+    `app_id` the compositor sees, `StartupWMClass` in crow.desktop, the
+    `Icon=crow` that entry names, and the `class:^(crow)$` of the window rule.
+    GDK takes the app id from `g_get_prgname()` because pywebview builds its
+    GtkApplication with a NULL application id, so this call IS that string.
+
+    WITHOUT IT THE CLASS IS `crow_gui.py`, the script's own basename -- measured
+    2026-09-16 with `hyprctl clients -j` -- and every one of the four matches
+    above fails at once: no icon, no launcher entry, no float rule.
+
+    NEVER FATAL. A window with the wrong class is a window with the wrong icon;
+    a client that refused to open over it would be the worse failure, which is
+    the same rule `taskbar_identity` states for the other platform.
+    """
+    if crow_platform.IS_WINDOWS:
+        return False
+    try:
+        from gi.repository import GLib
+
+        GLib.set_prgname(name)
+        return True
+    except Exception:                      # noqa: BLE001 - cosmetic, never fatal
+        return False
+
+
 def taskbar_identity() -> bool:
     """Tell the shell this process is Crow, before the window exists.
 
@@ -6417,7 +6712,15 @@ def taskbar_identity() -> bool:
     BEFORE THE WINDOW, not after: the shell reads the ID when it registers the
     button, the same way it reads the style bits in `shell_buttons`, and neither
     is looked at again afterwards.
+
+    NOTHING TO DO ANYWHERE ELSE. The Linux answer to the same question -- what
+    is this process called, and which launcher entry does it belong to -- is
+    `GLib.set_prgname("crow")` in `main`, and it is not a fallback for this one
+    but the identity the window really has: the compositor reads it as the
+    Wayland `app_id`, and `crow.desktop` matches on it.
     """
+    if not crow_platform.IS_WINDOWS:
+        return False
     try:
         import ctypes
 
@@ -6515,7 +6818,7 @@ def shell_buttons(title: str) -> bool:
     and a frameless window loses the region `pywebview-drag-region` hangs on --
     that cost the drag and the maximise on the first attempt.
     """
-    if sys.platform != "win32":
+    if not crow_platform.IS_WINDOWS:
         return False
     try:
         import ctypes
@@ -7170,6 +7473,12 @@ class Api:
         # waits on it -- the thread checks it and gives up.
         self._github_cancel = False
         self._restore: tuple | None = None
+        # WHAT THE MAXIMISE BUTTON LAST ASKED FOR, and only on the platforms
+        # where the compositor owns the frame. `_restore` above is the Windows
+        # answer and holds a RECTANGLE, because there the window is moved and
+        # resized by this process; here there is nothing to write down (see
+        # `maximise`), only which of the two states was last requested.
+        self._maximised = False
         # WHICH FILE THE OPEN CHAT ALREADY HAS, or None while it has none.
         #
         # A CHAT GETS ITS FILE WHEN IT IS LEFT, NOT WHEN IT IS OPENED. Writing
@@ -9642,6 +9951,143 @@ class Api:
         self._window.move(int(x), int(y))
         self._window.resize(int(w), int(h))
 
+    # -- the frame the compositor owns -------------------------------------
+    #
+    # WHY THERE ARE TWO WAYS TO MOVE A FRAMELESS WINDOW, and Wayland is the
+    # reason. On Windows the page tells Python the new rectangle and Python
+    # moves the window there -- `set_geometry` above, and pywebview's own
+    # `pywebview-drag-region` for the title bar. Both end in a call that says
+    # "be at these coordinates", and on Wayland a client may NOT say that: there
+    # are no global coordinates, `gtk_window_move()` is a documented no-op and
+    # `hyprctl` confirmed it (measured 2026-09-16: identical `at=[...]` before
+    # and after `move(150,150)`, while pywebview happily reported the new x/y
+    # from its own bookkeeping).
+    #
+    # SO THE COMPOSITOR IS ASKED TO RUN THE DRAG INSTEAD. `begin_move_drag` and
+    # `begin_resize_drag` map to `xdg_toplevel.move` / `.resize`: the client
+    # hands the gesture over at the mousedown and the compositor moves the
+    # window for as long as the button is held. That is also why these take no
+    # coordinates and return nothing -- there is no step to report back.
+    #
+    # THE WINDOWS PATH IS UNTOUCHED. These two methods exist on both platforms
+    # (the bridge is one object), and on Windows they answer False and the page
+    # never calls them: `__NATIVEDRAG__` below is empty there, so the page keeps
+    # the drag region and the grip arithmetic it has always used.
+    #
+    # The eight edges as `Gdk.WindowEdge` numbers them -- NORTH_WEST 0, NORTH 1,
+    # NORTH_EAST 2, WEST 3, EAST 4, SOUTH_WEST 5, SOUTH 6, SOUTH_EAST 7. The
+    # NUMBER and not the enum member, so this table can be read (and the case
+    # below can be run) on a machine with no GTK at all; `Gdk.WindowEdge(n)`
+    # turns it back into the enum at the one place that needs one.
+    _RESIZE_EDGES = {"nw": 0, "n": 1, "ne": 2, "w": 3, "e": 4,
+                     "sw": 5, "s": 6, "se": 7}
+
+    def _gtk_window(self) -> "object | None":
+        """The real GtkWindow under this pywebview window, or None.
+
+        `window.native` is set by pywebview's GTK backend in its own
+        constructor (`self.pywebview_window.native = self.window`), so it is
+        there from before the first paint -- unlike the Windows `_hwnd` above,
+        which only exists after before_show. None on every other backend, which
+        is what makes the two callers below no-ops on Windows.
+        """
+        if crow_platform.IS_WINDOWS:
+            return None
+        native = getattr(self._window, "native", None)
+        return native if hasattr(native, "begin_move_drag") else None
+
+    def begin_move(self) -> bool:
+        """mousedown on the title bar: the compositor moves the window.
+
+        ON THE GTK MAIN THREAD, VIA `GLib.idle_add`. Everything a js_api method
+        does runs on a fresh worker thread (pywebview spawns one per bridge
+        call, by its own comment "to prevent blocking the UI thread"), and GTK
+        may only be touched from the thread running its loop. A `begin_move_drag`
+        called straight from here is the class of bug that shows up as a window
+        that freezes on the third drag rather than on the first.
+
+        THE BUTTON, THE COORDINATES AND THE TIMESTAMP ARE ASKED OF GDK, not
+        carried over from the page. Wayland validates the gesture against the
+        serial of the last button press the toolkit saw; a coordinate invented
+        in JavaScript would not make that serial any better, and the pointer
+        position has moved on by the time this thread is scheduled anyway.
+        """
+        native = self._gtk_window()
+        if native is None:
+            return False
+        return self._native_drag(native, None)
+
+    def begin_resize(self, edge: str) -> bool:
+        """mousedown on one of the eight grips: the compositor resizes.
+
+        AN UNKNOWN EDGE IS REFUSED rather than defaulted to a corner: the page
+        sends one of eight names it holds in a table, so a ninth means the two
+        tables have drifted -- and a silent default would hide exactly that.
+        """
+        native = self._gtk_window()
+        if native is None:
+            return False
+        which = self._RESIZE_EDGES.get(str(edge or "").lower())
+        if which is None:
+            return False
+        return self._native_drag(native, which)
+
+    @staticmethod
+    def _native_drag(native, edge) -> bool:
+        """Hand one gesture to the compositor. `edge` None means move.
+
+        NEVER RAISES INTO THE BRIDGE. A gesture the compositor declines is a
+        drag that does not happen, which the user repeats; an exception here
+        would travel up through pywebview's bridge and be swallowed there
+        without a line -- the failure #175 paid a whole attempt for.
+        """
+        try:
+            # THE VERSIONS ARE NAMED, and it is not ceremony: this machine also
+            # has Gtk 4.0 and Gdk 4.0 typelibs, and a bare `from gi.repository
+            # import Gdk` binds whichever it finds first for the whole process.
+            # Measured 2026-09-16 -- doing that before pywebview started cost
+            # the window: `gi.require_version('Gdk','3.0')` inside pywebview
+            # then raised, and the only message was "You must have either QT or
+            # GTK with Python extensions installed". Asking for 3.0 here is a
+            # no-op once pywebview has loaded it and a loud refusal otherwise.
+            import gi
+
+            gi.require_version("Gtk", "3.0")
+            gi.require_version("Gdk", "3.0")
+            from gi.repository import Gdk, GLib, Gtk
+        except Exception:                  # noqa: BLE001 - no GTK here
+            return False
+
+        def start() -> bool:
+            # WHERE THE POINTER IS NOW, not where it was when the page sent
+            # this: a bridge call crosses two threads, and the compositor is
+            # going to take the pointer over anyway. `get_current_event_time()`
+            # answers GDK_CURRENT_TIME on an idle callback, which is the value
+            # that means "use the latest" -- exactly what is wanted here.
+            root_x = root_y = 0
+            stamp = 0
+            try:
+                pointer = Gdk.Display.get_default().get_default_seat().get_pointer()
+                _screen, root_x, root_y = pointer.get_position()
+                stamp = Gtk.get_current_event_time()
+            except Exception:              # noqa: BLE001 - see the docstring
+                pass
+            try:
+                if edge is None:
+                    native.begin_move_drag(1, root_x, root_y, stamp)
+                else:
+                    native.begin_resize_drag(Gdk.WindowEdge(edge), 1,
+                                             root_x, root_y, stamp)
+            except Exception:              # noqa: BLE001 - see the docstring
+                pass
+            return False                   # once, not every idle turn
+
+        try:
+            GLib.idle_add(start)
+        except Exception:                  # noqa: BLE001
+            return False
+        return True
+
     def _hwnd(self) -> int | None:
         """This window's HWND, or None.
 
@@ -9733,7 +10179,38 @@ class Api:
         THE PREVIOUS SIZE IS REMEMBERED HERE because nothing else remembers it:
         a frameless window has no restore state of its own, so a maximise that
         did not write the old rectangle down would be a one-way trip.
+
+        EXCEPT WHERE THE COMPOSITOR REMEMBERS IT, which is the whole Linux
+        branch below. `xdg_toplevel.set_maximized` is a request, not a
+        rectangle: the compositor picks the size, keeps the old one and gives it
+        back on unset. So there is nothing to write down, and writing one down
+        would be a second opinion about a geometry this client is not allowed to
+        have (see `_native_drag` on why coordinates are not ours on Wayland).
         """
+        native = self._gtk_window()
+        if native is not None:
+            # OUR OWN FLAG AND NOT `is_maximized()`, and that is measured
+            # rather than preferred: on this compositor the toolkit reports the
+            # window as maximised from the first frame and keeps saying so after
+            # `unmaximize()` (2026-09-16, GdkWindowState with the MAXIMIZED bit
+            # set on a floating 1180x800 window). A toggle read off that answer
+            # can never leave the state it starts in. The flag is what the
+            # BUTTON last asked for, which is the question the button is asking.
+            #
+            # A WINDOW MAXIMISED BY THE COMPOSITOR ITSELF -- a keybinding, a
+            # drag to the top edge -- leaves the flag behind, and the next
+            # double-click then asks for the state it is already in and looks
+            # like it did nothing. One wasted click on a path nobody takes twice
+            # is the price of a button that is otherwise exact.
+            try:
+                from gi.repository import GLib
+
+                self._maximised = not self._maximised
+                GLib.idle_add(native.maximize if self._maximised
+                              else native.unmaximize)
+            except Exception:              # noqa: BLE001 - cosmetic, never fatal
+                pass
+            return
         area = self._work_area(self._hwnd())
         now = (self._window.x, self._window.y, self._window.width, self._window.height)
         filled = (abs(now[2] - area[2]) < 4 and abs(now[3] - area[3]) < 4)
@@ -9745,17 +10222,49 @@ class Api:
         self._window.resize(int(target[2]), int(target[3]))
 
     def copy(self, text: str) -> bool:
-        """Put text on the Windows clipboard. True when it arrived.
+        """Put text on the clipboard. True when it arrived.
 
         The page cannot: it is loaded as HTML rather than served, so it is not a
         secure context and `navigator.clipboard` refuses without raising. `clip`
         is on every Windows since XP and takes UTF-16LE on stdin.
+
+        ON LINUX IT IS THE SAME SHAPE THROUGH ANOTHER PROGRAM: `wl-copy` under
+        Wayland, `xclip` under X11, both taking UTF-8 on stdin. The GTK route
+        was not taken for the reason `clipboard_image_posix` records: reading
+        through Gtk.Clipboard returned nothing on this compositor, and a
+        clipboard that only half works is worse than one that is one process
+        away. `wl-copy` FORKS AND STAYS ALIVE to own the selection, which is
+        why nothing here waits for it to exit beyond the handover.
         """
         if not text:
             return False
+        if not crow_platform.IS_WINDOWS:
+            for argv, payload in ((["wl-copy"], text.encode("utf-8")),
+                                  (["xclip", "-selection", "clipboard"],
+                                   text.encode("utf-8"))):
+                if not shutil.which(argv[0]):
+                    continue
+                try:
+                    # THE OWNER OUTLIVES THIS CALL, so the wait is bounded and a
+                    # timeout is SUCCESS rather than failure: wl-copy has taken
+                    # the bytes by the time it stops answering, and it goes on
+                    # holding the selection for as long as somebody may paste.
+                    subprocess.run(argv, input=payload, capture_output=True,
+                                   timeout=5)
+                except subprocess.TimeoutExpired:
+                    return True
+                except (OSError, subprocess.SubprocessError):
+                    return False
+                return True
+            return False
         try:
-            import subprocess
-
+            # `import subprocess` STOOD HERE AND HAD TO GO. The module is
+            # already imported at the top of this file, so the line bought
+            # nothing -- and it made `subprocess` a LOCAL name for the whole
+            # function, which is how the Linux branch above met
+            # `UnboundLocalError: cannot access local variable 'subprocess'`
+            # the first time it ran (2026-09-16, caught live). The Windows call
+            # below is unchanged in every other respect.
             proc = subprocess.run(
                 ["clip"], input=text.encode("utf-16-le"),
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=False)
@@ -10314,6 +10823,27 @@ class Api:
         """
         import webview
         if self._browser_win is None:
+            # WAS DIE SCHEIBE AUF WAYLAND NICHT KANN, und es ist keine
+            # Nachlaessigkeit, sondern das Protokoll: ein Client darf sein
+            # eigenes Fenster weder setzen noch heben. `move()` ist ein
+            # dokumentierter Leerlauf (gemessen 2026-09-16: `hyprctl clients`
+            # zeigt dasselbe `at=[...]` davor und danach), `on_top` wird zu
+            # `set_keep_above()` und damit ebenfalls zu nichts. Die Scheibe
+            # KLEBT DORT ALSO NICHT AM PANEL -- sie ist ein zweites,
+            # schwebendes Fenster mit derselben Klasse `crow`, und die
+            # Hyprland-Regel in cli/hyprland-crow.conf laesst es schweben statt
+            # die Haelfte der Arbeitsflaeche nehmen.
+            #
+            # `hidden=True` IST HIER EIN FEHLER IN PYWEBVIEW UND KEIN WUNSCH.
+            # `BrowserView.show()` versteckt das Fenster sofort wieder, wenn
+            # `pywebview_window.hidden` noch steht -- und `Window.show()` setzt
+            # es nie zurueck, also kann ein so erzeugtes Fenster auf GTK NIE
+            # erscheinen (gemessen 2026-09-16: es taucht auch nach `show()` in
+            # `hyprctl clients` nicht auf, waehrend `evaluate_js` darauf
+            # funktioniert -- WebKit laeuft, die Oberflaeche ist nur nie
+            # gemappt). `pane_show` setzt die Fahne darum vor jedem `show()`
+            # zurueck; auf Windows aendert das nichts, weil die Fahne dort
+            # ohnehin nur den ersten Aufbau steuert.
             self._browser_win = webview.create_window(
                 "crow-browser", url="about:blank", frameless=True,
                 easy_drag=False, hidden=True, on_top=True, focus=True,
@@ -10329,9 +10859,20 @@ class Api:
         return True
 
     def _pane_apply(self) -> None:
-        """Rechteck plus Fensterecke, auf die Scheibe geschrieben."""
+        """Rechteck plus Fensterecke, auf die Scheibe geschrieben.
+
+        AUF WAYLAND PASSIERT HIER NICHTS, und das steht hier als Satz, damit
+        niemand die Stelle sucht: es gibt keine globalen Koordinaten, `move()`
+        ist ein Leerlauf und `resize()` auf einem vom Compositor gelegten
+        Fenster ebenfalls. Ein Aufruf, der still nichts tut, ist aber schlimmer
+        als keiner -- `self._window.x` liest pywebviews eigene Buchhaltung und
+        nicht den Bildschirm, also stuende hier eine Rechnung aus zwei Zahlen,
+        die beide erfunden sind. Darum wird gar nicht erst gerechnet.
+        """
         win, rect = self._browser_win, self._browser_rect
         if win is None or rect is None or not self._browser_shown:
+            return
+        if self._gtk_window() is not None:
             return
         try:
             x = int(self._window.x + rect[0])
@@ -10353,6 +10894,7 @@ class Api:
             win.load_url(url)
             if not self._browser_shown:
                 self._browser_shown = True
+                self._pane_unhide(win)
                 win.show()
             self._pane_apply()
         except Exception as exc:       # noqa: BLE001
@@ -10377,11 +10919,33 @@ class Api:
             return True
         self._browser_shown = True
         try:
+            self._pane_unhide(self._browser_win)
             self._browser_win.show()
         except Exception:              # noqa: BLE001
             pass
         self._pane_apply()
         return True
+
+    @staticmethod
+    def _pane_unhide(win) -> None:
+        """Die `hidden`-Fahne loeschen, bevor `show()` sie wieder befolgt.
+
+        DER FEHLER SITZT IN PYWEBVIEW UND WIRD HIER UMGANGEN, NICHT REPARIERT:
+        `BrowserView.show()` ruft `show_all()` und versteckt das Fenster danach
+        sofort wieder, wenn `pywebview_window.hidden` noch steht -- und
+        `Window.show()` setzt die Fahne nie zurueck. Unter der GtkApplication
+        ist `gtk_main_level()` immer 0, also greift genau dieser Zweig, und ein
+        mit `hidden=True` erzeugtes Fenster kann NIE erscheinen (gemessen
+        2026-09-16). Die Fahne vorher zu loeschen ist die ganze Umgehung.
+
+        AUF WINDOWS IST ES EIN NO-OP MIT DEM GLEICHEN ERGEBNIS: dort steuert
+        `hidden` nur, ob das Fenster beim Aufbau gezeigt wird; ein spaeteres
+        `show()` hat die Fahne ohnehin nie gelesen.
+        """
+        try:
+            win.hidden = False
+        except Exception:              # noqa: BLE001 -- eine Fahne, nie fatal
+            pass
 
     def pane_follow(self, *_) -> None:
         """Das Hauptfenster ist gewandert oder hat die Groesse geaendert."""
@@ -10601,6 +11165,16 @@ class Api:
         files = ((event or {}).get("dataTransfer") or {}).get("files") or []
         paths = [f.get("pywebviewFullPath") for f in files
                  if isinstance(f, dict) and f.get("pywebviewFullPath")]
+        # A DROP THAT CARRIED NO PATH IS SAID OUT LOUD, and it is not a
+        # theoretical case: the path is attached by the backend, out of what the
+        # toolkit's own drag handler collected, and a source that hands over
+        # only bytes -- a picture dragged out of a browser, a file manager
+        # speaking a flavour the handler does not read -- leaves the name and
+        # nothing else. Silence there looks exactly like a window that ignored
+        # the drop, and the way round it (type the path) is one nobody guesses.
+        if files and not paths:
+            self.push({"k": "note", "t": "that drop carried no location on disk"
+                                         " -- typing the path works"})
         self.push({"k": "drop", "paths": paths})
 
     def paste_clipboard(self) -> str:
@@ -11211,6 +11785,12 @@ def main(argv: list[str] | None = None) -> int:
                 .replace("__BROWSER__", "open" if browser_open() else "shut")
                 .replace("__CODEW__", str(code_width_setting()))
                 .replace("__MARKDARK__", mark_svg("dark"))
+                # WHO MOVES THE WINDOW, stamped on the page for the reason the
+                # theme is stamped on it: the answer decides what the first
+                # mousedown on the title bar does, and a script that worked it
+                # out after load would be one frame late on every start.
+                .replace("__NATIVEDRAG__",
+                         "false" if crow_platform.IS_WINDOWS else "true")
                 .replace("__MARKLIGHT__", mark_svg("light")))
 
     api = Api(args)
@@ -11218,6 +11798,15 @@ def main(argv: list[str] | None = None) -> int:
     # registers the taskbar button, and an id set afterwards is not looked at
     # again -- the same rule the style bits in `shell_buttons` run into.
     taskbar_identity()
+    # AND THE SAME SENTENCE ON THE OTHER PLATFORM, for the same reason and at
+    # the same moment. `g_set_prgname` is what GDK falls back to for
+    # `xdg_toplevel.set_app_id` -- pywebview builds its GtkApplication with a
+    # NULL application id -- and the app id is the ONLY handle a Wayland
+    # compositor has on a window: the launcher entry matches it, the icon hangs
+    # off it, and `windowrule = float, class:^(crow)$` keys on it. Measured
+    # 2026-09-16: without this line `hyprctl clients -j` reports the class as
+    # `crow_gui.py`, the script's basename.
+    name_this_process()
     # FRAMELESS, because the title bar is part of the design: the caption is
     # drawn in the page with the wordmark in it, the way the mockup shows it.
     title = "CROW %s" % (client_version() or "")
@@ -11226,8 +11815,24 @@ def main(argv: list[str] | None = None) -> int:
     # erlaubten Code-Panel bleibt der Chatspalte ihr min-width von 560 --
     # 520 + 560 + 50 Spalten-Chrome = 1130. Das Code-Panel hat KEIN hartes
     # Minimum (min-width:0), es gibt zuerst nach; die Maske nie.
+    #
+    # THE PAGE IS HANDED OVER TWICE ON GTK, AND THAT IS THE FIX RATHER THAN A
+    # DETOUR. `create_window(html=...)` reaches WebKitGTK as
+    # `load_html(html, base_uri='')`, and WebKitGTK documents that a NULL base
+    # URI "defaults to about:blank" -- measured 2026-09-16: `document.baseURI`
+    # came back `about:blank`, a `file:///` `<img>` fired onerror with
+    # naturalWidth 0, and an `@font-face` pointing at a file on disk stayed
+    # `unloaded`. `window.load_html(page)` after creation defaults the base URI
+    # to the application's own directory, and everything resolves. So the window
+    # is created with a placeholder that is never seen (`load_html` runs before
+    # the first paint is worth looking at) and the real page follows.
+    #
+    # WINDOWS TAKES NEITHER BRANCH: WebView2 gets the page in `create_window`
+    # exactly as it always has.
+    handover = "" if crow_platform.IS_WINDOWS else page
+    placeholder = PAGE_PLACEHOLDER.replace("__BG__", theme_bg(current_theme()))
     window = webview.create_window(
-        title, html=page, js_api=api,
+        title, html=placeholder if handover else page, js_api=api,
         width=1180, height=800, min_size=(1130, 520), frameless=True,
         easy_drag=False, background_color=theme_bg(current_theme()))
     api._window = window
@@ -11244,6 +11849,23 @@ def main(argv: list[str] | None = None) -> int:
     # The styles can only be set once the window exists, so this runs as the
     # start-up callback rather than beside create_window.
     def styles(*_) -> None:
+        # THE REAL PAGE GOES IN HERE AND NOT BESIDE create_window, and that is
+        # pywebview's rule rather than a preference: `Window.load_html` waits
+        # for the `shown` event before it does anything, and `shown` is set by
+        # the GUI loop -- which has not started yet at create_window. Called
+        # from the main thread there it would block for twenty seconds and then
+        # raise. This callback already runs on a thread of its own, after the
+        # loop is up, which is exactly the place. See the comment at
+        # create_window for WHY the page is handed over twice at all.
+        if handover:
+            window.load_html(handover)
+        if not crow_platform.IS_WINDOWS:
+            # Nothing below exists here: there are no window styles to set, no
+            # taskbar button to re-register and no HWND to hang an icon on --
+            # the icon travels with `webview.start(icon=)` and with the launcher
+            # entry. Spinning the retry loop for five seconds over a call that
+            # answers False by its first line would be a wait for nothing.
+            return
         # RETRIED, because one attempt is too early: at the moment this callback
         # first runs the window has no caption yet, so the search below skips it
         # and sets nothing. The loop stops the moment the style is in.
@@ -11271,7 +11893,21 @@ def main(argv: list[str] | None = None) -> int:
                                         "pywebview build -- typing a path works"})
 
     window.events.loaded += wire_drop
-    webview.start(styles, window)
+    # `gui="gtk"` IS NAMED RATHER THAN LEFT TO THE SEARCH, and the reason is one
+    # environment variable: pywebview tries GTK first on Linux *unless*
+    # `KDE_FULL_SESSION` is set, in which case it forces Qt -- and Crow has been
+    # written against WebKitGTK, not against QtWebEngine. A user who logs into
+    # Plasma for an afternoon would otherwise get a different renderer for the
+    # same build. Windows keeps the search it has always had (edgechromium).
+    #
+    # `icon=` is a GTK/Qt-only parameter and a no-op under Wayland -- GTK3 does
+    # not implement xdg-toplevel-icon, so the icon comes from crow.desktop via
+    # the app id. It is passed anyway: under X11 and XWayland (CROW_GDK_BACKEND
+    # =x11) it is what puts the bird on the window.
+    if crow_platform.IS_WINDOWS:
+        webview.start(styles, window)
+    else:
+        webview.start(styles, window, gui="gtk", icon=icon_png(256) or None)
     return 0
 
 

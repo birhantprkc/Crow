@@ -83,7 +83,9 @@ Exit 0 = all three points hold.  1 = at least one does not.  2 = setup error.
 import argparse
 import ast
 import os
+import shutil
 import struct
+import subprocess
 import sys
 
 # BORROWED, NOT COPIED. `read` already exists next door, and SURFACE_DIRS is the
@@ -118,6 +120,37 @@ MIN_WEBVIEW2 = ""
 # INCLUDING the terminating NUL, so 31 usable. See the module docstring for the
 # two truncated siblings that measure it.
 TK_FACE_LIMIT = 31
+
+# ------------------------------------------------------- the Linux runtime ---
+#
+# WHAT THE WINDOW STANDS ON OVER THERE, and it is a different list because it is
+# a different renderer: WebView2 is Edge and comes with the operating system,
+# WebKitGTK is a library that either is installed or is not. Each of these fails
+# SEPARATELY and each of them fails the window completely -- the same reason
+# webview2_probe below asks two questions instead of one.
+#
+# The versions are the ones pywebview's GTK backend asks for in its own first
+# lines (`Gtk 3.0`, `Gdk 3.0`, then `WebKit2 4.1` falling back to `4.0`), quoted
+# rather than re-derived: two lists for one question is how they drift apart.
+# THERE IS NO GTK4 BACKEND in pywebview 6.2.1, so asking for WebKit 6.0 here
+# would be checking for something the window could not use if it found it.
+GI_NAMESPACES = (("Gtk", "3.0"), ("Gdk", "3.0"), ("WebKit2", "4.1"))
+
+# The clipboard reader the window shells out to for a pasted picture. pywebview
+# has no clipboard API on any backend, and Gtk.Clipboard's own image read
+# returned None here on a clipboard that demonstrably held a PNG [measured
+# 2026-09-16, focused and unfocused, on the main loop and off it]. So this
+# program is not a nicety: without it Ctrl+V on a screenshot does nothing at all.
+CLIPBOARD_TOOLS = ("wl-paste", "xclip")
+
+# THE VARIABLE THAT DECIDES WHETHER A WINDOW APPEARS AT ALL on NVIDIA under a
+# Wayland compositor. Without it WebKitGTK's DMA-BUF renderer commits a buffer
+# with explicit sync and no acquire point, the compositor answers
+# `Gdk-Message: Error 71 (Protocol error)`, and the process dies before the
+# surface maps. cli/crow_gui.py sets it at import (`prepare_environment`), which
+# is why this is a NOTE and not a failure: the window brings its own answer, and
+# a point that went red here would be red on every correct machine.
+NVIDIA_SYNC_ENV = "__NV_DISABLE_EXPLICIT_SYNC"
 
 # The three ranges the existing comments record, with the numbers those comments
 # state. cli/crow.py:233-234 says U+2580-259F is 32 of 32 and U+2500-257F is 128
@@ -432,6 +465,96 @@ def webview2_probe():
     return package, runtime, view
 
 
+def _tool(argv):
+    """Run one small program and return its stdout. None when it is not here.
+
+    NONE IS NOT AN EMPTY STRING, the same distinction cli/crow_gui.py draws for
+    its clipboard readers: "the tool is missing" and "the tool answered nothing"
+    are different answers, and only the second one is about the thing asked for.
+    """
+    if not shutil.which(argv[0]):
+        return None
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout if done.returncode == 0 else ""
+
+
+def fc_probe(shipped_path):
+    """Point (i) on Linux: every family fontconfig lists, and OUR family name.
+
+    THE FAMILY IS READ OFF THE SHIPPED FILE, and it is not the same string as on
+    the other platform. Windows resolves a variable font into named instances
+    and registers those, so the name a terminal has to be given there is
+    "Google Sans Code Monospace" -- which is what cli/crow_core.py's FONT_FAMILY
+    says and why it says it. fontconfig registers the FILE, under its name ID 1:
+    `fc-query` answers "Google Sans Code" for the very same bytes [measured
+    2026-09-16]. Asking Linux for the Windows string would report an installed
+    font as missing, and that is a false red on the one point whose whole job is
+    to be believed.
+
+    Returns (families, our_family), with None for whatever fontconfig would not
+    say.
+    """
+    listed = _tool(["fc-list", ":", "family"])
+    if listed is None:
+        return None, None
+    families = set()
+    for line in listed.splitlines():
+        for name in line.split(","):
+            if name.strip():
+                families.add(name.strip())
+    # THE `\n` IS PART OF THE FORMAT AND IS NOT DECORATION. fc-query repeats the
+    # family once per named STYLE -- seven times for the shipped variable font
+    # -- and without a separator in the format string they arrive as one
+    # 119-character run of the same name, which is then a family nothing lists.
+    said = _tool(["fc-query", "--format", "%{family}\n", shipped_path])
+    lines = [line.strip() for line in (said or "").splitlines() if line.strip()]
+    return tuple(sorted(families)), (lines[0] if lines else None)
+
+
+def gtk_probe():
+    """Point (iii) on Linux: can the toolkit the window renders in be loaded?
+
+    THE TYPELIB AND NOT THE PACKAGE NAME. `import gi` says PyGObject is there;
+    `gi.require_version('WebKit2', '4.1')` says the introspection data for the
+    renderer is on this machine, which is the half that is actually missing on a
+    fresh install. They fail separately, so they are asked separately.
+
+    NOTHING IS INSTANTIATED. No window opens and no display is needed: a
+    prerequisite check that required a session could not run in the place where
+    a prerequisite check is worth running.
+
+    Returns (problems, notes), both lists of finished lines.
+    """
+    problems, notes = [], []
+    try:
+        import gi
+    except Exception as exc:                        # noqa: BLE001 - reported
+        return (["PyGObject is not importable (%s: %s) -- the window has no "
+                 "toolkit" % (type(exc).__name__, exc)], notes)
+    notes.append("PyGObject %s" % getattr(gi, "__version__", "version unknown"))
+    for namespace, version in GI_NAMESPACES:
+        try:
+            gi.require_version(namespace, version)
+        except Exception as exc:                    # noqa: BLE001 - reported
+            problems.append("%s %s is not available (%s)" % (namespace, version, exc))
+            continue
+        notes.append("%s %s" % (namespace, version))
+    return problems, notes
+
+
+def clipboard_probe():
+    """Which clipboard reader the window would find, as (name, path) or (None, None)."""
+    for name in CLIPBOARD_TOOLS:
+        found = shutil.which(name)
+        if found:
+            return name, found
+    return None, None
+
+
 def tk_probe():
     """Ask Tk itself, in a root that is never mapped.
 
@@ -565,6 +688,17 @@ def main(argv):
               % (args.repo, exc))
         return 2
 
+    # WHICH PLATFORM'S QUESTIONS THIS RUN ASKS, taken from the client's own seam
+    # rather than from a `sys.platform` written here. cli/crow_platform.py is the
+    # one place in this repository allowed to know what OS this is, and a checker
+    # with a second opinion is a second opinion.
+    try:
+        import crow_platform
+    except ImportError as exc:
+        print("SETUP ERROR: cannot import cli/crow_platform.py from %s (%s)"
+              % (args.repo, exc))
+        return 2
+
     family = args.family or crow_core.FONT_FAMILY
     names = crow_core.font_files()
     if not names:
@@ -581,45 +715,89 @@ def main(argv):
     print()
 
     # (i) -----------------------------------------------------------------
-    patchlevel, families, tk_error = None, (), None
-    try:
-        patchlevel, families = tk_probe()
-    except Exception as exc:                      # noqa: BLE001 - see below
-        # Deliberately broad: Tk answers a missing display with TclError, a
-        # missing tcl library with ImportError, and a broken installation with
-        # whatever the loader raises. All three are the same answer to the
-        # question this tool asks - tkinter is not available here - and turning
-        # any of them into a traceback would report the toolkit as unmeasured
-        # rather than as unavailable.
-        tk_error = "%s: %s" % (type(exc).__name__, exc)
-
-    if tk_error is not None:
-        failed += 1
-        print("  FAILED   %-30s tkinter did not start" % "(i) family in Tk")
-        print("             %s" % tk_error)
-    else:
-        problems = family_problems(family, families)
-        if problems:
+    if not crow_platform.IS_WINDOWS:
+        # THE SAME QUESTION THROUGH THE OTHER FONT SYSTEM. Tk is not the toolkit
+        # on either platform any more -- 0.3.0 replaced it with a webview -- but
+        # the question this point asks outlives the toolkit: is the face this
+        # repository SHIPS reachable on this machine, under a name something can
+        # ask for? On Windows the reader is Tk's family list (and the
+        # 31-character truncation that comes with it); here it is fontconfig,
+        # which is what crow_platform.install_fonts writes into and what
+        # `fc-cache -f` refreshes.
+        #
+        # NO TRUNCATION RULE ON THIS SIDE. LOGFONT.lfFaceName is a Win32
+        # structure; fontconfig has no such limit, and carrying the check across
+        # would be a measurement of the wrong machine.
+        shipped = os.path.join(crow_core.FONT_DIR, names[0])
+        listed, ours = fc_probe(shipped)
+        # THE DEFAULT IS THE NAME THE FILE ITSELF DECLARES, see fc_probe. An
+        # explicit --family still wins, so the negative control is unchanged:
+        # a face nobody installed is not listed and the point goes red.
+        wanted = args.family or ours or family
+        if listed is None:
             failed += 1
-            print("  FAILED   %-30s %r not usable" % ("(i) family in Tk", family))
-            for p in problems:
-                print("             %s" % p)
-            near = neighbours(family, families)
-            if near:
-                print("             Tk does list, near that name:")
-                for f in near:
-                    print("               %-34s %d chars" % (f, len(f)))
-            else:
-                print("             and no family Tk lists begins with %r"
-                      % (family.split()[0] if family.split() else family))
+            print("  FAILED   %-30s fontconfig did not answer"
+                  % "(i) family in fontconfig")
+            print("             neither fc-list nor fc-query is on PATH -- the "
+                  "shipped faces can be copied but never found")
+        elif wanted not in listed:
+            failed += 1
+            print("  FAILED   %-30s %r not usable"
+                  % ("(i) family in fontconfig", wanted))
+            print("             fc-list reports %d families, none of them %r"
+                  % (len(listed), wanted))
+            print("             `python cli/crow.py` installs the shipped faces "
+                  "into %s on first start" % crow_platform.font_store())
+            for near in neighbours(wanted, listed):
+                print("             fontconfig does list %s" % near)
         else:
-            print("  OK       %-30s %r, %d chars, out of %d families"
-                  % ("(i) family in Tk", family, len(family), len(families)))
-            near = [f for f in neighbours(family, families) if f != family]
-            for f in near:
-                mark = "  <-- cut at %d" % TK_FACE_LIMIT if len(f) == TK_FACE_LIMIT else ""
-                print("             sibling %-34s %d chars%s" % (f, len(f), mark))
+            print("  OK       %-30s %r, out of %d families"
+                  % ("(i) family in fontconfig", wanted, len(listed)))
+            print("             the shipped file declares %r; FONT_FAMILY in "
+                  "cli/crow_core.py is %r, the WINDOWS named instance"
+                  % (ours, crow_core.FONT_FAMILY))
+            print("             per-user store %s, %d of %d shipped face(s) in it"
+                  % (crow_platform.font_store(),
+                     len(crow_core.font_installed()), len(names)))
+    else:
+        patchlevel, families, tk_error = None, (), None
+        try:
+            patchlevel, families = tk_probe()
+        except Exception as exc:                      # noqa: BLE001 - see below
+            # Deliberately broad: Tk answers a missing display with TclError, a
+            # missing tcl library with ImportError, and a broken installation with
+            # whatever the loader raises. All three are the same answer to the
+            # question this tool asks - tkinter is not available here - and turning
+            # any of them into a traceback would report the toolkit as unmeasured
+            # rather than as unavailable.
+            tk_error = "%s: %s" % (type(exc).__name__, exc)
 
+        if tk_error is not None:
+            failed += 1
+            print("  FAILED   %-30s tkinter did not start" % "(i) family in Tk")
+            print("             %s" % tk_error)
+        else:
+            problems = family_problems(family, families)
+            if problems:
+                failed += 1
+                print("  FAILED   %-30s %r not usable" % ("(i) family in Tk", family))
+                for p in problems:
+                    print("             %s" % p)
+                near = neighbours(family, families)
+                if near:
+                    print("             Tk does list, near that name:")
+                    for f in near:
+                        print("               %-34s %d chars" % (f, len(f)))
+                else:
+                    print("             and no family Tk lists begins with %r"
+                          % (family.split()[0] if family.split() else family))
+            else:
+                print("  OK       %-30s %r, %d chars, out of %d families"
+                      % ("(i) family in Tk", family, len(family), len(families)))
+                near = [f for f in neighbours(family, families) if f != family]
+                for f in near:
+                    mark = "  <-- cut at %d" % TK_FACE_LIMIT if len(f) == TK_FACE_LIMIT else ""
+                    print("             sibling %-34s %d chars%s" % (f, len(f), mark))
     # (ii) ----------------------------------------------------------------
     problems, notes = check_glyphs(args.repo, faces)
     if problems:
@@ -636,29 +814,70 @@ def main(argv):
         print("             %s" % n)
 
     # (iii) ---------------------------------------------------------------
-    package, runtime, view = webview2_probe()
-    if package is None:
-        failed += 1
-        print("  FAILED   %-30s pywebview is not importable -- the window "
-              "cannot start" % "(iii) window runtime")
-        print("             the installer runs `pip install pywebview`; the "
-              "terminal client does not need it")
-    elif runtime is None:
-        failed += 1
-        print("  FAILED   %-30s pywebview %s, but NO WebView2 runtime in any "
-              "of the three registry views" % ("(iii) window runtime", package))
-        print("             the import alone does not open a window -- Edge or "
-              "Windows 11 ships the runtime")
-    elif args.min_webview2 and not version_at_least(runtime, args.min_webview2):
-        failed += 1
-        print("  FAILED   %-30s WebView2 %s is below the floor %s"
-              % ("(iii) window runtime", runtime, args.min_webview2))
+    if not crow_platform.IS_WINDOWS:
+        # THE SAME POINT, THE OTHER RENDERER. On Windows this asks two things
+        # that fail separately -- the Python package, and the WebView2 runtime
+        # under it. Here it asks three, for exactly the same reason: pywebview
+        # imports without GTK, GTK loads without the WebKit2 typelib, and a
+        # clipboard reader is a program that may simply not be installed. All
+        # three are silent until a user clicks something.
+        package = webview2_probe()[0]
+        problems, notes = gtk_probe()
+        tool, where = clipboard_probe()
+        if package is None:
+            problems.insert(0, "pywebview is not importable -- `pip install "
+                               "pywebview` into the runtime venv (plain, NOT "
+                               "pywebview[gtk]: that extra pins PyGObject and "
+                               "would build it from source)")
+        else:
+            notes.insert(0, "pywebview %s" % package)
+        if tool is None:
+            problems.append("no clipboard reader on PATH (%s) -- Ctrl+V on a "
+                            "picture reaches nothing"
+                            % ", ".join(CLIPBOARD_TOOLS))
+        else:
+            notes.append("clipboard reader %s at %s" % (tool, where))
+        if problems:
+            failed += 1
+            print("  FAILED   %-30s %d problem(s)"
+                  % ("(iii) window runtime", len(problems)))
+            for p in problems:
+                print("             %s" % p)
+        else:
+            print("  OK       %-30s %s" % ("(iii) window runtime",
+                                           ", ".join(notes[:2])))
+        for n in notes:
+            print("             %s" % n)
+        # A NOTE AND NOT A POINT, see NVIDIA_SYNC_ENV: cli/crow_gui.py sets this
+        # itself at import, so a machine that does not have it in the
+        # environment is the NORMAL machine. It is printed because when a window
+        # does die with `Gdk-Message: Error 71` this is the first line to read.
+        print("             %s=%s (cli/crow_gui.py sets it at import; without "
+              "it WebKitGTK dies on NVIDIA+Wayland with Gdk Error 71)"
+              % (NVIDIA_SYNC_ENV, os.environ.get(NVIDIA_SYNC_ENV) or "unset"))
     else:
-        floor = args.min_webview2 or "none measured"
-        print("  OK       %-30s pywebview %s, WebView2 %s, floor %s"
-              % ("(iii) window runtime", package, runtime, floor))
-        print("             answered by %s" % view)
-
+        package, runtime, view = webview2_probe()
+        if package is None:
+            failed += 1
+            print("  FAILED   %-30s pywebview is not importable -- the window "
+                  "cannot start" % "(iii) window runtime")
+            print("             the installer runs `pip install pywebview`; the "
+                  "terminal client does not need it")
+        elif runtime is None:
+            failed += 1
+            print("  FAILED   %-30s pywebview %s, but NO WebView2 runtime in any "
+                  "of the three registry views" % ("(iii) window runtime", package))
+            print("             the import alone does not open a window -- Edge or "
+                  "Windows 11 ships the runtime")
+        elif args.min_webview2 and not version_at_least(runtime, args.min_webview2):
+            failed += 1
+            print("  FAILED   %-30s WebView2 %s is below the floor %s"
+                  % ("(iii) window runtime", runtime, args.min_webview2))
+        else:
+            floor = args.min_webview2 or "none measured"
+            print("  OK       %-30s pywebview %s, WebView2 %s, floor %s"
+                  % ("(iii) window runtime", package, runtime, floor))
+            print("             answered by %s" % view)
     print()
     print("RESULT: %d of 3 prerequisites hold" % (3 - failed))
     return 1 if failed else 0

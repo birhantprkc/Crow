@@ -58,6 +58,7 @@ sys.path.insert(0, str(HERE))
 import crow            # noqa: E402
 import crow_core       # noqa: E402
 import crow_gui        # noqa: E402
+import crow_platform   # noqa: E402
 
 # THE SUITE MAY NOT DEPEND ON WHAT THIS MACHINE HAS CONFIGURED (#130).
 # `crow_core` reads %LOCALAPPDATA%\Crow\mcp.json at import and appends whatever
@@ -120,6 +121,12 @@ crow_core.MCP_TOKEN_FILE = os.path.join(_SANDBOX, "has-no-mcp", "mcp_tokens.json
 _NOWHERE = os.path.join(_SANDBOX, "has-no-install")
 crow_core.INDEX_PATH = os.path.join(_NOWHERE, "index.db")
 crow_core.ROOTS_FILE = os.path.join(_NOWHERE, "roots.json")
+# UND DER, DEN DIE WACHE WEITER UNTEN BEIM LINUX-PORT GEFUNDEN HAT. Die
+# Geheimnisse standen in dieser Suite bis heute auf der ECHTEN Datei --
+# test_crow_core.py biegt sie seit langem um, diese Datei nie. Aufgefallen ist
+# es erst, als `_real_roots` alle drei XDG-Wurzeln pruefte statt nur der einen
+# Windows-Wurzel; die Wache war also richtig und ihr Fang der erste Beweis.
+crow_core.SECRETS_FILE = os.path.join(_NOWHERE, "secrets.json")
 crow_core.SESSION_DIR = os.path.join(_NOWHERE, "session")
 crow_core.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
 crow_core.SKILLS_DIR = os.path.join(_NOWHERE, "skills")
@@ -3047,7 +3054,13 @@ class TheDropAndThePasteTests(unittest.TestCase):
         """A screenshot is not part of the project it is about. Writing one into
         whatever folder happens to be bound would put Crow's own files into a
         user's repository."""
-        self.assertIn("os.path.dirname(crow_core.SESSION_DIR)", self.source)
+        # DURCH DIE NAHT, und der Fall sagt jetzt beides: der Ordner heisst
+        # `pastes` UND er haengt an `crow_platform.data_dir()`. Bis zum
+        # Linux-Port stand hier `os.path.dirname(crow_core.SESSION_DIR)` --
+        # auf Windows derselbe Ordner, auf Linux aber das STATE-Verzeichnis,
+        # und ein eingefuegtes Bild ist nichts, was man verliert, sondern
+        # etwas, worauf ein alter Chat noch zeigt.
+        self.assertIn("crow_platform.data_dir(), \"pastes\"", self.source)
         self.assertTrue(crow_gui.PASTE_DIR.endswith("pastes"))
 
 class TheModelMenuSurvivesASwitchTests(ApiCase):
@@ -6407,7 +6420,17 @@ class TheUpdateButtonTests(ApiCase):
         self.addCleanup(setattr, crow_gui.subprocess, "Popen", real_popen)
         api._update_run()
         said = [m for m in self.drained(api) if m.get("k") == "update"]
-        self.assertIn("-NoPause", seen[0])
+        # WAS `-NoPause` UND WAS ES AUF LINUX ERSETZT. Der Grund ist derselbe
+        # und steht in `crow_platform.updater_command`: der Installer wartet am
+        # Ende auf ENTER, damit man den letzten Bildschirm lesen kann, und hinter
+        # einem Fenster ohne Konsole ist das ein Warten ohne Ende. Auf Windows
+        # ist das Gegenmittel der Schalter; install.sh hat nichts dergleichen,
+        # also ist der Aufruf dort nackt -- aber `bash` MUSS davor stehen, weil
+        # ein ueber HTTP geholtes Skript ohne Ausfuehrungsrecht ankommt.
+        if crow_platform.IS_WINDOWS:
+            self.assertIn("-NoPause", seen[0])
+        else:
+            self.assertEqual(seen[0][0], "bash")
         self.assertIn(script, seen[0])
         self.assertTrue(said[-1]["done"])
         self.assertIn("restart", said[-1]["t"].lower())
@@ -7291,13 +7314,33 @@ class TheSuiteTouchesNoRealConfigurationTests(unittest.TestCase):
     Speicherort geht damit rot, bevor er zum ersten Mal schreibt.
     """
 
-    def _real_root(self) -> str:
-        base = os.environ.get("LOCALAPPDATA") or os.path.join(
-            os.path.expanduser("~"), "AppData", "Local")
-        return os.path.normcase(os.path.abspath(os.path.join(base, "Crow")))
+    def _real_roots(self) -> list:
+        """Jedes Verzeichnis, in dem eine echte Installation ihre Dateien hat.
+
+        EINE LISTE UND NICHT MEHR EINE WURZEL, seit es zwei Betriebssysteme
+        gibt. Auf Windows ist es weiterhin genau eines -- %LOCALAPPDATA%\\Crow,
+        und `crow_platform` gibt fuer config/data/state dreimal dasselbe
+        zurueck, die Liste schrumpft also von selbst auf einen Eintrag. Auf
+        Linux sind es DREI verschiedene (~/.config/crow, ~/.local/share/crow,
+        ~/.local/state/crow), und eine Pruefung, die nur nach dem
+        Windows-Pfad sucht, ist dort nicht streng, sondern LEER: sie kann gar
+        nicht rot werden, weil kein Pfad auf dieser Maschine je so aussieht.
+        Genau die Wache, die dieser Fall ist, waere damit still abgeschaltet.
+
+        DURCH DIE NAHT GEFRAGT und nicht hier nachgebaut: `crow_platform` ist
+        die Stelle, die weiss, wo eine Installation liegt, und eine zweite
+        Antwort daneben waere die erste, die veraltet.
+        """
+        roots = []
+        for path in (crow_platform.config_dir(), crow_platform.data_dir(),
+                     crow_platform.state_dir(), crow_platform.cache_dir()):
+            here = os.path.normcase(os.path.abspath(path))
+            if here not in roots:
+                roots.append(here)
+        return roots
 
     def test_no_path_constant_points_into_the_real_crow_directory(self):
-        root = self._real_root()
+        roots = self._real_roots()
         offenders = []
         for module in (crow_core, crow_gui):
             for name in dir(module):
@@ -7309,7 +7352,8 @@ class TheSuiteTouchesNoRealConfigurationTests(unittest.TestCase):
                 if os.sep not in value and "/" not in value:
                     continue
                 here = os.path.normcase(os.path.abspath(value))
-                if here == root or here.startswith(root + os.sep):
+                if any(here == root or here.startswith(root + os.sep)
+                       for root in roots):
                     offenders.append("%s.%s -> %s" % (module.__name__, name, value))
         self.assertEqual(offenders, [],
                          "diese Konstanten zeigen auf die echte Konfiguration:\n  "
@@ -9083,6 +9127,850 @@ class TheGoalPanelShowsTheGoalsOwnCostTests(ApiCase):
         api.push_goal(force=True)
         said = [m for m in self.drained(api) if m.get("k") == "goal"]
         self.assertEqual([m["goal"] for m in said], [None])
+
+
+# ============================================================== the Linux port
+
+class _FakeGtkWindow:
+    """A GtkWindow that only remembers what it was asked to do.
+
+    THE TOOLKIT IS NOT IMPORTED HERE, and that is the point rather than a
+    shortcut: these cases have to run on Windows, in CI and on a box with no
+    display, and every one of them is about what THIS file does with the handle
+    -- which call, on which thread, with which arguments. Whether
+    `begin_move_drag` moves a window is GTK's claim, not ours; whether it is
+    reached at all is ours.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def begin_move_drag(self, *a) -> None:
+        self.calls.append(("move", a))
+
+    def begin_resize_drag(self, *a) -> None:
+        self.calls.append(("resize", a))
+
+    def maximize(self) -> None:
+        self.calls.append(("maximize", ()))
+
+    def unmaximize(self) -> None:
+        self.calls.append(("unmaximize", ()))
+
+    def is_maximized(self) -> bool:
+        return False
+
+
+class TheWindowAsksThePlatformSeamTests(unittest.TestCase):
+    """#187 auf Linux: was das Fenster ueber sein Betriebssystem weiss, weiss es
+    durch cli/crow_platform.py -- oder es weiss es zweimal.
+
+    DIE REGEL, GEGEN DIE DIESE FAELLE GESCHNITTEN SIND: in crow_gui.py steht
+    kein `sys.platform` und kein `os.name`. Der Grund ist der des
+    Naht-Moduls selbst: sieben verstreute Zweige sind sieben Stellen zum
+    Vergessen, und die achte schreibt jemand, der die anderen sieben nie
+    gesehen hat.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def test_the_window_never_asks_the_interpreter_which_os_this_is(self):
+        """NEGATIV, und der einzige Fall, der die Regel selbst haelt."""
+        code = self.source[:self.source.index('PAGE = r"""')]
+        code += self.source[self.source.index("ICON_FILE = os.path.join"):]
+        for forbidden in ("sys.platform", "os.name =="):
+            self.assertNotIn(forbidden, code,
+                             "%s steht wieder in crow_gui.py -- die Antwort "
+                             "gehoert in crow_platform.py" % forbidden)
+
+    def test_the_settings_file_is_configuration_and_lands_there(self):
+        """Bis zum Port hing sie an `dirname(SESSION_DIR)`. Auf Windows ist das
+        derselbe Ordner; auf Linux waere es ~/.local/state, und was jemand
+        eingestellt hat, ist keine Sitzungsspur."""
+        self.assertIn('crow_platform.config_dir(), "settings.json"', self.source)
+        # DIE FORMEL UND NICHT DER WERT: der Kopf dieser Datei biegt
+        # `SETTINGS_FILE` auf einen Sandkasten um, damit kein Fall in robins
+        # echte Einstellungen schreibt (siehe
+        # TheSuiteTouchesNoRealConfigurationTests). Der laufende Wert ist hier
+        # also absichtlich ein anderer -- was geprueft gehoert, ist, woraus das
+        # Modul ihn beim Start bildet.
+        fresh = os.path.join(crow_platform.config_dir(), "settings.json")
+        self.assertTrue(os.path.basename(fresh) == "settings.json")
+        self.assertEqual(os.path.dirname(fresh), crow_platform.config_dir())
+
+    def test_on_windows_both_paths_are_where_they_have_always_been(self):
+        """DIE GEGENPROBE ZUM PORT: die Umschichtung darf auf Windows NICHTS
+        verschieben. Dort antworten config_dir(), data_dir() und state_dir()
+        alle drei %LOCALAPPDATA%\\Crow, also ist `dirname(SESSION_DIR)` -- die
+        alte Formel -- genau derselbe Ordner."""
+        if not crow_platform.IS_WINDOWS:
+            self.skipTest("die Gleichheit gilt fuer die Windows-Antwort")
+        old = os.path.dirname(crow_core.SESSION_DIR)
+        self.assertEqual(os.path.normcase(crow_platform.config_dir()),
+                         os.path.normcase(old))
+        self.assertEqual(os.path.normcase(crow_platform.data_dir()),
+                         os.path.normcase(old))
+
+    def test_the_paste_folder_is_data_and_not_state(self):
+        """Ein eingefuegtes Bild ueberlebt den Chat, der darauf zeigt -- der
+        Pfad steht in der Unterhaltung. Deshalb data_dir(), nicht state_dir()."""
+        self.assertIn('crow_platform.data_dir(), "pastes"', self.source)
+
+
+class TheWindowSetsItsEnvironmentBeforeTheToolkitTests(unittest.TestCase):
+    """A12: ohne `__NV_DISABLE_EXPLICIT_SYNC` stirbt das Fenster auf dieser
+    Maschine, bevor die Oberflaeche erscheint -- `Gdk-Message: Error 71
+    (Protocol error) dispatching to Wayland display`, gemessen 2026-09-16.
+
+    DIE VARIABLE MUSS VOR DEM IMPORT STEHEN, weil GTK und WebKitGTK sie genau
+    einmal lesen: beim Laden der Bibliothek. Deshalb laeuft `prepare_environment`
+    beim Import dieses Moduls und nicht in `main`.
+    """
+
+    def test_the_nvidia_switch_is_set_on_linux_and_nowhere_else(self):
+        env: dict = {}
+        crow_gui.prepare_environment(env)
+        if crow_platform.IS_LINUX:
+            self.assertEqual(env.get("__NV_DISABLE_EXPLICIT_SYNC"), "1")
+        else:
+            self.assertEqual(env, {}, "Windows bekommt keine GTK-Variablen")
+
+    def test_a_value_the_user_set_is_never_overwritten(self):
+        """NEGATIV. `setdefault`, damit die Variable eine Notluke bleibt und
+        keine zweite Meinung: wer sie gesetzt hat, hat einen Grund."""
+        env = {"__NV_DISABLE_EXPLICIT_SYNC": "0"}
+        set_here = crow_gui.prepare_environment(env)
+        self.assertEqual(env["__NV_DISABLE_EXPLICIT_SYNC"], "0")
+        self.assertNotIn("__NV_DISABLE_EXPLICIT_SYNC", set_here)
+
+    def test_crow_gdk_backend_is_the_escape_hatch_to_xwayland(self):
+        """Unter X11 gehen `move()`, `set_keep_above()` und die Drag-Region von
+        pywebview wieder -- der Weg dorthin darf kein Editieren dieser Datei
+        sein."""
+        if not crow_platform.IS_LINUX:
+            self.skipTest("GDK gibt es nur auf der einen Seite")
+        env = {"CROW_GDK_BACKEND": "x11", "GDK_BACKEND": "wayland,x11,*"}
+        crow_gui.prepare_environment(env)
+        self.assertEqual(env["GDK_BACKEND"], "x11",
+                         "die spezifischere Variable muss gewinnen -- sonst "
+                         "tut CROW_GDK_BACKEND in einer Wayland-Sitzung nie "
+                         "etwas, weil GDK_BACKEND dort immer schon gesetzt ist")
+
+    def test_nothing_is_set_when_the_user_named_no_backend(self):
+        """GEGENPROBE: eine leere Ansage ist keine Ansage."""
+        env = {"GDK_BACKEND": "wayland,x11,*"}
+        crow_gui.prepare_environment(env)
+        self.assertEqual(env["GDK_BACKEND"], "wayland,x11,*")
+
+    def test_it_ran_at_import(self):
+        """Der ganze Sinn: die Variable steht, bevor irgendwer `webview`
+        importiert. `ENVIRONMENT` ist der Beleg, dass der Aufruf gefallen ist."""
+        self.assertIsInstance(crow_gui.ENVIRONMENT, dict)
+        if crow_platform.IS_LINUX:
+            self.assertEqual(os.environ.get("__NV_DISABLE_EXPLICIT_SYNC"), "1")
+
+
+class TheCompositorMovesTheWindowTests(unittest.TestCase):
+    """A3. `pywebview-drag-region` und `easy_drag` bewegen unter Wayland nichts:
+    beide enden in `window.move(x, y)`, und `gtk_window_move()` ist dort ein
+    dokumentierter Leerlauf -- `hyprctl clients` zeigte 2026-09-16 dasselbe
+    `at=[...]` davor und danach.
+
+    ALSO WIRD DIE GESTE UEBERGEBEN STATT DAS RECHTECK BERECHNET. `begin_move_drag`
+    und `begin_resize_drag` werden zu `xdg_toplevel.move` / `.resize`: der
+    Compositor fuehrt die Bewegung, solange die Taste haengt. Diese Faelle
+    pruefen die Kette Seite -> Bruecke -> GTK-Hauptfaden, nicht den Compositor.
+    """
+
+    def _api(self, native=None):
+        args = crow_gui.build_parser().parse_args([])
+        api = crow_gui.Api(args)
+        api._gtk_window = lambda: native
+        return api
+
+    def _idle(self, api):
+        """`GLib.idle_add` durch einen Sammler ersetzen, der sofort ausfuehrt.
+
+        WARUM UEBERHAUPT UEBER `idle_add`: jede js_api-Methode laeuft in einem
+        frischen Thread (pywebview startet einen pro Bruecken-Aufruf), und GTK
+        darf nur aus dem Faden angefasst werden, der seine Schleife dreht. Ein
+        direkter Aufruf ist der Fehler, der sich als "das Fenster friert beim
+        dritten Ziehen ein" zeigt und nie beim ersten.
+        """
+        seen = []
+        real = crow_gui.Api._native_drag.__func__
+
+        def drag(native, edge):
+            seen.append(("dispatch", edge))
+            return real(native, edge)
+        return seen, drag
+
+    def test_the_bridge_offers_both_gestures(self):
+        native = _FakeGtkWindow()
+        api = self._api(native)
+        self.assertTrue(api.begin_move())
+        self.assertTrue(api.begin_resize("se"))
+
+    def test_an_unknown_edge_is_refused_rather_than_guessed(self):
+        """NEGATIV. Die Seite kennt acht Namen; ein neunter heisst, dass die
+        beiden Tabellen auseinandergelaufen sind, und ein stiller Vorgabewert
+        versteckte genau das."""
+        api = self._api(_FakeGtkWindow())
+        self.assertFalse(api.begin_resize("middle"))
+        self.assertFalse(api.begin_resize(""))
+        self.assertFalse(api.begin_resize(None))
+
+    def test_the_eight_edges_are_the_gdk_numbers(self):
+        """Die Tabelle steht als ZAHL da, damit dieser Fall ohne GTK laufen
+        kann; `Gdk.WindowEdge(n)` macht an der einen Stelle wieder ein Enum
+        daraus. NORTH_WEST 0 ... SOUTH_EAST 7."""
+        self.assertEqual(crow_gui.Api._RESIZE_EDGES,
+                         {"nw": 0, "n": 1, "ne": 2, "w": 3, "e": 4,
+                          "sw": 5, "s": 6, "se": 7})
+
+    def test_neither_gesture_exists_without_a_native_window(self):
+        """GEGENPROBE, und sie ist der Windows-Fall: `_gtk_window` antwortet
+        dort None, die Seite ruft diese beiden nie auf, und wenn doch, passiert
+        nichts statt eines Fehlers in der Bruecke."""
+        api = self._api(None)
+        self.assertFalse(api.begin_move())
+        self.assertFalse(api.begin_resize("n"))
+
+    def test_the_gesture_is_dispatched_and_not_run_on_this_thread(self):
+        """Der eigentliche Fall: `_native_drag` legt die Arbeit auf den
+        GTK-Faden. Ohne GTK auf der Maschine gibt es nichts zu dispatchen und
+        die Methode sagt False -- auch das ist die richtige Antwort."""
+        seen = []
+        native = _FakeGtkWindow()
+
+        class _GLib:
+            @staticmethod
+            def idle_add(func):
+                seen.append(func)
+                func()
+
+        class _Gdk:
+            class Display:
+                @staticmethod
+                def get_default():
+                    raise RuntimeError("no display in the suite")
+
+            WindowEdge = staticmethod(lambda n: n)
+
+        class _Gtk:
+            @staticmethod
+            def get_current_event_time():
+                return 0
+
+        modules = {"gi": mock.Mock(),
+                   "gi.repository": mock.Mock(GLib=_GLib, Gdk=_Gdk, Gtk=_Gtk)}
+        with mock.patch.dict(sys.modules, modules):
+            self.assertTrue(crow_gui.Api._native_drag(native, None))
+            self.assertTrue(crow_gui.Api._native_drag(native, 7))
+        self.assertEqual(len(seen), 2, "die Geste lief nicht ueber idle_add")
+        self.assertEqual([c[0] for c in native.calls], ["move", "resize"])
+        # Der Rueckgabewert der idle-Funktion ist False: einmal, nicht bei
+        # jeder Leerlaufrunde.
+        self.assertEqual([f() for f in seen], [False, False])
+
+    def test_a_compositor_that_declines_never_reaches_the_bridge(self):
+        """NEGATIV. Was hier fliegt, faellt sonst in die pywebview-Bruecke und
+        hinterlaesst keine Zeile -- der Fehler, den #175 einen ganzen Anlauf
+        gekostet hat."""
+        class _Angry(_FakeGtkWindow):
+            def begin_move_drag(self, *a):
+                raise RuntimeError("the compositor said no")
+
+        class _GLib:
+            @staticmethod
+            def idle_add(func):
+                func()
+
+        modules = {"gi": mock.Mock(),
+                   "gi.repository": mock.Mock(GLib=_GLib, Gdk=mock.Mock(),
+                                              Gtk=mock.Mock())}
+        with mock.patch.dict(sys.modules, modules):
+            self.assertTrue(crow_gui.Api._native_drag(_Angry(), None))
+
+    def test_the_page_hands_the_gesture_over_only_where_it_has_to(self):
+        """Die Seite traegt die Antwort, bevor sie uebergeben wird -- wie das
+        Theme und der Rail-Zustand, und aus demselben Grund: ein Skript, das
+        es nach dem Laden herausfaende, waere bei jedem Start einen Rahmen zu
+        spaet."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.assertIn("const NATIVEDRAG = __NATIVEDRAG__;", source)
+        self.assertIn('.replace("__NATIVEDRAG__",', source)
+        self.assertIn('if(NATIVEDRAG){ pywebview.api.begin_resize(map[id]); return; }',
+                      source)
+        self.assertIn("pywebview.api.begin_move();", source)
+
+    def test_the_title_bar_keeps_its_double_click(self):
+        """DER GRUND FUER DIE VIER PIXEL. Der Compositor nimmt den Zeiger in dem
+        Moment, in dem `xdg_toplevel.move` rausgeht -- ein Zug, der schon beim
+        ersten Druck beginnt, schluckt den zweiten, und der zweite ist
+        `ondblclick="pywebview.api.maximise()"` auf genau diesem Element."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        bar = source[source.index("(function bardrag(){"):]
+        bar = bar[:bar.index("})();")]
+        self.assertIn("<4", bar, "ohne Schwelle gibt es keinen Doppelklick mehr")
+        self.assertIn('e.target.closest(".pywebview-no-drag")', bar,
+                      "ein Zug auf 'close' waere ein Fenster, das man nicht "
+                      "mehr schliessen kann")
+
+
+class TheMaximiseButtonOnACompositorTests(unittest.TestCase):
+    """Doppelklick auf die Leiste, dort wo der Compositor den Rahmen besitzt.
+
+    ES GIBT NICHTS AUFZUSCHREIBEN. `xdg_toplevel.set_maximized` ist eine BITTE,
+    kein Rechteck: der Compositor waehlt die Groesse, behaelt die alte und gibt
+    sie beim Zuruecknehmen wieder her. Der Windows-Zweig merkt sich das
+    Rechteck, weil dort dieses Programm das Fenster bewegt.
+    """
+
+    def _api(self, native):
+        args = crow_gui.build_parser().parse_args([])
+        api = crow_gui.Api(args)
+        api._gtk_window = lambda: native
+        return api
+
+    def test_it_toggles_on_its_own_flag_and_not_on_is_maximized(self):
+        """GEMESSEN, NICHT VORGEZOGEN: auf dieser Maschine meldet das Toolkit
+        das Fenster vom ersten Rahmen an als maximiert und sagt das auch nach
+        `unmaximize()` weiter (2026-09-16, MAXIMIZED-Bit auf einem schwebenden
+        1180x800-Fenster). Ein Umschalter, der diese Antwort liest, kommt nie
+        aus dem Zustand heraus, in dem er startet."""
+        native = _FakeGtkWindow()
+        native.is_maximized = lambda: True
+        api = self._api(native)
+
+        class _GLib:
+            @staticmethod
+            def idle_add(func):
+                func()
+
+        modules = {"gi": mock.Mock(),
+                   "gi.repository": mock.Mock(GLib=_GLib)}
+        with mock.patch.dict(sys.modules, modules):
+            api.maximise()
+            api.maximise()
+        self.assertEqual([c[0] for c in native.calls],
+                         ["maximize", "unmaximize"])
+        self.assertFalse(api._maximised)
+
+    def test_the_windows_rectangle_is_untouched_by_the_new_branch(self):
+        """GEGENPROBE: ohne GtkWindow faellt `maximise` in den Win32-Zweig, und
+        der schreibt weiterhin ein Rechteck auf."""
+        api = self._api(None)
+        self.assertIsNone(api._restore)
+
+
+class TheClipboardIsReadByAProgramTests(unittest.TestCase):
+    """A9. pywebview hat auf KEINEM Backend eine Zwischenablage, und
+    `Gtk.Clipboard.wait_for_image()` gab hier None zurueck, obwohl
+    `wl-paste --list-types` `image/png` meldete -- aus einem Arbeitsfaden, vom
+    Hauptfaden und mit Fokus, dreimal None (2026-09-16).
+
+    ALSO WIRD EIN PROGRAMM GEFRAGT. `wl-paste` spricht `wlr-data-control` und
+    braucht keinen Tastaturfokus; `xclip` ist der X11-Fallback.
+    """
+
+    def _run(self, answers):
+        """`subprocess.run` durch eine Tabelle ersetzen: argv[0..] -> stdout."""
+        class _Done:
+            def __init__(self, out):
+                self.stdout, self.returncode = out, 0
+
+        def run(argv, **kw):
+            self.seen.append(list(argv))
+            for key, out in answers:
+                if argv[:len(key)] == key:
+                    return _Done(out)
+            return _Done(b"")
+        return run
+
+    def setUp(self) -> None:
+        self.seen: list = []
+        self._before = (crow_gui.subprocess.run, crow_gui.shutil.which)
+        self.addCleanup(self._restore)
+
+    def _restore(self) -> None:
+        crow_gui.subprocess.run, crow_gui.shutil.which = self._before
+
+    def _only(self, tool):
+        crow_gui.shutil.which = lambda name: ("/usr/bin/" + name
+                                              if name == tool else None)
+
+    def test_a_png_on_the_wayland_clipboard_comes_back_whole(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"pixels"
+        self._only("wl-paste")
+        crow_gui.subprocess.run = self._run([
+            (["wl-paste", "--list-types"], b"text/html\nimage/png\n"),
+            (["wl-paste", "-t", "image/png"], png)])
+        self.assertEqual(crow_gui.clipboard_image_posix(), (".png", png))
+
+    def test_the_types_are_asked_for_rather_than_guessed(self):
+        """Ein JPEG auf der Ablage: blind `image/png` zu lesen gaebe leere
+        Ausgabe und keine Zeile darueber, warum."""
+        self._only("wl-paste")
+        crow_gui.subprocess.run = self._run([
+            (["wl-paste", "--list-types"], b"image/jpeg\n"),
+            (["wl-paste", "-t", "image/jpeg"], b"\xff\xd8jpeg")])
+        self.assertEqual(crow_gui.clipboard_image_posix(),
+                         (".jpg", b"\xff\xd8jpeg"))
+
+    def test_text_on_the_clipboard_is_the_ordinary_no(self):
+        """GEGENPROBE, und der haeufigste Fall: das meiste, was jemand einfuegt,
+        ist Text. "" ist dort kein Fehler."""
+        self._only("wl-paste")
+        crow_gui.subprocess.run = self._run([
+            (["wl-paste", "--list-types"], b"text/plain\nUTF8_STRING\n")])
+        self.assertIsNone(crow_gui.clipboard_image_posix())
+
+    def test_xclip_answers_when_there_is_no_wayland(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"x"
+        self._only("xclip")
+        crow_gui.subprocess.run = self._run([
+            (["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"],
+             b"TARGETS\nimage/png\n"),
+            (["xclip", "-selection", "clipboard", "-t", "image/png", "-o"], png)])
+        self.assertEqual(crow_gui.clipboard_image_posix(), (".png", png))
+        self.assertTrue(self.seen, "xclip wurde nie gerufen")
+
+    def test_no_reader_at_all_is_none_and_not_a_crash(self):
+        """NEGATIV: eine Maschine ohne wl-clipboard und ohne xclip. Ctrl+V
+        bleibt dann wirkungslos -- aber nichts fliegt in die Bruecke."""
+        crow_gui.shutil.which = lambda name: None
+        self.assertIsNone(crow_gui.clipboard_image_posix())
+
+    def test_a_reader_that_hangs_is_bounded(self):
+        """Das hier laeuft auf einem Tastendruck. Ein Besitzer, der nie
+        antwortet, darf das Fenster nicht anhalten."""
+        crow_gui.shutil.which = lambda name: "/usr/bin/" + name
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(kw.get("timeout"))
+            raise crow_gui.subprocess.TimeoutExpired(argv, 10)
+        crow_gui.subprocess.run = run
+        self.assertIsNone(crow_gui.clipboard_image_posix())
+        self.assertTrue(all(t for t in seen), "ein Aufruf ohne Zeitschranke")
+
+    def test_the_windows_reader_is_still_the_one_windows_gets(self):
+        """Die Weiche selbst. Auf Windows aendert der Port nichts: derselbe
+        ctypes-Leser wie vorher, Byte fuer Byte."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.assertIn("def clipboard_image_windows()", source)
+        self.assertIn("if not crow_platform.IS_WINDOWS:\n"
+                      "        return clipboard_image_posix()", source)
+
+
+class TheCopyButtonPutsTextBackTests(ApiCase):
+    """`navigator.clipboard` verweigert hier den Dienst -- die Seite wird als
+    HTML uebergeben und ist damit kein sicherer Kontext, gemessen 2026-08-13.
+    Also schreibt Python. `clip` auf Windows, `wl-copy` oder `xclip` sonst."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._before = (crow_gui.subprocess.run, crow_gui.shutil.which)
+        self.addCleanup(self._restore)
+
+    def _restore(self) -> None:
+        crow_gui.subprocess.run, crow_gui.shutil.which = self._before
+
+    def test_wl_copy_takes_the_text_as_utf8(self):
+        if crow_platform.IS_WINDOWS:
+            self.skipTest("dort schreibt `clip`, und zwar UTF-16LE")
+        seen = {}
+        crow_gui.shutil.which = lambda n: "/usr/bin/" + n if n == "wl-copy" else None
+        crow_gui.subprocess.run = lambda argv, **kw: seen.update(
+            argv=list(argv), payload=kw.get("input"))
+        self.assertTrue(self.api().copy("Krähe"))
+        self.assertEqual(seen["argv"], ["wl-copy"])
+        self.assertEqual(seen["payload"], "Krähe".encode("utf-8"))
+
+    def test_a_timeout_is_success_because_wl_copy_stays_alive(self):
+        """wl-copy bleibt am Leben, um die Auswahl zu HALTEN. Ein Timeout heisst
+        hier also nicht "es ging schief", sondern "es tut noch, was es soll"."""
+        if crow_platform.IS_WINDOWS:
+            self.skipTest("kein wl-copy auf der anderen Seite")
+        crow_gui.shutil.which = lambda n: "/usr/bin/" + n
+
+        def run(argv, **kw):
+            raise crow_gui.subprocess.TimeoutExpired(argv, 5)
+        crow_gui.subprocess.run = run
+        self.assertTrue(self.api().copy("x"))
+
+    def test_nothing_to_copy_is_refused_before_any_process_starts(self):
+        """GEGENPROBE."""
+        started = []
+        crow_gui.subprocess.run = lambda *a, **kw: started.append(a)
+        self.assertFalse(self.api().copy(""))
+        self.assertEqual(started, [])
+
+
+class TheWindowIsCalledCrowTests(unittest.TestCase):
+    """D2/A4. Vier Stellen muessen sich auf EINE Zeichenkette einigen: die
+    Wayland-`app_id`, `StartupWMClass` in crow.desktop, das `Icon=crow`, das
+    dieser Eintrag nennt, und das `class:^(crow)$` der Fensterregel.
+
+    OHNE `GLib.set_prgname` IST DIE KLASSE `crow_gui.py`, der Dateiname des
+    Skripts -- gemessen 2026-09-16 mit `hyprctl clients -j` -- und damit
+    scheitern alle vier Treffer auf einmal: kein Icon, kein Eintrag, keine
+    Regel.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def test_the_process_is_named_before_the_window_opens(self):
+        main = self.source[self.source.index("def main(argv"):]
+        self.assertLess(main.index("name_this_process()"),
+                        main.index("webview.create_window("),
+                        "der Name wird gelesen, wenn das Fenster entsteht")
+
+    def test_naming_never_takes_the_window_down(self):
+        """Ein Fenster mit der falschen Klasse ist ein Fenster mit dem falschen
+        Icon; ein Client, der deswegen nicht aufgeht, ist keiner."""
+        with mock.patch.dict(sys.modules, {"gi": None, "gi.repository": None}):
+            self.assertFalse(crow_gui.name_this_process("crow"))
+
+    def test_it_really_sets_the_program_name(self):
+        if crow_platform.IS_WINDOWS:
+            self.skipTest("GLib gibt es dort nicht")
+        try:
+            from gi.repository import GLib
+        except Exception:                  # noqa: BLE001
+            self.skipTest("kein PyGObject auf dieser Maschine")
+        before = GLib.get_prgname()
+        self.addCleanup(GLib.set_prgname, before)
+        self.assertTrue(crow_gui.name_this_process("crow"))
+        self.assertEqual(GLib.get_prgname(), "crow")
+
+    def test_windows_keeps_its_own_identity_call(self):
+        """GEGENPROBE: `taskbar_identity` ist die Antwort auf dieselbe Frage
+        drueben, und die beiden treten sich nicht auf die Fuesse."""
+        self.assertIn("def taskbar_identity()", self.source)
+        if not crow_platform.IS_WINDOWS:
+            self.assertFalse(crow_gui.taskbar_identity())
+
+
+class TheWindowShipsALauncherEntryTests(unittest.TestCase):
+    """D1/D3. Das Fenster IST der Client (#187), also braucht es einen Eintrag,
+    ueber den man es startet, und ein Icon, das dabei gezeichnet wird."""
+
+    def setUp(self) -> None:
+        whole = (HERE / "crow.desktop").read_text(encoding="utf-8")
+        # DIE GRUPPE UND NICHT DIE DATEI. Ueber `[Desktop Entry]` steht der
+        # Kommentar, der erklaert, WARUM die Schluessel so lauten -- und ein
+        # Fall, der die ganze Datei durchsucht, findet jeden Schluessel auch in
+        # dem Satz, der ihn begruendet. Das ist genau die Verwechslung, die
+        # check_gui_prereqs.py fuer Zeichen in Kommentaren schon einmal
+        # auseinandersortiert hat.
+        self.desktop = whole[whole.index("[Desktop Entry]"):]
+        # NUR DIE ZEILEN, DIE HYPRLAND AUSFUEHRT. Ueber ihnen steht der
+        # Kommentar, der sie begruendet -- und der zitiert die alte Schreibweise,
+        # weil er von ihr HANDELT. Ein Fall, der die ganze Datei durchsucht,
+        # findet jede Regel auch in dem Satz, der sie erklaert; dieselbe
+        # Verwechslung, die weiter oben schon `[Desktop Entry]` von seinem
+        # Kopfkommentar trennt.
+        def rules_of(name):
+            text = (HERE / name).read_text(encoding="utf-8")
+            return "\n".join(line for line in text.splitlines()
+                              if not line.lstrip().startswith(("#", "--")))
+
+        self.rules = rules_of("hyprland-crow.conf")
+        self.lua = rules_of("hyprland-crow.lua")
+
+    def test_the_entry_has_what_the_specification_requires(self):
+        for line in ("[Desktop Entry]", "Type=Application", "Name=Crow"):
+            self.assertIn(line, self.desktop)
+
+    def test_the_three_names_agree(self):
+        """Dateiname, Icon und StartupWMClass -- und `GLib.set_prgname("crow")`
+        im Fenster ist die vierte Ecke desselben Vierecks."""
+        self.assertIn("Icon=crow\n", self.desktop)
+        self.assertIn("StartupWMClass=crow\n", self.desktop)
+        self.assertTrue((HERE / "crow.desktop").exists())
+        self.assertIn('name_this_process()',
+                      (HERE / "crow_gui.py").read_text(encoding="utf-8"))
+
+    def test_the_launcher_path_is_a_placeholder_the_installer_fills(self):
+        """Es gibt keinen Pfad, der im Repository richtig waere: das Fenster
+        laeuft aus einem Checkout, aus ~/.local/share/crow oder aus dem, worauf
+        `install.sh --to DIR` zeigte."""
+        self.assertIn("Exec=@CROW_LAUNCHER@", self.desktop)
+
+    def test_no_terminal_opens_behind_the_window(self):
+        self.assertIn("Terminal=false\n", self.desktop)
+
+    def test_a_mime_line_would_oblige_the_installer_and_there_is_none(self):
+        """GEGENPROBE: `update-desktop-database` baut den MIME-Cache und wird
+        NUR dafuer gebraucht. Kommt die Zeile dazu, muss der Installer das
+        Werkzeug laufen lassen -- und solange sie fehlt, darf er es nicht
+        behaupten."""
+        self.assertNotIn("MimeType=", self.desktop)
+
+    def test_the_window_rule_keys_on_the_same_class(self):
+        """Hyprland kachelt sonst das Fenster und ueberschreibt `min_size`:
+        `create_window(width=500,height=250)` kam 2026-09-16 als
+        `size=[1261,688] floating=false` heraus."""
+        self.assertIn("class:^([Cc]row)$", self.rules)
+        self.assertIn("float", self.rules)
+
+    def test_both_config_dialects_ship(self):
+        """Hyprland waehlt seinen Parser nach der Konfiguration, die es findet:
+        `hyprland.conf` bekommt den alten ini-Leser und `windowrule = ...`,
+        `hyprland.lua` den Lua-Leser und `hl.window_rule{...}`. Die beiden sind
+        NICHT austauschbar -- gemessen 2026-09-16 auf 0.56.2 mit einer
+        Lua-Konfiguration: `hyprctl keyword windowrule "float, class:^(crow)$"`
+        antwortete "keyword can't work with non-legacy parsers"."""
+        self.assertIn("hl.window_rule(", self.lua)
+        self.assertIn('class = "^([Cc]row)$"', self.lua)
+        self.assertIn("float = true", self.lua)
+        self.assertIn("windowrule = float", self.rules)
+
+    def test_the_window_is_opaque(self):
+        """robins Entwurf ist ein rahmenloses Fenster, dessen Chrom die SEITE
+        ist. Ein Aufbau, der unfokussierte Fenster durchscheinen laesst --
+        Omarchy malt jedes bei 0.985/0.96 -- macht daraus eine Ebene statt eines
+        Programms; die mitgelieferten Browser dort nehmen sich aus demselben
+        Grund aus."""
+        self.assertIn("opacity 1.0 1.0", self.rules)
+        self.assertIn('opacity = "1.0 1.0"', self.lua)
+
+    def test_the_rule_also_catches_the_xwayland_spelling(self):
+        """DIE NOTLUKE DARF NICHT DIE REGELN ABSCHALTEN. Unter
+        `CROW_GDK_BACKEND=x11` ist die Identitaet die X11-WM_CLASS, und deren
+        res_class schreibt GTK gross: `hyprctl clients -j` meldete 2026-09-16
+        `crow` auf Wayland und `Crow` unter XWayland. Ein Zeichen, und ohne es
+        gelten die Regeln genau auf dem Lauf nicht mehr, auf dem jemand schon
+        einen Fehler sucht."""
+        self.assertNotIn("class:^(crow)$", self.rules,
+                         "die Regel faellt unter XWayland aus")
+
+    def test_the_icons_are_png_and_the_sizes_the_theme_asks_for(self):
+        """PNG UND NICHT SVG: auf dieser Maschine gibt es keinen
+        SVG-gdk-pixbuf-Loader, also kann alles, was ein Theme-Icon ueber
+        GdkPixbuf rastert -- `webview.start(icon=)` eingeschlossen -- eine SVG
+        gar nicht oeffnen."""
+        for size in crow_gui.ICON_SIZES:
+            path = crow_gui.icon_png(size)
+            self.assertTrue(path, "es fehlt ein Icon in %dx%d" % (size, size))
+            with open(path, "rb") as fh:
+                head = fh.read(24)
+            self.assertEqual(head[:8], b"\x89PNG\r\n\x1a\n", path)
+            self.assertEqual(struct.unpack(">II", head[16:24]), (size, size),
+                             "%s ist nicht %dx%d" % (path, size, size))
+
+    def test_a_size_this_build_does_not_ship_is_empty_and_not_a_guess(self):
+        """GEGENPROBE: `webview.start(icon=)` nimmt None, und ein Fenster, das
+        wegen einer fehlenden Verzierung nicht aufgeht, waere der schlechtere
+        Fehler."""
+        self.assertEqual(crow_gui.icon_png(777), "")
+
+
+class ThePageArrivesWithABaseUriTests(unittest.TestCase):
+    """A8. `create_window(html=...)` erreicht WebKitGTK als
+    `load_html(html, base_uri='')`, und ein leerer Base-URI ist dort
+    `about:blank`: `file:///`-Bilder feuerten `onerror` mit naturalWidth 0 und
+    ein `@font-face` auf eine Datei blieb `unloaded` (gemessen 2026-09-16).
+
+    `window.load_html(page)` NACH dem Aufbau setzt den Base-URI auf das
+    Verzeichnis des Programms, und danach loest alles auf -- live geprueft:
+    `document.baseURI` ist eine `file://`-Adresse.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def test_windows_still_gets_the_page_in_create_window(self):
+        self.assertIn('handover = "" if crow_platform.IS_WINDOWS else page',
+                      self.source)
+
+    def test_the_handover_waits_for_the_window_to_exist(self):
+        """`Window.load_html` wartet auf das `shown`-Ereignis, und das setzt
+        erst die GUI-Schleife. Neben `create_window` gerufen blockiert es
+        zwanzig Sekunden und fliegt dann."""
+        main = self.source[self.source.index("def main(argv"):]
+        self.assertIn("if handover:\n            window.load_html(handover)", main)
+        self.assertLess(main.index("def styles(*_)"),
+                        main.index("webview.start("))
+
+    def test_the_placeholder_paints_the_ground_the_theme_will_paint(self):
+        """Ein Fenster, das in der einen Farbe aufgeht und in der anderen
+        weitergemalt wird, ist ein Aufblitzen des falschen Produkts -- bei jedem
+        Start, genau in dem Moment, in dem jemand hinsieht."""
+        self.assertIn("__BG__", crow_gui.PAGE_PLACEHOLDER)
+        painted = crow_gui.PAGE_PLACEHOLDER.replace(
+            "__BG__", crow_gui.theme_bg("dark"))
+        self.assertIn(crow_gui.theme_bg("dark"), painted)
+        self.assertNotIn("__BG__", painted)
+
+    def test_the_toolkit_is_named_rather_than_searched_for(self):
+        """`KDE_FULL_SESSION` im Environment zwingt pywebview auf Qt, und Crow
+        ist gegen WebKitGTK geschrieben. Ein Nachmittag in Plasma darf nicht den
+        Renderer wechseln."""
+        self.assertIn('webview.start(styles, window, gui="gtk", icon=',
+                      self.source)
+        self.assertIn("webview.start(styles, window)\n", self.source)
+
+
+class TheBrowserPaneOnACompositorTests(ApiCase):
+    """#175 auf Wayland. Die Scheibe kann dort NICHT am Panel kleben: `move()`
+    ist ein Leerlauf, `on_top` ebenso. Sie bleibt ein zweites Fenster, sie
+    schwebt statt zu kacheln (dieselbe Klasse, dieselbe Regel), und die Wege
+    zeigen/verstecken/schliessen duerfen nicht fliegen."""
+
+    class _Pane:
+        def __init__(self) -> None:
+            self.hidden, self.calls = True, []
+
+        def load_url(self, url) -> None:
+            self.calls.append(("load", url))
+
+        def show(self) -> None:
+            self.calls.append(("show", self.hidden))
+
+        def hide(self) -> None:
+            self.calls.append(("hide", None))
+
+        def move(self, x, y) -> None:
+            self.calls.append(("move", (x, y)))
+
+        def resize(self, w, h) -> None:
+            self.calls.append(("resize", (w, h)))
+
+    def _api(self, native=None):
+        api = self.api()
+        api._gtk_window = lambda: native
+        api._browser_win = self._Pane()
+        # `_pane` IMPORTIERT `webview`, UND ZWAR BEVOR ES NACHSIEHT, ob es die
+        # Scheibe schon gibt -- absichtlich, siehe den Kommentar dort: ein
+        # Modulname, den es in dieser Datei nicht gibt, kostete am 2026-08-31
+        # einen ganzen Anlauf. Die Faelle hier sind ueber die WEGE geschnitten,
+        # nicht ueber das Erzeugen, und sie muessen auch auf einer Maschine
+        # ohne pywebview laufen.
+        api._pane = lambda: api._browser_win
+        return api
+
+    def test_a_hidden_window_is_unhidden_before_it_is_shown(self):
+        """DER FEHLER SITZT IN PYWEBVIEW: `BrowserView.show()` ruft `show_all()`
+        und versteckt sofort wieder, solange `Window.hidden` steht -- und
+        `Window.show()` setzt die Fahne nie zurueck. Unter der GtkApplication
+        ist `gtk_main_level()` immer 0, also greift genau dieser Zweig, und ein
+        so erzeugtes Fenster kann NIE erscheinen."""
+        api = self._api(_FakeGtkWindow())
+        api.pane_go("https://example.com")
+        self.assertFalse(api._browser_win.hidden)
+        self.assertIn(("show", False), api._browser_win.calls)
+
+    def test_the_rectangle_is_not_computed_out_of_two_invented_numbers(self):
+        """`self._window.x` liest pywebviews eigene Buchhaltung und nicht den
+        Bildschirm. Auf Wayland waere die Rechnung also aus zwei erfundenen
+        Zahlen -- und `move()` befolgte sie ohnehin nicht."""
+        api = self._api(_FakeGtkWindow())
+        api.pane_go("https://example.com")
+        api.pane_place(10, 20, 300, 200)
+        self.assertEqual([c for c in api._browser_win.calls
+                          if c[0] in ("move", "resize")], [])
+
+    def test_on_windows_the_pane_still_follows_the_panel(self):
+        """GEGENPROBE, und sie ist die ganze Windows-Seite von #175: dort
+        WANDERT die Scheibe mit."""
+        api = self._api(None)
+        api._window = mock.Mock(x=100, y=50)
+        api.pane_go("https://example.com")
+        api.pane_place(10, 20, 300, 200)
+        self.assertIn(("move", (110, 70)), api._browser_win.calls)
+        self.assertIn(("resize", (300, 200)), api._browser_win.calls)
+
+    def test_hide_and_show_survive_a_window_that_refuses(self):
+        """Eine Scheibe im Aufbau ist kein Grund, das Fenster mitzunehmen."""
+        class _Angry(self._Pane):
+            def show(self):
+                raise RuntimeError("not mapped")
+
+            def hide(self):
+                raise RuntimeError("not mapped")
+
+        api = self._api(_FakeGtkWindow())
+        api._browser_win = _Angry()
+        api._browser_shown = True
+        self.assertTrue(api.pane_hide())
+        self.assertTrue(api.pane_show())
+
+
+class TheDropSaysWhenItCarriedNoPathTests(ApiCase):
+    """A10. Der Pfad haengt pywebview an, aus dem, was der Drag-Handler des
+    Toolkits eingesammelt hat. Eine Quelle, die nur Bytes uebergibt -- ein Bild
+    aus einem Browser gezogen -- hinterlaesst den Namen und sonst nichts.
+
+    SCHWEIGEN SIEHT DORT AUS WIE EIN FENSTER, DAS DEN WURF IGNORIERT HAT, und
+    der Weg drumherum (Pfad tippen) ist keiner, auf den jemand kommt."""
+
+    def test_a_drop_with_paths_is_passed_on_unchanged(self):
+        api = self.api()
+        api.on_drop({"dataTransfer": {"files": [
+            {"name": "a.txt", "pywebviewFullPath": "/home/x/a.txt"}]}})
+        said = self.drained(api)
+        self.assertEqual([m["k"] for m in said], ["drop"])
+        self.assertEqual(said[0]["paths"], ["/home/x/a.txt"])
+
+    def test_a_drop_without_a_path_says_so(self):
+        api = self.api()
+        api.on_drop({"dataTransfer": {"files": [{"name": "a.png"}]}})
+        said = self.drained(api)
+        self.assertEqual([m["k"] for m in said], ["note", "drop"])
+        self.assertIn("typing the path", said[0]["t"])
+        self.assertEqual(said[1]["paths"], [])
+
+    def test_an_empty_drop_says_nothing_at_all(self):
+        """GEGENPROBE: ein Wurf ohne Dateien ist kein Wurf, ueber den man reden
+        muss -- eine Notiz bei jedem Nicht-Ereignis erzieht dazu, Notizen zu
+        ueberlesen."""
+        api = self.api()
+        api.on_drop({"dataTransfer": {"files": []}})
+        self.assertEqual([m["k"] for m in self.drained(api)], ["drop"])
+
+
+class ThePageNamesNoPlatformItCannotSeeTests(unittest.TestCase):
+    """Zwei Saetze in der Seite waren Windows-Saetze und standen als Text da.
+
+    DER UNTERSCHIED ZU EINEM KOMMENTAR: was ein Leser SIEHT, muss auf seiner
+    Maschine stimmen. Ein Kommentar, der Windows erklaert, ist Geschichte; eine
+    Zeile im About-Fenster, die `%LOCALAPPDATA%\\Crow` nennt, waehrend die Kopie
+    unter ~/.local/share/crow liegt, schickt jemanden an die falsche Stelle.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.page = self.source[self.source.index('PAGE = r"""'):
+                                self.source.index("PAGE_PLACEHOLDER = (")]
+
+    def test_the_about_pane_asks_where_this_copy_lives(self):
+        """`update_check` traegt `install_dir` schon, und das kommt aus der
+        Naht. Die Seite nennt es, statt einen der beiden Pfade zu raten."""
+        self.assertIn('<span id="updwhere">', self.page)
+        self.assertIn('$("#updwhere").textContent=s.install_dir;', self.page)
+        body = self.page[self.page.index('data-cat="about"'):]
+        body = body[:body.index("</section>")]
+        self.assertNotIn("LOCALAPPDATA", body,
+                         "die sichtbare Zeile nennt wieder einen festen Pfad")
+
+    def test_a_posix_path_in_the_address_bar_becomes_a_file_url(self):
+        """`/srv/bau.html` traf weder die Laufwerksregel noch die
+        Schema-Regel und wurde zu `https:///srv/bau.html`."""
+        self.assertIn('url.charAt(0)==="/"', self.page)
+        self.assertIn("fileUrl(path){", self.page)
+
+    def test_the_three_slashes_are_not_glued_to_a_fourth(self):
+        """Die Regel, die `fileUrl` ueberhaupt zu einer Funktion macht: der
+        Pfad bringt auf POSIX seinen eigenen Schraegstrich mit."""
+        js = self.page[self.page.index("fileUrl(path){"):]
+        js = js[:js.index("},") + 2]
+        self.assertIn('p.charAt(0)==="/" ? "" : "/"', js)
+        self.assertNotIn('"file:///"', js)
 
 
 if __name__ == "__main__":
