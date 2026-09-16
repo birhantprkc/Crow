@@ -1191,6 +1191,8 @@ SERVER_FLAGS = (
     # LAST, and that is a statement about the README and not about the server: this list is the
     # order the printed line is checked in, so a flag appended here is a flag appended there.
     ("spec_type", "--spec-type"),
+    ("image_min_tokens", "--image-min-tokens"),
+    ("mmproj_offload", "--mmproj-offload"),
 )
 
 # TWO PLACES, FOR THE SAME REASON model_candidates HAS THREE: the package
@@ -1470,6 +1472,13 @@ def server_command(key: str, manifest: dict | None = None,
                         "%r needs a chat template and none is on disk. Tried: %s"
                         % (key, ", ".join(tried)))
                 argv.append(found)
+        elif name == "mmproj_offload" and value is False:
+            # THE ONE FLAG WHOSE FALSE IS A WORD. llama.cpp spells the switch
+            # --mmproj-offload / --no-mmproj-offload, and the Linux line turns
+            # it OFF on purpose (2026-09-16: the projector on the GPU segfaults
+            # in clip_encode at 1,024 image tokens because ~1.3 GiB of VRAM is
+            # all the card has left at -ncmoe 31). False here is the --no- form.
+            argv.append("--no-mmproj-offload")
         elif value is False or value is None:
             continue
         elif name == "slot_save_path":

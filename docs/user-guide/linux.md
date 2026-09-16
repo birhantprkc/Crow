@@ -177,8 +177,16 @@ memory, still swapped into zram, and the desktop was still what got squeezed. So
 the experts page-cache pages the kernel can drop and re-read from NVMe without swapping
 anything; `MemorySwapMax=0` keeps the server's remaining anonymous memory out of zram; the
 size bounds make the kernel reclaim the server's own cache before the desktop's. Decode under
-mmap is not yet measured against the 36.7 tok/s of `none`. `CROW_SERVER_MEMORY_HIGH=48G`
-moves the bound, `CROW_SERVER_SCOPE=0` runs the bare process. The page, the tools, the memory and the browser pane are the ones [`window.md`](window.md)
+mmap, measured the same evening in the window: 41.8 tok/s, above the 36.7 of `none`. `CROW_SERVER_MEMORY_HIGH=48G`
+moves the bound, `CROW_SERVER_SCOPE=0` runs the bare process.
+
+**Images: 1,024 tokens each, encoded on the CPU.** The Linux line carries `--image-min-tokens
+1024` and `--no-mmproj-offload`. Below 1,024 tokens the model does not see a pasted screenshot;
+with the projector on the GPU the encoder has no VRAM left at `-ncmoe 31` and the server
+segfaults. On the CPU an image costs a few seconds of prefill and is read correctly. Both
+measured 2026-09-16; the reasons in [operating points](../operating-points.md#flash-next-on-linux--the-line-that-differs-measured).
+
+The page, the tools, the memory and the browser pane are the ones [`window.md`](window.md)
 describes. What Wayland makes different:
 
 **It has to be told to float.** A Wayland client may not place, size or raise its own toplevel —

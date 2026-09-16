@@ -106,6 +106,8 @@ FLAG_SPECS = [
     # 6 % in the other -- a checker that only asked "is some speculator named"
     # would call the wrong one right.
     ("spec_type", r"--spec-type\s+(\S+)", "str"),
+    ("image_min_tokens", r"--image-min-tokens\s+(\d+)", "int"),
+    ("mmproj_offload", r"--no-mmproj-offload(?!\S)", "flag"),
 ]
 
 
@@ -229,6 +231,15 @@ def expected(server):
         want["slot_save_path"] = want["slot_save_path"].replace("\\", "/").split("/")[-1]
     if "mmproj" in want:
         want["mmproj"] = want["mmproj"].replace("\\", "/").split("/")[-1]
+    # mmproj_offload FALSE in the manifest is the --no-mmproj-offload word in a
+    # copy (2026-09-16, the Linux line): the regex above finds the word and
+    # reports True for "the flag is there", so the expectation is True as well.
+    # A line that says true carries no word and must not be required to.
+    if "mmproj_offload" in want:
+        if want["mmproj_offload"] is False:
+            want["mmproj_offload"] = True
+        else:
+            del want["mmproj_offload"]
     # The manifest records 32 because that is what this machine gets. install.ps1
     # computes it from the detected RAM, so a copy is correct as long as the flag
     # is there at all. Comparing the number would make the check fail on every

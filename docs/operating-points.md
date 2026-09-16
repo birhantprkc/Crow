@@ -14,7 +14,7 @@ raw text. Editing a flag here without editing the manifest turns the checker red
 | | model | decode | port | engine |
 |---|---|---|---|---|
 | **Default, Windows** | `Qwen3.8-Flash-Next-UD-Q2_K_XL` | **41.76 tok/s** | 8083 | llama.cpp, local build |
-| **Default, Linux** | `Qwen3.8-Flash-Next-UD-Q2_K_XL` | **36.7 / 36.2 tok/s** | 8083 | llama.cpp, built here |
+| **Default, Linux** | `Qwen3.8-Flash-Next-UD-Q2_K_XL` | **41.8 tok/s** | 8083 | llama.cpp, built here |
 | Second | `Qwen3.8-27B-UD-Q4_K_XL` | 123.05 / 133.18 tok/s | 8082 | llama.cpp, packaged |
 | Third (Rust) | `CNQ4.5-M` NVFP4 container | **45.1 tok/s** | 8099 | crow-nest `v0.2.0` |
 
@@ -86,14 +86,17 @@ python $env:LOCALAPPDATA\Crow\cli\crow.py --serve flash-next-q2-k-xl
 
 ---
 
-## Flash-Next on Linux — two flags differ, both measured
+## Flash-Next on Linux — the line that differs, measured
 
 Same model, same manifest line, with the `linux` object merged over it. Measured 2026-09-16 on
 Arch (Omarchy), Hyprland 0.56.2 on Wayland, RTX 5090, driver 610.57.
 
 | | |
 |---|---|
-| Placement | `-ncmoe 31 -t 24`, otherwise the Windows line |
+| Placement | `-ncmoe 31 -t 24 --load-mode mmap --image-min-tokens 1024 --no-mmproj-offload`, otherwise the Windows line |
+| Why `--load-mode mmap` | `none` holds ~48 GiB of experts in anonymous memory beside the page cache's copy; on 62 GiB with `vm.swappiness=150` over zram that swapped the desktop and systemd-oomd killed the terminal, five times. Under mmap the experts are file-backed pages: dropped and re-read, never compressed. Measured after the switch: **41.78 / 41.85 tok/s decode, 428 tok/s prefill** on a 3,964-token first turn -- above the 36.7 of `none`, because nothing sits in zram any more |
+| Why `--image-min-tokens 1024` | the model's own minimum turned a 1097×380 paste into ~350 tokens and the model said no image had arrived; llama.cpp warns at load that Qwen-VL needs 1,024 |
+| Why `--no-mmproj-offload` | at 1,024 image tokens the projector on the GPU died with `SIGSEGV` in `ggml_gallocr_alloc_graph` under `clip_encode` (core dump 18:43:27): ~1.3 GiB of VRAM is all the card has left at `-ncmoe 31`. On the CPU the same paste was read line for line, 155 tok/s prefill on the image turn |
 | Why `-ncmoe 31` | the Wayland desktop already holds about 1 GiB of the card, and the Windows placement died on its first request (`cublasCreate`, resource allocation failed). At 31 the card settles at 31,081–31,213 MiB after load, 31,334 peak in a turn |
 | Why `-t 24` | llama.cpp's Linux default picked 4 threads on the 24-core Ultra 9 285K |
 | Engine | built here: llama.cpp pin `6c84c7d5d` + PR #27880 + PR #28040, CUDA 13.3, `sm_120`. See [`tools/build-llama-server.sh`](../tools/build-llama-server.sh) |
@@ -108,14 +111,17 @@ Decode on two 200-token turns per arm, temperature 0, thinking off:
 | **`-t 24`** | **36.72 / 36.22** |
 | `-t 8 -tb 24` | 33.73 / 34.59 |
 
-The Windows line's 41.76 was a cold 33k-token turn at `-ncmoe 30`; **the two are not the same
-measurement.** Not measured: a cold 33k-token turn here, the 16–20 thread range, and how much of
-the gap to Windows is the extra CPU layer.
+Those four rows were taken under `--load-mode none`; the line now runs `mmap` and decodes at
+**41.78 / 41.85 tok/s** (124- and 445-token answers, the second with an image), prefill 428
+tok/s on a 3,964-token cold first turn. The Windows line's 41.76 was a cold 33k-token turn at
+`-ncmoe 30`; **the two are not the same measurement.** Not measured: a cold 33k-token turn here,
+the 16–20 thread range under mmap, and decode after the page cache has been evicted by
+something else.
 
 ### By hand
 
 ```bash
-$HOME/.local/share/crow/bin/llama-server -m $CROW_MODELS/Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf --port 8083 -c 200000 -b 2048 -ub 2048 -ctk q8_0 -ctv q8_0 -ncmoe 31 -t 24 --fit off --load-mode mmap -np 1 --mmproj $CROW_MODELS/mmproj-F16.gguf --jinja
+$HOME/.local/share/crow/bin/llama-server -m $CROW_MODELS/Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00003.gguf --port 8083 -c 200000 -b 2048 -ub 2048 -ctk q8_0 -ctv q8_0 -ncmoe 31 -t 24 --fit off --load-mode mmap --image-min-tokens 1024 --no-mmproj-offload -np 1 --mmproj $CROW_MODELS/mmproj-F16.gguf --jinja
 ```
 
 `python3 ~/.local/share/crow/tools/start-server.py flash-next-q2-k-xl` builds that line from the

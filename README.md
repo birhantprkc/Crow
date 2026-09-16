@@ -10,7 +10,7 @@
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
-<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-2.2.0-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
+<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-2.2.1-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
 <a href="docs/user-guide/install.md"><img src="https://img.shields.io/badge/platform-Windows%20x64%20%C2%B7%20Linux%20x86__64%20%C2%B7%20CUDA-555555?style=flat-square&logo=nvidia&logoColor=76b900&labelColor=000000" alt="Platform"></a>
 <a href="https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF"><img src="https://img.shields.io/badge/model-Qwen3.8--Flash--Next-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
 <a href="https://github.com/ggml-org/llama.cpp"><img src="https://img.shields.io/badge/engine-llama.cpp-555555?style=flat-square&logo=cplusplus&logoColor=00599c&labelColor=000000" alt="llama.cpp"></a>
@@ -175,7 +175,7 @@ Every MCP tool joins the same list as `mcp_<server>_<tool>`, with its own class.
 | | model | decode | port | engine |
 |---|---|---|---|---|
 | **Default, Windows** | `Qwen3.8-Flash-Next-UD-Q2_K_XL` | **41.76 tok/s** | 8083 | llama.cpp, local build |
-| **Default, Linux** | `Qwen3.8-Flash-Next-UD-Q2_K_XL` | **36.7 / 36.2 tok/s** | 8083 | llama.cpp, built here |
+| **Default, Linux** | `Qwen3.8-Flash-Next-UD-Q2_K_XL` | **41.8 tok/s** | 8083 | llama.cpp, built here |
 | Second | `Qwen3.8-27B-UD-Q4_K_XL` | 123.05 / 133.18 tok/s | 8082 | llama.cpp, packaged |
 | Third (Rust) | `CNQ4.5-M` NVFP4 container | **45.1 tok/s** | 8099 | crow-nest `v0.2.0` |
 

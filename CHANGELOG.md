@@ -3,7 +3,25 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
-## 2.2.1 — unreleased
+## 2.2.1 — 2026-09-16
+
+### Linux: `--load-mode mmap` decodes at 41.8 tok/s, and the window can see
+
+Measured in the window against the running server, the evening after 2.2.0: **41.78 / 41.85
+tok/s decode** (124- and 445-token answers, the second with an image), **428 tok/s prefill** on a
+3,964-token cold first turn -- above the 36.7 of `--load-mode none`, because with the experts
+file-backed nothing sits in zram any more. The load itself takes 8 s; the first turn pays the
+page-ins.
+
+Vision needed two flags, both now in the Linux line. `--image-min-tokens 1024`: at the model's
+own minimum a 1097×380 paste became ~350 image tokens and the model answered that no image had
+arrived (llama.cpp warns at load that Qwen-VL needs 1,024). `--no-mmproj-offload`: with 1,024
+tokens and the projector on the GPU the server died with `SIGSEGV` in `ggml_gallocr_alloc_graph`
+under `clip_encode` (core dump 18:43:27) -- ~1.3 GiB of VRAM is all the card has left at
+`-ncmoe 31`. On the CPU the same paste was read line for line, 155 tok/s prefill on the image
+turn. `server_command` spells the false as `--no-mmproj-offload`; the checker reads the word.
+Windows keeps its line; neither flag is measured there.
+
 
 ### The server gets a scope of its own, because oomd took the terminal with it
 

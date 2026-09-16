@@ -13457,11 +13457,15 @@ class TheShippedOperatingPointBootsOnLinuxTests(unittest.TestCase):
         self._lay_out_the_binary()
         manifest = crow_core._manifest()
         line = manifest["servers"][self.KEY]
-        self.assertEqual(line.get("linux"), {"ncmoe": 31, "threads": 24, "load_mode": "mmap"})
+        self.assertEqual(line.get("linux"), {"ncmoe": 31, "threads": 24, "load_mode": "mmap",
+                                             "image_min_tokens": 1024, "mmproj_offload": False})
         argv = crow_core.server_command(self.KEY, None, self.install)
         if crow_platform.IS_LINUX:
             self.assertEqual(argv[argv.index("-ncmoe") + 1], "31")
             self.assertEqual(argv[argv.index("-t") + 1], "24")
+            self.assertEqual(argv[argv.index("--image-min-tokens") + 1], "1024")
+            self.assertIn("--no-mmproj-offload", argv)
+            self.assertNotIn("--mmproj-offload", argv)
         else:
             self.assertEqual(argv[argv.index("-ncmoe") + 1], "30")
             self.assertNotIn("-t", argv)
