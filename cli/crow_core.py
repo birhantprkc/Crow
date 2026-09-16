@@ -1171,6 +1171,7 @@ SERVER_FLAGS = (
     # NVMe into every token (measured 2026-08-28, 19-31 tok/s spread on
     # identical lines).
     ("ncmoe", "-ncmoe"),
+    ("threads", "-t"),
     ("fit", "--fit"),
     ("load_mode", "--load-mode"),
     ("parallel", "-np"),
@@ -1413,6 +1414,15 @@ def server_command(key: str, manifest: dict | None = None,
         known = ", ".join(sorted(k for k in servers if not k.startswith("_"))) or "none"
         raise ServerBootError("no server line for model %r. The manifest has: %s"
                               % (key, known))
+    # ONE LINE, ONE OS-SHAPED EXCEPTION. A line is measured on one machine; the
+    # same card under Linux keeps ~1 GiB less free (the Wayland desktop) and
+    # llama.cpp's thread default differs, so a line may carry a `linux` object
+    # with the keys that differ THERE and nowhere else. It is merged over the
+    # line on Linux only; Windows never reads it, and the manifest's `_why_linux`
+    # beside it carries the measurement. Anything not in the object is the
+    # measured line, unchanged.
+    if crow_platform.IS_LINUX and isinstance(line.get("linux"), dict):
+        line = {**line, **line["linux"]}
 
     tried = model_candidates(key, manifest, install)
     gguf = next((p for p in tried if os.path.isfile(p)), None)

@@ -13292,7 +13292,8 @@ class TheShippedOperatingPointBootsOnLinuxTests(unittest.TestCase):
         for flag, value in (("--port", "8083"), ("-c", "200000"),
                             ("-b", "2048"), ("-ub", "2048"),
                             ("-ctk", "q8_0"), ("-ctv", "q8_0"),
-                            ("-ncmoe", "30"), ("--fit", "off"),
+                            ("-ncmoe", "31" if crow_platform.IS_LINUX else "30"),
+                            ("--fit", "off"),
                             ("--load-mode", "none"), ("-np", "1")):
             self.assertIn(flag, argv)
             self.assertEqual(argv[argv.index(flag) + 1], value, flag)
@@ -13302,6 +13303,26 @@ class TheShippedOperatingPointBootsOnLinuxTests(unittest.TestCase):
                                       *str(self.line["mmproj"]).split("/")))
         if not crow_platform.IS_WINDOWS:
             self.assertEqual([a for a in argv if a.endswith(".exe")], [])
+
+    def test_the_linux_object_is_merged_over_the_line_here_and_nowhere_else(self):
+        """Die eine Ausnahme je OS: das `linux`-Objekt der Zeile (ncmoe 31,
+        threads 24, gemessen 2026-09-16) liegt auf Linux ueber der Zeile; auf
+        Windows liest niemand es. Was nicht im Objekt steht, bleibt die
+        gemessene Zeile."""
+        self._lay_out_the_download()
+        self._lay_out_the_binary()
+        manifest = crow_core._manifest()
+        line = manifest["servers"][self.KEY]
+        self.assertEqual(line.get("linux"), {"ncmoe": 31, "threads": 24})
+        argv = crow_core.server_command(self.KEY, None, self.install)
+        if crow_platform.IS_LINUX:
+            self.assertEqual(argv[argv.index("-ncmoe") + 1], "31")
+            self.assertEqual(argv[argv.index("-t") + 1], "24")
+        else:
+            self.assertEqual(argv[argv.index("-ncmoe") + 1], "30")
+            self.assertNotIn("-t", argv)
+        self.assertEqual(argv[argv.index("--fit") + 1], "off")
+        self.assertNotIn("linux", argv)
 
     def test_without_any_binary_the_refusal_names_where_it_looked(self):
         """NEGATIVPROBE. "could not start" verstecke, welcher der drei Fehler es
