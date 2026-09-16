@@ -2880,6 +2880,11 @@ class ReadKeyTests(ToolLayerCase):
     def test_a_detour_through_a_parent_is_the_same_file(self):
         path = self._make("a.py", "alpha\n")
         crow.tool_read_file(path)
+        # DER UMWEG MUSS EXISTIEREN, ausserhalb von Windows: dort loest der
+        # Pfadparser `..` textuell auf, hier laeuft `open` das Verzeichnis
+        # wirklich entlang -- und ein `..` durch einen Ordner, den es nicht
+        # gibt, ist kein Umweg, sondern ein Fehler der Platte.
+        os.makedirs(os.path.join(self.dir, "sub"), exist_ok=True)
         detour = os.path.join(self.dir, "sub", "..", "a.py")
         self.assertIn("wrote", crow.tool_write_file(detour, "new"))
 
@@ -3639,7 +3644,13 @@ class WorkingDirectoryBoundaryTests(ToolLayerCase):
         """`commonpath`/`relpath` raise ValueError across drives instead of
         answering "no" -- measured 2026-08-14. An escaping exception does not
         refuse the write, it ends the turn."""
-        out = crow.tool_write_file(r"Z:\evil.txt", "x")
+        # EIN ANKER AUSSERHALB DER WURZEL, in der Schreibweise dieser
+        # Plattform: ein zweites Laufwerk auf Windows (wo `commonpath` quer
+        # ueber Laufwerke ValueError wirft statt "nein" zu sagen), die Wurzel
+        # der Platte auf Linux. Beide nennen ihren eigenen Bezugspunkt und
+        # liegen nicht unter dem Arbeitsbereich.
+        out = crow.tool_write_file(
+            r"Z:\evil.txt" if sys.platform == "win32" else "/evil.txt", "x")
         self.assertIn("refusing to write outside", out)
 
     def test_a_write_through_a_symlink_pointing_out_is_refused(self):
@@ -3716,7 +3727,8 @@ class WorkingDirectoryBoundaryTests(ToolLayerCase):
         """Same invariant as #88's decline: an assistant turn whose tool_calls
         have no `tool` message behind them is a broken prefix for every later
         turn."""
-        out = crow.tool_write_file(r"Z:\nope\x.txt", "x")
+        out = crow.tool_write_file(
+            r"Z:\nope\x.txt" if sys.platform == "win32" else "/nope/x.txt", "x")
         self.assertIsInstance(out, str)
         self.assertTrue(out.startswith("error: "))
 
@@ -4047,7 +4059,13 @@ class TheWorkingAreaIsNotASandboxTests(ToolLayerCase):
         carries normcase and the separator rule; this pins that the mandate goes
         through it rather than comparing raw text."""
         talk = crow.Conversation("SYS")
-        typed = self.outside.replace("\\", "/").upper()
+        # GROSSSCHREIBUNG NUR DORT, WO SIE NICHTS AENDERT: auf Windows ist
+        # `\DRAUSSEN.TXT` dieselbe Datei, auf Linux eine andere -- dort bliebe
+        # von dem Fall nur ein Schreibversuch an einem Ort, den niemand genannt
+        # hat, und die richtige Antwort darauf waere eine Ablehnung.
+        typed = self.outside.replace("\\", "/")
+        if sys.platform == "win32":
+            typed = typed.upper()
         self.serve([self._writes_outside()])
         self.serve([{"content": "done"}])
         self.turn(talk, _MarkRecorder(), line="Leg %s an" % typed)

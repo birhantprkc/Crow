@@ -1,0 +1,43 @@
+# The launcher entry for Crow's window, as a TEMPLATE. The installer copies it
+# to $XDG_DATA_HOME/applications/crow.desktop and substitutes @CROW_LAUNCHER@
+# with the absolute path of the program it just installed.
+#
+# @CROW_LAUNCHER@ AND NOT A PATH, because there is no path that is right in the
+# repository: the window may be started from a checkout, from ~/.local/share/crow
+# or from wherever `install.sh --to DIR` was pointed, and a hard-coded one would
+# name the machine it was written on. The placeholder is the contract; the
+# installer is the only place that knows the answer.
+#
+# THREE STRINGS HAVE TO AGREE AND ALL THREE ARE `crow`: the basename of this
+# file, `Icon=`, and `StartupWMClass=`. On Wayland a window is identified by its
+# `app_id`, which GTK takes from `g_get_prgname()`, which cli/crow_gui.py sets
+# to "crow" before the window opens -- measured 2026-09-16, `hyprctl clients -j`
+# then reports class "crow". Without that line the class is the script basename
+# (`crow_gui.py`), this entry matches nothing, and the launcher draws a generic
+# icon beside a window it cannot name.
+#
+# Icon=crow IS A NAME, NOT A PATH, which is what the Icon Theme Specification
+# wants: the installer puts cli/icons/crow-<N>.png into
+# ~/.local/share/icons/hicolor/<N>x<N>/apps/crow.png and refreshes the cache
+# with `gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor`. PNG and not
+# SVG on purpose: this machine has no SVG gdk-pixbuf loader, so anything reading
+# a themed icon through GdkPixbuf cannot open one.
+#
+# Terminal=false because the window IS the client (#187); a terminal opening
+# behind it would be a console nobody asked for and nobody reads.
+#
+# NO `MimeType=` LINE, so `update-desktop-database` is not needed -- that tool
+# builds the MIME cache, and launchers enumerate this directory directly. Add
+# the line and the installer has to run it; do not, and it must not pretend to.
+[Desktop Entry]
+Type=Application
+Name=Crow
+GenericName=Local LLM agent
+Comment=Crow's window: a local-LLM agent with tools, memory and a browser pane
+Exec=@CROW_LAUNCHER@
+Icon=crow
+Terminal=false
+Categories=Development;Utility;
+Keywords=llm;agent;chat;llama;
+StartupNotify=true
+StartupWMClass=crow

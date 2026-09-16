@@ -100,6 +100,18 @@ FLASH_LINE = (
     "-ncmoe 30 --fit off --load-mode none -np 1 --jinja --mmproj %LOCALAPPDATA%\\Crow\\models\\qwen-next-gguf\\mmproj-F16.gguf\n"
 )
 
+# THE LINUX COPY OF THE FLASH LINE, 2026-09-16. The manifest line carries a
+# `linux` object (ncmoe 31, threads 24; `_why_linux` beside it), and the checker
+# holds ONE document to the merged line under `docs [<key> on linux]`. So the
+# fixture README carries this copy too, and every flag the object starts
+# demanding has to appear here -- the same mirror rule as FLASH_LINE.
+FLASH_LINUX_LINE = (
+    "$HOME/.local/share/crow/bin/llama-server -m $CROW_MODELS/x.gguf "
+    "--port 8083 -c 200000 -b 2048 -ub 2048 -ctk q8_0 -ctv q8_0 "
+    "-ncmoe 31 -t 24 --fit off --load-mode none -np 1 --jinja --mmproj $CROW_MODELS/mmproj-F16.gguf\n"
+)
+
+
 def run(repo, extra=None):
     cmd = [sys.executable, TOOL, "--repo", repo]
     for e in extra or []:
@@ -156,7 +168,7 @@ def client_source(sampling, keys=None, body_keys=None, prose=False):
 
 
 def fixture(tmp, readme=None, install=None, manifest_patch=None, client=None,
-            gui=None, sep=None):
+            gui=None, sep=None, linux_line=None, install_flash=None):
     """A minimal repo the checker can be pointed at."""
     gap = BLANK if sep is None else sep
     root = os.path.join(tmp, "repo")
@@ -171,11 +183,13 @@ def fixture(tmp, readme=None, install=None, manifest_patch=None, client=None,
     with open(os.path.join(root, "README.md"), "w", encoding="utf-8") as fh:
         fh.write("version-%s-brightgreen\n\n```\n%s%s```\n"
                  % (ver, readme if readme is not None else GOOD_LINE,
-                    gap + QWEN_LINE + gap + FLASH_LINE))
+                    gap + QWEN_LINE + gap + FLASH_LINE + gap
+                    + (linux_line if linux_line is not None else FLASH_LINUX_LINE)))
     with open(os.path.join(root, "install.ps1"), "w", encoding="utf-8") as fh:
         fh.write('param([string] $Version = "%s")\n%s%s'
                  % (ver, install if install is not None else GOOD_LINE,
-                    gap + QWEN_LINE + gap + FLASH_LINE))
+                    gap + QWEN_LINE + gap
+                    + (install_flash if install_flash is not None else FLASH_LINE)))
     with open(os.path.join(root, "cli", "crow.py"), "w", encoding="utf-8") as fh:
         fh.write('VERSION = "%s"\n' % ver)
         fh.write(client_source(src["sampling"]) if client is None else client)
@@ -201,7 +215,7 @@ def main():
         # 1 - positive control on a fixture, so a red real repo cannot mask a
         #     checker that says no to everything.
         code, out = run(fixture(tmp, ))
-        check("1 a repo that agrees passes", code == 0 and "8 of 8" in out, out.strip()[-200:])
+        check("1 a repo that agrees passes", code == 0 and "9 of 9" in out, out.strip()[-200:])
         shutil.rmtree(os.path.join(tmp, "repo"))
 
         # 2 - a changed value must be named, not just counted.
@@ -323,7 +337,7 @@ def main():
         #      applied to the rule that counts - a sentence is not a copy.
         code, out = run(fixture(tmp, client=client_source(samp, prose=True)))
         check("14 prose quoting the value is not a second copy",
-              code == 0 and "8 of 8" in out, out.strip()[-300:])
+              code == 0 and "9 of 9" in out, out.strip()[-300:])
         shutil.rmtree(os.path.join(tmp, "repo"))
 
         # 15 - written exactly once, but in the wrong file. "Exactly one" alone
@@ -356,7 +370,43 @@ def main():
         #      the real files take, but one is -- and one was enough to break it.
         code, out = run(fixture(tmp, sep="\n"))
         check("17 commands one blank line apart do not borrow each other's flags",
-              code == 0 and "8 of 8" in out, out.strip()[-300:])
+              code == 0 and "9 of 9" in out, out.strip()[-300:])
+        shutil.rmtree(os.path.join(tmp, "repo"))
+
+        # 18 - the Linux copy is held to the MERGED line. Before 2026-09-16 a
+        #      README whose bash line still said -ncmoe 30 was green, because
+        #      compare() accepts either shape and the PowerShell line satisfied
+        #      the key. Now the key has a second docs entry that only the merged
+        #      line (ncmoe 31, -t 24) satisfies, so the Windows placement in the
+        #      Linux copy is red and the message names the flag.
+        wrong = FLASH_LINUX_LINE.replace("-ncmoe 31 -t 24", "-ncmoe 30")
+        code, out = run(fixture(tmp, linux_line=wrong))
+        check("18 a Linux copy at the Windows placement is red",
+              code != 0 and "on linux]" in out and "8 of 9" in out, out.strip()[-300:])
+        shutil.rmtree(os.path.join(tmp, "repo"))
+
+        # 19 - ONE FLAG AT A TIME, because case 18 drops two (-ncmoe 31 AND
+        #      -t 24) and a case that changes two things proves neither. `-t` is
+        #      the flag the `linux` object added, and its spec is the newest
+        #      regex in FLAG_SPECS -- a lookbehind that let `-ctk`, `-ctv` or
+        #      `--moe-stream-io-threads` match would make it green everywhere
+        #      and this case is what notices.
+        wrong = FLASH_LINUX_LINE.replace(" -t 24", "")
+        code, out = run(fixture(tmp, linux_line=wrong))
+        check("19 a Linux copy without -t is red and names threads",
+              code != 0 and "on linux]" in out and "threads: missing" in out,
+              out.strip()[-300:])
+        shutil.rmtree(os.path.join(tmp, "repo"))
+
+        # 20 - THE INSTALLER HAS ONE SHAPE AND IT IS THE WINDOWS ONE. install.ps1
+        #      starts both servers on that machine, so a flag wrong there is a
+        #      broken run. Until 2026-09-16 the installer was compared against
+        #      the Linux shape as an alternative too, so this very file -- the
+        #      Linux line pasted into install.ps1 -- read green.
+        code, out = run(fixture(tmp, install_flash=FLASH_LINUX_LINE))
+        check("20 install.ps1 at the Linux placement is red",
+              code != 0 and "install.ps1 [flash-next-q2-k-xl]" in out
+              and "ncmoe" in out, out.strip()[-400:])
         shutil.rmtree(os.path.join(tmp, "repo"))
 
     print()

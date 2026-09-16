@@ -63,6 +63,7 @@ FLAG_SPECS = [
     ("batch", r"-b\s+(\d+)", "int"),
     ("ubatch", r"-ub\s+(\d+)", "int"),
     ("ncmoe", r"(?<![-\w])-ncmoe\s+(\d+)", "int"),
+    ("threads", r"(?<![-\w])-t\s+(\d+)", "int"),
     ("fit", r"--fit\s+(\S+)", "str"),
     ("load_mode", r"--load-mode\s+(\S+)", "str"),
     # #140. The region ANCHORS on this token, so finding the region is what its
@@ -186,7 +187,23 @@ def extract(text):
             # Every copy writes the install directory differently -
             # %LOCALAPPDATA%\Crow, $InstallTo, an absolute path. Only the leaf
             # matters: the flag must point at the session directory.
-            found[key] = m.group(1).replace("\\", "/").rstrip("`").split("/")[-1]
+            #
+            # A QUOTE IS SHELL SYNTAX, NOT PART OF THE PATH, and until 2026-09-16
+            # it was read as part of it. README.md writes the Qwen line as
+            # `--slot-save-path "$env:LOCALAPPDATA\Crow\session"` where install.ps1
+            # prints the same path bare, and the closing quote rode into the leaf:
+            # the correct README line was reported as `session"`, manifest says
+            # `session`, and the page had to be written around the parser instead
+            # of for the reader. That is the one failure a drift checker may not
+            # have -- red at a copy that agrees -- because it is what teaches
+            # everyone to ignore it. Stripped for the reason the PowerShell
+            # line-continuation backtick already was: both are the shell's
+            # punctuation around a value, and neither is in the value.
+            #
+            # It cannot hide a real difference: no directory's name ends in a
+            # quote, so nothing that was equal before is equal now by this line.
+            found[key] = (m.group(1).replace("\\", "/")
+                          .strip("`\"'").split("/")[-1].strip("`\"'"))
         else:
             found[key] = m.group(1).rstrip("`")
     return found
@@ -197,6 +214,11 @@ def expected(server):
     # same convention as everywhere else in the file. Treating one as a flag
     # made every copy red the moment a note moved into the server block.
     want = {k: v for k, v in server.items() if not k.startswith("_")}
+    # `linux` IS NOT A FLAG. It is the per-OS exception object crow_core merges
+    # over the line on Linux (2026-09-16, `_why_linux` beside it); the Linux
+    # copy of the line is checked against the MERGED line by expected_on_linux
+    # below, so neither copy is held to the other machine's placement.
+    want.pop("linux", None)
     # EVERY NORMALISATION BELOW IS CONDITIONAL, AND THAT IS THE WHOLE OF #111's
     # CHANGE HERE. One server block could be assumed to carry all three keys.
     # A map of them cannot: the Qwen entry declares no expert stream and no
@@ -226,6 +248,19 @@ def expected(server):
     return want
 
 
+def expected_on_linux(server):
+    """The line as Linux boots it, or None when the line has no `linux` object.
+
+    A copy written for Linux (README's bash line, docs/user-guide/linux.md)
+    must agree with THIS, and a copy written for Windows with expected(); a
+    region that matches either is the operating point. Without this, the Linux
+    copy could only be green by lying about the placement it was measured at.
+    """
+    if not isinstance(server.get("linux"), dict):
+        return None
+    return expected({**server, **server["linux"]})
+
+
 def server_keys(manifest):
     """The model keys that declare a server line, in manifest order.
 
@@ -242,7 +277,7 @@ def server_keys(manifest):
     return keys, unknown
 
 
-def compare(label, text, want):
+def compare(label, text, want, want_linux=None):
     """A file passes if ONE of its command lines is the operating point.
 
     Not "some flag somewhere in the file matches": a document may legitimately
@@ -255,19 +290,21 @@ def compare(label, text, want):
     if not regions:
         return {}, ["no llama-server command line found in this file"]
 
+    shapes = [want] + ([want_linux] if want_linux else [])
     best, best_problems = {}, None
     for region in regions:
         got = extract(region)
-        problems = []
-        for key, value in want.items():
-            if key not in got:
-                problems.append("%s: missing" % key)
-            elif got[key] != value:
-                problems.append("%s: %r, manifest says %r" % (key, got[key], value))
-        if not problems:
-            return got, []
-        if best_problems is None or len(problems) < len(best_problems):
-            best, best_problems = got, problems
+        for shape in shapes:
+            problems = []
+            for key, value in shape.items():
+                if key not in got:
+                    problems.append("%s: missing" % key)
+                elif got[key] != value:
+                    problems.append("%s: %r, manifest says %r" % (key, got[key], value))
+            if not problems:
+                return got, []
+            if best_problems is None or len(problems) < len(best_problems):
+                best, best_problems = got, problems
     return best, best_problems
 
 
@@ -545,6 +582,7 @@ def main(argv):
               % ", ".join(sorted(unknown)))
         return 2
     wants = [(key, expected(manifest["servers"][key])) for key in keys]
+    linux = {key: expected_on_linux(manifest["servers"][key]) for key in keys}
 
     # #128. THE INSTALLER CARRIES EVERY KEY; THE DOCUMENTS SHARE THEM OUT.
     #
@@ -611,6 +649,13 @@ def main(argv):
             failed += 1
             print("  FAILED   %-34s does not exist" % where)
             continue
+        # THE INSTALLER IS HELD TO THE WINDOWS SHAPE ALONE, and no alternative
+        # is passed. install.ps1 is the file that STARTS both servers on that
+        # machine, so a flag wrong there is a broken run rather than a stale
+        # sentence -- and a second accepted shape would let its line drift to
+        # the Linux placement (-ncmoe 31 -t 24) and still read green. The Linux
+        # line has no installer copy to carry: install.sh prints the argv
+        # crow_core.server_command builds and writes none of its own down.
         got, problems = compare(where, read(path), want)
         if problems:
             failed += 1
@@ -620,15 +665,23 @@ def main(argv):
         else:
             print("  OK       %-34s all %d flags match" % (where, len(want)))
 
-    for key, want in wants:
+    # THE LINUX SHAPE IS ITS OWN DOCS CHECK. compare() accepts either shape, so
+    # a page that carries the Windows line is green for the key whatever its
+    # Linux line says -- measured 2026-09-16: README's bash line at `-ncmoe 30`
+    # passed while the manifest said 31. So a line with a `linux` object has
+    # a second entry here, held to the merged line ONLY: the Windows line does
+    # not satisfy it, and a Linux copy that is wrong or missing is red.
+    shapes = [(key, want, linux[key], "docs [%s]" % key) for key, want in wants]
+    shapes += [(key, linux[key], None, "docs [%s on linux]" % key)
+               for key, _want in wants if linux[key]]
+    for key, want, alt, where in shapes:
         checked += 1
-        where = "docs [%s]" % key
         carried, misses = None, []
         for doc_label, doc_path in docs:
             if not os.path.exists(doc_path):
                 misses.append((doc_label, ["does not exist"]))
                 continue
-            _got, problems = compare(where, read(doc_path), want)
+            _got, problems = compare(where, read(doc_path), want, alt)
             if problems:
                 misses.append((doc_label, problems))
             else:

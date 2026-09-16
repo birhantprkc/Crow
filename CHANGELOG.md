@@ -3,6 +3,133 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 2.2.0 — unreleased
+
+Crow runs on Linux. Not a port of the page to a second toolkit: the same `cli/crow_gui.py`, the
+same core, the same manifest and the same operating point, with one module between them and the
+operating system. Windows does not move — every value it had is byte-identical, and the three
+production bugs this port surfaced were Windows bugs.
+
+### One platform seam, and the core stops knowing its OS
+
+`cli/crow_platform.py` is the one module that answers "where" and "how" per platform: XDG
+directories, install and models roots, the server binary name and search order, `/proc`-based
+server discovery without `psutil`, spawn flags, kill by process group, the shell, the browser
+candidates, the font store, the updater argv. Standard library only, one-way — it never imports
+the core. `cli/crow_core.py` calls it at 45 sites and no longer mentions `sys.platform` or
+`os.name`.
+
+| | Windows, unchanged | Linux |
+|---|---|---|
+| install root | `%LOCALAPPDATA%\Crow` | `${XDG_DATA_HOME:-~/.local/share}/crow` |
+| settings, secrets, skills, MCP | `%LOCALAPPDATA%\Crow\` | `~/.config/crow/` |
+| sessions, `booted.json` | `%LOCALAPPDATA%\Crow\` | `~/.local/state/crow/` |
+| server boot logs | `<cwd>\runs\` | `~/.local/state/crow/log/` |
+| models | `<install>\models` | `<install>/models`, a link to the tree; `$CROW_MODELS` overrides it |
+
+**Three Windows assumptions were production bugs and are fixed.** The `run_command` path
+boundary (#144) knew only `C:\`, UNC and `%VAR%` shapes and released nothing on POSIX;
+`render_page` looked for a browser before validating its argument and built `file:////tmp`; the
+font install refused off Windows.
+
+### The window on Wayland
+
+Verified live on Hyprland 0.56.2: the window maps floating as class `crow`, streams a turn,
+discovers a running server's `--port`, pastes a clipboard image, opens the browser pane. What
+Wayland and WebKitGTK refused, and what answers it:
+
+| | |
+|---|---|
+| the process died before the surface mapped, `Gdk Error 71` | WebKitGTK's DMA-BUF renderer against NVIDIA explicit sync. `__NV_DISABLE_EXPLICIT_SYNC=1` is set at import, before `webview` is loaded; `CROW_GDK_BACKEND=x11` is the escape hatch |
+| `create_window(html=…)` yielded `about:blank`, `file://` never loaded | the window is created with a placeholder and the page arrives through `load_html` with a file base |
+| `pywebview-drag-region` and `window.move` are no-ops | `Api.begin_move` and `Api.begin_resize(edge)` hand `begin_move_drag` / `begin_resize_drag` to the compositor from the title bar and eight edge grips, on the GTK main thread |
+| a `hidden=True` window can never be shown on GTK | the browser pane clears the flag before `show()` and is a floating toplevel of its own — under Wayland it cannot be glued to the main window |
+| no Win32 clipboard | `wl-paste` / `wl-copy`, `xclip` as the X11 fallback |
+| the launcher and the float rule had nothing to key on | `GLib.set_prgname("crow")` before the window opens, so the app id is `crow`. PNG icons 16…512, `cli/crow.desktop`, and the rule in both Hyprland dialects — Lua for Omarchy, `.conf` for ini setups |
+
+### The Linux placement: `-ncmoe 31 -t 24`, measured
+
+The same card, one gigabyte less of it: the Wayland desktop holds ~1,083 MiB before the server
+starts, and the Windows line was measured with 1,059 MiB left. At `-ncmoe 30` the model loaded
+and died on its first request (`cublasCreate`: the resource allocation failed). At 31 the card
+settles at 31,081–31,213 MiB after load, 31,334 peak in a turn. llama.cpp's Linux thread default
+chose 4 of the Ultra 9 285K's 24 cores; two 200-token turns per arm, temperature 0, thinking off:
+
+| threads | decode tok/s |
+|---|---|
+| default (4) | 26.41 / 25.57 |
+| `-t 8` | 34.39 / 31.32 |
+| **`-t 24`** | **36.72 / 36.22** |
+| `-t 8 -tb 24` | 33.73 / 34.59 |
+
+The two flags live as the line's `linux` object in `manifests/operating-point.json`, merged over
+the line by `server_command` on Linux only; `check_operating_point.py` holds the Linux copies to
+the merged line and the Windows copies to the line. Not measured: a cold 33k-token turn, the
+16–20 thread range, and how much of the gap to Windows (41.76) is the extra CPU layer.
+
+### `install.sh`, and an engine that is built rather than downloaded
+
+`bash install.sh`, or `curl -fsSL …/install.sh | bash`. install.ps1's contract translated: the
+same five steps in the same order, the same per-file sha256 verification, the same refusal to
+elevate and to download the model. Preflight (Python, PyGObject, `wl-clipboard`, VRAM, RAM,
+disk) runs before anything is fetched. It writes `$CROW_HOME/manifest.sha256` and reads it on
+the next run, so a re-run reports what moved underneath it — and the only files it removes are
+the ones the previous manifest listed and the new payload no longer ships, so `bin/`, `cuda/`,
+`src/`, `build/`, `venv/` and a model tree beside them survive. `--selftest` drives 25 checks,
+including the ones that must fail.
+
+**The model root is a link, because a variable reached one entry point.** `--models DIR` wrote
+`export CROW_MODELS="DIR"` into `$CROW_HOME/env`, and the generated `$CROW_HOME/bin/crow` was the
+only thing that sourced it — so the window found the tree and nothing else did: `python3
+~/.local/share/crow/tools/start-server.py flash-next-q2-k-xl` answered `model 'flash-next-q2-k-xl'
+is not on disk`. It is now `$CROW_HOME/models`, a symlink to the tree, which is exactly where
+`crow_platform.models_dir()` looks with nothing set — the fallback its own docstring describes,
+written down on disk instead of into one process's environment, and read by the window, the
+terminal client and `tools/start-server.py` alike. A checkout is its own `<install>`
+(`crow_core.INSTALL_ROOT` is the parent of `cli/`), so it takes the same link and the last step of
+the installer prints that line rather than writing into somebody's git tree. `$CROW_MODELS` is what
+that docstring always called it: the
+override, for one shell. `$CROW_HOME/env` is no longer written and a run removes the one an earlier
+run left, byte for byte or not at all — an env file with a line of the user's own in it is kept and
+named. A real `<install>/models` directory with files in it is never replaced: the installer warns
+and prints the two lines that would move it aside. The model tree is not payload and never was, so
+the link is not in `manifest.sha256` and a re-run does not report it as drift.
+
+`tools/build-llama-server.sh` builds the CUDA engine, because the Windows release asset is an
+`.exe` and there is no Linux one: llama.cpp pin `6c84c7d5d` (PR #27742, `qwen4exp`) plus PR
+#27880 and PR #28040 — the three commits the operating point was measured at — CUDA 13.3 from
+NVIDIA's redistributable components, `sm_120`, no root, everything under `$CROW_HOME`. The
+result is not accepted until `ldd` resolves `libcudart` / `libcublas` / `libcublasLt` to that
+same prefix: compiling against one CUDA major and linking another's runtime produces failures
+that read like a warmup abort (upstream #28403, #25060).
+
+### The drift checker read a quote as part of a path
+
+`tools/check_operating_point.py` captured `--slot-save-path "…\Crow\session"` with its closing
+quote and compared `session"` against the manifest's `session`, so the README's Qwen line — which
+is correct, and which a human copies and runs — had been red since it was written, and the
+installer's own printed lines were laid out around the parser instead of around the reader. A
+quote is the shell's punctuation, not part of the value, and is now stripped the way the
+PowerShell line-continuation backtick already was. **8 of 8 sources agree** where it was 7; 9 of 9 with the Linux entry.
+
+### Also
+
+| | |
+|---|---|
+| `pyproject.toml` | hatchling, version read out of `cli/crow.py` so there is no second literal; `pywebview>=6.2`, extras `voice` and `dev`; ruff configured for `E9`/`F63`/`F7`/`F82` only — syntax and undefined names, nothing about style |
+| `justfile` | `check`, `test`, `lint`, `run`, `serve`, `engine`, `install` |
+| `.github/workflows/ci.yml` | ubuntu-latest and windows-latest: ruff, the suites, `check_shared_core`, `check_operating_point`, and `install.sh --selftest` on Linux |
+| [`docs/user-guide/linux.md`](docs/user-guide/linux.md) | install, the paths table, the window on Hyprland, models, engine, troubleshooting |
+| README | a **Linux** section with its own table, the install line, the model and engine lines, and the by-hand server line in bash — held to `manifests/operating-point.json` by the same checker as the PowerShell one |
+
+**Suites.** 1,947 cases, 0 failures: `test_crow_core` + `test_crow` 1,313 (25 of them failed on
+Linux before the seam), `test_crow_gui` 634. `check_shared_core` 79 of 79. `check_operating_point`
+9 of 9. `install.sh --selftest` 25 of 25.
+
+**Not verified:** the pointer-driven drag and resize themselves — the bridge, the edge table and
+the GTK call are covered by the suite, but synthesising a real button press against the
+compositor needs privileges the target machine does not have.
+
 ## 2.1.0 — 2026-09-01
 
 Flash-Next gets the placement it should have had, the engine gets its last two patches, and the

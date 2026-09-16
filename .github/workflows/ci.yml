@@ -1,0 +1,103 @@
+# The gate, on both platforms Crow ships for.
+#
+# WHAT RUNS WHERE IS NOT SYMMETRIC, AND THE ASYMMETRY IS NAMED RATHER THAN HIDDEN.
+# cli/test_crow_gui.py has one case -- TheCompositorMovesTheWindowTests.
+# test_the_bridge_offers_both_gestures -- that reaches through Api._native_drag
+# into `gi.repository.Gdk`, so it needs PyGObject actually importable. PyGObject
+# has no Windows wheel (it wants the GObject headers and the typelibs, which come
+# from a distribution, not from pip), so on windows-latest that case cannot pass
+# and the whole suite is run on Linux only. The two suites that DO run on Windows
+# are the ones the Windows product is made of: 1,313 cases over the core and the
+# terminal client.
+#
+# NOT `continue-on-error`. A step that is allowed to fail is a step nobody reads;
+# either a check runs and has to be green, or it is not claimed here at all.
+#
+# THE LINUX LEG USES THE RUNNER'S OWN python3, not setup-python's. `gi` is a
+# compiled extension installed by apt for the system interpreter, so it is
+# readable only by an interpreter of that exact ABI -- and a venv made with
+# --system-site-packages on top of it is exactly what install.sh builds on the
+# target machine. Mirroring the machine beats matching a version number.
+
+name: check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Windows'
+        with:
+          python-version: '3.12'
+
+      - name: GTK bindings and the clipboard tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            python3-gi python3-venv gir1.2-gtk-3.0 gir1.2-webkit2-4.1 wl-clipboard
+
+      - name: The interpreter, and pywebview + ruff in it
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            # .venv and not .ci: ruff's default exclude list already has it, so
+            # `ruff check .` below cannot walk into the interpreter it is run by.
+            python3 -m venv --system-site-packages .venv
+            PY="$PWD/.venv/bin/python"
+            echo "SUITES=test_crow_core test_crow test_crow_gui" >> "$GITHUB_ENV"
+          else
+            PY=python
+            echo "SUITES=test_crow_core test_crow" >> "$GITHUB_ENV"
+          fi
+          echo "PY=$PY" >> "$GITHUB_ENV"
+          "$PY" -m pip install --quiet --upgrade pip
+          "$PY" -m pip install --quiet pywebview ruff
+          "$PY" -c "import webview; print('webview imports without a display')"
+
+      - name: ruff
+        run: |
+          "$PY" -m ruff check .
+
+      - name: the unit suites
+        env:
+          # THE RUNNER'S %TEMP% IS AN 8.3 SHORT NAME. On windows-latest it is
+          # C:\Users\RUNNER~1\AppData\Local\Temp, and tempfile hands that
+          # spelling to the suites while the code under test answers with the
+          # long one (runneradmin). Five working-directory tests compare the two
+          # and were red on 2026-09-16 for that reason alone; every one is green
+          # on a machine whose temp path has no short name. runner.temp
+          # (D:\a\_temp) has none. Step-level, because the runner context is
+          # not available to a job-level env (the first attempt failed to parse).
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: |
+          cd cli && "$PY" -m unittest $SUITES
+
+      - name: the shared-core rules
+        run: |
+          "$PY" tools/check_shared_core.py
+
+      - name: the operating point, against every written copy of it
+        run: |
+          "$PY" tools/check_operating_point.py
+
+      - name: install.sh selftest
+        if: runner.os == 'Linux'
+        run: bash install.sh --selftest
