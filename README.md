@@ -182,7 +182,7 @@ Everything is under [`docs/`](docs/README.md).
 | **Operating points** | [The four lines](docs/operating-points.md) · [Measurements](docs/measurements/README.md) · [Placement sweep](docs/measurements/flash-next-placement.md) · [MCP cost](docs/measurements/mcp-cost.md) |
 | **Developer guide** | [Architecture](docs/developer-guide/architecture.md) · [Testing](docs/developer-guide/testing.md) · [Repo](docs/developer-guide/repo.md) · [Not built](docs/developer-guide/not-built.md) |
 | **Plans** | [Crow on Linux](docs/plans/linux-implementation-plan.md) |
-| **Earlier READMEs** | [v0.5.1, Qwen-first](docs/README-v0.5.1-qwen.md) · [v0.5.1, the one before it](docs/README-v0.5.1-deepseek.md) |
+| **Earlier READMEs** | [v0.5.1, Qwen-first](docs/archive/README-v0.5.1-qwen.md) · [v0.5.1, the one before it](docs/archive/README-v0.5.1-deepseek.md) |
 
 ## Licence
 

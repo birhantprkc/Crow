@@ -248,6 +248,13 @@ installer_env_p() {
 # refers to them, and cli/test_crow_gui.py alone is 900 kB in every install.
 # __pycache__ for the reason the Windows packager states: -Recurse once shipped
 # a .pyc of the packaging machine's Python version.
+#
+# tools/archive/ IS NOT SHIPPED EITHER, for the same reason one directory over:
+# it is the lab -- the dated measurement harnesses that produced the numbers in
+# CHANGELOG.md, PowerShell and CUDA probes against a machine nobody installing
+# this has. Nothing on any path the product takes reads them (that is the rule
+# in docs/plans/linux-implementation-plan.md 5.3 and why they are archived), and
+# they are the larger half of tools/ by file count.
 payload_paths() {
     local root="$1" d f
     {
@@ -255,6 +262,7 @@ payload_paths() {
             [ -d "$root/$d" ] || continue
             ( cd "$root" && find "$d" -type f \
                 ! -path '*/__pycache__/*' \
+                ! -path 'tools/archive/*' \
                 ! -name '*.pyc' ! -name '*.pyo' \
                 ! -name 'test_*.py' -print )
         done
@@ -394,13 +402,15 @@ selftest() {
     # edited, a file that was deleted, and a file the new payload dropped.
     # Silence is the interesting half -- a manifest that reports drift on a
     # clean install is one nobody reads by the third run.
-    mkdir -p "$tmp/src/cli" "$tmp/dst"
+    mkdir -p "$tmp/src/cli" "$tmp/src/tools/archive/2026-08" "$tmp/dst"
     printf 'print(1)\n' > "$tmp/src/cli/crow.py"
     printf 'print(2)\n' > "$tmp/src/cli/crow_gui.py"
     printf 'x\n'        > "$tmp/src/LICENSE"
     printf 'print(3)\n' > "$tmp/src/cli/test_crow.py"      # must not ship
+    printf 'x\n'        > "$tmp/src/tools/start-server.py" # must ship
+    printf 'x\n'        > "$tmp/src/tools/archive/2026-08/measure-vram.ps1"  # must not
     ( cd "$tmp/src" && tar cf - . ) | ( cd "$tmp/dst" && tar xf - )
-    rm -f "$tmp/dst/cli/test_crow.py"
+    rm -f "$tmp/dst/cli/test_crow.py" "$tmp/dst/tools/archive/2026-08/measure-vram.ps1"
     # A MODEL TREE IS NOT PAYLOAD, in either direction: 73 GiB must never be
     # sha256'd into manifest.sha256 on the way in, and the link at
     # <install>/models must not read as drift on the way back out. Both hold
@@ -424,6 +434,13 @@ selftest() {
           "$([ -L "$tmp/dst/models" ] \
              && [ -z "$(manifest_audit "$tmp/dst" "$tmp/dst/manifest.sha256")" ] && echo 0 || echo 1)" \
           "$(manifest_audit "$tmp/dst" "$tmp/dst/manifest.sha256")"
+    # THE LAB DOES NOT SHIP, and the positive half is the half that matters: a
+    # `find tools` that excluded too much would pass an "archive is absent" check
+    # by shipping no tools at all.
+    check "tools/archive is not in the payload, and the rest of tools/ is" \
+          "$(grep -q 'tools/archive/' "$tmp/dst/manifest.sha256" && echo 1 \
+             || { grep -q ' tools/start-server.py$' "$tmp/dst/manifest.sha256" && echo 0 || echo 1; })" \
+          "$(grep ' tools/' "$tmp/dst/manifest.sha256" | sed 's/^.*  //' | tr '\n' ' ')"
     printf 'print(99)\n' > "$tmp/dst/cli/crow_gui.py"
     rm -f "$tmp/dst/LICENSE"
     out="$(manifest_audit "$tmp/dst" "$tmp/dst/manifest.sha256")"
