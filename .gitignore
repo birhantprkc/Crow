@@ -41,3 +41,8 @@ dist/
 # Same, for the name the manifest actually resolves to in a checkout:
 # <install>/session, where <install> is the repository root.
 /session/
+
+# ruff's cache, and the metadata a `pip install -e .` leaves behind. Both are
+# rebuilt from pyproject.toml and neither is anybody else's business.
+.ruff_cache/
+*.egg-info/

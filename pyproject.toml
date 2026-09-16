@@ -1,0 +1,123 @@
+# Packaging metadata and the lint configuration. NOT a change of how Crow is
+# installed: install.ps1 and install.sh copy files, and the terminal client
+# still needs nothing but the standard library. This file exists so that
+#
+#   * `ruff check .` has one configuration instead of a flag on every caller,
+#   * the version number has exactly one home (cli/crow.py) on the packaging
+#     side as well -- hatch reads the literal out of it rather than carrying a
+#     second copy that tools/check_operating_point.py would then have to police,
+#   * `pip install -e .[voice]` is a way to get the window's optional extras
+#     without remembering what they are called.
+#
+# NOT PUBLISHED TO PyPI. The name is the project's, the distribution is the
+# release zip and the two installers.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "crow-agent"
+dynamic = ["version"]
+description = "Crow: a local-LLM agent with tools, memory, vision and a browser pane"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+authors = [{ name = "Robin Ludwig" }]
+keywords = ["llm", "agent", "llama.cpp", "gguf", "local"]
+# 3.9 IS MEASURED, NOT PICKED. Every cli/*.py carries
+# `from __future__ import annotations`, so the `X | None` annotations cost
+# nothing at run time and `ast.parse(..., feature_version=(3, 8))` accepts all
+# of them. What does not run on 3.8 is `str.removesuffix`, used twice in
+# cli/crow_core.py (the /slots save and restore URLs). pywebview's own floor is
+# 3.8, so the client is what sets this one.
+classifiers = [
+    "Environment :: X11 Applications :: GTK",
+    "Environment :: Win32 (MS Windows)",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+]
+
+# THE WINDOW'S ONLY DEPENDENCY, and it is deliberately plain. `pywebview[gtk]`
+# pulls a PyGObject wheel that then shadows the distribution's build, which is
+# the one that has the GTK and WebKit2 typelibs beside it -- see install.sh's
+# --system-site-packages venv and the pacman line it prints.
+dependencies = ["pywebview>=6.2"]
+
+[project.optional-dependencies]
+voice = ["faster-whisper", "sounddevice"]
+dev = ["ruff"]
+
+[project.urls]
+Homepage = "https://github.com/nibor1896/Crow"
+Documentation = "https://github.com/nibor1896/Crow/tree/main/docs"
+
+[project.scripts]
+crow = "crow:main"
+crow-gui = "crow_gui:main"
+
+# ONE version literal, in cli/crow.py, which is where cli/crow.py's own
+# `VERSION` already is and where tools/check_operating_point.py looks for it.
+# hatchling's default regex reads `VERSION = "x.y.z"`; the pattern is written
+# out anyway, because a default that changes upstream would silently start
+# reading something else.
+[tool.hatch.version]
+path = "cli/crow.py"
+pattern = '^VERSION\s*=\s*"(?P<version>[^"]+)"'
+
+# The clients are TOP-LEVEL MODULES and not a package, because that is how they
+# import each other: cli/crow_gui.py says `import crow_core`, and re-rooting
+# them under a package name would break every one of those imports as well as
+# the `python cli/crow.py` start line the README prints.
+[tool.hatch.build.targets.wheel]
+sources = ["cli"]
+only-include = ["cli"]
+exclude = ["cli/test_*.py"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["cli", "manifests", "tools", "patches", "docs",
+                "README.md", "LICENSE", "NOTICE", "CHANGELOG.md",
+                "install.ps1", "install.sh"]
+
+# ---------------------------------------------------------------------------
+# ruff
+#
+# WHAT IS SELECTED IS THE WHOLE DECISION, and it is four rule groups: E9 (syntax
+# errors), F63 (comparisons that cannot mean what they say), F7 (statements in
+# the wrong place) and F82 (undefined names). Every one of them is a bug that
+# the file would hit at run time.
+#
+# WHAT IS NOT SELECTED, ON PURPOSE: everything about style. This codebase is
+# deliberately unformatted -- the comments are the documentation, the alignment
+# in the tables is load-bearing, and a formatter would rewrite 60,000 lines of
+# it to say the same thing. A linter that argues about quotes teaches people to
+# stop reading it, and then it stops catching the undefined name too.
+#
+# line-length is MEASURED rather than picked: over cli/*.py the 95th percentile
+# of line lengths is 80 and the 99th is 88, with 32 lines past 100 (data tables
+# and one embedded blob). 100 is therefore above where the code actually lives.
+# It is not enforced -- E501 is not selected -- it is what an editor reading
+# this file should wrap at.
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+extend-exclude = ["tools/archive", "docs"]
+# `queue` IS DECLARED DEFINED, and this is the narrowest knob that exists for
+# what it fixes. cli/crow_core.py imports the module lazily inside the five
+# functions that need it (`def start_update_check(...) -> "queue.Queue | None"`,
+# and the import is the first statement in the body), so the name in the QUOTED
+# annotation is never evaluated at run time -- F821 reads the annotation as
+# code and reports two undefined names that cannot fail.
+#
+# NOT `per-file-ignores = {"cli/crow_core.py" = ["F821"]}`, which was the
+# obvious fix and is the wrong one: it would switch the undefined-name rule off
+# for the largest file in the project, which is the file most likely to acquire
+# a real one. This switches it off for a single NAME and leaves every other
+# name in every file red.
+builtins = ["queue"]
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
+

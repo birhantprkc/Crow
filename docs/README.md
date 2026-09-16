@@ -25,6 +25,7 @@ The [README](../README.md) covers requirements, install and start. Everything el
 | [Remote models](user-guide/remote-models.md) | subscriptions, dialects, routing |
 | [Browser panel](user-guide/browser.md) | tabs, the address bar, `render_page` |
 | [Window](user-guide/window.md) | the GUI |
+| [Linux](user-guide/linux.md) | install, paths, the window on Wayland, troubleshooting |
 
 ## Measurements
 
