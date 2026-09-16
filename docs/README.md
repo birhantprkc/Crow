@@ -65,5 +65,5 @@ Kept for the measurements in them. Neither is current, and no checker holds them
 
 | | |
 |---|---|
-| [README v0.5.1, Qwen-first](README-v0.5.1-qwen.md) | the page as it stood when Qwen3.8-27B was the operating point |
-| [README v0.5.1, the one before it](README-v0.5.1-deepseek.md) | the DeepSeek-0731 page |
+| [README v0.5.1, Qwen-first](archive/README-v0.5.1-qwen.md) | the page as it stood when Qwen3.8-27B was the operating point |
+| [README v0.5.1, the one before it](archive/README-v0.5.1-deepseek.md) | the DeepSeek-0731 page |

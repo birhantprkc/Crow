@@ -11,14 +11,14 @@ runs/
 digests/
 *.jsonl
 
-# Compiler artefacts from tools/probe-89.bat
-tools/obj/
+# Compiler artefacts from tools/archive/2026-08/probe-89.bat
+tools/archive/2026-08/obj/
 *.obj
 
-# Build output of tools/build-bench.ps1: binary, objects and the ggml-base.dll it
+# Build output of tools/archive/2026-08/build-bench.ps1: binary, objects and the ggml-base.dll it
 # needs beside it. Rebuilt from source, and tied to a build-native tree that the next
 # ninja run replaces.
-tools/build-bench/
+tools/archive/2026-08/build-bench/
 
 # code blocks the CLI writes out of a reply
 .crow/
