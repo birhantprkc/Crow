@@ -13059,6 +13059,8 @@ class ThePlatformSeamAnswersForOneSystemAtATimeTests(unittest.TestCase):
         with open(os.path.join(where, "cmdline"), "wb") as fh:
             fh.write(b"\0".join(a.encode("utf-8") for a in args) + b"\0")
 
+    @unittest.skipUnless(crow_platform.IS_LINUX, "/proc is the Linux listing; "
+                         "Windows asks CIM, tested through running_servers")
     def test_a_running_server_is_read_out_of_proc(self):
         """Kein psutil, kein Unterprozess: vier Dateilesungen. Der Befehl wird
         so zurueckgegeben, wie eine Kommandozeile ihn getragen haette -- mit
@@ -13250,6 +13252,9 @@ class ThePlatformSeamAnswersForOneSystemAtATimeTests(unittest.TestCase):
         self.assertIn("import crow_platform", _source("crow_core.py"))
 
 
+@unittest.skipUnless(crow_platform.IS_LINUX,
+                     "the Linux boot of the shipped line; on Windows the line boots "
+                     "as it always did and TheModelMenuBootsTests holds it")
 class TheShippedOperatingPointBootsOnLinuxTests(unittest.TestCase):
     """Der gemessene Betriebspunkt, auf der anderen Plattform gestartet.
 
