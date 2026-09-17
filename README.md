@@ -177,7 +177,7 @@ Every MCP tool joins the same list as `mcp_<server>_<tool>`, with its own class.
 | **Default, Windows** | `Qwen3.8-Flash-Next-UD-Q2_K_XL` | **41.76 tok/s** | 8083 | llama.cpp, local build |
 | **Default, Linux** | `Qwen3.8-Flash-Next-UD-Q2_K_XL` | **41.8 tok/s** | 8083 | llama.cpp, built here |
 | Second | `Qwen3.8-27B-UD-Q4_K_XL` | 123.05 / 133.18 tok/s | 8082 | llama.cpp, packaged |
-| Third (Rust) | `CNQ4.5-M` NVFP4 container | **45.1 tok/s** | 8099 | crow-nest `v0.2.0` |
+| Third (Rust) | `CNQ4.5-M` NVFP4 container | **45.1 tok/s** (Windows) · 36.8 tok/s at 16k context (Linux) | 8099 | crow-nest `v0.3.0`, Windows and Linux |
 
 Placements, conditions, the engine patches and the by-hand server lines:
 **[operating points](docs/operating-points.md)**. Source of truth:

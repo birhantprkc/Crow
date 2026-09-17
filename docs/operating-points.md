@@ -16,7 +16,7 @@ raw text. Editing a flag here without editing the manifest turns the checker red
 | **Default, Windows** | `Qwen3.8-Flash-Next-UD-Q2_K_XL` | **41.76 tok/s** | 8083 | llama.cpp, local build |
 | **Default, Linux** | `Qwen3.8-Flash-Next-UD-Q2_K_XL` | **41.8 tok/s** | 8083 | llama.cpp, built here |
 | Second | `Qwen3.8-27B-UD-Q4_K_XL` | 123.05 / 133.18 tok/s | 8082 | llama.cpp, packaged |
-| Third (Rust) | `CNQ4.5-M` NVFP4 container | **45.1 tok/s** | 8099 | crow-nest `v0.2.0` |
+| Third (Rust) | `CNQ4.5-M` NVFP4 container | **45.1 tok/s** (Windows) · 36.8 tok/s at 16k context (Linux) | 8099 | crow-nest `v0.3.0`, Windows and Linux |
 
 `DEFAULT_BASE_URL` is `http://127.0.0.1:8083/v1`.
 
@@ -163,24 +163,29 @@ token and the smaller download, and it runs on the **packaged** engine.
 
 Crow runs on crow-nest, the Rust engine built for this project. Since v0.2.0 (2026-09-14) its
 decode is faster than llama.cpp on the same machine, with identical greedy outputs; vision is
-served from the container itself, no projector file.
+served from the container itself, no projector file. Since v0.3.0 (2026-09-17) the engine runs
+on Linux too, inside the same memory-bounded scope Crow uses for llama-server.
 
 | | |
 |---|---|
-| Engine | crow-nest `v0.2.0` ([repo](https://github.com/nibor1896/crow-nest), [release](https://github.com/nibor1896/crow-nest/releases/tag/v0.2.0)), Windows, own HTTP server, OpenAI-compatible |
+| Engine | crow-nest `v0.3.0` ([repo](https://github.com/nibor1896/crow-nest), [release](https://github.com/nibor1896/crow-nest/releases/tag/v0.3.0)), Windows and Linux, own HTTP server, OpenAI-compatible |
 | Model | `CNQ4.5-M`, the project's own quant: one 104.7 GB NVFP4 container of `Qwen3.8-Flash-Next` ([package](https://huggingface.co/nibor1896/Qwen3.8-Flash-Next-CNQ4.5-M)) |
 | Context | 200,000, one slot |
 | Vision | yes, from the container's own `vit` section (no `--mmproj`, nothing extra to download) |
-| Decode | **45.1 tok/s** (22.18 ms/token) vs llama.cpp 44.9 on the same prompt; greedy ids bit-identical |
-| Prefill | 771 tok/s default, **871 tok/s** with `CROW_PF_GEMM_B=1`, vs llama.cpp 922.5 (16k reference prompt) |
+| Decode | Windows: **45.1 tok/s** (22.18 ms/token) vs llama.cpp 44.9 on the same prompt, greedy ids bit-identical. Linux: 36.8 tok/s at 16k context (the ten-task form, the same figure the Windows record of that form shows) |
+| Prefill | Windows: 771 tok/s default, **871 tok/s** with `CROW_PF_GEMM_B=1`, vs llama.cpp 922.5 (16k reference prompt). Linux: **968 tok/s** cold on the same 16k prompt, 740 tok/s on a cold 1024-token prompt, warm short turns 228 ms prefill / 247 ms to the first token |
 | Quality | ten-task suite unchanged (2/5/3) against the llama.cpp operating point's reading |
 | Port | 8099 |
-| GPU | RTX 5090 class (Blackwell `sm_120` required), 64 GB host RAM class, CUDA driver + NVRTC |
+| GPU | RTX 5090 class (Blackwell `sm_120` required), 62-64 GB host RAM class, CUDA driver + NVRTC 13.3 (Linux: the runtime libs on `LD_LIBRARY_PATH`, the container on a non-compressed path) |
 
-Measured 2026-09-13/14 on one RTX 5090, F49 pair-chain methodology; sources: crow-nest issues
-#62 (decode) and #10 (prefill), release notes of v0.2.0.
+Measured 2026-09-13/14 on one RTX 5090 (Windows), F49 pair-chain methodology; sources: crow-nest issues
+#62 (decode) and #10 (prefill), release notes of v0.2.0. Linux numbers measured 2026-09-17 on the same
+card under Arch Linux, driver 610.57.04, paired cold-state runs; sources: the crow-nest v0.3.0 release
+notes and its CHANGELOG. Known on Linux: the engine's logits drift from the Windows references beyond
+the 8-row parity form (NVRTC/driver JIT versions), ids identical on the short forms; long goal-mode
+sessions at 170k+ context degenerate (crow-nest #67, #68).
 
-Start (PowerShell, two windows; engine repo root):
+Start on Windows (PowerShell, two windows; engine repo root):
 
 ```powershell
 # engine (from the crow-nest repo root)
@@ -189,6 +194,16 @@ engine/target_srv/release/serve.exe --port 8099 --slot-save-path decode_out/sess
 
 # Crow (the window; pick the engine above, http://127.0.0.1:8099/v1, in its model menu)
 python cli/crow_gui.py
+```
+
+Start on Linux (two terminals; engine repo root):
+
+```bash
+# engine: the launcher puts serve in a memory-bounded systemd scope and sets LD_LIBRARY_PATH
+tools/serve-linux.sh --port 8099 --slot-save-path decode_out/slots
+
+# Crow
+crow --base-url http://127.0.0.1:8099/v1
 ```
 
 ---
