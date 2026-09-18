@@ -1809,7 +1809,8 @@ def _roll_with_digest(conversation, args, loaded, sampling, context_tokens, line
     digest = rollover_digest(
         conversation, base_url=args.base_url, model=loaded or None,
         temperature=sampling["temperature"], top_p=sampling["top_p"],
-        min_p=sampling["min_p"], top_k=sampling.get("top_k"))
+        min_p=sampling["min_p"], top_k=sampling.get("top_k"),
+        presence_penalty=sampling.get("presence_penalty"))
     return roll_over(conversation, args.base_url, context_tokens,
                      carry=line, digest=digest)
 

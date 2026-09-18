@@ -13921,5 +13921,113 @@ class TheShippedOperatingPointBootsOnLinuxTests(unittest.TestCase):
         self.assertIsNotNone(proc.wait(timeout=10))
 
 
+class ThePresencePenaltyIsTheModelsTests(unittest.TestCase):
+    """2026-09-18. An ABSENT `presence_penalty` was a value, and a different one
+    per engine: crow-nest's `serve` fills 1.5 into the hole (its data sheet's
+    non-thinking row, over every distinct token of the answer), llama-server
+    reads the same hole as 0.0. One model, one client, two samplers.
+
+    So the field travels like top_k -- named by the model's manifest entry or
+    not sent at all -- and the two entries that are the SAME model on two
+    engines have to resolve to the same row.
+    """
+
+    CNQ = "Qwen3.8-Flash-Next-CNQ4.5-M.cnq"
+    GGUF = "Qwen3.8-Flash-Next"
+
+    def _conversation(self):
+        conversation = crow_core.Conversation("be brief")
+        conversation.append("user", "hello")
+        conversation.append("assistant", "hi")
+        return conversation
+
+    def _turn_body(self, **kw) -> dict:
+        sent = {}
+
+        def fake(url, body, api_key, timeout, extra=None):
+            sent.update(body)
+            return iter(())
+
+        real, crow_core._post_stream = crow_core._post_stream, fake
+        self.addCleanup(lambda: setattr(crow_core, "_post_stream", real))
+        crow_core.stream_reply(self._conversation(),
+                               base_url="http://127.0.0.1:1/v1", model="m",
+                               api_key="k", temperature=1.0, top_p=0.95,
+                               min_p=0.0, timeout=1, **kw)
+        return sent
+
+    def test_what_crow_nest_reports_finds_its_entry(self):
+        """POSITIVE, and the pairing is the whole fix: `serve` reports the
+        container's file name, and until this entry existed that name matched
+        nothing, so the model fell through to the bare global row."""
+        self.assertEqual(crow_core.model_key_for(self.CNQ), "flash-next-cnq45-m")
+
+    def test_one_model_on_two_engines_resolves_to_one_row(self):
+        """POSITIVE. A comparison of the two engines that inherits two samplers
+        measures the samplers."""
+        self.assertEqual(crow_core.sampling_for(self.CNQ),
+                         crow_core.sampling_for(self.GGUF))
+        self.assertEqual(crow_core.sampling_for(self.CNQ)["presence_penalty"], 0.0)
+        self.assertEqual(crow_core.sampling_for(self.CNQ)["top_k"], 20)
+
+    def test_a_model_that_names_none_sends_none(self):
+        """NEGATIVE, the half that protects every figure taken so far: 0731 and
+        an unknown server keep the three values and nothing else."""
+        for model in ("DeepSeek-V4-Flash-0731", "never-heard-of-it", None):
+            self.assertNotIn("presence_penalty", crow_core.sampling_for(model))
+        self.assertNotIn("presence_penalty", self._turn_body())
+
+    def test_zero_is_a_value_and_travels(self):
+        """POSITIVE. `if presence_penalty:` would drop exactly the number this
+        field exists to send, and the engine would fill 1.5 back in."""
+        sent = self._turn_body(presence_penalty=0.0)
+        self.assertIn("presence_penalty", sent)
+        self.assertEqual(sent["presence_penalty"], 0.0)
+
+    def test_a_typed_override_wins_over_the_entry(self):
+        """The same door every sampling field has."""
+        got = crow_core.resolve_sampling(self.CNQ, {"presence_penalty": 1.5})
+        self.assertEqual(got["presence_penalty"], 1.5)
+
+    def test_it_stays_home(self):
+        """NEGATIVE. It is a manifest value for a local engine; away from home it
+        is one more parameter a strict broker finds no upstream for, and the
+        Messages API has no such field at all."""
+        self.assertNotIn("presence_penalty",
+                         self._turn_body(presence_penalty=0.0, remote=True))
+        body = crow_core.anthropic_body({
+            "model": "m", "messages": [{"role": "user", "content": "x"}],
+            "presence_penalty": 0.0, "max_tokens": 16, "stream": True})
+        self.assertNotIn("presence_penalty", body)
+
+    def test_the_unasked_pass_carries_it_too(self):
+        """`review_turn` builds its own body, so a field wired into the turn
+        alone would leave the background pass on the engine's 1.5."""
+        seen = {}
+
+        class _Resp:
+            def read(self_inner):
+                return json.dumps({"choices": [{"message": {"content": ""}}]}).encode()
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+        def fake(request, *a, **k):
+            seen.update(json.loads(request.data.decode("utf-8")))
+            return _Resp()
+
+        real = crow_core.urllib.request.urlopen
+        crow_core.urllib.request.urlopen = fake
+        self.addCleanup(setattr, crow_core.urllib.request, "urlopen", real)
+        crow_core.review_turn(self._conversation(),
+                              base_url="http://127.0.0.1:1/v1", model="m",
+                              api_key="k", temperature=1.0, top_p=0.95,
+                              min_p=0.0, timeout=1, presence_penalty=0.0)
+        self.assertEqual(seen.get("presence_penalty"), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

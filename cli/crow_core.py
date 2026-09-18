@@ -713,7 +713,15 @@ def reasoning_change_rerenders(current: str | None, wanted: str | None,
 # rather than derived from the manifest because it is a statement about THIS
 # build's wire format: these four are the fields `stream_reply` knows how to
 # send, and a manifest is data, not a licence to widen the request body.
-SAMPLING_FIELDS = ("temperature", "top_p", "min_p", "top_k")
+#
+# `presence_penalty` IS THE FIFTH (2026-09-18), AND IT IS HERE BECAUSE ITS ABSENCE
+# WAS A VALUE. crow-nest's `serve` fills an absent field with its data sheet's
+# NON-THINKING row, 1.5, applied over every token of the answer -- while
+# llama-server reads an absent field as 0.0. So the same client ran the same
+# model under two samplers and nobody had chosen either: the rule MIN_P already
+# states, met from the other side. It travels exactly like top_k: absent unless
+# the model's manifest entry names it, so no request that exists today changes.
+SAMPLING_FIELDS = ("temperature", "top_p", "min_p", "top_k", "presence_penalty")
 
 
 # The calls are executed -- see run_tool and the loop in repl().
@@ -3100,6 +3108,7 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
                     temperature: float, top_p: float, min_p: float,
                     model: "str | None" = None, api_key: str = "",
                     top_k: "int | None" = None,
+                    presence_penalty: "float | None" = None,
                     timeout: float = 120.0,
                     extra_headers: "dict | None" = None,
                     # None, nicht TRANSPORT_CHAT: die Konstante ist an dieser
@@ -3131,6 +3140,8 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
         body["model"] = model
     if top_k is not None:
         body["top_k"] = top_k
+    if presence_penalty is not None:
+        body["presence_penalty"] = presence_penalty
     if routing and transport != TRANSPORT_MESSAGES:
         body.update(routing)
     if remote:
@@ -3900,7 +3911,7 @@ ANTHROPIC_MAX_TOKENS = REMOTE_MAX_TOKENS
 # local server needs all three. The sampling triple is llama-server's, the same
 # way the slot and the prefix cache are.
 _ANTHROPIC_DROPS = ("temperature", "top_p", "min_p", "top_k",
-                    "chat_template_kwargs", "reasoning_effort",
+                    "presence_penalty", "chat_template_kwargs", "reasoning_effort",
                     "reasoning_budget_tokens", "reasoning_budget_message",
                     "timings_per_token", "stream_options")
 
@@ -3933,8 +3944,12 @@ _ANTHROPIC_DROPS = ("temperature", "top_p", "min_p", "top_k",
 # der Server liest sie in `server-common.cpp:1365`, und ein Broker, den jemand
 # auf `require_parameters` stellt, findet fuer sie keinen Upstream. Ob ein
 # entferntes Modell einen Denkdeckel bekommen SOLL, ist eine eigene Frage.
-_REMOTE_DROPS = ("min_p", "timings_per_token", "chat_template_kwargs",
-                 "reasoning_effort",
+#
+# `presence_penalty` (2026-09-18) GOES FOR THE REASON `min_p` DOES: it is a
+# per-model value out of the local manifest, a remote model has no entry, and a
+# broker on `require_parameters` finds no upstream for a field it never listed.
+_REMOTE_DROPS = ("min_p", "presence_penalty", "timings_per_token",
+                 "chat_template_kwargs", "reasoning_effort",
                  "reasoning_budget_tokens", "reasoning_budget_message")
 
 # WHAT IS LEFT, AND IT IS SPLIT BECAUSE ONE HALF IS NEGOTIABLE AND THE OTHER IS
@@ -4837,6 +4852,8 @@ def stream_reply(
     top_p: float = TOP_P,
     min_p: float = MIN_P,
     top_k: int | None = None,
+    # None is "this model declares none", exactly as top_k one line up.
+    presence_penalty: "float | None" = None,
     reasoning_effort: str | None = None,
     # #176. None HEISST "KEIN DECKEL", was jeder Zug bis heute war. Eine Zahl
     # deckelt das Denken je Anfrage; die Einspeisung dazu reist immer mit, weil
@@ -4961,6 +4978,12 @@ def stream_reply(
         # carries general.sampling.top_k = 20 and llama.cpp applies it. Sending
         # it stops the value depending on metadata nobody re-reads.
         body["top_k"] = top_k
+    if presence_penalty is not None:
+        # ABSENT BY DEFAULT, LIKE top_k, AND SENT FOR THE OPPOSITE REASON: not to
+        # add a penalty but to stop a server adding its own. crow-nest reads an
+        # absent field as 1.5 over the whole answer, llama-server as 0.0 -- see
+        # SAMPLING_FIELDS. 0.0 IS A VALUE and must travel, hence `is not None`.
+        body["presence_penalty"] = presence_penalty
     if reasoning_effort is not None:
         # Only when asked for. Sending nothing keeps the prompt byte-identical to a client that
         # predates the switch, which is what the prompt cache wants.
@@ -13281,6 +13304,7 @@ def review_question(incidents: "list[str] | None" = None) -> str:
 def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                 api_key: str, temperature: float, top_p: float, min_p: float,
                 top_k: int | None = None, reasoning_effort: str | None = None,
+                presence_penalty: "float | None" = None,
                 reasoning_budget: "int | None" = None,
                 reasoning_budget_message: "str | None" = None,
                 timeout: float = 180.0, gate: bool = False,
@@ -13324,6 +13348,8 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
     body["max_tokens"] = max_tokens or MAX_TOKENS
     if top_k is not None:
         body["top_k"] = top_k
+    if presence_penalty is not None:
+        body["presence_penalty"] = presence_penalty
     if reasoning_effort:
         # #176: dieselbe Tuer wie der Zug, aus demselben Grund. Ein Nachlauf, der
         # eine andere Tuer benutzt, waere ein zweiter Prompt-Stil im selben Chat.
@@ -13602,6 +13628,8 @@ def run_turn(
     # model declares no top_k", which is 0731's case and the case of every
     # endpoint this client has ever talked to. A number here would be a literal.
     top_k: int | None = None,
+    # The same None as top_k: the model's manifest entry names one or nothing does.
+    presence_penalty: "float | None" = None,
     reasoning_effort: str | None = None,
     # #176. Durchgereicht, nicht entschieden: was ein Deckel ist, sagt
     # `budget_command`, und wo er wirkt, sagt `stream_reply`.
@@ -13788,6 +13816,7 @@ def run_turn(
                 top_p=top_p,
                 min_p=min_p,
                 top_k=top_k,
+                presence_penalty=presence_penalty,
                 reasoning_effort=reasoning_effort,
                 reasoning_budget=reasoning_budget,
                 reasoning_budget_message=reasoning_budget_message,
@@ -14162,6 +14191,7 @@ def run_turn(
             digest = rollover_digest(
                 conversation, base_url=base_url, model=model, api_key=api_key,
                 temperature=temperature, top_p=top_p, min_p=min_p, top_k=top_k,
+                presence_penalty=presence_penalty,
                 extra_headers=extra_headers,
                 transport=transport, remote=remote, routing=routing)
             # #173: DIE MARKEN DES SCHREIBERS, wenn er welche fuehrt. Sie sind
@@ -16243,6 +16273,7 @@ def _subtask_attempt(sub: Subtask, spot: dict) -> "tuple[str, str]":
             api_key=spot["api_key"],
             temperature=sampling["temperature"], top_p=sampling["top_p"],
             min_p=sampling["min_p"], top_k=sampling.get("top_k"),
+            presence_penalty=sampling.get("presence_penalty"),
             reasoning_effort=None, timeout=SUBTASK_TIMEOUT,
             extra_headers=spot.get("headers") or None,
             transport=spot.get("transport") or TRANSPORT_CHAT,

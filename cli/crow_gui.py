@@ -11639,6 +11639,7 @@ class Api:
                 model=spot0["model"], api_key=spot0["api_key"],
                 temperature=sampling0["temperature"], top_p=sampling0["top_p"],
                 min_p=sampling0["min_p"], top_k=sampling0.get("top_k"),
+                presence_penalty=sampling0.get("presence_penalty"),
                 extra_headers=spot0.get("headers") or None,
                 transport=spot0.get("transport") or crow_core.TRANSPORT_CHAT,
                 remote=spot0["remote"])
@@ -11763,6 +11764,7 @@ class Api:
                 bills=self._timings,
                 temperature=sampling["temperature"], top_p=sampling["top_p"],
                 min_p=sampling["min_p"], top_k=sampling.get("top_k"),
+                presence_penalty=sampling.get("presence_penalty"),
                 # #116: None sends nothing, which is the "never chosen" state.
                 reasoning_effort=self._reasoning,
                 # #176: dasselbe fuer den Denkdeckel -- None schickt kein Feld.
@@ -11873,6 +11875,7 @@ class Api:
                 routing=routing,
                 temperature=sampling["temperature"], top_p=sampling["top_p"],
                 min_p=sampling["min_p"], top_k=sampling.get("top_k"),
+                presence_penalty=sampling.get("presence_penalty"),
                 reasoning_effort=self._reasoning,
                 reasoning_budget=self._budget,
                 incidents=result.incidents,
