@@ -12231,6 +12231,143 @@ class TheGoalOutlivesEverythingTests(unittest.TestCase):
         self.assertIsNone(crow_core.goal_load())
 
 
+class AStringIsNeverIteratedIntoAPlanTests(unittest.TestCase):
+    """#196. Die Havarie vom 2026-09-18, und der Riegel davor.
+
+    WAS PASSIERT WAR: das Modell rief `goal_set` mit `steps` als JSON-STRING --
+    976 Zeichen, und mitten darin ein verrutschtes Anfuehrungszeichen. Der
+    Handler nahm den String und iterierte ihn, weil Python das klaglos tut: 852
+    Schritte, jeder ein einzelnes Zeichen, und die Anzeige stand auf 0/852.
+
+    DIE DREI FAELLE SIND DREI VERSCHIEDENE SAETZE, deshalb drei Gruppen: ein
+    verpacktes, aber heiles Array wird ausgepackt; ein kaputtes wird
+    zurueckgewiesen, OHNE ein Ziel anzulegen; und die Einzelzeichen-Form wird
+    auch dann zurueckgewiesen, wenn sie auf einem anderen Weg hereinkaeme.
+    """
+
+    # Der Aufruf von 2026-09-18, gekuerzt -- das zweite Objekt traegt den Slip
+    # (`, " "status":`), und genau daran bricht jeder Parser.
+    SLIPPED = ('[{"item": "read the code", "status": "done"}, '
+               '{"item": "write it", " "status": "end"}]')
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-goal-arg-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", crow_core.SESSION_DIR)
+        crow_core.SESSION_DIR = self.dir
+
+    def call(self, **args) -> str:
+        """Durch die NAHT, nicht am Handler vorbei: `run_tool` ist die Stelle,
+        an der der Aufruf des Modells wirklich ankommt."""
+        return crow_core.run_tool("goal_set", json.dumps(args))
+
+    # -- ein verpacktes, aber heiles Array ---------------------------------
+
+    def test_a_string_encoded_array_is_parsed_and_used(self):
+        said = self.call(title="Ship it",
+                         steps=json.dumps(["read the code", "write it", "prove it"]))
+        self.assertIn("arrived as a JSON string", said.splitlines()[0])
+        out = json.loads(said.split("\n", 1)[1])
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["steps"], 3)
+        self.assertEqual([s["text"] for s in crow_core.goal_load()["steps"]],
+                         ["read the code", "write it", "prove it"])
+
+    def test_the_handler_parses_it_too_when_called_directly(self):
+        """Die Naht ist nicht der einzige Weg herein -- der Handler haelt selbst."""
+        out = json.loads(crow_core.tool_goal_set(
+            "Ship it", json.dumps(["read the code", "write it"])))
+        self.assertTrue(out["ok"])
+        self.assertIn("arrived as a JSON string", out["note"])
+
+    # -- das kaputte Array --------------------------------------------------
+
+    def test_the_slipped_string_is_a_tool_error_and_no_goal(self):
+        said = self.call(title="Ship it", steps=self.SLIPPED)
+        self.assertTrue(said.startswith("error: "), said)
+        self.assertIn("steps must be a JSON array of strings, got a string "
+                      "that is not valid JSON:", said)
+        self.assertIn("char ", said, "the error does not carry a position")
+        self.assertIsNone(crow_core.goal_load())
+        self.assertFalse(os.path.isfile(crow_core.goal_path()))
+
+    def test_a_string_holding_something_that_is_not_a_list_is_refused(self):
+        said = self.call(title="Ship it", steps=json.dumps({"item": "one"}))
+        self.assertIn("steps must be a JSON array of strings, got a string "
+                      "holding dict", said)
+        self.assertIsNone(crow_core.goal_load())
+
+    def test_a_bare_sentence_never_becomes_a_plan(self):
+        """DER FALL, DER DIE HAVARIE WAR: ein String, der kein JSON ist, darf
+        nicht Zeichen fuer Zeichen zum Plan werden."""
+        said = self.call(title="Ship it", steps="read the code, then write it")
+        self.assertTrue(said.startswith("error: "), said)
+        self.assertIsNone(crow_core.goal_load())
+
+    # -- Objekte statt Zeilen ----------------------------------------------
+
+    def test_object_steps_become_their_item(self):
+        """Das Schema sagt `string`, das Modell schickt Objekte -- beide Formen
+        tragen dieselbe Absicht, also werden beide genommen."""
+        said = self.call(title="Ship it", steps=json.dumps(
+            [{"item": "read the code", "status": "done"},
+             {"title": "write it"}, {"text": "prove it"}, {"step": "ship it"}]))
+        json.loads(said.split("\n", 1)[1])
+        self.assertEqual([s["text"] for s in crow_core.goal_load()["steps"]],
+                         ["read the code", "write it", "prove it", "ship it"])
+
+    def test_an_object_without_a_step_key_names_its_index(self):
+        out = json.loads(crow_core.tool_goal_set(
+            "Ship it", ["read the code", {"status": "done"}]))
+        self.assertFalse(out["ok"])
+        self.assertIn("at index 1", out["error"])
+        self.assertIsNone(crow_core.goal_load())
+
+    def test_a_number_among_the_steps_names_its_index(self):
+        out = json.loads(crow_core.tool_goal_set("Ship it", ["read it", 7]))
+        self.assertFalse(out["ok"])
+        self.assertIn("int at index 1", out["error"])
+        self.assertIsNone(crow_core.goal_load())
+
+    # -- die Einzelzeichen-Form ---------------------------------------------
+
+    def test_the_852_single_character_shape_is_refused(self):
+        """GUERTEL NEBEN HOSENTRAEGER: selbst als fertige Liste uebergeben ist
+        ein iterierter String kein Plan."""
+        out = json.loads(crow_core.tool_goal_set("Ship it", list(self.SLIPPED)))
+        self.assertFalse(out["ok"])
+        self.assertIn("single-character items", out["error"])
+        self.assertIn("iterated instead of parsed", out["error"])
+        self.assertIsNone(crow_core.goal_load())
+
+    def test_a_short_plan_of_short_steps_still_works(self):
+        """NEGATIVPROBE zur Probe davor: die Regel darf einen echten, kurzen
+        Plan nicht treffen -- sie greift erst ab mehr als zwanzig Schritten."""
+        out = json.loads(crow_core.tool_goal_set("Ship it", ["a", "b", "c"]))
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["steps"], 3)
+
+    # -- generisch, nicht nur fuer goal_set ---------------------------------
+
+    def test_the_seam_unpacks_any_declared_array(self):
+        """Die Regel haengt an der DEKLARATION, nicht am Namen `goal_set`:
+        `git_commit.paths` ist ebenso ein `array` und wird ebenso ausgepackt."""
+        args = {"paths": json.dumps(["a.py", "b.py"])}
+        bad, notes = crow_core.coerce_declared_containers("git_commit", args)
+        self.assertIsNone(bad)
+        self.assertEqual(args["paths"], ["a.py", "b.py"])
+        self.assertEqual(len(notes), 1)
+
+    def test_the_seam_leaves_a_declared_string_alone(self):
+        """Ein `string`, der wie JSON aussieht, bleibt ein String -- sonst wuerde
+        eine Datei namens `[1,2]` unterwegs zur Liste."""
+        args = {"path": "[1, 2]"}
+        bad, notes = crow_core.coerce_declared_containers("read_file", args)
+        self.assertIsNone(bad)
+        self.assertEqual(args["path"], "[1, 2]")
+        self.assertEqual(notes, [])
+
+
 class RelativePathsResolveInTheWorkingAreaTests(unittest.TestCase):
     """Ein blosser Name meint den Arbeitsbereich, nicht den Ort des Starters.
 

@@ -11944,6 +11944,74 @@ GOAL_COST_NOTE = ("the goal goes into the head of every prompt -- "
                   "the next turn pays a full prefill")
 
 
+# #196. EIN STRING IST KEIN PLAN, auch wenn `for` ihn klaglos durchlaeuft. Live
+# am 2026-09-18: das Modell rief `goal_set` mit `steps` als JSON-STRING statt
+# als Liste -- 976 Zeichen, und mitten darin ein verrutschtes Anfuehrungszeichen.
+# Der Handler nahm den String und iterierte ihn: 852 Schritte, jeder ein
+# einzelnes Zeichen (`[`, `{`, `"`, `i`, `t`, ...), und das Panel zeigte 0/852.
+# Kein Aufruf ist fehlgeschlagen, nichts hat gewarnt -- das ist das Teure daran.
+#
+# ZWEIMAL DASSELBE NEIN. Der Text unten ist der ganze Vertrag: was nicht die
+# deklarierte Form hat, wird NICHT iteriert, sondern zurueckgewiesen, damit das
+# Modell es in der naechsten Runde richtig schickt.
+_GOAL_STEPS_SHAPE = "steps must be a JSON array of strings, got %s"
+
+# WELCHER SCHLUESSEL EIN SCHRITT IST, wenn das Modell Objekte statt Zeilen
+# schickt -- was es tut, obwohl das Schema `string` sagt (gesehen am 2026-09-18:
+# `{"item": "...", "status": "done"}`). Das ist kein Fehler, den man dem Modell
+# vorhalten muss; es ist eine Schreibweise, die dieselbe Absicht traegt.
+_GOAL_STEP_KEYS = ("item", "title", "text", "step")
+
+
+def goal_steps_from(steps) -> "tuple[list[str] | None, str | None]":
+    """Was als `steps` ankam, als Liste von Zeilen -- oder ein Fehler, nie beides.
+
+    DER EINE PARSE-VERSUCH: ein Modell, das sein JSON doppelt verpackt, hat sich
+    vertippt und soll daran nicht scheitern. Was dabei nicht aufgeht, kommt als
+    Fehlertext zurueck -- mit der Stelle, an der das JSON bricht, weil genau die
+    dem Modell sagt, was es anders schreiben muss.
+
+    DIE EINZELZEICHEN-PROBE ist Guertel neben Hosentraeger: sie beschreibt die
+    Havarie aus #196 in ihrer reinen Form. Ein Plan aus 852 Schritten der Laenge
+    eins ist kein Plan, sondern ein iterierter String, und selbst wenn er hier
+    auf einem anderen Weg ankaeme, wird er nicht zum Ziel.
+    """
+    if isinstance(steps, str):
+        try:
+            steps = json.loads(steps)
+        except (json.JSONDecodeError, ValueError) as exc:
+            return None, _GOAL_STEPS_SHAPE % (
+                "a string that is not valid JSON: %s" % exc)
+        if not isinstance(steps, list):
+            return None, _GOAL_STEPS_SHAPE % (
+                "a string holding %s" % type(steps).__name__)
+    if steps is None:
+        steps = []
+    if not isinstance(steps, (list, tuple)):
+        return None, _GOAL_STEPS_SHAPE % type(steps).__name__
+    steps = list(steps)
+    if len(steps) > 20 and all(isinstance(s, str) and len(s) == 1 for s in steps):
+        return None, _GOAL_STEPS_SHAPE % (
+            "%d single-character items -- a JSON string was iterated instead of "
+            "parsed" % len(steps))
+    out = []
+    for n, item in enumerate(steps):
+        if isinstance(item, str):
+            out.append(item)
+            continue
+        if isinstance(item, dict):
+            named = next((item[k] for k in _GOAL_STEP_KEYS
+                          if isinstance(item.get(k), str) and item[k].strip()), None)
+            if named is None:
+                return None, _GOAL_STEPS_SHAPE % (
+                    "an object with no item/title/text/step key at index %d" % n)
+            out.append(named)
+            continue
+        return None, _GOAL_STEPS_SHAPE % (
+            "%s at index %d" % (type(item).__name__, n))
+    return out, None
+
+
 def tool_goal_set(title: str, steps: "list | None" = None) -> str:
     """#165. Das Modell schreibt seinen eigenen Plan. Gibt JSON zurueck.
 
@@ -11951,17 +12019,29 @@ def tool_goal_set(title: str, steps: "list | None" = None) -> str:
     das Modell. Was hier geprueft wird, ist nur, ob es ueberhaupt einer ist --
     ein Titel und mindestens zwei Schritte. Ein einziger Schritt ist kein Plan,
     sondern die Aufgabe noch einmal.
+
+    UND OB ES UEBERHAUPT EINE LISTE IST (#196). `run_tool` faengt die verpackte
+    Form schon an der Naht ab; dieser Handler prueft trotzdem selbst, weil er
+    auch direkt gerufen wird und ein Ziel aus einem String nie entstehen darf.
     """
-    clean = [str(s).strip() for s in (steps or []) if str(s).strip()]
+    packed = isinstance(steps, str)
+    steps, bad = goal_steps_from(steps)
+    if bad is not None:
+        return json.dumps({"ok": False, "error": bad})
+    clean = [str(s).strip() for s in steps if str(s).strip()]
     if len(clean) < 2:
         return json.dumps({"ok": False,
                            "error": "a plan needs at least two steps"})
     goal = goal_start(str(title or "").strip() or "the task", clean)
     if goal is None:
         return json.dumps({"ok": False, "error": "could not write the plan"})
-    return json.dumps({"ok": True, "title": goal["title"],
-                       "steps": len(goal["steps"]),
-                       "next": 1, "first": goal["steps"][0]["text"]})
+    out = {"ok": True, "title": goal["title"],
+           "steps": len(goal["steps"]),
+           "next": 1, "first": goal["steps"][0]["text"]}
+    if packed:
+        out["note"] = ("steps arrived as a JSON string and was parsed into an "
+                       "array of %d" % len(clean))
+    return json.dumps(out)
 
 
 def tool_goal_step(step: int, status: str, note: str = "") -> str:
@@ -12787,6 +12867,61 @@ def run_tool_cached(name: str, arguments: str) -> tuple[str, bool]:
     return out, False
 
 
+# ---------------------------------------------------------------- #196 -----
+# WAS NICHT SEINE DEKLARIERTE FORM HAT, ERREICHT DEN HANDLER NICHT. Dies ist die
+# einzige Stelle, an der ein Werkzeugaufruf die DEKLARATION und die ARGUMENTE
+# zugleich sieht, also die einzige, an der der Vergleich ueberhaupt moeglich ist.
+#
+# EIN PARSE-VERSUCH, NICHT ZWEI. Ein `array` oder `object`, das als String
+# ankommt, ist fast immer doppelt verpacktes JSON -- ein Vertipper des Modells,
+# kein Irrtum ueber die Absicht, und er wird still ausgepackt. Was sich nicht
+# auspacken laesst, wird zum Fehler an das Modell statt zu einem Wert, den ein
+# Handler dann Zeichen fuer Zeichen durchlaeuft (852 davon, am 2026-09-18).
+_ARGUMENT_SHAPES = {"array": list, "object": dict}
+
+
+def _declared_properties(name: str) -> dict:
+    """Die deklarierten Parameter eines Werkzeugs. `{}` fuer einen Namen, den
+    niemand deklariert hat -- MCP-Namen kommen aus `mcp.json` und stehen in
+    `TOOLS`, ein unbekannter bekommt einfach keine Pruefung statt einen Fehler."""
+    for entry in TOOLS:
+        function = entry.get("function") or {}
+        if function.get("name") == name:
+            return (function.get("parameters") or {}).get("properties") or {}
+    return {}
+
+
+def _shape_phrase(spec: dict) -> str:
+    """"a JSON array of strings" -- die deklarierte Form, wie ein Fehler sie nennt."""
+    if spec.get("type") == "object":
+        return "a JSON object"
+    items = (spec.get("items") or {}).get("type")
+    return "a JSON array of %ss" % items if items else "a JSON array"
+
+
+def coerce_declared_containers(name: str, args: dict) -> "tuple[str | None, list[str]]":
+    """Packt deklarierte Container aus, die als String ankamen. (Fehler, Noten)."""
+    notes = []
+    for key, spec in _declared_properties(name).items():
+        if not isinstance(spec, dict):
+            continue
+        want = _ARGUMENT_SHAPES.get(spec.get("type"))
+        if want is None or not isinstance(args.get(key), str):
+            continue
+        try:
+            parsed = json.loads(args[key])
+        except (json.JSONDecodeError, ValueError) as exc:
+            return ("%s must be %s, got a string that is not valid JSON: %s"
+                    % (key, _shape_phrase(spec), exc)), notes
+        if not isinstance(parsed, want):
+            return ("%s must be %s, got a string holding %s"
+                    % (key, _shape_phrase(spec), type(parsed).__name__)), notes
+        args[key] = parsed
+        notes.append("%s arrived as a JSON string and was parsed into %s"
+                     % (key, _shape_phrase(spec)))
+    return None, notes
+
+
 def run_tool(name: str, arguments: str) -> str:
     """Execute one tool call and return what the model gets back.
 
@@ -12805,12 +12940,21 @@ def run_tool(name: str, arguments: str) -> str:
     impl = TOOL_IMPL.get(name)
     if impl is None:
         return f"error: no tool named {name!r}. Available: {', '.join(sorted(TOOL_IMPL))}"
+    bad, notes = coerce_declared_containers(name, args)
+    if bad is not None:
+        return f"error: {bad}"
     try:
-        return impl(**args)
+        out = impl(**args)
     except TypeError as exc:
         return f"error: wrong arguments for {name}: {exc}"
     except Exception as exc:  # a tool must never take the turn down with it
         return f"error: {name} failed: {exc!r}"
+    # DIE NOTE STEHT VOR DEM ERGEBNIS, in derselben Klammerform, in der
+    # `run_tool_cached` einen Wiederholer meldet: eine Zeile, die sagt, dass an
+    # den Argumenten etwas geradegezogen wurde, damit es niemanden ueberrascht.
+    for note in notes:
+        out = "[%s]\n%s" % (note, out)
+    return out
 
 
 # ---------------------------------------------------------------- #122 -----
