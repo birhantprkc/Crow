@@ -5141,7 +5141,15 @@ const crow = {
   // definition silently replaced this one and the chip called the wrong
   // planner with no arguments. Nothing threw until somebody clicked.
   modelPlan(){ const out = [];
-    (this.models||[]).forEach(x => {
+    // A MODEL THIS CLIENT DID NOT BOOT STILL HAS LEVELS (robin, 2026-09-18, seen on screen). The
+    // CNQ container is served by crow-nest: it has a manifest entry and measured levels, but no
+    // `servers` block, so it is in nobody's bootable list, no row was ever `running`, and the chip
+    // read `none (default)` over a menu with no level in it. The model that ANSWERED the probe
+    // therefore gets a row under its own manifest key, first -- and everything below, the guard
+    // included, treats it like any other running row. `foreignRunning` is the one difference.
+    const shown = (this.models||[]).slice();
+    if(this.foreignRunning()) shown.unshift([this.modelKey, this.modelName]);
+    shown.forEach(x => {
       const running = (x[0] === this.modelKey);
       out.push({kind:"model", k:x[0], name:x[1],
                 what: running ? "running" : "restarts the server"});
@@ -5188,7 +5196,15 @@ const crow = {
       el.querySelector(".what").textContent = bits.join(" · "); });
     m.hidden=false; },
 
-  chooseModel(k){ $("#modelmenu").hidden=true; pywebview.api.choose_model(k); },
+  // The running model has a manifest entry and is NOT one this client can boot: crow-nest's
+  // container today. It is drawn, because its levels need a row to hang under, and it is never
+  // sent to `/model`, which would answer "no model ..." about the model that is answering.
+  foreignRunning(){ const k = this.modelKey;
+    return !!(k && this.modelName && !(this.models||[]).some(x => x[0] === k)); },
+
+  chooseModel(k){ $("#modelmenu").hidden=true;
+    if(this.foreignRunning() && k === this.modelKey) return;
+    pywebview.api.choose_model(k); },
 
   // #117. ONE ROW PER RENDERING, not one per name. The manifest carries which levels produce the
   // SAME prompt, measured through /apply-template, and the window draws the groups rather than

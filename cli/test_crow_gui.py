@@ -3286,6 +3286,29 @@ class TheBarLostThreeChipsAndTheMenuGainedASubmenuTests(unittest.TestCase):
         self.assertIn('const running = (x[0] === this.modelKey);', plan,
                       "running is decided by the key the probe reported, not by order")
 
+    def test_a_running_model_nobody_here_booted_still_gets_its_row(self):
+        """SEEN ON SCREEN 2026-09-18. crow-nest's container has a manifest entry
+        and measured levels but no `servers` block, so it is in no bootable list:
+        no row was `running`, the guard above returned for every row, and the
+        chip read `none (default)` over a menu without one level in it.
+
+        The fix puts the answering model INTO the list the loop walks, under its
+        own key, so the invariant above still decides where levels hang. And the
+        row is never sent to `/model`, which would say "no model ..." about the
+        model that is answering."""
+        plan = self.source[self.source.index("modelPlan(){"):
+                           self.source.index("modelMenu(){")]
+        self.assertIn("if(this.foreignRunning()) shown.unshift([this.modelKey, this.modelName]);",
+                      plan)
+        self.assertLess(plan.index("shown.unshift("), plan.index("shown.forEach("),
+                        "the row is added after the loop that needed it")
+        self.assertIn("!(this.models||[]).some(x => x[0] === k)", self.source,
+                      "foreign means: keyed by the manifest, absent from the bootable list")
+        choose = self.source[self.source.index("  chooseModel(k){"):]
+        choose = choose[:choose.index("pywebview.api.choose_model(k);")]
+        self.assertIn("if(this.foreignRunning() && k === this.modelKey) return;", choose,
+                      "a click on the foreign row reaches /model")
+
     def test_the_chip_names_the_model_and_what_it_does(self):
         """#117 SURVIVES THE MERGE. `high` means somebody chose it; `high
         (default)` means nothing was chosen and the template lands there anyway.
