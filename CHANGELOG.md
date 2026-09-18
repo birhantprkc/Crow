@@ -110,9 +110,9 @@ false cause, not the retry (2cedd44).
 ### The crow-nest line: the decode attention table is the default
 
 Crow's third operating point runs on crow-nest, and the engine moved on 2026-09-18 in two ways that
-are Crow's business. The **released** engine is still `v0.3.0`; v0.3.1 is open on the engine's
-`main` and untagged, and [`docs/operating-points.md`](docs/operating-points.md) records these as
-measured on `main` rather than pointing a version badge at a release that does not exist yet.
+are Crow's business. Both landed in crow-nest `v0.3.1`, tagged 2026-09-18 after this entry was
+written; [`docs/operating-points.md`](docs/operating-points.md) records them as measured on the
+engine's `main`, which is what they were at the time.
 
 **`CROW_ATTN_LUT` is the default** (crow-nest #61, 61g, robin's call on 2026-09-18): the split
 decode attention kernel reads its e4m3 KV bytes out of a shared table. Bit-identical by

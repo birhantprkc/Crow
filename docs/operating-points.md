@@ -166,9 +166,10 @@ decode is faster than llama.cpp on the same machine, with identical greedy outpu
 served from the container itself, no projector file. Since v0.3.0 (2026-09-17) the engine runs
 on Linux too, inside the same memory-bounded scope Crow uses for llama-server.
 
-The line below is **v0.3.0**, the released engine. `v0.3.1` is open on the engine's `main` and
-untagged; the three things on it that Crow has to know about are under
-[the engine's `main`](#the-engines-main) at the end of this section.
+The line below is **v0.3.0**, the engine these numbers were measured against. `v0.3.1` was
+released later the same day, 2026-09-18 ([release](https://github.com/nibor1896/crow-nest/releases/tag/v0.3.1));
+the three things on it that Crow has to know about are under
+[the engine's `main`](#the-engines-main) at the end of this section, measured before the tag.
 
 | | |
 |---|---|
@@ -212,8 +213,9 @@ crow --base-url http://127.0.0.1:8099/v1
 
 ### The engine's `main`
 
-Not a release. Measured on the engine's `main` after v0.3.0, on the same card under Arch Linux,
-and recorded here because each of them changes what a Crow user sees.
+Measured on the engine's `main` after v0.3.0, on the same card under Arch Linux, and recorded here
+because each of them changes what a Crow user sees. All three are in crow-nest **v0.3.1**, tagged
+2026-09-18 after this section was written.
 
 **`CROW_ATTN_LUT` is the engine's default since 2026-09-18** (crow-nest `#61`, 61g): the split
 decode attention kernel reads its e4m3 KV bytes out of a shared table. Bit-identical by
