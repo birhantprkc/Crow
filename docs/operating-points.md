@@ -166,6 +166,10 @@ decode is faster than llama.cpp on the same machine, with identical greedy outpu
 served from the container itself, no projector file. Since v0.3.0 (2026-09-17) the engine runs
 on Linux too, inside the same memory-bounded scope Crow uses for llama-server.
 
+The line below is **v0.3.0**, the released engine. `v0.3.1` is open on the engine's `main` and
+untagged; the three things on it that Crow has to know about are under
+[the engine's `main`](#the-engines-main) at the end of this section.
+
 | | |
 |---|---|
 | Engine | crow-nest `v0.3.0` ([repo](https://github.com/nibor1896/crow-nest), [release](https://github.com/nibor1896/crow-nest/releases/tag/v0.3.0)), Windows and Linux, own HTTP server, OpenAI-compatible |
@@ -205,6 +209,35 @@ tools/serve-linux.sh --port 8099 --slot-save-path decode_out/slots
 # Crow
 crow --base-url http://127.0.0.1:8099/v1
 ```
+
+### The engine's `main`
+
+Not a release. Measured on the engine's `main` after v0.3.0, on the same card under Arch Linux,
+and recorded here because each of them changes what a Crow user sees.
+
+**`CROW_ATTN_LUT` is the engine's default since 2026-09-18** (crow-nest `#61`, 61g): the split
+decode attention kernel reads its e4m3 KV bytes out of a shared table. Bit-identical by
+construction, and measured so — generated ids `56305eee11d6`, unchanged. `decode run`, one fresh
+process per run, W + 3N: **23.52 ms per decode token = 42.5 tok/s**, against the one
+`CROW_ATTN_LUT=0` fallback run at 25.20 ms = 39.68. The `serve` figure of record, an arm mean in
+one drift chain (`c3-sdsd-61g`, four counted runs): **53.32 tok/s, within-arm spread 1.0038**,
+beside that chain's adjacent `decode run` arm at 42.56 tok/s and spread 1.0010. `CROW_ATTN_LUT=0`
+is the fallback of record. Linux only — Windows has not been rerun at this default, and the 45.1
+tok/s in the table above is the v0.2.0 Windows reading, not this one.
+
+**Every image but the first of a process was read as the previous image** (crow-nest `#73`,
+`bc9cd9b`, found and fixed 2026-09-18). The vision tower launched asynchronously and the blocking
+copy that reads its result ran on the legacy null stream, which does not order against it, so the
+copy took whatever the one shared scratch buffer still held: the previous image's embeddings —
+complete, plausible and one request stale — cached under the **new** image's hash. It reads as a
+fixed colour permutation and is a shift by one request. This is what Crow's
+[`read_image`](reference/tools.md) and every clipboard paste got against a crow-nest server. The
+first image of a process was always correct, which is why it stayed invisible. No Crow code
+changes; the engine has to be on `main` or newer.
+
+**`serve`'s default `max_tokens` is 8192, not 1024** (`8bad310`, 2026-09-18). Crow sends
+`max_tokens` on every request since 2.3.0 and no longer depends on this, but a 2.2.1 client against
+an older engine can still lose a long tool call to `finish length`.
 
 ---
 

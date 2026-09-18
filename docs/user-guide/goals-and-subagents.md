@@ -21,6 +21,7 @@ while it keeps going.
 | Panel | in the chat, above the git panel: title, `done/total`, wall clock, tokens, delegated tokens, and one row per step |
 | Store | `<root>/.crow/goal.json`, beside `MEMORY.md` — the goal belongs to the folder the work is in |
 | States | `open` · `running` · `done` · `failed` |
+| Limits | 60 turns for the whole goal, 25 for one step, and a brake on three identical or three empty answers (#165, #202) |
 
 **Two tools and not one, because they cost different things.** The plan goes into the pinned head
 of every prompt, so writing one costs a full prefill — the composer says so before it changes
@@ -37,6 +38,30 @@ invisible until somebody asks.
 `running` steps would describe a machine that does not exist. A `failed` step may be started again
 later.
 
+**A goal that has stopped getting anywhere is stopped, and says so.** Seen live on 2026-09-18:
+thirty-five answers of a single character in a row, at 130,939 tokens, each one answering the same
+nudge. Three things catch that now (#202).
+
+*The brake.* Three identical answers — same text and the same tool calls with the same arguments
+— or three empty ones, where empty means at most two characters and no tool call at all, are read
+as a loop rather than as progress. Those turns are then **taken out of the history**, nudge and
+answer together, and one recovery line goes out in their place naming the step that is still open.
+An empty answer to that line ends the goal, with a line in the flow saying how many times, at what
+context size, and how many of how many steps are done. There is no second recovery line. Removing
+the loop is the point: an empty answer left standing in the history is an example the next turn
+copies.
+
+*A cap on one step: 25 turns*, beside the 60 the whole goal gets. The counter belongs to the step,
+so it starts again at every step and a plan that is moving never meets it. A step that has taken 25
+turns is either cut wrong or not doable, and both are questions for you: the goal pauses, `/goal`
+shows where it stands, and typing a line carries on from there.
+
+*A shorter nudge.* The first turn of a step gets the whole instruction, because that is where the
+step is named. From the second turn on, if the last turn worked on the nudge and called a tool, it
+gets `[Goal mode, step N still open. Continue.]` instead. The full block repeated byte for byte in
+front of every turn is itself a pattern, and a model that reads a hundred copies of it continues
+the pattern rather than the work.
+
 **The counters are the goal's, not the steps' sum.** Wall clock runs from the first step that
 started, and tokens are what the goal cost across every context it lived in — thinking, tool
 calls and the rollover itself included. Reading the step column instead inherited every error in
@@ -52,6 +77,10 @@ the folder. A chat with no folder at all keeps its goal in the session directory
 
 A goal with no steps is refused rather than created — the counter would read `0/0` and the header
 would carry a heading with nothing hanging off it.
+
+A plan that arrives as a **string** rather than a list is parsed once, or refused with an error the
+model can act on — never walked character by character. Seen live on 2026-09-18, before the guard:
+one over-packed JSON argument became 852 steps of one character each, and the panel read `0/852`.
 
 ---
 

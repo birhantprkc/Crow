@@ -3,6 +3,153 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 2.3.0 — 2026-09-18
+
+Goal mode gained behaviour in one day of robin's live sessions: a brake on the empty loop, a cap
+on a single step, a shorter nudge, and a client that never again iterates a string into a plan.
+Every request now carries its own output cap, local included. Minor rather than patch for that
+reason -- no flag, no path and no measured number of 2.2.1 moves.
+
+### A declared array that arrives as a string is parsed once, or refused
+
+Seen live 2026-09-18, 11:15: `goal_set` was called with `steps` as a JSON **string**, the string
+was walked character by character, and the panel read **0/852** -- 852 steps of one character
+each. The plan was the model's own JSON, packed once too often, and nothing in the client looked
+at what it had actually been handed before iterating it.
+
+`run_tool` now unpacks a declared container before the tool sees it. `coerce_declared_containers`
+reads the tool's own schema and, for every property declared `array` or `object` whose value
+arrived as a string, parses that string **once** -- not repeatedly, and not into whatever comes
+out: the result has to be of the declared kind, or the model gets a tool error naming the key, the
+shape that was wanted, and the position at which the JSON breaks. The repair is never silent; a
+note goes in front of the result, in the same bracket form `run_tool_cached` already uses for a
+repeated call.
+
+`goal_steps_from` holds the same line inside `goal_set`, which is also called directly. It parses a
+string once, maps an object step to its `item` / `title` / `text` / `step` key, and refuses more
+than twenty single-character items outright -- belt beside braces: a plan of 852 steps of length
+one is an iterated string however it arrives.
+
+Not measured: whether the model writes fewer such strings. This is a guard at the seam, not a
+change to the prompt, and the one session is the only instance on record (6761bc1).
+
+### The brake on the empty loop, and a cap on one step (#202)
+
+Measured in the stored session of 2026-09-18: **thirty-five** answers of a single character (`I`),
+one after the other, at **130,939 tokens** of context, each of them answering the same 330-byte
+nudge. The 60-turn cap of #165 was the only thing in the way, and it counts the whole goal, so a
+plan hanging on one step of six did not reach it. The day before, at 178,779 tokens, the same shape
+ran forty minutes: 105 identical nudges and 300 turns on step 4 of 5 (#202).
+
+Three things now stand between a plan and the night.
+
+**The brake.** `goal_answer_mark` fingerprints an answer by its text *and* its tool calls with
+their arguments -- `read_file` on twenty files is work, `read_file` twenty times on the same file
+is a circle. Three identical answers, or three empty ones, are a loop; empty means at most two
+characters **and** no tool call, because the two cases seen live were `I` and `3` and a rule that
+knows only the empty string would have caught neither. On the third, those engine turns are **cut
+out of the history** -- counted at Crow's own nudges, so a turn leaves with its answer and its tool
+results, and nothing before the first of them is touched -- and **one** recovery line goes out in
+their place, naming the step that is still open. An empty answer to that line stops the goal with a
+line robin can read: how many times, at what context size, how many of how many steps are done.
+There is no second recovery line. Cutting is the repair and stopping is not: an empty answer left
+standing in the history is not a record of a mistake, it is an example, and the next turn reads it
+as one.
+
+**A cap on one step: 25 turns**, beside the 60 the whole goal has. The counter belongs to the step
+and restarts whenever the step changes, so a plan that moves never sees it. A step that has taken
+25 turns is cut wrong or cannot be done, and both are questions for robin rather than for another
+turn: the goal pauses, `/goal` shows where it stands, and a typed line carries on.
+
+**A short nudge from the second turn of a step.** The full block is 330 bytes of instruction, and
+byte for byte in front of every turn it is itself the pattern the model continues -- at the
+twentieth repetition it says nothing the first did not. When the last turn ran on Crow's nudge and
+called a tool, the next one gets `[Goal mode, step N still open. Continue.]`. The first turn of a
+step keeps the whole block, because that is where the step is named.
+
+What this does not answer, and what keeps #202 open: the sampling row. Crow sends the model card's
+thinking-mode row (temperature 1.0 / top_p 0.95) while the engine renders this model with
+`enable_thinking false`, whose card row is a different one. Not measured: whether the brake would
+have caught the 2026-09-17 session. Its nine echo answers ran 65 to 76 tokens, so they were neither
+byte-identical nor empty, and the stored session has not been replayed against this code
+(2b4964f).
+
+### One output cap on every request, and a URL the model shortened
+
+**`MAX_TOKENS = 8192` travels on every request, the local one included.** Until 2026-09-18 the
+local body carried no `max_tokens` at all, on the reasoning that a cap would cut long answers the
+local server is happy to finish and that no measurement had asked for one. A measurement asked. A
+body without the field does not run uncapped -- it inherits the **server's** default, and that
+default is not this client's to choose. crow-nest's was 1024, and robin's live turn paid it: a
+`write_file` carrying a whole SVG hit `finish length` after 1,024 generated tokens, **before** the
+model had written its `path` argument, so the call arrived without one and the file was never
+written ("The file path was missing"). crow-nest raised its own default to 8192 the same day
+(8bad310), which is the right value and still not a thing a client may depend on. Away from home
+the field was already load-bearing: OpenRouter answered `HTTP 402 -- you requested up to 65536
+tokens, but can only afford 313` on 2026-08-23, because a provider reserves the model's maximum
+output and prices the request against it.
+
+8192 is the one value every Claude model accepts, which is what makes it one number instead of
+per-model knowledge this client does not have. The subtask budget (`subtask_max_tokens`) and the
+digest budgets still win where they are set. What the cap costs is named rather than hidden: an
+answer longer than it is marked `CUT OFF at the token budget`, so a truncated answer no longer
+looks like a finished one -- the half the 1024 incident was missing.
+
+**`fetch_url` and `render_page` answer a broken address before the socket.** Live the same day the
+model wrote `https://collectionapi.metm...org/v1/objects/343580` -- it abbreviated the hostname the
+way prose does -- and got back `did not answer within 20s ('idna' codec can't encode character
+'\x2e' in position 19: label empty)`. That sentence is a lie the error path told: nothing was ever
+sent, the address could not be assembled. The model read the first half of it, concluded the
+network was slow, and retried the same broken URL four times. The complaint now comes back before
+the socket and names the thing the model can fix: an abbreviated host, a URL that names no host, a
+space or a control character in the host, a port that is not a port, an address the idna codec
+refuses. A trailing dot is a root and not a hole, and an IPv6 literal is never asked the codec at
+all. Not measured: whether the model corrects itself on the named error -- the guard removes the
+false cause, not the retry (2cedd44).
+
+### The crow-nest line: the decode attention table is the default
+
+Crow's third operating point runs on crow-nest, and the engine moved on 2026-09-18 in two ways that
+are Crow's business. The **released** engine is still `v0.3.0`; v0.3.1 is open on the engine's
+`main` and untagged, and [`docs/operating-points.md`](docs/operating-points.md) records these as
+measured on `main` rather than pointing a version badge at a release that does not exist yet.
+
+**`CROW_ATTN_LUT` is the default** (crow-nest #61, 61g, robin's call on 2026-09-18): the split
+decode attention kernel reads its e4m3 KV bytes out of a shared table. Bit-identical by
+construction and measured so -- generated ids `56305eee11d6`, unchanged. `decode run`, fresh
+process per run, W + 3N: **23.52 ms per decode token = 42.5 tok/s**, against the
+`CROW_ATTN_LUT=0` fallback run's 25.20 ms = 39.68. The `serve` figure of record, taken as an arm
+mean in one drift chain (`c3-sdsd-61g`, RTX 5090 / Arch Linux, four counted runs):
+**53.32 tok/s mean, within-arm spread 1.0038**, beside that chain's adjacent `decode run` arm at
+42.56 tok/s and spread 1.0010. Measured on Linux only; Windows has not been rerun at this default.
+
+**Every image but the first of a process was read as the previous one** (crow-nest #73, `bc9cd9b`,
+found and fixed 2026-09-18). The vision tower launched asynchronously and the blocking copy that
+reads its result ran on the legacy null stream, which does not order against it, so the copy took
+whatever the one shared scratch buffer still held: the previous image's embeddings -- complete,
+plausible and one request stale -- and those rows were then cached under the **new** image's hash.
+It reads as a fixed colour permutation and is really a shift by one request. **This is Crow's
+`read_image` and every clipboard paste** against a crow-nest server. The first image of a process
+was always correct, which is why nothing here caught it. No Crow code changes; the engine has to be
+the one on `main` or newer.
+
+Crow's own two issues stand where they stand. **#201 is open**: on Hyprland the browser tab opens as
+its own window outside the Crow window instead of inside the browser area. **#202 is open** as
+well -- the brake and the two caps above are two of its three points, and the sampling row is the
+third.
+
+### Known limitations
+
+**Web search still needs a key.** Unchanged, and written down because robin hit it again today:
+with neither `CROW_TAVILY_KEY` nor `CROW_SEARXNG_URL` set, `web_search` answers out of the keyless
+sources, which cover code, packages and reference and **not** the open web -- the tool says so in
+its own first line. Tavily is free and takes no credit card; `CROW_SEARXNG_URL` points at an
+instance somebody already runs. The URL guard above does not touch this: a tool with no general
+index cannot be given one by an address check.
+
+**Suites.** 1,995 cases, 0 failures: `test_crow_core` + `test_crow` + `test_crow_gui`.
+`check_shared_core` 79 of 79, `check_operating_point` 9 of 9, ruff clean.
+
 ## 2.2.1 — 2026-09-16
 
 ### Linux: `--load-mode mmap` decodes at 41.8 tok/s, and the window can see
