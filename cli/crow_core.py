@@ -3845,10 +3845,11 @@ class Conversation:
 TRANSPORT_CHAT = "chat_completions"
 TRANSPORT_MESSAGES = "anthropic_messages"
 
-# WHAT ONE ANSWER MAY COST, and it is not the same question locally and away.
-# The Messages API REQUIRES it, and this is the value every Claude model accepts
-# -- the newer ones take 64k or 128k, the older ones cap at exactly this, and
-# which is which is per-model knowledge this client does not have.
+# WHAT ONE ANSWER MAY COST, and since 2026-09-18 it is ONE number for every
+# endpoint. The Messages API REQUIRES it, and this is the value every Claude
+# model accepts -- the newer ones take 64k or 128k, the older ones cap at
+# exactly this, and which is which is per-model knowledge this client does not
+# have.
 #
 # THE OPENAI-SHAPED PATH NEEDS IT TOO, AWAY FROM HOME, and leaving it off was a
 # defect measured on 2026-08-23: OpenRouter answered `HTTP 402 -- you requested
@@ -3857,9 +3858,27 @@ TRANSPORT_MESSAGES = "anthropic_messages"
 # it, so a small balance cannot buy even a one-line answer. llama-server bills
 # nobody and reserves nothing, which is why this never showed up at home.
 #
-# NOT SENT LOCALLY. A cap here would cut long answers the local server is happy
-# to finish, and no measurement asked for one.
-REMOTE_MAX_TOKENS = 8192
+# AND IT IS SENT AT HOME AS WELL, which is what this paragraph used to deny:
+# "a cap here would cut long answers the local server is happy to finish, and
+# no measurement asked for one". A measurement asked on 2026-09-18. A body
+# without the field does not run uncapped -- it inherits the SERVER's default,
+# and that default is not this client's to choose. crow-nest's was 1024, and
+# robin's live turn paid it: a `write_file` carrying a whole SVG hit `finish
+# length` after 1024 generated tokens, BEFORE the model had written the `path`
+# argument, so the call arrived without one and the file was never written
+# ("The file path was missing"). The engine defaults to 8192 now (crow-nest
+# 8bad310) -- but a server default is the server's to change again, and a
+# client that depends on one breaks silently when it does.
+#
+# WHAT THE CAP STILL COSTS, honestly: an answer longer than this is cut at it.
+# That case is NAMED rather than hidden -- see `CUT_OFF_NOTE` -- so a truncated
+# answer no longer looks like a finished one, which is the half the 1024
+# incident was missing.
+MAX_TOKENS = 8192
+
+# The name the surfaces and the tests already say, kept as one: the cap no
+# longer depends on where the turn is going.
+REMOTE_MAX_TOKENS = MAX_TOKENS
 
 # #145: the delegation half of the budget table. Module state like _ROOT, set
 # once by the surface at boot; 0 or less falls back to REMOTE_MAX_TOKENS, so a
@@ -4830,8 +4849,10 @@ def stream_reply(
     # something this function works out: the provider registry knows, and a
     # second place deciding it would be a second answer to where a turn goes.
     transport: str = TRANSPORT_CHAT,
-    # None MEANS "DO NOT SEND ONE", which is the local case and every case up to
-    # today. See REMOTE_MAX_TOKENS for what leaving it off costs away from home.
+    # None MEANS "THE MODULE CAP", not "send no cap": every request carries the
+    # field now, local included -- see MAX_TOKENS for the two measurements
+    # behind that. A number given here still wins, which is the subtask's
+    # budget (#145) and nothing else on this path.
     max_tokens: "int | None" = None,
     # TRUE FOR EVERY ENDPOINT THAT IS NOT THIS MACHINE, and a parameter for the
     # same reason `transport` is: the provider registry knows, and a second
@@ -4923,8 +4944,11 @@ def stream_reply(
     # never had tools. Every ordinary turn still sends the module list.
     if send_tools:
         body["tools"] = TOOLS
-    if max_tokens:
-        body["max_tokens"] = max_tokens
+    # ALWAYS PRESENT, WHEREVER THIS GOES. An absent field is not "no cap", it is
+    # the server's default -- 1024 on crow-nest until 2026-09-18, which cut a
+    # tool call in half before its `path` argument existed. The caller's number
+    # wins when it gave one; None means the module cap, never silence.
+    body["max_tokens"] = max_tokens or MAX_TOKENS
     if top_k is not None:
         # ABSENT BY DEFAULT, AND THAT IS NOT AN OVERSIGHT (#112). 0731 must keep
         # sending no top_k: it is the model under measurement, and adding a
@@ -7301,6 +7325,12 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     if not target:
         return "error: render_page needs a path or a URL"
     if re.match(r"^https?://", target, re.I):
+        # THE SAME GUARD `fetch_url` KEEPS (#203): an abbreviated hostname is a
+        # sentence the model can repair, and a browser would answer it with a
+        # screenshot of an error page instead.
+        bad = _url_complaint(target)
+        if bad:
+            return bad
         url = target
     else:
         target = _rooted(target)                    # #177
@@ -8435,6 +8465,54 @@ def _http_text(url: str, timeout: int = WEB_TIMEOUT, data: bytes | None = None,
     return ctype, raw.decode(charset, errors="replace")
 
 
+def _url_complaint(url: str) -> "str | None":
+    """What is wrong with this URL before anything is fetched, or None.
+
+    #203, robin live on 2026-09-18. The model wrote
+    `https://collectionapi.metm...org/v1/objects/343580` -- it ABBREVIATED the
+    hostname the way prose does, "metmuseum" to "metm..." -- and the fetch came
+    back `did not answer within 20s ('idna' codec can't encode character
+    '\x2e' in position 19: label empty)`. That sentence is a lie told by the
+    error path: nothing was ever sent, the address could not be assembled. The
+    model read the first half of it, concluded the network was slow, and tried
+    the same broken URL four times in a row.
+
+    SO THE COMPLAINT COMES BACK BEFORE THE SOCKET, and it names the thing the
+    model can fix. A timeout is a fact about the world; a typed address is a
+    fact about the last sentence the model wrote, and only one of the two is
+    worth retrying.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname or ""
+        netloc = parts.netloc
+        parts.port  # noqa: B018 -- raises on `:notaport`, and only when read
+    except ValueError as exc:
+        return f"error: not a valid URL: {exc}"
+    # A TRAILING DOT IS A ROOT, NOT A HOLE: `example.com.` is a valid FQDN and
+    # the idna codec handles it, so one is dropped before the labels are read.
+    labels = (host[:-1] if host.endswith(".") else host).split(".")
+    if "..." in url or ".." in netloc or (host and any(not part for part in labels)):
+        return (f'error: the URL is abbreviated ("{netloc or url}") - write the '
+                f'full hostname, e.g. collectionapi.metmuseum.org')
+    if not host:
+        return f"error: not a valid URL: {url} names no host"
+    # A SPACE IN A HOSTNAME ESCAPES `_http_text` ALTOGETHER: http.client raises
+    # InvalidURL, which is neither OSError nor ValueError, so the tool would
+    # raise instead of answering -- the one thing it promises never to do.
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in netloc):
+        return (f'error: not a valid URL: the host ("{netloc}") contains a '
+                f'space or a control character')
+    # IPv6 LITERALS ARE NOT NAMES. `::1` has empty labels by definition and the
+    # idna codec refuses it, so the codec is only asked about hostnames.
+    if ":" not in host:
+        try:
+            host.encode("idna")
+        except (UnicodeError, ValueError) as exc:
+            return f"error: not a valid URL: {exc}"
+    return None
+
+
 def tool_fetch_url(url: str = "", **_) -> str:
     """One page, as text. It serves the search; it is not the capability alone."""
     if not url:
@@ -8445,6 +8523,11 @@ def tool_fetch_url(url: str = "", **_) -> str:
         # an unbounded read of the disk that goes AROUND #92's boundary rather
         # than through it -- and reads are not bounded there by design.
         return f"error: fetch_url takes http or https, not {scheme or 'a bare path'}"
+    # BEFORE THE SOCKET, so an address the model shortened comes back as an
+    # address to fix rather than as a timeout to retry -- see `_url_complaint`.
+    bad = _url_complaint(url)
+    if bad:
+        return bad
     got = _http_text(url)
     if isinstance(got, str):
         return got
@@ -13236,8 +13319,9 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                                           "content": review_question(incidents)}]
     body = {"model": model, "messages": messages, "tools": TOOLS, "stream": False,
             "temperature": temperature, "top_p": top_p, "min_p": min_p}
-    if max_tokens:
-        body["max_tokens"] = max_tokens
+    # The same rule as the turn's body, for the same reason: a review cut off at
+    # a server default writes half a memory line and never says why.
+    body["max_tokens"] = max_tokens or MAX_TOKENS
     if top_k is not None:
         body["top_k"] = top_k
     if reasoning_effort:

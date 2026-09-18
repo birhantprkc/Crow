@@ -5655,9 +5655,10 @@ class TheRemoteEndpointTests(ApiCase):
         with mock.patch.object(crow_gui, "run_turn", fake_run),              mock.patch.object(crow_core, "review_turn", fake_review),              mock.patch.object(crow_core, "review_due", lambda *a, **k: 1.0):
             api._run("hello")
         self.assertEqual(seen.get("turn"), crow_core.TRANSPORT_CHAT)
-        # AND NO CAP AT HOME, which is the half that keeps a long local answer
-        # from being cut by a rule written for somebody else's billing.
-        self.assertIsNone(seen.get("cap"))
+        # AND THE SAME CAP AT HOME, which is the half that used to be None: a
+        # body without the field inherits the server's default, and crow-nest's
+        # 1024 cut a tool call off mid-argument on 2026-09-18.
+        self.assertEqual(seen.get("cap"), crow_core.MAX_TOKENS)
 
     def test_a_model_can_be_typed_when_no_catalogue_answers(self):
         """The field is always there rather than appearing on failure: a control

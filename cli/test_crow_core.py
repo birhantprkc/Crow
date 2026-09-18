@@ -3722,6 +3722,45 @@ class WebFetchTests(unittest.TestCase):
                                     ctype="text/plain")):
             self.assertIn("--moe-stream", crow_core.tool_fetch_url("https://e.org/f.txt"))
 
+    def test_an_abbreviated_hostname_is_answered_without_a_fetch(self):
+        """#203, robin live on 2026-09-18. The model wrote
+        `https://collectionapi.metm...org/v1/objects/343580` -- "metmuseum"
+        shortened to "metm..." the way prose shortens it -- and the tool said
+        `did not answer within 20s ('idna' codec can't encode character
+        '\x2e' in position 19: label empty)`. The model read the first half of
+        that sentence, concluded the network was slow, and tried the same
+        broken URL FOUR TIMES.
+
+        THE ASSERTION THAT MATTERS IS `seen == []`: nothing may reach the
+        socket, because there is no address to reach it with. A timeout is a
+        fact about the world; this is a fact about the URL the model typed."""
+        with _Urlopen(_FakeResponse(b"<p>never</p>")) as calls:
+            out = crow_core.tool_fetch_url(
+                "https://collectionapi.metm...org/v1/objects/343580")
+        self.assertEqual(calls.seen, [], "an abbreviated URL is never fetched")
+        self.assertIn("abbreviated", out)
+        self.assertIn("collectionapi.metm...org", out)
+        self.assertIn("write the full hostname", out)
+        self.assertNotIn("did not answer", out)
+
+    def test_an_address_that_cannot_be_assembled_is_not_a_timeout(self):
+        """The same lie, told by the other error path: a port that is not a
+        number, a space in the host. Both come back as what they are."""
+        for url in ("http://example.org:notaport/x", "http://exa mple.org/x"):
+            with _Urlopen(_FakeResponse(b"<p>never</p>")) as calls:
+                out = crow_core.tool_fetch_url(url)
+            self.assertEqual(calls.seen, [], url)
+            self.assertTrue(out.startswith("error: not a valid URL:"), out)
+
+    def test_a_whole_hostname_still_fetches(self):
+        """THE NEGATIVE HALF. Every case above is satisfied by a guard that
+        refuses everything -- this is the one that keeps the tool a tool."""
+        with _Urlopen(_FakeResponse(b"<p>Gallery 999, on view.</p>")) as calls:
+            out = crow_core.tool_fetch_url(
+                "https://collectionapi.metmuseum.org/public/collection/v1/objects/343580")
+        self.assertEqual(len(calls.seen), 1)
+        self.assertIn("Gallery 999", out)
+
 
 class _Console(io.StringIO):
     """A stderr that answers `isatty()` the way a terminal does.
@@ -9495,15 +9534,21 @@ class TheAnthropicTransportTests(unittest.TestCase):
             self.assertEqual(tool["name"], original["function"]["name"])
             self.assertEqual(tool["input_schema"], original["function"]["parameters"])
 
-    def test_an_output_cap_travels_away_from_home_and_not_at_home(self):
+    def test_an_output_cap_travels_on_every_request_local_included(self):
         """MEASURED 2026-08-23: OpenRouter answered `HTTP 402 -- you requested up
         to 65536 tokens, but can only afford 313`. With no cap in the body a
         provider RESERVES the model's maximum output and prices the request
         against it, so a small balance cannot buy even a one-line answer.
 
-        THE LOCAL HALF IS THE NEGATIVE ONE, and it matters as much: llama-server
-        reserves nothing and bills nobody, and a cap sent there would cut long
-        answers it is happy to finish. Nothing measured asked for that."""
+        THE LOCAL HALF USED TO BE THE NEGATIVE ONE -- this case asserted
+        `assertNotIn("max_tokens", sent)` until 2026-09-18, on the grounds that
+        a cap would cut long answers llama-server is happy to finish. robin's
+        live session measured the other side of that: a body with no cap does
+        not run uncapped, it runs on the SERVER's default. crow-nest's was 1024,
+        and a `write_file` carrying a whole SVG hit `finish length` before the
+        model had written its `path` argument -- the call arrived without one
+        and the file was never written. A server default is not this client's
+        to depend on."""
         sent = {}
 
         def fake(url, body, api_key, timeout, extra=None):
@@ -9517,13 +9562,36 @@ class TheAnthropicTransportTests(unittest.TestCase):
         crow_core.stream_reply(conversation, base_url="http://127.0.0.1:1/v1",
                                model="m", api_key="k", temperature=1.0,
                                top_p=0.95, min_p=0.01, timeout=1)
-        self.assertNotIn("max_tokens", sent)
+        self.assertEqual(sent.get("max_tokens"), crow_core.MAX_TOKENS)
+        self.assertEqual(crow_core.MAX_TOKENS, crow_core.REMOTE_MAX_TOKENS,
+                         "one cap for both paths, under either name")
         sent.clear()
         crow_core.stream_reply(conversation, base_url="http://127.0.0.1:1/v1",
                                model="m", api_key="k", temperature=1.0,
                                top_p=0.95, min_p=0.01, timeout=1,
                                max_tokens=crow_core.REMOTE_MAX_TOKENS)
         self.assertEqual(sent.get("max_tokens"), crow_core.REMOTE_MAX_TOKENS)
+
+    def test_a_caller_that_names_a_budget_still_wins(self):
+        """THE OVERRIDE IS THE POINT OF THE PARAMETER: #145's subtask budget is
+        a number the surface chose, and the module cap must not swallow it."""
+        sent = {}
+
+        def fake(url, body, api_key, timeout, extra=None):
+            sent.update(body)
+            return iter(())
+
+        real, crow_core._post_stream = crow_core._post_stream, fake
+        self.addCleanup(lambda: setattr(crow_core, "_post_stream", real))
+        crow_core.subtask_budget_set(512)
+        self.addCleanup(crow_core.subtask_budget_set, 0)
+        conversation = crow_core.Conversation("be brief")
+        conversation.append("user", "hi")
+        crow_core.stream_reply(conversation, base_url="http://127.0.0.1:1/v1",
+                               model="m", api_key="k", temperature=1.0,
+                               top_p=0.95, min_p=0.01, timeout=1,
+                               max_tokens=crow_core.subtask_max_tokens())
+        self.assertEqual(sent.get("max_tokens"), 512)
 
     def test_the_sampling_triple_does_not_travel(self):
         """`temperature`, `top_p` and `top_k` are REMOVED on the current Claude

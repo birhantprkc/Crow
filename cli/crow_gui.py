@@ -11744,11 +11744,14 @@ class Api:
                 model=spot["model"], api_key=spot["api_key"],
                 extra_headers=spot.get("headers") or None,
                 transport=spot.get("transport") or crow_core.TRANSPORT_CHAT,
-                # A PROVIDER RESERVES AND PRICES THE MAXIMUM when the body names
-                # no cap -- measured 2026-08-23, `HTTP 402 ... you requested up
-                # to 65536 tokens, but can only afford 313`. The local server
-                # reserves nothing, so it is sent nothing.
-                max_tokens=crow_core.REMOTE_MAX_TOKENS if spot["remote"] else None,
+                # ONE CAP, WHEREVER THE TURN IS GOING. A provider RESERVES AND
+                # PRICES THE MAXIMUM when the body names none -- measured
+                # 2026-08-23, `HTTP 402 ... you requested up to 65536 tokens,
+                # but can only afford 313` -- and a local server without one
+                # falls back to ITS default, which was 1024 on 2026-09-18 and
+                # cut a tool call off before its `path` argument. See
+                # crow_core.MAX_TOKENS for both measurements.
+                max_tokens=crow_core.MAX_TOKENS,
                 # THE SAME ANSWER THE CAP IS READ FROM, so the two can never
                 # disagree about which endpoint this turn is going to.
                 remote=spot["remote"],
@@ -11857,11 +11860,14 @@ class Api:
                 model=spot["model"], api_key=spot["api_key"],
                 extra_headers=spot.get("headers") or None,
                 transport=spot.get("transport") or crow_core.TRANSPORT_CHAT,
-                # A PROVIDER RESERVES AND PRICES THE MAXIMUM when the body names
-                # no cap -- measured 2026-08-23, `HTTP 402 ... you requested up
-                # to 65536 tokens, but can only afford 313`. The local server
-                # reserves nothing, so it is sent nothing.
-                max_tokens=crow_core.REMOTE_MAX_TOKENS if spot["remote"] else None,
+                # ONE CAP, WHEREVER THE TURN IS GOING. A provider RESERVES AND
+                # PRICES THE MAXIMUM when the body names none -- measured
+                # 2026-08-23, `HTTP 402 ... you requested up to 65536 tokens,
+                # but can only afford 313` -- and a local server without one
+                # falls back to ITS default, which was 1024 on 2026-09-18 and
+                # cut a tool call off before its `path` argument. See
+                # crow_core.MAX_TOKENS for both measurements.
+                max_tokens=crow_core.MAX_TOKENS,
                 remote=spot["remote"],
                 # THE SAME BLOCK THE TURN CARRIED, not a second one built here.
                 routing=routing,

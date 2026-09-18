@@ -854,10 +854,11 @@ def format_timings(timings: dict) -> str:
     # which of the two happened before trusting the answer.
     #
     # NO ADVICE ATTACHED, deliberately. This line used to end in "raise
-    # --max-tokens". There is no such flag: build_parser never had one and the
-    # request body carries no max_tokens, so the server runs on its own default.
-    # Telling someone to turn a knob that does not exist is worse than saying
-    # nothing -- they go looking for it. If a knob is added, name it here again.
+    # --max-tokens". There is no such flag: build_parser never had one, and the
+    # cap every request now carries is crow_core.MAX_TOKENS -- a constant, not a
+    # setting. Telling someone to turn a knob that does not exist is worse than
+    # saying nothing -- they go looking for it. If a knob is added, name it here
+    # again.
     if timings.get("_finish_reason") == "length":
         bits.append(crow_core.CUT_OFF_NOTE)
     return " | ".join(bits)
