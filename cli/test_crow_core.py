@@ -12966,6 +12966,148 @@ class TheThinkingCapTravelsAsAPairTests(unittest.TestCase):
         self.assertIn("/budget", crow_core.SLASH_COMMANDS)
 
 
+class TheEngineKnowsAnEmptyLoopWhenItSeesOneTests(unittest.TestCase):
+    """#202. Die Teile, aus denen die Notbremse gebaut ist: was eine
+    Wiederholung ist, was leer ist, und wo geschnitten werden muss.
+
+    LIVE AM 2026-09-18: derselbe Anstoss, das einzelne Token `I`, und das
+    fuenfunddreissig Mal hintereinander. Am Tag davor `3`, achtundvierzig Mal.
+    Der Kern faellt hier keine Entscheidung -- er beantwortet nur die drei
+    Fragen, an denen die Schleife im Fenster haengt.
+    """
+
+    def answer(self, text, calls=None):
+        message = {"role": "assistant", "content": text}
+        if calls:
+            message["tool_calls"] = [
+                {"id": "c%d" % n, "type": "function",
+                 "function": {"name": name, "arguments": args}}
+                for n, (name, args) in enumerate(calls)]
+        return message
+
+    def test_the_same_text_and_the_same_call_are_the_same_answer(self):
+        """POSITIV: der Fingerabdruck ist Text UND Aufruf mit Argumenten."""
+        one = self.answer("looking", [("read_file", '{"path": "a.py"}')])
+        two = self.answer("looking", [("read_file", '{"path": "a.py"}')])
+        self.assertEqual(crow_core.goal_answer_mark(one),
+                         crow_core.goal_answer_mark(two))
+
+    def test_the_same_tool_on_another_file_is_another_answer(self):
+        """GEGENPROBE, und sie ist der Grund fuer die Argumente im Abdruck:
+        `read_file` auf zwanzig Dateien ist Arbeit, zwanzigmal auf dieselbe ist
+        ein Kreis. Ein Abdruck ueber den Namen allein haelte das erste an."""
+        one = self.answer("looking", [("read_file", '{"path": "a.py"}')])
+        two = self.answer("looking", [("read_file", '{"path": "b.py"}')])
+        self.assertNotEqual(crow_core.goal_answer_mark(one),
+                            crow_core.goal_answer_mark(two))
+
+    def test_no_answer_has_no_fingerprint(self):
+        """None ist nicht der leere Abdruck: ein Gespraech ohne Antwort hat
+        nichts wiederholt."""
+        self.assertIsNone(crow_core.goal_answer_mark(None))
+        self.assertIsNone(crow_core.goal_last_answer([{"role": "user", "content": "hi"}]))
+
+    def test_a_single_token_without_a_tool_call_is_empty(self):
+        """Die beiden live gesehenen Faelle, `I` und `3`, und die leere Antwort
+        daneben."""
+        for text in ("I", "3", "", "  ", "ok"):
+            self.assertTrue(crow_core.goal_answer_empty(self.answer(text)),
+                            "%r did not read as empty" % text)
+
+    def test_a_short_answer_that_called_a_tool_is_not_empty(self):
+        """GEGENPROBE: wer `ok` sagt und dabei eine Datei schreibt, hat
+        gearbeitet. Ein Deckel, der das anhaelt, bremst die Arbeit."""
+        self.assertFalse(crow_core.goal_answer_empty(
+            self.answer("ok", [("write_file", "{}")])))
+        self.assertFalse(crow_core.goal_answer_empty(
+            self.answer("I read the log and it ends at line 40")))
+
+    def test_the_cut_takes_the_nudges_with_the_answers(self):
+        """Geschnitten wird am ANSTOSS: ein Zug faengt mit Crows Zeile an, und
+        alles dahinter gehoert dazu. Anstoesse ohne Antworten stehenzulassen
+        waere eine Geschichte, in der das Modell geschwiegen hat."""
+        messages = [{"role": "system", "content": "SYS"},
+                    {"role": "user", "content": "do the thing"},
+                    {"role": "assistant", "content": "on it"}]
+        for _ in range(3):
+            messages.append({"role": "user", "content": "[Goal mode. 4 of 6 steps"})
+            messages.append({"role": "assistant", "content": "I"})
+        self.assertEqual(crow_core.goal_loop_cut(messages, 3), 3)
+        self.assertEqual(crow_core.goal_loop_cut(messages, 1), 7)
+
+    def test_a_history_without_a_nudge_has_nothing_to_cut(self):
+        """GEGENPROBE: eine getippte Zeile ist kein Motorzug, und None heisst
+        hier `nichts zu schneiden` -- nicht `alles`."""
+        self.assertIsNone(crow_core.goal_loop_cut(
+            [{"role": "user", "content": "do the thing"}], 3))
+        self.assertIsNone(crow_core.goal_loop_cut([], 3))
+
+    def test_a_turn_that_called_a_tool_on_a_nudge_says_so(self):
+        """Die Frage hinter der kurzen Variante: lief dieser Zug auf Crows
+        Zeile, und wurde darin gearbeitet?"""
+        worked = [{"role": "user", "content": "[Goal mode. 1 of 2 steps done."},
+                  {"role": "assistant", "content": "",
+                   "tool_calls": [{"id": "c0", "type": "function",
+                                   "function": {"name": "read_file",
+                                                "arguments": "{}"}}]},
+                  {"role": "tool", "content": "...", "tool_call_id": "c0"},
+                  {"role": "assistant", "content": "read it"}]
+        self.assertTrue(crow_core.goal_worked_on_nudge(worked))
+
+    def test_a_turn_without_a_tool_call_does_not(self):
+        """GEGENPROBE ZWEIMAL: wer nichts getan hat, bekommt den ganzen Block
+        noch einmal -- und eine getippte Zeile ist ueberhaupt kein Anstoss."""
+        idle = [{"role": "user", "content": "[Goal mode. 1 of 2 steps done."},
+                {"role": "assistant", "content": "I"}]
+        self.assertFalse(crow_core.goal_worked_on_nudge(idle))
+        typed = [{"role": "user", "content": "carry on"},
+                 {"role": "assistant", "content": "",
+                  "tool_calls": [{"id": "c0", "type": "function",
+                                  "function": {"name": "read_file",
+                                               "arguments": "{}"}}]}]
+        self.assertFalse(crow_core.goal_worked_on_nudge(typed))
+
+
+class ALoopingTailCanBeCutOffTests(unittest.TestCase):
+    """#202. `Conversation.cut_to`: die einzige Entfernung, die diese Klasse hat.
+
+    SIE IST EINE AUSNAHME MIT EINEM GRUND. Eine leere Antwort im Verlauf ist
+    kein Protokoll, sondern ein Beispiel -- das Modell liest beim naechsten Mal,
+    womit in diesem Gespraech geantwortet wird. Nur anzuhalten liesse die
+    Lektion stehen.
+    """
+
+    def a_chat(self):
+        chat = crow_core.Conversation("SYS")
+        chat.append("user", "do the thing")
+        chat.append("assistant", "on it")
+        return chat
+
+    def test_the_tail_goes_and_everything_in_front_of_it_stays(self):
+        """POSITIV. Der Schnitt nimmt den Schwanz, nie etwas aus der Mitte."""
+        chat = self.a_chat()
+        chat.append("user", "[Goal mode. 0 of 2 steps done.")
+        chat.append("assistant", "I")
+        self.assertEqual(chat.cut_to(3), 2)
+        self.assertEqual([m["content"] for m in chat.payload()],
+                         ["SYS", "do the thing", "on it"])
+
+    def test_the_head_is_never_cut(self):
+        """Eine Konversation ohne ihren Kopf ist keine kuerzere Konversation:
+        der gepinnte Kopf (#121) ist das, woran der Server seinen Prefix
+        wiedererkennt."""
+        chat = self.a_chat()
+        chat.cut_to(0)
+        self.assertEqual([m["role"] for m in chat.payload()], ["system"])
+
+    def test_a_cut_behind_the_end_drops_nothing(self):
+        """GEGENPROBE: der Rueckgabewert ist die Zahl der verschwundenen
+        Nachrichten, und 0 heisst, dass nichts zu tun war."""
+        chat = self.a_chat()
+        self.assertEqual(chat.cut_to(99), 0)
+        self.assertEqual(len(chat), 3)
+
+
 class AGoalBelongsToItsFolderTests(unittest.TestCase):
     """#176-Nebenfund, live am 2026-08-31: ein ZWEITES Fenster fing von selbst
     an, das Ziel abzuarbeiten.

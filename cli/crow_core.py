@@ -3592,9 +3592,12 @@ def message_images(content) -> list:
 class Conversation:
     """The message list. Append-only by construction -- see module docstring.
 
-    There is deliberately no method to edit or remove a message. The only
-    way to shrink the context is `reset()`, which drops the whole thing and
-    is understood to cost a full re-prefill.
+    There is deliberately no method to EDIT a message, and only one to remove
+    any: `cut_to` drops a TAIL, whole turns at a time, for the one case #202
+    describes -- a goal loop that has written its own degenerate answers into
+    the history and would otherwise keep reading them back as examples. Nothing
+    in the middle is ever touched, and nothing is rewritten. Beside it,
+    `reset()` still drops the whole thing at the cost of a full re-prefill.
 
     AN ASSISTANT TURN CARRIES ITS REASONING. The model's template renders a
     kept turn as `<think>...</think>`; omitting the field leaves an EMPTY
@@ -3762,6 +3765,37 @@ class Conversation:
         if tool_call_id:
             message["tool_call_id"] = tool_call_id
         self._messages.append(message)
+
+    def cut_to(self, n: int) -> int:
+        """Drop message `n` and everything behind it. Returns how many went.
+
+        THE ONE REMOVAL THIS CLASS HAS, and it is #202's whole mechanism. A goal
+        loop that re-sends its nudge feeds the model its own degenerate answer
+        back as context, and a degenerate answer in the history is not a record,
+        it is a DEMONSTRATION: the next sampling reads `I` where an answer
+        belongs and gives `I` again. Measured 2026-09-18 at 130,939 tokens -- 35
+        turns of a single token, the identical nudge in front of every one of
+        them, until the 60-turn cap ended it.
+
+        SO THE LOOP IS NOT MERELY STOPPED, IT IS UNWRITTEN. Stopping and asking
+        differently leaves the lesson standing in the prompt; the model still
+        reads 35 examples of what this conversation answers with.
+
+        IT COSTS A PREFILL, like `repin_memory`, and by the cheaper half of the
+        same mechanism: only the tail goes, so the common prefix in front of the
+        cut survives and what is re-read is what was just dropped. The caller
+        has already decided that tail was worthless.
+
+        THE HEAD IS NEVER CUT. An `n` below the system message is raised to it:
+        a conversation without its head is not a shorter conversation.
+        """
+        floor = 1 if self._system else 0
+        n = max(floor, int(n))
+        if n >= len(self._messages):
+            return 0
+        dropped = len(self._messages) - n
+        del self._messages[n:]
+        return dropped
 
     def reset(self) -> None:
         # #121. THE PIN GOES WITH THE CONVERSATION, because `reset` is not a
@@ -12089,6 +12123,141 @@ def goal_next_open(goal: "dict | None" = None) -> "int | None":
         if step.get("status") != GOAL_DONE:
             return n
     return None
+
+
+# ---------------------------------------------------- #202, die Notbremse ----
+#
+# WAS HIER GEBREMST WIRD, am 2026-09-18 live gesehen: der Motor schickte
+# denselben Anstoss noch einmal, das Modell antwortete mit dem einzelnen Token
+# `I` und einem EOS, und das fuenfunddreissig Mal hintereinander -- bis der
+# 60-Zuege-Deckel es beendete. Am Tag davor dasselbe mit `3`, achtundvierzig Mal.
+#
+# WARUM ES SICH SELBST TRAEGT: jeder wiedergeschickte Zug steht danach im
+# Kontext. Das Modell liest also nicht nur einen Auftrag, sondern fuenfunddreissig
+# Beispiele dafuer, wie in diesem Gespraech geantwortet wird -- und antwortet
+# genauso. Der Motor bringt dem Modell bei, sich zu wiederholen.
+#
+# DIE ANTWORT DARAUF IST NICHT NUR AUFHOEREN. Wer nur anhaelt, laesst die
+# Beispiele stehen; wer nur anders fragt, fragt vor denselben Beispielen. Also:
+# erkennen, die Kreiszuege aus der Geschichte NEHMEN, einmal anders fragen, und
+# wenn auch das leer zurueckkommt, Schluss.
+#
+# DER KERN ENTSCHEIDET NICHT, WANN GEBREMST WIRD -- er sagt nur, was eine
+# Wiederholung ist, was leer ist und wo geschnitten werden muss. Die Schleife
+# gehoert der Oberflaeche, die sie faehrt.
+
+# WORAN CROW SEINE EIGENE ZIELZEILE WIEDERERKENNT. Der Anstoss ist keine
+# Nutzerzeile, sondern Crows Anweisung an das Modell -- und wenn er spaeter
+# wieder aus der Geschichte genommen werden muss, ist dieses Praefix das
+# einzige, was ihn von einer getippten Zeile unterscheidet. Beide Formen, der
+# volle Block und die kurze Variante, fangen damit an.
+GOAL_NUDGE_MARK = "[Goal mode"
+
+# WIE OFT DIESELBE ANTWORT KOMMEN DARF, bevor gebremst wird. Zwei gleiche
+# Antworten sind ein Zufall -- ein Modell, das zweimal "ok" sagt, kann trotzdem
+# arbeiten. Drei sind ein Kreis, und der dritte ist frueh genug: bis dahin
+# stehen drei Beispiele im Kontext und nicht fuenfunddreissig.
+GOAL_LOOP_ANSWERS = 3
+
+# WAS "LEER" HEISST: ein einzelnes Token ohne Werkzeugaufruf. Nicht die leere
+# Zeichenkette allein -- die beiden live gesehenen Faelle waren `I` und `3`,
+# also je ein Zeichen, und eine Grenze, die nur die Null kennt, haette keinen
+# von beiden gefangen.
+GOAL_EMPTY_CHARS = 2
+
+
+def goal_message_text(message: "dict | None") -> str:
+    """Der Text einer Nachricht -- auch wenn sie als Bloecke kam (#142)."""
+    content = (message or {}).get("content")
+    if isinstance(content, list):
+        return "".join(part.get("text") or "" for part in content
+                       if isinstance(part, dict) and part.get("type") == "text")
+    return content if isinstance(content, str) else ""
+
+
+def goal_last_answer(messages: "list | None") -> "dict | None":
+    """Die letzte Antwort des Modells in dieser Geschichte, oder None."""
+    for message in reversed(messages or []):
+        if message.get("role") == "assistant":
+            return message
+    return None
+
+
+def goal_answer_mark(message: "dict | None") -> "str | None":
+    """Der Fingerabdruck einer Antwort. None, wenn es keine gibt.
+
+    TEXT UND WERKZEUGE, MIT ARGUMENTEN: zwei Zuege, die denselben Satz sagen und
+    dabei verschiedene Dateien schreiben, sind nicht derselbe Zug -- und zwei,
+    die denselben Aufruf mit denselben Argumenten wiederholen, sind es, auch
+    wenn der Text daneben sich unterscheidet. Der Name allein waere zu grob:
+    `read_file` auf zwanzig Dateien ist Arbeit, `read_file` zwanzigmal auf
+    dieselbe ist ein Kreis.
+    """
+    if message is None:
+        return None
+    import hashlib
+
+    calls = [[(call.get("function") or {}).get("name") or "",
+              (call.get("function") or {}).get("arguments") or ""]
+             for call in message.get("tool_calls") or []]
+    material = json.dumps([goal_message_text(message).strip(), calls], sort_keys=True)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def goal_answer_empty(message: "dict | None") -> bool:
+    """Eine Antwort, die nichts ist: hoechstens `GOAL_EMPTY_CHARS` Zeichen und
+    kein Werkzeugaufruf.
+
+    DER AUFRUF FAELLT ZUERST, und das ist keine Feinheit: ein Zug, der `ok` sagt
+    und dabei eine Datei schreibt, hat gearbeitet. Kurz ist nur dann leer, wenn
+    daneben nichts passiert ist.
+    """
+    if message is None or message.get("tool_calls"):
+        return False
+    return len(goal_message_text(message).strip()) <= GOAL_EMPTY_CHARS
+
+
+def goal_is_nudge(message: "dict | None") -> bool:
+    """Ist diese Nachricht Crows eigener Anstoss und nicht robins Zeile?"""
+    return ((message or {}).get("role") == "user"
+            and goal_message_text(message).startswith(GOAL_NUDGE_MARK))
+
+
+def goal_loop_cut(messages: "list | None", turns: int) -> "int | None":
+    """Wo geschnitten wird, damit die letzten `turns` Motorzuege verschwinden.
+
+    GEZAEHLT WIRD AN DEN ANSTOESSEN, nicht an den Antworten: ein Motorzug faengt
+    mit Crows Zeile an, und alles dahinter gehoert dazu -- die Antwort, ihre
+    Werkzeugergebnisse und jede weitere Runde. Wer nur die Antworten wegnaehme,
+    liesse die Anstoesse stehen, und die Geschichte behauptete danach, das
+    Modell habe auf sie geschwiegen.
+
+    ALLES VOR DEM ERSTEN DIESER ZUEGE BLEIBT. Ein Kreis ist kein Grund, die
+    Arbeit davor zu verlieren.
+
+    None heisst: hier steht kein Motorzug, also gibt es nichts zu schneiden.
+    """
+    marks = [n for n, message in enumerate(messages or []) if goal_is_nudge(message)]
+    if not marks or turns < 1:
+        return None
+    return marks[-turns] if len(marks) >= turns else marks[0]
+
+
+def goal_worked_on_nudge(messages: "list | None") -> bool:
+    """Lief der letzte Zug auf Crows Anstoss UND hat er ein Werkzeug gerufen?
+
+    Die Frage, an der die kurze Variante des Anstosses haengt: wer arbeitet,
+    braucht den ganzen Block nicht noch einmal -- und ein Verlauf, in dem
+    hundertmal derselbe 330-Byte-Block steht, ist selbst schon das Muster, das
+    das Modell dann fortsetzt.
+    """
+    worked = False
+    for message in reversed(messages or []):
+        if message.get("role") == "user":
+            return worked and goal_is_nudge(message)
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            worked = True
+    return False
 
 
 def needs_approval(name: str, mode: str) -> bool:

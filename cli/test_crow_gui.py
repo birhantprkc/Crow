@@ -9129,6 +9129,156 @@ class TheGoalPanelShowsTheGoalsOwnCostTests(ApiCase):
         self.assertEqual([m["goal"] for m in said], [None])
 
 
+class TheGoalEngineBrakesOnAnEmptyLoopTests(ApiCase):
+    """#202, live am 2026-09-18, 12:02: der Motor schickte denselben Anstoss
+    noch einmal, das Modell antwortete mit dem einzelnen Token `I`, und das
+    fuenfunddreissig Mal hintereinander -- Nachricht 505 bis 573, jede zweite --,
+    bis der 60-Zuege-Deckel es beendete. Am Tag davor dasselbe mit `3`,
+    achtundvierzig Mal.
+
+    WARUM ES SICH SELBST TRUG: jeder wiedergeschickte Zug steht danach im
+    Kontext. Das Modell las nicht einen Auftrag, sondern fuenfunddreissig
+    Beispiele dafuer, wie in diesem Gespraech geantwortet wird. Deshalb ist
+    Anhalten allein hier keine Reparatur -- die Beispiele muessen weg.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(crow_core.goal_write, None)
+        crow_core.goal_start("Ship it", ["read the log", "write the fix"],
+                             now=1000.0)
+
+    def turn(self, api, text, answer, calls=None) -> None:
+        """Einen gefahrenen Zug in die Geschichte schreiben: Crows Zeile, die
+        Antwort darauf, und was das Modell dabei gerufen hat. Genau die zwei
+        Anhaenge, die `_run` um `run_turn` herum macht."""
+        api._conversation.append("user", text)
+        if calls:
+            api._conversation.append(
+                "assistant", "", tool_calls=[{"id": "c0", "name": calls,
+                                              "arguments": "{}"}])
+            api._conversation.append("tool", "...", tool_call_id="c0")
+        api._conversation.append("assistant", answer)
+
+    def notes(self, api) -> list:
+        return [m["t"] for m in self.drained(api) if m.get("k") == "note"]
+
+    def looped(self, api, answer: str = "I") -> str:
+        """Drei Zuege mit derselben leeren Antwort, und was der Motor danach
+        schicken will. Das ist die Lage aus dem Live-Fall, dreimal statt
+        fuenfunddreissig Mal."""
+        for _ in range(crow_core.GOAL_LOOP_ANSWERS):
+            self.turn(api, api._goal_nudge(), answer)
+        return api._goal_nudge()
+
+    def test_three_empty_answers_take_the_loop_out_of_the_history(self):
+        """POSITIV, die eigentliche Reparatur: Anstoesse UND Antworten sind
+        danach weg, und alles, was davor gearbeitet wurde, steht noch da."""
+        api = self.api()
+        api._conversation.append("user", "start please")
+        api._conversation.append("assistant", "will do")
+        before = api._conversation.payload()
+        self.looped(api)
+        self.assertEqual(api._conversation.payload(), before,
+                         "the empty turns are still in the prompt")
+
+    def test_the_loop_is_answered_once_with_another_line_not_the_nudge(self):
+        """Statt des Anstosses EINE andere Zeile -- sie benennt den Schritt, der
+        offen ist, und verlangt einen Werkzeugaufruf statt noch einer Antwort."""
+        api = self.api()
+        recovery = self.looped(api)
+        self.assertIn("Your last answers were empty", recovery)
+        self.assertIn("Step 1 is still open: read the log", recovery)
+        self.assertIn("tool call", recovery)
+        self.assertNotIn("Do it now.", recovery)
+
+    def test_robin_is_told_that_history_disappeared(self):
+        """Geschichte still zu loeschen waere schlimmer als der Kreis: beim
+        naechsten Blick fehlten Nachrichten und nichts sagte warum."""
+        api = self.api()
+        self.looped(api)
+        self.assertTrue(any("dropped from the history" in n
+                            for n in self.notes(api)), self.notes(api))
+
+    def test_an_empty_answer_after_the_recovery_stops_the_goal(self):
+        """Kein zweiter Versuch: wer auch auf eine frisch geschnittene
+        Geschichte mit nichts antwortet, hat nicht die falsche Frage gehoert."""
+        api = self.api()
+        api._context_tokens = 130939
+        before = api._conversation.payload()
+        self.turn(api, self.looped(api), "I")
+        self.assertIsNone(api._goal_nudge(), "the engine asked a third time")
+        self.assertIn("goal mode stopped: the model repeated an empty answer 3 "
+                      "times at 130,939 tokens; 0 of 2 steps done",
+                      self.notes(api))
+        self.assertEqual(api._conversation.payload(), before,
+                         "the recovery turn and its empty answer stayed")
+
+    def test_a_recovery_that_works_carries_the_goal_on(self):
+        """GEGENPROBE, und sie traegt die ganze Bremse: ein Modell, das sich
+        faengt, arbeitet weiter -- die Bremse ist keine Einbahnstrasse."""
+        api = self.api()
+        self.turn(api, self.looped(api), "read it", calls="read_file")
+        self.assertIsNotNone(api._goal_nudge(), "the engine gave up on a turn "
+                                                "that did the work")
+
+    def test_three_identical_answers_brake_even_when_they_are_not_empty(self):
+        """Die zweite Tuer in dieselbe Bremse: derselbe Satz mit demselben
+        Aufruf, dreimal -- laenger als zwei Zeichen und trotzdem ein Kreis."""
+        api = self.api()
+        for _ in range(crow_core.GOAL_LOOP_ANSWERS):
+            self.turn(api, api._goal_nudge(), "still looking at it",
+                      calls="read_file")
+        self.assertIn("Your last answers were empty", api._goal_nudge() or "")
+
+    def test_a_step_that_has_taken_its_turns_pauses_the_goal(self):
+        """#202. Der 60er-Deckel sichert das GANZE Ziel und merkt deshalb nicht,
+        dass ein Plan mit sechs Schritten seit fuenfzig Zuegen an Schritt 5
+        haengt -- genau die Lage am 2026-09-18."""
+        api = self.api()
+        for n in range(api.GOAL_STEP_TURN_CAP):
+            nudge = api._goal_nudge()
+            self.assertIsNotNone(nudge, "the step cap fired after %d turns" % n)
+            self.turn(api, nudge, "round %d, still on it" % n)
+        self.assertIsNone(api._goal_nudge())
+        self.assertIn("goal mode paused: step 1 has taken 25 turns. `/goal` "
+                      "shows where it stands -- a typed line carries on.",
+                      self.notes(api))
+
+    def test_the_step_counter_starts_over_on_the_next_step(self):
+        """GEGENPROBE: der Zaehler gehoert dem Schritt, nicht dem Ziel. Ein Plan,
+        der voranschreitet, sieht diesen Deckel nie."""
+        api = self.api()
+        for n in range(20):
+            self.turn(api, api._goal_nudge(), "round %d, still on it" % n)
+        crow_core.goal_step_begin(0, now=1000.0)
+        crow_core.goal_step_end(0, now=1010.0)
+        self.assertEqual(api._goal_nudge().count("Next is step 2"), 1)
+        self.assertEqual(api._goal_step_turns, 1, "the new step inherited a count")
+
+    def test_a_working_turn_gets_the_short_line_instead_of_the_whole_block(self):
+        """#202. Der volle Anstoss ist 330 Byte; byteweise identisch vor jedem
+        Zug ist er selbst das Muster, das das Modell dann fortsetzt."""
+        api = self.api()
+        first = api._goal_nudge()
+        self.assertIn("Do it now.", first)
+        self.turn(api, first, "read it", calls="read_file")
+        self.assertEqual(api._goal_nudge(),
+                         "[Goal mode, step 1 still open. Continue.]")
+
+    def test_the_first_turn_of_a_step_always_gets_the_whole_block(self):
+        """GEGENPROBE ZWEIMAL: der Schritt steht dort zum ersten Mal -- und wer
+        NICHT gearbeitet hat, bekommt ihn ebenfalls noch einmal ganz."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), "thinking about it")
+        second = api._goal_nudge()
+        self.assertIn("Do it now.", second)
+        self.turn(api, second, "read it", calls="read_file")
+        crow_core.goal_step_begin(0, now=1000.0)
+        crow_core.goal_step_end(0, now=1010.0)
+        self.assertIn("Next is step 2: write the fix", api._goal_nudge())
+
+
 # ============================================================== the Linux port
 
 class _FakeGtkWindow:

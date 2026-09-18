@@ -7446,11 +7446,12 @@ class Api:
         # denselben Weg durch `push` wie beim ersten Mal, und ohne diese Sperre
         # verdoppelte sich das Band bei jedem Zurueckwechseln.
         self._replaying = False
-        # #165. WIE VIELE ZUEGE DER MOTOR SCHON VON SELBST GEFAHREN HAT.
-        # Zurueckgesetzt, sobald jemand tippt: eine Zeile von robin ist der
-        # Beweis, dass ein Mensch zusieht, und das ist es, was der Deckel
-        # eigentlich absichert.
-        self._goal_turns = 0
+        # #165/#202. WAS DER MOTOR UEBER SICH SELBST WEISS: wie viele Zuege er
+        # gefahren ist, wie viele davon auf denselben Schritt gingen, und was
+        # das Modell zuletzt geantwortet hat. Zurueckgesetzt, sobald jemand
+        # tippt: eine Zeile von robin ist der Beweis, dass ein Mensch zusieht,
+        # und das ist es, was die Deckel eigentlich absichern.
+        self._goal_reset()
         # KEIN ZIEL IST DER BEKANNTE ANFANGSZUSTAND, nicht "noch nichts
         # gesehen": die Seite startet ohne Panel, also hat ein `goal: null`
         # beim ersten Zug niemandem etwas zu sagen.
@@ -8755,19 +8756,152 @@ class Api:
     # dem, was ein Kreis in einer Stunde schafft.
     GOAL_TURN_CAP = 60
 
+    # #202. WIE VIELE ZUEGE EIN EINZELNER SCHRITT BEKOMMT. Der 60er-Deckel oben
+    # sichert das GANZE Ziel und merkt deshalb nicht, dass ein Plan mit sechs
+    # Schritten seit fuenfzig Zuegen an Schritt 5 haengt -- am 2026-09-18 genau
+    # so passiert. Ein Schritt, der nach 25 Zuegen nicht fertig ist, ist entweder
+    # falsch geschnitten oder nicht zu machen, und beides sind Fragen an robin
+    # und nicht an noch einen Zug.
+    GOAL_STEP_TURN_CAP = 25
+
+    def _goal_reset(self) -> None:
+        """Der Motor auf Anfang. EIN Ort fuer alles, was er ueber sich weiss.
+
+        Drei Aufrufer, und jeder von ihnen bedeutet dasselbe: was der Motor
+        bisher gezaehlt hat, zaehlt nicht mehr. Der Start, eine getippte Zeile
+        und das Wegraeumen des Ziels. Ein zweiter Zaehler, der an einer dieser
+        Stellen vergessen wird, ist genau die Sorte Fehler, die erst nach
+        Stunden Laufzeit sichtbar wird -- deshalb steht die Liste hier und
+        nicht dreimal.
+        """
+        # Wie viele Zuege der Motor von selbst gefahren hat (#165).
+        self._goal_turns = 0
+        # Welcher Schritt das war und wie viele Zuege er schon hatte (#202).
+        self._goal_step: "int | None" = None
+        self._goal_step_turns = 0
+        # Der Fingerabdruck der letzten Antwort, wie oft er in Folge kam, und
+        # wie viele leere Antworten in Folge (#202).
+        self._goal_echo: "str | None" = None
+        self._goal_echoes = 0
+        self._goal_empties = 0
+        # Ob die zuletzt geschickte Zeile die EINE Erholungszeile war. Danach
+        # gibt es keinen zweiten Versuch (#202).
+        self._goal_recovery = False
+
+    def _goal_cut(self, turns: int) -> int:
+        """Die letzten `turns` Motorzuege aus der Geschichte nehmen. #202.
+
+        DAS IST DIE EIGENTLICHE REPARATUR, nicht das Anhalten. Eine leere
+        Antwort im Verlauf ist kein Protokoll, sondern ein Beispiel: das Modell
+        liest beim naechsten Mal, dass in diesem Gespraech auf einen Anstoss mit
+        einem Token geantwortet wird, und tut es wieder. Wer nur aufhoert, laesst
+        diese Lektion stehen; wer nur anders fragt, fragt vor ihr.
+
+        ANSTOSS UND ANTWORT GEHEN GEMEINSAM. Ein Anstoss ohne Antwort waere eine
+        Geschichte, in der Crow gefragt und das Modell geschwiegen hat -- auch
+        das ein Muster, und kein besseres.
+
+        DIE MARKEN UND DIE BILANZEN GEHEN MIT, soweit sie hinter dem Schnitt
+        liegen: ihr `at` zaehlt Nachrichten, und eine Marke ueber einer
+        Nachricht, die es nicht mehr gibt, zeichnete sich beim naechsten
+        Ansehen an der falschen Stelle.
+        """
+        cut = crow_core.goal_loop_cut(self._conversation.payload(), turns)
+        if cut is None:
+            return 0
+        dropped = self._conversation.cut_to(cut)
+        if not dropped:
+            return 0
+        self._notes = [n for n in self._notes if n.get("at", 0) <= cut]
+        self._timings = [t for t in self._timings if t.get("at", 0) <= cut]
+        # ROBIN SIEHT, DASS ETWAS VERSCHWUNDEN IST. Geschichte still zu
+        # loeschen waere schlimmer als der Kreis: beim naechsten Blick fehlten
+        # Nachrichten, und nichts sagte warum.
+        self.push({"k": "note",
+                   "t": "goal mode: %d message%s of an empty loop dropped from "
+                        "the history" % (dropped, "" if dropped == 1 else "s")})
+        return dropped
+
+    def _goal_brake(self, goal: dict, nxt: int) -> "tuple[bool, str | None]":
+        """Was die letzte Antwort ueber den naechsten Zug sagt. #202.
+
+        `(True, None)`  weitermachen, der Anstoss wird normal gebaut.
+        `(False, text)` stattdessen die EINE Erholungszeile schicken.
+        `(False, None)` Schluss -- es kommt nichts mehr.
+
+        DREI GLEICHE ANTWORTEN SIND EIN KREIS, und gleich heisst hier: derselbe
+        Text UND dieselben Werkzeugaufrufe mit denselben Argumenten. Leer ist der
+        zweite Weg hinein: `I`, `3`, ein Token, kein Aufruf -- so sah es am
+        2026-09-18 aus, fuenfunddreissig Mal hintereinander.
+
+        NACH DER ERHOLUNGSZEILE GIBT ES KEINEN ZWEITEN VERSUCH. Ein Modell, das
+        auch auf eine frisch geschnittene Geschichte mit nichts antwortet, hat
+        nicht die falsche Frage gehoert -- es kann hier gerade nicht arbeiten,
+        und der naechste Anstoss waere nur der naechste Kreis.
+        """
+        payload = self._conversation.payload()
+        answer = crow_core.goal_last_answer(payload)
+        mark = crow_core.goal_answer_mark(answer)
+        if mark is None:
+            # Noch keine Antwort in diesem Gespraech: nichts zu beurteilen.
+            return (True, None)
+        empty = crow_core.goal_answer_empty(answer)
+        if self._goal_recovery:
+            # Das hier ist die Antwort auf die Erholungszeile.
+            self._goal_recovery = False
+            if empty or mark == self._goal_echo:
+                self._goal_cut(1)
+                done, total = crow_core.goal_counts(goal)
+                self.push({"k": "note",
+                           "t": "goal mode stopped: the model repeated an empty "
+                                "answer %d times at %s tokens; %d of %d steps done"
+                                % (crow_core.GOAL_LOOP_ANSWERS,
+                                   format(self._context_tokens, ","), done, total)})
+                self._goal_reset()
+                return (False, None)
+            # Sie hat gewirkt: der Zaehler faengt bei dieser Antwort neu an.
+            self._goal_echo, self._goal_echoes, self._goal_empties = mark, 1, 0
+            return (True, None)
+        self._goal_echoes = self._goal_echoes + 1 if mark == self._goal_echo else 1
+        self._goal_echo = mark
+        self._goal_empties = self._goal_empties + 1 if empty else 0
+        streak = max(self._goal_echoes, self._goal_empties)
+        if streak < crow_core.GOAL_LOOP_ANSWERS:
+            return (True, None)
+        # DER KREIS IST ERKANNT. Erst schneiden, dann fragen -- in dieser
+        # Reihenfolge, damit die neue Frage vor einer Geschichte steht, in der
+        # die leeren Antworten nicht mehr stehen.
+        self._goal_cut(streak)
+        self._goal_recovery = True
+        self._goal_echoes = self._goal_empties = 0
+        return (False,
+                "[Goal mode. Your last answers were empty. Step %d is still "
+                "open: %s. Start with a tool call that makes progress on it, "
+                "then continue.]" % (nxt + 1, goal["steps"][nxt]["text"]))
+
     def _goal_nudge(self) -> "str | None":
         """Die Zeile, die den naechsten Schritt anstoesst. None, wenn Schluss ist.
 
-        VIER GRUENDE AUFZUHOEREN, und jeder einzelne muss greifen, sonst laeuft
+        SECHS GRUENDE AUFZUHOEREN, und jeder einzelne muss greifen, sonst laeuft
         ein Ziel bis zum Kontextende weiter:
 
           kein Ziel          nichts zu tun
           kein offener Schritt   fertig, und das Panel sagt Complete
           Stop gedrueckt     robins Wille schlaegt jeden Plan
+          die Bremse (#202)  dreimal dieselbe oder dreimal eine leere Antwort:
+                             der Kreis wird aus der Geschichte genommen, EINMAL
+                             anders gefragt, und wenn auch das leer bleibt, ist
+                             hier nichts mehr zu holen
+          der Schrittdeckel  ein Schritt, der 25 Zuege gebraucht hat, ist eine
+                             Frage an robin und nicht an noch einen Zug (#202)
           der Deckel         ein Plan, der nach so vielen Zuegen nicht fertig
                              ist, laeuft im Kreis -- und ein Kreis ohne Grenze
                              ist ein Fenster, das den Rechner die Nacht ueber
                              beschaeftigt
+
+        DIE REIHENFOLGE IST DIE DES SCHADENS: die Bremse steht vor den Deckeln,
+        weil ein Kreis, der auf einen Deckel wartet, bis dahin den Kontext mit
+        den Beispielen fuellt, aus denen er sich naehrt.
 
         DER TEXT IST EINE ANWEISUNG AN DAS MODELL, keine Nutzerzeile: er steht
         in eckigen Klammern wie die Rollover-Notiz, damit `_spoken_carry` ihn
@@ -8781,6 +8915,13 @@ class Api:
         nxt = crow_core.goal_next_open(goal)
         if nxt is None:
             return None
+        # #202. DIE BREMSE VOR DEN DECKELN, und vor jedem Zaehler: was zuletzt
+        # zurueckkam, entscheidet, ob es ueberhaupt einen Sinn hat, noch einmal
+        # zu fragen. Ein Kreis, der auf den 60er-Deckel wartet, hat bis dahin
+        # schon fuenfunddreissig leere Zuege in den Kontext geschrieben.
+        carry_on, instead = self._goal_brake(goal, nxt)
+        if not carry_on:
+            return instead
         self._goal_turns += 1
         if self._goal_turns > self.GOAL_TURN_CAP:
             self.push({"k": "note",
@@ -8788,6 +8929,18 @@ class Api:
                             "done. `/goal` shows where it stands."
                             % (self.GOAL_TURN_CAP,
                                crow_core.goal_counts(goal)[0], len(goal["steps"]))})
+            return None
+        # #202. DER ZWEITE DECKEL, auf EINEN Schritt. Der Zaehler gehoert dem
+        # Schritt und nicht dem Ziel, also faengt er bei jedem Wechsel neu an --
+        # ein Plan, der voranschreitet, sieht ihn nie.
+        if nxt != self._goal_step:
+            self._goal_step, self._goal_step_turns = nxt, 0
+        self._goal_step_turns += 1
+        if self._goal_step_turns > self.GOAL_STEP_TURN_CAP:
+            self.push({"k": "note",
+                       "t": "goal mode paused: step %d has taken %d turns. "
+                            "`/goal` shows where it stands -- a typed line "
+                            "carries on." % (nxt + 1, self.GOAL_STEP_TURN_CAP)})
             return None
         # #165. DER ANGESTOSSENE SCHRITT LAEUFT AB JETZT, und das setzt Crow,
         # nicht das Modell. Gemessen am 2026-08-30: `goal_step` wird praktisch
@@ -8798,6 +8951,16 @@ class Api:
         if goal["steps"][nxt]["status"] != crow_core.GOAL_RUNNING:
             crow_core.goal_step_begin(nxt)
             self.push_goal()
+        # #202. NICHT HUNDERTMAL DERSELBE BLOCK. Der volle Anstoss ist 330 Byte
+        # Anweisung; byteweise identisch vor jedem Zug wiederholt ist er selbst
+        # schon das Muster, das das Modell dann fortsetzt -- und er sagt beim
+        # zwanzigsten Mal nichts, was beim ersten nicht schon dastand. Wer
+        # gerade auf den Anstoss hin ein Werkzeug gerufen hat, weiss, woran er
+        # ist; ihm reicht die Zeile. Der erste Zug eines Schritts bekommt den
+        # ganzen Block, denn dort steht der Schritt zum ersten Mal.
+        if (self._goal_step_turns > 1
+                and crow_core.goal_worked_on_nudge(self._conversation.payload())):
+            return "[Goal mode, step %d still open. Continue.]" % (nxt + 1)
         done, total = crow_core.goal_counts(goal)
         return ("[Goal mode. %d of %d steps done. Next is step %d: %s\n"
                 "Do it now. Call goal_step with 'done' only once you have "
@@ -8813,7 +8976,7 @@ class Api:
         bis jemand es beendet, muss dort beendet werden koennen, wo es steht.
         """
         crow_core.goal_write(None)
-        self._goal_turns = 0
+        self._goal_reset()
         self.push_goal(force=True)
         self._conversation.repin_memory(
             crow_core.prompt_head(crow_core.get_root()))
@@ -8947,7 +9110,12 @@ class Api:
             # Deckel sichert gegen einen Plan, der ohne Aufsicht im Kreis
             # laeuft -- und eine Zeile von robin ist der Beweis, dass jemand
             # zusieht.
-            self._goal_turns = 0
+            #
+            # #202: UND MIT IHM DIE WIEDERHOLUNGSSPUR UND DER SCHRITTDECKEL.
+            # Ein pausierter Schritt muss weiterlaufen koennen, sonst waere die
+            # Pause ein Ende -- und wer gerade selbst etwas gesagt hat, hat die
+            # Kette leerer Antworten unterbrochen.
+            self._goal_reset()
             self._busy = True
             INTERRUPT.clear()
             self._worker = threading.Thread(target=self._pump, args=(text,),
