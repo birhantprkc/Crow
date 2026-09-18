@@ -14029,5 +14029,103 @@ class ThePresencePenaltyIsTheModelsTests(unittest.TestCase):
         self.assertEqual(seen.get("presence_penalty"), 0.0)
 
 
+class TheCnqReasoningLadderTests(unittest.TestCase):
+    """2026-09-18, crow-nest #74. The CNQ container had no reasoning entry at
+    all, so `reasoning_levels_for` fell back to the module union and
+    `reasoning_groups_for` returned nothing -- every level looked distinct and
+    the menu offered words the engine answers with a 400.
+
+    The engine now reads the TOP-LEVEL `reasoning_effort` this client has sent
+    since #176 and maps it onto the ORIGINAL template that container carries.
+    That mapping is not llama-server's, so the GROUPING is not the GGUF twin's
+    either: here `off` is `none`, not `high`.
+    """
+
+    CNQ = "Qwen3.8-Flash-Next-CNQ4.5-M.cnq"
+    GGUF = "Qwen3.8-Flash-Next"
+
+    def test_the_ladder_is_the_one_the_gguf_twin_offers(self):
+        """POSITIVE. One model, two engines, one menu -- a comparison between
+        them has to vary the engine and nothing the client chose."""
+        self.assertEqual(crow_core.reasoning_levels_for(self.CNQ),
+                         ("none", "low", "medium", "high"))
+        self.assertEqual(crow_core.reasoning_levels_for(self.CNQ),
+                         crow_core.reasoning_levels_for(self.GGUF))
+        # and every one of them is a word the engine accepts
+        for level in crow_core.reasoning_levels_for(self.CNQ):
+            self.assertIsNone(crow_core.reasoning_problem(self.CNQ, level))
+
+    def test_a_word_the_engine_answers_with_a_400_is_refused_here_first(self):
+        """NEGATIVE, and the reason the list is measured rather than guessed:
+        crow-nest refuses these with an HTTP 400 that names the five words, so a
+        menu offering them would kill the turn to say so."""
+        for level in ("max", "minimal", "off", "High", ""):
+            self.assertIsNotNone(crow_core.reasoning_problem(self.CNQ, level))
+
+    def test_off_is_none_on_this_engine_and_high_on_the_other(self):
+        """The measurement this entry exists for. crow-nest renders
+        enable_thinking false for a request that names no level, so the absent
+        key is the NON-THINKING prompt; llama-server's template takes its own
+        xhigh default instead. Same weights, opposite ends of the ladder."""
+        cnq = crow_core.reasoning_groups_for(self.CNQ)
+        gguf = crow_core.reasoning_groups_for(self.GGUF)
+        self.assertEqual(crow_core.reasoning_group_of(None, cnq), ("off", "none"))
+        self.assertEqual(crow_core.reasoning_group_of("none", cnq), ("off", "none"))
+        self.assertEqual(crow_core.reasoning_group_of(None, gguf), ("off", "high"))
+        self.assertNotEqual(cnq, gguf)
+
+    def test_four_distinct_steps_and_the_rows_they_name(self):
+        """Four prompts for the five words the engine accepts: off and none are
+        one prompt (61 tok), high and xhigh are one (97), low (85) and medium
+        (59) are their own. Measured 2026-09-18 through serve's
+        usage.prompt_tokens AND 48 identical greedy tokens per pair."""
+        groups = crow_core.reasoning_groups_for(self.CNQ)
+        self.assertEqual(len(groups), 4)
+        self.assertEqual([crow_core.reasoning_row_name(g) for g in groups],
+                         ["none", "low", "medium", "high"])
+        # every level the menu offers lands in exactly one group
+        for level in crow_core.reasoning_levels_for(self.CNQ):
+            self.assertEqual(
+                sum(1 for g in groups if level in g), 1, level)
+        # xhigh renders high's prompt on the engine, and appears in NEITHER list:
+        # a group may name only levels the entry offers (test_crow.py
+        # TheShippedManifestOffersOnlyMeasuredLevelsTests), and this entry does
+        # not offer a second name for a step it already has
+        self.assertNotIn("xhigh", crow_core.reasoning_levels_for(self.CNQ))
+        self.assertIsNone(crow_core.reasoning_group_of("xhigh", groups))
+
+    def test_the_cost_note_is_silent_only_inside_a_group(self):
+        """POSITIVE and NEGATIVE together: moving off -> none moves no byte and
+        must not promise a full prefill; off -> high does and must."""
+        groups = crow_core.reasoning_groups_for(self.CNQ)
+        self.assertFalse(crow_core.reasoning_change_rerenders(None, "none", groups))
+        self.assertTrue(crow_core.reasoning_change_rerenders(None, "high", groups))
+        self.assertTrue(crow_core.reasoning_change_rerenders("low", "medium", groups))
+        # a word the table does not claim warns, which is the honest default for
+        # an unmeasured move (see reasoning_groups_for)
+        self.assertTrue(crow_core.reasoning_change_rerenders("high", "xhigh", groups))
+
+    def test_the_level_travels_as_the_top_level_field(self):
+        """The door crow-nest reads. Through chat_template_kwargs alone this
+        engine would still think, but `none` there is not a level and the
+        template raises -- which is why the client sends the top-level field."""
+        sent = {}
+
+        def fake(url, body, api_key, timeout, extra=None):
+            sent.update(body)
+            return iter(())
+
+        real, crow_core._post_stream = crow_core._post_stream, fake
+        self.addCleanup(lambda: setattr(crow_core, "_post_stream", real))
+        conversation = crow_core.Conversation("be brief")
+        conversation.append("user", "hello")
+        crow_core.stream_reply(conversation, base_url="http://127.0.0.1:1/v1",
+                               model="m", api_key="k", temperature=1.0,
+                               top_p=0.95, min_p=0.0, timeout=1,
+                               reasoning_effort="high")
+        self.assertEqual(sent.get("reasoning_effort"), "high")
+        self.assertNotIn("chat_template_kwargs", sent)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
