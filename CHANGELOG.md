@@ -5,79 +5,60 @@ The reasoning is in the commit and on the issue.
 
 ## 2.4.0 — 2026-09-19
 
-A day of robin's live quality work against the llama.cpp arm left five changes: the sampling row
-that was quietly lying is fixed, the CNQ container got its measured reasoning ladder and a row to
-hang it on, the reply language can be pinned, and the dial gained a fourth word for going
-completely afk. Minor for the flag and the level -- no measured number of 2.3.0 moves; the numbers
-below were taken under the conditions named.
+### Added
 
-### The sampling row that was lying (presence_penalty)
+- **`yolo` release level** (de69502). A fourth position on the mode dial that releases every
+  question the other levels can ask: all tool classes run unasked, the outside-path question
+  (#144) is silenced, and `git_commit` runs without asking. Two limits are part of the design:
+  - `git_push` asks at **every** level, `yolo` included. The check sits before the level table
+    in `stops_for`, the single predicate the turn gate reads.
+  - `yolo` is session-only. `write_root_mode` stores `auto` while `yolo` is active and
+    `read_root_mode` answers unset for a hand-edited `yolo`, so the level cannot survive a
+    restart from disk.
+  - Activation is deliberate on both surfaces. The terminal asks once per activation and accepts
+    only a typed `y`; EOF or any other answer keeps the current level. `--mode yolo` starts
+    without asking, because an explicit flag is the decision. The window arms the row on the
+    first click ("runs everything unasked -- click again to accept"), disarms after four seconds,
+    and plays a one-shot pixel burst on the mode chip once the level is actually adopted
+    (delta-timed animation on a 3px grid, honours `prefers-reduced-motion`).
+  - An outside command that runs unasked is still reported -- `run_command ran unasked for
+    <paths>, outside the working area (yolo)` -- and the window draws its escape alarm as before.
 
-Seen live 2026-09-18 in the poster test: at CNQ4.5-M the model wrote word salad and a wrong green
-where the llama.cpp arm, at 2.4 bpw, wrote nine clean steps of German. Same model, same prompt,
-same temperature. The difference nobody had written down was the row. When Crow sent no
-`presence_penalty`, crow-nest's serve applied **1.5 over the whole answer** on its own, while
-llama.cpp computed with 0 -- and the name the engine reports matched no entry in the
-operating-point manifest, so the model ran without the Qwen row at all. The quality probe built
-the same evening put a number on the row's worth: **16.40** non-words per 1,000 words of long
-German prose at crow-nest against **8.21** at llama.cpp, 12 prompts, 3 seeds, thinking off -- the
-probe that started this whole entry (c00906b).
+- **`--language NAME` flag** (41d629f, terminal and window). Pins the reply language by replacing
+  the sentence "Always reply in the same language the user wrote in." in the default system
+  prompt with "Always reply in NAME, whatever language the user writes in." Default is
+  `$CROW_LANGUAGE`, else unset; unset changes no byte. A custom `--system` prompt gets the pin
+  appended; `--no-system` stays without a system prompt. A session resumed under a different
+  language pays one full prefill, because the system prompt is byte 0 of the prefix.
 
-`presence_penalty` now travels the road `top_k` already paved: default 0, sent on every request,
-one row per model in the manifest, and the manifest has an entry for the CNQ container under the
-name the engine actually reports. Nothing is left to a private default.
+- **Model menu row for engine-booted models** (98b2273). A model that is running but not
+  bootable by the client -- the CNQ container served by crow-nest -- now gets its own row in the
+  window's model menu, so its reasoning levels have somewhere to hang.
 
-### The measured ladder for the CNQ container
+- **Reasoning ladder for the CNQ container** (f2a093a). The menu shows the container's four
+  measured steps -- `none`, `low`, `medium`, `high`; `high` maps to `xhigh`, the highest step of
+  the original template. On this engine, off is none: a level that means no thinking sends no
+  thinking. Unknown level names are answered with a named 400 instead of silence. Engine side:
+  crow-nest commit 92a28dc.
 
-crow-nest's serve ignored `reasoning_effort`: Crow sent it, nothing happened (fixed there,
-92a28dc). The window's model menu now shows the container's four measured steps -- `none`, `low`,
-`medium`, `high` -- and on this engine off IS none: no thinking means no thinking, not the
-template's smallest dose. `high` maps to `xhigh`, the highest dose the original template ships,
-and a word the engine does not know comes back as a named refusal instead of silence (f2a093a).
+### Fixed
 
-### A running model this client did not boot gets its row
+- **Hidden `presence_penalty` default** (c00906b). When the client sent no `presence_penalty`,
+  crow-nest's serve applied 1.5 across the whole answer while llama.cpp computed with 0, and the
+  engine-reported model name matched no manifest entry, so the model ran without its manifest
+  sampling row. Crow now sends `presence_penalty` (default 0) on every request, and the
+  operating-point manifest carries an entry for the CNQ container under the name the engine
+  reports. Measured context (quality probe of 2026-09-18: 12 prompts, 3 seeds, thinking off):
+  16.40 vs 8.21 non-words per 1,000 words of long German prose, crow-nest against llama.cpp --
+  the measurement that started this change.
 
-The menu hangs the reasoning steps under the running model's row, and "running" meant only what
-Crow itself could boot. A container the engine booted had no row, so its ladder had nowhere to
-hang and there was no way to pick `high`. The model that answers now gets its own row, booted by
-this client or not (98b2273).
+### Known issues
 
-### The reply language can be pinned
-
-Seen live on both engines 2026-09-19: a chat that opens with "Hey" has no language, the model
-guessed German, and the German history outweighed the rule for a whole English goal run.
-`--language English` (or `$CROW_LANGUAGE`) replaces the one sentence in the default system prompt
--- "Always reply in the same language the user wrote in." -- instead of adding a second rule that
-could disagree with the first. Unset changes no byte; `--no-system` stays no system; a session
-resumed under another language pays one full prefill, the same price a changed `--system` has
-always had (41d629f).
-
-### yolo: the fourth word on the dial
-
-robin's decision of 2026-09-19, wörtlich: "YOLO hebt NIEMALS git_push auf." The level for leaving
-the machine alone with the work. At `yolo` every class runs unasked, the outside-path question
-(#144) falls silent, and `git_commit` -- a commit to the LOCAL history -- is released with it.
-The push is not: `NEVER_RELEASED` is checked BEFORE the dial in `stops_for`, the one predicate the
-turn gate now reads, because a dial position that released a push would be a position that lied.
-An outside command that runs unasked is still reported for what it is -- "ran unasked ... (yolo)"
--- and the window draws its alarm as before: #98's account of the working area does not depend on
-who was asked.
-
-The level is a session's word. `write_root_mode` never writes it -- a root bound while yolo runs
-stores `auto` -- and `read_root_mode` answers unset for a hand-edited one, because a file on disk
-is a standing bypass and that is exactly what this level may not be. The terminal asks once per
-activation, in words, typed `y`; anything else, a dead stdin included, keeps the old level, and
-`--mode yolo` deliberately does not ask, because a flag on the command line IS the decision. The
-window arms the row with a second click -- "runs everything unasked -- click again to accept" --
-disarms itself after four seconds, and explodes once when the page has ADOPTED the level: squares
-on a 3px grid out of the chip, delta-timed off the animation frame's own stamp, gone in under a
-second, silent when the OS asks for reduced motion. Not measured: whether afk runs come back
-cleaner. What is measured is the dial itself -- nineteen new cases over the predicate, the turn
-loop, the accept and the page (de69502).
+- None known for this release. Not yet measured: output quality of long unattended `yolo` runs.
 
 ## 2.3.0 — 2026-09-18
 
-Goal mode gained behaviour in one day of robin's live sessions: a brake on the empty loop, a cap
+Goal mode gained guards for failure shapes observed in live sessions: a brake on the empty loop, a cap
 on a single step, a shorter nudge, and a client that never again iterates a string into a plan.
 Every request now carries its own output cap, local included. Minor rather than patch for that
 reason -- no flag, no path and no measured number of 2.2.1 moves.
@@ -123,14 +104,14 @@ knows only the empty string would have caught neither. On the third, those engin
 out of the history** -- counted at Crow's own nudges, so a turn leaves with its answer and its tool
 results, and nothing before the first of them is touched -- and **one** recovery line goes out in
 their place, naming the step that is still open. An empty answer to that line stops the goal with a
-line robin can read: how many times, at what context size, how many of how many steps are done.
+line a user can read: how many times, at what context size, how many of how many steps are done.
 There is no second recovery line. Cutting is the repair and stopping is not: an empty answer left
 standing in the history is not a record of a mistake, it is an example, and the next turn reads it
 as one.
 
 **A cap on one step: 25 turns**, beside the 60 the whole goal has. The counter belongs to the step
 and restarts whenever the step changes, so a plan that moves never sees it. A step that has taken
-25 turns is cut wrong or cannot be done, and both are questions for robin rather than for another
+25 turns is cut wrong or cannot be done, and both are questions for the user rather than for another
 turn: the goal pauses, `/goal` shows where it stands, and a typed line carries on.
 
 **A short nudge from the second turn of a step.** The full block is 330 bytes of instruction, and
@@ -152,7 +133,7 @@ byte-identical nor empty, and the stored session has not been replayed against t
 local body carried no `max_tokens` at all, on the reasoning that a cap would cut long answers the
 local server is happy to finish and that no measurement had asked for one. A measurement asked. A
 body without the field does not run uncapped -- it inherits the **server's** default, and that
-default is not this client's to choose. crow-nest's was 1024, and robin's live turn paid it: a
+default is not this client's to choose. crow-nest's was 1024, and a live turn paid for it: a
 `write_file` carrying a whole SVG hit `finish length` after 1,024 generated tokens, **before** the
 model had written its `path` argument, so the call arrived without one and the file was never
 written ("The file path was missing"). crow-nest raised its own default to 8192 the same day
@@ -186,7 +167,7 @@ are Crow's business. Both landed in crow-nest `v0.3.1`, tagged 2026-09-18 after 
 written; [`docs/operating-points.md`](docs/operating-points.md) records them as measured on the
 engine's `main`, which is what they were at the time.
 
-**`CROW_ATTN_LUT` is the default** (crow-nest #61, 61g, robin's call on 2026-09-18): the split
+**`CROW_ATTN_LUT` is the default** (crow-nest #61, 61g, decided 2026-09-18): the split
 decode attention kernel reads its e4m3 KV bytes out of a shared table. Bit-identical by
 construction and measured so -- generated ids `56305eee11d6`, unchanged. `decode run`, fresh
 process per run, W + 3N: **23.52 ms per decode token = 42.5 tok/s**, against the
@@ -212,7 +193,7 @@ third.
 
 ### Known limitations
 
-**Web search still needs a key.** Unchanged, and written down because robin hit it again today:
+**Web search still needs a key.** Unchanged; listed again because it surfaced once more on 2026-09-18:
 with neither `CROW_TAVILY_KEY` nor `CROW_SEARXNG_URL` set, `web_search` answers out of the keyless
 sources, which cover code, packages and reference and **not** the open web -- the tool says so in
 its own first line. Tavily is free and takes no credit card; `CROW_SEARXNG_URL` points at an
@@ -572,7 +553,7 @@ claude.ai, github.com and google.com. A window is top-level, so neither header a
 | endless `fetch`, `wait_ms=1200` | 9.3 s | ends itself, names the timeout, no screenshot |
 
 It owns its child: `proc.kill()` on its own handle, never a name and never a process list — the
-#158 lesson, paid once when a sweep took robin's own test server with it. Its own
+#158 lesson, paid once when a sweep took down a running test server. Its own
 `--user-data-dir` per run, because without one Chrome hands the job to a running instance and
 returns exit 0 with nothing. stdout and stderr go to files, because `communicate()` hangs on
 Windows after a kill when a grandchild holds the pipe.
@@ -1172,7 +1153,7 @@ suite that no longer writes into a real installation.
 
 ### The suite stopped standing on the live installation
 
-Two cases wrote into robin's running client: an invented API key into
+Two cases wrote into a running client: an invented API key into
 `mcp_tokens.json`, a `rail_width` into `settings.json`. The head of both test
 files already redirected four paths, which is what made it look solved.
 
@@ -1513,8 +1494,7 @@ tok/s, lock wait unchanged at 0.24 us per operation.
 the 1.09x spread the manifest records for repeating one configuration, so it proves nothing on its
 own; the hit rate is the figure that moved. It ships because it costs one byte per entry and no lock
 time, and because holding it back would mean rebuilding the DLL to ship less than what was tested.
-The reasoning and the raw numbers are in the vault note *CLOCK schlägt FIFO im L2-Tier um 2,7 Punkte
-und kostet ein Byte*.
+The reasoning and the raw numbers are in the vault note on CLOCK beating FIFO at the L2 tier by 2.7 points at a cost of one byte.
 
 **A reopened chat kept its thoughts and lost every tool row (#99).** `_replay` read `content` and
 `reasoning_content` and never `tool_calls`, so an assistant turn that only called a tool was skipped
@@ -1635,7 +1615,7 @@ a word, since an empty file is worse than none — but the guard cannot tell tha
 emptied it on purpose*. So a `/reset` followed by an exit wrote nothing, the file from before the
 reset stayed, and the next start restored the conversation that had just been dropped.
 
-Found by robin in the window on 2026-08-14 and confirmed against the live file: `session.json` still
+Found in the window on 2026-08-14 and confirmed against the live file: `session.json` still
 held three messages, timestamped **before** the reset — the last turn's write, not the reset's.
 
 The fix is not a change to the guard, which would delete archives on the same reasoning.
@@ -2180,7 +2160,7 @@ against the baseline's 1.09x — the band is indicative, the direction clears th
 ### Not measured, said out loud
 
 - Quality of 0731 beyond the six graded pair tasks and the probe bundle — no like-for-like
-  quality comparison against the preview exists, by robin's decision: the preview is
+  quality comparison against the preview exists by design: the preview is
   replaced, not competed with.
 - The host-RAM peak (33.73 GiB) and hit-rate figures in the README are preview-series
   measurements; 0731 has not re-run them. Marked as such where they appear.
