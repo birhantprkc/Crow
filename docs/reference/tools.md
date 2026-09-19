@@ -71,8 +71,9 @@ while a turn is running](../user-guide/window.md).
 | `auto` (default) | nothing |
 | `allowedit` | executing |
 | `manual` | writing and executing |
+| `yolo` | nothing, and it MEANS it: the outside-path ask (#144) and `git_commit` fall silent with it. `git_push` asks at **every** level, yolo's included -- checked before the dial, so no position of it can lie |
 
-Reading never asks, at any level.
+Reading never asks, at any level. `yolo` is a session's word: it never reaches the root file, and it dies with the process.
 
 ### Goals (#165)
 

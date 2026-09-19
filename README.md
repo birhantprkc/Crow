@@ -10,7 +10,7 @@
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
-<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-2.3.0-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
+<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-2.4.0-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
 <a href="docs/user-guide/install.md"><img src="https://img.shields.io/badge/platform-Windows%20x64%20%C2%B7%20Linux%20x86__64%20%C2%B7%20CUDA-555555?style=flat-square&logo=nvidia&logoColor=76b900&labelColor=000000" alt="Platform"></a>
 <a href="https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF"><img src="https://img.shields.io/badge/model-Qwen3.8--Flash--Next-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
 <a href="https://github.com/ggml-org/llama.cpp"><img src="https://img.shields.io/badge/engine-llama.cpp-555555?style=flat-square&logo=cplusplus&logoColor=00599c&labelColor=000000" alt="llama.cpp"></a>
@@ -116,7 +116,7 @@ Everything below is in the screenshot at the top of this page.
 | **Composer** | type, or `/tools` for what the model can call. Seventeen slash commands, the same words in both surfaces. → [window](docs/user-guide/window.md) |
 | **Context meter** | `6.1k / 200k` at the left of the composer. Past 0.9 of the window the conversation rolls over: the leg is archived whole and the new one opens with a digest. → [window](docs/user-guide/window.md) |
 | **Model chip** | `Qwen3.8-Flash-Next · high (default)` — the model that is up and this chat's reasoning level, in one chip. Click it to switch models or providers. → [reasoning levels](docs/reference/reasoning-levels.md) · [remote models](docs/user-guide/remote-models.md) |
-| **Approvals** | the `auto` chip. `auto` asks nothing, `allowedit` asks before executing, `manual` before writing and executing. `git_commit`, `git_push` and any path outside the working directory ask at **every** level. → [tools](docs/reference/tools.md) |
+| **Approvals** | the mode chip, coloured by level: `manual` white, `allowedit` green, `auto` gold, `yolo` the alarm red. `auto` asks nothing, `allowedit` asks before executing, `manual` before writing and executing; `yolo` asks for nothing **and means it** -- outside paths and `git_commit` included. `git_push` asks at **every** level. → [tools](docs/reference/tools.md) |
 | **Working directory** | the chip beside the approvals one — `crow` in the shot, `no folder` when there is none. Pick a folder there, or right-click the rail and make a project: a project **is** a working directory. It is the boundary every writer is held to, the repository the git panel reads, and where this chat's memory and goal live. → [memory](docs/user-guide/memory.md) · [settings](docs/reference/settings.md) |
 | **Dropping files** | drop a file and its path lands in the composer for the model to `read_file`; drop an image and it becomes a chip that rides the next line. → [window](docs/user-guide/window.md) |
 | **Trace** | one line per round, folded. Open it to see what the model actually did. **Thought** is its own fold, labelled with the share of the turn it took. → [window](docs/user-guide/window.md) |

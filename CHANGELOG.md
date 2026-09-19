@@ -3,6 +3,78 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## 2.4.0 — 2026-09-19
+
+A day of robin's live quality work against the llama.cpp arm left five changes: the sampling row
+that was quietly lying is fixed, the CNQ container got its measured reasoning ladder and a row to
+hang it on, the reply language can be pinned, and the dial gained a fourth word for going
+completely afk. Minor for the flag and the level -- no measured number of 2.3.0 moves; the numbers
+below were taken under the conditions named.
+
+### The sampling row that was lying (presence_penalty)
+
+Seen live 2026-09-18 in the poster test: at CNQ4.5-M the model wrote word salad and a wrong green
+where the llama.cpp arm, at 2.4 bpw, wrote nine clean steps of German. Same model, same prompt,
+same temperature. The difference nobody had written down was the row. When Crow sent no
+`presence_penalty`, crow-nest's serve applied **1.5 over the whole answer** on its own, while
+llama.cpp computed with 0 -- and the name the engine reports matched no entry in the
+operating-point manifest, so the model ran without the Qwen row at all. The quality probe built
+the same evening put a number on the row's worth: **16.40** non-words per 1,000 words of long
+German prose at crow-nest against **8.21** at llama.cpp, 12 prompts, 3 seeds, thinking off -- the
+probe that started this whole entry (c00906b).
+
+`presence_penalty` now travels the road `top_k` already paved: default 0, sent on every request,
+one row per model in the manifest, and the manifest has an entry for the CNQ container under the
+name the engine actually reports. Nothing is left to a private default.
+
+### The measured ladder for the CNQ container
+
+crow-nest's serve ignored `reasoning_effort`: Crow sent it, nothing happened (fixed there,
+92a28dc). The window's model menu now shows the container's four measured steps -- `none`, `low`,
+`medium`, `high` -- and on this engine off IS none: no thinking means no thinking, not the
+template's smallest dose. `high` maps to `xhigh`, the highest dose the original template ships,
+and a word the engine does not know comes back as a named refusal instead of silence (f2a093a).
+
+### A running model this client did not boot gets its row
+
+The menu hangs the reasoning steps under the running model's row, and "running" meant only what
+Crow itself could boot. A container the engine booted had no row, so its ladder had nowhere to
+hang and there was no way to pick `high`. The model that answers now gets its own row, booted by
+this client or not (98b2273).
+
+### The reply language can be pinned
+
+Seen live on both engines 2026-09-19: a chat that opens with "Hey" has no language, the model
+guessed German, and the German history outweighed the rule for a whole English goal run.
+`--language English` (or `$CROW_LANGUAGE`) replaces the one sentence in the default system prompt
+-- "Always reply in the same language the user wrote in." -- instead of adding a second rule that
+could disagree with the first. Unset changes no byte; `--no-system` stays no system; a session
+resumed under another language pays one full prefill, the same price a changed `--system` has
+always had (41d629f).
+
+### yolo: the fourth word on the dial
+
+robin's decision of 2026-09-19, wörtlich: "YOLO hebt NIEMALS git_push auf." The level for leaving
+the machine alone with the work. At `yolo` every class runs unasked, the outside-path question
+(#144) falls silent, and `git_commit` -- a commit to the LOCAL history -- is released with it.
+The push is not: `NEVER_RELEASED` is checked BEFORE the dial in `stops_for`, the one predicate the
+turn gate now reads, because a dial position that released a push would be a position that lied.
+An outside command that runs unasked is still reported for what it is -- "ran unasked ... (yolo)"
+-- and the window draws its alarm as before: #98's account of the working area does not depend on
+who was asked.
+
+The level is a session's word. `write_root_mode` never writes it -- a root bound while yolo runs
+stores `auto` -- and `read_root_mode` answers unset for a hand-edited one, because a file on disk
+is a standing bypass and that is exactly what this level may not be. The terminal asks once per
+activation, in words, typed `y`; anything else, a dead stdin included, keeps the old level, and
+`--mode yolo` deliberately does not ask, because a flag on the command line IS the decision. The
+window arms the row with a second click -- "runs everything unasked -- click again to accept" --
+disarms itself after four seconds, and explodes once when the page has ADOPTED the level: squares
+on a 3px grid out of the chip, delta-timed off the animation frame's own stamp, gone in under a
+second, silent when the OS asks for reduced motion. Not measured: whether afk runs come back
+cleaner. What is measured is the dial itself -- nineteen new cases over the predicate, the turn
+loop, the accept and the page (de69502).
+
 ## 2.3.0 — 2026-09-18
 
 Goal mode gained behaviour in one day of robin's live sessions: a brake on the empty loop, a cap
