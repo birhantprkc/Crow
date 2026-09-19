@@ -2306,6 +2306,11 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 #mode[data-mode="manual"]{color:var(--text-strong);border-color:var(--bevel)}
 #mode[data-mode="allowedit"]{color:var(--ok);border-color:rgba(78,201,143,.45)}
 #mode[data-mode="auto"]{color:var(--gold);border-color:rgba(229,192,75,.45)}
+/* YOLO IS THE ALARM COLOUR, on purpose (#bad is what an escaped working area
+   and a failed call draw in): a level that asks nothing has to be the loudest
+   thing on the strip, not a fourth calm pill. */
+#mode[data-mode="yolo"]{color:var(--bad);border-color:rgba(240,101,90,.55)}
+#mode[data-mode="yolo"] .dot{box-shadow:0 0 6px rgba(240,101,90,.9)}
 
 /* UPWARDS, because the composer sits at the bottom of the window: a menu
    that opened downwards would be drawn outside it. */
@@ -2322,6 +2327,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 #modemenu button[data-mode="manual"] b{color:var(--text-strong)}
 #modemenu button[data-mode="allowedit"] b{color:var(--ok)}
 #modemenu button[data-mode="auto"] b{color:var(--gold)}
+#modemenu button[data-mode="yolo"] b{color:var(--bad)}
 #modemenu button .tick{float:right;color:var(--accent)}
 
 /* #92: the working directory, beside the level and deliberately quieter than
@@ -5031,7 +5037,80 @@ const crow = {
       + '<b>'+x.name+'</b><span class="what">'+x.what+'</span></button>').join("");
     m.hidden=false; },
 
-  setMode(name){ $("#modemenu").hidden=true; pywebview.api.set_mode(name); },
+  // YOLO IS A TWO-CLICK ACCEPT (robin, 2026-09-19: the level asks once per
+  // activation, and it must read as English on the page). The first click
+  // only ARMS the row -- its description line says so -- and four seconds
+  // later the arm forgets itself, so a menu left open is never a loaded one.
+  // The second click within that window is the decision and goes through.
+  // Every other level keeps the old one-click path.
+  setMode(name){
+    const m=$("#modemenu");
+    if(name==="yolo" && !this._yoloSure){
+      this._yoloSure=true;
+      const row=m.querySelector('button[data-mode="yolo"] .what');
+      if(row){ row.dataset.said=row.textContent;
+               row.textContent="runs everything unasked -- click again to accept"; }
+      clearTimeout(this._yoloArm);
+      this._yoloArm=setTimeout(()=>{ this._yoloSure=false;
+        const r=m.querySelector('button[data-mode="yolo"] .what');
+        if(r && r.dataset.said!==undefined){ r.textContent=r.dataset.said;
+                                            delete r.dataset.said; } }, 4000);
+      return;
+    }
+    this._yoloSure=false; clearTimeout(this._yoloArm);
+    m.hidden=true; pywebview.api.set_mode(name); },
+
+  // THE ONE-SHOT PIXEL BURST, drawn once the page has ADOPTED the level
+  // (modeIs fires it, so a refused switch never explodes). A canvas sits
+  // over the chip for under a second; the particles are SQUARES ON A 3PX
+  // GRID -- that snapping is the whole pixel-art trick -- in the chip's own
+  // alarm red plus a white-hot and two embers. Delta-timed off the
+  // requestAnimationFrame stamp so a 120Hz screen sees the same burst a 60Hz
+  // one does, capped against the tab-switch jump, cleaned up when the last
+  // block dies. prefers-reduced-motion means no burst at all: the chip
+  // turning red IS the announcement.
+  yoloBurst(){
+    const chip=$("#mode");
+    if(!chip || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const r=chip.getBoundingClientRect();
+    if(!r.width) return;
+    const dpr=devicePixelRatio||1, pad=24, P=3;
+    const w=Math.ceil(r.width+pad*2), h=Math.ceil(r.height+pad*2);
+    const cv=document.createElement("canvas");
+    cv.width=Math.ceil(w*dpr); cv.height=Math.ceil(h*dpr);
+    cv.style.cssText="position:fixed;left:"+(r.left-pad)+"px;top:"+(r.top-pad)
+      +"px;width:"+w+"px;height:"+h+"px;pointer-events:none;z-index:99;"
+      +"image-rendering:pixelated";
+    document.body.appendChild(cv);
+    const ctx=cv.getContext("2d"); ctx.scale(dpr,dpr);
+    const CX=w/2, CY=h/2;
+    const cols=["#f0655a","#f0655a","#ffd9d4","#e5c04b","#ff9b3d"];
+    let seed=20260919;
+    const rnd=()=>((seed=(seed*1103515245+12345)&0x7fffffff)/0x7fffffff);
+    const ps=[];
+    for(let i=0;i<110;i++){
+      const a=rnd()*Math.PI*2, sp=30+rnd()*140;
+      ps.push({x:CX,y:CY,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,
+               t:0,life:.4+rnd()*.45,c:cols[i%cols.length],
+               s:i%3?P:P*2});
+    }
+    let last=performance.now();
+    const frame=(now)=>{
+      const dt=Math.min((now-last)/1000,.05); last=now;
+      ctx.clearRect(0,0,w,h);
+      let alive=false;
+      for(const p of ps){
+        p.t+=dt; if(p.t>=p.life) continue; alive=true;
+        p.x+=p.vx*dt; p.y+=p.vy*dt;
+        ctx.globalAlpha=Math.max(0,1-p.t/p.life);
+        ctx.fillStyle=p.c;
+        ctx.fillRect(Math.round(p.x/P)*P, Math.round(p.y/P)*P, p.s, p.s);
+      }
+      ctx.globalAlpha=1;
+      if(alive) requestAnimationFrame(frame); else cv.remove();
+    };
+    requestAnimationFrame(frame);
+  },
 
   // #128. THE HELD-BACK WRITES, as a tile behind the composer.
   //
@@ -5441,7 +5520,11 @@ const crow = {
   // Called back by the core's answer, never set optimistically: the button
   // shows what the client IS running, not what was clicked.
   modeIs(name, modes){ this.mode=name; if(modes) this.modes=modes;
-    $("#mode").dataset.mode=name; $("#modename").textContent=name; },
+    $("#mode").dataset.mode=name; $("#modename").textContent=name;
+    // FIRED HERE, NOT IN setMode: the page celebrates only a level it
+    // actually adopted -- Python can refuse a switch mid-turn, and a burst
+    // for a refused switch would be a lie with confetti.
+    if(name==="yolo") this.yoloBurst(); },
 
   // "neu" ARCHIVES, it does not discard. The old conversation is written to its
   // own file and appears in the rail; clicking it loads it back. Without that a

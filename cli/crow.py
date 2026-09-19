@@ -295,7 +295,7 @@ def paint_banner(text: str) -> str:
 HEADER_COMMANDS = (
     ("/help", "for commands"),
     ("/tools", "for what the model can call"),
-    ("/mode", "manual, allowedit or auto"),
+    ("/mode", "manual, allowedit, auto or yolo"),
     ("/exit", "to leave"),
 )
 BANNER_GAP = 4
@@ -1029,7 +1029,7 @@ HELP = """commands:
   /help          this list
   /tools         the tools the model can call
   /mcp           the tool servers, /mcp fetch|use|drop <server> to change them
-  /mode          the release level, /mode manual|allowedit|auto to switch
+  /mode          the release level, /mode manual|allowedit|auto|yolo to switch
   /model         the model that is up, /model <key> restarts on another one
   /reasoning     this chat's thinking level, /reasoning <level>|off to set it
   /budget        cap the thinking per request, /budget <tokens>|off
@@ -1285,11 +1285,35 @@ def switch_mode(line: str, mode: str) -> tuple[str, str]:
     BOTH FORMS PRINT WHAT IS LIVE. "A release level nobody can see is one nobody
     can trust" -- so `/mode` alone reports rather than staying silent, and a
     switch names what it now holds back rather than only its own name.
+
+    YOLO ASKS ONCE, HERE, EVERY TIME IT IS ENTERED (robin, 2026-09-19). A
+    keystroke that silences every question -- outside paths and git commit
+    included -- is a decision, not a slip, and the ask is where the level
+    says what it lets through and what it does NOT (git_push asks on). The
+    start flag `--mode yolo` deliberately does not ask: a flag on the command
+    line IS the deliberate act, and a prompt a script cannot answer would
+    only make the headless case refuse. Anything that is not y leaves the
+    level where it was.
     """
     wanted = line[len("/mode"):].strip().lower()
     if wanted and wanted not in crow_core.MODES:
         return mode, (f"{DIM}no mode named {wanted!r}. "
                       f"one of: {', '.join(crow_core.MODES)}{RESET}\n")
+
+    accepted = ""
+    if wanted == "yolo" and mode != "yolo":
+        print(f"\n{DIM}yolo runs EVERY tool unasked -- outside paths and git "
+              f"commit included. git_push still asks.{RESET}")
+        try:
+            said = input(f"  type {YELLOW}y{RESET}{DIM} to accept, anything "
+                         f"else keeps {mode}{RESET} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            said = ""
+        if said != "y":
+            return mode, (f"{DIM}yolo not enabled -- the level stays "
+                          f"{mode}{RESET}\n")
+        accepted = "yolo accepted"
 
     dropped = ""
     if wanted:
@@ -1301,7 +1325,8 @@ def switch_mode(line: str, mode: str) -> tuple[str, str]:
         dropped = f"\n{DIM}standing approvals dropped{RESET}"
 
     what = crow_core.mode_description(mode)
-    return mode, f"mode {mode} -- {what}{dropped}\n"
+    tail = f"\n{DIM}{accepted}{RESET}" if accepted else ""
+    return mode, f"mode {mode} -- {what}{dropped}{tail}\n"
 
 
 def ask_approval(name: str, arguments: str) -> str:

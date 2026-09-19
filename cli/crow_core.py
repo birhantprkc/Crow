@@ -5708,13 +5708,18 @@ def read_root_mode(root: str) -> str | None:
     a convenience, and a broken convenience must not take the boundary down with
     it. The caller then falls back to DEFAULT_MODE, which is what a root without
     a level has always meant.
+
+    YOLO IS A SESSION'S WORD (robin, 2026-09-19): it is chosen per start and
+    dies with the process, so a file that names it reads as UNSET rather than
+    as a standing bypass. `write_root_mode` never writes it; this line is the
+    second half of the same rule, for a file edited by hand.
     """
     try:
         with open(root_file(root), encoding="utf-8") as fh:
             mode = json.load(fh).get("mode")
     except (OSError, ValueError, AttributeError):
         return None
-    return mode if mode in MODES else None
+    return mode if mode in MODES and mode not in RELEASES_ALL else None
 
 
 def write_root_mode(root: str, mode: str) -> bool:
@@ -5724,11 +5729,17 @@ def write_root_mode(root: str, mode: str) -> bool:
     the whole correction of 2026-08-14: `.crow/` appears on its own wherever crow
     runs, so a directory becomes a root when a human picks it, never because a
     spill file landed there once.
+
+    YOLO IS NOT WRITTEN, for the same rule `read_root_mode` keeps: the level
+    belongs to the session that asked for it, so binding a root while yolo
+    runs stores `auto` -- the file never holds a bypass (robin, 2026-09-19).
     """
     try:
         os.makedirs(os.path.join(root, ROOT_MARKER), exist_ok=True)
         with open(root_file(root), "w", encoding="utf-8") as fh:
-            json.dump({"mode": mode if mode in MODES else DEFAULT_MODE}, fh, indent=1)
+            json.dump({"mode": (mode if mode in MODES
+                                and mode not in RELEASES_ALL else DEFAULT_MODE)},
+                      fh, indent=1)
     except OSError:
         return False
     return True
@@ -9115,6 +9126,17 @@ MODE_ASKS = {
     "manual": ("writing", "executing"),
     "allowedit": ("executing",),
     "auto": (),
+    # YOLO READS AS ITS NAME, and it exists FOR the completely-AFK run
+    # (robin, 2026-09-19): every class the table names runs unasked, and the
+    # two questions the gate adds BESIDE the table -- the #144 outside-path
+    # ask and #156's git_commit -- fall silent with it. The one thing it
+    # cannot buy is `publish`: robin, wörtlich: "YOLO hebt NIEMALS git_push
+    # auf". That lock is `NEVER_RELEASED` below and is checked BEFORE the
+    # dial, because a dial position that released a push would be a position
+    # that lied. The row here is auto's on purpose: the table stays "what a
+    # level holds back", and the differences live in `stops_for`, the one
+    # predicate the turn gate reads.
+    "yolo": (),
 }
 
 # #156. TWO CLASSES NO LEVEL RELEASES -- and they are NOT rows in the table
@@ -9131,6 +9153,18 @@ MODE_ASKS = {
 # "always" can remember them either. Two independent locks, neither of which is
 # a setting.
 ALWAYS_ASKS = frozenset({"history", "publish"})
+
+# 2026-09-19, ROBIN SPLIT THE TWO LOCKS. `publish` stays unconditional --
+# "YOLO hebt NIEMALS git_push auf", wörtlich -- while `history` (a commit to
+# the LOCAL history) is exactly what an AFK run may do unasked, so yolo buys
+# it back. `NEVER_RELEASED` is checked before the dial in `stops_for`: a dial
+# position that released a push would be a position that lied.
+NEVER_RELEASED = frozenset({"publish"})
+
+# THE ONE LEVEL THAT READS BESIDE THE TABLE. The gate asks `stops_for`, and
+# only yolo turns off the two questions that are not class rows: the #144
+# outside-path ask and the `history` half of #156.
+RELEASES_ALL = frozenset({"yolo"})
 
 
 def always_asks(name: str) -> bool:
@@ -12413,6 +12447,25 @@ def needs_approval(name: str, mode: str) -> bool:
     return TOOL_CLASS.get(name, "executing") in MODE_ASKS.get(mode, ())
 
 
+def stops_for(name: str, mode: str, outside: bool) -> bool:
+    """Does this call stop and ask at this level? The ONE predicate the turn
+    gate reads, so the three sources of a question cannot drift apart: the
+    table (what the level holds back by class), the #144 outside-path
+    question (carried by the call's own arguments), and #156's acts outside
+    the table.
+
+    ORDER IS THE CONTRACT. `publish` first, BEFORE the dial -- no level
+    releases it, yolo included (robin, 2026-09-19: NIEMALS). yolo next,
+    because its whole point is that the other two sources go silent for the
+    AFK run. Everything else reads the table exactly as it always has.
+    """
+    if TOOL_CLASS.get(name, "executing") in NEVER_RELEASED:
+        return True
+    if mode in RELEASES_ALL:
+        return False
+    return needs_approval(name, mode) or outside or always_asks(name)
+
+
 def mode_description(mode: str) -> str:
     """What a level holds back, in a line that does NOT grow with the table.
 
@@ -12432,6 +12485,14 @@ def mode_description(mode: str) -> str:
     """
     asks = [t for t in sorted(TOOL_IMPL) if needs_approval(t, mode)]
     if not asks:
+        if mode in RELEASES_ALL:
+            # THE GENERIC BUILDER WOULD LIE HERE. "Every tool runs unasked"
+            # is true of the table and false of the gate: yolo keeps the
+            # #144 outside-path question silent AND the git_push ask on
+            # (robin, 2026-09-19). One honest line, said the same way in
+            # both surfaces.
+            return ("every tool runs unasked -- outside paths and git commit "
+                    "included; git_push still asks")
         return "every tool runs unasked"
     named = [t for t in asks if not t.startswith("mcp_")]
     served = len(asks) - len(named)
@@ -14084,9 +14145,12 @@ def run_turn(
                        if not any(_inside(m, p) for m in _MANDATED)]
             # #156: `git_commit` and `git_push` join `outside` here rather than
             # in MODE_ASKS -- see ALWAYS_ASKS for why the level table is the
-            # wrong place. `remembered` cannot release them: they have no scope.
-            if ((needs_approval(call["name"], mode) or outside
-                 or always_asks(call["name"]))
+            # wrong place. `remembered` cannot release them: they have no
+            # scope. Since 2026-09-19 the three sources read through ONE
+            # predicate: `stops_for` keeps git_push on at every level, lets
+            # yolo silence the outside-path ask and the git_commit ask, and
+            # leaves every other level exactly where #88 put it.
+            if (stops_for(call["name"], mode, bool(outside))
                     and not remembered(call["name"], call["arguments"])):
                 answer = "no"
                 if approve is not None:
@@ -14100,6 +14164,15 @@ def run_turn(
                         ("the user %s run_command for %s, outside the working "
                          "area") % ("declined" if answer not in ("yes", "always")
                                     else "released", ", ".join(outside[:2])))
+            elif outside and mode in RELEASES_ALL:
+                # YOLO WAS NOT ASKED, SO "THE USER RELEASED" WOULD BE A LIE --
+                # and a silent outside run would be worse (#98: the working
+                # area leaving is the one fact the screen must carry). The
+                # run is reported for what it is; the GUI draws it in
+                # `boundary_escaped`'s own colour.
+                incidents.append(
+                    "run_command ran unasked for %s, outside the working "
+                    "area (yolo)" % ", ".join(outside[:2]))
 
             if declined:
                 # A REFUSAL IS A RESULT. Same shape as a failed call: the text

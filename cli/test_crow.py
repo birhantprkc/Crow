@@ -4840,6 +4840,63 @@ class TheUserDelegatesFromTheTerminalTests(unittest.TestCase):
         self.assertEqual(dict(crow_core.SUBTASKS), {})
 
 
+class TheYoloAcceptTests(unittest.TestCase):
+    """`/mode yolo` asks once, in words, every time it is ENTERED (robin,
+    2026-09-19). A keystroke that silences every question is a decision, not
+    a slip; anything but y keeps the level where it was. `--mode yolo`
+    deliberately does not ask: a flag on the command line IS the decision."""
+
+    def _switch(self, typed, line="/mode yolo", mode="auto"):
+        saved_input = builtins.input
+        prompts, printed = [], io.StringIO()
+        builtins.input = lambda prompt="": (prompts.append(prompt), typed)[1]
+        try:
+            with contextlib.redirect_stdout(printed):
+                mode, said = crow.switch_mode(line, mode)
+        finally:
+            builtins.input = saved_input
+        return mode, said, prompts, printed.getvalue()
+
+    def test_y_accepts_and_says_what_stays_shut(self):
+        mode, said, prompts, shown = self._switch("y")
+        self.assertEqual(mode, "yolo")
+        self.assertEqual(len(prompts), 1, "the accept asked twice")
+        # WHAT IT LETS THROUGH AND WHAT IT DOES NOT, before the keystroke
+        self.assertIn("git_push", shown)
+        self.assertIn("git_push", said)
+        self.assertIn("yolo accepted", said)
+
+    def test_anything_but_y_keeps_the_old_level(self):
+        for typed in ("n", "no", "", "Y OLO"):
+            mode, said, _, _ = self._switch(typed)
+            self.assertEqual(mode, "auto", repr(typed))
+            self.assertIn("not enabled", said)
+
+    def test_yolo_to_yolo_is_not_a_second_activation(self):
+        mode, _, prompts, _ = self._switch("y", mode="yolo")
+        self.assertEqual(mode, "yolo")
+        self.assertEqual(prompts, [], "asked about a level already running")
+
+    def test_a_dead_stdin_keeps_the_old_level(self):
+        saved_input = builtins.input
+        builtins.input = lambda prompt="": (_ for _ in ()).throw(EOFError())
+        try:
+            mode, said = crow.switch_mode("/mode yolo", "auto")
+        finally:
+            builtins.input = saved_input
+        self.assertEqual(mode, "auto")
+        self.assertIn("not enabled", said)
+
+    def test_both_helps_name_all_four_levels(self):
+        joined = " ".join(t for c, t in crow.HEADER_COMMANDS if c == "/mode")
+        self.assertIn("yolo", joined)
+        self.assertIn("manual|allowedit|auto|yolo", crow.HELP)
+
+    def test_the_start_flag_takes_yolo(self):
+        self.assertEqual(crow.build_parser().parse_args(
+            ["--mode", "yolo"]).mode, "yolo")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 

@@ -14161,5 +14161,111 @@ class ThePinnedReplyLanguageTests(unittest.TestCase):
         self.assertTrue(out.endswith("whatever language the user writes in."))
 
 
+class TheYoloLevelTests(unittest.TestCase):
+    """robin, 2026-09-19, the fourth word on the dial. AFK means AFK: outside
+    paths and git commit run unasked. The one lock that never opens is the
+    push -- "YOLO hebt NIEMALS git_push auf" -- and the level never outlives
+    the session that asked for it."""
+
+    def test_the_dial_names_yolo_and_the_table_holds_nothing_back(self):
+        self.assertIn("yolo", crow_core.MODES)
+        self.assertEqual(crow_core.MODE_ASKS["yolo"], ())
+        for name in crow_core.TOOL_IMPL:
+            self.assertFalse(crow_core.needs_approval(name, "yolo"),
+                             "%s asks at yolo" % name)
+
+    def test_yolo_releases_the_outside_question(self):
+        self.assertTrue(crow_core.stops_for("run_command", "auto", True),
+                        "the #144 ask vanished from auto's side of the dial")
+        self.assertFalse(crow_core.stops_for("run_command", "yolo", True))
+
+    def test_yolo_releases_the_commit_and_never_the_push(self):
+        self.assertTrue(crow_core.stops_for("git_commit", "auto", False))
+        self.assertFalse(crow_core.stops_for("git_commit", "yolo", False))
+        for m in crow_core.MODES:
+            self.assertTrue(crow_core.stops_for("git_push", m, False),
+                            "%s released the push" % m)
+
+    def test_the_description_says_what_yolo_keeps_shut(self):
+        said = crow_core.mode_description("yolo")
+        self.assertIn("unasked", said)
+        self.assertIn("git_push", said)
+        self.assertNotEqual(said, crow_core.mode_description("auto"),
+                            "yolo's line must not be auto's line")
+
+    def test_a_root_file_never_carries_yolo(self):
+        """THE SESSION RULE, BOTH HALVES. The writer stores `auto` where yolo
+        was asked for, and the reader answers None for a hand-edited `yolo` --
+        a file on disk is a standing bypass, and that is exactly what this
+        level may not be."""
+        root = tempfile.mkdtemp(prefix="crow-yolo-")
+        self.addCleanup(shutil.rmtree, root, True)
+        self.assertTrue(crow_core.write_root_mode(root, "yolo"))
+        self.assertEqual(crow_core.read_root_mode(root), crow_core.DEFAULT_MODE)
+        with open(crow_core.root_file(root), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["mode"], crow_core.DEFAULT_MODE)
+        # the reader half: a file edited by hand to say yolo reads as unset
+        with open(crow_core.root_file(root), "w", encoding="utf-8") as fh:
+            json.dump({"mode": "yolo"}, fh)
+        self.assertEqual(crow_core.read_root_mode(root), None)
+        # a level that MAY be remembered still round-trips
+        self.assertTrue(crow_core.write_root_mode(root, "allowedit"))
+        self.assertEqual(crow_core.read_root_mode(root), "allowedit")
+
+
+class YoloTurnTests(TurnLoopCase):
+    """The loop half of yolo (robin, 2026-09-19): at the AFK level the #144
+    outside-path question falls silent AND the turn still says what ran
+    outside -- #98's account of the working area does not depend on who was
+    asked. And the one lock holds at turn level too."""
+
+    def setUp(self):
+        super().setUp()
+        crow_core.set_root(self.work)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(crow_core.forget_approvals)
+
+    def _one(self, name, arguments, mode):
+        self.asked = []
+
+        def approve(cname, cargs):
+            self.asked.append(cname)
+            return "no"
+
+        self.serve([{"content": "on it"},
+                    _call_delta(name, arguments)])
+        self.serve([{"content": "done"}])
+        talk = self.conversation()
+        result = self.turn(talk, mode=mode, approve=approve)
+        return talk, result
+
+    def test_an_outside_command_at_yolo_asks_nobody_and_runs(self):
+        talk, _ = self._one("run_command",
+                            json.dumps({"command": "cat /etc/os-release"}), "yolo")
+        self.assertEqual(self.asked, [], "yolo asked what it was built to release")
+        tools = [m for m in talk.payload() if m.get("role") == "tool"]
+        self.assertTrue(tools and not tools[-1]["content"].startswith("error: "),
+                        "the outside command did not run")
+
+    def test_the_unasked_outside_run_is_still_reported(self):
+        _, result = self._one("run_command",
+                              json.dumps({"command": "cat /etc/os-release"}), "yolo")
+        self.assertTrue(any("ran unasked" in i and "yolo" in i
+                            for i in result.incidents), result.incidents)
+
+    def test_an_outside_command_at_auto_still_asks(self):
+        self._one("run_command",
+                  json.dumps({"command": "cat /etc/os-release"}), "auto")
+        self.assertEqual(self.asked, ["run_command"],
+                         "yolo's release leaked into auto")
+
+    def test_a_push_asks_even_at_yolo(self):
+        talk, _ = self._one("git_push", json.dumps({}), "yolo")
+        self.assertEqual(self.asked, ["git_push"],
+                         "yolo released the one lock that never opens")
+        tools = [m for m in talk.payload() if m.get("role") == "tool"]
+        self.assertTrue(tools and tools[-1]["content"].startswith("error: "))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

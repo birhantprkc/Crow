@@ -10226,5 +10226,47 @@ class ThePageNamesNoPlatformItCannotSeeTests(unittest.TestCase):
         self.assertNotIn('"file:///"', js)
 
 
+class TheYoloChipTests(unittest.TestCase):
+    """robin's goodie and its guard rails, read as page source: the fourth
+    level is ARMED with a second click, it explodes once when the page has
+    ADOPTED it, and the burst respects the motion setting the OS already
+    knows."""
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def test_the_yolo_rows_carry_the_alarm_colour(self):
+        """The chip that asks nothing has to be the loudest thing on the
+        strip -- `--bad` is what an escaped working area draws in."""
+        self.assertIn('#mode[data-mode="yolo"]{color:var(--bad)', self.source)
+        self.assertIn('#modemenu button[data-mode="yolo"] b{color:var(--bad)',
+                      self.source)
+
+    def test_the_first_click_only_arms_the_row(self):
+        block = self.source[self.source.index("setMode(name){"):
+                            self.source.index("// THE ONE-SHOT PIXEL BURST")]
+        self.assertIn('name==="yolo" && !this._yoloSure', block)
+        self.assertIn("click again to accept", block)
+        self.assertIn("setTimeout", block, "the arm never disarms itself")
+        self.assertNotIn("yoloBurst", block,
+                         "the click must not explode -- the adoption does")
+
+    def test_the_burst_fires_on_adoption_not_on_the_click(self):
+        adopted = self.source[self.source.index("modeIs(name, modes){"):
+                              self.source.index('// "neu" ARCHIVES')]
+        self.assertIn('if(name==="yolo") this.yoloBurst()', adopted)
+
+    def test_the_burst_is_delta_timed_and_reduced_motion_aware(self):
+        burst = self.source[self.source.index("yoloBurst(){"):
+                            self.source.index("modeIs(name, modes){")]
+        self.assertIn("prefers-reduced-motion: reduce", burst)
+        self.assertIn("Math.min((now-last)/1000", burst,
+                      "frame-rate dependent timing rasts on 120Hz screens")
+        self.assertIn("image-rendering:pixelated", burst)
+        self.assertIn("pointer-events:none", burst,
+                      "the canvas must not eat the clicks under it")
+        self.assertIn("cv.remove()", burst, "the canvas outlives the burst")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
