@@ -14127,5 +14127,39 @@ class TheCnqReasoningLadderTests(unittest.TestCase):
         self.assertNotIn("chat_template_kwargs", sent)
 
 
+class ThePinnedReplyLanguageTests(unittest.TestCase):
+    """2026-09-19, seen live on both engines: a chat that opened with "Hey" was
+    answered in German, and the German history then outweighed "reply in the
+    language the user wrote in" for a whole English goal run. `--language`
+    replaces the guess with a pin."""
+
+    def test_the_rule_it_replaces_is_really_in_the_default_prompt(self):
+        """THE TWO ARE HELD TOGETHER HERE. A reworded DEFAULT_SYSTEM that drops
+        the sentence would turn the flag into an appended second rule without
+        anybody noticing."""
+        self.assertEqual(crow_core.DEFAULT_SYSTEM.count(crow_core.LANGUAGE_RULE), 1)
+
+    def test_a_pin_replaces_the_rule_and_adds_no_second_one(self):
+        out = crow_core.system_in_language(crow_core.DEFAULT_SYSTEM, "English")
+        self.assertIn("Always reply in English", out)
+        self.assertNotIn("the same language the user wrote in", out)
+        self.assertIn("call goal_set FIRST", out, "the rest of the head is untouched")
+
+    def test_no_language_changes_no_byte(self):
+        """NEGATIVE, and it protects every saved session: the prompt is byte 0
+        of the prefix."""
+        for nothing in (None, "", "   "):
+            self.assertEqual(crow_core.system_in_language(crow_core.DEFAULT_SYSTEM, nothing),
+                             crow_core.DEFAULT_SYSTEM)
+
+    def test_no_system_stays_no_system(self):
+        self.assertIsNone(crow_core.system_in_language(None, "English"))
+
+    def test_a_custom_prompt_gets_the_pin_appended(self):
+        out = crow_core.system_in_language("You are terse.", "English")
+        self.assertTrue(out.startswith("You are terse."))
+        self.assertTrue(out.endswith("whatever language the user writes in."))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

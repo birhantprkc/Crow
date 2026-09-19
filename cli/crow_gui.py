@@ -11906,6 +11906,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-m", "--model", default=DEFAULT_MODEL)
     parser.add_argument("--api-key", default="local-no-provider")
     parser.add_argument("--system", default=DEFAULT_SYSTEM)
+    # The same flag the terminal has, resolved by the same function in the core.
+    parser.add_argument("--language", default=os.environ.get("CROW_LANGUAGE") or None)
     parser.add_argument("--no-session", dest="session", action="store_false",
                         default=True)
     # ON BY DEFAULT SINCE 2026-08-13, and the reason is the other client.
@@ -11961,6 +11963,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    args.system = crow_core.system_in_language(args.system, args.language)
     # THE WINDOW FINDS THE SERVER THAT IS RUNNING. 8081 is 0731's port and was
     # the only one until a second model arrived on 8082; a window opened while
     # Qwen is up would otherwise knock on an empty port and say "no endpoint"

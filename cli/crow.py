@@ -2212,6 +2212,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="system prompt; stays byte-identical for the whole session")
     parser.add_argument("--no-system", dest="system", action="store_const", const=None,
                         help="send no system prompt at all (the model then picks its own language)")
+    parser.add_argument("--language", default=os.environ.get("CROW_LANGUAGE") or None,
+                        help="pin the language of the model's replies (e.g. English); default: $CROW_LANGUAGE, else the language the user writes in")
     # THE THREE VALUES AND THEIR REASONS MOVED TO crow_core, TOGETHER. They were
     # written here AND in `stream_reply`'s signature AND in the manifest, and
     # tools/check_operating_point.py counts rather than compares for exactly that
@@ -2465,6 +2467,9 @@ def serve_only(key: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # Once, here, before anything reads `args.system`: the conversation, the
+    # memory head and a resumed session all take the prompt from this one field.
+    args.system = crow_core.system_in_language(args.system, args.language)
     # #135. WHERE A SERVER'S QUESTION LANDS IN THE TERMINAL. Installed once, at
     # the top, because `crow_core` reads the name at call time and the MCP call
     # that triggers it happens deep inside a turn.

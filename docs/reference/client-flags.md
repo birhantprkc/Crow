@@ -16,6 +16,7 @@
 | `--rounds` | off | full timing line after every tool round |
 | `--show-reasoning` | off | stream the reasoning. `/thoughts` toggles it |
 | `--no-session` | off | do not resume the last session, do not save this one |
+| `--language NAME` | `$CROW_LANGUAGE`, else unset | pin the language of the model's replies, e.g. `--language English`. Unset keeps the rule "reply in the language the user wrote in", which the FIRST message decides: a chat opened with "Hey" was answered in German and stayed German through an English task (2026-09-19, both engines). It replaces that sentence in the system prompt, so a session resumed under another language pays one full prefill |
 | temperature / top_p / min_p | `1.0` / `0.95` / `0.01` | written once, in `cli/crow_core.py` |
 
 ## #145 — the terminal's budget flags

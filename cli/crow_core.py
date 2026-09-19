@@ -120,6 +120,43 @@ DEFAULT_SYSTEM = (
     "For any task needing more than a couple of turns, call goal_set FIRST "
     "with the whole plan, then work it step by step with goal_step."
 )
+# THE ONE SENTENCE `--language` REPLACES, as a name rather than a second copy of
+# its words: `system_in_language` looks for exactly this text, and a reworded
+# DEFAULT_SYSTEM that no longer contains it turns the flag into a refusal
+# instead of a silent no-op (the test beside it holds the two together).
+LANGUAGE_RULE = "Always reply in the same language the user wrote in. "
+
+
+def system_in_language(system: "str | None", language: "str | None") -> "str | None":
+    """The system prompt with the reply language PINNED, or unchanged.
+
+    WHY A PIN EXISTS AT ALL (robin, 2026-09-19, seen live on both engines): the
+    rule "reply in the language the user wrote in" is decided by the FIRST
+    message, and a chat that opens with "Hey" has no language. The model
+    guessed German, and from then on the German history outweighed the rule --
+    a long English task was answered in German for a whole goal run. A pinned
+    language removes the guess.
+
+    IT REPLACES THE SENTENCE, IT DOES NOT ADD ONE: the head of every context
+    stays one short line, and two rules that can disagree ("the user's
+    language" and "English") are worse than either alone. A custom `--system`
+    that does not carry the rule gets the pin appended instead, because a user
+    who passes both asked for both. `--no-system` stays no system prompt.
+
+    THE PROMPT IS BYTE 0 OF THE PREFIX, so a session saved under one language
+    and resumed under another pays one full prefill -- the same price a changed
+    `--system` has always had, and the same reason the flag is not a slash
+    command: it is chosen per start, not per turn.
+    """
+    language = (language or "").strip()
+    if not language or system is None:
+        return system
+    pin = f"Always reply in {language}, whatever language the user writes in. "
+    if LANGUAGE_RULE in system:
+        return system.replace(LANGUAGE_RULE, pin)
+    return system.rstrip() + " " + pin.rstrip()
+
+
 # #165: DER GOAL-SATZ STEHT NICHT HIER, und der Test daneben ist der Grund --
 # dieser Prompt ist Byte 0 jedes Praefixes und darf 200 Zeichen nicht
 # ueberschreiten. Er steht stattdessen in der Beschreibung von `goal_set`, die
