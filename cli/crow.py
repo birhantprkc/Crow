@@ -1831,11 +1831,18 @@ def _roll_with_digest(conversation, args, loaded, sampling, context_tokens, line
     danach waere dieselbe Frage ein voller Prefill -- dann der Roll. Ein
     Modulhelfer, kein repl-Block: repl() traegt einen Zeilendeckel, und
     schon der Digest-Call allein sprengte ihn."""
+    # #205: DIE REASONING-FELDER DES ZUGS REISEN MIT -- dieselbe Stufe,
+    # derselbe Deckel, derselbe Prompt-Kopf, sonst bricht der warme Cache.
+    # `context_tokens` skaliert das Timeout (ein kalter Praefix braucht
+    # grob 700 tok/s Prefill, kein fester 120s-Wert haelt dem stand).
     digest = rollover_digest(
         conversation, base_url=args.base_url, model=loaded or None,
         temperature=sampling["temperature"], top_p=sampling["top_p"],
         min_p=sampling["min_p"], top_k=sampling.get("top_k"),
-        presence_penalty=sampling.get("presence_penalty"))
+        presence_penalty=sampling.get("presence_penalty"),
+        reasoning_effort=args.reasoning_effort,
+        reasoning_budget=args.reasoning_budget,
+        prompt_tokens=context_tokens)
     return roll_over(conversation, args.base_url, context_tokens,
                      carry=line, digest=digest)
 

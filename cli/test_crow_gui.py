@@ -10268,5 +10268,248 @@ class TheYoloChipTests(unittest.TestCase):
         self.assertIn("cv.remove()", burst, "the canvas outlives the burst")
 
 
+class _FakeLoaded:
+    """pywebview's `loaded` event, soweit `_recover_window` es beruehrt."""
+
+    def __init__(self, window: "_FakeWindow") -> None:
+        self._window = window
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self._window.wait_calls.append(timeout)
+        return True
+
+
+class _FakeWindow:
+    """Ein Fenster, das die Pumpe trifft, ohne GUI.
+
+    VORGABE: tot -- jeder evaluate_js wirft den GError 601 (das Live-
+    Ereignis vom 2026-09-20, SIGSEGV im GPU-Treiber, in pywebviews
+    `_callback` gefangen und nur geloggt). `heal=True` setzt die Seite nach
+    `load_html` wieder in Gang, so wie Buzz Desktop denselben Crash
+    repairt; `load_raises=True` lasst AUCH den Reload sterben.
+    """
+
+    def __init__(self, heal: bool = True, load_raises: bool = False) -> None:
+        from types import SimpleNamespace
+        self.heal = heal
+        self.load_raises = load_raises
+        self.reloaded = False
+        self.calls: list[str] = []
+        self.load_htmls: list[str] = []
+        self.wait_calls: list[float | None] = []
+        self.events = SimpleNamespace(loaded=_FakeLoaded(self))
+
+    def evaluate_js(self, script: str) -> None:
+        self.calls.append(script)
+        if self.heal and self.reloaded:
+            return
+        raise _GError601("WebKitJavascriptError: Unsupported result "
+                         "type (601)")
+
+    def load_html(self, html: str, base_uri: str = "") -> None:
+        self.load_htmls.append(html)
+        if self.load_raises:
+            raise RuntimeError("reload refused -- the page stays dead")
+        self.reloaded = True
+
+
+class _GError601(Exception):
+    """Der Name ist Absicht: GLib.GError's Typname ist GError."""
+
+
+class WebViewException(Exception):
+    """pywebviews Shutdown-Typ, nachgebaut -- der Klassifizierer urteilt
+    ueber den TYPE-NAMEN, damit das Modul ohne pywebview importierbar
+    bleibt; ein lokaler Name mit gleichem Text ist derselbe Beweis."""
+
+
+class ThePumpSurvivesADeadWebprocessTests(ApiCase):
+    """#204. Das Fenster lebt vom WebProcess, und der stirbt (live am
+    2026-09-20: SIGSEGV in libnvidia-eglcore). Die alte Pumpe kehrte bei
+    jeder Exception still heim -- auf GTK kam die Exception NIE an, denn
+    pywebview faengt den GError in `_callback` und LOGGT ihn nur: ein
+    Traceback pro Nachricht, hunderte Zeilen, ein totes Fenster. Die Faelle
+    hier bewachen die Antwort: EINE Klasse je Fehler, EIN Reload, und nach
+    dem zweiten Tod nur noch Leeren -- niemals wieder JS, nie wieder
+    Laerm."""
+
+    # -- der Klassifizierer ----------------------------------------------
+
+    def test_the_three_classes(self):
+        self.assertEqual(
+            crow_gui._classify_push_failure(
+                _GError601("WebKitJavascriptError: Unsupported result "
+                           "type (601)")),
+            "dead_webprocess")
+        self.assertEqual(
+            crow_gui._classify_push_failure(
+                RuntimeError("GLib.GError: WebKitJavascriptError")),
+            "dead_webprocess")
+        self.assertEqual(
+            crow_gui._classify_push_failure(
+                RuntimeError("the Web process crashed")),
+            "dead_webprocess")
+        self.assertEqual(
+            crow_gui._classify_push_failure(
+                WebViewException("GUI is not initialized")),
+            "closed")
+        self.assertEqual(
+            crow_gui._classify_push_failure(ValueError("crow is not defined")),
+            "transient")
+
+    # -- der Plan ---------------------------------------------------------
+
+    def test_closed_stops_the_pump(self):
+        self.assertEqual(
+            crow_gui._push_failure_plan(
+                "closed", reload_tried=False, transient_said=0),
+            ("stop", False))
+
+    def test_the_first_death_tries_exactly_one_reload(self):
+        self.assertEqual(
+            crow_gui._push_failure_plan(
+                "dead_webprocess", reload_tried=False, transient_said=0),
+            ("reload", False))
+
+    def test_the_second_death_freezes_and_says_so_once(self):
+        self.assertEqual(
+            crow_gui._push_failure_plan(
+                "dead_webprocess", reload_tried=True, transient_said=0),
+            ("freeze", True))
+
+    def test_transient_notes_run_under_a_cap(self):
+        said = [crow_gui._push_failure_plan(
+                    "transient", reload_tried=False, transient_said=n)
+                for n in range(5)]
+        self.assertEqual([s for _, s in said], [True, True, True, False, False])
+        self.assertTrue(all(a == "continue" for a, _ in said))
+
+    def test_the_cap_is_a_parameter(self):
+        self.assertEqual(
+            crow_gui._push_failure_plan(
+                "transient", reload_tried=False, transient_said=3,
+                transient_cap=5),
+            ("continue", True))
+
+    # -- die verdrahtete Pumpe -------------------------------------------
+
+    @staticmethod
+    def _kind_of(script: str) -> str:
+        """Aus `window.crow.on("<json>")` der Nachrichtentyp."""
+        payload = script[len("window.crow.on("):-1]
+        return json.loads(json.loads(payload))["k"]
+
+    def test_a_dead_webprocess_is_reloaded_once_and_the_ui_comes_back(self):
+        """Der erste Tod laedt DIESE Seite neu (keine URL, HTML) und schiebt
+        den Stamm wieder in die Seite, bevor die wartende Nachricht kommt."""
+        api = self.api()
+        window = _FakeWindow()              # tot, heilt nach dem Reload
+        api._window = window
+        api._page = "<html>the page</html>"
+        api.push({"k": "note", "t": "first"})
+        api.push({"k": "note", "t": "second"})
+        api._out.put(None)
+        err = io.StringIO()
+        with mock.patch("sys.stderr", new=err):
+            api.pump()
+        self.assertEqual(len(window.load_htmls), 1, "genau EIN Reload")
+        self.assertEqual(window.load_htmls[0], "<html>the page</html>")
+        self.assertEqual(window.wait_calls, [15.0])
+        kinds = [self._kind_of(script) for script in window.calls]
+        # note (fehlschlag), root (der Stamm, SOFORT), note (erneut, heil),
+        # note -- der Stamm VOR der wartenden Nachricht, wie es der Plan
+        # verspricht.
+        self.assertEqual(kinds, ["note", "root", "note", "note"], kinds)
+        self.assertEqual(err.getvalue(), "", "heilen Passagen sagen nichts")
+        self.assertFalse(api._push_dead)
+
+    def test_a_second_death_freezes_drains_and_never_calls_js_again(self):
+        """Der Reload hielt nicht: EINE stderr-Zeile, ein toter Pin, und
+        alles Weitere wird geleert und weggeworfen -- ohne evaluate_js."""
+        api = self.api()
+        window = _FakeWindow(heal=False)    # der Reload heilt nicht
+        api._window = window
+        api._page = "<html>the page</html>"
+        api.push({"k": "note", "t": "first"})
+        api.push({"k": "note", "t": "second"})
+        api._out.put(None)
+        err = io.StringIO()
+        with mock.patch("sys.stderr", new=err):
+            api.pump()
+        # Genau zwei Versuche: die erste Zustellung, die Wiederholung nach
+        # dem Reload. Die zweite Nachricht wird NIE angefasst.
+        self.assertEqual(len(window.calls), 2)
+        self.assertEqual(len(window.load_htmls), 1)
+        notes = err.getvalue().strip().splitlines()
+        self.assertEqual(len(notes), 1, err.getvalue())
+        self.assertTrue(notes[0].startswith(
+            "crow: the window's web process died;"), notes[0])
+        self.assertIn("restart crow to get the window back", notes[0])
+        self.assertTrue(api._push_dead)
+
+    def test_a_failed_reload_freezes_without_a_second_deliver(self):
+        """Scheitert der Reload selbst, gibt es keine zweite Zustellung --
+        derselbe Freeze, dieselbe eine Zeile."""
+        api = self.api()
+        window = _FakeWindow(load_raises=True)
+        api._window = window
+        api._page = "<html>the page</html>"
+        api.push({"k": "note", "t": "first"})
+        api._out.put(None)
+        err = io.StringIO()
+        with mock.patch("sys.stderr", new=err):
+            api.pump()
+        self.assertEqual(len(window.load_htmls), 1)
+        self.assertEqual(len(window.calls), 1)
+        self.assertEqual(len(err.getvalue().strip().splitlines()), 1)
+        self.assertTrue(api._push_dead)
+
+    def test_transient_failures_are_noted_three_times_only(self):
+        api = self.api()
+        window = _FakeWindow()
+        calls: list[str] = []
+
+        def stumble(script: str) -> None:
+            calls.append(script)
+            raise ValueError("crow is not defined")
+
+        window.evaluate_js = stumble
+        api._window = window
+        api._page = "<html>the page</html>"
+        for n in range(5):
+            api.push({"k": "note", "t": "n%d" % n})
+        api._out.put(None)
+        err = io.StringIO()
+        with mock.patch("sys.stderr", new=err):
+            api.pump()
+        self.assertEqual(len(calls), 5, "alle fuenf wurden versucht")
+        notes = err.getvalue().strip().splitlines()
+        self.assertEqual(len(notes), 3, err.getvalue())
+        self.assertTrue(all("keeping on" in n for n in notes))
+
+    def test_a_closed_window_ends_the_pump_quietly(self):
+        """Der alte Vertrag bleibt: ein normales Fensterende kehrt heim,
+        ohne eine Zeile und ohne die Warteschlange zu leeren."""
+        api = self.api()
+        window = _FakeWindow()
+
+        def closed(script: str) -> None:
+            window.calls.append(script)
+            raise WebViewException("window was closed")
+
+        window.evaluate_js = closed
+        api._window = window
+        api._page = "<html>the page</html>"
+        api.push({"k": "note", "t": "first"})
+        api.push({"k": "note", "t": "never reached"})
+        err = io.StringIO()
+        with mock.patch("sys.stderr", new=err):
+            api.pump()
+        self.assertEqual(len(window.calls), 1)
+        self.assertEqual(err.getvalue(), "")
+        self.assertFalse(api._push_dead)
+        self.assertEqual(api._out.get_nowait().get("t"), "never reached")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

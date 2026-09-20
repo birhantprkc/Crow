@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import logging
 import os
 import queue
 import re
@@ -7405,6 +7406,135 @@ class Turn(TurnEvents):
         self._put({"k": "pend", "items": crow_core.pending_view()})
 
 
+# -- #204: the push, its failure classes, and the plan -----------------------
+
+# TODAY'S LIVE EPISODE (2026-09-20): the window's WebProcess died (SIGSEGV in
+# libnvidia-eglcore -- the GPU driver, not Crow's code) and every push after it
+# printed ONE traceback per message into the terminal:
+#
+#     File ".../webview/platforms/gtk.py", line 676, in _callback
+#     gi.repository.GLib.GError: WebKitJavascriptError: Unsupported result
+#     type (601)
+#
+# THE PART THAT MAKES THIS SUBTLE: WebKitGTK's evaluate_js NEVER RAISES. The
+# GError is caught inside pywebview's own `_callback` and only LOGGED
+# (`logger.exception`, logger name "pywebview", default handler -> stderr),
+# then evaluate_js quietly returns None. The old pump's `except: return` never
+# fired; the pump went on feeding a corpse and the terminal drowned. So the
+# failure is caught at TWO doors below: the exception itself on platforms that
+# raise (WebView2, a shut-down pywebview), and a logging tap around the call
+# for the platforms that swallow.
+
+# The strings that name a dead web process, from that traceback plus the
+# generic "Web process" wording other builds use.
+DEAD_WEBPROCESS_MARKS = ("Unsupported result type (601)",
+                         "WebKitJavascriptError",
+                         "Web process",
+                         "GLib.GError")
+
+# pywebview's own "the window/GUI is gone" exception type, matched by NAME:
+# importing `webview.errors` at module top would make this file need pywebview
+# to be importable at all, and the terminal client must not.
+CLOSED_EXC_NAMES = ("WebViewException",)
+
+# ONE stderr line per failure class, and the transient class shares a cap:
+# a dead window pushing forty messages an hour must not turn the run log into
+# the same flood this fix exists to stop.
+TRANSIENT_NOTE_CAP = 3
+
+# THE ONE NOTICE THE FREEZE GETS. The window is gone, so no in-page notice is
+# possible; the line is for the terminal the window was started from.
+FROZEN_NOTE = ("crow: the window's web process died; the window is frozen "
+               "but your run continues \u2014 restart crow to get the window back")
+
+
+def _classify_push_failure(exc: BaseException) -> str:
+    """#204: ONE failure, ONE class -- "closed", "dead_webprocess" or
+    "transient".
+
+    Pure and text-driven on purpose: the suite can cut against it without a
+    window, and a new platform's wording joins the marks instead of growing a
+    second classifier. `closed` means the shutdown path everyone already had;
+    `dead_webprocess` is the crash above, recoverable exactly once; anything
+    else is `transient` -- a live page that hiccuped (a `window.crow` not yet
+    defined during a reload, a script error) and is worth another try.
+    """
+    try:
+        text = "%s: %s" % (type(exc).__name__, exc)
+    except Exception:                    # noqa: BLE001 - a broken __str__ is
+        text = repr(exc)                 # still a failure, not a crash
+    if any(mark in text for mark in DEAD_WEBPROCESS_MARKS):
+        return "dead_webprocess"
+    if type(exc).__name__ in CLOSED_EXC_NAMES:
+        return "closed"
+    return "transient"
+
+
+def _push_failure_plan(kind: str, *, reload_tried: bool,
+                       transient_said: int,
+                       transient_cap: int = TRANSIENT_NOTE_CAP
+                       ) -> "tuple[str, bool]":
+    """#204: The decision for one classified failure, as pure as the
+    classifier. Returns (action, say_now): what the pump does and whether
+    THIS failure earns its stderr line.
+
+      stop    -- the window shut down normally; the old `return`.
+      reload  -- first dead_webprocess: ONE recovery reload is tried (the
+                 Buzz-desktop pattern for the identical crash: reload the
+                 page and the webview comes back).
+      freeze  -- the SECOND dead_webprocess: the reload did not hold. One
+                 notice, a permanent dead flag, never another evaluate_js.
+                 say_now is True exactly on the transition, so the notice
+                 prints once forever.
+      continue -- transient: keep going, note it only under the cap.
+    """
+    if kind == "closed":
+        return "stop", False
+    if kind == "dead_webprocess":
+        if not reload_tried:
+            return "reload", False
+        return "freeze", True
+    return "continue", transient_said < transient_cap
+
+
+class _SwallowedErrors(logging.Handler):
+    """The exceptions the webview layer logs away instead of raising.
+
+    Catches exactly `logger.exception` records -- the shape of gtk.py's
+    `_callback` -- while everything else passes through untouched.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self.errors: "list[BaseException]" = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        exc = record.exc_info[1] if record.exc_info else None
+        if exc is not None:
+            self.errors.append(exc)
+
+
+class _DuringPush:
+    """Tap the "pywebview" logger for the duration of ONE evaluate_js.
+
+    The pump is the only thread that calls evaluate_js, and it blocks inside
+    the call until the platform's semaphore answers -- so every record the
+    tap catches in here belongs to this push. Nothing is installed at module
+    scope; a handler left behind would catch every later log line forever.
+    """
+
+    def __init__(self) -> None:
+        self.catcher = _SwallowedErrors()
+
+    def __enter__(self) -> "_SwallowedErrors":
+        logging.getLogger("pywebview").addHandler(self.catcher)
+        return self.catcher
+
+    def __exit__(self, *exc_info) -> bool:
+        logging.getLogger("pywebview").removeHandler(self.catcher)
+        return False
+
+
 class Api:
     """What the page may call. Nothing here touches a widget; it queues."""
 
@@ -7425,6 +7555,19 @@ class Api:
         # is walked too, and `window.native.AccessibilityObject.Bounds.Empty…`
         # recurses until the stack gives out. Private names are skipped.
         self._window = None
+        # #204. DER ZUSTAND DER PUMPE GEGEN EINEN TOTEN WEBPROCESS. Genau
+        # EIN Reload wird versucht (`_push_reload_tried`), danach gefriert
+        # die Pumpe fuer immer (`_push_dead`: nur noch leeren, nie wieder
+        # JS), und die transienten stderr-Zeilen laufen unter einem Zaehler,
+        # damit ein krankes Fenster nicht doch noch das Terminal flutet.
+        self._push_reload_tried = False
+        self._push_dead = False
+        self._transient_said = 0
+        # #204. DIE SEITE SELBST, fuer genau diesen Reload. Das Fenster wurde
+        # aus HTML geoeffnet, nicht von einer URL -- `load_url` haette nichts,
+        # das es zurueckbringen koennte; `main` legt die fertige Seite hier
+        # ab, und `_recover_window` laedt genau sie neu.
+        self._page = ""
         self._out: "queue.Queue" = queue.Queue()
         # #135. THE WINDOW IS WHERE A SERVER'S QUESTION LANDS. Installed once,
         # here, because `crow_core` reads the name at call time -- and read from
@@ -7670,16 +7813,114 @@ class Api:
         return crow_core.answer_elicitation(int(ident), str(action), values) or ""
 
     def pump(self) -> None:
-        """One thread, forever: queue -> page. The only place JS is called."""
+        """One thread, forever: queue -> page. The only place JS is called.
+
+        #204: A DEAD WEBPROCESS KILLS NEITHER THE QUEUE NOR THE THREAD. The
+        old body turned ANY evaluate_js exception into `return`, so a dead
+        webview ended the pump while callers went on pushing -- and on GTK
+        the exception never even arrived (see `_deliver`), so the terminal
+        got one logged traceback per message and the pump kept feeding a
+        corpse. Now every failure is classified (`_classify_push_failure`),
+        the plan (`_push_failure_plan`) owns the decision, and the pump owns
+        the three states that decision can reach: ONE recovery reload with
+        the page's root re-pushed so the user sees their UI again, then --
+        if the reload did not hold -- a permanent dead flag under which
+        messages are drained and DISCARDED without evaluate_js, forever.
+        Callers can neither block nor crash on a window that is already
+        gone, and the terminal sees exactly one line per failure class.
+        """
         while True:
             message = self._out.get()
             if message is None:
                 return
-            try:
-                self._window.evaluate_js(
-                    "window.crow.on(%s)" % json.dumps(json.dumps(message)))
-            except Exception:              # noqa: BLE001 - a closed window, nothing else
-                return
+            while message is not None and not self._push_dead:
+                kind, exc = self._deliver(message)
+                if kind == "ok":
+                    break
+                action, say = _push_failure_plan(
+                    kind, reload_tried=self._push_reload_tried,
+                    transient_said=self._transient_said)
+                if action == "stop":
+                    return
+                if action == "reload":
+                    self._push_reload_tried = True
+                    if not self._recover_window():
+                        # Der Reload selbst scheiterte: dasselbe Urteil wie
+                        # ein zweiter toter Push -- gefrieren, einmal sagen.
+                        self._push_dead = True
+                        print(FROZEN_NOTE, file=sys.stderr)
+                        break
+                    # DIE SEITE ERLEBT WIEDER, was sie beim Start sah: der
+                    # Stamm -- derselbe Inhalt wie `push_root()`, aber SOFORT
+                    # zugestellt statt hinten angestellt, denn die neue
+                    # Seite steht leer. Stirbt schon der Stamm, hielt der
+                    # Reload nicht: derselbe Freeze, dieselbe eine Zeile.
+                    kind2, _exc2 = self._deliver(self._root_message())
+                    if kind2 == "dead_webprocess":
+                        self._push_dead = True
+                        print(FROZEN_NOTE, file=sys.stderr)
+                        break
+                    continue        # die Zustellung noch einmal wagen; der
+                                    # Plan landet bei einem zweiten toten
+                                    # Push jetzt auf "freeze"
+                if action == "freeze":
+                    self._push_dead = True
+                    print(FROZEN_NOTE, file=sys.stderr)
+                    break
+                # "continue" -- eine lebende Seite, die kurz gestolpert ist.
+                if say:
+                    self._transient_said += 1
+                    print("crow: pushing to the window failed (%s); "
+                          "keeping on" % exc, file=sys.stderr)
+                break
+            # Mit totengemeldeter Pumpe: LEEREN UND WEGWERFEN, ohne JS
+            # anzufassen -- der Lauf lebt weiter, nur die Scheibe nicht.
+
+    def _deliver(self, message: dict) -> "tuple[str, BaseException | None]":
+        """ONE evaluate_js, classified. ("ok", None) or (class, exception).
+
+        TWO DOORS (#204). Platforms that raise -- WebView2, a shut-down
+        pywebview -- come back through the `except`. WebKitGTK never raises:
+        its `_callback` catches the GError, LOGS it and releases the
+        semaphore, so evaluate_js returns None as if nothing happened. For
+        that door the "pywebview" logger is tapped for the duration of this
+        one call (`_DuringPush`); the first logged exception IS this push's
+        failure.
+        """
+        script = "window.crow.on(%s)" % json.dumps(json.dumps(message))
+        try:
+            with _DuringPush() as tap:
+                self._window.evaluate_js(script)
+        except Exception as exc:       # noqa: BLE001 - classified, not raised
+            return _classify_push_failure(exc), exc
+        if tap.errors:
+            return _classify_push_failure(tap.errors[0]), tap.errors[0]
+        return "ok", None
+
+    def _recover_window(self) -> bool:
+        """#204: EIN Reload, genau einer, dann nie wieder.
+
+        DAS FENSTER WURDE AUS HTML GEOEFFNET, nicht von einer URL: pywebview
+        haelt dafuer kein `original_url`, und die Seite, die der Nutzer sah,
+        kam ueber `load_html` (GTK) bzw. `create_window(html=...)` (Windows).
+        `main` legt dieselbe Seite an `_page` ab, und genau sie wird hier
+        neu geladen -- der Weg, mit dem Buzz Desktop denselben Crash heilt:
+        nach dem Reload lebt die Seite, statt fuer immer den GError 601 zu
+        werfen. `loaded` wird bounded abgewartet, damit die Zustellung nicht
+        gegen das erste Rendern der neuen Seite rennt; scheitert irgendwas,
+        kommt False zurueck und die Pumpe friert ein."""
+        page, window = self._page, self._window
+        if not page or window is None:
+            return False
+        try:
+            window.load_html(page)
+            loaded = getattr(getattr(window, "events", None),
+                             "loaded", None)
+            if loaded is not None and hasattr(loaded, "wait"):
+                loaded.wait(timeout=15.0)      # best effort, nie eine Garantie
+            return True
+        except Exception:              # noqa: BLE001 - the freeze says it
+            return False
 
     # -- inward ------------------------------------------------------------
 
@@ -7735,12 +7976,21 @@ class Api:
     # ---- #92: the working directory ------------------------------------
 
     def push_root(self) -> None:
+        """Der Stamm, gequeued wie jede Nachricht. Der Inhalt steckt in
+        `_root_message`, damit die Pumpe ihn nach einem Reload (#204) SOFORT
+        zustellen kann statt hinten anzustellen -- die neue Seite steht leer
+        und sieht ihren Zustand vor jeder alten Nachricht."""
+        self.push(self._root_message())
+
+    def _root_message(self) -> dict:
+        """DIESE Seite sieht ihren Stamm so. Ein Diktat wie jedes andere
+        Push-Diktat; nur der Weg dorthin ist ein anderer."""
         root = crow_core.get_root()
-        self.push({"k": "root",
-                   "path": root or "",
-                   "name": os.path.basename(root) if root else "",
-                   "roots": [{"path": p, "name": os.path.basename(p) or p}
-                             for p in crow_core.known_roots()]})
+        return {"k": "root",
+                "path": root or "",
+                "name": os.path.basename(root) if root else "",
+                "roots": [{"path": p, "name": os.path.basename(p) or p}
+                          for p in crow_core.known_roots()]}
 
     def _bind_root(self, path: str, mode: str | None = None) -> None:
         """Declare `path` a root, remember it, and adopt the level stored there.
@@ -11733,12 +11983,21 @@ class Api:
             spot0 = self._endpoint()
             sampling0 = crow_core.sampling_for(self._model)
             # #154: VOR roll_over, auf dem noch warmen Praefix.
+            # #205: DIESELBE STUFE UND DERSSELBE DECKEL WIE DER ZUG -- ein
+            # Digest-Koerper ohne die Reasoning-Felder rendert einen anderen
+            # Prompt und schiesst den warmen Cache ab (gemessen 2026-09-20:
+            # 181k bzw. 185k Tokens Neu-Prefill, danach war das alte
+            # 120s-Timeout tot). `self._context_tokens`, dieselbe Schaetzung
+            # wie in `should_roll` darunter, skaliert das Timeout.
             digest = crow_core.rollover_digest(
                 self._conversation, base_url=spot0["base_url"],
                 model=spot0["model"], api_key=spot0["api_key"],
                 temperature=sampling0["temperature"], top_p=sampling0["top_p"],
                 min_p=sampling0["min_p"], top_k=sampling0.get("top_k"),
                 presence_penalty=sampling0.get("presence_penalty"),
+                reasoning_effort=self._reasoning,
+                reasoning_budget=self._budget,
+                prompt_tokens=self._context_tokens,
                 extra_headers=spot0.get("headers") or None,
                 transport=spot0.get("transport") or crow_core.TRANSPORT_CHAT,
                 remote=spot0["remote"])
@@ -12138,6 +12397,12 @@ def main(argv: list[str] | None = None) -> int:
         width=1180, height=800, min_size=(1130, 520), frameless=True,
         easy_drag=False, background_color=theme_bg(current_theme()))
     api._window = window
+    # #204. DIE SEITE LIEGT BEI DER API, damit die Pumpe sie nach einem
+    # toten WebProcess neu laden kann. Aus HTML geoeffnete Fenster haben
+    # keine URL, die `load_url` zurueckbringen koennte; auf GTK kam die
+    # sichtbare Seite ueber `load_html`, auf Windows direkt aus
+    # `create_window` -- in beiden Faellen ist DIES hier der Inhalt.
+    api._page = page
     # #175. DIE SCHEIBE HAENGT AM HAUPTFENSTER: wandert es, wandert sie mit,
     # und ein minimiertes Crow darf keine Webseite auf dem Desktop stehen
     # lassen. Ohne diese vier Zeilen liegt sie beim ersten Verschieben neben

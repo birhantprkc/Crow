@@ -3080,6 +3080,14 @@ ROLLOVER_NOTE = (
 # woertliche Zeilen (#147) bleiben unangetastet daneben.
 ROLLOVER_DIGEST_DEFAULT = 400
 ROLLOVER_DIGEST_TOKENS = ROLLOVER_DIGEST_DEFAULT   # 0 schaltet den Digest ab
+# #205. DAS DENKZIMMER GEHOERT IN DIE RECHNUNG. Seit die Digest-Leg dieselben
+# Reasoning-Felder spricht wie der Zug (#205, unten), kann das Denken das alte
+# 400er-Budget auffressen, BEVOR die Antwort beginnt -- genau das wurde am
+# 2026-08-29 gemessen (#157): 400/400 Tokens Reasoning, 0 Zeichen Content.
+# Wirksam ist darum max(ROLLOVER_DIGEST_TOKENS, dieser Boden), und das Denken
+# wird NACH der Antwort aus dem Content gewaschen, statt es vorher zu
+# verbieten -- Verbieten war der Fehler, der den warmen Praefix brach.
+ROLLOVER_DIGEST_MIN_TOKENS = 2000
 DIGEST_HEAD = ("What the model itself noted before the cut "
                "(its own words, unverified):\n")
 DIGEST_ASK = (
@@ -3138,6 +3146,54 @@ def _spoken_carry(conversation: "Conversation", carry: "str | None") -> str:
     return SPOKEN_CARRY_HEAD + "\n".join(lines) + "\n" + tail
 
 
+# #205. DAS TIMEOUT WEISS, WAS EIN KALTER PREFILL KOSTET. Gemessen im
+# Engine-Log am 2026-09-20, dieselbe Messung, die den Kalten Praefix zeigte:
+# 181.745 Tokens in 217,1 s (837 tok/s) und 185.831 Tokens in 222,7 s
+# (834 tok/s) -- rund 835 tok/s Prefill, wenn der Cache kalt ist und der
+# Digest-Leg genau das passiert, was #154 verhindern will. Ein fester
+# 120s-Wert stirbt in dem Fall, BEVOR das erste Antworttoken existiert --
+# "Broken pipe", "client gone", und die Antwort war umsonst gedacht. Der
+# Teiler steht deshalb BESSER bei 700 als bei den gemessenen 835: er
+# unterbietet die gemessene Rate und gibt dem kalten Fall Luft, der Boden
+# von 120 s haelt kleine Chats exakt dort, wo sie heute stehen. Ein
+# ausdrueckliches `timeout` des Aufrufers gewinnt weiterhin -- der Skalierung
+# ist Sicherheitsnetz, keine Diktatur.
+DIGEST_PREFILL_TOK_S = 700.0
+DIGEST_TIMEOUT_FLOOR_S = 120.0
+
+
+def _digest_timeout(prompt_tokens: int, explicit: "float | None" = None) -> float:
+    """#205: Das Timeout der Digest-Leg. Ein ausdrueckliches gewinnt; None
+    skaliert mit der Groesse des Praefix, den die Leg warm zu treffen hofft:
+    Prefill mit den gemessenen 835 tok/s (Sicherheitsabschlag: 700/s), plus
+    eine Minute fuer Denken, Dekodieren und Schreiben, wenigstens aber die
+    120 s, die vor diesem Ticket galten. Rein rechnerisch, damit die Suite
+    die Kurve ohne Netz pruefen kann."""
+    if explicit is not None:
+        return explicit
+    return max(DIGEST_TIMEOUT_FLOOR_S,
+               prompt_tokens / DIGEST_PREFILL_TOK_S + 60.0)
+
+
+# #205. DAS DENKEN GEHOERT WASCHEN. Nicht jedes Template trennt das
+# Denken ueber `reasoning_content` -- etliche rendern `<think>...</think>`
+# mitten in den Content. Der Ausdruck frisst auch den UNABGESCHLOSSENEN
+# Block: wird die Leg mittendrin vom Deckel gekoepft (genau der Fall von
+# oben, 400/400), fehlt das schliessende Tag, und ohne das `|\Z` stuende
+# der ganze Gedankengang hinterher als "Digest" im Archiv der neuen Etappe.
+_THINK_RE = re.compile(r"<think\b[^>]*>.*?(?:</think\b[^>]*>|\Z)",
+                       re.S | re.I)
+
+
+def _strip_think(text: str) -> str:
+    """#205: Denken aus einer Digest-Antwort waschen, Antwort behalten.
+
+    `reasoning_content` ist vorher schon weg (nie gelesen, siehe oben);
+    hier fallen nur die Templates, die die Gedanken in den Content
+    schreiben. Ein Text ohne Gedanken kommt unveraendert durch."""
+    return _THINK_RE.sub("", text)
+
+
 def rollover_digest(conversation: "Conversation", *, base_url: str,
                     # Sampling ist PFLICHT, wie bei review_turn: Defaults hier
                     # waeren die zweite Kopie der drei Konstanten, und der
@@ -3146,7 +3202,18 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
                     model: "str | None" = None, api_key: str = "",
                     top_k: "int | None" = None,
                     presence_penalty: "float | None" = None,
-                    timeout: float = 120.0,
+                    # #205: DIESELBE TUER WIE DER ZUG (#176), durchgereicht
+                    # statt entschieden -- was eine Stufe ist, weiss nur der
+                    # Aufrufer, der sie dem Zug mitgegeben hat.
+                    reasoning_effort: "str | None" = None,
+                    reasoning_budget: "int | None" = None,
+                    reasoning_budget_message: "str | None" = None,
+                    # #205: DIE KONTEXTSCHAETZUNG, die der Aufrufer ohnehin
+                    # an `should_roll` uebergibt. Sie skaliert das Timeout
+                    # (unten); hier angenommen statt gesucht, weil eine zweite
+                    # Schaetzung eine zweite Wahrheit waere.
+                    prompt_tokens: int = 0,
+                    timeout: "float | None" = None,
                     extra_headers: "dict | None" = None,
                     # None, nicht TRANSPORT_CHAT: die Konstante ist an dieser
                     # Stelle des Moduls noch nicht definiert -- Defaults werten
@@ -3163,8 +3230,14 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
     warm prefix this call exists to exploit -- and IT NEVER RAISES. A digest
     that failed is "", and the roll proceeds exactly as without one.
 
-    #157: the leg does NOT think, and it carries no
-    `reasoning_effort` -- the measured reason sits with the body.
+    #205: "EXACT DIALECT" GILT JETZT AUCH FUER DAS DENKEN. Bis zum
+    2026-09-20 schaltete diese Leg das Denken ab und brach damit genau den
+    Praefix, den sie warm vorfand -- dieselben Nachrichten mit anderem
+    Template-Kwarg weichen im gerenderten Prompt bei Token 3-4 ab, und die
+    Lege zahlte zweimal an einem Tag 180k+ Tokens Prefill (217 s und
+    223 s), nach denen ihr 120s-Timeout laengst tot war. Sie spricht jetzt
+    dieselben Reasoning-Felder wie der Zug und waescht das Denken aus der
+    Antwort, statt es vorher zu verbieten -- siehe die Kommentare im Rumpf.
     """
     if ROLLOVER_DIGEST_TOKENS <= 0 or len(conversation) < 2:
         return ""
@@ -3172,13 +3245,40 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
     messages = conversation.payload() + [{"role": "user", "content": DIGEST_ASK}]
     body = {"messages": messages, "tools": TOOLS, "stream": False,
             "temperature": temperature, "top_p": top_p, "min_p": min_p,
-            "max_tokens": ROLLOVER_DIGEST_TOKENS}
+            # #205: DER DECKEL HEBELT SICH SONST SELBST AUF. 400 waren genug,
+            # solange die Leg nicht dachte; seit sie denkt, frisst das Denken
+            # das Budget leer, bevor die Antwort anfaengt (gemessen
+            # 2026-08-29: 400/400, 0 Zeichen). Wirksam ist der groessere der
+            # beiden Werte -- der Boden lebt von der Messung oben.
+            "max_tokens": max(ROLLOVER_DIGEST_TOKENS,
+                              ROLLOVER_DIGEST_MIN_TOKENS)}
     if model:
         body["model"] = model
     if top_k is not None:
         body["top_k"] = top_k
     if presence_penalty is not None:
         body["presence_penalty"] = presence_penalty
+    if reasoning_effort:
+        # #205/#176: DIESELBE TUER WIE DER ZUG, aus demselben Grund wie bei
+        # review_turn. Ein Koerper, der seine Stufe auf der anderen Tuer
+        # (kwargs) oder gar nicht schickt, rendert einen anderen Prompt --
+        # und genau DAS war der Defekt: dieselben Nachrichten, anderer
+        # Kopf, kalter Cache. Der Server legt einen nicht-`none`-Wert selbst
+        # wieder in die kwargs ab, der Prompt-Cache eines laufenden Chats
+        # bleibt unberuehrt.
+        body["reasoning_effort"] = reasoning_effort
+    capped = resolve_reasoning_budget(model, reasoning_budget)
+    if capped is not None:
+        # #205/#176: DERSELBE DECKEL WIE DER ZUG, dieselbe Einspeisung
+        # darunter. Die Felder gehen in den Sampler, nicht ins Template --
+        # der Prompt bleibt byte-gleich, der Cache bricht also auch hier
+        # nicht; sie reisen trotzdem mit, weil ein Digest, der ohne den
+        # Deckel des Chats denkt, am Schnitt der teuerste Aufruf des Tages
+        # waere -- und niemand sieht ihm dabei zu.
+        body["reasoning_budget_tokens"] = capped
+        body["reasoning_budget_message"] = (
+            REASONING_BUDGET_MESSAGE if reasoning_budget_message is None
+            else reasoning_budget_message)
     if routing and transport != TRANSPORT_MESSAGES:
         body.update(routing)
     if remote:
@@ -3187,39 +3287,51 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
         body = anthropic_body(body)
         url = f"{base_url.rstrip('/')}/messages"
     else:
-        # #157: DIE DIGEST-LEGE DENKT NICHT. Gemessen 2026-08-29 am
-        # laufenden 8082 (Qwen3.8-27B), eine Variable je Arm,
-        # max_tokens 400: mit dem Chat-Default `high` frisst das
-        # Reasoning das gesamte Budget -- 400/400 Tokens, 0 Zeichen
-        # Content -- und der Roll lief live still ohne Digest. Das
-        # Modell denkt auf JEDEM Level (low: 1006 Zeichen, die
-        # Antwort trotzdem finish-length), also heilt keine
-        # niedrigere Stufe, und reasoning_content zu ernten ist
-        # Lalltext, nicht Antwort. `enable_thinking: false` ist der
-        # Hebel: Antwort vollstaendig in 87/400 Tokens, finish stop,
-        # Reasoning 0. Templates ohne den Schalter lassen unbekannte
-        # Kwarg still fallen (gemessen: `no_think` wirkte nicht) --
-        # der Kwarg ist dort inert, und nur der chat_completions-
-        # Dialekt spricht sie an.
-        body["chat_template_kwargs"] = {"enable_thinking": False}
+        # #205: KEIN TEMPLATE-SCHALTER MEHR. Hier stand bis heute
+        # `chat_template_kwargs = {"enable_thinking": False}` -- der Stand
+        # von #157, gemessen am 2026-08-29 (8082, Qwen3.8-27B, max_tokens
+        # 400): mit dem Chat-Default frisst das Reasoning das Budget
+        # (400/400, 0 Zeichen Content), und `enable_thinking: False` hielt
+        # die Antwort auf 87 Tokens. Die Messung war echt; der SCHLUSS war
+        # es nicht. Der Schalter aendert den gerenderten Kopf DESSELBEN
+        # Praefix, auf dem die Lege sitzt -- Engine-Log vom 2026-09-20:
+        # COLD L 3, dann 181.745 bzw. 185.831 Tokens Neu-Prefill (217,1 s
+        # und 222,7 s, rund 835 tok/s), das 120s-Timeout schon tot
+        # ("Broken pipe", "client gone"), die Antwort verworfen, der Roll
+        # lief trotzdem. Der ganze Sinn von #154 ist EINE Frage auf dem
+        # warmen Praefix; dieser Koerper garantierte den 180k-Prefill.
+        # Deshalb denkt die Lege jetzt MIT dem Zug -- dieselben Felder wie
+        # er -- und `_strip_think` waescht die Gedanken unten aus der
+        # Antwort, statt sie hier zu verbieten. Templates ohne den Schalter
+        # lassen unbekannte Kwarg ohnehin still fallen (gemessen: `no_think`
+        # wirkte nicht) -- der Kwarg war dort inert und nur im
+        # chat_completions-Dialekt eine Waffe.
         url = f"{base_url.rstrip('/')}/chat/completions"
     try:
         request = urllib.request.Request(
             url, data=json.dumps(body).encode("utf-8"), method="POST",
             headers=dict(_stream_headers(api_key, extra_headers),
                          **{"Accept": "application/json"}))
-        with urllib.request.urlopen(request, timeout=timeout) as resp:
+        with urllib.request.urlopen(
+                request, timeout=_digest_timeout(prompt_tokens, timeout)) as resp:
             answer = json.loads(resp.read().decode("utf-8") or "{}")
         if transport == TRANSPORT_MESSAGES:
             text = "".join(block.get("text") or ""
                            for block in answer.get("content") or []
                            if block.get("type") == "text")
         else:
+            # #205: DAS DENKEN WIRD NICHT GELESEN. llama-server legt die
+            # Gedanken in `message.reasoning_content` und die Antwort in
+            # `message.content` -- indem hier nur `content` geerntet wird,
+            # ist der Nicht-Strom-Arm des Feldtrenners schon erledigt.
             text = ((answer.get("choices") or [{}])[0]
                     .get("message", {}).get("content") or "")
     except Exception:              # noqa: BLE001 - Beifang, nie der Roll selbst
         return ""
-    return text.strip()
+    # #205: UND DER REST DENKT IN <think>-BLOECKEN IM CONTENT SELBST, je
+    # nach Template -- gewaschen wird bei der Ausgabe, gemeinsam fuer beide
+    # Faelle. Der Vertrag bleibt: nie raise, "" bei Scheitern, kurzer Text.
+    return _strip_think(text).strip()
 
 
 def repin_head(conversation: "Conversation", root: "str | None" = None) -> bool:
@@ -7343,6 +7455,66 @@ _IMAGE_RIDE: "list[dict]" = []
 # (Adresse, Screenshot) des letzten `render_page`.
 _RENDER_RIDE: "list[tuple]" = []
 
+# #175-NACHTRAG (2026-09-20): DAS GEDAECHTNIS FUER DIE EHRLICHKEIT. Zu jedem
+# geloesten Pfad die Bytes des letzten Screenshots. Ein zweiter Fang derselben
+# Seite, der byte-identisch ausfaellt, ist kein Beweis fuer Stille auf der
+# Seite, sondern dafuer, dass die virtuelle Uhr die Animation NICHT gepumpt
+# hat -- genau das war heute an drei Varianten einer WebGL-Seite messbar
+# (byte-identische 92.027 Bytes, der eigene fps-Zaehler der Seite blieb bei
+# 0). Die Warnung darunter sagt dem Modell, den Pixeln in DEM Fall nicht zu
+# trauen und auf die Konsolenzeilen zu schauen.
+_LAST_CAPTURES: "dict[str, bytes]" = {}
+
+# Die Form einer Chromium-Logzeile vor der eigentlichen Meldung:
+# "[pid:tid:tttt/mm/dd.hh:mm:ss.ffffff:LEVEL:CONSOLE(n)]" -- dieser Kopf wird
+# gekuerzt, damit `console: ...` beim Modell lesbar ankommt.
+_CHROME_LOG_HEAD = re.compile(r"^\[[^\]]*\]\s*")
+
+# Eine Konsolenzeile ist dann ein FEHLER: "Uncaught" steht in der Meldung,
+# wenn eine Ausnahme die Seite nicht geschluckt hat, und Chromium schreibt
+# Fehler mit dem Level ERROR statt INFO -- nach dem gekuerzten Kopf bleibt
+# davon "ERROR:..." ueber.
+_CONSOLE_ERROR_MARKS = ("Uncaught", "ERROR:")
+
+
+def _console_lines(log_text: str, limit: int = 10) -> "list[str]":
+    """Die CONSOLE- (und ERROR-)Zeilen eines browser.log, die letzten
+    `limit` zuerst, Kopf gekuerzt.
+
+    #175-NACHTRAG: Die Pixel allein haben sich als Luegner erwiesen -- eine
+    Seite, die "scene voxels: 10577" in die Konsole schreibt, gibt dem
+    Agenten TEXTHINWEISE darauf, dass ihr Skript lief, unabhaengig davon,
+    ob der Compositor den Frame geschafft hat. Rein textlich, damit die
+    Suite den Parser ohne Browser pruefen kann."""
+    out = []
+    for line in log_text.splitlines():
+        stripped = line.strip()
+        if "CONSOLE" in stripped or ":ERROR:" in stripped:
+            out.append(_CHROME_LOG_HEAD.sub("", stripped))
+    return out[-limit:] if limit else out
+
+
+def _capture_warnings(previous: "bytes | None", current: bytes,
+                      console: "list[str]") -> "list[str]":
+    """#175-NACHTRAG: DAS EHRLICHKEITSURTEIL zum Fang, als Liste von
+    WARN-Zeilen in fester Reihenfolge -- byte-identischer Fang zuerst, dann
+    je Fehlerzeile der Konsole eine.
+
+    Rein rechnerisch und ohne Dateisystem, damit die Suite beide Faelle
+    gegen echte Bytes pruefen kann. `previous is None` heisst ERSTER Fang
+    dieser Seite im Lauf: dagegen gibt es nichts, womit man vergleichen
+    koennte, und byte-gleich mit NICHTS ist kein Verdacht."""
+    warns: list[str] = []
+    if previous is not None and current == previous:
+        warns.append("warn: this capture is byte-identical to the previous "
+                     "one \u2014 animated/canvas content is probably NOT "
+                     "reaching the screenshot; treat pixels as unreliable "
+                     "and rely on the console lines")
+    for line in console:
+        if any(mark in line for mark in _CONSOLE_ERROR_MARKS):
+            warns.append("warn: the page logged an error: %s" % line)
+    return warns
+
 
 def take_render_ride() -> "tuple | None":
     """Adresse und Screenshot des letzten `render_page`, genau einmal."""
@@ -7417,6 +7589,19 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     Bedingung dafuer, dass ueberhaupt etwas passiert: ohne `--user-data-dir`
     reicht Chrome den Auftrag an eine bereits laufende Instanz weiter und kehrt
     sofort zurueck -- mit Exit 0 und ohne Screenshot.
+
+    UND ES LUEGT NICHT UEBER SEINE EIGENEN BILDER (#175-Nachtrag,
+    2026-09-20). Gemessen an drei Varianten einer animierten WebGL-Seite:
+    byte-identische Fangs, waehrend die Seite selbst in die Konsole schrieb,
+    sie laufe. Ohne Gegenbeweis erklaert das Modell solche Leinwaende zu
+    "environment-blocked, page correct" -- das Werkzeug hat dem Modell einen
+    kaputten Spiegel gereicht und es WAHR gesagt. Darum steht jetzt vor
+    jedem Ergebnis, was gegen es spricht: ein byte-identischer Fang gegen
+    denselben Pfad bekommt eine WARN-Zeile ("Pixels unzuverlaessig, lies
+    die Konsole"), Fehlerzeilen der Seitenkonsole werden als WARN
+    durchgereicht, und die letzten Konsolenzeilen selbst reisen im Text mit
+    -- "scene voxels: 10577" ist ein Beweis, den kein Compositor
+    unterschlagen kann.
     """
     import shutil as _shutil
     import tempfile as _tempfile
@@ -7460,7 +7645,30 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     profile = _tempfile.mkdtemp(prefix="crow-render-")
     log = os.path.join(profile, "browser.log")
 
-    argv = [exe, "--headless=new", "--disable-gpu", "--hide-scrollbars",
+    argv = [exe, "--headless=new", "--disable-gpu",
+            # #175-NACHTRAG (2026-09-20): DIE ZWEI SWIFTSHADER-SCHALTER. Bis
+            # heute stand hier nur --disable-gpu, und die Folge war messbar:
+            # unter der virtuellen Uhr lief requestAnimationFrame NIE an, drei
+            # Varianten einer animierten WebGL-Seite ergaben byte-identische
+            # 92.027-Byte-Fangs nach 8 echten Sekunden Wartezeit, und das
+            # Modell auditete diese Leinwaende als "environment-blocked,
+            # page correct" -- das MESSGERAET war kaputt, nicht die Seite.
+            # Dazu kam Chromium 144: der automatische SwiftShader-Fallback
+            # fuer WebGL wurde gestrichen (chromestatus "Remove SwiftShader
+            # fallback"), ohne --enable-unsafe-swiftshader scheitert in
+            # Headless die WebGL-Kontexterzeugung. GEMESSEN hier (Chromium
+            # 152, dieselbe Testseite mit fahrendem Balken und fps-Zaehler,
+            # Budget 2000 gegen 8000):
+            #   alt  (--disable-gpu):        5.138 B @ rAF 3 == 5.138 B @ rAF 3
+            #   neu  (+ --use-angle=swiftshader
+            #         + --enable-unsafe-swiftshader):
+            #                                5.138 B @ rAF 3 != 5.117 B @ rAF 5
+            # Die Animation ZIEHT unter der virtuellen Uhr, und zwei Budgets
+            # liefern verschiedene Bilder. Alles bleibt CPU: SwiftShader ist
+            # Software-Rasterung, --disable-gpu bleibt und haelt die Karte
+            # draussen.
+            "--enable-unsafe-swiftshader", "--use-angle=swiftshader",
+            "--hide-scrollbars",
             "--no-first-run", "--no-default-browser-check",
             "--disable-extensions", "--mute-audio",
             "--user-data-dir=" + profile,
@@ -7481,7 +7689,11 @@ def tool_render_page(path: str, wait_ms: int | None = None,
             # ("ends the call by itself, with a reason"), und nicht der, den es
             # bebildert.
             "--run-all-compositor-stages-before-draw",
-            "--enable-logging=stderr", "--log-level=0",
+            # --v UND NICHT DER ALTE SCHALTER: die Verbositaet des
+            # Chromium-Loggers regelt --v, und nur mit ihr landen die
+            # CONSOLE-Zeilen der Seite im browser.log -- der TEXT-Beweis
+            # dafuer, dass ihr Skript lief (#175-Nachtrag, siehe oben).
+            "--enable-logging=stderr", "--v=0",
             "--screenshot=" + shot, url]
 
     detach = crow_platform.spawn_kwargs(detached=True)
@@ -7510,25 +7722,40 @@ def tool_render_page(path: str, wait_ms: int | None = None,
                 crow_platform.terminate_tree(proc)
                 proc.wait(timeout=10)
                 reason = "timed out after %d ms and was stopped" % wait
-        console = []
+        log_text = ""
         try:
             with open(log, encoding="utf-8", errors="replace") as fh:
-                for line in fh:
-                    if "CONSOLE" in line or "ERROR:" in line:
-                        console.append(line.rstrip())
+                log_text = fh.read()
         except OSError:
             pass
+        console = _console_lines(log_text)
         if not os.path.isfile(shot):
             return ("error: the browser wrote no screenshot (%s). Console:\n%s"
-                    % (reason, "\n".join(console[:20]) or "(empty)"))
+                    % (reason, "\n".join(_console_lines(log_text, 20))
+                       or "(empty)"))
+        # #175-NACHTRAG: DAS URTEIL VOR DEM FANG. Die Bytes DIESER Datei
+        # gegen den letzten Fang DIESER Seite -- byte-gleich ist ein
+        # Verdachtsmoment gegen die eigenen Pixel, kein Erfolg. Die Warnung
+        # steht im Ergebnis VOR der Groesse, damit sie zuerst gelesen wird;
+        # der Fang selbst haengt am Ride wie immer.
+        try:
+            with open(shot, "rb") as fh:
+                pixels = fh.read()
+        except OSError:
+            pixels = b""
+        previous = _LAST_CAPTURES.get(url)
+        _LAST_CAPTURES[url] = pixels
+        # DER RIDE, UNVERAENDERT (#175): das Paar (Adresse, Fang) fuer die
+        # Schleife, genau einmal.
         _RENDER_RIDE.clear()
         _RENDER_RIDE.append((url, shot))
-        said = ["%s -- %d bytes, %dx%d, %s"
-                % (shot, os.path.getsize(shot), w, h, reason),
-                "read_image it to look at the page."]
+        said = _capture_warnings(previous, pixels, console)
+        said.append("%s -- %d bytes, %dx%d, %s"
+                    % (shot, os.path.getsize(shot), w, h, reason))
+        said.append("read_image it to look at the page.")
         if console:
-            said.append("console (%d lines):" % len(console))
-            said.extend(console[:40])
+            said.append("console (last %d of the page's log):" % len(console))
+            said.extend("console: %s" % line for line in console)
         return _clip("\n".join(said))
     finally:
         _shutil.rmtree(profile, ignore_errors=True)
@@ -14506,10 +14733,21 @@ def run_turn(
                 break
             # #154: VOR roll_over, solange der volle Praefix noch warm im
             # Server-Cache liegt -- danach ist dieselbe Frage ein 180k-Prefill.
+            # #205: DIE REASONING-FELDER REISEN MIT, genau die, die der Zug
+            # oben selbst bekommen hat -- ein Koerper ohne sie (oder mit dem
+            # alten `enable_thinking: False`) rendert einen anderen Prompt
+            # und schiesst den warmen Cache ab. Und `context_tokens`, dieselbe
+            # Schaetzung, die `should_roll` hier bewertet, skaliert das
+            # Timeout, damit ein kalter Praefix die Leg nicht mehr an einem
+            # festen 120s-Wert sterben laesst.
             digest = rollover_digest(
                 conversation, base_url=base_url, model=model, api_key=api_key,
                 temperature=temperature, top_p=top_p, min_p=min_p, top_k=top_k,
                 presence_penalty=presence_penalty,
+                reasoning_effort=reasoning_effort,
+                reasoning_budget=reasoning_budget,
+                reasoning_budget_message=reasoning_budget_message,
+                prompt_tokens=context_tokens,
                 extra_headers=extra_headers,
                 transport=transport, remote=remote, routing=routing)
             # #173: DIE MARKEN DES SCHREIBERS, wenn er welche fuehrt. Sie sind

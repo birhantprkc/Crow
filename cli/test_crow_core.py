@@ -11456,7 +11456,9 @@ class TheRolloverCarriesADigestTests(unittest.TestCase):
     def test_the_digest_asks_once_on_the_warm_prefix(self):
         """POSITIV: payload plus EINE Frage, tools im Body (ohne sie rendert
         das Template anders und der warme Praefix bricht), max_tokens ist der
-        Cap -- und die Konversation bleibt unangetastet."""
+        Cap ueber dem #205-Boden -- und die Konversation bleibt unangetastet.
+        #205: KEIN `enable_thinking`-Schalter mehr -- der brach den Praefix,
+        den die Lege warm vorfand."""
         seen = self._serve("STATE: Runde 2 offen")
         conversation = self._conversation()
         before = conversation.payload()
@@ -11470,11 +11472,13 @@ class TheRolloverCarriesADigestTests(unittest.TestCase):
         self.assertEqual(seen["body"]["tools"], crow_core.TOOLS,
                          "ohne tools bricht der warme Praefix")
         self.assertEqual(seen["body"]["max_tokens"],
-                         crow_core.ROLLOVER_DIGEST_TOKENS)
+                         max(crow_core.ROLLOVER_DIGEST_TOKENS,
+                             crow_core.ROLLOVER_DIGEST_MIN_TOKENS))
         self.assertFalse(seen["body"]["stream"])
-        self.assertEqual(seen["body"]["chat_template_kwargs"],
-                         {"enable_thinking": False},
-                         "#157: die Lege denkt nicht, gemessen")
+        self.assertNotIn("chat_template_kwargs", seen["body"],
+                         "#205: der Schalter brach den warmen Praefix")
+        self.assertNotIn("reasoning_effort", seen["body"],
+                         "ohne Stufe kein Feld, wie beim Zug (#116)")
         self.assertEqual(conversation.payload(), before)
 
     def test_the_messages_dialect_carries_no_template_kwargs(self):
@@ -11530,6 +11534,159 @@ class TheRolloverCarriesADigestTests(unittest.TestCase):
                             carry="weiter", path=path, digest="")
         note = crow_core.message_text(conversation.payload()[-1]["content"])
         self.assertNotIn(crow_core.DIGEST_HEAD, note)
+
+
+class TheDigestLegSpeaksTheTurnsDialectTests(unittest.TestCase):
+    """#205. Die Digest-Leg zerstoerte ihren eigenen warmen Cache: sie
+    schickte denselben Prompt MIT `enable_thinking: false`, waehrend die
+    Zuege mit denken -- der gerenderte Kopf wich ab, der Server-Cache fiel
+    kalt, und die Lege zahlte 181.745 bzw. 185.831 Tokens Neu-Prefill
+    (217,1 s / 222,7 s, rund 835 tok/s), nach denen ihr 120s-Timeout laengst
+    tot war. Zweimal an einem Tag. Die Faelle hier bewachen den heilen
+    Praefix: dieselben Reasoning-Felder wie der Zug, ein Timeout, das mit
+    dem Praefix waechst, und ein Denken, das aus der Antwort gewaschen wird,
+    statt es vorher zu verbieten."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-digest205-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(crow_core.rollover_digest_set,
+                        crow_core.ROLLOVER_DIGEST_TOKENS)
+
+    @staticmethod
+    def _conversation():
+        conversation = crow_core.Conversation("SYS", memory="")
+        conversation.append("user", "frage")
+        conversation.append("assistant", "antwort")
+        return conversation
+
+    def _serve(self, message: dict) -> dict:
+        """Ein Endpunkt, der EINE Nachricht antwortet, und der Merker fuer
+        Koerper, URL und Timeout des Requests."""
+        seen: dict = {}
+
+        class _Resp:
+            def read(self_inner):
+                return json.dumps(
+                    {"choices": [{"message": message}]}).encode()
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+        def fake(request, timeout=None):
+            seen["body"] = json.loads(request.data.decode("utf-8"))
+            seen["url"] = request.full_url
+            seen["timeout"] = timeout
+            return _Resp()
+
+        real = crow_core.urllib.request.urlopen
+        crow_core.urllib.request.urlopen = fake
+        self.addCleanup(setattr, crow_core.urllib.request, "urlopen", real)
+        return seen
+
+    def _ask(self, **kwargs) -> dict:
+        """Ein Digest-Call mit Defaults, Merkzahlen drin."""
+        seen = self._serve({"content": "STATE: ok"})
+        crow_core.rollover_digest(
+            self._conversation(), base_url="http://127.0.0.1:1/v1",
+            temperature=1.0, top_p=0.95, min_p=0.01, model="crow",
+            **kwargs)
+        return seen
+
+    def test_the_body_carries_the_reasoning_fields_of_the_turn(self):
+        """#205 POSITIV: Stufe und Deckel reisen durch die #176-Tuer genau
+        wie beim Zug -- ein Koerper ohne sie rendert einen anderen Prompt
+        und schiesst den warmen Cache ab."""
+        seen = self._ask(reasoning_effort="high", reasoning_budget=1000)
+        self.assertEqual(seen["body"]["reasoning_effort"], "high")
+        self.assertEqual(seen["body"]["reasoning_budget_tokens"], 1000)
+        self.assertEqual(seen["body"]["reasoning_budget_message"],
+                         crow_core.REASONING_BUDGET_MESSAGE)
+        self.assertNotIn("chat_template_kwargs", seen["body"],
+                         "die kwargs-Tuer ist #157s Defekt, nicht die Loesung")
+
+    def test_a_cap_of_zero_sends_no_budget_field(self):
+        """NEGATIV: ein Deckel von 0 ist AUS, nicht 0 -- derselbe Vertrag wie
+        beim Zug, sonst liesse der Server 0 als Denkverbot lesen."""
+        seen = self._ask(reasoning_effort="low", reasoning_budget=0)
+        self.assertNotIn("reasoning_budget_tokens", seen["body"])
+        self.assertNotIn("reasoning_budget_message", seen["body"])
+
+    def test_the_timeout_scales_with_the_prefix(self):
+        """#205: Die Skalierung ist eine PURE Funktion und gehorcht der
+        Messung: 835 tok/s Prefill gemessen, gerechnet mit dem
+        sichereren 700er-Teiler, Boden bei den alten 120 s."""
+        self.assertEqual(crow_core._digest_timeout(0), 120.0)
+        self.assertAlmostEqual(crow_core._digest_timeout(181745),
+                               181745 / 700.0 + 60.0, places=6)
+        self.assertAlmostEqual(crow_core._digest_timeout(200000), 345.714285,
+                               places=5)
+        self.assertGreater(crow_core._digest_timeout(400000),
+                           crow_core._digest_timeout(100000))
+        # Der FLOOR gilt nur ohne Ausdruck: ein Skalierungswert unter 120
+        # wird gehoben, ein ausdruecklicher gewinnt immer.
+        self.assertEqual(crow_core._digest_timeout(1000), 120.0)
+        self.assertEqual(crow_core._digest_timeout(10 ** 9, 30.0), 30.0)
+
+    def test_the_wired_timeout_follows_the_context_estimate(self):
+        """#205 VERDRAHTUNG: Der Aufrufer gibt seine `should_roll`-Schaetzung
+        durch, `urlopen` bekommt den skalierten Wert; ein ausdrueckliches
+        Timeout gewinnt auch hier."""
+        seen = self._ask(prompt_tokens=200000)
+        self.assertAlmostEqual(seen["timeout"], 345.714285, places=5)
+        seen = self._ask(prompt_tokens=200000, timeout=15.0)
+        self.assertEqual(seen["timeout"], 15.0)
+
+    def test_the_thinking_is_washed_out_of_the_answer(self):
+        """#205: Templates, die die Gedanken in den Content schreiben,
+        hinterlassen nur die Antwort -- im abgeschlossenen wie im vom
+        Deckel gekoepften Fall (kein schliessendes Tag)."""
+        cases = [
+            ({"content": "<think>erst ueberlegen</think>STATE: ok"},
+             "STATE: ok"),
+            ({"content": "<THINK>laut</THINK>STATE: ok"}, "STATE: ok"),
+            ({"content": "<think>kopf gefallen</think>\n\nSTATE: ok"},
+             "STATE: ok"),
+            ({"content": "<think>nicht zu Ende gedacht"}, ""),
+            ({"content": "STATE: plain"}, "STATE: plain"),
+        ]
+        for message, wanted in cases:
+            seen = self._serve(message)
+            out = crow_core.rollover_digest(
+                self._conversation(), base_url="http://127.0.0.1:1/v1",
+                temperature=1.0, top_p=0.95, min_p=0.01, model="crow")
+            self.assertEqual(out, wanted, message)
+            self.assertTrue(seen["body"]["messages"][-1]
+                            ["content"].endswith("after the cut.]"))
+
+    def test_reasoning_content_is_earned_but_never_read(self):
+        """#205: llama-server legt die Gedanken in `reasoning_content` und
+        die Antwort in `content` -- geerntet wird nur das zweite, genau wie
+        im Strom (#E10 und daum), ohne eigene Zusammenfuehrung."""
+        seen = self._serve({"content": "STATE: ok",
+                            "reasoning_content": "Ich ueberlege, was hier gilt"})
+        out = crow_core.rollover_digest(
+            self._conversation(), base_url="http://127.0.0.1:1/v1",
+            temperature=1.0, top_p=0.95, min_p=0.01, model="crow")
+        self.assertEqual(out, "STATE: ok")
+        # Der Koerper selbst bleibt frei von gefornten Gedanken: das Feld
+        # wird nur NICHT GELESEN, es gibt keinen zweiten Ort, der es
+        # zusammenfuehrt -- derselbe Vertrag wie im Strom.
+        self.assertEqual(seen["body"]["messages"][-1]["content"],
+                         crow_core.DIGEST_ASK)
+
+    def test_the_answer_cap_leaves_room_for_the_thinking(self):
+        """#205: Der wirksame Deckel ist max(Cap, 2000) -- gemessen
+        2026-08-29 frass das Denken 400/400, und die Antwort war leer. Der
+        Nutzer-Cap gewinnt, sobald ER der groessere ist."""
+        seen = self._ask()
+        self.assertEqual(seen["body"]["max_tokens"], 2000)
+        crow_core.rollover_digest_set(5000)
+        seen = self._ask()
+        self.assertEqual(seen["body"]["max_tokens"], 5000)
 
 
 class CrowOwnsTheBrowserItStartsTests(unittest.TestCase):
@@ -11643,6 +11800,122 @@ class CrowOwnsTheBrowserItStartsTests(unittest.TestCase):
         self.assertTrue(said.startswith("error:"), said)
         self.assertIn("Chrome", said)
         self.assertIn("Edge", said)
+
+
+class TheRenderNeverHandsOverABrokenMirrorTests(unittest.TestCase):
+    """#175-Nachtrag (2026-09-20): der Fang allein luegt. Gemessen an drei
+    Varianten einer animierten WebGL-Seite: byte-identische 92.027 Bytes,
+    der fps-Zaehler der Seite blieb auf 0 -- und das Modell erklaerte die
+    Leinwaende zu "environment-blocked, page correct". Das Werkzeug hatte
+    dem Modell einen KAPUTTEN SPIEGEL gereicht. Die reinen Helfer hier
+    bewachen die Gegenmittel: Konsole als Text, das byte-identische Urteil
+    und die WARN-Form, mit der beides vor die Pixel des Ergebnisses tritt."""
+
+    def setUp(self) -> None:
+        self.src = inspect.getsource(crow_core.tool_render_page)
+
+    # -- die Schalter ------------------------------------------------------
+
+    def test_the_swiftshader_pair_travels_with_disable_gpu(self):
+        """Chromium 144+ hat den automatischen SwiftShader-Fallback fuer
+        WebGL gestrichen (chromestatus "Remove SwiftShader fallback") --
+        ohne --enable-unsafe-swiftshader scheitert headless die
+        Kontexterzeugung, ohne --use-angle=swiftshader blieb rAF hier im
+        Versuchsstau (3 Frames je Budget, byte-gleiche Fangs).
+        --disable-gpu bleibt: SwiftShader ist Software, die Karte wird
+        nicht angefasst."""
+        self.assertIn("--enable-unsafe-swiftshader", self.src)
+        self.assertIn("--use-angle=swiftshader", self.src)
+        self.assertIn("--disable-gpu", self.src)
+
+    def test_console_logging_went_to_the_canonical_flag(self):
+        """--v=0, nicht --log-level=0: die Verbositaet des Chromium-Loggers
+        regelt --v, und nur so landen die CONSOLE-Zeilen im browser.log."""
+        self.assertIn("--enable-logging=stderr", self.src)
+        self.assertIn('"--v=0"', self.src.replace("'", '"'))
+        self.assertNotIn("--log-level", self.src)
+
+    # -- der Konsolen-Parser ----------------------------------------------
+
+    LOG = (
+        "[59442:59442:0920/125728.532036:WARNING:dbus/portal.cc:126] noise\n"
+        '[59442:59442:0920/125728.558631:INFO:CONSOLE(27)] "scene voxels: '
+        '10577 meshes: 15", source: file:///tmp/v/viewer.html (27)\n'
+        '[59442:59442:0920/125729.001234:WARNING:CONSOLE(3)] "deprecation", '
+        'source: file:///tmp/v/viewer.html (3)\n'
+        '[59442:59442:0920/125729.500000:ERROR:CONSOLE(9)] "Uncaught TypeError: '
+        'x is not a function", source: file:///tmp/v/viewer.html (9)\n'
+        '[59442:59442:0920/125730.100000:ERROR:audio_output] device lost\n'
+        "[59442:59442:0920/125731.000000:INFO:CONSOLE(30)] \"late\", "
+        "source: file:///tmp/v/viewer.html (30)\n")
+
+    def test_console_lines_are_parsed_and_head_stripped(self):
+        out = crow_core._console_lines(self.LOG)
+        self.assertTrue(any('"scene voxels: 10577 meshes: 15"' in line
+                            for line in out), out)
+        self.assertFalse(any(line.startswith("[59442") for line in out),
+                         "der Chromium-Kopf bleibt draussen")
+        self.assertNotIn("dbus/portal", "\n".join(out))
+
+    def test_console_lines_come_back_last_first(self):
+        out = crow_core._console_lines(self.LOG, limit=2)
+        self.assertEqual(len(out), 2)
+        self.assertIn('"late"', out[-1], "die LETZTE Zeile bleibt zuletzt")
+
+    def test_error_level_lines_count_as_console_even_without_marker(self):
+        out = crow_core._console_lines(self.LOG, limit=10)
+        self.assertTrue(any("device lost" in line for line in out),
+                        "ein :ERROR: ohne CONSOLE ist auch Seitenbefund")
+
+    def test_empty_and_broken_logs_say_nothing(self):
+        self.assertEqual(crow_core._console_lines(""), [])
+        self.assertEqual(crow_core._console_lines("no console here\n"), [])
+
+    # -- das Urteil --------------------------------------------------------
+
+    def test_identical_bytes_warn_with_the_exact_sentence(self):
+        console = ['INFO:CONSOLE(27)] "scene voxels: 10577 meshes: 15"']
+        warns = crow_core._capture_warnings(b"PNG", b"PNG", console)
+        self.assertEqual(len(warns), 1, warns)
+        self.assertTrue(warns[0].startswith(
+            "warn: this capture is byte-identical to the previous one"), warns)
+        self.assertIn("treat pixels as unreliable", warns[0])
+        self.assertIn("rely on the console lines", warns[0])
+
+    def test_different_bytes_and_a_first_catch_warn_nothing(self):
+        self.assertEqual(crow_core._capture_warnings(
+            b"PNG-old", b"PNG-new", []), [])
+        # ERSTER Fang derselben Seite: es gibt nichts, womit man vergleicht.
+        self.assertEqual(crow_core._capture_warnings(
+            None, b"PNG", []), [])
+
+    def test_console_errors_surface_as_warns(self):
+        console = ['INFO:CONSOLE(27)] "scene voxels: 10577 meshes: 15"',
+                   'ERROR:CONSOLE(9)] "Uncaught TypeError: x"',
+                   'ERROR:audio_output] device lost']
+        warns = crow_core._capture_warnings(b"a", b"b", console)
+        self.assertEqual(len(warns), 2, warns)
+        self.assertTrue(all(w.startswith("warn: the page logged an error: ")
+                            for w in warns), warns)
+        self.assertIn("Uncaught TypeError", warns[0])
+        self.assertIn("device lost", warns[1])
+
+    def test_identical_warn_comes_before_error_warns(self):
+        console = ['ERROR:CONSOLE(9)] "Uncaught x"']
+        warns = crow_core._capture_warnings(b"same", b"same", console)
+        self.assertEqual(len(warns), 2, warns)
+        self.assertIn("byte-identical", warns[0])
+        self.assertIn("Uncaught", warns[1])
+
+    # -- die Verdrahtung im Werkzeug ---------------------------------------
+
+    def test_the_tool_compares_stores_and_prefixes(self):
+        """Das Werkzeug selbst liest die Bytes, haelt den letzten Fang je
+        geloestem Pfad und stellt die WARNs VOR die Groesse."""
+        self.assertIn("_LAST_CAPTURES.get(url)", self.src)
+        self.assertIn("_LAST_CAPTURES[url] = pixels", self.src)
+        self.assertIn("_capture_warnings(previous, pixels, console)", self.src)
+        self.assertIn('"console: %s" % line', self.src)
 
 
 class TheModelCanLookAtAnImageTests(unittest.TestCase):
