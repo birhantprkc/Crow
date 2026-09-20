@@ -802,10 +802,20 @@ TOOLS = [
          "height": {"type": "integer", "description": "Viewport height, default 800."}},
         ["path"]),
     _fn("write_file",
-        "Write a file, creating directories as needed. An existing file must have been "
-        "read first in this session; otherwise the call is refused.",
+        "Write a file whole, creating directories as needed. An existing file must "
+        "have been read first in this session; otherwise the call is refused. For a "
+        "file too large for one call, write the skeleton here and grow it with "
+        "append_file -- never shell-heredoc big content.",
         {"path": dict(_STR, description="Path to write."),
          "content": dict(_STR, description="Full new contents.")}, ["path", "content"]),
+    _fn("append_file",
+        "Append content to a file, creating it if missing, and return the new total "
+        "size. THE way to build a large file in parts: write_file the head, then one "
+        "append per section -- each append is a clean round instead of a shell "
+        "heredoc that breaks mid-escape. No read-first guard: appending destroys "
+        "nothing.",
+        {"path": dict(_STR, description="Path to append to."),
+         "content": dict(_STR, description="Text to append at the end.")}, ["path", "content"]),
     _fn("edit_file",
         "Replace one exact occurrence of 'old' with 'new'. The file must have been read "
         "first. Fails if 'old' is absent or appears more than once.",
@@ -4034,7 +4044,14 @@ TRANSPORT_MESSAGES = "anthropic_messages"
 # That case is NAMED rather than hidden -- see `CUT_OFF_NOTE` -- so a truncated
 # answer no longer looks like a finished one, which is the half the 1024
 # incident was missing.
-MAX_TOKENS = 8192
+#
+# 8192 -> 16384 (2026-09-20, the voxel single-file build): EVERY code-writing
+# round died at 8192 with `finish length` -- a 2.4 MB single-file page is
+# ~600k tokens, i.e. ~75 forced aborts minimum, each abort a fresh round that
+# re-sends the whole conversation. The engine served exactly what was asked;
+# the cap was crow's. CROW_MAX_TOKENS overrides for a coding-heavy run
+# without an edit here.
+MAX_TOKENS = int(os.environ.get("CROW_MAX_TOKENS") or 16384)
 
 # The name the surfaces and the tests already say, kept as one: the cap no
 # longer depends on where the turn is going.
@@ -7885,6 +7902,30 @@ def tool_write_file(path: str, content: str = "", **_) -> str:
     return f"wrote {len(content)} bytes to {path}"
 
 
+def tool_append_file(path: str, content: str = "", **_) -> str:
+    """#voxel-2026-09-20: the missing half of write_file. The 8192-cap run had
+    to build a 2.4 MB page through shell heredocs -- every one an escaping trap
+    and an abort point -- because write_file only ever replaces a file WHOLE and
+    demands read-first. Appending destroys nothing, so this one carries no
+    read guard; the boundary still applies in full."""
+    path = _rooted(path)
+    outside = _outside_root(path)
+    if outside:
+        return outside
+    existed = os.path.exists(path)
+    if content and not content.endswith("\n"):
+        content += "\n"
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "a", encoding="utf-8", newline="") as fh:
+            fh.write(content)
+    except OSError as exc:
+        return f"error: could not append to {path}: {exc}"
+    total = os.path.getsize(path)
+    verb = "appended to" if existed else "created"
+    return f"{verb} {path} (+{len(content)} bytes, file now {total} bytes)"
+
+
 def tool_edit_file(path: str, old: str = "", new: str = "", **_) -> str:
     """Exact-match replacement, and it refuses an ambiguous one.
 
@@ -9266,6 +9307,7 @@ TOOL_IMPL = {
     "read_image": tool_read_image,
     "render_page": tool_render_page,
     "write_file": tool_write_file,
+    "append_file": tool_append_file,
     "edit_file": tool_edit_file,
     "list_dir": tool_list_dir,
     "find_files": tool_find_files,
@@ -9308,6 +9350,7 @@ TOOL_CLASS = {
     "find_files": "reading",
     "search_text": "reading",
     "write_file": "writing",
+    "append_file": "writing",
     "edit_file": "writing",
     "run_command": "executing",
     # #96. A FOURTH CLASS, because neither of the three fits. Fetching destroys
@@ -12941,7 +12984,7 @@ def approval_scope(name: str, arguments: str) -> tuple[str, str] | None:
     if not isinstance(args, dict):
         return None
 
-    if name in ("write_file", "edit_file"):
+    if name in ("write_file", "append_file", "edit_file"):
         path = args.get("path")
         if not isinstance(path, str) or not path.strip():
             return None

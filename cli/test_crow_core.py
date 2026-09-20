@@ -1600,7 +1600,8 @@ class ReleaseLevelTests(TurnLoopCase):
         # Browser gebaut hat. Es hier nicht zu fuehren hiesse, einen Prozess
         # ohne Nachfrage zu starten, wo vorher gefragt wurde.
         self.assertEqual(asks["manual"],
-                         ["edit_file", "render_page", "run_command", "write_file"])
+                         ["append_file", "edit_file", "render_page", "run_command",
+                          "write_file"])
         self.assertEqual(asks["allowedit"], ["render_page", "run_command"])
         self.assertEqual(asks["auto"], [])
 
@@ -12822,6 +12823,53 @@ class RelativePathsResolveInTheWorkingAreaTests(unittest.TestCase):
         aus dem Starterordner -- refused bleibt refused."""
         out = crow_core.tool_write_file(os.path.join("..", "escaped.txt"), "x")
         self.assertIn("refusing to write outside", out)
+
+
+class AppendFileBuildsLargeFilesInPartsTests(unittest.TestCase):
+    """#voxel-2026-09-20. Der 8192er-Lauf musste eine 2,4-MB-Seite durch Shell-
+    Heredocs bauen -- jede Sektion ein Abbruchpunkt mit Escaping-Falle. Das
+    fehlende Halbwerkzeug: append_file, ohne Read-First-Guard (Anhaengen
+    zerstoert nichts), mit derselben Grenze wie write_file."""
+
+    def setUp(self):
+        self._old = os.getcwd()
+        self.root = tempfile.mkdtemp(prefix="crow-append-")
+        self.launcher = tempfile.mkdtemp(prefix="crow-append-launcher-")
+        crow_core.set_root(self.root)
+        os.chdir(self.root)
+
+    def tearDown(self):
+        os.chdir(self._old)
+        crow_core.set_root(None)
+        import shutil
+        shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self.launcher, ignore_errors=True)
+
+    def test_an_append_to_a_missing_file_creates_it(self):
+        out = crow_core.tool_append_file("gross.html", "<html>\n")
+        self.assertIn("created", out)
+        with open(os.path.join(self.root, "gross.html"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "<html>\n")
+
+    def test_an_append_adds_on_without_any_read_first(self):
+        """Der ganze Punkt: write_file verlangt read-first, append_file nie --
+        sonst waere das segmentierte Bauen eine Ablehnung je Runde."""
+        crow_core.tool_append_file("gross.html", "Teil eins\n")
+        out = crow_core.tool_append_file("gross.html", "Teil zwei\n")
+        self.assertIn("appended to", out)
+        self.assertIn("+10 bytes", out)
+        with open(os.path.join(self.root, "gross.html"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "Teil eins\nTeil zwei\n")
+
+    def test_an_append_still_refuses_an_escape(self):
+        out = crow_core.tool_append_file(os.path.join("..", "escaped.txt"), "x")
+        self.assertIn("refusing to write outside", out)
+
+    def test_the_tool_is_dispatched_and_classified_writing(self):
+        self.assertIs(crow_core.TOOL_IMPL["append_file"],
+                      crow_core.tool_append_file)
+        self.assertEqual(crow_core.TOOL_CLASS["append_file"], "writing")
+        self.assertTrue(crow_core.needs_approval("append_file", "manual"))
 
 
 class StorePathsGetNoStandingApprovalTests(unittest.TestCase):
