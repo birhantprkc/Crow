@@ -5113,27 +5113,62 @@ def stream_reply(
             first_token_at = now
 
     try:
-        # THE FIFTH ARGUMENT IS PASSED ONLY WHEN THERE IS ONE, and that is the
-        # transport contract rather than tidiness. `_post_stream` is looked up as
-        # a module global so a test double can replace it -- see this function's
-        # docstring -- and every double written before providers existed takes
-        # four parameters. Widening the call unconditionally breaks all of them,
-        # including the ones outside this repository; widening it only when a
-        # provider actually asked for a header leaves the old shape intact.
-        if transport == TRANSPORT_MESSAGES:
-            # THE BODY IS TRANSLATED, THE LOOP IS NOT. `_post_messages` yields
-            # the same chunk shape this loop has always read, so the reasoning
-            # state machine, the tool-call accumulator and every case pinning
-            # them are untouched by a second endpoint existing.
-            stream = _post_messages(f"{base_url.rstrip('/')}/messages",
-                                    anthropic_body(body), api_key, timeout,
-                                    extra_headers)
-        else:
+        # #203. THE STREAM OPENING IS WRAPPED FOR ONE POISONED-HISTORY CASE:
+        # a conversation saved before this seam existed can carry an
+        # assistant turn whose arguments string never closed, and the
+        # llama.cpp arm answers every request for it with the same HTTP 500
+        # (`func_args_not_string` cannot parse what it is handed). The
+        # wrapper repairs the history -- `repair_history_calls` -- and asks
+        # again, exactly once; the repaired render succeeds and the turn
+        # proceeds instead of inheriting the dead end. Any other error, or a
+        # repair that changed nothing, re-raises untouched.
+        #
+        # ONLY BEFORE THE FIRST PAYLOAD, deliberately: a stream that already
+        # delivered chunks has been consumed on screen, and replaying it
+        # would duplicate every event. The 500 of this shape arrives at the
+        # opening (urlopen), never mid-stream.
+        def _repaired_retry(exc: CrowError) -> bool:
+            text = str(exc)
+            return ("HTTP 500" in text
+                    and "Failed to parse tool call arguments as JSON" in text)
+
+        def _open():
+            # THE FIFTH ARGUMENT IS PASSED ONLY WHEN THERE IS ONE, and that is
+            # the transport contract rather than tidiness. `_post_stream` is
+            # looked up as a module global so a test double can replace it --
+            # see this function's docstring -- and every double written before
+            # providers existed takes four parameters. Widening the call
+            # unconditionally breaks all of them, including the ones outside
+            # this repository; widening it only when a provider actually asked
+            # for a header leaves the old shape intact.
+            if transport == TRANSPORT_MESSAGES:
+                # THE BODY IS TRANSLATED, THE LOOP IS NOT. `_post_messages`
+                # yields the same chunk shape this loop has always read, so
+                # the reasoning state machine, the tool-call accumulator and
+                # every case pinning them are untouched by a second endpoint
+                # existing.
+                return _post_messages(f"{base_url.rstrip('/')}/messages",
+                                      anthropic_body(body), api_key, timeout,
+                                      extra_headers)
             where = f"{base_url}/chat/completions"
-            stream = (_post_stream(where, body, api_key, timeout, extra_headers)
-                      if extra_headers else
-                      _post_stream(where, body, api_key, timeout))
-        for payload in stream:
+            return (_post_stream(where, body, api_key, timeout, extra_headers)
+                    if extra_headers else
+                    _post_stream(where, body, api_key, timeout))
+
+        def _open_repaired():
+            sent = False
+            try:
+                for payload in _open():
+                    sent = True
+                    yield payload
+            except CrowError as exc:
+                if sent or not _repaired_retry(exc) \
+                        or not repair_history_calls(conversation):
+                    raise
+                body["messages"] = conversation.payload()
+                yield from _open()
+
+        for payload in _open_repaired():
             try:
                 chunk = json.loads(payload)
             except json.JSONDecodeError:
@@ -9185,6 +9220,148 @@ DEFAULT_MODE = "auto"
 # broken prefix for every later turn of the session. The model can read this
 # line and try something else; it cannot read a turn that ended.
 DECLINED = "error: declined by the user"
+
+# #203. WHAT A CALL CUT IN HALF BY THE OUTPUT CAP COMES BACK AS -- a tool
+# result for the same three reasons DECLINED is one: the prefix stays valid,
+# and the model gets an instruction it can act on instead of a dead end.
+#
+# THE DEAD END WAS MEASURED (llama.cpp arm, 2026-09-19): a `write_file`
+# carrying a whole HTML page hit `max_tokens` at 8,192 generated tokens
+# BEFORE the closing quote of its `content` string existed. llama-server
+# masked the cut as `finish_reason: "tool_calls"`, stored what it had, and
+# the NEXT request died with HTTP 500 -- `func_args_not_string`
+# (common/chat.cpp:3154) cannot parse a string that never closed, and
+# because this client re-sends its whole history every turn, every later
+# turn of the session died the same way: 42 failures in one goal run, none
+# of them counted by the #145 retry cap (a re-cut has different arguments).
+#
+# TWO ENGINES, ONE SEAM. crow-nest's engine already closes an abandoned
+# call's arguments itself and marks them `_truncated`
+# (engine/src/toolcall.rs, TASK J), and its serve normalises a history that
+# carries such a string -- but until here that marker reached the model as
+# `wrong arguments for write_file`, a sentence with no instruction in it.
+# `classify_arguments` reads both shapes, and `run_turn` answers either with
+# the same structured result. What the model is told to DO has to work with
+# the tools that exist: `write_file` replaces whole contents and has no
+# append mode, so the instruction names the two roads -- parts via
+# `edit_file`, or a shell append.
+TRUNCATED_CALL = (
+    "error: this tool call was cut off at the output token limit before its "
+    "arguments were complete, so it did not run. Do not send the same call "
+    "again -- the limit will cut it in the same place. Build large content "
+    "in parts instead: one write_file with the first part, then extend the "
+    "file with edit_file or a shell append (cat >> <path> <<'EOF'), keeping "
+    "each call small enough to finish inside the limit.")
+UNPARSEABLE_CALL = (
+    "error: this tool call's arguments were not valid JSON and were dropped "
+    "from the history, so it did not run. Re-send the call as one valid "
+    "JSON object, and split large content into several smaller calls.")
+
+
+def classify_arguments(arguments: "str | None") -> "str | None":
+    """#203: is this call's argument string one the history cannot carry?
+
+    `"truncated"` for the two cut shapes -- an unterminated string
+    (llama.cpp: the generation ended inside the argument text) and
+    crow-nest's `{"_truncated": true}` marker. `"unparseable"` for any other
+    broken JSON. None for arguments that parse, whatever else may be wrong
+    with them -- those are `run_tool`'s business, not this seam's.
+    """
+    try:
+        parsed = json.loads(arguments or "{}")
+    except json.JSONDecodeError as exc:
+        # "Unterminated string starting at ..." is the cut shape; anything
+        # else (single quotes, a stray bracket) is a malformed call the model
+        # must re-send, not a cut it must split.
+        return "truncated" if "Unterminated string" in exc.msg else "unparseable"
+    if isinstance(parsed, dict) and parsed.get("_truncated") is True:
+        return "truncated"
+    return None
+
+
+def salvage_cut_calls(calls: list) -> dict:
+    """#203: make the calls of one streamed round safe to store, and name the
+    ones that were cut.
+
+    An arguments string that does not parse is replaced with `{}` IN PLACE --
+    the stored assistant turn has to survive the next request's template
+    render, and `func_args_not_string` on the llama.cpp arm answers anything
+    that is not valid JSON with a 500 that kills every later turn of the
+    session. The crow-nest shape already parses and is left verbatim; its
+    serve normalises a history on its own.
+
+    Returns `{call id: classification}` for the calls that must not RUN --
+    the caller turns each into the structured result instead of executing a
+    call whose arguments are gone or half-invented.
+    """
+    cut: dict = {}
+    for call in calls or []:
+        args = call.get("arguments") or "{}"
+        why = classify_arguments(args)
+        if why is None:
+            continue
+        cut[call.get("id") or ""] = why
+        # SANITISED EXACTLY WHEN THE STRING DOES NOT PARSE: that is the
+        # llama.cpp cut shape, whatever the classifier called it, and the
+        # crow-nest marker shape parses and stays verbatim.
+        try:
+            json.loads(args)
+        except json.JSONDecodeError:
+            call["arguments"] = "{}"
+    return cut
+
+
+def repair_history_calls(conversation: "Conversation") -> bool:
+    """#203: strip cut calls out of a stored history. True when it changed
+    anything.
+
+    FOR THE SESSIONS THAT WERE POISONED BEFORE THIS SEAM EXISTED: a saved
+    conversation whose last assistant turn carries an unterminated arguments
+    string fails every request with the llama.cpp 500, and a resumed chat
+    would inherit the dead end on its first turn. `stream_reply` calls this
+    when a request died exactly that way, then asks again -- the repaired
+    history renders, the inserted tool result tells the model what happened
+    to its call, and the turn proceeds instead of dying.
+
+    A cut call with no `tool` answer behind it would leave the prefix
+    dangling, so an answer is inserted in the same breath -- the same
+    invariant `run_turn` keeps for every other call that cannot run.
+    """
+    changed = False
+    messages = conversation._messages
+    for i, message in enumerate(messages):
+        calls = message.get("tool_calls")
+        if not isinstance(calls, list):
+            continue
+        answered = set()
+        for follow in messages[i + 1:]:
+            if follow.get("role") == "assistant":
+                break
+            if follow.get("role") == "tool":
+                answered.add(follow.get("tool_call_id"))
+        insertions = []
+        for call in calls:
+            fn = call.get("function") if isinstance(call, dict) else None
+            if not isinstance(fn, dict):
+                continue
+            args = fn.get("arguments") or "{}"
+            why = classify_arguments(args)
+            if why is None:
+                continue
+            changed = True
+            try:
+                json.loads(args)
+            except json.JSONDecodeError:
+                fn["arguments"] = "{}"
+            cid = call.get("id")
+            if cid is not None and cid not in answered:
+                insertions.append({"role": "tool", "content":
+                                   TRUNCATED_CALL if why == "truncated"
+                                   else UNPARSEABLE_CALL,
+                                   "tool_call_id": cid})
+        for tool_message in reversed(insertions):
+            messages.insert(i + 1, tool_message)
+    return changed
 
 
 def declined_outside(paths: "list[str]") -> str:
@@ -14031,6 +14208,13 @@ def run_turn(
             break
 
         calls = timings.get("_tool_calls") or []
+        # #203: THE CUT CALLS ARE MADE SAFE TO STORE BEFORE THE TURN THAT
+        # CARRIES THEM EXISTS. An unterminated arguments string in the stored
+        # assistant turn kills every later request against the llama.cpp arm
+        # with a 500 the history cannot recover from; here it never gets in.
+        # The calls named in `cut` do not run -- the loop below answers each
+        # with the structured result instead.
+        cut = salvage_cut_calls(calls)
         # CALLS THAT WILL NEVER RUN ARE NOT APPENDED, and that is not
         # tidiness. An assistant turn whose tool_calls have no `tool` message
         # behind them is a broken prefix for every later turn of the session.
@@ -14125,6 +14309,14 @@ def run_turn(
             events.tool_started(call["name"], call["arguments"])
             started = time.monotonic()
 
+            # #203: A CALL THE OUTPUT CAP CUT IN HALF RUNS NOTHING AND ASKS
+            # NOBODY. There is nothing to approve -- the arguments are gone or
+            # half-invented -- and an approval card for `{}` would be a
+            # question about a call that cannot happen. The structured result
+            # below is the answer, and it is a RESULT so the prefix stays
+            # valid for the next round (#88 point 1, DECLINED's reason).
+            cut_why = cut.get(call.get("id") or "")
+
             # #88: THE LEVEL DECIDES, THE SURFACE ASKS. This loop knows which
             # class a tool is in and whether the level releases it; it does not
             # know how to put a question on a screen, and a core that did would
@@ -14150,8 +14342,9 @@ def run_turn(
             # predicate: `stops_for` keeps git_push on at every level, lets
             # yolo silence the outside-path ask and the git_commit ask, and
             # leaves every other level exactly where #88 put it.
-            if (stops_for(call["name"], mode, bool(outside))
-                    and not remembered(call["name"], call["arguments"])):
+            if (cut_why is None
+                    and (stops_for(call["name"], mode, bool(outside))
+                         and not remembered(call["name"], call["arguments"]))):
                 answer = "no"
                 if approve is not None:
                     answer = approve(call["name"], call["arguments"]) or "no"
@@ -14185,9 +14378,24 @@ def run_turn(
                                      % (call["name"], call["arguments"][:80]))
             elif failures.get((call["name"], call["arguments"]), 0) >= RETRY_CAP:
                 # #145: the fourth identical failure is refused BEFORE it runs.
+                # It stands BEFORE the #203 branch on purpose: the sanitized
+                # arguments of a cut call make every repeat the SAME key, so
+                # the cap -- which the live run's ever-different cuts could
+                # never trip -- is what stops a model from re-sending the
+                # same call to be cut a fifth time.
                 result, repeated = retry_capped(call["name"]), False
                 incidents.append("%s failed %d times with identical arguments "
                                  "and was capped" % (call["name"], RETRY_CAP))
+            elif cut_why is not None:
+                # #203: THE RECOVERY SIGNAL. The call never ran, the result
+                # says why and what to do instead, and the incident keeps a
+                # record that does not depend on the model choosing to
+                # mention it. `failed` counts it below through the "error: "
+                # prefix.
+                result, repeated = (TRUNCATED_CALL if cut_why == "truncated"
+                                    else UNPARSEABLE_CALL), False
+                incidents.append("a %s call was cut off at the output token "
+                                 "limit and did not run" % call["name"])
             else:
                 result, repeated = run_tool_cached(call["name"], call["arguments"])
             took = time.monotonic() - started

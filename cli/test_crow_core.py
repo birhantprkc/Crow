@@ -14267,5 +14267,173 @@ class YoloTurnTests(TurnLoopCase):
         self.assertTrue(tools and tools[-1]["content"].startswith("error: "))
 
 
+class TheCutCallTests(TurnLoopCase):
+    """#203: a tool call the output cap cut in half is a message, not a dead
+    end. The measured run -- a write_file carrying a whole HTML page, cut at
+    8,192 generated tokens before its content string closed -- left an
+    unparseable string in the history that killed every later request with
+    the llama.cpp 500, and the model was told none of it."""
+
+    def _cut_round(self, arguments):
+        """ONE scripted round: the cut call. What follows it -- a recovery, a
+        done, another cut -- is each test's own sequence."""
+        self.serve([{"content": "writing it"},
+                    _call_delta("write_file", arguments)])
+
+    def _done_round(self):
+        self.serve([{"content": "done"}])
+
+    def _stored_arguments(self, talk):
+        for message in reversed(talk.payload()):
+            for call in message.get("tool_calls") or []:
+                return call["function"]["arguments"]
+        return None
+
+    def _last_tool_result(self, talk):
+        tools = [m for m in talk.payload() if m.get("role") == "tool"]
+        return tools[-1]["content"] if tools else None
+
+    def test_an_unterminated_call_does_not_run_and_tells_the_model_why(self):
+        """The llama.cpp shape: the arguments string never closed."""
+        target = os.path.join(self.work, "page.html")
+        self._cut_round(json.dumps({"path": target, "content": "<html>"})[:-8])
+        talk = self.conversation()
+        self._done_round()
+        result = self.turn(talk, mode="manual")
+        self.assertFalse(os.path.exists(target), "the cut call wrote anyway")
+        said = self._last_tool_result(talk)
+        self.assertTrue(said and said.startswith("error: "), said)
+        self.assertIn("output token limit", said)
+        self.assertIn("write_file", said)
+        self.assertTrue(any("cut off at the output token limit" in i
+                            for i in result.incidents), result.incidents)
+
+    def test_the_stored_arguments_survive_the_next_request(self):
+        """The history is what the 500 killed: the stored string must parse."""
+        self._cut_round('{"path": "x.html", "content": "<html>')
+        self._done_round()
+        talk = self.conversation()
+        self.turn(talk)
+        stored = self._stored_arguments(talk)
+        self.assertEqual(stored, "{}")
+        for message in talk.payload():
+            for call in message.get("tool_calls") or []:
+                json.loads(call["function"]["arguments"])  # must not raise
+
+    def test_the_crow_nest_marker_gets_the_same_answer(self):
+        """crow-nest closes the JSON itself and marks `_truncated`; until #203
+        that marker reached the model as an unknown-argument error with no
+        instruction in it."""
+        target = os.path.join(self.work, "page.html")
+        self._cut_round(json.dumps({"path": target, "content": "half",
+                                    "_truncated": True}))
+        self._done_round()
+        talk = self.conversation()
+        self.turn(talk)
+        self.assertFalse(os.path.exists(target), "the marked call wrote anyway")
+        self.assertIn("output token limit", self._last_tool_result(talk))
+        self.assertEqual(self._stored_arguments(talk),
+                         json.dumps({"path": target, "content": "half",
+                                     "_truncated": True}),
+                         "a valid-JSON marker is stored verbatim")
+
+    def test_a_cut_call_is_not_an_approval_question(self):
+        """There is nothing to approve: the call cannot run, so no card may
+        ask about it -- in manual, where every write asks."""
+        asked = []
+
+        def approve(name, args):
+            asked.append(name)
+            return "no"
+
+        self._cut_round('{"path": "x.html", "content": "<html>')
+        self._done_round()
+        talk = self.conversation()
+        self.turn(talk, mode="manual", approve=approve)
+        self.assertEqual(asked, [], "a cut call was put to the user")
+
+    def test_a_repeat_of_the_same_cut_trips_the_retry_cap(self):
+        """The live run's cuts were all DIFFERENT, so #145 never counted
+        them. The sanitized arguments make every repeat the same key."""
+        arguments = '{"path": "x.html", "content": "<html>'
+        for _ in range(crow_core.RETRY_CAP + 1):
+            self._cut_round(arguments)
+        self._done_round()
+        talk = self.conversation()
+        result = self.turn(talk)
+        self.assertTrue(any("was capped" in i for i in result.incidents),
+                        result.incidents)
+
+
+class ThePoisonedHistoryTests(TurnLoopCase):
+    """#203's safety net: a session saved before the seam existed, resumed
+    against the llama.cpp arm, answers its first request with the 500 and
+    every later one the same way. The repair strips the cut call out of the
+    stored history and answers it, then the request goes out again."""
+
+    POISON = '{"path": "page.html", "content": "<!DOCTYPE html><html>'
+
+    def _poisoned(self):
+        talk = self.conversation()
+        talk._messages.append({"role": "assistant", "content": None,
+                               "tool_calls": [
+                                   {"id": "cut1", "type": "function",
+                                    "function": {"name": "write_file",
+                                                 "arguments": self.POISON}}]})
+        return talk
+
+    def test_the_500_repair_makes_the_turn_proceed(self):
+        talk = self._poisoned()
+        real = self._post_stream_before
+
+        def flaky(url, body, api_key, timeout):
+            if not hasattr(flaky, "asked"):
+                flaky.asked = True
+                raise crow_core.CrowError(
+                    "HTTP 500 from http://x/v1/chat/completions: "
+                    "{\"error\":{\"message\":\"Failed to parse tool call "
+                    "arguments as JSON: [json.exception.parse_error.101] "
+                    "parse error at line 1, column 18569\"}}")
+            self.script.append(([{"content": "recovered"}],
+                                {"predicted_n": 1}, None))
+            yield from real(url, body, api_key, timeout)
+
+        crow_core._post_stream = flaky
+        try:
+            self.turn(talk)
+        finally:
+            crow_core._post_stream = real
+        # the poisoned arguments are gone from what the server was sent
+        for body in self.bodies:
+            for message in body["messages"]:
+                for call in message.get("tool_calls") or []:
+                    json.loads(call["function"]["arguments"])  # must not raise
+        # and the dangling call now has an answer behind it
+        self.assertEqual(_dangling(talk.payload()), [])
+
+    def test_a_500_that_is_not_ours_stays_an_error(self):
+        real = self._post_stream_before
+
+        def stubborn(url, body, api_key, timeout):
+            raise crow_core.CrowError("HTTP 500 from http://x/v1: model exploded")
+            yield  # pragma: no cover
+
+        crow_core._post_stream = stubborn
+        self.addCleanup(setattr, crow_core, "_post_stream", real)
+        self.turn(self._poisoned())
+        failed = [e for e in self.events.log if e[0] == "failed"]
+        self.assertTrue(failed and "model exploded" in failed[0][1], failed)
+
+    def test_repair_inserts_the_answer_a_dangling_cut_call_never_had(self):
+        talk = self._poisoned()
+        self.assertTrue(crow_core.repair_history_calls(talk))
+        answered = [m for m in talk.payload() if m.get("tool_call_id") == "cut1"]
+        self.assertEqual(len(answered), 1)
+        self.assertIn("output token limit", answered[0]["content"])
+        self.assertEqual(_dangling(talk.payload()), [])
+        # idempotent: a second pass finds nothing to do
+        self.assertFalse(crow_core.repair_history_calls(talk))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
