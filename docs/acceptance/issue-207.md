@@ -4,7 +4,7 @@
 and the turn hung mid-pair: spinner forever, no follow-up request, only killing the app ended it.**
 
 Issue: https://github.com/nibor1896/Crow/issues/207
-State: implemented, locally verified; **awaiting robin's live acceptance (no push before it)**
+State: **LIVE-ACCEPTED 2026-09-21, attempt 2** — evidence below and in §"Attempt 2 result"
 
 ## What happened (measured, 2026-09-21 live session)
 
@@ -103,3 +103,31 @@ corruption detector riding along.
 
 After the tests: engine log clean, no request left unanswered, and the session file ends on a
 `tool` message, not mid-pair.
+
+### Attempt 2 result (2026-09-21, ~14:0x) — ALL TESTS PASSED
+
+Evidence from robin's screenshots and the session file (`session.json`, 36 messages):
+
+- **Test 1 PASS, verbatim.** The tool result in the transcript:
+  `no match for quuxblorb` + `[skipped 373 file(s) over 2 MiB or binary -- a hit in them is not
+  a hit you can use this way]`. The round completed in seconds, follow-up requests flowed
+  (5 rounds, 4 tool calls, ~1m31s wall including the model's own second-opinion grep over
+  43,994 files). No stall, no spinner.
+- **Test 1b PASS.** The model ran the 500 MB command **redirected to /dev/null** and hashed the
+  same 500 MB instead of capturing it (its own trace text: "same 500 MB, hashed instead of
+  captured") — the pipe never carried the bomb, so the 32 MiB cap stood as the untriggered
+  backstop. The harness survived, the round completed (4 rounds, 35.9 s), serve stayed alive,
+  and the model itself verified "62 GiB total, 9.2 GiB available, so no OOM". The cap's firing
+  behavior is covered by `CommandCaptureIsBoundedTests` (unit) rather than this live run —
+  recorded here honestly.
+- **Test 2 PASS.** Exact hits with line numbers: `sample.rs:720-727` (the min_p filter on the
+  logits), `sample.rs:321-323` (`ln_min_p` computed host-side), the device twin via
+  `kernels.rs` params, and serve's parsing — chain position (typical → min_p → temperature →
+  top_p → XTC) quoted correctly. 5 rounds, completed.
+- **Bonus: the memory self-healed correctly.** After the wipe, the model's review wrote ONE
+  entry: "search_text skips files >2MiB/binary (reported as 'skipped N file(s)') — for a truly
+  exhaustive string search use `grep -rl --exclude-dir=.git <str> .` instead." The poisoned
+  "rotated extensions" entry did not come back.
+- Two trivia claims in the model's Test-2 answer were checked and are NOT in the code: no stale
+  "minp accepted and ignored" log line exists in `serve.rs` (only the historical doc note at
+  line 310 that the era is over), and no `ths_sampler` test-name typo exists.
