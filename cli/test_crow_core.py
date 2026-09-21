@@ -12825,6 +12825,102 @@ class RelativePathsResolveInTheWorkingAreaTests(unittest.TestCase):
         self.assertIn("refusing to write outside", out)
 
 
+class SearchIsBoundedTests(unittest.TestCase):
+    """#207. A search that cannot end took the turn with it.
+
+    MEASURED 2026-09-21, LIVE, against the crow-nest tree: `search_text` with
+    the default glob walked the working area, matched the 105 GB CNQ container,
+    and read it as "text" (`errors="replace"` never raises) hunting a pattern
+    that has no hits in binary. The hit caps cannot fire without a hit, so the
+    tool read every byte; to the screen that was a hang -- spinner forever, no
+    follow-up request, only killing the app ended it. The session file stopped
+    mid-pair: `run_command` answered, `search_text` never returned.
+
+    THE THREE BOUNDS ARE RIPGREP'S DEFAULTS, not taste: a NUL byte means
+    binary and the file is skipped; an oversized file is never opened; and a
+    walk that cannot finish returns the partial truth as a result, so the
+    model narrows the search instead of the session dying.
+    """
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp())
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(shutil.rmtree, self.root, True)
+        with open(os.path.join(self.root, "plain.txt"), "w", encoding="utf-8") as fh:
+            fh.write("the needle is in the plain text file\n")
+        # The pattern IS inside both of these -- a text-mode reader would find
+        # it. That is the point: only the bounds keep them out of the result.
+        with open(os.path.join(self.root, "blob.bin"), "wb") as fh:
+            fh.write(b"needle\x00\x00\x00 the container class: NUL-dense")
+        os.makedirs(os.path.join(self.root, "target"))
+        with open(os.path.join(self.root, "target", "built.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("needle, but in a build tree nobody means\n")
+
+    def _patch(self, name, value):
+        self.addCleanup(setattr, crow_core, name, getattr(crow_core, name))
+        setattr(crow_core, name, value)
+
+    def test_a_binary_file_is_skipped_not_read(self):
+        """The measured hazard in one line: `errors="replace"` would have made
+        the blob "text" and matched. The NUL sniff must keep it out."""
+        out = crow_core.tool_search_text(pattern="needle")
+        self.assertIn("plain.txt", out)
+        self.assertNotIn("blob.bin", out, "a NUL-dense file was read as text")
+        self.assertIn("skipped", out)
+
+    def test_an_oversized_file_is_never_opened(self):
+        """The --max-filesize contract: stat first, read never. The cap is
+        patched small so the oversized file is two hundred bytes, not two
+        mebibytes of test fixture."""
+        with open(os.path.join(self.root, "huge.log"), "w", encoding="utf-8") as fh:
+            fh.write("padding " * 40 + " needle in the oversized tail\n")
+        self._patch("SEARCH_MAX_FILE_BYTES", 64)
+        out = crow_core.tool_search_text(pattern="needle")
+        self.assertIn("plain.txt", out)
+        self.assertNotIn("huge.log", out)
+        self.assertIn("skipped", out)
+
+    def test_build_trees_are_pruned(self):
+        """`target` joined the skip list with #207 -- the Rust build tree is
+        tens of GB of small artifacts nobody means by "the source"."""
+        self.assertNotIn("built.txt", crow_core.tool_find_files(pattern="*.txt"))
+        self.assertNotIn("built.txt", crow_core.tool_search_text(pattern="needle"))
+
+    def test_a_walk_that_cannot_finish_returns_a_partial_result(self):
+        """The deadline must END the search as a result, not as a hang: with
+        the budget spent at once, the walk stops after the first directory and
+        says so -- the shape the model can narrow, and the turn survives."""
+        self._patch("SEARCH_DEADLINE", 0.0)
+        out = crow_core.tool_search_text(pattern="needle")
+        self.assertIn("plain.txt", out)
+        self.assertIn("[stopped after", out)
+        self.assertIn("did not finish", out)
+        found = crow_core.tool_find_files(pattern="*.txt")
+        self.assertIn("plain.txt", found)
+        self.assertIn("[stopped after", found)
+
+    def test_unknown_argument_keys_are_said_not_swallowed(self):
+        """The incident's stowaway: `pattern`, `pattern_2: "placeholder"` and
+        `regex` arrived together, and `**_` absorbed two of them silently. The
+        note makes the corruption visible to the model and the screen."""
+        out = crow_core.run_tool(
+            "search_text",
+            json.dumps({"pattern": "needle", "pattern_2": "placeholder",
+                        "regex": "needle"}))
+        self.assertTrue(out.startswith("[unknown argument(s) ignored: pattern_2, regex]"),
+                        out)
+        self.assertIn("plain.txt", out)
+
+    def test_a_well_formed_call_carries_no_note(self):
+        """NEGATIVPROBE. The note is a finding about the call, not a fixture
+        of the result -- clean arguments must read as before."""
+        out = crow_core.run_tool("search_text", json.dumps({"pattern": "needle"}))
+        self.assertFalse(out.startswith("["), out)
+        self.assertIn("plain.txt", out)
+
+
 class AppendFileBuildsLargeFilesInPartsTests(unittest.TestCase):
     """#voxel-2026-09-20. Der 8192er-Lauf musste eine 2,4-MB-Seite durch Shell-
     Heredocs bauen -- jede Sektion ein Abbruchpunkt mit Escaping-Falle. Das

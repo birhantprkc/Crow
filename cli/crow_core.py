@@ -180,6 +180,30 @@ MAX_TOOL_ROUNDS = 24
 MAX_HITS = 200
 COMMAND_TIMEOUT = 120
 
+# #207. THE THREE BOUNDS EVERY PRODUCTION GREP HAS, and search_text had none of
+# them. Measured 2026-09-21, live: a search_text over the crow-nest tree opened
+# the 105 GB CNQ container (`errors="replace"` makes a blob "text" that never
+# raises) and the turn hung mid-pair -- spinner forever, no follow-up request,
+# only killing the app ended it. The MAX_HITS/MAX_TOOL_BYTES caps fire only when
+# a HIT is found, so a pattern without hits in the binary read every byte first.
+# ripgrep's contract, all three defaults there: a NUL byte means binary and the
+# file is skipped (--text turns it off); --max-filesize skips oversized files
+# BEFORE they are read; and a search that cannot finish returns what it has.
+#
+# 2 MiB sits above every source file this tree has produced; 30 s is a cold
+# cache reading well over a gigabyte of small files, which is already a search
+# gone wrong; 4 KiB of head is enough to see a NUL in every container format --
+# they are NUL-dense from byte one, which is what retires the 105 GB file.
+SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024
+SEARCH_DEADLINE = 30.0
+SEARCH_SNIFF_BYTES = 4096
+# Shared by find_files and search_text, which walked the same tree with two
+# copies of this list before #207 -- and `target` (the Rust build tree, tens of
+# GB of small artifacts) was in neither. The set says what it said when it was
+# written: directories nobody means when they say "find the source file".
+SEARCH_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv",
+                    "build", "dist", "target", ".cache"}
+
 # WHICH SHELL THE MODEL IS TALKING TO, said in the tool's own description
 # because guessing it costs a round in either direction: on Windows an `ls`
 # comes back "not recognized as an internal or external command", on Linux a
@@ -7989,11 +8013,11 @@ def tool_find_files(root: str = ".", pattern: str = "*", **_) -> str:
 
     root = _rooted(root)                            # #177
     hits, size = [], 0
+    started = time.monotonic()
     for base, dirs, files in os.walk(root):
         # Directories nobody means when they say "find the source file", and
         # walking them turns a search into minutes.
-        dirs[:] = [d for d in dirs if d not in
-                   {".git", "node_modules", "__pycache__", ".venv", "venv", "build", "dist"}]
+        dirs[:] = [d for d in dirs if d not in SEARCH_SKIP_DIRS]
         for name in files:
             if fnmatch.fnmatch(name, pattern):
                 hit = os.path.join(base, name)
@@ -8003,6 +8027,16 @@ def tool_find_files(root: str = ".", pattern: str = "*", **_) -> str:
                 # few hits can still be long paths, many short ones still add up.
                 if len(hits) >= MAX_HITS or size >= MAX_TOOL_BYTES:
                     return "\n".join(hits) + "\n[stopped -- narrow the pattern or the root]"
+        # #207. THE WALK ITSELF IS BOUNDED, not only the result: a deep or huge
+        # tree spends its minutes in os.walk before any hit exists, and the
+        # ceilings above cannot see that. A deadline checked per directory makes
+        # "still walking" a state that ends, with the partial truth as the result.
+        took = time.monotonic() - started
+        if took > SEARCH_DEADLINE:
+            head = "\n".join(hits)
+            tail = ("[stopped after %.0f s -- the walk over %s did not finish; "
+                    "narrow the root]" % (took, root))
+            return head + "\n" + tail if head else tail
     return "\n".join(hits) or f"no file matching {pattern} under {root}"
 
 
@@ -8017,15 +8051,33 @@ def tool_search_text(root: str = ".", pattern: str = "", glob: str = "*", **_) -
         rx = _re.compile(pattern)
     except _re.error as exc:
         return f"error: bad regular expression: {exc}"
-    hits, size = [], 0
+    hits, size, skipped = [], 0, 0
+    started = time.monotonic()
+    stopped = None
     for base, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in
-                   {".git", "node_modules", "__pycache__", ".venv", "venv", "build", "dist"}]
+        dirs[:] = [d for d in dirs if d not in SEARCH_SKIP_DIRS]
         for name in files:
             if not fnmatch.fnmatch(name, glob):
                 continue
             full = os.path.join(base, name)
             try:
+                # #207. THE TWO SKIPS THAT MADE THIS TOOL HAZARDOUS TO LEAVE
+                # OUT, and both are ripgrep's defaults rather than taste. The
+                # measured incident: glob "*" matched the 105 GB CNQ container,
+                # `errors="replace"` read it as "text" without ever raising,
+                # and the hit caps below could not fire because the pattern had
+                # no hits in binary -- so the tool read every byte of it. A
+                # file over the cap is never opened (stat first, the
+                # --max-filesize contract), and a NUL in the first bytes means
+                # binary, not text -- the containers are NUL-dense from byte
+                # one, which is what retires them here.
+                if os.path.getsize(full) > SEARCH_MAX_FILE_BYTES:
+                    skipped += 1
+                    continue
+                with open(full, "rb") as probe:
+                    if b"\0" in probe.read(SEARCH_SNIFF_BYTES):
+                        skipped += 1
+                        continue
                 with open(full, encoding="utf-8", errors="replace") as fh:
                     for n, line in enumerate(fh, 1):
                         if rx.search(line):
@@ -8040,7 +8092,22 @@ def tool_search_text(root: str = ".", pattern: str = "", glob: str = "*", **_) -
                                         + "\n[stopped -- narrow the pattern, or pass a glob]")
             except OSError:
                 continue
-    return "\n".join(hits) or f"no match for {pattern}"
+        # #207. THE WALK IS BOUNDED, NOT ONLY THE RESULT -- a tree that spends
+        # its minutes in files the caps cannot see (many small files, no hits)
+        # ends here with the partial truth as a result, and the model narrows
+        # the search instead of the session dying mid-pair.
+        took = time.monotonic() - started
+        if took > SEARCH_DEADLINE:
+            stopped = ("[stopped after %.0f s -- the walk over %s did not "
+                       "finish; narrow the root, or pass a glob]" % (took, root))
+            break
+    out = "\n".join(hits) or f"no match for {pattern}"
+    if skipped:
+        out += ("\n[skipped %d file(s) over %d MiB or binary -- a hit in them "
+                "is not a hit you can use this way]" % (skipped, SEARCH_MAX_FILE_BYTES >> 20))
+    if stopped:
+        out += "\n" + stopped
+    return out
 
 
 def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
@@ -13763,6 +13830,17 @@ def run_tool(name: str, arguments: str) -> str:
     bad, notes = coerce_declared_containers(name, args)
     if bad is not None:
         return f"error: {bad}"
+    # #207. UNKNOWN KEYS ARE SAID, NOT SWALLOWED. The live incident rode in on
+    # `search_text` arguments carrying `pattern`, `pattern_2: "placeholder"`
+    # and `regex` -- three keys for one argument, two of them declared by no
+    # tool, and `**_` absorbed both without a trace. The corruption stayed
+    # invisible on every surface until the session transcript was read by
+    # hand. One bracket note, the same shape as the coercion notes, makes it a
+    # fact the model and the screen both see; no declaration, no note.
+    declared = _declared_properties(name)
+    extra = sorted(k for k in args if k not in declared)
+    if declared and extra:
+        notes.append("unknown argument(s) ignored: %s" % ", ".join(extra)[:120])
     try:
         out = impl(**args)
     except TypeError as exc:
