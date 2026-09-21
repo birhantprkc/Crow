@@ -52,6 +52,20 @@ watchdog at the GUI seam is a separate ticket if the class recurs.
 
 ## robin's live acceptance (Crow GUI — no curl)
 
+### Attempt 1 (2026-09-21, 13:23–13:26) — rounds 1–5 passed; a sibling defect ended the session
+
+Five tool rounds completed in seconds each with the search bounds live — then round 6's `run_command`
+printed into the GiB scale, `capture_output=True` gathered all of it, Crow's python ballooned until
+13.6 GiB of it was swapped, and the kernel's global OOM killer shot `serve` (46.8 GiB pinned, the
+biggest RSS). Same ticket class, one layer up: the capture, not the result, is what fills the
+machine. Fixed in `d22f3a2` (32 MiB cap inside the reader threads, kill + result the model can act
+on; `read_image` refuses oversized files before reading; clock arm and result contracts unchanged;
+982/982 core, 46/46 GUI tests). Full account in the
+[ticket comment](https://github.com/nibor1896/Crow/issues/207#issuecomment-5759863185).
+No reboot was needed — the pinned tier was released cleanly.
+
+### Attempt 2 (after d22f3a2, reinstalled)
+
 Same setup as the min_p retest:
 
 1. Terminal 1: `crow-nest` (serve on 8099, default tier).
@@ -65,6 +79,15 @@ Same setup as the min_p retest:
 Expected: the round **completes** in seconds. `search_text` returns `no match for quuxblorb`
 plus a `[skipped N file(s) …]` line (the containers and `target/` are skipped); the turn goes
 on; the engine log shows the follow-up POST. No endless spinner at any point.
+
+**Test 1b — the second incident's shape (capture bound).** Send:
+
+> Run `python3 -c "print('x' * 500000000)"` and tell me what came back.
+
+Expected: the command is killed at the 32 MiB cap within a moment; the tool result is
+`error: command printed more than 32 MiB and was killed -- pipe it through head, or write it to a
+file and read the range: …`; the round continues; serve stays alive; the machine's memory is
+untouched (no zram spike).
 
 **Test 2 — a real search still finds.** Send:
 
