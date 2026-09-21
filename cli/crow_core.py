@@ -179,6 +179,21 @@ MAX_TOOL_BYTES = 16_000
 MAX_TOOL_ROUNDS = 24
 MAX_HITS = 200
 COMMAND_TIMEOUT = 120
+# #207, second incident, same class. 2026-09-21 13:26:37, live acceptance of
+# the search bounds: round 6's tool ran a command whose output ran into the
+# container class; `capture_output=True` accumulates EVERYTHING the child
+# prints at pipe speed, and `_clip` runs only after the whole thing sits in
+# python. Crow's python ballooned until the kernel had 13.6 GiB of it swapped,
+# then the global OOM killer shot `serve` -- the biggest RSS on the machine at
+# 46.8 GiB pinned -- and the session died with it. The cap kills the child at
+# 32 MiB of combined output: far above what a legitimate command prints before
+# `_clip` shows 16 KB of it (a `cargo build`'s progress noise fits), and five
+# orders of magnitude below the GiB that kill the desktop's engine.
+COMMAND_CAPTURE_BYTES = 32 * 1024 * 1024
+# read_image hands the file's bytes to the wire as-is; the extension table
+# already refuses non-images, and this refuses the pathological sizes -- a
+# reader with no bound is a reader that can take the machine down (#207).
+IMAGE_MAX_BYTES = 32 * 1024 * 1024
 
 # #207. THE THREE BOUNDS EVERY PRODUCTION GREP HAS, and search_text had none of
 # them. Measured 2026-09-21, live: a search_text over the crow-nest tree opened
@@ -7820,12 +7835,20 @@ def tool_read_image(path: str, **_) -> str:
 
     KEINE ZWEITE GROESSENREGEL. `image_part` schickt die Bytes, wie sie auf der
     Platte liegen; der Server kappt selbst bei `--image-max-tokens` (4.096), und
-    eine eigene Zahl hier waere eine, die niemand nachzieht.
+    eine eigene Zahl hier waere eine, die niemand nachzieht. DIE EINE AUSNAHME
+    IST KEINE GROESSENREGEL FUERS MODELL, sondern eine fuer den ARBEITSSPEICHER
+    (#207): der Server kappt, was ANKOMMT, aber vorher lesen wir hier schon die
+    ganze Datei -- ein Leser ohne Grenze ist ein Leser, der die Maschine nehmen
+    kann. 32 MiB liegt ueber jedem Bild, das dieses Programm je gesehen hat.
     """
     path = _rooted(path)                            # #177
     if not os.path.isfile(path):
         return "error: no such image: %s" % path
     try:
+        if os.path.getsize(path) > IMAGE_MAX_BYTES:
+            return ("error: image is over %d MiB and was not read -- "
+                    "the size is the bound, crop or resize it first: %s"
+                    % (IMAGE_MAX_BYTES >> 20, path))
         part = image_part(path)
     except CrowError as exc:
         return "error: %s" % exc
@@ -8135,7 +8158,7 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
     try:
         # DAS KIND BEKOMMT KEINE TASTATUR (2026-08-29, live gefunden). Ein
         # `Invoke-WebRequest` ohne `-UseBasicParsing` stellt in PS 5.1 eine
-        # Sicherheitsrueckfrage -- und die erschien in dem Terminal, aus dem
+        # Sicherheitsruefrage -- und die erschien in dem Terminal, aus dem
         # das FENSTER gestartet war, wo niemand sie erwartet und robin sie erst
         # nach Minuten fand. Der Zug stand still, ohne dass irgendwo etwas
         # dazu stand: die Frage ging an die Konsole, nicht durch die Rohre,
@@ -8154,16 +8177,77 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
         # steht, und das Modell schreibt bash (`[[`, `$'...'`). `executable`
         # benennt sie deshalb, und nur wenn es sie wirklich gibt; auf Windows ist
         # die Antwort None und der Aufruf bleibt Zeichen fuer Zeichen der alte.
-        done = subprocess.run(command, shell=True, cwd=cwd, env=env, timeout=COMMAND_TIMEOUT,
-                              executable=crow_platform.shell_executable(),
-                              stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, errors="replace")
-    except subprocess.TimeoutExpired:
-        return f"error: command exceeded {COMMAND_TIMEOUT}s and was killed: {command}"
+        #
+        # #207. THE CAPTURE IS BOUNDED, NOT JUST THE RESULT. `subprocess.run
+        # (capture_output=True)` accumulates everything the child prints at
+        # pipe speed and `_clip` runs only afterwards -- measured live, a
+        # command that prints into the GiB scale took Crow's python to
+        # 13.6 GiB swapped and the kernel's OOM killer then shot `serve`.
+        # Readers on threads (a pipe has no portable non-blocking read --
+        # the same sentence `_pump` stands on) and a poll loop that watches
+        # BOTH bounds: the clock (COMMAND_TIMEOUT, as before) and the bytes
+        # (COMMAND_CAPTURE_BYTES, new). Whichever trips first kills the
+        # child, and the result says which -- a fact the model can act on,
+        # never an exception out of the tool.
+        proc = subprocess.Popen(
+            command, shell=True, cwd=cwd, env=env,
+            executable=crow_platform.shell_executable(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, errors="replace")
     except OSError as exc:
         return f"error: could not run: {exc}"
-    out = (done.stdout or "") + (("\n[stderr]\n" + done.stderr) if done.stderr else "")
-    return _clip(f"[exit {done.returncode}]\n{out}".rstrip())
+    drained = {"out": [], "err": [], "over": False}
+
+    def _drain(which: str) -> None:
+        pipe = proc.stdout if which == "out" else proc.stderr
+        held = 0
+        try:
+            while True:
+                chunk = pipe.read(65536)
+                if not chunk:
+                    break
+                drained[which].append(chunk)
+                # THE CAP LIVES IN THE READER, NOT THE POLL LOOP. A child
+                # can push a burst through the pipe faster than any poll
+                # interval; the reader is the only place that sees every
+                # chunk the moment it lands, so it is where "too much"
+                # becomes a kill and a stopped accumulation.
+                held += len(chunk)
+                if held > COMMAND_CAPTURE_BYTES:
+                    drained["over"] = True
+                    proc.kill()
+                    break
+        except OSError:
+            pass
+
+    for which in ("out", "err"):
+        threading.Thread(target=_drain, args=(which,), daemon=True,
+                         name="run-command-%s" % which).start()
+    timed_out = False
+    deadline = time.monotonic() + COMMAND_TIMEOUT
+    while proc.poll() is None and not drained["over"]:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            timed_out = True
+            break
+        try:
+            proc.wait(timeout=min(left, 0.25))
+        except subprocess.TimeoutExpired:
+            pass
+    if timed_out:
+        proc.kill()
+    proc.wait()
+    if timed_out:
+        return f"error: command exceeded {COMMAND_TIMEOUT}s and was killed: {command}"
+    if drained["over"]:
+        return ("error: command printed more than %d MiB and was killed -- "
+                "pipe it through head, or write it to a file and read the "
+                "range: %s" % (COMMAND_CAPTURE_BYTES >> 20, command))
+    out = "".join(drained["out"])
+    err = "".join(drained["err"])
+    return _clip(f"[exit {proc.returncode}]\n{out}".rstrip()
+                 + (f"\n[stderr]\n{err}" if err.strip() else ""))
 
 
 # ---------------------------------------------------------------- #156 -----

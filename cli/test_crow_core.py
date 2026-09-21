@@ -12921,6 +12921,69 @@ class SearchIsBoundedTests(unittest.TestCase):
         self.assertIn("plain.txt", out)
 
 
+class CommandCaptureIsBoundedTests(unittest.TestCase):
+    """#207, second incident, same class as the search: the capture, not the
+    result, is what fills the machine.
+
+    MEASURED 2026-09-21 13:26:37, during live acceptance of the search bounds:
+    a tool command printed into the GiB scale, `capture_output=True` gathered
+    every byte of it at pipe speed, and `_clip` -- the 16 KB the model ever
+    sees -- ran only after the whole output sat in python. Crow's python
+    ballooned until the kernel had 13.6 GiB of it swapped; the global OOM
+    killer then shot `serve`, the biggest RSS present at 46.8 GiB pinned, and
+    the session died with it.
+
+    THE CAP BELONGS IN THE READER. A burst crosses a pipe faster than any poll
+    interval; only the reader thread sees every chunk the moment it lands, so
+    there and only there does "too much" become a kill and a stopped hand.
+    """
+
+    def setUp(self):
+        self._saved = (crow_core.COMMAND_CAPTURE_BYTES, crow_core.COMMAND_TIMEOUT,
+                       crow_core.IMAGE_MAX_BYTES)
+
+    def tearDown(self):
+        (crow_core.COMMAND_CAPTURE_BYTES, crow_core.COMMAND_TIMEOUT,
+         crow_core.IMAGE_MAX_BYTES) = self._saved
+
+    def test_a_command_that_prints_past_the_cap_is_killed(self):
+        crow_core.COMMAND_CAPTURE_BYTES = 1024 * 1024
+        out = crow_core.tool_run_command(
+            '"%s" -c "print(chr(120) * 3000000)"' % sys.executable)
+        self.assertTrue(out.startswith("error: command printed more than 1 MiB"),
+                        out)
+        self.assertIn("was killed", out)
+
+    def test_an_ordinary_command_comes_back_as_before(self):
+        """NEGATIVPROBE. The rewrite must not cost the old contract: exit code,
+        stdout, and the [stderr] marker travel exactly as they did."""
+        out = crow_core.tool_run_command(
+            '"%s" -c "import sys; print(\'plain out\'); '
+            'sys.stderr.write(\'side note\')"' % sys.executable)
+        self.assertIn("[exit 0]", out)
+        self.assertIn("plain out", out)
+        self.assertIn("[stderr]", out)
+        self.assertIn("side note", out)
+
+    def test_the_clock_still_kills_a_command_that_never_ends(self):
+        crow_core.COMMAND_TIMEOUT = 1
+        out = crow_core.tool_run_command('"%s" -c "import time; time.sleep(30)"'
+                                         % sys.executable)
+        self.assertTrue(out.startswith("error: command exceeded 1s"), out)
+        self.assertIn("was killed", out)
+
+    def test_an_oversized_image_is_refused_before_it_is_read(self):
+        """The extension table refuses non-images; this refuses the
+        pathological sizes -- the reader that must not run, doesn't."""
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + b"pad" * 64)
+            path = fh.name
+        self.addCleanup(os.unlink, path)
+        crow_core.IMAGE_MAX_BYTES = 64
+        out = crow_core.run_tool("read_image", json.dumps({"path": path}))
+        self.assertTrue(out.startswith("error: image is over"), out)
+
+
 class AppendFileBuildsLargeFilesInPartsTests(unittest.TestCase):
     """#voxel-2026-09-20. Der 8192er-Lauf musste eine 2,4-MB-Seite durch Shell-
     Heredocs bauen -- jede Sektion ein Abbruchpunkt mit Escaping-Falle. Das
