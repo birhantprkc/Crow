@@ -908,7 +908,9 @@ TOOLS = [
          "out": dict(_STR, description="The file to write, .html or .js. "
                                        "Default: <entry>.bundle.html / .js."),
          "global_name": dict(_STR, description="For a module entry: the global "
-                                               "its exports land on, e.g. APP."),
+                                               "its exports land on, e.g. APP. "
+                                               "Without it the exports of a .js "
+                                               "out are unreachable."),
          "minify": {"type": "boolean", "description": "Default true."}},
         ["entry"]),
     # #156. GIT AS ITS OWN GROUP, NOT AS SHELL LINES. A `git push` through
@@ -9715,6 +9717,33 @@ def _bare_page_warning(entry: str, exports: "list[str] | None", global_name: str
             "bundle THAT .html as the entry." % what)
 
 
+def _unreachable_exports_warning(entry: str, exports: "list[str]") -> str:
+    """A .js out without global_name, from a module that exports something.
+
+    #212 FOLLOW-UP. `--format=iife` without `--global-name` wraps the module in
+    `(() => { ... })();` and its exports go nowhere: nothing outside the bundle
+    can call them, and the build says 0 errors. Same trap as the bare page, one
+    step earlier -- the classic script that loads this file finds no `boot`.
+
+    WARNED, NOT DEFAULTED. A global name derived from the entry (`app`, `main`,
+    `index`) would change the output nobody asked to change and put a short
+    common name on `window`, where it can shadow a global the page already
+    has; and a module that starts itself needs none. So the build stays as
+    asked, and when the esm probe -- the same one the bare page uses, run only
+    in this case, 0.06 s on the diorama graph -- finds exports, the result
+    names them and the argument that reaches them. No exports, or a probe that
+    failed, says nothing: the first is a module that starts itself, the second
+    is no fact.
+    """
+    return ("warn: no global_name -- %s exports %s, and an IIFE without a global "
+            "leaves %s unreachable from outside the bundle. Pass global_name (e.g. "
+            "\"APP\") to put %s on window.APP, or bundle an .html entry page that "
+            "imports and starts the app." % (
+                os.path.basename(entry), ", ".join(exports)[:300],
+                "it" if len(exports) == 1 else "them",
+                "it" if len(exports) == 1 else "them"))
+
+
 def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
                       minify=True, **_) -> str:
     """#212. Entry page or module -> one self-contained offline file."""
@@ -9804,6 +9833,8 @@ def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
                 if css:
                     logs.append("note: the graph imports CSS (%d bytes); a .js out cannot "
                                 "carry it -- build to an .html out to inline it" % len(css))
+                if not global_name:
+                    exports = _entry_exports(exe, entry, base, deadline, scratch)
         else:
             if os.path.getsize(entry) > BUNDLE_PAGE_MAX_BYTES:
                 return (f"error: {entry} is over {BUNDLE_PAGE_MAX_BYTES >> 20} MiB -- that "
@@ -9948,6 +9979,8 @@ def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
              f"warning(s), {took:.2f}s, {tool}"]
     if bare_page:
         lines.append(_bare_page_warning(entry, exports, global_name))
+    elif not page and not out_html and not global_name and exports:
+        lines.append(_unreachable_exports_warning(entry, exports))
     if inlined:
         lines.append("inlined: " + "; ".join(inlined))
     if left:

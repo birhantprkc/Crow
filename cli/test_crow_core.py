@@ -15213,6 +15213,44 @@ class BuildBundleTests(unittest.TestCase):
             self.assertNotIn("ONLY the bundle", out)
         self.assertFalse([c for c in self._calls() if "--format=esm" in c["argv"]])
 
+    def test_a_module_to_js_without_global_name_names_the_exports_nothing_reaches(self):
+        """#212 follow-up: an IIFE without --global-name drops its exports --
+        0 errors, and the classic script that loads it finds no boot. Warned,
+        not defaulted: the build stays the one asked for."""
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        os.environ["FAKE_EXPORTS"] = "boot"
+        self._write("src/app.js", "export function boot(canvas) {}\n")
+        out = crow_core.tool_build_bundle("src/app.js", "app.iife.js")
+        self.assertTrue(out.startswith("built "), out)
+        self.assertTrue(out.splitlines()[1].startswith(
+            "warn: no global_name -- app.js exports boot, and an IIFE without a "
+            "global leaves it unreachable from outside the bundle"), out)
+        self.assertIn('Pass global_name (e.g. "APP") to put it on window.APP', out)
+        self.assertNotIn("ONLY the bundle", out)
+        build, probe = self._calls()
+        self.assertFalse([a for a in build["argv"] if a.startswith("--global-name")])
+        self.assertIn("--format=esm", probe["argv"])
+        os.environ["FAKE_EXPORTS"] = "boot,dispose"
+        self.assertIn("app.js exports boot, dispose, and an IIFE without a global "
+                      "leaves them unreachable",
+                      crow_core.tool_build_bundle("src/app.js", "app.iife.js"))
+        # NEGATIVPROBE: a module that exports nothing starts itself, and a probe
+        # without an answer is no fact -- neither gets a line
+        for value in ("", None):
+            if value is None:
+                os.environ.pop("FAKE_EXPORTS")
+            else:
+                os.environ["FAKE_EXPORTS"] = value
+            out = crow_core.tool_build_bundle("src/app.js", "app.iife.js")
+            self.assertTrue(out.startswith("built "), out)
+            self.assertNotIn("warn:", out)
+        # with a global the exports are reachable: no probe, no line
+        os.environ["FAKE_EXPORTS"] = "boot"
+        before = len(self._calls())
+        out = crow_core.tool_build_bundle("src/app.js", "app.iife.js", "APP")
+        self.assertNotIn("warn:", out)
+        self.assertEqual(len(self._calls()), before + 1)
+
     def test_errors_are_counted_and_nothing_is_written(self):
         self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
         os.environ["FAKE_MODE"] = "error"
@@ -15280,9 +15318,10 @@ class BuildBundleTests(unittest.TestCase):
         self._write("app.js", "")
         self.assertTrue(crow_core.tool_build_bundle("app.js").startswith("built "))
         self.assertIn("[exit 0]", crow_core.tool_run_command("echo one"))
-        self.assertEqual(seen, [(["esbuild", "--version"], False),
-                                (["esbuild", os.path.join(self.root, "app.js")], False),
-                                ("echo one", True)])
+        app = os.path.join(self.root, "app.js")
+        # --version, the IIFE build, the exports probe (no global_name), the shell
+        self.assertEqual(seen, [(["esbuild", "--version"], False), (["esbuild", app], False),
+                                (["esbuild", app], False), ("echo one", True)])
         # and the loop exists once: no caller starts a child or a reader itself
         self.assertEqual(inspect.getsource(crow_core).count("pipe.read(65536)"), 1)
         for fn in (crow_core.tool_run_command, crow_core.tool_build_bundle,
@@ -15320,6 +15359,10 @@ class BuildBundleTests(unittest.TestCase):
                          ("executing", "build_bundle"))
         described = [t["function"]["description"] for t in crow_core.TOOLS
                      if t["function"]["name"] == "build_bundle"][0]
+        params = [t["function"]["parameters"] for t in crow_core.TOOLS
+                  if t["function"]["name"] == "build_bundle"][0]
+        self.assertIn("Without it the exports of a .js out are unreachable",
+                      params["properties"]["global_name"]["description"])
         for words in ("file:// CANNOT load ES modules", "IIFE",
                       "Never flatten or concatenate a library by hand",
                       "For a PAGE, make the entry an .html file",
@@ -15366,6 +15409,8 @@ class BuildBundleTests(unittest.TestCase):
         out = crow_core.tool_build_bundle("app.js", "app.html")
         self.assertIn("0 error(s)", out)
         self.assertIn("app.js exports: boot, version -- nothing calls them", out)
+        out = crow_core.tool_build_bundle("app.js", "app.iife.js")
+        self.assertIn("warn: no global_name -- app.js exports boot, version", out)
 
 
 class StorePathsGetNoStandingApprovalTests(unittest.TestCase):
