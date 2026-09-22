@@ -33,6 +33,13 @@ Nothing here is live-accepted yet; acceptance is robin's GUI replay.
 
 ### Fixed
 
+- **An invented `cwd` never runs** (#221). `run_command` refuses a cwd that is not an existing directory before
+  anything runs and before the approval card. The refusal names the working area and the near miss found on disk
+  (edit distance 1-2, unique best match, case-insensitive on Windows): `'nibor11896' is 'nibor1896' here`.
+  read_file, list_dir and the outside-root write refusal carry the same hint; `~` in cwd is expanded. A bare
+  filesystem root in prose (`4120 / package`) no longer counts as a user-named path. That `/` in the 2026-09-22
+  rollover note had disarmed #144 and `_outside_root` for the whole session. Measured over all stored sessions:
+  5 of 18 cwd calls named a home that does not exist, and each cost a `pwd` round after a bare Errno 2.
 - **Tool arguments under another harness's names are taken and said** (#215). `edit_file` accepts
   `old_string`/`old_str`, `new_string`/`new_str` and `file_path`; `read_file`/`write_file`/`append_file`
   accept `file_path` (write_file also `file_text`); `search_text`/`find_files` accept `path` as `root`;

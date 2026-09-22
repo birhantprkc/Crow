@@ -6564,6 +6564,197 @@ def _rooted(path: str) -> str:
     return os.path.join(_ROOT, path)
 
 
+# #221. A PATH THAT DOES NOT EXIST IS USUALLY ONE CHARACTER AWAY FROM
+# ONE THAT DOES, and the error that said so was the OS's, not Crow's. Measured
+# over every stored session on this machine (2026-09-22): 18 distinct
+# run_command calls carried a `cwd`, and 5 of them named a home that is not
+# there -- the account name spelled `nibor11896` three times and `nibor11899`
+# twice, for the real `nibor1896`. crow-nest #91's replay puts the digit at logprob
+# -0.013 against -4.41 for the right one: a confident error, so a sampler
+# cannot be relied on to avoid it and the tool has to answer it. What came
+# back each time was `[Errno 2] No such file or directory: '<the wrong
+# path>'` -- the fabricated string a second time, and the right one nowhere.
+#
+# THE DISK IS THE WITNESS, as in `_extend_over_spaces`: each missing component
+# is compared against the names that DO exist in its parent, and only a
+# single closest one within NEAR_MISS_EDITS counts. Two equally close names
+# are a guess, and a guess is not offered. A directory with more than
+# NEAR_MISS_SCAN entries is not scanned (a `/usr/lib` must not cost a call a
+# second); the hint then stops there and says the nearest existing ancestor.
+NEAR_MISS_SCAN = 4096
+
+
+def _near_edits(name: str) -> int:
+    """How many edits still count as the same name: 1 below 8 characters,
+    2 from there. `nibor11899` -> `nibor1896` is two, and a 3-letter `src`
+    must not turn into `bin`."""
+    return 1 if len(name) < 8 else 2
+
+
+def _name_key(name: str) -> str:
+    """Windows compares names without case (NTFS does), POSIX does not."""
+    return name.casefold() if crow_platform.IS_WINDOWS else name
+
+
+def _edits(a: str, b: str, cap: int) -> int:
+    """Levenshtein with adjacent transpositions (OSA), `cap + 1` once over."""
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev2: "list[int]" = []
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1,
+                         prev[j - 1] + (ca != cb))
+            if (i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb):
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        if min(cur) > cap:
+            return cap + 1
+        prev2, prev = prev, cur
+    return prev[-1]
+
+
+def _near_name(name: str, parent: str) -> "str | None":
+    """The one existing entry of `parent` that `name` is a near miss of."""
+    try:
+        with os.scandir(parent) as it:
+            entries = []
+            for entry in it:
+                entries.append(entry.name)
+                if len(entries) > NEAR_MISS_SCAN:
+                    return None
+    except OSError:
+        return None
+    cap = _near_edits(name)
+    key = _name_key(name)
+    scored = sorted((_edits(key, _name_key(e), cap), e) for e in entries)
+    scored = [(d, e) for d, e in scored if d <= cap]
+    if not scored or (len(scored) > 1 and scored[1][0] == scored[0][0]):
+        return None
+    return scored[0][1]
+
+
+def path_near_miss(path: str) -> "dict | None":
+    """#221: where a path that does not exist was probably meant to go.
+
+    None when the path exists. Otherwise:
+      `existing`  the deepest ancestor of the path AS WRITTEN that exists;
+      `fixed`     the path with each near-miss component swapped for the
+                  existing name, as far as the swaps reach (None without one);
+      `swaps`     the (written, existing) name pairs;
+      `whole`     True when `fixed` is the complete path and exists.
+    """
+    if not path:
+        return None
+    full = os.path.normpath(os.path.abspath(path))
+    if os.path.exists(full):
+        return None
+    existing = full
+    while not os.path.isdir(existing):
+        up = os.path.dirname(existing)
+        if up == existing:
+            break
+        existing = up
+    drive, rest = os.path.splitdrive(full)
+    parts = [p for p in re.split(r"[\\/]", rest) if p]
+    here = drive + os.sep
+    swaps: "list[tuple[str, str]]" = []
+    whole = True
+    first = None
+    for part in parts:
+        step = os.path.join(here, part)
+        if os.path.exists(step):
+            here = step
+            continue
+        near = _near_name(part, here)
+        if near is None:
+            whole = False
+            break
+        swaps.append((part, near))
+        here = os.path.join(here, near)
+        if first is None:
+            first = here
+    # A CHAIN OF SWAPS IS OFFERED ONLY WHEN IT LANDS. Measured on this machine:
+    # #91's K=2 cwd (the home as `nibor11896`, then `/work/git/work-portfolio`)
+    # swaps the home, then `work` for an unrelated `Work` beside it, then stops -- a second guess stacked
+    # on the first, pointing at a folder the call never meant. When the whole
+    # path does not resolve, the hint stops at the FIRST swap, which is the
+    # one the evidence carries.
+    if swaps and not whole:
+        here, swaps = first, swaps[:1]
+    return {"existing": existing, "fixed": here if swaps else None,
+            "swaps": swaps, "whole": bool(swaps) and whole}
+
+
+def near_miss_hint(path: str) -> str:
+    """The lines a refusal appends for a path that does not exist, or ""."""
+    miss = path_near_miss(path)
+    if not miss:
+        return ""
+    lines = []
+    if miss["fixed"]:
+        said = ", ".join("`%s` is `%s` here" % pair for pair in miss["swaps"])
+        if miss["whole"]:
+            lines.append("did you mean: %s  (%s)" % (miss["fixed"], said))
+        else:
+            lines.append("closest existing: %s  (%s)" % (miss["fixed"], said))
+    elif os.path.dirname(miss["existing"]) != miss["existing"]:
+        # A filesystem root as "nearest" says nothing the path did not.
+        lines.append("nearest existing directory: %s" % miss["existing"])
+    return "\n".join(lines)
+
+
+def cwd_refusal(cwd: "str | None") -> "str | None":
+    """#221: the result for a run_command whose `cwd` is no directory.
+
+    ANSWERED BEFORE ANYTHING RUNS AND BEFORE ANYONE IS ASKED. Until here a
+    missing cwd went to Popen and came back as the OS's `[Errno 2]`, which
+    names the wrong path and nothing else; and #144's guard, reading the same
+    cwd as an outside path, would first have put it on an approval card -- a
+    question to the user about a directory that does not exist, for a call
+    that could not have run whatever they answered. The answer names the
+    working area (where an omitted cwd runs) and the near miss, so the model
+    can correct in one round instead of spending one on `pwd`, which is what
+    it did after all five measured cases.
+
+    None for no cwd or an existing directory. The same expansion the tool
+    uses (`~`, then `_rooted`), so what is checked is what would run.
+    """
+    if not isinstance(cwd, str) or not cwd:
+        return None
+    where = _rooted(os.path.expanduser(cwd))
+    if os.path.isdir(where):
+        return None
+    if os.path.exists(where):
+        head = "error: cwd is a file, not a directory: %s" % where
+    else:
+        head = "error: no such directory: %s" % where
+    lines = [head + " -- the command did not run."]
+    hint = near_miss_hint(where)
+    if hint:
+        lines.append(hint)
+    root = get_root()
+    if root:
+        lines.append("working area: %s -- omit cwd to run there." % root)
+    else:
+        lines.append("Omit cwd to run in the current directory, or pass one "
+                     "that exists.")
+    return "\n".join(lines)
+
+
+def run_command_cwd_refusal(arguments: str) -> "str | None":
+    """`cwd_refusal` for one call's raw arguments -- None when they do not parse
+    (the tool call then fails on its own terms, as before)."""
+    try:
+        args = json.loads(arguments or "{}")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(args, dict):
+        return None
+    return cwd_refusal(args.get("cwd"))
+
+
 # #144. The tokens the guard can see: drive-absolute (bare or quoted), UNC,
 # %VAR%-prefixed, and ..\ escapes. A bare relative name is NOT a token -- it
 # resolves inside the cwd by construction, and flagging it would turn every
@@ -8052,7 +8243,10 @@ def _mandates_in(text: str) -> "list[str]":
         if any(a <= hit.start() and hit.end() <= b for a, b in spans):
             continue                      # steht schon zitiert in der Liste
         base = hit.group(0).rstrip(".,;:!?\"')")
-        if not base:
+        # #221: a lone `/` in prose ("4120 / die 8237") is a
+        # separator, not a place -- neither a mandate nor a named-but-
+        # ambiguous prefix (see mandated_paths).
+        if not base or os.path.dirname(_resolve(base)) == _resolve(base):
             continue
         rest = text[hit.end():]
         if not rest[:1].isspace() or not rest.strip():
@@ -8168,8 +8362,24 @@ def mandated_paths(conversation: "Conversation") -> set[str]:
             continue
         for hit in _mandates_in(message_text(message.get("content") or "")):
             hit = hit.rstrip(".,;:!?\"')")
-            if hit:
-                found.add(_resolve(hit))
+            if not hit:
+                continue
+            here = _resolve(hit)
+            # #221. A FILESYSTEM ROOT IS NOT A PLACE ANYONE NAMED.
+            # Measured on the 2026-09-22 diorama session: the rollover note
+            # (a user-role message) carried "`substrate 4120 / package 11036
+            # / die 8237`", the POSIX branch read the lone `/` as a path,
+            # `die` as German prose after it, and `/` became a mandate --
+            # which releases EVERY path. From msg 2 on #144's card
+            # could not fire and `_outside_root` could not refuse: the
+            # invented cwd (`nibor11896` for the home + `/three-staging`) went
+            # straight to Popen, and msg 69's write_file to `/\n` + that home
+            # went to the disk and died on `Permission denied`, not on the
+            # fence. Naming a whole drive is naming no folder; the user who
+            # means one names it.
+            if os.path.dirname(here) == here:
+                continue
+            found.add(here)
     return found
 
 
@@ -8220,9 +8430,13 @@ def _outside_root(path: str) -> str | None:
                "directory nor named anywhere in this conversation by the user. Do not "
                "reach it by other means either. Write inside the root, or ask for the "
                "path you need and let the user name it.")
+    # #221: A PATH OUTSIDE THAT DOES NOT EXIST is most often the
+    # home with a wrong digit (see NEAR_MISS_SCAN) -- the refusal then says
+    # which one exists, so the retry does not re-type the same invention.
+    hint = near_miss_hint(resolved)
     return (f"error: refusing to write outside the working directory.\n"
             f"  root: {_ROOT}\n"
-            f"  path: {resolved}\n" + why)
+            f"  path: {resolved}\n" + why + ("\n" + hint if hint else ""))
 
 
 def escaped_the_working_area(name: str) -> bool:
@@ -9170,6 +9384,12 @@ def tool_read_file(path: str, start_line: int | None = None, end_line: int | Non
             near = []
         if near:
             return f"error: no such file: {path}\ndid you mean: {', '.join(near)}"
+        # #221: the stem rule above needs the parent to exist; a
+        # parent that does not is the invented-directory case, and gets the
+        # same near-miss answer run_command's cwd gets.
+        hint = near_miss_hint(path) if not os.path.isdir(parent) else ""
+        if hint:
+            return f"error: no such file: {path}\n{hint}"
         return f"error: no such file: {path} (use find_files or list_dir to locate it)"
     except IsADirectoryError:
         return f"error: {path} is a directory -- use list_dir"
@@ -9298,7 +9518,8 @@ def tool_list_dir(path: str = ".", **_) -> str:
     try:
         entries = sorted(os.listdir(path))
     except FileNotFoundError:
-        return f"error: no such directory: {path}"
+        hint = near_miss_hint(path)                 # #221
+        return f"error: no such directory: {path}" + ("\n" + hint if hint else "")
     except NotADirectoryError:
         return f"error: {path} is a file -- use read_file"
     except OSError as exc:
@@ -9601,7 +9822,14 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
     # same split that turned `write_file("x")` into a refusal -- and #144's
     # guard was reading a command line whose bare names it believed to
     # "resolve inside the cwd by construction". They did. It was the wrong cwd.
-    cwd = _rooted(cwd) if cwd else get_root()
+    # #221: A CWD THAT IS NO DIRECTORY RUNS NOTHING, and says where
+    # the working area and the near miss are (cwd_refusal). `~` expands here
+    # because #144's guard expands it too: the approval card showed
+    # `/home/u/x` while the tool would have run in `<root>/~/x`.
+    refused = cwd_refusal(cwd)
+    if refused:
+        return refused
+    cwd = _rooted(os.path.expanduser(cwd)) if cwd else get_root()
     # The child does not inherit anything that looks like a secret (_child_env).
     try:
         # DAS KIND BEKOMMT KEINE TASTATUR (2026-08-29, live gefunden). Ein
@@ -17632,8 +17860,16 @@ def run_turn(
             # #98's mandate carries over: a path the USER spelled out is not
             # asked about -- the guard protects the inattentive user from the
             # model, never from their own typed address.
+            # #221: A CWD THAT DOES NOT EXIST IS ANSWERED HERE,
+            # before the card. Its path would otherwise stand on the card as
+            # an outside path -- a question about a place that is not there,
+            # for a call that runs nothing whatever the answer (cwd_refusal).
+            cwd_refused = (run_command_cwd_refusal(call["arguments"])
+                           if cut_why is None and call["name"] == "run_command"
+                           else None)
             outside = (run_command_boundary(call["arguments"])
-                       if call["name"] == "run_command" else [])
+                       if call["name"] == "run_command" and cwd_refused is None
+                       else [])
             outside = [p for p in outside
                        if not any(_inside(m, p) for m in _MANDATED)]
             # #156: `git_commit` and `git_push` join `outside` here rather than
@@ -17643,7 +17879,7 @@ def run_turn(
             # predicate: `stops_for` keeps git_push on at every level, lets
             # yolo silence the outside-path ask and the git_commit ask, and
             # leaves every other level exactly where #88 put it.
-            if (cut_why is None
+            if (cut_why is None and cwd_refused is None
                     and (stops_for(call["name"], mode, bool(outside))
                          and not remembered(call["name"], call["arguments"]))):
                 answer = "no"
@@ -17687,6 +17923,12 @@ def run_turn(
                 result, repeated = retry_capped(call["name"]), False
                 incidents.append("%s failed %d times with identical arguments "
                                  "and was capped" % (call["name"], RETRY_CAP))
+            elif cwd_refused is not None:
+                # #221: nothing ran and nobody was asked; the
+                # incident keeps the record on the user's side too.
+                result, repeated = cwd_refused, False
+                incidents.append("a run_command named a cwd that is not an "
+                                 "existing directory and did not run")
             elif cut_why is not None:
                 # #203: THE RECOVERY SIGNAL. The call never ran, the result
                 # says why and what to do instead, and the incident keeps a

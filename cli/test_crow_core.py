@@ -4004,6 +4004,219 @@ class RunCommandBoundaryTurnTests(TurnLoopCase):
                          "the guard asked about the path the user named")
 
 
+class CwdGuardTests(unittest.TestCase):
+    """#221: a run_command `cwd` that is no directory runs nothing
+    and says where the working area and the near miss are.
+
+    MEASURED 2026-09-22 over every stored session: 18 distinct run_command
+    calls carried a cwd, 5 named a home that is not there (`nibor11896` x3,
+    `nibor11899` x2 for `nibor1896`), and each came back as the OS's
+    `[Errno 2] No such file or directory: '<the wrong path>'` -- the invented
+    string twice in the history, the real one nowhere. The layout below is
+    that machine in miniature: `base/nibor1896/Projects/diorama` is the
+    working area, the home is `base/nibor1896`."""
+
+    def setUp(self):
+        self.base = os.path.realpath(tempfile.mkdtemp(prefix="crow-cwd-"))
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.home = os.path.join(self.base, "nibor1896")
+        self.root = os.path.join(self.home, "Projects", "diorama")
+        os.makedirs(os.path.join(self.root, "src"))
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+
+    def wrong(self, *rest):
+        return os.path.join(self.base, "nibor11896", *rest)
+
+    def test_the_invented_home_does_not_run_and_names_the_real_one(self):
+        """The 2026-09-22 cleantest shape: the whole path right but the home."""
+        marker = os.path.join(self.base, "ran")
+        out = crow_core.tool_run_command("touch %s" % marker,
+                                         cwd=self.wrong("Projects", "diorama"))
+        self.assertFalse(os.path.exists(marker), "the command ran")
+        self.assertTrue(out.startswith("error: no such directory: "), out)
+        self.assertIn("did you mean: %s" % self.root, out)
+        self.assertIn("`nibor11896` is `nibor1896` here", out)
+        self.assertIn("working area: %s" % self.root, out)
+        self.assertNotIn("Errno", out)
+
+    def test_an_invented_tail_stops_at_the_first_swap(self):
+        """The live K=2 shape (the home as `nibor11896`, then `/three-staging`): the home is
+        a near miss, the rest is invented. The hint names the real home and no
+        second guess stacked on it."""
+        os.makedirs(os.path.join(self.home, "Work"))
+        out = crow_core.cwd_refusal(self.wrong("work", "git", "portfolio"))
+        self.assertIn("closest existing: %s " % self.home, out)
+        self.assertNotIn("Work", out, "a second swap was stacked on the first")
+        self.assertNotIn("did you mean", out)
+
+    def test_two_equally_close_names_are_not_a_guess(self):
+        os.makedirs(os.path.join(self.base, "nibor11897"))   # also one edit away
+        out = crow_core.cwd_refusal(self.wrong("x"))
+        self.assertNotIn("did you mean", out)
+        self.assertNotIn("closest existing", out)
+        self.assertIn("nearest existing directory: %s" % self.base, out)
+
+    def test_a_file_as_cwd_is_refused_as_a_file(self):
+        path = os.path.join(self.root, "index.html")
+        open(path, "w").close()
+        out = crow_core.tool_run_command("echo hi", cwd=path)
+        self.assertTrue(out.startswith("error: cwd is a file, not a directory"), out)
+
+    def test_an_existing_cwd_still_runs(self):
+        """POSITIVE CONTROL, absolute and relative (#177's ground)."""
+        cmd = "cd" if crow_platform.IS_WINDOWS else "pwd"
+        self.assertIn(os.path.join(self.root, "src"),
+                      crow_core.tool_run_command(cmd, cwd="src"))
+        self.assertIn(self.home, crow_core.tool_run_command(cmd, cwd=self.home))
+        self.assertIsNone(crow_core.cwd_refusal(None))
+        self.assertIsNone(crow_core.cwd_refusal(""))
+
+    def test_a_relative_near_miss_is_named_inside_the_working_area(self):
+        out = crow_core.cwd_refusal("srx")
+        self.assertIn("did you mean: %s" % os.path.join(self.root, "src"), out)
+
+    def test_a_tilde_cwd_is_the_home_the_guard_already_saw(self):
+        """#144's guard expands `~` and the tool did not: the card showed the
+        home while the tool would have run in `<root>/~`."""
+        self.addCleanup(os.environ.__setitem__, "HOME", os.environ.get("HOME", ""))
+        self.addCleanup(os.environ.__setitem__, "USERPROFILE",
+                        os.environ.get("USERPROFILE", ""))
+        os.environ["HOME"] = os.environ["USERPROFILE"] = self.home
+        self.assertIsNone(crow_core.cwd_refusal("~"))
+        cmd = "cd" if crow_platform.IS_WINDOWS else "pwd"
+        self.assertIn(self.home, crow_core.tool_run_command(cmd, cwd="~"))
+
+    def test_windows_names_match_without_case(self):
+        """NTFS compares without case; so does the near miss, there only."""
+        self.addCleanup(setattr, crow_platform, "IS_WINDOWS",
+                        crow_platform.IS_WINDOWS)
+        crow_platform.IS_WINDOWS = True
+        self.assertEqual(crow_core._near_name("NIBOR11896", self.base),
+                         "nibor1896")
+        crow_platform.IS_WINDOWS = False
+        self.assertIsNone(crow_core._near_name("NIBOR11896", self.base))
+
+    def test_the_distance_counts_a_swap_of_two_digits_as_one(self):
+        self.assertEqual(crow_core._edits("nibor1986", "nibor1896", 2), 1)
+        self.assertEqual(crow_core._edits("nibor11899", "nibor1896", 2), 2)
+        self.assertEqual(crow_core._edits("src", "bin", 1), 2)
+
+    def test_a_short_name_takes_one_edit_only(self):
+        os.makedirs(os.path.join(self.root, "bin"))
+        self.assertIsNone(crow_core._near_name("sxx", self.root))
+
+    def test_read_file_under_an_invented_directory_names_the_real_file(self):
+        """#215's read tools answer the same question the cwd does."""
+        path = os.path.join(self.root, "src", "app.js")
+        open(path, "w").close()
+        out = crow_core.tool_read_file(self.wrong("Projects", "diorama", "src", "app.js"))
+        self.assertIn("did you mean: %s" % path, out)
+        out = crow_core.tool_list_dir(self.wrong("Projects"))
+        self.assertIn("did you mean: %s" % os.path.join(self.home, "Projects"), out)
+
+    def test_read_file_keeps_its_stem_rule(self):
+        """NEGATIVE PROBE: an existing parent still answers by stem, as before."""
+        open(os.path.join(self.root, "src", "a.cpp"), "w").close()
+        out = crow_core.tool_read_file(os.path.join(self.root, "src", "a.c"))
+        self.assertIn("did you mean: a.cpp", out)
+
+    def test_a_write_outside_to_an_invented_home_says_which_exists(self):
+        out = crow_core.tool_write_file(self.wrong("x.js"), "1")
+        self.assertIn("refusing to write outside", out)
+        self.assertIn("closest existing: %s" % self.home, out)
+
+    def test_the_boundary_is_unchanged_for_the_run_command_guard(self):
+        """The cwd refusal sits BESIDE #144, not inside it: the boundary
+        still lists the path, the loop decides which answer comes first."""
+        args = json.dumps({"command": "ls", "cwd": self.wrong()})
+        self.assertTrue(crow_core.run_command_boundary(args))
+        self.assertTrue(crow_core.run_command_cwd_refusal(args))
+        self.assertIsNone(crow_core.run_command_cwd_refusal("{not json"))
+
+
+class FilesystemRootIsNoMandateTests(unittest.TestCase):
+    """#221: a lone `/` in a user-role message mandated `/`, and a
+    mandate on `/` releases every path. Measured on the 2026-09-22 diorama
+    session: the rollover note's "`substrate 4120 / package 11036 / die
+    8237`" did it (`die` reads as German prose after a path), so the
+    invented cwd went to Popen unasked and msg 69's write to
+    `/\\n` + the invented home reached the disk."""
+
+    def setUp(self):
+        self.addCleanup(crow_core._AMBIGUOUS.clear)
+
+    def test_a_slash_in_prose_is_no_mandate(self):
+        said = _Said("## Build / verify commands (the working loop)\n"
+                     "substrate 4120 / package 11036 / die 8237")
+        self.assertEqual(crow_core.mandated_paths(said), set())
+        self.assertFalse(crow_core.named_but_ambiguous("/home/x"),
+                         "the lone slash became a named-but-ambiguous prefix")
+
+    def test_a_quoted_root_is_no_mandate_either(self):
+        root = "C:\\" if crow_platform.IS_WINDOWS else "/"
+        self.assertEqual(crow_core.mandated_paths(_Said('schreib nach "%s"' % root)),
+                         set())
+
+    def test_a_real_path_is_still_a_mandate(self):
+        """POSITIVE CONTROL."""
+        here = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, here, True)
+        self.assertIn(here, crow_core.mandated_paths(_Said("schreib nach %s" % here)))
+
+
+class CwdGuardTurnTests(TurnLoopCase):
+    """The loop half: a cwd that does not exist is answered before the card,
+    at every level, and the refusal is what the history keeps."""
+
+    def setUp(self):
+        super().setUp()
+        crow_core.set_root(self.work)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(crow_core.forget_approvals)
+        self.asked = []
+
+    def _run(self, cwd, mode="auto", question="what is here?"):
+        def approve(name, args):
+            self.asked.append(name)
+            return "yes"
+
+        self.serve([{"content": "on it"},
+                    _call_delta("run_command",
+                                json.dumps({"command": "ls", "cwd": cwd}))])
+        self.serve([{"content": "done"}])
+        talk = self.conversation(question)
+        result = self.turn(talk, mode=mode, approve=approve)
+        tools = [m["content"] for m in talk.payload() if m.get("role") == "tool"]
+        return result, tools
+
+    def test_a_missing_outside_cwd_asks_nobody_and_runs_nothing(self):
+        """Before: #144 put the invented path on a card at auto, and a yes
+        sent it to Popen for the OS's Errno 2."""
+        result, tools = self._run(os.path.join(self.dir, "nowhere", "x"))
+        self.assertEqual(self.asked, [], "a card asked about a path that is not there")
+        self.assertTrue(tools[-1].startswith("error: no such directory"), tools)
+        self.assertIn("working area: %s" % self.work, tools[-1])
+        self.assertTrue(any("cwd" in i for i in result.incidents))
+
+    def test_yolo_does_not_report_an_outside_run_that_never_happened(self):
+        result, _ = self._run(os.path.join(self.dir, "nowhere"), mode="yolo")
+        self.assertFalse(any("ran unasked" in i for i in result.incidents),
+                         result.incidents)
+
+    def test_an_existing_outside_cwd_still_asks(self):
+        """POSITIVE CONTROL: #144 is untouched for a place that exists."""
+        self._run(self.dir)
+        self.assertEqual(self.asked, ["run_command"])
+
+    def test_a_slash_in_the_user_text_no_longer_disarms_the_card(self):
+        """The live disarm, with the live line: `/ die` mandated `/`."""
+        self._run(self.dir, question="by kind `substrate 4120 / package "
+                                     "11036 / die 8237`")
+        self.assertEqual(self.asked, ["run_command"],
+                         "a lone slash in prose released the whole disk")
+
+
 class TurnBudgetTests(TurnLoopCase):
     """#145: the operational caps of the harness table -- a token budget for
     the turn and a retry cap for one identical failing call. The round budget
