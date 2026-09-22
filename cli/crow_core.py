@@ -833,7 +833,8 @@ TOOLS = [
         "Open a local page or a URL in a real browser and get back a screenshot plus the "
         "console output. Use it to SEE what you built -- then read_image the screenshot. "
         "Do not drive a browser through run_command; this one is supervised and always "
-        "comes back.",
+        "comes back. A local file opens as file://, where module imports are blocked "
+        "-- render the build_bundle output, not the module source page.",
         {"path": dict(_STR, description="A file in the working area, or an http(s) URL."),
          "wait_ms": {"type": "integer",
                      "description": "How long the page may take to settle. Default 4000."},
@@ -875,6 +876,32 @@ TOOLS = [
         f"Killed after {COMMAND_TIMEOUT}s. {SHELL_HINT}",
         {"command": dict(_STR, description="The command line."),
          "cwd": dict(_STR, description="Working directory.")}, ["command"]),
+    # #212. THE DESCRIPTION CARRIES THE RULE THE TWO LOST AFTERNOONS DID NOT
+    # HAVE: the browser's file:// wall, the shape that gets through it, and the
+    # instruction not to build that shape by hand. The model plans from this
+    # text; a rule it first meets in a console error costs the afternoon.
+    _fn("build_bundle",
+        "Bundle a web app into ONE self-contained offline file with the esbuild "
+        "already on this machine (found for you: project node_modules, PATH, "
+        "deno/npx caches -- no network). A page opened from file:// CANNOT load "
+        "ES modules: the browser blocks every import between local files (CORS, "
+        "origin null), and import maps do not help. The offline shape is one "
+        "classic <script> holding the whole graph, bundled as an IIFE -- this "
+        "tool makes it. Never flatten or concatenate a library by hand. Entry "
+        "an .html page: its <script type=\"module\">, import map and local "
+        "stylesheets are bundled and inlined. Entry a .js/.ts module: out .js "
+        "gives the IIFE, out .html wraps it in a page. Bare imports ('three', "
+        "'three/addons/...') resolve from node_modules; shaders (.glsl/.vert/"
+        ".frag) import as text, images and models as data URLs. Edit the "
+        "sources and build again -- never patch the output.",
+        {"entry": dict(_STR, description="The page (.html) or the main module "
+                                         "(.js/.mjs/.ts)."),
+         "out": dict(_STR, description="The file to write, .html or .js. "
+                                       "Default: <entry>.bundle.html / .js."),
+         "global_name": dict(_STR, description="For a module entry: the global "
+                                               "its exports land on, e.g. APP."),
+         "minify": {"type": "boolean", "description": "Default true."}},
+        ["entry"]),
     # #156. GIT AS ITS OWN GROUP, NOT AS SHELL LINES. A `git push` through
     # run_command is one more "executing" ask with no context; these five carry
     # branch, paths and counts, run a fixed argv with no shell -- and the two
@@ -8583,6 +8610,606 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
                  + (f"\n[stderr]\n{err}" if err.strip() else ""))
 
 
+# ---------------------------------------------------------------- #212 -----
+# ONE OFFLINE PAGE IS ONE BUNDLE, AND THE BUNDLER WAS ON THE MACHINE.
+#
+# 2026-09-21 and 2026-09-22, two multi-hour sessions (476 and 763 requests):
+# "one self-contained offline HTML with the vendored three.js" died both times
+# hand-flattening a 2 MB split-build library with regex "bundlers" the model
+# wrote itself -- five ~2 MB variants on disk, each pass moving a SyntaxError
+# one name deeper, one closure scan dropping EffectComposer for ~15 rounds.
+# The wall it was fighting is Chromium's and correct: a page opened from
+# file:// has origin null, module scripts are fetched in CORS mode, and every
+# `import` between local files is refused ("Cross origin requests are only
+# supported for protocol schemes: ... http, https"). A classic `<script>` is
+# not subject to that rule. So the only shape that works offline is one
+# classic script with the whole graph in it -- which is what a bundler emits
+# with `--format=iife`, and what esbuild's own docs describe as "intended to
+# be run in the browser".
+#
+# The evening session proved the other half: `esbuild --bundle --format=iife
+# --global-name=APP --minify` on the full app graph gave 0 errors and 957 KB,
+# twice -- after most of 220 run_command calls spent rediscovering that
+# esbuild sat in the deno cache since 09-19 and in the project's node_modules.
+# This tool is that one call, found without searching.
+#
+# WHY A TOOL AND NOT A SENTENCE IN run_command. Knowing the flags is not the
+# expensive part; finding the binary is (the aborted predecessor went through
+# another program's node_modules under ~/.hermes), and assembling the page is
+# where #91's corruption bites -- every literal the model re-types into an
+# inlined page is one more chance for `mediumploat`. Here the bytes go from the
+# source files through esbuild into the page without passing the model's hand.
+#
+# BOUNDS, #207's shape. One clock for the whole build (every esbuild call draws
+# from it), a capture cap in the reader threads, a size cap on what gets
+# inlined, and the write fence `write_file` has. esbuild itself never touches
+# the network (no plugins run here), so a remote import is an error in the
+# result, not a download.
+BUNDLE_TIMEOUT = COMMAND_TIMEOUT
+# Far above the measured target (957 KB for three.js plus post-processing)
+# and far below what a browser tab still opens without a fight.
+BUNDLE_MAX_BYTES = 64 * 1024 * 1024
+# The entry page is read whole; a page that is already this large is not a
+# source page, it is a previous build.
+BUNDLE_PAGE_MAX_BYTES = 8 * 1024 * 1024
+# `--version` on a binary that answers in milliseconds; ten seconds is a cold
+# disk, anything past it is not an esbuild.
+BUNDLE_PROBE_TIMEOUT = 10
+# What an import of a non-JS file becomes. Text for shader sources -- the
+# three.js shape, and exactly what the sessions re-typed and corrupted
+# (`"a:"` -> `"a "`); data URLs for images, fonts and models, because a page
+# that fetches a sibling file is not self-contained and a data URL loads
+# through the same `loader.load(url)` call.
+BUNDLE_LOADERS = (
+    tuple((ext, "text") for ext in (".glsl", ".vert", ".frag", ".vs", ".fs",
+                                   ".wgsl", ".txt")) +
+    tuple((ext, "dataurl") for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp",
+                                      ".avif", ".svg", ".woff", ".woff2",
+                                      ".ttf", ".otf", ".glb", ".gltf", ".hdr",
+                                      ".exr", ".ktx2", ".bin", ".wasm")))
+# The mark a build leaves, so the next build may replace it without the
+# read-first guard -- see `_bundle_may_replace`.
+BUNDLE_MARK = "crow build_bundle"
+# #212: `--version` answers, per resolved path; a binary does not change its
+# version between two calls of one process.
+_ESBUILD_VERSION: "dict[str, str]" = {}
+
+
+def _esbuild_version(path: str) -> str | None:
+    """The version a candidate answers with, or None when it is no esbuild."""
+    real = os.path.realpath(path)
+    if real in _ESBUILD_VERSION:
+        return _ESBUILD_VERSION[real]
+    try:
+        done = subprocess.run([path, "--version"], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, errors="replace",
+                              timeout=BUNDLE_PROBE_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    answer = (done.stdout or "").strip()
+    if done.returncode != 0 or not re.fullmatch(r"\d+\.\d+\.\d+\S*", answer):
+        return None
+    _ESBUILD_VERSION[real] = answer
+    return answer
+
+
+def _version_key(version: str) -> tuple:
+    return tuple(int(n) for n in re.findall(r"\d+", version)[:3])
+
+
+def _esbuild_in_node_modules(folder: str) -> "list[str]":
+    """The esbuild binaries one node_modules holds, native package first.
+
+    `@esbuild/<platform>` IS THE BINARY ITSELF and needs no node; `esbuild/bin/
+    esbuild` is either the same binary (npm's optimised install copies it
+    there, measured in diorama-test) or a node shim; `.bin/esbuild` is a link
+    to one of the two. On Windows the package carries `esbuild.exe` at its top
+    level instead of under bin/.
+    """
+    import glob as _glob
+
+    nm = os.path.join(folder, "node_modules")
+    if not os.path.isdir(nm):
+        return []
+    found = sorted(_glob.glob(os.path.join(nm, "@esbuild", "*", "bin", "esbuild")))
+    found += sorted(_glob.glob(os.path.join(nm, "@esbuild", "*", "esbuild.exe")))
+    found += [os.path.join(nm, "esbuild", "bin", "esbuild"),
+              os.path.join(nm, ".bin", "esbuild")]
+    return found
+
+
+def _esbuild_caches() -> "list[tuple[str, str]]":
+    """(glob, label) for the caches a runtime fills without asking.
+
+    MEASURED ON THIS MACHINE 2026-09-22: deno keeps the binary it downloaded
+    for `deno bundle` as `~/.cache/deno/dl/esbuild-0.25.5-1/esbuild-linux-x64`
+    (dated 09-19 -- the one #212 names), and npx keeps its packages under
+    `~/.npm/_npx/<hash>/node_modules` (esbuild 0.28.1 there). Both honour an
+    override variable, which is read first.
+    """
+    home = os.path.expanduser("~")
+    if crow_platform.IS_WINDOWS:
+        local = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+        deno = os.environ.get("DENO_DIR") or os.path.join(local, "deno")
+        npm = os.environ.get("npm_config_cache") or os.path.join(local, "npm-cache")
+        exe = "esbuild.exe"
+    else:
+        default = (os.path.join(home, "Library", "Caches", "deno")
+                   if sys.platform == "darwin"
+                   else os.path.join(crow_platform.cache_dir(), "deno"))
+        deno = os.environ.get("DENO_DIR") or default
+        npm = os.environ.get("npm_config_cache") or os.path.join(home, ".npm")
+        exe = os.path.join("bin", "esbuild")
+    return [(os.path.join(deno, "dl", "esbuild-*", "esbuild-*"), "deno cache"),
+            (os.path.join(npm, "_npx", "*", "node_modules", "@esbuild", "*", exe),
+             "npx cache")]
+
+
+def find_esbuild(start: str) -> "tuple[str | None, str, str, list[str]]":
+    """(path, version, where it was found, everything searched).
+
+    THE ORDER IS A STATEMENT ABOUT WHOSE ESBUILD IT IS. `CROW_ESBUILD` pins one
+    for a measurement. Then the project's own, nearest node_modules first,
+    walking up the way node's resolution does -- a pinned project version is
+    the one its lockfile was written against. Then one on PATH, which somebody
+    installed on purpose. The runtime caches come last and the newest version
+    among them wins, because nobody chose any of them.
+    """
+    import glob as _glob
+
+    searched: "list[str]" = []
+
+    def _try(path: str, where: str) -> "tuple[str, str] | None":
+        if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+            return None
+        version = _esbuild_version(path)
+        return (version, where) if version else None
+
+    pinned = os.environ.get("CROW_ESBUILD")
+    if pinned:
+        searched.append("CROW_ESBUILD=%s" % pinned)
+        hit = _try(pinned, "CROW_ESBUILD")
+        if hit:
+            return pinned, hit[0], hit[1], searched
+    here = os.path.abspath(start if os.path.isdir(start) else os.path.dirname(start))
+    while True:
+        searched.append(os.path.join(here, "node_modules"))
+        for candidate in _esbuild_in_node_modules(here):
+            hit = _try(candidate, "project node_modules")
+            if hit:
+                return candidate, hit[0], hit[1], searched
+        parent = os.path.dirname(here)
+        if parent == here:
+            break
+        here = parent
+    searched.append("PATH")
+    on_path = shutil.which("esbuild")
+    if on_path:
+        hit = _try(on_path, "PATH")
+        if hit:
+            return on_path, hit[0], hit[1], searched
+    best: "tuple[str, str, str] | None" = None
+    for pattern, label in _esbuild_caches():
+        searched.append(pattern)
+        for candidate in sorted(_glob.glob(pattern))[:16]:
+            hit = _try(candidate, label)
+            if hit and (best is None or _version_key(hit[0]) > _version_key(best[1])):
+                best = (candidate, hit[0], label)
+    if best:
+        return best[0], best[1], best[2], searched
+    return None, "", "", searched
+
+
+def _bounded_run(argv: "list[str]", cwd: str, deadline: float,
+                 stdin_text: str | None = None) -> "tuple[int | None, str, str]":
+    """(exit code, stdout, stderr); None as the code means the clock or the
+    cap stopped it, and stderr then says which.
+
+    run_command's #207 contract without the shell: readers on threads, the
+    byte cap inside the reader, the clock in the poll loop. esbuild writes its
+    output to a file and its log is bounded by `--log-limit`, so neither bound
+    is expected to fire -- they are here because a binary found in a cache is
+    a binary nobody has vouched for.
+    """
+    env = {k: v for k, v in os.environ.items()
+           if not any(s in k.upper() for s in ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"))}
+    try:
+        proc = subprocess.Popen(
+            argv, cwd=cwd, env=env,
+            stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, errors="replace")
+    except OSError as exc:
+        return None, "", f"could not start {argv[0]}: {exc}"
+    drained = {"out": [], "err": [], "over": False}
+
+    def _drain(which: str) -> None:
+        pipe = proc.stdout if which == "out" else proc.stderr
+        held = 0
+        try:
+            while True:
+                chunk = pipe.read(65536)
+                if not chunk:
+                    break
+                drained[which].append(chunk)
+                held += len(chunk)
+                if held > COMMAND_CAPTURE_BYTES:
+                    drained["over"] = True
+                    proc.kill()
+                    break
+        except (OSError, ValueError):
+            pass
+
+    readers = [threading.Thread(target=_drain, args=(which,), daemon=True,
+                                name="build-bundle-%s" % which)
+               for which in ("out", "err")]
+    for reader in readers:
+        reader.start()
+    if stdin_text is not None:
+        try:
+            proc.stdin.write(stdin_text)
+            proc.stdin.close()
+        except OSError:
+            pass
+    timed_out = False
+    while proc.poll() is None and not drained["over"]:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            timed_out = True
+            break
+        try:
+            proc.wait(timeout=min(left, 0.25))
+        except subprocess.TimeoutExpired:
+            pass
+    if timed_out or drained["over"]:
+        proc.kill()
+    proc.wait()
+    for reader in readers:
+        reader.join(timeout=2)
+    for pipe in (proc.stdout, proc.stderr):
+        try:
+            pipe.close()
+        except OSError:
+            pass
+    if timed_out:
+        return None, "", f"the build exceeded {BUNDLE_TIMEOUT}s and was killed"
+    if drained["over"]:
+        return None, "", ("the bundler printed more than %d MiB and was killed"
+                          % (COMMAND_CAPTURE_BYTES >> 20))
+    return proc.returncode, "".join(drained["out"]), "".join(drained["err"])
+
+
+def _esbuild_argv(exe: str, entry: str | None, outfile: str, aliases: "dict[str, str]",
+                  minify: bool, global_name: str | None, sourcefile: str = "") -> "list[str]":
+    argv = [exe] + ([entry] if entry else []) + [
+        "--bundle", "--format=iife", "--platform=browser", "--charset=utf8",
+        "--outfile=" + outfile, "--log-level=warning", "--log-limit=20",
+        "--color=false"]
+    argv += ["--loader:%s=%s" % pair for pair in BUNDLE_LOADERS]
+    argv += ["--alias:%s=%s" % pair for pair in sorted(aliases.items())]
+    if minify:
+        argv.append("--minify")
+    if global_name:
+        argv.append("--global-name=" + global_name)
+    if sourcefile:
+        argv.append("--sourcefile=" + sourcefile)
+    return argv
+
+
+def _log_counts(log: str) -> "tuple[int, int]":
+    """(errors, warnings) in an esbuild log: one `[ERROR]`/`[WARNING]` head per
+    message, after a glyph that differs by terminal (measured: `✘` and `▲`)."""
+    errors = len(re.findall(r"^\S*\s*\[ERROR\]", log, re.M))
+    warnings = len(re.findall(r"^\S*\s*\[WARNING\]", log, re.M))
+    return errors, warnings
+
+
+def _html_attr(attrs: str, name: str) -> str | None:
+    match = re.search(r"""\b%s\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""" % name,
+                      attrs, re.I)
+    if not match:
+        return None
+    return next(g for g in match.groups() if g is not None)
+
+
+def _local_ref(ref: str | None) -> bool:
+    """A reference a file:// page would load from disk: not a URL, not data."""
+    if not ref:
+        return False
+    ref = ref.strip()
+    return not re.match(r"^(?:[a-z][a-z0-9+.-]*:|//|#)", ref, re.I)
+
+
+def _import_map_aliases(body: str, base: str) -> "tuple[dict[str, str], list[str]]":
+    """An import map's bare specifiers as esbuild aliases, plus what was skipped.
+
+    THE VENDORED-LIBRARY PAGE CARRIES ITS RESOLUTION HERE: `"three":
+    "./vendor/three.module.js"`, `"three/addons/": "./vendor/jsm/"`. esbuild
+    resolves an alias in its WORKING DIRECTORY, not beside the importing file
+    (esbuild docs, "alias"), so every target is made absolute against the page.
+    A trailing-slash prefix becomes the alias of the package path without it;
+    measured with esbuild 0.28.1: `three` and `three/addons` side by side, and
+    `three/addons/sub/a.js` lands in the longer one.
+    """
+    try:
+        imports = (json.loads(body) or {}).get("imports") or {}
+    except (ValueError, AttributeError):
+        return {}, ["an import map that is not valid JSON"]
+    aliases, skipped = {}, []
+    for key, target in imports.items():
+        if (not isinstance(target, str) or not _local_ref(target)
+                or key.startswith((".", "/")) or ":" in key):
+            skipped.append(key)
+            continue
+        aliases[key.rstrip("/")] = os.path.normpath(os.path.join(base, target.rstrip("/")))
+    return aliases, skipped
+
+
+def _bundle_may_replace(path: str) -> bool:
+    """May a build overwrite what stands at `path`?
+
+    A BUILD OUTPUT IS REGENERATED, A HAND-WRITTEN PAGE IS NOT. write_file's
+    read-first guard exists because an overwrite destroys what nobody looked
+    at; a previous build destroys nothing, its sources are still there. So a
+    file carrying BUNDLE_MARK near its top is replaced freely, anything else
+    -- the model's hand-written index.html -- only after a read, the rule
+    write_file keeps.
+    """
+    if not os.path.exists(path) or _key(path) in _READ:
+        return True
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(65536)
+    except OSError:
+        return False
+    return BUNDLE_MARK in head
+
+
+def _flag(value, default: bool) -> bool:
+    """A model sends `"false"` as often as `false`."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower() not in ("false", "0", "no", "off")
+    return default
+
+
+def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
+                      minify=True, **_) -> str:
+    """#212. Entry page or module -> one self-contained offline file."""
+    if not entry:
+        return "error: build_bundle needs an 'entry' -- an .html page or a .js/.ts module"
+    entry = _rooted(entry)
+    if not os.path.isfile(entry):
+        return f"error: no such file: {entry}"
+    stem, ext = os.path.splitext(entry)
+    ext = ext.lower()
+    page = ext in (".html", ".htm")
+    out = _rooted(out) if out else stem + (".bundle.html" if page else ".bundle.js")
+    out_html = os.path.splitext(out)[1].lower() in (".html", ".htm")
+    if page and not out_html:
+        return f"error: an .html entry builds an .html page; name out as one, not {out}"
+    if _resolve(out) == _resolve(entry):
+        return ("error: out is the entry itself -- the build would replace its own "
+                "source. Name another file.")
+    outside = _outside_root(out)
+    if outside:
+        return outside
+    if not _bundle_may_replace(out):
+        return (f"error: refusing to replace {out}: it is not an earlier build_bundle "
+                f"output and was not read in this turn. Read it first, or build to "
+                f"another name.")
+    minify = _flag(minify, True)
+    started = time.monotonic()
+    deadline = started + BUNDLE_TIMEOUT
+    exe, version, where, searched = find_esbuild(entry)
+    if not exe:
+        return ("error: no bundler found -- no esbuild answered in any of these "
+                "places:\n  " + "\n  ".join(searched) + "\nDo not flatten the "
+                "library by hand: tell the user a bundler is missing (a project "
+                "node_modules with esbuild is enough), or pin one with "
+                "CROW_ESBUILD=/path/to/esbuild.")
+    base = os.path.dirname(entry)
+    logs: "list[str]" = []
+    counts = [0, 0]
+    inlined: "list[str]" = []
+    with tempfile.TemporaryDirectory(prefix="crow-bundle-") as scratch:
+        serial = [0]
+
+        def _build(src: str | None, aliases: "dict[str, str]", stdin_text: str | None = None,
+                   name: str = "") -> "tuple[str | None, str]":
+            """One esbuild run -> (js or None, css)."""
+            serial[0] += 1
+            outfile = os.path.join(scratch, "part%d%s" % (serial[0], ".css" if (
+                src or "").lower().endswith(".css") else ".js"))
+            argv = _esbuild_argv(exe, src, outfile, aliases, minify,
+                                 None if page else (global_name or None), name)
+            code, _stdout, log = _bounded_run(argv, base, deadline, stdin_text)
+            errors, warnings = _log_counts(log)
+            if code is None:
+                errors = max(errors, 1)
+            counts[0] += errors
+            counts[1] += warnings
+            if log.strip():
+                logs.append(log.strip())
+            if code != 0 or not os.path.isfile(outfile):
+                if code not in (None, 0) and not errors:
+                    counts[0] += 1
+                return None, ""
+            with open(outfile, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+            css_file = os.path.splitext(outfile)[0] + ".css"
+            css = ""
+            if outfile.endswith(".js") and os.path.isfile(css_file):
+                with open(css_file, encoding="utf-8", errors="replace") as fh:
+                    css = fh.read()
+            return text, css
+
+        if not page:
+            js, css = _build(entry, {})
+            if js is None:
+                result = None
+            elif out_html:
+                result = ("<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
+                          "<meta name=\"generator\" content=\"%s\">\n%s</head>\n<body>\n"
+                          "<script>\n%s</script>\n</body>\n</html>\n"
+                          % (BUNDLE_MARK, ("<style>\n%s</style>\n" % css) if css else "", js))
+                inlined.append("1 module graph (%s)" % os.path.basename(entry))
+            else:
+                result = "/* %s from %s */\n%s" % (BUNDLE_MARK, os.path.basename(entry), js)
+                if css:
+                    logs.append("note: the graph imports CSS (%d bytes); a .js out cannot "
+                                "carry it -- build to an .html out to inline it" % len(css))
+        else:
+            if os.path.getsize(entry) > BUNDLE_PAGE_MAX_BYTES:
+                return (f"error: {entry} is over {BUNDLE_PAGE_MAX_BYTES >> 20} MiB -- that "
+                        f"is a built page, not a source page. Bundle from the source.")
+            with open(entry, encoding="utf-8", errors="replace") as fh:
+                html = fh.read()
+            script_rx = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.I | re.S)
+            aliases: "dict[str, str]" = {}
+            for attrs, body in script_rx.findall(html):
+                if (_html_attr(attrs, "type") or "").lower() == "importmap":
+                    found, skipped = _import_map_aliases(body, base)
+                    aliases.update(found)
+                    inlined.append("1 import map (%d alias%s)"
+                                   % (len(found), "" if len(found) == 1 else "es"))
+                    if skipped:
+                        logs.append("note: import map entries left alone (not local "
+                                    "packages): " + ", ".join(skipped)[:300])
+            modules: "list[str]" = []
+            styles: "list[str]" = []
+            failed = [False]
+
+            def _script(match) -> str:
+                attrs, body = match.group(1), match.group(2)
+                kind = (_html_attr(attrs, "type") or "").lower()
+                src = _html_attr(attrs, "src")
+                if kind == "importmap":
+                    return ""
+                if kind != "module":
+                    if not _local_ref(src):
+                        return match.group(0)
+                    path = os.path.join(base, src.split("?")[0].split("#")[0])
+                    try:
+                        with open(path, encoding="utf-8", errors="replace") as fh:
+                            text = fh.read()
+                    except OSError as exc:
+                        logs.append(f"error: could not read the classic script {src}: {exc}")
+                        counts[0] += 1
+                        failed[0] = True
+                        return match.group(0)
+                    inlined.append("1 classic script (%s)" % src)
+                    return "<script>\n%s\n</script>" % re.sub(r"</(script)", r"<\\/\1",
+                                                              text, flags=re.I)
+                if src and not _local_ref(src):
+                    logs.append(f"note: the module {src} is remote and stays a network load")
+                    return match.group(0)
+                if src:
+                    path = os.path.join(base, src.split("?")[0].split("#")[0])
+                    js, css = _build(path, aliases)
+                    label = src
+                else:
+                    js, css = _build(None, aliases, body, "inline-module.js")
+                    label = "inline module"
+                if js is None:
+                    failed[0] = True
+                    return match.group(0)
+                # MODULE SCRIPTS ARE DEFERRED, CLASSIC ONES ARE NOT. A module in
+                # <head> runs after the document is parsed; the same code inlined
+                # there as a classic script would run before <canvas> exists. So
+                # every bundle moves to the end of <body>, in document order --
+                # the order and the moment a module would have had.
+                modules.append(js)
+                if css:
+                    styles.append(css)
+                inlined.append("1 module script (%s)" % label)
+                return ""
+
+            html = script_rx.sub(_script, html)
+
+            def _link(match) -> str:
+                attrs = match.group(0)
+                href = _html_attr(attrs, "href")
+                if "stylesheet" not in (_html_attr(attrs, "rel") or "").lower() \
+                        or not _local_ref(href):
+                    return attrs
+                css, _ = _build(os.path.join(base, href.split("?")[0].split("#")[0]), {})
+                if css is None:
+                    failed[0] = True
+                    return attrs
+                inlined.append("1 stylesheet (%s)" % href)
+                return "<style>\n%s</style>" % re.sub(r"</(style)", r"<\\/\1", css, flags=re.I)
+
+            html = re.sub(r"<link\b[^>]*>", _link, html, flags=re.I)
+            if failed[0]:
+                result = None
+            elif not modules and not inlined:
+                return (f"error: nothing to bundle in {entry} -- it has no module script, "
+                        f"import map, local script or local stylesheet. Point entry at the "
+                        f"page's module, or give the page a <script type=\"module\" src=...>.")
+            else:
+                if styles:
+                    block = "<style>\n%s</style>\n" % "\n".join(styles)
+                    head_end = re.search(r"</head\s*>", html, re.I)
+                    html = (html[:head_end.start()] + block + html[head_end.start():]
+                            if head_end else block + html)
+                tail = "".join("<script>\n%s</script>\n" % js for js in modules)
+                body_end = None
+                for body_end in re.finditer(r"</body\s*>", html, re.I):
+                    pass
+                html = (html[:body_end.start()] + tail + html[body_end.start():]
+                        if body_end else html + tail)
+                mark = '<meta name="generator" content="%s">' % BUNDLE_MARK
+                head = re.search(r"<head\b[^>]*>", html, re.I)
+                result = (html[:head.end()] + "\n" + mark + html[head.end():]
+                          if head else mark + "\n" + html)
+    took = time.monotonic() - started
+    errors, warnings = counts
+    log = "\n\n".join(logs)
+    tail = f"\n[log]\n{log}" if log else ""
+    tool = f"esbuild {version} ({where}: {exe})"
+    if result is None:
+        return _clip(f"error: the bundle did not build -- {errors} error(s), {warnings} "
+                     f"warning(s), nothing was written. {tool}, {took:.2f}s. Fix the "
+                     f"source files and build again; do not patch the output.{tail}")
+    data = result.encode("utf-8")
+    if len(data) > BUNDLE_MAX_BYTES:
+        return (f"error: the bundle is {len(data)} bytes, over the "
+                f"{BUNDLE_MAX_BYTES >> 20} MiB cap -- nothing was written. {tool}.")
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+        with open(out, "wb") as fh:
+            fh.write(data)
+    except OSError as exc:
+        return f"error: could not write {out}: {exc}"
+    _READ.add(_key(out))
+    # WHAT THE PAGE STILL LOADS FROM DISK, said rather than discovered in the
+    # browser: a leftover module script or local src is the file:// wall again.
+    left = []
+    if out_html:
+        text = result
+        if re.search(r"<script\b[^>]*\btype\s*=\s*[\"']?module", text, re.I):
+            left.append("a <script type=\"module\"> (blocked on file://)")
+        for tag in re.findall(r"<script\b[^>]*>|<link\b[^>]*>", text, re.I):
+            if tag[1:5].lower() == "link" and \
+                    "stylesheet" not in (_html_attr(tag, "rel") or "").lower():
+                continue
+            ref = _html_attr(tag, "src") or _html_attr(tag, "href")
+            if _local_ref(ref):
+                left.append(ref)
+    lines = [f"built {out} -- {len(data)} bytes, {errors} error(s), {warnings} "
+             f"warning(s), {took:.2f}s, {tool}"]
+    if inlined:
+        lines.append("inlined: " + "; ".join(inlined))
+    if left:
+        lines.append("warn: the page still loads from disk: " + ", ".join(left)[:400])
+    elif out_html:
+        lines.append("self-contained: no module script, no local file reference -- "
+                     "it opens from file:// as it is.")
+    return _clip("\n".join(lines) + tail)
+
+
 # ---------------------------------------------------------------- #156 -----
 # GIT AS A GROUP OF ITS OWN, AND WHY IT IS NOT `run_command "git ..."`.
 #
@@ -9797,6 +10424,7 @@ TOOL_IMPL = {
     "find_files": tool_find_files,
     "search_text": tool_search_text,
     "run_command": tool_run_command,
+    "build_bundle": tool_build_bundle,
     "git_status": tool_git_status,
     "git_diff": tool_git_diff,
     "git_log": tool_git_log,
@@ -9837,6 +10465,11 @@ TOOL_CLASS = {
     "append_file": "writing",
     "edit_file": "writing",
     "run_command": "executing",
+    # #212. `executing`, render_page's reasoning: it starts a process and
+    # writes a file. It replaces exactly the run_command lines a session used
+    # to find and drive esbuild, so it asks where those asked -- no level that
+    # asked before a shell stops asking because the shell got a name.
+    "build_bundle": "executing",
     # #96. A FOURTH CLASS, because neither of the three fits. Fetching destroys
     # nothing, so it is not `writing`; it starts no shell, so it is not
     # `executing`. But it is not `reading` either, and calling it that would be
@@ -13551,6 +14184,16 @@ def approval_scope(name: str, arguments: str) -> tuple[str, str] | None:
         # `git` and `rm` do not.
         return ("executing", command.split()[0].lower())
 
+    # #212: one fixed program with a fixed argv, and its write is fenced by
+    # the tool itself -- so an "always" can safely cover the tool, the way it
+    # covers one program under run_command. Its own key: it never releases
+    # `run_command esbuild ...` with arguments nobody saw.
+    if name == "build_bundle":
+        entry = args.get("entry")
+        if not isinstance(entry, str) or not entry.strip():
+            return None
+        return ("executing", "build_bundle")
+
     return None
 
 
@@ -14166,9 +14809,13 @@ _SEEN: dict[tuple, str] = {}
 # working tree as it stood before the commit the model just made. `github_connect`
 # is here for the same reason in time rather than in state: the answer changes
 # the moment somebody types the code on github.com.
+# #212: `build_bundle` is #93's run_command-after-edit_file case exactly. Edit a
+# source, build again with the same arguments -- the ordinary loop -- and a
+# cached answer would report the bundle from before the fix.
 NEVER_CACHED = frozenset({"run_command", "memory", "skill",
                           "git_status", "git_diff", "git_log",
-                          "git_commit", "git_push", "github_connect"})
+                          "git_commit", "git_push", "github_connect",
+                          "build_bundle"})
 READ_GATED = frozenset({"write_file", "edit_file"})
 
 

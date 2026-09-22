@@ -1721,10 +1721,13 @@ class ReleaseLevelTests(TurnLoopCase):
         # genau die run_command-Zeilen, mit denen das Modell sich vorher einen
         # Browser gebaut hat. Es hier nicht zu fuehren hiesse, einen Prozess
         # ohne Nachfrage zu starten, wo vorher gefragt wurde.
+        # `build_bundle` seit #212: executing wie render_page -- es startet
+        # esbuild und legt eine Datei an, und es ersetzt die run_command-Zeilen,
+        # mit denen das Modell esbuild vorher selbst gesucht und gefahren hat.
         self.assertEqual(asks["manual"],
-                         ["append_file", "edit_file", "render_page", "run_command",
-                          "write_file"])
-        self.assertEqual(asks["allowedit"], ["render_page", "run_command"])
+                         ["append_file", "build_bundle", "edit_file", "render_page",
+                          "run_command", "write_file"])
+        self.assertEqual(asks["allowedit"], ["build_bundle", "render_page", "run_command"])
         self.assertEqual(asks["auto"], [])
 
     def test_an_unknown_tool_is_treated_as_the_strictest_class(self):
@@ -13740,6 +13743,295 @@ class SiblingArgumentNamesAreTakenAndSaidTests(unittest.TestCase):
         out = crow_core.run_tool("edit_file", json.dumps(
             {"path": self.path, "old": "scene", "new": "world"}))
         self.assertEqual(out, "replaced 1 occurrence in %s" % self.path)
+
+
+FAKE_ESBUILD = r'''#!__PY__
+# A stand-in for esbuild: answers --version, logs its argv, and does what
+# FAKE_MODE says -- write the outfile, fail like esbuild fails, or hang.
+import json, os, sys, time
+if sys.argv[1:] == ["--version"]:
+    print("__VERSION__")
+    sys.exit(0)
+log = os.environ.get("FAKE_ARGV_LOG")
+if log:
+    with open(log, "a") as fh:
+        fh.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(),
+                             "stdin": sys.stdin.read() if "--sourcefile=inline-module.js" in sys.argv else None}) + "\n")
+mode = os.environ.get("FAKE_MODE", "ok")
+if mode == "hang":
+    time.sleep(60)
+if mode == "error":
+    sys.stderr.write('✘ [ERROR] Could not resolve "three"\n\n    main.js:1:16:\n\n'
+                     '▲ [WARNING] "import.meta" is not available [empty-import-meta]\n\n')
+    sys.exit(1)
+out = [a.split("=", 1)[1] for a in sys.argv if a.startswith("--outfile=")][0]
+with open(out, "w") as fh:
+    fh.write("(()=>{console.log('bundled')})();\n" if out.endswith(".js") else "body{color:red}\n")
+if os.environ.get("FAKE_CSS") and out.endswith(".js"):
+    with open(out[:-3] + ".css", "w") as fh:
+        fh.write("canvas{display:block}\n")
+if mode == "warn":
+    sys.stderr.write('▲ [WARNING] "import.meta" is not available [empty-import-meta]\n')
+'''
+
+
+@unittest.skipIf(sys.platform == "win32", "the stand-in is a shebang script")
+class BuildBundleTests(unittest.TestCase):
+    """#212. Two multi-hour sessions died hand-flattening a split-build three.js
+    into one offline page, because a file:// page cannot load ES modules and
+    nothing told the model that -- or that esbuild sat in the deno cache and in
+    the project's node_modules the whole time. build_bundle finds the bundler,
+    runs it bounded, and inlines the IIFE; these pin each half with a stand-in
+    esbuild, and one case at the end runs the real one when the machine has it.
+    """
+
+    def setUp(self):
+        self._old = os.getcwd()
+        self._saved = (crow_core.BUNDLE_TIMEOUT, crow_core._esbuild_caches,
+                       os.environ.get("PATH"), os.environ.get("CROW_ESBUILD"))
+        self.root = tempfile.mkdtemp(prefix="crow-bundle-root-")
+        self.caches = tempfile.mkdtemp(prefix="crow-bundle-caches-")
+        self.empty = tempfile.mkdtemp(prefix="crow-bundle-path-")
+        self.argv_log = os.path.join(self.caches, "argv.jsonl")
+        crow_core.set_root(self.root)
+        os.chdir(self.root)
+        crow_core._ESBUILD_VERSION.clear()
+        crow_core._READ.clear()
+        # NOTHING OF THIS MACHINE LEAKS IN: an empty PATH and caches that
+        # point into this test's own directory.
+        os.environ["PATH"] = self.empty
+        os.environ.pop("CROW_ESBUILD", None)
+        crow_core._esbuild_caches = lambda: [
+            (os.path.join(self.caches, "deno", "dl", "esbuild-*", "esbuild-*"), "deno cache")]
+        os.environ["FAKE_ARGV_LOG"] = self.argv_log
+        for key in ("FAKE_MODE", "FAKE_CSS"):
+            os.environ.pop(key, None)
+
+    def tearDown(self):
+        os.chdir(self._old)
+        crow_core.set_root(None)
+        crow_core.BUNDLE_TIMEOUT, crow_core._esbuild_caches = self._saved[:2]
+        for name, value in (("PATH", self._saved[2]), ("CROW_ESBUILD", self._saved[3])):
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        for key in ("FAKE_ARGV_LOG", "FAKE_MODE", "FAKE_CSS"):
+            os.environ.pop(key, None)
+        crow_core._ESBUILD_VERSION.clear()
+        for folder in (self.root, self.caches, self.empty):
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def _fake(self, path: str, version: str = "0.28.2") -> str:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(FAKE_ESBUILD.replace("__PY__", sys.executable)
+                     .replace("__VERSION__", version))
+        os.chmod(path, 0o755)
+        return path
+
+    def _write(self, rel: str, text: str) -> str:
+        path = os.path.join(self.root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+    def _calls(self) -> list:
+        if not os.path.exists(self.argv_log):
+            return []
+        with open(self.argv_log, encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh]
+
+    def test_the_project_copy_wins_over_path_and_caches(self):
+        project = self._fake(os.path.join(self.root, "node_modules", "@esbuild",
+                                          "linux-x64", "bin", "esbuild"), "0.28.2")
+        self._fake(os.path.join(self.empty, "esbuild"), "0.99.0")
+        self._fake(os.path.join(self.caches, "deno", "dl", "esbuild-0.30.0-1",
+                                "esbuild-linux-x64"), "0.30.0")
+        entry = self._write("src/app.js", "export const x = 1;\n")
+        found, version, where, _ = crow_core.find_esbuild(entry)
+        self.assertEqual((found, version, where), (project, "0.28.2", "project node_modules"))
+
+    def test_path_comes_before_the_caches_and_the_newest_cache_wins(self):
+        on_path = self._fake(os.path.join(self.empty, "esbuild"), "0.20.0")
+        entry = self._write("app.js", "")
+        self.assertEqual(crow_core.find_esbuild(entry)[:3], (on_path, "0.20.0", "PATH"))
+        os.remove(on_path)
+        crow_core._ESBUILD_VERSION.clear()
+        self._fake(os.path.join(self.caches, "deno", "dl", "esbuild-0.25.5-1",
+                                "esbuild-linux-x64"), "0.25.5")
+        newer = self._fake(os.path.join(self.caches, "deno", "dl", "esbuild-0.27.0-1",
+                                        "esbuild-linux-x64"), "0.27.0")
+        self.assertEqual(crow_core.find_esbuild(entry)[:3], (newer, "0.27.0", "deno cache"))
+
+    def test_a_binary_that_does_not_answer_like_esbuild_is_passed_over(self):
+        liar = os.path.join(self.root, "node_modules", ".bin", "esbuild")
+        os.makedirs(os.path.dirname(liar))
+        with open(liar, "w", encoding="utf-8") as fh:
+            fh.write("#!%s\nprint('hello, I am not a bundler')\n" % sys.executable)
+        os.chmod(liar, 0o755)
+        self.assertIsNone(crow_core.find_esbuild(self._write("app.js", ""))[0])
+
+    def test_no_bundler_names_every_place_it_searched(self):
+        entry = self._write("app.js", "import * as THREE from 'three';\n")
+        out = crow_core.tool_build_bundle(entry, "app.html")
+        self.assertTrue(out.startswith("error: no bundler found"), out)
+        self.assertIn(os.path.join(self.root, "node_modules"), out)
+        self.assertIn("PATH", out)
+        self.assertIn(os.path.join(self.caches, "deno"), out)
+        self.assertIn("Do not flatten the library by hand", out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "app.html")))
+
+    def test_a_module_entry_runs_the_iife_argv_and_says_what_it_wrote(self):
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        entry = self._write("src/app.js", "export function boot() {}\n")
+        out = crow_core.tool_build_bundle("src/app.js", "build/app.iife.js", "APP")
+        target = os.path.join(self.root, "build", "app.iife.js")
+        size = os.path.getsize(target)
+        self.assertTrue(out.startswith("built %s -- %d bytes, 0 error(s), 0 warning(s)"
+                                       % (target, size)), out)
+        self.assertIn("esbuild 0.28.2 (project node_modules", out)
+        argv = self._calls()[0]["argv"]
+        self.assertEqual(argv[0], entry)
+        for flag in ("--bundle", "--format=iife", "--platform=browser", "--minify",
+                     "--global-name=APP", "--loader:.glsl=text", "--loader:.png=dataurl",
+                     "--log-limit=20"):
+            self.assertIn(flag, argv)
+        # esbuild writes into a scratch directory, never into the project:
+        # the fence is Python's write, not the bundler's.
+        outfile = [a for a in argv if a.startswith("--outfile=")][0][len("--outfile="):]
+        self.assertFalse(outfile.startswith(self.root), outfile)
+        with open(target, encoding="utf-8") as fh:
+            self.assertTrue(fh.readline().startswith("/* crow build_bundle from app.js"))
+        crow_core.tool_build_bundle("src/app.js", "build/app.iife.js", minify="false")
+        self.assertNotIn("--minify", self._calls()[1]["argv"])
+
+    def test_a_page_entry_inlines_modules_import_map_and_stylesheets(self):
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        os.environ["FAKE_CSS"] = "1"
+        self._write("style.css", "body{}\n")
+        self._write("main.js", "import * as THREE from 'three';\n")
+        self._write("index.src.html", (
+            "<!DOCTYPE html>\n<html><head>\n"
+            "<script type=\"importmap\">{\"imports\": {\"three\": \"./vendor/three.module.js\","
+            " \"three/addons/\": \"./vendor/jsm/\"}}</script>\n"
+            "<script type=\"module\" src=\"./main.js\"></script>\n"
+            "<link rel=\"stylesheet\" href=\"style.css\">\n"
+            "</head><body><canvas id=\"c\"></canvas>\n"
+            "<script type=\"module\">import './main.js';</script>\n</body></html>\n"))
+        out = crow_core.tool_build_bundle("index.src.html", "index.html")
+        self.assertIn("0 error(s)", out)
+        self.assertIn("1 import map (2 aliases)", out)
+        self.assertIn("1 module script (./main.js)", out)
+        self.assertIn("1 module script (inline module)", out)
+        self.assertIn("1 stylesheet (style.css)", out)
+        self.assertIn("self-contained", out)
+        with open(os.path.join(self.root, "index.html"), encoding="utf-8") as fh:
+            page = fh.read()
+        self.assertNotIn("type=\"module\"", page)
+        self.assertNotIn("importmap", page)
+        self.assertIn('<meta name="generator" content="crow build_bundle">', page)
+        # DEFERRED STAYS DEFERRED: both bundles sit after the canvas, before
+        # </body>, in document order.
+        self.assertLess(page.index("<canvas"), page.index("console.log('bundled')"))
+        self.assertEqual(page.count("console.log('bundled')"), 2)
+        self.assertLess(page.rindex("console.log('bundled')"), page.index("</body>"))
+        self.assertIn("canvas{display:block}", page)          # CSS the graph imported
+        calls = self._calls()
+        aliases = [a for a in calls[0]["argv"] if a.startswith("--alias:")]
+        self.assertEqual(aliases, [
+            "--alias:three=" + os.path.join(self.root, "vendor", "three.module.js"),
+            "--alias:three/addons=" + os.path.join(self.root, "vendor", "jsm")])
+        inline = [c for c in calls if c["stdin"] is not None][0]
+        self.assertEqual(inline["stdin"], "import './main.js';")
+        self.assertEqual(os.path.realpath(inline["cwd"]), os.path.realpath(self.root))
+
+    def test_errors_are_counted_and_nothing_is_written(self):
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        os.environ["FAKE_MODE"] = "error"
+        self._write("app.js", "import 'three';\n")
+        out = crow_core.tool_build_bundle("app.js", "app.html")
+        self.assertTrue(out.startswith("error: the bundle did not build -- 1 error(s), "
+                                       "1 warning(s), nothing was written"), out)
+        self.assertIn('Could not resolve "three"', out)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "app.html")))
+
+    def test_the_clock_kills_a_bundler_that_hangs(self):
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        os.environ["FAKE_MODE"] = "hang"
+        crow_core.BUNDLE_TIMEOUT = 1
+        self._write("app.js", "")
+        started = time.monotonic()
+        out = crow_core.tool_build_bundle("app.js")
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertIn("error: the bundle did not build", out)
+        self.assertIn("exceeded 1s and was killed", out)
+
+    def test_the_write_is_fenced_like_write_file(self):
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        self._write("app.js", "")
+        out = crow_core.tool_build_bundle("app.js", os.path.join("..", "escaped.js"))
+        self.assertIn("refusing to write outside", out)
+        out = crow_core.tool_build_bundle("app.js", "app.js")
+        self.assertIn("out is the entry itself", out)
+        self.assertEqual(self._calls(), [])                    # refused before any run
+
+    def test_a_hand_written_page_is_not_replaced_but_an_earlier_build_is(self):
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        self._write("app.js", "")
+        self._write("index.html", "<html>the hand-written page</html>\n")
+        out = crow_core.tool_build_bundle("app.js", "index.html")
+        self.assertIn("refusing to replace", out)
+        self.assertIn("Read it first", out)
+        self.assertIn("built", crow_core.tool_build_bundle("app.js", "dist.html"))
+        crow_core._READ.clear()                                 # the next turn
+        self.assertIn("built", crow_core.tool_build_bundle("app.js", "dist.html"))
+
+    def test_registered_executing_never_cached_and_the_rule_is_in_the_description(self):
+        self.assertIs(crow_core.TOOL_IMPL["build_bundle"], crow_core.tool_build_bundle)
+        self.assertEqual(crow_core.TOOL_CLASS["build_bundle"], "executing")
+        self.assertIn("build_bundle", crow_core.NEVER_CACHED)
+        self.assertEqual(crow_core.approval_scope("build_bundle", '{"entry": "a.html"}'),
+                         ("executing", "build_bundle"))
+        described = [t["function"]["description"] for t in crow_core.TOOLS
+                     if t["function"]["name"] == "build_bundle"][0]
+        for words in ("file:// CANNOT load ES modules", "IIFE",
+                      "Never flatten or concatenate a library by hand"):
+            self.assertIn(words, described)
+        render = [t["function"]["description"] for t in crow_core.TOOLS
+                  if t["function"]["name"] == "render_page"][0]
+        self.assertIn("build_bundle", render)
+
+    def test_the_real_esbuild_builds_an_offline_page_when_the_machine_has_one(self):
+        """ONE REAL RUN, skipped cleanly where no esbuild exists: the machine's
+        own discovery (real PATH, real caches), a split module graph with a
+        shader and an import map, and a page that must come out import-free."""
+        os.environ["PATH"] = self._saved[2] or ""
+        crow_core._esbuild_caches = self._saved[1]
+        exe = crow_core.find_esbuild(self.root)[0]
+        if not exe:
+            self.skipTest("no esbuild on this machine")
+        self._write("vendor/three.module.js",
+                    "import { REVISION } from './three.core.js';\nexport { REVISION };\n")
+        self._write("vendor/three.core.js", "export const REVISION = '180';\n")
+        self._write("shaders/wave.glsl", "precision mediump float; // a:b\n")
+        self._write("main.js", "import { REVISION } from 'three';\n"
+                               "import wave from './shaders/wave.glsl';\n"
+                               "document.title = REVISION + wave.length;\n")
+        self._write("index.src.html", (
+            "<html><head><script type=\"importmap\">{\"imports\": "
+            "{\"three\": \"./vendor/three.module.js\"}}</script>"
+            "<script type=\"module\" src=\"main.js\"></script></head>"
+            "<body></body></html>"))
+        out = crow_core.tool_build_bundle("index.src.html", "index.html")
+        self.assertIn("0 error(s), 0 warning(s)", out)
+        self.assertIn("self-contained", out)
+        with open(os.path.join(self.root, "index.html"), encoding="utf-8") as fh:
+            page = fh.read()
+        self.assertNotIn("import ", page)
+        self.assertIn("precision mediump float; // a:b", page)   # the shader, byte for byte
+        self.assertIn('"180"', page)
 
 
 class StorePathsGetNoStandingApprovalTests(unittest.TestCase):

@@ -80,6 +80,11 @@
    "why": "Local execution with a timeout and a secret-stripped environment. A surface that ships its own would be shipping its own idea of what a child process may see."
   },
   {
+   "name": "tool_build_bundle",
+   "kind": "def",
+   "why": "#212. The one place that decides which esbuild runs (project node_modules, PATH, then the runtime caches) and how a module graph becomes one offline page. A second copy would find a different bundler, or inline a module script as a classic one in <head> where the canvas does not exist yet."
+  },
+  {
    "name": "tool_git_status",
    "kind": "def",
    "why": "#156. The repository a surface reports on is the one the WORKING AREA is bound to, never the process's cwd -- the window's cwd is whatever the shortcut handed it. A surface with its own copy would be a surface with its own idea of which repository it is looking at."

@@ -51,3 +51,10 @@ describe something else. The real address is in the bar — Enter loads it live.
 
 See [tools](../reference/tools.md#render_page-175) for the flags, the caps and the measured
 cases.
+
+## Offline pages
+
+A page opened from a file cannot load ES modules — the browser refuses every `import` between
+local files. `build_bundle` turns the page and its modules into one self-contained file with the
+esbuild already on the machine; render that file, not the module source. See
+[tools](../reference/tools.md#build_bundle-212).

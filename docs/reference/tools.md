@@ -2,11 +2,11 @@
 
 ## Tools
 
-25 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured. `/tools` lists
+27 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured. `/tools` lists
 them in either surface, derived from the declarations themselves rather than written beside them.
 
-`read_file` `read_image` `render_page` `write_file` `edit_file` `list_dir` `find_files`
-`search_text` `run_command` `web_search` `fetch_url` `memory` `skill` `session_search`
+`read_file` `read_image` `render_page` `write_file` `append_file` `edit_file` `list_dir` `find_files`
+`search_text` `run_command` `build_bundle` `web_search` `fetch_url` `memory` `skill` `session_search`
 `delegate` `subtasks` `collect` `goal_set` `goal_step` `git_status` `git_diff` `git_log`
 `git_commit` `git_push` `github_connect`.
 
@@ -38,6 +38,36 @@ Measured 2026-08-31, Chrome 151.0.7922.175:
 
 `--run-all-compositor-stages-before-draw` does **not** rescue the hanging page. The result opens
 as a tab in the [browser panel](../user-guide/browser.md).
+
+### `build_bundle` (#212)
+
+`build_bundle(entry, out=<entry>.bundle.html|.js, global_name="", minify=true)` — a module
+graph as ONE offline file, built by the esbuild already on the machine.
+
+The rule it exists for: a page opened from `file://` has origin `null`, and Chromium fetches
+module scripts in CORS mode, so every `import` between local files is refused ("Cross origin
+requests are only supported for protocol schemes: … http, https"). Import maps do not change
+that. A classic `<script>` is not affected — so the offline shape is one classic script holding
+the whole graph, which is esbuild's `--format=iife`. The tool description says this to the
+model, together with "never flatten a library by hand".
+
+| | |
+|---|---|
+| class | `executing` — it starts a process and writes a file; an "always" is keyed to the tool, never to `run_command esbuild` |
+| entry `.html` | every `<script type="module">` (`src` or inline) bundled and inlined at the end of `<body>` in document order (modules are deferred; a classic script in `<head>` would run before the canvas exists); the import map becomes `--alias` pairs (targets made absolute: esbuild resolves an alias in its working directory); local stylesheets bundled into `<style>`; local classic scripts inlined as they are |
+| entry `.js/.mjs/.ts` | `out` `.js` → the IIFE (`global_name` names its exports); `out` `.html` → the IIFE wrapped in a minimal page |
+| argv | `--bundle --format=iife --platform=browser --charset=utf8 --log-level=warning --log-limit=20`, `--minify` by default, text loader for `.glsl .vert .frag .vs .fs .wgsl .txt`, data URLs for images, fonts, `.glb .gltf .hdr .exr .ktx2 .bin .wasm` |
+| esbuild, in order | `CROW_ESBUILD`; `node_modules` walking up from the entry (`@esbuild/<platform>`, `esbuild/bin`, `.bin`); `esbuild` on `PATH`; the deno cache (`$DENO_DIR/dl/esbuild-*/`) and the npx cache (`~/.npm/_npx/*/node_modules/@esbuild/`), newest version wins there. Every candidate must answer `--version` |
+| none found | the result lists every place searched and says not to hand-flatten |
+| caps | one clock for the whole build (`BUNDLE_TIMEOUT` = 120 s), the #207 capture cap in the reader threads, 64 MiB on the result, 8 MiB on the entry page |
+| write | esbuild writes to a temporary directory; Crow writes `out` behind `write_file`'s fence. A file carrying the `crow build_bundle` mark (a `<meta name="generator">` / a first-line comment) is replaced freely; any other existing file only after a read in the same turn |
+| result | path, bytes, errors, warnings, seconds, which esbuild and where from, what was inlined, and whether the page still loads anything from disk. On errors nothing is written and the esbuild log comes back |
+| cache | never answered from the repeat cache: an edit to a source changes the result of the same call |
+
+Measured 2026-09-22 on a copy of the diorama-test app graph (three.js 0.186 plus post-processing,
+esbuild 0.28.2 from its `node_modules`): 957,335 bytes as an IIFE and 957,410 bytes as a page,
+0 errors, 0 warnings, 0.07 s wall. The page rendered the scene through `render_page`; the
+module source page next to it logged the CORS refusal above.
 
 ### `read_image` (#170)
 
