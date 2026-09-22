@@ -6694,11 +6694,14 @@ const crow = {
   // legt die Fensterecke darauf -- das Hauptfenster ist rahmenlos, also ist
   // seine Ecke zugleich die Ecke dieser Flaeche.
   brPlace(){
-    // #238. NICHT WO DER COMPOSITOR DAS FENSTER HAT. `_pane_apply` kehrt auf
-    // GTK sofort um (Wayland kennt keine globalen Koordinaten), also war jeder
-    // Aufruf hier ein Bruecken-Thread fuer nichts -- und der Beobachter auf
-    // `#brbody` ruft ihn in jedem Frame eines Zugs oder einer Fenstergroesse.
-    if(!window.pywebview || NATIVEDRAG) return;
+    // #238 und #201 zusammen: T3 liess diesen Aufruf auf GTK aus, weil
+    // `_pane_apply` dort sofort umkehrte (Wayland kennt keine globalen
+    // Koordinaten). Seit #201 liegt das Panel aber IM Fenster, und
+    // der Bruecken-Aufruf unten setzt genau dieses Rechteck auf die eingebettete WebKitWebView
+    // (`_inwin.place`) -- ohne den Aufruf bliebe die Seite beim Ziehen stehen.
+    // Die Kosten haelt die Rechteck-Sperre unten klein: ein Aufruf pro
+    // tatsaechlich geaenderter Lage, nicht pro Layout.
+    if(!window.pywebview) return;
     const b=$("#brbody"); if(!b) return;
     const r=b.getBoundingClientRect();
     if(r.width<2 || r.height<2) return;

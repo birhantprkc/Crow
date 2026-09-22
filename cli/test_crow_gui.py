@@ -11439,7 +11439,11 @@ class TheWindowFollowsADragTests(unittest.TestCase):
         page = crow_gui.PAGE
         place = page[page.index("\n  brPlace(){"):]
         place = place[:place.index("pane_place")]
-        self.assertIn("NATIVEDRAG) return;", place)
+        # #201: on GTK the panel is embedded IN the window and `pane_place` moves
+        # it, so the call must survive NATIVEDRAG; the same-rectangle gate keeps
+        # it to one bridge call per real change.
+        self.assertNotIn("NATIVEDRAG) return;", place)
+        self.assertIn("if(key===this.brSent) return;", place)
 
     def test_the_window_grips_keep_one_resize_in_flight(self):
         page = crow_gui.PAGE
