@@ -384,8 +384,13 @@
   },
   {
    "id": "edit_file demands a read first",
-   "text": "before editing it, in this turn",
-   "why": "The second refusal. The words 'in this turn' are the scope E6 decided; a copy that says 'first' describes a rule nobody implemented."
+   "text": "before editing it, in this conversation",
+   "why": "The second refusal. The words 'in this conversation' are the scope #215-H decided (E6's 'in this turn' before it); a copy that says 'first' describes a rule nobody implemented."
+  },
+  {
+   "id": "a read file changed on disk",
+   "text": "it changed on disk since you read it",
+   "why": "#215-H. The refusal write_file and edit_file share when the file no longer carries the (mtime_ns, size) it was read with. A surface with its own wording would be a surface with its own idea of what 'read' still means."
   },
   {
    "id": "edit_file refuses an ambiguous match",

@@ -846,7 +846,8 @@ TOOLS = [
         ["path"]),
     _fn("write_file",
         "Write a file whole, creating directories as needed. An existing file must "
-        "have been read first in this session; otherwise the call is refused. For a "
+        "have been read in this conversation and be unchanged on disk since; "
+        "otherwise the call is refused. For a "
         "file too large for one call, write the skeleton here and grow it with "
         "append_file -- never shell-heredoc big content.",
         {"path": dict(_STR, description="Path to write."),
@@ -861,7 +862,8 @@ TOOLS = [
          "content": dict(_STR, description="Text to append at the end.")}, ["path", "content"]),
     _fn("edit_file",
         "Replace one exact occurrence of 'old' with 'new'. The file must have been read "
-        "first. Fails if 'old' is absent or appears more than once.",
+        "in this conversation and be unchanged on disk since. Fails if 'old' is "
+        "absent or appears more than once.",
         {"path": dict(_STR, description="File to edit."),
          "old": dict(_STR, description="Exact text to replace, unique in the file."),
          "new": dict(_STR, description="Replacement text.")}, ["path", "old", "new"]),
@@ -4029,6 +4031,13 @@ class Conversation:
         self._messages: list[dict[str, str]] = []
         if system:
             self._messages.append({"role": "system", "content": system})
+        # #215-H. WHICH CONTEXT THE READ-STATE BELONGS TO. A new token here, in
+        # `reset()` and in `restore()` -- the three places the model stops
+        # holding what it read -- and `adopt_read_state` empties `_READ` when
+        # the turn's conversation carries a token it has not seen. A token, not
+        # a clear: this object must not reach into module state itself, or a
+        # delegate's own Conversation would wipe the parent's reads.
+        self.read_epoch = object()
         if memory is not None:
             self.pin_memory(memory)
 
@@ -4134,6 +4143,9 @@ class Conversation:
         if len(self._messages) > (1 if self._system else 0):
             raise RuntimeError("restore() is for a fresh conversation, not a running one")
         self._messages = [dict(m) for m in messages]
+        # #215-H: the saved history may show reads, but not the files as they
+        # stand now -- a resumed chat reads again before it writes.
+        self.read_epoch = object()
         # #121. A PINNED CONVERSATION OWNS ITS HEAD, so the restored payload's
         # system message is brought into line with it. Not tidiness: the head is
         # what the next request will actually send and what the next save will
@@ -4216,6 +4228,7 @@ class Conversation:
         self._reviewed = 0.0
         self._system = self._base_system
         self._messages = []
+        self.read_epoch = object()      # #215-H: rollover and new chat alike
         if self._system:
             self._messages.append({"role": "system", "content": self._system})
 
@@ -5824,38 +5837,103 @@ class TurnCost:
 # that overwrites a file it never read destroys work it cannot see, and at this
 # decode rate nobody is watching closely enough to catch it.
 #
-# ITS LIFETIME IS ONE USER TURN (E6), and that is a decided scope rather than an
-# inherited one. Until E6 there was no clear() and no del anywhere, so "read in
-# this session" in fact meant "read in this PROCESS" -- true only for as long as
-# a process IS a session, which stops being true the moment a second surface can
-# close one session and open another without exiting.
+# ITS LIFETIME WAS ONE USER TURN (E6), and #215-H replaced it. Until E6 there
+# was no clear() and no del anywhere, so "read in this session" in fact meant
+# "read in this PROCESS" -- true only for as long as a process IS a session,
+# which stops being true the moment a second surface can close one session and
+# open another without exiting. E6 measured 2026-08-12 (3 rollover/session
+# files, 25 user turns, 31 read_file calls, 4 write_file/edit_file calls): 0
+# writes landed on a file last read in an earlier turn, so the turn scope was
+# free -- in a CLI where a person types every turn.
 #
-# THE THRESHOLD WAS WRITTEN DOWN BEFORE THE COUNT, so the number could decide
-# rather than confirm: null cases of a write landing on a file last read in an
-# EARLIER turn makes the turn scope free; one or more, and the scope is the
-# session. MEASURED 2026-08-12 over every rollover archive and session.json on
-# this machine -- 3 distinct files (one archive counted once, not twice: the
-# session-backup copy is byte-identical), 25 user turns, 31 read_file calls,
-# 4 write_file/edit_file calls -- RESULT 0. Every one of the four writes was
-# preceded by a read of the same file INSIDE ITS OWN TURN. So the turn scope
-# costs nothing that has ever actually happened here, and it is the narrower of
-# the two on a rule whose failure mode is losing someone's work.
+# #215. "IN THIS TURN" WAS TRUE AND NOT ENOUGH. A turn is one user message, and
+# in goal mode crow sends those itself -- "[Goal mode, step 9 still open.
+# Continue.]" and the spent-budget note both opened a new turn and emptied the
+# set. Measured 2026-09-22: 4 of the 15 read-rule refusals that session were
+# edits of src/app.js, read one such nudge earlier. The turn was a stand-in for
+# the question the rule actually asks -- DOES THE MODEL KNOW WHAT IT IS ABOUT
+# TO OVERWRITE -- and a nudge changes nothing about that answer.
 #
-# What the user pays for it is one extra refusal where there was none, and the
-# way out is the same one the rule already asks for on a file it has never seen:
-# read it again, then write. It is named in the refusal itself, which is why
-# both messages below say "in this turn" rather than just "first".
-_READ: set[str] = set()
+# #215-H (robin, 2026-09-22): THE STATE IS THE FILE'S, NOT THE CLOCK'S. Per
+# canonical path, the (mtime_ns, size) the file had when the model read it --
+# or when crow itself wrote it, since crow then knows the bytes. write_file and
+# edit_file go through only while the file on disk still carries that stamp:
+#
+#   never read in this conversation ....... refused, "read it first"
+#   read, and changed on disk since ....... refused, "read it again"
+#   read, and unchanged ................... allowed, across any number of turns
+#
+# The shape Claude Code's readFileState ("File has been modified since read")
+# and opencode's FileTime BLOCK on, both keyed on mtime; Cline's
+# FileContextTracker compares mtime too but only warns. Size rides along
+# because mtime alone misses a rewrite inside one timestamp tick, and a rewrite
+# that changes the length is the common one; same tick AND same size stays a
+# residual (see #215).
+#
+# THE SET EMPTIES WHERE THE MODEL STOPS HOLDING THE CONTENTS, not at a turn:
+# a rollover and a new chat (`Conversation.reset`), a resumed or switched chat
+# (`restore`, a new `Conversation`). Each gives the conversation a new
+# `read_epoch`; `adopt_read_state` empties the set when the turn's epoch is not
+# the one it holds. A delegation thread (`owns_turn_state=False`) never adopts,
+# so it neither inherits nor clobbers the parent's reads -- it runs no tools.
+#
+# NO LOCK, as before: the one writer is the turn's own worker thread, and a
+# dict's get/set/clear are single bytecode-level operations under the GIL.
+_READ: dict[str, tuple[int, int]] = {}
+_READ_EPOCH: "object | None" = None
 
-# #215. "IN THIS TURN" WAS TRUE AND NOT ENOUGH. A turn is one
-# user message, and in goal mode crow sends those itself -- "[Goal mode, step 9
-# still open. Continue.]" and the spent-budget note both open a new turn and
-# empty `_READ`. Measured 2026-09-22: 4 of the 15 read-rule refusals that
-# session were edits of a file the model HAD read, one such nudge earlier. The
-# refusal now says where the turn began, so a correct read is not mistaken for
-# a broken guard.
-TURN_SCOPE_HINT = (" (a turn starts at every user message, crow's own "
-                   "[Goal mode ...] nudges included)")
+# THE SCOPE, SAID IN THE REFUSAL ITSELF, so a correct read is not mistaken for
+# a broken guard (#215): what counts, and what starts it over.
+READ_SCOPE_HINT = (" (a read counts across turns and crow's own [Goal mode ...] "
+                   "nudges; a rollover, a new chat or a resumed one starts over)")
+
+# #215-H. The second refusal, written once for write_file and edit_file alike.
+READ_STALE = ("it changed on disk since you read it -- read it again, "
+              "then retry the call.")
+
+
+def _stamp(st: os.stat_result) -> "tuple[int, int]":
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _disk_stamp(path: str) -> "tuple[int, int] | None":
+    try:
+        return _stamp(os.stat(path))
+    except OSError:
+        return None
+
+
+def _mark_read(path: str, stamp: "tuple[int, int] | None" = None) -> None:
+    """The model now knows these bytes: record the stamp they carry.
+
+    A read passes the stamp it took from the OPEN handle before reading, so a
+    write that lands mid-read leaves a stamp older than the bytes -- the next
+    edit is refused and re-read, the safe direction. A write of crow's own is
+    stamped from disk after the handle closed."""
+    stamp = stamp or _disk_stamp(path)
+    if stamp is None:
+        _READ.pop(_key(path), None)
+    else:
+        _READ[_key(path)] = stamp
+
+
+def _read_state(path: str) -> "tuple":
+    """("unread",), ("changed", stamp) or ("fresh", stamp) -- #215-H's verdict,
+    and the value `_cache_key` carries, so a read between two identical calls
+    is a different call."""
+    stamp = _READ.get(_key(path))
+    if stamp is None:
+        return ("unread",)
+    return ("fresh" if _disk_stamp(path) == stamp else "changed", stamp)
+
+
+def adopt_read_state(conversation: "Conversation") -> None:
+    """Empty `_READ` if it belongs to another context than this conversation's."""
+    global _READ_EPOCH
+    epoch = getattr(conversation, "read_epoch", None)
+    if epoch is not _READ_EPOCH:
+        _READ.clear()
+        _READ_EPOCH = epoch
 
 
 def _key(path: str) -> str:
@@ -7349,7 +7427,8 @@ def tool_session_search(query: str, limit: int | None = None) -> str:
 # unrelated command in the same turn; it cannot under-report the #98 sequence,
 # and a marker that is wrong in the safe direction is the only kind worth having.
 #
-# Lifetime is `_READ`'s and `_SEEN`'s: ONE USER TURN, cleared in `run_turn`.
+# Lifetime is `_SEEN`'s: ONE USER TURN, cleared in `run_turn`. (`_READ` left
+# that pair with #215-H: it lives as long as the conversation's context.)
 _REFUSED: set[str] = set()
 
 
@@ -8555,6 +8634,7 @@ def tool_read_file(path: str, start_line: int | None = None, end_line: int | Non
         try:
             out, total = [], 0
             with open(path, encoding="utf-8", errors="replace") as fh:
+                stamp = _stamp(os.fstat(fh.fileno()))     # #215-H, before the bytes
                 for n, line in enumerate(fh, 1):
                     total = n
                     if lo <= n <= hi:
@@ -8569,11 +8649,12 @@ def tool_read_file(path: str, start_line: int | None = None, end_line: int | Non
         if not out:
             return f"error: {path} has no lines in {lo}-{hi}" + (
                 f" (the file has {total})" if total else "")
-        _READ.add(_key(path))
+        _mark_read(path, stamp)
         return _clip("\n".join(out))
 
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
+            stamp = _stamp(os.fstat(fh.fileno()))         # #215-H, before the bytes
             data = fh.read(MAX_TOOL_BYTES + 1)
     except FileNotFoundError:
         # Near-misses only, not the whole directory. Forty names came back on
@@ -8597,7 +8678,7 @@ def tool_read_file(path: str, start_line: int | None = None, end_line: int | Non
         return f"error: permission denied: {path}"
     except OSError as exc:
         return f"error: could not read {path}: {exc}"
-    _READ.add(_key(path))
+    _mark_read(path, stamp)
     return _clip(data)
 
 
@@ -8613,16 +8694,21 @@ def tool_write_file(path: str, content: str = "", **_) -> str:
     outside = _outside_root(path)
     if outside:
         return outside
-    if os.path.exists(path) and _key(path) not in _READ:
+    # #215-H: A FILE THAT DOES NOT EXIST HAS NOTHING TO LOSE, whatever the
+    # set says about an earlier version of it.
+    state = _read_state(path) if os.path.exists(path) else ("new",)
+    if state[0] == "unread":
         return (f"error: refusing to overwrite {path} without reading it first in "
-                f"this turn{TURN_SCOPE_HINT}. Call read_file on it, then write.")
+                f"this conversation{READ_SCOPE_HINT}. Call read_file on it, then write.")
+    if state[0] == "changed":
+        return f"error: refusing to overwrite {path}: {READ_STALE}"
     try:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(content)
     except OSError as exc:
         return f"error: could not write {path}: {exc}"
-    _READ.add(_key(path))
+    _mark_read(path)                                # #215-H: crow knows these bytes
     return f"wrote {len(content)} bytes to {path}"
 
 
@@ -8637,6 +8723,10 @@ def tool_append_file(path: str, content: str = "", **_) -> str:
     if outside:
         return outside
     existed = os.path.exists(path)
+    # #215-H: AN APPEND TO A FILE THE MODEL KNOWS KEEPS IT KNOWN -- it is what
+    # was read plus what was just sent. One it had not read stays unread:
+    # appending is not reading.
+    known = _read_state(path)[0] == "fresh"
     if content and not content.endswith("\n"):
         content += "\n"
     try:
@@ -8645,6 +8735,8 @@ def tool_append_file(path: str, content: str = "", **_) -> str:
             fh.write(content)
     except OSError as exc:
         return f"error: could not append to {path}: {exc}"
+    if known:
+        _mark_read(path)
     total = os.path.getsize(path)
     verb = "appended to" if existed else "created"
     return f"{verb} {path} (+{len(content)} bytes, file now {total} bytes)"
@@ -8675,9 +8767,12 @@ def tool_edit_file(path: str, old: str = "", new: "str | None" = None, **_) -> s
         return "error: edit_file needs 'old' -- to create a file use write_file"
     if new is None:
         return "error: edit_file needs 'new' -- pass new=\"\" to delete 'old'"
-    if _key(path) not in _READ:
-        return (f"error: read {path} before editing it, in this turn{TURN_SCOPE_HINT}. "
-                f"Call read_file on it, then edit.")
+    state = _read_state(path)                       # #215-H
+    if state[0] == "unread":
+        return (f"error: read {path} before editing it, in this conversation"
+                f"{READ_SCOPE_HINT}. Call read_file on it, then edit.")
+    if state[0] == "changed":
+        return f"error: refusing to edit {path}: {READ_STALE}"
     try:
         with open(path, encoding="utf-8") as fh:
             data = fh.read()
@@ -8693,6 +8788,9 @@ def tool_edit_file(path: str, old: str = "", new: "str | None" = None, **_) -> s
             fh.write(data.replace(old, new, 1))
     except OSError as exc:
         return f"error: could not write {path}: {exc}"
+    # #215-H: THE EDIT MOVED THE STAMP, and crow made the move -- without this
+    # the model's own second edit would read as someone else's change.
+    _mark_read(path)
     return f"replaced 1 occurrence in {path}"
 
 
@@ -9298,7 +9396,7 @@ def _bundle_may_replace(path: str) -> bool:
     -- the model's hand-written index.html -- only after a read, the rule
     write_file keeps.
     """
-    if not os.path.exists(path) or _key(path) in _READ:
+    if not os.path.exists(path) or _read_state(path)[0] == "fresh":
         return True
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -9406,8 +9504,8 @@ def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
         return outside
     if not _bundle_may_replace(out):
         return (f"error: refusing to replace {out}: it is not an earlier build_bundle "
-                f"output and was not read in this turn. Read it first, or build to "
-                f"another name.")
+                f"output, and it was not read in this conversation or changed on "
+                f"disk since. Read it first, or build to another name.")
     minify = _flag(minify, True)
     started = time.monotonic()
     deadline = started + BUNDLE_TIMEOUT
@@ -9597,7 +9695,7 @@ def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
             fh.write(data)
     except OSError as exc:
         return f"error: could not write {out}: {exc}"
-    _READ.add(_key(out))
+    _mark_read(out)
     # WHAT THE PAGE STILL LOADS FROM DISK, said rather than discovered in the
     # browser: a leftover module script or local src is the file:// wall again.
     left = []
@@ -15588,9 +15686,11 @@ _SEEN: dict[tuple, str] = {}
 # inputs is wrong whatever the text says, so the inputs go into the key:
 #
 #   run_command           depends on everything a shell can reach -> never cached
-#   write_file/edit_file  depend on `_READ` -> the key carries whether this
-#                         path has been read in this turn, so a read between two
-#                         identical calls IS a different call
+#   write_file/edit_file  depend on `_READ` -> the key carries the path's read
+#                         state (#215-H: unread, or the stamp and whether the
+#                         disk still matches it), so a read between two
+#                         identical calls IS a different call, and so is an
+#                         edit of crow's own -- it moved the stamp
 #   everything else       is a function of its arguments -> keyed as before
 #
 # That last line is what keeps the 2026-08-09 loop closed: it happened on
@@ -15649,8 +15749,8 @@ def _cache_key(name: str, arguments: str) -> tuple | None:
     path = canonical_arguments(name, args).get("path") if isinstance(args, dict) else None
     # A call whose path is missing or not a string cannot have been read, and it
     # is about to fail on its arguments -- which IS a function of its arguments,
-    # so caching it under `seen=False` is correct rather than a fallback.
-    seen = _key(path) in _READ if isinstance(path, str) else False
+    # so caching it under `("unread",)` is correct rather than a fallback.
+    seen = _read_state(path) if isinstance(path, str) else ("unread",)
     return (name, arguments, seen)
 
 
@@ -16332,9 +16432,10 @@ def run_turn(
     # no tools declared at all. See the parameter there for why `[]` would not do.
     send_tools: bool = True,
     # #143. TRUE FOR EVERY TURN A USER RUNS, FALSE ONLY ON A DELEGATION THREAD.
-    # The per-turn state this loop clears -- `_READ`, `_SEEN`, `_REFUSED`,
-    # `_MANDATED`, and the INTERRUPT flag -- is module state, owned by the ONE
-    # turn a surface runs at a time. A subtask's `run_turn` rides beside that
+    # The per-turn state this loop clears -- `_SEEN`, `_REFUSED`, `_MANDATED`,
+    # and the INTERRUPT flag -- is module state, owned by the ONE turn a
+    # surface runs at a time; so is `_READ`, which since #215-H this loop
+    # does not clear but ADOPTS (`adopt_read_state`). A subtask's `run_turn` rides beside that
     # turn on its own thread: clearing here would wipe the read-permissions of
     # the turn that spawned it mid-round, and consuming the INTERRUPT flag would
     # swallow a Ctrl+C meant for the turn the user is watching. A subtask still
@@ -16406,16 +16507,18 @@ def run_turn(
     # cleared for the CLI and never for anybody else, and every later turn of a
     # second surface would be answered out of a stale result, forever.
     #
-    # E6 ANSWERED THE LIFETIME QUESTION THIS LINE LEFT OPEN, and the answer put
-    # the second name beside it: ONE USER TURN, for both. The measurement behind
-    # that choice is written out where `_READ` is declared.
+    # E6 ANSWERED THE LIFETIME QUESTION THIS LINE LEFT OPEN, and put `_READ`
+    # beside it for one user turn. #215-H TOOK `_READ` BACK OUT: a read counts
+    # while the file still carries the stamp it was read with, and the set
+    # empties when the model stops holding the contents -- a rollover, a new or
+    # resumed chat -- which `adopt_read_state` learns from the conversation's
+    # `read_epoch`. The reasons are written out where `_READ` is declared.
     #
-    # THE THREE CLEARS ARE ONE STATEMENT GROUP AND MUST STAY ONE. Split them and
-    # the half-state is a live configuration rather than a mistake somebody has
-    # to make: `_READ` emptied without `_SEEN` refuses the write correctly while
-    # still handing back a tool result from the turn before, and `_SEEN` emptied
-    # without `_READ` lets a stale permission outlive the results that earned
-    # it. Neither is a state anyone would choose, and neither announces itself.
+    # THE HALF-STATE E6 FEARED IS GONE WITH THE PAIRING, not ignored. `_SEEN`
+    # emptied while `_READ` stays was "a stale permission outliving the results
+    # that earned it"; the permission is now the file's stamp, checked against
+    # the disk at every call, and `_cache_key` keys on that verdict -- so no
+    # cached answer can outlive a read-state change inside a turn either.
     #
     # `_REFUSED` JOINED THEM WITH #98 and fails the same way: left behind, the
     # next turn's first `run_command` is marked as an escape from a refusal that
@@ -16426,7 +16529,7 @@ def run_turn(
     # runs no tools -- none are declared on it -- so it needs none of the four,
     # and touching them from a second thread is the race the parameter names.
     if owns_turn_state:
-        _READ.clear()
+        adopt_read_state(conversation)      # #215-H: not a clear
         _SEEN.clear()
         _REFUSED.clear()
         # NOT CLEARED -- REBUILT, and from the conversation rather than this turn's
@@ -16924,6 +17027,12 @@ def run_turn(
             # der gerade weggeschnitten wurde; ohne sie im Kopf steht der
             # Stand nirgends (Messung 2026-09-22: drei Neu-Planungen).
             repin_head(conversation, get_root(), include_status=True)
+            # #215-H: THE REST OF THIS TURN WRITES FROM THE NOTE, NOT FROM
+            # WHAT WAS READ -- the reads went into the archive. `reset()` gave
+            # the conversation a new epoch; adopting it empties the set now,
+            # not at the next user line.
+            if owns_turn_state:
+                adopt_read_state(conversation)
             if archived:
                 if notes is not None:
                     del notes[:]

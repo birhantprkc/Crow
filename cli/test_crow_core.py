@@ -1096,8 +1096,10 @@ class TurnLoopCase(unittest.TestCase):
         self.work = os.path.join(self.dir, "work")
         os.makedirs(self.work)
 
-        self._read_before = set(crow_core._READ)
+        self._read_before = dict(crow_core._READ)
         self._seen_before = dict(crow_core._SEEN)
+        # #215-H: the epoch is a REBOUND name, so it is put back by setattr.
+        self.addCleanup(setattr, crow_core, "_READ_EPOCH", crow_core._READ_EPOCH)
         self._session_dir_before = crow_core.SESSION_DIR
         self._post_stream_before = crow_core._post_stream
         self.addCleanup(self._restore)
@@ -1450,6 +1452,226 @@ class MidTurnRolloverTests(TurnLoopCase):
         self._fills_the_window_after_one_tool_round()
         self.turn(talk, n_ctx=100, rollover_at=0.9, rolled=True, carry="the question")
         self.assertEqual(len(self.bodies), 1, "it asked the same question again")
+
+
+class ReadStateLivesWithTheContextTests(TurnLoopCase):
+    """#215-H: "already read" is the FILE's state, kept for the conversation.
+
+    Per path, the (mtime_ns, size) the file carried when the model read it or
+    crow wrote it. write_file/edit_file go through while the disk still shows
+    that stamp -- across any number of turns, crow's own goal nudges included
+    -- and the set empties only where the model stops holding the contents: a
+    rollover, a new chat, a resumed one. Measured 2026-09-22: 4 of 15 read-rule
+    refusals were edits of src/app.js read one nudge earlier.
+
+    EVERY BOUNDARY IS PINNED FROM BOTH SIDES, for E6's reason: "refused" alone
+    passes a rule that refuses always, "allowed" alone one that never does.
+    """
+
+    NUDGE = "[Goal mode, step 9 still open. Continue.]"
+
+    def setUp(self):
+        super().setUp()
+        self.path = os.path.join(self.work, "app.js")
+        self._put("const sea = createSea();\n")
+
+    def _put(self, text):
+        with open(self.path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+
+    def _text(self):
+        with open(self.path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def _reads(self):
+        return [_call_delta("read_file", json.dumps({"path": self.path}))]
+
+    def _edits(self, old="createSea", new="createOcean"):
+        return [_call_delta("edit_file", json.dumps(
+            {"path": self.path, "old": old, "new": new}))]
+
+    def _results(self, talk):
+        return [m["content"] for m in talk.payload() if m["role"] == "tool"]
+
+    def _read_in_a_turn(self, talk):
+        self.serve(self._reads()).serve([{"content": "read it"}])
+        self.turn(talk)
+
+    # ---- across turns: the nudge case, and what still refuses ---------------
+
+    def test_an_edit_one_goal_nudge_after_the_read_goes_through(self):
+        """THE MEASURED CASE. Red on 0e65d70: the nudge opened a turn and the
+        turn emptied the set."""
+        talk = self.conversation()
+        self._read_in_a_turn(talk)
+        talk.append("user", self.NUDGE)
+        self.serve(self._edits()).serve([{"content": "done"}])
+        self.turn(talk)
+        self.assertIn("replaced 1 occurrence", self._results(talk)[-1])
+        self.assertEqual(self._text(), "const sea = createOcean();\n")
+
+    def test_a_change_on_disk_between_read_and_edit_is_refused(self):
+        talk = self.conversation()
+        self._read_in_a_turn(talk)
+        self._put("const sea = createSea(); // the user's own line\n")
+        talk.append("user", self.NUDGE)
+        self.serve(self._edits()).serve([{"content": "I could not"}])
+        self.turn(talk)
+        said = self._results(talk)[-1]
+        self.assertIn("changed on disk since you read it -- read it again", said)
+        self.assertEqual(self._text(), "const sea = createSea(); // the user's own line\n")
+
+    def test_reading_again_lifts_it_and_the_same_call_is_not_replayed(self):
+        """The way out, and `_cache_key` carrying the stamp: the identical edit
+        after the second read is a NEW call, not the refusal handed back."""
+        talk = self.conversation()
+        self._read_in_a_turn(talk)
+        self._put("const sea = createSea(); // moved\n")
+        talk.append("user", self.NUDGE)
+        self.serve(self._edits()).serve(self._reads()).serve(self._edits())
+        self.serve([{"content": "done"}])
+        self.turn(talk)
+        results = self._results(talk)
+        self.assertIn("changed on disk", results[-3])
+        self.assertIn("replaced 1 occurrence", results[-1])
+        self.assertNotIn("you already called", results[-1])
+        self.assertEqual(self._text(), "const sea = createOcean(); // moved\n")
+
+    # ---- where it empties ---------------------------------------------------
+
+    def test_a_rollover_inside_the_turn_empties_it(self):
+        talk = self.conversation()
+        self.serve(self._reads(), {"prompt_n": 95, "predicted_n": 0})
+        self.serve(self._edits(), {"prompt_n": 1, "predicted_n": 0})
+        self.serve([{"content": "I could not"}], {"prompt_n": 1, "predicted_n": 0})
+        self.turn(talk, n_ctx=100, rollover_at=0.9, carry="the question")
+        self.assertIn("rolled", self.events.names)
+        self.assertIn("before editing it, in this conversation", self._results(talk)[-1])
+        self.assertEqual(self._text(), "const sea = createSea();\n")
+
+    def test_a_rollover_between_turns_empties_it(self):
+        """What both surfaces do before a turn: `roll_over` resets the
+        conversation, and the next turn adopts the fresh epoch."""
+        talk = self.conversation()
+        self._read_in_a_turn(talk)
+        self.assertIn(crow_core._key(self.path), crow_core._READ)
+        crow_core.roll_over(talk, "http://x/v1", 95, carry="go on")
+        self.serve(self._edits()).serve([{"content": "I could not"}])
+        self.turn(talk)
+        self.assertIn("before editing it", self._results(talk)[-1])
+        self.assertEqual(self._text(), "const sea = createSea();\n")
+
+    def test_a_new_chat_empties_it(self):
+        talk = self.conversation()
+        self._read_in_a_turn(talk)
+        talk.reset()                                     # /reset, the new-chat button
+        talk.append("user", "edit it")
+        self.serve(self._edits()).serve([{"content": "I could not"}])
+        self.turn(talk)
+        self.assertIn("before editing it", self._results(talk)[-1])
+
+    def test_a_resumed_chat_empties_it(self):
+        talk = self.conversation()
+        self._read_in_a_turn(talk)
+        resumed = crow_core.Conversation("SYS")
+        resumed.restore(talk.payload())                  # --resume, a chat switch
+        resumed.append("user", "edit it")
+        self.serve(self._edits()).serve([{"content": "I could not"}])
+        self.turn(resumed)
+        self.assertIn("before editing it", self._results(resumed)[-1])
+
+    def test_a_delegate_neither_inherits_nor_clobbers_it(self):
+        """`owns_turn_state=False` -- the subtask's own run_turn -- on its own
+        Conversation between two of the parent's turns."""
+        talk = self.conversation()
+        self._read_in_a_turn(talk)
+        before = (dict(crow_core._READ), crow_core._READ_EPOCH)
+        side = crow_core.Conversation()
+        side.append("user", "the delegated task")
+        self.serve([{"content": "the subtask's answer"}])
+        self.turn(side, execute_tools=False, send_tools=False, owns_turn_state=False)
+        self.assertEqual((dict(crow_core._READ), crow_core._READ_EPOCH), before)
+        self.assertIsNot(crow_core._READ_EPOCH, side.read_epoch)
+        talk.append("user", self.NUDGE)
+        self.serve(self._edits()).serve([{"content": "done"}])
+        self.turn(talk)
+        self.assertIn("replaced 1 occurrence", self._results(talk)[-1])
+
+
+class ReadStampTests(unittest.TestCase):
+    """#215-H at the tool layer: what moves the stamp, and what it catches."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-stamp-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(crow_core.set_root, crow_core.get_root())
+        crow_core.set_root(None)
+        before = dict(crow_core._READ)
+        self.addCleanup(crow_core._READ.update, before)
+        self.addCleanup(crow_core._READ.clear)
+        crow_core._READ.clear()
+        self.path = os.path.join(self.dir, "notes.txt")
+        self._put("alpha beta\n")
+
+    def _put(self, text):
+        with open(self.path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+
+    def _text(self):
+        with open(self.path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_crows_own_write_keeps_the_stamp_fresh(self):
+        fresh = os.path.join(self.dir, "new.txt")
+        self.assertIn("wrote", crow_core.tool_write_file(fresh, "one two\n"))
+        self.assertIn("replaced", crow_core.tool_edit_file(fresh, old="one", new="uno"))
+        # AND ITS OWN EDIT DOES TOO: a second edit is not somebody else's change.
+        self.assertIn("replaced", crow_core.tool_edit_file(fresh, old="two", new="dos!"))
+        self.assertIn("wrote", crow_core.tool_write_file(fresh, "whole again\n"))
+
+    def test_same_mtime_but_another_size_is_refused(self):
+        crow_core.tool_read_file(self.path)
+        st = os.stat(self.path)
+        self._put("alpha beta gamma\n")
+        os.utime(self.path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.assertEqual(os.stat(self.path).st_mtime_ns, st.st_mtime_ns)
+        out = crow_core.tool_edit_file(self.path, old="alpha", new="omega")
+        self.assertIn("changed on disk since you read it", out)
+        out = crow_core.tool_write_file(self.path, "x")
+        self.assertIn("refusing to overwrite", out)
+        self.assertIn("changed on disk since you read it", out)
+        self.assertEqual(self._text(), "alpha beta gamma\n")
+
+    def test_same_size_but_another_mtime_is_refused(self):
+        crow_core.tool_read_file(self.path)
+        st = os.stat(self.path)
+        os.utime(self.path, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+        self.assertIn("changed on disk",
+                      crow_core.tool_edit_file(self.path, old="alpha", new="omega"))
+        self.assertEqual(self._text(), "alpha beta\n")
+
+    def test_a_range_read_stamps_too(self):
+        crow_core.tool_read_file(self.path, start_line=1, end_line=1)
+        self.assertIn("replaced", crow_core.tool_edit_file(self.path, old="alpha", new="a"))
+
+    def test_an_append_keeps_a_known_file_known_and_unlocks_no_unknown_one(self):
+        crow_core.tool_read_file(self.path)
+        crow_core.tool_append_file(self.path, "gamma")
+        self.assertIn("replaced", crow_core.tool_edit_file(self.path, old="gamma", new="g"))
+        other = os.path.join(self.dir, "other.txt")
+        with open(other, "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        crow_core.tool_append_file(other, "y")
+        self.assertIn("before editing it",
+                      crow_core.tool_edit_file(other, old="x", new="z"))
+
+    def test_a_file_deleted_after_its_read_says_read_it_again(self):
+        crow_core.tool_read_file(self.path)
+        os.remove(self.path)
+        self.assertIn("changed on disk",
+                      crow_core.tool_edit_file(self.path, old="alpha", new="a"))
+        # A write CREATES -- nothing on disk to lose.
+        self.assertIn("wrote", crow_core.tool_write_file(self.path, "new\n"))
 
 
 class TheSeamKeepsTheRequestTests(TurnLoopCase):
@@ -11527,15 +11749,16 @@ class TheModelDelegatesSubtasksTests(unittest.TestCase):
     # ---- the race the parameter exists for
 
     def test_the_parent_turn_state_survives_a_subtask(self):
-        crow_core._READ.add("the-parents-read-permission")
+        crow_core._READ["the-parents-read-permission"] = (1, 1)
         try:
             self._serve()
             crow_core.tool_delegate(task="beside the turn")
             self._wait_settled("d1")
             self.assertIn("the-parents-read-permission", crow_core._READ)
             self.assertEqual(crow_core.SUBTASKS["d1"].status, "done")
-            # NEGATIVE: a turn that OWNS the state still clears it -- the guard
-            # protects the parent, it does not switch the clearing off.
+            # NEGATIVE: a turn that OWNS the state still empties it for a
+            # conversation it has not held (#215-H) -- the guard protects the
+            # parent, it does not switch the adoption off.
             conversation = crow_core.Conversation()
             conversation.append("user", "hi")
             crow_core.run_turn(conversation, base_url="http://x/v1", model="m",
@@ -14217,13 +14440,13 @@ class SiblingArgumentNamesAreTakenAndSaidTests(unittest.TestCase):
         self.assertNotIn("unknown argument", out)
         self.assertIn("// ---- water", self._text())
 
-    def test_the_replayed_call_unread_meets_the_read_rule_with_the_turn_named(self):
+    def test_the_replayed_call_unread_meets_the_read_rule_with_the_scope_named(self):
         """With the names resolved, the read rule is the right answer -- and it
-        now says where a turn begins (4 of the 15 refusals followed a read one
-        goal nudge earlier)."""
+        says what a read covers (4 of the 15 refusals followed a read one goal
+        nudge earlier; since #215-H such a read counts)."""
         out = crow_core.run_tool("edit_file", self._replay())
-        self.assertIn("before editing it, in this turn", out)
-        self.assertIn("[Goal mode ...] nudges included", out)
+        self.assertIn("before editing it, in this conversation", out)
+        self.assertIn("across turns and crow's own [Goal mode ...] nudges", out)
         self.assertIn("read_file", out)
 
     def test_the_anthropic_and_openhands_names_are_taken_too(self):
@@ -14658,7 +14881,7 @@ class BuildBundleTests(unittest.TestCase):
         self.assertIn("refusing to replace", out)
         self.assertIn("Read it first", out)
         self.assertIn("built", crow_core.tool_build_bundle("app.js", "dist.html"))
-        crow_core._READ.clear()                                 # the next turn
+        crow_core._READ.clear()                     # a rollover, a new chat
         self.assertIn("built", crow_core.tool_build_bundle("app.js", "dist.html"))
 
     def test_registered_executing_never_cached_and_the_rule_is_in_the_description(self):

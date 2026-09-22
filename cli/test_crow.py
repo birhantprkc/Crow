@@ -2680,8 +2680,11 @@ class ToolLayerCase(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="crow-tools-")
         self.addCleanup(shutil.rmtree, self.dir, True)
-        self._read_before = set(crow._READ)
+        self._read_before = dict(crow._READ)
         self._seen_before = dict(crow._SEEN)
+        # #215-H: the epoch the read-state belongs to is a REBOUND name in the
+        # core, so it goes back by setattr, like `_ROOT` goes back by set_root.
+        self.addCleanup(setattr, crow_core, "_READ_EPOCH", crow_core._READ_EPOCH)
         # #92 JOINS THE LIST, and it had to: `_ROOT` is the third piece of global
         # tool state, and unlike the two above it can be set by a case that never
         # touches a tool -- `SessionFormatGateTests` calls `repl()`, which binds
@@ -3416,8 +3419,8 @@ def _tool_call_delta(name, arguments, index=0, cid=None):
                             "function": {"name": name, "arguments": arguments}}]}
 
 
-class ReadScopeIsOneTurnTests(ToolLayerCase):
-    """E6: how long "already read" lasts, and it is checked in BOTH directions.
+class ReadScopeIsTheConversationTests(ToolLayerCase):
+    """E6, then #215-H: how long "already read" lasts, checked in BOTH directions.
 
     A ONE-DIRECTION CASE HERE WOULD CHECK NOTHING. "The write is refused after
     the boundary" is satisfied by a rule that refuses always, and "the write goes
@@ -3425,18 +3428,19 @@ class ReadScopeIsOneTurnTests(ToolLayerCase):
     pins a SCOPE rather than a rule, which is why every boundary below is spelled
     out twice -- once from each side.
 
-    THE SCOPE IS ONE USER TURN, and it was chosen by a measurement whose
-    threshold was written down first: null cases of a write landing on a file
-    last read in an earlier turn makes the turn scope free, one or more and the
-    scope is the session. Counted 2026-08-12 over 3 distinct rollover/session
-    files, 25 user turns, 31 read_file calls and 4 write_file/edit_file calls:
-    RESULT 0. The numbers are kept beside `_READ` in cli/crow_core.py, because a
-    measurement that lives only in a chat is gone by the next reading.
+    E6 MADE THE SCOPE ONE USER TURN (measured 2026-08-12: 0 writes on a file
+    last read in an earlier turn). #215-H MADE IT THE CONVERSATION, bounded by
+    the file itself: goal mode opens a turn with every nudge, and 4 of the 15
+    read-rule refusals of 2026-09-22 were edits of a file read one nudge
+    earlier. A read now counts while the file carries the (mtime_ns, size) it
+    was read with, and until a rollover, a new chat or a resumed one. Both
+    measurements are kept beside `_READ` in cli/crow_core.py.
 
     THESE RUN THROUGH `run_turn`, NOT THROUGH THE TOOLS. That is the whole
     difference between this class and `ToolStateLifetimeTests` above, and both
     are true at once: nothing in the TOOL LAYER empties the set -- no tool, no
-    dispatcher -- and the TURN LOOP one level up empties it on the way in. A case
+    dispatcher -- and the TURN LOOP one level up empties it on the way in when
+    the conversation is not the one the set belongs to. A case
     that called `tool_read_file` and `tool_write_file` directly would never cross
     a turn boundary and would stay green whatever the scope became.
     """
@@ -3523,28 +3527,45 @@ class ReadScopeIsOneTurnTests(ToolLayerCase):
         self.assertIn("wrote", self._results(talk)[-1])
         self.assertEqual(self._text(path), "new")
 
-    # ---- and from the side where it must now be refused --------------------
-
-    def test_a_write_in_the_next_turn_is_refused(self):
-        """THE ADDED REFUSAL, where there was none before E6.
-
-        The file was read -- in the turn before. Under the process scope this
-        write went through; under the turn scope it does not, and this case is
-        the one that goes red if the clear is taken back out.
+    def test_a_write_in_the_next_turn_goes_through(self):
+        """#215-H TOOK E6'S ADDED REFUSAL BACK. The file was read in the turn
+        before and nothing touched it since, so the model knows what it is
+        overwriting -- whoever typed the line in between, crow's nudge included.
         """
-        path = self._make("notes.txt", "the work that must survive")
+        path = self._make("notes.txt", "old")
         talk = crow.Conversation("SYS")
         self.serve([self._reads(path)])
         self.serve([{"content": "read it"}])
         self.turn(talk)
 
+        self.serve([self._writes(path, "new")])
+        self.serve([{"content": "done"}])
+        self.turn(talk, "[Goal mode, step 9 still open. Continue.]")
+        self.assertIn("wrote", self._results(talk)[-1])
+        self.assertEqual(self._text(path), "new")
+
+    # ---- and from the side where it must be refused -------------------------
+
+    def test_a_write_after_a_change_on_disk_is_refused(self):
+        """THE REFUSAL THAT REPLACES E6's: not "another turn" but "another
+        file" -- somebody wrote it after the model read it."""
+        path = self._make("notes.txt", "old")
+        talk = crow.Conversation("SYS")
+        self.serve([self._reads(path)])
+        self.serve([{"content": "read it"}])
+        self.turn(talk)
+
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("the work that must survive")
         self.serve([self._writes(path, "overwritten")])
         self.serve([{"content": "I could not"}])
         self.turn(talk, "now write it")
-        self.assertIn("refusing to overwrite", self._results(talk)[-1])
+        said = self._results(talk)[-1]
+        self.assertIn("refusing to overwrite", said)
+        self.assertIn("changed on disk since you read it", said)
         self.assertEqual(self._text(path), "the work that must survive")
 
-    def test_the_refusal_names_the_turn_it_means(self):
+    def test_the_refusal_names_the_scope_it_means(self):
         """A refusal that says "without reading it first" to someone who DID read
         it reads as a bug. The message has to name the scope it is enforcing."""
         path = self._make("notes.txt", "x")
@@ -3553,17 +3574,19 @@ class ReadScopeIsOneTurnTests(ToolLayerCase):
         self.serve([{"content": "read it"}])
         self.turn(talk)
 
+        talk.reset()                                   # a new chat, same object
         self.serve([self._writes(path, "y")])
         self.serve([{"content": "I could not"}])
         self.turn(talk, "now write it")
         said = self._results(talk)[-1]
-        self.assertIn("in this turn", said)
+        self.assertIn("in this conversation", said)
+        self.assertIn("a rollover, a new chat or a resumed one", said)
         self.assertIn("read_file", said)
 
-    def test_an_edit_in_the_next_turn_is_refused_too(self):
-        """`edit_file` consults the same set through a different door
-        (crow_core.py, the `_key(path) not in _READ` check). One scope, and both
-        callers have to be under it."""
+    def test_an_edit_follows_the_same_scope(self):
+        """`edit_file` consults the same state through a different door
+        (crow_core.py, `_read_state`). One scope, and both callers have to be
+        under it: the next turn goes through, a change on disk does not."""
         path = self._make("code.py", "alpha\n")
         talk = crow.Conversation("SYS")
         self.serve([self._reads(path)])
@@ -3572,15 +3595,23 @@ class ReadScopeIsOneTurnTests(ToolLayerCase):
 
         self.serve([_tool_call_delta("edit_file", json.dumps(
             {"path": path, "old": "alpha", "new": "beta"}))])
-        self.serve([{"content": "I could not"}])
+        self.serve([{"content": "done"}])
         self.turn(talk, "now edit it")
-        self.assertIn("before editing it", self._results(talk)[-1])
-        self.assertEqual(self._text(path), "alpha\n")
+        self.assertIn("replaced 1 occurrence", self._results(talk)[-1])
+
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("beta, and the user's line\n")
+        self.serve([_tool_call_delta("edit_file", json.dumps(
+            {"path": path, "old": "beta", "new": "gamma"}))])
+        self.serve([{"content": "I could not"}])
+        self.turn(talk, "again")
+        self.assertIn("changed on disk since you read it", self._results(talk)[-1])
+        self.assertEqual(self._text(path), "beta, and the user's line\n")
 
     def test_a_new_session_refuses_what_the_old_one_had_read(self):
-        """THE CASE THE STAGE WAS NAMED FOR, and under the turn scope it is a
-        superset rather than a separate rule: a new session's first turn is a new
-        turn, so the boundary has already been crossed.
+        """THE CASE THE STAGE WAS NAMED FOR. Since #215-H it is its own rule
+        again: a different `Conversation` carries a different `read_epoch`, and
+        the turn that adopts it empties the set.
 
         A session is modelled here as what `repl()` actually holds one of -- a
         `Conversation`. The point of the case is not the object: it is that
@@ -3601,13 +3632,12 @@ class ReadScopeIsOneTurnTests(ToolLayerCase):
         self.assertIn("refusing to overwrite", self._results(second)[-1])
         self.assertEqual(self._text(path), "the work that must survive")
 
-    # ---- the two names share one lifetime, which is the half-state ----------
+    # ---- two lifetimes since #215-H, and the cache keys on the read state -----
 
-    def test_the_result_cache_is_emptied_on_the_same_boundary(self):
-        """THE HALF-STATE, CHECKED RATHER THAN TRUSTED. `_READ` emptied without
-        `_SEEN` refuses the write correctly while still handing back a tool
-        result produced in the turn before. Same boundary, both names, one pair
-        of statements in the core."""
+    def test_the_result_cache_is_still_emptied_every_turn(self):
+        """`_SEEN` KEPT E6's TURN. A cached tool result from the turn before
+        must not answer this one; `_READ` left the pair because its permission
+        is now the file's stamp, which `_cache_key` carries."""
         talk = crow.Conversation("SYS")
         args = json.dumps({"path": self.dir})
         self.serve([_tool_call_delta("list_dir", args)])
@@ -3619,11 +3649,11 @@ class ReadScopeIsOneTurnTests(ToolLayerCase):
         self.turn(talk, "again")
         self.assertNotIn("you already called", self._results(talk)[-1])
 
-    def test_both_names_are_empty_once_the_turn_has_started(self):
+    def test_the_cache_is_empty_and_the_reads_are_not_once_the_turn_has_started(self):
         """The direct reading of the same fact, so a failure says WHICH name.
 
         The tools run inside the turn, so the state is sampled from one of them
-        rather than from outside: after the turn, both have been filled again.
+        rather than from outside.
         """
         seen = {}
 
@@ -3643,7 +3673,7 @@ class ReadScopeIsOneTurnTests(ToolLayerCase):
         self.serve([_tool_call_delta("probe", "{}")])
         self.serve([{"content": "done"}])
         self.turn(talk, "probe")
-        self.assertEqual(seen["read"], set())
+        self.assertEqual(seen["read"], {crow._key(path)})
         self.assertEqual(seen["cached"], {})
 
 
@@ -3666,7 +3696,7 @@ class WorkingDirectoryBoundaryTests(ToolLayerCase):
     module-level string in crow_core, so `crow.py` re-exporting it would bind the
     VALUE and a rebinding here would move a copy while the tools went on reading
     the core's. That is the trap `ToolLayerCase` documents for `_READ`, in the
-    one shape where it actually bites -- `_READ` is a set and survives in-place
+    one shape where it actually bites -- `_READ` is a dict and survives in-place
     mutation; a string does not.
     """
 

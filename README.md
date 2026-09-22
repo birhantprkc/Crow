@@ -158,7 +158,7 @@ Everything below is in the screenshot at the top of this page.
 
 | group | |
 |---|---|
-| **Files** | `read_file` a file or a line range · `write_file` (an existing file must have been read first) · `edit_file` one exact occurrence · `list_dir` · `find_files` by glob · `search_text` by regex |
+| **Files** | `read_file` a file or a line range · `write_file` (an existing file must have been read in this conversation and be unchanged since) · `edit_file` one exact occurrence · `list_dir` · `find_files` by glob · `search_text` by regex |
 | **Shell** | `run_command` — named shell, timeout, and a path outside the working directory asks first |
 | **Git** | `git_status` · `git_diff` · `git_log` · `git_commit` (stages exactly the paths given) · `git_push` · `github_connect` over the OAuth device flow |
 | **Web** | `web_search` — answer from what you read, a list of links is not an answer · `fetch_url` one page as readable text |

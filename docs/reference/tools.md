@@ -81,7 +81,7 @@ model, together with "never flatten a library by hand".
 | esbuild, in order | `CROW_ESBUILD`; `node_modules` walking up from the entry (`@esbuild/<platform>`, `esbuild/bin`, `.bin`); `esbuild` on `PATH`; the deno cache (`$DENO_DIR/dl/esbuild-*/`) and the npx cache (`~/.npm/_npx/*/node_modules/@esbuild/`), newest version wins there. Every candidate must answer `--version` |
 | none found | the result lists every place searched and says not to hand-flatten |
 | caps | one clock for the whole build (`BUNDLE_TIMEOUT` = 120 s), the #207 capture cap in the reader threads, 64 MiB on the result, 8 MiB on the entry page |
-| write | esbuild writes to a temporary directory; Crow writes `out` behind `write_file`'s fence. A file carrying the `crow build_bundle` mark (a `<meta name="generator">` / a first-line comment) is replaced freely; any other existing file only after a read in the same turn |
+| write | esbuild writes to a temporary directory; Crow writes `out` behind `write_file`'s fence. A file carrying the `crow build_bundle` mark (a `<meta name="generator">` / a first-line comment) is replaced freely; any other existing file only after a read in this conversation, unchanged on disk since ([Read before write](#read-before-write-215)) |
 | result | path, bytes, errors, warnings, seconds, which esbuild and where from, what was inlined, and whether the page still loads anything from disk. On errors nothing is written and the esbuild log comes back |
 | cache | never answered from the repeat cache: an edit to a source changes the result of the same call |
 
@@ -163,6 +163,27 @@ turn that long. The token lands in `provider_keys.json`, owner-only, and is neve
 handed to a surface; what a surface shows is the login name. Needs a client id, see
 [the window's git panel](../user-guide/window.md).
 
+### Read before write (#215)
+
+`write_file` (on an existing file) and `edit_file` refuse a file the model does not know.
+Per path Crow keeps the `(mtime_ns, size)` the file had when `read_file` read it — a line
+range counts — or when Crow itself last wrote it (`write_file`, `edit_file`, `build_bundle`;
+`append_file` keeps an already-known file known). The call goes through while the file on
+disk still carries that stamp.
+
+| state | answer |
+|---|---|
+| never read in this conversation | `refusing to overwrite … without reading it first in this conversation` / `read … before editing it, in this conversation` |
+| read, then changed on disk (another program, the user, a deletion) | `… it changed on disk since you read it -- read it again, then retry the call.` |
+| read or written by Crow, unchanged | allowed, across any number of turns |
+
+A read counts for the conversation, not the turn: goal mode's `[Goal mode ...]` nudges are
+user messages, and until #215 each of them emptied the state (measured 2026-09-22: 4 of 15
+read-rule refusals were edits of a file read one nudge earlier). The state empties where the
+model stops holding the contents: a rollover (mid-turn too), a new chat or `/reset`, a
+model switch, `--resume` and a chat switch in the window. A delegated subtask neither sees
+nor changes it. A rewrite that keeps both the size and the modification time is not seen.
+
 ### Outside paths ask (#144)
 
 `run_command` touching paths outside the working directory asks first, at every release
@@ -210,8 +231,9 @@ A required key missing on its own gets the tool's own sentence; `edit_file` says
 Measured 2026-09-22 after a rollover: 22 of 22 `edit_file` calls arrived as
 `old_string`/`new_string`, all 22 failed, and 15 of them were first told to read the file —
 so the model read it and sent the same wrong keys again. 4 of those 15 had read the file one
-`[Goal mode ...]` nudge earlier: the read rule of `write_file` and `edit_file` is per turn,
-a turn starts at every user message, crow's own nudges included, and the refusal now says so.
+`[Goal mode ...]` nudge earlier — the read rule was per turn then, and every nudge opened
+one. It now lasts the conversation and ends where the file changes
+([Read before write](#read-before-write-215)).
 
 The request after a rollover declares the same `tools` array, the same sampler and the same
 thinking fields as the one before; only the messages and the pinned head differ (pinned by
