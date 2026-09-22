@@ -2101,7 +2101,7 @@ class RolloverTests(unittest.TestCase):
             args = crow.build_parser().parse_args(["--base-url", "http://x/v1"])
             with mock.patch.object(crow, "rollover_digest", return_value=""):
                 archived = crow._roll_with_digest(
-                    c, args, "crow", {"temperature": 0.0, "top_p": 1.0,
+                    c, args, {"temperature": 0.0, "top_p": 1.0,
                                       "min_p": 0.0}, 180_000, "and now?")
         finally:
             crow_core.prompt_head, crow_core.SESSION_DIR = real_head, real_dir
@@ -2138,7 +2138,7 @@ class RolloverTests(unittest.TestCase):
             args = crow.build_parser().parse_args(["--base-url", "http://x/v1"])
             with mock.patch.object(crow, "rollover_digest", return_value=""):
                 archived = crow._roll_with_digest(
-                    c, args, "crow", {"temperature": 0.0, "top_p": 1.0,
+                    c, args, {"temperature": 0.0, "top_p": 1.0,
                                       "min_p": 0.0}, 180_000, "and now?")
             head = c.payload()[0]["content"]
         finally:
@@ -2149,6 +2149,84 @@ class RolloverTests(unittest.TestCase):
         self.assertIn("2. [open] write", head)
         self.assertIn("Next: step 2. write", head)
         self.assertIn(crow_core.GOAL_SEAM_NOTE, head)
+
+
+    def test_the_terminal_roll_carries_the_last_good_round(self):
+        """#214 im Terminal: der Roll zwischen zwei Zeilen traegt die letzte
+        gelungene Runde hinter die Notiz, und die getippte Zeile steht
+        zuletzt -- derselbe `roll_over` wie Fenster und Kern."""
+        c = self._conversation()
+        edit = json.dumps({"path": "src/app.js", "old": "a", "new": "b"})
+        c.append("assistant", "", tool_calls=[
+            {"id": "call_0", "name": "edit_file", "arguments": edit}])
+        c.append("tool", "replaced 1 occurrence", tool_call_id="call_0")
+        real_dir = crow_core.SESSION_DIR
+        crow_core.SESSION_DIR = self.dir
+        try:
+            args = crow.build_parser().parse_args(["--base-url", "http://x/v1"])
+            with mock.patch.object(crow, "rollover_digest", return_value=""):
+                archived = crow._roll_with_digest(
+                    c, args, {"temperature": 0.0, "top_p": 1.0,
+                              "min_p": 0.0}, 180_000, "and now?")
+        finally:
+            crow_core.SESSION_DIR = real_dir
+        self.assertIsNotNone(archived)
+        after = c.payload()
+        self.assertEqual([m["role"] for m in after],
+                         ["system", "user", "assistant", "tool", "user"])
+        self.assertEqual(after[2]["tool_calls"][0]["function"]["arguments"],
+                         edit)
+        self.assertEqual(after[-1]["content"], "and now?")
+
+    def test_the_digest_leg_asks_with_the_turns_key_and_model(self):
+        """#214: die Digest-Leg des Terminals fragte ohne `api_key` und mit
+        dem von /props gelesenen Namen statt `--model` -- gegen einen
+        entfernten Endpunkt ein 401 und ein stiller "[digest failed ...]".
+        Geprueft auf dem Draht: der Header und das Modell, mit denen die Leg
+        fragt, sind die des Zugs (`_turn_endpoint`)."""
+        c = self._conversation()
+        seen = []
+
+        def wire(request, timeout=None):
+            seen.append(request)
+            raise OSError("no server here")
+
+        real_dir = crow_core.SESSION_DIR
+        crow_core.SESSION_DIR = self.dir
+        try:
+            args = crow.build_parser().parse_args(
+                ["--base-url", "https://remote.example/api/v1",
+                 "--api-key", "sk-remote-0123456789", "--model", "z-ai/glm"])
+            with mock.patch.object(crow_core.urllib.request, "urlopen", wire):
+                crow._roll_with_digest(
+                    c, args, {"temperature": 0.0, "top_p": 1.0,
+                              "min_p": 0.0}, 180_000, "and now?")
+        finally:
+            crow_core.SESSION_DIR = real_dir
+        self.assertTrue(seen, "the digest leg never asked")
+        request = seen[0]
+        self.assertEqual(request.full_url,
+                         "https://remote.example/api/v1/chat/completions")
+        self.assertEqual(request.get_header("Authorization"),
+                         "Bearer sk-remote-0123456789")
+        self.assertEqual(json.loads(request.data.decode("utf-8"))["model"],
+                         "z-ai/glm")
+        self.assertEqual(crow._turn_endpoint(args),
+                         {"base_url": "https://remote.example/api/v1",
+                          "model": "z-ai/glm",
+                          "api_key": "sk-remote-0123456789"})
+
+    def test_the_turn_and_the_digest_share_one_endpoint(self):
+        """#214: EIN Ort fuer beide -- der Zug in `repl` und die Leg in
+        `_roll_with_digest` lesen `_turn_endpoint`, damit sie nie wieder
+        auseinanderlaufen."""
+        source = inspect.getsource(crow.repl)
+        call = source[source.index("turn = run_turn("):]
+        call = call[:call.index("events=")]
+        self.assertIn("**_turn_endpoint(args)", call)
+        self.assertNotIn("api_key=", call)
+        self.assertIn("**_turn_endpoint(args)",
+                      inspect.getsource(crow._roll_with_digest))
 
 
 class SessionFormatGateTests(unittest.TestCase):

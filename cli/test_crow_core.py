@@ -1407,9 +1407,11 @@ class MidTurnRolloverTests(TurnLoopCase):
         self._fills_the_window_after_one_tool_round()
         self.serve([{"content": "carrying on"}], {"prompt_n": 1, "predicted_n": 0})
         self.turn(talk, n_ctx=100, rollover_at=0.9, carry="the question")
-        opening = [m for m in talk.payload() if m["role"] == "user"][0]["content"]
-        self.assertIn("the question", opening)
-        self.assertIn("archived", opening)
+        users = [m["content"] for m in talk.payload() if m["role"] == "user"]
+        self.assertIn("archived", users[0])
+        # #214: hinter dem getragenen Schwanz, als eigene Zeile -- die Runden
+        # sind Geschichte, die Frage ist das Juengste.
+        self.assertEqual(users[-1], "the question")
 
     def test_the_count_is_zeroed_and_the_turn_goes_on(self):
         talk = self.conversation()
@@ -1768,16 +1770,20 @@ class TheSeamKeepsTheRequestTests(TurnLoopCase):
     def test_the_base_system_prompt_is_kept_and_the_note_opens_the_context(self):
         """What DOES change is the conversation: the head may grow by what
         `repin_head` puts there (#163), the base prompt may not move, and
-        the first user message is the note carrying the typed line."""
+        the first user message is the note, the typed line closes the
+        context behind the carried rounds (#214)."""
         before, after = self._across_the_seam()
         self.assertEqual(before["messages"][0]["role"], "system")
         self.assertEqual(after["messages"][0]["role"], "system")
         self.assertTrue(after["messages"][0]["content"].startswith(
             before["messages"][0]["content"]))
-        self.assertEqual([m["role"] for m in after["messages"]], ["system", "user"])
+        # #214: die Notiz, die eine getragene Runde (list_dir, beantwortet),
+        # dann die getippte Zeile -- nie zwei gleiche Rollen hintereinander.
+        self.assertEqual([m["role"] for m in after["messages"]],
+                         ["system", "user", "assistant", "tool", "user"])
         self.assertIsNotNone(crow_core.rollover_note_parts(
             after["messages"][1]["content"]))
-        self.assertIn("the question", after["messages"][1]["content"])
+        self.assertEqual(after["messages"][-1]["content"], "the question")
 
     def test_the_digest_leg_speaks_the_turns_dialect(self):
         before, _ = self._across_the_seam()
@@ -2290,6 +2296,279 @@ class RolloverCarryTests(unittest.TestCase):
         talk.append("assistant", "ok")
         first = self._roll(talk, carry="the question")
         self.assertEqual(first.count("the question"), 1)
+
+
+def _unpaired_rounds(messages: list[dict]) -> list[int]:
+    """#214: Runden, deren Aufrufe nicht GENAU von den `tool`-Nachrichten
+    direkt dahinter beantwortet werden. Je Runde, nicht global wie
+    `_dangling`: llama-server vergibt `call_0` in jeder Runde neu, und ein
+    globaler Abgleich saehe eine offene Runde als beantwortet."""
+    bad = []
+    for i, m in enumerate(messages):
+        if m.get("role") != "assistant" or not m.get("tool_calls"):
+            continue
+        ids = sorted(c["id"] for c in m["tool_calls"])
+        answers = []
+        for f in messages[i + 1:]:
+            if f.get("role") != "tool":
+                break
+            answers.append(f.get("tool_call_id"))
+        if sorted(answers) != ids:
+            bad.append(i)
+    return bad
+
+
+class TheRolloverCarriesToolRoundsTests(unittest.TestCase):
+    """#214: die letzten beantworteten, gelungenen, wohlgeformten Runden
+    stehen nach dem Schnitt woertlich hinter der Notiz -- Paare vollstaendig,
+    Ergebnisse geklippt, Bilder durch einen Satz ersetzt, Fehler nie."""
+
+    EDIT = {"path": "src/app.js", "old": "a", "new": "b"}
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-carry-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    @staticmethod
+    def _round(talk, name, args, result, cid="call_0", content="doing it"):
+        """Eine Runde wie llama-server sie schreibt: `call_0` jedes Mal."""
+        talk.append("assistant", content, reasoning="thinking about it",
+                    tool_calls=[{"id": cid, "name": name,
+                                 "arguments": json.dumps(args)}])
+        talk.append("tool", result, tool_call_id=cid)
+
+    def _roll(self, talk, carry="weiter"):
+        path = os.path.join(self.dir, "arch-%d.json" % len(os.listdir(self.dir)))
+        self.assertIsNotNone(crow_core.roll_over(
+            talk, "http://127.0.0.1:1/v1", 180000, carry=carry, path=path))
+        return talk.payload()
+
+    @staticmethod
+    def _calls(payload):
+        return [(c["function"]["name"], json.loads(c["function"]["arguments"]))
+                for m in payload for c in (m.get("tool_calls") or [])]
+
+    @staticmethod
+    def _talk():
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "go")
+        return talk
+
+    def test_the_last_three_rounds_follow_the_note_and_the_line_closes(self):
+        talk = self._talk()
+        for n in range(5):
+            self._round(talk, "list_dir", {"path": "d%d" % n}, "a\nb")
+        after = self._roll(talk)
+        self.assertEqual([m["role"] for m in after],
+                         ["system", "user"] + ["assistant", "tool"] * 3
+                         + ["user"])
+        self.assertEqual([a["path"] for _, a in self._calls(after)],
+                         ["d2", "d3", "d4"])
+        self.assertEqual(after[-1]["content"], "weiter")
+        parts, carry = crow_core.rollover_note_split(after[1]["content"])
+        self.assertIsNotNone(parts)
+        self.assertEqual(carry, "")
+        self.assertIn("The last 3 tool round(s) before the cut",
+                      after[1]["content"])
+        self.assertTrue(after[1]["content"].endswith(
+            crow_core.ROLLOVER_NOTE_END))
+        self.assertEqual(_unpaired_rounds(after), [])
+
+    def test_calls_are_verbatim_and_the_thinking_and_prose_stay_behind(self):
+        talk = self._talk()
+        self._round(talk, "edit_file", self.EDIT, "replaced 1 occurrence")
+        raw = talk.payload()[2]["tool_calls"][0]["function"]["arguments"]
+        after = self._roll(talk)
+        carried = after[2]
+        self.assertEqual(carried["tool_calls"][0]["function"]["arguments"], raw)
+        self.assertEqual(carried["content"], "")
+        self.assertNotIn("reasoning_content", carried)
+        self.assertEqual(after[3]["content"],
+                         crow_core.ROLLOVER_CARRY_MARK + "]\n"
+                         "replaced 1 occurrence")
+
+    def test_pairing_holds_per_round_with_reused_ids(self):
+        """Eine unbeantwortete Runde und eine mit zwei Aufrufen, von denen nur
+        einer beantwortet ist, reisen nie -- auch wenn `call_0` weiter hinten
+        beantwortet wird."""
+        talk = self._talk()
+        talk.append("assistant", "", tool_calls=[
+            {"id": "call_0", "name": "list_dir", "arguments": '{"path": "x"}'}])
+        talk.append("user", "interrupted")
+        talk.append("assistant", "", tool_calls=[
+            {"id": "call_0", "name": "list_dir", "arguments": '{"path": "y"}'},
+            {"id": "call_1", "name": "list_dir", "arguments": '{"path": "z"}'}])
+        talk.append("tool", "ok", tool_call_id="call_0")
+        self._round(talk, "list_dir", {"path": "good"}, "ok")
+        after = self._roll(talk)
+        self.assertEqual(self._calls(after), [("list_dir", {"path": "good"})])
+        self.assertEqual(_unpaired_rounds(after), [])
+
+    def test_a_round_with_two_calls_travels_whole(self):
+        talk = self._talk()
+        talk.append("assistant", "", tool_calls=[
+            {"id": "call_0", "name": "list_dir", "arguments": '{"path": "y"}'},
+            {"id": "call_1", "name": "list_dir", "arguments": '{"path": "z"}'}])
+        talk.append("tool", "one", tool_call_id="call_0")
+        talk.append("tool", "two", tool_call_id="call_1")
+        after = self._roll(talk)
+        self.assertEqual(len(self._calls(after)), 2)
+        self.assertEqual(_unpaired_rounds(after), [])
+
+    def test_error_rounds_never_travel(self):
+        talk = self._talk()
+        self._round(talk, "list_dir", {"path": "ok"}, "fine")
+        self._round(talk, "edit_file", self.EDIT,
+                    "error: read src/app.js before editing it, in this turn")
+        self._round(talk, "read_file", {"path": "x"},
+                    "[took file_path as path]\nerror: no such file")
+        self._round(talk, "run_command", {"command": "false"}, "[exit 1]\n")
+        self._round(talk, "run_command", {"command": "x"},
+                    crow_core.DECLINED)
+        after = self._roll(talk)
+        self.assertEqual(self._calls(after), [("list_dir", {"path": "ok"})])
+
+    def test_misnamed_or_undeclared_calls_never_travel(self):
+        """#215 liess `old_string` laufen -- als Beispiel lehrte es trotzdem
+        den falschen Namen. Ebenso ein Schluessel `parameter name`, ein
+        Werkzeug, das es nicht gibt, und Argumente, die kein JSON sind."""
+        talk = self._talk()
+        self._round(talk, "list_dir", {"path": "ok"}, "fine")
+        self._round(talk, "edit_file",
+                    {"path": "p", "old_string": "a", "new_string": "b"},
+                    "[took old_string as old, new_string as new]\nreplaced 1")
+        self._round(talk, "read_file", {"path": "p", "parameter name": "x"},
+                    "[unknown argument(s) ignored: parameter name]\nbody")
+        self._round(talk, "run_image", {"path": "p"}, "done")
+        talk.append("assistant", "", tool_calls=[
+            {"id": "call_0", "name": "list_dir", "arguments": "{not json"}])
+        talk.append("tool", "fine", tool_call_id="call_0")
+        after = self._roll(talk)
+        self.assertEqual(self._calls(after), [("list_dir", {"path": "ok"})])
+
+    def test_a_long_result_is_clipped_and_says_so(self):
+        talk = self._talk()
+        self._round(talk, "read_file", {"path": "big"}, "x" * 5000)
+        after = self._roll(talk)
+        cap = crow_core.ROLLOVER_CARRY_RESULT_CHARS
+        head, body = after[3]["content"].split("\n", 1)
+        self.assertEqual(head, "%s -- clipped to the first %d of 5000 chars]"
+                         % (crow_core.ROLLOVER_CARRY_MARK, cap))
+        self.assertEqual(body, "x" * cap)
+
+    def test_an_image_is_replaced_by_a_sentence(self):
+        talk = self._talk()
+        talk.append("assistant", "", tool_calls=[
+            {"id": "call_0", "name": "read_image",
+             "arguments": '{"path": "shot.png"}'}])
+        talk.append("tool", [{"type": "text", "text": "read shot.png"},
+                             {"type": "image_url",
+                              "image_url": {"url": "data:image/png;base64,AAAA"}}],
+                    tool_call_id="call_0")
+        after = self._roll(talk)
+        result = after[3]["content"]
+        self.assertIsInstance(result, str)
+        self.assertIn("read shot.png", result)
+        self.assertIn("image rode this result and was not carried", result)
+        self.assertNotIn("base64", json.dumps(after))
+
+    def test_an_edit_is_preferred_over_a_fourth_shell_call(self):
+        """Das 17:12-Muster: Shell-Aufrufe am Ende, das letzte gute
+        `edit_file` weiter vorn -- es verdraengt die aelteste Shell-Runde."""
+        talk = self._talk()
+        self._round(talk, "edit_file", self.EDIT, "replaced 1 occurrence")
+        for n in range(4):
+            self._round(talk, "run_command", {"command": "echo %d" % n},
+                        "[exit 0]\n%d" % n)
+        after = self._roll(talk)
+        self.assertEqual([n for n, _ in self._calls(after)],
+                         ["edit_file", "run_command", "run_command"])
+        self.assertEqual([a.get("command") for _, a in self._calls(after)][1:],
+                         ["echo 2", "echo 3"])
+
+    def test_the_budget_holds_and_an_oversized_round_is_skipped_whole(self):
+        talk = self._talk()
+        self._round(talk, "list_dir", {"path": "old"}, "fine")
+        budget = (crow_core.ROLLOVER_CARRY_TOKENS
+                  * crow_core.ROLLOVER_CARRY_CHARS_PER_TOKEN)
+        self._round(talk, "write_file",
+                    {"path": "huge", "content": "y" * budget}, "wrote huge")
+        self._round(talk, "list_dir", {"path": "new"}, "fine")
+        carried = crow_core.carry_rounds(talk.payload())
+        self.assertLessEqual(sum(len(json.dumps(m, ensure_ascii=False))
+                                 for m in carried), budget)
+        after = self._roll(talk)
+        self.assertEqual([a["path"] for _, a in self._calls(after)],
+                         ["old", "new"])
+        self.assertNotIn("y" * 100, json.dumps(after))
+
+    def test_nothing_to_carry_keeps_the_one_message(self):
+        talk = self._talk()
+        talk.append("assistant", "just words")
+        after = self._roll(talk)
+        self.assertEqual([m["role"] for m in after], ["system", "user"])
+        self.assertIn("weiter", after[1]["content"])
+        self.assertNotIn("tool round(s)", after[1]["content"])
+
+    def test_a_carried_round_is_not_carried_twice(self):
+        """Am zweiten Schnitt sind die getragenen Runden des ersten keine
+        eigenen Beispiele mehr -- zweimal getragen hiesse zweimal markiert."""
+        talk = self._talk()
+        self._round(talk, "list_dir", {"path": "first"}, "fine")
+        self._roll(talk)
+        self._round(talk, "list_dir", {"path": "second"}, "fine")
+        after = self._roll(talk)
+        self.assertEqual([a["path"] for _, a in self._calls(after)], ["second"])
+
+    def test_the_window_can_tell_a_carried_round(self):
+        talk = self._talk()
+        self._round(talk, "list_dir", {"path": "x"}, "fine")
+        self.assertFalse(crow_core.carried_round(talk.payload(), 2))
+        after = self._roll(talk)
+        self.assertTrue(crow_core.carried_round(after, 2))
+        self.assertFalse(crow_core.carried_round(after, 1))
+
+    def test_the_17_12_cut_carries_its_last_good_edit(self):
+        """Das Ende des Archivs von 17:12 in Kleinform: eine gute Shell-
+        Runde, ein `edit_file`, das am Lese-Tor scheiterte, ein `read_file`
+        mit `parameter name`, dann das gelungene `edit_file` mit old/new."""
+        talk = self._talk()
+        self._round(talk, "run_command", {"command": "grep -n camera app.js"},
+                    "[exit 0]\n28: const VW = 1280")
+        self._round(talk, "edit_file", self.EDIT,
+                    "error: read src/app.js before editing it, in this turn")
+        self._round(talk, "read_file",
+                    {"path": "src/app.js", "parameter name": "end_line"},
+                    "[unknown argument(s) ignored: parameter name]\n// app")
+        self._round(talk, "edit_file", self.EDIT,
+                    "replaced 1 occurrence in src/app.js")
+        after = self._roll(talk)
+        self.assertEqual(self._calls(after),
+                         [("run_command", {"command": "grep -n camera app.js"}),
+                          ("edit_file", self.EDIT)])
+
+
+class TheMidTurnRollCarriesRoundsTests(TurnLoopCase):
+    """#214 im Kern: der Mid-Turn-Roll traegt die Runde, die ihn ausgeloest
+    hat, woertlich in die naechste Anfrage -- gepaart, markiert, und die
+    Frage des Zugs steht dahinter."""
+
+    def test_the_request_after_the_cut_carries_the_round(self):
+        talk = self.conversation()
+        args = json.dumps({"path": self.work})
+        self.serve([_call_delta("list_dir", args)],
+                   {"prompt_n": 95, "predicted_n": 0})
+        self.serve([{"content": "carrying on"}], {"prompt_n": 1, "predicted_n": 0})
+        result = self.turn(talk, n_ctx=100, rollover_at=0.9, carry="the question")
+        self.assertTrue(result.rolled)
+        after = self.bodies[1]["messages"]
+        calls = [c for m in after for c in (m.get("tool_calls") or [])]
+        self.assertEqual([(c["function"]["name"], c["function"]["arguments"])
+                          for c in calls], [("list_dir", args)])
+        self.assertEqual(_unpaired_rounds(after), [])
+        tool = next(m for m in after if m["role"] == "tool")
+        self.assertTrue(tool["content"].startswith(crow_core.ROLLOVER_CARRY_MARK))
+        self.assertEqual(after[-1], {"role": "user", "content": "the question"})
 
 
 class SpotFallbackTests(unittest.TestCase):

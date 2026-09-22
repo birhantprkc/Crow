@@ -12796,6 +12796,16 @@ def _replay_rows(api, messages: list, upto) -> None:
         calls = message.get("tool_calls") or []
         if not body.strip() and not thought.strip() and not calls:
             continue
+        # #214. EINE GETRAGENE RUNDE IST KEIN NEUER AUFRUF. Sie lief vor dem
+        # Schnitt und steht dort im Archiv; hinter der Karte als Werkzeugzeile
+        # gezeichnet saehe sie aus, als haette das Modell sie eben noch
+        # einmal gemacht. Gezaehlt wird sie trotzdem -- `seen` folgt jedem
+        # Aufruf der Konversation, wie `tools_cleared` ihn zaehlt.
+        if calls and crow_core.carried_round(messages, index):
+            seen += len(calls)
+            api.push({"k": "note", "t": "carried across the cut: " + ", ".join(
+                (c.get("function") or {}).get("name") or "?" for c in calls)})
+            continue
         sink = Sink(api.push, live=False)
         sink.reply_started()
         if thought.strip():

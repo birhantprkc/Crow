@@ -3356,6 +3356,197 @@ def _spoken_carry(conversation: "Conversation", carry: "str | None") -> str:
     return SPOKEN_CARRY_HEAD + "\n".join(lines) + "\n" + tail
 
 
+# #214. DER SCHWANZ GEHT MIT UEBER DEN SCHNITT. Gemessen am 2026-09-22, Schnitt
+# um 17:12: vor dem Schnitt standen 221 eigene, beantwortete Aufrufe im Fenster,
+# und 15/15 `edit_file` trugen `path, old, new`; danach sah das Modell eine
+# Notiz aus Prosa und KEINEN einzigen Aufruf -- und 22/22 `edit_file` trugen
+# `old_string`/`new_string`. Jedes reife Harness ausser Codex behaelt darum
+# einen woertlichen Schwanz: Anthropics Context Editing haelt die letzten
+# `keep` = 3 Tool-Use/Result-Paare (clear_tool_uses_20250919), OpenHands'
+# Condenser die juengsten Ereignisse, Claude Code raeumt alte Ausgaben vor den
+# neuen. Codex (`build_compacted_history`) wirft die Aufrufe weg -- dieselbe
+# Form wie die Notiz bisher, dieselbe Luecke.
+#
+# DREI, NICHT MEHR: Anthropics Vorgabe, und genug, um eine Form zu zeigen,
+# ohne den neuen Praefix mit altem Zustand zu fuellen -- der Stand gehoert dem
+# Digest und dem Transkript, nicht dem Schwanz.
+ROLLOVER_CARRY_ROUNDS = 3
+# JE ERGEBNIS 2000 ZEICHEN: das Beispiel ist der AUFRUF, das Ergebnis zeigt
+# nur, dass er antwortete. Der Rest steht im Transkript, auf das die Notiz zeigt.
+ROLLOVER_CARRY_RESULT_CHARS = 2000
+# DAS BUDGET DES SCHWANZES, gegen den der Schwanz ganz gezaehlt wird --
+# Argumente, Namen, Ergebnisse. Gemessen am Archiv von 17:12: 515.387 Zeichen
+# Text auf 180.969 Tokens, 2,85 Zeichen je Token; 3 ist die runde Zahl darueber,
+# die Schaetzung liegt also eher zu hoch als zu niedrig. 3000 Tokens sind 1,5 %
+# eines 200k-Fensters: der Schwanz kann den Schnitt nie in Richtung der
+# naechsten Schwelle schieben. Was nicht passt, wird uebersprungen, nie
+# gekuerzt -- ein halbes Argument ist ein kaputtes Beispiel.
+ROLLOVER_CARRY_TOKENS = 3000
+ROLLOVER_CARRY_CHARS_PER_TOKEN = 3
+# DIE AUFRUFE, DIE DRIFTEN, zuerst: `edit_file` ist der, dessen Namen andere
+# Harnesses anders schreiben (old_string/new_string, #214/#215). Liegt unter
+# den letzten Runden keine davon, ersetzt die juengste passende die aelteste.
+ROLLOVER_CARRY_PREFER = ("edit_file", "write_file", "append_file")
+# DIE MARKE AM ERGEBNIS. Sie sagt dem Modell, dass es ein getragenes Ergebnis
+# liest, und dem Fenster beim Wiederoeffnen, dass die Runde getragen ist
+# (`carried_round`) -- ohne ein Feld, das an den Server ginge.
+ROLLOVER_CARRY_MARK = "[carried across the cut"
+ROLLOVER_CARRY_HEAD = (
+    "The last {n} tool round(s) before the cut follow this note verbatim -- "
+    "calls that ran and were answered, results clipped. They show this "
+    "harness's tool arguments as they worked.\n")
+
+
+def _carried_result_failed(text: str) -> bool:
+    """#214: ein Ergebnis, das ein Fehlschlag war -- `error: ...` (auch hinter
+    den #207-Klammerzeilen) oder ein Befehl, der nicht mit 0 endete."""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("[exit "):
+            return line != "[exit 0]"
+        if line.startswith("["):
+            continue              # #207/#215-Notizen: weiterlesen
+        return line.startswith("error")
+    return False
+
+
+def _carried_call_shaped(call: dict) -> bool:
+    """#214: ein Aufruf, den das Modell abschreiben darf -- ein deklariertes
+    Werkzeug, ein JSON-Objekt, nur deklarierte Schluessel, alle Pflichtschluessel.
+    Ein Aufruf mit `old_string` lief dank #215 zwar, lehrte aber den falschen
+    Namen; ein Aufruf mit `parameter name` lehrte gar keinen."""
+    function = call.get("function") or {}
+    name = function.get("name") or ""
+    declared = _declared_properties(name)
+    if not declared:
+        return False
+    try:
+        args = json.loads(function.get("arguments") or "")
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(args, dict):
+        return False
+    return (all(key in declared for key in args)
+            and all(key in args for key in _declared_required(name)))
+
+
+def _carried_result(content) -> str:
+    """#214: ein Ergebnis in seiner getragenen Form -- markiert, geklippt,
+    ein Bild durch einen Satz ersetzt (ein Bildblock ist der teuerste Teil
+    und zeigt keine Argumentform)."""
+    text = message_text(content)
+    image = ("\n[an image rode this result and was not carried]"
+             if message_images(content) else "")
+    if len(text) > ROLLOVER_CARRY_RESULT_CHARS:
+        mark = "%s -- clipped to the first %d of %d chars]\n" % (
+            ROLLOVER_CARRY_MARK, ROLLOVER_CARRY_RESULT_CHARS, len(text))
+        text = text[:ROLLOVER_CARRY_RESULT_CHARS]
+    else:
+        mark = ROLLOVER_CARRY_MARK + "]\n"
+    return mark + text + image
+
+
+def _answered_rounds(messages: list) -> list:
+    """#214: jede Runde, die getragen werden darf, aelteste zuerst.
+
+    Eine Runde ist eine Assistenten-Nachricht mit `tool_calls` und die
+    `tool`-Nachrichten DIREKT dahinter. Gepaart wird je Runde, nicht global --
+    llama-server vergibt `call_0` in jeder Runde neu (so im Archiv von 17:12).
+    Getragen wird nur eine Runde, deren Aufrufe ALLE genau eine Antwort haben,
+    keine davon ein Fehler, und deren Aufrufe alle wohlgeformt sind: eine
+    offene `tool_call_id` waere ein Request, den das Template verwirft.
+    """
+    rounds = []
+    for i, message in enumerate(messages):
+        calls = message.get("tool_calls") or []
+        if message.get("role") != "assistant" or not calls:
+            continue
+        results = []
+        for follower in messages[i + 1:]:
+            if follower.get("role") != "tool":
+                break
+            results.append(follower)
+        ids = [c.get("id") for c in calls]
+        if (not all(ids) or len(set(ids)) != len(ids)
+                or sorted(ids) != sorted(r.get("tool_call_id") or ""
+                                         for r in results)):
+            continue
+        texts = [message_text(r.get("content") or "") for r in results]
+        if any(t.startswith(ROLLOVER_CARRY_MARK) for t in texts):
+            continue              # schon einmal getragen: nicht zweimal
+        if any(_carried_result_failed(t) for t in texts):
+            continue
+        if not all(_carried_call_shaped(c) for c in calls):
+            continue
+        # DAS DENKEN UND DIE PROSA BLEIBEN ZURUECK: die Prosa erzaehlt einen
+        # Stand, den der Digest traegt, und vor der Zeile des Menschen gelesen
+        # klaenge sie wie eine Antwort darauf.
+        carried = [{"role": "assistant", "content": "",
+                    "tool_calls": [dict(c) for c in calls]}]
+        by_id = {r.get("tool_call_id"): r for r in results}
+        for call_id in ids:
+            carried.append({"role": "tool", "tool_call_id": call_id,
+                            "content": _carried_result(
+                                by_id[call_id].get("content") or "")})
+        names = [(c.get("function") or {}).get("name") or "" for c in calls]
+        size = sum(len(json.dumps(m, ensure_ascii=False)) for m in carried)
+        rounds.append({"at": i, "names": names, "chars": size,
+                       "messages": carried})
+    return rounds
+
+
+def carry_rounds(messages: list) -> list:
+    """#214: die Nachrichten, die hinter der Rollover-Notiz stehen.
+
+    Die juengsten `ROLLOVER_CARRY_ROUNDS` tragbaren Runden, zusammen unter
+    `ROLLOVER_CARRY_TOKENS`; eine zu grosse wird uebersprungen, nicht gekuerzt.
+    Zeigt keine davon einen der Aufrufe aus `ROLLOVER_CARRY_PREFER`, tritt die
+    juengste Runde, die einen zeigt und ins Budget passt, an die Stelle der
+    aeltesten. Aelteste zuerst, wie sie liefen. `[]`, wenn nichts taugt.
+    """
+    budget = ROLLOVER_CARRY_TOKENS * ROLLOVER_CARRY_CHARS_PER_TOKEN
+    rounds = _answered_rounds(messages)
+    picked: list = []
+    used = 0
+    for r in reversed(rounds):
+        if len(picked) >= ROLLOVER_CARRY_ROUNDS:
+            break
+        if used + r["chars"] <= budget:
+            picked.append(r)
+            used += r["chars"]
+    if (picked and not any(n in ROLLOVER_CARRY_PREFER
+                           for r in picked for n in r["names"])):
+        oldest = picked[-1]
+        spare = budget - used + (oldest["chars"]
+                                 if len(picked) >= ROLLOVER_CARRY_ROUNDS else 0)
+        found = None
+        for name in ROLLOVER_CARRY_PREFER:
+            found = next((r for r in reversed(rounds)
+                          if name in r["names"] and r["chars"] <= spare), None)
+            if found is not None:
+                break
+        if found is not None:
+            if len(picked) >= ROLLOVER_CARRY_ROUNDS:
+                picked.pop()
+            picked.append(found)
+    picked.sort(key=lambda r: r["at"])
+    return [m for r in picked for m in r["messages"]]
+
+
+def carried_round(messages: list, index: int) -> bool:
+    """#214: ist die Assistenten-Nachricht bei `index` eine getragene Runde?
+    Das Fenster zeichnet sie beim Wiederoeffnen als getragen, nicht als neue
+    Aufrufe -- erkannt an der Marke ihres ersten Ergebnisses."""
+    if index + 1 >= len(messages):
+        return False
+    follower = messages[index + 1]
+    return (follower.get("role") == "tool"
+            and message_text(follower.get("content") or "")
+            .startswith(ROLLOVER_CARRY_MARK))
+
+
 # #205. DAS TIMEOUT WEISS, WAS EIN KALTER PREFILL KOSTET. Gemessen im
 # Engine-Log am 2026-09-20, dieselbe Messung, die den Kalten Praefix zeigte:
 # 181.745 Tokens in 217,1 s (837 tok/s) und 185.831 Tokens in 222,7 s
@@ -3634,6 +3825,8 @@ def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
     where = recent_paths(conversation)
 
     spoken = _spoken_carry(conversation, carry)
+    # #214: vor dem Reset gewaehlt -- danach gibt es keine Runde mehr zu lesen.
+    rounds = carry_rounds(conversation.payload())
     conversation.reset()
     # #163. DEN KOPF SETZT DER AUFRUFER WIEDER, NICHT DIESE FUNKTION -- und das
     # ist keine Bequemlichkeit, sondern die Zustaendigkeit: was oben steht,
@@ -3651,11 +3844,36 @@ def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
         # #154: als Modelltext gekennzeichnet, nie als Fakt -- und seit #210
         # formt `_digest_block` den Block: leer bleibt leer, Scheitern heisst
         # Scheitern, und nur echter Modelltext traegt die Ueberschrift.
-        digest=_digest_block(digest))
-    # ONE message, not two. Consecutive turns of the same role are merged or
-    # rejected depending on the chat template, and neither is a thing to find
-    # out at 180k tokens.
-    conversation.append("user", f"{note}\n\n{carry}" if carry else note)
+        # #214: der Satz ueber den Schwanz steht am Ende des Digest-Blocks,
+        # vor dem Schlusssatz -- ein eigener Platzhalter haette jede Stelle
+        # gebrochen, die die Notiz mit ihren sieben Feldern formt.
+        digest=_digest_block(digest) + (
+            ROLLOVER_CARRY_HEAD.format(
+                n=sum(1 for m in rounds if m["role"] == "assistant"))
+            if rounds else ""))
+    if not rounds:
+        # ONE message, not two. Consecutive turns of the same role are merged
+        # or rejected depending on the chat template, and neither is a thing
+        # to find out at 180k tokens.
+        conversation.append("user", f"{note}\n\n{carry}" if carry else note)
+        return path
+    # #214. DIE NOTIZ, DER SCHWANZ, DANN DIE ZEILE DES MENSCHEN. Die Runden
+    # sind Geschichte und stehen darum VOR der Zeile, die gerade getippt wurde
+    # -- dahinter lasen sie sich wie die Antwort auf sie. Die Regel oben haelt
+    # trotzdem: zwischen den beiden Nutzer-Nachrichten stehen Assistent und
+    # Werkzeug, nie zwei gleiche Rollen hintereinander.
+    conversation.append("user", note)
+    for message in rounds:
+        if message["role"] == "assistant":
+            conversation.append("assistant", message["content"], tool_calls=[
+                {"id": c["id"], "name": c["function"]["name"],
+                 "arguments": c["function"]["arguments"]}
+                for c in message["tool_calls"]])
+        else:
+            conversation.append("tool", message["content"],
+                                tool_call_id=message["tool_call_id"])
+    if carry:
+        conversation.append("user", carry)
     return path
 
 

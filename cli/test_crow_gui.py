@@ -1038,6 +1038,83 @@ class TheSecondRolloverFiresTests(ApiCase):
             self.assertIn(line, heads[0])
 
 
+    def test_the_pre_turn_roll_carries_the_last_good_round(self):
+        """#214: der ECHTE `roll_over` im Vor-Turn-Roll des Fensters -- der
+        erste Zug nach dem Schnitt sieht das letzte gelungene `edit_file`
+        woertlich hinter der Notiz, gepaart, und die getippte Zeile zuletzt."""
+        self._provider()
+        sent = []
+
+        def fake_run(conversation, **kw):
+            sent.append(conversation.payload())
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost="", context_tokens=9,
+                                        promised_warm=False, rolled=True,
+                                        stopped=False, reported=True)
+
+        api = self.api()
+        edit = json.dumps({"path": "src/app.js", "old": "a", "new": "b"})
+        api._conversation.append("user", "erste Frage")
+        api._conversation.append("assistant", "", tool_calls=[
+            {"id": "call_0", "name": "edit_file", "arguments": edit}])
+        api._conversation.append("tool", "replaced 1 occurrence",
+                                 tool_call_id="call_0")
+        api._conversation.append("assistant", "erste Antwort")
+        api._n_ctx = 200192
+        api._context_tokens = 190000
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "rollover_digest",
+                               lambda *a, **k: ""), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
+            api._run("weiter im Text")
+        self.assertEqual(len(sent), 1)
+        after = sent[0]
+        self.assertEqual([m["role"] for m in after],
+                         ["system", "user", "assistant", "tool", "user"])
+        self.assertEqual(after[2]["tool_calls"][0]["function"]["arguments"],
+                         edit)
+        self.assertEqual(after[3]["tool_call_id"], "call_0")
+        self.assertTrue(after[3]["content"].startswith(
+            crow_core.ROLLOVER_CARRY_MARK))
+        self.assertEqual(after[-1]["content"], "weiter im Text")
+
+
+class TheReplayDrawsACarriedRoundAsCarriedTests(unittest.TestCase):
+    """#214: eine getragene Runde lief VOR dem Schnitt. Beim Wiederoeffnen
+    steht sie hinter der Karte als Hinweis, nicht als neue Werkzeugzeile."""
+
+    def test_a_carried_round_is_a_note_and_a_real_one_a_row(self):
+        note = crow_core.ROLLOVER_NOTE.format(
+            tokens=180145, transcript="/x/rollover-1.md", lines=5223,
+            path="/x/rollover-1.json", where="", spoken="", digest="")
+        call = {"id": "call_0", "type": "function", "function": {
+            "name": "edit_file",
+            "arguments": '{"path": "p", "old": "a", "new": "b"}'}}
+        messages = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": note},
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": "call_0",
+             "content": crow_core.ROLLOVER_CARRY_MARK + "]\nreplaced 1"},
+            {"role": "user", "content": "weiter so"},
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": "call_0", "content": "replaced 1"}]
+        out: list[dict] = []
+
+        class _Collector:
+            def __init__(self_inner):
+                self_inner.push = out.append
+                self_inner._context_tokens = 0
+                self_inner._n_ctx = 0
+
+        crow_gui._replay_rows(_Collector(), messages, lambda n: None)
+        kinds = [m["k"] for m in out]
+        self.assertEqual(kinds[:3], ["roll", "note", "user"])
+        self.assertEqual(out[1]["t"], "carried across the cut: edit_file")
+        tools = [m for m in out if m["k"] == "tool"]
+        self.assertEqual(len(tools), 1, "the carried call was drawn as a row")
+
+
 class APastedScreenshotBecomesAChipTests(unittest.TestCase):
     """robins Frage 2026-08-29 nachmittags ('wieso geht vision auf einmal
     nicht mehr'): Ctrl+V schrieb das Bild nach pastes\\ und haengte den

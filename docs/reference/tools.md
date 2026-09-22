@@ -239,6 +239,22 @@ The request after a rollover declares the same `tools` array, the same sampler a
 thinking fields as the one before; only the messages and the pinned head differ (pinned by
 `TheSeamKeepsTheRequestTests`).
 
+Since #214 the messages after the cut also show calls that worked. Behind the rollover note
+come the last 3 tool rounds before the cut, verbatim: each is the assistant's call(s) and
+every matching result, with no dangling `tool_call_id`. A round is carried only when every
+call names a declared tool with only declared keys and all required ones, and when no
+result was an error (`error: ...`, also behind the bracket notes, or a non-zero `[exit N]`).
+So an `old_string` call that #215 resolved is not carried, since it would teach the wrong
+name. Reasoning and prose stay behind. Results start with `[carried across the cut]` and
+are clipped to 2000 chars (`-- clipped to the first 2000 of N chars`). An image is replaced
+by a sentence. The rounds share a budget of 3000 tokens (at 3 chars per token; measured
+2.85 on the 17:12 archive). A round that does not fit is skipped whole, never cut. If none
+of the three shows `edit_file`, `write_file` or `append_file`, the latest one that does
+and fits takes the oldest one's place. The typed line comes after the rounds. Without
+rounds the note and the line stay one message. `_READ` stays per turn, so a carried read
+grants no edit. At the 17:12 cut this would have carried two `run_command` rounds and the
+final `edit_file` (`path, old, new`): 3,755 JSON chars, about 1,250 tokens.
+
 ---
 
 ### /verify (#149)

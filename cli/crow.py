@@ -1826,7 +1826,17 @@ def spend_staged(line: str, staged_images: list, base_url: str):
     return content
 
 
-def _roll_with_digest(conversation, args, loaded, sampling, context_tokens, line):
+def _turn_endpoint(args) -> dict:
+    """#214: wohin und mit welchem Schluessel ein Zug dieses Terminals fragt --
+    EIN Ort fuer den Zug und die Digest-Leg davor. Das Terminal kennt keine
+    Provider-Datei; was es spricht, sind `--base-url`, `--model` und
+    `--api-key`, und der Transport ist der Standard (`TRANSPORT_CHAT`, keine
+    eigenen Header), den `run_turn` und `rollover_digest` beide annehmen."""
+    return {"base_url": args.base_url, "model": args.model,
+            "api_key": args.api_key}
+
+
+def _roll_with_digest(conversation, args, sampling, context_tokens, line):
     """#154 vor dem Schnitt: erst der Digest auf dem noch warmen Praefix --
     danach waere dieselbe Frage ein voller Prefill -- dann der Roll. Ein
     Modulhelfer, kein repl-Block: repl() traegt einen Zeilendeckel, und
@@ -1835,8 +1845,14 @@ def _roll_with_digest(conversation, args, loaded, sampling, context_tokens, line
     # derselbe Deckel, derselbe Prompt-Kopf, sonst bricht der warme Cache.
     # `context_tokens` skaliert das Timeout (ein kalter Praefix braucht
     # grob 700 tok/s Prefill, kein fester 120s-Wert haelt dem stand).
+    # #214: UND DERSELBE ENDPUNKT WIE DER ZUG (`_turn_endpoint`). Bis hier
+    # fragte die Leg ohne `api_key` und mit dem von /props gelesenen Namen
+    # statt `--model` -- gemessen auf 0e65d70: `Authorization: Bearer ` (leer)
+    # und `"model": <der geladene Name>`. Ein entfernter Endpunkt, der den
+    # Schluessel prueft, lehnt das ab, und der Digest endete still als
+    # "[digest failed ...]".
     digest = rollover_digest(
-        conversation, base_url=args.base_url, model=loaded or None,
+        conversation, **_turn_endpoint(args),
         temperature=sampling["temperature"], top_p=sampling["top_p"],
         min_p=sampling["min_p"], top_k=sampling.get("top_k"),
         presence_penalty=sampling.get("presence_penalty"),
@@ -1989,7 +2005,7 @@ def repl(args: argparse.Namespace) -> int:
         # instead of being the last thing in a file nobody reads.
         rolled = False
         if should_roll(context_tokens, n_ctx, args.rollover_at):
-            archived = _roll_with_digest(conversation, args, loaded, sampling, context_tokens, line)
+            archived = _roll_with_digest(conversation, args, sampling, context_tokens, line)
             if archived:
                 # Printed while context_tokens still HOLDS the number. Zeroing
                 # first and interpolating after is how this reads "archived at
@@ -2020,9 +2036,7 @@ def repl(args: argparse.Namespace) -> int:
         # it -- and it owns them for every surface, not just this one.
         turn = run_turn(
             conversation,
-            base_url=args.base_url,
-            model=args.model,
-            api_key=args.api_key,
+            **_turn_endpoint(args),
             **sampling,
             reasoning_effort=args.reasoning_effort, reasoning_budget=args.reasoning_budget,
             timeout=args.timeout,
