@@ -920,6 +920,20 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 #g-ne{top:0;right:0;width:8px;height:8px;cursor:nesw-resize}
 #g-sw{bottom:0;left:0;width:8px;height:8px;cursor:nesw-resize}
 #g-se{bottom:0;right:0;width:8px;height:8px;cursor:nwse-resize}
+/* #237. WAEHREND SICH DIE CHATBREITE AENDERT, WIRD NUR DAS SICHTBARE
+   GESETZT. Jede Breite -- Rail-Griff, Panel-Griff, Fensterkante -- bricht
+   jede Zeile des ganzen Verlaufs neu um, auch die tausend Zeilen ueber dem
+   Bildschirm. Gemessen 2026-09-23 an 200 Runden (12 968 Knoten): WebKitGTK
+   2.52 16 ms Layout pro Schritt, Chromium 13 ms; mit `content-visibility`
+   3.3 ms. NUR WAEHREND DER GESTE und nicht immer, weil WebKitGTK 2.52 kein
+   Scroll-Anchoring kann (`CSS.supports("overflow-anchor","auto")` = false):
+   dauerhaft eingeschaltet sprang die Sicht beim Hochscrollen in 24 von 40
+   Schritten, und das Ende lag 581 px unter dem Ende. `auto` in der
+   Platzhaltergroesse ist die zuletzt gezeichnete Hoehe jeder Runde -- also
+   steht waehrend der Geste alles ueber dem Bildschirm genau so hoch wie davor,
+   und `sizing.end` setzt die Sicht danach selbst wieder an ihren Anker. */
+#flow > .turn{contain-intrinsic-size:auto 240px}
+#flow.sizing > .turn{content-visibility:auto}
 
 /* -- rail --------------------------------------------------------------- */
 #rail{width:var(--railw,242px);flex:none;
@@ -4609,16 +4623,23 @@ const crow = {
     ev.preventDefault();
     const rail=$("#rail"), grip=$("#railgrip");
     grip.classList.add("on"); rail.classList.add("dragging");
+    sizing.begin();
     const left=rail.getBoundingClientRect().left;
     const move=e=>{
       // GEKLEMMT IN DER SEITE UND NOCH EINMAL IN PYTHON. Der Wert kommt aus
       // einer Maus, und eine Rail von zwoelf Pixeln ist keine Rail.
       const w=Math.max(180,Math.min(520,Math.round(e.clientX-left)));
-      document.documentElement.style.setProperty("--railw",w+"px"); };
+      // #236. AUF DIE RAIL, NICHT AUF <html>. Eine Custom Property erbt
+      // sich, und an der Wurzel gesetzt rechnete jeder Mausschritt den Stil
+      // ALLER 12 968 Knoten neu -- gemessen 2026-09-23: 1249 ms Stil fuer
+      // einen Zug von 80 Schritten (Chromium), WebKitGTK 38.5 -> 16.1 ms pro
+      // Schritt. Gelesen wird `--railw` nur von `#rail` selbst.
+      rail.style.setProperty("--railw",w+"px"); };
     const up=()=>{
       document.removeEventListener("mousemove",move);
       document.removeEventListener("mouseup",up);
       grip.classList.remove("on"); rail.classList.remove("dragging");
+      sizing.end();
       pywebview.api.rail_width(Math.round(
         rail.getBoundingClientRect().width)); };
     document.addEventListener("mousemove",move);
@@ -4633,6 +4654,7 @@ const crow = {
     // Panels darin liegen -- gezogen wird eine Kante, und die gehoert beiden.
     const panel=$("#side"), grip=$("#codegrip");
     grip.classList.add("on"); panel.classList.add("dragging");
+    sizing.begin();
     const right=panel.getBoundingClientRect().right;
     // #175. DIE DECKE HAENGT DAVON AB, WAS IN DER SPALTE STEHT. 612 ist die
     // Decke fuer ein Code-Panel; steht der Browser darin, ist sie weg und es
@@ -4643,11 +4665,13 @@ const crow = {
                    : 612;
     const move=e=>{
       const w=Math.max(260,Math.min(cap,Math.round(right-e.clientX)));
-      document.documentElement.style.setProperty("--codew",w+"px"); };
+      // #236. Aus demselben Grund auf `#side`, das `--codew` als einziges liest.
+      panel.style.setProperty("--codew",w+"px"); };
     const up=()=>{
       document.removeEventListener("mousemove",move);
       document.removeEventListener("mouseup",up);
       grip.classList.remove("on"); panel.classList.remove("dragging");
+      sizing.end();
       pywebview.api.code_width(Math.round(
         panel.getBoundingClientRect().width)); };
     document.addEventListener("mousemove",move);
@@ -6090,6 +6114,7 @@ const crow = {
   toggleRail(){ const el=document.body;
     const open=el.dataset.rail!=="shut";
     el.dataset.rail=open ? "shut" : "open";
+    sizing.pulse();                        // #237: .16s Breitenuebergang
     pywebview.api.set_rail_open(!open); },
 
   // #138. DASSELBE FUER RECHTS. Eigene Methode statt eines Parameters: die
@@ -6098,6 +6123,7 @@ const crow = {
   toggleCode(){ const el=document.body;
     const open=el.dataset.code!=="shut";
     el.dataset.code=open ? "shut" : "open";
+    sizing.pulse();                        // #237: .16s Breitenuebergang
     pywebview.api.set_code_open(!open); },
 
   // #175. DASSELBE FUER DEN BROWSER. Eigene Methode statt eines Parameters,
@@ -6108,6 +6134,7 @@ const crow = {
   toggleBrowser(){ const el=document.body;
     const open=el.dataset.browser!=="shut";
     el.dataset.browser=open ? "shut" : "open";
+    sizing.pulse();                        // #237: .16s Breitenuebergang
     pywebview.api.set_browser_open(!open);
     if(open) return;                       // zugeklappt: `set_browser_open` versteckt
     if(!this.tabs.length){ this.brNew(); return; }
@@ -6259,7 +6286,11 @@ const crow = {
   // legt die Fensterecke darauf -- das Hauptfenster ist rahmenlos, also ist
   // seine Ecke zugleich die Ecke dieser Flaeche.
   brPlace(){
-    if(!window.pywebview) return;
+    // #238. NICHT WO DER COMPOSITOR DAS FENSTER HAT. `_pane_apply` kehrt auf
+    // GTK sofort um (Wayland kennt keine globalen Koordinaten), also war jeder
+    // Aufruf hier ein Bruecken-Thread fuer nichts -- und der Beobachter auf
+    // `#brbody` ruft ihn in jedem Frame eines Zugs oder einer Fenstergroesse.
+    if(!window.pywebview || NATIVEDRAG) return;
     const b=$("#brbody"); if(!b) return;
     const r=b.getBoundingClientRect();
     if(r.width<2 || r.height<2) return;
@@ -6511,8 +6542,7 @@ const crow = {
       // be copied into the sheet when it opened; the ribbon is a name and three
       // window buttons now, so the number goes where somebody looks it up.
       case "meta": $("#aboutver").textContent=e.version;
-        if(e.rail) document.documentElement.style.setProperty(
-          "--railw", e.rail+"px");
+        if(e.rail) $("#rail").style.setProperty("--railw", e.rail+"px");
         // THE TITLE, NOT A CHIP (#119). Set rather than interpolated for the same reason every
         // other name here is: it is a string that arrived over the bridge.
         $("#conn").title=e.url;
@@ -6652,6 +6682,52 @@ const fitFlow = () => {
 // The observer covers the window resize too: a narrower window rewraps the foot
 // row, which changes the composer's height, which is the thing being watched.
 new ResizeObserver(fitFlow).observe(composer);
+
+// #237. DIE GESTE, IN DER SICH DIE CHATBREITE AENDERT. `begin` schaltet
+// `#flow.sizing` ein (nur die sichtbaren Runden werden gesetzt, siehe die
+// CSS-Regel bei den Griffen), `end` schaltet es ab und bezahlt EIN volles
+// Layout statt eines pro Schritt. Danach steht die Sicht dort, wo sie stand:
+// wer unten war, ist wieder unten; sonst bleibt die oberste sichtbare Runde auf
+// ihrem Pixel. Das ist Scroll-Anchoring von Hand, und es ist noetig, weil
+// WebKitGTK 2.52 es nicht selbst kann (Safari 27 bringt es erst) -- ohne es
+// wanderte die Sicht nach jedem Umbruch darueber, wie sie es vorher bei jedem
+// einzelnen Schritt tat.
+const sizing = (function(){
+  let pin = null, timer = 0;
+  const begin = () => {
+    clearTimeout(timer);
+    if(pin) return;
+    // GELESEN, BEVOR DIE KLASSE SITZT: das Layout ist hier noch sauber, also
+    // kostet keine dieser Abfragen einen erzwungenen Umbruch.
+    if(crow.atBottom()) pin = {bottom: true};
+    else {
+      const top = flow.getBoundingClientRect().top;
+      const t = Array.prototype.find.call(flow.children,
+        c => c.getBoundingClientRect().bottom > top);
+      pin = {turn: t || null, y: t ? t.getBoundingClientRect().top : 0};
+    }
+    flow.classList.add("sizing");
+  };
+  const end = () => {
+    clearTimeout(timer);
+    if(!pin) return;
+    const p = pin; pin = null;
+    flow.classList.remove("sizing");
+    // SOFORT, NICHT WEICH: `#flow` scrollt mit `scroll-behavior:smooth`, und
+    // eine Korrektur, die man gleiten sieht, ist der Sprung, den sie verhindert.
+    const was = flow.style.scrollBehavior;
+    flow.style.scrollBehavior = "auto";
+    if(p.bottom) flow.scrollTop = flow.scrollHeight;
+    else if(p.turn && p.turn.isConnected)
+      flow.scrollTop += p.turn.getBoundingClientRect().top - p.y;
+    flow.style.scrollBehavior = was;
+  };
+  // Fuer Gesten ohne eigenes Ende: die Fensterkante (der Compositor zieht sie,
+  // die Seite sieht nur `resize`) und die .16s-Uebergaenge der Panel-Knoepfe.
+  const pulse = () => { begin(); timer = setTimeout(end, 250); };
+  return {begin, end, pulse};
+})();
+window.addEventListener("resize", () => sizing.pulse());
 // The grips: press, drag, and Python moves the window. `screenX/screenY` are
 // used rather than clientX so the numbers stay right while the window itself is
 // moving underneath the pointer.
@@ -6671,11 +6747,29 @@ new ResizeObserver(fitFlow).observe(composer);
       // mousedown to the compositor instead: it resizes for as long as the
       // button is held, and there is no per-step message at all. See
       // `Api.begin_resize`.
+      // #237: the page learns of the new size only through `resize`, so the
+      // cheap layout mode is switched on at the press, before the first step.
+      sizing.pulse();
       if(NATIVEDRAG){ pywebview.api.begin_resize(map[id]); return; }
       drag={edge:map[id],x:e.screenX,y:e.screenY};
       pywebview.api.geometry().then(g=>{ if(drag) drag.start=g; });
     });
   });
+  // #238. ONE STEP IN FLIGHT, AND IT IS ALWAYS THE LATEST. Every
+  // mousemove used to be its own bridge call -- a worker thread in pywebview
+  // and a synchronous resize on the UI thread each -- so a fast drag queued
+  // steps faster than the window could take them, and the window then
+  // replayed the backlog after the pointer had stopped. Now a step waits for
+  // the one before it and carries only the newest rectangle; steps in
+  // between are dropped because the window would pass through them anyway.
+  // Windows only: under NATIVEDRAG the compositor resizes and none of this runs.
+  let want=null, busy=false;
+  const flush=()=>{
+    if(busy || !want) return;
+    const r=want; want=null; busy=true;
+    Promise.resolve(pywebview.api.set_geometry(r[0],r[1],r[2],r[3]))
+      .catch(()=>{}).then(()=>{ busy=false; flush(); });
+  };
   window.addEventListener("mousemove",e=>{
     if(!drag||!drag.start) return;
     const dx=e.screenX-drag.x, dy=e.screenY-drag.y, s=drag.start, k=drag.edge;
@@ -6684,8 +6778,8 @@ new ResizeObserver(fitFlow).observe(composer);
     if(k.includes("s")) h=s.h+dy;
     if(k.includes("w")){ x=s.x+dx; w=s.w-dx; }
     if(k.includes("n")){ y=s.y+dy; h=s.h-dy; }
-    pywebview.api.set_geometry(Math.round(x),Math.round(y),
-                               Math.round(w),Math.round(h));
+    want=[Math.round(x),Math.round(y),Math.round(w),Math.round(h)];
+    flush();
   });
   window.addEventListener("mouseup",()=>{ drag=null; });
 })();
@@ -12702,8 +12796,15 @@ def main(argv: list[str] | None = None) -> int:
     # und ein minimiertes Crow darf keine Webseite auf dem Desktop stehen
     # lassen. Ohne diese vier Zeilen liegt sie beim ersten Verschieben neben
     # dem Panel und sieht aus wie ein fremdes Fenster.
-    window.events.moved += api.pane_follow
-    window.events.resized += api.pane_follow
+    #
+    # #238. NUR AUF WINDOWS, weil nur dort `_pane_apply` etwas tut: auf GTK
+    # kehrt es sofort um, und pywebview startet fuer JEDES `moved`/`resized`
+    # einen eigenen Thread auf dem GTK-Hauptthread (`Event.set`) -- gemessen
+    # 2026-09-23 44 us pro Ereignis, zwei pro Konfigurationsschritt des
+    # Compositors, fuer einen Aufruf, der nichts tut.
+    if crow_platform.IS_WINDOWS:
+        window.events.moved += api.pane_follow
+        window.events.resized += api.pane_follow
     window.events.minimized += (lambda *_: api.pane_hide())
     window.events.restored += (lambda *_: api.pane_show())
     window.events.closing += (lambda *_: api.pane_hide())

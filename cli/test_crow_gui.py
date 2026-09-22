@@ -11054,5 +11054,95 @@ class ThePumpSurvivesADeadWebprocessTests(ApiCase):
         self.assertEqual(api._out.get_nowait().get("t"), "never reached")
 
 
+class TheWindowFollowsADragTests(unittest.TestCase):
+    """#236 #237 #238. Drags and resizes stuttered in a long chat.
+
+    Measured 2026-09-23 on a 200-turn chat (12 968 nodes), WebKitGTK 2.52:
+    38.8 ms per rail-drag step before, 3.6 ms after. These tests pin the three
+    causes so that none of them comes back unnoticed.
+    """
+
+    def _drag(self, name: str) -> str:
+        page = crow_gui.PAGE
+        start = page.index("\n  %s(ev){" % name)
+        return page[start:page.index("document.addEventListener(\"mouseup\",up); }", start)]
+
+    def test_a_drag_step_does_not_restyle_the_whole_document(self):
+        # T1: an inherited custom property on <html> restyled every node per
+        # mousemove (1249 ms of style for 80 steps in Chromium).
+        page = crow_gui.PAGE
+        self.assertNotIn('documentElement.style.setProperty("--railw"', page)
+        self.assertNotIn('documentElement.style.setProperty("--codew"', page)
+        self.assertIn('rail.style.setProperty("--railw",w+"px")', self._drag("railDrag"))
+        self.assertIn('panel.style.setProperty("--codew",w+"px")', self._drag("codeDrag"))
+        # The start-up value lands on the same element, so there is one owner.
+        self.assertIn('$("#rail").style.setProperty("--railw", e.rail+"px")', page)
+
+    def test_a_drag_step_neither_calls_python_nor_reads_layout(self):
+        # No bridge call (and so no settings write) per step: the width is
+        # handed over once, on mouseup. No layout read after the write either.
+        for name in ("railDrag", "codeDrag"):
+            body = self._drag(name)
+            move = body[body.index("const move="):body.index("const up=")]
+            self.assertNotIn("pywebview", move, name)
+            for read in ("getBoundingClientRect", "offsetWidth", "offsetHeight",
+                         "scrollHeight", "clientWidth"):
+                self.assertNotIn(read, move, name)
+            up = body[body.index("const up="):]
+            self.assertEqual(up.count("pywebview.api."), 1, name)
+
+    def test_the_drag_widths_do_not_transition(self):
+        page = crow_gui.PAGE
+        self.assertIn("#rail.dragging{transition:none}", page)
+        self.assertIn("#side.dragging{transition:none}", page)
+
+    def test_only_the_visible_turns_are_laid_out_while_the_width_changes(self):
+        # T2: content-visibility ONLY during the gesture -- permanently on, the
+        # view jumped while scrolling up (WebKitGTK 2.52 has no scroll anchoring).
+        page = crow_gui.PAGE
+        self.assertIn("#flow.sizing > .turn{content-visibility:auto}", page)
+        self.assertIn("#flow > .turn{contain-intrinsic-size:auto 240px}", page)
+        css = page[:page.index("</style>")]
+        self.assertEqual(css.count("content-visibility:auto"), 1)
+        for name in ("railDrag", "codeDrag"):
+            body = self._drag(name)
+            self.assertLess(body.index("sizing.begin()"), body.index("const move="), name)
+            self.assertIn("sizing.end()", body[body.index("const up="):], name)
+        self.assertIn('window.addEventListener("resize", () => sizing.pulse());', page)
+
+    def test_the_view_keeps_its_place_when_the_gesture_ends(self):
+        page = crow_gui.PAGE
+        helper = page[page.index("const sizing = (function(){"):]
+        helper = helper[:helper.index("})();")]
+        self.assertIn("crow.atBottom()", helper)
+        self.assertIn("flow.scrollTop = flow.scrollHeight", helper)
+        self.assertIn("p.turn.getBoundingClientRect().top - p.y", helper)
+        # The correction must not glide: #flow scrolls smoothly otherwise.
+        self.assertIn('flow.style.scrollBehavior = "auto"', helper)
+
+    def test_the_pane_is_not_followed_where_it_cannot_move(self):
+        # T3: pywebview starts a thread per moved/resized event, and on GTK
+        # `_pane_apply` returns at once -- so the subscription is Windows-only.
+        source = inspect.getsource(crow_gui.main)
+        guard = source.index("if crow_platform.IS_WINDOWS:\n        window.events.moved")
+        self.assertLess(guard, source.index("window.events.moved += api.pane_follow"))
+        self.assertLess(guard, source.index("window.events.resized += api.pane_follow"))
+        page = crow_gui.PAGE
+        place = page[page.index("\n  brPlace(){"):]
+        place = place[:place.index("pane_place")]
+        self.assertIn("NATIVEDRAG) return;", place)
+
+    def test_the_window_grips_keep_one_resize_in_flight(self):
+        page = crow_gui.PAGE
+        grips = page[page.index("(function grips(){"):]
+        grips = grips[:grips.index("})();")]
+        self.assertEqual(grips.count("pywebview.api.set_geometry("), 1)
+        flush = grips[grips.index("const flush="):grips.index('window.addEventListener("mousemove"')]
+        self.assertIn("if(busy || !want) return;", flush)
+        self.assertIn("pywebview.api.set_geometry(", flush)
+        move = grips[grips.index('window.addEventListener("mousemove"'):]
+        self.assertNotIn("pywebview.api.set_geometry(", move)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
