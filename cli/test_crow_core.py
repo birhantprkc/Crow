@@ -14953,6 +14953,14 @@ if log:
         fh.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(),
                              "stdin": sys.stdin.read() if "--sourcefile=inline-module.js" in sys.argv else None}) + "\n")
 mode = os.environ.get("FAKE_MODE", "ok")
+if mode == "orphan":
+    # esbuild's node wrapper shape: the work runs in a grandchild that
+    # inherits stdout and stderr, and outlives a kill of this process.
+    import subprocess
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    with open(os.environ["FAKE_ORPHAN_PID"], "w") as fh:
+        fh.write(str(child.pid))
+    time.sleep(60)
 if mode == "hang":
     time.sleep(60)
 if mode == "error":
@@ -15008,7 +15016,7 @@ class BuildBundleTests(unittest.TestCase):
         crow_core._esbuild_caches = lambda: [
             (os.path.join(self.caches, "deno", "dl", "esbuild-*", "esbuild-*"), "deno cache")]
         os.environ["FAKE_ARGV_LOG"] = self.argv_log
-        for key in ("FAKE_MODE", "FAKE_CSS", "FAKE_EXPORTS"):
+        for key in ("FAKE_MODE", "FAKE_CSS", "FAKE_EXPORTS", "FAKE_ORPHAN_PID"):
             os.environ.pop(key, None)
 
     def tearDown(self):
@@ -15020,7 +15028,7 @@ class BuildBundleTests(unittest.TestCase):
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
-        for key in ("FAKE_ARGV_LOG", "FAKE_MODE", "FAKE_CSS", "FAKE_EXPORTS"):
+        for key in ("FAKE_ARGV_LOG", "FAKE_MODE", "FAKE_CSS", "FAKE_EXPORTS", "FAKE_ORPHAN_PID"):
             os.environ.pop(key, None)
         crow_core._ESBUILD_VERSION.clear()
         for folder in (self.root, self.caches, self.empty):
@@ -15225,6 +15233,64 @@ class BuildBundleTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 10)
         self.assertIn("error: the bundle did not build", out)
         self.assertIn("exceeded 1s and was killed", out)
+
+    def test_a_grandchild_holding_the_pipe_does_not_hold_the_clock(self):
+        """#212 follow-up, found while making ONE bounded runner: the bundle's
+        copy closed its pipes after the join, and a close waits for the read a
+        grandchild keeps blocked -- measured with a shim that leaves the work
+        to a grandchild holding stdout (esbuild's node wrapper has that shape):
+        a 1 s clock came back after 8.01 s, when the grandchild ended.
+        run_command's copy never closed its pipes and never hung."""
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        os.environ["FAKE_MODE"] = "orphan"
+        os.environ["FAKE_ORPHAN_PID"] = pid_file = os.path.join(self.caches, "orphan.pid")
+        crow_core.BUNDLE_TIMEOUT = 1
+        self._write("app.js", "")
+
+        def _reap():
+            # the grandchild this test started, by its own pid -- never a name
+            try:
+                with open(pid_file, encoding="utf-8") as fh:
+                    os.kill(int(fh.read()), 9)
+            except (OSError, ValueError):
+                pass
+        self.addCleanup(_reap)
+        started = time.monotonic()
+        out = crow_core.tool_build_bundle("app.js")
+        took = time.monotonic() - started
+        self.assertTrue(os.path.exists(pid_file), "the grandchild never started")
+        self.assertLess(took, 5, "the build waited for the grandchild: %.1fs" % took)
+        self.assertIn("exceeded 1s and was killed", out)
+
+    def test_run_command_and_build_bundle_run_through_one_bounded_runner(self):
+        """#212 follow-up: #207's reader-thread runner, once. build_bundle had
+        its own copy, and the two had already drifted (the case above); the
+        --version probe ran `subprocess.run(capture_output=True)`, the very
+        unbounded capture #207 is about."""
+        real = crow_core._bounded_run
+        seen = []
+
+        def spy(cmd, cwd, deadline, stdin_text=None, **kw):
+            seen.append((cmd if isinstance(cmd, str) else [os.path.basename(cmd[0])]
+                         + cmd[1:2], kw.get("shell", False)))
+            return real(cmd, cwd, deadline, stdin_text, **kw)
+        crow_core._bounded_run = spy
+        self.addCleanup(setattr, crow_core, "_bounded_run", real)
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        self._write("app.js", "")
+        self.assertTrue(crow_core.tool_build_bundle("app.js").startswith("built "))
+        self.assertIn("[exit 0]", crow_core.tool_run_command("echo one"))
+        self.assertEqual(seen, [(["esbuild", "--version"], False),
+                                (["esbuild", os.path.join(self.root, "app.js")], False),
+                                ("echo one", True)])
+        # and the loop exists once: no caller starts a child or a reader itself
+        self.assertEqual(inspect.getsource(crow_core).count("pipe.read(65536)"), 1)
+        for fn in (crow_core.tool_run_command, crow_core.tool_build_bundle,
+                   crow_core._bundle_run, crow_core._entry_exports,
+                   crow_core._esbuild_version):
+            src = inspect.getsource(fn)
+            for word in ("subprocess.Popen", "subprocess.run", "threading.Thread"):
+                self.assertNotIn(word, src, "%s: %s" % (fn.__name__, word))
 
     def test_the_write_is_fenced_like_write_file(self):
         self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))

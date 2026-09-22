@@ -9158,6 +9158,127 @@ def tool_search_text(root: str = ".", pattern: str = "", glob: str = "*", **_) -
     return out
 
 
+def _child_env() -> "dict[str, str]":
+    """The environment a tool's child gets: nothing that looks like a secret.
+
+    It is a blocklist, so it is not airtight -- it stops the accident, not an
+    attacker."""
+    return {k: v for k, v in os.environ.items()
+            if not any(s in k.upper() for s in ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"))}
+
+
+# How long the bounded runner waits for its readers after the child is gone.
+# A reader whose pipe hit EOF finishes in microseconds; one that does not has a
+# grandchild holding the pipe (`server &`) and would wait for IT, so the wait
+# is short and a reader still blocked is left behind as the daemon it is.
+BOUNDED_RUN_SETTLE = 0.25
+
+
+def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
+                 stdin_text: str | None = None, *,
+                 shell: bool = False) -> "tuple[int | None, str, str, str]":
+    """(exit code, stdout, stderr, stopped) -- #207's bounded child, once.
+
+    `stopped` is "" when the child ended by itself, "clock" when `deadline`
+    (a time.monotonic() value) passed, "cap" when one stream went over
+    COMMAND_CAPTURE_BYTES; the code is None then, and the caller says which
+    in its own words. A child that cannot be started raises OSError.
+
+    #212 FOLLOW-UP: ONE RUNNER, NOT TWO. run_command (#207) and build_bundle
+    (#212) each carried this reader-thread loop, and the copies had already
+    drifted: build_bundle closed its pipes after a 2 s join, and a pipe whose
+    reader is still blocked cannot be closed -- the close takes the lock the
+    read holds. Measured with a shim that leaves its work to a grandchild
+    holding stdout (the shape of esbuild's node wrapper): a 1 s deadline
+    returned after 8.01 s, when the grandchild ended, and a grandchild that
+    never ends would have held the build forever. run_command never closed and
+    never had that hang. So here a pipe is closed only once its reader is done.
+    The esbuild `--version` probe was a third caller in #207's other shape,
+    `subprocess.run(capture_output=True)` on binaries found in caches; it
+    runs through here too.
+
+    THE CAPTURE IS BOUNDED, NOT JUST THE RESULT. `subprocess.run(capture_output
+    =True)` accumulates everything the child prints at pipe speed and `_clip`
+    runs only afterwards -- measured live, a command that printed into the GiB
+    scale took Crow's python to 13.6 GiB swapped and the kernel's OOM killer
+    then shot `serve`. Readers on threads (a pipe has no portable non-blocking
+    read -- the same sentence `_pump` stands on) and a poll loop that watches
+    BOTH bounds, the clock and the bytes. Whichever trips first kills the
+    child -- the handle this call started, never a name (#158).
+
+    `shell=True` is run_command's: `executable` names bash where it exists and
+    stays None on Windows, which means COMSPEC -- cmd.exe, as it always was.
+    No process group is made here: what a killed shell leaves behind is what
+    run_command has always left, and render_page keeps its own scope.
+    """
+    proc = subprocess.Popen(
+        cmd, shell=shell, cwd=cwd, env=_child_env(),
+        executable=crow_platform.shell_executable() if shell else None,
+        stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, errors="replace")
+    drained = {"out": [], "err": [], "over": False}
+
+    def _drain(which: str) -> None:
+        pipe = proc.stdout if which == "out" else proc.stderr
+        held = 0
+        try:
+            while True:
+                chunk = pipe.read(65536)
+                if not chunk:
+                    break
+                drained[which].append(chunk)
+                # THE CAP LIVES IN THE READER, NOT THE POLL LOOP. A child
+                # can push a burst through the pipe faster than any poll
+                # interval; the reader is the only place that sees every
+                # chunk the moment it lands, so it is where "too much"
+                # becomes a kill and a stopped accumulation.
+                held += len(chunk)
+                if held > COMMAND_CAPTURE_BYTES:
+                    drained["over"] = True
+                    proc.kill()
+                    break
+        except (OSError, ValueError):
+            pass
+
+    readers = [threading.Thread(target=_drain, args=(which,), daemon=True,
+                                name="bounded-run-%s" % which)
+               for which in ("out", "err")]
+    for reader in readers:
+        reader.start()
+    if stdin_text is not None:
+        try:
+            proc.stdin.write(stdin_text)
+            proc.stdin.close()
+        except OSError:
+            pass
+    timed_out = False
+    while proc.poll() is None and not drained["over"]:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            timed_out = True
+            break
+        try:
+            proc.wait(timeout=min(left, 0.25))
+        except subprocess.TimeoutExpired:
+            pass
+    if timed_out or drained["over"]:
+        proc.kill()
+    proc.wait()
+    settle = time.monotonic() + BOUNDED_RUN_SETTLE
+    for reader, pipe in zip(readers, (proc.stdout, proc.stderr)):
+        reader.join(timeout=max(0.0, settle - time.monotonic()))
+        if not reader.is_alive():
+            try:
+                pipe.close()
+            except OSError:
+                pass
+    stopped = "clock" if timed_out else "cap" if drained["over"] else ""
+    if stopped:
+        return None, "", "", stopped
+    return proc.returncode, "".join(drained["out"]), "".join(drained["err"]), ""
+
+
 def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
     """Local execution only, with a timeout and a capped result.
 
@@ -9176,10 +9297,7 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
     # guard was reading a command line whose bare names it believed to
     # "resolve inside the cwd by construction". They did. It was the wrong cwd.
     cwd = _rooted(cwd) if cwd else get_root()
-    # The child does not inherit anything that looks like a secret. It is a
-    # blocklist, so it is not airtight -- it stops the accident, not an attacker.
-    env = {k: v for k, v in os.environ.items()
-           if not any(s in k.upper() for s in ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"))}
+    # The child does not inherit anything that looks like a secret (_child_env).
     try:
         # DAS KIND BEKOMMT KEINE TASTATUR (2026-08-29, live gefunden). Ein
         # `Invoke-WebRequest` ohne `-UseBasicParsing` stellt in PS 5.1 eine
@@ -9203,75 +9321,22 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
         # benennt sie deshalb, und nur wenn es sie wirklich gibt; auf Windows ist
         # die Antwort None und der Aufruf bleibt Zeichen fuer Zeichen der alte.
         #
-        # #207. THE CAPTURE IS BOUNDED, NOT JUST THE RESULT. `subprocess.run
-        # (capture_output=True)` accumulates everything the child prints at
-        # pipe speed and `_clip` runs only afterwards -- measured live, a
-        # command that prints into the GiB scale took Crow's python to
-        # 13.6 GiB swapped and the kernel's OOM killer then shot `serve`.
-        # Readers on threads (a pipe has no portable non-blocking read --
-        # the same sentence `_pump` stands on) and a poll loop that watches
-        # BOTH bounds: the clock (COMMAND_TIMEOUT, as before) and the bytes
-        # (COMMAND_CAPTURE_BYTES, new). Whichever trips first kills the
-        # child, and the result says which -- a fact the model can act on,
-        # never an exception out of the tool.
-        proc = subprocess.Popen(
-            command, shell=True, cwd=cwd, env=env,
-            executable=crow_platform.shell_executable(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, errors="replace")
+        # #207. THE CAPTURE IS BOUNDED, NOT JUST THE RESULT -- the clock
+        # (COMMAND_TIMEOUT) and the bytes (COMMAND_CAPTURE_BYTES), in
+        # _bounded_run, the one runner build_bundle uses too. Whichever trips
+        # first kills the child, and the result says which -- a fact the
+        # model can act on, never an exception out of the tool.
+        code, out, err, stopped = _bounded_run(
+            command, cwd, time.monotonic() + COMMAND_TIMEOUT, shell=True)
     except OSError as exc:
         return f"error: could not run: {exc}"
-    drained = {"out": [], "err": [], "over": False}
-
-    def _drain(which: str) -> None:
-        pipe = proc.stdout if which == "out" else proc.stderr
-        held = 0
-        try:
-            while True:
-                chunk = pipe.read(65536)
-                if not chunk:
-                    break
-                drained[which].append(chunk)
-                # THE CAP LIVES IN THE READER, NOT THE POLL LOOP. A child
-                # can push a burst through the pipe faster than any poll
-                # interval; the reader is the only place that sees every
-                # chunk the moment it lands, so it is where "too much"
-                # becomes a kill and a stopped accumulation.
-                held += len(chunk)
-                if held > COMMAND_CAPTURE_BYTES:
-                    drained["over"] = True
-                    proc.kill()
-                    break
-        except OSError:
-            pass
-
-    for which in ("out", "err"):
-        threading.Thread(target=_drain, args=(which,), daemon=True,
-                         name="run-command-%s" % which).start()
-    timed_out = False
-    deadline = time.monotonic() + COMMAND_TIMEOUT
-    while proc.poll() is None and not drained["over"]:
-        left = deadline - time.monotonic()
-        if left <= 0:
-            timed_out = True
-            break
-        try:
-            proc.wait(timeout=min(left, 0.25))
-        except subprocess.TimeoutExpired:
-            pass
-    if timed_out:
-        proc.kill()
-    proc.wait()
-    if timed_out:
+    if stopped == "clock":
         return f"error: command exceeded {COMMAND_TIMEOUT}s and was killed: {command}"
-    if drained["over"]:
+    if stopped == "cap":
         return ("error: command printed more than %d MiB and was killed -- "
                 "pipe it through head, or write it to a file and read the "
                 "range: %s" % (COMMAND_CAPTURE_BYTES >> 20, command))
-    out = "".join(drained["out"])
-    err = "".join(drained["err"])
-    return _clip(f"[exit {proc.returncode}]\n{out}".rstrip()
+    return _clip(f"[exit {code}]\n{out}".rstrip()
                  + (f"\n[stderr]\n{err}" if err.strip() else ""))
 
 
@@ -9345,14 +9410,16 @@ def _esbuild_version(path: str) -> str | None:
     real = os.path.realpath(path)
     if real in _ESBUILD_VERSION:
         return _ESBUILD_VERSION[real]
+    # Through the bounded runner, not a run with `capture_output=True`:
+    # every candidate here is a binary nobody has vouched for, and that call
+    # is #207's unbounded capture.
     try:
-        done = subprocess.run([path, "--version"], stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, errors="replace",
-                              timeout=BUNDLE_PROBE_TIMEOUT)
-    except (OSError, subprocess.SubprocessError):
+        code, stdout, _err, _stopped = _bounded_run(
+            [path, "--version"], None, time.monotonic() + BUNDLE_PROBE_TIMEOUT)
+    except OSError:
         return None
-    answer = (done.stdout or "").strip()
-    if done.returncode != 0 or not re.fullmatch(r"\d+\.\d+\.\d+\S*", answer):
+    answer = stdout.strip()
+    if code != 0 or not re.fullmatch(r"\d+\.\d+\.\d+\S*", answer):
         return None
     _ESBUILD_VERSION[real] = answer
     return answer
@@ -9465,83 +9532,23 @@ def find_esbuild(start: str) -> "tuple[str | None, str, str, list[str]]":
     return None, "", "", searched
 
 
-def _bounded_run(argv: "list[str]", cwd: str, deadline: float,
-                 stdin_text: str | None = None) -> "tuple[int | None, str, str]":
-    """(exit code, stdout, stderr); None as the code means the clock or the
-    cap stopped it, and stderr then says which.
-
-    run_command's #207 contract without the shell: readers on threads, the
-    byte cap inside the reader, the clock in the poll loop. esbuild writes its
-    output to a file and its log is bounded by `--log-limit`, so neither bound
-    is expected to fire -- they are here because a binary found in a cache is
-    a binary nobody has vouched for.
-    """
-    env = {k: v for k, v in os.environ.items()
-           if not any(s in k.upper() for s in ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"))}
+def _bundle_run(argv: "list[str]", cwd: str, deadline: float,
+                stdin_text: str | None = None) -> "tuple[int | None, str, str]":
+    """(exit code, stdout, stderr) of one esbuild call through _bounded_run;
+    None as the code means the clock or the cap stopped it, and stderr then
+    says which. esbuild writes its output to a file and its log is bounded by
+    `--log-limit`, so neither bound is expected to fire -- they are here
+    because a binary found in a cache is a binary nobody has vouched for."""
     try:
-        proc = subprocess.Popen(
-            argv, cwd=cwd, env=env,
-            stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, errors="replace")
+        code, out, err, stopped = _bounded_run(argv, cwd, deadline, stdin_text)
     except OSError as exc:
         return None, "", f"could not start {argv[0]}: {exc}"
-    drained = {"out": [], "err": [], "over": False}
-
-    def _drain(which: str) -> None:
-        pipe = proc.stdout if which == "out" else proc.stderr
-        held = 0
-        try:
-            while True:
-                chunk = pipe.read(65536)
-                if not chunk:
-                    break
-                drained[which].append(chunk)
-                held += len(chunk)
-                if held > COMMAND_CAPTURE_BYTES:
-                    drained["over"] = True
-                    proc.kill()
-                    break
-        except (OSError, ValueError):
-            pass
-
-    readers = [threading.Thread(target=_drain, args=(which,), daemon=True,
-                                name="build-bundle-%s" % which)
-               for which in ("out", "err")]
-    for reader in readers:
-        reader.start()
-    if stdin_text is not None:
-        try:
-            proc.stdin.write(stdin_text)
-            proc.stdin.close()
-        except OSError:
-            pass
-    timed_out = False
-    while proc.poll() is None and not drained["over"]:
-        left = deadline - time.monotonic()
-        if left <= 0:
-            timed_out = True
-            break
-        try:
-            proc.wait(timeout=min(left, 0.25))
-        except subprocess.TimeoutExpired:
-            pass
-    if timed_out or drained["over"]:
-        proc.kill()
-    proc.wait()
-    for reader in readers:
-        reader.join(timeout=2)
-    for pipe in (proc.stdout, proc.stderr):
-        try:
-            pipe.close()
-        except OSError:
-            pass
-    if timed_out:
+    if stopped == "clock":
         return None, "", f"the build exceeded {BUNDLE_TIMEOUT}s and was killed"
-    if drained["over"]:
+    if stopped == "cap":
         return None, "", ("the bundler printed more than %d MiB and was killed"
                           % (COMMAND_CAPTURE_BYTES >> 20))
-    return proc.returncode, "".join(drained["out"]), "".join(drained["err"])
+    return code, out, err
 
 
 def _esbuild_argv(exe: str, entry: str | None, outfile: str, aliases: "dict[str, str]",
@@ -9657,7 +9664,7 @@ def _entry_exports(exe: str, entry: str, base: str, deadline: float,
     meta = os.path.join(scratch, "exports.json")
     argv = _esbuild_argv(exe, entry, os.path.join(scratch, "exports.mjs"), {}, False,
                          None, fmt="esm", metafile=meta)
-    code, _stdout, _log = _bounded_run(argv, base, deadline)
+    code, _stdout, _log = _bundle_run(argv, base, deadline)
     if code != 0:
         return None
     try:
@@ -9759,7 +9766,7 @@ def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
                 src or "").lower().endswith(".css") else ".js"))
             argv = _esbuild_argv(exe, src, outfile, aliases, minify,
                                  None if page else (global_name or None), name)
-            code, _stdout, log = _bounded_run(argv, base, deadline, stdin_text)
+            code, _stdout, log = _bundle_run(argv, base, deadline, stdin_text)
             errors, warnings = _log_counts(log)
             if code is None:
                 errors = max(errors, 1)
