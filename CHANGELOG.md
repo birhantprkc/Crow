@@ -10,6 +10,18 @@ Nothing here is live-accepted yet; acceptance is robin's GUI replay.
 
 ### Added
 
+- **The head names the working area on every request** (#222). `prompt_head` opens with `Working area: <root>`
+  and one sentence on how relative paths and a cwd-less `run_command` resolve there. It is byte-identical and at
+  the same offset on both sides of the rollover cut. The 2026-09-22 K=2 head (6,738 tokens) had no working
+  directory, and the model invented one (crow-nest#91).
+- **A moved working area is said once** (#224): `[Working area is now X (was Y).]` before the next user message.
+  `clear_root` re-pins the head too.
+- **Thinking fixed on for Qwen3.8-Flash-Next, sent explicitly** (#225, robin 2026-09-22). Both entries carry
+  `reasoning_fixed: "high"` (llama: same bytes as the absent key, #160; serve: the template's xhigh). The turn,
+  the digest leg, the turn after the cut and the review all send it. The window shows no level for these points.
+  Sampling is the card's thinking row (min_p 0.0, corrected from 0.01); `sampling_no_thinking` holds the
+  non-thinking row for a later flip. **crow-nest changes from thinking OFF (2,962 of 2,962 requests on
+  2026-09-22) to xhigh with the 1024 cap.** The budget stays 1024 until measured.
 - **`build_bundle` tool** (#212). Bundles a page's ES modules, or one module, into a single self-contained
   offline HTML/IIFE with the esbuild already on the machine: `CROW_ESBUILD`, project `node_modules`, PATH,
   then the deno/npx caches. No network. Import maps become aliases, shaders import as text (bytes are never
@@ -33,6 +45,9 @@ Nothing here is live-accepted yet; acceptance is robin's GUI replay.
 
 ### Fixed
 
+- **The rollover note is data, not the user's words** (#223). It is framed as a record written by Crow and the
+  model; only the user's carried lines and the typed line count as user-named paths. The Qwen3.8 template allows
+  no other role for it (a late system message raises, and so does a turn with no user query).
 - **An invented `cwd` never runs** (#221). `run_command` refuses a cwd that is not an existing directory before
   anything runs and before the approval card. The refusal names the working area and the near miss found on disk
   (edit distance 1-2, unique best match, case-insensitive on Windows): `'nibor11896' is 'nibor1896' here`.
