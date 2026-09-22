@@ -14380,6 +14380,15 @@ with open(out, "w") as fh:
 if os.environ.get("FAKE_CSS") and out.endswith(".js"):
     with open(out[:-3] + ".css", "w") as fh:
         fh.write("canvas{display:block}\n")
+meta = [a.split("=", 1)[1] for a in sys.argv if a.startswith("--metafile=")]
+if meta and os.environ.get("FAKE_EXPORTS") is not None:
+    # esbuild's metafile shape: `exports` per output, the entry's under the
+    # output whose entryPoint is set -- and filled only for --format=esm.
+    names = [n for n in os.environ["FAKE_EXPORTS"].split(",") if n]
+    with open(meta[0], "w") as fh:
+        json.dump({"outputs": {out: {"imports": [], "entryPoint": sys.argv[1],
+                                     "exports": names if "--format=esm" in sys.argv else []}}},
+                  fh)
 if mode == "warn":
     sys.stderr.write('▲ [WARNING] "import.meta" is not available [empty-import-meta]\n')
 '''
@@ -14414,7 +14423,7 @@ class BuildBundleTests(unittest.TestCase):
         crow_core._esbuild_caches = lambda: [
             (os.path.join(self.caches, "deno", "dl", "esbuild-*", "esbuild-*"), "deno cache")]
         os.environ["FAKE_ARGV_LOG"] = self.argv_log
-        for key in ("FAKE_MODE", "FAKE_CSS"):
+        for key in ("FAKE_MODE", "FAKE_CSS", "FAKE_EXPORTS"):
             os.environ.pop(key, None)
 
     def tearDown(self):
@@ -14426,7 +14435,7 @@ class BuildBundleTests(unittest.TestCase):
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
-        for key in ("FAKE_ARGV_LOG", "FAKE_MODE", "FAKE_CSS"):
+        for key in ("FAKE_ARGV_LOG", "FAKE_MODE", "FAKE_CSS", "FAKE_EXPORTS"):
             os.environ.pop(key, None)
         crow_core._ESBUILD_VERSION.clear()
         for folder in (self.root, self.caches, self.empty):
@@ -14557,6 +14566,60 @@ class BuildBundleTests(unittest.TestCase):
         self.assertEqual(inline["stdin"], "import './main.js';")
         self.assertEqual(os.path.realpath(inline["cwd"]), os.path.realpath(self.root))
 
+    def test_a_module_entry_to_a_page_says_the_page_is_bare_and_names_the_exports(self):
+        """#212 follow-up, the .js-entry trap: diorama's src/app.js bundled to an
+        .html out built clean and rendered one colour -- it exports boot(canvas)
+        and the generated page has neither the canvas nor the call."""
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        os.environ["FAKE_EXPORTS"] = "boot"
+        self._write("src/app.js", "export function boot(canvas) {}\n")
+        out = crow_core.tool_build_bundle("src/app.js", "app.html")
+        self.assertIn("0 error(s)", out)
+        # right under the "built" line, ahead of "self-contained"
+        self.assertTrue(out.splitlines()[1].startswith(
+            "warn: this page holds ONLY the bundle -- no markup"), out)
+        self.assertIn("no call to any export; app.js exports: boot -- nothing calls it", out)
+        self.assertIn("bundle THAT .html as the entry", out)
+        # the probe is a second, esm run with a metafile, into scratch; the
+        # page itself is the IIFE run's, unchanged
+        first, probe = self._calls()
+        self.assertIn("--format=iife", first["argv"])
+        self.assertNotIn("--metafile", " ".join(first["argv"]))
+        self.assertIn("--format=esm", probe["argv"])
+        self.assertNotIn("--minify", probe["argv"])
+        meta = [a for a in probe["argv"] if a.startswith("--metafile=")][0]
+        self.assertFalse(meta[len("--metafile="):].startswith(self.root), meta)
+        self.assertEqual(sorted(os.listdir(self.root)), ["app.html", "node_modules", "src"])
+        with open(os.path.join(self.root, "app.html"), encoding="utf-8") as fh:
+            self.assertIn("console.log('bundled')", fh.read())
+        # several exports, and the global they land on
+        os.environ["FAKE_EXPORTS"] = "boot,dispose"
+        out = crow_core.tool_build_bundle("src/app.js", "app.html", "APP")
+        self.assertIn("app.js exports (on window.APP): boot, dispose -- nothing calls them",
+                      out)
+        # a module that exports nothing has to start itself
+        os.environ["FAKE_EXPORTS"] = ""
+        out = crow_core.tool_build_bundle("src/app.js", "app.html")
+        self.assertIn("app.js exports nothing -- it has to create its own elements", out)
+        # a probe that yields no metafile costs the build nothing
+        os.environ.pop("FAKE_EXPORTS")
+        out = crow_core.tool_build_bundle("src/app.js", "app.html")
+        self.assertTrue(out.startswith("built "), out)
+        self.assertIn("its exports could not be read", out)
+
+    def test_a_module_to_js_and_a_page_entry_carry_no_bare_page_warning(self):
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        os.environ["FAKE_EXPORTS"] = "boot"
+        self._write("src/app.js", "export function boot(canvas) {}\n")
+        self._write("index.src.html", "<html><head></head><body><canvas id=\"c\"></canvas>"
+                                      "<script type=\"module\">import {boot} from "
+                                      "'./src/app.js'; boot(c);</script></body></html>")
+        for args in (("src/app.js", "app.iife.js", "APP"), ("index.src.html", "index.html")):
+            out = crow_core.tool_build_bundle(*args)
+            self.assertTrue(out.startswith("built "), out)
+            self.assertNotIn("ONLY the bundle", out)
+        self.assertFalse([c for c in self._calls() if "--format=esm" in c["argv"]])
+
     def test_errors_are_counted_and_nothing_is_written(self):
         self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
         os.environ["FAKE_MODE"] = "error"
@@ -14607,7 +14670,9 @@ class BuildBundleTests(unittest.TestCase):
         described = [t["function"]["description"] for t in crow_core.TOOLS
                      if t["function"]["name"] == "build_bundle"][0]
         for words in ("file:// CANNOT load ES modules", "IIFE",
-                      "Never flatten or concatenate a library by hand"):
+                      "Never flatten or concatenate a library by hand",
+                      "For a PAGE, make the entry an .html file",
+                      "then bundle THAT", "EMPTY page -- no markup, no call to any export"):
             self.assertIn(words, described)
         render = [t["function"]["description"] for t in crow_core.TOOLS
                   if t["function"]["name"] == "render_page"][0]
@@ -14642,6 +14707,14 @@ class BuildBundleTests(unittest.TestCase):
         self.assertNotIn("import ", page)
         self.assertIn("precision mediump float; // a:b", page)   # the shader, byte for byte
         self.assertIn('"180"', page)
+        # the .js-entry trap on the real metafile: esm lists the exports that
+        # the IIFE's metafile leaves empty
+        self._write("app.js", "import { REVISION } from './vendor/three.core.js';\n"
+                              "export function boot(canvas) { canvas.title = REVISION; }\n"
+                              "export const version = REVISION;\n")
+        out = crow_core.tool_build_bundle("app.js", "app.html")
+        self.assertIn("0 error(s)", out)
+        self.assertIn("app.js exports: boot, version -- nothing calls them", out)
 
 
 class StorePathsGetNoStandingApprovalTests(unittest.TestCase):

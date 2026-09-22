@@ -890,15 +890,19 @@ TOOLS = [
         "ES modules: the browser blocks every import between local files (CORS, "
         "origin null), and import maps do not help. The offline shape is one "
         "classic <script> holding the whole graph, bundled as an IIFE -- this "
-        "tool makes it. Never flatten or concatenate a library by hand. Entry "
-        "an .html page: its <script type=\"module\">, import map and local "
+        "tool makes it. Never flatten or concatenate a library by hand. For a "
+        "PAGE, make the entry an .html file: write the page as HTML (its canvas "
+        "and markup) with a <script type=\"module\"> that imports and starts "
+        "your app, then bundle THAT -- its module scripts, import map and local "
         "stylesheets are bundled and inlined. Entry a .js/.ts module: out .js "
-        "gives the IIFE, out .html wraps it in a page. Bare imports ('three', "
+        "gives the IIFE; out .html wraps it in an EMPTY page -- no markup, no "
+        "call to any export. Bare imports ('three', "
         "'three/addons/...') resolve from node_modules; shaders (.glsl/.vert/"
         ".frag) import as text, images and models as data URLs. Edit the "
         "sources and build again -- never patch the output.",
-        {"entry": dict(_STR, description="The page (.html) or the main module "
-                                         "(.js/.mjs/.ts)."),
+        {"entry": dict(_STR, description="The page (.html) -- the entry for "
+                                         "anything a browser shows -- or the main "
+                                         "module (.js/.mjs/.ts)."),
          "out": dict(_STR, description="The file to write, .html or .js. "
                                        "Default: <entry>.bundle.html / .js."),
          "global_name": dict(_STR, description="For a module entry: the global "
@@ -9216,9 +9220,10 @@ def _bounded_run(argv: "list[str]", cwd: str, deadline: float,
 
 
 def _esbuild_argv(exe: str, entry: str | None, outfile: str, aliases: "dict[str, str]",
-                  minify: bool, global_name: str | None, sourcefile: str = "") -> "list[str]":
+                  minify: bool, global_name: str | None, sourcefile: str = "",
+                  fmt: str = "iife", metafile: str = "") -> "list[str]":
     argv = [exe] + ([entry] if entry else []) + [
-        "--bundle", "--format=iife", "--platform=browser", "--charset=utf8",
+        "--bundle", "--format=" + fmt, "--platform=browser", "--charset=utf8",
         "--outfile=" + outfile, "--log-level=warning", "--log-limit=20",
         "--color=false"]
     argv += ["--loader:%s=%s" % pair for pair in BUNDLE_LOADERS]
@@ -9229,6 +9234,8 @@ def _esbuild_argv(exe: str, entry: str | None, outfile: str, aliases: "dict[str,
         argv.append("--global-name=" + global_name)
     if sourcefile:
         argv.append("--sourcefile=" + sourcefile)
+    if metafile:
+        argv.append("--metafile=" + metafile)
     return argv
 
 
@@ -9310,6 +9317,72 @@ def _flag(value, default: bool) -> bool:
     return default
 
 
+def _entry_exports(exe: str, entry: str, base: str, deadline: float,
+                   scratch: str) -> "list[str] | None":
+    """The names the entry module exports, or None when they could not be read.
+
+    esbuild's metafile lists `exports` per output only for `--format=esm`; for
+    the IIFE it is `[]` whatever the module exports (measured, esbuild 0.28.2:
+    diorama's src/app.js `export function boot` -> [] as IIFE, ["boot"] as
+    esm). So this is a second, esm run of the same graph, unminified, into the
+    scratch directory -- 0.06 s on that three.js graph, the same as the IIFE.
+    Its log is not the build's: a probe that fails says "could not be read"
+    and costs the build nothing.
+    """
+    meta = os.path.join(scratch, "exports.json")
+    argv = _esbuild_argv(exe, entry, os.path.join(scratch, "exports.mjs"), {}, False,
+                         None, fmt="esm", metafile=meta)
+    code, _stdout, _log = _bounded_run(argv, base, deadline)
+    if code != 0:
+        return None
+    try:
+        with open(meta, encoding="utf-8") as fh:
+            outputs = (json.load(fh) or {}).get("outputs") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    for output in outputs.values():
+        if isinstance(output, dict) and output.get("entryPoint"):
+            names = output.get("exports")
+            return [str(n) for n in names] if isinstance(names, list) else None
+    return None
+
+
+def _bare_page_warning(entry: str, exports: "list[str] | None", global_name: str) -> str:
+    """What a .js entry built to an .html page does NOT contain, said plainly.
+
+    #212 FOLLOW-UP, THE .js-ENTRY TRAP. The acceptance run bundled diorama's
+    src/app.js to an .html out: 0 errors, "self-contained" -- and render_page
+    showed one colour, 100 %. The app exports `boot(canvas, opts)` and needs
+    `<canvas id="c">`; the generated page has neither the canvas nor a call.
+    The same graph behind an .html source page (the canvas plus `<script
+    type="module">import {boot} ...; boot(...)</script>`) rendered the scene.
+    A model reads the blank as a broken build and starts patching the bundle.
+
+    WARNED, NOT REFUSED. A module that builds its own DOM and starts itself on
+    load -- the three.js-example shape, `document.body.appendChild(renderer.
+    domElement)` at top level -- works through exactly this path, and nothing
+    short of running it tells the two apart. Refusing would push those onto a
+    wrapper page they do not need; the result naming what is missing, and the
+    exports nobody calls, costs them nothing and tells the boot()-shaped app
+    what to build instead.
+    """
+    name = os.path.basename(entry)
+    on = " (on window.%s)" % global_name if global_name else ""
+    if exports is None:
+        what = "its exports could not be read"
+    elif exports:
+        what = "%s exports%s: %s -- nothing calls %s" % (
+            name, on, ", ".join(exports)[:300], "it" if len(exports) == 1 else "them")
+    else:
+        what = ("%s exports nothing -- it has to create its own elements and start "
+                "itself on load" % name)
+    return ("warn: this page holds ONLY the bundle -- no markup (an empty <body>, no "
+            "<canvas>) and no call to any export; %s. Unless the module starts "
+            "itself, it renders blank. For a page, write it as HTML with its markup "
+            "and a <script type=\"module\"> that imports and starts your app, then "
+            "bundle THAT .html as the entry." % what)
+
+
 def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
                       minify=True, **_) -> str:
     """#212. Entry page or module -> one self-contained offline file."""
@@ -9349,6 +9422,7 @@ def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
     logs: "list[str]" = []
     counts = [0, 0]
     inlined: "list[str]" = []
+    bare_page, exports = False, None
     with tempfile.TemporaryDirectory(prefix="crow-bundle-") as scratch:
         serial = [0]
 
@@ -9391,6 +9465,8 @@ def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
                           "<script>\n%s</script>\n</body>\n</html>\n"
                           % (BUNDLE_MARK, ("<style>\n%s</style>\n" % css) if css else "", js))
                 inlined.append("1 module graph (%s)" % os.path.basename(entry))
+                bare_page = True
+                exports = _entry_exports(exe, entry, base, deadline, scratch)
             else:
                 result = "/* %s from %s */\n%s" % (BUNDLE_MARK, os.path.basename(entry), js)
                 if css:
@@ -9482,8 +9558,10 @@ def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
                 result = None
             elif not modules and not inlined:
                 return (f"error: nothing to bundle in {entry} -- it has no module script, "
-                        f"import map, local script or local stylesheet. Point entry at the "
-                        f"page's module, or give the page a <script type=\"module\" src=...>.")
+                        f"import map, local script or local stylesheet. Give the page a "
+                        f"<script type=\"module\"> (src=... or inline) that imports and "
+                        f"starts the app -- pointing entry at the module instead builds a "
+                        f"page with no markup and no call to it.")
             else:
                 if styles:
                     block = "<style>\n%s</style>\n" % "\n".join(styles)
@@ -9536,6 +9614,8 @@ def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
                 left.append(ref)
     lines = [f"built {out} -- {len(data)} bytes, {errors} error(s), {warnings} "
              f"warning(s), {took:.2f}s, {tool}"]
+    if bare_page:
+        lines.append(_bare_page_warning(entry, exports, global_name))
     if inlined:
         lines.append("inlined: " + "; ".join(inlined))
     if left:

@@ -75,7 +75,8 @@ model, together with "never flatten a library by hand".
 |---|---|
 | class | `executing` — it starts a process and writes a file; an "always" is keyed to the tool, never to `run_command esbuild` |
 | entry `.html` | every `<script type="module">` (`src` or inline) bundled and inlined at the end of `<body>` in document order (modules are deferred; a classic script in `<head>` would run before the canvas exists); the import map becomes `--alias` pairs (targets made absolute: esbuild resolves an alias in its working directory); local stylesheets bundled into `<style>`; local classic scripts inlined as they are |
-| entry `.js/.mjs/.ts` | `out` `.js` → the IIFE (`global_name` names its exports); `out` `.html` → the IIFE wrapped in a minimal page |
+| entry `.js/.mjs/.ts` | `out` `.js` → the IIFE (`global_name` names its exports); `out` `.html` → the IIFE wrapped in an EMPTY page: no markup, no call to any export. The result then says so right under the `built` line and names the entry's exports ("app.js exports: boot -- nothing calls it"), read from a second, unminified `--format=esm --metafile` run into the temp directory — esbuild's metafile lists `exports` only for esm, for the IIFE it is `[]`. A failed probe says "could not be read" and costs the build nothing |
+| a page = an `.html` entry | the tool description says it: write the page as HTML (canvas, markup) with a `<script type="module">` that imports and starts the app, then bundle THAT. A `.js` entry to `.html` is warned, not refused: a module that builds its own DOM and starts itself on load (the three.js-example shape) works through it, and nothing short of running it tells that apart from a `boot()`-shaped one |
 | argv | `--bundle --format=iife --platform=browser --charset=utf8 --log-level=warning --log-limit=20`, `--minify` by default, text loader for `.glsl .vert .frag .vs .fs .wgsl .txt`, data URLs for images, fonts, `.glb .gltf .hdr .exr .ktx2 .bin .wasm` |
 | esbuild, in order | `CROW_ESBUILD`; `node_modules` walking up from the entry (`@esbuild/<platform>`, `esbuild/bin`, `.bin`); `esbuild` on `PATH`; the deno cache (`$DENO_DIR/dl/esbuild-*/`) and the npx cache (`~/.npm/_npx/*/node_modules/@esbuild/`), newest version wins there. Every candidate must answer `--version` |
 | none found | the result lists every place searched and says not to hand-flatten |
@@ -87,7 +88,10 @@ model, together with "never flatten a library by hand".
 Measured 2026-09-22 on a copy of the diorama-test app graph (three.js 0.186 plus post-processing,
 esbuild 0.28.2 from its `node_modules`): 957,335 bytes as an IIFE and 957,410 bytes as a page,
 0 errors, 0 warnings, 0.07 s wall. The page rendered the scene through `render_page`; the
-module source page next to it logged the CORS refusal above.
+module source page next to it logged the CORS refusal above. The same graph with `src/app.js`
+as the entry and an `.html` out built just as clean and rendered one colour: the app exports
+`boot(canvas, opts)` and needs `<canvas id="c">`, and that page has neither — the trap the
+warning above names (0.13 s with the exports probe, `exports: boot`).
 
 ### `read_image` (#170)
 
