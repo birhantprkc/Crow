@@ -8129,7 +8129,7 @@ class NothingOverhangsOrClipsTests(unittest.TestCase):
         """Pfad, URL, Kompositum: #flow hatte 891 px Inhalt in 666. `anywhere`,
         nicht `break-word` -- nur `anywhere` senkt min-content, und die
         Nutzerblase ist ein Grid-Item in einer 1fr-Spur."""
-        self.assertIn("overflow-wrap:anywhere", self._rule(".turn{"))
+        self.assertIn("overflow-wrap:anywhere", self._rule("\n.turn{"))
         self.assertIn("overflow-wrap:normal", self._rule(".md table{"))
 
     def test_the_composers_menus_open_above_the_cards(self):
