@@ -283,19 +283,24 @@ Every round is classified before it may enter the history (`classify_round`):
 | class | what it is | what happens |
 |---|---|---|
 | `markup` | no parsed call, and tool-call markup in the content: crow-nest's `crow_malformed_calls` says `raw_in_content`, or (any other engine) a line starting `<tool_call>`, `</function>`, `<function=`, `function=` or `<parameter=` outside a code fence | not stored; asked again once |
-| `stub` | no call, finish `stop`, tools declared, and the text ends on a colon, or mid-sentence within 200 chars (a letter, comma or dash last, or an inline code span left open) | not stored; asked again once |
+| `stub` | no call, finish `stop`, tools declared, and the text ends on a colon, or shows within 200 chars that a sentence stopped: a comma, dash or opening bracket last, an inline code span or `**` left open, or a last word that cannot end a sentence (an article, a conjunction, a possessive; a form of "to be" right after a noun). No punctuation alone is not enough: `Ja`, `Erledigt`, `42`, `src/app.js` are answers | not stored; asked again once; a stub again on the retry is kept as the answer |
 | `think_only` | reasoning and no visible text (#150) | the one visible-answer nudge, as before |
 
 The re-request is on the same prefix — no message is added, so the read ledger, the goal step
 and the prompt cache stand — with a new `seed`. A note says `discarded a degenerate reply
-(<class>, N chars, seed S) -- asking again with a new seed`. A second degenerate round ends the
-turn with one red line naming both classes and both seeds; the history gets
-`[no usable reply: <class>]` instead of either round. Replayed over the stored rounds of
-2026-09-18..22 (3,155 assistant rounds in 27 files): 8 markup and 100 stub rounds, each one
-followed by a goal nudge or by the loop being called out; no healthy answer flagged.
+(<class>, N chars, seed S) -- asking again with a new seed`. If the retry is a stub, it is
+stored as the answer with a note (`kept the re-asked reply although it looks unfinished`):
+a short answer is never refused twice. If the retry is markup, the turn ends with one red
+line naming both classes and both seeds, and the history gets `[no usable reply: markup]`
+instead of either round. Replayed over the stored rounds of 2026-09-18..22 (3,155 assistant
+rounds in 27 files): 8 markup and 79 stub rounds flagged, 86 of them followed by a goal
+nudge; no healthy answer flagged.
 
 Every local request now carries `seed`, drawn per round (1..2^31-1) and recorded as
-`_seed` in the round's timings and as `seeds` in the turn's bill in `session.json`. crow-nest
+`_seed` in the round's timings and as `seeds` in the turn's bill in `session.json`. The
+rollover digest and the memory pass draw their own and record them as `leg_seeds` in a bill
+(the window; the terminal keeps no bills). The seed goes to the sampler, not the template,
+so the digest still asks on the warm prefix. crow-nest
 samples with seed 0 when none is sent, so a re-request of the same prefix returned the same
 tokens. Remote requests carry no seed (`_REMOTE_DROPS`).
 

@@ -1806,6 +1806,11 @@ class TheSeamKeepsTheRequestTests(TurnLoopCase):
                     "reasoning_effort", "reasoning_budget_tokens",
                     "reasoning_budget_message"):
             self.assertEqual(leg[key], before[key], key)
+        # #217: DER SEED IST DIE EINE AUSNAHME, wie zwischen zwei Runden des
+        # Zuges -- jede Anfrage zieht ihren eigenen. Er geht in den Sampler,
+        # nicht ins Template, also bleibt der warme Praefix derselbe.
+        self.assertIsInstance(leg.get("seed"), int)
+        self.assertNotEqual(leg["seed"], before["seed"])
         # Die Leg fragt auf dem Praefix, den die erste Runde gesehen hat --
         # plus deren Antwort und Ergebnis, plus die eine Frage.
         self.assertEqual(leg["messages"][:len(before["messages"])],
@@ -18000,6 +18005,32 @@ class ClassifyRoundTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(crow_core.classify_round(text, [], "stop"))
 
+    def test_a_short_answer_without_punctuation_is_an_answer(self):
+        """Lead review of ba48641: robin writes German, and no punctuation is
+        not evidence of a cut. None of these may ever be re-asked."""
+        for text in ("Ja", "Erledigt", "Fertig", "ok", "42", "src/app.js",
+                     "Done", "Yes", "`src/app.js`", "Nein, das nicht",
+                     "here it is", "Ich fange an", "Das mache ich",
+                     "genau das", "Kommst du mit", "log in", "if you want to",
+                     "**Erledigt**", "Step 6 re-audited"):
+            with self.subTest(text=text):
+                self.assertIsNone(crow_core.classify_round(text, [], "stop"))
+
+    def test_a_stopped_sentence_needs_positive_evidence(self):
+        for text, why in (("Now I can see the", "an article last"),
+                          ("The file is a", "an article last"),
+                          ("remove it and", "a conjunction last"),
+                          ("Ich pruefe zuerst, ob die Datei und", "und last"),
+                          ("The engine is", "a copula after a noun"),
+                          ("The page is a valid, self-", "a hyphen last"),
+                          ("Checked three files,", "a comma last"),
+                          ("See the result (", "an open bracket"),
+                          ("**Step", "an open emphasis"),
+                          ("The", "a lone article")):
+            with self.subTest(why=why):
+                self.assertEqual(crow_core.classify_round(text, [], "stop"),
+                                 "stub")
+
     def test_quoted_markup_is_not_a_leak(self):
         """An answer ABOUT the tags -- in a fence or inline -- is an answer."""
         fenced = "The server sent this:\n\n```\n<tool_call>\n</function>\n```\n\nThat is the bug."
@@ -18128,9 +18159,9 @@ class ADegenerateRoundIsAskedAgainTests(_FinishingLoopCase):
                          ["user", "assistant", "tool", "assistant"])
         self.assertNotIn("concrete plan", json.dumps(talk.payload()))
 
-    def test_two_degenerate_rounds_fail_loud_once(self):
+    def test_markup_twice_fails_loud_once(self):
         talk = self.conversation()
-        self.say([{"content": LIVE_MARKUP[0]}]).say([{"content": "The full picture is"}])
+        self.say([{"content": LIVE_MARKUP[0]}]).say([{"content": LIVE_MARKUP[4]}])
         self.say([{"content": "never asked for"}])
         result = self.turn(talk)
         self.assertEqual(len(self.bodies), 2, "one retry, not a loop")
@@ -18138,13 +18169,28 @@ class ADegenerateRoundIsAskedAgainTests(_FinishingLoopCase):
         failed = [e[1] for e in self.events.log if e[0] == "failed"]
         self.assertEqual(len(failed), 1)
         self.assertIn("no usable reply twice", failed[0])
-        self.assertIn("markup, then stub", failed[0])
+        self.assertIn("markup, then markup", failed[0])
         for body in self.bodies:
             self.assertIn(str(body["seed"]), failed[0])
-        self.assertEqual(self._stored(talk), ["[no usable reply: stub]"])
-        payload = json.dumps(talk.payload())
-        self.assertNotIn("tool_call>", payload)
-        self.assertNotIn("The full picture is", payload)
+        self.assertEqual(self._stored(talk), ["[no usable reply: markup]"])
+        self.assertNotIn("tool_call>", json.dumps(talk.payload()))
+
+    def test_a_stub_on_the_retry_is_kept_never_failed(self):
+        """Lead review: a stub may be a real short answer, so the re-asked
+        one is stored with a note -- only markup ends in the loud line."""
+        for first in ("Let me stop re-", LIVE_MARKUP[1]):
+            with self.subTest(first=first):
+                self.events = _NotingRecorder()
+                self.bodies.clear()
+                talk = self.conversation()
+                self.say([{"content": first}]).say([{"content": "The full picture is"}])
+                result = self.turn(talk)
+                self.assertEqual(len(self.bodies), 2)
+                self.assertFalse(result.stopped)
+                self.assertEqual([e for e in self.events.log if e[0] == "failed"], [])
+                self.assertEqual(self._stored(talk), ["The full picture is"])
+                self.assertNotIn(first, json.dumps(talk.payload()))
+                self.assertIn("kept the re-asked reply", self.notes()[-1])
 
     def test_the_think_only_nudge_is_unchanged(self):
         """#150 is the detector's first class; it still nudges, it does not
@@ -18294,6 +18340,80 @@ class EveryLocalRequestNamesItsSeedTests(unittest.TestCase):
         finally:
             crow_core._post_stream = original
         self.assertEqual(timings["_malformed_calls"], record)
+
+
+class TheSideRequestsSeedToo(unittest.TestCase):
+    """#217 lead review: the digest leg and the memory pass fell to crow-nest's
+    seed 0 -- the seed that reproduced the corruption."""
+
+    def _capture(self, answer):
+        sent = []
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake(request, timeout=None):
+            sent.append(json.loads(request.data.decode("utf-8")))
+            return _Resp(json.dumps(answer).encode())
+
+        real = crow_core.urllib.request.urlopen
+        self.addCleanup(setattr, crow_core.urllib.request, "urlopen", real)
+        crow_core.urllib.request.urlopen = fake
+        return sent
+
+    def _talk(self):
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "q")
+        talk.append("assistant", "a")
+        return talk
+
+    def test_the_digest_sends_and_records_a_fresh_seed_per_ask(self):
+        # Short content -> the leg asks twice (#210), each with its own seed.
+        sent = self._capture({"choices": [{"finish_reason": "tool_calls",
+                                           "message": {"content": ""}}]})
+        seeds = []
+        crow_core.rollover_digest(self._talk(), base_url="http://x/v1",
+                                  temperature=1.0, top_p=0.95, min_p=0.01,
+                                  seeds=seeds)
+        self.assertEqual(len(sent), 2)
+        self.assertEqual([b["seed"] for b in sent], seeds)
+        self.assertNotEqual(seeds[0], seeds[1])
+
+    def test_a_remote_digest_sends_none(self):
+        sent = self._capture({"choices": [{"finish_reason": "stop",
+                                           "message": {"content": "x" * 300}}]})
+        seeds = []
+        crow_core.rollover_digest(self._talk(), base_url="http://x/v1",
+                                  temperature=1.0, top_p=0.95, min_p=0.01,
+                                  remote=True, seeds=seeds)
+        self.assertNotIn("seed", sent[0])
+        self.assertEqual(seeds, [])
+
+    def test_the_review_sends_and_records_one(self):
+        sent = self._capture({"choices": [{"finish_reason": "stop",
+                                           "message": {"tool_calls": []}}]})
+        seeds = []
+        crow_core.review_turn(self._talk(), base_url="http://x/v1", model="m",
+                              api_key="k", temperature=1.0, top_p=0.95,
+                              min_p=0.01, timeout=1, seeds=seeds)
+        self.assertIsInstance(sent[0]["seed"], int)
+        self.assertEqual(seeds, [sent[0]["seed"]])
+        sent.clear()
+        crow_core.review_turn(self._talk(), base_url="http://x/v1", model="m",
+                              api_key="k", temperature=1.0, top_p=0.95,
+                              min_p=0.01, timeout=1, remote=True)
+        self.assertNotIn("seed", sent[0])
+
+    def test_the_bill_keeps_the_leg_seeds_apart(self):
+        cost = crow_core.TurnCost()
+        cost.add_round({"predicted_n": 1, "_seed": 11})
+        cost.leg_seeds.append(99)
+        bill = crow_core.clean_timings([cost.record()])[0]
+        self.assertEqual((bill["seeds"], bill["leg_seeds"]), ([11], [99]))
 
 
 class AnAbortIsNeverAnAnswerTests(unittest.TestCase):

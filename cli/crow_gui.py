@@ -12261,7 +12261,12 @@ class Api:
                 prompt_tokens=self._context_tokens,
                 extra_headers=spot0.get("headers") or None,
                 transport=spot0.get("transport") or crow_core.TRANSPORT_CHAT,
-                remote=spot0["remote"])
+                remote=spot0["remote"],
+                # #217: DER SEED DER LEG GEHT IN DIE LETZTE BILANZ, und die
+                # geht mit ins Archiv -- der Digest gehoert zum Kontext, der
+                # hier weggelegt wird.
+                seeds=(self._timings[-1].setdefault("leg_seeds", [])
+                       if self._timings else None))
             archived = crow_core.roll_over(
                 self._conversation, spot0["base_url"],
                 self._context_tokens, carry=text, digest=digest,
@@ -12506,6 +12511,10 @@ class Api:
                 reasoning_budget=self._budget,
                 served_name=self._model,
                 incidents=result.incidents,
+                # #217: der Seed des Nachlaufs in die Bilanz des Zuges, dem
+                # er folgt (gerade oben angehaengt, wenn es eine gab).
+                seeds=(self._timings[-1].setdefault("leg_seeds", [])
+                       if line and self._timings else None),
                 gate=getattr(self._args, "memory_approval",
                              crow_core.MEMORY_APPROVAL_DEFAULT),
                 events=events)

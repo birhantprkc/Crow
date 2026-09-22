@@ -58,7 +58,8 @@ copies.
 on a colon with no call behind it) used to end the turn, stay in the history and open the next
 nudge — five markup rounds and one stub in 42 minutes on 2026-09-22, the markup copied four
 times. Such a round is now dropped and asked again once in the same turn, with a new seed and
-no nudge; a second one ends the turn with one red line. See
+no nudge. A stub again on the retry is kept as the answer (a short answer like `Erledigt` is
+never refused twice); markup again ends the turn with one red line. See
 [Rounds that are not answers](../reference/tools.md#rounds-that-are-not-answers-217).
 
 *A cap on one step: 25 turns*, beside the 60 the whole goal gets. The counter belongs to the step,

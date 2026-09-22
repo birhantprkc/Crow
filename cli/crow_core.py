@@ -2898,10 +2898,12 @@ def clean_timings(timings: "list | None") -> list:
             keep["finish"] = turn["finish"]
         # #217: DIE SEEDS DER RUNDEN, Zahlen wie alles hier -- ohne sie ist
         # eine Runde nach dem Wegfall des festen Seeds nicht mehr nachspielbar.
-        seeds = turn.get("seeds")
-        if isinstance(seeds, list) and seeds and all(
-                isinstance(x, int) and not isinstance(x, bool) for x in seeds):
-            keep["seeds"] = list(seeds)
+        for name in ("seeds", "leg_seeds"):
+            seeds = turn.get(name)
+            if isinstance(seeds, list) and seeds and all(
+                    isinstance(x, int) and not isinstance(x, bool)
+                    for x in seeds):
+                keep[name] = list(seeds)
         # EIN ZUG OHNE RUNDEN IST KEIN ZUG. Eine leere Bilanz im Archiv liest
         # sich wie ein Zug, der nichts gekostet hat -- dieselbe Luege wie die
         # stille 0 in der Tokenspalte.
@@ -3178,17 +3180,17 @@ ROUND_MARKUP_RE = re.compile(
 _ROUND_FENCE_RE = re.compile(r"(?ms)^[ \t]*```.*?(?:^[ \t]*```|\Z)")
 # THE STUB CLASS, measured on every stored round of 2026-09-18..22 (session.json,
 # the rollover archives, the backup of the clean test: 3,155 assistant rounds
-# in 27 files, 299 of them without a call): the 100 that ended on a colon, or
-# mid-sentence in their first STUB_MAX_CHARS characters, were followed by a
-# goal nudge (97), by robin's "you are looping" (1), by the next line after a
-# greeting cut off at "I can see the" (1), or ended the 2026-09-18 loop (1) --
+# in 27 files, 299 of them without a call). The rule below flags 79: 78 were
+# followed by a goal nudge, 1 is a greeting cut off at "I can see the" --
 # "Let me verify:", "Let me stop re-", "The full picture is", "Step 4 -- the
-# concrete plan:". Not one healthy answer in that set ends that way; they end
-# on `.`/`!`/`?`, a closed code fence or a list. 200 rather than the ticket's
-# ~120 because the measured stubs run to 196 characters ("... Let me capture
-# properly:" is an announce, "... Let me stop routing around it and" a cut at
-# 166). Five longer cuts (204-1,347 chars) stay unflagged: past the cap, a
-# long answer ending on a word is too likely a real one.
+# concrete plan:". Not one healthy answer is flagged. 27 rounds that were cut
+# too stay unflagged, most of them the one-phrase answers of the 2026-09-20
+# loop ("Same", "Re-audit", "Step 6 re-audited") that #202's brake catches:
+# without punctuation and without a word that cannot end a sentence they look
+# exactly like "Erledigt", and a real short answer must never be refused.
+# 200 chars for the mid-sentence evidence because the measured stubs run to
+# 196 ("... Let me stop routing around it and" is a cut at 166); an announce
+# ending on a colon counts at any length.
 STUB_MAX_CHARS = 200
 # WHAT ENDS A SENTENCE, after trailing emphasis/inline-code closers are taken
 # off. A colon is NOT here: an answer that ends on one announced something
@@ -3197,6 +3199,28 @@ _STUB_TERMINAL = frozenset(".!?…)]}\"'»。！？")
 # A LAST LINE THAT IS A LIST ITEM, A TABLE ROW OR A HEADING ends an answer
 # without punctuation by design ("- update the docs"), and is never a cut.
 _STUB_STRUCTURED_RE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|\||#)")
+# NO PUNCTUATION IS NOT EVIDENCE (lead review of ba48641): robin writes German,
+# and "Ja", "Erledigt", "Fertig", "ok", "42" or a bare `src/app.js` are whole
+# answers. A stub needs POSITIVE evidence of a sentence that stopped: a
+# trailing comma, dash or opening bracket, an inline span or `**` left open,
+# or a last word that cannot end a sentence. The words are the ones that
+# CANNOT close one in either language -- articles, conjunctions, possessives.
+# Left out on purpose: German prepositions that double as separable particles
+# ("Ich fange an", "Kommst du mit"), demonstratives ("genau das", "nimm die"),
+# pronouns ("Das mache ich"), English particles ("log in", "if you want
+# to") and English "an", which is German "an" ("Ich fange an"). A form of
+# "to be" counts only after a noun: "The full picture is" is
+# cut, "here it is" is not.
+_STUB_OPEN_ENDINGS = frozenset(",-\u2013\u2014([{")
+_STUB_DANGLING_WORDS = frozenset((
+    "the", "a", "and", "or", "but", "of", "because", "my", "your",
+    "its", "their", "our",
+    "und", "oder", "aber", "dass", "weil", "wenn", "des", "einen", "einem",
+    "einer", "eines", "zum", "zur"))
+_STUB_BE = frozenset(("is", "are", "was", "were", "be"))
+_STUB_BE_OK_AFTER = frozenset((
+    "it", "that", "this", "what", "how", "where", "there", "here", "he",
+    "she", "they", "we", "you", "i", "which", "who", "one", "so"))
 # The classes `run_turn` re-requests instead of storing (see there).
 DEGENERATE_ROUNDS = ("markup", "stub")
 
@@ -3214,9 +3238,10 @@ def classify_round(reply: "str | None", calls: "list | None",
                 one -- the text carries tool-call markup (any finish -- a
                 leaked call is never an answer);
     `"stub"`    no call, finish `stop`, tools declared, and the visible text
-                ends on a colon (any length) or stops mid-sentence within
-                STUB_MAX_CHARS -- a letter, comma or dash last, or an inline
-                code span left open;
+                ends on a colon (any length) or -- within STUB_MAX_CHARS --
+                shows that a sentence stopped: a comma, dash or opening
+                bracket last, an inline span or `**` left open, or a last
+                word that cannot end a sentence (see _STUB_DANGLING_WORDS);
     `"think_only"`  #150: reasoning and no visible text at all;
     None        an answer, a tool round, or something this cannot judge.
 
@@ -3248,14 +3273,25 @@ def classify_round(reply: "str | None", calls: "list | None",
         return None
     if _STUB_STRUCTURED_RE.match(text.rsplit("\n", 1)[-1]):
         return None
-    if text.count("`") % 2:
+    if text.count("`") % 2 or text.count("**") % 2:
         return "stub"
     if not core:
         return "stub"
     last = core[-1]
     if last in _STUB_TERMINAL:
         return None
-    return "stub" if (last.isalpha() or last in ",-–—") else None
+    if last in _STUB_OPEN_ENDINGS:
+        return "stub"
+    words = re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", core)
+    if not words or not core[-1].isalpha():
+        return None
+    word = words[-1]
+    if word in _STUB_DANGLING_WORDS or (len(words) == 1 and word == "The"):
+        return "stub"
+    if (word in _STUB_BE and len(words) >= 2
+            and words[-2].lower() not in _STUB_BE_OK_AFTER):
+        return "stub"
+    return None
 
 
 def strip_call_markup(reply: str) -> str:
@@ -3784,7 +3820,11 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
                     # bei der Definition aus, nicht beim Aufruf.
                     transport: "str | None" = None,
                     remote: bool = False,
-                    routing: "dict | None" = None) -> str:
+                    routing: "dict | None" = None,
+                    # #217: WHERE THE SEEDS OF THIS LEG ARE RECORDED, or None.
+                    # A list the caller keeps (the turn's bill); each request
+                    # of the leg appends the seed it sent.
+                    seeds: "list | None" = None) -> str:
     """#154. One short question on the still-warm prefix, BEFORE the cut.
 
     A sibling of `review_turn`, and it keeps the same three promises: the
@@ -3887,6 +3927,16 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
     for ask in (DIGEST_ASK, DIGEST_ASK_RETRY):
         body["messages"] = conversation_messages + [
             {"role": "user", "content": ask}]
+        # #217: DIE LEG ZIEHT IHREN EIGENEN SEED, wie jede Runde des Zuges --
+        # ohne ihn sampelt crow-nest mit Seed 0, genau dem Seed, der die
+        # Korruption vom 2026-09-22 Byte fuer Byte reproduziert hat. Der Seed
+        # geht in den Sampler, nicht ins Template: der warme Praefix bleibt,
+        # wofuer die Leg existiert (#154/#205). Lokal und im Chat-Dialekt nur,
+        # aus demselben Grund wie beim Zug (`_REMOTE_DROPS`).
+        if not remote and transport != TRANSPORT_MESSAGES:
+            body["seed"] = draw_seed(avoid=body.get("seed"))
+            if seeds is not None:
+                seeds.append(body["seed"])
         try:
             request = urllib.request.Request(
                 url, data=json.dumps(body).encode("utf-8"), method="POST",
@@ -6166,6 +6216,9 @@ class TurnCost:
         # #217: THE SEED OF EVERY ROUND, in the order they ran -- a discarded
         # degenerate round included, because it is the one a replay wants.
         self.seeds: list[int] = []
+        # #217: the seeds of the requests that are not rounds -- the mid-turn
+        # rollover digest -- kept apart so `seeds` stays one per round.
+        self.leg_seeds: list[int] = []
 
     def add_round(self, timings: dict) -> None:
         self.rounds += 1
@@ -6269,6 +6322,8 @@ class TurnCost:
         # #217: what makes each round of this turn replayable (see SEED_MAX).
         if self.seeds:
             out["seeds"] = list(self.seeds)
+        if self.leg_seeds:
+            out["leg_seeds"] = list(self.leg_seeds)
         return out
 
 
@@ -16721,7 +16776,10 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                 remote: bool = False,
                 routing: "dict | None" = None,
                 incidents: "list[str] | None" = None,
-                events: "TurnEvents | None" = None) -> "list[str]":
+                events: "TurnEvents | None" = None,
+                # #217: where this pass's seed is recorded, or None -- see
+                # `rollover_digest`.
+                seeds: "list | None" = None) -> "list[str]":
     """Ask once whether this turn left anything worth keeping. Returns what was saved.
 
     IT IS CALLED AFTER THE TURN IS OVER ON SCREEN, never inside it. It sat
@@ -16776,10 +16834,17 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
     # Hermes shipped exactly that gap and fixed it as their #70820.
     if routing and transport != TRANSPORT_MESSAGES:
         body.update(routing)
+    # #217: A SEED OF ITS OWN, like every round of the turn. Without it
+    # crow-nest samples this pass at seed 0 -- the seed that reproduced the
+    # 2026-09-22 corruption byte for byte. Set before the gate below, which
+    # takes it back out for a remote endpoint.
+    body["seed"] = draw_seed()
     # THE SAME GATE THE TURN PASSES. This body is built here and not there, so
     # a fix applied once would leave this the only request still carrying them.
     if remote:
         remote_body(body)
+    if seeds is not None and "seed" in body and transport != TRANSPORT_MESSAGES:
+        seeds.append(body["seed"])
     # THE UNASKED PASS SPEAKS THE SAME DIALECT AS THE TURN IT FOLLOWS. It builds
     # its own body and its own headers -- that is what makes it the one easiest
     # to forget -- so the translation happens here as well or this pass alone
@@ -17374,13 +17439,26 @@ def run_turn(
         malformed = timings.get("_malformed_calls") or []
         kind = classify_round(reply, calls, finish, reasoning, tools=send_tools,
                               malformed=malformed)
-        if kind in DEGENERATE_ROUNDS:
+        note = getattr(events, "turn_note", lambda _t: None)
+        if kind == "stub" and degenerate:
+            # A STUB ON THE RE-REQUEST IS KEPT, NOT REFUSED (lead review of
+            # ba48641). Two short, unpunctuated answers in a row from two
+            # different seeds are as likely the answer -- "Erledigt", a
+            # file name -- as a cut, and refusing an answer twice is the one
+            # failure that must not happen to a real one. It is stored below
+            # like any answer; the note and the incident say what it was.
+            note("kept the re-asked reply although it looks unfinished "
+                 "(stub again%s)" % (", seed %s" % timings.get("_seed")
+                                     if timings.get("_seed") is not None
+                                     else ""))
+            incidents.append("the re-asked round was a stub again and was "
+                             "kept as the answer")
+        elif kind in DEGENERATE_ROUNDS:
             # THE TOKENS WERE SPENT, so the round is billed and drawn like any
             # other; only the conversation never hears of it.
             cost.add_round(timings)
             events.round_finished(timings)
             degenerate.append((kind, timings.get("_seed")))
-            note = getattr(events, "turn_note", lambda _t: None)
             if len(degenerate) == 1:
                 # ONCE, IN THE SAME TURN, ON THE SAME PREFIX. No user message
                 # is added, so the read ledger, the goal step and the prompt
@@ -17396,6 +17474,7 @@ def run_turn(
                 incidents.append("a degenerate round (%s) was discarded "
                                  "unstored and asked again" % kind)
                 continue
+            # MARKUP ON THE RE-REQUEST (a stub never gets here, see above):
             # TWICE IS THE MODEL'S ANSWER, NOT BAD LUCK -- and a third try is
             # the silent loop #202 had to brake. One loud line, one
             # placeholder so the history keeps its alternation (a user line
@@ -17760,7 +17839,8 @@ def run_turn(
                 served_name=served_name,
                 prompt_tokens=context_tokens,
                 extra_headers=extra_headers,
-                transport=transport, remote=remote, routing=routing)
+                transport=transport, remote=remote, routing=routing,
+                seeds=cost.leg_seeds)
             # #173: DIE MARKEN DES SCHREIBERS, wenn er welche fuehrt. Sie sind
             # eine Liste, die dem Aufrufer gehoert -- sie wandert ins Archiv und
             # wird DANN geleert, weil ihre Positionen Nachrichten zaehlen, die
