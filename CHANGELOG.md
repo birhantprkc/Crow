@@ -19,6 +19,17 @@ Nothing here is live-accepted yet; acceptance is robin's GUI replay.
   graph: 957,410 B page, 0 errors, 0 warnings, 0.07 s.
 - A regression test holds the tool list, sampling, thinking fields and `max_tokens` identical across the
   rollover seam, and the digest request identical to the turn's (#214).
+- **The #202 brake names the wall** (#202). Each failed tool result of the running goal step is sorted
+  into a class -- dead service (same HTTP 401/402/403 per tool and host), refusal loop, phantom path (ENOENT on
+  a path first named by the failing call), render/command timeout, same exception signature -- and at three in
+  one step the next nudge carries the class, the count and the way around instead of the step text; the flow
+  shows a note. Replayed on the 2026-09-22 session: web_search 401 named at the first nudge after [29], phantom
+  paths at [296], edit_file refusals at [348], render timeouts at [522] -- before the 12000/20000 escalation.
+- **Rollover carries its last good tool calls** (#214). Behind the rollover note the fresh context opens with
+  the last 3 answered, successful, correctly shaped tool rounds (verbatim calls, results clipped to 2000 chars
+  and marked `[carried across the cut]`, images replaced by a sentence, 3000-token budget, an edit preferred).
+  At the 2026-09-22 17:12 cut: 2 run_command rounds and an edit_file with `path, old, new`, ~1,250 tokens.
+
 
 ### Fixed
 
@@ -52,14 +63,28 @@ Nothing here is live-accepted yet; acceptance is robin's GUI replay.
   schema errors stop the chain at once. A failed delegate names every spot it tried and why, saved in
   `subtasks-registry.json` and the transcript. A mid-stream error chunk from a remote endpoint reports its
   code instead of "the model answered nothing".
+- **Read-before-write is the file's state, not the turn** (#215). A read counts across turns and goal-mode
+  nudges while the file keeps the mtime and size it was read with; refusals say "never read in this
+  conversation" or "it changed on disk since you read it". Crow's own writes keep the file counted. The state
+  empties at a rollover (mid-turn included -- it did not before), a new chat, a model switch or a resume.
+- The thinking budget is looked up by the model the server reports, not the request's `"crow"` label (#220):
+  the manifest's `reasoning_budget` now reaches local turns, reviews and digests from window and terminal. No
+  change while thinking is off. The terminal's rollover digest uses the turn's `--api-key` and `--model` (#214).
+- `check_shared_core` is green again (82/82): `tool_append_file` was never declared since 2026-09-20 (#219).
+- `run_command`, `build_bundle` and the esbuild `--version` probe run through one bounded runner (#212/#207);
+  a grandchild holding the pipe no longer holds `build_bundle` past its clock (1 s deadline: 8.01 s -> 1.25 s).
+- `build_bundle`: a `.js` entry built to `.html` says the page holds only the bundle and names the module's
+  exports ("app.js exports: boot -- nothing calls it"); the description recommends an `.html` entry for a page;
+  a `.js` out without `global_name` names the exports nothing can reach (#212).
+
 
 ### Known issues
 
 - render_page on Windows keeps the command-line capture under the virtual clock (now with the fixed
   ceiling); it cannot capture on the deadline. A page with a blocked main thread now costs 25 s (was 9.2 s).
 - `wait_ms` changed meaning from virtual to real time: light pages cost about `wait_ms` of real time.
-- The read-first state still lasts one turn, and every goal-mode nudge starts a new one (#215) -- open design
-  question.
+- The #202 class counting runs between turns; one turn can still spend its tool rounds on one wall.
+- The #220 budget now caps every default turn on the llama arm (absent level = high there).
 
 ## 2.4.0 — 2026-09-19
 
