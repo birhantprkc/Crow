@@ -880,7 +880,10 @@ TOOLS = [
          "glob": dict(_STR, description="Only files matching this glob, e.g. *.py")}, ["pattern"]),
     _fn("run_command",
         f"Run a shell command locally and return its exit code and output. "
-        f"Killed after {COMMAND_TIMEOUT}s. {SHELL_HINT}",
+        f"Killed after {COMMAND_TIMEOUT}s, with everything it started; on Linux it "
+        f"also runs under a memory ceiling (8G by default, no swap) and a kill there "
+        f"says so. For a screenshot of a page use render_page, not a browser here. "
+        f"{SHELL_HINT}",
         {"command": dict(_STR, description="The command line."),
          "cwd": dict(_STR, description="Working directory.")}, ["command"]),
     # #212. THE DESCRIPTION CARRIES THE RULE THE TWO LOST AFTERNOONS DID NOT
