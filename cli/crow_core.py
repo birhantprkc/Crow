@@ -14479,6 +14479,388 @@ def goal_worked_on_nudge(messages: "list | None") -> bool:
     return False
 
 
+# ------------------------------- #202, dieselbe Fehlerklasse je Schritt ----
+#
+# WAS DIE BREMSE OBEN NICHT SIEHT, am 2026-09-22 zweimal gemessen: ein Modell,
+# das ARBEITET -- jeder Zug ruft Werkzeuge, keine zwei Antworten gleich --, und
+# trotzdem seit Stunden gegen dieselbe Wand laeuft. 48 blinde Runden mit toter
+# Suche (Tavily 401) und toten Delegaten (403); in der 655-Nachrichten-Sitzung
+# 22 edit_file-Aufrufe, von denen keiner landete, sechs Pfade, die das Modell
+# nie angelegt hatte, und render_page-Fehlschlaege, auf die es mit wait_ms 6000
+# -> 12000 -> 20000 antwortete und dann mit einem eigenen chromium ueber
+# run_command. Der Anstoss dazwischen wiederholte jedes Mal nur den Schritt.
+#
+# DER FINGERABDRUCK DER ANTWORT hilft hier nicht: web_search mit drei
+# verschiedenen Fragen sind drei verschiedene Zuege und EIN toter Dienst.
+# Gezaehlt wird deshalb die KLASSE des Ergebnisses, nicht der Aufruf -- und das
+# ist auch der Unterschied zu dem, was andere Harnesses zaehlen: OpenHands'
+# StuckDetector verlangt dieselbe Aktion mit denselben Argumenten (action_error,
+# Schwelle 3), Clines MistakeTracker zaehlt jeden Fehler gleich
+# (maxConsecutiveMistakes), Aider (max_reflections 3) und SWE-agent
+# (max_requeries 3) begrenzen Wiederholungen ohne sie zu benennen. Keiner sagt
+# dem Modell, WAS tot ist und was es stattdessen tun soll.
+#
+# DER KERN KLASSIFIZIERT UND FORMULIERT, die Oberflaeche zaehlt pro Schritt und
+# entscheidet, wann ein Anstoss faellig ist -- dieselbe Teilung wie bei der
+# Bremse oben.
+
+# WIE OFT DIESELBE KLASSE IN EINEM SCHRITT KOMMEN DARF, bevor der Anstoss sie
+# beim Namen nennt. Dieselbe Drei wie `GOAL_LOOP_ANSWERS`, und aus demselben
+# Grund: zweimal ist ein Zufall (ein 401 kann ein Tippfehler im Schluessel
+# sein, der gleich behoben ist), dreimal ist ein Zustand. Es ist auch die Zahl,
+# die OpenHands, Aider und SWE-agent unabhaengig voneinander gewaehlt haben.
+# Gemessen: die drei web_search-401 vom 2026-09-22 kamen in EINEM Zug -- bei
+# drei ist der naechste Anstoss der erste, der es sagt.
+GOAL_TROUBLE_TRIPS = 3
+
+# DIE KLASSEN, in der Reihenfolge, in der ein Ergebnis gegen sie geprueft wird.
+# Die Reihenfolge ist Absicht: ein 401 ist kein Verweigern des Werkzeugs, ein
+# ENOENT ist keine beliebige Ausnahme, und ein Fang-Timeout keine Weigerung --
+# die spezifischere Klasse hat den besseren Rat.
+GOAL_TROUBLE_DEAD = "dead"          # externer Dienst antwortet 401/402/403
+GOAL_TROUBLE_PHANTOM = "phantom"    # ENOENT auf einen Pfad, den nie jemand anlegte
+GOAL_TROUBLE_TIMEOUT = "timeout"    # Render/Pruefung lief in die Zeit
+GOAL_TROUBLE_REFUSED = "refused"    # ein Werkzeug sagt wieder dasselbe Nein
+GOAL_TROUBLE_ERROR = "error"        # dieselbe Ausnahme im Befehl, wieder und wieder
+
+# Eine Zeile, die Crow selbst vor ein Ergebnis setzt ("[took old_string as
+# old]", vor #215 "[unknown argument(s) ignored: ...]") -- sie verdeckt, ob
+# darunter ein Fehler steht.
+_TROUBLE_NOTE = re.compile(r"^\[[^\]\n]*\]\n")
+_TROUBLE_HTTP = re.compile(r"\bHTTP (40[123])\b")
+_TROUBLE_HOST = re.compile(r"https?://([^/\s:'\"]+)")
+_TROUBLE_EXIT = re.compile(r"^\[exit (-?\d+)\]")
+# DIE FORMEN, IN DENEN EIN FEHLENDER PFAD ANKOMMT, jede so, wie sie in den
+# Transkripten steht: node (`ENOENT: ..., open '/tmp/water.js'`), Python
+# (`[Errno 2] No such file or directory: '...'`), Crows eigene Werkzeuge
+# (`no such file: ...`, `no such page: ...`) und die coreutils.
+_TROUBLE_MISSING = (
+    re.compile(r"ENOENT: no such file or directory, \w+ '([^']+)'"),
+    re.compile(r"No such file or directory: '([^']+)'"),
+    re.compile(r"^error: no such (?:file|page|directory): (\S+)", re.M),
+    re.compile(r"cannot (?:access|open|stat|create regular file) '([^']+)'"),
+    re.compile(r"^[\w.-]+: ([^\s:']+): No such file or directory", re.M),
+)
+# DIE SIGNATUR EINER AUSNAHME: die Zeile, an der ein Mensch sie wiedererkennt.
+# esbuilds `✘ [ERROR] ...`, eine Python-/JS-Ausnahme `XyzError: ...`, und die
+# Shell, die an einer offenen Anfuehrung scheitert.
+_TROUBLE_SIGNATURE = (
+    re.compile(r"✘ \[ERROR\] (.+)"),
+    re.compile(r"^\s*((?:[A-Za-z_][\w.]*)?(?:Error|Exception)\b:?.*)$", re.M),
+    re.compile(r"(unexpected EOF while looking for matching .+)"),
+)
+_TROUBLE_PATHLIKE = re.compile(
+    r"(?:~|\.{1,2})?/[^\s'\"`,;:()]+|\b[\w.-]+/[\w./-]+")
+
+
+def _trouble_norm(text: str) -> str:
+    """Eine Zeile ohne das, was sich von Mal zu Mal aendert: Pfade und Zahlen.
+
+    "read src/app.js before editing it" und "read /tmp/shot2/index.html before
+    editing it" sind DIESELBE Weigerung -- gemessen 2026-09-22, elf Mal mit
+    wechselnden Pfaden. Wer sie nach Pfad trennte, zaehlte elf Einzelfaelle.
+    """
+    text = _TROUBLE_PATHLIKE.sub("<path>", text.strip())
+    return re.sub(r"\d+", "N", text)[:160]
+
+
+def _trouble_tool(name: str) -> str:
+    """`collect` meldet, was `delegate` losschickte: ein toter Delegat ist
+    EINE Klasse, egal an welchem der beiden Aufrufe er sichtbar wird."""
+    return "delegate" if name in ("delegate", "collect") else name
+
+
+def _trouble_first_line(text: str) -> str:
+    return (text.strip().splitlines() or [""])[0][:200]
+
+
+def goal_trouble_of(name: str, result: str, seen: "Callable[[str], bool]"
+                    ) -> "tuple[str, str, str] | None":
+    """Die Fehlerklasse eines Werkzeugergebnisses: `(klasse, schluessel,
+    detail)`, oder None fuer ein Ergebnis, das kein Fehler ist.
+
+    `seen(pfad)` sagt, ob ein Pfad VOR diesem Aufruf schon irgendwo im
+    Gespraech stand. Der Kern liest das Gespraech nicht selbst, damit dieselbe
+    Funktion live und in der Nachrechnung eines gespeicherten Verlaufs laeuft.
+
+    NUR FEHLSCHLAEGE WERDEN GEZAEHLT: `error: ...` von einem Werkzeug oder ein
+    run_command mit Exit ungleich 0. Ein grep, der "HTTP 401" in einer Quelle
+    findet, ist Arbeit und kein toter Dienst.
+    """
+    text = result if isinstance(result, str) else json.dumps(result)
+    # Das Exit-Praefix von run_command steht auch in eckigen Klammern -- es
+    # ist aber das Ergebnis und keine Notiz davor, also wird es nicht
+    # abgeschaelt.
+    while _TROUBLE_NOTE.match(text) and not _TROUBLE_EXIT.match(text):
+        text = _TROUBLE_NOTE.sub("", text, count=1)
+    exit_code = _TROUBLE_EXIT.match(text)
+    failed = text.startswith("error") or (exit_code is not None
+                                          and exit_code.group(1) != "0")
+    if not failed:
+        return None
+    tool = _trouble_tool(name)
+    # 1. EIN TOTER DIENST. Nur an Crows eigenem Fehlerpraefix: ein 401 im
+    # Ausgabetext eines Befehls sagt nichts ueber einen Dienst dieses Laufs.
+    http = _TROUBLE_HTTP.search(text) if text.startswith("error") else None
+    if http:
+        host = _TROUBLE_HOST.search(text)
+        host = host.group(1) if host else ""
+        return (GOAL_TROUBLE_DEAD, "%s|%s|%s" % (tool, host, http.group(1)),
+                "HTTP %s%s" % (http.group(1), " from " + host if host else ""))
+    # 2. EIN PFAD, DEN ES NIE GAB. Der Pfad steht zum ERSTEN Mal im Aufruf, der
+    # an ihm scheitert -- gemessen in allen sechs Faellen vom 2026-09-22.
+    missing = []
+    for pattern in _TROUBLE_MISSING:
+        for path in pattern.findall(text):
+            path = path.strip().rstrip(".")
+            if path and path not in missing and not seen(path):
+                missing.append(path)
+    if missing:
+        return (GOAL_TROUBLE_PHANTOM, GOAL_TROUBLE_PHANTOM, "\n".join(missing))
+    # 3. EIN FANG, DER NICHT KAM. render_page sagt es in eigenen Worten, alles
+    # andere mit "timed out" oder dem Deckel von run_command.
+    if (text.startswith("error: the browser wrote no screenshot")
+            or (text.startswith("error") and ("timed out" in text
+                                              or "and was killed" in text))):
+        # Der Grund steht in der ersten Klammer ("timed out after 9000 ms and
+        # was stopped"); die Konsolenzeilen dahinter hat das Modell schon.
+        reason = re.search(r"\(([^()\n]+)\)", text)
+        return (GOAL_TROUBLE_TIMEOUT, tool,
+                reason.group(1) if reason else _trouble_first_line(text))
+    # 4. DAS WERKZEUG SAGT NEIN, und zwar dasselbe.
+    if text.startswith("error"):
+        line = re.sub(r"^error:\s*", "", _trouble_first_line(text))
+        return (GOAL_TROUBLE_REFUSED, "%s|%s" % (tool, _trouble_norm(line)), line)
+    # 5. DIESELBE AUSNAHME IM BEFEHL. Ein Exit ungleich 0 ohne erkennbare
+    # Signatur zaehlt nicht: `grep` ohne Treffer ist Exit 1 und kein Fehler.
+    for pattern in _TROUBLE_SIGNATURE:
+        hit = pattern.search(text)
+        if hit:
+            line = hit.group(1).strip()[:200]
+            return (GOAL_TROUBLE_ERROR, _trouble_norm(line), line)
+    return None
+
+
+def _trouble_mentions(message: dict) -> str:
+    """Was in einer Nachricht an Pfaden stehen KANN: Text und Aufrufargumente."""
+    parts = [goal_message_text(message)]
+    for call in message.get("tool_calls") or []:
+        parts.append((call.get("function") or {}).get("arguments") or "")
+    return "\n".join(p for p in parts if p)
+
+
+def _trouble_phantoms(counts: dict) -> "set[str]":
+    return {path for entry in counts.values()
+            if entry["cls"] == GOAL_TROUBLE_PHANTOM
+            for path in entry["detail"].split("\n") if path}
+
+
+def _trouble_mentioned(path: str, text: str) -> bool:
+    """Steht `path` als PFAD in `text`, nicht als Teil eines anderen?
+
+    GEMESSEN 2026-09-22: `/tmp/water.js` stand vorher nur als Ende von
+    `~/.local/state/crow/tmp/water.js` im Gespraech -- einer anderen Datei.
+    Ein absoluter Pfad braucht deshalb eine Grenze davor; ein relativer darf
+    das Ende eines laengeren sein (`src/app.js` in `/home/.../src/app.js`),
+    denn so schreibt man ihn aus dem Arbeitsverzeichnis heraus. Dahinter
+    duerfen weder Pfadzeichen noch eine Endung folgen: `src/water.js` ist
+    nicht `src/water.js.bak`.
+    """
+    lead = r"(?<![\w.~-])" if path[:1] in ("/", "~") else ""
+    return re.search(lead + re.escape(path) + r"(?![\w/-]|\.\w)", text) is not None
+
+
+def goal_trouble_scan(messages: "list | None", start: int,
+                      counts: "dict | None" = None,
+                      new_step: bool = False) -> dict:
+    """Die Werkzeugergebnisse ab `start` in `counts` zaehlen und es zurueckgeben.
+
+    `counts` gehoert dem Schritt: `{schluessel: {"cls", "tool", "n", "detail",
+    "at", "said"}}`. `at` ist der Index des Ergebnisses, an dem die Klasse die
+    Schwelle erreichte -- das, was die Nachrechnung berichtet.
+
+    EIN `goal_step` MIT 'done' LEERT DIE ZAEHLER mitten im Zug: ein Schritt,
+    der abgeschlossen wurde, vererbt seine Fehler nicht dem naechsten, auch
+    wenn beide im selben Zug liegen. 'failed' NICHT: ein gescheiterter Schritt
+    bleibt der naechste offene, Crow stoesst ihn wieder an -- gemessen
+    2026-09-22, [97] 'failed' auf Schritt 9 und danach 550 Nachrichten
+    Schritt 9. Wer dort die Zaehler leerte, vergaesse die Wand genau dann,
+    wenn das Modell selbst gesagt hat, dass es an ihr scheitert.
+
+    `new_step`: der Schritt hat seit dem letzten Anstoss gewechselt. Dann
+    gehoert der Zug bis zum abschliessenden `goal_step` dem ALTEN Schritt und
+    wird nicht gezaehlt -- ohne einen solchen Aufruf im Zug (robin hat im
+    Panel gewechselt) gar nichts davon.
+
+    WAS "SCHON GESEHEN" HEISST, fuer einen Pfad: er steht in irgendeiner
+    Nachricht VOR der Antwort, die den scheiternden Aufruf enthielt -- als
+    Text, als Werkzeugergebnis oder als Argument. Der Text davor wird erst
+    gebaut, wenn ein Pfad fehlt: ein gesunder Lauf zahlt nichts dafuer.
+    """
+    counts = counts if counts is not None else {}
+    messages = messages or []
+    calls: dict = {}
+    counting = not new_step
+    for n in range(max(0, start), len(messages)):
+        message = messages[n]
+        role = message.get("role")
+        if role == "assistant":
+            for call in message.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                calls[call.get("id")] = (n, fn.get("name") or "",
+                                         fn.get("arguments") or "")
+            continue
+        if role != "tool":
+            continue
+        at, name, arguments = calls.get(message.get("tool_call_id"), (n, "", ""))
+        if name == "goal_step":
+            try:
+                status = (json.loads(arguments or "{}") or {}).get("status")
+            except (ValueError, AttributeError):
+                status = None
+            if status == GOAL_DONE:
+                counts.clear()
+                counting = True
+            continue
+        if not counting:
+            continue
+        before: "list[str]" = []
+
+        def seen(path: str, _at: int = at) -> bool:
+            # EIN PFAD, DER SCHON EINMAL INS LEERE GING, BLEIBT EIN PHANTOM,
+            # auch wenn er inzwischen im Gespraech steht: gemessen 2026-09-22,
+            # `cp` nach /tmp/s21/index.html scheiterte (kein mkdir), und der
+            # naechste Aufruf, render_page auf genau diesen Pfad, erwaehnte
+            # ihn damit "schon".
+            if path in _trouble_phantoms(counts):
+                return False
+            if not before:
+                before.append("\n".join(_trouble_mentions(m)
+                                        for m in messages[:_at]))
+            return _trouble_mentioned(path, before[0])
+
+        kind = goal_trouble_of(name, message.get("content") or "", seen)
+        if kind is None:
+            continue
+        cls, key, detail = kind
+        entry = counts.setdefault(cls + "|" + key, {
+            "cls": cls, "tool": _trouble_tool(name), "n": 0, "detail": "",
+            "at": None, "said": 0})
+        entry["n"] += 1
+        if cls == GOAL_TROUBLE_PHANTOM:
+            paths = entry["detail"].split("\n") if entry["detail"] else []
+            entry["detail"] = "\n".join(paths + [p for p in detail.split("\n")
+                                                 if p not in paths])
+        else:
+            entry["detail"] = detail
+        if entry["n"] == GOAL_TROUBLE_TRIPS:
+            entry["at"] = n
+    return counts
+
+
+# WAS STATT DES TOTEN DIENSTES ZU TUN IST, je Werkzeug. Nur fuer die, deren
+# Ausweg feststeht; jedes andere bekommt den allgemeinen Satz.
+_TROUBLE_DEAD_INSTEAD = {
+    "web_search": "work from local sources (files on disk, installed docs, "
+                  "--help) or ask the user for a working key",
+    "fetch_url": "work from local sources or ask the user to fetch it",
+    "delegate": "do the work yourself in this conversation",
+}
+
+
+def goal_trouble_line(entry: dict) -> str:
+    """Die EINE Zeile, die eine ausgeloeste Klasse im Anstoss bekommt: Klasse,
+    Zahl und der Ausweg -- nicht der Schritt noch einmal."""
+    cls, tool, n, detail = entry["cls"], entry["tool"], entry["n"], entry["detail"]
+    if cls == GOAL_TROUBLE_DEAD:
+        return ("%s is dead this session (%s, %d×) -- stop calling it; %s."
+                % (tool, detail, n, _TROUBLE_DEAD_INSTEAD.get(
+                    tool, "do the step without it or ask the user")))
+    if cls == GOAL_TROUBLE_PHANTOM:
+        paths = detail.split("\n")
+        return ("these paths were never created in this conversation (%d "
+                "failures): %s -- create them first, or use the files that "
+                "exist (list_dir, find_files)."
+                % (n, ", ".join(paths[-5:])))
+    if cls == GOAL_TROUBLE_TIMEOUT:
+        if tool == "render_page":
+            return ("render_page failed to capture %d× (%s) -- a larger "
+                    "wait_ms will not help: lower wait_ms or make the scene "
+                    "cheaper (fewer draw calls, a smaller canvas); do not "
+                    "drive a browser through run_command." % (n, detail))
+        return ("%s timed out %d× (%s) -- make the work smaller instead of "
+                "running it again." % (tool, n, detail))
+    if cls == GOAL_TROUBLE_REFUSED:
+        return ("%s refused %d× the same way: %s -- do what that message "
+                "names before calling it again." % (tool, n, detail))
+    return ("the same error came back %d× from %s: %s -- the approach is "
+            "wrong, not the detail; change it instead of patching the same "
+            "spot again." % (n, tool, detail))
+
+
+def goal_trouble_due(counts: "dict | None") -> "list[dict]":
+    """Die Klassen, die in den naechsten Anstoss gehoeren, und merkt sie sich.
+
+    FAELLIG IST EINE KLASSE, die die Schwelle erreicht hat UND seit dem letzten
+    Anstoss wieder vorkam. Wer nach der Zeile aufhoert, hoert sie nicht noch
+    einmal -- dieselbe Zeile vor jedem Zug waere wieder der 105-mal-Block, den
+    #202 abgeschafft hat. Wer weitermacht, hoert sie mit der neuen Zahl.
+    """
+    due = []
+    for entry in (counts or {}).values():
+        if entry["n"] >= GOAL_TROUBLE_TRIPS and entry["n"] > entry["said"]:
+            due.append(entry)
+            entry["said"] = entry["n"]
+    return due
+
+
+def goal_trouble_label(entry: dict) -> str:
+    """Die kurze Form fuer robins Notiz: was ausgeloest hat, wie oft."""
+    cls, tool, n = entry["cls"], entry["tool"], entry["n"]
+    if cls == GOAL_TROUBLE_DEAD:
+        return "%s dead (%s, %d×)" % (tool, entry["detail"], n)
+    if cls == GOAL_TROUBLE_PHANTOM:
+        return "%d calls on paths never created" % n
+    if cls == GOAL_TROUBLE_TIMEOUT:
+        return "%s timed out %d×" % (tool, n)
+    if cls == GOAL_TROUBLE_REFUSED:
+        return "%s refused %d× the same way" % (tool, n)
+    return "the same error %d× from %s" % (n, tool)
+
+
+def goal_turn_start(messages: "list | None") -> "int | None":
+    """Wo der letzte Zug anfing: Crows Anstoss oder robins getippte Zeile.
+
+    NICHT JEDE NUTZERZEILE BEGINNT EINEN ZUG. Die Notiz ueber das verbrauchte
+    Werkzeugbudget und die Rollover-Notiz stehen mitten in einem -- beide in
+    eckigen Klammern, wie Crows eigene Zeilen, aber ohne dessen Praefix. Wer
+    ab ihnen zaehlte, verloere alles, was der Zug davor gerufen hat.
+    """
+    for n in range(len(messages or []) - 1, -1, -1):
+        message = messages[n]
+        if message.get("role") != "user":
+            continue
+        if goal_is_nudge(message) or not goal_message_text(message).startswith("["):
+            return n
+    return None
+
+
+def goal_trouble_nudge(step: int, due: "list[dict]") -> str:
+    """Der Anstoss, wenn eine Klasse ausgeloest hat: je Klasse eine Zeile aus
+    `goal_trouble_line`. `step` zaehlt ab 1.
+
+    DER SCHRITTTEXT STEHT NICHT DRIN. Das Modell kennt ihn -- es arbeitet seit
+    mindestens drei Fehlschlaegen daran --, und ihn noch einmal zu schicken
+    hiesse, dieselbe Aufgabe vor dieselbe Wand zu stellen. Was es nicht weiss,
+    ist, dass die Wand eine ist.
+    """
+    return ("%s, step %d still open -- the same failure keeps coming back:\n"
+            "%s\nDo not repeat what failed. If the step cannot be done "
+            "another way, call goal_step with 'failed' and say why.]"
+            % (GOAL_NUDGE_MARK, step,
+               "\n".join("- " + goal_trouble_line(entry) for entry in due)))
+
+
 def needs_approval(name: str, mode: str) -> bool:
     """Does this tool stop and ask at this level?
 

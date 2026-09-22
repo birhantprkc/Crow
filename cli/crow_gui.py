@@ -9236,6 +9236,9 @@ class Api:
         # Ob die zuletzt geschickte Zeile die EINE Erholungszeile war. Danach
         # gibt es keinen zweiten Versuch (#202).
         self._goal_recovery = False
+        # Die Fehlerklassen des laufenden Schritts, gezaehlt von
+        # `crow_core.goal_trouble_scan` (#202).
+        self._goal_trouble: dict = {}
 
     def _goal_cut(self, turns: int) -> int:
         """Die letzten `turns` Motorzuege aus der Geschichte nehmen. #202.
@@ -9348,6 +9351,11 @@ class Api:
                              ist ein Fenster, das den Rechner die Nacht ueber
                              beschaeftigt
 
+        UND EIN ANDERER ANSTOSS STATT DES SCHRITTS, wenn dieselbe
+        Fehlerklasse im Schritt dreimal kam (#202): toter Dienst, dieselbe
+        Weigerung, ein Pfad, den es nie gab, derselbe Timeout, dieselbe
+        Ausnahme. Der Anstoss nennt die Klasse, die Zahl und den Ausweg.
+
         DIE REIHENFOLGE IST DIE DES SCHADENS: die Bremse steht vor den Deckeln,
         weil ein Kreis, der auf einen Deckel wartet, bis dahin den Kontext mit
         den Beispielen fuellt, aus denen er sich naehrt.
@@ -9382,8 +9390,11 @@ class Api:
         # #202. DER ZWEITE DECKEL, auf EINEN Schritt. Der Zaehler gehoert dem
         # Schritt und nicht dem Ziel, also faengt er bei jedem Wechsel neu an --
         # ein Plan, der voranschreitet, sieht ihn nie.
-        if nxt != self._goal_step:
+        new_step = nxt != self._goal_step
+        if new_step:
             self._goal_step, self._goal_step_turns = nxt, 0
+            # Die Fehlerklassen gehoeren dem Schritt wie der Zaehler (#202).
+            self._goal_trouble = {}
         self._goal_step_turns += 1
         if self._goal_step_turns > self.GOAL_STEP_TURN_CAP:
             self.push({"k": "note",
@@ -9400,6 +9411,27 @@ class Api:
         if goal["steps"][nxt]["status"] != crow_core.GOAL_RUNNING:
             crow_core.goal_step_begin(nxt)
             self.push_goal()
+        # #202. DIESELBE FEHLERKLASSE, NICHT DERSELBE SCHRITTTEXT. Gezaehlt
+        # wird der Zug, der gerade zu Ende ging -- ab seinem Anfang, Crows
+        # Anstoss oder robins Zeile --, in die Zaehler des Schritts; hat der
+        # Schritt gerade gewechselt, nur was nach dem Abschluss des alten kam.
+        # Hat eine Klasse die Schwelle erreicht und kam seitdem wieder,
+        # bekommt das Modell statt des Schritts, der es an dieselbe Wand
+        # schickt, die Wand beim Namen und den Weg darum herum. robin sieht es
+        # als Notiz, wie die Bremse.
+        payload = self._conversation.payload()
+        start = crow_core.goal_turn_start(payload)
+        if start is not None:
+            crow_core.goal_trouble_scan(payload, start, self._goal_trouble,
+                                        new_step=new_step)
+        due = crow_core.goal_trouble_due(self._goal_trouble)
+        if due:
+            self.push({"k": "note",
+                       "t": "goal mode, step %d: the same failure keeps coming "
+                            "back -- %s. The nudge names the way around it."
+                            % (nxt + 1, "; ".join(crow_core.goal_trouble_label(e)
+                                                  for e in due))})
+            return crow_core.goal_trouble_nudge(nxt + 1, due)
         # #202. NICHT HUNDERTMAL DERSELBE BLOCK. Der volle Anstoss ist 330 Byte
         # Anweisung; byteweise identisch vor jedem Zug wiederholt ist er selbst
         # schon das Muster, das das Modell dann fortsetzt -- und er sagt beim

@@ -21,7 +21,7 @@ while it keeps going.
 | Panel | in the chat, above the git panel: title, `done/total`, wall clock, tokens, delegated tokens, and one row per step |
 | Store | `<root>/.crow/goal.json`, beside `MEMORY.md` — the goal belongs to the folder the work is in |
 | States | `open` · `running` · `done` · `failed` |
-| Limits | 60 turns for the whole goal, 25 for one step, and a brake on three identical or three empty answers (#165, #202) |
+| Limits | 60 turns for the whole goal, 25 for one step, a brake on three identical or three empty answers, and the same failure class three times in one step named in the next nudge (#165, #202) |
 
 **Two tools and not one, because they cost different things.** The plan goes into the pinned head
 of every prompt, so writing one costs a full prefill — the composer says so before it changes
@@ -42,7 +42,7 @@ later.
 
 **A goal that has stopped getting anywhere is stopped, and says so.** Seen live on 2026-09-18:
 thirty-five answers of a single character in a row, at 130,939 tokens, each one answering the same
-nudge. Three things catch that now (#202).
+nudge. Four things catch that now (#202).
 
 *The brake.* Three identical answers — same text and the same tool calls with the same arguments
 — or three empty ones, where empty means at most two characters and no tool call at all, are read
@@ -63,6 +63,31 @@ step is named. From the second turn on, if the last turn worked on the nudge and
 gets `[Goal mode, step N still open. Continue.]` instead. The full block repeated byte for byte in
 front of every turn is itself a pattern, and a model that reads a hundred copies of it continues
 the pattern rather than the work.
+
+*The same failure, named.* The brake watches the answers; a model that is busy — a tool call every
+turn, no two answers alike — slips past it while hitting the same wall for hours. Seen live on
+2026-09-22: three `web_search` calls with three different questions, all `HTTP 401` from the search
+provider; 22 `edit_file` calls, none of which landed; six paths the model had never created;
+`render_page` failing while the model raised `wait_ms` from 6000 to 20000. So Crow also sorts every
+**failed** tool result of the running step into a class:
+
+| Class | What counts | The line in the next nudge says |
+|---|---|---|
+| dead service | the same `HTTP 401/402/403` from the same tool and host (`collect` counts as `delegate`) | the tool is dead this session, stop calling it — work from local sources, ask for a key, or do the delegated work yourself |
+| refusal loop | the same tool refusing with the same text, paths and numbers ignored | the refusal, and to do what it names before calling again |
+| phantom path | "no such file" on a path that appears for the first time in the very call that fails (or already failed that way) | the paths — create them first, or use the files that exist |
+| timeout | `render_page` capturing nothing, or a tool that timed out | a larger `wait_ms` will not help — lower it or make the scene cheaper, and do not drive a browser through `run_command` |
+| same error | the same exception signature from `run_command` (`SyntaxError: …`, esbuild's `✘ [ERROR] …`), line numbers ignored | the approach is wrong, not the detail |
+
+Only failures count: a result that starts with `error:` or a command with a non-zero exit, and for
+a command only when a signature can be read — a `grep` that found nothing is not an error. At
+**three** of one class in one step (the brake's number, and the one OpenHands, Aider and SWE-agent
+settled on), the next nudge carries one line per tripped class — class, count, the way around —
+**instead of** the step text, and the flow shows a note. The line comes back only when that class
+came back; a model that stopped is not told again. The counts belong to the step: they start over
+when the step changes, when the model marks it `done`, and when you type a line. A step marked
+`failed` keeps them, because Crow nudges that same step again. Counting happens between turns, so
+a single turn can still spend its 24 tool rounds on the wall before the line arrives.
 
 **The counters are the goal's, not the steps' sum.** Wall clock runs from the first step that
 started, and tokens are what the goal cost across every context it lived in — thinking, tool

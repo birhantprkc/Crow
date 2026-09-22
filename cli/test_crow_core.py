@@ -15302,6 +15302,302 @@ class TheEngineKnowsAnEmptyLoopWhenItSeesOneTests(unittest.TestCase):
         self.assertFalse(crow_core.goal_worked_on_nudge(typed))
 
 
+class TheSameFailureIsCountedByItsClassTests(unittest.TestCase):
+    """#202. Dieselbe Fehlerklasse je Schritt -- was die Antwort-Bremse nicht
+    sieht, weil das Modell dabei arbeitet.
+
+    LIVE AM 2026-09-22: drei web_search mit drei verschiedenen Fragen, alle
+    `HTTP 401` von Tavily; 22 edit_file, keiner gelandet; sechs Pfade, die das
+    Modell nie angelegt hatte; render_page mit wait_ms 6000 -> 12000 -> 20000.
+    Kein Zug glich dem vorigen, also hielt die Bremse nichts an -- und der
+    Anstoss dazwischen wiederholte nur den Schritt. Die Ergebnistexte hier sind
+    die aus jener Sitzung, gekuerzt.
+    """
+
+    NUDGE = {"role": "user", "content": "[Goal mode, step 9 still open. Continue.]"}
+
+    def transcript(self, *results, head=()):
+        """Ein Zug: Crows Anstoss, dann je Ergebnis ein Aufruf und seine
+        Antwort. `results` sind `(werkzeug, argumente, ergebnis)`."""
+        messages = [{"role": "system", "content": "SYS"}] + list(head) + [self.NUDGE]
+        for n, (name, args, result) in enumerate(results):
+            messages.append({"role": "assistant", "content": "",
+                             "tool_calls": [{"id": "c%d" % n, "type": "function",
+                                             "function": {"name": name,
+                                                          "arguments": args}}]})
+            messages.append({"role": "tool", "content": result,
+                             "tool_call_id": "c%d" % n})
+        return messages
+
+    def scan(self, messages, counts=None):
+        return crow_core.goal_trouble_scan(
+            messages, crow_core.goal_turn_start(messages), counts)
+
+    def only(self, counts):
+        tripped = [e for e in counts.values()
+                   if e["n"] >= crow_core.GOAL_TROUBLE_TRIPS]
+        self.assertEqual(len(tripped), 1, counts)
+        return tripped[0]
+
+    TAVILY = ("error: https://api.tavily.com/search answered HTTP 401 "
+              "Unauthorized\nCROW_TAVILY_KEY was refused.")
+
+    def test_the_threshold_is_three(self):
+        """Zweimal ist ein Zufall, dreimal ein Zustand -- dieselbe Zahl wie
+        die Antwort-Bremse und wie OpenHands, Aider und SWE-agent."""
+        self.assertEqual(crow_core.GOAL_TROUBLE_TRIPS, 3)
+        self.assertEqual(crow_core.GOAL_TROUBLE_TRIPS, crow_core.GOAL_LOOP_ANSWERS)
+
+    def test_a_dead_search_is_one_class_across_three_questions(self):
+        """POSITIV, der Live-Fall [27]-[29]: drei verschiedene Fragen, EIN
+        toter Dienst. Der Abdruck der Antwort haette drei Zuege gesehen."""
+        counts = self.scan(self.transcript(
+            ("web_search", '{"query": "three.js Water.js"}', self.TAVILY),
+            ("web_search", '{"query": "InstancedMesh setMatrixAt"}', self.TAVILY),
+            ("web_search", '{"query": "gl_PointSize WebGL2"}', self.TAVILY)))
+        entry = self.only(counts)
+        self.assertEqual(entry["cls"], crow_core.GOAL_TROUBLE_DEAD)
+        line = crow_core.goal_trouble_line(entry)
+        self.assertIn("web_search is dead this session (HTTP 401 from "
+                      "api.tavily.com, 3×) -- stop calling it", line)
+        self.assertIn("ask the user for a working key", line)
+
+    def test_two_are_not_yet_a_class(self):
+        """GEGENPROBE an der Schwelle: zwei 401 bleiben still."""
+        counts = self.scan(self.transcript(
+            ("web_search", '{"query": "a"}', self.TAVILY),
+            ("web_search", '{"query": "b"}', self.TAVILY)))
+        self.assertEqual(crow_core.goal_trouble_due(counts), [])
+
+    def test_a_dead_delegate_counts_on_delegate_and_collect_alike(self):
+        """Die 403 eines Delegaten kommt an `collect` an -- dieselbe Klasse wie
+        die am `delegate` selbst, sonst zaehlte jede Seite nur die Haelfte."""
+        failed = ("error: == d%d failed after 0.8 s -- no spot answered -- "
+                  "tried inkling-small:free (spot: HTTP 403 Forbidden)")
+        counts = self.scan(self.transcript(
+            ("collect", '{"id": "d1"}', failed % 1),
+            ("delegate", '{"task": "x"}', "error: HTTP 403 Forbidden"),
+            ("collect", '{"id": "d3"}', failed % 3)))
+        entry = self.only(counts)
+        self.assertEqual((entry["cls"], entry["tool"]),
+                         (crow_core.GOAL_TROUBLE_DEAD, "delegate"))
+        self.assertIn("do the work yourself", crow_core.goal_trouble_line(entry))
+
+    def test_a_401_in_command_output_is_not_a_dead_service(self):
+        """GEGENPROBE: ein grep, der `HTTP 401` in einer Quelle findet, ist
+        Arbeit. Nur Crows eigenes `error:`-Praefix sagt etwas ueber einen
+        Dienst dieses Laufs."""
+        seen = lambda path: True  # noqa: E731
+        for result in ("[exit 0]\nsrc/net.js:12: // HTTP 401 means retry",
+                       "[exit 1]\nsrc/net.js:12: // HTTP 401 means retry"):
+            self.assertIsNone(crow_core.goal_trouble_of("run_command", result, seen))
+
+    def test_the_same_refusal_with_other_paths_is_one_loop(self):
+        """POSITIV: "read X before editing it" mit wechselnden Pfaden ist EINE
+        Weigerung -- gemessen elf Mal hintereinander, nie dieselbe Datei."""
+        refusal = "error: read %s before editing it, in this turn"
+        counts = self.scan(self.transcript(
+            ("edit_file", "{}", "[took old_string as old]\n" + refusal % "src/app.js"),
+            ("edit_file", "{}", refusal % "/tmp/shot2/index.html"),
+            ("edit_file", "{}", refusal % "/testbed/html/diorama/index.html")))
+        entry = self.only(counts)
+        self.assertEqual(entry["cls"], crow_core.GOAL_TROUBLE_REFUSED)
+        self.assertIn("edit_file refused 3× the same way: read "
+                      "/testbed/html/diorama/index.html before editing it, in "
+                      "this turn -- do what that message names",
+                      crow_core.goal_trouble_line(entry))
+
+    def test_different_refusals_are_not_one(self):
+        """GEGENPROBE: drei verschiedene Nein sind drei Einzelfaelle."""
+        counts = self.scan(self.transcript(
+            ("edit_file", "{}", "error: edit_file needs 'old'"),
+            ("edit_file", "{}", "error: read a.py before editing it, in this turn"),
+            ("edit_file", "{}", "error: 'old' does not appear in a.py")))
+        self.assertEqual(crow_core.goal_trouble_due(counts), [])
+
+    ENOENT = ("[exit 1]\n[stderr]\nnode:fs:621\n\nError: ENOENT: no such file "
+              "or directory, open '%s'\n    at Object.readFileSync")
+
+    def test_a_path_first_named_by_the_call_that_fails_is_a_phantom(self):
+        """POSITIV, drei der sechs Live-Faelle: der Pfad steht zum ERSTEN Mal
+        im Aufruf, der an ihm scheitert. Die Zeile nennt sie."""
+        counts = self.scan(self.transcript(
+            ("run_command", '{"command": "node x /tmp/water.js"}',
+             self.ENOENT % "/tmp/water.js"),
+            ("run_command", '{"command": "node x src/water.js.bak"}',
+             self.ENOENT % "src/water.js.bak"),
+            ("render_page", '{"path": "/tmp/s21/index.html"}',
+             "error: no such page: /tmp/s21/index.html")))
+        entry = self.only(counts)
+        self.assertEqual(entry["cls"], crow_core.GOAL_TROUBLE_PHANTOM)
+        self.assertIn("these paths were never created in this conversation (3 "
+                      "failures): /tmp/water.js, src/water.js.bak, "
+                      "/tmp/s21/index.html -- create them first",
+                      crow_core.goal_trouble_line(entry))
+
+    def test_a_path_the_conversation_produced_is_not_a_phantom(self):
+        """GEGENPROBE: eine Datei, die vorher geschrieben wurde und jetzt fehlt,
+        ist ein anderes Problem -- das Modell hat sie nicht erfunden. Als
+        Text, als Ergebnis oder als Argument: gesehen ist gesehen."""
+        head = [{"role": "tool", "content": "wrote 1496 bytes to /tmp/w/a.js"},
+                {"role": "assistant", "content": "I keep it in src/water.js."}]
+        messages = self.transcript(
+            ("run_command", "{}", self.ENOENT % "/tmp/w/a.js"),
+            ("run_command", "{}", self.ENOENT % "src/water.js"), head=head)
+        counts = self.scan(messages)
+        self.assertNotIn("phantom|phantom", counts)
+        self.assertEqual({e["cls"] for e in counts.values()},
+                         {crow_core.GOAL_TROUBLE_ERROR})
+
+    def test_the_tail_of_another_path_is_not_the_path(self):
+        """GEMESSEN 2026-09-22: `/tmp/water.js` stand vorher nur als Ende von
+        `~/.local/state/crow/tmp/water.js` da -- eine andere Datei."""
+        self.assertFalse(crow_core._trouble_mentioned(
+            "/tmp/water.js", "wrote 1496 bytes to /home/u/.local/state/crow/tmp/water.js"))
+        self.assertTrue(crow_core._trouble_mentioned(
+            "/tmp/water.js", "cat > /tmp/water.js <<EOF"))
+        self.assertTrue(crow_core._trouble_mentioned(
+            "src/app.js", "read /home/u/proj/src/app.js."))
+
+    def test_a_phantom_stays_a_phantom_once_named(self):
+        """Der Live-Fall /tmp/s21: `cp` dorthin scheiterte (kein mkdir), und
+        render_page auf genau diesen Pfad "kannte" ihn danach -- aus der
+        Fehlermeldung. Ein Pfad, der einmal ins Leere ging, zaehlt weiter."""
+        cp = ("[exit 1]\n[stderr]\ncp: cannot create regular file "
+              "'/tmp/s21/index.html': No such file or directory")
+        counts = self.scan(self.transcript(
+            ("run_command", '{"command": "cp index.html /tmp/s21/index.html"}', cp),
+            ("render_page", '{"path": "/tmp/s21/index.html"}',
+             "error: no such page: /tmp/s21/index.html")))
+        entry = counts["phantom|phantom"]
+        self.assertEqual((entry["n"], entry["detail"]), (2, "/tmp/s21/index.html"))
+
+    NO_SHOT = ("error: the browser wrote no screenshot (timed out after %d ms "
+               "and was stopped). The page (wait_ms %d) could not deliver a "
+               "frame in time. Console:\n\"THREE.WebGLShadowMap: ...\"")
+
+    def test_a_render_that_keeps_timing_out_says_what_not_to_do(self):
+        """POSITIV, [472]-[518]: 6000, 12000, 8000 -- jedes Mal hoeher, jedes
+        Mal ohne Bild, und danach chromium ueber run_command."""
+        counts = self.scan(self.transcript(
+            *[("render_page", '{"wait_ms": %d}' % w, self.NO_SHOT % (w, w))
+              for w in (6000, 12000, 8000)]))
+        entry = self.only(counts)
+        self.assertEqual(entry["cls"], crow_core.GOAL_TROUBLE_TIMEOUT)
+        line = crow_core.goal_trouble_line(entry)
+        self.assertIn("render_page failed to capture 3× (timed out after 8000 "
+                      "ms and was stopped)", line)
+        self.assertIn("lower wait_ms or make the scene cheaper", line)
+        self.assertIn("do not drive a browser through run_command", line)
+
+    def test_the_same_exception_in_a_command_is_one_class(self):
+        """Dieselbe Ausnahme, nur die Zeilennummer wandert -- EINE Signatur."""
+        error = "[exit 1]\n[stderr]\n[eval]:%d\n\nSyntaxError: Unexpected token ')' at %d"
+        counts = self.scan(self.transcript(
+            *[("run_command", '{"command": "node -e %d"}' % n, error % (n, n))
+              for n in (7, 14, 21)]))
+        entry = self.only(counts)
+        self.assertEqual(entry["cls"], crow_core.GOAL_TROUBLE_ERROR)
+        self.assertIn("the same error came back 3× from run_command: "
+                      "SyntaxError: Unexpected token ')'",
+                      crow_core.goal_trouble_line(entry))
+
+    def test_a_failing_grep_is_no_error(self):
+        """GEGENPROBE: Exit 1 ohne Signatur -- `grep` ohne Treffer -- zaehlt
+        nicht, und ein Exit 0 schon gar nicht."""
+        for result in ("[exit 1]", "[exit 1]\n=== FACES ===\n", "[exit 0]\nError: x"):
+            self.assertIsNone(crow_core.goal_trouble_of(
+                "run_command", result, lambda path: True), result)
+
+    def test_a_finished_step_takes_its_counts_with_it(self):
+        """Counts reset on step change: ein `goal_step` mit 'done' mitten im Zug
+        leert die Zaehler -- der naechste Schritt erbt keine Fehler."""
+        counts = self.scan(self.transcript(
+            ("web_search", '{"query": "a"}', self.TAVILY),
+            ("web_search", '{"query": "b"}', self.TAVILY),
+            ("goal_step", '{"step": 9, "status": "done"}', '{"ok": true}'),
+            ("web_search", '{"query": "c"}', self.TAVILY)))
+        self.assertEqual([e["n"] for e in counts.values()], [1])
+
+    def test_a_running_or_failed_goal_step_does_not(self):
+        """GEGENPROBE: 'running' ist das Modell, das den Schritt neu ansagt
+        (live fuenf Mal, [59] [193] [503] [601] [629]), und 'failed' laesst
+        den Schritt offen -- Crow stoesst ihn wieder an (live [97], danach 550
+        Nachrichten Schritt 9). Kein Wechsel, kein Neuanfang."""
+        for status in ("running", "failed"):
+            counts = self.scan(self.transcript(
+                ("web_search", '{"query": "a"}', self.TAVILY),
+                ("goal_step", '{"step": 9, "status": "%s"}' % status, '{"ok": true}'),
+                ("web_search", '{"query": "b"}', self.TAVILY),
+                ("web_search", '{"query": "c"}', self.TAVILY)))
+            self.assertEqual(self.only(counts)["n"], 3, status)
+
+    def test_a_tripped_class_is_said_once_until_it_comes_back(self):
+        """Dieselbe Zeile vor jedem Zug waere der 105-mal-Block von neuem.
+        Faellig ist sie erst wieder, wenn die Klasse wieder vorkam."""
+        messages = self.transcript(
+            *[("web_search", '{"query": "%s"}' % q, self.TAVILY) for q in "abc"])
+        counts = self.scan(messages)
+        self.assertEqual(len(crow_core.goal_trouble_due(counts)), 1)
+        self.assertEqual(crow_core.goal_trouble_due(counts), [])
+        again = self.transcript(("web_search", '{"query": "d"}', self.TAVILY))
+        self.scan(again, counts)
+        due = crow_core.goal_trouble_due(counts)
+        self.assertIn("(HTTP 401 from api.tavily.com, 4×)",
+                      crow_core.goal_trouble_line(due[0]))
+
+    def test_the_nudge_names_the_wall_and_not_the_step(self):
+        """Der Anstoss ist ein Anstoss (Crows Praefix, damit Bremse und Schnitt
+        ihn erkennen), nennt die Klasse -- und NICHT den Schritttext."""
+        counts = self.scan(self.transcript(
+            *[("web_search", '{"query": "%s"}' % q, self.TAVILY) for q in "abc"]))
+        nudge = crow_core.goal_trouble_nudge(9, crow_core.goal_trouble_due(counts))
+        self.assertTrue(crow_core.goal_is_nudge({"role": "user", "content": nudge}))
+        self.assertTrue(nudge.startswith("[Goal mode, step 9 still open -- the "
+                                         "same failure keeps coming back:\n- "
+                                         "web_search is dead"), nudge)
+        self.assertIn("call goal_step with 'failed'", nudge)
+        self.assertNotIn("Do it now", nudge)
+
+    def test_the_turn_starts_at_the_nudge_not_at_the_budget_note(self):
+        """Die Budget-Notiz und die Rollover-Notiz stehen MITTEN in einem Zug.
+        Ab ihnen zu zaehlen verloere alles, was der Zug davor gerufen hat."""
+        messages = [{"role": "user", "content": "do it"},
+                    {"role": "user", "content": "[Goal mode, step 1 still open. Continue.]"},
+                    {"role": "assistant", "content": "x"},
+                    {"role": "user", "content": "[The tool budget for this turn is spent"}]
+        self.assertEqual(crow_core.goal_turn_start(messages), 1)
+        self.assertEqual(crow_core.goal_turn_start(messages[:1]), 0)
+        self.assertIsNone(crow_core.goal_turn_start(messages[3:]))
+
+    def test_a_healthy_step_trips_nothing(self):
+        """GEGENPROBE UEBER EINEN GANZEN ZUG, Nachrichten [2]-[24] der Sitzung
+        vom 2026-09-22 im Kern (gekuerzt): Lesen, Suchen, Bauen, ein Exit 2
+        eines grep, eine Ausnahme, ein Tippfehler im Pfad, ein Render-Timeout,
+        ein 401 -- jedes fuer sich, keins dreimal. Nichts darf ausloesen."""
+        counts = self.scan(self.transcript(
+            ("run_command", '{"cwd": "/home/u/three-stagin"}',
+             "error: could not run: [Errno 2] No such file or directory: "
+             "'/home/u/three-stagin'"),
+            ("run_command", '{"command": "ls -l"}', "[exit 0]\ntotal 1180"),
+            ("run_command", '{"command": "grep -n precision src/water.js"}',
+             "[exit 2]\n34:precision mediump float;"),
+            ("read_file", '{"path": "src/water.js"}', "// THE SILICON FOUNDRY"),
+            ("read_file", '{"path": "src/app.js"}', "// application entry"),
+            ("search_text", '{"pattern": "createSea"}', "src/app.js:23: import"),
+            ("run_command", '{"command": "esbuild"}',
+             "[exit 1]\n✘ [ERROR] Expected \"}\" but found \"a\""),
+            ("render_page", '{"wait_ms": 4000}', self.NO_SHOT % (4000, 4000)),
+            ("web_search", '{"query": "a"}', self.TAVILY),
+            ("edit_file", "{}", "error: 'old' does not appear in src/app.js"),
+            ("write_file", '{"path": "src/water.js"}', "wrote 4077 bytes to src/water.js"),
+            ("run_command", '{"command": "node -e 1"}',
+             "[exit 1]\nTypeError: FACES is not iterable"),
+            ("run_command", '{"command": "esbuild"}', "[exit 0]\n⚡ Done in 55ms")))
+        self.assertEqual(crow_core.goal_trouble_due(counts), [])
+        self.assertTrue(counts, "the scan saw none of the single failures")
+
+
 class ALoopingTailCanBeCutOffTests(unittest.TestCase):
     """#202. `Conversation.cut_to`: die einzige Entfernung, die diese Klasse hat.
 

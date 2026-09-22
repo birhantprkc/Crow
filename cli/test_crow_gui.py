@@ -9507,6 +9507,108 @@ class TheGoalEngineBrakesOnAnEmptyLoopTests(ApiCase):
         self.assertIn("Next is step 2: write the fix", api._goal_nudge())
 
 
+class TheGoalEngineNamesTheWallTests(ApiCase):
+    """#202, 2026-09-22: 48 blinde Runden mit toter Suche und toten
+    Delegaten, und in der Sitzung danach 22 edit_file, von denen keiner
+    landete. Jeder Zug rief Werkzeuge, keine zwei Antworten glichen sich --
+    die Bremse sah nichts, und der Anstoss wiederholte nur den Schritt. Hier:
+    dieselbe Fehlerklasse dreimal im Schritt, und der naechste Anstoss nennt
+    sie statt des Schritts.
+    """
+
+    TAVILY = ("error: https://api.tavily.com/search answered HTTP 401 "
+              "Unauthorized\nCROW_TAVILY_KEY was refused.")
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(crow_core.goal_write, None)
+        crow_core.goal_start("Ship it", ["read the log", "write the fix"],
+                             now=1000.0)
+
+    def turn(self, api, text, results) -> None:
+        """Ein gefahrener Zug: Crows Zeile, je Ergebnis ein Aufruf und seine
+        Antwort, und ein Schlusssatz."""
+        api._conversation.append("user", text)
+        for n, (name, args, result) in enumerate(results):
+            api._conversation.append(
+                "assistant", "", tool_calls=[{"id": "t%d" % n, "name": name,
+                                              "arguments": args}])
+            api._conversation.append("tool", result, tool_call_id="t%d" % n)
+        api._conversation.append("assistant", "tried again")
+
+    def searches(self, *queries):
+        return [("web_search", '{"query": "%s"}' % q, self.TAVILY) for q in queries]
+
+    def notes(self, api) -> list:
+        return [m["t"] for m in self.drained(api) if m.get("k") == "note"]
+
+    def test_three_dead_searches_turn_the_nudge_into_the_way_around(self):
+        """POSITIV: statt "Continue" oder des Schritttexts die Klasse, die Zahl
+        und der Ausweg -- und robin sieht es als Notiz, wie die Bremse."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), self.searches("a", "b", "c"))
+        nudge = api._goal_nudge()
+        self.assertIn("web_search is dead this session (HTTP 401 from "
+                      "api.tavily.com, 3×) -- stop calling it", nudge)
+        self.assertNotIn("read the log", nudge)
+        self.assertNotIn("Continue.", nudge)
+        self.assertIn("goal mode, step 1: the same failure keeps coming back -- "
+                      "web_search dead (HTTP 401 from api.tavily.com, 3×). The "
+                      "nudge names the way around it.", self.notes(api))
+
+    def test_a_class_spread_over_turns_counts_for_the_step(self):
+        """Gezaehlt wird im Schritt, nicht im Zug: zwei, dann einer."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), self.searches("a", "b"))
+        second = api._goal_nudge()
+        self.assertEqual(second, "[Goal mode, step 1 still open. Continue.]")
+        self.turn(api, second, self.searches("c"))
+        self.assertIn("web_search is dead", api._goal_nudge())
+
+    def test_the_line_is_not_repeated_when_nothing_failed_again(self):
+        """Wer nach der Zeile aufhoert, hoert sie nicht noch einmal -- sonst
+        stuende sie vor jedem Zug, wie der 105-mal-Block."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), self.searches("a", "b", "c"))
+        trouble = api._goal_nudge()
+        self.turn(api, trouble, [("read_file", '{"path": "README.md"}', "# docs")])
+        self.assertEqual(api._goal_nudge(),
+                         "[Goal mode, step 1 still open. Continue.]")
+
+    def test_the_next_step_starts_with_clean_counts(self):
+        """Counts reset on step change: zwei Fehlschlaege in Schritt 1, der
+        Schritt wird fertig, einer in Schritt 2 -- das sind keine drei."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), self.searches("a", "b"))
+        crow_core.goal_step_end(0, now=1010.0)
+        nudge = api._goal_nudge()
+        self.assertIn("Next is step 2: write the fix", nudge)
+        self.turn(api, nudge, self.searches("c"))
+        self.assertNotIn("dead", api._goal_nudge())
+
+    def test_what_failed_after_the_step_closed_counts_for_the_next(self):
+        """Der Zug, in dem ein Schritt fertig wird, arbeitet oft schon am
+        naechsten: was NACH dem `goal_step` 'done' scheiterte, gehoert ihm."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), self.searches("a", "b"))
+        nudge = api._goal_nudge()
+        crow_core.goal_step_end(0, now=1010.0)
+        self.turn(api, nudge, [("goal_step", '{"step": 1, "status": "done"}',
+                                '{"ok": true}')] + self.searches("c", "d", "e"))
+        self.assertIn("[Goal mode, step 2 still open -- the same failure keeps "
+                      "coming back:\n- web_search is dead this session (HTTP 401 "
+                      "from api.tavily.com, 3×)", api._goal_nudge())
+
+    def test_a_typed_line_starts_the_count_over(self):
+        """robin hat eingegriffen -- vielleicht mit einem Schluessel. Was davor
+        gezaehlt war, zaehlt nicht mehr (`_goal_reset`, wie jeder Zaehler)."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), self.searches("a", "b"))
+        api._goal_reset()
+        self.turn(api, "here is a new key", self.searches("c"))
+        self.assertNotIn("dead", api._goal_nudge())
+
+
 # ============================================================== the Linux port
 
 class _FakeGtkWindow:
