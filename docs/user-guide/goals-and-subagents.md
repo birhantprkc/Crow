@@ -103,6 +103,23 @@ free pool's best answer, because nothing may be billed without a word. Three
 [delegate favourites](remote-models.md) are tried in the order a person put them in, and a spot
 that failed this session is skipped.
 
+**When a spot fails, the error decides what happens next.**
+
+| The spot answered | Meaning | The chain |
+|---|---|---|
+| 429, 408, 5xx, a timeout, "provider returned error", an empty reply | this spot is sick right now | next spot; at most three sick spots |
+| 403 (a model gated to agentic harnesses, a moderation flag), "no endpoints found", 402 on a **paid** favourite | this spot will not serve this client | next spot; up to six refusals, not counted against the three |
+| 401, 402 on a **free** spot (the account is below zero), a schema error | the key, the account or the request is wrong | stops. Every spot would answer the same way |
+
+A spot that failed is skipped for the rest of the session, with its reason. A spot that hit a stop
+error is not, because the spot was never the problem. The chain still falls forward only to
+favourites and free models, so a fallback never lands on something that bills unless you chose it.
+The card and the `collect` result name every spot tried and why each one failed:
+`no spot answered -- tried a:free (HTTP 429: …); b:free (gated for this client (403): …)`.
+A result that came from a fallback carries the same `fell back from …` note. The attempts are
+also stored in `session/subtasks-registry.json` (`chain`) and in the subtask's transcript, so the
+first spot's error is still there after a restart.
+
 **A subtask sees nothing.** No conversation, no tools, no follow-up questions: text in, text out.
 Everything it needs goes into `task` and `context`. That is a decided scope, not a missing
 feature — research over its own knowledge, summarising, drafting, judging.

@@ -5490,6 +5490,21 @@ def stream_reply(
             if isinstance(chunk.get("timings"), dict):
                 timings = chunk["timings"]
 
+            # #216. AN ERROR AFTER THE HEADERS IS STILL AN
+            # ERROR. OpenRouter documents it: a failure mid-stream arrives as
+            # a chunk with a top-level `error` object and finish_reason
+            # "error", "the HTTP status remains 200 OK". Read as a delta it is
+            # an empty reply -- "the model answered nothing" -- and its code
+            # and words were gone. Raised in the HTTP shape `_post_stream`
+            # writes, so one classifier reads both doors. Remote only: the
+            # local server's stream is not what OpenRouter documented.
+            problem = chunk.get("error")
+            if remote and isinstance(problem, dict):
+                raise CrowError("HTTP %s mid-stream from %s: %s"
+                                % (problem.get("code") or "?", model,
+                                   strip_tag_characters(
+                                       str(problem.get("message") or problem))[:500]))
+
             # The absolute size of the conversation, straight from the server's
             # tokeniser. It arrives on the last chunk only, and only one chunk
             # carries it, so it is read wherever it turns up rather than assumed
@@ -17844,6 +17859,10 @@ class Subtask:
         # 2026-08-28 spaetnachts: der Chat, der diese Aufgabe delegiert hat --
         # vom Fenster gestampt, mit persistiert; "" ist der dateilose Live-Chat.
         self.parent = ""
+        # #216: every failed attempt, in order --
+        # `{"model", "class", "reason", "detail"}`. Persisted with the record,
+        # so the first spot's own words survive the card and the restart.
+        self.chain: "list[dict]" = []
         self.thread: "threading.Thread | None" = None
 
     @property
@@ -17909,7 +17928,8 @@ def _subtask_persist() -> None:
              "failure": s.failure, "seconds": round(s.clock(), 1),
              "prompt_tokens": s.prompt_tokens, "reply_tokens": s.reply_tokens,
              "usage_tokens": s.usage_tokens, "transcript": s.transcript,
-             "collected": s.collected, "parent": getattr(s, "parent", "")}
+             "collected": s.collected, "parent": getattr(s, "parent", ""),
+             "chain": list(getattr(s, "chain", []))}
             for s in subs]
     path = _subtask_registry_path()
     try:
@@ -17955,6 +17975,8 @@ def subtasks_recall() -> int:
             sub.transcript = str(row.get("transcript") or "")
             sub.collected = bool(row.get("collected"))
             sub.parent = str(row.get("parent") or "")
+            sub.chain = [c for c in (row.get("chain") or [])
+                         if isinstance(c, dict)]
             if sub.status == "running":
                 sub.status = "interrupted"
                 sub.failure = "crow was closed while it ran"
@@ -18092,6 +18114,10 @@ def _subtask_transcript(sub: Subtask, conversation: Conversation,
                                 "model": spot["model"],
                                 "seconds": round(time.monotonic() - sub.started, 1),
                                 "tokens": sub.tokens}
+        # #216: a result that landed after a fallback says in
+        # its own file which spots failed first, and with what words.
+        if sub.chain:
+            data["crow_subtask"]["chain"] = list(sub.chain)
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
         with open(path, encoding="utf-8") as fh:
@@ -18127,10 +18153,65 @@ _RETRYABLE = ("429", "shared_pool", "timed out", "timeout", "answered nothing",
               "temporarily", "connection", "unavailable", "502", "503",
               "provider returned error", "no endpoints found")
 
+# #216. THREE VERDICTS, NOT TWO. The live run of 2026-09-22
+# fell forward from the primary onto `thinkingmachines/inkling-small:free`,
+# which OpenRouter serves "only on agentic harnesses" -- HTTP 403 -- and a 403
+# was "would fail identically anywhere", so the chain STOPPED on the one spot
+# that was nobody's choice. It is the opposite: a 403 is THIS spot refusing
+# THIS client, and the next spot answers. Measured the same evening against
+# the catalogue on disk: the two largest free windows (1,048,576) are both
+# Thinking Machines, so behind any primary the first two fallbacks refuse.
+#
+#   transient -- this spot is sick right now (429, timeouts, 5xx, "provider
+#                returned error"): memo it, next spot.
+#   spot      -- this spot will not serve this client (403 gating/moderation,
+#                "no endpoints found", 402 on a PAID spot): memo it with the
+#                reason, next spot, and it costs no transient attempt -- a
+#                refusal is instant and did no work.
+#   global    -- the request or the account is wrong (401 key, 402 on a FREE
+#                spot = negative balance, schema/400): every spot answers the
+#                same, the chain stops and the spot is NOT memoed.
+#
+# 402 SPLITS ON WHAT WAS ASKED, per OpenRouter's limits page: "If your account
+# has a negative credit balance, you may see 402 errors, including for free
+# models." A free spot's 402 is therefore the account, not the spot; a paid
+# favourite's 402 is its price, and the free spots behind it bill nothing.
+_SPOT_REFUSED = ("no endpoints found",)
+_TRANSIENT_CODES = (408, 429, 500, 502, 503, 504)
+
+
+def _http_code(detail: str) -> "int | None":
+    """The status `_post_stream` and the mid-stream door write, or None."""
+    hit = re.search(r"\bHTTP (\d{3})\b", detail or "")
+    return int(hit.group(1)) if hit else None
+
+
+def _spot_verdict(detail: str, model: str = "") -> "tuple[str, str]":
+    """(class, reason) for one failed attempt -- see the table above."""
+    low = (detail or "").lower()
+    code = _http_code(detail)
+    if code == 401:
+        return "global", "the key was refused (401)"
+    if code == 402:
+        if model.endswith(FREE_MODEL_SUFFIX):
+            return "global", "the account is out of credits (402, free models included)"
+        return "spot", "no credits for this paid model (402)"
+    if code == 403:
+        if "harness" in low or "only available" in low:
+            return "spot", "gated for this client (403)"
+        if "moderation" in low or "flagged" in low:
+            return "spot", "moderation flag (403)"
+        return "spot", "forbidden for this client (403)"
+    if any(m in low for m in _SPOT_REFUSED):
+        return "spot", "no provider serves it%s" % (" (%d)" % code if code else "")
+    if code in _TRANSIENT_CODES or any(m in low for m in _RETRYABLE):
+        return "transient", ("HTTP %d" % code) if code else "no answer"
+    return "global", ("HTTP %d" % code) if code else "refused"
+
 
 def _spot_retryable(detail: str) -> bool:
-    low = (detail or "").lower()
-    return any(m in low for m in _RETRYABLE)
+    """Whether another spot is worth asking -- both non-global verdicts."""
+    return _spot_verdict(detail)[0] != "global"
 
 
 def delegate_fallbacks(spot: dict, doc: "dict | None" = None) -> "list[dict]":
@@ -18238,14 +18319,19 @@ def _run_subtask(sub: Subtask, spot: dict) -> None:
     place `collect` can trust.
 
     #146: A RETRYABLE FAILURE FALLS TO THE NEXT FREE SPOT, at most three
-    attempts, and the record says where it landed -- a card that silently
+    sick spots, and the record says where it landed -- a card that silently
     swapped its model would be a spot nobody can trust twice. The health memo
     keeps the dead spot out of every later resolution this session.
+
+    #216: a spot that REFUSES this client (403, 402 on a paid
+    spot, no endpoints) falls forward too, outside the three; only a global
+    verdict (401, a free spot's 402, a schema error) stops the chain. Every
+    attempt lands in `sub.chain`, and the failure sentence names them all.
     """
     current = spot
     detail = ""
-    tried: list[str] = []
-    for attempt in range(3):
+    transient = refused = 0
+    for _ in range(_CHAIN_TRANSIENT + _CHAIN_REFUSALS):
         state, detail = _subtask_attempt(sub, current)
         if state == "done":
             # The fallback note survives a good landing: a card that says
@@ -18253,20 +18339,73 @@ def _run_subtask(sub: Subtask, spot: dict) -> None:
             # models silently.
             _subtask_close(sub, "done", sub.failure)
             return
-        if state == "interrupted" or not _spot_retryable(detail):
-            _subtask_close(sub, state, detail)
+        model = str(current.get("model"))
+        if state == "interrupted":
+            _subtask_close(sub, state, _chain_said(detail, sub.chain))
             return
-        _SPOT_DEAD[str(current.get("model"))] = detail
-        tried.append(str(current.get("model")))
+        verdict, reason = _spot_verdict(detail, model)
+        # #216: EVERY attempt is written down with its own
+        # words before anything is decided -- the first spot's error was
+        # the one the live run of 2026-09-22 lost, the card said "403".
+        sub.chain.append({"model": model, "class": verdict, "reason": reason,
+                          "detail": _chain_detail(detail)})
+        if verdict == "global":
+            _subtask_close(sub, "failed", "%s -- the chain stops here, every "
+                           "spot would answer the same: %s"
+                           % (reason, _chain_said(detail, sub.chain[:-1])))
+            return
+        _SPOT_DEAD[model] = "%s: %s" % (reason, _chain_detail(detail))
+        if verdict == "transient":
+            transient += 1
+        else:
+            refused += 1
+        if transient >= _CHAIN_TRANSIENT or refused >= _CHAIN_REFUSALS:
+            break
         nxt = delegate_fallbacks(current)
         if not nxt or sub.cancelled:
             break
         current = nxt[0]
         sub.model = current["model"]
         sub.label = current["label"]
-        sub.failure = "fell back from %s (%s)" % (tried[-1], detail)
-    _subtask_close(sub, "failed",
-                   "%s -- tried %s" % (detail, ", ".join(tried) or "one spot"))
+        sub.failure = "fell back from " + _chain_story(sub.chain)
+        # Mid-chain the record is on disk too: a crash between two spots
+        # must not lose what the first one said.
+        _subtask_persist()
+    _subtask_close(sub, "failed", "no spot answered -- tried "
+                   + _chain_story(sub.chain))
+
+
+# #216. The attempt budget, split by verdict: THREE spots that
+# were sick (the #146 figure, unchanged -- each can cost a 600 s timeout), and
+# up to SIX that refused. A refusal is one instant HTTP answer and did no work;
+# counting it against the three is what ended the 2026-09-22 chain on the
+# second gated Thinking Machines spot before any healthy one was asked.
+_CHAIN_TRANSIENT = 3
+_CHAIN_REFUSALS = 6
+
+# What one attempt keeps of its error. `_post_stream` already cuts the body at
+# 500; the card shows 4000 chars, and nine attempts must fit in it.
+_CHAIN_DETAIL = 240
+
+
+def _chain_detail(detail: str) -> str:
+    """One line, bounded -- the story is read as a first line in the terminal."""
+    flat = " ".join(str(detail or "").split())
+    return flat if len(flat) <= _CHAIN_DETAIL else flat[:_CHAIN_DETAIL] + "..."
+
+
+def _chain_story(chain: "list[dict]") -> str:
+    """`model (reason: detail); model (...)` -- every spot and why it failed."""
+    return "; ".join("%s (%s: %s)" % (c.get("model"), c.get("reason"),
+                                      c.get("detail"))
+                     for c in chain) or "one spot"
+
+
+def _chain_said(detail: str, earlier: "list[dict]") -> str:
+    """The last detail, and the spots that failed before it when there were."""
+    if not earlier:
+        return detail
+    return "%s -- after %s" % (detail, _chain_story(earlier))
 
 
 # #149. THE MAKER IS NOT THE CHECKER. A model grading its own diff approves
@@ -18449,9 +18588,13 @@ def tool_collect(id: str = "all", **_) -> str:
     for sub in picked:
         sub.collected = True
         if sub.status == "done":
-            parts.append("== %s | %s | %.1f s | %s tok\n%s"
+            # #216: the fallback note rides along -- the model
+            # that reads this result should know it came from a second spot.
+            parts.append("== %s | %s | %.1f s | %s tok%s\n%s"
                          % (sub.ident, sub.model, sub.seconds,
-                            format(sub.tokens, ","), sub.result.strip()))
+                            format(sub.tokens, ","),
+                            " | " + sub.failure if sub.failure else "",
+                            sub.result.strip()))
         else:
             parts.append("== %s %s after %.1f s -- %s"
                          % (sub.ident, sub.status, sub.seconds, sub.failure))

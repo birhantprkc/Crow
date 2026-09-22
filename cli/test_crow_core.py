@@ -2157,6 +2157,167 @@ class SpotFallbackTests(unittest.TestCase):
             "HTTP 404 from https://x/v1/chat/completions: Not Found"))
         self.assertFalse(crow_core._spot_retryable("the schema refused it"))
 
+    GATED = ('HTTP 403 from https://openrouter.ai/api/v1/chat/completions: '
+             '{"error":{"message":"thinkingmachines/inkling-small:free is only '
+             'available on agentic harnesses. Try plugging it into a coding '
+             'agent or productivity app listed on https://openrouter.ai/apps",'
+             '"code":403}}')
+
+    def test_three_verdicts_each_with_its_reason(self):
+        """#216: transient / spot / global, and the 402 split
+        on what was asked -- a free spot's 402 is the account (OpenRouter:
+        negative balance 402s "including for free models"), a paid spot's
+        402 is its price."""
+        verdict = crow_core._spot_verdict
+        self.assertEqual(verdict(self.GATED, "t/inkling-small:free"),
+                         ("spot", "gated for this client (403)"))
+        self.assertEqual(verdict('HTTP 403 from u: {"error":{"message":'
+                                 '"Input was flagged","metadata":{"reasons":'
+                                 '["x"]}}}')[0], "spot")
+        self.assertEqual(verdict("HTTP 403 from u: Forbidden")[0], "spot")
+        self.assertEqual(verdict("HTTP 402 from u: Insufficient credits",
+                                 "unit/paid"),
+                         ("spot", "no credits for this paid model (402)"))
+        self.assertEqual(verdict("HTTP 402 from u: Insufficient credits",
+                                 "unit/x:free")[0], "global")
+        self.assertEqual(verdict('HTTP 401 from u: {"error":{"message":'
+                                 '"User not found.","code":401}}'),
+                         ("global", "the key was refused (401)"))
+        self.assertEqual(verdict('HTTP 404: {"error":{"message":"No endpoints '
+                                 'found for unit/x:free."}}')[0], "spot")
+        for sick in ('HTTP 429 from u: rate-limited upstream',
+                     'HTTP 404 from u: {"error":{"message":"Provider '
+                     'returned error","code":404}}',
+                     "HTTP 503 from u: no available provider",
+                     "HTTP 504 from u: gateway", "HTTP 500 from u: oops",
+                     "HTTP 429 mid-stream from unit/a:free: slow down",
+                     "the model answered nothing", "timed out"):
+            self.assertEqual(verdict(sick)[0], "transient", sick)
+        for hard in ("HTTP 404 from https://x/v1/chat/completions: Not Found",
+                     "HTTP 400 from u: invalid schema", "the schema refused it"):
+            self.assertEqual(verdict(hard)[0], "global", hard)
+
+    def _chain(self, answers: dict, spots: "list[str]") -> None:
+        """`_post_stream` answers by model: an error string raises, anything
+        else streams as the reply. The fallbacks honour the health memo the
+        way the real `delegate_fallbacks` does."""
+        def fake(url, body, key, timeout, extra=None):
+            self.calls += 1
+            said = answers[body["model"]]
+            if said.startswith(("HTTP", "!")):
+                raise crow_core.CrowError(said.lstrip("!"))
+            yield json.dumps({"choices": [{"delta": {"content": said}}]})
+            yield json.dumps({"choices": [], "usage": {"total_tokens": 9}})
+
+        crow_core._post_stream = fake
+        crow_core.delegate_fallbacks = lambda spot, doc=None: [
+            dict(self.A, model=m) for m in spots
+            if m != spot.get("model") and m not in crow_core._SPOT_DEAD]
+
+    def test_a_gated_spot_is_skipped_not_the_end(self):
+        """THE LIVE RUN OF 2026-09-22 AS A CASE: primary sick, then the two
+        Thinking Machines spots refuse with 403 -- the old chain stopped at
+        the first 403 (and a three-attempt cap would have ended on the
+        second). Both refusals are skipped, outside the transient budget,
+        and the healthy fourth spot answers."""
+        self._chain({"unit/alpha:free": "HTTP 429 from u: rate-limited upstream",
+                     "t/inkling-small:free": self.GATED,
+                     "t/inkling:free": self.GATED,
+                     "unit/ok:free": "LANDED"},
+                    ["t/inkling-small:free", "t/inkling:free", "unit/ok:free"])
+        crow_core.tool_delegate(task="research")
+        self._settle()
+        sub = crow_core.SUBTASKS["d1"]
+        self.assertEqual(sub.status, "done")
+        self.assertEqual(sub.model, "unit/ok:free")
+        self.assertEqual(self.calls, 4)
+        self.assertEqual([c["class"] for c in sub.chain],
+                         ["transient", "spot", "spot"])
+        self.assertIn("gated for this client (403)",
+                      crow_core._SPOT_DEAD["t/inkling:free"])
+        # The note names every spot that failed first, and the collect
+        # result carries it to the model that reads it.
+        for name in ("unit/alpha:free", "t/inkling-small:free", "t/inkling:free"):
+            self.assertIn(name, sub.failure)
+        out = crow_core.tool_collect(id="d1")
+        self.assertIn("fell back from unit/alpha:free (HTTP 429", out)
+        self.assertIn("LANDED", out)
+
+    def test_a_dead_chain_names_every_spot_and_keeps_the_first_words(self):
+        """The card said "403" and nothing else. Now the failure sentence
+        lists each spot with its reason, one line, and the first spot's own
+        error survives in the registry file and its recall."""
+        self._chain({"unit/alpha:free": "HTTP 429 from u: FIRST WORDS upstream",
+                     "t/inkling-small:free": self.GATED},
+                    ["t/inkling-small:free"])
+        crow_core.tool_delegate(task="research")
+        self._settle()
+        sub = crow_core.SUBTASKS["d1"]
+        self.assertEqual(sub.status, "failed")
+        self.assertTrue(sub.failure.startswith("no spot answered -- tried "))
+        self.assertIn("unit/alpha:free (HTTP 429: HTTP 429 from u: FIRST WORDS",
+                      sub.failure)
+        self.assertIn("t/inkling-small:free (gated for this client (403): ",
+                      sub.failure)
+        self.assertNotIn("\n", sub.failure, "the terminal reads a first line")
+        with open(crow_core._subtask_registry_path(), encoding="utf-8") as fh:
+            row = json.load(fh)["subtasks"][0]
+        self.assertIn("FIRST WORDS", row["chain"][0]["detail"])
+        crow_core.forget_subtasks()
+        crow_core.subtasks_recall()
+        self.assertEqual(crow_core.SUBTASKS["d1"].chain[0]["model"],
+                         "unit/alpha:free")
+
+    def test_a_refused_key_stops_the_chain_and_memos_nothing(self):
+        """NEGATIVE CONTROL: a 401 is the account, not the spot -- every spot
+        would answer the same, so one request, and the spot stays healthy."""
+        self._chain({"unit/alpha:free": 'HTTP 401 from u: {"error":{"message":'
+                                        '"User not found.","code":401}}',
+                     "unit/beta:free": "NEVER"}, ["unit/beta:free"])
+        crow_core.tool_delegate(task="research")
+        self._settle()
+        sub = crow_core.SUBTASKS["d1"]
+        self.assertEqual(sub.status, "failed")
+        self.assertEqual(self.calls, 1)
+        self.assertEqual(crow_core._SPOT_DEAD, {})
+        self.assertTrue(sub.failure.startswith("the key was refused (401) -- "
+                                               "the chain stops here"))
+
+    def test_the_transient_budget_stays_three(self):
+        """#146's figure survives: three SICK spots, then the sentence --
+        a sick spot can cost a 600 s timeout each."""
+        sick = "HTTP 503 from u: down"
+        names = ["unit/s%d:free" % i for i in range(5)]
+        self._chain(dict({"unit/alpha:free": sick},
+                         **{n: sick for n in names}), names)
+        crow_core.tool_delegate(task="research")
+        self._settle()
+        self.assertEqual(self.calls, 3)
+        self.assertEqual(crow_core.SUBTASKS["d1"].status, "failed")
+
+    def test_a_mid_stream_error_keeps_its_code_and_words(self):
+        """OpenRouter's documented mid-stream shape: HTTP 200, then a chunk
+        with a top-level `error` and finish_reason "error". It was an empty
+        reply -- "answered nothing" -- and the code and words were lost."""
+        def fake(url, body, key, timeout, extra=None):
+            self.calls += 1
+            if body["model"] == "unit/alpha:free":
+                yield json.dumps({"error": {"code": 429, "message":
+                                            "MID WORDS rate-limited"},
+                                  "choices": [{"delta": {"content": ""},
+                                               "finish_reason": "error"}]})
+                return
+            yield json.dumps({"choices": [{"delta": {"content": "OK"}}]})
+
+        crow_core._post_stream = fake
+        crow_core.tool_delegate(task="research")
+        self._settle()
+        sub = crow_core.SUBTASKS["d1"]
+        self.assertEqual(sub.status, "done")
+        self.assertEqual(sub.chain[0]["class"], "transient")
+        self.assertIn("HTTP 429 mid-stream from unit/alpha:free: MID WORDS",
+                      sub.chain[0]["detail"])
+
     def test_a_favourite_beats_the_largest_window(self):
         """#148: the person's pick over the biggest number -- the biggest
         number was the dead provider. Dead favourite: the next rule speaks."""

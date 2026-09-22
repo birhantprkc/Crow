@@ -94,7 +94,10 @@ delivers is dropped and the card ends `interrupted`. Tokens are counted from the
 `usage` block — remote endpoints send no llama timings. The default spot is the free
 pool's best answer, pinned only after a model answered twice in a row and carried a real
 delegation; the user's own `/delegate <task>` does the same from the composer, [also
-while a turn is running](../user-guide/window.md).
+while a turn is running](../user-guide/window.md). A failed spot falls forward by what
+its error means: sick (429/5xx/timeout) and refusing (403, no endpoints, 402 on a paid
+favourite) spots are skipped, while 401, a free spot's 402 and schema errors stop the chain.
+The failure names every spot tried and why each one failed ([details](../user-guide/goals-and-subagents.md)).
 
 | release level | asks before |
 |---|---|
