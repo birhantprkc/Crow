@@ -11713,5 +11713,18 @@ class TheIntegrationSeamsHoldTests(unittest.TestCase):
         self.assertNotIn(".pth:focus-visible,#menu button:focus-visible", page)
 
 
+class TheBlankTabHasABlankBarTests(unittest.TestCase):
+    """#227. `brNew()` without an address cleared nothing: the one shared
+    address field kept the previous tab's URL (integration re-audit 2026-09-23)."""
+
+    def test_a_new_blank_tab_empties_and_focuses_the_bar(self):
+        src = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        body = src[src.index("  brNew(url){"):]
+        body = body[:body.index("\n  },")]
+        blank = body[body.index("else {"):]
+        self.assertIn('$("#brurl").value=""', blank)
+        self.assertLess(blank.index('$("#brurl").value=""'), blank.index('$("#brurl").focus()'))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

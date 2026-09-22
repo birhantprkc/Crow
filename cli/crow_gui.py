@@ -6573,7 +6573,11 @@ const crow = {
     this.tabs.push({id:id, hist:[], at:-1});
     this.tabOn=id;
     this.brDraw();
-    if(url) this.brGo(url); else { this.brBlank(); $("#brurl").focus(); }
+    // #227. A BLANK TAB HAS A BLANK BAR. The bar is one field for all tabs,
+    // so without this the new tab showed the address of the one before it --
+    // and Enter there reloaded that page into the tab meant to be empty.
+    if(url) this.brGo(url);
+    else { this.brBlank(); $("#brurl").value=""; $("#brurl").focus(); }
   },
 
   // EIN REITER OHNE ADRESSE ZEIGT NICHTS -- und "nichts" heisst hier: die
