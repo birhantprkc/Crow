@@ -11783,6 +11783,41 @@ class TheMarkdownIsCutInTheCoreTests(unittest.TestCase):
 
 
 
+class TheUnderscoreIsNotEmphasisInsideAWordTests(unittest.TestCase):
+    """#229. A URL or a snake_case word is not cut by emphasis.
+
+    MEASURED on the integrated GUI 2026-09-23: a GitHub URL with `crow_gui.py`
+    in it became a link to `.../cli/crow` plus italics, and
+    `datei_mit_langem_namen` rendered `mit` in italics. CommonMark 0.31.2, 6.2:
+    `_` opens/closes only where no alphanumeric stands on the outer side; `*`
+    may sit inside a word.
+    """
+
+    def spans(self, text):
+        return crow_core.markdown_blocks(text)[0]["spans"]
+
+    def test_a_bare_url_with_underscores_is_one_plain_run(self):
+        url = "https://github.com/o/r/blob/main/cli/crow_gui.py?plain=1&aaa_b#L4018"
+        self.assertEqual(self.spans("see " + url + " now"), [{"s": "see " + url + " now"}])
+
+    def test_snake_case_words_and_paths_stay_text(self):
+        for text in ("datei_mit_langem_namen", "foo_bar_", "/home/x/my_file_name.py",
+                     "a__b__c and x_y_z"):
+            self.assertEqual(self.spans(text), [{"s": text}], text)
+
+    def test_underscores_at_word_edges_still_emphasise(self):
+        self.assertEqual(self.spans("_it_ and __b__"),
+                         [{"s": "it", "i": True}, {"s": " and "}, {"s": "b", "b": True}])
+        self.assertEqual(self.spans("_foo_bar_"), [{"s": "foo_bar", "i": True}])
+        self.assertEqual(self.spans("a*b*c"), [{"s": "a"}, {"s": "b", "i": True}, {"s": "c"}])
+
+    def test_emphasis_around_a_url_keeps_the_url_whole(self):
+        self.assertEqual(self.spans("**see https://x.org/a_b_c**"),
+                         [{"s": "see https://x.org/a_b_c", "b": True}])
+        self.assertEqual(self.spans("[x_y](https://a.org/b_c_d)"),
+                         [{"s": "x_y", "href": "https://a.org/b_c_d"}])
+
+
 class TheUpdateIsRunFromTheWindowTests(unittest.TestCase):
     """The terminal has had the check since 0.0.6: it asks GitHub on a thread
     and prints the line to run. A window cannot print a line to run -- the

@@ -5715,11 +5715,27 @@ _MD_RULE = re.compile(r"^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)
 # backticks is a star: `a**b` is a glob or a pointer, not the start of a bold
 # run. Emphasis takes no newline, which is what keeps a lone star in "2 * 3"
 # from pairing with one two lines further down.
+#
+# #229. A BARE URL IS ONE PIECE, and it sits before emphasis for the reason code
+# does: `https://github.com/o/r/blob/main/cli/crow_gui.py?plain=1` was cut at
+# the first `_` into a link to `.../cli/crow` and italics after it (measured on
+# the integrated GUI, 2026-09-23). The URL goes out as plain text; the window's
+# finder makes it a link, the terminal prints it whole.
+#
+# AN UNDERSCORE INSIDE A WORD IS NOT EMPHASIS. CommonMark 0.31.2, 6.2: a `_`
+# run opens only if it is not preceded by an alphanumeric and closes only if it
+# is not followed by one ("foo_bar_" stays text), while `*` may sit intraword.
+# `\w` rather than "alphanumeric" because a run is read whole there and one
+# character at a time here: `a__b__c` would otherwise open at its second `_`.
+# Without it `datei_mit_langem_namen` rendered `datei` + italic `mit` + `langem`.
 _MD_INLINE = re.compile(
     r"(?P<fence>`+)(?P<code>.+?)(?P=fence)"
     r"|\[(?P<text>[^\]\n]*)\]\((?P<href>[^)\s]+)\)"
-    r"|(?P<strong>\*\*|__)(?P<bold>[^\s\n](?:[^\n]*?[^\s\n])?)(?P=strong)"
-    r"|(?P<slant>[*_])(?P<italic>[^\s*_\n](?:[^*_\n]*[^\s*_\n])?)(?P=slant)")
+    r"|(?P<url>https?://[^\s<>\"`]+)"
+    r"|\*\*(?P<bold>[^\s\n](?:[^\n]*?[^\s\n])?)\*\*"
+    r"|(?<!\w)__(?P<ubold>[^\s\n](?:[^\n]*?[^\s\n])?)__(?!\w)"
+    r"|\*(?P<italic>[^\s*\n](?:[^*\n]*[^\s*\n])?)\*"
+    r"|(?<!\w)_(?P<uitalic>[^\s_\n](?:[^\n]*?[^\s\n])?)_(?!\w)")
 
 # THE EDGES OF EMPHASIS MAY NOT BE WHITESPACE, and that is the spec rather than
 # taste: CommonMark 0.31.2 calls an opener a "left-flanking delimiter run" and
@@ -5776,10 +5792,16 @@ def _md_spans(text: str, bold: bool = False, italic: bool = False,
                 out.extend(_md_spans(found.group("text"), bold, italic, target))
             else:
                 _md_plain(out, found.group(0), bold, italic, href)
-        elif found.group("bold") is not None:
-            out.extend(_md_spans(found.group("bold"), True, italic, href))
+        elif found.group("url") is not None:
+            _md_plain(out, found.group("url"), bold, italic, href)
+        elif found.group("bold") is not None or found.group("ubold") is not None:
+            inner = found.group("bold")
+            out.extend(_md_spans(inner if inner is not None else found.group("ubold"),
+                                 True, italic, href))
         else:
-            out.extend(_md_spans(found.group("italic"), bold, True, href))
+            inner = found.group("italic")
+            out.extend(_md_spans(inner if inner is not None else found.group("uitalic"),
+                                 bold, True, href))
         at = found.end()
     _md_plain(out, text[at:], bold, italic, href)
     return out
