@@ -812,6 +812,17 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--line);border-radius:99px}
 ::-webkit-scrollbar-thumb:hover{background:var(--bevel)}
+/* #235. DIE LEISTE BLEIBT AUS DEN RUNDEN ECKEN. Ein Scrollcontainer,
+   der selbst (oder dessen Rahmen) gerundet ist, legt seine Leiste bis in die
+   Ecke; gerendert in WebKitGTK 2.52 lief der Daumen der Zielkarte in deren
+   10-px-Rundung und der von #flow in die 12-px-Ecke von #main, sichtbar
+   angeschnitten. Der Spurrand in Hoehe des Radius haelt sie gerade.
+   (Headless-Chromium blendet Leisten aus -- dort war davon nichts zu sehen.) */
+#flow::-webkit-scrollbar-track{margin-top:12px}
+#goalpanel::-webkit-scrollbar-track{margin:10px 0}
+#gitbody::-webkit-scrollbar-track{margin-bottom:10px}
+#spane::-webkit-scrollbar-track{margin-bottom:12px}
+.code pre::-webkit-scrollbar-track{margin:0 8px}
 
 /* -- title bar: ours, because the frame is off ------------------------- */
 /* THE CAPTION DRAGS THE WINDOW, and the hook is pywebview's own class.
@@ -868,10 +879,16 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 /* A LAYER IN THIS WINDOW, NOT A SECOND WINDOW. A second pywebview window would
    need its own bridge, its own theme attribute and its own close path, for a
    panel that is only ever open on top of this one. */
+/* #234. UNTER DER TITELLEISTE ZENTRIERT, nicht im ganzen Fenster.
+   Bei 1130x520 war das Blatt 468 px hoch (90vh) und begann bei y=26 -- die
+   34 px hohe #bar lag mit ihren Fensterknoepfen 8 px darunter. `padding-top`
+   in #bar-Hoehe verschiebt die Mitte, die dritte Grenze im `min()` haelt
+   darunter 12 px Luft; der Schleier dimmt die Leiste weiterhin. */
 #settings{position:fixed;inset:0;z-index:80;display:grid;place-items:center;
-  background:var(--shadow-strong)}
+  background:var(--shadow-strong);padding-top:34px}
 #settings[hidden]{display:none}
-#settings .sheet{width:min(1040px,94vw);height:min(780px,90vh);display:flex;
+#settings .sheet{width:min(1040px,94vw);
+  height:min(780px,90vh,calc(100vh - 58px));display:flex;
   flex-direction:column;background:var(--panel);border:1px solid var(--bevel);
   border-radius:12px;box-shadow:0 24px 60px var(--shadow-strong);overflow:hidden}
 #settings .shead{display:flex;align-items:center;gap:10px;padding:13px 16px;
@@ -970,6 +987,16 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
   display:flex;flex-direction:column;min-height:0;background:var(--rail);
   transition:width .16s ease}
 #side.dragging{transition:none}
+/* #234. EIN GEQUETSCHTES PANEL ZEIGT NICHTS STATT EIN HALBES. Die
+   Spalte darf nachgeben (#138c) -- bei 1130x520 mit Rail 520 bis auf 48 px --,
+   und dann stand dort "CO" ueber "Tool Cal" und ein um 60 px abgeschnittenes
+   "clear all". Unter 150 px passt der Kopf nicht mehr; die Spalte bleibt eine
+   Flaeche in Rail-Farbe, bis sie wieder Platz hat. Nur inline-size-
+   Containment: die Breite kommt aus --codew und dem Flex-Algorithmus, nie
+   aus dem Inhalt. `visibility` statt `display`, damit Klappzustand und
+   Scrollstand der Panels das Quetschen ueberleben. */
+#side{container:side/inline-size}
+@container side (max-width:150px){#side>*{visibility:hidden}}
 /* DIE ZUSAGE DES PANELS BLEIBT SEINE EIGENE. `min-width:0` und `flex:0 1 auto`
    stehen weiter hier, wo #138c sie hingeschrieben hat: das Panel gibt nach,
    bevor die Eingabemaske es tut. Dass es jetzt in einer Spalte liegt, aendert
@@ -1081,10 +1108,14 @@ body[data-code="shut"][data-browser="shut"] #codegrip{display:none}
 .brtab .t{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .brtab .x{flex:none;color:var(--dimmer);padding:0 2px}
 .brtab .x:hover{color:var(--bad)}
-#brbar{display:flex;align-items:center;gap:5px;padding:0 8px 7px;flex:none}
+/* #235: STRETCH, aus dem Grund, den #acts aufgeschrieben hat -- eine
+   Zeile, eine Hoehe. Mit `center` standen 20 px hohe Pfeile neben einem 28 px
+   hohen Adressfeld. Die Knoepfe zentrieren ihr Zeichen selbst. */
+#brbar{display:flex;align-items:stretch;gap:5px;padding:0 8px 7px;flex:none}
 .brnav{font:inherit;font-size:12px;line-height:1;color:var(--dimmer);
   background:transparent;border:1px solid var(--line);border-radius:6px;
-  padding:3px 7px;cursor:pointer}
+  padding:3px 7px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;min-width:26px}
 .brnav:hover{border-color:var(--bevel);color:var(--accent)}
 #brurl{flex:1;min-width:0;font:inherit;font-size:11.5px;font-family:var(--mono);
   background:var(--bg);border:1px solid var(--line);border-radius:6px;
@@ -1238,10 +1269,18 @@ body[data-git="shut"] #git{display:none}
    DIE HOEHE IST DIE ALTE, EINMAL: 60 % gehoerten dem Ziel allein, jetzt teilen
    sich zwei Karten 70 % minus dem Rand -- der Abstand zur Eingabemaske bleibt
    damit derselbe, den das Zielpanel seit #164 haelt. */
+/* #233. UND NIE UEBER DIE EINGABEMASKE. 70 % setzte voraus, dass der
+   Composer nie mehr als 30 % von #main belegt; mit Speicherleiste und zwei
+   Bildchips waren es bei 1130x520 190 von 486 px, und die Git-Karte lag ueber
+   Textfeld, Ordner-, Stufen- und Mikrofonknopf. `--comph` ist die Hoehe, die
+   `fitFlow` ohnehin misst (inklusive der 26-px-Blende, die so den Abstand
+   stellt); ohne sie gilt die alte Rechnung. */
 #panels{position:absolute;top:14px;right:16px;z-index:5;width:290px;
-  height:calc(70% - 14px);display:flex;flex-direction:column;gap:10px;
+  height:min(calc(70% - 14px),calc(100% - var(--comph,0px) - 14px));
+  display:flex;flex-direction:column;gap:10px;
   pointer-events:none}
 #panels>*{pointer-events:auto}
+
 
 /* -- #164: das Zielpanel ------------------------------------------------- */
 /* ORT UND BREITE GEHOEREN `#panels`. Was hier steht, ist die Karte selbst --
@@ -1286,7 +1325,11 @@ body[data-git="shut"] #git{display:none}
    ohne Leerzeichen umbrechen laesst, statt das Panel zu sprengen. */
 #goalpanel li{display:flex;gap:9px;padding:7px 0 9px;align-items:flex-start;
   color:var(--text-faint);line-height:1.45}
-#goalpanel li>span:last-child{min-width:0;overflow-wrap:anywhere}
+#goalpanel li>span:last-child{min-width:0;overflow-wrap:anywhere;
+  /* #235: DIE SPALTE FUELLT DIE ZEILE, sonst ist sie so breit wie
+     ihr Text -- und mit ihr die gestrichelte Linie ueber der Kostenzeile:
+     unter "Audit rendern" ein Stummel, unter einem langen Schritt volle Breite. */
+  flex:1}
 #goalpanel li .m{flex:none;margin-top:2px;display:flex;color:var(--dimmer)}
 /* ERLEDIGT WIRD DURCHGESTRICHEN UND GRUEN, LAUFEND AMBER -- dieselben zwei
    Farben, die die Rail fuer laufend und fertig benutzt, damit ein Blick von
@@ -1449,6 +1492,13 @@ body:not([data-git="shut"]) #gittoggle{color:var(--accent);
 .sess.inproj{padding-left:24px}
 .sess.inproj::after{content:"";position:absolute;left:14px;top:0;bottom:0;
   width:1px;background:var(--line-soft)}
+/* #235: IM PROJEKT LIEGT DER BALKEN AUF DER LINIE. Bei `left:2px`
+   standen in einer markierten Projektzeile zwei Senkrechte 12 px nebeneinander
+   -- Akzent links, Baumlinie rechts. Auf 13 px deckt der 2-px-Balken die
+   1-px-Linie bei 14 und wird zu ihrem hervorgehobenen Stueck. `z-index:1`,
+   weil `::after` spaeter gemalt wird und sonst die halbe Balkenbreite in
+   Linienfarbe uebermalt -- der Akzent las sich dann grau. */
+.sess.inproj.on::before,.sess.inproj.done::before{left:13px;z-index:1}
 /* The rename field replaces the row in place, so the list never jumps. */
 .sess input{width:100%;font:inherit;font-size:12px;color:var(--model);
   background:var(--bg);border:1px solid var(--accent);border-radius:4px;
@@ -1493,7 +1543,12 @@ body:not([data-git="shut"]) #gittoggle{color:var(--accent);
      Fensterhintergrund, und eine Ecke, die beim Zuklappen aufspringt, macht
      aus dem Falten eine Formaenderung. */
   border-top-right-radius:12px;overflow:hidden;
-  position:relative}
+  position:relative;
+  /* #233: der Abfragecontainer fuer #panels (siehe dort). Nur
+     inline-size, also Stil- und Breiten-Containment, KEIN Layout-Containment:
+     kein neuer Bezugsblock fuer `fixed`, kein neuer Stapelkontext. Die Breite
+     kommt ohnehin aus `flex:1` und min-width 560, nie aus dem Inhalt. */
+  container:chat/inline-size}
 /* #125. THE STATUS BAR IS GONE, not hidden. Both chips it carried moved into
    the settings sheet -- the connection with its address, and the tool switch --
    and an empty bar is a band of nothing between the ribbon and the first line
@@ -1553,7 +1608,15 @@ details.rollcard pre.rtp{max-height:220px;overflow:auto;white-space:pre-wrap;
    and leaves the rest of a wide window empty; the auto margins are what put it
    in the middle. 960 includes the 30px padding, so the text runs 900 wide --
    the same 900 #box is held to, which is what makes the two flush. */
-.turn{padding:0 30px;max-width:960px;margin-inline:auto}
+/* #232. `overflow-wrap:anywhere`, VERERBT AN ALLES IM ZUG. Ein Pfad,
+   eine URL, ein deutsches Kompositum oder ein langer Inline-Code hatte keine
+   Bruchstelle und machte die Spalte breiter als das Fenster: gemessen #flow
+   891 px Inhalt in 666 (1180x800), die Nutzerblase 808 in 673 selbst bei
+   2560x1440. `anywhere` und nicht `break-word`: nur `anywhere` senkt die
+   min-content-Breite, und `.you .txt` ist ein Grid-Item in einer `1fr`-Spur
+   (= minmax(auto,1fr)) -- mit `break-word` bliebe die Blase so breit wie das
+   Wort. Code-Bloecke sind `pre` und brechen weiterhin nie. */
+.turn{padding:0 30px;max-width:960px;margin-inline:auto;overflow-wrap:anywhere}
 .turn+.turn{margin-top:26px}
 /* #131. NO LABEL. The bubble says whose the line is; a three-letter prefix in
    front of it says it a second time, and the model's own turns never had one. */
@@ -1624,7 +1687,11 @@ details.think[open] .caret{transform:rotate(90deg)}
 /* A WIDE TABLE SCROLLS INSIDE ITSELF rather than widening the chat: the column
    is what every other block is measured against. */
 .md table{display:block;overflow-x:auto;border-collapse:collapse;margin:0 0 9px;
-  font-size:12.5px}
+  font-size:12.5px;
+  /* #232: die Tabelle nimmt das `anywhere` von .turn NICHT an --
+     sonst braeche jede Zelle mitten im Wort, statt dass die Tabelle wie oben
+     versprochen in sich scrollt. */
+  overflow-wrap:normal}
 .md th,.md td{border:1px solid var(--line);padding:5px 9px;text-align:left;
   vertical-align:top}
 .md th{background:var(--raised);color:var(--text-hi);font-weight:600}
@@ -1699,6 +1766,12 @@ details.think[open] .caret{transform:rotate(90deg)}
    es haengen koennte. */
 .gitgrp .tchd{align-items:baseline}
 .gitgrp .tcx{align-self:center}
+/* #235. EINE KOPFZEILE BLEIBT EINE ZEILE. Ein langer Zweigname
+   (`t-gui-layout-with-a-long-branch-name`) brach auf zwei Zeilen um, und
+   `↑3 ↓1` daneben auf zwei weitere. Der Name kuerzt jetzt am Ende (voll im
+   `title` und in der Zweigliste darunter), die Zahlen stehen fest. */
+.gitgrp .tct{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gitgrp .gcount{flex:none;white-space:nowrap}
 
 /* #138b. JEDE ZEILE IST IHRE EIGENE KLAPPE. Der Kopf bleibt eine Zeile -- er
    ist der Index -- und alles, was Platz braucht, liegt darunter und nur dann,
@@ -2026,7 +2099,10 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   color:var(--dim);font-size:11.5px;display:flex;align-items:center;gap:10px}
 #viewbar[hidden]{display:none}
 #viewbar b{color:var(--text);font-weight:600}
-#viewbar button{margin-left:auto;background:none;border:1px solid var(--line);
+/* #235: `flex:none` + `nowrap` -- bei 2560x600 brach der Knopf zu
+   "back to / it" um, weil der lange Satz daneben ihn zusammendrueckte. */
+#viewbar button{flex:none;white-space:nowrap;
+  margin-left:auto;background:none;border:1px solid var(--line);
   border-radius:7px;color:var(--accent);font:inherit;padding:2px 9px;cursor:pointer}
 #viewbar button:hover{border-color:var(--accent)}
 #pendbar .top{display:flex;align-items:center;gap:10px}
@@ -2123,9 +2199,31 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    in Chromium, so it fades to nothing rather than through grey -- and 26px of it
    is why the gap #flow keeps below is measured from offsetHeight, which
    INCLUDES the fade: the last line comes to rest above it, never inside it. */
-#composer{position:absolute;left:0;right:var(--sbw);bottom:0;
+/* #233: z-index 6, EINE STUFE UEBER #panels (5). #box ist mit
+   `z-index:1` ein eigener Stapelkontext, also galt das `z-index:40` der Menues
+   nur darin -- Modell-, Stufen- und Ordnermenue oeffneten UNTER der Git-Karte
+   (elementFromPoint: #gitbranchname ueber der Modellzeile, 1180x800). Hebt man
+   den ganzen Composer, heben sich die Menues mit; die Karten enden seit
+   `--comph` oberhalb, also teilen sich beide sonst kein Pixel. */
+#composer{position:absolute;left:0;right:var(--sbw);bottom:0;z-index:6;
   padding:26px 40px 14px;
   background:linear-gradient(to bottom,transparent,var(--bg) 26px)}
+/* #233. WO PLATZ IST, WEICHT DIE SPALTE DEN KARTEN AUS. Die Karten
+   bleiben absolut (#164), aber ueber der Leseflaeche lagen sie bei jeder
+   Breite: 1920x1080 (#main 1418 px) endet die 960er-Spalte bei 1189, die
+   Karten beginnen bei 1112 -- 77 px jedes Zuges und der Kopierknopf jedes
+   Code-Blocks darunter. Ab 1100 px #main bekommt #flow rechts die Breite der
+   Karten (290 + 16 Rand) dazu, und #composer zieht seine rechte Kante um
+   dieselben 306 px ein: Spalte und Maske bleiben buendig und mittig im freien
+   Raum (Mitte beider: (#main - --sbw - 306)/2). Darunter bleibt das Schweben,
+   wie es war -- eine reservierte Spalte waere dort schmaler als die Karte.
+   Nur solange eine Karte STEHT: das Git-Panel offen oder ein Ziel gesetzt. */
+@container chat (min-width:1100px){
+  body:not([data-git="shut"]) #flow,
+  #main:has(#goalpanel:not([hidden])) #flow{padding-right:calc(10px + 306px)}
+  body:not([data-git="shut"]) #composer,
+  #main:has(#goalpanel:not([hidden])) #composer{right:calc(var(--sbw) + 306px)}
+}
 /* DAS BAND LIEGT UEBER DEM PLATZHALTER, NICHT UEBER DER ZEILE (robin,
    2026-08-23). Eine eigene Zeile machte die Maske hoeher, sobald jemand zu
    sprechen anfaengt, und schoebe alles darunter -- dieselbe Bewegung, die der
@@ -2211,7 +2309,12 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 #foot{display:flex;align-items:center;gap:10px;margin-top:9px;font-size:11px;
   color:var(--dimmer);min-width:0}
 #ctx{font-size:11.5px;white-space:nowrap;min-width:0;overflow:hidden;
-  text-overflow:ellipsis;flex:0 1 auto}
+  text-overflow:ellipsis;
+  /* #231: .2 STATT 1, damit die Rangfolge oben stimmt. Schrumpfen
+     verteilt sich nach Faktor MAL Basis; mit 1 verlor die kurze Zahl anteilig
+     so viel wie der lange Chip und stand bei 1130x520 als "48.…" da. So gibt
+     erst der Modell-Chip nach, die Zahl erst, wenn er es nicht mehr kann. */
+  flex:0 .2 auto}
 #modelwrap{min-width:0;flex:0 1 auto;display:inline-flex}
 /* JEDES KIND, NICHT NUR DAS ERSTE. Der Chip ist ein `inline-flex` aus zwei
    Teilen -- dem Modellnamen und dem Grad dahinter -- und eine Regel nur auf
@@ -2232,8 +2335,18 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    each would be the fix that goes stale the first time a font-size moves --
    `stretch` is the initial value of align-items for a reason: the row gets ONE
    height, from its tallest control, and the rest adopt it. */
+/* #231. DIE GRUPPE SELBST GIBT NICHT NACH -- sie WAECHST. Mit
+   `flex:0 1 auto; min-width:0` war #acts ein schrumpfendes Kind von #foot,
+   und Schrumpfen verteilt sich nach flex-shrink MAL Basis: #acts hatte mit
+   307 px die groesste Basis und bekam den groessten Schnitt, seine starren
+   Knoepfe liefen hinaus. Gemessen (Chromium, Harness mit langem Ordnernamen):
+   1180x800 #acts 307 in 251 px, #go 46 px rechts NEBEN der Maske; 1130x520
+   #go von #main um 18 px abgeschnitten. Jetzt ist die Basis nur die Knoepfe
+   (der Hinweis traegt 0 bei, siehe #hint), #acts schrumpft nie darunter und
+   nimmt allen Rest der Zeile -- den der Hinweis fuellt. Der Mangel landet bei
+   #ctx und #modelwrap, die dafuer min-width:0 und Ellipse haben. */
 #acts{margin-left:auto;display:flex;gap:8px;align-items:stretch;
-  min-width:0;flex:0 1 auto}
+  min-width:0;flex:1 0 auto}
 /* #138c. DIE KNOEPFE GEBEN NICHT NACH. Sie sind das Angeklickte, und ein
    halber Knopf ist schlimmer als ein gekuerztes Wort -- also schrumpft in
    dieser Reihe nur der Hinweis. */
@@ -2243,9 +2356,18 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 #hint{color:var(--dimmer);font-size:10.5px;align-self:center;
   /* #138c. GIBT ALS ERSTES NACH, bis auf null. Er sagt "read timeout 600 s"
      oder worauf eine gepufferte Zeile wartet -- entbehrlich neben einem Knopf,
-     den jemand treffen muss. */
-  min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;
-  white-space:nowrap}
+     den jemand treffen muss.
+     #231: `width:0` + `flex:1 1 0` ist, was das WAHR macht. Eine
+     feste Breite 0 traegt 0 zur Eigenbreite von #acts bei, also bekommt der
+     Hinweis nur, was nach allen Knoepfen UND Chips uebrig ist -- er geht als
+     Erster, vor dem Modell-Chip. Rechtsbuendig, damit er am Ordnerknopf steht
+     statt links im leeren Raum. */
+  min-width:0;width:0;flex:1 1 0;text-align:right;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+/* #235. EINE ZEILE, wie jede Zahl in dieser Reihe: ohne Regel brach
+   "1234 tok · 23.4 tok/s" waehrend eines Zuges auf zwei Zeilen um (1280x720)
+   und machte die Fusszeile hoeher, genau in dem Moment, in dem gelesen wird. */
+#turnstate{white-space:nowrap;flex:none}
 /* A FLEX BOX SO THE GLYPH STAYS ON THE CENTRE LINE once #acts stretches this
    button past its own line box. Left as a plain button it would grow at the
    bottom and the arrow would ride high in it. */
@@ -2419,6 +2541,12 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 /* THE LEVEL IS DIMMER THAN THE MODEL because it is the setting, not the subject -- the same
    split #modelmenu draws between a model row and the level rows under it. */
 #model .lvl{color:var(--dimmer)}
+/* #235. `pre`, WEIL DER RAUM VOR DEM PUNKT SONST STIRBT. `levelLabel`
+   liefert " · high", und `.lvl` ist ein eigenes Flex-Item -- also eine eigene
+   Zeile, an deren Anfang CSS Text Phase II zusammenfallende Leerzeichen
+   streicht. Gezeichnet stand "(llama.cpp)· high". `pre` haelt das Leerzeichen
+   und bricht so wenig um wie das `nowrap` davor; die Ellipse bleibt. */
+#model .lvl{white-space:pre}
 /* #117 LEFT ITS SLIDER HERE AND #119 TOOK THE SECOND PANEL WITH IT. There were two menus with
    one rule set; now there is one menu with two kinds of row, because a thinking level was never
    a second subject -- it is how the model in the row above it thinks.
@@ -6411,6 +6539,7 @@ const crow = {
       staged.appendChild(row); }
 
     $("#gitbranchname").textContent = "⎇ " + (state.branch || "(detached)");
+    $("#gitbranchname").title = state.branch || "";
     const ab=$("#gitab");
     ab.textContent = (state.ahead||state.behind)
       ? ("↑"+state.ahead+" ↓"+state.behind) : (state.upstream || "");
@@ -6675,6 +6804,9 @@ const fitFlow = () => {
   // changed would ask whether we are at a bottom that has already moved.
   const atBottom = flow.scrollHeight - flow.scrollTop - flow.clientHeight < 4;
   flow.style.paddingBottom = (composer.offsetHeight + 10) + "px";
+  // #233: DIESELBE ZAHL FUER DIE KARTEN. #panels endet dort, wo der
+  // Composer anfaengt, statt bei festen 70 % -- siehe die Regel an #panels.
+  composer.parentNode.style.setProperty("--comph", composer.offsetHeight + "px");
   // RE-PIN, or typing a third line pushes the answer you were reading up and
   // out of sight -- the padding grows downwards and the view does not follow.
   if(atBottom) flow.scrollTop = flow.scrollHeight;

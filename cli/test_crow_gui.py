@@ -8076,7 +8076,17 @@ class NothingSticksOutOfTheComposerTests(unittest.TestCase):
         for selector in ("#hint{", "#ctx{", "#modelwrap{"):
             self.assertIn("min-width:0", self._rule(selector),
                           "%s muss nachgeben koennen" % selector)
-        self.assertIn("flex:0 1 auto", self._rule("#hint{"))
+        # #231: DIE RANGFOLGE, WIE SIE GEMESSEN WURDE. Hier stand
+        # `flex:0 1 auto` auf #hint -- und #acts selbst schrumpfte mit, weil
+        # Schrumpfen nach Faktor MAL Basis verteilt: bei 1180x800 lag #go
+        # 46 px neben der Maske. Der Hinweis nimmt jetzt nur den Rest (feste
+        # Breite 0, Basis 0), #acts waechst und schrumpft nie, und die
+        # Kontextzahl gibt nach dem Modell-Chip nach.
+        hint = self._rule("#hint{")
+        self.assertIn("width:0", hint)
+        self.assertIn("flex:1 1 0", hint)
+        self.assertIn("flex:1 0 auto", self._rule("#acts{"))
+        self.assertIn("flex:0 .2 auto", self._rule("#ctx{"))
 
     def test_the_long_chip_is_clipped_in_both_halves(self):
         """Der Chip ist ein `inline-flex` aus Modellname UND Grad. Eine Regel
@@ -8088,6 +8098,118 @@ class NothingSticksOutOfTheComposerTests(unittest.TestCase):
         ein Umbruch macht die Maske hoeher, sobald ein Chip nicht passt, und
         bewegt alles darueber."""
         self.assertNotIn("flex-wrap", self._rule("#foot{"))
+
+
+class NothingOverhangsOrClipsTests(unittest.TestCase):
+    """#231-#235. Die Befunde des Layout-Audits als Regeln im Blatt.
+
+    GEMESSEN WURDE GERENDERT (headless Chromium ueber alle Groessen von
+    1130x520 bis 2560x1440, drei Themes, Menues offen, Rail/Code an beiden
+    Anschlaegen; die schlimmsten Faelle nachgerendert in WebKitGTK 2.52).
+    Diese Suite hat keinen Browser, also haelt sie fest, was die Messung
+    herbeigefuehrt hat -- und rechnet dort nach, wo zwei Zahlen an zwei
+    Stellen zusammenpassen muessen.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):
+                               self.source.index("</style>")]
+
+    def _rule(self, selector: str) -> str:
+        found = self.css[self.css.index(selector):]
+        return found[:found.index(chr(125))]
+
+    def _px(self, rule: str, prop: str) -> float:
+        match = re.search(r"(?:^|[;{\s])" + re.escape(prop) + r":\s*(-?[\d.]+)px", rule)
+        self.assertIsNotNone(match, "%s fehlt in %r" % (prop, rule[:80]))
+        return float(match.group(1))
+
+    def test_a_long_word_breaks_inside_the_column(self):
+        """Pfad, URL, Kompositum: #flow hatte 891 px Inhalt in 666. `anywhere`,
+        nicht `break-word` -- nur `anywhere` senkt min-content, und die
+        Nutzerblase ist ein Grid-Item in einer 1fr-Spur."""
+        self.assertIn("overflow-wrap:anywhere", self._rule(".turn{"))
+        self.assertIn("overflow-wrap:normal", self._rule(".md table{"))
+
+    def test_the_composers_menus_open_above_the_cards(self):
+        """#box ist ein Stapelkontext; die Menues darin koennen nur ueber die
+        Karten, wenn der ganze Composer ueber #panels liegt."""
+        composer = self._rule("#composer{position:absolute")
+        panels = self._rule("#panels{")
+        z = lambda rule: int(re.search(r"z-index:(\d+)", rule).group(1))  # noqa: E731
+        self.assertGreater(z(composer), z(panels))
+
+    def test_the_cards_end_where_the_composer_begins(self):
+        """70 % galt nur, solange der Composer unter 30 % blieb. Die Hoehe, die
+        fitFlow ohnehin misst, ist dieselbe Zahl fuer die Karten."""
+        self.assertIn("var(--comph", self._rule("#panels{"))
+        fit = self.source[self.source.index("const fitFlow"):]
+        fit = fit[:fit.index("};")]
+        self.assertIn('"--comph"', fit)
+
+    def test_the_column_makes_room_for_the_cards_by_the_same_amount(self):
+        """Spalte und Maske bleiben buendig: #flow bekommt rechts genau das
+        dazu, was #composer an seiner rechten Kante einzieht -- und das ist
+        die Kartenbreite plus ihr Rand."""
+        self.assertIn("container:chat/inline-size", self._rule("#main{"))
+        block = self.css[self.css.index("@container chat"):]
+        block = block[:block.index("}\n}")]
+        flow = re.search(r"#flow\{padding-right:calc\(10px \+ (\d+)px\)", block)
+        comp = re.search(r"#composer\{right:calc\(var\(--sbw\) \+ (\d+)px\)", block)
+        self.assertIsNotNone(flow)
+        self.assertIsNotNone(comp)
+        panels = self._rule("#panels{")
+        reserve = self._px(panels, "width") + self._px(panels, "right")
+        self.assertEqual(int(flow.group(1)), reserve)
+        self.assertEqual(int(comp.group(1)), reserve)
+        # Die 10 px vor dem Plus sind die padding-inline von #flow.
+        self.assertIn("padding-inline:10px", self._rule("#flow{"))
+
+    def test_a_squeezed_side_column_shows_nothing_rather_than_half(self):
+        self.assertIn("container:side/inline-size", self.css)
+        self.assertRegex(self.css, r"@container side \(max-width:\d+px\)\{#side>\*"
+                                   r"\{visibility:hidden\}\}")
+
+    def test_the_settings_sheet_starts_below_the_title_bar(self):
+        bar = self._px(self._rule("#bar{"), "height")
+        settings = self._rule("#settings{position:fixed")
+        self.assertEqual(self._px(settings, "padding-top"), bar)
+
+    def test_the_level_keeps_the_space_before_its_dot(self):
+        """`.lvl` ist ein Flex-Item, sein fuehrendes Leerzeichen stuende am
+        Zeilenanfang und fiele weg: gezeichnet stand "(llama.cpp)· high"."""
+        self.assertIn('" · "', self.source[self.source.index("  levelLabel(){"):][:300])
+        self.assertIn("white-space:pre", self._rule("#model .lvl{white-space"))
+
+    def test_single_line_things_stay_single_line(self):
+        self.assertIn("white-space:nowrap", self._rule("#turnstate{"))
+        self.assertIn("white-space:nowrap", self._rule("#viewbar button{"))
+        self.assertIn("text-overflow:ellipsis", self._rule(".gitgrp .tct{min-width"))
+        self.assertIn("white-space:nowrap", self._rule(".gitgrp .gcount{flex:none"))
+
+    def test_rows_line_up(self):
+        """Die Kostenlinie eines Zielschritts ist so breit wie die Zeile, und
+        die Browserknoepfe sind so hoch wie das Adressfeld."""
+        self.assertIn("flex:1", self._rule("#goalpanel li>span:last-child{"))
+        self.assertIn("align-items:stretch", self._rule("#brbar{"))
+
+    def test_the_accent_bar_sits_on_the_tree_line(self):
+        """2 px Balken auf 1 px Linie: der Balken beginnt einen Pixel links der
+        Linie und deckt sie."""
+        line = self._px(self._rule(".sess.inproj::after{"), "left")
+        bar = self._rule(".sess.inproj.on::before,.sess.inproj.done::before{")
+        self.assertEqual(self._px(bar, "left"), line - 1)
+        self.assertIn("z-index:1", bar)
+
+    def test_scrollbars_stay_out_of_rounded_corners(self):
+        """Der Spurrand ist der Radius, gegen den die Leiste laeuft."""
+        main = self._px(self._rule("#main{"), "border-top-right-radius")
+        self.assertEqual(self._px(self._rule("#flow::-webkit-scrollbar-track{"),
+                                  "margin-top"), main)
+        goal = self._px(self._rule("#goalpanel{"), "border-radius")
+        self.assertIn("margin:%dpx 0" % goal,
+                      self._rule("#goalpanel::-webkit-scrollbar-track{"))
 
 
 class ALineTypedDuringTheReviewIsNotLostTests(ApiCase):
