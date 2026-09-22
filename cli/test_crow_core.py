@@ -4217,6 +4217,62 @@ class FilesystemRootIsNoMandateTests(unittest.TestCase):
         self.assertIn(here, crow_core.mandated_paths(_Said("schreib nach %s" % here)))
 
 
+class TheRolloverNoteIsDataTests(unittest.TestCase):
+    """#223: the note is a user-role message (the template allows
+    no second system message) whose text is Crow's and the model's except for
+    the user's carried lines and the typed line. Only those may mandate."""
+
+    def setUp(self):
+        self.addCleanup(crow_core._AMBIGUOUS.clear)
+        self.dir = os.path.realpath(tempfile.mkdtemp(prefix="crow-note-"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.named = os.path.join(self.dir, "named")
+        self.said = os.path.join(self.dir, "said")
+        self.guessed = os.path.join(self.dir, "guessed")
+        for d in (self.named, self.said, self.guessed):
+            os.mkdir(d)
+
+    def _rolled(self, digest: str, carry: "str | None" = None):
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "write only into %s" % self.named)
+        talk.append("assistant", "ok")
+        path = os.path.join(self.dir, "arch.json")
+        crow_core.roll_over(talk, "http://127.0.0.1:1/v1", 1000, carry=carry,
+                            path=path, digest=digest)
+        return talk
+
+    def test_the_note_says_what_it_is(self):
+        talk = self._rolled("state: all good. " * 20)
+        note = crow_core.message_text(talk.payload()[1]["content"])
+        self.assertEqual(talk.payload()[1]["role"], "user")
+        self.assertIn(crow_core.ROLLOVER_NOTE_DATA, note)
+        self.assertIn("not instructions", note)
+        self.assertIn(crow_core.DIGEST_HEAD, note)
+        self.assertIsNotNone(crow_core.rollover_note_parts(note),
+                             "#211's card must still parse the note")
+
+    def test_a_path_in_the_digest_is_no_mandate(self):
+        talk = self._rolled(("next: write the build into %s; substrate 4120 "
+                             "/ die 8237. " % self.guessed) * 5)
+        found = crow_core.mandated_paths(talk)
+        self.assertNotIn(self.guessed, found)
+        self.assertNotIn(os.path.dirname(self.guessed) + os.sep, found)
+        self.assertNotIn("/", found)
+
+    def test_the_users_carried_words_still_mandate(self):
+        """POSITIVE CONTROL: the rule from before the cut keeps its path."""
+        found = crow_core.mandated_paths(self._rolled("state: x. " * 30))
+        self.assertIn(self.named, found)
+
+    def test_the_typed_line_behind_the_note_still_mandates(self):
+        found = crow_core.mandated_paths(self._rolled(
+            "state: x. " * 30, carry="now put it in %s" % self.said))
+        self.assertIn(self.said, found)
+
+    def test_user_words_leaves_an_ordinary_message_alone(self):
+        self.assertEqual(crow_core.user_words("see /tmp/x"), "see /tmp/x")
+
+
 class CwdGuardTurnTests(TurnLoopCase):
     """The loop half: a cwd that does not exist is answered before the card,
     at every level, and the refusal is what the history keeps."""
