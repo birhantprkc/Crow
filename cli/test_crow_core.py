@@ -34,6 +34,7 @@ Standard library only, same as everything else here.
 from __future__ import annotations
 
 import ast
+import copy
 import atexit
 import http.server
 import importlib.util
@@ -52,6 +53,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -17936,6 +17938,141 @@ class ThePresencePenaltyIsTheModelsTests(unittest.TestCase):
         self.assertEqual(seen.get("presence_penalty"), 0.0)
 
 
+class ThinkingIsSentExplicitlyTests(TurnLoopCase):
+    """#225: both Qwen3.8-Flash-Next points think at the template
+    default and every sender says so -- turn, digest leg, turn after the cut,
+    review. Before, a never-chosen chat sent no key: llama-server's template
+    then took xhigh, crow-nest's serve took thinking OFF."""
+
+    POINTS = (crow_core.model_display_name("/m/Qwen3.8-Flash-Next-CNQ4.5-M.cnq"),
+              "Qwen3.8-Flash-Next")
+    CARD_THINKING = {"temperature": 1.0, "top_p": 0.95, "top_k": 20,
+                     "min_p": 0.0, "presence_penalty": 0.0}
+
+    _digest_leg = TheSeamKeepsTheRequestTests._digest_leg
+
+    def setUp(self):
+        super().setUp()
+        self.digests: list[dict] = []
+        real = crow_core.urllib.request.urlopen
+        self.addCleanup(setattr, crow_core.urllib.request, "urlopen", real)
+        crow_core.urllib.request.urlopen = self._digest_leg
+
+    def _three_bodies(self, served, **kw):
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))],
+                   {"prompt_n": 95, "predicted_n": 0})
+        self.serve([{"content": "carrying on"}], {"prompt_n": 1, "predicted_n": 0})
+        sampling = crow_core.sampling_for(served)
+        result = self.turn(self.conversation(), n_ctx=100, rollover_at=0.9,
+                           carry="the question", model="crow",
+                           served_name=served, **sampling, **kw)
+        self.assertTrue(result.rolled, "the seam was never crossed")
+        return [self.bodies[0], self.digests[0], self.bodies[1]]
+
+    def test_both_points_are_fixed_at_high(self):
+        for point in self.POINTS:
+            self.assertEqual(crow_core.reasoning_fixed_for(point), "high", point)
+            self.assertEqual(crow_core.reasoning_menu_for(point), (), point)
+            self.assertEqual(crow_core.reasoning_menu_groups_for(point), (), point)
+
+    def test_other_models_are_not_fixed(self):
+        """NEGATIVE: the 27B, 0731 and an unknown server keep the chat's word."""
+        for model in ("Qwen3.8-27B", "DeepSeek-V4-Flash-0731", "crow", None):
+            self.assertIsNone(crow_core.reasoning_fixed_for(model), model)
+            self.assertEqual(crow_core.effective_reasoning(model, "low"), "low")
+            self.assertIsNone(crow_core.effective_reasoning(model, None))
+        self.assertTrue(crow_core.reasoning_menu_for("Qwen3.8-27B"))
+
+    def test_the_card_thinking_row_on_both_points(self):
+        for point in self.POINTS:
+            got = crow_core.sampling_for(point)
+            self.assertEqual(got, self.CARD_THINKING, point)
+
+    def test_every_sender_of_the_seam_says_high(self):
+        """Turn, digest leg, first turn after the cut -- one word, one row."""
+        for point in self.POINTS:
+            self.bodies.clear()
+            self.digests.clear()
+            for body in self._three_bodies(point):
+                self.assertEqual(body["reasoning_effort"], "high", point)
+                self.assertEqual(body["reasoning_budget_tokens"], 1024, point)
+                for name, value in self.CARD_THINKING.items():
+                    self.assertEqual(body[name], value, (point, name))
+
+    def test_a_chosen_level_does_not_move_a_fixed_point(self):
+        for body in self._three_bodies(self.POINTS[0], reasoning_effort="low"):
+            self.assertEqual(body["reasoning_effort"], "high")
+
+    def test_the_review_says_high_too(self):
+        seen = {}
+        payload = json.dumps({"choices": [{"message": {"tool_calls": []}}]})
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake(request, *a, **k):
+            seen.update(json.loads(request.data.decode("utf-8")))
+            return _Resp(payload.encode("utf-8"))
+
+        crow_core.urllib.request.urlopen = fake
+        crow_core.review_turn(self.conversation(), base_url="http://x/v1",
+                              model="crow", api_key="k", temperature=1.0,
+                              top_p=0.95, min_p=0.0, timeout=1,
+                              served_name=self.POINTS[0])
+        self.assertEqual(seen["reasoning_effort"], "high")
+
+    def test_an_unknown_server_still_sends_no_key(self):
+        """NEGATIVE, #116's third state where nothing is declared."""
+        self.serve([{"content": "ok"}], {"prompt_n": 1, "predicted_n": 1})
+        self.turn(self.conversation(), model="crow")
+        self.assertNotIn("reasoning_effort", self.bodies[0])
+
+    def test_the_command_says_it_is_fixed_and_changes_nothing(self):
+        said, level, changed = crow_core.reasoning_command(
+            "low", self.POINTS[0], None)
+        self.assertIn("fixed", said)
+        self.assertEqual((level, changed), (None, False))
+
+    def test_a_stored_level_is_left_in_the_file_and_not_used(self):
+        with mock.patch.object(crow_core, "session_reasoning", lambda p=None: "low"):
+            self.assertEqual(crow_core.reasoning_for_chat(self.POINTS[0]),
+                             (None, None))
+
+
+class TheFlipIsOneManifestValueTests(unittest.TestCase):
+    """#225: flipping a point to `none` sends `none` and the card's
+    NON-thinking row; deleting `reasoning_fixed` gives the choice back."""
+
+    POINT = "Qwen3.8-Flash-Next"
+
+    def _with(self, change):
+        manifest = copy.deepcopy(crow_core._manifest())
+        change(manifest["models"]["entries"]["flash-next-q2-k-xl"])
+        return mock.patch.object(crow_core, "_manifest", lambda: manifest)
+
+    def test_none_takes_the_non_thinking_row(self):
+        with self._with(lambda e: e.update(reasoning_fixed="none")):
+            self.assertEqual(crow_core.effective_reasoning(self.POINT, None), "none")
+            self.assertEqual(crow_core.sampling_for(self.POINT),
+                             {"temperature": 0.7, "top_p": 0.8, "top_k": 20,
+                              "min_p": 0.0, "presence_penalty": 1.5})
+
+    def test_without_the_field_the_chat_chooses_and_none_picks_the_row(self):
+        with self._with(lambda e: e.pop("reasoning_fixed")):
+            self.assertIsNone(crow_core.reasoning_fixed_for(self.POINT))
+            self.assertTrue(crow_core.reasoning_menu_for(self.POINT))
+            self.assertEqual(crow_core.sampling_for(self.POINT, "none")["temperature"], 0.7)
+            self.assertEqual(crow_core.sampling_for(self.POINT, "high")["temperature"], 1.0)
+
+    def test_a_word_the_entry_does_not_offer_is_not_fixed(self):
+        with self._with(lambda e: e.update(reasoning_fixed="max")):
+            self.assertIsNone(crow_core.reasoning_fixed_for(self.POINT))
+
+
 class TheCnqReasoningLadderTests(unittest.TestCase):
     """2026-09-18, crow-nest #74. The CNQ container had no reasoning entry at
     all, so `reasoning_levels_for` fell back to the module union and
@@ -17958,9 +18095,15 @@ class TheCnqReasoningLadderTests(unittest.TestCase):
                          ("none", "low", "medium", "high"))
         self.assertEqual(crow_core.reasoning_levels_for(self.CNQ),
                          crow_core.reasoning_levels_for(self.GGUF))
-        # and every one of them is a word the engine accepts
+        # every one of them is a word the engine accepts -- and since
+        # #225 the point is FIXED at high, so a typed level other
+        # than that one is refused with the reason, not with "unknown".
         for level in crow_core.reasoning_levels_for(self.CNQ):
-            self.assertIsNone(crow_core.reasoning_problem(self.CNQ, level))
+            problem = crow_core.reasoning_problem(self.CNQ, level)
+            if level == crow_core.reasoning_fixed_for(self.CNQ):
+                self.assertIsNone(problem)
+            else:
+                self.assertIn("fixed at high", problem)
 
     def test_a_word_the_engine_answers_with_a_400_is_refused_here_first(self):
         """NEGATIVE, and the reason the list is measured rather than guessed:

@@ -2272,6 +2272,30 @@ class TheTerminalAsksTheManifestAboutTheServedModelTests(unittest.TestCase):
         self.assertEqual(seen["served_name"], self.CNQ)
 
 
+class TheTerminalSendsTheFixedThinkingTests(unittest.TestCase):
+    """#225, the terminal half: a fixed point takes the card's
+    thinking row, and a typed level that contradicts it stops the run with
+    the reason instead of being dropped in silence."""
+
+    CNQ = crow_core.model_display_name("/m/Qwen3.8-Flash-Next-CNQ4.5-M.cnq")
+
+    def test_the_run_takes_the_thinking_row(self):
+        args = crow.build_parser().parse_args(["--base-url", "http://x/v1"])
+        with mock.patch("sys.stdout", new_callable=io.StringIO):
+            got = crow.sampling_for_run(args, self.CNQ)
+        self.assertEqual(got, {"temperature": 1.0, "top_p": 0.95, "top_k": 20,
+                               "min_p": 0.0, "presence_penalty": 0.0})
+
+    def test_a_contradicting_flag_is_refused_with_the_reason(self):
+        args = crow.build_parser().parse_args(
+            ["--base-url", "http://x/v1", "--reasoning-effort", "low"])
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err), mock.patch.object(crow, "reset_background",
+                                                             lambda: None):
+            self.assertIsNone(crow.sampling_for_run(args, self.CNQ))
+        self.assertIn("fixed at high", err.getvalue())
+
+
 class SessionFormatGateTests(unittest.TestCase):
     """The gate on the shared session file, before a second writer exists.
 

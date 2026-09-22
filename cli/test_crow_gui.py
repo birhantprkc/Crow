@@ -1172,6 +1172,39 @@ class TheWindowAsksTheManifestAboutTheServedModelTests(ApiCase):
         for name, value in crow_core.sampling_for(self.CNQ).items():
             self.assertEqual(body[name], value, name)
 
+    def test_a_never_chosen_chat_sends_thinking_explicitly(self):
+        """#225: `_reasoning` None used to send no key -- serve read
+        that as thinking OFF. The fixed word goes on the wire now, with the
+        card's thinking row."""
+        body = self._turn_bodies(self._window(_reasoning=None))[0]
+        self.assertEqual(body["reasoning_effort"], "high")
+        for name, value in (("temperature", 1.0), ("top_p", 0.95), ("top_k", 20),
+                            ("min_p", 0.0), ("presence_penalty", 0.0)):
+            self.assertEqual(body[name], value, name)
+
+    def test_a_stored_level_does_not_move_a_fixed_point(self):
+        body = self._turn_bodies(self._window(_reasoning="low"))[0]
+        self.assertEqual(body["reasoning_effort"], "high")
+
+    def test_the_window_offers_no_level_for_a_fixed_point(self):
+        """#225: the chip's level menu is empty for a fixed point."""
+        api = self._window()
+        self.drained(api)
+        api._surface()
+        up = [m for m in self.drained(api) if m.get("k") == "up"][-1]
+        self.assertEqual((up["levels"], up["groups"]), ([], []))
+        self.assertIn("fixed", api._reasoning_command([]))
+
+    def test_a_model_that_is_not_fixed_keeps_its_levels(self):
+        """NEGATIVE: the 27B keeps the chip as it was."""
+        api = self._window(_model="Qwen3.8-27B")
+        self.drained(api)
+        api._surface()
+        up = [m for m in self.drained(api) if m.get("k") == "up"][-1]
+        self.assertEqual(up["levels"],
+                         list(crow_core.reasoning_levels_for("Qwen3.8-27B")))
+        self.assertTrue(up["levels"])
+
     def test_a_lifted_cap_is_lifted_in_the_window_too(self):
         body = self._turn_bodies(self._window(
             _budget=crow_core.BUDGET_LIFTED))[0]

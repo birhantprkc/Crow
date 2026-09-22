@@ -558,7 +558,55 @@ def model_key_for(model: str | None, manifest: dict | None = None) -> str | None
     return None
 
 
-def sampling_for(model: str | None) -> dict:
+def _entry_for(model: "str | None", manifest: "dict | None" = None) -> dict:
+    """The manifest entry of the model the server has open, or {}."""
+    manifest = manifest if manifest is not None else _manifest()
+    key = model_key_for(model, manifest)
+    return ((((manifest.get("models") or {}).get("entries") or {}).get(key)
+             or {}) if key else {})
+
+
+# #225. THINKING IS SENT, NOT INHERITED. Measured 2026-09-22: Crow
+# sent no `reasoning_effort` on a never-chosen chat, so the operating point
+# decided -- llama-server left the key to Qwen3.8's template, whose default is
+# xhigh (chat_template.jinja: `reasoning_effort|default('xhigh')`), while
+# crow-nest's `serve` reads an absent key as thinking OFF (serve.rs, `None =>
+# (kw_thinking.unwrap_or(false), None)`; engine.log: 2,962 requests logged
+# "thinking off"). One model, two engines, two modes, and nobody had chosen
+# either -- while Crow sent the card's THINKING sampling row to both. An entry
+# that declares `reasoning_fixed` gets that word on every request of every
+# sender (turn, digest leg, review), whatever the chat stored, and the window
+# offers no choice for it. robin, 2026-09-22: both Qwen3.8-Flash-Next points
+# think at the template default -- `high`, which renders as xhigh on both
+# engines (llama: the off/high group, #160; serve: `map_reasoning_effort`).
+# Flipping a point is one manifest value.
+def reasoning_fixed_for(model: "str | None") -> "str | None":
+    """#225: the word this model is always sent, or None."""
+    entry = _entry_for(model)
+    word = entry.get("reasoning_fixed")
+    levels = entry.get("reasoning_levels") or ()
+    if isinstance(word, str) and word in levels:
+        return word
+    return None
+
+
+def effective_reasoning(model: "str | None",
+                        chosen: "str | None") -> "str | None":
+    """#225: what goes on the wire -- the fixed word, else the chat's."""
+    return reasoning_fixed_for(model) or chosen
+
+
+def reasoning_menu_for(model: "str | None") -> "tuple[str, ...]":
+    """#225: the levels the window OFFERS -- none for a fixed point."""
+    return () if reasoning_fixed_for(model) else reasoning_levels_for(model)
+
+
+def reasoning_menu_groups_for(model: "str | None") -> "tuple[tuple[str, ...], ...]":
+    """#225: the groups the window draws -- none for a fixed point."""
+    return () if reasoning_fixed_for(model) else reasoning_groups_for(model)
+
+
+def sampling_for(model: str | None, level: "str | None" = None) -> dict:
     """The sampling values for one model: the shared block, then its own.
 
     THE OVERRIDE CARRIES ONLY WHAT DIFFERS, and the reason is the checker rather
@@ -579,7 +627,17 @@ def sampling_for(model: str | None) -> dict:
     key = model_key_for(model, manifest)
     if key:
         entry = ((manifest.get("models") or {}).get("entries") or {}).get(key) or {}
-        blocks.append(entry.get("sampling") or {})
+        # #225: THE ROW OF THE MODE ACTUALLY SENT. `sampling` is the
+        # thinking row; a request that turns thinking off (`none`) takes the
+        # entry's `sampling_no_thinking` when it declares one -- the card's
+        # two rows differ in temperature, top_p and presence_penalty.
+        # `level` is the chat's choice; a fixed entry overrides it, exactly
+        # as it does on the wire (`effective_reasoning`).
+        word = reasoning_fixed_for(model) or level
+        row = entry.get("sampling") or {}
+        if word == "none" and isinstance(entry.get("sampling_no_thinking"), dict):
+            row = entry["sampling_no_thinking"]
+        blocks.append(row)
     for block in blocks:
         for name, value in block.items():
             # FILTERED AGAINST A FIXED LIST, and not merely against a leading
@@ -593,14 +651,15 @@ def sampling_for(model: str | None) -> dict:
     return out
 
 
-def resolve_sampling(model: str | None, overrides: dict | None = None) -> dict:
+def resolve_sampling(model: str | None, overrides: dict | None = None,
+                     level: "str | None" = None) -> dict:
     """The model's sampling, with anything the user typed on top.
 
     `overrides` carries ONLY what was actually given -- see `_Explicit` in
     cli/crow.py. A dict of every flag with its default would put the terminal's
     idea of min_p back on top of the model's and undo the whole stage.
     """
-    out = sampling_for(model)
+    out = sampling_for(model, level)
     for name, value in (overrides or {}).items():
         if name in SAMPLING_FIELDS and value is not None:
             out[name] = value
@@ -617,6 +676,12 @@ def reasoning_problem(model: str | None, level: str | None) -> str | None:
     """
     if level is None:
         return None
+    fixed = reasoning_fixed_for(model)
+    if fixed is not None and level != fixed:
+        # #225: named, not silently overridden.
+        return ("--reasoning-effort %s: thinking is fixed at %s for %s "
+                "(reasoning_fixed in manifests/operating-point.json)"
+                % (level, fixed, model or "this model"))
     levels = reasoning_levels_for(model)
     if level in levels:
         return None
@@ -2509,7 +2574,9 @@ def reasoning_for_chat(model: str | None,
     a choice on the strength of a server that happens to be up right now.
     """
     level = session_reasoning(path)
-    if level is None:
+    # #225: a fixed point ignores the stored level (and leaves it in
+    # the file) -- the wire gets the fixed word from `effective_reasoning`.
+    if level is None or reasoning_fixed_for(model) is not None:
         return None, None
     levels = reasoning_levels_for(model)
     if level in levels:
@@ -2532,6 +2599,12 @@ def reasoning_command(argument: str, model: str | None,
     "send nothing", which is the state every existing chat is in and the only
     one whose prompt is byte-identical to a client without this feature.
     """
+    fixed = reasoning_fixed_for(model)
+    if fixed is not None:
+        # #225: nothing to choose on this point; say what is sent.
+        return ("reasoning: %s, fixed for %s (reasoning_fixed in "
+                "manifests/operating-point.json)" % (fixed, model or "this model"),
+                current, False)
     levels = reasoning_levels_for(model)
     groups = reasoning_groups_for(model)
     known = ", ".join(levels)
@@ -3900,6 +3973,9 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
         body["top_k"] = top_k
     if presence_penalty is not None:
         body["presence_penalty"] = presence_penalty
+    # #225: the same fixed word as the turn, or the leg renders
+    # another head than the warm prefix (#205) -- `effective_reasoning`.
+    reasoning_effort = effective_reasoning(served_name or model, reasoning_effort)
     if reasoning_effort:
         # #205/#176: DIESELBE TUER WIE DER ZUG, aus demselben Grund wie bei
         # review_turn. Ein Koerper, der seine Stufe auf der anderen Tuer
@@ -5939,6 +6015,8 @@ def stream_reply(
         # absent field as 1.5 over the whole answer, llama-server as 0.0 -- see
         # SAMPLING_FIELDS. 0.0 IS A VALUE and must travel, hence `is not None`.
         body["presence_penalty"] = presence_penalty
+    # #225: a fixed point is sent its word on every request.
+    reasoning_effort = effective_reasoning(served_name or model, reasoning_effort)
     if reasoning_effort is not None:
         # Only when asked for. Sending nothing keeps the prompt byte-identical to a client that
         # predates the switch, which is what the prompt cache wants.
@@ -17199,6 +17277,8 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
         body["top_k"] = top_k
     if presence_penalty is not None:
         body["presence_penalty"] = presence_penalty
+    # #225: the review asks with the turn's fixed word, too.
+    reasoning_effort = effective_reasoning(served_name or model, reasoning_effort)
     if reasoning_effort:
         # #176: dieselbe Tuer wie der Zug, aus demselben Grund. Ein Nachlauf, der
         # eine andere Tuer benutzt, waere ein zweiter Prompt-Stil im selben Chat.

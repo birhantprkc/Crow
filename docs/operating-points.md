@@ -36,7 +36,7 @@ A fourth server, DeepSeek-V4-Flash-0731 on `:8081`, is still set up by `install.
 | Placement | `-ncmoe 30 --fit off --load-mode none`, `-b 2048 -ub 2048` |
 | KV | `q8_0` / `q8_0` |
 | Vision | `--mmproj mmproj-F16.gguf`, 904,004,000 B (#170) |
-| Reasoning | `low` `medium` `high`; `max`, `minimal` and an explicit `off` return HTTP 500 (#160) |
+| Reasoning | fixed: `high` (the template's xhigh) on every request; the window offers no level. Accepted words `none` `low` `medium` `high`; `max`, `minimal` and an explicit `off` return HTTP 500 (#160). See [thinking and sampling](#thinking-and-sampling-per-point) |
 | Thinking cap | `reasoning_budget` 1024 per request, from the manifest (#176) |
 | GPU | RTX 5090, 32,607 MiB. **30,984 MiB in use**, 1,059 MiB left |
 | Decode | **41.76 tok/s** (40.34–42.76) |
@@ -181,6 +181,7 @@ the three things on it that Crow has to know about are under
 | Prefill | Windows: 771 tok/s default, **871 tok/s** with `CROW_PF_GEMM_B=1`, vs llama.cpp 922.5 (16k reference prompt). Linux: **968 tok/s** cold on the same 16k prompt, 740 tok/s on a cold 1024-token prompt, warm short turns 228 ms prefill / 247 ms to the first token |
 | Quality | ten-task suite unchanged (2/5/3) against the llama.cpp operating point's reading |
 | Port | 8099 |
+| Thinking | fixed: `high`, which serve maps to the template's xhigh, capped at 1024 reasoning tokens. Until 2026-09-22 Crow sent no level and serve read that as thinking **off**. See [thinking and sampling](#thinking-and-sampling-per-point) |
 | GPU | RTX 5090 class (Blackwell `sm_120` required), 62-64 GB host RAM class, CUDA driver + NVRTC 13.3 (Linux: the runtime libs on `LD_LIBRARY_PATH`, the container on a non-compressed path) |
 
 Measured 2026-09-13/14 on one RTX 5090 (Windows), F49 pair-chain methodology; sources: crow-nest issues
@@ -242,6 +243,36 @@ changes; the engine has to be on `main` or newer.
 an older engine can still lose a long tool call to `finish length`.
 
 ---
+
+## Thinking and sampling, per point
+
+Before 2026-09-22 Crow sent no `reasoning_effort` on a chat where nobody had picked a level, so
+the engine decided. llama-server passed the empty key to Qwen3.8's template, which defaults to
+xhigh. crow-nest's `serve` read the same empty key as thinking **off** (`serve.rs`; engine.log
+2026-09-22: 2,962 requests `thinking off`). Both got the card's *thinking* sampling row. Now an
+entry in `manifests/operating-point.json` can set `reasoning_fixed`. Crow then sends that word
+on every request: turn, rollover digest, turn after the cut and review. A level stored in the
+chat is ignored, and the window shows no level menu. To flip a point, change that one value
+(`none` picks the entry's `sampling_no_thinking` row). To give the choice back to the chat,
+delete it.
+
+| Entry | Thinking sent | Sampling (temperature / top_p / top_k / min_p / presence) | Cap |
+|---|---|---|---|
+| `flash-next-q2-k-xl` | `high` | 1.0 / 0.95 / 20 / 0.0 / 0.0 | 1024 |
+| `flash-next-cnq45-m` | `high` | 1.0 / 0.95 / 20 / 0.0 / 0.0 | 1024 |
+
+The rows are the card's Best Practices
+([Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next), re-read 2026-09-22):
+
+- thinking: 1.0 / 0.95 / 20 / 0.0 / 0.0
+- non-thinking: 0.7 / 0.80 / 20 / 0.0 / 1.5
+
+`min_p` is 0.0 in **both** rows. From 2026-09-21 to 2026-09-22 both entries sent 0.01, because
+a note wrongly claimed 0.01 was the card's value. The cap of 1024 stays until it is measured.
+The card allows up to 262,144 reasoning tokens for agentic work, and this repo has no
+measurement above 1024 with the cap on. Without a cap, 21 of 30 xhigh generations on crow-nest
+ended at `max_tokens` 16384 with no answer text (#80). `tools/check_operating_point.py` checks
+that this table matches the manifest.
 
 ## DeepSeek-V4-Flash-0731
 

@@ -1741,7 +1741,8 @@ def sampling_for_run(args: argparse.Namespace, model: str | None) -> dict | None
     # which is the difference between "the user chose 0.01" and "the terminal
     # has always said 0.01", and the second must not beat the model's own.
     return crow_core.resolve_sampling(
-        model, {name: getattr(args, name) for name in args.sampling_given})
+        model, {name: getattr(args, name) for name in args.sampling_given},
+        level=args.reasoning_effort)
 
 
 def resume_into(conversation: "crow_core.Conversation", args: argparse.Namespace,

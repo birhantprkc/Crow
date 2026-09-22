@@ -8730,11 +8730,14 @@ class Api:
                                   for k in crow_core.bootable_models()],
                        "model_key": "" if spot["remote"] else crow_core.model_key_for(name),
                        "reasoning": self._reasoning or "",
-                       "levels": [] if spot["remote"] else list(crow_core.reasoning_levels_for(name)),
+                       # #225: a point whose manifest entry fixes
+                       # its thinking offers no level -- the chip then shows
+                       # none (`levelLabel` is empty on an empty list).
+                       "levels": [] if spot["remote"] else list(crow_core.reasoning_menu_for(name)),
                        # #117. Which of those levels render the SAME prompt, measured. Empty
                        # means unmeasured, and the page collapses nothing on an empty list.
                        "groups": [] if spot["remote"] else
-                                 [list(g) for g in crow_core.reasoning_groups_for(name)]})
+                                 [list(g) for g in crow_core.reasoning_menu_groups_for(name)]})
         except Exception as exc:           # noqa: BLE001 - shown, never raised
             self.push({"k": "down", "why": str(exc)[:120]})
             return
@@ -9170,9 +9173,9 @@ class Api:
         if changed:
             self._reasoning = level
             self.push({"k": "reasoning", "level": level or "",
-                       "levels": list(crow_core.reasoning_levels_for(self._model)),
+                       "levels": list(crow_core.reasoning_menu_for(self._model)),
                        "groups": [list(g)
-                                  for g in crow_core.reasoning_groups_for(self._model)]})
+                                  for g in crow_core.reasoning_menu_groups_for(self._model)]})
         return said
 
     def _budget_command(self, rest: list) -> str:
@@ -9500,9 +9503,9 @@ class Api:
                    else crow_core.model_key_for(name),
                    "reasoning": self._reasoning or "",
                    "levels": [] if spot.get("remote")
-                   else list(crow_core.reasoning_levels_for(name)),
+                   else list(crow_core.reasoning_menu_for(name)),
                    "groups": [] if spot.get("remote")
-                   else [list(g) for g in crow_core.reasoning_groups_for(name)]})
+                   else [list(g) for g in crow_core.reasoning_menu_groups_for(name)]})
         self.push_goal(force=True)
 
     def push_goal(self, force: bool = False) -> None:
@@ -11550,9 +11553,9 @@ class Api:
                    "model_key": "" if spot["remote"] else crow_core.model_key_for(name),
                    "reasoning": self._reasoning or "",
                    "levels": [] if spot["remote"] else
-                             list(crow_core.reasoning_levels_for(name)),
+                             list(crow_core.reasoning_menu_for(name)),
                    "groups": [] if spot["remote"] else
-                             [list(g) for g in crow_core.reasoning_groups_for(name)]})
+                             [list(g) for g in crow_core.reasoning_menu_groups_for(name)]})
 
     def set_theme(self, name: str) -> bool:
         """The picker in Aussehen. True when the choice reached the disk.
@@ -12254,7 +12257,7 @@ class Api:
         if crow_core.should_roll(self._context_tokens, self._n_ctx,
                                  crow_core.ROLLOVER_AT):
             spot0 = self._endpoint()
-            sampling0 = crow_core.sampling_for(self._model)
+            sampling0 = crow_core.sampling_for(self._model, self._reasoning)
             # #154: VOR roll_over, auf dem noch warmen Praefix.
             # #205: DIESELBE STUFE UND DERSSELBE DECKEL WIE DER ZUG -- ein
             # Digest-Koerper ohne die Reasoning-Felder rendert einen anderen
@@ -12353,7 +12356,8 @@ class Api:
         # outlives a server restart -- the endpoint can be pointed at a
         # different model while the window stays open, and a value cached at
         # launch would keep sending the old model's min_p.
-        sampling = sampling_for(self._model)
+        # #225: the row of the mode this turn sends.
+        sampling = sampling_for(self._model, self._reasoning)
         # RESOLVED ONCE FOR THE WHOLE TURN, and handed to BOTH senders below.
         # The reply is the one a person is waiting for; the review at the end is
         # the one that goes without being asked, with its own body and its own
