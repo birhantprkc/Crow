@@ -1232,17 +1232,20 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
             # old one's, and #112 exists because sending one model's sampling to
             # another is a change nothing on screen reports. The dict is edited
             # in place because repl() splats the same object into every turn.
+            # #220: the name the next body's budget is looked up
+            # by. Left on the old model, `/model` would carry its cap across.
+            args.served_name = fetch_model_name(url)
             if sampling is not None:
                 # #116 RIDES ALONG HERE, and it has to: a level bound under the
                 # old model is not necessarily one the new one takes -- `max` is
                 # fine for 0731 and RAISES against unsloth's template. The
                 # request would fail after the prefill was already paid for.
                 kept = args.reasoning_effort
-                if kept and crow_core.reasoning_problem(fetch_model_name(url), kept):
+                if kept and crow_core.reasoning_problem(args.served_name, kept):
                     args.reasoning_effort = None
                     print(f"{DIM}{kept} is not a level {url} takes -- sending"
                           f" nothing until it is set again{RESET}")
-                fresh = sampling_for_run(args, fetch_model_name(url))
+                fresh = sampling_for_run(args, args.served_name)
                 if fresh is not None:
                     sampling.clear()
                     sampling.update(fresh)
@@ -1706,6 +1709,11 @@ def sampling_for_run(args: argparse.Namespace, model: str | None) -> dict | None
 
     Returns the four fields `run_turn` takes, ready to splat.
     """
+    # #220: KEPT ON `args`, beside the level, because this is the
+    # one call that sees every model the run is pointed at -- the start and
+    # every `/model`. The senders read it for the manifest's budget; the wire
+    # label stays args.model.
+    args.served_name = model
     problem = crow_core.reasoning_problem(model, args.reasoning_effort)
     if problem is not None:
         print(f"crow: {problem}", file=sys.stderr)
@@ -1853,6 +1861,9 @@ def _roll_with_digest(conversation, args, sampling, context_tokens, line):
     # "[digest failed ...]".
     digest = rollover_digest(
         conversation, **_turn_endpoint(args),
+        # #220: the served name beside the wire label, for the
+        # manifest -- the leg asks the same entry its turn asks.
+        served_name=getattr(args, "served_name", None),
         temperature=sampling["temperature"], top_p=sampling["top_p"],
         min_p=sampling["min_p"], top_k=sampling.get("top_k"),
         presence_penalty=sampling.get("presence_penalty"),
@@ -2039,7 +2050,7 @@ def repl(args: argparse.Namespace) -> int:
             **_turn_endpoint(args),
             **sampling,
             reasoning_effort=args.reasoning_effort, reasoning_budget=args.reasoning_budget,
-            timeout=args.timeout,
+            served_name=args.served_name, timeout=args.timeout,
             carry=line,
             context_tokens=context_tokens,
             n_ctx=n_ctx,
@@ -2083,9 +2094,9 @@ def repl(args: argparse.Namespace) -> int:
             crow_core.review_turn(
                 conversation, base_url=args.base_url, model=args.model,
                 api_key=args.api_key, **sampling, reasoning_budget=args.reasoning_budget,
-                reasoning_effort=args.reasoning_effort, incidents=turn.incidents,
-                gate=getattr(args, "memory_approval",
-                             crow_core.MEMORY_APPROVAL_DEFAULT),
+                reasoning_effort=args.reasoning_effort, served_name=args.served_name,
+                incidents=turn.incidents, gate=getattr(args, "memory_approval",
+                                                       crow_core.MEMORY_APPROVAL_DEFAULT),
                 events=TerminalTurnEvents(rounds=args.rounds,
                                           show_reasoning=show_reasoning))
             # AFTER IT RETURNED. With the gate off this finds nothing and costs

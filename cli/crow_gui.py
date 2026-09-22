@@ -12257,6 +12257,7 @@ class Api:
                 presence_penalty=sampling0.get("presence_penalty"),
                 reasoning_effort=self._reasoning,
                 reasoning_budget=self._budget,
+                served_name=self._model,
                 prompt_tokens=self._context_tokens,
                 extra_headers=spot0.get("headers") or None,
                 transport=spot0.get("transport") or crow_core.TRANSPORT_CHAT,
@@ -12390,6 +12391,10 @@ class Api:
                 reasoning_effort=self._reasoning,
                 # #176: dasselbe fuer den Denkdeckel -- None schickt kein Feld.
                 reasoning_budget=self._budget,
+                # #220: the manifest is asked about what /props
+                # reported -- the name `sampling` above came from -- and not
+                # about the wire label, which is `crow` and names no entry.
+                served_name=self._model,
                 timeout=READ_TIMEOUT_S, context_tokens=self._context_tokens,
                 n_ctx=self._n_ctx, promised_warm=self._promised_warm,
                 # #152: frisch je Turn, gesetzt allein vom Vor-Turn-Roll oben
@@ -12499,6 +12504,7 @@ class Api:
                 presence_penalty=sampling.get("presence_penalty"),
                 reasoning_effort=self._reasoning,
                 reasoning_budget=self._budget,
+                served_name=self._model,
                 incidents=result.incidents,
                 gate=getattr(self._args, "memory_approval",
                              crow_core.MEMORY_APPROVAL_DEFAULT),

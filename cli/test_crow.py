@@ -2229,6 +2229,40 @@ class RolloverTests(unittest.TestCase):
                       inspect.getsource(crow._roll_with_digest))
 
 
+class TheTerminalAsksTheManifestAboutTheServedModelTests(unittest.TestCase):
+    """#220, the terminal half: the served name rides on `args`
+    from `sampling_for_run` (start and every `/model`), and the digest leg
+    sends the turn's wire label instead of the /props name it used to."""
+
+    CNQ = crow_core.model_display_name("/m/Qwen3.8-Flash-Next-CNQ4.5-M.cnq")
+
+    def test_the_run_keeps_the_name_its_sampling_came_from(self):
+        args = crow.build_parser().parse_args(["--base-url", "http://x/v1"])
+        with mock.patch("sys.stdout", new_callable=io.StringIO):
+            crow.sampling_for_run(args, self.CNQ)
+        self.assertEqual(args.served_name, self.CNQ)
+        self.assertEqual(args.model, crow_core.DEFAULT_MODEL)
+
+    def test_the_digest_leg_sends_the_label_and_asks_by_the_served_name(self):
+        args = crow.build_parser().parse_args(["--base-url", "http://x/v1"])
+        seen = {}
+
+        def digest(conversation, **kw):
+            seen.update(kw)
+            return ""
+        c = crow_core.Conversation("SYS")
+        c.append("user", "q")
+        c.append("assistant", "a")
+        with mock.patch.object(crow, "rollover_digest", digest), \
+             mock.patch.object(crow, "roll_over", lambda *a, **k: None):
+            args.served_name = self.CNQ
+            crow._roll_with_digest(c, args,
+                                   {"temperature": 0.0, "top_p": 1.0,
+                                    "min_p": 0.0}, 180_000, "and now?")
+        self.assertEqual(seen["model"], crow_core.DEFAULT_MODEL)
+        self.assertEqual(seen["served_name"], self.CNQ)
+
+
 class SessionFormatGateTests(unittest.TestCase):
     """The gate on the shared session file, before a second writer exists.
 

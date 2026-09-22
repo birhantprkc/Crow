@@ -10,10 +10,16 @@ Per model, out of the manifest. Names that render the same prompt are one row in
 
 ## Thinking budget
 
-**On by default, out of the manifest.** Flash-Next `UD-Q2_K_XL` ships `reasoning_budget`
-1024; a model whose entry does not declare one stays uncapped, which is what every release
-up to 1.7.0 did. `/budget <tokens>` overrides it for a chat, `/budget off` lifts it,
-`--reasoning-budget N` does the same from the command line.
+**On by default, out of the manifest.** Flash-Next `UD-Q2_K_XL` and the CNQ container ship
+`reasoning_budget` 1024; a model whose entry does not declare one stays uncapped, which is
+what every release up to 1.7.0 did. `/budget <tokens>` overrides it for a chat, `/budget off`
+lifts it, `--reasoning-budget N` does the same from the command line.
+
+The entry is found by the model the server reports in `/props` -- the same name sampling
+and the levels come from -- never by the request's `model` field, which is the label `crow`
+unless `--model` says otherwise. Until #220 the budget alone was looked up by
+that label, matched no entry, and no local turn or review without `--model` carried the cap
+(only the terminal's digest leg did, because it sent the `/props` name as its `model`).
 
 It is a sampler field and not a template one, so the prompt is unchanged and setting it
 mid-chat costs no prefill -- unlike a level change.

@@ -3609,6 +3609,7 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
                     reasoning_effort: "str | None" = None,
                     reasoning_budget: "int | None" = None,
                     reasoning_budget_message: "str | None" = None,
+                    served_name: "str | None" = None,
                     # #205: DIE KONTEXTSCHAETZUNG, die der Aufrufer ohnehin
                     # an `should_roll` uebergibt. Sie skaliert das Timeout
                     # (unten); hier angenommen statt gesucht, weil eine zweite
@@ -3675,7 +3676,7 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
         # wieder in die kwargs ab, der Prompt-Cache eines laufenden Chats
         # bleibt unberuehrt.
         body["reasoning_effort"] = reasoning_effort
-    capped = resolve_reasoning_budget(model, reasoning_budget)
+    capped = resolve_reasoning_budget(served_name or model, reasoning_budget)
     if capped is not None:
         # #205/#176: DERSELBE DECKEL WIE DER ZUG, dieselbe Einspeisung
         # darunter. Die Felder gehen in den Sampler, nicht ins Template --
@@ -5492,6 +5493,14 @@ def stream_reply(
     # ein Deckel ohne sie die Antwort koepft.
     reasoning_budget: "int | None" = None,
     reasoning_budget_message: "str | None" = None,
+    # #220. WHICH MODEL THE SERVER HAS OPEN, and the one name the
+    # manifest is asked about. NOT `model`: that is the wire label, `crow`
+    # unless somebody typed --model (see `fetch_model_name`), and it names no
+    # entry -- so a budget looked up by it was None for every local turn since
+    # #176. The surfaces pass what /props reported, the name their sampling
+    # and reasoning levels already come from. None falls back to `model`,
+    # which is the remote case: there the slug on the wire IS the served name.
+    served_name: "str | None" = None,
     timeout: float,
     extra_headers: "dict | None" = None,
     # WHICH DIALECT THE ENDPOINT SPEAKS, and it is a parameter rather than
@@ -5651,7 +5660,7 @@ def stream_reply(
     # Antworten auf dieselbe Frage waeren -- dieselbe Regel, der `transport` und
     # `remote` folgen. Ein entferntes Modell hat keinen Manifesteintrag, bekommt
     # also keinen Deckel, und `remote_body` nimmt ihn ohnehin wieder heraus.
-    capped = resolve_reasoning_budget(model, reasoning_budget)
+    capped = resolve_reasoning_budget(served_name or model, reasoning_budget)
     if capped is not None:
         # ZWEI FELDER, EINE ENTSCHEIDUNG (#176). Der Deckel ohne die Einspeisung
         # ist gemessen schaedlich, also reisen sie zusammen oder gar nicht. Der
@@ -16289,6 +16298,7 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                 presence_penalty: "float | None" = None,
                 reasoning_budget: "int | None" = None,
                 reasoning_budget_message: "str | None" = None,
+                served_name: "str | None" = None,
                 timeout: float = 180.0, gate: bool = False,
                 extra_headers: "dict | None" = None,
                 transport: str = TRANSPORT_CHAT,
@@ -16336,7 +16346,7 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
         # #176: dieselbe Tuer wie der Zug, aus demselben Grund. Ein Nachlauf, der
         # eine andere Tuer benutzt, waere ein zweiter Prompt-Stil im selben Chat.
         body["reasoning_effort"] = reasoning_effort
-    capped = resolve_reasoning_budget(model, reasoning_budget)
+    capped = resolve_reasoning_budget(served_name or model, reasoning_budget)
     if capped is not None:
         # #176: derselbe Deckel wie der Zug, aus demselben Grund wie die Stufe
         # eine Zeile darueber. Ein Nachlauf, der ohne Deckel denkt, ist der
@@ -16617,6 +16627,9 @@ def run_turn(
     # `budget_command`, und wo er wirkt, sagt `stream_reply`.
     reasoning_budget: "int | None" = None,
     reasoning_budget_message: "str | None" = None,
+    # #220. The model the server HAS OPEN, for the manifest
+    # lookups -- see `stream_reply`. Passed through to both senders.
+    served_name: "str | None" = None,
     timeout: float,
     carry: str | None = None,
     context_tokens: int = 0,
@@ -16805,6 +16818,7 @@ def run_turn(
                 reasoning_effort=reasoning_effort,
                 reasoning_budget=reasoning_budget,
                 reasoning_budget_message=reasoning_budget_message,
+                served_name=served_name,
                 timeout=timeout,
                 extra_headers=extra_headers,
                 transport=transport,
@@ -17230,6 +17244,7 @@ def run_turn(
                 reasoning_effort=reasoning_effort,
                 reasoning_budget=reasoning_budget,
                 reasoning_budget_message=reasoning_budget_message,
+                served_name=served_name,
                 prompt_tokens=context_tokens,
                 extra_headers=extra_headers,
                 transport=transport, remote=remote, routing=routing)

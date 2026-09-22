@@ -1115,6 +1115,101 @@ class TheReplayDrawsACarriedRoundAsCarriedTests(unittest.TestCase):
         self.assertEqual(len(tools), 1, "the carried call was drawn as a row")
 
 
+class TheWindowAsksTheManifestAboutTheServedModelTests(ApiCase):
+    """#220, the window half. `_endpoint` answers `model: "crow"`
+    for the local provider (DEFAULT_MODEL through provider_endpoint), sampling
+    and levels came from `self._model` -- what /props reported -- and the #176
+    budget came from "crow", which names no entry: the CNQ container's 1024
+    never reached the wire from this window. The REAL `run_turn` and the REAL
+    `rollover_digest` run here; only the transport is scripted."""
+
+    CNQ = crow_core.model_display_name("/m/Qwen3.8-Flash-Next-CNQ4.5-M.cnq")
+
+    def setUp(self) -> None:
+        # THE LOCAL PROVIDER, WHATEVER RAN BEFORE: a case that picks OpenRouter
+        # in the module sandbox leaves it chosen, and this class is about the
+        # local path -- same fence as the rollover class above.
+        super().setUp()
+        for name in ("PROVIDERS_FILE", "PROVIDER_KEYS_FILE", "PROVIDER_TOKEN_FILE"):
+            self.addCleanup(setattr, crow_core, name, getattr(crow_core, name))
+            setattr(crow_core, name, os.path.join(self.dir, name.lower() + ".json"))
+
+    def _window(self, **state):
+        api = self.api()
+        api._model = self.CNQ
+        api._n_ctx = 200192
+        for name, value in state.items():
+            setattr(api, name, value)
+        return api
+
+    def _turn_bodies(self, api, text="hello") -> list[dict]:
+        bodies = []
+
+        def fake(url, body, api_key, timeout):
+            bodies.append(json.loads(json.dumps(body)))
+            yield from chunks_for([{"content": "ok"}], {"predicted_n": 1})
+        crow_core._post_stream = fake
+        api._conversation.append("user", text)
+        with mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
+            api._run(text)
+        self.assertTrue(bodies, "the turn never reached the transport")
+        return bodies
+
+    def test_the_turn_for_the_container_carries_what_its_entry_declares(self):
+        body = self._turn_bodies(self._window(_reasoning="high"))[0]
+        self.assertEqual(body["model"], crow_core.DEFAULT_MODEL,
+                         "the wire label moved -- serve only echoes it")
+        self.assertEqual(body["reasoning_budget_tokens"],
+                         crow_core.reasoning_budget_for(self.CNQ))
+        self.assertEqual(body["reasoning_budget_tokens"], 1024)
+        self.assertEqual(body["reasoning_budget_message"],
+                         crow_core.REASONING_BUDGET_MESSAGE)
+        self.assertEqual(body["reasoning_effort"], "high")
+        self.assertIn(body["reasoning_effort"],
+                      crow_core.reasoning_levels_for(self.CNQ))
+        # The sampling half was right before; held here so the two lookups
+        # stay on one name.
+        for name, value in crow_core.sampling_for(self.CNQ).items():
+            self.assertEqual(body[name], value, name)
+
+    def test_a_lifted_cap_is_lifted_in_the_window_too(self):
+        body = self._turn_bodies(self._window(
+            _budget=crow_core.BUDGET_LIFTED))[0]
+        self.assertNotIn("reasoning_budget_tokens", body)
+        self.assertNotIn("reasoning_budget_message", body)
+
+    def test_the_pre_turn_digest_asks_the_same_name(self):
+        legs = []
+        answer = json.dumps({"choices": [{"finish_reason": "stop", "message": {
+            "content": "state: the work stands where the transcript ends. " * 8}}]})
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def leg(request, timeout=None):
+            legs.append(json.loads(request.data.decode("utf-8")))
+            return _Resp(answer.encode("utf-8"))
+
+        def fake_roll(conversation, base_url, context_tokens, carry=None, **_):
+            conversation.reset()
+            conversation.append("user", "note\n\n" + (carry or ""))
+            return os.path.join(crow_core.SESSION_DIR, "rollover-fake.json")
+
+        api = self._window(_context_tokens=190000)
+        self.a_chat(api)
+        with mock.patch.object(crow_core.urllib.request, "urlopen", leg), \
+             mock.patch.object(crow_core, "roll_over", fake_roll):
+            body = self._turn_bodies(api, "weiter")[0]
+        self.assertEqual(len(legs), 1, "one digest question")
+        for sent in (legs[0], body):
+            self.assertEqual(sent["model"], crow_core.DEFAULT_MODEL)
+            self.assertEqual(sent["reasoning_budget_tokens"], 1024)
+
+
 class APastedScreenshotBecomesAChipTests(unittest.TestCase):
     """robins Frage 2026-08-29 nachmittags ('wieso geht vision auf einmal
     nicht mehr'): Ctrl+V schrieb das Bild nach pastes\\ und haengte den

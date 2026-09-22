@@ -1802,6 +1802,89 @@ class TheSeamKeepsTheRequestTests(TurnLoopCase):
         self.assertEqual(leg["messages"][-1]["content"], crow_core.DIGEST_ASK)
 
 
+class TheServedModelNamesTheBudgetTests(TurnLoopCase):
+    """#220: the manifest is asked about the model the server has
+    OPEN, not about the wire label.
+
+    Both surfaces send `model: "crow"` (DEFAULT_MODEL, via provider_endpoint's
+    fallback), and `stream_reply` looked the #176 budget up by that label --
+    which names no entry, so no local turn carried the 1024 the CNQ container
+    and the llama arm declare, while the window's sampling and levels already
+    came from the /props name. These cases hold the budget to the served name
+    on every sender of the seam, with the label left on the wire as it was.
+    """
+
+    CNQ = crow_core.model_display_name("/m/Qwen3.8-Flash-Next-CNQ4.5-M.cnq")
+
+    _digest_leg = TheSeamKeepsTheRequestTests._digest_leg
+
+    def setUp(self):
+        super().setUp()
+        self.digests: list[dict] = []
+        real = crow_core.urllib.request.urlopen
+        self.addCleanup(setattr, crow_core.urllib.request, "urlopen", real)
+        crow_core.urllib.request.urlopen = self._digest_leg
+
+    def _three_bodies(self, **kw):
+        """Round one, the digest leg at the cut, round two after it."""
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))],
+                   {"prompt_n": 95, "predicted_n": 0})
+        self.serve([{"content": "carrying on"}], {"prompt_n": 1, "predicted_n": 0})
+        result = self.turn(self.conversation(), n_ctx=100, rollover_at=0.9,
+                           carry="the question", model="crow", **kw)
+        self.assertTrue(result.rolled, "the seam was never crossed")
+        self.assertEqual((len(self.bodies), len(self.digests)), (2, 1))
+        return [self.bodies[0], self.digests[0], self.bodies[1]]
+
+    def test_the_premise_the_label_names_no_entry_and_the_container_does(self):
+        self.assertIsNone(crow_core.reasoning_budget_for(crow_core.DEFAULT_MODEL))
+        self.assertEqual(crow_core.model_key_for(self.CNQ), "flash-next-cnq45-m")
+        self.assertEqual(crow_core.reasoning_budget_for(self.CNQ), 1024)
+
+    def test_every_sender_of_the_seam_carries_the_served_models_cap(self):
+        for body in self._three_bodies(served_name=self.CNQ,
+                                       reasoning_effort="high"):
+            self.assertEqual(body["model"], "crow", "the wire label moved")
+            self.assertEqual(body["reasoning_budget_tokens"], 1024)
+            self.assertEqual(body["reasoning_budget_message"],
+                             crow_core.REASONING_BUDGET_MESSAGE)
+            self.assertEqual(body["reasoning_effort"], "high")
+
+    def test_without_the_served_name_the_label_decides_and_sends_none(self):
+        """NEGATIVE, and the state before this change: the label is asked."""
+        for body in self._three_bodies(reasoning_effort="high"):
+            self.assertNotIn("reasoning_budget_tokens", body)
+            self.assertNotIn("reasoning_budget_message", body)
+
+    def test_a_lifted_cap_stays_lifted_on_the_served_model(self):
+        for body in self._three_bodies(served_name=self.CNQ,
+                                       reasoning_budget=crow_core.BUDGET_LIFTED):
+            self.assertNotIn("reasoning_budget_tokens", body)
+
+    def test_the_unasked_review_asks_the_same_name(self):
+        seen = {}
+        payload = json.dumps({"choices": [{"message": {"tool_calls": []}}]})
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake(request, *a, **k):
+            seen.update(json.loads(request.data.decode("utf-8")))
+            return _Resp(payload.encode("utf-8"))
+
+        crow_core.urllib.request.urlopen = fake
+        crow_core.review_turn(self.conversation(), base_url="http://x/v1",
+                              model="crow", api_key="k", temperature=1.0,
+                              top_p=0.95, min_p=0.01, timeout=1,
+                              served_name=self.CNQ)
+        self.assertEqual(seen["model"], "crow")
+        self.assertEqual(seen["reasoning_budget_tokens"], 1024)
+
+
 class TheSeamSendsTheGoalItCarriesTests(TurnLoopCase):
     """#210, Audit des Schnitts vom 2026-09-22 17:12: DER KOPF DER ERSTEN
     ANFRAGE NACH DEM SCHNITT, nicht `prompt_head` im Reagenzglas.
