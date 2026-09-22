@@ -3,6 +3,64 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## Unreleased
+
+Measured against the 2026-09-22 diorama session (655 messages after a rollover at 17:12 CEST, 474 before).
+Nothing here is live-accepted yet; acceptance is robin's GUI replay.
+
+### Added
+
+- **`build_bundle` tool** (#212). Bundles a page's ES modules, or one module, into a single self-contained
+  offline HTML/IIFE with the esbuild already on the machine: `CROW_ESBUILD`, project `node_modules`, PATH,
+  then the deno/npx caches. No network. Import maps become aliases, shaders import as text (bytes are never
+  re-typed, the #91 escape hatch), images and models as data URLs. Bounded by one 120 s build clock, the
+  #207 capture cap and write_file's fence. Its description tells the model that a file:// page cannot load
+  ES modules and that a library is never flattened by hand. Measured on a scratch copy of the diorama app
+  graph: 957,410 B page, 0 errors, 0 warnings, 0.07 s.
+- A regression test holds the tool list, sampling, thinking fields and `max_tokens` identical across the
+  rollover seam, and the digest request identical to the turn's (#214).
+
+### Fixed
+
+- **Tool arguments under another harness's names are taken and said** (#215). `edit_file` accepts
+  `old_string`/`old_str`, `new_string`/`new_str` and `file_path`; `read_file`/`write_file`/`append_file`
+  accept `file_path` (write_file also `file_text`); `search_text`/`find_files` accept `path` as `root`;
+  `memory` accepts `new_text` as `content`. The result opens with `[took old_string as old, ...]`; two names
+  with different values are an error. After the rollover, 22 of 22 edit_file calls had failed on Claude
+  Code's names, 15 of them first told to read the file.
+- A call with an unknown key and a missing required one runs nothing and returns the tool's argument list,
+  before the tool's own checks (#214). `edit_file` checks `old`/`new` before the read-first rule, and a
+  missing `new` is an error instead of silently deleting `old` (`new=""` still deletes) (#215).
+- The read-first refusals say that a turn starts at every user message, goal-mode nudges included (#215).
+- `search_text` given a file as root searches that file instead of answering "no match" (#215).
+- The terminal's between-turn rollover keeps the chat's memory, skills and goal (#214).
+- **Rollover digest cut off at its token cap** no longer passes as complete: the unfinished last line is
+  dropped and the note says `[digest cut off at the N-token cap ...]`; the digest prompt names a 500-word
+  budget (unmeasured) (#210). Measured: 2000 tokens, finish length, 6,795 chars ending mid-bullet.
+- **render_page on heavy WebGL pages** (#213 follow-up). On Linux the page runs `wait_ms` of real time over
+  `--remote-debugging-pipe` and is captured when that time is up, even if it never finishes loading; one
+  ceiling (15 s load + wait_ms + 10 s frame). The old virtual-time path needed 32.7 s on the diorama page at
+  every budget while its deadline was `wait/1000 + 8` -- raising wait_ms could never help. Now 5.6 s
+  (software) / 5.8 s (GPU) at wait_ms 4000. A failed capture names the rasterer and says a larger wait_ms
+  will not help; `wait_ms` is real milliseconds, max 20000.
+- render_page: a capture that is almost but not entirely one colour (one line of text on white measured
+  99.96 %) says "almost one colour" instead of "no-signal"; GCM login noise and DevTools pipe messages no
+  longer crowd out the page's console lines.
+- **Delegation: a gated fallback spot is skipped** (#216). HTTP 403 (e.g. a model OpenRouter serves only to
+  agentic harnesses), "no endpoints found" and 402 on a paid favourite mark the spot dead and try the next;
+  up to six such refusals don't count against the three transient retries. 401, 402 on a free model and
+  schema errors stop the chain at once. A failed delegate names every spot it tried and why, saved in
+  `subtasks-registry.json` and the transcript. A mid-stream error chunk from a remote endpoint reports its
+  code instead of "the model answered nothing".
+
+### Known issues
+
+- render_page on Windows keeps the command-line capture under the virtual clock (now with the fixed
+  ceiling); it cannot capture on the deadline. A page with a blocked main thread now costs 25 s (was 9.2 s).
+- `wait_ms` changed meaning from virtual to real time: light pages cost about `wait_ms` of real time.
+- The read-first state still lasts one turn, and every goal-mode nudge starts a new one (#215) -- open design
+  question.
+
 ## 2.4.0 — 2026-09-19
 
 ### Added
