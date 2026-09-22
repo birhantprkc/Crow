@@ -55,6 +55,11 @@
    "why": "The one tool whose drift costs data: #10 measured hermes-agent resolving read-before-write to last-write-wins in two independent code paths, one warning and one writing anyway. Two implementations here is that same defect with a different name."
   },
   {
+   "name": "tool_append_file",
+   "kind": "def",
+   "why": "The one write that carries no read guard, because appending destroys nothing -- and the only thing standing between it and a file outside the working area is the _outside_root check it shares with write_file. A second copy is where that check gets dropped, or where the missing trailing newline is handled differently and two rounds run together on one line."
+  },
+  {
    "name": "tool_edit_file",
    "kind": "def",
    "why": "Exact match plus a uniqueness check. A copy that fuzzy-matches instead would silently edit the wrong occurrence in whichever surface carries it."
