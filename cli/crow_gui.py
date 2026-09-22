@@ -951,6 +951,14 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
    und `sizing.end` setzt die Sicht danach selbst wieder an ihren Anker. */
 #flow > .turn{contain-intrinsic-size:auto 240px}
 #flow.sizing > .turn{content-visibility:auto}
+/* A CONTAINED BOX DOES NOT LET ITS CHILDREN'S MARGINS COLLAPSE THROUGH IT:
+   under .sizing a turn whose first or last child carries a margin (.alarm 6px,
+   .fail, .code, details.rollcard) grew by it -- measured 17.8 -> 23.8 px in
+   Chromium, everything below dropped 6 px for the length of a drag (re-audit of
+   the integration, 2026-09-23). Those margins already collapsed into the 26px
+   .turn+.turn gap, so dropping them keeps the look and makes both states equal. */
+#flow > .turn > :first-child{margin-top:0}
+#flow > .turn > :last-child{margin-bottom:0}
 
 /* -- rail --------------------------------------------------------------- */
 #rail{width:var(--railw,242px);flex:none;
@@ -1100,12 +1108,16 @@ body[data-code="shut"][data-browser="shut"] #codegrip{display:none}
 #brtabs{display:flex;gap:4px;padding:0 8px 6px;overflow-x:auto;flex:none;
   scrollbar-width:none}
 #brtabs::-webkit-scrollbar{display:none}
-.brtab{display:flex;align-items:center;gap:6px;flex:0 0 auto;max-width:150px;
+.brtab{display:flex;align-items:center;gap:6px;flex:0 1 auto;min-width:64px;max-width:150px;
   font:inherit;font-size:11px;color:var(--dim);background:transparent;
   border:1px solid var(--line);border-radius:6px;padding:3px 6px 3px 9px;
   cursor:pointer}
 .brtab.on{background:var(--raised);color:var(--text);border-color:var(--bevel)}
-.brtab .t{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.brtab .t{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;min-width:0}
+/* TABS SHRINK BEFORE THEY SCROLL: at flex 0 0 auto three tabs were 345 px in a
+   260 px strip with its scrollbar hidden, and the active (new) tab sat outside
+   it, invisible. 64 px keeps a favicon-less title readable; from about four tabs
+   the strip scrolls. */
 .brtab .x{flex:none;color:var(--dimmer);padding:0 2px}
 .brtab .x:hover{color:var(--bad)}
 /* #235: STRETCH, aus dem Grund, den #acts aufgeschrieben hat -- eine
@@ -1708,8 +1720,10 @@ a.lnk{color:var(--accent);text-decoration:underline;cursor:pointer;
 .pth{text-decoration:underline dotted;text-underline-offset:2px;
   text-decoration-color:var(--dimmer);cursor:context-menu}
 .pth:hover{text-decoration-color:var(--accent)}
-a.lnk:focus-visible,.pth:focus-visible,#menu button:focus-visible
+a.lnk:focus-visible,.pth:focus-visible
   {outline:1px solid var(--accent);outline-offset:1px;border-radius:3px}
+/* the menu's own buttons keep their 5px radius: the ring sits inside them */
+#menu button:focus-visible{outline:1px solid var(--accent);outline-offset:-1px}
 /* A WIDE TABLE SCROLLS INSIDE ITSELF rather than widening the chat: the column
    is what every other block is measured against. */
 .md table{display:block;overflow-x:auto;border-collapse:collapse;margin:0 0 9px;

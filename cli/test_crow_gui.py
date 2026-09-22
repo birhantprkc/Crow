@@ -11690,5 +11690,28 @@ class TheLinkAndPathMarkTests(ApiCase):
                          ["explorer", "/select,C:\\a\\c.bat"])
 
 
+class TheIntegrationSeamsHoldTests(unittest.TestCase):
+    """Re-audit of the four GUI branches together (2026-09-23)."""
+
+    def test_a_drag_does_not_change_a_turn_height(self):
+        # content-visibility under .sizing stops margins collapsing through a
+        # turn; the first/last child margins are dropped so both states match.
+        page = crow_gui.PAGE
+        self.assertIn("#flow > .turn > :first-child{margin-top:0}", page)
+        self.assertIn("#flow > .turn > :last-child{margin-bottom:0}", page)
+
+    def test_browser_tabs_shrink_before_they_scroll(self):
+        page = crow_gui.PAGE
+        tab = page[page.index("\n.brtab{"):]
+        tab = tab[:tab.index("}")]
+        self.assertIn("flex:0 1 auto", tab)
+        self.assertIn("min-width:64px", tab)
+
+    def test_the_menu_focus_ring_keeps_the_button_radius(self):
+        page = crow_gui.PAGE
+        self.assertIn("#menu button:focus-visible{outline:1px solid var(--accent);outline-offset:-1px}", page)
+        self.assertNotIn(".pth:focus-visible,#menu button:focus-visible", page)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
