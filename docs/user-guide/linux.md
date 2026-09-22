@@ -213,11 +213,11 @@ reload.
 `Gtk.Window.begin_move_drag` and one on any of the eight edge grips calls `begin_resize_drag`,
 on the GTK main thread. The compositor runs the drag; Crow never computes a rectangle.
 
-**The browser pane is a window of its own.** On Windows it is a second WebView2 over the panel
-rect; under Wayland a child window cannot be glued to a parent's coordinates, so it is a
-separate floating toplevel carrying the same `crow` app id — the float rule above catches it
-too. `hl.window_rule({ ..., pin = true })` is commented out in `crow.lua`: "stays with me" is a
-preference, not a requirement.
+**The browser pane is inside the window (#201).** It is a second WebKitWebView in Crow's own
+GtkWindow, placed on the panel through a `GtkOverlay`, not a toplevel. No window rule is involved.
+Before #201 it was a separate toplevel with the `crow` app id. The float, center and
+`size 1180 800` rules then made it a second 1180×800 window centred over Crow.
+`CROW_PANE_WINDOW=1` brings that window back for comparison.
 
 **The app id is `crow`.** `GLib.set_prgname("crow")` runs before the window opens, which is what
 `xdg_toplevel.set_app_id` falls back to. Without it `hyprctl clients -j` reports the class as

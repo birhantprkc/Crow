@@ -3492,7 +3492,12 @@ const crow = {
     if(sp.href && /^https?:\/\//i.test(sp.href)){
       const a=document.createElement("a"); a.className="lnk"; a.title=sp.href;
       a.appendChild(node);
-      a.onclick=ev=>{ ev.preventDefault(); pywebview.api.open_url(sp.href); };
+      // #201: A CLICK OPENS IT IN THE PANEL (Python decides whether there is
+      // one in the window); Ctrl, Cmd or the middle button still send it out.
+      a.onclick=ev=>{ ev.preventDefault();
+        pywebview.api.open_url(sp.href, !!(ev.ctrlKey||ev.metaKey)); };
+      a.onauxclick=ev=>{ if(ev.button!==1) return; ev.preventDefault();
+        pywebview.api.open_url(sp.href, true); };
       node=a; }
     return node; },
   spansInto(el,spans){ (spans||[]).forEach(sp=>el.appendChild(this.span(sp)));
@@ -5621,7 +5626,9 @@ const crow = {
 
   ghOpen(btn){
     const card=btn.closest(".askcard");
-    pywebview.api.open_url(card.dataset.url||""); },
+    // OUTSIDE ON PURPOSE (#201): the code is typed where the user is
+    // signed in to GitHub, and that is their own browser, not the panel.
+    pywebview.api.open_url(card.dataset.url||"", true); },
 
   ghCopy(btn){
     const card=btn.closest(".askcard");
@@ -6306,14 +6313,21 @@ const crow = {
   // DAS PANEL KLAPPT SICH DAFUER AUF. Ein Tab, das in einem zugeklappten Panel
   // entsteht, ist ein Ereignis, von dem niemand erfaehrt.
   brRendered(url, shot){
-    if(document.body.dataset.browser==="shut"){
-      document.body.dataset.browser="open";
-      pywebview.api.set_browser_open(true); }
-    const id=++this.tabSeq;
+    this.brUnfold();
+    // #230: EIN REITER FUER DIE RENDERS DES MODELLS, nicht einer je Aufruf.
+    // robin, 2026-09-23: "every time Crow opens a website it opens a new tab".
+    // Zehn Renders waren zehn Reiter, die niemand schliesst. Der Render-Reiter
+    // wird wiederverwendet und bekommt je Render einen Eintrag in seiner
+    // Historie, also geht Zurueck durch die frueheren Renders.
     // DIE ECHTE ADRESSE IN DER HISTORIE, nicht der Screenshot: ein Klick auf
     // Neu laden holt die Seite, nicht noch einmal das Bild.
-    this.tabs.push({id:id, hist:[url||""], at:0});
-    this.tabOn=id;
+    let t=this.tabs.find(x=>x.model);
+    if(t){ t.hist=t.hist.slice(0, t.at+1); t.hist.push(url||""); t.at=t.hist.length-1; }
+    else { t={id:++this.tabSeq, hist:[url||""], at:0, model:true}; this.tabs.push(t); }
+    // DAS BILD STEHT, NICHT DIE ADRESSE: die Meldung "brnav" ueber die
+    // geladene PNG-Datei darf den Eintrag nicht ueberschreiben (#227).
+    t.shot=true;
+    this.tabOn=t.id;
     this.brDraw();
     $("#brurl").value=url||"";
     // DAS BILD ZUERST, weil es das ist, was das Modell gesehen hat -- die Seite
@@ -6399,6 +6413,7 @@ const crow = {
     this.brShow(t, url); },
 
   brShow(t, url){
+    t.shot=false;
     $("#brurl").value=url;
     this.brSend(url);
     this.brDraw(); },
@@ -6422,7 +6437,64 @@ const crow = {
     const b=$("#brbody"); if(!b) return;
     const r=b.getBoundingClientRect();
     if(r.width<2 || r.height<2) return;
-    pywebview.api.pane_place(r.left, r.top, r.width, r.height); },
+    // DASSELBE RECHTECK WIRD NICHT ZWEIMAL GESCHICKT (#201): der Beobachter
+    // feuert bei jedem Layout, und jeder Aufruf ist ein Bruecken-Thread.
+    const key=[r.left,r.top,r.width,r.height].map(Math.round).join(",");
+    if(key===this.brSent) return;
+    this.brSent=key;
+    pywebview.api.pane_place(r.left, r.top, r.width, r.height);
+    this.brCover(); },
+  brSent: "",
+
+  // #201. DAS PANEL AUFKLAPPEN, wenn es zu ist -- ein Reiter, der in einem
+  // zugeklappten Panel entsteht, ist ein Ereignis, von dem niemand erfaehrt.
+  brUnfold(){
+    if(document.body.dataset.browser!=="shut") return;
+    document.body.dataset.browser="open";
+    pywebview.api.set_browser_open(true); },
+
+  // #201. EIN LINK AUS EINER ANTWORT, im Panel statt in einem zweiten
+  // Fenster. Ein neuer Reiter, weil der Link neben dem steht, was gerade
+  // offen ist, und es nicht ersetzen soll.
+  brOpen(url){ if(!url) return; this.brUnfold(); this.brNew(url); },
+
+  // #227. DIE SEITE IST SELBST GEGANGEN (Link, Formular, Umleitung). "replace"
+  // heisst: die Last kam von hier (getippt, Zurueck, Reiterwechsel) und ihre
+  // Umleitungen landen im selben Eintrag. "push" heisst: ein neuer Eintrag,
+  // alles davor Vorwaerts faellt weg, wie in jedem Browser.
+  brNav(url, how){
+    const t=this.brTab(this.tabOn); if(!t || !url) return;
+    if(how==="replace"){
+      if(t.shot) return;
+      if(t.at>=0) t.hist[t.at]=url; else { t.hist=[url]; t.at=0; }
+    } else {
+      t.shot=false;
+      if(t.at>=0 && t.hist[t.at]===url) return;
+      t.hist=t.hist.slice(0, t.at+1); t.hist.push(url); t.at=t.hist.length-1;
+    }
+    $("#brurl").value=url;
+    this.brDraw(); },
+
+  // #201. LIEGT ETWAS VON CROW UEBER DER FLAECHE? Die Scheibe ist ein
+  // natives Widget und liegt ueber der GANZEN Seite -- ein Einstellungsblatt
+  // oder ein Menue, das ueber `#brbody` aufgeht, verschwaende darunter. Neun
+  // Proben, 14 px nach innen, damit die Fenstergriffe am Rand nicht zaehlen.
+  brCovered(r){
+    const box=$("#browser");
+    for(const fx of [0,.5,1]) for(const fy of [0,.5,1]){
+      const x=r.left+14+fx*(r.width-28), y=r.top+14+fy*(r.height-28);
+      const el=document.elementFromPoint(x, y);
+      if(el && !box.contains(el)) return true; }
+    return false; },
+  brCover(){
+    if(!window.pywebview) return;
+    const b=$("#brbody"); if(!b) return;
+    const r=b.getBoundingClientRect();
+    const c = r.width>=30 && r.height>=30 && this.brCovered(r);
+    if(c===this.brWasCovered) return;
+    this.brWasCovered=c;
+    pywebview.api.pane_cover(c); },
+  brWasCovered: false,
 
   brBack(){ const t=this.brTab(this.tabOn);
     if(t && t.at>0){ t.at--; this.brShow(t, t.hist[t.at]); } },
@@ -6685,6 +6757,9 @@ const crow = {
       case "ask": this.ask(e.name, e.args, e.scope); break;
       // #175. Ein Render des Modells oeffnet sein Tab im Browser-Panel.
       case "page": this.brRendered(e.url, e.shot); break;
+      // #227: the pane moved (a link, a redirect); #201: a link to open here.
+      case "brnav": this.brNav(e.url, e.how); break;
+      case "bropen": this.brOpen(e.url); break;
       case "rail": this.rail(e);
         this.archive(e.archived||[]); break;
       // THE PAGE CLEARS ITSELF ON "new", because the click is here. A DELETE of
@@ -6990,6 +7065,12 @@ crow.brDraw();
 // tippt. Ein Beobachter auf dem Element erwischt alle drei; ihn an `resize` zu
 // haengen haette die anderen zwei verpasst.
 new ResizeObserver(() => crow.brPlace()).observe($("#brbody"));
+// #201. EIN BLATT UEBER DEM PANEL schiebt die Scheibe beiseite. Nur die zwei
+// Ebenen, die ueber `#brbody` aufgehen koennen, werden beobachtet, und nur ihre
+// Attribute -- ein Beobachter auf dem ganzen Baum liefe bei jedem Token mit.
+["#settings","#menu"].forEach(sel => { const el=$(sel); if(el)
+  new MutationObserver(() => requestAnimationFrame(() => crow.brCover()))
+    .observe(el, {attributes:true, attributeFilter:["hidden","class","style"]}); });
 // KEINE STARTBREITEN-AUTOMATIK MEHR. #138c richtete eine nie gezogene Breite
 // an der halben Flaeche aus -- auf robins Fenster am 2026-08-27 war genau das
 // der zu breite Start, und die Icons standen wieder neben der Maske. Seine
@@ -7851,6 +7932,305 @@ class _DuringPush:
         return False
 
 
+# -- #201 #226 #227: the browser panel INSIDE the window (GTK) ----------------
+#
+# WHY THIS EXISTS. Up to here the panel on Linux was a second pywebview
+# toplevel ("crow-browser"). Wayland gives a client no way to place its own
+# toplevel (xdg_toplevel has no set_position; `gtk_window_move` is a no-op,
+# measured 2026-09-16), so the pane could never sit on `#brbody`. It also has
+# Crow's app id, so robin's live rule set (`~/.config/hypr/crow.lua`: float,
+# center, size 1180x800 for `^([Cc]row)$`) turns it into a second 1180x800
+# window centred over Crow. XEmbed (GtkSocket/GtkPlug) is X11-only, and the
+# rules cannot place one window relative to another (the Hyprland wiki's
+# expression variables are the window's own geometry, the monitor and the
+# cursor). Research and the full comparison are in #201.
+#
+# SO THE PANE IS A WIDGET, NOT A WINDOW: a second WebKitWebView in the SAME
+# GtkWindow. pywebview builds GtkWindow > GtkScrolledWindow > WebKitWebView
+# (gtk.py:134-265) and offers no second view (r0x0r/pywebview#1730, "Multiple
+# webviews per window are not planned"). So `before_show`, which pywebview
+# fires synchronously on the GTK main thread after the tree is built and before
+# it is shown, moves the ScrolledWindow into a GtkOverlay. The pane view is
+# then an overlay child placed on the CSS rectangle of `#brbody` by
+# `get-child-position`. The window is frameless and the page is not zoomed, so
+# CSS px of the main page are GTK logical px of the overlay; no screen
+# coordinate is involved and none is invented.
+#
+# ITS OWN CONTEXT (#226). The pywebview pane shared Crow's UI context, which is
+# ephemeral because pywebview defaults `private_mode=True`. That meant logins
+# lost on every start, no memory kill (WebKit's default kill threshold is 0.0,
+# "never killed", read on this machine), no sandbox (WebKitWebProcess not
+# under bwrap), and pywebview's bridge injected into every foreign page. This
+# view gets a persistent profile of its own, a memory kill, bwrap, and no
+# UserContentManager, so there is no bridge at all.
+
+# THE CEILING, WITH THE KILL SWITCHED ON. WebKit's default limit is 3072 MB
+# (min(3 GiB, RAM)), but its default kill threshold is 0.0, "never killed",
+# read on this machine. The 54 GiB run (#208/#213) was exactly the page kind
+# the panel shows: the model's own WebGL build.
+# THE KILL OVERSHOOTS BY ONE POLL OF GROWTH, measured 2026-09-23 with a page
+# allocating 512 MB every 300 ms (about 1.7 GB/s): limit 400 MB, poll 1 s ->
+# killed at 1709 MB; limit 400 MB, poll 2 s -> killed at 2734 MB, the note
+# 4.1 s after the load. So the poll is 1 s, not WebKit's 30 s, and the limit
+# is 2048 MB rather than 3072: with an engine holding most of the machine
+# (about 10 GiB free here during a run) a 3 GiB limit plus a poll's growth is
+# too close to the edge. 2 GiB is far above what the #201 run needed: ten
+# cross-site loads kept the pane AND Crow's own view under 420 MB PSS in
+# total. Whether a heavy real site (maps, video) needs more is unmeasured.
+PANE_MEMORY_LIMIT_MB = 2048
+PANE_KILL_FRACTION = 1.0
+PANE_POLL_S = 1.0
+
+# WHAT THE PANE LOADS. `javascript:` would run in whatever page is up; `data:`
+# is refused as a top-level navigation by browsers for phishing reasons.
+# `file://` stays because render screenshots and local builds are what the
+# panel is for (#175).
+_PANE_SCHEMES = ("http://", "https://", "file://")
+
+
+def pane_url_ok(url) -> bool:
+    """May the in-window pane load this address? http(s), file, about:blank."""
+    if not isinstance(url, str):
+        return False
+    low = url.strip().lower()
+    return low == "about:blank" or low.startswith(_PANE_SCHEMES)
+
+
+class InWindowPane:
+    """The browser panel as an overlay child of Crow's own GtkWindow (#201).
+
+    EVERY PUBLIC METHOD MAY BE CALLED FROM ANY THREAD. pywebview runs each
+    js_api call on a fresh worker thread, and GTK may only be touched from the
+    thread running its loop, so the public methods record state and hand the
+    widget work to `idle_add`. The state is plain attributes so the suite can
+    check the decisions without a display.
+    """
+
+    def __init__(self, on_event, idle_add=None) -> None:
+        self._on_event = on_event
+        self._idle = idle_add or (lambda fn, *a: fn(*a))
+        self.rect = None          # (x, y, w, h) in CSS px == overlay px
+        self.wanted = False       # the page wants a page visible
+        self.covered = False      # something of Crow's lies over the rect
+        self.own = 0              # loads Crow asked for and not yet committed
+        self.last = ""            # the last address reported to the page
+        self._overlay = None
+        self._view = None
+        self._ctx = None
+
+    # -- installing ---------------------------------------------------------
+
+    @classmethod
+    def install(cls, native, on_event) -> "InWindowPane":
+        """Wrap pywebview's content in a GtkOverlay. GTK main thread only.
+
+        Called from `before_show`, so nothing is realized yet and nothing
+        flickers; the WebView itself is built on first use, because a web
+        process at start costs memory for everyone who never opens the panel.
+        """
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import GLib, Gtk
+        child = native.get_child()
+        if child is None:
+            raise RuntimeError("the window has no content to wrap")
+        pane = cls(on_event, idle_add=GLib.idle_add)
+        overlay = Gtk.Overlay()
+        native.remove(child)
+        overlay.add(child)
+        native.add(overlay)
+        overlay.show()
+        overlay.connect("get-child-position", pane._position)
+        pane._overlay = overlay
+        return pane
+
+    def _position(self, _overlay, widget, alloc) -> bool:
+        if widget is not self._view or self.rect is None:
+            return False
+        alloc.x, alloc.y, alloc.width, alloc.height = self.rect
+        return True
+
+    def _build(self) -> "object":
+        """The view, its own context, its limits. GTK main thread only."""
+        if self._view is not None:
+            return self._view
+        import gi
+        gi.require_version("WebKit2", "4.1")
+        from gi.repository import WebKit2
+        data = os.path.join(crow_platform.state_dir(), "browser")
+        cache = os.path.join(crow_platform.cache_dir(), "browser")
+        os.makedirs(data, exist_ok=True)
+        manager = WebKit2.WebsiteDataManager(base_data_directory=data,
+                                             base_cache_directory=cache)
+        limits = WebKit2.MemoryPressureSettings.new()
+        limits.set_memory_limit(PANE_MEMORY_LIMIT_MB)
+        limits.set_poll_interval(PANE_POLL_S)
+        limits.set_kill_threshold(PANE_KILL_FRACTION)
+        ctx = WebKit2.WebContext(website_data_manager=manager,
+                                 memory_pressure_settings=limits)
+        ctx.get_cookie_manager().set_persistent_storage(
+            os.path.join(data, "cookies.sqlite"),
+            WebKit2.CookiePersistentStorage.SQLITE)
+        # BWRAP WHEN THERE IS ONE. Measured 2026-09-23: enabling it on this
+        # context works after Crow's own web process already exists, and the
+        # pane's WebKitWebProcess then runs under `bwrap`. Without bwrap
+        # WebKit cannot spawn a sandboxed process at all, so no bwrap means no
+        # sandbox rather than no panel.
+        # NO PATHS ARE ADDED, and file:// still works: a PNG under ~/Projects
+        # loaded in the sandboxed pane with nothing added (title "... 1786x1119
+        # pixels") -- presumably because the unsandboxed network process reads
+        # files, not the web process (inferred, not traced). Adding $HOME is refused anyway ("Attempted to add
+        # disallowed path to sandbox: /home/...", a g_critical on the terminal).
+        if shutil.which("bwrap") and os.environ.get("CROW_PANE_SANDBOX") != "0":
+            try:
+                ctx.set_sandbox_enabled(True)
+            except Exception:          # noqa: BLE001 -- older WebKit: no sandbox
+                pass
+        ctx.connect("download-started", self._download)
+        view = WebKit2.WebView(web_context=ctx)
+        # NOT SHOWN BY `show_all`. pywebview calls `window.show_all()` from
+        # its `show()`, and without this a hidden pane came back with it.
+        # Measured in the prototype: after hide() + show_all(), visible False.
+        view.set_no_show_all(True)
+        view.connect("load-changed", self._load_changed)
+        view.connect("notify::uri", self._uri_changed)
+        view.connect("create", self._new_window)
+        view.connect("web-process-terminated", self._terminated)
+        self._overlay.add_overlay(view)
+        self._ctx, self._view = ctx, view
+        return view
+
+    # -- what the page asks for (any thread) --------------------------------
+
+    def place(self, x, y, w, h) -> None:
+        self.rect = (int(round(x)), int(round(y)),
+                     max(1, int(round(w))), max(1, int(round(h))))
+        self._idle(self._apply)
+
+    def go(self, url: str) -> None:
+        self.wanted = True
+        self.own += 1
+        self._idle(self._load, url)
+
+    def hide(self) -> None:
+        self.wanted = False
+        self._idle(self._apply)
+
+    def show(self) -> None:
+        # ONLY A PANE THAT HAS A PAGE COMES BACK. `pane_show` is also what an
+        # unfolded panel with an empty tab calls, and an empty view would be a
+        # white rectangle in a dark panel -- the reason `brBlank` exists.
+        if self._view is not None and self.last:
+            self.wanted = True
+        self._idle(self._apply)
+
+    def cover(self, covered: bool) -> None:
+        self.covered = bool(covered)
+        self._idle(self._apply)
+
+    def visible(self) -> bool:
+        return self.wanted and not self.covered and self.rect is not None
+
+    # -- GTK main thread ----------------------------------------------------
+
+    def _load(self, url: str) -> bool:
+        try:
+            self._build().load_uri(url)
+        except Exception as exc:       # noqa: BLE001 -- said, never silent
+            self.own = 0
+            self._on_event({"k": "note",
+                            "t": "the browser panel could not open %s: %s"
+                                 % (url, exc)})
+        self._apply()
+        return False
+
+    def _apply(self) -> bool:
+        view = self._view
+        if view is None:
+            return False
+        if self.visible():
+            view.show()
+            if self._overlay is not None:
+                self._overlay.queue_resize()
+        else:
+            view.hide()
+        return False
+
+    def committed(self, uri: str) -> "dict | None":
+        """What the page is told about a committed navigation, or None.
+
+        #227. "replace" when the load was Crow's own (typed, Back, a tab
+        switch -- and the redirects in front of it, which commit only once);
+        "push" when the page moved by itself: a link, a form, pushState. The
+        page keeps the per-tab history and needs to know which one it was.
+        """
+        if not uri:
+            return None
+        if self.own > 0:
+            self.own = 0
+            how = "replace"
+        elif uri == self.last:
+            return None
+        else:
+            how = "push"
+        self.last = uri
+        return {"k": "brnav", "url": uri, "how": how}
+
+    def _load_changed(self, view, event) -> None:
+        if getattr(event, "value_nick", "") == "committed":
+            said = self.committed(view.get_uri() or "")
+            if said:
+                self._on_event(said)
+
+    def _uri_changed(self, view, _spec) -> None:
+        # SAME-DOCUMENT NAVIGATION (pushState, #hash) changes the URI without
+        # a load. A real load is reported at commit instead, and only there.
+        if view.is_loading():
+            return
+        said = self.committed(view.get_uri() or "")
+        if said:
+            self._on_event(said)
+
+    def _new_window(self, _view, action) -> None:
+        """#227. target=_blank and window.open land in the panel.
+
+        pywebview sent these to `webbrowser.open` (gtk.py:460), which on
+        robin's machine is Chromium in a window of its own. Returning None
+        refuses the second view; the address is loaded here instead and
+        reported as the page's own navigation.
+        """
+        try:
+            uri = action.get_request().get_uri()
+        except Exception:              # noqa: BLE001
+            uri = ""
+        if pane_url_ok(uri):
+            self._idle(lambda: (self._view.load_uri(uri), False)[1])
+        return None
+
+    def _terminated(self, _view, reason) -> None:
+        why = getattr(reason, "value_nick", str(reason))
+        if why == "exceeded-memory-limit":
+            text = ("the page in the browser panel was stopped: it grew past "
+                    "the panel's %d MB ceiling (#226)" % PANE_MEMORY_LIMIT_MB)
+        else:
+            text = "the page in the browser panel stopped (%s)" % why
+        self.last = ""
+        self._on_event({"k": "note", "t": text})
+
+    def _download(self, _ctx, download) -> None:
+        """WHERE IT WENT, SAID ONCE. WebKit's default destination is the XDG
+        download directory under the suggested name; a panel that saved a
+        file without a word would leave it for someone to stumble over."""
+        def done(d, *_) -> None:
+            self._on_event({"k": "note",
+                            "t": "downloaded to %s" % (d.get_destination() or "?")})
+
+        def failed(_d, err, *_) -> None:
+            self._on_event({"k": "note", "t": "the download failed: %s" % err})
+        download.connect("finished", done)
+        download.connect("failed", failed)
+
+
 class Api:
     """What the page may call. Nothing here touches a widget; it queues."""
 
@@ -8003,6 +8383,10 @@ class Api:
         self._browser_win = None
         self._browser_rect = None
         self._browser_shown = False
+        # #201. AUF GTK STATTDESSEN EIN WIDGET IM EIGENEN FENSTER, siehe
+        # `InWindowPane`. None heisst: der Fensterweg oben (Windows, oder ein
+        # GTK, auf dem das Einhaengen scheiterte).
+        self._inwin = None
         # #171. WAS JEDER ZUG DIESES CHATS GEKOSTET HAT, als Zahlen. Dieselbe
         # Bauart wie das Band darueber und aus demselben Grund: die Timing-Zeile
         # war reine Bildschirmausgabe, also nahm der Rollover sie nicht mit, und
@@ -11403,8 +11787,16 @@ class Api:
         doc["rail_width"] = width
         return write_settings(doc)
 
-    def open_url(self, url: str) -> bool:
-        """A link in an answer, opened OUTSIDE this window. True when it went.
+    def open_url(self, url: str, outside: bool = False) -> bool:
+        """A link in an answer, opened in the panel or outside. True when it went.
+
+        #201. IN THE PANEL WHEN THE PANEL IS IN THE WINDOW: robin, 2026-09-23,
+        the browser belongs inside Crow and not in an extra window, and on his
+        machine `webbrowser.open` is Chromium (`xdg-settings get
+        default-web-browser` -> chromium.desktop) in a window Hyprland places
+        on its own. `outside=True` (Ctrl-click, middle click, and the GitHub
+        device code, which has to be entered where the user is signed in to
+        GitHub) still goes to the system browser.
 
         NEVER IN THE WEBVIEW. Following a link in here would replace the client
         with a web page, and a frameless window has no back button -- the chat,
@@ -11419,6 +11811,9 @@ class Api:
             return False
         if not url.lower().startswith(("http://", "https://")):
             return False
+        if self._inwin is not None and not outside:
+            self.push({"k": "bropen", "url": url})
+            return True
         try:
             return bool(webbrowser.open(url))
         except Exception:                  # noqa: BLE001 - a link, never fatal
@@ -11888,6 +12283,9 @@ class Api:
         """Das Rechteck, auf dem die Scheibe liegt -- in CSS-Pixeln der Seite."""
         self._browser_rect = (float(left), float(top),
                               max(1.0, float(width)), max(1.0, float(height)))
+        if self._inwin is not None:
+            self._inwin.place(*self._browser_rect)
+            return True
         self._pane_apply()
         return True
 
@@ -11922,6 +12320,14 @@ class Api:
         was hier scheitert, faellt sonst in die JS-Bruecke und hinterlaesst ein
         leeres Panel ohne eine einzige Zeile darueber, warum.
         """
+        if self._inwin is not None:
+            # #201: DAS WIDGET IM FENSTER. Das Schema wird hier geprueft und
+            # nicht erst in WebKit: `javascript:` liefe sonst in der Seite, die
+            # gerade dasteht.
+            if not pane_url_ok(url):
+                return "error: the browser panel opens http, https and file only"
+            self._inwin.go(url)
+            return url
         try:
             win = self._pane()
             win.load_url(url)
@@ -11939,6 +12345,9 @@ class Api:
     def pane_hide(self) -> bool:
         """Weg, ohne zerstoert zu werden -- eine Scheibe, die neu gebaut wird,
         verliert die Seite, auf der jemand gerade war."""
+        if self._inwin is not None:
+            self._inwin.hide()
+            return True
         self._browser_shown = False
         if self._browser_win is not None:
             try:
@@ -11948,6 +12357,9 @@ class Api:
         return True
 
     def pane_show(self) -> bool:
+        if self._inwin is not None:
+            self._inwin.show()
+            return True
         if self._browser_win is None or self._browser_shown:
             return True
         self._browser_shown = True
@@ -11983,6 +12395,42 @@ class Api:
     def pane_follow(self, *_) -> None:
         """Das Hauptfenster ist gewandert oder hat die Groesse geaendert."""
         self._pane_apply()
+
+    def pane_embed(self) -> bool:
+        """#201. Hang the pane into Crow's own GtkWindow. True when it is in.
+
+        WIRED TO pywebview's `before_show`, which fires synchronously on the
+        GTK main thread once the widget tree exists and before it is shown --
+        the one moment the content can be rewrapped without a realized
+        WebView being moved. Anything that goes wrong leaves the old window
+        pane in place (it still works, it only floats), and says so once.
+        `CROW_PANE_WINDOW=1` keeps the old pane for a comparison.
+        """
+        if crow_platform.IS_WINDOWS or os.environ.get("CROW_PANE_WINDOW") == "1":
+            return False
+        native = self._gtk_window()
+        if native is None:
+            return False
+        try:
+            self._inwin = InWindowPane.install(native, self.push)
+        except Exception as exc:       # noqa: BLE001 -- the old pane remains
+            self._inwin = None
+            self.push({"k": "note",
+                       "t": "the browser panel opens as its own window: %s" % exc})
+            return False
+        return True
+
+    def pane_cover(self, covered: bool) -> bool:
+        """#201. Something of Crow's (settings, a menu) lies over the panel.
+
+        A native view is drawn above the whole page, so a sheet that opens
+        over `#brbody` would be hidden under the web page. The page tells us
+        and the view steps aside until the sheet is gone. The window pane on
+        Windows has the same problem and is not covered by this (#201).
+        """
+        if self._inwin is not None:
+            self._inwin.cover(bool(covered))
+        return bool(covered)
 
     def set_git_open(self, open_: bool) -> bool:
         """#156. Remember whether the git panel is folded away.
@@ -12940,6 +13388,9 @@ def main(argv: list[str] | None = None) -> int:
     window.events.minimized += (lambda *_: api.pane_hide())
     window.events.restored += (lambda *_: api.pane_show())
     window.events.closing += (lambda *_: api.pane_hide())
+    # #201. BEFORE THE FIRST SHOW, ON THE GTK THREAD: see `Api.pane_embed`.
+    if not crow_platform.IS_WINDOWS:
+        window.events.before_show += api.pane_embed
     threading.Thread(target=api.pump, daemon=True).start()
     # The styles can only be set once the window exists, so this runs as the
     # start-up callback rather than beside create_window.

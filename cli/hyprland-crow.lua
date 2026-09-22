@@ -52,9 +52,9 @@ hl.window_rule({
 hl.window_rule({ match = { class = "^([Cc]row)$" }, tag = "-default-opacity",
                  opacity = "1.0 1.0" })
 
--- THE BROWSER PANE IS A SECOND TOPLEVEL and carries the same class, so the rule
--- above already catches it -- it floats instead of taking half the workspace.
--- It cannot be glued to the main window (see `_pane` in cli/crow_gui.py); `pin`
--- is the closest thing to "stays with me" that Wayland offers, and it is left
--- commented out because it is a preference rather than a requirement.
--- hl.window_rule({ match = { class = "^([Cc]row)$" }, pin = true })
+-- THE BROWSER PANE IS NOT A WINDOW ANY MORE (#201). It is a second WebKitWebView
+-- inside Crow's GtkWindow, placed by a GtkOverlay (see `InWindowPane` in
+-- cli/crow_gui.py), so no rule here applies to it. As a separate toplevel it
+-- carried this same class and the float/center/size rules above made it a
+-- second 1180x800 window centred over Crow. CROW_PANE_WINDOW=1 brings that back
+-- for a comparison; the rules then catch it as before.

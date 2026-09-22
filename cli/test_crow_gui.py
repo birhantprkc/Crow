@@ -10819,6 +10819,193 @@ class TheBrowserPaneOnACompositorTests(ApiCase):
         self.assertTrue(api.pane_show())
 
 
+class ThePaneLivesInsideTheWindowTests(ApiCase):
+    """#201 #226 #227. Auf GTK ist die Scheibe ein WIDGET im eigenen Fenster,
+    kein zweites Toplevel. Die Faelle hier pruefen die Entscheidungen ohne
+    Display: welcher Weg, welches Schema, welche Meldung an die Seite. Dass
+    GtkOverlay das Kind dorthin legt, wurde unter broadwayd gemessen (#201)."""
+
+    class _Pane:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def __getattr__(self, name):
+            return lambda *a: self.calls.append((name, a))
+
+    def _api(self):
+        api = self.api()
+        api._inwin = self._Pane()
+        return api
+
+    def test_only_http_https_file_and_blank_reach_the_pane(self):
+        for good in ("https://x.org", "http://127.0.0.1:8000/", "file:///h/a.png",
+                     "about:blank", " HTTPS://X.ORG "):
+            self.assertTrue(crow_gui.pane_url_ok(good), good)
+        for bad in ("javascript:alert(1)", "data:text/html,x", "ftp://x", "",
+                    None, "about:config", "chrome://settings"):
+            self.assertFalse(crow_gui.pane_url_ok(bad), bad)
+
+    def test_go_place_hide_show_go_to_the_widget_not_a_window(self):
+        api = self._api()
+        api._pane = lambda: self.fail("a second window was built")
+        self.assertEqual(api.pane_go("https://example.com"), "https://example.com")
+        api.pane_place(10, 20, 300, 200)
+        api.pane_hide()
+        api.pane_show()
+        api.pane_cover(True)
+        self.assertEqual([c[0] for c in api._inwin.calls],
+                         ["go", "place", "hide", "show", "cover"])
+        self.assertEqual(api._inwin.calls[1][1], (10.0, 20.0, 300.0, 200.0))
+
+    def test_a_script_address_is_refused_before_webkit(self):
+        api = self._api()
+        self.assertTrue(api.pane_go("javascript:alert(1)").startswith("error:"))
+        self.assertEqual(api._inwin.calls, [])
+
+    def test_an_answer_link_opens_in_the_panel_and_ctrl_sends_it_out(self):
+        api = self._api()
+        opened = []
+        real = crow_gui.webbrowser.open
+        crow_gui.webbrowser.open = lambda url: opened.append(url) or True
+        self.addCleanup(setattr, crow_gui.webbrowser, "open", real)
+        self.assertTrue(api.open_url("https://example.com/a"))
+        self.assertEqual(opened, [])
+        said = self.drained(api)
+        self.assertEqual([(m["k"], m["url"]) for m in said],
+                         [("bropen", "https://example.com/a")])
+        self.assertTrue(api.open_url("https://example.com/b", True))
+        self.assertEqual(opened, ["https://example.com/b"])
+        self.assertFalse(api.open_url("javascript:x"))
+
+    def test_no_native_window_no_embedding(self):
+        api = self.api()
+        api._gtk_window = lambda: None
+        self.assertFalse(api.pane_embed())
+        self.assertIsNone(api._inwin)
+
+    def test_a_failed_embedding_keeps_the_window_pane_and_says_so(self):
+        api = self.api()
+        api._gtk_window = lambda: object()
+        real = crow_gui.InWindowPane.install
+        crow_gui.InWindowPane.install = classmethod(
+            lambda cls, native, on_event: (_ for _ in ()).throw(RuntimeError("no gi")))
+        self.addCleanup(setattr, crow_gui.InWindowPane, "install", real)
+        old = os.environ.pop("CROW_PANE_WINDOW", None)
+        self.addCleanup(lambda: old is None or os.environ.__setitem__(
+            "CROW_PANE_WINDOW", old))
+        if crow_gui.crow_platform.IS_WINDOWS:
+            self.skipTest("the embedding is GTK only")
+        self.assertFalse(api.pane_embed())
+        self.assertIsNone(api._inwin)
+        said = self.drained(api)
+        self.assertEqual(said[0]["k"], "note")
+        self.assertIn("no gi", said[0]["t"])
+
+    def test_the_escape_hatch_keeps_the_old_pane(self):
+        api = self.api()
+        api._gtk_window = lambda: self.fail("looked at the window")
+        os.environ["CROW_PANE_WINDOW"] = "1"
+        self.addCleanup(os.environ.pop, "CROW_PANE_WINDOW", None)
+        self.assertFalse(api.pane_embed())
+
+
+class TheInWindowPaneDecidesTests(unittest.TestCase):
+    """#201 #227. Die Zustandsentscheidungen von `InWindowPane`, ohne GTK."""
+
+    def _pane(self):
+        said = []
+        return crow_gui.InWindowPane(said.append, idle_add=lambda fn, *a: None), said
+
+    def test_crows_own_load_replaces_and_the_pages_own_pushes(self):
+        pane, _ = self._pane()
+        pane.go("http://a/")
+        self.assertEqual(pane.committed("https://a/")["how"], "replace",
+                         "a redirect of our own load is not a new entry")
+        self.assertEqual(pane.committed("https://a/b")["how"], "push")
+        self.assertIsNone(pane.committed("https://a/b"), "said twice")
+        self.assertIsNone(pane.committed(""))
+
+    def test_visible_needs_a_wish_a_rect_and_nothing_on_top(self):
+        pane, _ = self._pane()
+        pane.go("https://a/")
+        self.assertFalse(pane.visible(), "no rectangle yet")
+        pane.place(1.4, 2.6, 300.2, 0)
+        self.assertEqual(pane.rect, (1, 3, 300, 1))
+        self.assertTrue(pane.visible())
+        pane.cover(True)
+        self.assertFalse(pane.visible())
+        pane.cover(False)
+        pane.hide()
+        self.assertFalse(pane.visible())
+
+    def test_show_brings_back_only_a_pane_with_a_page(self):
+        pane, _ = self._pane()
+        pane.place(0, 0, 10, 10)
+        pane.show()
+        self.assertFalse(pane.wanted, "an empty view is a white hole")
+        pane._view, pane.last = object(), "https://a/"
+        pane.show()
+        self.assertTrue(pane.wanted)
+
+    def test_a_memory_kill_is_said_with_the_ceiling(self):
+        pane, said = self._pane()
+        pane.last = "https://a/"
+        pane._terminated(None, mock.Mock(value_nick="exceeded-memory-limit"))
+        self.assertIn("%d MB" % crow_gui.PANE_MEMORY_LIMIT_MB, said[0]["t"])
+        self.assertEqual(pane.last, "")
+
+    def test_a_new_window_is_refused_and_loaded_here(self):
+        pane, _ = self._pane()
+        action = mock.Mock()
+        action.get_request.return_value.get_uri.return_value = "https://b/"
+        self.assertIsNone(pane._new_window(None, action))
+
+    def test_the_view_has_its_own_limits_and_no_bridge(self):
+        """#226. Quelle statt Display: eigener Kontext, Kill an, bwrap, und
+        kein UserContentManager -- also keine pywebview-Bruecke."""
+        src = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        body = src[src.index("    def _build(self)"):src.index("    # -- what the page asks for")]
+        for need in ("set_kill_threshold(PANE_KILL_FRACTION)",
+                     "memory_pressure_settings=limits",
+                     "WebsiteDataManager(base_data_directory=data",
+                     "set_sandbox_enabled(True)", "set_no_show_all(True)",
+                     '"web-process-terminated"', '"create"'):
+            self.assertIn(need, body, need)
+        self.assertNotIn("UserContentManager", body)
+        self.assertGreater(crow_gui.PANE_KILL_FRACTION, 0.5,
+                           "WebKit wants kill above strict (0.5)")
+
+
+class ThePageFollowsThePaneTests(unittest.TestCase):
+    """#201 #227, auf der Seite: die Meldungen haben Empfaenger, ein Render
+    macht keinen neuen Reiter je Aufruf, und GitHub bleibt draussen."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.src = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def test_the_messages_have_a_case(self):
+        self.assertIn('case "brnav": this.brNav(e.url, e.how)', self.src)
+        self.assertIn('case "bropen": this.brOpen(e.url)', self.src)
+
+    def test_renders_reuse_one_tab(self):
+        body = self.src[self.src.index("  brRendered(url, shot){"):]
+        body = body[:body.index("  brSelect(id)")]
+        self.assertIn("this.tabs.find(x=>x.model)", body)
+        self.assertEqual(body.count("this.tabs.push("), 1)
+
+    def test_the_github_code_goes_outside(self):
+        self.assertIn('pywebview.api.open_url(card.dataset.url||"", true)',
+                      self.src)
+
+    def test_the_embedding_is_wired_before_show(self):
+        self.assertIn("window.events.before_show += api.pane_embed", self.src)
+
+    def test_a_sheet_over_the_panel_moves_the_pane_aside(self):
+        self.assertIn("pywebview.api.pane_cover(c)", self.src)
+        self.assertIn('["#settings","#menu"]', self.src)
+
+
 class TheDropSaysWhenItCarriedNoPathTests(ApiCase):
     """A10. Der Pfad haengt pywebview an, aus dem, was der Drag-Handler des
     Toolkits eingesammelt hat. Eine Quelle, die nur Bytes uebergibt -- ein Bild
