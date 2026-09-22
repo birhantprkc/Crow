@@ -114,6 +114,29 @@ command, not just the first; `always` is kept in `approvals.json` — under
 `%LOCALAPPDATA%\Crow\` on Windows, `~/.config/crow/` on Linux — and survives the restart. Directories the conversation was pointed at pass without asking.
 An obfuscated path does not ask — the gate is a question, not a sandbox.
 
+### Argument names (#207, #214)
+
+A key no declaration names is said, never swallowed: the result opens with
+`[unknown argument(s) ignored: …]` and the call still runs on what it was given (#207).
+
+A key that is unknown **while a required one is missing** is a misnamed argument, and then
+nothing runs. The answer names the signature, and it comes before the tool's own checks —
+the read-before-edit gate included:
+
+```
+error: edit_file was called with unknown argument(s) new_string, old_string and without the
+required old, new -- nothing was run. Its arguments are: path, old, new.
+```
+
+Measured 2026-09-22 after a rollover: 22 of 22 `edit_file` calls arrived as
+`old_string`/`new_string`, all 22 failed, and 15 of them were first told to read the file —
+so the model read it and sent the same wrong keys again. A required key missing on its own
+still gets the tool's own sentence.
+
+The request after a rollover declares the same `tools` array, the same sampler and the same
+thinking fields as the one before; only the messages and the pinned head differ (pinned by
+`TheSeamKeepsTheRequestTests`).
+
 ---
 
 ### /verify (#149)

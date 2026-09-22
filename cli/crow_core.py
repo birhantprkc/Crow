@@ -14224,6 +14224,17 @@ def _declared_properties(name: str) -> dict:
     return {}
 
 
+def _declared_required(name: str) -> list:
+    """Die Pflichtschluessel eines Werkzeugs, in der deklarierten Reihenfolge.
+    `[]` fuer einen unbekannten Namen -- dieselbe Nachsicht wie oben."""
+    for entry in TOOLS:
+        function = entry.get("function") or {}
+        if function.get("name") == name:
+            required = (function.get("parameters") or {}).get("required")
+            return list(required) if isinstance(required, list) else []
+    return []
+
+
 def _shape_phrase(spec: dict) -> str:
     """"a JSON array of strings" -- die deklarierte Form, wie ein Fehler sie nennt."""
     if spec.get("type") == "object":
@@ -14285,6 +14296,26 @@ def run_tool(name: str, arguments: str) -> str:
     # fact the model and the screen both see; no declaration, no note.
     declared = _declared_properties(name)
     extra = sorted(k for k in args if k not in declared)
+    # #214. UNBEKANNT UND FEHLEND ZUGLEICH IST KEIN
+    # STOWAWAY, SONDERN EIN FALSCHER NAME -- und dann laeuft nichts. Gemessen
+    # in robins Sitzung vom 2026-09-22 nach dem Schnitt um 17:12: 22 von 22
+    # `edit_file`-Aufrufen kamen mit `old_string`/`new_string` (der Name eines
+    # anderen Harness), 22 von 22 scheiterten, keiner korrigierte sich. 15 der
+    # 22 Antworten sagten zuerst "read ... before editing it" -- die
+    # Lese-Sperre im Werkzeug lief VOR jeder Pruefung der Argumente, also las
+    # das Modell brav und schickte dieselben falschen Schluessel noch einmal.
+    # Die Note oben stand zwar davor, nannte aber nur, was ignoriert wurde,
+    # nicht, wie es richtig heisst. Hier steht die Signatur im Fehler, vor
+    # dem Werkzeug und vor seiner Sperre -- dieselbe Form, in der Claude Code
+    # ein Schema-Fehler meldet (InputValidationError, "The required parameter
+    # `content` is missing"). Nur wenn BEIDES zutrifft: ein fehlender Pflicht-
+    # schluessel allein bleibt die Sache des Werkzeugs und seiner Saetze.
+    missing = [k for k in _declared_required(name) if k not in args]
+    if declared and extra and missing:
+        return ("error: %s was called with unknown argument(s) %s and without "
+                "the required %s -- nothing was run. Its arguments are: %s."
+                % (name, ", ".join(extra)[:120], ", ".join(missing),
+                   ", ".join(declared)))
     if declared and extra:
         notes.append("unknown argument(s) ignored: %s" % ", ".join(extra)[:120])
     try:

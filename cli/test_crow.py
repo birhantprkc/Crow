@@ -2087,6 +2087,38 @@ class RolloverTests(unittest.TestCase):
         self.assertNotEqual(crow.rollover_path("20260810-074500"),
                             crow.rollover_path("20260810-074501"))
 
+    def _terminal_roll(self, head):
+        """The terminal's between-turn roll, with the head and the digest held
+        still: `prompt_head` is what the chat was pinned with, the digest leg
+        answers nothing (it would otherwise ask a server that is not there)."""
+        c = self._conversation()
+        real_head, real_dir = crow_core.prompt_head, crow_core.SESSION_DIR
+        crow_core.prompt_head = lambda root=None, include_status=False: head
+        crow_core.SESSION_DIR = self.dir
+        try:
+            c.pin_memory(head)
+            pinned = c.payload()[0]["content"]
+            args = crow.build_parser().parse_args(["--base-url", "http://x/v1"])
+            with mock.patch.object(crow, "rollover_digest", return_value=""):
+                archived = crow._roll_with_digest(
+                    c, args, "crow", {"temperature": 0.0, "top_p": 1.0,
+                                      "min_p": 0.0}, 180_000, "and now?")
+        finally:
+            crow_core.prompt_head, crow_core.SESSION_DIR = real_head, real_dir
+        return c, pinned, archived
+
+    def test_the_terminal_roll_keeps_the_head(self):
+        """#214: the window and the core's mid-turn roll
+        re-pin the head after `roll_over`; the terminal's between-turn roll did
+        not, so `reset()` left a CLI chat without memory, skills and goal for
+        the rest of its life. The system prompt is the one part of the request
+        besides the messages that the seam touches -- it must come back."""
+        c, pinned, archived = self._terminal_roll("MEMORY -- the project facts")
+        self.assertIsNotNone(archived)
+        self.assertEqual(c.payload()[0]["content"], pinned)
+        self.assertIn("MEMORY -- the project facts", c.payload()[0]["content"])
+        self.assertEqual(c.memory, "MEMORY -- the project facts")
+
 
 class SessionFormatGateTests(unittest.TestCase):
     """The gate on the shared session file, before a second writer exists.

@@ -1843,8 +1843,19 @@ def _roll_with_digest(conversation, args, loaded, sampling, context_tokens, line
         reasoning_effort=args.reasoning_effort,
         reasoning_budget=args.reasoning_budget,
         prompt_tokens=context_tokens)
-    return roll_over(conversation, args.base_url, context_tokens,
-                     carry=line, digest=digest)
+    archived = roll_over(conversation, args.base_url, context_tokens,
+                         carry=line, digest=digest)
+    # #214: DER KOPF GEHT MIT UEBER DEN SCHNITT, wie im
+    # Fenster und im Mid-Turn-Roll des Kerns. Bis hier fehlte die Zeile nur
+    # an dieser einen Stelle: `roll_over` ruft `reset()`, `reset()` laesst den
+    # Pin fallen, und der Terminal-Chat lief nach dem Schnitt ohne Gedaechtnis,
+    # Faehigkeiten und Ziel weiter -- der einzige Unterschied im Request vor
+    # und nach dem Schnitt, der nicht die Nachrichten selbst waren. Der Pin
+    # vom Start (`conversation.memory is None`) greift danach nicht mehr, weil
+    # er nur beim Oeffnen laeuft.
+    crow_core.repin_head(conversation, crow_core.get_root(),
+                         include_status=True)
+    return archived
 
 
 def repl(args: argparse.Namespace) -> int:

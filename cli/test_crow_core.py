@@ -1452,6 +1452,128 @@ class MidTurnRolloverTests(TurnLoopCase):
         self.assertEqual(len(self.bodies), 1, "it asked the same question again")
 
 
+class TheSeamKeepsTheRequestTests(TurnLoopCase):
+    """#214: VOR UND NACH DEM SCHNITT DERSELBE REQUEST,
+    bis auf die Nachrichten.
+
+    Die Frage der Nacht vom 2026-09-22: nach dem Schnitt um 17:12 kamen 22 von
+    22 `edit_file`-Aufrufen mit `old_string`/`new_string`, davor 15 von 15 mit
+    `old`/`new`. Wenn der Schnitt irgendetwas ausser den Nachrichten veraendert
+    -- die Werkzeugtabelle, ihre Schemata, `tool_choice`, den Sampler, die
+    Denkstufe, den Deckel --, waere DAS der Befund. Code-Lesung sagt nein:
+    `stream_reply` baut den Koerper aus `TOOLS`, `MAX_TOKENS` und den
+    Argumenten von `run_turn`, und keines davon beruehrt der Schnitt. Diese
+    Klasse haelt die Aussage fest, damit sie nicht still kippt: zwei Runden,
+    der Schnitt dazwischen, und beide Koerper werden Feld fuer Feld
+    verglichen. Die Digest-Leg (#154/#205) sitzt ebenfalls auf der Naht und
+    wird mitgeprueft -- sie muss dieselbe Tabelle und denselben Sampler
+    schicken, sonst bricht sie den warmen Praefix, fuer den sie existiert.
+    """
+
+    SAMPLING = {"temperature": 0.6, "top_p": 0.95, "min_p": 0.01, "top_k": 20,
+                "presence_penalty": 0.0, "reasoning_effort": "high",
+                "reasoning_budget": 512}
+
+    def setUp(self):
+        super().setUp()
+        self.digests: list[dict] = []
+        real = crow_core.urllib.request.urlopen
+        self.addCleanup(setattr, crow_core.urllib.request, "urlopen", real)
+        crow_core.urllib.request.urlopen = self._digest_leg
+
+    def _digest_leg(self, request, timeout=None):
+        """Die Digest-Leg ist Nicht-Strom und geht an `urlopen`, nicht an
+        `_post_stream` -- ihr Koerper wird hier abgegriffen, die Antwort ist
+        lang genug fuer DIGEST_MIN_CHARS."""
+        self.digests.append(json.loads(request.data.decode("utf-8")))
+        answer = json.dumps({"choices": [{"finish_reason": "stop", "message": {
+            "content": "state: the work stands where the transcript ends. " * 8}}]})
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+        return _Resp(answer.encode("utf-8"))
+
+    def _across_the_seam(self):
+        talk = self.conversation()
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))],
+                   {"prompt_n": 95, "predicted_n": 0})
+        self.serve([{"content": "carrying on"}], {"prompt_n": 1, "predicted_n": 0})
+        result = self.turn(talk, n_ctx=100, rollover_at=0.9, carry="the question",
+                           **self.SAMPLING)
+        self.assertTrue(result.rolled, "the seam was never crossed")
+        self.assertEqual(len(self.bodies), 2)
+        return self.bodies[0], self.bodies[1]
+
+    def test_everything_but_the_messages_is_identical_across_the_seam(self):
+        before, after = self._across_the_seam()
+        strip = lambda body: {k: v for k, v in body.items() if k != "messages"}
+        self.assertEqual(strip(before), strip(after),
+                         "the cut changed the request, not just the conversation")
+
+    def test_the_tool_table_crosses_the_seam_whole(self):
+        """Present, same names, same schemas -- byte for byte what `TOOLS` is."""
+        before, after = self._across_the_seam()
+        table = json.loads(json.dumps(crow_core.TOOLS))
+        self.assertEqual(before["tools"], table)
+        self.assertEqual(after["tools"], table)
+        names = [t["function"]["name"] for t in after["tools"]]
+        self.assertIn("edit_file", names)
+        edit = next(t for t in after["tools"]
+                    if t["function"]["name"] == "edit_file")
+        self.assertEqual(edit["function"]["parameters"]["required"],
+                         ["path", "old", "new"])
+
+    def test_no_tool_choice_on_either_side(self):
+        """Crow sends none anywhere; a seam that started to would force or
+        forbid calls on exactly one side of the cut."""
+        before, after = self._across_the_seam()
+        self.assertNotIn("tool_choice", before)
+        self.assertNotIn("tool_choice", after)
+
+    def test_the_sampler_and_the_thinking_fields_cross_the_seam(self):
+        before, after = self._across_the_seam()
+        for key in ("temperature", "top_p", "min_p", "top_k", "presence_penalty",
+                    "reasoning_effort", "reasoning_budget_tokens",
+                    "reasoning_budget_message", "max_tokens"):
+            self.assertIn(key, before, key)
+            self.assertEqual(before[key], after[key], key)
+        self.assertNotIn("chat_template_kwargs", after)
+
+    def test_the_base_system_prompt_is_kept_and_the_note_opens_the_context(self):
+        """What DOES change is the conversation: the head may grow by what
+        `repin_head` puts there (#163), the base prompt may not move, and
+        the first user message is the note carrying the typed line."""
+        before, after = self._across_the_seam()
+        self.assertEqual(before["messages"][0]["role"], "system")
+        self.assertEqual(after["messages"][0]["role"], "system")
+        self.assertTrue(after["messages"][0]["content"].startswith(
+            before["messages"][0]["content"]))
+        self.assertEqual([m["role"] for m in after["messages"]], ["system", "user"])
+        self.assertIsNotNone(crow_core.rollover_note_parts(
+            after["messages"][1]["content"]))
+        self.assertIn("the question", after["messages"][1]["content"])
+
+    def test_the_digest_leg_speaks_the_turns_dialect(self):
+        before, _ = self._across_the_seam()
+        self.assertEqual(len(self.digests), 1, "one digest question, answered")
+        leg = self.digests[0]
+        self.assertEqual(leg["tools"], before["tools"])
+        self.assertNotIn("tool_choice", leg)
+        for key in ("temperature", "top_p", "min_p", "top_k", "presence_penalty",
+                    "reasoning_effort", "reasoning_budget_tokens",
+                    "reasoning_budget_message"):
+            self.assertEqual(leg[key], before[key], key)
+        # Die Leg fragt auf dem Praefix, den die erste Runde gesehen hat --
+        # plus deren Antwort und Ergebnis, plus die eine Frage.
+        self.assertEqual(leg["messages"][:len(before["messages"])],
+                         before["messages"])
+        self.assertEqual(leg["messages"][-1]["content"], crow_core.DIGEST_ASK)
+
+
 class ReportedNotRunTests(TurnLoopCase):
     """The operating mode this stage added, and the gate for the CLI change.
 
@@ -13293,6 +13415,33 @@ class SearchIsBoundedTests(unittest.TestCase):
         out = crow_core.run_tool("search_text", json.dumps({"pattern": "needle"}))
         self.assertFalse(out.startswith("["), out)
         self.assertIn("plain.txt", out)
+
+    def test_a_wrong_name_for_a_required_argument_says_the_signature(self):
+        """#214, measured 2026-09-22 after the 17:12
+        cut: 22/22 `edit_file` calls arrived as `old_string`/`new_string`, and
+        15 of them were told "read ... before editing it" first -- the tool's
+        read gate ran before anything looked at the keys. Unknown AND missing
+        at once is a misnamed argument: the answer names the signature, comes
+        before the gate, and runs nothing."""
+        target = os.path.join(self.root, "plain.txt")
+        with open(target, encoding="utf-8") as fh:
+            before = fh.read()
+        out = crow_core.run_tool("edit_file", json.dumps(
+            {"path": target, "old_string": "needle", "new_string": "pin"}))
+        self.assertTrue(out.startswith("error: edit_file"), out)
+        self.assertIn("unknown argument(s) new_string, old_string", out)
+        self.assertIn("without the required old, new", out)
+        self.assertIn("Its arguments are: path, old, new.", out)
+        self.assertNotIn("before editing", out)
+        with open(target, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), before)
+
+    def test_a_missing_argument_alone_is_still_the_tools_to_answer(self):
+        """NEGATIVPROBE. Without a stray key there is no misnaming to report --
+        the tool's own sentence stands, exactly as before."""
+        target = os.path.join(self.root, "plain.txt")
+        out = crow_core.run_tool("edit_file", json.dumps({"path": target}))
+        self.assertNotIn("Its arguments are", out)
 
 
 class CommandCaptureIsBoundedTests(unittest.TestCase):
