@@ -11890,6 +11890,21 @@ class CrowOwnsTheBrowserItStartsTests(unittest.TestCase):
         self.assertIn("--virtual-time-budget=", self.src)
         self.assertIn("TimeoutExpired", self.src)
 
+    def test_the_browser_runs_capped_and_names_its_rasterer(self):
+        """#213. Der Lauf vom 2026-09-21: 54 GiB Software-WebGL, eingefrorene
+        Maschine, der Kernel schoss den SERVER. Drei Dinge muessen seitdem am
+        Start stehen: der Scope mit MemoryMax (der Browser stirbt als EIN
+        Prozess), der GL-Modus aus der Karte (die RTX 5090, wenn sie frei ist;
+        SwiftShader sonst), und das Warten auf die Leiche innerhalb des
+        Aufrufs -- der damalige Prozess ueberlebte die Antwort um 20 Minuten."""
+        self.assertIn("render_scope_prefix", self.src)
+        self.assertIn("render_gl_mode", self.src)
+        self.assertIn("render_memory_bounds", self.src)
+        self.assertIn("--use-gl=angle", self.src)
+        # Der Deckel-Tot ist kein "done": der Grund steht in der Antwort.
+        self.assertIn("memory ceiling", self.src)
+        self.assertIn("would not die", self.src)
+
     def test_the_browser_is_looked_up_and_never_hard_coded(self):
         """Eine Maschine ohne Chrome hat Edge, und ein Pfad im Quelltext ist der
         Pfad EINER Maschine. Alle Kandidaten gehen ueber Umgebungsvariablen."""
@@ -12020,6 +12035,88 @@ class TheRenderNeverHandsOverABrokenMirrorTests(unittest.TestCase):
                             for w in warns), warns)
         self.assertIn("Uncaught TypeError", warns[0])
         self.assertIn("device lost", warns[1])
+
+    # -- der leere Fang (#213) --------------------------------------------
+
+    @staticmethod
+    def _png(width, height, scanlines, filters, colour=6, depth=8):
+        """Eine kleine PNG-Schreiberin: Filterbyte je Zeile davor, zlib
+        dahinter. Die `scanlines` sind der GEFILTERTE Rohstrom, wie ihn ein
+        Encoder ablegen wuerde -- nur so prueft der Fall den Dekoder und
+        nicht sich selbst."""
+        import zlib
+        raw = b"".join(bytes([filters[y]]) + bytes(scanlines[y])
+                       for y in range(height))
+
+        def chunk(kind, body):
+            return (len(body).to_bytes(4, "big") + kind + body
+                    + (zlib.crc32(kind + body) & 0xFFFFFFFF).to_bytes(4, "big"))
+
+        head = (width.to_bytes(4, "big") + height.to_bytes(4, "big")
+                + bytes([depth, colour, 0, 0, 0]))
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head)
+                + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+    def test_a_uniform_capture_is_one_colour_whatever_the_filter(self):
+        """Die Leerfaenge vom 2026-09-22 (4,6 KB, vom Modell als
+        "environment-blocked, page correct" ausgelesen) waren eine Farbe.
+        Der Anteil muss 1.0 sein -- egal, mit welchem Filter der Encoder die
+        gleiche Flaeche abgelegt hat, denn Sub und Up speichern sie als
+        Nullen und der Dekoder muss sie zurueckrechnen."""
+        w = 24
+        white = b"\xff" * (w * 4)
+        # Filter 0: die Zeile selbst.
+        plain = self._png(w, 3, [white] * 3, [0, 0, 0])
+        # Filter 1 (Sub): erster Pixel, dann Differenz-Nullen.
+        sub = [white[:4] + b"\x00" * (w * 4 - 4)] * 3
+        as_sub = self._png(w, 3, sub, [1, 1, 1])
+        # Filter 2 (Up): Zeile 1 wie sie ist, Zeile 2/3 als Nullen (gleich
+        # der Vorzeile).
+        as_up = self._png(w, 3, [white, b"\x00" * (w * 4),
+                                 b"\x00" * (w * 4)], [0, 2, 2])
+        for name, png in (("plain", plain), ("sub", as_sub), ("up", as_up)):
+            self.assertEqual(crow_core._png_dominant_share(png), 1.0, name)
+
+    def test_content_lands_far_below_the_blank_line(self):
+        """Ein Seitenframe ist KEINE Farbe, selbst mit ruhigem Grund: die
+        gemessenen Fangs der animierten Testseite lagen bei ~0,85 -- der
+        Grund ist eine Farbe, der Inhalt ist der Rest. Ein Farbverlauf
+        ueberstreicht alles und bleibt unter der Schwelle."""
+        w = 32
+        rows = [bytes(v for x in range(w) for v in (x * 8 % 256, 64, 96, 255))
+                for _ in range(4)]
+        gradient = self._png(w, 4, rows, [0] * 4)
+        share = crow_core._png_dominant_share(gradient)
+        self.assertIsNotNone(share)
+        self.assertLess(share, crow_core._BLANK_SHARE)
+
+    def test_what_is_not_decodable_is_no_verdict_at_all(self):
+        """Garbage, Palette, 16 Bit: None und damit KEIN Urteil -- ein Werkzeug,
+        das seinen Fang nicht lesen kann, darf ihn auch nicht verdammen."""
+        self.assertIsNone(crow_core._png_dominant_share(b"PNG-but-not"))
+        self.assertIsNone(crow_core._png_dominant_share(b""))
+        sixteen = self._png(4, 2, [b"\x00" * 8] * 2, [0, 0], depth=16)
+        self.assertIsNone(crow_core._png_dominant_share(sixteen))
+
+    def test_a_blank_capture_warns_first_and_by_the_ticket_sentence(self):
+        """#213: ein degenerierter Fang bekommt seine Zeile VOR allen anderen
+        Verdachtsmomenten -- kein Signal ist das staerkere Urteil --, und ein
+        ERSTER Fang warnt ebenfalls: gegen Nichts gibt es keinen
+        Byte-Vergleich, aber die leere Leinwand steht auch ohne ihn da."""
+        blank = self._png(8, 2, [b"\xaa" * 32] * 2, [0, 0])
+        warns = crow_core._capture_warnings(None, blank, [])
+        self.assertEqual(len(warns), 1, warns)
+        self.assertTrue(warns[0].startswith("warn: this capture looks blank"),
+                        warns)
+        self.assertIn("treat it as no-signal", warns[0])
+        self.assertIn("rely on the console", warns[0])
+        again = crow_core._capture_warnings(blank, blank, [
+            'ERROR:CONSOLE(9)] "Uncaught TypeError: x"'])
+        self.assertEqual(len(again), 3, again)
+        self.assertTrue(again[0].startswith("warn: this capture looks blank"))
+        self.assertTrue(again[1].startswith(
+            "warn: this capture is byte-identical"))
+        self.assertTrue(again[2].startswith("warn: the page logged an error"))
 
     def test_identical_warn_comes_before_error_warns(self):
         console = ['ERROR:CONSOLE(9)] "Uncaught x"']
@@ -14295,6 +14392,82 @@ class ThePlatformSeamAnswersForOneSystemAtATimeTests(unittest.TestCase):
         self.assertEqual(crow_platform.server_memory_bounds(62 * gib)["MemoryMax"], "54G")
         self._env("CROW_SERVER_MEMORY_HIGH", "none")
         self.assertEqual(crow_platform.server_memory_bounds(62 * gib), {"MemorySwapMax": "0"})
+
+    def test_the_render_browser_gets_its_own_ceiling(self):
+        """#213: der 54-GiB-Lauf vom 2026-09-21. Ein Sechs-GiB-Deckel (der
+        Runaway stirbt ein Neuntel des Weges), MemoryHigh darunter, Swap immer
+        verboten -- der zram-Grund ist derselbe wie beim Server. Die Variable
+        bewegt die Killschwelle selbst; `none` laesst nur den Swap-Deckel."""
+        self._env("CROW_RENDER_MEMORY_MAX", "")
+        self.assertEqual(crow_platform.render_memory_bounds(),
+                         {"MemorySwapMax": "0", "MemoryHigh": "5G", "MemoryMax": "6G"})
+        self._env("CROW_RENDER_MEMORY_MAX", "3G")
+        self.assertEqual(crow_platform.render_memory_bounds(),
+                         {"MemorySwapMax": "0", "MemoryMax": "3G"})
+        self._env("CROW_RENDER_MEMORY_MAX", "none")
+        self.assertEqual(crow_platform.render_memory_bounds(), {"MemorySwapMax": "0"})
+
+    def test_the_render_scope_is_the_servers_shape_with_render_bounds(self):
+        """Dieselbe Form wie beim Server (session.slice, --scope, `--`),
+        dieselben zwei Abschalter: kein systemd-run bzw. kein erreichbarer
+        User-Manager, und CROW_RENDER_SCOPE=0 fuer eine Messung, die den
+        nackten Prozess will."""
+        self._env("CROW_RENDER_SCOPE", "0")
+        self.assertEqual(crow_platform.render_scope_prefix(), [])
+        self._env("CROW_RENDER_SCOPE", "")
+        self.addCleanup(setattr, crow_platform.shutil, "which", crow_platform.shutil.which)
+        crow_platform.shutil.which = lambda name: None
+        self.assertEqual(crow_platform.render_scope_prefix(), [])
+        if crow_platform.IS_WINDOWS:
+            return
+        crow_platform.shutil.which = lambda name: "/usr/bin/systemd-run"
+        self._env("XDG_RUNTIME_DIR", self.dir)  # no systemd/private socket here
+        self.assertEqual(crow_platform.render_scope_prefix(), [])
+        self.addCleanup(setattr, crow_platform, "user_manager_reachable",
+                        crow_platform.user_manager_reachable)
+        crow_platform.user_manager_reachable = lambda runtime_dir=None: True
+        prefix = crow_platform.render_scope_prefix()
+        self.assertEqual(prefix[0], "/usr/bin/systemd-run")
+        self.assertIn("--slice=session.slice", prefix)
+        props = [prefix[i + 1] for i, a in enumerate(prefix) if a == "-p"]
+        self.assertIn("MemorySwapMax=0", props)
+        self.assertIn("MemoryHigh=5G", props)
+        self.assertIn("MemoryMax=6G", props)
+        self.assertEqual(prefix[-1], "--")
+
+    def test_free_vram_is_read_not_guessed(self):
+        """#213: die Karte entscheidet mit. ` 31000 ` (mit Leerstellen, wie
+        nvidia-smi schreibt) ist 31000 MiB; was kein Parser liest, ist None --
+        und None heisst software, niemals geraten."""
+        self.assertEqual(crow_platform.gpu_free_mib(query=lambda: " 31000 \n"), 31000)
+        self.assertEqual(crow_platform.gpu_free_mib(query=lambda: "2048.0\n"), 2048)
+        self.assertIsNone(crow_platform.gpu_free_mib(query=lambda: ""))
+        self.assertIsNone(crow_platform.gpu_free_mib(query=lambda: "[N/A]\n"))
+        self.assertIsNone(crow_platform.gpu_free_mib(query=lambda: "x"))
+        self.addCleanup(setattr, crow_platform.shutil, "which", crow_platform.shutil.which)
+        crow_platform.shutil.which = lambda name: None
+        self.assertIsNone(crow_platform.gpu_free_mib())
+
+    def test_gl_mode_is_forced_or_reads_the_card(self):
+        """CROW_RENDER_GL pinnt den Arm (die ehrliche Messung), auto fragt die
+        Karte: unter 512 MiB Freiem bleibt SwiftShader, darueber nimmt es die
+        Karte, und ein unbekannter Stand ist Software -- der Render darf sich
+        nicht auf eine Karte raten, die er nicht lesen konnte."""
+        self._env("CROW_RENDER_GL", "angle")
+        self.assertEqual(crow_platform.render_gl_mode(free_mib=0), "angle")
+        self._env("CROW_RENDER_GL", "swiftshader")
+        self.assertEqual(crow_platform.render_gl_mode(free_mib=99999), "swiftshader")
+        self._env("CROW_RENDER_GL", "")
+        self.assertEqual(crow_platform.render_gl_mode(free_mib=511), "swiftshader")
+        self.assertEqual(crow_platform.render_gl_mode(free_mib=512), "angle")
+        # free_mib=None heisst FRAGEN -- und eine Frage ohne Antwort (die
+        # Karte nicht lesbar) ist Software, nie ein Raten.
+        real = crow_platform.gpu_free_mib
+        crow_platform.gpu_free_mib = lambda: None
+        self.addCleanup(setattr, crow_platform, "gpu_free_mib", real)
+        self.assertEqual(crow_platform.render_gl_mode(), "swiftshader")
+        crow_platform.gpu_free_mib = lambda: 4096
+        self.assertEqual(crow_platform.render_gl_mode(), "angle")
 
     def test_the_scope_really_starts_a_child_here(self):
         """Nicht nur die Liste: wenn diese Maschine einen User-Manager hat,

@@ -7674,10 +7674,116 @@ def _console_lines(log_text: str, limit: int = 10) -> "list[str]":
     return out[-limit:] if limit else out
 
 
+# #213. WANN EIN FANG KEIN SIGNAL IST. Der Anteil der haeufigsten Farbe, ab dem
+# der Fang als leer gilt: 99,9 %. Die gemessenen Leerfaenge vom 2026-09-22
+# waren 4.6-4.7 KB reines Weiss (heute nachgebaut: 4.714 B fuer eine weisse
+# Leinwand), ein Seitenframe mit Inhalt liegt selbst bei dunklem Grund weit
+# darunter -- und die Schwelle greift nur als WARN, nie als Fehler: eine Seite,
+# die wirklich nur eine Farbe zeigen will, verliert das Bild nicht, sie kriegt
+# die Gegenmeinung neben ihren Pixeln.
+_BLANK_SHARE = 0.999
+
+# DAS DEKODIER-BUDGET: 16 MiB rohe Scanlines (1280x800 RGBA sind 4,1 MiB,
+# 2560x1440 sind 14,7). Ein 4k-Fang waere eine Minute Python, und ein Werkzeug,
+# das den Zug verlangsamt, um sein eigenes Bild zu bewerten, tauscht eine
+# Blindheit gegen die andere. Ueber dem Budget gibt es kein Urteil.
+_PNG_DECODE_BUDGET = 16 * 1024 * 1024
+
+
+def _png_dominant_share(data: bytes) -> "float | None":
+    """#213. Der Farben-Anteil des Fangs: welcher Bruchteil aller Pixel GENAU
+    die haeufigste Farbe traegt, oder None, wenn sich das nicht sagen laesst.
+
+    Rein rechnerisch ueber die PNG-Bytes selbst -- Signatur, Chunks, zlib,
+    Filter --, damit die Suite echte Bytes ohne Browser pruefen kann. Nur was
+    ein Screenshot hier wirklich ist (8 Bit Tiefe, kein Interlace, Grau/RGB/
+    RGBA) wird dekodiert; Palette und 16 Bit sind None und damit KEIN Urteil.
+    Gezaehlt wird hoch maximal 100.000 gleichmaessig gestreute Pixel: der
+    Anteil der herrschenden Farbe ist auf dieser Grundlage auf ein Zehntel
+    Prozent genau, und die Zahl, die ihn faellt, uebersteht jede Stichprobe.
+    """
+    import zlib
+
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    head: "bytes | None" = None
+    idat: list[bytes] = []
+    pos = 8
+    while pos + 12 <= len(data):
+        size = int.from_bytes(data[pos:pos + 4], "big")
+        kind = data[pos + 4:pos + 8]
+        body = data[pos + 8:pos + 8 + size]
+        pos += 12 + size
+        if kind == b"IHDR":
+            head = body
+        elif kind == b"IDAT":
+            idat.append(body)
+        elif kind == b"IEND":
+            break
+    if head is None or len(head) < 13 or not idat:
+        return None
+    width = int.from_bytes(head[0:4], "big")
+    height = int.from_bytes(head[4:8], "big")
+    depth, colour, interlace = head[8], head[9], head[12]
+    if depth != 8 or interlace != 0 or colour not in (0, 2, 6):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    channels = {0: 1, 2: 3, 6: 4}[colour]
+    stride = width * channels
+    if height * (stride + 1) > _PNG_DECODE_BUDGET:
+        return None
+    try:
+        raw = zlib.decompress(b"".join(idat))
+    except zlib.error:
+        return None
+    if len(raw) < height * (stride + 1):
+        return None
+    counts: "dict[bytes, int]" = {}
+    prev = bytearray(stride)
+    step = max(1, (width * height) // 100_000)
+    for y in range(height):
+        off = y * (stride + 1)
+        # Der Filtertyp steht vor jeder Scanline; die vier Arme sind die
+        # PNG-Spezifikation, unverdichtet.
+        filter_type = raw[off]
+        line = raw[off + 1:off + 1 + stride]
+        cur = bytearray(line)
+        if filter_type == 1:                    # Sub: plus linker Nachbar
+            for i in range(channels, stride):
+                cur[i] = (cur[i] + cur[i - channels]) & 255
+        elif filter_type == 2:                  # Up: plus Vorzeile
+            for i in range(stride):
+                cur[i] = (cur[i] + prev[i]) & 255
+        elif filter_type == 3:                  # Average: plus Mitte aus links/oben
+            for i in range(stride):
+                left = cur[i - channels] if i >= channels else 0
+                cur[i] = (cur[i] + ((left + prev[i]) >> 1)) & 255
+        elif filter_type == 4:                  # Paeth: plus bester Predictor
+            for i in range(stride):
+                a = cur[i - channels] if i >= channels else 0
+                b = prev[i]
+                c = prev[i - channels] if i >= channels else 0
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                best = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                cur[i] = (cur[i] + best) & 255
+        elif filter_type != 0:
+            return None
+        for x in range(0, width, step):
+            key = bytes(cur[x * channels:x * channels + channels])
+            counts[key] = counts.get(key, 0) + 1
+        prev = cur
+    if not counts:
+        return None
+    return max(counts.values()) / sum(counts.values())
+
+
 def _capture_warnings(previous: "bytes | None", current: bytes,
                       console: "list[str]") -> "list[str]":
-    """#175-NACHTRAG: DAS EHRLICHKEITSURTEIL zum Fang, als Liste von
-    WARN-Zeilen in fester Reihenfolge -- byte-identischer Fang zuerst, dann
+    """#175-Nachtrag + #213: DAS EHRLICHKEITSURTEIL zum Fang, als Liste von
+    WARN-Zeilen in fester Reihenfolge -- der leere Fang zuerst (das staerkere
+    Urteil: die Leinwand hat nichts empfangen), dann der byte-identische, dann
     je Fehlerzeile der Konsole eine.
 
     Rein rechnerisch und ohne Dateisystem, damit die Suite beide Faelle
@@ -7685,6 +7791,11 @@ def _capture_warnings(previous: "bytes | None", current: bytes,
     dieser Seite im Lauf: dagegen gibt es nichts, womit man vergleichen
     koennte, und byte-gleich mit NICHTS ist kein Verdacht."""
     warns: list[str] = []
+    share = _png_dominant_share(current)
+    if share is not None and share >= _BLANK_SHARE:
+        warns.append("warn: this capture looks blank \u2014 %.1f%% of its "
+                     "pixels are one colour; treat it as no-signal and rely "
+                     "on the console lines" % (100.0 * share))
     if previous is not None and current == previous:
         warns.append("warn: this capture is byte-identical to the previous "
                      "one \u2014 animated/canvas content is probably NOT "
@@ -7765,6 +7876,20 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     Timeout. Ein Browser startet genau solche Enkel. Dateien haben dieses
     Problem nicht.
 
+    UND ES TRAEGT SEINEN EIGENEN DECKEL (#213, 2026-09-21). Der Lauf auf der
+    2-MB-three.js-Seite wuchs auf 54 GiB Software-WebGL, die Maschine fror
+    ein, und der Kernel schoss den SERVER -- der Browser lag in keiner Cgroup,
+    die ihn allein getroffen haette. Heute laeuft er in einem Scope mit
+    MemoryMax (crow_platform.render_memory_bounds), stirbt am Deckel als EIN
+    Prozess mit einem Grund in der Antwort, und seine Leiche wird GEMESSEN und
+    nicht angenommen. Die Karte entscheidet mit, wenn sie frei ist (gemessen
+    2026-09-22: --use-gl=angle nimmt die RTX 5090, beide Budgets zeichnen;
+    SwiftShader bleibt der Rueckfall). Und ein Fang, der fast nur eine Farbe
+    enthaelt, wird als das benannt, was er ist: kein Signal -- die Leerfaenge
+    vom 2026-09-22 waren 4,6 KB weisses Nichts, vom Modell als
+    "environment-blocked, page correct" ausgelegt, und zwei Nachmittage Arbeit
+    liefen auf einem kaputten Messgeraet.
+
     EIN EIGENES PROFIL JE LAUF, und das ist keine Hygiene, sondern die
     Bedingung dafuer, dass ueberhaupt etwas passiert: ohne `--user-data-dir`
     reicht Chrome den Auftrag an eine bereits laufende Instanz weiter und kehrt
@@ -7825,29 +7950,41 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     profile = _tempfile.mkdtemp(prefix="crow-render-")
     log = os.path.join(profile, "browser.log")
 
-    argv = [exe, "--headless=new", "--disable-gpu",
-            # #175-NACHTRAG (2026-09-20): DIE ZWEI SWIFTSHADER-SCHALTER. Bis
-            # heute stand hier nur --disable-gpu, und die Folge war messbar:
-            # unter der virtuellen Uhr lief requestAnimationFrame NIE an, drei
-            # Varianten einer animierten WebGL-Seite ergaben byte-identische
-            # 92.027-Byte-Fangs nach 8 echten Sekunden Wartezeit, und das
-            # Modell auditete diese Leinwaende als "environment-blocked,
-            # page correct" -- das MESSGERAET war kaputt, nicht die Seite.
-            # Dazu kam Chromium 144: der automatische SwiftShader-Fallback
-            # fuer WebGL wurde gestrichen (chromestatus "Remove SwiftShader
-            # fallback"), ohne --enable-unsafe-swiftshader scheitert in
-            # Headless die WebGL-Kontexterzeugung. GEMESSEN hier (Chromium
-            # 152, dieselbe Testseite mit fahrendem Balken und fps-Zaehler,
-            # Budget 2000 gegen 8000):
-            #   alt  (--disable-gpu):        5.138 B @ rAF 3 == 5.138 B @ rAF 3
-            #   neu  (+ --use-angle=swiftshader
-            #         + --enable-unsafe-swiftshader):
-            #                                5.138 B @ rAF 3 != 5.117 B @ rAF 5
-            # Die Animation ZIEHT unter der virtuellen Uhr, und zwei Budgets
-            # liefern verschiedene Bilder. Alles bleibt CPU: SwiftShader ist
-            # Software-Rasterung, --disable-gpu bleibt und haelt die Karte
-            # draussen.
-            "--enable-unsafe-swiftshader", "--use-angle=swiftshader",
+    # #213. WELCHER RASTERER, UND DIE KARTE ENTSCHEIDET MIT. Gemessen hier
+    # 2026-09-22 am selben Kriterien wie #175-Nachtrag (zwei Budgets, zwei
+    # verschiedene Bilder): die swiftshader-Paarung unten rendert weiter
+    # softwareseitig ("ANGLE (Google, Vulkan ... SwiftShader driver)"),
+    # --use-gl=angle nimmt die Karte ("ANGLE (NVIDIA ... RTX 5090, OpenGL ES
+    # 3.2)") -- aber nur, wenn freie VRAM da ist, denn der Server zuerst ist
+    # die Regel, nicht die Ausnahme. Die Antwort steht im Ergebnis mit dabei,
+    # weil ein Modell, das seinen Spiegel nicht kennt, ihn auch nicht
+    # bezweifeln kann.
+    gl = crow_platform.render_gl_mode()
+    gl_flags = (["--use-gl=angle"] if gl == "angle" else
+                # #175-NACHTRAG (2026-09-20): DIE ZWEI SWIFTSHADER-SCHALTER. Bis
+                # heute stand hier nur --disable-gpu, und die Folge war messbar:
+                # unter der virtuellen Uhr lief requestAnimationFrame NIE an, drei
+                # Varianten einer animierten WebGL-Seite ergaben byte-identische
+                # 92.027-Byte-Fangs nach 8 echten Sekunden Wartezeit, und das
+                # Modell auditierte diese Leinwaende als "environment-blocked,
+                # page correct" -- das MESSGERAET war kaputt, nicht die Seite.
+                # Dazu kam Chromium 144: der automatische SwiftShader-Fallback
+                # fuer WebGL wurde gestrichen (chromestatus "Remove SwiftShader
+                # fallback"), ohne --enable-unsafe-swiftshader scheitert in
+                # Headless die WebGL-Kontexterzeugung. GEMESSEN hier (Chromium
+                # 152, dieselbe Testseite mit fahrendem Balken und fps-Zaehler,
+                # Budget 2000 gegen 8000):
+                #   alt  (--disable-gpu):        5.138 B @ rAF 3 == 5.138 B @ rAF 3
+                #   neu  (+ --use-angle=swiftshader
+                #         + --enable-unsafe-swiftshader):
+                #                                5.138 B @ rAF 3 != 5.117 B @ rAF 5
+                # Die Animation ZIEHT unter der virtuellen Uhr, und zwei Budgets
+                # liefern verschiedene Bilder. SwiftShader bleibt Software: die
+                # Karte wird nicht angefasst, solange sie nicht frei ist.
+                ["--disable-gpu",
+                 "--enable-unsafe-swiftshader", "--use-angle=swiftshader"])
+
+    argv = [exe, "--headless=new"] + gl_flags + [
             "--hide-scrollbars",
             "--no-first-run", "--no-default-browser-check",
             "--disable-extensions", "--mute-audio",
@@ -7876,6 +8013,17 @@ def tool_render_page(path: str, wait_ms: int | None = None,
             "--enable-logging=stderr", "--v=0",
             "--screenshot=" + shot, url]
 
+    # #213. DER BROWSER IN EINEM EIGENEN DECKEL. Der Lauf vom 2026-09-21 wuchs
+    # auf 54 GiB und fror die Maschine ein, weil der Renderprozess in keiner
+    # Cgroup lag, die ihn allein getroffen haette -- der Kernel beantwortete
+    # "groesster Prozess" mit dem SERVER. Der Praefix stellt ihn in
+    # session.slice mit MemoryMax aus render_memory_bounds; alles in argv ist
+    # absolut, und NUR deshalb ist das sicher: die Unit startet in $HOME, nicht
+    # im cwd des Aufrufers (gemessen 2026-09-22, ein stiller ENOENT).
+    scope = crow_platform.render_scope_prefix()
+    if scope:
+        argv = scope + argv
+
     detach = crow_platform.spawn_kwargs(detached=True)
     reason = "done"
     try:
@@ -7900,8 +8048,32 @@ def tool_render_page(path: str, wait_ms: int | None = None,
                 # Es ist dieselbe Regel -- die Sitzung, die DIESER Aufruf selbst
                 # aufgemacht hat, nie eine Prozessliste und nie ein Name.
                 crow_platform.terminate_tree(proc)
-                proc.wait(timeout=10)
-                reason = "timed out after %d ms and was stopped" % wait
+                # #213. UND DAS WARTEN AUF DIE LEICHE DARF KEINEN FEHLER
+                # WERFEN. Der Lauf vom 2026-09-21 ueberlebte den Werkzeugruf
+                # um 20 Minuten; ab hier heisst "was stopped" auch, dass der
+                # Tod GEMESSEN wurde -- und wenn er nicht eintritt, STEHT ER
+                # DA, als Grund, den das Modell lesen kann.
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    reason = ("timed out after %d ms; the browser (pid %d) "
+                              "would not die and may still be running"
+                              % (wait, proc.pid))
+                else:
+                    reason = "timed out after %d ms and was stopped" % wait
+            else:
+                # #213. EIN DECKEL-TOT SIEHT WIE ERFOLG AUS. Der Kernel
+                # ueberhoeht den Browser innerhalb seiner Scope-Cgroup, der
+                # Rueckgabewert ist nur ein Signal -- aber "done" waere die
+                # Luege, mit der das Modell einen halben Frame liest.
+                # -9 ist das Signal des Popen-Handles, 137 (128+9) die Zahl,
+                # mit der systemd-run ihn weiterreicht.
+                code = proc.returncode
+                if scope and code is not None and code in (-9, 137):
+                    cap = crow_platform.render_memory_bounds().get("MemoryMax")
+                    reason = ("stopped by the render's memory ceiling%s -- "
+                              "the scene outgrew the browser"
+                              % (" (%s)" % cap if cap else ""))
         log_text = ""
         try:
             with open(log, encoding="utf-8", errors="replace") as fh:
@@ -7930,8 +8102,12 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         _RENDER_RIDE.clear()
         _RENDER_RIDE.append((url, shot))
         said = _capture_warnings(previous, pixels, console)
-        said.append("%s -- %d bytes, %dx%d, %s"
-                    % (shot, os.path.getsize(shot), w, h, reason))
+        # #213. DER RASTERER IM ERGEBNIS: software-gerasterte Fangs einer
+        # WebGL-Seite sehen anders aus als GPU-gerasterte, und ein Modell, das
+        # seinen Spiegel kennt, bezweifelt ihn auch.
+        gl_said = ("gpu (angle)" if gl == "angle" else "software (swiftshader)")
+        said.append("%s -- %d bytes, %dx%d, %s, %s"
+                    % (shot, os.path.getsize(shot), w, h, reason, gl_said))
         said.append("read_image it to look at the page.")
         if console:
             said.append("console (last %d of the page's log):" % len(console))

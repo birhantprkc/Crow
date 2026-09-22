@@ -449,6 +449,36 @@ def user_manager_reachable(runtime_dir: str | None = None) -> bool:
         return False
 
 
+_RENDER_MEMORY_DEFAULT = "6G"
+
+
+def render_memory_bounds() -> dict:
+    """The memory properties the render browser's scope gets, as systemd sizes.
+
+    #213. The 2026-09-21 incident: a software-WebGL render of the 2 MB three.js
+    page grew its headless chromium to 54 GiB, the desktop froze, and the
+    kernel's OOM killer shot the ENGINE -- the browser sat in no cgroup of its
+    own, so "largest process" was answered with somebody else's server.
+    MemoryMax=6G kills that runaway one ninth of the way up while leaving a
+    healthy software render of the same page ten times its usual size to
+    finish; MemoryHigh one below it makes the kernel reclaim first. The swap
+    cap carries the server's reason unchanged: on this machine's zram the
+    browser's anonymous memory is the freeze, and without the cap it goes
+    exactly there. $CROW_RENDER_MEMORY_MAX moves the kill bound (any systemd
+    size); `none` drops the size bounds and keeps the swap cap.
+    """
+    out = {"MemorySwapMax": "0"}
+    raw = (os.environ.get("CROW_RENDER_MEMORY_MAX") or "").strip()
+    if raw.lower() in ("0", "none", "off"):
+        return out
+    if raw:
+        out["MemoryMax"] = raw
+        return out
+    out["MemoryHigh"] = "5G"
+    out["MemoryMax"] = _RENDER_MEMORY_DEFAULT
+    return out
+
+
 def server_scope_prefix() -> list[str]:
     """What to put in front of llama-server's argv so it runs in its own scope.
 
@@ -488,13 +518,49 @@ def server_scope_prefix() -> list[str]:
     """
     if IS_WINDOWS or (os.environ.get("CROW_SERVER_SCOPE") or "").strip().lower() in ("0", "off", "none"):
         return []
+    return _user_scope_prefix(server_memory_bounds())
+
+
+def _user_scope_prefix(properties: dict) -> list[str]:
+    """The shared builder: a user scope in session.slice with these properties.
+
+    The two callers differ only in their bounds and their switch -- the shape
+    (user manager, --scope so the Popen pid stays the waitable one, the slice
+    oomd does not watch, --quiet, `--` before the payload) is what #158 and the
+    2026-09-16 oomd kills paid for, and it belongs in one place like every
+    other OS fact in this file. Verified here (2026-09-22): the scoped process
+    lands in session.slice/run-*.scope with memory.max/memory.high/
+    memory.swap.max exactly as given.
+    """
     run = shutil.which("systemd-run")
     if not run or not user_manager_reachable():
         return []
     prefix = [run, "--user", "--scope", "--slice=session.slice", "--quiet"]
-    for name, value in server_memory_bounds().items():
+    for name, value in properties.items():
         prefix += ["-p", "%s=%s" % (name, value)]
     return prefix + ["--"]
+
+
+def render_scope_prefix() -> list[str]:
+    """What to put in front of the render browser's argv (#213).
+
+    The 2026-09-21 runaway (54 GiB software-WebGL render, frozen desktop, the
+    kernel shooting the ENGINE instead) ended in no cgroup of the browser's
+    own; this prefix gives it one, sized by render_memory_bounds, so the next
+    runaway dies alone inside it. Empty on Windows and everywhere systemd-run
+    cannot reach the user manager -- then the browser runs as before, bounded
+    only by the wall-clock kill. `CROW_RENDER_SCOPE=0` switches it off for a
+    measurement that wants the bare process.
+
+    THE UNIT STARTS IN $HOME, NOT IN THE CALLER'S CWD -- measured 2026-09-22:
+    a systemd-run probe launched from ~ resolved its relative path against ~
+    and died of ENOENT without one retry line. render_page's argv carries only
+    absolute paths (the found browser, mkdtemp's profile, the rooted target),
+    which is what makes this prefix safe to prepend there.
+    """
+    if IS_WINDOWS or (os.environ.get("CROW_RENDER_SCOPE") or "").strip().lower() in ("0", "off", "none"):
+        return []
+    return _user_scope_prefix(render_memory_bounds())
 
 
 def kill_pid(pid) -> bool:
@@ -657,6 +723,78 @@ def find_browser_path() -> "str | None":
             if found:
                 return found
     return None
+
+
+# #213. GPU WHEN THE CARD IS FREE, SWIFTSHADER OTHERWISE. Measured here
+# 2026-09-22, headless, one animated WebGL page, budgets 2000 vs 8000:
+#
+#   --disable-gpu --enable-unsafe-swiftshader --use-angle=swiftshader
+#       renderer "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)),
+#       SwiftShader driver)" -- software, as it has been since #175-Nachtrag;
+#       both budgets drew (14260 != 14162 bytes).
+#   --use-gl=angle (no --disable-gpu)
+#       renderer "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 5090/PCIe/
+#       SSE2, OpenGL ES 3.2)" -- the card, and both budgets drew too
+#       (13836 != 13261 bytes). Its own VRAM draw stayed inside ~150 MiB on
+#       that page; the runaway memory class of software WebGL never started.
+#
+# The gate is FREE VRAM, not presence: the engine may hold the card, and a
+# render that guesses itself onto a busy one trades a frozen desktop for a
+# shot engine. 512 MiB free is comfortably above the measured draw of a
+# headless render while being small enough to let the common card-free case
+# through.
+_GPU_HEADROOM_MIB = 512
+
+
+def gpu_free_mib(query=None) -> "int | None":
+    """Free VRAM in MiB on the first card, or None when there is no answer.
+
+    nvidia-smi is the only reader -- the machine this was measured on answers
+    with an NVIDIA card, and a generic probe would be a second opinion nobody
+    asked for. A probe that cannot run or cannot be parsed is None, and None
+    means SOFTWARE (swiftshader): the render may not guess itself onto a card
+    whose state it could not read. `query` is the injection point for the
+    suite, the same seam find_servers has.
+    """
+    if query is None:
+        exe = shutil.which("nvidia-smi")
+        if not exe:
+            return None
+
+        def query():
+            try:
+                done = subprocess.run(
+                    [exe, "--query-gpu=memory.free",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                    timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                return ""
+            return done.stdout if done.returncode == 0 else ""
+
+    try:
+        first = (query() or "").strip().splitlines()[0]
+        return int(round(float(first.strip().split(",")[0])))
+    except (IndexError, ValueError):
+        return None
+
+
+def render_gl_mode(free_mib: "int | None" = None) -> str:
+    """"angle" when the card has headroom, else "swiftshader" (#213).
+
+    $CROW_RENDER_GL forces the answer (`angle`/`gpu` or `swiftshader`/
+    `software`/`cpu`) -- the honest way to pin an arm for a measurement;
+    default `auto` asks the card and falls back to software on every doubt.
+    """
+    forced = (os.environ.get("CROW_RENDER_GL") or "").strip().lower()
+    if forced in ("angle", "gpu"):
+        return "angle"
+    if forced in ("swiftshader", "software", "cpu"):
+        return "swiftshader"
+    if free_mib is None:
+        free_mib = gpu_free_mib()
+    return "angle" if (free_mib is not None
+                       and free_mib >= _GPU_HEADROOM_MIB) else "swiftshader"
 
 
 # --------------------------------------------------------------- the fonts ---
