@@ -1684,6 +1684,32 @@ details.think[open] .caret{transform:rotate(90deg)}
 .md code{font-family:var(--mono);font-size:12px;background:var(--raised);
   border-radius:4px;padding:1px 5px}
 .md a.lnk{color:var(--accent);text-decoration:underline;cursor:pointer}
+/* -- #228: what can be selected, in BOTH spellings ------------------------
+   WEBKITGTK DROPS THE UNPREFIXED PROPERTY. Measured 2026-09-23, WebKitGTK
+   2.52.6: CSS.supports("user-select","text") is false, and computed
+   -webkit-user-select is "none" on every answer paragraph -- pywebview
+   (text_select=False) injects `body{-webkit-user-select:none}`, and Crow's
+   `#flow{user-select:text}` never reached the engine. A synthesised mouse drag
+   over an answer selected "" there. Blink knows both spellings, which is why
+   the chat selected on Windows and the side panels did not (they had no rule
+   at all). ONE BLOCK STATES THE POLICY so the eleven rules above stay as they
+   are; test_crow_gui holds every `user-select` in this page to a `-webkit-`
+   twin. Content is text, the controls inside it are not. */
+body,button,summary,#menu,.code .hd,#toolcalls .tool .hd,#toolcalls .tchd,
+#codefiles .tchd,.gitgrp .tchd,.code.foldable .hd,details.rollcard summary
+  {-webkit-user-select:none;user-select:none}
+#flow,#spane,#in,input,textarea,.code pre,.ghcode,#tclist .tsec,#cflist .cwp,
+#cflist .cwh{-webkit-user-select:text;user-select:text;cursor:auto}
+/* -- #229: links and paths in the output ---------------------------------
+   NOT DRAGGED AWAY: pywebview cancels dragstart on <a> anyway (draggable=False),
+   and a link that looks draggable and is not is a gesture that does nothing. */
+a.lnk{color:var(--accent);text-decoration:underline;cursor:pointer;
+  -webkit-user-drag:none}
+.pth{text-decoration:underline dotted;text-underline-offset:2px;
+  text-decoration-color:var(--dimmer);cursor:context-menu}
+.pth:hover{text-decoration-color:var(--accent)}
+a.lnk:focus-visible,.pth:focus-visible,#menu button:focus-visible
+  {outline:1px solid var(--accent);outline-offset:1px;border-radius:3px}
 /* A WIDE TABLE SCROLLS INSIDE ITSELF rather than widening the chat: the column
    is what every other block is measured against. */
 .md table{display:block;overflow-x:auto;border-collapse:collapse;margin:0 0 9px;
@@ -3315,6 +3341,103 @@ const HL = {
   }
 };
 
+// -- #229: links and paths, found in text ------------------------------------
+//
+// A PURE FUNCTION OF A STRING, like HL above, so test_crow_gui runs it in node.
+// `split` hands back pieces whose `s` put together IS the input, character for
+// character -- a selection copied across a mark must read like the text did.
+//
+// STRICT BY DESIGN. Only `http(s)://` is a URL (linkify-it keeps scheme-less
+// "fuzzy" links behind an option for the same false-positive reason); `file:`,
+// `javascript:` and `data:` never become links. A path is marked by spelling,
+// not by looking at the disk -- VS Code's terminal stats before it underlines,
+// which here would be a bridge call per line of an `ls`; the disk is asked
+// once, when somebody acts on the mark (`Api.path_info` / `reveal_path`).
+const LINK = {
+  MAX: 200000,
+  // url | windows drive or UNC | posix absolute, ~/ ./ ../ | relative a/b.ext
+  RE: /(https?:\/\/[^\s<>"` ]+)|((?:[A-Za-z]:[\\\/]|\\\\[\w.$-]+\\)[^\s<>"'`|*?:;,()\[\]{} ]*)|((?:~|\.\.?)?\/[\w.@%+=~#$&!-]+(?:\/[\w.@%+=~#$&!-]*)*)|([\w.@+-]+(?:\/[\w.@+-]+)+)/g,
+  // WHAT MAY STAND BEFORE A PATH. A letter may not: that is `km/h`, `and/or`,
+  // the `/s` in `tok/s` -- and a slash or dot in front means we are inside
+  // something that did not match as a whole.
+  GATE: /^$|[\s(\[{<"'`=,;:>|*]/,
+
+  split(text){
+    const out=[], RE=this.RE; let at=0, m;
+    const push=seg=>{
+      if(seg.t==="text"){ if(!seg.s) return;
+        const last=out[out.length-1];
+        if(last && last.t==="text"){ last.s+=seg.s; return; } }
+      out.push(seg); };
+    RE.lastIndex=0;
+    while((m=RE.exec(text))){
+      const i=m.index, prev=i ? text.charAt(i-1) : "";
+      let s=m[0], seg=null;
+      if(m[1]){
+        if(!/[A-Za-z0-9]/.test(prev)){ s=this.trimUrl(s);
+          if(/^https?:\/\/[^\/?#\s]+/i.test(s)) seg={t:"url", s:s, href:s}; }
+      } else if(this.GATE.test(prev)){
+        s=s.replace(/[.,!?]+$/,"");
+        const ok = m[4] ? this.relOk(s) : (s.length>1 && s!=="~/");
+        if(ok){
+          // `file:12` and `file:12:3`, the suffix every compiler and grep -n
+          // prints. It belongs to the mark but not to the path.
+          const tail=/^:(\d+)(?::(\d+))?/.exec(text.slice(i+s.length));
+          seg={t:"path", s:s+(tail ? tail[0] : ""), path:s,
+               line:tail ? tail[1] : "", col:tail && tail[2] ? tail[2] : ""}; }
+      }
+      // ONE CHARACTER ON, not past the refused match: `path:/tmp/a.log` first
+      // matches `h:/tmp/a.log` as a drive letter, which the gate refuses --
+      // and the real path starts two characters later.
+      if(!seg){ RE.lastIndex=i+1; continue; }
+      push({t:"text", s:text.slice(at,i)}); push(seg);
+      at=i+seg.s.length; RE.lastIndex=at;
+    }
+    push({t:"text", s:text.slice(at)});
+    return out; },
+
+  // GFM's autolink rules (spec 6.9): trailing ? ! . , : * _ ~ are prose, an
+  // unmatched closing bracket belongs to the sentence around the link, and a
+  // trailing `&name;` is an entity. `'` `"` `;` go too -- a URL ending in them
+  // is rarer than a sentence that puts them after one.
+  trimUrl(s){
+    const n=(str,ch)=>str.split(ch).length-1;
+    for(;;){ const was=s;
+      s=s.replace(/&[A-Za-z0-9]+;$/,"");
+      s=s.replace(/[?!.,:*_~'";]+$/,"");
+      [["(",")"],["[","]"],["{","}"]].forEach(([o,c])=>{
+        while(s.endsWith(c) && n(s,c)>n(s,o)) s=s.slice(0,-1); });
+      if(s===was) return s; } },
+
+  // A RELATIVE PATH HAS TO LOOK LIKE ONE: a letter first (not `1/2`, not
+  // `2026/09/23`), no segment ending in a dot (`e.g./i.e.`), not a host
+  // (`example.org/x.html` is a URL without its scheme), and a file extension
+  // with a letter in it at the end -- `TCP/IP` and `and/or` have none.
+  relOk(s){
+    if(!/^[A-Za-z_.]/.test(s)) return false;
+    const parts=s.split("/");
+    if(parts.some(p=>p!=="." && p!==".." && /\.$/.test(p))) return false;
+    if(/^[^._][^\/]*\.[A-Za-z]{2,}$/.test(parts[0]) && parts.length>1
+       && !/_/.test(parts[0])) return false;
+    const last=parts[parts.length-1];
+    return /^[\w@+.-]*[\w@+-]\.[A-Za-z][A-Za-z0-9]{0,9}$/.test(last)
+        || /^\.[A-Za-z][\w.-]*$/.test(last); },
+
+  // INLINE CODE THAT IS ONE URL OR ONE PATH, the way models write paths most
+  // often. Backticks delimit, so here a path may carry spaces -- but only when
+  // it ends in a file name and holds no ` -`, or `/usr/bin/env python` and
+  // `/bin/ls -la` would be marked as files.
+  whole(text){
+    const t=String(text||"");
+    const segs=this.split(t);
+    if(segs.length===1 && segs[0].t!=="text") return segs[0];
+    const m=/^((?:~|\.\.?)?\/[^\n\0:]*[^\s:]|[A-Za-z]:[\\\/][^\n\0:*?"<>|]*[^\s:])(?::(\d+)(?::(\d+))?)?$/.exec(t);
+    if(m && /\s/.test(m[1]) && !/\s-/.test(m[1])
+       && /[^\s\\\/]\.[A-Za-z][A-Za-z0-9]{0,9}$/.test(m[1]))
+      return {t:"path", s:t, path:m[1], line:m[2]||"", col:m[3]||""};
+    return null; }
+};
+
 const crow = {
   running:false, col:null, say:null, think:null, fence:null, fenceLang:"",
   cursor:null, blocks:[],
@@ -3482,24 +3605,162 @@ const crow = {
   // region and refuses the one property that would allow it.
   span(sp){
     let node=document.createTextNode(sp.s||"");
-    if(sp.c){ const c=document.createElement("code"); c.textContent=sp.s||""; node=c; }
+    if(sp.c){ const c=document.createElement("code"); c.textContent=sp.s||""; node=c;
+      // #229. `/home/x/a.py` IN BACKTICKS is how models write a path, so a
+      // code span that is ONE url or ONE path becomes that mark, code look kept.
+      const w=sp.href ? null : LINK.whole(sp.s||"");
+      if(w) node = w.t==="url" ? this.linkNode(c, w.href) : this.pathNode(c, w); }
+    else if(!sp.href) node=this.linkify(document.createDocumentFragment(), sp.s||"");
     if(sp.b){ const b=document.createElement("strong"); b.appendChild(node); node=b; }
     if(sp.i){ const i=document.createElement("em"); i.appendChild(node); node=i; }
     // THE SECOND GATE ON A TARGET. The core already refuses to name anything
     // but http and https; this one is here because the text is a stranger's and
     // a link that navigates would replace the whole window, which has no way
-    // back -- so it never navigates, it asks the browser outside.
-    if(sp.href && /^https?:\/\//i.test(sp.href)){
-      const a=document.createElement("a"); a.className="lnk"; a.title=sp.href;
-      a.appendChild(node);
-      // #201: A CLICK OPENS IT IN THE PANEL (Python decides whether there is
-      // one in the window); Ctrl, Cmd or the middle button still send it out.
-      a.onclick=ev=>{ ev.preventDefault();
-        pywebview.api.open_url(sp.href, !!(ev.ctrlKey||ev.metaKey)); };
-      a.onauxclick=ev=>{ if(ev.button!==1) return; ev.preventDefault();
-        pywebview.api.open_url(sp.href, true); };
-      node=a; }
+    // back -- so it never navigates: `linkNode` cancels every click.
+    if(sp.href && /^https?:\/\//i.test(sp.href)) node=this.linkNode(node, sp.href);
     return node; },
+
+  // #229. TEXT IN, TEXT AND MARKS OUT, never markup: every piece goes in as a
+  // text node, and `LINK.split` guarantees the pieces ARE the text.
+  linkify(el, text){
+    const t=String(text||"");
+    if(t.length>LINK.MAX){ el.appendChild(document.createTextNode(t)); return el; }
+    LINK.split(t).forEach(seg=>{ const label=document.createTextNode(seg.s);
+      el.appendChild(seg.t==="url" ? this.linkNode(label, seg.href)
+        : seg.t==="path" ? this.pathNode(label, seg) : label); });
+    return el; },
+
+  // AN HREF NOW, which the old link did not have: without one an <a> takes no
+  // focus and ignores Enter. It still never navigates -- the click is always
+  // cancelled and routed (`linkClick`); only http(s) ever reaches here.
+  linkNode(label, url){
+    const a=document.createElement("a"); a.className="lnk";
+    a.href=url; a.title=url; a.dataset.href=url; a.appendChild(label);
+    // A DRAG IS NOT A CLICK. Measured in Chromium 152: a drag across a link's
+    // text fired `click` on release, so trying to select part of a URL opened
+    // it. `linkClick` now drops a click whose pointer travelled; not draggable,
+    // so the drag does not carry the link off either. (Selecting a link's text
+    // starts beside it, as in any browser -- a drag begun ON a link selected
+    // "" in Chromium with or without this.)
+    a.draggable=false;
+    a.onmousedown=ev=>{ this.linkAt=[ev.clientX, ev.clientY]; };
+    a.onclick=ev=>this.linkClick(ev, url);
+    a.onauxclick=ev=>{ if(ev.button===1){ ev.preventDefault(); this.linkOut(url); } };
+    return a; },
+
+  pathNode(label, seg){
+    const p=document.createElement("span"); p.className="pth"; p.tabIndex=0;
+    p.dataset.path=seg.path||"";
+    if(seg.line) p.dataset.line=seg.line;
+    if(seg.col) p.dataset.col=seg.col;
+    p.title="right-click: copy path"; p.appendChild(label);
+    return p; },
+
+  // #229. A PLAIN CLICK OPENS IN CROW'S OWN BROWSER PANEL -- where #175 put
+  // the pages the model renders and #201/#227 keep browsing -- and the system
+  // browser is one modifier away (Ctrl/Cmd/Shift-click, middle click, menu).
+  // A CLICK THAT ENDS A SELECTION INSIDE THE LINK IS A SELECTION: mousedown and
+  // mouseup on the same <a> fire `click` even after a drag across its text.
+  linkClick(ev, url){
+    ev.preventDefault();
+    const at=this.linkAt; this.linkAt=null;
+    if(at && Math.abs(ev.clientX-at[0])+Math.abs(ev.clientY-at[1])>4) return;
+    const s=window.getSelection();
+    if(s && !s.isCollapsed && s.containsNode(ev.currentTarget, true)) return;
+    if(ev.ctrlKey || ev.metaKey || ev.shiftKey) return this.linkOut(url);
+    this.linkIn(url); },
+  // #201 decides where: `Api.open_url` opens the in-window panel when there is
+  // one and the system browser otherwise (Windows' pane window, the fallback),
+  // so the click has ONE rule on every platform instead of a second copy here.
+  linkIn(url){ pywebview.api.open_url(url, false); },
+  linkOut(url){ pywebview.api.open_url(url, true); },
+
+  // #228. THE SELECTION AS TEXT, or "" -- and never the menu's own labels.
+  selText(){
+    const s=window.getSelection();
+    if(!s || s.isCollapsed) return "";
+    const a=s.anchorNode, el=a && (a.nodeType===1 ? a : a.parentElement);
+    if(el && el.closest && el.closest("#menu")) return "";
+    return s.toString(); },
+
+  // #228. THROUGH PYTHON FIRST, the route `Api.copy` documents and robin's
+  // code-block button proves every day: `navigator.clipboard` refuses on
+  // WebView2 (no secure context). If Python says no, `execCommand("copy")`,
+  // which WebKitGTK allows because pywebview sets javascript-can-access-clipboard.
+  clip(text){
+    const local=()=>{ try{
+      const ta=document.createElement("textarea"); ta.value=text;
+      ta.style.position="fixed"; ta.style.opacity="0";
+      document.body.appendChild(ta); ta.select();
+      const ok=document.execCommand("copy"); ta.remove(); return ok;
+    }catch(err){ return false; } };
+    if(!text) return Promise.resolve(false);
+    const via = window.pywebview && pywebview.api && pywebview.api.copy
+      ? pywebview.api.copy(text).then(ok=>ok || local(), ()=>local())
+      : Promise.resolve(local());
+    return via.then(ok=>{ if(!ok) this.note("the clipboard did not take it"); return ok; }); },
+
+  // #228/#229. RIGHT-CLICK ON CONTENT. True when this menu took the event.
+  // Rows are built from a plan with textContent, the rail menu's rule: a URL or
+  // a path is a stranger's text and only ever a label. Nothing to offer, no
+  // menu -- the old guard then cancels the engine's, as it always did.
+  textMenu(e){
+    const t=e.target;
+    if(!t || !t.closest || t.closest("#menu")) return false;
+    const lnk=t.closest("a.lnk"), pth=t.closest(".pth"), sel=this.selText();
+    const rows=[];
+    if(sel) rows.push({label:"Copy", run:()=>this.clip(sel)});
+    if(lnk){ const u=lnk.dataset.href||"";
+      if(rows.length) rows.push({sep:true});
+      rows.push({label:"Open in Crow's browser", run:()=>this.linkIn(u)},
+                {label:"Open in system browser", run:()=>this.linkOut(u)},
+                {label:"Copy link", run:()=>this.clip(u)}); }
+    if(pth){ const p=pth.dataset.path||"", ln=pth.dataset.line, col=pth.dataset.col;
+      if(rows.length) rows.push({sep:true});
+      rows.push({label:"Copy path", run:()=>this.clip(p)});
+      if(ln){ const at=p+":"+ln+(col ? ":"+col : "");
+        rows.push({label:"Copy "+(col ? "path:line:col" : "path:line"),
+                   run:()=>this.clip(at)}); }
+      rows.push({label:"Show in file manager", run:()=>
+        pywebview.api.reveal_path(p).then(why=>{ if(why) this.note(why); })});
+      // ONLY WHAT THE PANEL SHOWS AS A PAGE, and never "open with the default
+      // program": that can execute a `.desktop`, `.sh` or `.exe` (see
+      // `crow_platform.reveal_command`).
+      if(/\.(html?|svg)$/i.test(p)) rows.push({label:"Open in Crow's browser", run:()=>
+        pywebview.api.path_info(p).then(i=>{
+          if(i && i.exists) this.linkIn(this.fileUrl(i.path));
+          else this.note("not on this disk: "+(i && i.path || p)); })}); }
+    if(!rows.length) return false;
+    e.preventDefault();
+    const m=$("#menu"); m.textContent=""; m.setAttribute("role","menu");
+    rows.forEach(r=>{
+      if(r.sep){ const d=document.createElement("div"); d.className="sep";
+        m.appendChild(d); return; }
+      const b=document.createElement("button"); b.setAttribute("role","menuitem");
+      const l=document.createElement("b"); l.textContent=r.label; b.appendChild(l);
+      b.onclick=()=>{ this.closeMenu(); this.menuBack(); r.run(); };
+      m.appendChild(b); });
+    // APG menu keys: Up/Down/Home/End move, Escape closes and gives focus back.
+    m.onkeydown=ev=>{
+      const btns=[...m.querySelectorAll("button")], i=btns.indexOf(document.activeElement);
+      const go=j=>{ ev.preventDefault(); btns[(j+btns.length)%btns.length].focus(); };
+      if(ev.key==="ArrowDown") go(i+1); else if(ev.key==="ArrowUp") go(i-1);
+      else if(ev.key==="Home") go(0); else if(ev.key==="End") go(btns.length-1);
+      else if(ev.key==="Escape" || ev.key==="Tab"){ ev.preventDefault();
+        this.closeMenu(); this.menuBack(); } };
+    this.menuFrom=document.activeElement;
+    m.classList.add("on");
+    // A KEYBOARD-OPENED MENU (ContextMenu key, Shift+F10) may arrive at 0,0;
+    // it opens at the mark then, not in the corner of the window.
+    let x=e.clientX, y=e.clientY;
+    if(!x && !y){ const r=(lnk||pth||t).getBoundingClientRect(); x=r.left; y=r.bottom; }
+    const w=m.offsetWidth||170, h=m.offsetHeight||110;
+    m.style.left=Math.max(0, Math.min(x, innerWidth-w-6))+"px";
+    m.style.top=Math.max(0, Math.min(y, innerHeight-h-6))+"px";
+    const first=m.querySelector("button"); if(first) first.focus();
+    return true; },
+  menuBack(){ const f=this.menuFrom; this.menuFrom=null;
+    if(f && f.focus && f!==document.body && f.isConnected) f.focus(); },
   spansInto(el,spans){ (spans||[]).forEach(sp=>el.appendChild(this.span(sp)));
     return el; },
   cellsInto(row,cells,tag){ (cells||[]).forEach(cell=>this.spansInto(
@@ -3698,7 +3959,10 @@ const crow = {
       if(typeof body==="string" && pre) pre.textContent=body;
       if(got.path){
         const head=box.querySelector(".cwh");
-        if(head) head.textContent=got.path;
+        // #229: the file being written, as a path mark (right-click: copy).
+        if(head){ head.textContent="";
+          head.appendChild(this.pathNode(document.createTextNode(got.path),
+                                         {path:String(got.path)})); }
         const dot=String(got.path).lastIndexOf(".");
         if(dot>=0) lang=String(got.path).slice(dot+1); }
     }catch(err){ /* unvollstaendig oder nicht JSON: der rohe Strom bleibt */ }
@@ -3750,7 +4014,8 @@ const crow = {
     const head=document.createElement("div"); head.className="tsh";
     head.textContent = bad ? "error" : "result";
     const pre=document.createElement("pre"); pre.className="tsp";
-    pre.textContent = text || "(nothing)";
+    // #229: `grep -n` lines, `ls` listings, URLs -- marked, text unchanged.
+    this.linkify(pre, text || "(nothing)");
     wrap.appendChild(head); wrap.appendChild(pre);
     if(cut>0){
       const more=document.createElement("div"); more.className="tsmore";
@@ -7049,7 +7314,25 @@ window.addEventListener("mousedown",e=>{
 // reason "new chat" and "new project" had nowhere to live.
 window.addEventListener("contextmenu",e=>{
   if(e.target.closest("#sessions")){ crow.railMenu(e); return; }
+  if(crow.textMenu(e)) return;                     // #228/#229: content
   if(!e.target.closest(".sess")) e.preventDefault(); });
+// #228. CTRL+C STAYS THE ENGINE'S, AND PYTHON COPIES TOO. Nothing in this page
+// blocked the key -- nothing could be selected. WebView2 keeps Ctrl+C with
+// browser accelerators off (Microsoft: editing keys are not affected), and
+// WebKitGTK copies natively; whether GTK's clipboard reaches Hyprland from the
+// WebKit process was NOT measured (that would write robin's live clipboard),
+// so the selection also goes the way the copy button proves works. Not in a
+// field: there the engine's own copy is the whole story. A focused link or
+// path with nothing selected copies its target, the keyboard's "Copy path".
+document.addEventListener("keydown",e=>{
+  if(!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey
+     || (e.key!=="c" && e.key!=="C")) return;
+  const a=document.activeElement;
+  if(a && (a.tagName==="INPUT" || a.tagName==="TEXTAREA" || a.isContentEditable)) return;
+  const sel=crow.selText();
+  if(sel){ crow.clip(sel); return; }
+  const mark=a && a.closest ? a.closest("a.lnk,.pth") : null;
+  if(mark){ e.preventDefault(); crow.clip(mark.dataset.path || mark.dataset.href || ""); } });
 
 // #131. THE TILE IS THERE BEFORE THE FIRST CALL IS, because "always present"
 // is what makes it a place to look rather than something that appears once and
@@ -11688,6 +11971,57 @@ class Api:
             return proc.returncode == 0
         except Exception:                  # noqa: BLE001 - reported as False
             return False
+
+    # -- #229: a path in the output, right-clicked ---------------------------
+    #
+    # THE PAGE MARKS PATHS BY SPELLING, NOT BY LOOKING. A bridge call per path
+    # per render would be one per line of an `ls`; VS Code's terminal verifies
+    # before it underlines, Crow verifies when somebody asks for the path --
+    # which is here, once, for the one that was clicked.
+
+    def _path_abs(self, path: str) -> "str | None":
+        """The mark's path as an absolute one, or None when it cannot be one.
+
+        RELATIVE AGAINST THE CHAT'S WORKING AREA, because that is what the tools
+        that printed it resolved against. No working area, no guess: the process
+        directory of the GUI is nothing the model ever saw.
+        """
+        if not isinstance(path, str) or not path.strip() or "\0" in path:
+            return None
+        full = os.path.expanduser(path.strip())
+        if not os.path.isabs(full):
+            root = crow_core.get_root()
+            if not root:
+                return None
+            full = os.path.join(root, full)
+        return os.path.normpath(full)
+
+    def path_info(self, path: str) -> dict:
+        """`{path, exists, dir}` for a marked path; `path` is "" when unusable."""
+        full = self._path_abs(path)
+        if full is None:
+            return {"path": "", "exists": False, "dir": False}
+        return {"path": full, "exists": os.path.exists(full),
+                "dir": os.path.isdir(full)}
+
+    def reveal_path(self, path: str) -> str:
+        """Show the path in the file manager. "" when it went, else why not.
+
+        NEVER THE FILE ITSELF -- see `crow_platform.reveal_command`: the path is
+        a stranger's text, and opening it with the default program can run it.
+        """
+        full = self._path_abs(path)
+        if full is None:
+            return "a relative path needs a working area"
+        if not os.path.exists(full):
+            return "not on this disk: " + full
+        argv = crow_platform.reveal_command(full, os.path.isdir(full))
+        try:
+            subprocess.Popen(argv, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except OSError:
+            return "no file manager took " + full
+        return ""
 
     def update_check(self) -> dict:
         """What the About pane asks when it opens. Never raises.

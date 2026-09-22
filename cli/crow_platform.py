@@ -1058,6 +1058,23 @@ def opener_command(path: str) -> "list[str] | None":
     return ["xdg-open", path]
 
 
+def reveal_command(path: str, is_dir: bool) -> list[str]:
+    """#229. How this platform shows a path IN ITS FOLDER, as data. Runs nothing.
+
+    A FOLDER IS WHAT GETS OPENED, NEVER THE FILE. The path comes out of a
+    model's text, and `xdg-open` / `os.startfile` on a `.desktop`, `.sh`, `.exe`
+    or `.bat` can run it -- so the file manager is shown the folder (Windows and
+    macOS select the file in it; freedesktop's `xdg-open` has no "select", so
+    Linux opens the parent). A directory handler runs nothing it is pointed at.
+    """
+    if IS_WINDOWS:
+        # `explorer /select,<path>` is ONE argument to explorer, comma and all.
+        return ["explorer", path] if is_dir else ["explorer", "/select," + path]
+    if sys.platform == "darwin":
+        return ["open", path] if is_dir else ["open", "-R", path]
+    return ["xdg-open", path if is_dir else os.path.dirname(path) or "/"]
+
+
 def updater_command(script: str, install: str | None = None) -> list[str]:
     """How this platform runs the installer, as data. Nothing is executed here.
 

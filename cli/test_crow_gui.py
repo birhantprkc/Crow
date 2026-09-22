@@ -11453,5 +11453,238 @@ class TheWindowFollowsADragTests(unittest.TestCase):
         self.assertNotIn("pywebview.api.set_geometry(", move)
 
 
+class TheSelectionPolicyTests(unittest.TestCase):
+    """#228. Text in the window can be selected -- in WebKitGTK too.
+
+    MEASURED 2026-09-23, WebKitGTK 2.52.6: `CSS.supports("user-select","text")`
+    is false. pywebview (text_select=False) injects `body{-webkit-user-select:
+    none}`, so every unprefixed `user-select:text` in this page was dropped and a
+    real (GDK-synthesised) mouse drag over an answer selected "". The cases hold
+    the policy in the spelling the engine reads.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        page = crow_gui.PAGE
+        cls.css = page[page.index("<style>"):page.index("</style>")]
+
+    def _rules(self, prop):
+        """{selector: value} for every rule in the page that sets `prop`."""
+        found = {}
+        css = re.sub(r"/\*.*?\*/", "", self.css, flags=re.S)   # comments quote rules
+        for sels, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+            for m in re.finditer(r"(?<![\w-])" + re.escape(prop) + r"\s*:\s*(\w+)", body):
+                for sel in sels.split(","):
+                    found[" ".join(sel.split())] = m.group(1)
+        return found
+
+    def test_every_user_select_has_its_webkit_twin(self):
+        """THE REGRESSION ITSELF: a rule WebKitGTK cannot read is a rule the
+        Linux window does not have. Every unprefixed `user-select` needs a
+        `-webkit-user-select` with the same value for the same selector."""
+        plain = self._rules("user-select")
+        webkit = self._rules("-webkit-user-select")
+        missing = {sel: v for sel, v in plain.items() if webkit.get(sel) != v}
+        self.assertEqual(missing, {}, "no -webkit- twin (WebKitGTK ignores these)")
+
+    def test_content_is_text_and_its_controls_are_not(self):
+        webkit = self._rules("-webkit-user-select")
+        for sel in ("#flow", "#spane", "#tclist .tsec", "#cflist .cwp", ".code pre",
+                    "#in", "textarea"):
+            self.assertEqual(webkit.get(sel), "text", sel)
+        for sel in ("body", "button", "summary", ".code .hd", "#toolcalls .tool .hd",
+                    "#menu"):
+            self.assertEqual(webkit.get(sel), "none", sel)
+
+    def test_the_content_menu_is_asked_before_the_engine_menu_is_cancelled(self):
+        """The old guard cancelled every context menu outside the rail; the
+        content menu gets the event first, and the guard still stands after it."""
+        guard = self.source[self.source.index('window.addEventListener("contextmenu"'):]
+        guard = guard[:guard.index("});")]
+        self.assertLess(guard.index("crow.textMenu(e)"), guard.index("e.preventDefault()"))
+
+    def test_copy_goes_through_python_first(self):
+        """`navigator.clipboard` refuses on WebView2 (no secure context, see
+        `Api.copy`); the page's copy is the bridge, `execCommand` its fallback."""
+        clip = self.source[self.source.index("  clip(text){"):]
+        clip = clip[:clip.index("\n  // #228/#229. RIGHT-CLICK")]
+        self.assertIn("pywebview.api.copy(text)", clip)
+        self.assertIn('document.execCommand("copy")', clip)
+        self.assertNotIn("navigator.clipboard", clip)
+
+    def test_ctrl_c_leaves_fields_alone(self):
+        """In the composer the engine's own copy is the whole story -- a second
+        copy of a field's selection through Python would be the wrong text."""
+        key = self.source[self.source.index('document.addEventListener("keydown",e=>{\n  if(!(e.ctrlKey'):]
+        key = key[:key.index("});")]
+        self.assertLess(key.index('a.tagName==="TEXTAREA"'), key.index("crow.clip(sel)"))
+
+
+class TheLinkifierTests(unittest.TestCase):
+    """#229. URLs and paths found in text -- the finder is RUN, in node.
+
+    The same reason as the highlighter's cases: this is logic, and a string in
+    the source proves nothing about what it marks.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.node = _node()
+        cls.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def _run(self, expr):
+        import subprocess
+        start = self.source.index("const LINK = {")
+        js = self.source[start:self.source.index("\n};", start) + 3]
+        done = subprocess.run([self.node, "-e", js + "\nconsole.log(JSON.stringify(" + expr + "));"],
+                              capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    def _marks(self, text):
+        """[(kind, target, line, col)] for every mark in `text`."""
+        segs = self._run("LINK.split(" + json.dumps(text) + ")")
+        self.assertEqual("".join(x["s"] for x in segs), text, "the text changed")
+        return [(x["t"], x.get("href") or x.get("path"), x.get("line", ""), x.get("col", ""))
+                for x in segs if x["t"] != "text"]
+
+    def setUp(self):
+        if not self.node:
+            self.skipTest("no node on this machine")
+
+    def test_nothing_is_lost_and_nothing_is_invented(self):
+        """A selection copied across marks must read exactly like the text."""
+        for text in ("", "plain", "See https://x.org/a_(b). and /home/r/x.py:12 now",
+                     "C:\\Users\\r\\a.txt, \\\\srv\\share\\x.log.", "a/b/c/d/e " * 50,
+                     "path:/tmp/a.log; ~/x ./y.sh ../z.md", "https://", "////", "üñî/çø.py"):
+            self._marks(text)
+
+    def test_urls_follow_the_gfm_trailing_rules(self):
+        self.assertEqual(self._marks("see https://example.org/a_(b)."),
+                         [("url", "https://example.org/a_(b)", "", "")])
+        self.assertEqual(self._marks("(https://x.org/y)"), [("url", "https://x.org/y", "", "")])
+        self.assertEqual(self._marks("www.google.com https://www.google.com/search?q=Markup+(business)))"),
+                         [("url", "https://www.google.com/search?q=Markup+(business)", "", "")])
+        self.assertEqual(self._marks("x https://x.org/?a=1&hl; y"), [("url", "https://x.org/?a=1", "", "")])
+        self.assertEqual(self._marks("'https://x.org'"), [("url", "https://x.org", "", "")])
+
+    def test_no_other_scheme_ever_becomes_a_link(self):
+        """NEGATIVE: script, data and the reader's own disk are not links."""
+        marks = self._marks("javascript:alert(1) data:text/html,x file:///etc/passwd "
+                            "xhttps://evil.org ftp://x.org/y")
+        self.assertEqual([m for m in marks if m[0] == "url"], [])
+
+    def test_paths_are_marked_with_their_line_and_column(self):
+        self.assertEqual(self._marks("grep: src/a.py:3:14: bad"), [("path", "src/a.py", "3", "14")])
+        self.assertEqual(self._marks("at /home/r/x.py:12, then"),
+                         [("path", "/home/r/x.py", "12", "")])
+        self.assertEqual([m[1] for m in self._marks("~/Projects/crow ./run.sh ../x/y.md docs/.env")],
+                         ["~/Projects/crow", "./run.sh", "../x/y.md", "docs/.env"])
+        self.assertEqual([m[1] for m in self._marks("open C:\\Users\\r\\a.txt, or \\\\srv\\share\\x.log.")],
+                         ["C:\\Users\\r\\a.txt", "\\\\srv\\share\\x.log"])
+        self.assertEqual(self._marks("path:/tmp/a.log; done"), [("path", "/tmp/a.log", "", "")])
+
+    def test_prose_with_slashes_is_not_a_path(self):
+        """NEGATIVE, the false positives a naive finder makes."""
+        self.assertEqual(self._marks("and/or TCP/IP km/h 12 tok/s 1/2 2026/09/23 e.g./i.e. "
+                                     "example.org/x.html github.com/a/b.py /"), [])
+
+    def test_a_code_span_may_be_one_path_with_spaces(self):
+        """Backticks delimit, so `/My Docs/a b.txt` is one path -- but a command
+        is not: `/usr/bin/env python` and `/bin/ls -la` stay code."""
+        w = self._run('["/home/r/My Docs/a b.txt","/usr/bin/env python","/bin/ls -la",'
+                      '"https://x.org","ls"].map(t=>LINK.whole(t))')
+        self.assertEqual(w[0]["path"], "/home/r/My Docs/a b.txt")
+        self.assertEqual(w[1:3], [None, None])
+        self.assertEqual(w[3]["href"], "https://x.org")
+        self.assertIsNone(w[4])
+
+
+class TheLinkAndPathMarkTests(ApiCase):
+    """#229. What the page does with a mark, and what Python does for it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def _js(self, head, stop):
+        js = self.source[self.source.index(head):]
+        return js[:js.index(stop)]
+
+    def test_a_link_click_never_navigates_and_routes_by_modifier(self):
+        click = self._js("  linkClick(ev, url){", "\n  linkIn(url){")
+        self.assertTrue(click.split("\n")[1].strip().startswith("ev.preventDefault();"),
+                        "the click is cancelled first, before anything can throw")
+        self.assertIn("ev.ctrlKey || ev.metaKey || ev.shiftKey", click)
+        self.assertIn("this.linkOut(url)", click)
+        self.assertIn("this.linkIn(url)", click)
+        node = self._js("  linkNode(label, url){", "\n  pathNode(")
+        self.assertIn("ev.button===1", node)          # middle click: outside
+        # #201 decides panel vs outside in Python (`Api.open_url(url, outside)`):
+        # a plain click asks for the panel, a modifier or middle click for outside.
+        self.assertIn("pywebview.api.open_url(url, true)", self._js("  linkOut(url){", "\n"))
+        self.assertIn("pywebview.api.open_url(url, false)", self._js("  linkIn(url){", "\n  linkOut("))
+
+    def test_fenced_code_and_arguments_are_not_linkified(self):
+        """Highlighted blocks keep their text nodes; the copy button covers them."""
+        for head, stop in (("  codeOpen(lang){", "\n  codeClose("),
+                           ("  toolArgBlock(row, name, raw){", "\n  toolEnd(")):
+            self.assertNotIn("linkify", self._js(head, stop))
+        self.assertIn("this.linkify(pre,", self._js("  toolRes(name,text,cut){", "this.openCall=null;"))
+
+    def test_the_menu_offers_no_way_to_run_a_path(self):
+        """A path is a stranger's text: copy it, show its folder, show a page in
+        Crow's panel -- never hand it to the default program."""
+        menu = self._js("  textMenu(e){", "\n  menuBack(){")
+        self.assertNotIn("innerHTML", menu)
+        self.assertNotIn("roll_show", menu)
+        self.assertIn("reveal_path", menu)
+        self.assertIn(r"/\.(html?|svg)$/i", menu)
+
+    def test_path_info_resolves_against_the_working_area(self):
+        api = self.api()
+        self.addCleanup(crow_core.set_root, crow_core.get_root())
+        crow_core.set_root(None)
+        self.assertEqual(api.path_info("a/b.py")["path"], "")
+        crow_core.set_root(self.dir)
+        open(os.path.join(self.dir, "b.py"), "w").close()
+        got = api.path_info("b.py")
+        self.assertEqual(got["path"], os.path.join(self.dir, "b.py"))
+        self.assertTrue(got["exists"]); self.assertFalse(got["dir"])
+        self.assertTrue(api.path_info(self.dir)["dir"])
+        self.assertEqual(api.path_info("x\0y")["path"], "")
+
+    def test_reveal_opens_the_folder_never_the_file(self):
+        api = self.api()
+        self.addCleanup(crow_core.set_root, crow_core.get_root())
+        crow_core.set_root(self.dir)
+        script = os.path.join(self.dir, "evil.sh")
+        with open(script, "w") as f:
+            f.write("#!/bin/sh\n")
+        ran = []
+        real = crow_gui.subprocess.Popen
+        crow_gui.subprocess.Popen = lambda argv, **kw: ran.append(argv)
+        self.addCleanup(setattr, crow_gui.subprocess, "Popen", real)
+        self.assertEqual(api.reveal_path("evil.sh"), "")
+        self.assertEqual(ran, [crow_platform.reveal_command(script, False)])
+        self.assertIn("not on this disk", api.reveal_path("gone.py"))
+        self.assertEqual(len(ran), 1)
+
+    def test_reveal_command_is_a_folder_on_every_platform(self):
+        real = (crow_platform.IS_WINDOWS, crow_platform.sys.platform)
+        self.addCleanup(lambda: (setattr(crow_platform, "IS_WINDOWS", real[0]),
+                                 setattr(crow_platform.sys, "platform", real[1])))
+        crow_platform.IS_WINDOWS = False
+        crow_platform.sys.platform = "linux"
+        self.assertEqual(crow_platform.reveal_command("/a/b/c.sh", False), ["xdg-open", "/a/b"])
+        self.assertEqual(crow_platform.reveal_command("/a/b", True), ["xdg-open", "/a/b"])
+        crow_platform.sys.platform = "darwin"
+        self.assertEqual(crow_platform.reveal_command("/a/c.sh", False), ["open", "-R", "/a/c.sh"])
+        crow_platform.IS_WINDOWS = True
+        self.assertEqual(crow_platform.reveal_command("C:\\a\\c.bat", False),
+                         ["explorer", "/select,C:\\a\\c.bat"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
