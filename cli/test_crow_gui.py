@@ -1001,6 +1001,42 @@ class TheSecondRolloverFiresTests(ApiCase):
             api._run("weiter im Text")
         self.assertEqual(seen.get("digest"), "DIGEST-TEXT")
 
+    def test_the_pre_turn_roll_sends_the_goal_marks(self):
+        """#210, Audit 2026-09-22 17:12: der ECHTE `roll_over`, der echte
+        `repin_head`, eine gebundene Wurzel mit goal.json unter `.crow/` --
+        und der Kopf, den der erste Zug nach dem Schnitt bekommt, traegt die
+        Marken und den naechsten Schritt."""
+        self._provider()
+        root = os.path.join(self.dir, "work")
+        os.makedirs(root)
+        heads = []
+
+        def fake_run(conversation, **kw):
+            heads.append(conversation.payload()[0]["content"])
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost="", context_tokens=9,
+                                        promised_warm=False, rolled=True,
+                                        stopped=False, reported=True)
+
+        api = self.api()
+        crow_core.set_root(root)
+        self.addCleanup(crow_core.set_root, None)
+        crow_core.goal_start("Ship", ["read", "write", "prove"], now=1000.0)
+        crow_core.goal_step_end(0, now=1010.0)
+        api._conversation.append("user", "erste Frage")
+        api._conversation.append("assistant", "erste Antwort")
+        api._n_ctx = 200192
+        api._context_tokens = 190000
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "rollover_digest",
+                               lambda *a, **k: ""), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
+            api._run("weiter im Text")
+        self.assertEqual(len(heads), 1)
+        for line in ("1. [done] read", "2. [open] write",
+                     "Next: step 2. write", crow_core.GOAL_SEAM_NOTE):
+            self.assertIn(line, heads[0])
+
 
 class APastedScreenshotBecomesAChipTests(unittest.TestCase):
     """robins Frage 2026-08-29 nachmittags ('wieso geht vision auf einmal

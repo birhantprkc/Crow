@@ -2119,6 +2119,37 @@ class RolloverTests(unittest.TestCase):
         self.assertIn("MEMORY -- the project facts", c.payload()[0]["content"])
         self.assertEqual(c.memory, "MEMORY -- the project facts")
 
+    def test_the_terminal_roll_carries_the_goal_marks(self):
+        """#210 in the terminal: with the real `prompt_head` and a bound root
+        (goal.json under `<root>/.crow/`, as in the 2026-09-22 session), the
+        head after the roll names each step's status and the next one -- the
+        same seam head the window and the mid-turn roll send."""
+        root = os.path.join(self.dir, "work")
+        os.makedirs(root)
+        real_dir = crow_core.SESSION_DIR
+        crow_core.SESSION_DIR = self.dir
+        crow_core.set_root(root)
+        try:
+            crow_core.goal_start("Ship", ["read", "write", "prove"], now=1000.0)
+            crow_core.goal_step_end(0, now=1010.0)
+            c = self._conversation()
+            c.pin_memory(crow_core.prompt_head(root))
+            self.assertNotIn("[done]", c.payload()[0]["content"])
+            args = crow.build_parser().parse_args(["--base-url", "http://x/v1"])
+            with mock.patch.object(crow, "rollover_digest", return_value=""):
+                archived = crow._roll_with_digest(
+                    c, args, "crow", {"temperature": 0.0, "top_p": 1.0,
+                                      "min_p": 0.0}, 180_000, "and now?")
+            head = c.payload()[0]["content"]
+        finally:
+            crow_core.set_root(None)
+            crow_core.SESSION_DIR = real_dir
+        self.assertIsNotNone(archived)
+        self.assertIn("1. [done] read", head)
+        self.assertIn("2. [open] write", head)
+        self.assertIn("Next: step 2. write", head)
+        self.assertIn(crow_core.GOAL_SEAM_NOTE, head)
+
 
 class SessionFormatGateTests(unittest.TestCase):
     """The gate on the shared session file, before a second writer exists.

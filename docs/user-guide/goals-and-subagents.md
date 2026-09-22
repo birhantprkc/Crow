@@ -32,7 +32,9 @@ been five full prefills.
 **It outlives the context.** The head block ends with a sentence saying so, and it is true: a goal
 survives a rollover, a restart, and a window that is opened a day later on the same folder. A new
 session that finds an active goal says which one it is and how far it got, instead of leaving it
-invisible until somebody asks.
+invisible until somebody asks. At a rollover the head is re-pinned anyway, so that one head carries
+the marks — each step `[done]`, `[failed]`, `[running]` or `[open]`, plus the next open step — as
+they stood at the cut; they are not refreshed afterwards (#210).
 
 **One step runs at a time.** The local server has one slot (`-np 1`), so a store that allowed two
 `running` steps would describe a machine that does not exist. A `failed` step may be started again

@@ -1574,6 +1574,79 @@ class TheSeamKeepsTheRequestTests(TurnLoopCase):
         self.assertEqual(leg["messages"][-1]["content"], crow_core.DIGEST_ASK)
 
 
+class TheSeamSendsTheGoalItCarriesTests(TurnLoopCase):
+    """#210, Audit des Schnitts vom 2026-09-22 17:12: DER KOPF DER ERSTEN
+    ANFRAGE NACH DEM SCHNITT, nicht `prompt_head` im Reagenzglas.
+
+    Der Verdacht war "der Kopf nach dem Schnitt hat keinen Zielblock" --
+    gelesen an session.json, msg[0], 1.590 Zeichen ohne Ziel. Nachgemessen an
+    den Koerpergroessen im Engine-Log: alle 326 Zug-Anfragen nach dem Schnitt
+    (die erste 25.539 Bytes, die letzte um 17:54:30) trugen einen Kopf von
+    exakt 2.352 JSON-Bytes -- byte-genau Faehigkeiten + `goal_block(
+    include_status=True)` mit 8 [done] und Schritt 9 [running]; der Kopf
+    bewegte sich bis dahin nie. Das msg[0] in der Datei wurde erst danach
+    neu gepinnt, als das Ziel schon fort war (goal.json weg, `.crow/` um
+    17:54:13 zuletzt geaendert) -- daher Gedaechtnis, aber kein Ziel. Der
+    Schnitt war heil; diese
+    Klasse haelt ihn fest, mit gebundener Wurzel wie live -- goal.json liegt
+    unter `<root>/.crow/`, nicht im Sitzungsordner, den die aelteren Faelle
+    benutzen."""
+
+    def setUp(self):
+        super().setUp()
+        crow_core.set_root(self.work)
+        self.addCleanup(crow_core.set_root, None)
+        real = crow_core.urllib.request.urlopen
+        self.addCleanup(setattr, crow_core.urllib.request, "urlopen", real)
+        crow_core.urllib.request.urlopen = self._digest_leg
+
+    def _digest_leg(self, request, timeout=None):
+        answer = json.dumps({"choices": [{"finish_reason": "stop", "message": {
+            "content": "state: the work stands where the transcript ends. " * 8}}]})
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+        return _Resp(answer.encode("utf-8"))
+
+    def _goal_two_of_three_done(self):
+        crow_core.goal_start("Ship the thing",
+                             ["read the code", "write it", "prove it"], now=1000.0)
+        crow_core.goal_step_end(0, now=1010.0)
+        crow_core.goal_step_end(1, now=1020.0)
+        crow_core.goal_step_begin(2, now=1021.0)
+
+    def _first_head_after_the_cut(self):
+        talk = self.conversation()
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))],
+                   {"prompt_n": 95, "predicted_n": 0})
+        self.serve([{"content": "carrying on"}], {"prompt_n": 1, "predicted_n": 0})
+        result = self.turn(talk, n_ctx=100, rollover_at=0.9, carry="go on")
+        self.assertTrue(result.rolled, "the seam was never crossed")
+        return self.bodies[0]["messages"][0]["content"], \
+            self.bodies[1]["messages"][0]["content"]
+
+    def test_the_first_request_after_the_cut_carries_the_marks(self):
+        self._goal_two_of_three_done()
+        self.assertTrue(crow_core.goal_path().startswith(
+            os.path.join(self.work, crow_core.ROOT_MARKER)),
+            "the goal must live under the bound root, as it did live")
+        before, after = self._first_head_after_the_cut()
+        self.assertNotIn("[done]", before, "#163: no marks before the cut")
+        for line in ("1. [done] read the code", "2. [done] write it",
+                     "3. [running] prove it", "Next: step 3. prove it",
+                     crow_core.GOAL_SEAM_NOTE):
+            self.assertIn(line, after)
+
+    def test_without_a_goal_the_seam_adds_no_goal_block(self):
+        """NEGATIV: kein Ziel, kein Block -- der Kopf erfindet keins."""
+        _, after = self._first_head_after_the_cut()
+        self.assertNotIn("Active goal:", after)
+
+
 class ReportedNotRunTests(TurnLoopCase):
     """The operating mode this stage added, and the gate for the CLI change.
 
@@ -11930,6 +12003,93 @@ class TheRolloverCarriesADigestTests(unittest.TestCase):
         note = crow_core.message_text(conversation.payload()[-1]["content"])
         self.assertIn(crow_core.DIGEST_FAILED, note)
         self.assertNotIn(crow_core.DIGEST_HEAD, note)
+
+    # -- #210: der Deckel ist kein Schlusspunkt ----------------------------
+
+    # Die Form des Live-Digests vom 2026-09-22 17:12 (finish=length, 2000 von
+    # 2000 Tokens, 6.795 Zeichen): ganze Zeilen, dann ein Punkt, der mitten im
+    # Backtick abbricht.
+    _CAPPED = ("# The Silicon Foundry -- state as of the cut\n"
+               "## Open steps\n"
+               "4. Prove water is visible: the sea plane must sit at the true "
+               "shoreline, and a readable waterfall must appear at the lip.\n"
+               "5. Then step 11's other content, the grading pass and the "
+               "report.\n"
+               "## The two tool bugs that keep costing correctness\n"
+               "- **`")
+
+    def _capped(self, finish="length", text=None, transport=None):
+        seen = self._serve_seq([{"choices": [{
+            "message": {"content": self._CAPPED if text is None else text},
+            "finish_reason": finish}]}] if transport is None else
+            [{"content": [{"type": "text",
+                           "text": self._CAPPED if text is None else text}],
+              "stop_reason": finish}])
+        out = crow_core.rollover_digest(
+            self._conversation(), base_url="http://127.0.0.1:1/v1",
+            temperature=1.0, top_p=0.95, min_p=0.01, transport=transport)
+        return out, seen
+
+    def test_a_capped_digest_says_it_was_cut(self):
+        """#210 POSITIV: die halbe Zeile faellt, die ganzen bleiben, und der
+        Satz nennt den Deckel, den die Leg geschickt hat -- live 2000."""
+        out, seen = self._capped()
+        cap = seen[0]["max_tokens"]
+        self.assertTrue(out.endswith(
+            crow_core.DIGEST_TRUNCATED.format(cap=cap)), out)
+        self.assertIn("[digest cut off at the %d-token cap" % cap, out)
+        self.assertIn("## The two tool bugs that keep costing correctness", out)
+        self.assertNotIn("- **`", out, "the unfinished line rode across")
+        self.assertEqual(len(seen), 1,
+                         "a capped answer is state, not a reason to ask again")
+
+    def test_the_messages_dialect_names_its_cap_too(self):
+        """Der Anthropic-Dialekt sagt `max_tokens`, nicht `length`."""
+        out, _ = self._capped(finish="max_tokens",
+                              transport=crow_core.TRANSPORT_MESSAGES)
+        self.assertIn("[digest cut off at the", out)
+
+    def test_a_finished_digest_carries_no_cut_line(self):
+        """NEGATIV: finish=stop ist fertig -- kein Satz, der einen Schnitt
+        behauptet, den es nicht gab, und die Zeilen bleiben, wie sie kamen."""
+        text = self._CAPPED.replace("- **`", "- read_image caches by size+mtime.")
+        out, _ = self._capped(finish="stop", text=text)
+        self.assertEqual(out, text.strip())
+        self.assertNotIn("[digest cut off", out)
+
+    def test_one_long_capped_paragraph_stays_whole_and_marked(self):
+        """Ohne Umbruch gibt es keine letzte ganze Zeile -- der Absatz bleibt,
+        der Satz dahinter sagt trotzdem, dass er gekappt ist."""
+        text = "state: the island renders and the water is wired " * 6 + "but"
+        out, _ = self._capped(text=text)
+        self.assertTrue(out.startswith(text.strip()))
+        self.assertIn("[digest cut off at the", out)
+
+    def test_a_cap_that_ate_the_thinking_is_still_a_failure(self):
+        """#205 bleibt: vom Deckel gekoepftes Denken ist kein gekappter
+        Zustandsbericht, sondern Scheitern -- gewaschen wird VOR der Kappung."""
+        out, _ = self._capped(text="<think>" + "weighing the plan. " * 40)
+        self.assertEqual(out, crow_core.DIGEST_FAILED)
+
+    def test_the_cut_line_rides_inside_the_note(self):
+        """Der Satz steht unter der Ueberschrift des Modells, vor dem
+        Schlusssatz -- das Modell liest ihn dort, wo es den Digest liest."""
+        out, _ = self._capped()
+        conversation = self._conversation()
+        path = os.path.join(self.dir, "rollover-capped.json")
+        crow_core.roll_over(conversation, "http://127.0.0.1:1/v1", 1000,
+                            carry="weiter", path=path, digest=out)
+        note = crow_core.message_text(conversation.payload()[-1]["content"])
+        self.assertIn(crow_core.DIGEST_HEAD, note)
+        self.assertLess(note.index("[digest cut off at the"),
+                        note.index(crow_core.ROLLOVER_NOTE_END))
+
+    def test_the_ask_names_a_length_the_cap_can_hold(self):
+        """Beide Fragen nennen die Laenge -- das Modell kannte den Deckel
+        nicht und schrieb 2000 Tokens Markdown. Ob es sich daran haelt, ist
+        UNGEMESSEN; die Suite prueft nur, dass die Zahl ankommt."""
+        for ask in (crow_core.DIGEST_ASK, crow_core.DIGEST_ASK_RETRY):
+            self.assertIn("under 500 words", ask)
 
 
 class TheDigestLegSpeaksTheTurnsDialectTests(unittest.TestCase):

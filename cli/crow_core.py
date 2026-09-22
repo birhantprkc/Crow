@@ -3219,7 +3219,8 @@ DIGEST_ASK = (
     "[This conversation is about to be archived and reset. For the fresh "
     "context that follows, state in plain text: the current state, the "
     "decisions taken with their reasons, and the concrete open steps. "
-    "No tool calls. Be dense -- every line must still be true after the cut.]")
+    "No tool calls. Stay under 500 words: a longer answer is cut off. "
+    "Be dense -- every line must still be true after the cut.]")
 
 # #210. DIE EINEN WIEDERHOLUNG. Gemessen am 2026-09-22 in robins Test: die Leg
 # schickt die Werkzeugtabelle mit (sie muss, siehe Rumpf -- der warme Praefix
@@ -3236,8 +3237,9 @@ DIGEST_ASK_RETRY = (
     "[This conversation is about to be archived and reset. Your last answer "
     "was a tool call -- this question wants TEXT, and no tool will be run for "
     "it. State in plain text: the current state, the decisions taken with "
-    "their reasons, and the concrete open steps. No tool calls. Be dense -- "
-    "every line must still be true after the cut.]")
+    "their reasons, and the concrete open steps. No tool calls. Stay under "
+    "500 words: a longer answer is cut off. Be dense -- every line must "
+    "still be true after the cut.]")
 
 # #210. DAS LAUTE SCHEITERN. Bis hier stand der Halbtruth der Leg ungeprueft
 # unter der Ueberschrift "What the model itself noted": ein abgebrochener
@@ -3246,6 +3248,40 @@ DIGEST_ASK_RETRY = (
 # Scheitern, und der Status-Kopf (#210, `goal_block`) traegt den Plan.
 DIGEST_FAILED = "[digest failed: the model did not answer in plain text]"
 DIGEST_MIN_CHARS = 200
+
+# #210. DER DECKEL IST KEIN SCHLUSSPUNKT. Gemessen am 2026-09-22, Schnitt um
+# 17:12 (Engine-Log 15:12:55Z): die Leg lief mit finish=length, generated
+# 2000 von 2000 -- der #205-Boden --, und der Digest endete nach 6.795 Zeichen
+# mitten in einem Aufzaehlungspunkt ("## The two tool bugs ... - **`"). Die
+# Leg wiederholte nur bei einem Tool-Call; ein gekappter Text war >= 200
+# Zeichen und ging als VOLLSTAENDIGE Erwaegung des Modells ueber den Schnitt.
+# KEINE WIEDERHOLUNG dafuer, anders als beim Tool-Call: der gekappte Text IST
+# Zustand (6,8k Zeichen echter Plan), eine zweite Frage kostete noch einmal
+# ~40 s Decode (2000 Tokens bei 50 tok/s, gemessen), waehrend der Roll
+# wartet, und warf das Vorhandene fuer eine Hoffnung weg. Stattdessen: die
+# halbe letzte Zeile faellt, und der Satz sagt, dass und wo gekappt wurde --
+# das Modell weiss danach, dass hinter der letzten Zeile noch etwas stand und
+# wo es liegt (das Transkript steht zwei Zeilen hoeher in derselben Notiz).
+# Die Frage nennt den Deckel jetzt selbst ("under 500 words", oben): 500
+# Woerter passen in den 2000er-Boden auch dann, wenn gedacht wird --
+# UNGEMESSEN, das kann nur ein Live-Schnitt zeigen.
+DIGEST_TRUNCATED = ("[digest cut off at the {cap}-token cap -- the unfinished "
+                    "last line was dropped; the transcript holds the rest]")
+# chat_completions sagt "length", der Messages-Dialekt "max_tokens".
+DIGEST_CAPPED = ("length", "max_tokens")
+
+
+def _digest_trim(text: str, cap: int) -> str:
+    """#210: ein gekappter Digest endet an seiner letzten ganzen Zeile und
+    SAGT, dass er gekappt ist.
+
+    Die halbe Zeile faellt nur, wenn davor noch ein Zustandsbericht steht
+    (DIGEST_MIN_CHARS) -- ein einziger langer Absatz ohne Umbruch bleibt
+    ganz stehen, der Satz dahinter markiert den Schnitt trotzdem."""
+    cut = text.rfind("\n")
+    if cut >= 0 and len(text[:cut].rstrip()) >= DIGEST_MIN_CHARS:
+        text = text[:cut].rstrip()
+    return text + "\n" + DIGEST_TRUNCATED.format(cap=cap)
 
 
 def _digest_block(digest: str) -> str:
@@ -3424,6 +3460,9 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
             # beiden Werte -- der Boden lebt von der Messung oben.
             "max_tokens": max(ROLLOVER_DIGEST_TOKENS,
                               ROLLOVER_DIGEST_MIN_TOKENS)}
+    # #210: der Deckel, den die Kappungszeile nennt -- vor `anthropic_body`
+    # gelesen, das den Koerper in seinen Dialekt umschreibt.
+    cap = body["max_tokens"]
     if model:
         body["model"] = model
     if top_k is not None:
@@ -3522,6 +3561,11 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
     text = _strip_think(text).strip()
     if len(text) < DIGEST_MIN_CHARS:
         return DIGEST_FAILED
+    # #210: GEKAPPT IST NICHT FERTIG -- siehe DIGEST_TRUNCATED. Nach dem
+    # Waschen geprueft, damit ein vom Deckel gekoepftes Denken (#205) weiter
+    # als Scheitern zaehlt und nicht als gekappter Zustandsbericht.
+    if finish in DIGEST_CAPPED:
+        return _digest_trim(text, cap)
     return text
 
 
