@@ -563,6 +563,46 @@ def render_scope_prefix() -> list[str]:
     return _user_scope_prefix(render_memory_bounds())
 
 
+def devtools_pipe() -> "tuple[list[str], tuple[int, int], int, int] | None":
+    """The two pipes of `--remote-debugging-pipe`, or None where they cannot be had (#213).
+
+    Chromium reads DevTools commands from fd 3 and writes answers to fd 4 --
+    the transport puppeteer's and playwright's `pipe` launch use. Returns
+    (argv prefix, fds for Popen's pass_fds, our write end, our read end);
+    the caller closes the pass_fds pair after Popen and its own pair when
+    the render is over.
+
+    A SHELL TRAMPOLINE AND NOT preexec_fn: the GUI calls render_page from a
+    worker thread, and preexec_fn is documented unsafe with threads. The
+    child ends are lifted to fds >= 10 first, because `exec 3<&3 3<&-`
+    closes what it just placed -- measured 2026-09-22: a fresh os.pipe()
+    hands out fd 3, and the browser then logged "Remote debugging pipe file
+    descriptors are not open". The prefix goes AFTER the scope prefix: sh
+    execs the browser in place, so the pid the scope holds is the browser.
+
+    None on Windows: there the pipe needs handle inheritance through
+    --remote-debugging-io-pipes, which nobody has measured here; the caller
+    keeps the command-line screenshot path.
+    """
+    if IS_WINDOWS:
+        return None
+    import fcntl
+
+    def lifted(fd: int) -> int:
+        high = fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 10)
+        os.close(fd)
+        return high
+
+    child_in, ours_out = os.pipe()
+    ours_in, child_out = os.pipe()
+    child_in, ours_out, ours_in, child_out = (
+        lifted(child_in), lifted(ours_out), lifted(ours_in), lifted(child_out))
+    sh = shutil.which("sh") or "/bin/sh"
+    prefix = [sh, "-c", 'exec "$@" 3<&%d 4>&%d %d<&- %d>&-'
+              % (child_in, child_out, child_in, child_out), "sh"]
+    return prefix, (child_in, child_out), ours_out, ours_in
+
+
 def kill_pid(pid) -> bool:
     """Ask the process with this pid to end. True when the ask went out.
 

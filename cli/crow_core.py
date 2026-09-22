@@ -837,7 +837,10 @@ TOOLS = [
         "-- render the build_bundle output, not the module source page.",
         {"path": dict(_STR, description="A file in the working area, or an http(s) URL."),
          "wait_ms": {"type": "integer",
-                     "description": "How long the page may take to settle. Default 4000."},
+                     "description": "How long the page runs after loading before the "
+                                    "screenshot, in real milliseconds. Default 4000, "
+                                    "max 20000. A larger value never rescues a page "
+                                    "too heavy to draw -- make the scene cheaper."},
          "width": {"type": "integer", "description": "Viewport width, default 1280."},
          "height": {"type": "integer", "description": "Viewport height, default 800."}},
         ["path"]),
@@ -7717,10 +7720,22 @@ def _console_lines(log_text: str, limit: int = 10) -> "list[str]":
     Seite, die "scene voxels: 10577" in die Konsole schreibt, gibt dem
     Agenten TEXTHINWEISE darauf, dass ihr Skript lief, unabhaengig davon,
     ob der Compositor den Frame geschafft hat. Rein textlich, damit die
-    Suite den Parser ohne Browser pruefen kann."""
+    Suite den Parser ohne Browser pruefen kann.
+
+    #213-NACHTRAG: OHNE DAS GCM-RAUSCHEN DES PROFILS. Im Lauf vom 2026-09-22
+    standen "Registration response error" und "Failed to log in to GCM"
+    zwischen den Zeilen, die das Modell als Beweis bekommt -- sie kommen aus
+    google_apis/gcm, nie aus der Seite. Kein Schalter bringt sie verlaesslich
+    zum Schweigen (gemessen, je 1 Lauf: ohne 3, --disable-background-networking
+    3, dazu --disable-sync 5, dazu --disable-features=PushMessaging,... 1
+    Zeile), also bleiben sie hier am Kopf haengen, bevor der gekuerzt wird.
+    Dasselbe fuer die Klagen des Rohrs selbst (devtools_pipe_handler), falls
+    ein Browser beim Schliessen noch liest: Crows Leitung, nicht die Seite."""
     out = []
     for line in log_text.splitlines():
         stripped = line.strip()
+        if ":google_apis/" in stripped or "devtools_pipe_handler" in stripped:
+            continue
         if "CONSOLE" in stripped or ":ERROR:" in stripped:
             out.append(_CHROME_LOG_HEAD.sub("", stripped))
     return out[-limit:] if limit else out
@@ -7844,10 +7859,21 @@ def _capture_warnings(previous: "bytes | None", current: bytes,
     koennte, und byte-gleich mit NICHTS ist kein Verdacht."""
     warns: list[str] = []
     share = _png_dominant_share(current)
-    if share is not None and share >= _BLANK_SHARE:
+    # #213-NACHTRAG: EINE FARBE IST LEER, FAST EINE FARBE IST NUR FAST. Eine
+    # Zeile Text auf weissem Grund liegt ueber der Schwelle (gemessen,
+    # Seite mit "SETTLED" in 1280x720: 99,96 % Weiss, Referenz-Dekoder ueber
+    # jedes Pixel: 99,959 %) und bekam dasselbe "no-signal" wie ein Fang, in
+    # dem die Leinwand nie gezeichnet hat (4.718 B, 100,0 % #060912). Die
+    # zweite Form sagt, was die Zahl hergibt: wenig drauf -- nicht nichts.
+    if share is not None and share >= 1.0:
         warns.append("warn: this capture looks blank \u2014 %.1f%% of its "
                      "pixels are one colour; treat it as no-signal and rely "
                      "on the console lines" % (100.0 * share))
+    elif share is not None and share >= _BLANK_SHARE:
+        warns.append("warn: this capture is almost one colour \u2014 %.2f%% "
+                     "of its pixels; a line of text fits that, a drawn scene "
+                     "does not -- if you expected one, it did not reach the "
+                     "screenshot" % (100.0 * share))
     if previous is not None and current == previous:
         warns.append("warn: this capture is byte-identical to the previous "
                      "one \u2014 animated/canvas content is probably NOT "
@@ -7899,6 +7925,180 @@ def _render_dir() -> str:
     out = os.path.join(base, "renders")
     os.makedirs(out, exist_ok=True)
     return out
+
+
+# #213-NACHTRAG (2026-09-22): EIN BUDGET, DAS SICH EINHALTEN LAESST. Im Lauf
+# vom 2026-09-22 kamen 9 von 11 Renders der Diorama-Seite ohne Bild zurueck,
+# bei wait_ms 4000 bis 20000 -- und das Modell drehte wait_ms hoch, bis es
+# sich am Ende selbst einen Chromium ueber run_command baute (220 Aufrufe).
+# GEMESSEN, Chromium 152, dieselbe Seite, Kommandozeilen-Screenshot mit
+# --virtual-time-budget, swiftshader-Arm:
+#   Budget 1000 / 2000 / 4000 ms  ->  32,7 / 32,8 / 32,8 s Wandzeit
+# FLACH: die virtuelle Uhr ist gar nicht der Posten. Die Zeit geht in die
+# Frames, 0,345 s echte Zeit je Frame in Software, rund 90 davon, bevor der
+# Kommandozeilen-Pfad zeichnet -- und das Zeitfenster war wait/1000 + 8, also
+# 12 s bei 4000 und 28 s bei 20000. Ein hoeheres wait_ms konnte NIE helfen.
+# Der angle-Arm brauchte fuer dasselbe 1,5 s, und dort lief unter der
+# virtuellen Uhr kein einziger rAF-Frame (die Probe der Seite zaehlte keinen).
+#
+# DARUM WARTET DER RENDER JETZT IN ECHTER ZEIT UND FAENGT AUF DEN TERMIN:
+# ueber --remote-debugging-pipe (dieselbe Leitung, mit der puppeteer und
+# playwright ihren Browser fahren) laedt die Seite, laeuft wait_ms ECHTE
+# Millisekunden, und dann wird Page.captureScreenshot gerufen -- was die
+# Seite bis dahin gezeichnet hat, kommt zurueck. Gemessen auf derselben Seite
+# (Software, wait 4000): Last 1,65 s, Fang bei 6,6 s, 230 KB, ~11 Frames; die
+# endlos animierende Variante gleich schnell -- auf dem alten Pfad kam sie
+# einmal nach 31 s und einmal gar nicht (40-s-Deckel, kein Bild).
+#
+# DREI FENSTER, UND KEINES WAECHST MIT DEM ANDEREN: Laden, wait_ms, ein Frame.
+# Die Summe ist der harte Deckel des ganzen Aufrufs.
+RENDER_LOAD_S = 15          # bis zum load-Ereignis, danach wird trotzdem gefangen
+RENDER_CAPTURE_S = 10       # fuer den EINEN Frame des Fangs (Software: ~0,8 s gemessen)
+RENDER_WAIT_MAX_MS = 20000  # echte Zeit; mehr kauft keinen Frame, nur Warten
+
+
+def _render_stall_advice(gl: str, wait: int) -> str:
+    """#213-NACHTRAG: WAS DAS MODELL NACH EINEM FEHLGESCHLAGENEN FANG TUN SOLL,
+    in einem Satz, der den Arm nennt. Der alte Satz ("timed out after 12000
+    ms") las sich wie "gib mehr Zeit" -- und genau das hat das Modell von 6000
+    ueber 12000 auf 20000 getrieben. Rein textlich, damit die Suite ihn gegen
+    Eskalationswoerter pruefen kann."""
+    arm = ("the GPU rasterer (angle)" if gl == "angle"
+           else "the software rasterer (swiftshader)")
+    return ("The page (wait_ms %d) could not deliver a frame in time in %s. "
+            "A larger wait_ms will NOT help -- it only delays the capture; a "
+            "lower one returns sooner. The page is too heavy for this "
+            "rasterer or its main thread is blocked: render it cheaper (fewer "
+            "draw calls, a smaller canvas, stop the animation loop after a few "
+            "frames), check for an endless loop, and read the console lines "
+            "below." % (wait, arm))
+
+
+class _Devtools:
+    """Ein CDP-Gespraech ueber die zwei Rohre von --remote-debugging-pipe.
+
+    #213-NACHTRAG. Das Protokoll auf dem Rohr ist JSON, je Nachricht mit
+    einem NUL-Byte abgeschlossen -- nichts weiter, keine Bibliothek. Jedes
+    Warten hat einen Termin (monotone Uhr), und ein geschlossenes Rohr ist
+    eine Antwort (`None`), keine Ausnahme: ein toter Browser muss als Grund
+    ankommen, nicht als Traceback."""
+
+    def __init__(self, to_fd: int, from_fd: int) -> None:
+        self.to_fd, self.from_fd = to_fd, from_fd
+        self.buf = b""
+        self.last = 0
+        self.closed = False
+
+    def send(self, method: str, params: "dict | None" = None,
+             session: "str | None" = None) -> int:
+        self.last += 1
+        msg: dict = {"id": self.last, "method": method, "params": params or {}}
+        if session:
+            msg["sessionId"] = session
+        try:
+            os.write(self.to_fd, json.dumps(msg).encode("utf-8") + b"\0")
+        except OSError:
+            self.closed = True
+        return self.last
+
+    def wait_for(self, match: "Callable[[dict], bool]",
+                 until: float) -> "dict | None":
+        import select as _select
+        while True:
+            while b"\0" in self.buf:
+                raw, self.buf = self.buf.split(b"\0", 1)
+                try:
+                    msg = json.loads(raw.decode("utf-8", errors="replace"))
+                except ValueError:
+                    continue
+                if isinstance(msg, dict) and match(msg):
+                    return msg
+            left = until - time.monotonic()
+            if self.closed or left <= 0:
+                return None
+            ready, _, _ = _select.select([self.from_fd], [], [], min(left, 0.5))
+            if ready:
+                try:
+                    chunk = os.read(self.from_fd, 1 << 20)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    self.closed = True
+                    return None
+                self.buf += chunk
+
+    def call(self, method: str, params: "dict | None" = None,
+             session: "str | None" = None,
+             until: float = 0.0) -> "dict | None":
+        wanted = self.send(method, params, session)
+        return self.wait_for(lambda m: m.get("id") == wanted, until)
+
+
+def _render_over_devtools(dt: _Devtools, url: str, w: int, h: int, wait: int,
+                          shot: str, load_s: float = RENDER_LOAD_S,
+                          capture_s: float = RENDER_CAPTURE_S) -> "tuple[bool, str]":
+    """Laden, wait ECHTE Millisekunden laufen lassen, fangen (#213-Nachtrag).
+
+    (gefangen, Grund). Der Fang kommt auch dann, wenn die Seite nie fertig
+    laedt -- dann ohne Wartezeit, denn sie lief schon `load_s` lang: das ist
+    die Aufnahme auf den Termin, die der Kommandozeilen-Pfad nicht kann.
+    Kein Fang heisst: die Seite hat binnen `capture_s` keinen Frame
+    geliefert, oder der Browser ist weg -- beides steht im Grund."""
+    t0 = time.monotonic()
+    gone = "the browser closed its devtools pipe before the capture"
+    made = dt.call("Target.createTarget", {"url": "about:blank"},
+                   until=t0 + load_s)
+    target = ((made or {}).get("result") or {}).get("targetId")
+    if not target:
+        return False, gone if dt.closed else "the browser opened no page"
+    joined = dt.call("Target.attachToTarget",
+                     {"targetId": target, "flatten": True}, until=t0 + load_s)
+    sid = ((joined or {}).get("result") or {}).get("sessionId")
+    if not sid:
+        return False, gone if dt.closed else "the browser let no one attach"
+    # DIE GROESSE GILT FUER DIE SEITE, NICHT FUERS FENSTER: ohne das bekam
+    # der Fang 1280x633 statt 1280x720 (gemessen) -- --window-size zaehlt
+    # den Rahmen mit.
+    dt.call("Emulation.setDeviceMetricsOverride",
+            {"width": w, "height": h, "deviceScaleFactor": 1, "mobile": False},
+            sid, until=t0 + load_s)
+    dt.call("Page.enable", session=sid, until=t0 + load_s)
+    went = dt.call("Page.navigate", {"url": url}, sid, until=t0 + load_s)
+    failed = ((went or {}).get("result") or {}).get("errorText")
+    if failed:
+        return False, "the page did not load: %s" % failed
+    loaded = dt.wait_for(lambda m: m.get("method") == "Page.loadEventFired"
+                         and m.get("sessionId") == sid, until=t0 + load_s)
+    if dt.closed:
+        return False, gone
+    if loaded:
+        reason = "done"
+        settle = time.monotonic() + wait / 1000.0
+        # Das Rohr wird waehrend des Wartens geleert, damit der Browser
+        # nie an einem vollen Puffer haengt.
+        dt.wait_for(lambda m: False, until=settle)
+        if dt.closed:
+            return False, gone
+    else:
+        reason = ("captured while still loading -- no load event within "
+                  "%d s" % load_s)
+        dt.call("Page.stopLoading", session=sid, until=time.monotonic() + 2)
+    asked = time.monotonic()
+    got = dt.call("Page.captureScreenshot", {"format": "png"}, sid,
+                  until=asked + capture_s)
+    data = ((got or {}).get("result") or {}).get("data")
+    if not data:
+        if dt.closed:
+            return False, gone
+        return False, ("no frame within %d s of the capture request%s"
+                       % (capture_s, "" if loaded else
+                          ", and no load event within %d s before it"
+                          % load_s))
+    import base64 as _b64
+    with open(shot, "wb") as fh:
+        fh.write(_b64.b64decode(data))
+    return True, "%s, captured %.1f s after start" % (reason,
+                                                     time.monotonic() - t0)
 
 
 def tool_render_page(path: str, wait_ms: int | None = None,
@@ -7959,6 +8159,13 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     durchgereicht, und die letzten Konsolenzeilen selbst reisen im Text mit
     -- "scene voxels: 10577" ist ein Beweis, den kein Compositor
     unterschlagen kann.
+
+    UND SEIN BUDGET LAESST SICH EINHALTEN (#213-Nachtrag, 2026-09-22). Die
+    virtuelle Uhr war nie der Posten -- Software-Frames sind es, und das
+    Zeitfenster wuchs mit wait_ms, die Kosten nicht. Wo es die Leitung gibt
+    (--remote-debugging-pipe, POSIX), laeuft die Seite wait_ms ECHTE
+    Millisekunden und wird dann gefangen, auch eine, die nie fertig laedt;
+    ein Fehlschlag nennt den Arm und sagt, dass mehr wait_ms nicht hilft.
     """
     import shutil as _shutil
     import tempfile as _tempfile
@@ -7993,7 +8200,9 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         return ("error: no Chromium browser on this machine. render_page needs "
                 "Chrome or Edge; neither was found in the usual places.")
 
-    wait = max(200, min(int(wait_ms or 4000), 60000))
+    # #213-NACHTRAG: wait_ms ist ECHTE Zeit nach dem Laden und hat einen
+    # Deckel, der kein Eskalationsraum ist (siehe RENDER_WAIT_MAX_MS).
+    wait = max(200, min(int(wait_ms or 4000), RENDER_WAIT_MAX_MS))
     w = max(200, min(int(width or 1280), 4096))
     h = max(200, min(int(height or 800), 4096))
 
@@ -8009,8 +8218,20 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     # --use-gl=angle nimmt die Karte ("ANGLE (NVIDIA ... RTX 5090, OpenGL ES
     # 3.2)") -- aber nur, wenn freie VRAM da ist, denn der Server zuerst ist
     # die Regel, nicht die Ausnahme. Die Antwort steht im Ergebnis mit dabei,
-    # weil ein Modell, das seinen Spiegel nicht kennt, ihn auch nicht
+    # weil ein Modell, das seinen Spiegel kennt, ihn auch nicht
     # bezweifeln kann.
+    #
+    # #213-NACHTRAG: DAS ETIKETT STIMMT, AUCH WENN DIE KONSOLE ANDERS KLINGT.
+    # "GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU
+    # stall due to ReadPixels" sieht nach NVIDIA aus und ist es nicht:
+    # gemessen auf einer Probeseite kommt die Zeile NUR im swiftshader-Arm
+    # (Renderer "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device ...))"),
+    # der angle-Arm auf der RTX 5090 schreibt sie nicht; der Text steht im
+    # chromium-Binary (ANGLEs eigene Performance-Warnung) und in keiner
+    # libnvidia-*. GL_CLOSE_PATH_NV ist nur der Name, den Chromiums
+    # Enum-Tabelle fuer die Meldungs-ID 0 findet. Der GPU-Prozess des
+    # Software-Arms haelt /dev/nvidiactl offen, aber keinen VRAM (nicht in
+    # nvidia-smi) -- gerastert wird in SwiftShader.
     gl = crow_platform.render_gl_mode()
     gl_flags = (["--use-gl=angle"] if gl == "angle" else
                 # #175-NACHTRAG (2026-09-20): DIE ZWEI SWIFTSHADER-SCHALTER. Bis
@@ -8036,12 +8257,25 @@ def tool_render_page(path: str, wait_ms: int | None = None,
                 ["--disable-gpu",
                  "--enable-unsafe-swiftshader", "--use-angle=swiftshader"])
 
+    # #213-NACHTRAG: DIE LEITUNG, WO ES SIE GIBT. Mit ihr faehrt Crow die
+    # Seite selbst (_render_over_devtools); ohne sie (Windows) bleibt der
+    # Kommandozeilen-Screenshot mit der virtuellen Uhr.
+    pipe = crow_platform.devtools_pipe()
     argv = [exe, "--headless=new"] + gl_flags + [
             "--hide-scrollbars",
             "--no-first-run", "--no-default-browser-check",
             "--disable-extensions", "--mute-audio",
             "--user-data-dir=" + profile,
             "--window-size=%d,%d" % (w, h),
+            # --v UND NICHT DER ALTE SCHALTER: die Verbositaet des
+            # Chromium-Loggers regelt --v, und nur mit ihr landen die
+            # CONSOLE-Zeilen der Seite im browser.log -- der TEXT-Beweis
+            # dafuer, dass ihr Skript lief (#175-Nachtrag, siehe oben).
+            "--enable-logging=stderr", "--v=0"]
+    if pipe:
+        argv += ["--remote-debugging-pipe", "about:blank"]
+    else:
+        argv += [
             # DER DECKEL IST IM BROWSER UND NICHT NUR DRAUSSEN. Eine Seite, die
             # nie fertig laedt, wuerde sonst nur vom Timeout getroffen -- und
             # das liefert KEIN Bild. Die virtuelle Uhr laesst ihn nach dieser
@@ -8058,11 +8292,6 @@ def tool_render_page(path: str, wait_ms: int | None = None,
             # ("ends the call by itself, with a reason"), und nicht der, den es
             # bebildert.
             "--run-all-compositor-stages-before-draw",
-            # --v UND NICHT DER ALTE SCHALTER: die Verbositaet des
-            # Chromium-Loggers regelt --v, und nur mit ihr landen die
-            # CONSOLE-Zeilen der Seite im browser.log -- der TEXT-Beweis
-            # dafuer, dass ihr Skript lief (#175-Nachtrag, siehe oben).
-            "--enable-logging=stderr", "--v=0",
             "--screenshot=" + shot, url]
 
     # #213. DER BROWSER IN EINEM EIGENEN DECKEL. Der Lauf vom 2026-09-21 wuchs
@@ -8072,27 +8301,65 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     # session.slice mit MemoryMax aus render_memory_bounds; alles in argv ist
     # absolut, und NUR deshalb ist das sicher: die Unit startet in $HOME, nicht
     # im cwd des Aufrufers (gemessen 2026-09-22, ein stiller ENOENT).
+    # Das Trampolin der Leitung steht HINTER dem Scope: sh ersetzt sich durch
+    # den Browser, die pid im Scope ist seine.
     scope = crow_platform.render_scope_prefix()
+    if pipe:
+        argv = pipe[0] + argv
     if scope:
         argv = scope + argv
 
+    # #213-NACHTRAG: EIN DECKEL FUER DEN GANZEN AUFRUF, UND ER HAENGT NICHT
+    # AN DER SEITE. Laden + wait_ms + ein Frame, auf beiden Pfaden dieselbe
+    # Summe -- vorher wait/1000 + 8, das auf der Diorama-Seite 12 s bei
+    # wait 4000 ergab, gegen 32,7 s echten Bedarf.
+    ceiling = RENDER_LOAD_S + wait / 1000.0 + RENDER_CAPTURE_S
+
     detach = crow_platform.spawn_kwargs(detached=True)
+    if pipe:
+        detach["pass_fds"] = pipe[1]
     reason = "done"
+    captured = False
     try:
         with open(log, "w", encoding="utf-8", errors="replace") as sink:
-            proc = subprocess.Popen(argv, stdout=sink, stderr=subprocess.STDOUT,
-                                    **detach)
             try:
-                # Das Zeitfenster ist der Deckel der Seite plus Luft fuer Start
-                # und Schreiben -- nicht der Deckel selbst, sonst schlaegt das
-                # Timeout genau in dem Moment zu, in dem gezeichnet wird.
-                # ACHT SEKUNDEN LUFT, NICHT ZWANZIG. Der Deckel gehoert der
-                # Seite; das hier ist nur der Start des Browsers und das
-                # Schreiben der Datei. Mit 20 kostete eine haengende Seite 21 s
-                # bei einem Deckel von 1,2 -- gemessen, und das ist die Sorte
-                # Wartezeit, wegen der jemand wieder anfaengt, selbst zu
-                # basteln.
-                proc.wait(timeout=wait / 1000.0 + 8)
+                proc = subprocess.Popen(argv, stdout=sink,
+                                        stderr=subprocess.STDOUT, **detach)
+            except OSError:
+                if pipe:
+                    for fd in (pipe[2], pipe[3]):
+                        os.close(fd)
+                raise
+            finally:
+                if pipe:
+                    for fd in pipe[1]:
+                        os.close(fd)
+            if pipe:
+                dt = _Devtools(pipe[2], pipe[3])
+                try:
+                    captured, reason = _render_over_devtools(
+                        dt, url, w, h, wait, shot)
+                    # Der hoefliche Weg zuerst, und das Rohr bleibt offen, bis
+                    # er gegangen ist -- sonst schreibt der Browser "Connection
+                    # terminated while reading from pipe" in den Konsolen-
+                    # schwanz (gemessen). Was danach noch lebt, trifft der
+                    # Zweig darunter wie jeden anderen Browser.
+                    dt.send("Browser.close")
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                finally:
+                    for fd in (pipe[2], pipe[3]):
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+            try:
+                # Kommandozeile: das Zeitfenster ist der ganze Deckel. Leitung:
+                # das Bild ist schon da oder nicht, hier geht es nur noch ums
+                # Aufraeumen -- fuenf Sekunden fuer ein Browser.close.
+                proc.wait(timeout=5 if pipe else ceiling)
             except subprocess.TimeoutExpired:
                 proc.kill()                          # SEIN Kind, nie ein Name
                 # UND SEINE ENKEL, auf Linux: ein Chromium startet Zonen- und
@@ -8108,11 +8375,14 @@ def tool_render_page(path: str, wait_ms: int | None = None,
                 try:
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
-                    reason = ("timed out after %d ms; the browser (pid %d) "
-                              "would not die and may still be running"
-                              % (wait, proc.pid))
+                    reason = ("%s; the browser (pid %d) would not die and may "
+                              "still be running"
+                              % (reason if pipe else "timed out after %d s"
+                                 % ceiling, proc.pid))
                 else:
-                    reason = "timed out after %d ms and was stopped" % wait
+                    if not pipe:
+                        reason = ("timed out after %d s and was stopped"
+                                  % ceiling)
             else:
                 # #213. EIN DECKEL-TOT SIEHT WIE ERFOLG AUS. Der Kernel
                 # ueberhoeht den Browser innerhalb seiner Scope-Cgroup, der
@@ -8121,7 +8391,7 @@ def tool_render_page(path: str, wait_ms: int | None = None,
                 # -9 ist das Signal des Popen-Handles, 137 (128+9) die Zahl,
                 # mit der systemd-run ihn weiterreicht.
                 code = proc.returncode
-                if scope and code is not None and code in (-9, 137):
+                if scope and code is not None and code in (-9, 137) and not captured:
                     cap = crow_platform.render_memory_bounds().get("MemoryMax")
                     reason = ("stopped by the render's memory ceiling%s -- "
                               "the scene outgrew the browser"
@@ -8134,9 +8404,16 @@ def tool_render_page(path: str, wait_ms: int | None = None,
             pass
         console = _console_lines(log_text)
         if not os.path.isfile(shot):
-            return ("error: the browser wrote no screenshot (%s). Console:\n%s"
-                    % (reason, "\n".join(_console_lines(log_text, 20))
-                       or "(empty)"))
+            # #213-NACHTRAG: DER GRUND UND DANN DER RAT, DER DEN ARM NENNT --
+            # nie "timed out after 20000 ms" allein, das las sich als "gib
+            # mehr". Ein Speicherdeckel-Tod und eine falsche Adresse haben ihre
+            # eigene Antwort und brauchen den Rat nicht.
+            advice = ("" if ("memory ceiling" in reason
+                             or "did not load" in reason)
+                      else " " + _render_stall_advice(gl, wait))
+            return ("error: the browser wrote no screenshot (%s).%s Console:\n%s"
+                    % (reason, advice,
+                       "\n".join(_console_lines(log_text, 20)) or "(empty)"))
         # #175-NACHTRAG: DAS URTEIL VOR DEM FANG. Die Bytes DIESER Datei
         # gegen den letzten Fang DIESER Seite -- byte-gleich ist ein
         # Verdachtsmoment gegen die eigenen Pixel, kein Erfolg. Die Warnung

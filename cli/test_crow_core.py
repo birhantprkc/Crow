@@ -12422,6 +12422,295 @@ class TheRenderNeverHandsOverABrokenMirrorTests(unittest.TestCase):
         self.assertIn('"console: %s" % line', self.src)
 
 
+class TheRenderBudgetCanBeMetTests(unittest.TestCase):
+    """#213-Nachtrag (2026-09-22): 9 von 11 Renders der Diorama-Seite kamen
+    ohne Bild zurueck, das Modell drehte wait_ms von 6000 auf 20000 und baute
+    sich danach selbst einen Chromium ueber run_command. Gemessen: die
+    virtuelle Uhr war nie der Posten (Budget 1000/2000/4000 -> 32,7/32,8/32,8 s
+    Wandzeit im Software-Arm), das Zeitfenster wuchs aber mit wait_ms. Die
+    Faelle hier bewachen die Leitung (--remote-debugging-pipe), den Fang auf
+    den Termin und den Satz, der nicht mehr zur Eskalation einlaedt -- alles
+    ohne echten Browser: ein Gegenueber im Thread spricht das Protokoll."""
+
+    PNG = (b"\x89PNG\r\n\x1a\n" + b"stand-in bytes for the capture")
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-cdp-t-")
+        self.shot = os.path.join(self.dir, "shot.png")
+        self.seen: list[dict] = []
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _peer(self, answer):
+        """Ein Browser-Stellvertreter: liest NUL-getrennte Befehle, fragt
+        `answer(msg)` nach der Liste der Antworten (leere Liste = Schweigen,
+        None = Rohr zu). Gibt (Devtools, Thread) zurueck."""
+        import threading as _th
+        to_r, to_w = os.pipe()
+        from_r, from_w = os.pipe()
+
+        def run():
+            buf = b""
+            try:
+                while True:
+                    chunk = os.read(to_r, 65536)
+                    if not chunk:
+                        return
+                    buf += chunk
+                    while b"\0" in buf:
+                        raw, buf = buf.split(b"\0", 1)
+                        msg = json.loads(raw)
+                        self.seen.append(msg)
+                        out = answer(msg)
+                        if out is None:
+                            return
+                        for reply in out:
+                            os.write(from_w, json.dumps(reply).encode() + b"\0")
+            finally:
+                os.close(from_w)
+                os.close(to_r)
+
+        worker = _th.Thread(target=run, daemon=True)
+        worker.start()
+        dt = crow_core._Devtools(to_w, from_r)
+        self.addCleanup(os.close, from_r)
+        self.addCleanup(os.close, to_w)
+        return dt, worker
+
+    def _browser(self, load=True, frame=True, nav_error=None, die_after=None):
+        import base64 as _b64
+
+        def answer(msg):
+            method, mid = msg.get("method"), msg.get("id")
+            if die_after and method == die_after:
+                return None
+            ok = {"id": mid, "result": {}}
+            if method == "Target.createTarget":
+                return [{"id": mid, "result": {"targetId": "T1"}}]
+            if method == "Target.attachToTarget":
+                return [{"id": mid, "result": {"sessionId": "S1"}}]
+            if method == "Page.navigate":
+                result = {"frameId": "F1"}
+                if nav_error:
+                    result["errorText"] = nav_error
+                ok = {"id": mid, "result": result, "sessionId": "S1"}
+                if load and not nav_error:
+                    return [ok, {"method": "Page.loadEventFired",
+                                 "params": {}, "sessionId": "S1"}]
+                return [ok]
+            if method == "Page.captureScreenshot":
+                if not frame:
+                    return []
+                return [{"id": mid, "sessionId": "S1", "result": {
+                    "data": _b64.b64encode(self.PNG).decode()}}]
+            return [ok]
+        return answer
+
+    def _run(self, wait=300, **browser):
+        dt, _ = self._peer(self._browser(**browser))
+        t0 = time.monotonic()
+        got = crow_core._render_over_devtools(
+            dt, "file:///x/index.html", 640, 360, wait, self.shot,
+            load_s=0.6, capture_s=0.6)
+        return got, time.monotonic() - t0
+
+    def methods(self):
+        return [m.get("method") for m in self.seen]
+
+    def test_the_page_runs_real_time_and_is_captured(self):
+        (captured, reason), took = self._run(wait=300)
+        self.assertTrue(captured, reason)
+        self.assertTrue(reason.startswith("done"), reason)
+        with open(self.shot, "rb") as fh:
+            self.assertEqual(fh.read(), self.PNG)
+        # wait_ms ist ECHTE Zeit nach dem load-Ereignis.
+        self.assertGreaterEqual(took, 0.3)
+        m = self.methods()
+        self.assertLess(m.index("Page.navigate"), m.index("Page.captureScreenshot"))
+        size = [x for x in self.seen
+                if x.get("method") == "Emulation.setDeviceMetricsOverride"][0]
+        self.assertEqual((size["params"]["width"], size["params"]["height"]),
+                         (640, 360))
+        # Keine virtuelle Uhr auf diesem Pfad: sie war nie der Posten.
+        self.assertNotIn("Emulation.setVirtualTimePolicy", m)
+
+    def test_a_page_that_never_loads_is_still_captured(self):
+        """DER FANG AUF DEN TERMIN: kein load-Ereignis, trotzdem ein Bild --
+        und ohne die Wartezeit, denn die Seite lief schon load_s lang."""
+        (captured, reason), took = self._run(wait=5000, load=False)
+        self.assertTrue(captured, reason)
+        self.assertIn("still loading", reason)
+        self.assertIn("Page.stopLoading", self.methods())
+        self.assertLess(took, 3.0, "wait_ms darf danach nicht noch laufen")
+
+    def test_no_frame_is_a_reason_and_not_a_hang(self):
+        (captured, reason), took = self._run(wait=200, frame=False)
+        self.assertFalse(captured)
+        self.assertIn("no frame within", reason)
+        self.assertFalse(os.path.exists(self.shot))
+        self.assertLess(took, 3.0)
+
+    def test_a_wedged_page_says_it_never_loaded(self):
+        """Gemessen an `while(true){}`: kein load, kein Frame -- der Grund
+        nennt beides, damit niemand es fuer eine zu schwere Szene haelt."""
+        (captured, reason), _ = self._run(wait=200, load=False, frame=False)
+        self.assertFalse(captured)
+        self.assertIn("no frame within", reason)
+        self.assertIn("no load event", reason)
+
+    def test_a_dead_browser_is_a_reason(self):
+        (captured, reason), _ = self._run(die_after="Page.enable")
+        self.assertFalse(captured)
+        self.assertIn("closed its devtools pipe", reason)
+
+    def test_a_navigation_error_is_named(self):
+        (captured, reason), _ = self._run(nav_error="net::ERR_FILE_NOT_FOUND")
+        self.assertFalse(captured)
+        self.assertIn("net::ERR_FILE_NOT_FOUND", reason)
+
+    def test_the_advice_names_the_arm_and_never_invites_more_wait(self):
+        """Der alte Satz ("timed out after 12000 ms") las sich als "gib mehr
+        Zeit" -- genau das hat das Modell von 6000 bis 20000 getrieben."""
+        soft = crow_core._render_stall_advice("swiftshader", 4000)
+        gpu = crow_core._render_stall_advice("angle", 4000)
+        self.assertIn("software rasterer (swiftshader)", soft)
+        self.assertIn("GPU rasterer (angle)", gpu)
+        for text in (soft, gpu):
+            self.assertIn("larger wait_ms will NOT help", text)
+            low = text.lower()
+            for escalation in ("increase", "raise", "longer", "higher wait",
+                               "try again with"):
+                self.assertNotIn(escalation, low)
+
+    def test_the_tool_uses_the_pipe_and_a_ceiling_that_does_not_follow_wait(self):
+        src = inspect.getsource(crow_core.tool_render_page)
+        self.assertIn("devtools_pipe", src)
+        self.assertIn("--remote-debugging-pipe", src)
+        self.assertIn("_render_over_devtools", src)
+        self.assertIn("_render_stall_advice", src)
+        self.assertNotIn("wait / 1000.0 + 8", src)
+        self.assertIn("RENDER_LOAD_S + wait / 1000.0 + RENDER_CAPTURE_S", src)
+        self.assertLessEqual(crow_core.RENDER_WAIT_MAX_MS, 20000)
+
+    def test_the_schema_says_real_time_and_no_rescue(self):
+        spec = [t for t in crow_core.TOOLS
+                if t["function"]["name"] == "render_page"][0]
+        text = spec["function"]["parameters"]["properties"]["wait_ms"]["description"]
+        self.assertIn("real milliseconds", text)
+        self.assertIn("never rescues", text)
+
+    @unittest.skipIf(sys.platform == "win32", "the pipe is POSIX-only")
+    def test_the_trampoline_puts_the_pipes_on_three_and_four(self):
+        """GEMESSEN 2026-09-22: ein frisches os.pipe() liefert fd 3, und
+        `exec 3<&3 3<&-` schliesst, was es gerade gesetzt hat -- der Browser
+        meldete "Remote debugging pipe file descriptors are not open". Hier
+        ein echter Kindprozess statt eines Browsers: er liest von 3 und
+        schreibt auf 4, was ankam."""
+        pipe = crow_platform.devtools_pipe()
+        self.assertIsNotNone(pipe)
+        prefix, pass_fds, ours_out, ours_in = pipe
+        self.assertTrue(all(fd >= 10 for fd in pass_fds + (ours_out, ours_in)))
+        echo = [sys.executable, "-c",
+                "import os; os.write(4, os.read(3, 64)[::-1])"]
+        proc = subprocess.Popen(prefix + echo, pass_fds=pass_fds,
+                                stdin=subprocess.DEVNULL)
+        for fd in pass_fds:
+            os.close(fd)
+        try:
+            os.write(ours_out, b"crow")
+            os.close(ours_out)
+            self.assertEqual(os.read(ours_in, 64), b"worc")
+            self.assertEqual(proc.wait(timeout=20), 0)
+        finally:
+            os.close(ours_in)
+
+    def test_gcm_noise_never_reaches_the_console_tail(self):
+        log = (
+            "[1:2:0922/185916.523397:ERROR:google_apis/gcm/engine/"
+            "registration_request.cc:291] Registration response error "
+            "message: DEPRECATED_ENDPOINT\n"
+            "[1:2:0922/185916.804961:ERROR:google_apis/gcm/engine/"
+            "mcs_client.cc:702]   Error code: 401  Error message: "
+            "Authentication Failed: wrong_secret\n"
+            '[1:1:0922/185916.9:INFO:CONSOLE:3] "scene voxels: 10577", '
+            "source: file:///x.html (3)\n")
+        out = crow_core._console_lines(log)
+        self.assertEqual(len(out), 1, out)
+        self.assertIn("scene voxels", out[0])
+
+    # -- der Farben-Anteil, gegen einen echten mehrfarbigen PNG ------------
+
+    @staticmethod
+    def _filtered(rows, filters, bpp):
+        """Ein unabhaengiger ENCODER nach PNG-Spezifikation 9.2: jede Zeile
+        mit ihrem Filter (0-4) abgelegt. So prueft der Fall Average und Paeth
+        -- die zwei Arme, die die bisherigen Faelle nicht erreichten."""
+        out, prev = [], bytes(len(rows[0]))
+        for row, f in zip(rows, filters):
+            enc = bytearray()
+            for i, x in enumerate(row):
+                a = row[i - bpp] if i >= bpp else 0
+                b = prev[i]
+                c = prev[i - bpp] if i >= bpp else 0
+                if f == 0:
+                    p = 0
+                elif f == 1:
+                    p = a
+                elif f == 2:
+                    p = b
+                elif f == 3:
+                    p = (a + b) >> 1
+                else:
+                    q = a + b - c
+                    pa, pb, pc = abs(q - a), abs(q - b), abs(q - c)
+                    p = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                enc.append((x - p) & 255)
+            out.append(bytes(enc))
+            prev = row
+        return out
+
+    def test_a_multi_colour_capture_decodes_to_its_true_share_under_all_filters(self):
+        """Der Lead-Befund vom 2026-09-22 ("100 % eine Farbe" auf einem Fang
+        mit beleuchteter Voxel-Szene) liess sich an den Dateien NICHT
+        nachstellen: der 271.446-B-Fang ergibt 0,3287 (Referenz ueber jedes
+        Pixel: 0,3288), die 100 % gehoeren dem 4.718-B-Fang daneben, der
+        wirklich eine Flaeche #060912 ist. Dieser Fall haelt den Dekoder
+        fest: ein Bild aus vielen Farben, jede Zeile mit einem anderen Filter,
+        muss genau den Anteil ergeben, den die rohen Pixel haben."""
+        w, h, bpp = 40, 10, 3
+        rows = []
+        for y in range(h):
+            row = bytearray()
+            for x in range(w):
+                if x < 24:                       # ruhiger Grund: 24 von 40
+                    row += b"\x06\x09\x12"
+                else:                            # Szene: jede Zelle anders
+                    row += bytes(((x * 37 + y * 11) % 256, (x * y) % 256,
+                                  (200 + x - y) % 256))
+            rows.append(bytes(row))
+        filters = [y % 5 for y in range(h)]
+        png = TheRenderNeverHandsOverABrokenMirrorTests._png(
+            w, h, self._filtered(rows, filters, bpp), filters, colour=2)
+        share = crow_core._png_dominant_share(png)
+        self.assertAlmostEqual(share, 24 / 40, places=6)
+        self.assertEqual(crow_core._capture_warnings(None, png, []), [])
+
+    def test_almost_one_colour_is_not_called_blank(self):
+        """Eine Zeile Text auf weissem Grund: 99,96 % Weiss (gemessen). Das
+        ist wenig -- aber nicht no-signal, und der Satz sagt das."""
+        w, h = 100, 20
+        rows = [b"\xff" * (w * 3) for _ in range(h)]
+        rows[5] = b"\x00\x00\x00" + b"\xff" * (w * 3 - 3)   # 1 Pixel von 2000
+        png = TheRenderNeverHandsOverABrokenMirrorTests._png(
+            w, h, rows, [0] * h, colour=2)
+        warns = crow_core._capture_warnings(None, png, [])
+        self.assertEqual(len(warns), 1, warns)
+        self.assertTrue(warns[0].startswith(
+            "warn: this capture is almost one colour"), warns)
+        self.assertNotIn("no-signal", warns[0])
+
+
 class TheModelCanLookAtAnImageTests(unittest.TestCase):
     """#170. Das Werkzeug, mit dem das Modell selbst ein Bild aufmacht.
 

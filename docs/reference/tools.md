@@ -24,20 +24,40 @@ own class.
 | target | a file in the working area, or an `http(s)` URL |
 | output | `<root>/.crow/renders/render-<stamp>.png`, plus the console lines from stderr |
 | isolation | its own `--user-data-dir` per run. Without it Chrome hands the job to a running instance and returns exit 0 with no screenshot |
-| caps | `--virtual-time-budget` in the page, `wait_ms/1000 + 8 s` on the process |
-| kill | `proc.kill()` on its own handle. Never by name, never a process list (#158) |
-| pipes | none. stdout and stderr go to a file: `communicate()` hangs on Windows after a kill when a grandchild holds the write end |
+| driving (Linux) | `--remote-debugging-pipe` (fd 3/4, NUL-separated CDP JSON, no library): load, run `wait_ms` **real** milliseconds, `Page.captureScreenshot`. A page with no load event after 15 s is captured anyway |
+| driving (Windows) | the command-line `--screenshot` with `--virtual-time-budget=wait_ms`; the pipe there needs handle inheritance nobody has measured yet |
+| `wait_ms` | real time after load, 200–20,000. A larger value never rescues a page too heavy to draw |
+| caps | one ceiling for the whole call: 15 s load + `wait_ms` + 10 s for the frame. It does not grow with anything the page does |
+| rasterer | `gpu (angle)` when the card has ≥ 512 MiB free, else `software (swiftshader)`; named in every result |
+| memory | Linux: its own user scope, `MemoryMax=6G`, swap 0 (#213) |
+| kill | `proc.kill()` on its own handle, then its session. Never by name, never a process list (#158) |
+| pipes | stdout and stderr go to a file: `communicate()` hangs on Windows after a kill when a grandchild holds the write end. The two DevTools pipes are Crow's own ends, read with `select` and a deadline |
 
-Measured 2026-08-31, Chrome 151.0.7922.175:
+A failed capture says which rasterer ran and that a larger `wait_ms` will not help —
+the old `timed out after 20000 ms` read as "give it more", and a model escalated
+6000 → 12000 → 20000 on a page whose cost did not depend on it.
+
+Measured 2026-09-22, Chromium 152.0.7977.82, RTX 5090 free:
 
 | case | wall clock | result |
 |---|---|---|
-| page settling at 300 ms, `wait_ms=1500` | 0.5 s | screenshot shows the settled text |
-| page settling at 3 s, `wait_ms=6000` | 0.5 s | not killed; the virtual clock runs the page forward |
-| endless `fetch`, `wait_ms=1200` | 9.3 s | `error: the browser wrote no screenshot (timed out after 1200 ms and was stopped)` |
+| WebGL voxel diorama (23k voxels), software, old path, virtual budget 1000 / 2000 / 4000 | 32.7 / 32.8 / 32.8 s | flat: 0.345 s per software frame, ~90 frames before the CLI draws. The old deadline was 9 / 10 / 12 s |
+| same page, software, `wait_ms=4000` | 6.9 s | 1280×720 capture of the scene |
+| same page, GPU, `wait_ms=4000` | 5.7 s | capture; the page's own 90-frame loop settled |
+| same page with an endless animation loop, software, `wait_ms=20000` | 22.8 s | capture (old path: once 31 s, once no image in 40 s) |
+| page settling at 300 ms, `wait_ms=1500` | 1.8 s | settled text; "almost one colour" note (99.96 % white) |
+| endless `fetch` loop, `wait_ms=1200` | 1.5 s | capture (old path, measured 2026-08-31: no image after 9.3 s) |
+| `while(true){}` | 25.1 s | `error: ... no frame within 10 s of the capture request, and no load event within 15 s before it` plus the rasterer advice |
 
-`--run-all-compositor-stages-before-draw` does **not** rescue the hanging page. The result opens
-as a tab in the [browser panel](../user-guide/browser.md).
+Under the old virtual clock the GPU arm drew **no** `requestAnimationFrame` frame at all
+(a page-side counter stayed below 10 while the budget ran out in ~10 ms of real time);
+real time is what an animated page actually needs.
+
+The console line `GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU
+stall due to ReadPixels` comes from Chromium's bundled ANGLE, not from the NVIDIA driver:
+measured, it appears only in the SwiftShader arm, and the string is in the `chromium`
+binary and in no `libnvidia-*`. The result opens as a tab in the
+[browser panel](../user-guide/browser.md).
 
 ### `build_bundle` (#212)
 
