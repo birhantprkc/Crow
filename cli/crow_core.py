@@ -112,6 +112,8 @@ DEFAULT_MODEL = "crow"
 # of the prefix: a session saved in one directory would then be worthless when
 # resumed from another. `list_dir` with no argument answers the same question
 # and costs one round only when the model actually needs it.
+# #222: the working area now travels in the PINNED HEAD instead
+# (`working_area_line`) -- per chat, like its memory, never in this string.
 DEFAULT_SYSTEM = (
     "You are Crow, a local coding assistant. You have tools to read, write, "
     "search and run commands -- look instead of guessing paths. "
@@ -7781,10 +7783,47 @@ def prompt_head(root: "str | None" = None,
     #210. `include_status` NUR VOM SCHNITT gesetzt: derselbe Kopf, einmal mit
     den Marken des Schnittzeitpunkts (siehe `goal_block`). Zwei Stellen
     rufen das -- repin nach `roll_over`, beide Oberflaechen.
+
+    #222: the working area opens the head (`working_area_line`).
     """
-    parts = [p for p in (memory_block(root), skill_block(),
+    here = get_root() if root is None else root
+    parts = [p for p in (working_area_line(here), memory_block(root),
+                         skill_block(),
                          goal_block(include_status=include_status)) if p]
     return "\n\n".join(parts)
+
+
+# #222. THE HEAD NAMES THE WORKING AREA, on every request.
+# Measured 2026-09-22 (crow-nest #91, replay point K=2 of the diorama session):
+# the first request after the 17:12 rollover carried base prompt + skills + the
+# goal block + the note -- no working directory anywhere in the 6,738 prompt
+# tokens. The model's first call invented one: the home directory with one
+# wrong digit (`nibor11896`) plus `/work/git/work-portfolio`, and under greedy
+# the wrong digit was the argmax (logprob -0.013 against -4.41 for the right
+# one); the rest of the path appears nowhere in the context. Before the cut the root had
+# only ever reached the model through tool results, and the cut drops those.
+#
+# IN THE PINNED HEAD, NOT IN DEFAULT_SYSTEM, and that keeps the rule written
+# there: the base prompt stays the same for every folder, while the head is
+# already per chat (`memory_block` reads the same root) and is re-pinned
+# exactly when the root moves (`_bind_root`) and at the cut (`repin_head`).
+# FIRST in the head: it is a fact, the order is facts before actions, and in
+# first place it sits inside the common prefix of the heads before and after
+# the cut -- the goal marks (#210) only change what comes behind it.
+#
+# A CHAT WITHOUT A ROOT GETS NO LINE, so its head stays byte-identical to what
+# it was before this change -- and a sentence about where relative paths land
+# without a boundary would be a claim this file has not measured.
+WORKING_AREA_LINE = ("Working area: {root}\n"
+                     "Relative paths and a run_command without cwd resolve "
+                     "here. Use this exact path; do not retype it from memory.")
+
+
+def working_area_line(root: "str | None") -> str:
+    """#222: the head's working-area block, or "" without a root."""
+    if not root:
+        return ""
+    return WORKING_AREA_LINE.format(root=root)
 
 
 def system_with_memory(system: "str | None", block: "str | None") -> "str | None":

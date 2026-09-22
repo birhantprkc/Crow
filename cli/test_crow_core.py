@@ -1946,8 +1946,11 @@ class TheSeamSendsTheGoalItCarriesTests(TurnLoopCase):
         crow_core.goal_step_end(1, now=1020.0)
         crow_core.goal_step_begin(2, now=1021.0)
 
-    def _first_head_after_the_cut(self):
+    def _first_head_after_the_cut(self, pinned: bool = False):
         talk = self.conversation()
+        if pinned:
+            # as live: both surfaces pin the head once the root is bound
+            talk.pin_memory(crow_core.prompt_head())
         self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))],
                    {"prompt_n": 95, "predicted_n": 0})
         self.serve([{"content": "carrying on"}], {"prompt_n": 1, "predicted_n": 0})
@@ -1972,6 +1975,55 @@ class TheSeamSendsTheGoalItCarriesTests(TurnLoopCase):
         """NEGATIV: kein Ziel, kein Block -- der Kopf erfindet keins."""
         _, after = self._first_head_after_the_cut()
         self.assertNotIn("Active goal:", after)
+
+    def test_the_k2_head_names_the_working_area(self):
+        """#222, crow-nest #91 K=2: the first request after the cut
+        carried base + skills + goal marks + the note and no working directory
+        at all, and the model invented a cwd. The same shape here -- goal
+        running, root bound -- must name the root in the head."""
+        self._goal_two_of_three_done()
+        _, after = self._first_head_after_the_cut()
+        self.assertIn(crow_core.working_area_line(self.work), after)
+        self.assertIn("Working area: %s\n" % self.work, after)
+        self.assertIn("3. [running] prove it", after,
+                      "the K=2 shape: the goal marks ride the same head")
+
+    def test_the_working_area_is_byte_stable_across_the_seam(self):
+        """Same block, same place: it opens the head right behind the base
+        prompt on both sides, so the goal marks (#210) move nothing in front
+        of it."""
+        self._goal_two_of_three_done()
+        before, after = self._first_head_after_the_cut(pinned=True)
+        block = crow_core.working_area_line(self.work)
+        self.assertEqual(before.index(block), after.index(block))
+        cut = before.index(block) + len(block)
+        self.assertEqual(before[:cut], after[:cut])
+
+
+class TheHeadNamesTheWorkingAreaTests(unittest.TestCase):
+    """#222: `prompt_head` in isolation."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-area-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(crow_core.set_root, crow_core.get_root())
+
+    def test_a_bound_root_opens_the_head(self):
+        crow_core.set_root(self.dir)
+        head = crow_core.prompt_head()
+        self.assertTrue(head.startswith("Working area: %s\n" % crow_core.get_root()))
+
+    def test_an_explicit_root_wins_over_the_bound_one(self):
+        crow_core.set_root(None)
+        self.assertTrue(crow_core.prompt_head(self.dir).startswith(
+            "Working area: %s\n" % self.dir))
+
+    def test_a_rootless_head_carries_no_line(self):
+        """NEGATIVE: without a root nothing is claimed, and the head of every
+        rootless chat stays what it was."""
+        crow_core.set_root(None)
+        self.assertNotIn("Working area", crow_core.prompt_head())
+        self.assertEqual(crow_core.working_area_line(None), "")
 
 
 class ReportedNotRunTests(TurnLoopCase):
