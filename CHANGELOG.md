@@ -76,6 +76,20 @@ Nothing here is live-accepted yet; acceptance is robin's GUI replay.
 - `build_bundle`: a `.js` entry built to `.html` says the page holds only the bundle and names the module's
   exports ("app.js exports: boot -- nothing calls it"); the description recommends an `.html` entry for a page;
   a `.js` out without `global_name` names the exports nothing can reach (#212).
+- **Degenerate rounds stay out of the history** (#217). A round that is bare tool-call markup, or a stub that
+  visibly stopped (ends on a colon, a dangling word, comma or dash), is not stored; it is asked again once on
+  the same prefix with a fresh seed. A stub on the retry is kept; markup twice ends the turn with one red line.
+  Short answers ("Ja", "Erledigt", "42") are never touched. Replayed over 27 session files: 8 markup + 79 stub
+  rounds flagged, 0 false positives. A call cut by the model's own stop gets `UNCLOSED_CALL` naming the
+  parameter instead of blaming the output limit; crow-nest's `finish: abort` and `crow_malformed_calls` are read.
+- **Every local request sends its own seed** (#217): turn rounds, the rollover digest and the memory pass
+  (crow-nest defaulted to seed 0, the seed that reproduced the 2026-09-22 corruption byte for byte). Seeds are
+  recorded as `seeds`/`leg_seeds` in the turn bill.
+- **`run_command` is bounded like the render** (#218). On Linux the shell runs in its own user scope
+  (`MemoryMax=8G`, no swap, `OOMPolicy=kill`; `CROW_COMMAND_MEMORY_MAX`, `CROW_COMMAND_SCOPE=0`); a ceiling kill
+  says so, and a timeout or capture-cap kill takes the whole process group and the scope. A headless browser in
+  the command gets a note pointing to render_page. systemd-run's `${VAR}`/`$$` expansion is switched off
+  (`--expand-environment=no`, systemd >= 254) -- it had emptied them.
 
 
 ### Known issues
@@ -85,6 +99,9 @@ Nothing here is live-accepted yet; acceptance is robin's GUI replay.
 - `wait_ms` changed meaning from virtual to real time: light pages cost about `wait_ms` of real time.
 - The #202 class counting runs between turns; one turn can still spend its tool rounds on one wall.
 - The #220 budget now caps every default turn on the llama arm (absent level = high there).
+- run_command on Windows has no scope and no process group (no Job Object yet); the 8G ceiling does not scale
+  with the machine's RAM.
+- #217's live escape rate (does a fresh-seed retry avoid the bad round?) is unmeasured.
 
 ## 2.4.0 — 2026-09-19
 
