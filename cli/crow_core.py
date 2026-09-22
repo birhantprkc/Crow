@@ -2451,7 +2451,10 @@ REASONING_COST_NOTE = "the level changes the head of every prompt -- the next tu
 # #121. THE SAME BILL FOR THE SAME REASON, said the same way round: before the
 # change, not after it. Binding a different folder to an open chat swaps that
 # chat's project memory, and the memory sits in the head.
-MEMORY_COST_NOTE = "the project memory changed -- the next turn pays a full prefill"
+# #224: so does the working area now (`working_area_line`), so any
+# bind to a different folder moves the head, memory or not.
+MEMORY_COST_NOTE = ("the working area and its project memory changed -- the "
+                    "next turn pays a full prefill")
 
 # #124. The same bill again, and said the same way round: before the change.
 SKILL_COST_NOTE = "the skill list changed -- the next turn pays a full prefill"
@@ -3559,7 +3562,10 @@ def _spoken_carry(conversation: "Conversation", carry: "str | None") -> str:
     for message in conversation.payload():
         if message.get("role") != "user":
             continue
-        text = message_text(message.get("content") or "").strip()
+        text = message_text(message.get("content") or "")
+        # #224: a working-area notice in front is Crow's, the line
+        # behind it the user's.
+        text = ROOT_NOTICE_RE.sub("", text, count=1).strip()
         # Protocol notes -- budget spent, an earlier rollover -- speak in
         # brackets and are Crow's own words, not the user's.
         if not text or text.startswith("["):
@@ -4455,6 +4461,20 @@ def message_images(content) -> list:
     return []
 
 
+# #224. A MOVED WORKING AREA IS SAID, ONCE, IN ONE LINE. Until now a
+# rebind re-pinned the head (and only when the memory moved) and said nothing
+# in the conversation: the model kept reading tool results full of the old
+# root with no line telling it they are stale. The notice rides in front of
+# the NEXT user message -- not as its own message (two user turns in a row are
+# a template question, see `roll_over`) and not as a system message (Qwen3.8's
+# template raises on one past index 0). It is appended with that message,
+# never edited into history, so no sent prefix moves. A chat with no turns yet
+# gets none: its head already names the new root (`working_area_line`).
+ROOT_NOTICE = "[Working area is now {new} (was {old}).]\n\n"
+ROOT_NOTICE_NONE = "none"
+ROOT_NOTICE_RE = re.compile(r"\A\[Working area is now [^\n]*\]\n\n")
+
+
 class Conversation:
     """The message list. Append-only by construction -- see module docstring.
 
@@ -4497,6 +4517,11 @@ class Conversation:
         # a clear: this object must not reach into module state itself, or a
         # delegate's own Conversation would wipe the parent's reads.
         self.read_epoch = object()
+        # #224: the working-area notice waiting for the next user
+        # message, and the root it moved away from (kept across two rebinds
+        # before a request, so A -> B -> C says "C (was A)").
+        self._notice: "str | None" = None
+        self._notice_from: "str | None" = None
         if memory is not None:
             self.pin_memory(memory)
 
@@ -4590,6 +4615,27 @@ class Conversation:
         elif self._system:
             self._messages.append({"role": "system", "content": self._system})
 
+    def note_root_change(self, old: "str | None", new: "str | None") -> bool:
+        """#224: queue "working area is now X (was Y)". True when queued.
+
+        Nothing is queued for a chat without turns, or when the root ends up
+        where the model last saw it; a pending notice is then withdrawn.
+        """
+        if self._notice is not None:
+            old = self._notice_from
+        if (old or None) == (new or None) or len(self._messages) <= (
+                1 if self._system else 0):
+            self._notice = self._notice_from = None
+            return False
+        self._notice_from = old
+        self._notice = ROOT_NOTICE.format(new=new or ROOT_NOTICE_NONE,
+                                          old=old or ROOT_NOTICE_NONE)
+        return True
+
+    @property
+    def pending_notice(self) -> "str | None":
+        return self._notice
+
     def restore(self, messages: list[dict]) -> None:
         """Adopt a saved history wholesale, at construction time only.
 
@@ -4627,6 +4673,19 @@ class Conversation:
         # `content` is a LIST exactly when a user turn carries images (#142) --
         # the OpenAI block shape from user_content(). Everything else stays the
         # bare string it always was.
+        if role == "user" and self._notice is not None:
+            # #224: the queued working-area notice opens the next
+            # user message -- appended with it, so no sent byte moves.
+            if isinstance(content, list):
+                content = [dict(b) for b in content]
+                first = next((b for b in content if b.get("type") == "text"), None)
+                if first is None:
+                    content.insert(0, {"type": "text", "text": self._notice.rstrip()})
+                else:
+                    first["text"] = self._notice + (first.get("text") or "")
+            else:
+                content = self._notice + (content or "")
+            self._notice = self._notice_from = None
         message = {"role": role, "content": content}
         # Absent rather than empty: a turn that produced no reasoning has to
         # serialise exactly as it did before this field existed.
@@ -4688,6 +4747,9 @@ class Conversation:
         self._system = self._base_system
         self._messages = []
         self.read_epoch = object()      # #215-H: rollover and new chat alike
+        # #224: a fresh context has nothing stale to correct; its
+        # head names the root.
+        self._notice = self._notice_from = None
         if self._system:
             self._messages.append({"role": "system", "content": self._system})
 
@@ -8403,9 +8465,6 @@ def named_but_ambiguous(path: str) -> bool:
     return any(here.startswith(os.path.normcase(prefix)) for prefix in _AMBIGUOUS)
 
 
-# #223 (item 3 sets the text): Crow's working-area notice in front
-# of a typed line. Defined here so `user_words` can strip it.
-ROOT_NOTICE_RE = re.compile(r"\A\[Working area is now [^\n]*\]\n\n")
 
 
 def user_words(text: str) -> str:

@@ -4273,6 +4273,82 @@ class TheRolloverNoteIsDataTests(unittest.TestCase):
         self.assertEqual(crow_core.user_words("see /tmp/x"), "see /tmp/x")
 
 
+class TheWorkingAreaNoticeTests(unittest.TestCase):
+    """#224: a rebind mid-chat is said once, in front of the next
+    user message, never edited into history."""
+
+    def _talk(self):
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "hi")
+        talk.append("assistant", "hello")
+        return talk
+
+    def test_the_next_user_message_carries_the_notice_once(self):
+        talk = self._talk()
+        sent = talk.payload()
+        self.assertTrue(talk.note_root_change("/a/old", "/a/new"))
+        talk.append("user", "go on")
+        talk.append("assistant", "ok")
+        talk.append("user", "and again")
+        msgs = talk.payload()
+        self.assertEqual(msgs[:len(sent)], sent, "a sent message moved")
+        self.assertEqual(msgs[3]["content"],
+                         "[Working area is now /a/new (was /a/old).]\n\ngo on")
+        self.assertEqual(msgs[5]["content"], "and again")
+
+    def test_two_rebinds_say_where_it_was_before_both(self):
+        talk = self._talk()
+        talk.note_root_change("/a", "/b")
+        talk.note_root_change("/b", "/c")
+        self.assertIn("now /c (was /a)", talk.pending_notice)
+
+    def test_back_where_it_was_says_nothing(self):
+        talk = self._talk()
+        talk.note_root_change("/a", "/b")
+        self.assertFalse(talk.note_root_change("/b", "/a"))
+        self.assertIsNone(talk.pending_notice)
+
+    def test_an_unbind_is_said_too(self):
+        talk = self._talk()
+        talk.note_root_change("/a", None)
+        self.assertIn("now none (was /a)", talk.pending_notice)
+
+    def test_a_chat_without_turns_gets_none(self):
+        """NEGATIVE: the head already names the new root."""
+        talk = crow_core.Conversation("SYS")
+        self.assertFalse(talk.note_root_change("/a", "/b"))
+
+    def test_a_reset_drops_it(self):
+        talk = self._talk()
+        talk.note_root_change("/a", "/b")
+        talk.reset()
+        self.assertIsNone(talk.pending_notice)
+
+    def test_an_image_turn_carries_it_in_its_text_block(self):
+        talk = self._talk()
+        talk.note_root_change("/a", "/b")
+        talk.append("user", [{"type": "text", "text": "look"},
+                             {"type": "image_url", "image_url": {"url": "d"}}])
+        content = talk.payload()[-1]["content"]
+        self.assertTrue(content[0]["text"].startswith("[Working area is now /b"))
+        self.assertTrue(content[0]["text"].endswith("look"))
+
+    def test_the_notice_mandates_nothing_and_the_line_still_does(self):
+        self.addCleanup(crow_core._AMBIGUOUS.clear)
+        here = os.path.realpath(tempfile.mkdtemp(prefix="crow-notice-"))
+        self.addCleanup(shutil.rmtree, here, True)
+        old = os.path.join(here, "old")
+        said = os.path.join(here, "said")
+        os.mkdir(old)
+        os.mkdir(said)
+        talk = self._talk()
+        talk.note_root_change(old, os.path.join(here, "new"))
+        talk.append("user", "write to %s" % said)
+        found = crow_core.mandated_paths(talk)
+        self.assertNotIn(old, found)
+        self.assertIn(said, found)
+
+
 class CwdGuardTurnTests(TurnLoopCase):
     """The loop half: a cwd that does not exist is answered before the card,
     at every level, and the refusal is what the history keeps."""

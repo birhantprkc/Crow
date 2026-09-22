@@ -3987,6 +3987,38 @@ class ProjectsInTheRailTests(ApiCase):
         api.clear_root()
         self.assertIn("rail", self.kinds(api))
 
+    def test_a_rebind_mid_chat_is_said_at_the_next_request(self):
+        """#224: the move is one line in front of the next user
+        message, and the head follows it."""
+        first, second = self.project("Crow"), self.project("Nest")
+        api = self.api()
+        self.addCleanup(crow_core.set_root, None)
+        api._bind_root(first)
+        api._conversation.pin_memory(crow_core.prompt_head())
+        api._conversation.append("user", "hi")
+        api._conversation.append("assistant", "hello")
+        api._bind_root(second)
+        self.assertIn("Working area: %s" % crow_core.get_root(),
+                      api._conversation.system)
+        api._conversation.append("user", "go on")
+        self.assertEqual(api._conversation.payload()[-1]["content"],
+                         "[Working area is now %s (was %s).]\n\ngo on"
+                         % (crow_core.get_root(), first))
+
+    def test_an_unbind_mid_chat_moves_the_head_and_is_said(self):
+        root = self.project("Crow")
+        api = self.api()
+        self.addCleanup(crow_core.set_root, None)
+        api._bind_root(root)
+        api._conversation.pin_memory(crow_core.prompt_head())
+        api._conversation.append("user", "hi")
+        api._conversation.append("assistant", "hello")
+        self.drained(api)
+        api.clear_root()
+        self.assertNotIn("Working area", api._conversation.system or "")
+        self.assertIn("now none (was %s)" % root,
+                      api._conversation.pending_notice)
+
     def test_the_live_chat_without_a_file_can_be_discarded(self):
         """robin: the new chat could not be deleted.
 

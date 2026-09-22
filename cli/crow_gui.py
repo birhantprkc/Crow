@@ -8103,7 +8103,11 @@ class Api:
         stored = crow_core.read_root_mode(path)
         wanted = mode or stored or getattr(self._args, "mode", DEFAULT_MODE)
         crow_core.write_root_mode(path, wanted)
+        was = crow_core.get_root()
         crow_core.set_root(path)
+        # #224: the next request says the area moved, in one line,
+        # instead of the history silently pointing at the old one.
+        self._conversation.note_root_change(was, crow_core.get_root())
         self._root_chosen = True                 # #101: a person picked, for THIS chat
         crow_core.remember_root(path)
         # #92: AND THIS IS WHERE THE NEXT START READS FROM. `remember_root` fills
@@ -8415,8 +8419,17 @@ class Api:
         """
         if self._worker and self._worker.is_alive():
             return
+        was = crow_core.get_root()
         crow_core.set_root(None)
         self._root_chosen = True                 # #101: "none" is a choice too
+        # #224: the head named the old area (`working_area_line`),
+        # so it follows the unbind like it follows a bind -- cost said first --
+        # and the next request says the area is gone.
+        if self._conversation.memory is not None:
+            if self._conversation.repin_memory(
+                    crow_core.prompt_head(crow_core.get_root())):
+                self.push({"k": "note", "t": crow_core.MEMORY_COST_NOTE})
+        self._conversation.note_root_change(was, None)
         # #92: "NONE" IS A CHOICE AND SURVIVES A RESTART. Written as an explicit
         # null rather than by deleting the key: an absent key means nobody ever
         # chose, and collapsing the two would make this decision evaporate on the
