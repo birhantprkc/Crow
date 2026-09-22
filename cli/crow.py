@@ -901,6 +901,12 @@ class TerminalTurnEvents(TurnEvents):
     def turn_interrupted(self) -> None:
         print(f"\n{crow_core.ABORT_NOTE}\n", file=self._out)
 
+    def turn_note(self, message: str) -> None:
+        # #217: THE TERMINAL HEARS THE SAME NOTES THE WINDOW DRAWS. Without
+        # this a discarded degenerate round left its stub on screen and the
+        # re-request streamed behind it with nothing saying why.
+        print(f"{DIM}[{message}]{RESET}\n", file=self._out)
+
     def round_finished(self, timings: dict) -> None:
         line_out = format_timings(timings) if self._rounds else ""
         print(f"\n\n[{line_out}]\n" if line_out else "\n", file=self._out)

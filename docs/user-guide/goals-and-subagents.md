@@ -53,6 +53,14 @@ context size, and how many of how many steps are done. There is no second recove
 the loop is the point: an empty answer left standing in the history is an example the next turn
 copies.
 
+*A reply that is not an answer is not stored (#217).* Bare tool-call markup
+(`<tool_call></function></tool_call>`) or a stub (`Let me stop re-`, an announcement ending
+on a colon with no call behind it) used to end the turn, stay in the history and open the next
+nudge — five markup rounds and one stub in 42 minutes on 2026-09-22, the markup copied four
+times. Such a round is now dropped and asked again once in the same turn, with a new seed and
+no nudge; a second one ends the turn with one red line. See
+[Rounds that are not answers](../reference/tools.md#rounds-that-are-not-answers-217).
+
 *A cap on one step: 25 turns*, beside the 60 the whole goal gets. The counter belongs to the step,
 so it starts again at every step and a plan that is moving never meets it. A step that has taken 25
 turns is either cut wrong or not doable, and both are questions for you: the goal pauses, `/goal`

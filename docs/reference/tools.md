@@ -256,8 +256,9 @@ one. It now lasts the conversation and ends where the file changes
 ([Read before write](#read-before-write-215)).
 
 The request after a rollover declares the same `tools` array, the same sampler and the same
-thinking fields as the one before; only the messages and the pinned head differ (pinned by
-`TheSeamKeepsTheRequestTests`).
+thinking fields as the one before; only the messages, the pinned head and the per-round
+`seed` differ (pinned by `TheSeamKeepsTheRequestTests`; the seed is drawn fresh for every
+round, see below).
 
 Since #214 the messages after the cut also show calls that worked. Behind the rollover note
 come the last 3 tool rounds before the cut, verbatim: each is the assistant's call(s) and
@@ -274,6 +275,38 @@ and fits takes the oldest one's place. The typed line comes after the rounds. Wi
 rounds the note and the line stay one message. `_READ` stays per turn, so a carried read
 grants no edit. At the 17:12 cut this would have carried two `run_command` rounds and the
 final `edit_file` (`path, old, new`): 3,755 JSON chars, about 1,250 tokens.
+
+### Rounds that are not answers (#217)
+
+Every round is classified before it may enter the history (`classify_round`):
+
+| class | what it is | what happens |
+|---|---|---|
+| `markup` | no parsed call, and tool-call markup in the content: crow-nest's `crow_malformed_calls` says `raw_in_content`, or (any other engine) a line starting `<tool_call>`, `</function>`, `<function=`, `function=` or `<parameter=` outside a code fence | not stored; asked again once |
+| `stub` | no call, finish `stop`, tools declared, and the text ends on a colon, or mid-sentence within 200 chars (a letter, comma or dash last, or an inline code span left open) | not stored; asked again once |
+| `think_only` | reasoning and no visible text (#150) | the one visible-answer nudge, as before |
+
+The re-request is on the same prefix — no message is added, so the read ledger, the goal step
+and the prompt cache stand — with a new `seed`. A note says `discarded a degenerate reply
+(<class>, N chars, seed S) -- asking again with a new seed`. A second degenerate round ends the
+turn with one red line naming both classes and both seeds; the history gets
+`[no usable reply: <class>]` instead of either round. Replayed over the stored rounds of
+2026-09-18..22 (3,155 assistant rounds in 27 files): 8 markup and 100 stub rounds, each one
+followed by a goal nudge or by the loop being called out; no healthy answer flagged.
+
+Every local request now carries `seed`, drawn per round (1..2^31-1) and recorded as
+`_seed` in the round's timings and as `seeds` in the turn's bill in `session.json`. crow-nest
+samples with seed 0 when none is sent, so a re-request of the same prefix returned the same
+tokens. Remote requests carry no seed (`_REMOTE_DROPS`).
+
+A call's raw markup that arrived beside the parsed call is cut out of the stored content.
+A call the generation left open gets one of three results, chosen by crow-nest's record for
+that call when there is one, else by `finish_reason`: at `stop`,
+`error: the generation stopped inside this call's arguments (`path` had run to N chars) ...
+This was not the output token limit`; at `length`, the output-limit answer (#203) as before;
+a `bad-param-name` record, the declared-names answer. A `finish_reason` of `abort` (crow-nest
+#99: the client left or the server shut down) is never an answer: the turn treats it as a
+broken stream (one retry, #151), the rollover digest as failed, the memory pass writes nothing.
 
 ---
 

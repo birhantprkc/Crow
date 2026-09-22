@@ -715,6 +715,15 @@ class ShowReasoningTests(unittest.TestCase):
         self.assertTrue(events.reply_events()._show)
         self.assertFalse(crow.TerminalTurnEvents(out=out).reply_events()._show)
 
+    def test_the_terminal_says_why_a_round_was_asked_again(self):
+        """#217: the discarded round's stub is already on screen; the note is
+        what stops the re-request looking like a second answer."""
+        out = io.StringIO()
+        crow.TerminalTurnEvents(out=out).turn_note(
+            "discarded a degenerate reply (stub, 15 chars, seed 7) -- asking "
+            "again with a new seed")
+        self.assertIn("discarded a degenerate reply (stub", out.getvalue())
+
     def test_repl_carries_the_switch_into_every_turn(self):
         """`/thoughts` flips it BETWEEN turns, so it may not be read once at
         start and remembered inside the sink."""

@@ -1733,10 +1733,21 @@ class TheSeamKeepsTheRequestTests(TurnLoopCase):
         return self.bodies[0], self.bodies[1]
 
     def test_everything_but_the_messages_is_identical_across_the_seam(self):
+        """#217: AUSSER DEN NACHRICHTEN -- UND DEM SEED, mit Absicht. Jede
+        Runde zieht seit #217 ihren eigenen Seed (SEED_MAX erklaert, warum der
+        feste Seed 0 eine Wiederholung zur Kopie machte), also unterscheiden
+        sich zwei Runden darin immer, ob mit Schnitt oder ohne. Die Regel
+        bleibt, was sie war -- der Schnitt aendert nichts ausser dem Gespraech
+        --, und der Seed wird darunter fuer sich geprueft: auf beiden Seiten
+        da, eine Zahl, und verschieden."""
         before, after = self._across_the_seam()
-        strip = lambda body: {k: v for k, v in body.items() if k != "messages"}
+        strip = lambda body: {k: v for k, v in body.items()
+                              if k not in ("messages", "seed")}
         self.assertEqual(strip(before), strip(after),
                          "the cut changed the request, not just the conversation")
+        for body in (before, after):
+            self.assertIsInstance(body.get("seed"), int)
+        self.assertNotEqual(before["seed"], after["seed"])
 
     def test_the_tool_table_crosses_the_seam_whole(self):
         """Present, same names, same schemas -- byte for byte what `TOOLS` is."""
@@ -17927,6 +17938,437 @@ class ThePoisonedHistoryTests(TurnLoopCase):
         self.assertEqual(_dangling(talk.payload()), [])
         # idempotent: a second pass finds nothing to do
         self.assertFalse(crow_core.repair_history_calls(talk))
+
+
+# ----------------------------------------------------------------- #217
+
+# THE FIVE MARKUP ROUNDS OF 2026-09-22, byte for byte as session.json stored
+# them (msgs 65, 71, 139, 469, 561), and the stubs of the same day and the
+# archives before it. The ticket's table is the source; nothing here is made up.
+LIVE_MARKUP = (
+    "<tool_call>\n\n\n\n\n\n<tool_call>",
+    "<tool_call>\n\n</function>\n</tool_call>",
+    "<tool_call>\n\n</function>\n</tool_call>",
+    "<tool_call>\n\n</function>\n</tool_call>",
+    "<tool_call>\nfunction>\n</function>\n</tool_call>",
+)
+LIVE_STUBS = (
+    "The full picture is",                              # session.json 643
+    "Let me stop the",                                  # rollover-131737.md:1594
+    "I've been burning turns re-",                      # :1968
+    "Let me stop re-",                                  # :4043
+    "Step 4 — the concrete plan:\n",                    # rollover-171255.json 66
+    "Now delete the fragile block (lines 221–237 — the `CORNERERS` hand "
+    "table) and keep only `FACE_AO`; then implement `buildBoxWithAO` "
+    "correctly. A precise, verifiable in-place surgery:\n\n",   # msg 190
+    "That 3rd \"fix\" (the `_chk` marker) was junk I don't want — remove it and",
+    "**This is the whole story, finally.** `node` says `OK`, yet the file "
+    "*text* reads `1",                                  # an inline span left open
+)
+
+
+class ClassifyRoundTests(unittest.TestCase):
+    """#217: one detector, three degenerate classes, and answers left alone."""
+
+    def test_every_stored_markup_round_is_markup(self):
+        for text in LIVE_MARKUP:
+            with self.subTest(text=text):
+                self.assertEqual(crow_core.classify_round(text, [], "stop"), "markup")
+
+    def test_markup_is_markup_at_any_finish_and_behind_prose(self):
+        """A call that leaked is never an answer, however the round ended --
+        and the prose in front of it announced a call that never ran
+        (rollover-103404.md:2099, a whole write_file as content)."""
+        leaked = ("Writing it now:\n\n<tool_call>\n<function=write_file>\n"
+                  "<parameter=path>\nprobe.html\n</parameter>\n</function>\n</tool_call>")
+        for finish in ("stop", "length", None):
+            self.assertEqual(crow_core.classify_round(leaked, [], finish), "markup")
+
+    def test_every_stored_stub_is_a_stub(self):
+        for text in LIVE_STUBS:
+            with self.subTest(text=text):
+                self.assertEqual(crow_core.classify_round(text, [], "stop"), "stub")
+
+    def test_answers_stay_answers(self):
+        for text in ("Done.", "Fertig!", "What are we working on today?",
+                     "**Goal complete — 8/8.**",
+                     "Here it is:\n\n```python\nprint(1)\n```",
+                     "Changed:\n- the parser\n- update the docs",
+                     "| file | size |\n|---|---|\n| a.js | 12 |",
+                     "42",
+                     "x " * 150 + "and a long answer that ends without a stop"):
+            with self.subTest(text=text):
+                self.assertIsNone(crow_core.classify_round(text, [], "stop"))
+
+    def test_quoted_markup_is_not_a_leak(self):
+        """An answer ABOUT the tags -- in a fence or inline -- is an answer."""
+        fenced = "The server sent this:\n\n```\n<tool_call>\n</function>\n```\n\nThat is the bug."
+        inline = "The content was `<tool_call></function>` and nothing else."
+        self.assertIsNone(crow_core.classify_round(fenced, [], "stop"))
+        self.assertIsNone(crow_core.classify_round(inline, [], "stop"))
+
+    def test_the_stub_rule_needs_stop_and_tools(self):
+        self.assertIsNone(crow_core.classify_round("Let me verify:", [], "length"))
+        self.assertIsNone(crow_core.classify_round("Let me verify:", [], None))
+        self.assertIsNone(crow_core.classify_round("Let me verify:", [], "stop",
+                                                   tools=False))
+
+    def test_a_round_with_calls_is_never_degenerate(self):
+        call = [{"id": "c0", "name": "read_file", "arguments": "{}"}]
+        self.assertIsNone(crow_core.classify_round("Let me verify:", call, "stop"))
+        self.assertIsNone(crow_core.classify_round(LIVE_MARKUP[1], call, "stop"))
+
+    def test_think_only_is_the_150_case(self):
+        self.assertEqual(crow_core.classify_round("", [], "stop", "thinking..."),
+                         "think_only")
+        self.assertEqual(crow_core.classify_round("<think>a</think>\n", [], "stop",
+                                                  "x"), "think_only")
+        self.assertIsNone(crow_core.classify_round("", [], "stop", ""))
+
+    def test_the_engines_record_decides_first(self):
+        """crow-nest #99: `raw_in_content` says the content IS abandoned
+        markup, whatever the text looks like to a regex."""
+        record = [{"kind": "close-before-function", "index": None,
+                   "raw_in_content": True}]
+        self.assertEqual(crow_core.classify_round("odd bytes", [], "stop",
+                                                  malformed=record), "markup")
+        named = [{"kind": "end-in-call", "index": 0, "raw_in_content": False}]
+        self.assertIsNone(crow_core.classify_round("Done.", [], "stop",
+                                                   malformed=named))
+
+    def test_markup_beside_a_parsed_call_is_cut_off(self):
+        """#217 point 3, the 10:23 shape: prose, then the raw call."""
+        reply = ("Let me look at the render:\n\n<tool_call>\n<function=read_image>\n"
+                 "<parameter=path>\nhttp://routify-file-proxy/...")
+        self.assertEqual(crow_core.strip_call_markup(reply),
+                         "Let me look at the render:")
+        quoted = "Use this:\n```\n<tool_call>\n```\nok"
+        self.assertEqual(crow_core.strip_call_markup(quoted), quoted)
+        self.assertEqual(crow_core.strip_call_markup("plain"), "plain")
+
+
+class _FinishingLoopCase(TurnLoopCase):
+    """TurnLoopCase with a finish reason and an engine record per round --
+    the two things #217 reads that the base script never sends."""
+
+    def say(self, deltas, finish="stop", timings=None, malformed=None):
+        self.script.append((deltas, timings or {"predicted_n": 8},
+                            (finish, malformed)))
+        return self
+
+    def _serve(self, url, body, api_key, timeout):
+        self.bodies.append(json.loads(json.dumps(body)))
+        if not self.script:
+            raise AssertionError("the loop asked for round %d; only %d were "
+                                 "scripted" % (len(self.bodies),
+                                               len(self.bodies) - 1))
+        deltas, timings, (finish, malformed) = self.script.pop(0)
+        for delta in deltas:
+            yield json.dumps({"choices": [{"delta": delta}]})
+        last = {"choices": [{"delta": {}, "finish_reason": finish}],
+                "timings": timings}
+        if malformed is not None:
+            last["crow_malformed_calls"] = malformed
+        yield json.dumps(last)
+
+    def notes(self):
+        return [e[1] for e in self.events.log if e[0] == "note"]
+
+
+class _NotingRecorder(_TurnRecorder):
+    def turn_note(self, message):
+        self.log.append(("note", message))
+
+
+class ADegenerateRoundIsAskedAgainTests(_FinishingLoopCase):
+    """#217: not stored, re-requested once on the same prefix with a new
+    seed, and a second one ends the turn loudly."""
+
+    def setUp(self):
+        super().setUp()
+        self.events = _NotingRecorder()
+
+    def _stored(self, talk):
+        return [m.get("content") for m in talk.payload()
+                if m.get("role") == "assistant"]
+
+    def test_markup_is_not_stored_and_the_retry_resamples(self):
+        talk = self.conversation()
+        self.say([{"content": LIVE_MARKUP[1]}]).say([{"content": "Done."}])
+        result = self.turn(talk)
+        self.assertEqual(self._stored(talk), ["Done."])
+        self.assertEqual(len(self.bodies), 2)
+        self.assertEqual(self.bodies[0]["messages"], self.bodies[1]["messages"],
+                         "the retry must ask on the same prefix")
+        self.assertIsInstance(self.bodies[0]["seed"], int)
+        self.assertNotEqual(self.bodies[0]["seed"], self.bodies[1]["seed"])
+        self.assertFalse(result.stopped)
+        self.assertEqual(len(self.notes()), 1)
+        self.assertIn("markup", self.notes()[0])
+        self.assertTrue(any("degenerate" in i for i in result.incidents))
+        self.assertEqual(result.cost.seeds,
+                         [self.bodies[0]["seed"], self.bodies[1]["seed"]])
+
+    def test_a_stub_is_asked_again_too(self):
+        talk = self.conversation()
+        self.say([{"content": "Let me stop re-"}]).say([{"content": "All done."}])
+        self.turn(talk)
+        self.assertEqual(self._stored(talk), ["All done."])
+        self.assertEqual(len(self.bodies), 2)
+
+    def test_the_retry_may_call_a_tool(self):
+        """The resample is a full round: a call on the retry runs."""
+        talk = self.conversation()
+        self.say([{"content": "Step 4 — the concrete plan:\n"}])
+        self.say([_call_delta("list_dir", json.dumps({"path": self.work}))],
+                 finish="tool_calls")
+        self.say([{"content": "Listed."}])
+        self.turn(talk)
+        self.assertEqual([m["role"] for m in talk.payload()][1:],
+                         ["user", "assistant", "tool", "assistant"])
+        self.assertNotIn("concrete plan", json.dumps(talk.payload()))
+
+    def test_two_degenerate_rounds_fail_loud_once(self):
+        talk = self.conversation()
+        self.say([{"content": LIVE_MARKUP[0]}]).say([{"content": "The full picture is"}])
+        self.say([{"content": "never asked for"}])
+        result = self.turn(talk)
+        self.assertEqual(len(self.bodies), 2, "one retry, not a loop")
+        self.assertTrue(result.stopped)
+        failed = [e[1] for e in self.events.log if e[0] == "failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertIn("no usable reply twice", failed[0])
+        self.assertIn("markup, then stub", failed[0])
+        for body in self.bodies:
+            self.assertIn(str(body["seed"]), failed[0])
+        self.assertEqual(self._stored(talk), ["[no usable reply: stub]"])
+        payload = json.dumps(talk.payload())
+        self.assertNotIn("tool_call>", payload)
+        self.assertNotIn("The full picture is", payload)
+
+    def test_the_think_only_nudge_is_unchanged(self):
+        """#150 is the detector's first class; it still nudges, it does not
+        re-request."""
+        talk = self.conversation()
+        self.say([{"reasoning_content": "hmm"}]).say([{"content": "Said."}])
+        self.turn(talk)
+        self.assertIn(crow_core.THINK_ONLY_NUDGE,
+                      [m.get("content") for m in talk.payload()])
+
+    def test_the_engines_record_makes_markup_of_any_text(self):
+        talk = self.conversation()
+        self.say([{"content": "<tool_call>\n</tool_call>"}],
+                 malformed=[{"kind": "close-before-function", "index": None,
+                             "raw_in_content": True}])
+        self.say([{"content": "Done."}])
+        self.turn(talk)
+        self.assertEqual(self._stored(talk), ["Done."])
+
+    def test_a_healthy_short_answer_is_one_request(self):
+        talk = self.conversation()
+        self.say([{"content": "Done."}])
+        self.turn(talk)
+        self.assertEqual(len(self.bodies), 1)
+        self.assertEqual(self._stored(talk), ["Done."])
+
+
+class AStopInsideTheArgumentsIsNotTheCapTests(_FinishingLoopCase):
+    """#217: TRUNCATED_CALL blamed the output limit for the model's own EOS."""
+
+    CUT = json.dumps({"path": "http://routify-file-proxy/" + "x" * 300,
+                      "_truncated": True})
+
+    def _result(self, finish, malformed=None, arguments=None):
+        talk = self.conversation()
+        self.say([{"content": "Reading it."},
+                  _call_delta("read_image", arguments or self.CUT)],
+                 finish=finish, malformed=malformed)
+        self.say([{"content": "Understood."}])
+        self.turn(talk)
+        tool = [m for m in talk.payload() if m.get("role") == "tool"]
+        self.assertEqual(len(tool), 1)
+        return tool[0]["content"]
+
+    def test_finish_stop_says_unclosed_and_names_the_parameter(self):
+        said = self._result("stop")
+        self.assertTrue(said.startswith("error: the generation stopped inside"))
+        self.assertIn("`path` had run to 326 chars", said)
+        self.assertIn("not the output token limit", said)
+        self.assertNotEqual(said, crow_core.TRUNCATED_CALL)
+
+    def test_finish_length_keeps_the_limits_answer(self):
+        self.assertEqual(self._result("length"), crow_core.TRUNCATED_CALL)
+
+    def test_the_engines_end_in_call_record_agrees(self):
+        record = [{"kind": "end-in-call", "index": 0, "raw_in_content": False}]
+        self.assertIn("stopped inside", self._result("stop", record))
+        self.assertEqual(self._result("length", record), crow_core.TRUNCATED_CALL)
+
+    def test_a_bad_parameter_name_is_neither(self):
+        record = [{"kind": "bad-param-name", "index": 0, "raw_in_content": False}]
+        self.assertEqual(self._result("stop", record),
+                         crow_core.BAD_PARAMETER_CALL)
+
+    def test_the_llama_cut_shape_names_the_parameter_too(self):
+        """llama.cpp's unterminated string: read before the salvage empties it."""
+        raw = '{"path": "http://proxy/' + "y" * 40
+        said = self._result("stop", arguments=raw)
+        self.assertIn("`path` had run to 53 chars", said)
+
+    def test_the_raw_markup_beside_the_call_is_not_stored(self):
+        talk = self.conversation()
+        self.say([{"content": "Let me look:\n\n<tool_call>\n<function=read_image>\n"
+                              "<parameter=path>\nhttp://proxy/zzz"},
+                  _call_delta("read_image", self.CUT)], finish="stop")
+        self.say([{"content": "Understood."}])
+        self.turn(talk)
+        first = [m for m in talk.payload() if m.get("role") == "assistant"][0]
+        self.assertEqual(first["content"], "Let me look:")
+        self.assertTrue(first.get("tool_calls"))
+
+
+class EveryLocalRequestNamesItsSeedTests(unittest.TestCase):
+    """#217: seed 0 on every request made a retry a replay."""
+
+    def _run(self, **kw):
+        original = crow_core._post_stream
+        sent = {}
+
+        def fake(url, body, key, timeout):
+            sent.update(json.loads(json.dumps(body)))
+            yield json.dumps({"choices": [{"delta": {"content": "hi."},
+                                           "finish_reason": "stop"}]})
+
+        crow_core._post_stream = fake
+        try:
+            _text, _r, timings = crow_core.stream_reply(
+                crow_core.Conversation("SYS"), base_url="http://x/v1",
+                model="crow", api_key="k", temperature=1.0, timeout=1.0, **kw)
+        finally:
+            crow_core._post_stream = original
+        return sent, timings
+
+    def test_a_local_request_draws_and_records_one(self):
+        sent, timings = self._run()
+        self.assertIsInstance(sent.get("seed"), int)
+        self.assertTrue(1 <= sent["seed"] <= crow_core.SEED_MAX)
+        self.assertEqual(timings["_seed"], sent["seed"])
+
+    def test_a_given_seed_is_sent_as_given(self):
+        sent, timings = self._run(seed=7)
+        self.assertEqual((sent["seed"], timings["_seed"]), (7, 7))
+
+    def test_a_remote_request_carries_none_and_records_none(self):
+        sent, timings = self._run(remote=True, seed=7)
+        self.assertNotIn("seed", sent)
+        self.assertNotIn("_seed", timings)
+
+    def test_draw_seed_never_repeats_what_it_must_avoid(self):
+        for _ in range(200):
+            a = crow_core.draw_seed()
+            self.assertNotEqual(crow_core.draw_seed(avoid=a), a)
+
+    def test_the_bill_keeps_the_seeds(self):
+        cost = crow_core.TurnCost()
+        cost.add_round({"predicted_n": 1, "_seed": 11})
+        cost.add_round({"predicted_n": 1, "_seed": 12})
+        bill = cost.record()
+        self.assertEqual(bill["seeds"], [11, 12])
+        self.assertEqual(crow_core.clean_timings([bill])[0]["seeds"], [11, 12])
+        self.assertNotIn("seeds", crow_core.clean_timings(
+            [dict(bill, seeds=["x"])])[0])
+
+    def test_the_engines_malformed_records_reach_the_timings(self):
+        original = crow_core._post_stream
+        record = [{"kind": "end-in-call", "index": 0, "raw_in_content": False}]
+
+        def fake(url, body, key, timeout):
+            yield json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}],
+                              "crow_malformed_calls": record})
+
+        crow_core._post_stream = fake
+        try:
+            _t, _r, timings = crow_core.stream_reply(
+                crow_core.Conversation("SYS"), base_url="http://x/v1",
+                model="crow", api_key="k", temperature=1.0, timeout=1.0)
+        finally:
+            crow_core._post_stream = original
+        self.assertEqual(timings["_malformed_calls"], record)
+
+
+class AnAbortIsNeverAnAnswerTests(unittest.TestCase):
+    """crow-nest #99: `finish abort` is a fragment wherever Crow reads it."""
+
+    def _document(self, finish, message):
+        payload = json.dumps({"choices": [{"finish_reason": finish,
+                                           "message": message}]}).encode()
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        real = crow_core.urllib.request.urlopen
+        self.addCleanup(setattr, crow_core.urllib.request, "urlopen", real)
+        crow_core.urllib.request.urlopen = lambda request, timeout=None: _Resp(payload)
+
+    def _talk(self):
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "q")
+        talk.append("assistant", "a")
+        return talk
+
+    def test_the_stream_raises_in_the_words_the_151_retry_reads(self):
+        original = crow_core._post_stream
+
+        def fake(url, body, key, timeout):
+            yield json.dumps({"choices": [{"delta": {"content": "half"},
+                                           "finish_reason": "abort"}]})
+
+        crow_core._post_stream = fake
+        try:
+            with self.assertRaises(crow_core.CrowError) as caught:
+                crow_core.stream_reply(
+                    crow_core.Conversation("SYS"), base_url="http://x/v1",
+                    model="crow", api_key="k", temperature=1.0, timeout=1.0)
+        finally:
+            crow_core._post_stream = original
+        self.assertIn("stream broke", str(caught.exception))
+        self.assertIn("abort", str(caught.exception))
+
+    def test_an_aborted_digest_is_a_failed_digest(self):
+        long = "state: the work stands where the transcript ends. " * 8
+        self._document("abort", {"content": long})
+        self.assertEqual(crow_core.rollover_digest(
+            self._talk(), base_url="http://x/v1", temperature=1.0, top_p=0.95,
+            min_p=0.01), crow_core.DIGEST_FAILED)
+
+    def test_a_stopped_digest_is_still_accepted(self):
+        long = "state: the work stands where the transcript ends. " * 8
+        self._document("stop", {"content": long})
+        self.assertEqual(crow_core.rollover_digest(
+            self._talk(), base_url="http://x/v1", temperature=1.0, top_p=0.95,
+            min_p=0.01), long.strip())
+
+    def _review(self, finish):
+        ran = []
+        real = crow_core.run_tool
+        self.addCleanup(setattr, crow_core, "run_tool", real)
+        crow_core.run_tool = lambda name, args: (ran.append(name) or json.dumps(
+            {"success": True, "action": "add", "target": "memory"}))
+        self._document(finish, {"tool_calls": [{"function": {
+            "name": "memory", "arguments": json.dumps({"action": "add",
+                                                       "content": "x"})}}]})
+        crow_core.review_turn(self._talk(), base_url="http://x/v1", model="m",
+                              api_key="k", temperature=1.0, top_p=0.95,
+                              min_p=0.01, timeout=1)
+        return ran
+
+    def test_an_aborted_review_writes_nothing(self):
+        self.assertEqual(self._review("abort"), [])
+        self.assertEqual(self._review("stop"), ["memory"])
 
 
 if __name__ == "__main__":

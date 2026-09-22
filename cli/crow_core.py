@@ -54,6 +54,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import random
 import re
 import shutil
 import signal
@@ -2895,6 +2896,12 @@ def clean_timings(timings: "list | None") -> list:
                 keep[name] = round(float(turn[name]), 3)
         if isinstance(turn.get("finish"), str) and turn["finish"]:
             keep["finish"] = turn["finish"]
+        # #217: DIE SEEDS DER RUNDEN, Zahlen wie alles hier -- ohne sie ist
+        # eine Runde nach dem Wegfall des festen Seeds nicht mehr nachspielbar.
+        seeds = turn.get("seeds")
+        if isinstance(seeds, list) and seeds and all(
+                isinstance(x, int) and not isinstance(x, bool) for x in seeds):
+            keep["seeds"] = list(seeds)
         # EIN ZUG OHNE RUNDEN IST KEIN ZUG. Eine leere Bilanz im Archiv liest
         # sich wie ein Zug, der nichts gekostet hat -- dieselbe Luege wie die
         # stille 0 in der Tokenspalte.
@@ -3149,6 +3156,149 @@ THINK_ONLY_NUDGE = (
 # the suite checks is that it reaches the conversation at all.
 
 
+# #217. ONE DETECTOR FOR EVERY ROUND THAT IS NOT AN ANSWER, and #150's
+# think-only case is its first class, not a second detector beside it. Until
+# here a round with no call and some text was a finished answer whatever the
+# text was -- measured 2026-09-22 in the 42 minutes after the 17:12 cut: five
+# rounds of bare tool markup (`<tool_call>\n\n</function>\n</tool_call>`, 7-11
+# tokens, finish stop) and one stub (`The full picture is`) ended their turns,
+# were STORED as the assistant's answer and re-sent on every later request,
+# and the markup shape came back four times in 30 minutes: a degenerate round
+# in the prefix is a demonstration, not a record (#202, crow-nest #67/#68).
+#
+# THE MARKUP CLASS: tool-call markup at the start of a line, outside a code
+# fence, in a round that carries no parsed call. A call the parser gave up on
+# lands in `content` as its raw tags (crow-nest #99's give_up path; vLLM
+# #22975 is the same leak on another server), and whatever prose stands in
+# front of it was an announcement of a call that never ran. Line-anchored and
+# fence-blind so an answer that QUOTES the tags in a code block or inline
+# stays an answer.
+ROUND_MARKUP_RE = re.compile(
+    r"(?m)^[ \t]*(?:</?tool_call>|</?function\b|function=|<parameter=|</parameter>)")
+_ROUND_FENCE_RE = re.compile(r"(?ms)^[ \t]*```.*?(?:^[ \t]*```|\Z)")
+# THE STUB CLASS, measured on every stored round of 2026-09-18..22 (session.json,
+# the rollover archives, the backup of the clean test: 3,155 assistant rounds
+# in 27 files, 299 of them without a call): the 100 that ended on a colon, or
+# mid-sentence in their first STUB_MAX_CHARS characters, were followed by a
+# goal nudge (97), by robin's "you are looping" (1), by the next line after a
+# greeting cut off at "I can see the" (1), or ended the 2026-09-18 loop (1) --
+# "Let me verify:", "Let me stop re-", "The full picture is", "Step 4 -- the
+# concrete plan:". Not one healthy answer in that set ends that way; they end
+# on `.`/`!`/`?`, a closed code fence or a list. 200 rather than the ticket's
+# ~120 because the measured stubs run to 196 characters ("... Let me capture
+# properly:" is an announce, "... Let me stop routing around it and" a cut at
+# 166). Five longer cuts (204-1,347 chars) stay unflagged: past the cap, a
+# long answer ending on a word is too likely a real one.
+STUB_MAX_CHARS = 200
+# WHAT ENDS A SENTENCE, after trailing emphasis/inline-code closers are taken
+# off. A colon is NOT here: an answer that ends on one announced something
+# that never came.
+_STUB_TERMINAL = frozenset(".!?…)]}\"'»。！？")
+# A LAST LINE THAT IS A LIST ITEM, A TABLE ROW OR A HEADING ends an answer
+# without punctuation by design ("- update the docs"), and is never a cut.
+_STUB_STRUCTURED_RE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|\||#)")
+# The classes `run_turn` re-requests instead of storing (see there).
+DEGENERATE_ROUNDS = ("markup", "stub")
+
+
+def classify_round(reply: "str | None", calls: "list | None",
+                   finish: "str | None", reasoning: "str | None" = None,
+                   tools: bool = True,
+                   malformed: "list | None" = None) -> "str | None":
+    """#217: what kind of round this is, before it may enter the history.
+
+    `"markup"`  no parsed call, and either the engine says an abandoned call's
+                raw markup went out as content (`malformed`, crow-nest #99's
+                `crow_malformed_calls` with `raw_in_content`) or -- for an
+                engine that does not report, llama-server and every remote
+                one -- the text carries tool-call markup (any finish -- a
+                leaked call is never an answer);
+    `"stub"`    no call, finish `stop`, tools declared, and the visible text
+                ends on a colon (any length) or stops mid-sentence within
+                STUB_MAX_CHARS -- a letter, comma or dash last, or an inline
+                code span left open;
+    `"think_only"`  #150: reasoning and no visible text at all;
+    None        an answer, a tool round, or something this cannot judge.
+
+    THE STUB RULE IS OFF WITHOUT TOOLS (a subtask declares none, and a short
+    answer there is the whole job) AND FOR ANY FINISH BUT `stop`: a `length`
+    cut is the output cap's, and an unknown finish is not evidence.
+    """
+    if calls:
+        return None
+    # THE ENGINE'S WORD FIRST: it parsed the markup and knows where every
+    # abandoned byte went (crow-nest #99, 7.11.21). The text reading below is
+    # the fallback, and it runs whenever the key is absent -- which is also
+    # every round of an engine that has nothing to report.
+    if any(r.get("raw_in_content") for r in malformed or []
+           if isinstance(r, dict)):
+        return "markup"
+    visible = _strip_think(reply or "")
+    if ROUND_MARKUP_RE.search(_ROUND_FENCE_RE.sub("", visible)):
+        return "markup"
+    text = visible.strip()
+    if not text:
+        return "think_only" if (reasoning or "").strip() else None
+    if not tools or finish != "stop":
+        return None
+    core = text.rstrip("*_` \t\n")
+    if core.endswith(":"):
+        return "stub"
+    if len(text) > STUB_MAX_CHARS:
+        return None
+    if _STUB_STRUCTURED_RE.match(text.rsplit("\n", 1)[-1]):
+        return None
+    if text.count("`") % 2:
+        return "stub"
+    if not core:
+        return "stub"
+    last = core[-1]
+    if last in _STUB_TERMINAL:
+        return None
+    return "stub" if (last.isalpha() or last in ",-–—") else None
+
+
+def strip_call_markup(reply: str) -> str:
+    """#217 point 3: the raw markup of a call that ALSO arrived parsed.
+
+    Measured 2026-09-22 10:23: a `read_image` whose `path` ran into a 6,986-
+    token URL came back as the salvaged call AND as its own raw markup in
+    `content` (crow-nest #99), and both sat in the prefix until the next
+    rollover. The call travels structurally; its text form is pure prefix
+    cost, so everything from the first line-anchored tag outside a fence on is
+    cut. A reply without such a tag comes back unchanged.
+    """
+    text = reply or ""
+    fenced = [(m.start(), m.end()) for m in _ROUND_FENCE_RE.finditer(text)]
+    for match in ROUND_MARKUP_RE.finditer(text):
+        if not any(a <= match.start() < b for a, b in fenced):
+            return text[:match.start()].rstrip()
+    return text
+
+
+# #217. EVERY LOCAL ROUND CARRIES ITS OWN SEED, and the seed is recorded.
+# crow-nest samples with seed 0 when a request names none (serve.rs
+# DEFAULT_SEED, "a warm process draws what a cold one draws"), and Crow named
+# none: every round of every session drew from the same stream, so asking the
+# same prefix again returned the same tokens -- the #91 replay reproduced the
+# stored bad rounds byte for byte under seed 0, and seeds 1-7 were clean at
+# the same points. A retry without a new seed is the same round twice. Drawn
+# per round rather than per session so that ANY re-request (this ticket's, the
+# #151 stream retry, the reboot) resamples; written into the round's timings
+# and the turn's bill so a round stays replayable -- which is what seed 0 gave
+# the #91 probe for free. llama-server reads `seed` as uint32 with 0xFFFFFFFF
+# meaning "pick one", so the range stays inside 31 bits.
+SEED_MAX = 2 ** 31 - 1
+
+
+def draw_seed(avoid: "int | None" = None) -> int:
+    """A fresh per-request seed in 1..SEED_MAX, never `avoid`."""
+    while True:
+        seed = random.SystemRandom().randint(1, SEED_MAX)
+        if seed != avoid:
+            return seed
+
+
 # #211. DER SCHLUSSSATZ DER NOTIZ, als eigener Name: die Karte am Schnitt
 # teilt die Notiz in ihre Teile (unten), und der Schlussatz ist der Schnitt-
 # punkt. Der Wortlaut steht genau hier (die Schleifenregel zaehlt ihn).
@@ -3278,6 +3428,15 @@ DIGEST_TRUNCATED = ("[digest cut off at the {cap}-token cap -- the unfinished "
                     "last line was dropped; the transcript holds the rest]")
 # chat_completions sagt "length", der Messages-Dialekt "max_tokens".
 DIGEST_CAPPED = ("length", "max_tokens")
+# #217 / crow-nest #99. EIN ABGEBROCHENER LAUF IST KEIN ENDE. Seit #99 schreibt
+# serve `abort`, wenn der Client ging oder der Server herunterfuhr -- vorher
+# stand dort `length`, und ein geschlossenes Fenster las sich als verbrauchtes
+# Budget. Ein Strom bekommt dann gar keinen Schlusschunk, das `stream:false`-
+# Dokument aber wird noch geschrieben, mit diesem Wert. Was bis dahin kam, ist
+# ein Bruchstueck: jeder Leser hier (Zug, Digest, Nachlauf) nimmt es als
+# Scheitern, nie als fertige Antwort. Ein unbekannter Wert galt bisher als
+# "nicht gekappt", also als fertig -- genau das darf `abort` nicht sein.
+FINISH_ABORT = "abort"
 
 
 def _digest_trim(text: str, cap: int) -> str:
@@ -3751,6 +3910,9 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
                 text = (choice.get("message", {}).get("content") or "")
                 finish = choice.get("finish_reason") or ""
         except Exception:          # noqa: BLE001 - Beifang, nie der Roll selbst
+            return DIGEST_FAILED
+        # #217 / crow-nest #99: ein abgebrochenes Dokument ist kein Digest.
+        if finish == FINISH_ABORT:
             return DIGEST_FAILED
         if finish not in ("tool_calls", "tool_use"):
             break
@@ -4584,9 +4746,15 @@ _ANTHROPIC_DROPS = ("temperature", "top_p", "min_p", "top_k",
 # `presence_penalty` (2026-09-18) GOES FOR THE REASON `min_p` DOES: it is a
 # per-model value out of the local manifest, a remote model has no entry, and a
 # broker on `require_parameters` finds no upstream for a field it never listed.
+#
+# `seed` (#217) GOES BECAUSE IT IS THE MACHINE'S ANSWER TO THE MACHINE'S
+# PROBLEM: crow-nest's fixed default seed is what made a local re-request
+# return the same round. A remote endpoint samples as it likes, OpenAI calls
+# the field best-effort, and a broker on `require_parameters` would have one
+# more field to find no upstream for -- the 404 above, again.
 _REMOTE_DROPS = ("min_p", "presence_penalty", "timings_per_token",
                  "chat_template_kwargs", "reasoning_effort",
-                 "reasoning_budget_tokens", "reasoning_budget_message")
+                 "reasoning_budget_tokens", "reasoning_budget_message", "seed")
 
 # WHAT IS LEFT, AND IT IS SPLIT BECAUSE ONE HALF IS NEGOTIABLE AND THE OTHER IS
 # NOT. `provider.require_parameters` asks a broker to route only to upstreams
@@ -5530,6 +5698,12 @@ def stream_reply(
     # model that must not use any invites the call this client would then have
     # to refuse.
     send_tools: bool = True,
+    # #217. THE SAMPLER SEED OF THIS REQUEST. None draws a fresh one -- every
+    # local request names its seed now, see SEED_MAX -- and a number is sent
+    # as given, which is how `run_turn` makes its re-request differ. Either
+    # way it lands in the timings as `_seed`. Never sent away from home
+    # (`_REMOTE_DROPS`), and then not recorded either.
+    seed: "int | None" = None,
     events: "ReplyEvents | None" = None,
 ) -> tuple[str, str, dict]:
     """Stream one assistant turn. Returns (text, reasoning, timings).
@@ -5686,10 +5860,17 @@ def stream_reply(
     # taken before today.
     if routing and transport != TRANSPORT_MESSAGES:
         body.update(routing)
+    # #217: EVERY LOCAL REQUEST NAMES ITS SEED. Set before `remote_body` like
+    # every other field, so the one place that decides what leaves the machine
+    # still decides this one.
+    body["seed"] = draw_seed() if seed is None else int(seed)
     # THE LAST THING THAT HAPPENS TO THE BODY. Put here rather than beside each
     # field so a field added above cannot travel by being forgotten.
     if remote:
         remote_body(body)
+    # WHAT WAS SENT IS WHAT IS RECORDED: `anthropic_body` builds its own object
+    # and carries no seed, so that dialect records none either.
+    sent_seed = body.get("seed") if transport != TRANSPORT_MESSAGES else None
 
     text_parts: list[str] = []
     # THE THOUGHT BLOCKS, and this used to be a flat list plus an `in_reasoning`
@@ -5705,6 +5886,7 @@ def stream_reply(
     first_token_at: float | None = None
     first_content_at: float | None = None
     finish_reason: str | None = None
+    malformed: "list | None" = None
 
     events.reply_started()
 
@@ -5799,6 +5981,14 @@ def stream_reply(
                                    strip_tag_characters(
                                        str(problem.get("message") or problem))[:500]))
 
+            # #217 / crow-nest #99: THE ENGINE'S OWN ACCOUNT OF EVERY CALL IT
+            # ABANDONED, on the final chunk and only when there was one. It is
+            # what `classify_round` and the cut answers read first; the text
+            # heuristics stand in for engines that do not send it.
+            abandoned = chunk.get("crow_malformed_calls")
+            if isinstance(abandoned, list):
+                malformed = [r for r in abandoned if isinstance(r, dict)]
+
             # The absolute size of the conversation, straight from the server's
             # tokeniser. It arrives on the last chunk only, and only one chunk
             # carries it, so it is read wherever it turns up rather than assumed
@@ -5873,6 +6063,14 @@ def stream_reply(
         thoughts.finish()
         events.reply_finished()
 
+    # #217 / crow-nest #99: `abort` IS A BROKEN STREAM, NOT AN ANSWER. serve
+    # never puts it on a stream it can still write to, so seeing it means a
+    # relay or a future server did; either way what came before it is a
+    # fragment. Raised in the words the #151 retry already recognises, before
+    # anything of this round can be appended.
+    if finish_reason == FINISH_ABORT:
+        raise CrowError("stream broke: the server aborted the generation "
+                        "(finish abort) -- nothing of this round was kept")
     elapsed = time.monotonic() - started
     # ttft is the FIRST token of any kind. Before 2026-08-07 it was the first
     # content token, so it silently included the whole reasoning decode and
@@ -5894,6 +6092,10 @@ def stream_reply(
         timings.setdefault("_reasoning_blocks", len(thoughts.blocks))
     if finish_reason:
         timings.setdefault("_finish_reason", finish_reason)
+    if sent_seed is not None:
+        timings["_seed"] = sent_seed
+    if malformed:
+        timings["_malformed_calls"] = malformed
     if context_tokens is not None:
         timings.setdefault("_context_tokens", context_tokens)
     if cached_tokens is not None:
@@ -5961,9 +6163,15 @@ class TurnCost:
         self.cached: int | None = None
         self.cached_of: int | None = None
         self.finish: str | None = None
+        # #217: THE SEED OF EVERY ROUND, in the order they ran -- a discarded
+        # degenerate round included, because it is the one a replay wants.
+        self.seeds: list[int] = []
 
     def add_round(self, timings: dict) -> None:
         self.rounds += 1
+        seed = timings.get("_seed")
+        if isinstance(seed, int):
+            self.seeds.append(seed)
         for key, attr in (("predicted_n", "decoded"), ("prompt_n", "prefilled")):
             value = timings.get(key)
             if value is not None:
@@ -6058,6 +6266,9 @@ class TurnCost:
             out["cached"], out["cached_of"] = self.cached, self.cached_of
         if self.finish:
             out["finish"] = self.finish
+        # #217: what makes each round of this turn replayable (see SEED_MAX).
+        if self.seeds:
+            out["seeds"] = list(self.seeds)
         return out
 
 
@@ -11507,6 +11718,87 @@ UNPARSEABLE_CALL = (
     "error: this tool call's arguments were not valid JSON and were dropped "
     "from the history, so it did not run. Re-send the call as one valid "
     "JSON object, and split large content into several smaller calls.")
+# #217. A CUT IS NOT ALWAYS THE CAP. crow-nest marks every abandoned call
+# `_truncated`, whether the output limit ended it or the model's own EOS did,
+# and TRUNCATED_CALL above blamed the limit for both. Measured 2026-09-22
+# 10:23 (engine.log): a `read_image` whose `path` ran into a 6,986-token
+# hallucinated URL, `finish stop`, far under max_tokens -- and the model was
+# told the limit had cut it and to "build large content in parts", the wrong
+# cause and the wrong remedy for a path. At finish `stop` the generation
+# ended on its own inside the arguments; the cure is the short, exact value.
+UNCLOSED_CALL = (
+    "error: the generation stopped inside this call's arguments{where}, so it "
+    "did not run. This was not the output token limit -- the reply ended on "
+    "its own before the call was closed. Re-send the call with the exact, "
+    "short value{name}.")
+
+
+# crow-nest #99's `bad-param-name`: the call was named, then a parameter name
+# the parser could not read ended it. Neither the cap nor a stop -- the cure is
+# the declared names, which is what the sentence says.
+BAD_PARAMETER_CALL = (
+    "error: this call used a parameter name the server could not read, so it "
+    "was abandoned and did not run. Re-send it with exactly the parameter "
+    "names the tool declares.")
+
+
+def cut_answer(why: str, finish: "str | None", record: "dict | None",
+               parameter: "tuple[str, int] | None") -> "tuple[str, str]":
+    """#217: the tool result for a call that must not run, and its kind.
+
+    THE ENGINE'S RECORD DECIDES WHEN THERE IS ONE (crow-nest #99): `end-in-
+    call` is a stop (`finish` stop) or the cap (`length`), `bad-param-name`
+    is neither. Without a record the finish alone decides, as it did for the
+    10:23 round: `stop` is the model's own end inside the arguments, anything
+    else keeps the limit's answer (llama-server's `tool_calls` masks a cap
+    cut, see TRUNCATED_CALL). Returns (result, "unclosed" | "truncated" |
+    "bad-parameter" | "unparseable").
+    """
+    kind = (record or {}).get("kind")
+    if kind == "bad-param-name":
+        return BAD_PARAMETER_CALL, "bad-parameter"
+    if why == "truncated" and finish == "stop":
+        return unclosed_call(parameter), "unclosed"
+    if why == "truncated":
+        return TRUNCATED_CALL, "truncated"
+    return UNPARSEABLE_CALL, "unparseable"
+
+
+def unclosed_call(parameter: "tuple[str, int] | None") -> str:
+    """UNCLOSED_CALL naming the parameter the stop landed in, when known."""
+    if not parameter:
+        return UNCLOSED_CALL.format(where="", name="")
+    name, length = parameter
+    return UNCLOSED_CALL.format(
+        where=" (`%s` had run to %d chars)" % (name, length),
+        name=" for `%s`" % name)
+
+
+def cut_parameter(arguments: "str | None") -> "tuple[str, int] | None":
+    """#217: which argument a cut call was writing, and how far it got.
+
+    READ BEFORE `salvage_cut_calls` replaces an unparseable string with `{}`.
+    Two shapes: crow-nest's closed object with `_truncated` (the parameter is
+    the last key before the marker) and llama.cpp's unterminated string (the
+    last `"key": "` opener and whatever follows it). None when neither says.
+    """
+    raw = arguments or ""
+    try:
+        parsed = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        opener = None
+        for opener in re.finditer(r'"([A-Za-z_][\w-]*)"\s*:\s*"', raw):
+            pass
+        if opener is None:
+            return None
+        return opener.group(1), len(raw) - opener.end()
+    if not isinstance(parsed, dict):
+        return None
+    keys = [k for k in parsed if k != "_truncated"]
+    if not keys:
+        return None
+    value = parsed[keys[-1]]
+    return keys[-1], len(value if isinstance(value, str) else json.dumps(value))
 
 
 def classify_arguments(arguments: "str | None") -> "str | None":
@@ -16507,6 +16799,13 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                          **{"Accept": "application/json"}))
         with urllib.request.urlopen(request, timeout=timeout) as resp:
             answer = json.loads(resp.read().decode("utf-8") or "{}")
+        # #217 / crow-nest #99: A PASS THE SERVER ABORTED WRITES NOTHING. Its
+        # calls are whatever stood when the generation was cut, and this pass
+        # has nobody at the keyboard to notice half a memory entry.
+        if transport != TRANSPORT_MESSAGES and (
+                (answer.get("choices") or [{}])[0].get("finish_reason")
+                == FINISH_ABORT):
+            return []
         calls = (anthropic_calls(answer) if transport == TRANSPORT_MESSAGES else
                  (answer.get("choices") or [{}])[0].get("message", {}).get("tool_calls") or [])
     except Exception:                       # noqa: BLE001 - see the docstring
@@ -16926,7 +17225,18 @@ def run_turn(
     # model"), wartet ihn EINMAL aus, statt am Boot zu sterben.
     reboots = 0
     waited_ready = False
-    for round_no in range(budget + 2):
+    # #217: the one re-request a degenerate round may spend, and the seed of
+    # the round before -- so the next one is guaranteed a different draw.
+    degenerate: "list[tuple[str, int | None]]" = []
+    seed: "int | None" = None
+    # ONE MORE INDEX THAN THE BUDGET NEEDS, and it belongs to #217: a
+    # degenerate round that arrives as the forced answer (the last index
+    # before this) still gets its one re-request instead of ending the loop
+    # with nothing appended behind BUDGET_SPENT. Only `continue` paths can
+    # reach it; a tool round past the budget is forced, and a forced round
+    # always breaks.
+    for round_no in range(budget + 3):
+        seed = None if remote else draw_seed(avoid=seed)
         try:
             reply, reasoning, timings = stream_reply(
                 conversation,
@@ -16949,6 +17259,7 @@ def run_turn(
                 remote=remote,
                 routing=routing,
                 send_tools=send_tools,
+                seed=seed,
                 events=events.reply_events(),
             )
         except CrowError as exc:
@@ -17055,13 +17366,74 @@ def run_turn(
             break
 
         calls = timings.get("_tool_calls") or []
+        finish = timings.get("_finish_reason")
+        # #217. CLASSIFIED BEFORE ANYTHING IS APPENDED, because the append is
+        # what made a degenerate round a lesson: stored as the answer, re-sent
+        # on every later request, imitated (the markup shape four times in 30
+        # minutes on 2026-09-22), and -- in goal mode -- answered by a nudge.
+        malformed = timings.get("_malformed_calls") or []
+        kind = classify_round(reply, calls, finish, reasoning, tools=send_tools,
+                              malformed=malformed)
+        if kind in DEGENERATE_ROUNDS:
+            # THE TOKENS WERE SPENT, so the round is billed and drawn like any
+            # other; only the conversation never hears of it.
+            cost.add_round(timings)
+            events.round_finished(timings)
+            degenerate.append((kind, timings.get("_seed")))
+            note = getattr(events, "turn_note", lambda _t: None)
+            if len(degenerate) == 1:
+                # ONCE, IN THE SAME TURN, ON THE SAME PREFIX. No user message
+                # is added, so the read ledger, the goal step and the prompt
+                # cache all stand where they stood; the loop head draws a
+                # seed that differs from this round's, which is the whole
+                # difference between a resample and a replay.
+                said = ("discarded a degenerate reply (%s, %d chars%s) -- "
+                        "asking again with a new seed"
+                        % (kind, len((reply or "").strip()),
+                           ", seed %s" % degenerate[0][1]
+                           if degenerate[0][1] is not None else ""))
+                note(said)
+                incidents.append("a degenerate round (%s) was discarded "
+                                 "unstored and asked again" % kind)
+                continue
+            # TWICE IS THE MODEL'S ANSWER, NOT BAD LUCK -- and a third try is
+            # the silent loop #202 had to brake. One loud line, one
+            # placeholder so the history keeps its alternation (a user line
+            # after a user line is what the next nudge would otherwise make),
+            # and the turn ends.
+            placeholder = "[no usable reply: %s]" % kind
+            conversation.append("assistant", placeholder)
+            seeds = [s for _k, s in degenerate if s is not None]
+            line = ("the model sent no usable reply twice (%s, then %s%s) -- "
+                    "neither was stored, the turn stops here"
+                    % (degenerate[0][0], kind,
+                       "; seeds " + " and ".join(map(str, seeds))
+                       if seeds else ""))
+            incidents.append(line)
+            events.turn_failed(line)
+            stopped = True
+            break
         # #203: THE CUT CALLS ARE MADE SAFE TO STORE BEFORE THE TURN THAT
         # CARRIES THEM EXISTS. An unterminated arguments string in the stored
         # assistant turn kills every later request against the llama.cpp arm
         # with a 500 the history cannot recover from; here it never gets in.
         # The calls named in `cut` do not run -- the loop below answers each
         # with the structured result instead.
+        # #217: which argument each cut call was writing -- read before the
+        # salvage below may replace an unparseable string with `{}`.
+        cut_params = {c.get("id") or "": cut_parameter(c.get("arguments"))
+                      for c in calls}
+        # THE ENGINE'S RECORD PER CALL, by stream index. `_tool_calls` is the
+        # stream's slots in index order and serve numbers the calls it emits
+        # without gaps, so the position in the list is the index.
+        records = {r.get("index"): r for r in malformed
+                   if isinstance(r.get("index"), int)}
+        record_of = {c.get("id") or "": records.get(n)
+                     for n, c in enumerate(calls)}
         cut = salvage_cut_calls(calls)
+        # #217 point 3: A CALL THAT ARRIVED PARSED IS NOT ALSO KEPT AS TEXT.
+        if calls:
+            reply = strip_call_markup(reply)
         # CALLS THAT WILL NEVER RUN ARE NOT APPENDED, and that is not
         # tidiness. An assistant turn whose tool_calls have no `tool` message
         # behind them is a broken prefix for every later turn of the session.
@@ -17113,8 +17485,8 @@ def run_turn(
             # turn: the model is told to say it visibly. If the second attempt
             # is silent too, the turn ends and the incident says so -- looping
             # on a model that will not speak would spend the window on nothing.
-            if (not calls and not forced and not nudged
-                    and not (reply or "").strip() and (reasoning or "").strip()):
+            # #217: the same question `classify_round` answered above.
+            if not forced and not nudged and kind == "think_only":
                 nudged = True
                 conversation.append("user", THINK_ONLY_NUDGE)
                 continue
@@ -17239,10 +17611,28 @@ def run_turn(
                 # record that does not depend on the model choosing to
                 # mention it. `failed` counts it below through the "error: "
                 # prefix.
-                result, repeated = (TRUNCATED_CALL if cut_why == "truncated"
-                                    else UNPARSEABLE_CALL), False
-                incidents.append("a %s call was cut off at the output token "
-                                 "limit and did not run" % call["name"])
+                # #217: WHICH CUT -- the engine's record when it sent one,
+                # else the finish. `stop` is the model's own EOS inside the
+                # arguments, and blaming the limit for it sent the model
+                # splitting a path into parts. `length`, and llama-server's
+                # `tool_calls` that masks a cap cut (see TRUNCATED_CALL),
+                # keep the limit's answer. `cut_answer` holds the table.
+                cid = call.get("id") or ""
+                result, cut_kind = cut_answer(cut_why, finish,
+                                              record_of.get(cid),
+                                              cut_params.get(cid))
+                if cut_kind == "unclosed":
+                    incidents.append("a %s call stopped inside its arguments "
+                                     "(finish stop, not the output limit) and "
+                                     "did not run" % call["name"])
+                elif cut_kind == "bad-parameter":
+                    incidents.append("a %s call was abandoned on an unreadable "
+                                     "parameter name and did not run"
+                                     % call["name"])
+                else:
+                    incidents.append("a %s call was cut off at the output token "
+                                     "limit and did not run" % call["name"])
+                repeated = False
             else:
                 result, repeated = run_tool_cached(call["name"], call["arguments"])
             took = time.monotonic() - started
