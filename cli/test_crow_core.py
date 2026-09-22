@@ -13422,14 +13422,18 @@ class SearchIsBoundedTests(unittest.TestCase):
         15 of them were told "read ... before editing it" first -- the tool's
         read gate ran before anything looked at the keys. Unknown AND missing
         at once is a misnamed argument: the answer names the signature, comes
-        before the gate, and runs nothing."""
+        before the gate, and runs nothing.
+
+        #215: `old_string`/`new_string` themselves are now
+        declared aliases and are taken (SiblingArgumentNamesAreTakenAndSaidTests);
+        the signature answer is for the names nobody declared, like these."""
         target = os.path.join(self.root, "plain.txt")
         with open(target, encoding="utf-8") as fh:
             before = fh.read()
         out = crow_core.run_tool("edit_file", json.dumps(
-            {"path": target, "old_string": "needle", "new_string": "pin"}))
+            {"path": target, "search": "needle", "replace": "pin"}))
         self.assertTrue(out.startswith("error: edit_file"), out)
-        self.assertIn("unknown argument(s) new_string, old_string", out)
+        self.assertIn("unknown argument(s) replace, search", out)
         self.assertIn("without the required old, new", out)
         self.assertIn("Its arguments are: path, old, new.", out)
         self.assertNotIn("before editing", out)
@@ -13552,6 +13556,190 @@ class AppendFileBuildsLargeFilesInPartsTests(unittest.TestCase):
                       crow_core.tool_append_file)
         self.assertEqual(crow_core.TOOL_CLASS["append_file"], "writing")
         self.assertTrue(crow_core.needs_approval("append_file", "manual"))
+
+
+class SiblingArgumentNamesAreTakenAndSaidTests(unittest.TestCase):
+    """#215. MEASURED 2026-09-22, session.json after the
+    17:12 rollover: 22 of 22 `edit_file` calls carried `old_string` and
+    `new_string` -- Claude Code's names for the same two arguments. #207's
+    note said so every time; 15 of the 22 were answered by the read rule
+    first, the model read, retried the same shape, and wrote that the guard
+    itself was the obstacle. Not one edit landed through edit_file.
+
+    The fix is two orders: a declared alias table at the dispatcher (said in
+    a bracket note, a conflict is an error), and the argument check ahead of
+    the read rule, in the dispatcher and in the handler."""
+
+    # The exact shape of message [305], shortened: the call that met the read
+    # rule first.
+    REPLAY = {"old_string": "\tconst sea = createSea( SIZE );\n",
+              "new_string": "\t// ---- water: the built-in sea ---\n",
+              "path": None}
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-alias-"))
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.path = os.path.join(self.root, "app.js")
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write("\tconst sea = createSea( SIZE );\n\tscene.add( sea.mesh );\n")
+        crow_core._READ.clear()
+        crow_core._SEEN.clear()
+        self.addCleanup(crow_core._READ.clear)
+        self.addCleanup(crow_core._SEEN.clear)
+
+    def _text(self):
+        with open(self.path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def _replay(self):
+        return json.dumps(dict(self.REPLAY, path=self.path))
+
+    def test_the_replayed_call_edits_once_read_and_says_what_it_took(self):
+        crow_core.tool_read_file(self.path)
+        out = crow_core.run_tool("edit_file", self._replay())
+        self.assertTrue(out.startswith("[took old_string as old, new_string as new]\n"), out)
+        self.assertIn("replaced 1 occurrence", out)
+        self.assertNotIn("unknown argument", out)
+        self.assertIn("// ---- water", self._text())
+
+    def test_the_replayed_call_unread_meets_the_read_rule_with_the_turn_named(self):
+        """With the names resolved, the read rule is the right answer -- and it
+        now says where a turn begins (4 of the 15 refusals followed a read one
+        goal nudge earlier)."""
+        out = crow_core.run_tool("edit_file", self._replay())
+        self.assertIn("before editing it, in this turn", out)
+        self.assertIn("[Goal mode ...] nudges included", out)
+        self.assertIn("read_file", out)
+
+    def test_the_anthropic_and_openhands_names_are_taken_too(self):
+        crow_core.tool_read_file(self.path)
+        out = crow_core.run_tool("edit_file", json.dumps(
+            {"file_path": self.path, "old_str": "scene.add", "new_str": "world.add"}))
+        self.assertTrue(out.startswith(
+            "[took file_path as path, old_str as old, new_str as new]"), out)
+        self.assertIn("world.add", self._text())
+
+    def test_two_names_with_different_values_are_an_error_not_a_pick(self):
+        crow_core.tool_read_file(self.path)
+        before = self._text()
+        out = crow_core.run_tool("edit_file", json.dumps(
+            {"path": self.path, "old": "scene", "old_string": "sea", "new": "x"}))
+        self.assertTrue(out.startswith("error: wrong arguments for edit_file:"), out)
+        self.assertIn("old and old_string both given with different values", out)
+        self.assertEqual(self._text(), before)
+
+    def test_two_aliases_that_disagree_name_each_other(self):
+        """The error names the keys the model SENT -- not `old`, which it
+        never wrote."""
+        out = crow_core.run_tool("edit_file", json.dumps(
+            {"path": self.path, "old_string": "a", "old_str": "b", "new": "x"}))
+        self.assertIn("old_string and old_str both given", out)
+
+    def test_two_names_with_the_same_value_run_and_say_the_drop(self):
+        crow_core.tool_read_file(self.path)
+        out = crow_core.run_tool("edit_file", json.dumps(
+            {"path": self.path, "old": "scene", "old_string": "scene", "new": "world"}))
+        self.assertIn("[dropped old_string, the same value as its declared name]", out)
+        self.assertIn("replaced 1 occurrence", out)
+
+    def test_an_alias_and_a_stray_name_meet_the_signature_before_the_read_rule(self):
+        """THE ORDERING, with both halves at once: `old_string` is taken, the
+        undeclared `replacement` leaves `new` missing -- an unread file, and
+        still the signature answers first, with the take said above it."""
+        out = crow_core.run_tool("edit_file", json.dumps(
+            {"path": self.path, "old_string": "sea", "replacement": "x"}))
+        self.assertNotIn("before editing it", out)
+        self.assertIn("unknown argument(s) replacement and without the required new", out)
+        self.assertIn("Its arguments are: path, old, new.", out)
+        self.assertEqual(self._text().count("sea"), 2)
+
+    def test_the_handler_checks_old_and_new_before_the_read_rule(self):
+        """A missing 'new' was a silent deletion: the default "" replaced
+        `old` with nothing. Deleting is said as new=""."""
+        out = crow_core.tool_edit_file(self.path, old="", new="x")
+        self.assertIn("needs 'old'", out)
+        self.assertNotIn("before editing it", out)
+        out = crow_core.tool_edit_file(self.path, old="scene")
+        self.assertIn("needs 'new'", out)
+        self.assertNotIn("before editing it", out)
+        crow_core.tool_read_file(self.path)
+        out = crow_core.tool_edit_file(self.path, old="scene", new="")
+        self.assertIn("replaced 1 occurrence", out)
+
+    def test_a_file_path_edit_repeated_after_the_read_is_not_answered_from_cache(self):
+        """The repeat cache keyed the read state on `path`. Without the
+        canonical name a `file_path` call is never-read forever, and its
+        refusal would be replayed after the read that lifted it."""
+        call = json.dumps({"file_path": self.path, "old_string": "scene",
+                           "new_string": "world"})
+        first, _ = crow_core.run_tool_cached("edit_file", call)
+        self.assertIn("before editing it", first)
+        crow_core.tool_read_file(self.path)
+        second, repeated = crow_core.run_tool_cached("edit_file", call)
+        self.assertFalse(repeated, second)
+        self.assertIn("replaced 1 occurrence", second)
+
+    def test_the_approval_scope_reads_the_declared_name(self):
+        call = json.dumps({"file_path": self.path, "old_string": "a", "new_string": "b"})
+        self.assertEqual(crow_core.approval_scope("edit_file", call),
+                         ("writing", os.path.dirname(self.path).lower()))
+
+    def test_verify_material_carries_an_aliased_edit(self):
+        """/verify reads the calls from the history, as sent -- an edit made
+        under Claude Code's names must reach the checker as replaced/with."""
+        talk = crow_core.Conversation()
+        talk.append("user", "fix it")
+        talk.append("assistant", "on it", tool_calls=[{
+            "id": "c", "name": "edit_file", "arguments": json.dumps(
+                {"file_path": "a.py", "old_string": "OLD", "new_string": "NEW"})}])
+        material = crow_core.verify_material(talk)
+        self.assertIn("=== a.py ===", material)
+        self.assertIn("replaced:\nOLD\nwith:\nNEW", material)
+
+    def test_search_text_takes_path_as_root_and_a_file_root_is_searched(self):
+        """Measured before the rollover: `search_text(path="build/entry.mjs")`
+        twice, answered "no match" both times -- the path was ignored, and a
+        file handed over as root would have walked to nothing anyway."""
+        out = crow_core.run_tool("search_text", json.dumps(
+            {"path": self.path, "pattern": "createSea"}))
+        self.assertTrue(out.startswith("[took path as root]"), out)
+        self.assertIn("app.js:1:", out)
+
+    def test_memory_takes_new_text_as_content(self):
+        """Measured twice in the same session: `memory(action=replace,
+        old_text=..., new_text=...)` -- a TypeError, "Did you mean
+        'old_text'?", which is the wrong half."""
+        args = {"action": "replace", "old_text": "a", "new_text": "b"}
+        self.assertEqual(crow_core.resolve_argument_aliases("memory", args),
+                         (None, ["took new_text as content"]))
+        self.assertEqual(args, {"action": "replace", "old_text": "a", "content": "b"})
+
+    def test_an_undeclared_name_stays_207s_note(self):
+        """NEGATIVPROBE. The table is declared, not guessed: `replace_all`
+        has no Crow equivalent and is not renamed into anything."""
+        crow_core.tool_read_file(self.path)
+        out = crow_core.run_tool("edit_file", json.dumps(
+            {"path": self.path, "old": "scene", "new": "world", "replace_all": True}))
+        self.assertIn("[unknown argument(s) ignored: replace_all]", out)
+        self.assertNotIn("took", out)
+
+    def test_every_alias_targets_a_declared_argument(self):
+        """A table entry pointing at a name the tool does not declare would
+        rename a call into a different wrong call."""
+        for tool, table in crow_core.ARGUMENT_ALIASES.items():
+            declared = crow_core._declared_properties(tool)
+            self.assertTrue(declared, tool)
+            for alias, canonical in table.items():
+                self.assertIn(canonical, declared, (tool, alias))
+                self.assertNotIn(alias, declared, (tool, alias))
+
+    def test_a_well_formed_call_carries_no_note(self):
+        crow_core.tool_read_file(self.path)
+        out = crow_core.run_tool("edit_file", json.dumps(
+            {"path": self.path, "old": "scene", "new": "world"}))
+        self.assertEqual(out, "replaced 1 occurrence in %s" % self.path)
 
 
 class StorePathsGetNoStandingApprovalTests(unittest.TestCase):

@@ -114,24 +114,47 @@ command, not just the first; `always` is kept in `approvals.json` — under
 `%LOCALAPPDATA%\Crow\` on Windows, `~/.config/crow/` on Linux — and survives the restart. Directories the conversation was pointed at pass without asking.
 An obfuscated path does not ask — the gate is a question, not a sandbox.
 
-### Argument names (#207, #214)
+### Argument names (#207, #214, #215)
 
-A key no declaration names is said, never swallowed: the result opens with
-`[unknown argument(s) ignored: …]` and the call still runs on what it was given (#207).
+A tool is called with the names its declaration gives. Three cases fall outside that, and
+each one is said, never swallowed.
 
-A key that is unknown **while a required one is missing** is a misnamed argument, and then
+**A sibling harness's name** for the same argument is taken — declared in
+`ARGUMENT_ALIASES`, not guessed — and the result opens with what was taken:
+`[took old_string as old, new_string as new]`.
+
+| tool | taken as declared |
+|---|---|
+| `edit_file` | `file_path` → `path`, `old_string` / `old_str` → `old`, `new_string` / `new_str` → `new` |
+| `read_file` `append_file` | `file_path` → `path` |
+| `write_file` | `file_path` → `path`, `file_text` → `content` |
+| `search_text` `find_files` | `path` → `root` |
+| `memory` | `new_text` → `content` |
+
+Two names for one argument with different values are an error, not a pick; the same value
+twice runs, with `[dropped …]`.
+
+**A key no declaration names** is ignored, and the result opens with
+`[unknown argument(s) ignored: …]` (#207).
+
+**A key that is unknown while a required one is missing** is a misnamed argument, and then
 nothing runs. The answer names the signature, and it comes before the tool's own checks —
 the read-before-edit gate included:
 
 ```
-error: edit_file was called with unknown argument(s) new_string, old_string and without the
+error: edit_file was called with unknown argument(s) replace, search and without the
 required old, new -- nothing was run. Its arguments are: path, old, new.
 ```
 
+A required key missing on its own gets the tool's own sentence; `edit_file` says a missing
+`old` or `new` before its read rule (`new=""` deletes, a missing `new` no longer does).
+`search_text` given a file as its root searches that file.
+
 Measured 2026-09-22 after a rollover: 22 of 22 `edit_file` calls arrived as
 `old_string`/`new_string`, all 22 failed, and 15 of them were first told to read the file —
-so the model read it and sent the same wrong keys again. A required key missing on its own
-still gets the tool's own sentence.
+so the model read it and sent the same wrong keys again. 4 of those 15 had read the file one
+`[Goal mode ...]` nudge earlier: the read rule of `write_file` and `edit_file` is per turn,
+a turn starts at every user message, crow's own nudges included, and the refusal now says so.
 
 The request after a rollover declares the same `tools` array, the same sampler and the same
 thinking fields as the one before; only the messages and the pinned head differ (pinned by

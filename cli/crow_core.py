@@ -5754,6 +5754,16 @@ class TurnCost:
 # both messages below say "in this turn" rather than just "first".
 _READ: set[str] = set()
 
+# #215. "IN THIS TURN" WAS TRUE AND NOT ENOUGH. A turn is one
+# user message, and in goal mode crow sends those itself -- "[Goal mode, step 9
+# still open. Continue.]" and the spent-budget note both open a new turn and
+# empty `_READ`. Measured 2026-09-22: 4 of the 15 read-rule refusals that
+# session were edits of a file the model HAD read, one such nudge earlier. The
+# refusal now says where the turn began, so a correct read is not mistaken for
+# a broken guard.
+TURN_SCOPE_HINT = (" (a turn starts at every user message, crow's own "
+                   "[Goal mode ...] nudges included)")
+
 
 def _key(path: str) -> str:
     return os.path.normcase(os.path.abspath(path))
@@ -8238,7 +8248,7 @@ def tool_write_file(path: str, content: str = "", **_) -> str:
         return outside
     if os.path.exists(path) and _key(path) not in _READ:
         return (f"error: refusing to overwrite {path} without reading it first in "
-                f"this turn. Call read_file on it, then write.")
+                f"this turn{TURN_SCOPE_HINT}. Call read_file on it, then write.")
     try:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "w", encoding="utf-8", newline="") as fh:
@@ -8273,7 +8283,7 @@ def tool_append_file(path: str, content: str = "", **_) -> str:
     return f"{verb} {path} (+{len(content)} bytes, file now {total} bytes)"
 
 
-def tool_edit_file(path: str, old: str = "", new: str = "", **_) -> str:
+def tool_edit_file(path: str, old: str = "", new: "str | None" = None, **_) -> str:
     """Exact-match replacement, and it refuses an ambiguous one.
 
     A patch format would be more expressive and needs fuzzy matching to survive
@@ -8284,10 +8294,23 @@ def tool_edit_file(path: str, old: str = "", new: str = "", **_) -> str:
     outside = _outside_root(path)                   # #92, and before the read rule
     if outside:
         return outside
-    if _key(path) not in _READ:
-        return f"error: read {path} before editing it, in this turn"
+    # #215. THE ARGUMENT CHECK GOES BEFORE THE READ RULE, for
+    # the reason the boundary does: it needs no state. Measured 2026-09-22 after
+    # a rollover: 22 of 22 edit_file calls carried old_string/new_string, 15 of
+    # them were answered "read it first" -- the model read, retried the same
+    # shape, and concluded the GUARD was the obstacle. A call that cannot run
+    # whatever was read has to hear that first.
+    #
+    # A MISSING 'new' IS NOT AN EMPTY ONE. The old default of "" made an edit
+    # without it a silent deletion of `old`; deleting stays possible, it just
+    # has to be said as new="".
     if not old:
         return "error: edit_file needs 'old' -- to create a file use write_file"
+    if new is None:
+        return "error: edit_file needs 'new' -- pass new=\"\" to delete 'old'"
+    if _key(path) not in _READ:
+        return (f"error: read {path} before editing it, in this turn{TURN_SCOPE_HINT}. "
+                f"Call read_file on it, then edit.")
     try:
         with open(path, encoding="utf-8") as fh:
             data = fh.read()
@@ -8377,7 +8400,17 @@ def tool_search_text(root: str = ".", pattern: str = "", glob: str = "*", **_) -
     hits, size, skipped = [], 0, 0
     started = time.monotonic()
     stopped = None
-    for base, dirs, files in os.walk(root):
+    # #215. A FILE AS ROOT IS SEARCHED, NOT WALKED. os.walk over
+    # a file yields nothing, so the answer was "no match" -- a false negative,
+    # not an error. Measured 2026-09-22: twice with `path: build/entry.mjs`,
+    # the name grep and ripgrep take a file under. The file was named, so the
+    # glob does not filter it out again.
+    if os.path.isfile(root):
+        walk = [(os.path.dirname(root) or ".", [], [os.path.basename(root)])]
+        glob = "*"
+    else:
+        walk = os.walk(root)
+    for base, dirs, files in walk:
         dirs[:] = [d for d in dirs if d not in SEARCH_SKIP_DIRS]
         for name in files:
             if not fnmatch.fnmatch(name, glob):
@@ -13498,7 +13531,7 @@ def approval_scope(name: str, arguments: str) -> tuple[str, str] | None:
         return None
 
     if name in ("write_file", "append_file", "edit_file"):
-        path = args.get("path")
+        path = canonical_arguments(name, args).get("path")   # #215
         if not isinstance(path, str) or not path.strip():
             return None
         return ("writing", os.path.dirname(os.path.abspath(path)).lower())
@@ -14165,7 +14198,10 @@ def _cache_key(name: str, arguments: str) -> tuple | None:
         args = json.loads(arguments or "{}")
     except json.JSONDecodeError:
         args = None
-    path = args.get("path") if isinstance(args, dict) else None
+    # #215: read under the name the handler will see, or a
+    # `file_path` call keys as never-read forever and replays its refusal
+    # after the read that should have lifted it.
+    path = canonical_arguments(name, args).get("path") if isinstance(args, dict) else None
     # A call whose path is missing or not a string cannot have been read, and it
     # is about to fail on its arguments -- which IS a function of its arguments,
     # so caching it under `seen=False` is correct rather than a fallback.
@@ -14266,6 +14302,80 @@ def coerce_declared_containers(name: str, args: dict) -> "tuple[str | None, list
     return None, notes
 
 
+# ---------------------------------------------------- #215 -----
+# A SIBLING SCHEMA'S NAME IS TAKEN, AND SAID. After the rollover of 2026-09-22
+# the model wrote edit_file as the edit tool it was trained on -- 22 of 22
+# calls with `old_string`/`new_string`, Claude Code's names -- and #207's note
+# ("unknown argument(s) ignored") told it so 22 times without it ever changing
+# the call. The names are not a misunderstanding of intent: the value under
+# `old_string` IS the old text, and refusing it only buys rounds.
+#
+# A DECLARED TABLE, NOT A FUZZY MATCH. Every entry is a name a major harness
+# documents for the same argument (Claude Code: file_path/old_string/
+# new_string; Anthropic's and OpenHands' text editor: old_str/new_str/
+# file_text; grep, ripgrep and Claude Code's Grep/Glob: path for the search
+# root) or one measured in a crow transcript (`new_text` on memory, twice).
+# A name nobody declared stays #207's business: ignored and said, and when a
+# required argument is missing with it, the signature is the answer and
+# nothing runs (#214, below in run_tool).
+#
+# SAID, NOT SWALLOWED -- the #207 rule holds. Every mapping puts one bracket
+# note ahead of the result ("[took old_string as old]"), so the model sees
+# the real name on the call that worked. Two names for one argument with
+# DIFFERENT values is an error, not a pick: there is no right one to guess.
+ARGUMENT_ALIASES: dict = {
+    "read_file":   {"file_path": "path"},
+    "write_file":  {"file_path": "path", "file_text": "content"},
+    "append_file": {"file_path": "path"},
+    "edit_file":   {"file_path": "path",
+                    "old_string": "old", "old_str": "old",
+                    "new_string": "new", "new_str": "new"},
+    "search_text": {"path": "root"},
+    "find_files":  {"path": "root"},
+    "memory":      {"new_text": "content"},
+}
+
+
+def resolve_argument_aliases(name: str, args: dict) -> "tuple[str | None, list[str]]":
+    """Renames declared sibling names in place. (Error, notes) -- the error
+    names both keys when they disagree, and then nothing has been renamed
+    that the caller would act on: the call does not run."""
+    table = ARGUMENT_ALIASES.get(name) or {}
+    origin: dict = {}                               # canonical -> key it came from
+    taken, same = [], []
+    for alias, canonical in table.items():
+        if alias not in args:
+            continue
+        value = args.pop(alias)
+        if canonical in args:
+            seen = origin.get(canonical, canonical)
+            if args[canonical] != value:
+                return ("%s and %s both given with different values -- %s is "
+                        "one argument, send it once as %s"
+                        % (seen, alias, canonical, canonical)), []
+            same.append(alias)
+            continue
+        args[canonical] = value
+        origin[canonical] = alias
+        taken.append("%s as %s" % (alias, canonical))
+    notes = []
+    if taken:
+        notes.append("took %s" % ", ".join(taken))
+    if same:
+        notes.append("dropped %s, the same value as its declared name"
+                     % ", ".join(same))
+    return None, notes
+
+
+def canonical_arguments(name: str, args: dict) -> dict:
+    """The arguments as the handler will see them, for the readers that look
+    at a call without running it -- the repeat cache, the approval key,
+    /verify. A copy; a conflict leaves them as sent, and run_tool refuses it."""
+    copy = dict(args)
+    bad, _notes = resolve_argument_aliases(name, copy)
+    return dict(args) if bad else copy
+
+
 def run_tool(name: str, arguments: str) -> str:
     """Execute one tool call and return what the model gets back.
 
@@ -14284,9 +14394,13 @@ def run_tool(name: str, arguments: str) -> str:
     impl = TOOL_IMPL.get(name)
     if impl is None:
         return f"error: no tool named {name!r}. Available: {', '.join(sorted(TOOL_IMPL))}"
+    bad, taken = resolve_argument_aliases(name, args)
+    if bad is not None:
+        return f"error: wrong arguments for {name}: {bad}"
     bad, notes = coerce_declared_containers(name, args)
     if bad is not None:
         return f"error: {bad}"
+    notes = taken + notes
     # #207. UNKNOWN KEYS ARE SAID, NOT SWALLOWED. The live incident rode in on
     # `search_text` arguments carrying `pattern`, `pattern_2: "placeholder"`
     # and `regex` -- three keys for one argument, two of them declared by no
@@ -14310,6 +14424,11 @@ def run_tool(name: str, arguments: str) -> str:
     # ein Schema-Fehler meldet (InputValidationError, "The required parameter
     # `content` is missing"). Nur wenn BEIDES zutrifft: ein fehlender Pflicht-
     # schluessel allein bleibt die Sache des Werkzeugs und seiner Saetze.
+    #
+    # #215: WAS HIER ANKOMMT, IST SCHON UEBERSETZT. Die Namen
+    # anderer Harnesses, die `ARGUMENT_ALIASES` deklariert (old_string,
+    # old_str, file_path ...), sind oben uebernommen und gesagt worden; diese
+    # Pruefung sieht nur noch, was niemand deklariert hat.
     missing = [k for k in _declared_required(name) if k not in args]
     if declared and extra and missing:
         return ("error: %s was called with unknown argument(s) %s and without "
@@ -17541,6 +17660,9 @@ def verify_material(conversation: "Conversation") -> str:
                 args = json.loads(fn.get("arguments") or "{}")
             except json.JSONDecodeError:
                 continue
+            if not isinstance(args, dict):
+                continue
+            args = canonical_arguments(name, args)  # #215
             path = str(args.get("path") or "")
             if not path:
                 continue
