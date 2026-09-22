@@ -56,6 +56,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -9177,8 +9178,9 @@ BOUNDED_RUN_SETTLE = 0.25
 
 
 def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
-                 stdin_text: str | None = None, *,
-                 shell: bool = False) -> "tuple[int | None, str, str, str]":
+                 stdin_text: str | None = None, *, shell: bool = False,
+                 prefix: "list[str] | None" = None,
+                 unit: str | None = None) -> "tuple[int | None, str, str, str]":
     """(exit code, stdout, stderr, stopped) -- #207's bounded child, once.
 
     `stopped` is "" when the child ended by itself, "clock" when `deadline`
@@ -9210,16 +9212,48 @@ def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
 
     `shell=True` is run_command's: `executable` names bash where it exists and
     stays None on Windows, which means COMSPEC -- cmd.exe, as it always was.
-    No process group is made here: what a killed shell leaves behind is what
-    run_command has always left, and render_page keeps its own scope.
+    `prefix` goes in front of the command (#218: run_command's memory scope);
+    a shell command then becomes the explicit argv `shell_argv` builds, the
+    same bash -c the shell=True path runs. `unit` names that scope, and a kill
+    sweeps it too (kill_scope): a descendant that left the group by setsid
+    is still in the cgroup -- and until it dies it holds the pipe, measured:
+    swept only after the runner had returned, its reader was left behind.
+
+    #218. THE KILL TAKES THE GROUP, NOT THE HANDLE ALONE. `proc.kill()` on a
+    shell signals the shell; `sleep 300 & sleep 300` or `timeout 40 chromium
+    ... | grep` kept running after it, holding the pipe and the memory. On
+    POSIX the child starts a session of its own (start_new_session, setsid --
+    so the pgid IS proc.pid) and the clock and the cap SIGKILL that whole
+    group: every process the shell started that did not leave the group by
+    itself. Codex had the same hang (openai/codex#4337, "only kills the shell
+    wrapper") and the same remedy. A child that exits by itself is left
+    alone, and so is whatever it put in the background -- `server &` is a
+    thing a command may mean. Windows keeps `proc.kill()`: cmd.exe's children
+    survive it there, as they always did.
     """
+    argv = cmd
+    if prefix:
+        argv = list(prefix) + (crow_platform.shell_argv(cmd) if shell else list(cmd))
+        shell = False
     proc = subprocess.Popen(
-        cmd, shell=shell, cwd=cwd, env=_child_env(),
+        argv, shell=shell, cwd=cwd, env=_child_env(),
         executable=crow_platform.shell_executable() if shell else None,
         stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, errors="replace")
+        text=True, errors="replace",
+        **({} if crow_platform.IS_WINDOWS else {"start_new_session": True}))
     drained = {"out": [], "err": [], "over": False}
+
+    def _kill() -> None:
+        try:
+            if crow_platform.IS_WINDOWS:
+                proc.kill()
+            else:
+                os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass                           # the group is already gone
+        if unit:
+            crow_platform.kill_scope(unit)
 
     def _drain(which: str) -> None:
         pipe = proc.stdout if which == "out" else proc.stderr
@@ -9238,7 +9272,7 @@ def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
                 held += len(chunk)
                 if held > COMMAND_CAPTURE_BYTES:
                     drained["over"] = True
-                    proc.kill()
+                    _kill()
                     break
         except (OSError, ValueError):
             pass
@@ -9265,7 +9299,7 @@ def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
         except subprocess.TimeoutExpired:
             pass
     if timed_out or drained["over"]:
-        proc.kill()
+        _kill()
     proc.wait()
     settle = time.monotonic() + BOUNDED_RUN_SETTLE
     for reader, pipe in zip(readers, (proc.stdout, proc.stderr)):
@@ -9328,18 +9362,67 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
         # _bounded_run, the one runner build_bundle uses too. Whichever trips
         # first kills the child, and the result says which -- a fact the
         # model can act on, never an exception out of the tool.
+        #
+        # #218. AND THE MEMORY, IN A SCOPE OF THE SHELL'S OWN. The shell runs
+        # in a user scope named for this call (command_scope_prefix: 8G, no
+        # swap, OOMPolicy=kill); without systemd-run or on Windows the prefix
+        # is empty and the call is what it was.
+        unit = "crow-cmd-%d-%s" % (os.getpid(), os.urandom(4).hex())
+        prefix = crow_platform.command_scope_prefix(unit)
         code, out, err, stopped = _bounded_run(
-            command, cwd, time.monotonic() + COMMAND_TIMEOUT, shell=True)
+            command, cwd, time.monotonic() + COMMAND_TIMEOUT, shell=True,
+            prefix=prefix, unit=unit if prefix else None)
     except OSError as exc:
         return f"error: could not run: {exc}"
+    note = _headless_browser_note(command, bool(prefix))
     if stopped == "clock":
-        return f"error: command exceeded {COMMAND_TIMEOUT}s and was killed: {command}"
+        return f"error: command exceeded {COMMAND_TIMEOUT}s and was killed: {command}" + note
     if stopped == "cap":
         return ("error: command printed more than %d MiB and was killed -- "
                 "pipe it through head, or write it to a file and read the "
-                "range: %s" % (COMMAND_CAPTURE_BYTES >> 20, command))
+                "range: %s" % (COMMAND_CAPTURE_BYTES >> 20, command)) + note
+    # #218. A CEILING KILL IS NAMED AS ONE -- asked of the unit, not read
+    # off the -9, which a `kill -9 $$` gives too (scope_result). The output up
+    # to the kill stays: it says how far the command got.
+    if prefix and code in (-9, 137) and crow_platform.scope_result(unit) == "oom-kill":
+        cap = crow_platform.command_memory_bounds().get("MemoryMax")
+        head = ("error: command exceeded its memory ceiling (%sno swap) and was "
+                "killed, with everything it started: %s"
+                % ("MemoryMax=%s, " % cap if cap else "", command))
+        return _clip(head + (f"\n{out}".rstrip())
+                     + (f"\n[stderr]\n{err}" if err.strip() else "")) + note
     return _clip(f"[exit {code}]\n{out}".rstrip()
-                 + (f"\n[stderr]\n{err}" if err.strip() else ""))
+                 + (f"\n[stderr]\n{err}" if err.strip() else "")) + note
+
+
+# #218. THE BOUNDED WAY TO A SCREENSHOT, SAID WHERE THE UNBOUNDED ONE IS TAKEN.
+# 2026-09-22: 20 run_command calls started `/usr/bin/chromium --headless=new
+# ... --screenshot=` after render_page timed out, 18 of them with the software-
+# WebGL flags of the 54 GiB runaway. A note, not a refusal: with the shell in
+# its own scope the browser is bounded here too, a headless browser has uses
+# render_page does not cover (--dump-dom, --print-to-pdf, a project's own test
+# runner), and a refused command line comes back as a script file the pattern
+# cannot see. A browser name as a word, and a headless or screenshot switch.
+_HEADLESS_BROWSER = re.compile(
+    r"(?i)(?:^|[\s/\\\"'=])(?:chromium(?:-browser)?|google-chrome(?:-stable)?|"
+    r"chrome(?:\.exe)?|chrome-headless-shell|headless_shell|msedge(?:\.exe)?|"
+    r"microsoft-edge|brave(?:-browser)?|firefox)(?=[\s\"']|$)")
+_HEADLESS_SWITCH = re.compile(r"(?i)(?:^|\s)--?(?:headless|screenshot)\b")
+
+
+def _headless_browser_note(command: str, scoped: bool) -> str:
+    """The line run_command appends when its command starts a headless browser.
+
+    `scoped` says whether this call's shell had its memory scope; without one
+    the note says so instead of naming a bound that was not there."""
+    if not (_HEADLESS_BROWSER.search(command) and _HEADLESS_SWITCH.search(command)):
+        return ""
+    cap = crow_platform.command_memory_bounds().get("MemoryMax") if scoped else None
+    return ("\nnote: render_page takes this screenshot inside the render's own "
+            "memory ceiling and returns the page's console; a headless browser "
+            "here runs %s."
+            % ("only under run_command's bound (MemoryMax=%s)" % cap if cap
+               else "with no memory bound but the clock"))
 
 
 # ---------------------------------------------------------------- #212 -----

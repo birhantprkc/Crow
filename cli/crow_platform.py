@@ -521,21 +521,52 @@ def server_scope_prefix() -> list[str]:
     return _user_scope_prefix(server_memory_bounds())
 
 
-def _user_scope_prefix(properties: dict) -> list[str]:
+_SYSTEMD_VERSIONS: dict = {}
+
+
+def _systemd_version(run: str) -> int:
+    """The major version `systemd-run --version` reports (0 if unreadable), once per binary."""
+    if run not in _SYSTEMD_VERSIONS:
+        try:
+            first = subprocess.run([run, "--version"], capture_output=True, text=True,
+                                   timeout=5, stdin=subprocess.DEVNULL).stdout.split()
+            _SYSTEMD_VERSIONS[run] = int(first[1]) if first[:1] == ["systemd"] else 0
+        except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+            _SYSTEMD_VERSIONS[run] = 0
+    return _SYSTEMD_VERSIONS[run]
+
+
+def _user_scope_prefix(properties: dict, unit: str | None = None,
+                       literal: bool = False) -> list[str]:
     """The shared builder: a user scope in session.slice with these properties.
 
-    The two callers differ only in their bounds and their switch -- the shape
+    The callers differ only in their bounds and their switch -- the shape
     (user manager, --scope so the Popen pid stays the waitable one, the slice
     oomd does not watch, --quiet, `--` before the payload) is what #158 and the
     2026-09-16 oomd kills paid for, and it belongs in one place like every
     other OS fact in this file. Verified here (2026-09-22): the scoped process
     lands in session.slice/run-*.scope with memory.max/memory.high/
-    memory.swap.max exactly as given.
+    memory.swap.max exactly as given. `unit` names the scope (`--unit=`) for a
+    caller that has to ask it afterwards how it ended (scope_result) or stop
+    what is left in it (kill_scope); without it systemd picks run-*.scope.
+
+    `literal` is for a payload that carries a model's shell text. systemd-run
+    EXPANDS ITS COMMAND LINE: measured 2026-09-22 on systemd 261, `bash -c
+    'X=secret; echo "[$X]" "[${X}]"'` printed `[secret] []` with "Referenced
+    but unset environment variable" on stderr, and `$$` arrived as `$`.
+    `--expand-environment=no` turns that off; it exists from systemd 254 on,
+    and before 254 a scope did no expansion (systemd NEWS 254/258: off by
+    default for --scope until 258 flipped it on), so older ones get nothing.
+    The render's and the server's argv hold no `${`, and stay as they were.
     """
     run = shutil.which("systemd-run")
     if not run or not user_manager_reachable():
         return []
     prefix = [run, "--user", "--scope", "--slice=session.slice", "--quiet"]
+    if unit:
+        prefix.append("--unit=" + unit)
+    if literal and _systemd_version(run) >= 254:
+        prefix.append("--expand-environment=no")
     for name, value in properties.items():
         prefix += ["-p", "%s=%s" % (name, value)]
     return prefix + ["--"]
@@ -561,6 +592,112 @@ def render_scope_prefix() -> list[str]:
     if IS_WINDOWS or (os.environ.get("CROW_RENDER_SCOPE") or "").strip().lower() in ("0", "off", "none"):
         return []
     return _user_scope_prefix(render_memory_bounds())
+
+
+_COMMAND_MEMORY_DEFAULT = "8G"
+
+
+def command_memory_bounds() -> dict:
+    """The memory properties run_command's shell scope gets, as systemd sizes.
+
+    #218. 2026-09-22 evening: after render_page kept timing out, the model ran
+    the SAME software-WebGL headless chromium (--enable-unsafe-swiftshader
+    --no-sandbox) 20 times through run_command -- the one tool with no memory
+    bound, so the runaway #213 had just fenced in was one shell away. The
+    bound goes on the shell, not on a binary: the model reaches any binary
+    through it.
+
+    WHY 8G. Measured 2026-09-22 as each scope's own memory.peak: the
+    diorama's three.js esbuild bundle 106 MiB, `npm ls --all` 46 MiB, node
+    importing three 21 MiB, gcc 9 MiB, Crow's own test_crow 60 MiB and
+    test_crow_core 109 MiB. 8G is ~75x the largest of those and above a node
+    build at V8's own heap ceiling (~4 GiB); it stops the 54 GiB runaway at a
+    seventh of the way. MemoryHigh one below makes the kernel reclaim first,
+    the swap cap is render_memory_bounds' reason unchanged (on zram the
+    anonymous memory IS the freeze). $CROW_COMMAND_MEMORY_MAX moves the kill
+    bound (any systemd size); `none` drops the size bounds, keeps the swap cap.
+    """
+    out = {"MemorySwapMax": "0"}
+    raw = (os.environ.get("CROW_COMMAND_MEMORY_MAX") or "").strip()
+    if raw.lower() in ("0", "none", "off"):
+        return out
+    if raw:
+        out["MemoryMax"] = raw
+        return out
+    out["MemoryHigh"] = "7G"
+    out["MemoryMax"] = _COMMAND_MEMORY_DEFAULT
+    return out
+
+
+def command_scope_prefix(unit: str) -> list[str]:
+    """What to put in front of run_command's shell argv (#218): its own scope.
+
+    Sized by command_memory_bounds, named `unit` so the caller can ask how it
+    ended (scope_result) and sweep it after a kill (kill_scope). OOMPolicy=kill
+    sets memory.oom.group: at the ceiling the kernel kills EVERY process in
+    the scope at once. Measured 2026-09-22 (200 MB hog against MemoryMax=100M,
+    `hog; echo after`): with the default OOMPolicy=stop the shell went on and
+    printed "after rc=137" before systemd's stop reached it; with kill the
+    shell died with the hog (-9) and printed nothing more -- a command either
+    ran or was killed whole, never half.
+
+    The scope inherits the caller's cwd: measured 2026-09-22, `pwd` under the
+    prefix from a scratch directory printed that directory -- `--scope` execs
+    the payload in systemd-run's own process. Empty on Windows, empty where
+    systemd-run cannot reach the user manager (then the shell runs as before,
+    bounded by the clock and the capture cap only), and with
+    `CROW_COMMAND_SCOPE=0`.
+    """
+    if IS_WINDOWS or (os.environ.get("CROW_COMMAND_SCOPE") or "").strip().lower() in ("0", "off", "none"):
+        return []
+    return _user_scope_prefix(dict(command_memory_bounds(), OOMPolicy="kill"), unit,
+                              literal=True)
+
+
+def _systemctl_user(*args: str) -> str:
+    """`systemctl --user <args>` stdout, "" on any failure. Short and bounded."""
+    ctl = shutil.which("systemctl")
+    if not ctl:
+        return ""
+    try:
+        return subprocess.run([ctl, "--user", *args], capture_output=True, text=True,
+                              timeout=5, stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def scope_result(unit: str, settle: float = 0.5) -> str:
+    """How the named scope ended: systemd's Result= ("oom-kill", "success", ...).
+
+    A FACT FROM THE UNIT, NOT A GUESS FROM THE EXIT CODE. -9 is also what a
+    `kill -9 $$` gives, and a reason the model acts on has to be the real one.
+    Measured 2026-09-22, 8 of 8: the first query right after the shell's -9
+    already read `failed oom-kill`; `settle` covers a unit still marked
+    active/deactivating. A failed unit stays loaded until reset-failed -- it is
+    reset here, so the kill leaves no row in `systemctl --user --failed`.
+    """
+    import time
+    deadline = time.monotonic() + settle
+    while True:
+        fields = _systemctl_user("show", unit + ".scope", "-p", "ActiveState",
+                                 "-p", "Result", "--value").split()
+        state, result = (fields + ["", ""])[:2]
+        if state == "failed":
+            _systemctl_user("reset-failed", unit + ".scope")
+            return result
+        if state not in ("active", "deactivating", "reloading") or time.monotonic() >= deadline:
+            return result
+        time.sleep(0.05)
+
+
+def kill_scope(unit: str) -> None:
+    """SIGKILL whatever is still in the named scope -- the sweep after a kill.
+
+    The process-group kill reaches everything the shell started EXCEPT a
+    descendant that left the group (setsid, a daemonizer). The scope's cgroup
+    it cannot leave. The unit is the one this caller named, never a pattern
+    (#158)."""
+    _systemctl_user("kill", "--signal=SIGKILL", unit + ".scope")
 
 
 def devtools_pipe() -> "tuple[list[str], tuple[int, int], int, int] | None":

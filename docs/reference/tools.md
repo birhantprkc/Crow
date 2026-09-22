@@ -29,7 +29,7 @@ own class.
 | `wait_ms` | real time after load, 200–20,000. A larger value never rescues a page too heavy to draw |
 | caps | one ceiling for the whole call: 15 s load + `wait_ms` + 10 s for the frame. It does not grow with anything the page does |
 | rasterer | `gpu (angle)` when the card has ≥ 512 MiB free, else `software (swiftshader)`; named in every result |
-| memory | Linux: its own user scope, `MemoryMax=6G`, swap 0 (#213) |
+| memory | Linux: its own user scope, `MemoryMax=6G`, swap 0 (#213). A browser started through `run_command` instead runs under that tool's 8G scope (#218) |
 | kill | `proc.kill()` on its own handle, then its session. Never by name, never a process list (#158) |
 | pipes | stdout and stderr go to a file: `communicate()` hangs on Windows after a kill when a grandchild holds the write end. The two DevTools pipes are Crow's own ends, read with `select` and a deadline |
 
@@ -59,6 +59,26 @@ measured, it appears only in the SwiftShader arm, and the string is in the `chro
 binary and in no `libnvidia-*`. The result opens as a tab in the
 [browser panel](../user-guide/browser.md).
 
+### `run_command` (#207, #218)
+
+`run_command(command, cwd=<working area>)` — one shell line, bash on Linux, cmd.exe on
+Windows, stdin closed.
+
+| | |
+|---|---|
+| class | `executing` — outside paths ask first ([Outside paths ask](#outside-paths-ask-144)) |
+| clock | `COMMAND_TIMEOUT` = 120 s |
+| capture | 32 MiB per stream in the reader threads (#207); 16 KB of it reach the model |
+| memory (Linux) | its own user scope per call, `crow-cmd-<pid>-<hex>.scope` in `session.slice`: `MemoryMax=8G`, `MemoryHigh=7G`, `MemorySwapMax=0`, `OOMPolicy=kill` (#218). `CROW_COMMAND_MEMORY_MAX` moves the kill bound (any systemd size), `none` keeps only the swap cap; `CROW_COMMAND_SCOPE=0` runs the shell bare |
+| why 8G | measured 2026-09-22 as each scope's `memory.peak`: diorama three.js esbuild bundle 106 MiB, `npm ls --all` 46 MiB, node importing three 21 MiB, gcc 9 MiB, `test_crow` 60 MiB, `test_crow_core` 109 MiB. 8G stops the 54 GiB software-WebGL runaway a seventh of the way and leaves a node build room up to V8's own ~4 GiB heap |
+| at the ceiling | the kernel kills every process in the scope at once (`OOMPolicy=kill` = `memory.oom.group`); the result reads `error: command exceeded its memory ceiling (MemoryMax=8G, no swap) and was killed, with everything it started: <command>` followed by the output up to the kill. The reason comes from the unit's `Result=oom-kill`, not from the exit code — `kill -9 $$` stays `[exit -9]`. The failed unit is reset |
+| kill | the clock and the capture cap SIGKILL the shell's whole process group (`start_new_session`, `killpg`), then the scope (`systemctl --user kill`), which also takes a descendant that left the group with `setsid`. A command that ends by itself keeps what it put in the background (`server &`); that process stays in its scope and under its ceiling |
+| literal | `--expand-environment=no` on systemd ≥ 254: systemd-run expands `${VAR}` and `$$` in its own command line (measured on 261: `${X}` came out empty) |
+| without systemd | no `systemd-run` or no reachable user manager (container, CI, SSH without a session): no scope, no ceiling; the process-group kill still holds |
+| Windows | no scope and no group: the clock kills `cmd.exe` by its handle, and what it started can outlive it — a Job Object would be the fix, not built |
+| headless browser | a browser name and `--headless`/`--screenshot` in the line add `note: render_page takes this screenshot inside the render's own memory ceiling …` to the result. A note, not a refusal: the browser is bounded here too, a headless browser has uses `render_page` does not cover (`--dump-dom`, `--print-to-pdf`), and a refused line comes back as a script file no pattern sees |
+| background output | a process left in the background that still holds stdout keeps its reader: the runner waits 0.25 s (`BOUNDED_RUN_SETTLE`) and returns without what it prints later. Redirect it (`server >log 2>&1 &`) and read the file |
+
 ### `build_bundle` (#212)
 
 `build_bundle(entry, out=<entry>.bundle.html|.js, global_name="", minify=true)` — a module
@@ -80,7 +100,7 @@ model, together with "never flatten a library by hand".
 | argv | `--bundle --format=iife --platform=browser --charset=utf8 --log-level=warning --log-limit=20`, `--minify` by default, text loader for `.glsl .vert .frag .vs .fs .wgsl .txt`, data URLs for images, fonts, `.glb .gltf .hdr .exr .ktx2 .bin .wasm` |
 | esbuild, in order | `CROW_ESBUILD`; `node_modules` walking up from the entry (`@esbuild/<platform>`, `esbuild/bin`, `.bin`); `esbuild` on `PATH`; the deno cache (`$DENO_DIR/dl/esbuild-*/`) and the npx cache (`~/.npm/_npx/*/node_modules/@esbuild/`), newest version wins there. Every candidate must answer `--version` |
 | none found | the result lists every place searched and says not to hand-flatten |
-| caps | one clock for the whole build (`BUNDLE_TIMEOUT` = 120 s), the #207 capture cap in the reader threads, 64 MiB on the result, 8 MiB on the entry page. Every esbuild call, the `--version` probes included, runs through `_bounded_run` — the one runner `run_command` uses; a grandchild left holding the pipe (a node wrapper's shape) does not hold the clock |
+| caps | one clock for the whole build (`BUNDLE_TIMEOUT` = 120 s), the #207 capture cap in the reader threads, 64 MiB on the result, 8 MiB on the entry page. Every esbuild call, the `--version` probes included, runs through `_bounded_run` — the one runner `run_command` uses; a grandchild left holding the pipe (a node wrapper's shape) does not hold the clock, and a kill takes esbuild's whole process group (#218) |
 | write | esbuild writes to a temporary directory; Crow writes `out` behind `write_file`'s fence. A file carrying the `crow build_bundle` mark (a `<meta name="generator">` / a first-line comment) is replaced freely; any other existing file only after a read in this conversation, unchanged on disk since ([Read before write](#read-before-write-215)) |
 | result | path, bytes, errors, warnings, seconds, which esbuild and where from, what was inlined, and whether the page still loads anything from disk. On errors nothing is written and the esbuild log comes back |
 | cache | never answered from the repeat cache: an edit to a source changes the result of the same call |

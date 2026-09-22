@@ -14709,6 +14709,266 @@ class CommandCaptureIsBoundedTests(unittest.TestCase):
         self.assertTrue(out.startswith("error: image is over"), out)
 
 
+def _scoped_here() -> bool:
+    """Can this machine give run_command its scope (systemd-run + user manager)?"""
+    return bool(crow_platform.command_scope_prefix("crow-cmd-probe"))
+
+
+def _gone(pid: int, within: float = 3.0) -> bool:
+    """True once `pid` is dead or a zombie waiting for its reaper."""
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            with open("/proc/%d/stat" % pid) as fh:
+                if fh.read().rsplit(")", 1)[1].split()[0] == "Z":
+                    return True
+        except OSError:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+@unittest.skipIf(crow_platform.IS_WINDOWS, "process groups and user scopes are POSIX/systemd")
+class RunCommandIsBoundedLikeTheRenderTests(unittest.TestCase):
+    """#218: run_command was the unbounded way around #208/#213.
+
+    2026-09-22 evening: 20 run_command calls started `/usr/bin/chromium
+    --headless=new`, 18 with the software-WebGL flags of the 54 GiB runaway,
+    after render_page kept timing out. run_command had no memory ceiling and
+    killed only the shell on its clock (`proc.kill()`, no process group), so a
+    multi-statement command's browser outlived the kill. Now the shell runs in
+    a user scope of its own (8G, no swap, OOMPolicy=kill), the clock and the
+    cap SIGKILL the shell's whole process group, and a headless browser in the
+    command line gets a note pointing at render_page.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-218-")
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self._saved = (crow_core.COMMAND_CAPTURE_BYTES, crow_core.COMMAND_TIMEOUT)
+        for name in ("CROW_COMMAND_MEMORY_MAX", "CROW_COMMAND_SCOPE"):
+            self._env(name, "")
+        self.stray = []
+        self.addCleanup(self._kill_strays)
+
+    def tearDown(self):
+        crow_core.COMMAND_CAPTURE_BYTES, crow_core.COMMAND_TIMEOUT = self._saved
+
+    def _env(self, name, value):
+        before = os.environ.get(name)
+        self.addCleanup(
+            lambda: os.environ.__setitem__(name, before) if before is not None
+            else os.environ.pop(name, None))
+        os.environ[name] = value
+
+    def _kill_strays(self):
+        """A test that fails must not leave its sleeper behind -- by its pid."""
+        import signal
+        for pid in self.stray:
+            if not _gone(pid, 0):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+
+    def _pid(self, name):
+        with open(os.path.join(self.dir, name)) as fh:
+            pid = int(fh.read().strip())
+        self.stray.append(pid)
+        return pid
+
+    def _hog(self):
+        """200 MB touched page by page -- twice a 100M ceiling, never more."""
+        path = os.path.join(self.dir, "hog.py")
+        with open(path, "w") as fh:
+            fh.write("x = bytearray(200 << 20)\n"
+                     "for i in range(0, len(x), 4096):\n    x[i] = 1\n"
+                     "print('hog survived')\n")
+        return '"%s" "%s"' % (sys.executable, path)
+
+    # ---- the ceiling
+
+    @unittest.skipUnless(_scoped_here(), "needs systemd-run and a reachable user manager")
+    def test_a_command_over_its_ceiling_is_killed_whole_and_says_so(self):
+        self._env("CROW_COMMAND_MEMORY_MAX", "100M")
+        out = crow_core.tool_run_command("echo before; %s; echo after" % self._hog(),
+                                         cwd=self.dir)
+        self.assertTrue(out.startswith(
+            "error: command exceeded its memory ceiling (MemoryMax=100M, no swap) "
+            "and was killed"), out)
+        printed = out.split("\n", 1)[1]
+        self.assertEqual(printed, "before")     # how far it got; OOMPolicy=kill:
+                                                # the shell died with the hog
+        failed = subprocess.run(
+            ["systemctl", "--user", "list-units", "--failed", "--no-legend", "--plain",
+             "crow-cmd-%d-*" % os.getpid()], capture_output=True, text=True).stdout
+        self.assertEqual(failed.strip(), "", "the killed scope was left failed")
+
+    @unittest.skipUnless(_scoped_here(), "needs systemd-run and a reachable user manager")
+    def test_a_minus_nine_that_is_not_the_ceiling_is_not_called_one(self):
+        """NEGATIVPROBE. -9 is also `kill -9 $$`; the reason comes from the
+        unit's Result=, not from the exit code."""
+        out = crow_core.tool_run_command("kill -9 $$", cwd=self.dir)
+        self.assertEqual(out, "[exit -9]")
+
+    @unittest.skipUnless(_scoped_here(), "needs systemd-run and a reachable user manager")
+    def test_the_shell_text_reaches_bash_unexpanded_by_systemd(self):
+        """systemd-run expands ${VAR} and $$ in its own command line (systemd
+        261: `${X}` came out empty, `$$` as `$`) -- the model's shell text must
+        reach bash as written."""
+        out = crow_core.tool_run_command(
+            'X=inner; echo "[$X] [${X}] $((1+2))"; test "$$" -gt 1 && echo pid-ok',
+            cwd=self.dir)
+        self.assertEqual(out, "[exit 0]\n[inner] [inner] 3\npid-ok")
+
+    @unittest.skipUnless(_scoped_here(), "needs systemd-run and a reachable user manager")
+    def test_the_shell_sits_in_its_own_scope_with_the_ceiling(self):
+        out = crow_core.tool_run_command(
+            'd=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); basename "$d"; '
+            'cat "$d/memory.max" "$d/memory.swap.max" "$d/memory.oom.group"; pwd',
+            cwd=self.dir)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "[exit 0]", out)
+        self.assertRegex(lines[1], r"^crow-cmd-%d-[0-9a-f]{8}\.scope$" % os.getpid())
+        self.assertEqual(lines[2:5], [str(8 << 30), "0", "1"])
+        self.assertEqual(os.path.realpath(lines[5]), os.path.realpath(self.dir))
+
+    # ---- the group
+
+    def _clock_kills_the_background_too(self):
+        crow_core.COMMAND_TIMEOUT = 1
+        started = time.monotonic()
+        out = crow_core.tool_run_command("sleep 300 & echo $! > bg.pid; sleep 300",
+                                         cwd=self.dir)
+        self.assertTrue(out.startswith("error: command exceeded 1s and was killed"), out)
+        self.assertLess(time.monotonic() - started, 5)
+        pid = self._pid("bg.pid")
+        self.assertTrue(_gone(pid), "the backgrounded sleep %d outlived the kill" % pid)
+
+    def test_the_clock_kills_the_shells_whole_group(self):
+        self._clock_kills_the_background_too()
+
+    def test_the_group_kill_holds_without_a_scope(self):
+        """The process group alone, as on a machine without systemd-run."""
+        self._env("CROW_COMMAND_SCOPE", "0")
+        self._clock_kills_the_background_too()
+
+    def test_the_capture_cap_kills_the_shells_whole_group(self):
+        crow_core.COMMAND_CAPTURE_BYTES = 1024 * 1024
+        out = crow_core.tool_run_command(
+            'sleep 300 & echo $! > bg.pid; "%s" -c "print(chr(120) * 3000000)"; sleep 300'
+            % sys.executable, cwd=self.dir)
+        self.assertTrue(out.startswith("error: command printed more than 1 MiB"), out)
+        self.assertTrue(_gone(self._pid("bg.pid")))
+
+    @unittest.skipUnless(_scoped_here(), "needs systemd-run and a reachable user manager")
+    def test_a_descendant_that_left_the_group_dies_with_the_scope(self):
+        """setsid takes a process out of the group; the scope's cgroup it
+        cannot leave (kill_scope after the clock)."""
+        crow_core.COMMAND_TIMEOUT = 1
+        out = crow_core.tool_run_command("setsid sleep 300 & echo $! > esc.pid; sleep 300",
+                                         cwd=self.dir)
+        self.assertIn("was killed", out)
+        self.assertTrue(_gone(self._pid("esc.pid")))
+
+    def test_a_command_that_ends_by_itself_keeps_its_background(self):
+        """NEGATIVPROBE. `server &` is a thing a command may mean: only a KILL
+        takes the group."""
+        out = crow_core.tool_run_command("sleep 30 >/dev/null 2>&1 & echo $! > bg.pid",
+                                         cwd=self.dir)
+        self.assertEqual(out, "[exit 0]")
+        pid = self._pid("bg.pid")
+        self.assertFalse(_gone(pid, 0.3), "a finished command's background was killed")
+
+    # ---- the fallback
+
+    def test_without_systemd_run_the_shell_runs_as_before(self):
+        self.addCleanup(setattr, crow_platform.shutil, "which", crow_platform.shutil.which)
+        real_which = crow_platform.shutil.which
+        crow_platform.shutil.which = lambda name: None if name == "systemd-run" else real_which(name)
+        self.assertEqual(crow_platform.command_scope_prefix("u"), [])
+        real = crow_core._bounded_run
+        seen = []
+
+        def spy(cmd, cwd, deadline, stdin_text=None, **kw):
+            seen.append(kw.get("prefix"))
+            return real(cmd, cwd, deadline, stdin_text, **kw)
+        crow_core._bounded_run = spy
+        self.addCleanup(setattr, crow_core, "_bounded_run", real)
+        self.assertEqual(crow_core.tool_run_command("echo bare", cwd=self.dir),
+                         "[exit 0]\nbare")
+        self.assertEqual(seen, [[]])
+
+    def test_the_scope_prefix_has_the_command_shape(self):
+        self._env("CROW_COMMAND_SCOPE", "0")
+        self.assertEqual(crow_platform.command_scope_prefix("u"), [])
+        self._env("CROW_COMMAND_SCOPE", "")
+        self.addCleanup(setattr, crow_platform.shutil, "which", crow_platform.shutil.which)
+        crow_platform.shutil.which = lambda name: "/usr/bin/" + name
+        self.addCleanup(setattr, crow_platform, "user_manager_reachable",
+                        crow_platform.user_manager_reachable)
+        crow_platform.user_manager_reachable = lambda runtime_dir=None: True
+        self.addCleanup(crow_platform._SYSTEMD_VERSIONS.clear)
+        crow_platform._SYSTEMD_VERSIONS["/usr/bin/systemd-run"] = 261
+        prefix = crow_platform.command_scope_prefix("crow-cmd-1-ab")
+        self.assertEqual(prefix[:5], ["/usr/bin/systemd-run", "--user", "--scope",
+                                      "--slice=session.slice", "--quiet"])
+        self.assertIn("--unit=crow-cmd-1-ab", prefix)
+        self.assertIn("--expand-environment=no", prefix)
+        props = [prefix[i + 1] for i, a in enumerate(prefix) if a == "-p"]
+        self.assertEqual(sorted(props), ["MemoryHigh=7G", "MemoryMax=8G",
+                                         "MemorySwapMax=0", "OOMPolicy=kill"])
+        self.assertEqual(prefix[-1], "--")
+        crow_platform._SYSTEMD_VERSIONS["/usr/bin/systemd-run"] = 253
+        self.assertNotIn("--expand-environment=no", crow_platform.command_scope_prefix("u"))
+        # the render's prefix is untouched by the literal switch
+        self.assertNotIn("--expand-environment=no", crow_platform.render_scope_prefix())
+
+    def test_the_ceiling_moves_with_its_variable(self):
+        self.assertEqual(crow_platform.command_memory_bounds(),
+                         {"MemorySwapMax": "0", "MemoryHigh": "7G", "MemoryMax": "8G"})
+        self._env("CROW_COMMAND_MEMORY_MAX", "12G")
+        self.assertEqual(crow_platform.command_memory_bounds(),
+                         {"MemorySwapMax": "0", "MemoryMax": "12G"})
+        self._env("CROW_COMMAND_MEMORY_MAX", "none")
+        self.assertEqual(crow_platform.command_memory_bounds(), {"MemorySwapMax": "0"})
+
+    # ---- the note
+
+    MSG_649 = ("cd ~/Projects/localconf/testcases/diorama-test\n"
+               "timeout 40 /usr/bin/chromium --headless=new --no-sandbox "
+               "--disable-gpu-sandbox --allow-file-access --allow-file-access-from-url "
+               "--window-size=1280,720 --hide-scrollbars --enable-unsafe-swiftshader "
+               "--allow-file-access-from-url=file:/// --allow-file-access-from-url=file:///tmp "
+               "--virtual-time-budget=20000 --screenshot=build/proof.png "
+               "--screenshot=build/proof2.png \"file:///tmp/shot/index.html\" 2>&1")
+
+    def test_a_headless_browser_is_pointed_at_render_page(self):
+        note = crow_core._headless_browser_note(self.MSG_649, True)
+        self.assertIn("render_page takes this screenshot", note)
+        self.assertIn("MemoryMax=8G", note)
+        self.assertIn("no memory bound", crow_core._headless_browser_note(self.MSG_649, False))
+        for command in ('"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --headless '
+                        '--screenshot=a.png x.html',
+                        "google-chrome-stable --headless=new --dump-dom http://x",
+                        "firefox --headless --screenshot out.png file:///x"):
+            self.assertTrue(crow_core._headless_browser_note(command, True), command)
+
+    def test_a_browser_without_headless_or_a_headless_elsewhere_is_no_note(self):
+        """NEGATIVPROBE."""
+        for command in ("chromium --version", "grep -r headless src/",
+                        "ls ~/.config/chromium", "pip show chromium-headless",
+                        "npm run test -- --headless"):
+            self.assertEqual(crow_core._headless_browser_note(command, True), "", command)
+
+    def test_the_note_rides_on_the_result_it_does_not_block(self):
+        out = crow_core.tool_run_command("echo chromium --headless=new --screenshot=x.png",
+                                         cwd=self.dir)
+        self.assertTrue(out.startswith("[exit 0]\nchromium --headless=new"), out)
+        self.assertIn("\nnote: render_page takes this screenshot", out)
+
+
 class AppendFileBuildsLargeFilesInPartsTests(unittest.TestCase):
     """#voxel-2026-09-20. Der 8192er-Lauf musste eine 2,4-MB-Seite durch Shell-
     Heredocs bauen -- jede Sektion ein Abbruchpunkt mit Escaping-Falle. Das
