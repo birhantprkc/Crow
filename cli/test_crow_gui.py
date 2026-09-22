@@ -50,6 +50,7 @@ import threading
 import time
 from unittest import mock
 import unittest
+import types
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -661,6 +662,173 @@ class TheCounterFollowsTheRolloverTests(unittest.TestCase):
         sw = source[source.index('case "cost"'):]
         sw = sw[:sw.index('case "subs"')]
         self.assertIn('case "ctx": this.ctx(e.tokens,e.n_ctx); break;', sw)
+
+
+class TheSeamReassertsTheSurfaceTests(unittest.TestCase):
+    """#211. Der Roll sagte der Seite bis hier genau EINE Sache (die Notiz)
+    -- Modell-Chip und Berechtigungsstufe standen danach auf dem, was zufaell-
+    ig zuletzt stand, und jede Neudarstellung liess sie leer (robins Test
+    2026-09-22). Der Schnitt ruft den Fensterzustand NACH, gebuendelt."""
+
+    def test_rolled_over_calls_the_surface_after_the_counter(self):
+        """POSITIV: Karte, Notiz, ctx 0 -- und DANN der Burst; die Reihenfolge
+        ist der Vertrag, denn die Karte steht im Band, bevor irgendwer von
+        Zahlen spricht, und der Burst schreibt Zahlen, die die Notiz nennt."""
+        collected: list[dict] = []
+        fired: list[bool] = []
+        turn = crow_gui.Turn(collected.append,
+                             surface_reload=lambda: fired.append(True))
+        turn.rolled_over(180145, "rollover-x.json")
+        kinds = [m["k"] for m in collected]
+        self.assertEqual(kinds, ["roll", "note", "ctx"])
+        self.assertEqual(collected[0]["tokens"], 180145)
+        self.assertTrue(collected[0]["path"].endswith("rollover-x.md"))
+        self.assertEqual(collected[kinds.index("ctx")]["tokens"], 0)
+        self.assertEqual(fired, [True], "der Schnitt ruft den Zustand nach")
+
+    def test_without_a_surface_the_roll_rolls_as_before(self):
+        """NEGATIV: die Suite und das Terminal bauen Turn ohne Fenster --
+        kein Rueckruf darf dort zum AttributeError werden."""
+        crow_gui.Turn(lambda m: None).rolled_over(1, "rollover-x.json")
+
+
+class TheLevelWaitsForTheGapTests(unittest.TestCase):
+    """#211. Der Goal-Motor haelt den Worker stundenlang am Leben -- die
+    Weigerung "mid-turn" hatte kein Ende, solange ein Ziel lief (robins
+    Live-Befund: die Berechtigungsstufe war unveraenderlich). Ein Level,
+    das mitten im Zug gewaehlt wird, wartet auf den Spalt zwischen zwei
+    Zuegen und wird dort echt."""
+
+    def _api(self, mode: str = "auto") -> "crow_gui.Api":
+        api = crow_gui.Api.__new__(crow_gui.Api)
+        api._mode_queued = None
+        api._args = types.SimpleNamespace(mode=mode)
+        api._worker = None
+        api.push = self.out.append
+        return api
+
+    def setUp(self) -> None:
+        self.out: list[dict] = []
+
+    def test_mid_turn_the_level_queues_instead_of_refusing(self):
+        """POSITIV: der Klick wird angenommen, wartet, und die Notiz nennt
+        den Moment, an dem er gilt -- kein Abweisungston mehr ohne Ende."""
+        api = self._api()
+        api._worker = types.SimpleNamespace(is_alive=lambda: True)
+        applied: list[str] = []
+        api._apply_mode = applied.append          # der Spalt selbst, hier gefakt
+        api.set_mode("yolo")
+        self.assertEqual(applied, [], "mitten im Zug gilt noch nichts")
+        self.assertEqual(api._mode_queued, "yolo")
+        self.assertTrue(any("yolo applies after this one" in m.get("t", "")
+                            for m in self.out if m.get("k") == "note"))
+
+    def test_the_gap_applies_the_queued_level_once(self):
+        """POSITIV: `_drain_mode_queue` ist der Spalt -- angewandt wird nur,
+        was noch nicht gilt, und genau ein Mal."""
+        api = self._api()
+        api._mode_queued = "yolo"
+        applied: list[str] = []
+        api._apply_mode = applied.append
+        api._drain_mode_queue()
+        self.assertEqual(applied, ["yolo"])
+        self.assertIsNone(api._mode_queued)
+        api._drain_mode_queue()
+        self.assertEqual(applied, ["yolo"], "zweimal ziehen aendert nichts")
+
+    def test_a_level_that_already_stands_needs_no_gap(self):
+        """NEGATIV: derselbe Name ist keine Aenderung -- die Notiz wuerde von
+        einem Wechsel sprechen, der keiner ist."""
+        api = self._api(mode="yolo")
+        api._mode_queued = "yolo"
+        applied: list[str] = []
+        api._apply_mode = applied.append
+        api._drain_mode_queue()
+        self.assertEqual(applied, [])
+        self.assertIsNone(api._mode_queued)
+
+
+class TheArchiveCardBacksItsButtonsTests(ApiCase):
+    """#211. Die Karte am Schnitt nennt den Transkriptpfad; ihre Knoepfen
+    lesen NUR Dateien, die der Roll selbst in den Sitzungsordner geschrieben
+    hat -- ein Gespraech, das jemand bearbeitet hat, darf kein beliebiger
+    Datei-Oeffner sein."""
+
+    def _api(self) -> "crow_gui.Api":
+        api = crow_gui.Api.__new__(crow_gui.Api)
+        api.push = self.out.append
+        return api
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.out: list[dict] = []
+
+    def _write_transcript(self, lines: int = 60) -> str:
+        path = crow_core.rollover_path("card.json")[:-5] + ".md"
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join("zeile %d" % n for n in range(1, lines + 1)))
+        return path
+
+    def test_the_tail_is_the_end_of_the_file(self):
+        """POSITIV: 40 Zeilen vom Ende -- die Notiz selbst sagt, dass DORT zu
+        lesen ist, wo die Dinge standen."""
+        path = self._write_transcript()
+        tail = self._api().roll_tail(path)
+        self.assertEqual(tail.splitlines()[0], "zeile 21")
+        self.assertEqual(tail.splitlines()[-1], "zeile 60")
+        self.assertEqual(len(tail.splitlines()), 40)
+
+    def test_a_path_outside_the_session_folder_is_refused(self):
+        """NEGATIV: die Karte steht im Gespraech, und Gespraechstext ist kein
+        Pfadvertrauen -- nur das eigene Verzeichnis, nur .md. (ApiCase biegt
+        SESSION_DIR auf das Temp-Verzeichnis; 'daneben' ist darum ein
+        eigenes.)"""
+        elsewhere = tempfile.mkdtemp(prefix="crow-card-out-")
+        self.addCleanup(shutil.rmtree, elsewhere, True)
+        outside = os.path.join(elsewhere, "notes.md")
+        with open(outside, "w", encoding="utf-8") as fh:
+            fh.write("nichts fuer die Karte")
+        self.assertEqual(self._api().roll_tail(outside), "")
+        self.assertTrue(any(m.get("k") == "fail" for m in self.out))
+
+    def test_show_opens_nothing_when_the_file_is_gone(self):
+        """NEGATIV: ein verschwundenes Transkript ist eine Zeile, kein
+        Oeffnen daneben -- der Klick kam von einer alten Karte."""
+        gone = crow_core.rollover_path("gone.json")[:-5] + ".md"
+        with mock.patch.object(crow_gui.subprocess, "Popen") as popen:
+            self._api().roll_show(gone)
+        popen.assert_not_called()
+        self.assertTrue(any(m.get("k") == "fail" for m in self.out))
+
+
+class TheReplayDrawsTheBoundaryTests(unittest.TestCase):
+    """#211. Ein wieder geoeffneter Chat zeigt seine Grenze: die Notiz wird
+    zur Karte, die Zeile, die mit ihr reiste, zur getippten Frage -- derselbe
+    Spalter wie live, dasselbe Ereignis fuer die Seite."""
+
+    def test_a_restored_note_becomes_a_card_and_its_carry_a_line(self):
+        note = crow_core.ROLLOVER_NOTE.format(
+            tokens=180145, transcript="/x/rollover-1.md", lines=5223,
+            path="/x/rollover-1.json", where="", spoken="", digest="")
+        messages = [{"role": "system", "content": "SYS"},
+                    {"role": "user", "content": note + "\n\nweiter so"},
+                    {"role": "user", "content": "eine zweite Frage"}]
+        out: list[dict] = []
+
+        class _Collector:
+            """Der Sammler, von dem `Api._replay` sagt, dass die ihn so baut:
+            nur `push`, kein Fenster."""
+            def __init__(self_inner):
+                self_inner.push = out.append
+
+        crow_gui._replay_rows(_Collector(), messages, lambda n: None)
+        kinds = [m["k"] for m in out]
+        self.assertEqual(kinds, ["roll", "user", "user"])
+        self.assertEqual(out[0]["tokens"], 180145)
+        self.assertEqual(out[0]["path"], "/x/rollover-1.md")
+        self.assertEqual(out[0]["lines"], 5223)
+        self.assertEqual(out[1]["t"], "weiter so")
+        self.assertEqual(out[2]["t"], "eine zweite Frage")
 
 
 class TheSecondRolloverFiresTests(ApiCase):

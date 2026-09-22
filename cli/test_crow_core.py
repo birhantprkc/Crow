@@ -11459,15 +11459,21 @@ class TheRolloverCarriesADigestTests(unittest.TestCase):
         das Template anders und der warme Praefix bricht), max_tokens ist der
         Cap ueber dem #205-Boden -- und die Konversation bleibt unangetastet.
         #205: KEIN `enable_thinking`-Schalter mehr -- der brach den Praefix,
-        den die Lege warm vorfand."""
-        seen = self._serve("STATE: Runde 2 offen")
+        den die Lege warm vorfand.
+        #210: die Antwort ist eine echte Laenge -- unter der Mindestbreite
+        waere sie kein Zustandsbericht, sondern ein Halbsatz."""
+        text = ("STATE: milestone 1 done -- the voxel island is baked and the "
+                "palette is locked; milestone 2 is running -- the chain3 "
+                "monolith builds; open steps: verify index.html runs offline, "
+                "prove 60 fps on the integrated GPU, then ship the deliverable.")
+        seen = self._serve(text)
         conversation = self._conversation()
         before = conversation.payload()
         out = crow_core.rollover_digest(
             conversation, base_url="http://127.0.0.1:1/v1",
             temperature=1.0, top_p=0.95, min_p=0.01,
             model="crow", api_key="k")
-        self.assertEqual(out, "STATE: Runde 2 offen")
+        self.assertEqual(out, text)
         self.assertEqual(seen["body"]["messages"][-1]["content"],
                          crow_core.DIGEST_ASK)
         self.assertEqual(seen["body"]["tools"], crow_core.TOOLS,
@@ -11503,13 +11509,16 @@ class TheRolloverCarriesADigestTests(unittest.TestCase):
             temperature=1.0, top_p=0.95, min_p=0.01), "")
         self.assertNotIn("body", seen)
 
-    def test_a_failed_digest_is_empty_and_never_raises(self):
-        """NEGATIV: der Digest ist Beifang -- stirbt er, rollt der Roll exakt
-        wie heute."""
+    def test_a_failed_digest_fails_loud_and_never_raises(self):
+        """#210 NEGATIV: der Digest ist Beifang -- stirbt er, rollt der Roll
+        trotzdem. Aber seit der Messung vom 2026-09-22 (der Halbsatz unter der
+        Ueberschrift des Modells) heisst Scheitern der ehrliche Satz, nicht
+        "" -- die Notiz darf nicht so tun, als haette jemand zusammengefasst."""
         self._serve(raise_=True)
         self.assertEqual(crow_core.rollover_digest(
             self._conversation(), base_url="http://127.0.0.1:1/v1",
-            temperature=1.0, top_p=0.95, min_p=0.01), "")
+            temperature=1.0, top_p=0.95, min_p=0.01),
+            crow_core.DIGEST_FAILED)
 
     def test_the_note_carries_the_digest_as_marked_model_text(self):
         """Der Block ist als Modelltext gekennzeichnet und steht VOR dem
@@ -11534,6 +11543,106 @@ class TheRolloverCarriesADigestTests(unittest.TestCase):
         crow_core.roll_over(conversation, "http://127.0.0.1:1/v1", 1000,
                             carry="weiter", path=path, digest="")
         note = crow_core.message_text(conversation.payload()[-1]["content"])
+        self.assertNotIn(crow_core.DIGEST_HEAD, note)
+
+    # -- #210: der Tool-Call ist keine Antwort, aber auch kein Urteil -------
+
+    def _serve_seq(self, answers: list) -> list:
+        """Ein Endpunkt mit einer FOLGE von Antworten, und der Merker fuer
+        jeden gestellten Koerper. Die Antworten kommen in der Reihenfolge,
+        in der die Leg sie fragt -- der erste Versuch, dann die Wiederholung."""
+        seen: list = []
+
+        class _Resp:
+            def __init__(self_inner, doc):
+                self_inner._doc = doc
+
+            def read(self_inner):
+                return json.dumps(self_inner._doc).encode()
+
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+        def fake(request, timeout=None):
+            seen.append(json.loads(request.data.decode("utf-8")))
+            return _Resp(answers[len(seen) - 1])
+
+        real = crow_core.urllib.request.urlopen
+        crow_core.urllib.request.urlopen = fake
+        self.addCleanup(setattr, crow_core.urllib.request, "urlopen", real)
+        return seen
+
+    _TOOLCALL_ANSWER = {
+        "choices": [{
+            "message": {"content": "The parse check finally exposed the real "
+                                   "mechanism, which changes the plan",
+                        "tool_calls": [{"id": "c1", "type": "function",
+                                        "function": {"name": "goal_step",
+                                                     "arguments": "{}"}}]},
+            "finish_reason": "tool_calls"}]}
+
+    def test_a_tool_call_answer_gets_one_sharper_retry(self):
+        """#210 POSITIV: die Frage noch einmal, einen Satz schaerfer, auf dem
+        selben Rumpf -- die Messung des Tages war ein `goal_step` mitten in
+        der Digest-Frage, und 482 Tokens fuer einen Halbsatz."""
+        text = ("STATE: steps 1-9 are done and the palette is locked; step 10 "
+                "runs -- the chain3 monolith builds against three 0.188; "
+                "open: verify the offline single file, prove 60 fps on the "
+                "integrated GPU, then ship the deliverable and write the "
+                "acceptance note.")
+        seen = self._serve_seq([
+            dict(self._TOOLCALL_ANSWER),
+            {"choices": [{"message": {"content": text},
+                          "finish_reason": "stop"}]}])
+        out = crow_core.rollover_digest(
+            self._conversation(), base_url="http://127.0.0.1:1/v1",
+            temperature=1.0, top_p=0.95, min_p=0.01)
+        self.assertEqual(out, text)
+        self.assertEqual(len(seen), 2, "ein Retry, kein dritter Versuch")
+        self.assertEqual(seen[0]["messages"][-1]["content"],
+                         crow_core.DIGEST_ASK)
+        self.assertEqual(seen[1]["messages"][-1]["content"],
+                         crow_core.DIGEST_ASK_RETRY)
+        self.assertEqual(seen[0]["messages"][:-1], seen[1]["messages"][:-1],
+                         "der Rumpf bleibt byte-gleich -- der Praefix bleibt warm")
+
+    def test_two_tool_call_answers_fail_loud(self):
+        """#210 NEGATIV: wer auch die schaerfere Frage mit einem Werkzeug
+        beantwortet, will nicht zusammenfassen -- die Notiz sagt das, statt
+        einen Halbsatz als Erwaegung des Modells zu praesentieren."""
+        seen = self._serve_seq([dict(self._TOOLCALL_ANSWER),
+                                dict(self._TOOLCALL_ANSWER)])
+        out = crow_core.rollover_digest(
+            self._conversation(), base_url="http://127.0.0.1:1/v1",
+            temperature=1.0, top_p=0.95, min_p=0.01)
+        self.assertEqual(out, crow_core.DIGEST_FAILED)
+        self.assertEqual(len(seen), 2, "kein dritter Versuch")
+        self.assertEqual(seen[1]["messages"][-1]["content"],
+                         crow_core.DIGEST_ASK_RETRY)
+
+    def test_a_short_answer_is_not_a_digest(self):
+        """#210 NEGATIV: unter der Mindestbreite ist keine Antwort ein
+        Zustandsbericht -- der eine Satz, der wie eine Erwaegung begann und
+        mittendrin abbrach, war genau das."""
+        self._serve("zu kurz")
+        self.assertEqual(crow_core.rollover_digest(
+            self._conversation(), base_url="http://127.0.0.1:1/v1",
+            temperature=1.0, top_p=0.95, min_p=0.01),
+            crow_core.DIGEST_FAILED)
+
+    def test_the_loud_failure_wears_no_model_header(self):
+        """#210: das Scheitern ist kein Modelltext -- es traegt keinen eigenen
+        Satz unter der Ueberschrift 'what the model itself noted'."""
+        conversation = self._conversation()
+        path = os.path.join(self.dir, "rollover-loud.json")
+        crow_core.roll_over(conversation, "http://127.0.0.1:1/v1", 1000,
+                            carry="weiter", path=path,
+                            digest=crow_core.DIGEST_FAILED)
+        note = crow_core.message_text(conversation.payload()[-1]["content"])
+        self.assertIn(crow_core.DIGEST_FAILED, note)
         self.assertNotIn(crow_core.DIGEST_HEAD, note)
 
 
@@ -11644,15 +11753,21 @@ class TheDigestLegSpeaksTheTurnsDialectTests(unittest.TestCase):
     def test_the_thinking_is_washed_out_of_the_answer(self):
         """#205: Templates, die die Gedanken in den Content schreiben,
         hinterlassen nur die Antwort -- im abgeschlossenen wie im vom
-        Deckel gekoepften Fall (kein schliessendes Tag)."""
+        Deckel gekoepften Fall (kein schliessendes Tag). #210: der gewaschene
+        Rest muss eine Zustandsbreite haben, sonst ist er der Halbsatz, fuer
+        den die Mindestbreite existiert."""
+        state = ("STATE: nine of fifteen steps are done, the voxel palette is "
+                 "locked, and step 10 is running -- the chain3 monolith "
+                 "builds against three r180; open are the offline single-file "
+                 "proof, the frame-rate proof on the integrated GPU, and the "
+                 "acceptance note with the numbers.")
         cases = [
-            ({"content": "<think>erst ueberlegen</think>STATE: ok"},
-             "STATE: ok"),
-            ({"content": "<THINK>laut</THINK>STATE: ok"}, "STATE: ok"),
-            ({"content": "<think>kopf gefallen</think>\n\nSTATE: ok"},
-             "STATE: ok"),
-            ({"content": "<think>nicht zu Ende gedacht"}, ""),
-            ({"content": "STATE: plain"}, "STATE: plain"),
+            ({"content": "<think>erst ueberlegen</think>" + state}, state),
+            ({"content": "<THINK>laut</THINK>" + state}, state),
+            ({"content": "<think>kopf gefallen</think>\n\n" + state}, state),
+            ({"content": "<think>nicht zu Ende gedacht"},
+             crow_core.DIGEST_FAILED),
+            ({"content": state}, state),
         ]
         for message, wanted in cases:
             seen = self._serve(message)
@@ -11667,12 +11782,17 @@ class TheDigestLegSpeaksTheTurnsDialectTests(unittest.TestCase):
         """#205: llama-server legt die Gedanken in `reasoning_content` und
         die Antwort in `content` -- geerntet wird nur das zweite, genau wie
         im Strom (#E10 und daum), ohne eigene Zusammenfuehrung."""
-        seen = self._serve({"content": "STATE: ok",
+        state = ("STATE: nine of fifteen steps are done, the voxel palette is "
+                 "locked, and step 10 is running -- the chain3 monolith "
+                 "builds against three r180; open are the offline single-file "
+                 "proof, the frame-rate proof on the integrated GPU, and the "
+                 "acceptance note with the numbers.")
+        seen = self._serve({"content": state,
                             "reasoning_content": "Ich ueberlege, was hier gilt"})
         out = crow_core.rollover_digest(
             self._conversation(), base_url="http://127.0.0.1:1/v1",
             temperature=1.0, top_p=0.95, min_p=0.01, model="crow")
-        self.assertEqual(out, "STATE: ok")
+        self.assertEqual(out, state)
         # Der Koerper selbst bleibt frei von gefornten Gedanken: das Feld
         # wird nur NICHT GELESEN, es gibt keinen zweiten Ort, der es
         # zusammenfuehrt -- derselbe Vertrag wie im Strom.
@@ -12199,6 +12319,163 @@ class MarksKeepTheirPlaceInTheChatTests(unittest.TestCase):
                             notes=[{"k": "note", "at": 1, "t": "MARKER-TEXT"}])
         self.assertNotIn("MARKER-TEXT", json.dumps(conversation.payload()),
                          "a mark became a message and comes back as a user line")
+
+
+class TheSeamHeadCarriesTheGoalStatusTests(unittest.TestCase):
+    """#210. Der gratis bewegte Kopf traegt einmal die Marken des Schnitts.
+
+    Die Messung des Tages: der Plan reiste statuslos (korrekt nach #163 --
+    eine Marke im Kopf kaeme ein Prefill je Haken), der Digest, der den Stand
+    haette tragen koennen, starb an einem Tool-Call, und das Modell baute den
+    Plan drei Mal neu. Am Schnitt ist der Prefill ohnehin verloren -- dort
+    duerfen die Marken reiten, und NUR dort."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-seam-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._before = crow_core.SESSION_DIR
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", self._before)
+        crow_core.SESSION_DIR = self.dir
+
+    def _goal_two_of_three_done(self):
+        goal = crow_core.goal_start(
+            "Ship the thing", ["read the code", "write it", "prove it"],
+            now=1000.0)
+        crow_core.goal_step_begin(0, now=1001.0)
+        crow_core.goal_step_end(0, tokens=10, now=1010.0)
+        crow_core.goal_step_begin(1, now=1011.0)
+        crow_core.goal_step_end(1, tokens=10, now=1020.0)
+        return goal
+
+    def test_the_normal_head_stays_statusless(self):
+        """#163 BLEIBT: auf jedem anderen Weg steht kein Stand im Kopf -- jede
+        Marke wuerde dort einen vollen Prefill kosten, und der Zug sagt den
+        Stand ohnehin."""
+        self._goal_two_of_three_done()
+        block = crow_core.goal_block()
+        self.assertIn("2. write it", block)
+        self.assertNotIn("[done]", block)
+        self.assertNotIn("Next:", block)
+        self.assertIn(crow_core.GOAL_HEAD_NOTE, block)
+
+    def test_the_seam_head_marks_and_names_the_next(self):
+        """#210: Marken je Schritt, der erste offene genannt, der Hinweis
+        spricht vom Stand des Schnitts."""
+        self._goal_two_of_three_done()
+        block = crow_core.goal_block(include_status=True)
+        self.assertIn("1. [done] read the code", block)
+        self.assertIn("2. [done] write it", block)
+        self.assertIn("3. [open] prove it", block)
+        self.assertIn("Next: step 3. prove it", block)
+        self.assertIn(crow_core.GOAL_SEAM_NOTE, block)
+        self.assertNotIn(crow_core.GOAL_HEAD_NOTE, block)
+
+    def test_prompt_head_threads_the_flag(self):
+        """Der Faden laeuft durch: `prompt_head(include_status=True)` ist der
+        Kopf, den `repin_head` nach dem Schnitt setzt."""
+        self._goal_two_of_three_done()
+        head = crow_core.prompt_head(include_status=True)
+        self.assertIn("[done] read the code", head)
+        self.assertNotIn("[done]", crow_core.prompt_head())
+
+    def test_a_running_step_is_the_next_thing_at_the_cut(self):
+        """#168 am Schnitt: ein laufender Schritt ist genau, wo die Arbeit
+        stand -- er traegt seine Marke UND die Next-Zeile."""
+        crow_core.goal_start("Ship", ["a", "b"], now=1000.0)
+        crow_core.goal_step_begin(0, now=1001.0)
+        block = crow_core.goal_block(include_status=True)
+        self.assertIn("1. [running] a", block)
+        self.assertIn("Next: step 1. a", block)
+
+
+class TheReplannedGoalKeepsItsMarksTests(unittest.TestCase):
+    """#210. `goal_set` ersetzt ein laufendes Ziel -- aber vergessen heisst
+    es nicht: Haken auf treffende Schritte reiten mit.
+
+    GEMESSEN AM 2026-09-22: nach dem Schnitt baute das Modell denselben Plan
+    drei Mal neu; jeder Aufruf loeschte alle Haken, und das Panel zeigte 0/15
+    ueber fertiggearbeiteten Schritten. Ein Schritt, der da steht und wieder
+    da steht, war fertig und bleibt es."""
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-carry-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._before = crow_core.SESSION_DIR
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", self._before)
+        crow_core.SESSION_DIR = self.dir
+
+    def _two_done(self):
+        crow_core.goal_start(
+            "Old plan", ["read the code", "write it", "prove it"], now=1000.0)
+        crow_core.goal_step_begin(0, now=1001.0)
+        crow_core.goal_step_end(0, tokens=10, now=1010.0)
+        crow_core.goal_step_begin(1, now=1011.0)
+        crow_core.goal_step_end(1, tokens=10, now=1020.0)
+
+    def test_marks_ride_matching_steps(self):
+        """Gleichlautend nach Normalisierung (Gross/Weiss anders getippt),
+        `next` nennt den ersten offenen Schritt, und die Antwort SAGT es dem
+        Modell -- es liest daraus, wie weit der alte Plan war."""
+        self._two_done()
+        out = json.loads(crow_core.tool_goal_set(
+            "New plan", ["Read  the CODE", "write it", "prove it"]))
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["carried"], {"done": 2, "of": 3, "matched": 2})
+        self.assertEqual(out["next"], 3)
+        self.assertEqual(out["first"], "prove it")
+        goal = crow_core.goal_load()
+        self.assertEqual([s["status"] for s in goal["steps"]],
+                         ["done", "done", "open"])
+
+    def test_unrelated_steps_start_open(self):
+        """Ein wirklich neuer Plan ist einer: keine Marke passt, nichts wird
+        getragen, und `next` ist der erste Schritt."""
+        self._two_done()
+        out = json.loads(crow_core.tool_goal_set(
+            "Different work", ["first new thing", "second new thing"]))
+        self.assertTrue(out["ok"])
+        self.assertNotIn("carried", out)
+        self.assertEqual(out["next"], 1)
+        goal = crow_core.goal_load()
+        self.assertEqual([s["status"] for s in goal["steps"]],
+                         ["open", "open"])
+
+    def test_no_goal_before_no_carry(self):
+        out = json.loads(crow_core.tool_goal_set(
+            "Fresh", ["step one", "step two"]))
+        self.assertTrue(out["ok"])
+        self.assertNotIn("carried", out)
+
+
+class TheRolloverNoteIsParsableTests(unittest.TestCase):
+    """#211. Die Karte am Schnitt liest Zahlen und Pfad aus der Notiz selbst
+    -- live getippt wie wiederhergestellt kommt sie durch dieselbe Tuere."""
+
+    def test_a_note_yields_its_parts(self):
+        note = crow_core.ROLLOVER_NOTE.format(
+            tokens=180145, transcript="/x/rollover-1.md", lines=5223,
+            path="/x/rollover-1.json", where="", spoken="", digest="")
+        self.assertEqual(crow_core.rollover_note_parts(note),
+                         {"tokens": 180145, "transcript": "/x/rollover-1.md",
+                          "lines": 5223})
+
+    def test_the_split_separates_the_carry(self):
+        """#211: die getippte Zeile reist MIT der Notiz (roll_over haengt sie
+        an) -- der Spalter gibt ihr ihren eigenen Platz zurueck."""
+        note = crow_core.ROLLOVER_NOTE.format(
+            tokens=180145, transcript="/x/rollover-1.md", lines=5223,
+            path="/x/rollover-1.json", where="", spoken="", digest="")
+        parts, carry = crow_core.rollover_note_split(note + "\n\nweiter so")
+        self.assertEqual(parts["tokens"], 180145)
+        self.assertEqual(carry, "weiter so")
+        parts, carry = crow_core.rollover_note_split(note)
+        self.assertEqual(carry, "")
+
+    def test_a_normal_line_is_no_note(self):
+        self.assertIsNone(crow_core.rollover_note_parts("wie geht es weiter?"))
+        self.assertIsNone(crow_core.rollover_note_parts(""))
+        self.assertIsNone(crow_core.rollover_note_parts(None))
+        self.assertEqual(crow_core.rollover_note_split("frage"), (None, ""))
 
 
 class TheGoalOutlivesEverythingTests(unittest.TestCase):

@@ -3110,6 +3110,11 @@ THINK_ONLY_NUDGE = (
 # the suite checks is that it reaches the conversation at all.
 
 
+# #211. DER SCHLUSSSATZ DER NOTIZ, als eigener Name: die Karte am Schnitt
+# teilt die Notiz in ihre Teile (unten), und der Schlussatz ist der Schnitt-
+# punkt. Der Wortlaut steht genau hier (die Schleifenregel zaehlt ihn).
+ROLLOVER_NOTE_END = "This conversation starts here.]"
+
 ROLLOVER_NOTE = (
     "[The conversation up to this point reached {tokens} tokens and was archived.\n"
     "Transcript: {transcript} -- {lines} lines, oldest first, so read the END of it "
@@ -3118,8 +3123,49 @@ ROLLOVER_NOTE = (
     "Full record, for `crow --resume`: {path}\n"
     "{spoken}"
     "{digest}"
-    "This conversation starts here.]"
-)
+) + ROLLOVER_NOTE_END
+
+# #211. DIE KARTE ZUM SCHNITT. Der Parser liest Zahlen und Transkriptpfad aus
+# der Notiz selbst -- nicht aus einem zweiten Speicher daneben: die Notiz ist
+# der eine Ort, an dem der Schnitt steht, und live wie beim Wiederoffnen zieht
+# dieselbe Zeile dieselbe Karte. Das Format ist der feste Kopf der Notiz
+# (oben), und jede Aenderung an ihm muss diesen Ausdruck mitziehen.
+ROLLOVER_NOTE_RE = re.compile(
+    r"^\[The conversation up to this point reached (\d+) tokens and was "
+    r"archived\.\nTranscript: (\S+) -- (\d+) lines")
+
+
+def rollover_note_parts(text: str) -> "dict | None":
+    """#211: `{tokens, transcript, lines}` aus einer Rollover-Notiz, oder None.
+
+    None heisst "das ist keine" -- alles andere zeichnet die Bandgrenze als
+    Karte statt als fremdartige erste Zeile des neuen Kontexts.
+    """
+    m = ROLLOVER_NOTE_RE.match(text or "")
+    if m is None:
+        return None
+    return {"tokens": int(m.group(1)), "transcript": m.group(2),
+            "lines": int(m.group(3))}
+
+
+def rollover_note_split(text: str) -> "tuple[dict | None, str]":
+    """#211: `(parts, carry)` -- die Notiz als Karte, die Zeile, die mit ihr
+    reiste, als das, was sie ist.
+
+    DER EINE SPALTER. Live kommt der Schnitt als Ereignis, beim Wiederoffnen
+    als Nachricht -- beide rufen diese Funktion, und die Seite sieht in
+    beiden Faellen denselben Zug. Die getippte Zeile gehoert dem Menschen:
+    sie steht nach dem Schlusssatz der Notiz, weil `roll_over` sie dort
+    anhaengt, und sie als Teil der Karte zu zeichnen waere die Antwort auf
+    eine Frage, die niemand gestellt hat.
+    """
+    parts = rollover_note_parts(text)
+    if parts is None:
+        return None, ""
+    text = text or ""
+    end = text.find(ROLLOVER_NOTE_END)
+    carry = text[end + len(ROLLOVER_NOTE_END):].strip() if end >= 0 else ""
+    return parts, carry
 
 # #154. DIE VERDICHTUNG VOR DEM SCHNITT. In dem Moment, in dem der Roll
 # ansteht, liegt der volle Praefix noch warm im Server-Cache -- EINE kurze
@@ -3144,6 +3190,49 @@ DIGEST_ASK = (
     "context that follows, state in plain text: the current state, the "
     "decisions taken with their reasons, and the concrete open steps. "
     "No tool calls. Be dense -- every line must still be true after the cut.]")
+
+# #210. DIE EINEN WIEDERHOLUNG. Gemessen am 2026-09-22 in robins Test: die Leg
+# schickt die Werkzeugtabelle mit (sie muss, siehe Rumpf -- der warme Praefix
+# rendert sie), der Prompt sagt "No tool calls", und das Modell rief TROTZDEM
+# `goal_step` auf -- finish=tool_calls, 482 Tokens, und das, was als Digest
+# ueber den Schnitt trug, war der eine Halbsatz, der dem Aufruf vorausging.
+# Ein Tool-Call ist keine Antwort auf diese Frage, aber er ist auch kein
+# dauerhafter Zustand: dieselbe Frage, ein Satz schaerfer gestellt, auf
+# demselben (weiter warmen) Praefix beantwortet sie das Modell richtig.
+# Die Wiederholung tauscht NUR die Frage am Ende aus -- der Rumpf bleibt
+# byte-gleich, der Cache bleibt warm bis auf die letzten Dutzend Tokens,
+# und kein halbfertiger Tool-Call haengt unbeantwortet im Protokoll.
+DIGEST_ASK_RETRY = (
+    "[This conversation is about to be archived and reset. Your last answer "
+    "was a tool call -- this question wants TEXT, and no tool will be run for "
+    "it. State in plain text: the current state, the decisions taken with "
+    "their reasons, and the concrete open steps. No tool calls. Be dense -- "
+    "every line must still be true after the cut.]")
+
+# #210. DAS LAUTE SCHEITERN. Bis hier stand der Halbtruth der Leg ungeprueft
+# unter der Ueberschrift "What the model itself noted": ein abgebrochener
+# Gedankenanfang, gelesen wie die zusammenfassende Erwaegung des Modells.
+# Wer den Zustand nicht tragen kann, muss das sagen -- die Notiz nennt das
+# Scheitern, und der Status-Kopf (#210, `goal_block`) traegt den Plan.
+DIGEST_FAILED = "[digest failed: the model did not answer in plain text]"
+DIGEST_MIN_CHARS = 200
+
+
+def _digest_block(digest: str) -> str:
+    """#210: der {digest}-Block der Rollover-Notiz, an einer Stelle geformt.
+
+    Leer bleibt leer -- ausgeschaltet ist ausgeschaltet (#154), und eine
+    Ueberschrift ueber nichts laese "geprueft und nichts gewesen". Das
+    Scheitern traegt seinen eigenen Satz OHNE die Ueberschrift des Modells:
+    DIGEST_FAILED ist kein Modelltext und darf nicht als einer gelesen
+    werden, genau wie der Halbsatz davor es nicht haette duerfen.
+    """
+    d = (digest or "").strip()
+    if not d:
+        return ""
+    if d == DIGEST_FAILED:
+        return d + "\n"
+    return DIGEST_HEAD + d + "\n"
 
 
 def rollover_digest_set(tokens) -> None:
@@ -3291,8 +3380,12 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
     if ROLLOVER_DIGEST_TOKENS <= 0 or len(conversation) < 2:
         return ""
     transport = transport or TRANSPORT_CHAT
-    messages = conversation.payload() + [{"role": "user", "content": DIGEST_ASK}]
-    body = {"messages": messages, "tools": TOOLS, "stream": False,
+    # #210: DER RUMPF OHNE DIE FRAGE. Die Frage steht nicht mehr fest in den
+    # `messages`, weil die Wiederholung sie am Ende austauscht -- Rumpf und
+    # Frage sind zwei Dinge, und nur die zweite aendert sich zwischen den
+    # Versuchen. Der Cache bleibt dadurch bis auf die Frage selbst warm.
+    conversation_messages = conversation.payload()
+    body = {"messages": [], "tools": TOOLS, "stream": False,
             "temperature": temperature, "top_p": top_p, "min_p": min_p,
             # #205: DER DECKEL HEBELT SICH SONST SELBST AUF. 400 waren genug,
             # solange die Leg nicht dachte; seit sie denkt, frisst das Denken
@@ -3356,34 +3449,54 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
         # wirkte nicht) -- der Kwarg war dort inert und nur im
         # chat_completions-Dialekt eine Waffe.
         url = f"{base_url.rstrip('/')}/chat/completions"
-    try:
-        request = urllib.request.Request(
-            url, data=json.dumps(body).encode("utf-8"), method="POST",
-            headers=dict(_stream_headers(api_key, extra_headers),
-                         **{"Accept": "application/json"}))
-        with urllib.request.urlopen(
-                request, timeout=_digest_timeout(prompt_tokens, timeout)) as resp:
-            answer = json.loads(resp.read().decode("utf-8") or "{}")
-        if transport == TRANSPORT_MESSAGES:
-            text = "".join(block.get("text") or ""
-                           for block in answer.get("content") or []
-                           if block.get("type") == "text")
-        else:
-            # #205: DAS DENKEN WIRD NICHT GELESEN. llama-server legt die
-            # Gedanken in `message.reasoning_content` und die Antwort in
-            # `message.content` -- indem hier nur `content` geerntet wird,
-            # ist der Nicht-Strom-Arm des Feldtrenners schon erledigt.
-            text = ((answer.get("choices") or [{}])[0]
-                    .get("message", {}).get("content") or "")
-    except Exception:              # noqa: BLE001 - Beifang, nie der Roll selbst
-        return ""
+    # #210. ZWEI VERSCHE, KEIN DRITTER. Der erste stellt die Frage, der
+    # zweite stellt sie schaerfer, nachdem das Modell sie mit einem Tool-Call
+    # beantwortet hat (gemessen 2026-09-22: finish=tool_calls, 482 Tokens,
+    # ein Halbsatz als Digest). Ein dritter Versuch bewiese nichts mehr, was
+    # die ersten beiden nicht schon bewiesen haben -- und der Roll wartet.
+    text = ""
+    for ask in (DIGEST_ASK, DIGEST_ASK_RETRY):
+        body["messages"] = conversation_messages + [
+            {"role": "user", "content": ask}]
+        try:
+            request = urllib.request.Request(
+                url, data=json.dumps(body).encode("utf-8"), method="POST",
+                headers=dict(_stream_headers(api_key, extra_headers),
+                             **{"Accept": "application/json"}))
+            with urllib.request.urlopen(
+                    request,
+                    timeout=_digest_timeout(prompt_tokens, timeout)) as resp:
+                answer = json.loads(resp.read().decode("utf-8") or "{}")
+            if transport == TRANSPORT_MESSAGES:
+                text = "".join(block.get("text") or ""
+                               for block in answer.get("content") or []
+                               if block.get("type") == "text")
+                finish = answer.get("stop_reason") or ""
+            else:
+                choice = (answer.get("choices") or [{}])[0]
+                # #205: DAS DENKEN WIRD NICHT GELESEN. llama-server legt die
+                # Gedanken in `message.reasoning_content` und die Antwort in
+                # `message.content` -- indem hier nur `content` geerntet wird,
+                # ist der Nicht-Strom-Arm des Feldtrenners schon erledigt.
+                text = (choice.get("message", {}).get("content") or "")
+                finish = choice.get("finish_reason") or ""
+        except Exception:          # noqa: BLE001 - Beifang, nie der Roll selbst
+            return DIGEST_FAILED
+        if finish not in ("tool_calls", "tool_use"):
+            break
     # #205: UND DER REST DENKT IN <think>-BLOECKEN IM CONTENT SELBST, je
     # nach Template -- gewaschen wird bei der Ausgabe, gemeinsam fuer beide
-    # Faelle. Der Vertrag bleibt: nie raise, "" bei Scheitern, kurzer Text.
-    return _strip_think(text).strip()
+    # Faelle. Der Vertrag bleibt: nie raise. Seit #210 lautet das Scheitern
+    # nicht mehr "" (der Halbtruth unter der Ueberschrift des Modells war
+    # das Messergebnis), sondern der eine ehrliche Satz.
+    text = _strip_think(text).strip()
+    if len(text) < DIGEST_MIN_CHARS:
+        return DIGEST_FAILED
+    return text
 
 
-def repin_head(conversation: "Conversation", root: "str | None" = None) -> bool:
+def repin_head(conversation: "Conversation", root: "str | None" = None,
+               include_status: bool = False) -> bool:
     """Den Kopf dieses Chats nach einem Schnitt wieder setzen. True, wenn er sich
     bewegt hat.
 
@@ -3398,8 +3511,13 @@ def repin_head(conversation: "Conversation", root: "str | None" = None) -> bool:
     Kopf. Der Rollover ist damit der einzige Moment, an dem ein Kopf gratis
     bewegt werden kann -- ueberall sonst ist es die Rechnung, die
     `MEMORY_COST_NOTE` ansagt.
+
+    #210. `include_status` NUR HIER, NUR VOM SCHNITT: der gratis bewegte Kopf
+    traegt einmal die Marken des Ziels (siehe `goal_block`). Alle anderen
+    Aufrufer pinnen weiter ohne Stand -- dort kostet jede Marke einen Prefill.
     """
-    return conversation.repin_memory(prompt_head(root))
+    return conversation.repin_memory(prompt_head(root,
+                                                 include_status=include_status))
 
 
 def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
@@ -3450,10 +3568,10 @@ def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
         tokens=context_tokens, path=path, transcript=transcript, lines=lines,
         where=f"Last worked on: {', '.join(where)}\n" if where else "",
         spoken=spoken,
-        # #154: als Modelltext gekennzeichnet, nie als Fakt -- und ein leerer
-        # Digest laesst keine Ueberschrift zurueck, die wie "geprueft und
-        # nichts gewesen" laese.
-        digest=(DIGEST_HEAD + digest.strip() + "\n") if digest.strip() else "")
+        # #154: als Modelltext gekennzeichnet, nie als Fakt -- und seit #210
+        # formt `_digest_block` den Block: leer bleibt leer, Scheitern heisst
+        # Scheitern, und nur echter Modelltext traegt die Ueberschrift.
+        digest=_digest_block(digest))
     # ONE message, not two. Consecutive turns of the same role are merged or
     # rejected depending on the chat template, and neither is a thing to find
     # out at 180k tokens.
@@ -6771,7 +6889,8 @@ def memory_block(root: "str | None" = None) -> str:
     return "\n\n".join(blocks)
 
 
-def prompt_head(root: "str | None" = None) -> str:
+def prompt_head(root: "str | None" = None,
+                include_status: bool = False) -> str:
     """Everything this chat carries above the conversation: memory, then skills.
 
     ONE FUNCTION, BECAUSE ONE STRING IS PINNED. The chat file holds a single
@@ -6787,8 +6906,13 @@ def prompt_head(root: "str | None" = None) -> str:
     wird -- das Fluechtigste von dreien und deshalb hinten, wo eine Aenderung
     den kuerzesten Praefix entwertet. Es traegt nur den PLAN: der Stand steht in
     `goal.json`, weil ein Haken hier einen vollen Prefill kosten wuerde.
+
+    #210. `include_status` NUR VOM SCHNITT gesetzt: derselbe Kopf, einmal mit
+    den Marken des Schnittzeitpunkts (siehe `goal_block`). Zwei Stellen
+    rufen das -- repin nach `roll_over`, beide Oberflaechen.
     """
-    parts = [p for p in (memory_block(root), skill_block(), goal_block()) if p]
+    parts = [p for p in (memory_block(root), skill_block(),
+                         goal_block(include_status=include_status)) if p]
     return "\n\n".join(parts)
 
 
@@ -12821,6 +12945,51 @@ def goal_steps_from(steps) -> "tuple[list[str] | None, str | None]":
     return out, None
 
 
+def _goal_step_norm(text: str) -> str:
+    """#210: Kleinschreibung und Weite gefaltet -- derselbe Schritt, anders
+    getippt, ist fuer die Marken-Uebertragung derselbe Schritt."""
+    return " ".join(str(text or "").lower().split())
+
+
+def _carry_goal_marks(old: "dict | None", new: "dict") -> "dict | None":
+    """#210. Die Haken eines laufenden Ziels auf den neuen Plan uebertragen.
+
+    GEMESSEN AM 2026-09-22: nach einem Rollover (der Stand stand nirgends --
+    siehe `goal_block`) baute das Modell denselben Plan drei Mal neu, und
+    jeder `goal_set` loeschte alle Haken des Ziels, an dem es gerade sass.
+    `goal_start` ersetzt ein laufendes Ziel absichtlich (eines zur Zeit) --
+    aber ERSETZEN heisst nicht VERGESSEN: ein Schritt, der da steht und
+    wieder da steht, war fertig und bleibt es.
+
+    GETROFFEN WIRD NACH TEXT, normalisiert. Ein Modell, das neu plant,
+    formuliert Schritte um; exakte Gleichheit finge fast nichts. Gross- und
+    Kleinschreibung und Leerraum sind keine anderen Schritte, inhaltliche
+    Umstellungen sind es -- und die bleiben dann ehrlich offen.
+
+    NUR DONE UND FAILED REITEN. Ein `running` gehoert zu dem Zug, der gerade
+    abgeschnitten oder beendet wurde -- der neue Plan sagt selbst, wo er
+    anfaengt. Und niemand schreibt Zeiten oder Token um: Die Bilanz des
+    neuen Plans beginnt bei 0, das getragene Zeichen ist die Marke, nicht
+    die Rechnung.
+    """
+    steps_old = (old or {}).get("steps") or []
+    marks = {_goal_step_norm(s.get("text")): s.get("status")
+             for s in steps_old
+             if s.get("status") in (GOAL_DONE, GOAL_FAILED)}
+    if not marks:
+        return None
+    hits = 0
+    for step in new.get("steps") or []:
+        status = marks.get(_goal_step_norm(step.get("text")))
+        if status is not None:
+            step["status"] = status
+            hits += 1
+    if not hits:
+        return None
+    return {"done": sum(1 for s in steps_old if s.get("status") == GOAL_DONE),
+            "of": len(steps_old), "matched": hits}
+
+
 def tool_goal_set(title: str, steps: "list | None" = None) -> str:
     """#165. Das Modell schreibt seinen eigenen Plan. Gibt JSON zurueck.
 
@@ -12832,6 +13001,10 @@ def tool_goal_set(title: str, steps: "list | None" = None) -> str:
     UND OB ES UEBERHAUPT EINE LISTE IST (#196). `run_tool` faengt die verpackte
     Form schon an der Naht ab; dieser Handler prueft trotzdem selbst, weil er
     auch direkt gerufen wird und ein Ziel aus einem String nie entstehen darf.
+
+    #210. EIN LAUFENDES ZIEL WIRD ERSETZT, ABER NICHT VERGESSEN: Haken auf
+    treffende Schritte reiten mit, und die Antwort sagt es dem Modell -- es
+    liest daraus, wie weit der alte Plan war, ohne ihn neu zu erraten.
     """
     packed = isinstance(steps, str)
     steps, bad = goal_steps_from(steps)
@@ -12841,12 +13014,25 @@ def tool_goal_set(title: str, steps: "list | None" = None) -> str:
     if len(clean) < 2:
         return json.dumps({"ok": False,
                            "error": "a plan needs at least two steps"})
+    # #210. DER ALTE PLAN VOR DEM NEUEN GELESEN -- `goal_start` ueberschreibt
+    # goal.json, und was dann noch in ihm stand, steht nur noch hier.
+    before = goal_load()
     goal = goal_start(str(title or "").strip() or "the task", clean)
     if goal is None:
         return json.dumps({"ok": False, "error": "could not write the plan"})
+    carried = _carry_goal_marks(before, goal)
+    if carried:
+        goal_write(goal)
+    # #210. `next` NENNT DEN ERSTEN OFFENEN SCHRITT, nicht blind den ersten:
+    # ein getragener Haken vorn im Plan waere eine Anweisung, Fertigtes noch
+    # einmal zu tun -- genau die Schleife, die das Panel zeigen wuerde.
+    nxt = next((n for n, s in enumerate(goal["steps"], 1)
+                if s.get("status") != GOAL_DONE), 1)
     out = {"ok": True, "title": goal["title"],
            "steps": len(goal["steps"]),
-           "next": 1, "first": goal["steps"][0]["text"]}
+           "next": nxt, "first": goal["steps"][nxt - 1]["text"]}
+    if carried:
+        out["carried"] = carried
     if packed:
         out["note"] = ("steps arrived as a JSON string and was parsed into an "
                        "array of %d" % len(clean))
@@ -14963,7 +15149,10 @@ def run_turn(
                                  carry=carry, digest=digest, notes=notes,
                                  timings=bills)
             # #163: der Kopf gilt weiter -- Gedaechtnis, Faehigkeiten, Ziel.
-            repin_head(conversation, get_root())
+            # #210: MIT DEN MARKEN -- der Zug, der den Stand sagt, ist der,
+            # der gerade weggeschnitten wurde; ohne sie im Kopf steht der
+            # Stand nirgends (Messung 2026-09-22: drei Neu-Planungen).
+            repin_head(conversation, get_root(), include_status=True)
             if archived:
                 if notes is not None:
                     del notes[:]
@@ -17820,22 +18009,55 @@ def goal_seconds(goal: "dict | None" = None,
 GOAL_HEAD_NOTE = ("This goal outlives a context rollover: if the conversation "
                   "above was cut, the plan below still stands.")
 
+# #210. DIE SEAM-VARIANTE DES HINWEISES. Der normale Kopf nennt nur den Plan
+# (#163: der Stand steht in goal.json, eine Marke im Kopf kaeme einen Prefill
+# je Haken). Der Kopf NACH DEM SCHNITT traegt die Marken des Schnittzeitpunkts
+# -- dort ist der Prefill ohnehin verloren (#163, "der einzige Moment, an dem
+# ein Kopf gratis bewegt werden kann"), und der Zug, der den Stand sagt, ist
+# genau der, der weggeschnitten wurde. Gemessen am 2026-09-22: ohne die Marken
+# baute das Modell den Plan drei Mal neu und loeschte mit jedem `goal_set` die
+# Haken. Die Marken altern bewusst nicht -- sie dokumentieren den Schnitt, bis
+# der naechste sie neu setzt.
+GOAL_SEAM_NOTE = ("This goal outlives a context rollover: the plan above still "
+                  "stands, each step with its status as it was at the cut. "
+                  "Continue at the first step not marked done.")
 
-def goal_block(goal: "dict | None" = None) -> "str | None":
+
+def goal_block(goal: "dict | None" = None,
+               include_status: bool = False) -> "str | None":
     """Der Text, der in den gepinnten Kopf gehoert. None, wenn es kein Ziel gibt.
 
     OHNE JEDEN STAND, und das ist keine Sparsamkeit, sondern die Rechnung: der
     Block ist Teil des Prompt-Kopfes, und jede Aenderung daran kostet einen
     vollen Prefill. Ein abgehakter Schritt im Text waere ein Prefill je Schritt.
     Was das Modell hier braucht, ist der PLAN; wo es steht, sagt ihm der Zug.
+
+    #210. AUSSER AM SCHNITT (`include_status`). Dort ist der Prefill bereits
+    verloren und der Stand nirgends mehr zu lesen -- der Digest, der ihn haette
+    tragen koennen, war an einem Tool-Call gestorben. Die Marken reiten einmal
+    mit und altern dann bewusst: Sie sind der Stand des Schnitts, nicht des
+    Zuges, und der naechste Schnitt setzt sie neu.
     """
     goal = goal if goal is not None else goal_load()
     if not goal:
         return None
     lines = ["Active goal: %s" % goal["title"], "Steps:"]
-    lines += ["%d. %s" % (n, s["text"])
-              for n, s in enumerate(goal.get("steps") or [], 1)]
-    lines.append(GOAL_HEAD_NOTE)
+    steps = goal.get("steps") or []
+    if include_status:
+        marks = {GOAL_DONE: "[done]", GOAL_FAILED: "[failed]",
+                 GOAL_RUNNING: "[running]"}
+        lines += ["%d. %s %s" % (n, marks.get(s.get("status"), "[open]"),
+                                 s["text"])
+                  for n, s in enumerate(steps, 1)]
+        nxt = next(((n, s) for n, s in enumerate(steps, 1)
+                    if s.get("status") != GOAL_DONE), None)
+        if nxt is not None:
+            lines.append("Next: step %d. %s" % (nxt[0], nxt[1]["text"]))
+        lines.append(GOAL_SEAM_NOTE)
+    else:
+        lines += ["%d. %s" % (n, s["text"])
+                  for n, s in enumerate(steps, 1)]
+        lines.append(GOAL_HEAD_NOTE)
     return "\n".join(lines)
 
 

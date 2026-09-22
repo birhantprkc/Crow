@@ -727,6 +727,22 @@ def install_fonts(source_dir: str, names: "list[str]", family: str = "") -> int:
 
 # ------------------------------------------------------------- the updater ---
 
+def opener_command(path: str) -> "list[str] | None":
+    """How this platform shows a file to the person, as data. Nothing runs here.
+
+    #211. DIE KARTE AM SCHNITT braucht einen Weg, das Transkript zu zeigen:
+    Windows hat `os.startfile` (kein argv -- None heisst hier "die eigene
+    Tuere", der Aufrufer kennt sie), macOS `open`, alles andere `xdg-open`.
+    Dasselbe Warum wie bei `updater_command`: die Plattformentscheidung
+    gehoert in dieses Modul, nicht zwanzigmal in den Aufrufern.
+    """
+    if IS_WINDOWS:
+        return None
+    if sys.platform == "darwin":
+        return ["open", path]
+    return ["xdg-open", path]
+
+
 def updater_command(script: str, install: str | None = None) -> list[str]:
     """How this platform runs the installer, as data. Nothing is executed here.
 

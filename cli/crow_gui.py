@@ -1501,6 +1501,29 @@ body:not([data-git="shut"]) #gittoggle{color:var(--accent);
 #tools{cursor:pointer;transition:color .15s,border-color .15s}
 #tools:hover{border-color:var(--bevel)}
 
+/* #211. DIE BANDGRENZE ALS KARTE. Der Rollover-Schnitt im Band: eingeklappt
+   eine Zeile, die sagt wie gross das Archiv ist, ausgeklappt der Zeiger und
+   auf einen Klick das Ende des Transkripts. Dieselben Farben wie die Chips
+   -- es ist eine Fussnote zum Gespraech, kein Ereignis im Gespraech. */
+details.rollcard{margin:8px 0;border:1px solid var(--line);
+  border-left:3px solid var(--dimmer);border-radius:8px}
+details.rollcard summary{display:flex;gap:8px;align-items:center;
+  padding:6px 10px;cursor:pointer;font-size:12px;color:var(--dim);
+  list-style:none;user-select:none}
+details.rollcard summary::-webkit-details-marker{display:none}
+details.rollcard[open] summary .caret{transform:rotate(90deg)}
+details.rollcard .caret{transition:transform .12s}
+details.rollcard .rn{margin-left:auto;white-space:nowrap}
+details.rollcard .rc{padding:0 10px 8px;font-size:12px;color:var(--text-soft)}
+details.rollcard .rt{margin:2px 0 8px;word-break:break-all}
+details.rollcard button{font:inherit;font-size:12px;padding:2px 10px;
+  margin-right:6px;color:var(--text-soft);background:none;
+  border:1px solid var(--line);border-radius:999px;cursor:pointer}
+details.rollcard button:hover{border-color:var(--bevel)}
+details.rollcard pre.rtp{max-height:220px;overflow:auto;white-space:pre-wrap;
+  font-size:11px;color:var(--dim);margin:8px 0 0}
+
+
 
 /* STABLE GUTTER, so the column does not shift sideways the moment a chat grows
    past one screen -- and so the composer below can line up against one number
@@ -3187,6 +3210,43 @@ const crow = {
     const t=this.turn(""); t.innerHTML=
       '<div class="you"><div class="txt"></div></div>';
     t.querySelector(".txt").textContent=text; this.bottom(true);
+  },
+
+  // #211. DIE KARTE AM SCHNITT. Der Kern erkennt die Notiz (ein Ort, eine
+  // Wahrheit -- `crow_core.rollover_note_split`) und schickt ihre Teile als
+  // `roll`-Ereignis: live vom Schnitt selbst, beim Wiederoffnen vom Replay.
+  // Die Seite zeichnet nur, was ihr gegeben wird -- keine zweite Erkennung,
+  // kein zweiter Wortlaut, der auseinanderlaufen koennte.
+  rollCard(e){
+    this.endTrace();
+    const t=this.turn("");
+    const d=document.createElement("details"); d.className="rollcard";
+    const s=document.createElement("summary");
+    s.innerHTML='<span class="caret"></span><span class="rl"></span>'
+      +'<span class="rn"></span>';
+    s.querySelector(".caret").textContent=String.fromCharCode(9654);
+    s.querySelector(".rl").textContent="archived before the cut";
+    s.querySelector(".rn").textContent=
+      (e.lines||0).toLocaleString("en-US")+" lines · "
+      +(e.tokens||0).toLocaleString("en-US")+" tok";
+    const b=document.createElement("div"); b.className="rc";
+    b.innerHTML='<div class="rt"></div>'
+      +'<button class="ropen"></button><button class="rtail"></button>'
+      +'<pre class="rtp" hidden></pre>';
+    b.querySelector(".rt").textContent=
+      "The earlier conversation is archived at "+(e.path||"?")
+      +" -- oldest first; the END is where things stood.";
+    b.querySelector(".ropen").textContent="open transcript";
+    const path=e.path||"";
+    b.querySelector(".ropen").onclick=()=>pywebview.api.roll_show(path);
+    const pre=b.querySelector(".rtp");
+    const tail=b.querySelector(".rtail"); tail.textContent="show the last 40 lines";
+    tail.onclick=()=>{ if(pre.hidden){
+      pywebview.api.roll_tail(path).then(tx=>{
+        pre.textContent=tx||"(the transcript is empty)"; pre.hidden=false; });
+    } else { pre.hidden=true; } };
+    d.appendChild(s); d.appendChild(b); t.appendChild(d);
+    this.bottom(true);
   },
 
   // #142. A SEPARATE CALL, NOT A SECOND PARAMETER: four cases anchor the whole
@@ -6485,6 +6545,8 @@ const crow = {
       case "thoughts": document.querySelectorAll("details.think")
         .forEach(d=>{ d.open=e.open; }); break;
       case "user": this.user(e.t); if(e.i) this.userImages(e.i); break;
+      // #211. DIE BANDGRENZE ALS KARTE -- vom Schnitt selbst oder vom Replay.
+      case "roll": this.rollCard(e); break;
       case "start": this.start(); break;
       case "think_open": this.thinkOpen(); break;
       case "think": this.thinkText(e.t); break;
@@ -7217,11 +7279,19 @@ class Sink(ReplyEvents, FenceEvents):
 class Turn(TurnEvents):
     """The core's turn callbacks. Every one of them ends up on the screen."""
 
-    def __init__(self, put, git_reload=None, goal_reload=None) -> None:
+    def __init__(self, put, git_reload=None, goal_reload=None,
+                 surface_reload=None) -> None:
         self._put = put
         self._sink = Sink(put)
         # #165: dasselbe Muster wie `git_reload` -- ein Callable, kein Fenster.
         self._goal_reload = goal_reload
+        # #211. WAS DER SCHNITT DER SEITE NACHSAGT, oder None. Ein Callable
+        # wie die beiden daneben: dieses Objekt schreibt in eine Warteschlange
+        # und weiss sonst nichts vom Fenster -- der Schnitt ruft es, und die
+        # Seite zieht ihre Chips aus derselben Quelle, die sie beim Start
+        # fuellt. Ohne das stand nach einem Roll da, was zuletzt stand, und
+        # ein Neuaufbau der Seite liess die Chips leer.
+        self._surface_reload = surface_reload
         # #156. WAS DAS PANEL NACHLESEN LAESST, oder None. Ein Callable und
         # keine Api-Referenz: dieses Objekt schreibt in eine Warteschlange und
         # weiss sonst nichts vom Fenster -- so bleibt es in der Suite baubar,
@@ -7360,6 +7430,20 @@ class Turn(TurnEvents):
             self.tool_started(call.get("name", "?"), call.get("arguments", ""))
 
     def rolled_over(self, tokens: int, path: str) -> None:
+        # #211. DIE KARTE ZUERST: der Schnitt erscheint im Band genau dort,
+        # wo die Geschichte endete -- mit den Zahlen des Archivs und dem
+        # Zeiger auf sein Ende. Der Kern hat die Teile schon einmal geformt
+        # (`rollover_note_split`); hier ist der live Augenblick, und die
+        # Zeilenzahl steht im Transkript, das der Roll eben geschrieben hat.
+        transcript = (path[:-5] + ".md" if path.endswith(".json")
+                      else path + ".md")
+        try:
+            with open(transcript, encoding="utf-8", errors="replace") as fh:
+                lines = len(fh.read().splitlines())
+        except OSError:
+            lines = 0
+        self._put({"k": "roll", "tokens": tokens, "path": transcript,
+                   "lines": lines})
         self._put({"k": "note", "t": "rolled over at %d tokens -> %s"
                                      % (tokens, os.path.basename(path))})
         # robins Live-Test 2026-08-29: unten links stand bis zum Turn-Ende der
@@ -7368,6 +7452,12 @@ class Turn(TurnEvents):
         # als `cost`: cost() raeumt den Stream-Cursor ab, und der Turn laeuft
         # noch. Das Turn-Ende schreibt danach den echten neuen Fuellstand.
         self._put({"k": "ctx", "tokens": 0, "n_ctx": 0})
+        # #211. DER SCHNITT NENNT DER SEITE ALLES, WAS SIE WEISS -- Mode,
+        # Modell, Panel. Bis hier war diese Notiz fast das Einzige, was die
+        # Seite vom Roll erfuhr, und jede Neudarstellung liess die Chips leer
+        # (gemessen 2026-09-22: Modell-Chip und Berechtigungsstufe fort).
+        if self._surface_reload is not None:
+            self._surface_reload()
 
     def rollover_refused(self) -> None:
         # #152: die Verweigerung war ein No-op der Basisklasse -- der Turn
@@ -7626,6 +7716,16 @@ class Api:
         # Verhalten etwas geaendert haette.
         self._queued_to: str | None = None
         self._queue_lock = threading.Lock()
+        # #211. DER GEWARTE LEVEL, oder None. `set_mode` weigert sich zu Recht
+        # MITTEN in einem Zug -- `run_turn` liest die Grenze durch die Werkzeuge
+        # hindurch, ein Wechsel darunter liesse die erste Haelfte eines Zuges
+        # dort schreiben, wo die zweite nicht mehr darf. Aber der Goal-Motor
+        # haelt den Worker STUNDEN am Leben (ein Zug nach dem anderen, kein
+        # Spalt zum Zugreifen -- gemessen 2026-09-22: der Level war unveraender-
+        # lich, "weil goal aktiv"). Eine Zeile kann warten, also kann ein Level
+        # warten: gepuffert wie `_queued`, angewendet in dem einen Spalt, den
+        # die Pumpe zwischen zwei Zuegen ohnehin hat.
+        self._mode_queued: str | None = None
         # #162. WELCHER CHAT ANGEZEIGT WIRD, WENN ES NICHT DER LAUFENDE IST.
         #
         # `None` heisst: die Ansicht zeigt den Chat, in dem gearbeitet wird --
@@ -9330,6 +9430,36 @@ class Api:
         self._conversation.repin_memory(
             crow_core.prompt_head(crow_core.get_root()))
 
+    def _surface(self) -> None:
+        """#211. Der Schnitt sagt der Seite, was sie weiss -- einmal, gebuendelt.
+
+        EINE METHODE FUER DEN ROLL: Mode, Modell, Panel. Die Chips der Seite
+        sind Fensterzustand, kein Gespraechszustand -- nach dem Roll stand da,
+        was zuletzt stand, und jede Neudarstellung liess sie leer (gemessen
+        2026-09-22 in robins Test: Modell-Chip und Berechtigungsstufe fort,
+        bis der naechste Neustart sie neu fuellte). Dieselben Formen, die der
+        Start und die Probe schicken -- keine zweite Schreibweise fuer
+        dieselben Tatsachen, sonst laufen Seite und Wahrheit auseinander.
+        """
+        self.push({"k": "mode", "name": getattr(self._args, "mode",
+                                                crow_core.DEFAULT_MODE),
+                   "modes": self.mode_menu()})
+        remote = crow_core.provider_endpoint()
+        spot = remote or {}
+        name = self._model or ""
+        self.push({"k": "up", "model": name, "n_ctx": self._n_ctx,
+                   "tokens": 0, "state": "ok",
+                   "models": [[k, crow_core.model_label(k)]
+                              for k in crow_core.bootable_models()],
+                   "model_key": "" if spot.get("remote")
+                   else crow_core.model_key_for(name),
+                   "reasoning": self._reasoning or "",
+                   "levels": [] if spot.get("remote")
+                   else list(crow_core.reasoning_levels_for(name)),
+                   "groups": [] if spot.get("remote")
+                   else [list(g) for g in crow_core.reasoning_groups_for(name)]})
+        self.push_goal(force=True)
+
     def push_goal(self, force: bool = False) -> None:
         """Was die Seite ueber das Ziel wissen muss. Ohne Ziel: nichts.
 
@@ -9608,20 +9738,109 @@ class Api:
         underneath would leave the screen and the loop with two different
         opinions about what was released.
 
+        #211. GEWARTE, NICHT ABGEWIESEN. Der Goal-Motor faehrt Zug um Zug auf
+        einem Worker, der dazwischen nicht stirbt -- die Weigerung hatte also
+        kein Ende, solange ein Ziel lief (robins Live-Befund 2026-09-22). Ein
+        Level, das mitten im Zug gewaehlt wird, wartet auf den Spalt zwischen
+        zwei Zuegen und heisst das auch in der Notiz.
+
         SWITCHING DROPS STANDING APPROVALS. Going to `manual` while keeping the
         directories released under `allowedit` would hand back a level that asks
         less than its name says.
         """
         if name not in crow_core.MODES:
             return
+        if name == getattr(self._args, "mode", None) and self._mode_queued is None:
+            return                      # schon gesetzt -- nichts zu warten
         if self._worker and self._worker.is_alive():
-            self.push({"k": "note", "t": "the level does not change mid-turn"})
+            self._mode_queued = name
+            self.push({"k": "note",
+                       "t": "the level does not change mid-turn -- "
+                            "%s applies after this one" % name})
             return
+        self._apply_mode(name)
+
+    def _apply_mode(self, name: str) -> None:
+        """#211. Den Level wirklich setzen -- eine Stelle, zwei Tueren.
+
+        Der direkten Taste und dem nachgetragenen Wartenden darf nichts
+        Unterschiedliches passieren: dieselben zwei Pushes, in derselben
+        Reihenfolge, sonst zweifelt die Seite je nach Weg etwas anderes.
+        """
+        self._mode_queued = None
         self._args.mode = name
         crow_core.forget_approvals()
         self.push({"k": "mode", "name": name, "modes": self.mode_menu()})
         self.push({"k": "note", "t": "mode %s -- %s" % (
             name, next(m["what"] for m in self.mode_menu() if m["name"] == name))})
+
+    def _drain_mode_queue(self) -> None:
+        """#211. Der Spalt zwischen zwei Zuegen: der gewarte Level wird jetzt.
+
+        NUR VON DER PUMPE GERUFEN, zwischen `_run`-Ruecke und naechstem Zug --
+        der eine Ort, an dem sicher niemand die Grenze durch laufende
+        Werkzeuge liest. Auch beim ENDEN der Pumpe: ein Level, das auf den
+        letzten Zug wartete, darf nicht mit ihm sterben.
+        """
+        if self._mode_queued is None:
+            return
+        name = self._mode_queued
+        self._mode_queued = None
+        if name != getattr(self._args, "mode", None):
+            self._apply_mode(name)
+
+    # #211. DIE ZWEI TUEREN DER KARTE. Die Archiv-Karte im Band nennt den Pfad
+    # des Transkripts; diese beiden Methoden sind, was hinter ihren Knoepfen
+    # steht. Beide lesen NUR Dateien, die der Roll selbst geschrieben hat --
+    # der Pfad kommt aus der Notiz im Gespraech, aber gegengecheckt wird er
+    # gegen das Verzeichnis, in dem ausschliesslich crow schreibt.
+    def _roll_transcript(self, path: str) -> "str | None":
+        """Der gepruefte Pfad eines Transkripts, oder None mit einer Zeile.
+
+        EINE .MD IM EIGENEN SITZUNGSORDNER, sonst nichts: der Klick kam von
+        einer Karte, deren Text im Gespraech steht -- ein Gespraech, das
+        jemand bearbeitet hat, darf kein beliebiger Datei-Oeffner sein.
+        """
+        full = os.path.abspath(os.path.expanduser(str(path or "")))
+        folder = os.path.dirname(crow_core.rollover_path("x.json"))
+        if (not full.endswith(".md") or not os.path.isfile(full)
+                or os.path.dirname(full) != folder):
+            self.push({"k": "fail", "t": "that transcript is not there"})
+            return None
+        return full
+
+    def roll_show(self, path: str) -> None:
+        """#211. Das Transkript des Schnitts im Sichtprogramm der Umgebung.
+        Der WIE-Satz steht in crow_platform -- die Antwort auf "welches
+        Programm" gehoert dorthin, nicht hierher."""
+        full = self._roll_transcript(path)
+        if full is None:
+            return
+        argv = crow_platform.opener_command(full)
+        try:
+            if argv is None:
+                os.startfile(full)            # noqa: S606 - Windows' eigene Tuere
+            else:
+                subprocess.Popen(argv)
+        except OSError:
+            self.push({"k": "fail", "t": "no viewer took the transcript"})
+
+    def roll_tail(self, path: str) -> str:
+        """#211. Die letzten 40 Zeilen des Transkripts -- wo die Arbeit stand.
+
+        DAS ENDE, NICHT DER ANFANG: die Notiz selbst sagt schon, dass dort
+        zu lesen ist, wo die Dinge standen; die Karte legt es frei, ohne
+        den Viewer zu brauchen.
+        """
+        full = self._roll_transcript(path)
+        if full is None:
+            return ""
+        try:
+            with open(full, encoding="utf-8", errors="replace") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            return ""
+        return "\n".join(lines[-40:])
 
     def reset(self) -> None:
         """Put the current conversation aside and start an empty one.
@@ -11928,6 +12147,12 @@ class Api:
                     if text is None:
                         self._busy = False
                         stop = True
+                # #211. DER GEWARTE LEVEL WIRD JETZT ECHT. Dieser Spalt --
+                # voriger Zug zurueck, naechster noch nicht angefasst -- ist
+                # der einzige Moment zwischen zwei Zuegen, und auch der
+                # letzte Durchlauf faellt hierher: ein Level, das auf das
+                # Zugende wartete, stirbt nicht mit der Pumpe.
+                self._drain_mode_queue()
                 if stop:
                     # #162. DIE RAIL ERFAEHRT VOM ENDE, UND ZWAR HIER. `_run`
                     # zeichnet sie am Zugende -- da steht `_busy` aber noch auf
@@ -11976,7 +12201,10 @@ class Api:
         # existiert schon hier, damit der Roll dieselbe Notiz und dasselbe
         # Zaehler-Reset bekommt wie ein Mid-Turn-Roll.
         events = Turn(self.push, git_reload=self.git_refresh,
-                      goal_reload=self.push_goal)
+                      goal_reload=self.push_goal,
+                      # #211: der Schnitt buendelt den Fensterzustand neu --
+                      # siehe `_surface`.
+                      surface_reload=self._surface)
         rolled = False
         if crow_core.should_roll(self._context_tokens, self._n_ctx,
                                  crow_core.ROLLOVER_AT):
@@ -12008,7 +12236,10 @@ class Api:
             # #163: derselbe Kopf, den dieser Chat vor dem Schnitt trug --
             # Gedaechtnis, Faehigkeiten, Ziel. Ohne ihn beginnt die zweite
             # Haelfte einer Sitzung ohne alles, was ihre erste wusste.
-            crow_core.repin_head(self._conversation, crow_core.get_root())
+            # #210: MIT DEN MARKEN DES ZIELS -- der gratis bewegte Kopf traegt
+            # einmal den Stand des Schnitts mit (siehe crow_core.goal_block).
+            crow_core.repin_head(self._conversation, crow_core.get_root(),
+                                 include_status=True)
             if archived:
                 # #173/#171. BEIDE BAENDER GEHEN MIT INS ARCHIV UND HIER WEG --
                 # ihre Positionen zaehlen Nachrichten, und die sind soeben alle
@@ -12504,6 +12735,16 @@ def _replay_rows(api, messages: list, upto) -> None:
             # the line, the images go back as images -- the ticket's "the
             # same image is still there after a restart".
             words = crow_core.message_text(body)
+            # #211. DIE NOTIZ IST KEINE FRAGE. Der Spalter ist der Kerns
+            # (`rollover_note_split`, der eine Ort): eine Rollover-Notiz
+            # wird als Karte gezeichnet und die Zeile, die mit ihr reiste,
+            # als das, was sie ist -- die getippte Frage des Menschen.
+            parts, carry = crow_core.rollover_note_split(words)
+            if parts is not None:
+                api.push({"k": "roll", "tokens": parts["tokens"],
+                          "path": parts["transcript"],
+                          "lines": parts["lines"]})
+                words = carry
             urls = [u for u in
                     (((p.get("image_url") or {}).get("url") or "")
                      for p in crow_core.message_images(body)) if u]
