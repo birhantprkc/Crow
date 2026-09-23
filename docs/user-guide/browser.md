@@ -54,7 +54,7 @@ On Linux, a link in an answer opens as a **new tab in the panel** (#201). **Ctrl
 middle-click still sends it to the system browser. The GitHub sign-in code always opens in the
 system browser, because that is where you are signed in to GitHub. Inside the panel,
 `target=_blank` and `window.open` load in the panel instead of starting the system browser (#227).
-On Windows, links still open in the system browser.
+On Windows, links still open in the system browser (not verified there, #247).
 
 ## Width
 
@@ -79,3 +79,16 @@ A page opened from a file cannot load ES modules — the browser refuses every `
 local files. `build_bundle` turns the page and its modules into one self-contained file with the
 esbuild already on the machine; render that file, not the module source. See
 [tools](../reference/tools.md#build_bundle-212).
+
+## Not verified on Windows (#247)
+
+Development and acceptance of #201, #226, #228, #229 and #238 ran on Linux (Hyprland) only. The
+Windows code paths have never run on Windows:
+
+| | |
+|---|---|
+| the pane | Windows keeps the old second frameless WebView2 window (`on_top=True`). By the Win32 documentation that makes it TopMost over **every** application, not only over Crow; not observed |
+| profile | the Windows pane shares the main window's WebView2 profile; #226's own profile, memory kill and sandbox are Linux only |
+| copy and menu | Ctrl+C relies on WebView2 still passing editing keys with browser accelerators off (Microsoft's documentation); `Api.copy` goes through `clip`. Not run |
+| Show in file manager | `explorer /select,<path>`; a path with a space is not verified |
+| edge grips | one geometry call in flight with the newest rectangle (#238); not run |

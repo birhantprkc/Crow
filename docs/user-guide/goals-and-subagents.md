@@ -17,11 +17,12 @@ while it keeps going.
 | | |
 |---|---|
 | Tools | `goal_set(title, steps)` writes the plan, `goal_step(step, status, note)` moves one step |
-| From the composer | `/goal <title>` then one step per line, or `title \| step \| step`. `/goal` alone shows where it stands, `/goal off` clears it |
-| Panel | in the chat, above the git panel: title, `done/total`, wall clock, tokens, delegated tokens, and one row per step |
+| From the composer | `/goal <title>` then one step per line, or `title \| step \| step`. A line `check: <command>` (or a `\| check: <command>` part) is the acceptance check, not a step (#250). `/goal` alone shows where it stands, `/goal off` clears it and its check |
+| Panel | the first of the pinned cards at the top right of the chat (goal, subtasks, git): title, `done/total`, wall clock, tokens, delegated tokens, and one row per step |
 | Store | `<root>/.crow/goal.json`, beside `MEMORY.md` — the goal belongs to the folder the work is in |
 | States | `open` · `running` · `done` · `failed` |
 | Limits | 60 turns for the whole goal, 25 for one step, a brake on three identical or three empty answers, and the same failure class three times in one step named in the next nudge (#165, #202) |
+| `done` | refused when its note says the step is not done, and — with a `check:` set — refused on the step that would close the goal until the check exits 0 (#250) |
 
 **Two tools and not one, because they cost different things.** The plan goes into the pinned head
 of every prompt, so writing one costs a full prefill — the composer says so before it changes
@@ -39,6 +40,31 @@ they stood at the cut; they are not refreshed afterwards (#210).
 **One step runs at a time.** The local server has one slot (`-np 1`), so a store that allowed two
 `running` steps would describe a machine that does not exist. A `failed` step may be started again
 later.
+
+**`done` means verified working (#250).** Seen live on 2026-09-23: a goal closed at 9/9 over a
+page that drew nothing, with step notes such as "treated as done-with-deviation only in spirit".
+Two guards now stand in front of `goal_step(..., "done")`:
+
+- *The note is read.* A `done` whose own note reports failure — "in spirit", "with deviation",
+  "not done", "cannot be created", "unreachable" and similar — is refused with the words that
+  tripped it, and the model is told to finish the step or report it `failed`. A `done` with no note
+  on a step last reported `failed` is refused too: it has to say what proves it works now. Replayed
+  on the 10 real `done` calls of 2026-09-23: 6 refused, the 4 with positive notes pass.
+- *The user's acceptance check.* `/goal title | step | step | check: <command>` stores a command.
+  The `done` that would close the goal — every other step already `done` — runs it through
+  `run_command`, with its clock, capture cap and (on Linux) memory scope. A non-zero exit refuses
+  the `done`, the result carries the command's output, and the goal stays open. The head names the
+  check. It is stored in the session directory (`goal-checks.json`, keyed by the goal's path), not
+  in `goal.json`: the working area is writable by the model, and a command it wrote there would run
+  unasked at `allowedit`. A replan by the model keeps the check; `/goal off` drops it. Only the
+  user sets one — the model's `goal_set` has no such field.
+
+Not measured: whether the model then finishes the work instead of stopping at the refusal.
+
+**Crow's nudges are not your words (#240).** Goal-mode nudges travel as user-role messages and
+carry the model's own plan text. The paths in them used to count as user-named, which released the
+outside-path question (#144) for places only the model had named. Now only a plan you typed with
+`/goal` counts as yours (`by` in `goal.json`); a plan the model wrote with `goal_set` does not.
 
 **A goal that has stopped getting anywhere is stopped, and says so.** Seen live on 2026-09-18:
 thirty-five answers of a single character in a row, at 130,939 tokens, each one answering the same

@@ -6,7 +6,7 @@
 
 <h3>An agent, not a chat box.</h3>
 
-<p>A local model at 200k context with 25 tools and MCP, persistent memory, its own skills,<br>a browser panel, eyes, and subagents it can send out while it keeps working.<br>Runs on this machine, or on a provider you choose.</p>
+<p>A local model at 200k context with 27 tools and MCP, persistent memory, its own skills,<br>a browser panel, eyes, and subagents it can send out while it keeps working.<br>Runs on this machine, or on a provider you choose.</p>
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
@@ -121,9 +121,9 @@ Everything below is in the screenshot at the top of this page.
 | **Dropping files** | drop a file and its path lands in the composer for the model to `read_file`; drop an image and it becomes a chip that rides the next line. → [window](docs/user-guide/window.md) |
 | **Trace** | one line per round, folded. Open it to see what the model actually did. **Thought** is its own fold, labelled with the share of the turn it took. → [window](docs/user-guide/window.md) |
 | **CODE panel** | on the right: every tool call with its `arguments` and its `result`, and under them the source `write_file` and `edit_file` produced, by path, with a `copy` per block. → [window](docs/user-guide/window.md) |
-| **Goal panel** | the plan the model wrote for itself: `3/3` steps, wall clock, tokens, delegated tokens. It outlives a rollover and a restart. → [goals and subagents](docs/user-guide/goals-and-subagents.md) |
-| **Subagents** | `delegate` hands a task to a second model and returns at once; the turn keeps streaming. `collect` fetches the results. Never on this machine's slot. → [goals and subagents](docs/user-guide/goals-and-subagents.md) |
-| **Browser panel** | the globe in the title bar. Tabs, an address bar, per-tab history — a real window, not an iframe, so claude.ai and github.com load. → [browser](docs/user-guide/browser.md) |
+| **Goal panel** | the plan the model wrote for itself: `3/3` steps, wall clock, tokens, delegated tokens. It outlives a rollover and a restart, and `done` has to hold up: `/goal title \| step \| check: <command>` makes a command the acceptance test. → [goals and subagents](docs/user-guide/goals-and-subagents.md) |
+| **Subagents** | `delegate` hands a task to a second model and returns at once; the turn keeps streaming. `collect` fetches the results. Each one is a card in the pinned **Subtasks** card beside goal and git. Never on this machine's slot. → [goals and subagents](docs/user-guide/goals-and-subagents.md) |
+| **Browser panel** | the globe in the title bar. Tabs, an address bar, per-tab history — a real web view, not an iframe, so claude.ai and github.com load. On Linux it lives inside Crow's window with its own profile, a memory kill and a sandbox; links in answers open there. → [browser](docs/user-guide/browser.md) |
 | **Voice** | the microphone beside the arrow. Recorded and transcribed locally; nothing reaches the disk. → [window](docs/user-guide/window.md) |
 | **Themes** | dark, light and crow. `Help → Settings → Appearance`. → [settings](docs/reference/settings.md) |
 | **Images** | paste a screenshot (Ctrl+V) or `/image <path>`. They ride the next line, stay in the transcript and survive a restart; the model opens one itself with `read_image`. → [tools](docs/reference/tools.md) |
@@ -138,7 +138,7 @@ Everything below is in the screenshot at the top of this page.
 
 | | |
 |---|---|
-| [**Tools**](docs/reference/tools.md) | 25 built in, plus every MCP server you add |
+| [**Tools**](docs/reference/tools.md) | 27 built in, plus every MCP server you add |
 | [**Memory**](docs/user-guide/memory.md) | two plain-text stores, per project and per person, written only after you approve |
 | [**Skills**](docs/user-guide/skills.md) | procedures the model keeps and rewrites; name and description in the prompt, body on request |
 | [**Goals**](docs/user-guide/goals-and-subagents.md) | a plan in the pinned head, the state in a file — it survives a rollover and a restart |
@@ -153,19 +153,19 @@ Everything below is in the screenshot at the top of this page.
 
 ## Tools
 
-25 built in. `/tools` lists them in either surface; the full reference is
+27 built in. `/tools` lists them in either surface; the full reference is
 [docs/reference/tools.md](docs/reference/tools.md).
 
 | group | |
 |---|---|
-| **Files** | `read_file` a file or a line range · `write_file` (an existing file must have been read in this conversation and be unchanged since) · `edit_file` one exact occurrence · `list_dir` · `find_files` by glob · `search_text` by regex |
-| **Shell** | `run_command` — named shell, timeout, and a path outside the working directory asks first |
+| **Files** | `read_file` a file or a line range · `write_file` a whole file (an existing file must have been read in this conversation and be unchanged since) · `append_file` only for a file above `write_file`'s size limit · `edit_file` one exact occurrence · `list_dir` · `find_files` by glob · `search_text` by regex. A write says its byte count and sha256 as read back, and a `.js` or HTML write carries `node --check`'s first error when node is installed |
+| **Shell** | `run_command` — named shell, timeout, and a path outside the working directory asks first; on Linux in a memory-bounded scope of its own (8 GiB) · `build_bundle` — a page and its ES modules as one offline file, with the esbuild already on the machine |
 | **Git** | `git_status` · `git_diff` · `git_log` · `git_commit` (stages exactly the paths given) · `git_push` · `github_connect` over the OAuth device flow |
 | **Web** | `web_search` — answer from what you read, a list of links is not an answer · `fetch_url` one page as readable text |
 | **Browser** | `render_page` opens a page in a browser Crow owns and brings back a screenshot plus the console |
 | **Vision** | `read_image` — check your own work when a step says it has to look right |
 | **Memory** | `memory` add, replace, remove · `skill` read, save, remove · `session_search` over months of archives |
-| **Goals** | `goal_set` writes the plan · `goal_step` moves one step, and costs no prefill |
+| **Goals** | `goal_set` writes the plan · `goal_step` moves one step, and costs no prefill. A `done` whose note says it is not done is refused, and a `check:` you set must pass before the goal closes |
 | **Subagents** | `delegate` hands a task out · `subtasks` where they stand · `collect` waits and returns |
 
 Every MCP tool joins the same list as `mcp_<server>_<tool>`, with its own class.

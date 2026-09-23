@@ -15,6 +15,12 @@ OpenRouter has its own page instead: switch, delegate favourites and model pick.
 no turn** — its switch runs the broker for delegation while the machine keeps answering, in
 parallel. The default is always the machine; turns leave it only through the Model page.
 
+When a delegate spot fails, the error decides the next step: a sick spot (429, 5xx, timeout) and a
+spot that will not serve this client (403, "no endpoints found", 402 on a paid favourite) are
+skipped for the next one; 401, 402 on a free spot and schema errors stop the chain at once. The
+result names every spot tried and why (#216). Full table:
+[goals and subagents](goals-and-subagents.md#subagents-143).
+
 Three files, in `%LOCALAPPDATA%\Crow\` on Windows and `~/.config/crow/` on Linux:
 
 | file | |
