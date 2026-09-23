@@ -5570,6 +5570,110 @@ class WebSearchTests(unittest.TestCase):
         self.assertIn("CROW_TAVILY_KEY", out)
 
 
+class TheSearchTextsNameTheStoreTests(unittest.TestCase):
+    """#194: since #193 the store is the documented place for CROW_TAVILY_KEY
+    and the environment is the fallback. Every text that tells the reader
+    where the key goes names the store's REAL path first -- `SECRETS_FILE`,
+    which follows `crow_platform.config_dir()` and `XDG_CONFIG_HOME` -- and
+    the refusal says which source the refused key came from. The live case
+    of 2026-09-22: a key from the environment was refused, the store had
+    none, and the text did not say so.
+
+    Fake names and values only; the store is a temporary path.
+    """
+
+    NAME = "CROW_TEST_SECRET_Y"
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-secret-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.store = os.path.join(self.dir, "secrets.json")
+        self.addCleanup(setattr, crow_core, "SECRETS_FILE", crow_core.SECRETS_FILE)
+        crow_core.SECRETS_FILE = self.store
+        self.addCleanup(setattr, crow_core, "TAVILY_FROM",
+                        getattr(crow_core, "TAVILY_FROM", ""))
+        crow_core._SECRET_SAID.clear()
+        self.addCleanup(crow_core._SECRET_SAID.clear)
+        os.environ.pop(self.NAME, None)
+        self.addCleanup(os.environ.pop, self.NAME, None)
+
+    def _store_first(self, text: str) -> None:
+        self.assertIn("CROW_TAVILY_KEY", text)
+        self.assertIn(crow_core.SECRETS_FILE, text)
+        self.assertIn("environment", text)
+        self.assertLess(text.index(crow_core.SECRETS_FILE),
+                        text.index("environment"), text)
+        self.assertNotIn("set CROW_TAVILY_KEY", text)
+
+    def test_the_two_upgrade_hints_name_the_store_before_the_environment(self):
+        for text in (crow_core.search_upgrade_hint(),
+                     crow_core.keyless_scope(), crow_core.no_general_index()):
+            self._store_first(text)
+
+    def test_the_place_is_the_resolved_store_path(self):
+        """Not a hard-coded `~/.config/crow` or `%LOCALAPPDATA%`: the path the
+        reader actually opens, so `XDG_CONFIG_HOME` and `CROW_SECRETS_FILE`
+        are honoured."""
+        self.assertIn(self.store, crow_core.secret_place("CROW_TAVILY_KEY"))
+
+    def test_the_script_is_named_on_windows_only(self):
+        """tools/migrate-secrets.ps1 is PowerShell 5.1 with icacls."""
+        self.addCleanup(setattr, crow_core.crow_platform, "IS_WINDOWS",
+                        crow_core.crow_platform.IS_WINDOWS)
+        crow_core.crow_platform.IS_WINDOWS = True
+        self.assertIn("migrate-secrets.ps1", crow_core.secret_place("X"))
+        crow_core.crow_platform.IS_WINDOWS = False
+        self.assertNotIn("migrate-secrets.ps1", crow_core.secret_place("X"))
+
+    def test_the_environment_notice_on_linux_does_not_send_to_powershell(self):
+        self.addCleanup(setattr, crow_core.crow_platform, "IS_WINDOWS",
+                        crow_core.crow_platform.IS_WINDOWS)
+        crow_core.crow_platform.IS_WINDOWS = False
+        err = _Console()
+        self.addCleanup(setattr, sys, "stderr", sys.stderr)
+        sys.stderr = err
+        os.environ[self.NAME] = "env-value-0123456789"
+        crow_core.secret(self.NAME)
+        said = err.getvalue()
+        self.assertIn(self.store, said)
+        self.assertNotIn("migrate-secrets.ps1", said)
+        self.assertNotIn("env-value-0123456789", said)
+
+    def test_the_origin_is_store_environment_or_nothing(self):
+        self.assertEqual(crow_core.secret_origin(self.NAME), "")
+        os.environ[self.NAME] = "env-value"
+        self.assertEqual(crow_core.secret_origin(self.NAME), "environment")
+        with io.open(self.store, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({self.NAME: "store-value"}))
+        self.assertEqual(crow_core.secret_origin(self.NAME), "store")
+
+    def _refused(self, origin: str) -> str:
+        crow_core.TAVILY_FROM = origin
+        exc = crow_core.urllib.error.HTTPError(crow_core.TAVILY_URL, 401,
+                                               "Unauthorized", None, None)
+        with _Backend(tavily="tvly-fake"), _Urlopen(exc):
+            return crow_core.tool_web_search("x")
+
+    def test_a_refused_key_from_the_environment_says_so_and_names_the_store(self):
+        out = self._refused("environment")
+        self.assertIn("CROW_TAVILY_KEY from the environment was refused", out)
+        self.assertIn(self.store, out)
+        self.assertIn("401", out)
+        self.assertNotIn("tvly-fake", out)
+
+    def test_a_refused_key_from_the_store_names_that_file(self):
+        out = self._refused("store")
+        self.assertIn("CROW_TAVILY_KEY from %s was refused" % self.store, out)
+        self.assertNotIn("from the environment", out)
+
+    def test_the_searxng_hint_names_the_store(self):
+        with _Backend(searxng="http://127.0.0.1:8888"), \
+                _Urlopen(crow_core.urllib.error.URLError("refused")):
+            out = crow_core.tool_web_search("x")
+        self.assertIn("CROW_TAVILY_KEY", out)
+        self.assertIn(self.store, out)
+
+
 class WebToolsAreDeclaredTests(unittest.TestCase):
     """#96. The wiring, and the one entry whose absence is silent."""
 
@@ -7187,7 +7291,7 @@ class TheSearchDescriptionTellsTheTruthTests(unittest.TestCase):
         self.assertIn("code, packages and reference", desc)
 
     def test_it_points_at_the_line_the_result_carries(self):
-        """KEYLESS_SCOPE is the first line of every keyless answer. The
+        """keyless_scope() is the first line of every keyless answer. The
         description is where the model learns that line is worth reading."""
         self.assertIn("first line", self._description())
 

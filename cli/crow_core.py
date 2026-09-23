@@ -383,12 +383,42 @@ def secret(name: str) -> str:
         return found
     from_env = os.environ.get(name, "")
     if from_env and _secret_console():
+        # #194: the script is PowerShell 5.1 and Windows ACLs -- named on Windows
+        # only. On Linux the file is written by hand.
+        how = (" with tools\\migrate-secrets.ps1" if crow_platform.IS_WINDOWS
+               else " (a flat JSON object, one entry per name)")
         _secret_note(
             "env:%s" % name,
-            "crow: %s was read from the environment. Move it into %s with "
-            "tools/migrate-secrets.ps1 -- every child process inherits it "
-            "where it is.\n" % (name, SECRETS_FILE))
+            "crow: %s was read from the environment. Move it into %s%s -- "
+            "every child process inherits it where it is.\n"
+            % (name, SECRETS_FILE, how))
     return from_env
+
+
+def secret_origin(name: str) -> str:
+    """#194: where `secret(name)` takes its value from -- "store",
+    "environment" or "". The same order as `secret()`, and silent: it is
+    asked for a sentence, not for the value."""
+    found = _secret_stored().get(name)
+    if isinstance(found, str) and found:
+        return "store"
+    return "environment" if os.environ.get(name) else ""
+
+
+def secret_place(name: str) -> str:
+    """#194: the one phrase every text uses to say where `name` belongs.
+
+    THE STORE FIRST, BY ITS REAL PATH. `SECRETS_FILE` is what the reader
+    opens -- `crow_platform.config_dir()`, `XDG_CONFIG_HOME` and
+    `CROW_SECRETS_FILE` included -- so a text cannot name a place the reader
+    does not look. The environment is named last, as the fallback it is
+    since #193. The migration script is Windows-only (PowerShell 5.1 and
+    Windows ACLs), so it is named there and nowhere else.
+    """
+    script = (r" (tools\migrate-secrets.ps1 moves it there from the environment)"
+              if crow_platform.IS_WINDOWS else "")
+    return ("%s in %s%s; the environment variable %s is the fallback"
+            % (name, SECRETS_FILE, script, name))
 
 
 # WHERE THE SEARCH RUNS, AND WHY IT IS NOT A SELF-HOSTED SERVICE BY DEFAULT.
@@ -423,6 +453,9 @@ def secret(name: str) -> str:
 # its own sentence rather than a JSONDecodeError.
 TAVILY_URL = "https://api.tavily.com/search"
 TAVILY_KEY = secret("CROW_TAVILY_KEY")
+# #194: which source that key came from, for the refusal sentence -- the live
+# case of 2026-09-22 was a refused key from the environment with an empty store.
+TAVILY_FROM = secret_origin("CROW_TAVILY_KEY")
 SEARXNG_URL = os.environ.get("CROW_SEARXNG_URL", "")
 
 # Per keyless source. Shorter than WEB_TIMEOUT because several run at once and
@@ -436,7 +469,7 @@ KEYLESS_TIMEOUT = 8
 # the open web. A question outside that is a reason to offer the upgrade, not to
 # report a fault.
 # SAID ON EVERY KEYLESS ANSWER, not only on the empty one -- and that gap was
-# the defect. `NO_GENERAL_INDEX` below is the honest sentence, but it only ever
+# the defect. `no_general_index()` below is the honest sentence, but it only ever
 # reached the model when the federation found NOTHING. It almost always finds
 # something: measured 2026-08-22, `was kostet ein rtx 5090` came back with
 # github issue #5090 at rank one, because the number matched an issue NUMBER.
@@ -448,18 +481,29 @@ KEYLESS_TIMEOUT = 8
 # FIRST, NOT LAST, for the reason the registry notes below already carry: a line
 # about what the whole list is worth, printed under the list, is read after the
 # list has already been believed.
-KEYLESS_SCOPE = (
-    "note: this index covers code, packages and reference -- NOT the open web. "
-    "A hit here may be a keyword match rather than an answer; weigh it before "
-    "using it. For a general index set CROW_TAVILY_KEY (free, no credit card, "
-    "https://tavily.com) or CROW_SEARXNG_URL to your own instance."
-)
+#
+# #194: THE KEY GOES INTO THE STORE, and the sentence says so -- built at call
+# time from `secret_place`, because the store's path is `SECRETS_FILE` and
+# that is resolved per platform. Tool RESULTS, not the tool description, so
+# the prefix fingerprint does not move with the machine.
+def search_upgrade_hint() -> str:
+    """The one sentence that offers a general index."""
+    return ("For a general index get a Tavily key (free, no credit card, "
+            "https://tavily.com) and put %s. Or set CROW_SEARXNG_URL to your "
+            "own instance." % secret_place("CROW_TAVILY_KEY"))
 
-NO_GENERAL_INDEX = (
-    "\n[these sources cover code, packages and reference, not the open web. "
-    "For a general index set CROW_TAVILY_KEY (free, no credit card, "
-    "https://tavily.com) or CROW_SEARXNG_URL to your own instance.]"
-)
+
+def keyless_scope() -> str:
+    """The first line of every keyless answer."""
+    return ("note: this index covers code, packages and reference -- NOT the "
+            "open web. A hit here may be a keyword match rather than an "
+            "answer; weigh it before using it. " + search_upgrade_hint())
+
+
+def no_general_index() -> str:
+    """What an empty keyless search says."""
+    return ("\n[these sources cover code, packages and reference, not the "
+            "open web. " + search_upgrade_hint() + "]")
 
 # Archive the conversation and start a fresh one at this share of the window.
 #
@@ -11852,7 +11896,7 @@ def _src_ddg_answer(query: str, want: int) -> list[dict]:
 # github reported 7,356 repositories and 245 issues, wikipedia 10 articles,
 # pypi `requests 2.34.2`, stackexchange quota_remaining 298 of 300.
 #
-# For general web search beyond these, CROW_TAVILY_KEY or CROW_SEARXNG_URL take
+# For general web search beyond these, CROW_TAVILY_KEY (the store, #193/#194) or CROW_SEARXNG_URL take
 # over -- an upgrade the user may choose, not a setup step they must complete.
 # THE ORDER IS AUTHORITY, AND IT IS LOAD-BEARING. Measured live on 2026-08-14:
 # concatenating the sources put github first unconditionally, so "requests
@@ -11924,10 +11968,20 @@ def _search_tavily(query: str, want: int) -> dict | str:
     if isinstance(got, str):
         # A rejected key is an HTTP 401, and "unauthorized" alone would leave the
         # user guessing which of their env vars is wrong.
+        #
+        # #194: AND WHICH SOURCE IT CAME FROM. The live case of 2026-09-22
+        # was a key from the environment with no entry in the store; a text
+        # that did not say so sent the reader to look in the wrong place.
         if "401" in got or "403" in got:
-            return (f"{got}\nCROW_TAVILY_KEY was refused. Check it at "
-                    f"https://tavily.com, or unset it and set CROW_SEARXNG_URL "
-                    f"to your own instance.")
+            if TAVILY_FROM == "store":
+                came = f"CROW_TAVILY_KEY from {SECRETS_FILE} was refused."
+            else:
+                came = (f"CROW_TAVILY_KEY from the environment was refused "
+                        f"({SECRETS_FILE} has no entry for it).")
+            return (f"{got}\n{came} Put a valid key (https://tavily.com) "
+                    f"into {SECRETS_FILE} -- the store wins over the "
+                    f"environment -- or set CROW_SEARXNG_URL to your own "
+                    f"instance.")
         return got
     _, text = got
     try:
@@ -11943,8 +11997,8 @@ def _search_searxng(query: str) -> dict | str:
     got = _http_text(url)
     if isinstance(got, str):
         return (f"{got}\n(Crow is set to search through a SearXNG at "
-                f"{SEARXNG_URL}. Change CROW_SEARXNG_URL, or unset it and set "
-                f"CROW_TAVILY_KEY instead.)")
+                f"{SEARXNG_URL}. Change CROW_SEARXNG_URL, or unset it and put "
+                f"{secret_place('CROW_TAVILY_KEY')}.)")
     _, body = got
     try:
         return json.loads(body)
@@ -12003,7 +12057,7 @@ def tool_web_search(query: str = "", count: int = SEARCH_RESULTS, **_) -> str:
     # keyless path -- with a real index configured the results ARE a web search
     # and the warning would be a lie in the other direction.
     if not (SEARXNG_URL or TAVILY_KEY):
-        lines.append(KEYLESS_SCOPE)
+        lines.append(keyless_scope())
     # Before the results, because a registry saying "this does not exist" outranks
     # every keyword match underneath it -- and underneath is where it would be
     # read last, if at all.
@@ -12031,7 +12085,7 @@ def tool_web_search(query: str = "", count: int = SEARCH_RESULTS, **_) -> str:
             return (f"no result for {query} -- and {len(dead)} engine(s) did not "
                     f"answer: {dead}. This may be the instance, not the query.")
         if not (SEARXNG_URL or TAVILY_KEY):
-            return f"no result for {query}" + NO_GENERAL_INDEX
+            return f"no result for {query}" + no_general_index()
         return f"no result for {query}"
     lines.append(f"\n[the snippets answer most questions; fetch_url at most "
                  f"{MAX_FETCHES} of these, each costs ~2 min]")
