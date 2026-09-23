@@ -9093,6 +9093,349 @@ def _capture_warnings(previous: "bytes | None", current: bytes,
     return warns
 
 
+# #253. THE FAILING CALL IS THE PAGE'S OWN, AND THE RESULT SAYS SO. In the
+# diorama run of 2026-09-23 (serve 70a69e3, Crow c4f1b3c) the model's code
+# called `gl2.texImage33D(...)` -- a digit-insertion corruption from the engine
+# (crow-nest#91) -- and read Chromium's correct `texImage33D is not a
+# function` as "this SwiftShader has no texImage3D", while its OWN probe in the
+# same console printed `texImage3D=function` (rollover-20260923-082406 tool
+# results 147, 151, 203, 333). `renderbufferStorage(gl.RENDERBUFFER, 0, fmt,
+# w, h)` -- the five-argument signature of renderbufferStorageMultisample --
+# drew `INVALID_ENUM: invalid internalformat` and became "no renderbuffer can
+# be created on this machine" (session.json 58-91). Hours of goal steps were
+# closed on a platform limit that did not exist.
+#
+# THE NAMES COME FROM THE PAGE'S OWN BROWSER, NOT FROM A LIST HERE. After the
+# capture, one Runtime.evaluate dumps every interface prototype on the page's
+# global object with each member's `length` (WebIDL "create an operation
+# function": the length of the shortest argument list, i.e. the required
+# arguments). A static WebGL IDL list would be a second copy of the browser
+# that nobody updates and knows nothing of Canvas2D, WebGPU or the DOM; edit
+# distance alone has nothing to measure against. Without the pipe (Windows)
+# or when the evaluate fails, the hints fall back to the names the page's own
+# console reported as `name=function`, and to the call's argument count read
+# from the page's source line -- facts, never a guess.
+_API_DUMP_JS = r"""(() => {
+  const out = {};
+  for (const k of Object.getOwnPropertyNames(globalThis)) {
+    if (!/^[A-Z]/.test(k)) continue;
+    const d = Object.getOwnPropertyDescriptor(globalThis, k);
+    const v = d && d.value;
+    if (typeof v !== 'function' || !v.prototype) continue;
+    const members = {};
+    let names;
+    try { names = Object.getOwnPropertyNames(v.prototype); } catch (e) { continue; }
+    for (const n of names) {
+      if (n === 'constructor') continue;
+      const m = Object.getOwnPropertyDescriptor(v.prototype, n);
+      members[n] = (m && typeof m.value === 'function') ? m.value.length : -1;
+    }
+    if (Object.keys(members).length) out[k] = members;
+  }
+  return out;
+})()"""
+
+# Seconds for that one evaluate. A page whose main thread never yields gets no
+# names and loses nothing else: the screenshot is already on disk.
+RENDER_PROBE_S = 3
+
+# "gl2.texImage33D is not a function" -- Chromium's TypeError text. The
+# receiver is whatever expression stood before the dot; only its last name
+# is used.
+_NOT_A_FUNCTION = re.compile(
+    r"(?:([\w$\]\)]+)\.)?([A-Za-z_$][\w$]*) is not a function")
+# "texSub3D=undefined" / "texSub3D: undefined" -- the shape of a page's own
+# API probe; a hint is given only when a real name is near it.
+_PROBE_UNDEFINED = re.compile(r"\b([A-Za-z_$][\w$]*)\s*[=:]\s*undefined\b")
+# "WebGL: INVALID_ENUM: renderbufferStorage: invalid internalformat"
+_WEBGL_ERROR = re.compile(
+    r"WebGL: (INVALID_ENUM|INVALID_VALUE|INVALID_OPERATION): (\w+): ([^\"]*)")
+# the tail Chromium puts on a console line: `, source: <url> (<line>)`
+_CONSOLE_SOURCE = re.compile(r"source: (\S+) \((\d+)\)\s*$")
+
+# Interfaces a hint names first when a name lives on several.
+_HINT_PREFER = ("WebGL2RenderingContext", "WebGLRenderingContext",
+                "CanvasRenderingContext2D", "OffscreenCanvasRenderingContext2D",
+                "GPUDevice", "GPUCommandEncoder")
+_HINT_MAX = 6
+
+
+def _edit_distance(a: str, b: str, cap: int) -> int:
+    """Optimal-string-alignment distance (a swap of neighbours is one edit),
+    or `cap + 1` as soon as it is certain to exceed `cap`."""
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev2: "list[int]" = []
+    prev = list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        cur = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            if (i > 1 and j > 1 and a[i - 1] == b[j - 2]
+                    and a[i - 2] == b[j - 1]):
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        if min(cur) > cap:
+            return cap + 1
+        prev2, prev = prev, cur
+    return prev[-1]
+
+
+def _edit_said(wrong: str, right: str) -> str:
+    """One edit, in words: the reader sees WHICH character is off."""
+    if len(wrong) == len(right) + 1:
+        for i in range(len(wrong)):
+            if wrong[:i] + wrong[i + 1:] == right:
+                return 'one "%s" too many' % wrong[i]
+    if len(wrong) + 1 == len(right):
+        for i in range(len(right)):
+            if right[:i] + right[i + 1:] == wrong:
+                return 'a "%s" missing' % right[i]
+    if len(wrong) == len(right):
+        diff = [i for i in range(len(wrong)) if wrong[i] != right[i]]
+        if len(diff) == 1:
+            i = diff[0]
+            return '"%s" where it has "%s"' % (wrong[i], right[i])
+        if (len(diff) == 2 and diff[1] == diff[0] + 1
+                and wrong[diff[0]] == right[diff[1]]):
+            return "two letters swapped"
+    return "%d edits" % _edit_distance(wrong, right, 9)
+
+
+def _camel_words(name: str) -> "list[str]":
+    return re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name)
+
+
+def _where(api: "dict[str, dict]", name: str) -> "list[str]":
+    """The interfaces that have `name`, preferred ones first."""
+    have = [k for k, members in api.items() if name in members]
+    return sorted(have, key=lambda k: (_HINT_PREFER.index(k)
+                                       if k in _HINT_PREFER else 99, k))
+
+
+def _source_label(line: str) -> str:
+    m = _CONSOLE_SOURCE.search(line)
+    if not m:
+        return ""
+    return "%s:%s" % (m.group(1).rsplit("/", 1)[-1], m.group(2))
+
+
+def _probe_says(console: "list[str]", name: str) -> str:
+    """Where the page's own console reported `name=function`, or ''."""
+    said = re.compile(r"(?<![\w$])%s\s*[=:]\s*function\b" % re.escape(name))
+    for line in console:
+        if said.search(line):
+            label = _source_label(line)
+            return ("the page's own console reports %s=function%s"
+                    % (name, " (%s)" % label if label else ""))
+    return ""
+
+
+def _source_line(line: str, page: "str | None") -> "tuple[str, str] | None":
+    """(label, text) of the page-source line a console line points at.
+
+    Read only when the console line names a file:// source inside the rendered
+    page's own folder -- the page and its local scripts, nothing else."""
+    m = _CONSOLE_SOURCE.search(line)
+    if not m or not page or not m.group(1).startswith("file://"):
+        return None
+    from urllib.parse import unquote
+    path = unquote(m.group(1)[len("file://"):])
+    if os.name == "nt":
+        path = path.lstrip("/")
+    path = os.path.realpath(path)
+    home = os.path.dirname(os.path.realpath(page))
+    if not (path == os.path.realpath(page)
+            or path.startswith(home + os.sep)) or not os.path.isfile(path):
+        return None
+    want = int(m.group(2))
+    try:
+        if os.path.getsize(path) > 8 * 1024 * 1024:
+            return None
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for n, text in enumerate(fh, 1):
+                if n == want:
+                    return _source_label(line), text
+    except OSError:
+        return None
+    return None
+
+
+def _call_args(text: str, fn: str) -> "list[list[str]]":
+    """The argument lists of every call `fn(...)` on one line of source,
+    split at top-level commas (brackets and string literals respected)."""
+    calls = []
+    for m in re.finditer(r"(?<![\w$])%s\s*\(" % re.escape(fn), text):
+        i, depth, quote, cur, args = m.end(), 1, "", "", []
+        while i < len(text):
+            c = text[i]
+            if quote:
+                cur += c
+                if c == "\\" and i + 1 < len(text):
+                    cur += text[i + 1]
+                    i += 1
+                elif c == quote:
+                    quote = ""
+            elif c in "'\"`":
+                quote = c
+                cur += c
+            elif c in "([{":
+                depth += 1
+                cur += c
+            elif c in ")]}":
+                depth -= 1
+                if depth == 0:
+                    args.append(cur.strip())
+                    break
+                cur += c
+            elif c == "," and depth == 1:
+                args.append(cur.strip())
+                cur = ""
+            else:
+                cur += c
+            i += 1
+        else:
+            continue                     # the call runs past this line
+        if args and args[-1] == "":
+            args.pop()                   # f(a, b,) and f() alike
+        calls.append(args)
+    return calls
+
+
+def _near_names(api: "dict[str, dict]", extra: "set[str]", name: str,
+                functions_only: bool) -> "list[tuple[int, str]]":
+    """(distance, name) of the real names within reach of `name`."""
+    cap = 1 if len(name) <= 5 else 2
+    pool = set(extra)
+    for members in api.values():
+        for member, length in members.items():
+            if not functions_only or length >= 0:
+                pool.add(member)
+    pool.discard(name)
+    found = []
+    for real in pool:
+        d = _edit_distance(name, real, cap)
+        if d <= cap:
+            found.append((d, real))
+    return sorted(found, key=lambda x: (x[0], x[1].lower() != name.lower(),
+                                        x[1]))
+
+
+def _console_hints(console: "list[str]", api: "dict[str, dict] | None",
+                   page: "str | None" = None) -> "list[str]":
+    """#253. One `hint:` line per failing name or WebGL call in the page's
+    console, saying what the browser really has -- the near real name, the
+    page's own probe line, the argument count against the signature.
+
+    Pure text in, text out (the source line is the only read), so the suite
+    replays the real 2026-09-23 console lines without a browser."""
+    api = api or {}
+    probed = set()
+    for line in console:
+        probed.update(re.findall(r"(?<![\w$])([A-Za-z_$][\w$]*)\s*[=:]\s*function\b",
+                                 line))
+    hints: "list[str]" = []
+    seen: "set[tuple]" = set()
+
+    def missing(name: str, receiver: str, line: str, called: bool) -> None:
+        if ("name", name) in seen or len(name) < 4:
+            return
+        seen.add(("name", name))
+        # A bare `init()` is the page's own function, not a browser API: the
+        # browser's names answer only a member call (`gl.x`) or a probe line.
+        names = api if (receiver or not called) else {}
+        where = _where(names, name)
+        if where:
+            if not called:
+                return
+            shown = ", ".join(where[:3]) + (" and %d more" % (len(where) - 3)
+                                            if len(where) > 3 else "")
+            hints.append("hint: %s is a real name in this browser, on %s -- "
+                         "so `%s` is not one of those objects%s."
+                         % (name, shown, receiver or name,
+                            " (a \"webgl\" context has no WebGL2 methods; "
+                            "ask for \"webgl2\")"
+                            if where[0] == "WebGL2RenderingContext"
+                            and "WebGLRenderingContext" not in where else ""))
+            return
+        near = _near_names(names, probed, name, functions_only=called)
+        if not near:
+            if not called or not names:
+                return
+            words = _camel_words(name)
+            kin = sorted({m for k in _HINT_PREFER if k in api
+                          for m in api[k]
+                          if len(words) > 1 and _camel_words(m)[:1] == words[:1]
+                          and _camel_words(m)[-1:] == words[-1:]})
+            hints.append("hint: %s exists on no interface in this browser, "
+                         "and no real name is within 2 edits of it -- the "
+                         "name is not part of the API, the platform is not "
+                         "missing a feature.%s"
+                         % (name, (" Names with the same first and last word: "
+                                   "%s." % ", ".join(kin[:3])) if kin else ""))
+            return
+        dist, real = near[0]
+        on = _where(names, real)
+        away = "%s away (%s)" % ("1 edit" if dist == 1 else "%d edits" % dist,
+                                 _edit_said(name, real))
+        probe = _probe_says(console, real)
+        if on:
+            said = ("hint: %s is not a name in this browser; %s has %s, %s."
+                    % (name, on[0], real, away))
+        else:
+            # No live names (no devtools pipe, or the evaluate got no answer):
+            # only what the page itself printed is claimed.
+            said = "hint: %s failed here, while %s, %s, did not." % (
+                name, real, away)
+        hints.append("%s%s The misspelling is in the page's code, not a "
+                     "missing platform feature."
+                     % (said, " The page's own console reports %s=function%s."
+                        % (real, probe.split("=function", 1)[1])
+                        if probe else ""))
+
+    for line in console:
+        if len(hints) >= _HINT_MAX:
+            break
+        for m in _NOT_A_FUNCTION.finditer(line):
+            missing(m.group(2), (m.group(1) or "") and
+                    "%s.%s" % (m.group(1), m.group(2)), line, True)
+        for m in _PROBE_UNDEFINED.finditer(line):
+            missing(m.group(1), "", line, False)
+        m = _WEBGL_ERROR.search(line)
+        if not m:
+            continue
+        fn = m.group(2)
+        src = _source_line(line, page)
+        if not src or ("call", fn, src[0]) in seen:
+            continue
+        seen.add(("call", fn, src[0]))
+        on = [k for k in _where(api, fn) if api[k].get(fn, -1) >= 0]
+        takes = api[on[0]][fn] if on else None
+        for args in _call_args(src[1], fn):
+            if takes is not None and len(args) == takes:
+                continue
+            said = ("hint: %s calls %s with %d arguments (%s)"
+                    % (src[0], fn, len(args), ", ".join(args)))
+            if takes is None:
+                hints.append(said + "; check them against its signature -- "
+                             "the %s is about the call, not the platform."
+                             % m.group(1))
+                break
+            said += ("; in this browser %s.%s takes %d"
+                     % (on[0], fn, takes))
+            if len(args) > takes:
+                said += (", and JavaScript drops the rest -- it read (%s)"
+                         % ", ".join(args[:takes]))
+            kin = sorted(k for k, n in api[on[0]].items()
+                         if n == len(args) and k != fn and k.startswith(fn))
+            if kin:
+                said += ". %s takes %d" % (kin[0], len(args))
+            hints.append(said + ". The %s comes from this call's arguments, "
+                         "not from the platform." % m.group(1))
+            break
+    return hints[:_HINT_MAX]
+
+
 def take_render_ride() -> "tuple | None":
     """Adresse und Screenshot des letzten `render_page`, genau einmal."""
     return _RENDER_RIDE.pop() if _RENDER_RIDE else None
@@ -9244,14 +9587,19 @@ class _Devtools:
 
 def _render_over_devtools(dt: _Devtools, url: str, w: int, h: int, wait: int,
                           shot: str, load_s: float = RENDER_LOAD_S,
-                          capture_s: float = RENDER_CAPTURE_S) -> "tuple[bool, str]":
+                          capture_s: float = RENDER_CAPTURE_S,
+                          api: "dict | None" = None) -> "tuple[bool, str]":
     """Laden, wait ECHTE Millisekunden laufen lassen, fangen (#213-Nachtrag).
 
     (gefangen, Grund). Der Fang kommt auch dann, wenn die Seite nie fertig
     laedt -- dann ohne Wartezeit, denn sie lief schon `load_s` lang: das ist
     die Aufnahme auf den Termin, die der Kommandozeilen-Pfad nicht kann.
     Kein Fang heisst: die Seite hat binnen `capture_s` keinen Frame
-    geliefert, oder der Browser ist weg -- beides steht im Grund."""
+    geliefert, oder der Browser ist weg -- beides steht im Grund.
+
+    #253: after a capture, `api` (when given) is filled with the
+    page's own interface names and their `length`s (_API_DUMP_JS), for the
+    console hints. No answer within RENDER_PROBE_S leaves it empty."""
     t0 = time.monotonic()
     gone = "the browser closed its devtools pipe before the capture"
     made = dt.call("Target.createTarget", {"url": "about:blank"},
@@ -9305,6 +9653,15 @@ def _render_over_devtools(dt: _Devtools, url: str, w: int, h: int, wait: int,
     import base64 as _b64
     with open(shot, "wb") as fh:
         fh.write(_b64.b64decode(data))
+    if api is not None:
+        got = dt.call("Runtime.evaluate",
+                      {"expression": _API_DUMP_JS, "returnByValue": True,
+                       "silent": True, "timeout": RENDER_PROBE_S * 1000},
+                      sid, until=time.monotonic() + RENDER_PROBE_S)
+        value = ((((got or {}).get("result") or {}).get("result") or {})
+                 .get("value"))
+        if isinstance(value, dict):
+            api.update(value)
     return True, "%s, captured %.1f s after start" % (reason,
                                                      time.monotonic() - t0)
 
@@ -9395,6 +9752,7 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         if bad:
             return bad
         url = target
+        page_file = None
     else:
         target = _rooted(target)                    # #177
         if not os.path.isfile(target):
@@ -9402,6 +9760,7 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         # lstrip, damit ein POSIX-Pfad nicht `file:////tmp/...` ergibt: unter
         # Windows beginnt der Pfad mit dem Laufwerk, unter Linux mit `/`.
         url = "file:///" + target.replace(os.sep, "/").lstrip("/")
+        page_file = target
 
     exe = find_browser()
     if exe is None:
@@ -9528,6 +9887,7 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         detach["pass_fds"] = pipe[1]
     reason = "done"
     captured = False
+    api: dict = {}              # #253: the page's own names
     try:
         with open(log, "w", encoding="utf-8", errors="replace") as sink:
             try:
@@ -9546,7 +9906,7 @@ def tool_render_page(path: str, wait_ms: int | None = None,
                 dt = _Devtools(pipe[2], pipe[3])
                 try:
                     captured, reason = _render_over_devtools(
-                        dt, url, w, h, wait, shot)
+                        dt, url, w, h, wait, shot, api=api)
                     # Der hoefliche Weg zuerst, und das Rohr bleibt offen, bis
                     # er gegangen ist -- sonst schreibt der Browser "Connection
                     # terminated while reading from pipe" in den Konsolen-
@@ -9611,6 +9971,10 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         except OSError:
             pass
         console = _console_lines(log_text)
+        # #253: every console line, not the last ten -- the page's
+        # own probe line that contradicts the error may be further up.
+        hints = _console_hints(_console_lines(log_text, 0), api,
+                               page_file)
         if not os.path.isfile(shot):
             # #213-NACHTRAG: DER GRUND UND DANN DER RAT, DER DEN ARM NENNT --
             # nie "timed out after 20000 ms" allein, das las sich als "gib
@@ -9619,9 +9983,12 @@ def tool_render_page(path: str, wait_ms: int | None = None,
             advice = ("" if ("memory ceiling" in reason
                              or "did not load" in reason)
                       else " " + _render_stall_advice(gl, wait))
-            return ("error: the browser wrote no screenshot (%s).%s Console:\n%s"
-                    % (reason, advice,
-                       "\n".join(_console_lines(log_text, 20)) or "(empty)"))
+            return _clip("error: the browser wrote no screenshot (%s).%s%s "
+                         "Console:\n%s"
+                         % (reason, advice,
+                            "".join("\n" + x for x in hints),
+                            "\n".join(_console_lines(log_text, 20))
+                            or "(empty)"))
         # #175-NACHTRAG: DAS URTEIL VOR DEM FANG. Die Bytes DIESER Datei
         # gegen den letzten Fang DIESER Seite -- byte-gleich ist ein
         # Verdachtsmoment gegen die eigenen Pixel, kein Erfolg. Die Warnung
@@ -9639,6 +10006,8 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         _RENDER_RIDE.clear()
         _RENDER_RIDE.append((url, shot))
         said = _capture_warnings(previous, pixels, console)
+        # #253: right under the error warnings they answer.
+        said.extend(hints)
         # #213. DER RASTERER IM ERGEBNIS: software-gerasterte Fangs einer
         # WebGL-Seite sehen anders aus als GPU-gerasterte, und ein Modell, das
         # seinen Spiegel kennt, bezweifelt ihn auch.
