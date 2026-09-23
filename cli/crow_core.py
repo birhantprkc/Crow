@@ -3682,7 +3682,7 @@ def _spoken_carry(conversation: "Conversation", carry: "str | None") -> str:
         text = message_text(message.get("content") or "")
         # #224: a working-area notice in front is Crow's, the line
         # behind it the user's.
-        text = ROOT_NOTICE_RE.sub("", text, count=1).strip()
+        text = split_root_notice(text)[1].strip()
         # Protocol notes -- budget spent, an earlier rollover -- speak in
         # brackets and are Crow's own words, not the user's.
         if not text or text.startswith("["):
@@ -4592,7 +4592,23 @@ def message_images(content) -> list:
 # gets none: its head already names the new root (`working_area_line`).
 ROOT_NOTICE = "[Working area is now {new} (was {old}).]\n\n"
 ROOT_NOTICE_NONE = "none"
-ROOT_NOTICE_RE = re.compile(r"\A\[Working area is now [^\n]*\]\n\n")
+# #241: the blank line is absent when the turn had no text block and the
+# notice became its only one (`append`), so the end of the text counts too.
+ROOT_NOTICE_RE = re.compile(r"\A\[Working area is now [^\n]*\](?:\n\n|\Z)")
+
+
+def split_root_notice(text: str) -> "tuple[str | None, str]":
+    """#241: (#224's notice or None, the rest -- the user's typed line).
+
+    The one place that tells the two apart, for the mandate rule
+    (`user_words`), the rollover carry (`_spoken_carry`) and the window's
+    replay, which draws only the rest, as the live bubble did.
+    """
+    text = text or ""
+    hit = ROOT_NOTICE_RE.match(text)
+    if not hit:
+        return None, text
+    return hit.group(0).strip(), text[hit.end():]
 
 
 class Conversation:
@@ -8638,9 +8654,7 @@ def user_words(text: str) -> str:
     # rides inside one (the nudge IS the turn's opening message).
     if text.startswith(GOAL_NUDGE_MARK):
         return ""
-    notice = ROOT_NOTICE_RE.match(text)
-    if notice:
-        text = text[notice.end():]
+    _notice, text = split_root_notice(text)
     parts, carry = rollover_note_split(text)
     if parts is None:
         return text

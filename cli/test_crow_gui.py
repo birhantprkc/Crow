@@ -831,6 +831,44 @@ class TheReplayDrawsTheBoundaryTests(unittest.TestCase):
         self.assertEqual(out[2]["t"], "eine zweite Frage")
 
 
+class TheReplayDropsTheWorkingAreaNoticeTests(unittest.TestCase):
+    """#241: #224's notice opens the stored user message, but live the
+    bubble showed only the typed line -- a reopened chat must draw the same."""
+
+    def _drawn(self, messages):
+        out: list[dict] = []
+
+        class _Collector:
+            def __init__(self_inner):
+                self_inner.push = out.append
+                self_inner._context_tokens = 0
+                self_inner._n_ctx = 0
+
+        crow_gui._replay_rows(_Collector(), messages, lambda n: None)
+        return out
+
+    def test_the_bubble_holds_only_the_typed_line(self):
+        out = self._drawn([
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": crow_core.ROOT_NOTICE.format(
+                new="/a/new", old="/a/old") + "go on"}])
+        users = [m["t"] for m in out if m["k"] == "user"]
+        self.assertEqual(users, ["hi", "go on"])
+
+    def test_an_image_turn_without_words_draws_no_notice(self):
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "hi")
+        talk.append("assistant", "hello")
+        talk.note_root_change("/a", "/b")
+        talk.append("user", [{"type": "image_url", "image_url": {"url": "data:x"}}])
+        out = self._drawn(talk.payload())
+        last = [m for m in out if m["k"] == "user"][-1]
+        self.assertEqual(last["t"], "")
+        self.assertEqual(last["i"], ["data:x"])
+
+
 class TheSecondRolloverFiresTests(ApiCase):
     """#152, robins Live-Nacht 2026-08-29: der erste Rollover griff, danach
     verweigerte jeder Folgeturn den naechsten Roll -- stumm -- bis der Server

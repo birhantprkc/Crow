@@ -4402,6 +4402,21 @@ class TheWorkingAreaNoticeTests(unittest.TestCase):
         self.assertTrue(content[0]["text"].startswith("[Working area is now /b"))
         self.assertTrue(content[0]["text"].endswith("look"))
 
+    def test_an_image_only_turn_s_notice_mandates_nothing(self):
+        """#241: with no text block the notice stands alone, without
+        the blank line behind it, and ROOT_NOTICE_RE missed it."""
+        self.addCleanup(crow_core._AMBIGUOUS.clear)
+        here = os.path.realpath(tempfile.mkdtemp(prefix="crow-notice-"))
+        self.addCleanup(shutil.rmtree, here, True)
+        old = os.path.join(here, "old")
+        os.mkdir(old)
+        talk = self._talk()
+        talk.note_root_change(old, os.path.join(here, "new"))
+        talk.append("user", [{"type": "image_url", "image_url": {"url": "d"}}])
+        self.assertEqual(crow_core.user_words(
+            crow_core.message_text(talk.payload()[-1]["content"])), "")
+        self.assertNotIn(old, crow_core.mandated_paths(talk))
+
     def test_the_notice_mandates_nothing_and_the_line_still_does(self):
         self.addCleanup(crow_core._AMBIGUOUS.clear)
         here = os.path.realpath(tempfile.mkdtemp(prefix="crow-notice-"))

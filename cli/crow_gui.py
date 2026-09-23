@@ -13921,6 +13921,9 @@ def _replay_rows(api, messages: list, upto) -> None:
             # (`rollover_note_split`, der eine Ort): eine Rollover-Notiz
             # wird als Karte gezeichnet und die Zeile, die mit ihr reiste,
             # als das, was sie ist -- die getippte Frage des Menschen.
+            # #241. #224's notice opens the stored message; live, the bubble
+            # showed the composer text only, so the replay drops it too.
+            words = crow_core.split_root_notice(words)[1]
             parts, carry = crow_core.rollover_note_split(words)
             if parts is not None:
                 api.push({"k": "roll", "tokens": parts["tokens"],
