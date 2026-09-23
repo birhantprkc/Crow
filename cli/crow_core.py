@@ -52,6 +52,7 @@ Standard library only, same as the client.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import random
@@ -9863,6 +9864,129 @@ def _said_new_dir(made: "str | None") -> str:
     return " (new directory: %s)" % made if made else ""
 
 
+# ------------------------------------------------ corruption follow-ups -----
+# 2026-09-23 (crow-nest#91): the model wrote corrupt numbers into its own code
+# (`o[13]`->`o[113]`, `texImage3D`->`texImage33D`, `[0,0,0]`->`[0,0,00]`), the
+# bytes on disk equalled its write_file arguments, and it blamed the tools --
+# "the read channel is byte-unstable" -- for hours. Two answers from the
+# harness: say that a write is byte-exact, with the numbers to check it by,
+# and parse what was written, so the first error is in the model's own result.
+
+def _write_receipt(path: str, sent: bytes, whole: bool = True) -> str:
+    """#252. What a write result says about the bytes: the count in
+    BYTES (the old `len(content)` counted characters -- 32 of 112 writes on
+    2026-09-23 held non-ASCII text, so the number disagreed with the file),
+    a short sha256 of the file as it now is, and that it is byte-exact. The
+    file is read back, so the claim is measured, not assumed."""
+    try:
+        with open(path, "rb") as fh:
+            disk = fh.read()
+    except OSError as exc:
+        return " (could not read it back: %s)" % exc
+    digest = hashlib.sha256(disk).hexdigest()[:12]
+    if not disk.endswith(sent):
+        return (" (sha256 %s) -- WARNING: the file does not end with the bytes "
+                "sent; read it back" % digest)
+    return (" (sha256 %s, file %d bytes). Byte-exact: the file %s exactly "
+            "the bytes this call sent; a later read returns them. A mistake "
+            "in them was in the content." % (
+                digest, len(disk), "holds" if whole else "ends with"))
+
+
+# #251. A CHEAP PARSE OF WHAT WAS WRITTEN. `node --check` parses
+# without running (nodejs.org/api/cli.html, -c/--check). An HTML page's
+# inline scripts are parsed one by one through stdin, padded with newlines so
+# the line number is the page's. No node, no word: the check is a help, not
+# a gate, and a write never fails because of it.
+SYNTAX_CHECK_SECONDS = 5.0
+SYNTAX_CHECK_BYTES = 8 << 20
+SYNTAX_CHECK_SCRIPTS = 16
+_SYNTAX_JS = (".js", ".mjs", ".cjs")
+_SYNTAX_HTML = (".html", ".htm")
+_INLINE_SCRIPT = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.I | re.S)
+_SCRIPT_SRC = re.compile(r"\bsrc\s*=", re.I)
+_SCRIPT_TYPE = re.compile(r"""\btype\s*=\s*["']?([^"'\s>]*)""", re.I)
+# The HTML standard's classic-script types and "module"; anything else
+# (importmap, x-shader/x-fragment, application/json) is a data block.
+_SCRIPT_JS_TYPES = ("", "text/javascript", "application/javascript",
+                    "text/ecmascript", "application/ecmascript", "module")
+_NODE_WHERE = re.compile(r"^\S.*:(\d+)$")
+_NODE_ERROR = re.compile(r"^[A-Za-z]*Error\b.*?: ")
+
+
+def _node_first_error(stderr: str) -> str:
+    """node's report cut to its first error: the line, the source line with
+    the caret (a window of it, for minified code), and the message."""
+    lines = stderr.splitlines()
+    msg = next((ln for ln in lines if _NODE_ERROR.match(ln)), None)
+    if msg is None:
+        return (lines[-1] if lines else "node --check failed").strip()[:300]
+    at = next((i for i, ln in enumerate(lines) if _NODE_WHERE.match(ln)), None)
+    if at is None or at + 1 >= len(lines):
+        return msg.strip()[:300]
+    code = lines[at + 1]
+    caret = lines[at + 2] if at + 2 < len(lines) and "^" in lines[at + 2] else ""
+    col = caret.find("^") if caret else 0
+    lo = max(0, col - 80)
+    shown = code[lo:col + 80]
+    out = "line %s: %s" % (_NODE_WHERE.match(lines[at]).group(1),
+                           msg.strip()[:300])
+    if not shown.strip():
+        return out
+    out += "\n  " + shown
+    if caret:
+        out += "\n  " + " " * (col - lo) + "^"
+    return out
+
+
+def syntax_check(path: str) -> str:
+    """#251. '' when there is nothing to say (not JS/HTML, no node, too
+    big, nothing to parse), else one line starting with a newline."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in _SYNTAX_JS + _SYNTAX_HTML:
+        return ""
+    node = shutil.which("node")
+    try:
+        if not node or os.path.getsize(path) > SYNTAX_CHECK_BYTES:
+            return ""
+        deadline = time.monotonic() + SYNTAX_CHECK_SECONDS
+        cwd = os.path.dirname(os.path.abspath(path))
+        if ext in _SYNTAX_JS:
+            jobs = [([node, "--check", path], None)]
+        else:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                page = fh.read()
+            jobs = []
+            for m in _INLINE_SCRIPT.finditer(page):
+                typed = _SCRIPT_TYPE.search(m.group(1))
+                kind = typed.group(1).lower() if typed else ""
+                if _SCRIPT_SRC.search(m.group(1)) or kind not in _SCRIPT_JS_TYPES:
+                    continue
+                pad = "\n" * page.count("\n", 0, m.start(2))
+                jobs.append(([node, "--check", "--input-type=%s" % (
+                    "module" if kind == "module" else "commonjs"), "-"],
+                    pad + m.group(2)))
+            if not jobs:
+                return ""
+        what = ("node --check" if ext in _SYNTAX_JS else
+                "node --check, %d inline script%s" % (
+                    min(len(jobs), SYNTAX_CHECK_SCRIPTS),
+                    "" if len(jobs) == 1 else "s"))
+        for argv, stdin_text in jobs[:SYNTAX_CHECK_SCRIPTS]:
+            code, _out, err, stopped = _bounded_run(argv, cwd, deadline,
+                                                    stdin_text)
+            if stopped:
+                return ("\nsyntax check (%s): not finished within %gs -- not "
+                        "checked" % (what, SYNTAX_CHECK_SECONDS))
+            if code != 0:
+                return ("\nsyntax check (%s) FAILED -- the error is in the "
+                        "content this file was given:\n%s"
+                        % (what, _node_first_error(err)))
+    except OSError:
+        return ""
+    return "\nsyntax check (%s): ok" % what
+
+
 def tool_write_file(path: str, content: str = "", **_) -> str:
     # THE BOUNDARY GOES FIRST, ahead of read-before-write, and the order is not
     # cosmetic: reads are NOT bounded, so a path outside the root would answer
@@ -9893,7 +10017,9 @@ def tool_write_file(path: str, content: str = "", **_) -> str:
     except OSError as exc:
         return f"error: could not write {path}: {exc}"
     _mark_read(path)                                # #215-H: crow knows these bytes
-    return f"wrote {len(content)} bytes to {path}" + _said_new_dir(made)
+    sent = content.encode("utf-8")
+    return (f"wrote {len(sent)} bytes to {path}" + _said_new_dir(made)
+            + _write_receipt(path, sent) + syntax_check(path))
 
 
 def tool_append_file(path: str, content: str = "", **_) -> str:
@@ -9924,10 +10050,14 @@ def tool_append_file(path: str, content: str = "", **_) -> str:
         return f"error: could not append to {path}: {exc}"
     if known:
         _mark_read(path)
-    total = os.path.getsize(path)
+    sent = content.encode("utf-8")
     verb = "appended to" if existed else "created"
-    return (f"{verb} {path} (+{len(content)} bytes, file now {total} bytes)"
-            + _said_new_dir(made))
+    checked = syntax_check(path)
+    if "FAILED" in checked and existed:
+        checked += ("\n(this parsed the whole file as it stands now; a file "
+                    "still being built in pieces may not parse yet)")
+    return (f"{verb} {path} (+{len(sent)} bytes)" + _said_new_dir(made)
+            + _write_receipt(path, sent, whole=False) + checked)
 
 
 def tool_edit_file(path: str, old: str = "", new: "str | None" = None, **_) -> str:
@@ -15641,20 +15771,29 @@ def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
         if goal_load() is None:
             return ("no goal to clear.", None, False)
         goal_write(None)
+        goal_check_set(None)                                   # #250
         return ("goal cleared.", None, True)
     lines = [p.strip() for p in text.splitlines() if p.strip()]
     if len(lines) == 1:
         lines = [p.strip() for p in lines[0].split("|") if p.strip()]
+    # #250: `check: <command>` is the acceptance check, not a step.
+    checks = [ln[len(GOAL_CHECK_PREFIX):].strip() for ln in lines
+              if ln.lower().startswith(GOAL_CHECK_PREFIX)]
+    lines = [ln for ln in lines if not ln.lower().startswith(GOAL_CHECK_PREFIX)]
     if len(lines) < 2:
         return ("a goal needs steps: `/goal <title>` then one step per line, "
                 "or `title | step | step`.", goal_load(), False)
     goal = goal_start(lines[0], lines[1:], by=GOAL_BY_USER)
     if goal is None:
         return ("that is not a goal I can hold.", goal_load(), False)
+    check = next((c for c in reversed(checks) if c), None)
+    goal_check_set(check)
     # DIE KOSTEN STEHEN VOR DER TAT, wie bei jeder Kopfaenderung: das Ziel geht
     # in den gepinnten Block, also zahlt der naechste Zug einen vollen Prefill.
-    return ("goal: %s -- %d steps.\n%s"
-            % (goal["title"], len(goal["steps"]), GOAL_COST_NOTE), goal, True)
+    return ("goal: %s -- %d steps%s.\n%s"
+            % (goal["title"], len(goal["steps"]),
+               ", acceptance check: %s" % check if check else "",
+               GOAL_COST_NOTE), goal, True)
 
 
 # #240: who wrote a plan -- the user through `/goal`, or the model through
@@ -15847,6 +15986,11 @@ def tool_goal_step(step: int, status: str, note: str = "") -> str:
     if state == GOAL_RUNNING:
         goal = goal_step_begin(index)
     elif state in (GOAL_DONE, GOAL_FAILED):
+        passed = None
+        if state == GOAL_DONE:
+            refused, passed = goal_done_refusal(index, note)   # #250
+            if refused:
+                return json.dumps({"ok": False, "error": refused})
         goal = goal_step_end(index, ok=(state == GOAL_DONE), note=note)
     else:
         return json.dumps({"ok": False,
@@ -15857,10 +16001,108 @@ def tool_goal_step(step: int, status: str, note: str = "") -> str:
                                     "another step is still running"})
     done, total = goal_counts(goal)
     nxt = goal_next_open(goal)
-    return json.dumps({"ok": True, "done": done, "total": total,
-                       "complete": goal.get("status") == GOAL_DONE,
-                       "next_step": None if nxt is None else nxt + 1,
-                       "next": None if nxt is None else goal["steps"][nxt]["text"]})
+    out = {"ok": True, "done": done, "total": total,
+           "complete": goal.get("status") == GOAL_DONE,
+           "next_step": None if nxt is None else nxt + 1,
+           "next": None if nxt is None else goal["steps"][nxt]["text"]}
+    if state == GOAL_DONE and passed:
+        out["acceptance_check"] = "passed: %s" % passed
+    return json.dumps(out)
+
+
+# #250. `done` WITHOUT EVIDENCE. 2026-09-23, diorama run: step 4 went
+# `done` with the note "Step treated as done-with-deviation only in spirit",
+# step 3 with "the 128^3 3D texture literally cannot be created here", and
+# step 9 went `failed` ("no fps figure can be read") and then `done` with no
+# note two messages later -- 9/9 "complete" over a 1.4 KB index.html that
+# draws nothing. The tool took every word. Two checks, both on what the call
+# itself carries: a `done` whose own note says it is not done, and a `done`
+# with no note on a step whose last report was `failed`. Narrow on purpose:
+# a false refusal costs a round and teaches the model to drop its caveats.
+_GOAL_NOT_DONE = re.compile(
+    r"(?i)\b(?:in spirit|not done|is not (?:done|finished|working|verified)|"
+    r"not verified|unverified|could not (?:be )?verif\w*|"
+    r"(?:cannot|can't|could not) be (?:built|drawn|created|verified|done|bound|"
+    r"linked|finished|measured|reached|rendered)|impossible|unreachable|"
+    r"with[- ]deviation|does not work|doesn't work|paints nothing|"
+    r"nothing draws)\b")
+
+# THE ACCEPTANCE CHECK IS THE USER'S WORD, so it lives where the model's
+# write_file cannot reach: goal.json sits in the working area, and a command
+# the model wrote there would run unasked at `allowedit`. One file in
+# SESSION_DIR, keyed by the goal's path.
+GOAL_CHECK_PREFIX = "check:"
+GOAL_CHECKS_FILE = "goal-checks.json"
+
+
+def _goal_checks_path() -> str:
+    return os.path.join(SESSION_DIR, GOAL_CHECKS_FILE)
+
+
+def _goal_checks() -> dict:
+    try:
+        with open(_goal_checks_path(), encoding="utf-8") as fh:
+            found = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
+def goal_check_get() -> "str | None":
+    """The acceptance check the user set for the goal in this working area."""
+    check = _goal_checks().get(os.path.abspath(goal_path()))
+    return check if isinstance(check, str) and check.strip() else None
+
+
+def goal_check_set(check: "str | None") -> None:
+    """Set (or with None, drop) this working area's acceptance check."""
+    checks = _goal_checks()
+    key = os.path.abspath(goal_path())
+    if check:
+        checks[key] = check
+    elif checks.pop(key, None) is None:
+        return
+    try:
+        os.makedirs(SESSION_DIR, exist_ok=True)
+        tmp = _goal_checks_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(checks, fh, indent=1, ensure_ascii=False)
+        os.replace(tmp, _goal_checks_path())
+    except OSError:
+        pass
+
+
+def goal_done_refusal(index: int, note: str = "",
+                      goal: "dict | None" = None) -> "tuple[str | None, str | None]":
+    """(why `done` on step `index` is refused, or None; the check that passed,
+    or None). The acceptance check runs only on the `done` that would close
+    the goal, through run_command -- its clock, capture cap and memory scope."""
+    goal = goal if goal is not None else goal_load()
+    if not goal or not 0 <= index < len(goal.get("steps") or []):
+        return None, None
+    step = goal["steps"][index]
+    said = str(note or "")
+    hit = _GOAL_NOT_DONE.search(said)
+    if hit:
+        return ("refused: the note says this step is not done (\"%s\"). 'done' "
+                "means verified working. Finish it and report done with what "
+                "proves it, or call goal_step with 'failed' and this note."
+                % hit.group(0)), None
+    if not said.strip() and step.get("status") == GOAL_FAILED:
+        return ("refused: step %d was last reported failed (\"%s\"). A 'done' "
+                "after that needs a note saying what proves it works now."
+                % (index + 1, str(step.get("note") or "")[:160])), None
+    check = goal_check_get()
+    closes = all(s.get("status") == GOAL_DONE
+                 for n, s in enumerate(goal["steps"]) if n != index)
+    if not check or not closes:
+        return None, None
+    result = tool_run_command(check)
+    if result.startswith("[exit 0]"):
+        return None, check
+    return ("refused: this would close the goal, and its acceptance check "
+            "failed. The goal stays open until it passes.\ncheck: %s\n%s"
+            % (check, _clip(result, 2000))), None
 
 
 def goal_next_open(goal: "dict | None" = None) -> "int | None":
@@ -21654,6 +21896,10 @@ def goal_block(goal: "dict | None" = None,
         lines += ["%d. %s" % (n, s["text"])
                   for n, s in enumerate(steps, 1)]
         lines.append(GOAL_HEAD_NOTE)
+    check = goal_check_get()                                   # #250
+    if check:
+        lines.append("Acceptance check, run when the last step is reported "
+                     "done; the goal closes only if it passes: %s" % check)
     return "\n".join(lines)
 
 

@@ -36,6 +36,7 @@ from __future__ import annotations
 import ast
 import copy
 import atexit
+import hashlib
 import http.server
 import importlib.util
 import inspect
@@ -4242,6 +4243,110 @@ class CwdGuardTests(unittest.TestCase):
         self.assertIsNone(crow_core.run_command_cwd_refusal("{not json"))
 
 
+class AWriteSaysItIsByteExactTests(unittest.TestCase):
+    """#252. 2026-09-23: the bytes on disk equalled the model's own
+    write_file arguments, and the model spent hours blaming "the read
+    channel". The result now says the write is byte-exact, in bytes, with a
+    short sha256 of the file read back."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-exact-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+
+    def test_the_count_is_bytes_not_characters(self):
+        """The old line said len(content): 2 for "ä—", which is 5 bytes."""
+        path = os.path.join(self.root, "u.txt")
+        out = crow_core.tool_write_file(path, "ä—")
+        self.assertTrue(out.startswith("wrote 5 bytes to %s" % path), out)
+        self.assertEqual(os.path.getsize(path), 5)
+
+    def test_the_sha256_is_the_files(self):
+        path = os.path.join(self.root, "a.txt")
+        out = crow_core.tool_write_file(path, "o[13] = 1;\n")
+        with open(path, "rb") as fh:
+            want = hashlib.sha256(fh.read()).hexdigest()[:12]
+        self.assertIn("sha256 %s" % want, out)
+        self.assertIn("Byte-exact: the file holds exactly the bytes", out)
+
+    def test_an_append_says_the_file_ends_with_the_bytes(self):
+        path = os.path.join(self.root, "log.txt")
+        crow_core.tool_append_file(path, "a")
+        out = crow_core.tool_append_file(path, "é")
+        self.assertIn("(+3 bytes)", out)          # "é\\n"
+        self.assertIn("file 5 bytes", out)
+        self.assertIn("Byte-exact: the file ends with exactly the bytes", out)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is not on PATH")
+class AWriteParsesWhatItWroteTests(unittest.TestCase):
+    """#251. Replayed through node --check, 20 of 98 JS/HTML writes of
+    the 2026-09-23 diorama run did not parse (`o[1100;`, `[0,0,00]` in a
+    module, `var o = = gl.createShader(t)`), and each result said only
+    "wrote N bytes"."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-syntax-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+
+    def at(self, name):
+        return os.path.join(self.root, name)
+
+    def test_a_js_syntax_error_is_in_the_result_with_its_line(self):
+        out = crow_core.tool_write_file(self.at("a.js"),
+                                        "let o = [1];\nlet b = o[1100;\n")
+        self.assertIn("syntax check (node --check) FAILED", out)
+        self.assertIn("line 2: SyntaxError", out)
+        self.assertIn("let b = o[1100;", out)
+        self.assertTrue(os.path.isfile(self.at("a.js")), "the write is kept")
+
+    def test_clean_js_says_ok(self):
+        out = crow_core.tool_write_file(self.at("m.mjs"),
+                                        "export const a = [0, 0, 0];\n")
+        self.assertIn("syntax check (node --check): ok", out)
+
+    def test_an_inline_module_is_parsed_at_the_pages_line(self):
+        page = ("<!doctype html>\n<script src=\"x.js\"></script>\n"
+                "<script type=\"x-shader/x-fragment\">void main(){}</script>\n"
+                "<script type=\"module\">\nconst z = [0,0,00];\n</script>\n")
+        out = crow_core.tool_write_file(self.at("p.html"), page)
+        self.assertIn("node --check, 1 inline script) FAILED", out)
+        self.assertIn("line 5: SyntaxError", out)
+
+    def test_a_clean_page_says_ok_and_a_page_without_script_says_nothing(self):
+        out = crow_core.tool_write_file(
+            self.at("ok.html"), "<script>\nvar a = 1;\n</script>\n")
+        self.assertIn("inline script): ok", out)
+        out = crow_core.tool_write_file(self.at("plain.html"), "<p>hi</p>\n")
+        self.assertNotIn("syntax check", out)
+        out = crow_core.tool_write_file(self.at("notes.txt"), "o[1100;\n")
+        self.assertNotIn("syntax check", out)
+
+    def test_an_append_in_pieces_says_the_file_may_be_unfinished(self):
+        crow_core.tool_append_file(self.at("big.js"), "function f() {")
+        out = crow_core.tool_append_file(self.at("big.js"), "  return 1;")
+        self.assertIn("FAILED", out)
+        self.assertIn("still being built in pieces", out)
+        out = crow_core.tool_append_file(self.at("big.js"), "}")
+        self.assertIn("syntax check (node --check): ok", out)
+
+    def test_no_node_means_no_word_and_the_write_stands(self):
+        with mock.patch.object(crow_core.shutil, "which", return_value=None):
+            out = crow_core.tool_write_file(self.at("a.js"), "let b = = 1;\n")
+        self.assertTrue(out.startswith("wrote 13 bytes"), out)
+        self.assertNotIn("syntax check", out)
+
+    def test_a_check_past_its_clock_says_so(self):
+        with mock.patch.object(crow_core, "_bounded_run",
+                               return_value=(None, "", "", "clock")):
+            out = crow_core.tool_write_file(self.at("a.js"), "let a = 1;\n")
+        self.assertIn("not finished within", out)
+        self.assertIn("not checked", out)
+
+
 class ANearMissDirectoryIsAskedOnceTests(unittest.TestCase):
     """#244: write_file/append_file created any missing parent in
     silence. Measured: 2026-09-18 msg 238 wrote `testcases/w/fs.py` while the
@@ -4291,8 +4396,9 @@ class ANearMissDirectoryIsAskedOnceTests(unittest.TestCase):
     def test_an_existing_directory_is_unchanged(self):
         """POSITIVE CONTROL: the result stays the exact line it was."""
         path = self.at("work", "a.py")
-        self.assertEqual(crow_core.tool_write_file(path, "1"),
-                         "wrote 1 bytes to %s" % path)
+        out = crow_core.tool_write_file(path, "1")
+        self.assertTrue(out.startswith("wrote 1 bytes to %s (sha256 " % path), out)
+        self.assertNotIn("new directory", out)
 
     def test_a_control_character_in_the_path_is_refused_always(self):
         bad = self.at("src", "gen.py\nparameter>\n<parameter name=\"path\">",
@@ -14723,6 +14829,102 @@ class TheRolloverNoteIsParsableTests(unittest.TestCase):
         self.assertIsNone(crow_core.rollover_note_parts(""))
         self.assertIsNone(crow_core.rollover_note_parts(None))
         self.assertEqual(crow_core.rollover_note_split("frage"), (None, ""))
+
+
+class GoalDoneNeedsEvidenceTests(unittest.TestCase):
+    """#250. 2026-09-23: goal mode closed 9/9 over a 1.4 KB index.html
+    that draws nothing. Step 4's `done` note said "done-with-deviation only in
+    spirit"; step 9 went `failed`, then `done` with no note."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-goaldone-"))
+        self.state = tempfile.mkdtemp(prefix="crow-goaldone-state-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.state, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", crow_core.SESSION_DIR)
+        crow_core.SESSION_DIR = self.state
+
+    def step(self, n, status, note=""):
+        return json.loads(crow_core.tool_goal_step(n, status, note))
+
+    def test_a_note_that_says_not_done_is_refused(self):
+        crow_core.goal_command("diorama | build it | verify it")
+        out = self.step(1, "done", "Step treated as done-with-deviation only "
+                                   "in spirit; the GLSL work remains queued.")
+        self.assertFalse(out["ok"])
+        self.assertIn("not done", out["error"])
+        self.assertEqual(crow_core.goal_load()["steps"][0]["status"], "open")
+
+    def test_a_note_with_evidence_passes(self):
+        """POSITIVE CONTROL: a plain proof, and a note that mentions a
+        failure it fixed, are not refused."""
+        crow_core.goal_command("diorama | build it | verify it")
+        self.assertTrue(self.step(1, "done", "node --check ok; 0 failed of 12 "
+                                             "tests; render shows the scene")["ok"])
+
+    def test_done_after_failed_needs_a_note(self):
+        crow_core.goal_command("diorama | build it | verify it")
+        self.step(1, "done", "built")
+        self.step(2, "failed", "no fps figure can be read")
+        out = self.step(2, "done")
+        self.assertFalse(out["ok"])
+        self.assertIn("last reported failed", out["error"])
+        self.assertTrue(self.step(2, "done", "renders at 61 fps")["ok"])
+
+    def test_the_acceptance_check_holds_the_goal_open(self):
+        said, _goal, _ch = crow_core.goal_command(
+            "diorama | build it | verify it | check: exit 3")
+        self.assertIn("acceptance check: exit 3", said)
+        self.assertIn("Acceptance check", crow_core.goal_block())
+        self.assertTrue(self.step(1, "done", "built")["ok"])
+        out = self.step(2, "done", "looks right")
+        self.assertFalse(out["ok"])
+        self.assertIn("acceptance check failed", out["error"])
+        self.assertIn("[exit 3]", out["error"])
+        self.assertNotEqual(crow_core.goal_load().get("status"), "done")
+
+    def test_a_passing_check_closes_the_goal(self):
+        crow_core.goal_command("diorama | build it | verify it | check: exit 0")
+        self.step(1, "done", "built")
+        out = self.step(2, "done", "verified")
+        self.assertTrue(out["ok"] and out["complete"], out)
+        self.assertEqual(out["acceptance_check"], "passed: exit 0")
+
+    def test_the_check_runs_only_on_the_closing_done(self):
+        crow_core.goal_command("diorama | a | b | c | check: exit 0")
+        with mock.patch.object(crow_core, "tool_run_command",
+                               return_value="[exit 0]") as ran:
+            self.step(1, "done", "a")
+            self.step(2, "done", "b")
+            self.assertEqual(ran.call_count, 0)
+            self.step(3, "done", "c")
+            self.assertEqual(ran.call_count, 1)
+
+    def test_the_check_is_not_in_the_working_area(self):
+        """NEGATIVE: goal.json is writable by the model's write_file; a
+        command put there runs nothing."""
+        crow_core.goal_command("diorama | a | b | check: exit 0")
+        with open(crow_core.goal_path(), encoding="utf-8") as fh:
+            self.assertNotIn("exit 0", fh.read())
+        crow_core.goal_check_set(None)
+        with open(crow_core.goal_path(), encoding="utf-8") as fh:
+            raw = json.load(fh)
+        raw["goal"]["check"] = "exit 7"
+        with open(crow_core.goal_path(), "w", encoding="utf-8") as fh:
+            json.dump(raw, fh)
+        with mock.patch.object(crow_core, "tool_run_command") as ran:
+            self.step(1, "done", "a")
+            self.assertTrue(self.step(2, "done", "b")["ok"])
+        ran.assert_not_called()
+
+    def test_a_replan_keeps_the_users_check_and_off_drops_it(self):
+        crow_core.goal_command("diorama | a | b | check: exit 3")
+        crow_core.tool_goal_set("diorama", ["a", "b", "c"])
+        self.assertEqual(crow_core.goal_check_get(), "exit 3")
+        crow_core.goal_command("off")
+        self.assertIsNone(crow_core.goal_check_get())
 
 
 class TheGoalOutlivesEverythingTests(unittest.TestCase):
