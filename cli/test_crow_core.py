@@ -18689,6 +18689,28 @@ class YoloTurnTests(TurnLoopCase):
         crow_core.set_root(self.work)
         self.addCleanup(crow_core.set_root, None)
         self.addCleanup(crow_core.forget_approvals)
+        # THE OUTSIDE COMMAND IS BUILT PER PLATFORM (#248). Until 2026-09-23
+        # it was `cat /etc/os-release` on every OS; on Windows a leading `/` is
+        # a switch (`dir /s`), not a path -- _PATH_TOKENS leaves the POSIX branch
+        # out there by design -- so the command named NOTHING outside, auto
+        # never asked, and two of these cases were red on windows-latest from
+        # de69502 on while the yolo case passed for the wrong reason. A real
+        # file beside the working area (self.dir is its parent, never inside
+        # the root) is outside on both platforms, and reading it proves the
+        # command ran.
+        self.outside = os.path.join(self.dir, "outside.txt")
+        with open(self.outside, "w", encoding="utf-8") as f:
+            f.write("crow-outside-marker\n")
+        self.outside_command = (
+            'type "%s"' % self.outside if crow_platform.IS_WINDOWS
+            else "cat '%s'" % self.outside)
+
+    def test_the_fixture_command_is_outside_on_this_platform(self):
+        """The precondition every case below stands on, stated on its own so a
+        platform where it breaks says so instead of failing downstream."""
+        self.assertTrue(crow_core.run_command_boundary(
+            json.dumps({"command": self.outside_command})),
+            self.outside_command)
 
     def _one(self, name, arguments, mode):
         self.asked = []
@@ -18706,21 +18728,23 @@ class YoloTurnTests(TurnLoopCase):
 
     def test_an_outside_command_at_yolo_asks_nobody_and_runs(self):
         talk, _ = self._one("run_command",
-                            json.dumps({"command": "cat /etc/os-release"}), "yolo")
+                            json.dumps({"command": self.outside_command}), "yolo")
         self.assertEqual(self.asked, [], "yolo asked what it was built to release")
         tools = [m for m in talk.payload() if m.get("role") == "tool"]
         self.assertTrue(tools and not tools[-1]["content"].startswith("error: "),
                         "the outside command did not run")
+        self.assertIn("crow-outside-marker", tools[-1]["content"],
+                      "the outside file was not read")
 
     def test_the_unasked_outside_run_is_still_reported(self):
         _, result = self._one("run_command",
-                              json.dumps({"command": "cat /etc/os-release"}), "yolo")
+                              json.dumps({"command": self.outside_command}), "yolo")
         self.assertTrue(any("ran unasked" in i and "yolo" in i
                             for i in result.incidents), result.incidents)
 
     def test_an_outside_command_at_auto_still_asks(self):
         self._one("run_command",
-                  json.dumps({"command": "cat /etc/os-release"}), "auto")
+                  json.dumps({"command": self.outside_command}), "auto")
         self.assertEqual(self.asked, ["run_command"],
                          "yolo's release leaked into auto")
 
