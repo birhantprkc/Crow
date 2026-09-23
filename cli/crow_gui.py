@@ -6152,7 +6152,11 @@ const crow = {
     if(here) rows.push({act:"toproj", label:"out of project", arg:"",
                         sep:!others.length});
     rows.push({sep:true});
-    rows.push({act:"arch", label:archived ? "restore" : "archive"});
+    // #261: A ROLLOVER HAS NOTHING TO BE RESTORED TO. It is
+    // the live chat's earlier half, not a chat of its own; the drawer is
+    // where it lives, and the note in the live chat points at its path.
+    if(!entry.rollover)
+      rows.push({act:"arch", label:archived ? "restore" : "archive"});
     rows.push({act:"del", label:"delete", danger:true});
     return rows; },
 
@@ -9520,6 +9524,7 @@ class Api:
         self.push({"k": "note", "t": "no working directory -- writes are unbounded"})
 
     ARCHIVE_PREFIX = "chat-"
+    ROLLOVER_PREFIX = "rollover-"
 
     @staticmethod
     def _same(one: "str | None", other: "str | None") -> bool:
@@ -9606,10 +9611,22 @@ class Api:
             if not name.endswith(".json"):
                 continue
             if not (name.startswith(self.ARCHIVE_PREFIX)
-                    or name.startswith("rollover-")):
+                    or name.startswith(self.ROLLOVER_PREFIX)):
                 continue
             path = os.path.join(folder, name)
             if not os.path.isfile(path):   # the archiv/ folder, and anything like it
+                continue
+            # #261. A ROLLOVER IS NOT A CHAT, IT IS THE SAME
+            # CHAT'S EARLIER HALF. Listed here, every cut added an entry beside
+            # the live chat, titled by whatever user-role line opened the
+            # segment (robin, 2026-09-23: "[The tool budget for this turn is
+            # ..." and "Hey", both "rolled over"). They are kept on disk where
+            # the rollover note points and listed in the archive drawer
+            # (`_archived`). The one exception is a rollover somebody opened:
+            # it is then the chat in the window and has to stand in the rail.
+            if (name.startswith(self.ROLLOVER_PREFIX)
+                    and not self._same(path, self._current_path)
+                    and not self._same(path, self._viewed_path())):
                 continue
             # THE OPEN ONE STAYS IN THE LIST, MARKED WHERE IT IS. Filtering it
             # out here made a click MOVE the chat out of the list and into the
@@ -9647,21 +9664,11 @@ class Api:
         before anyone names it -- and it is read the same way whether the
         conversation is on disk or still in the window.
         """
-        # #153: die Rollover-Note ist die erste User-Zeile jeder Fortsetzung
-        # und jedes Folge-Archivs -- als Titel gelesen sieht das Archiv aus
-        # wie "die ganze Session", direkt neben dem offenen Chat. Das Praefix
-        # kommt aus dem Kern-Template, keine zweite Kopie des Wortlauts.
-        note = crow_core.ROLLOVER_NOTE.split("{", 1)[0]
-        for message in messages or []:
-            if message.get("role") == "user":
-                # #142: blocks title by their words, like everywhere else.
-                first = crow_core.message_text(
-                    message.get("content") or "").strip().splitlines()
-                if first and first[0]:
-                    if first[0].startswith(note):
-                        continue
-                    return first[0][:cls.TITLE_MAX]
-        return None
+        # #153 skipped the rollover note; #261 skips every
+        # Crow note (budget, goal nudge, ...) and carries the title across the
+        # cut. The one rule lives in the core: `crow_core.chat_title`.
+        line = crow_core.chat_title(messages)
+        return line[:cls.TITLE_MAX] if line else None
 
     @classmethod
     def _stored_title(cls, path: str) -> str | None:
@@ -9730,8 +9737,9 @@ class Api:
             return {"path": path, "title": name, "meta": ""}
         messages = data.get("messages") or []
         given = (data.get("crow_title") or "").strip()[:cls.TITLE_MAX]
-        kind = "rolled over" if name.startswith("rollover-") else "put aside"
-        return {"path": path,
+        rolled = name.startswith(cls.ROLLOVER_PREFIX)
+        kind = "rolled over" if rolled else "put aside"
+        return {"path": path, "rollover": rolled,
                 "title": given or cls._first_line(messages) or name,
                 # #119. THE CHAT'S OWN BOUNDARY IS ITS PROJECT MEMBERSHIP, and it
                 # is read here because this is the one read of the file. There is
@@ -11561,16 +11569,36 @@ class Api:
             self._replaying = False
 
     def _archived(self) -> list:
-        """What the user put away, out of .crow/archiv/. Same shape as the rest."""
-        folder = os.path.join(os.path.dirname(SESSION_FILE) or ".", self.ARCHIVE_DIR)
+        """What the user put away, out of .crow/archiv/, and the rollover
+        archives. Same shape as the rest.
+
+        #261: THE ROLLOVERS STAY WHERE THEY ARE. The rollover
+        note names their path and the model reads it with read_file, so they
+        are listed in place (session folder), never moved into archiv/. The
+        one open in the window stands in the rail instead (`_archives`).
+        """
+        session = os.path.dirname(SESSION_FILE) or "."
+        folder = os.path.join(session, self.ARCHIVE_DIR)
         out = []
         try:
             names = sorted(os.listdir(folder), reverse=True)
         except OSError:
-            return out
+            names = []
         for name in names:
             path = os.path.join(folder, name)
             if not name.endswith(".json") or not os.path.isfile(path):
+                continue
+            out.append(self._entry_of(path, name))
+        try:
+            names = sorted(os.listdir(session), reverse=True)
+        except OSError:
+            names = []
+        for name in names:
+            path = os.path.join(session, name)
+            if (not name.startswith(self.ROLLOVER_PREFIX)
+                    or not name.endswith(".json") or not os.path.isfile(path)
+                    or self._same(path, self._current_path)
+                    or self._same(path, self._viewed_path())):
                 continue
             out.append(self._entry_of(path, name))
         return out
