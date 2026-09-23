@@ -32,6 +32,7 @@ own class.
 | memory | Linux: its own user scope, `MemoryMax=6G`, swap 0 (#213). A browser started through `run_command` instead runs under that tool's 8G scope (#218) |
 | kill | `proc.kill()` on its own handle, then its session. Never by name, never a process list (#158) |
 | pipes | stdout and stderr go to a file: `communicate()` hangs on Windows after a kill when a grandchild holds the write end. The two DevTools pipes are Crow's own ends, read with `select` and a deadline |
+| metrics (#265) | after the file line, `metrics:` lines from the capture's own pixels (the #213 decoder, PNG only): the content box on a near-uniform background, its coverage of the frame and ~visual tokens (~1,030 px per token, measured), distinct colours in a ≤100,000-px sample, mean luma and an 8-bin luma histogram. `warn:` when coverage is under 25 % or under 16 colours. Under 50 % coverage the box plus a margin is saved enlarged as `render-<stamp>-crop.png` and named — `read_image` it for detail |
 | API hints (#253) | after the capture, one `Runtime.evaluate` (3 s, `RENDER_PROBE_S`) lists the page's own interface prototypes with each member's `length` (WebIDL: the required argument count). Every console line is then read against it: `X.name is not a function` gets a `hint:` line naming the nearest real member within 1-2 edits and the interface that has it (or says the name is real on another object, or exists nowhere), plus the page's own `name=function` probe line when there is one; `WebGL: INVALID_*: fn: …` gets the call's top-level argument count from the source line the console names (the page or its own folder only) against the live `fn.length`, and a sibling with that arity. Linux only: without the pipe (Windows) or without an answer, only the page's own probe lines and the argument count are claimed |
 
 A failed capture says which rasterer ran and that a larger `wait_ms` will not help —
@@ -131,9 +132,22 @@ user's.
 | class | `reading` — asks at no level |
 | types | `.png .jpg .jpeg .gif .webp .bmp`, other extensions refused by name |
 | path | resolved against the working area, like every other reader (#177) |
-| result | tool message content becomes `[{text}, {image_url}]` — the block a pasted image travels as; the server reads it in any role |
+| result | tool message content becomes `[{text}, {image_url}]` (or `[{text}, frame, crop]`, below) — the block a pasted image travels as; the server reads it in any role |
 | no projector | `refuse_images` checks `/props` before the block is attached; without `--mmproj` the sentence comes back instead of an image (a picture to a blind server is HTTP 500, not a recoverable tool error) |
 | size | none of its own — the server caps at `--image-max-tokens` (4,096) |
+| small scene (#265) | a PNG whose content sits on a near-uniform background and covers under 50 % of the frame gets a **second** block: the content box plus a margin, nearest-neighbour enlarged to a 1024-px long edge (≤ 4×, ≤ ~1,024 visual tokens). The frame stays first and unchanged; the text says `TWO images`, the coverage (`the content fills 8 % of the 1280x720 frame`), the crop box and the scale |
+
+How the content box is found: 16-px cells, each cell's mean colour against the per-channel
+median of the outer ring of cells (the ring must be ≥ 60 % ground, else no claim); a cell off
+by more than 12 on any channel is content; 8-connected regions at least a quarter the size of the
+largest are kept, so a HUD line in a corner drops out. Cell means average film grain away — the
+diorama page's ground holds only ~67 % of its pixels in one exact colour.
+
+Measured 2026-09-24 on the 62 renders of the 2026-09-23 diorama run (the served tower bills
+~1,030 px per token: 984×552 → 527 tokens, 1280×720 → 880): frames with the scene in view
+cover 7.0–22.2 % (`render-20260923-232855.png`: box x 512–768, y 224–512, 8.0 %, ~72 tokens;
+crop x 471–809, y 180–556 at 2.7× → 920×1024), blank captures give no box, a page drawn edge to
+edge gives no crop. Decode plus detection: 0.03–0.23 s per render.
 
 ### Delegation (#143)
 

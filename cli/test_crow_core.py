@@ -14671,8 +14671,12 @@ class TheModelCanLookAtAnImageTests(unittest.TestCase):
     def test_a_picture_comes_back_as_a_block_exactly_once(self):
         said = crow_core.tool_read_image(self.png)
         self.assertIn("shot.png", said)
-        part = crow_core.take_image_ride()
-        self.assertIsNotNone(part, "no image was staged for the loop")
+        parts = crow_core.take_image_ride()
+        self.assertIsNotNone(parts, "no image was staged for the loop")
+        # #265: a 1x1 picture has no ground to crop from -- one
+        # block, the file itself.
+        self.assertEqual(len(parts), 1, parts)
+        part = parts[0]
         self.assertEqual(part["type"], "image_url")
         self.assertTrue(part["image_url"]["url"].startswith("data:image/png;base64,"))
         # GENAU EINMAL. Der Platz ist kein Stapel: ein zweites Abholen muss
@@ -14713,7 +14717,7 @@ class TheModelCanLookAtAnImageTests(unittest.TestCase):
         der kostet den ganzen Zug. Also wird gefragt, BEVOR angehaengt wird."""
         src = inspect.getsource(crow_core.run_turn)
         ask = src.index("refuse_images(base_url)")
-        attach = src.index('[{"type": "text", "text": result}, ride]')
+        attach = src.index('[{"type": "text", "text": result}] + ride')
         self.assertLess(ask, attach,
                         "the projector is checked after the block is attached")
 
@@ -14730,6 +14734,135 @@ class TheModelCanLookAtAnImageTests(unittest.TestCase):
             self.assertIsNotNone(crow_core.take_image_ride())
         finally:
             crow_core.set_root(before)
+
+
+class ASmallSceneGetsAnEnlargedSecondViewTests(unittest.TestCase):
+    """#265. In the diorama run of 2026-09-23 the scene filled
+    7-20 % of a 984x552 / 1280x720 render on a black, grainy ground; the vision
+    tower bills ~1,030 px per token, so the model judged the scene from ~40-120
+    tokens and rated every criterion 9+. read_image now adds a crop of the
+    content, enlarged, and says how small the scene is; render_page states the
+    same numbers as `metrics:` lines and saves the crop beside the capture."""
+
+    @staticmethod
+    def _png(width, height, pixel):
+        """RGB, filter 0 -- written here, not with crow_core's encoder, so
+        the decoder is checked against an independent file."""
+        import zlib
+        raw = b"".join(b"\x00" + b"".join(bytes(pixel(x, y))
+                                           for x in range(width))
+                       for y in range(height))
+
+        def chunk(kind, body):
+            return (len(body).to_bytes(4, "big") + kind + body
+                    + (zlib.crc32(kind + body) & 0xFFFFFFFF).to_bytes(4, "big"))
+
+        head = (width.to_bytes(4, "big") + height.to_bytes(4, "big")
+                + bytes([8, 2, 0, 0, 0]))
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head)
+                + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+    @classmethod
+    def _scene(cls, width=320, height=200):
+        """The diorama frame in small: a grainy near-black ground, a HUD
+        line top left, and a lit block of 48x40 px at (140, 80)."""
+        def pixel(x, y):
+            grain = (x * 7 + y * 13) % 9          # 0-8, like film grain
+            if 140 <= x < 188 and 80 <= y < 120:
+                return (150 + x % 40, 90 + y % 30, 200)
+            if 4 <= x < 60 and y == 5 and x % 3:
+                return (120, 120, 130)            # a thin HUD line
+            return (grain, grain, grain + 2)
+        return cls._png(width, height, pixel)
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-crop-")
+        crow_core.take_image_ride()
+
+    def tearDown(self) -> None:
+        crow_core.take_image_ride()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_the_box_is_the_scene_not_the_grain_or_the_hud(self):
+        view = crow_core._content_view(self._scene())
+        self.assertIsNotNone(view)
+        x0, y0, x1, y1 = view["box"]
+        # Cell precision: the box snaps to 16 px cells around the block.
+        self.assertTrue(128 <= x0 <= 140 and 188 <= x1 <= 208, view["box"])
+        self.assertTrue(64 <= y0 <= 80 and 120 <= y1 <= 128, view["box"])
+        self.assertLess(view["coverage"], 0.1)
+
+    def test_the_crop_is_enlarged_to_the_budget_and_decodes(self):
+        view = crow_core._content_view(self._scene())
+        img = crow_core._png_pixels(view["png"])
+        self.assertIsNotNone(img, "the crop must be a PNG the decoder reads")
+        w, h = img[0], img[1]
+        cx0, cy0, cx1, cy1 = view["crop"]
+        # Enlarged, capped at 4x, never past the 1024-px long edge.
+        self.assertEqual(view["scale"], crow_core._CROP_MAX_SCALE)
+        self.assertEqual((w, h), (int((cx1 - cx0) * 4), int((cy1 - cy0) * 4)))
+        self.assertLessEqual(max(w, h), crow_core._CROP_LONG_EDGE)
+        # Nearest neighbour: the block's colour is in the middle of the crop.
+        mid = img[4][h // 2]
+        self.assertEqual(mid[3 * (w // 2) + 2], 200)
+
+    def test_a_frame_drawn_edge_to_edge_gets_no_second_view(self):
+        busy = self._png(64, 48, lambda x, y: (x * 4 % 256, y * 5, 128))
+        self.assertIsNone(crow_core._content_view(busy))
+        big = self._png(64, 48, lambda x, y: (
+            (220, 60, 60) if 4 <= x < 60 and 4 <= y < 44 else (0, 0, 0)))
+        view = crow_core._content_view(big)
+        self.assertIsNotNone(view)
+        self.assertGreaterEqual(view["coverage"], crow_core._CROP_MAX_COVER)
+        self.assertIsNone(view["png"], "a large scene needs no enlargement")
+
+    def test_read_image_hands_frame_then_crop_and_says_how_small(self):
+        path = os.path.join(self.dir, "render.png")
+        with open(path, "wb") as fh:
+            fh.write(self._scene())
+        said = crow_core.tool_read_image(path)
+        parts = crow_core.take_image_ride()
+        self.assertEqual(len(parts), 2, said)
+        self.assertIn("TWO images", said)
+        self.assertRegex(said, r"the content fills \d+ % of the 320x200 frame")
+        self.assertIn("Image 1 is the full frame", said)
+        self.assertIn("Image 2 is x ", said)
+        import base64
+        full = base64.b64decode(parts[0]["image_url"]["url"].split(",", 1)[1])
+        with open(path, "rb") as fh:
+            self.assertEqual(full, fh.read(), "the frame travels unchanged")
+
+    def test_render_metrics_name_box_colours_luma_and_save_the_crop(self):
+        shot = os.path.join(self.dir, "render-1.png")
+        warns, lines = crow_core._capture_metrics(shot, self._scene())
+        self.assertTrue(any(w.startswith("warn: the content fills only")
+                            for w in warns), warns)
+        self.assertTrue(all(x.startswith("metrics: ") for x in lines), lines)
+        text = "\n".join(lines)
+        self.assertRegex(text, r"content box x \d+-\d+, y \d+-\d+ of 320x200")
+        self.assertRegex(text, r"coverage \d+\.\d %")
+        self.assertRegex(text, r"\d+ distinct colours")
+        self.assertIn("luma histogram", text)
+        crop = os.path.join(self.dir, "render-1-crop.png")
+        self.assertTrue(os.path.isfile(crop))
+        self.assertIn(crop, text)
+
+    def test_few_colours_warn_and_a_full_frame_saves_no_crop(self):
+        shot = os.path.join(self.dir, "flat.png")
+        flat = self._png(64, 48, lambda x, y: (
+            (255, 0, 0) if 4 <= x < 60 and 4 <= y < 44 else (0, 0, 0)))
+        warns, lines = crow_core._capture_metrics(shot, flat)
+        self.assertTrue(any("only 2 distinct colours" in w for w in warns),
+                        warns)
+        self.assertFalse(any("fills only" in w for w in warns), warns)
+        self.assertFalse(os.path.exists(os.path.join(self.dir,
+                                                     "flat-crop.png")))
+
+    def test_render_page_puts_the_metrics_in_its_result(self):
+        src = inspect.getsource(crow_core.tool_render_page)
+        self.assertIn("_capture_metrics(shot, pixels)", src)
+        self.assertLess(src.index("said.extend(metrics)"),
+                        src.index('"read_image it to look at the page."'))
 
 
 class ATurnsBillOutlivesTheCutTests(unittest.TestCase):
