@@ -2676,6 +2676,9 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   font-size:11px;color:var(--dim);text-align:left;cursor:pointer}
 #subpanel .spfold[hidden]{display:none}
 #subpanel .spfold:hover{color:var(--text-soft)}
+#subpanel .spfold .caret{display:inline-block;font-size:8px;margin-right:6px;
+  color:var(--dimmer);transition:transform .12s}
+#subpanel .spfold.open .caret{transform:rotate(90deg)}
 #subpanel.shut .splive,#subpanel.shut .spfold,#subpanel.shut .spdone{display:none}
 @keyframes subseen{0%{box-shadow:0 0 0 2px var(--sub)}100%{box-shadow:0 0 0 2px transparent}}
 #subpanel .subcard.seen{animation:subseen 1.4s ease-out}
@@ -6472,7 +6475,11 @@ const crow = {
     p.querySelector(".sph .st").textContent=run+" running · "+fin+" finished";
     const fold=p.querySelector(".spfold"), done=p.querySelector(".spdone");
     fold.hidden=!fin;
-    fold.textContent=(done.hidden ? "▸ " : "▾ ")+"finished · "+fin;
+    // THE HOUSE CARET, not U+25B8/U+25BE: neither is in the shipped Google Sans Code
+    // faces (check_gui_prereqs, 2026-09-23), while &#9654; is, and every other
+    // fold in this file turns that one by 90 degrees.
+    fold.classList.toggle("open", !done.hidden);
+    fold.innerHTML='<span class="caret">&#9654;</span>finished · '+fin;
   },
 
   subPanelFold(){ $("#subpanel").classList.toggle("shut"); },
