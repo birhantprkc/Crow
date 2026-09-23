@@ -14131,17 +14131,9 @@ class TheRenderBudgetCanBeMetTests(unittest.TestCase):
     def _peer(self, answer):
         """Ein Browser-Stellvertreter: liest NUL-getrennte Befehle, fragt
         `answer(msg)` nach der Liste der Antworten (leere Liste = Schweigen,
-        None = Rohr zu). Gibt (Devtools, Thread) zurueck.
-
-        POSIX ONLY, LIKE THE PATH IT STANDS IN FOR. On Windows
-        crow_platform.devtools_pipe() is None and render_page takes the
-        command-line screenshot, so _Devtools never runs there -- and
-        select() on Windows takes sockets only (WinError 10038 on a pipe,
-        CI 2026-09-23). The Windows path is pinned by
-        test_windows_takes_the_command_line_path instead."""
-        if sys.platform == "win32":
-            self.skipTest("no devtools pipe on Windows; render_page takes "
-                          "the command-line screenshot there")
+        None = Rohr zu). Gibt (Devtools, Thread) zurueck. On Windows it
+        drives _Devtools' reader-thread branch (select() there takes sockets
+        only, WinError 10038 on CI 2026-09-23)."""
         import threading as _th
         to_r, to_w = os.pipe()
         from_r, from_w = os.pipe()
@@ -16238,7 +16230,8 @@ class RunCommandIsBoundedLikeTheRenderTests(unittest.TestCase):
         self.assertIn("--unit=crow-cmd-1-ab", prefix)
         self.assertIn("--expand-environment=no", prefix)
         props = [prefix[i + 1] for i, a in enumerate(prefix) if a == "-p"]
-        self.assertEqual(sorted(props), ["MemoryHigh=7G", "MemoryMax=8G",
+        self.assertEqual(sorted(props), ["CollectMode=inactive-or-failed",
+                                         "MemoryHigh=7G", "MemoryMax=8G",
                                          "MemorySwapMax=0", "OOMPolicy=kill"])
         self.assertEqual(prefix[-1], "--")
         crow_platform._SYSTEMD_VERSIONS["/usr/bin/systemd-run"] = 253

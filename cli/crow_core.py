@@ -9591,6 +9591,27 @@ class _Devtools:
         self.buf = b""
         self.last = 0
         self.closed = False
+        # WINDOWS: select() takes sockets only (WinError 10038 on a pipe, CI
+        # 2026-09-23), so a daemon thread reads the pipe into a queue and
+        # wait_for takes from it with the same half-second slices. b"" is
+        # the end of the pipe. POSIX keeps select(), unchanged.
+        self.chunks: "queue.Queue[bytes] | None" = None
+        if os.name == "nt":
+            import queue as _queue
+            import threading as _threading
+            self.chunks = _queue.Queue()
+            _threading.Thread(target=self._pump, daemon=True,
+                              name="crow-devtools-read").start()
+
+    def _pump(self) -> None:
+        while True:
+            try:
+                chunk = os.read(self.from_fd, 1 << 20)
+            except OSError:
+                chunk = b""
+            self.chunks.put(chunk)
+            if not chunk:
+                return
 
     def send(self, method: str, params: "dict | None" = None,
              session: "str | None" = None) -> int:
@@ -9619,6 +9640,17 @@ class _Devtools:
             left = until - time.monotonic()
             if self.closed or left <= 0:
                 return None
+            if self.chunks is not None:
+                import queue as _queue
+                try:
+                    chunk = self.chunks.get(timeout=min(left, 0.5))
+                except _queue.Empty:
+                    continue
+                if not chunk:
+                    self.closed = True
+                    return None
+                self.buf += chunk
+                continue
             ready, _, _ = _select.select([self.from_fd], [], [], min(left, 0.5))
             if ready:
                 try:

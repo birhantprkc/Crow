@@ -650,7 +650,13 @@ def command_scope_prefix(unit: str) -> list[str]:
     """
     if IS_WINDOWS or (os.environ.get("CROW_COMMAND_SCOPE") or "").strip().lower() in ("0", "off", "none"):
         return []
-    return _user_scope_prefix(dict(command_memory_bounds(), OOMPolicy="kill"), unit,
+    # CollectMode: a scope the ceiling killed is unloaded, not kept "failed".
+    # CI 2026-09-23 (systemd 255): the unit sat in deactivating past
+    # scope_result's settle and turned failed afterwards, a row in
+    # `systemctl --user --failed` nobody resets. The kill is still named:
+    # session_oom_kills is the witness that does not depend on the unit.
+    return _user_scope_prefix(dict(command_memory_bounds(), OOMPolicy="kill",
+                                   CollectMode="inactive-or-failed"), unit,
                               literal=True)
 
 
