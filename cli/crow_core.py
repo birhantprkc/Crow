@@ -10955,7 +10955,10 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
     # the race and reports success (255, CI 2026-09-23), the kernel's own
     # count for the slice says it (session_oom_kills); a `kill -9` moves
     # neither.
-    if prefix and code in (-9, 137) and (
+    # -15 too (CI 2026-09-23, run 35901246504): with OOMPolicy=kill systemd
+    # stops the rest of the scope with SIGTERM once the kernel killed the hog,
+    # so the shell itself can end on -15. The witnesses below still decide.
+    if prefix and code in (-9, 137, -15, 143) and (
             crow_platform.scope_result(unit) == "oom-kill"
             or (oom_before is not None
                 and (crow_platform.session_oom_kills() or 0) > oom_before)):
