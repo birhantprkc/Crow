@@ -4279,6 +4279,74 @@ class AWriteSaysItIsByteExactTests(unittest.TestCase):
         self.assertIn("Byte-exact: the file ends with exactly the bytes", out)
 
 
+@unittest.skipUnless(shutil.which("node"), "node is not on PATH")
+class AWriteParsesWhatItWroteTests(unittest.TestCase):
+    """#251. Replayed through node --check, 20 of 98 JS/HTML writes of
+    the 2026-09-23 diorama run did not parse (`o[1100;`, `[0,0,00]` in a
+    module, `var o = = gl.createShader(t)`), and each result said only
+    "wrote N bytes"."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-syntax-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+
+    def at(self, name):
+        return os.path.join(self.root, name)
+
+    def test_a_js_syntax_error_is_in_the_result_with_its_line(self):
+        out = crow_core.tool_write_file(self.at("a.js"),
+                                        "let o = [1];\nlet b = o[1100;\n")
+        self.assertIn("syntax check (node --check) FAILED", out)
+        self.assertIn("line 2: SyntaxError", out)
+        self.assertIn("let b = o[1100;", out)
+        self.assertTrue(os.path.isfile(self.at("a.js")), "the write is kept")
+
+    def test_clean_js_says_ok(self):
+        out = crow_core.tool_write_file(self.at("m.mjs"),
+                                        "export const a = [0, 0, 0];\n")
+        self.assertIn("syntax check (node --check): ok", out)
+
+    def test_an_inline_module_is_parsed_at_the_pages_line(self):
+        page = ("<!doctype html>\n<script src=\"x.js\"></script>\n"
+                "<script type=\"x-shader/x-fragment\">void main(){}</script>\n"
+                "<script type=\"module\">\nconst z = [0,0,00];\n</script>\n")
+        out = crow_core.tool_write_file(self.at("p.html"), page)
+        self.assertIn("node --check, 1 inline script) FAILED", out)
+        self.assertIn("line 5: SyntaxError", out)
+
+    def test_a_clean_page_says_ok_and_a_page_without_script_says_nothing(self):
+        out = crow_core.tool_write_file(
+            self.at("ok.html"), "<script>\nvar a = 1;\n</script>\n")
+        self.assertIn("inline script): ok", out)
+        out = crow_core.tool_write_file(self.at("plain.html"), "<p>hi</p>\n")
+        self.assertNotIn("syntax check", out)
+        out = crow_core.tool_write_file(self.at("notes.txt"), "o[1100;\n")
+        self.assertNotIn("syntax check", out)
+
+    def test_an_append_in_pieces_says_the_file_may_be_unfinished(self):
+        crow_core.tool_append_file(self.at("big.js"), "function f() {")
+        out = crow_core.tool_append_file(self.at("big.js"), "  return 1;")
+        self.assertIn("FAILED", out)
+        self.assertIn("still being built in pieces", out)
+        out = crow_core.tool_append_file(self.at("big.js"), "}")
+        self.assertIn("syntax check (node --check): ok", out)
+
+    def test_no_node_means_no_word_and_the_write_stands(self):
+        with mock.patch.object(crow_core.shutil, "which", return_value=None):
+            out = crow_core.tool_write_file(self.at("a.js"), "let b = = 1;\n")
+        self.assertTrue(out.startswith("wrote 13 bytes"), out)
+        self.assertNotIn("syntax check", out)
+
+    def test_a_check_past_its_clock_says_so(self):
+        with mock.patch.object(crow_core, "_bounded_run",
+                               return_value=(None, "", "", "clock")):
+            out = crow_core.tool_write_file(self.at("a.js"), "let a = 1;\n")
+        self.assertIn("not finished within", out)
+        self.assertIn("not checked", out)
+
+
 class ANearMissDirectoryIsAskedOnceTests(unittest.TestCase):
     """#244: write_file/append_file created any missing parent in
     silence. Measured: 2026-09-18 msg 238 wrote `testcases/w/fs.py` while the

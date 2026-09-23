@@ -9869,9 +9869,8 @@ def _said_new_dir(made: "str | None") -> str:
 # (`o[13]`->`o[113]`, `texImage3D`->`texImage33D`, `[0,0,0]`->`[0,0,00]`), the
 # bytes on disk equalled its write_file arguments, and it blamed the tools --
 # "the read channel is byte-unstable" -- for hours. Two answers from the
-# harness: say that a write is byte-exact, with the numbers to check it by
-# (#252), and parse what was written, so the first error is in the model's
-# own result (#251).
+# harness: say that a write is byte-exact, with the numbers to check it by,
+# and parse what was written, so the first error is in the model's own result.
 
 def _write_receipt(path: str, sent: bytes, whole: bool = True) -> str:
     """#252. What a write result says about the bytes: the count in
@@ -9892,6 +9891,100 @@ def _write_receipt(path: str, sent: bytes, whole: bool = True) -> str:
             "the bytes this call sent; a later read returns them. A mistake "
             "in them was in the content." % (
                 digest, len(disk), "holds" if whole else "ends with"))
+
+
+# #251. A CHEAP PARSE OF WHAT WAS WRITTEN. `node --check` parses
+# without running (nodejs.org/api/cli.html, -c/--check). An HTML page's
+# inline scripts are parsed one by one through stdin, padded with newlines so
+# the line number is the page's. No node, no word: the check is a help, not
+# a gate, and a write never fails because of it.
+SYNTAX_CHECK_SECONDS = 5.0
+SYNTAX_CHECK_BYTES = 8 << 20
+SYNTAX_CHECK_SCRIPTS = 16
+_SYNTAX_JS = (".js", ".mjs", ".cjs")
+_SYNTAX_HTML = (".html", ".htm")
+_INLINE_SCRIPT = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.I | re.S)
+_SCRIPT_SRC = re.compile(r"\bsrc\s*=", re.I)
+_SCRIPT_TYPE = re.compile(r"""\btype\s*=\s*["']?([^"'\s>]*)""", re.I)
+# The HTML standard's classic-script types and "module"; anything else
+# (importmap, x-shader/x-fragment, application/json) is a data block.
+_SCRIPT_JS_TYPES = ("", "text/javascript", "application/javascript",
+                    "text/ecmascript", "application/ecmascript", "module")
+_NODE_WHERE = re.compile(r"^\S.*:(\d+)$")
+_NODE_ERROR = re.compile(r"^[A-Za-z]*Error\b.*?: ")
+
+
+def _node_first_error(stderr: str) -> str:
+    """node's report cut to its first error: the line, the source line with
+    the caret (a window of it, for minified code), and the message."""
+    lines = stderr.splitlines()
+    msg = next((ln for ln in lines if _NODE_ERROR.match(ln)), None)
+    if msg is None:
+        return (lines[-1] if lines else "node --check failed").strip()[:300]
+    at = next((i for i, ln in enumerate(lines) if _NODE_WHERE.match(ln)), None)
+    if at is None or at + 1 >= len(lines):
+        return msg.strip()[:300]
+    code = lines[at + 1]
+    caret = lines[at + 2] if at + 2 < len(lines) and "^" in lines[at + 2] else ""
+    col = caret.find("^") if caret else 0
+    lo = max(0, col - 80)
+    shown = code[lo:col + 80]
+    out = "line %s: %s" % (_NODE_WHERE.match(lines[at]).group(1),
+                           msg.strip()[:300])
+    if not shown.strip():
+        return out
+    out += "\n  " + shown
+    if caret:
+        out += "\n  " + " " * (col - lo) + "^"
+    return out
+
+
+def syntax_check(path: str) -> str:
+    """#251. '' when there is nothing to say (not JS/HTML, no node, too
+    big, nothing to parse), else one line starting with a newline."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in _SYNTAX_JS + _SYNTAX_HTML:
+        return ""
+    node = shutil.which("node")
+    try:
+        if not node or os.path.getsize(path) > SYNTAX_CHECK_BYTES:
+            return ""
+        deadline = time.monotonic() + SYNTAX_CHECK_SECONDS
+        cwd = os.path.dirname(os.path.abspath(path))
+        if ext in _SYNTAX_JS:
+            jobs = [([node, "--check", path], None)]
+        else:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                page = fh.read()
+            jobs = []
+            for m in _INLINE_SCRIPT.finditer(page):
+                typed = _SCRIPT_TYPE.search(m.group(1))
+                kind = typed.group(1).lower() if typed else ""
+                if _SCRIPT_SRC.search(m.group(1)) or kind not in _SCRIPT_JS_TYPES:
+                    continue
+                pad = "\n" * page.count("\n", 0, m.start(2))
+                jobs.append(([node, "--check", "--input-type=%s" % (
+                    "module" if kind == "module" else "commonjs"), "-"],
+                    pad + m.group(2)))
+            if not jobs:
+                return ""
+        what = ("node --check" if ext in _SYNTAX_JS else
+                "node --check, %d inline script%s" % (
+                    min(len(jobs), SYNTAX_CHECK_SCRIPTS),
+                    "" if len(jobs) == 1 else "s"))
+        for argv, stdin_text in jobs[:SYNTAX_CHECK_SCRIPTS]:
+            code, _out, err, stopped = _bounded_run(argv, cwd, deadline,
+                                                    stdin_text)
+            if stopped:
+                return ("\nsyntax check (%s): not finished within %gs -- not "
+                        "checked" % (what, SYNTAX_CHECK_SECONDS))
+            if code != 0:
+                return ("\nsyntax check (%s) FAILED -- the error is in the "
+                        "content this file was given:\n%s"
+                        % (what, _node_first_error(err)))
+    except OSError:
+        return ""
+    return "\nsyntax check (%s): ok" % what
 
 
 def tool_write_file(path: str, content: str = "", **_) -> str:
@@ -9926,7 +10019,7 @@ def tool_write_file(path: str, content: str = "", **_) -> str:
     _mark_read(path)                                # #215-H: crow knows these bytes
     sent = content.encode("utf-8")
     return (f"wrote {len(sent)} bytes to {path}" + _said_new_dir(made)
-            + _write_receipt(path, sent))
+            + _write_receipt(path, sent) + syntax_check(path))
 
 
 def tool_append_file(path: str, content: str = "", **_) -> str:
@@ -9959,8 +10052,12 @@ def tool_append_file(path: str, content: str = "", **_) -> str:
         _mark_read(path)
     sent = content.encode("utf-8")
     verb = "appended to" if existed else "created"
+    checked = syntax_check(path)
+    if "FAILED" in checked and existed:
+        checked += ("\n(this parsed the whole file as it stands now; a file "
+                    "still being built in pieces may not parse yet)")
     return (f"{verb} {path} (+{len(sent)} bytes)" + _said_new_dir(made)
-            + _write_receipt(path, sent, whole=False))
+            + _write_receipt(path, sent, whole=False) + checked)
 
 
 def tool_edit_file(path: str, old: str = "", new: "str | None" = None, **_) -> str:

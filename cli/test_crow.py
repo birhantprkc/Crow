@@ -3318,10 +3318,13 @@ class ToolResultCeilingTests(ToolLayerCase):
     def test_the_short_results_need_no_ceiling(self):
         """write_file and edit_file return one fixed line, so they are bounded by
         construction and not by a call to _clip. #252 adds a fixed
-        byte-exact receipt -- still a bound that does not grow with the
-        content."""
+        byte-exact receipt, and #251 at most one clipped error
+        (message 300 chars, a 160-char window of the line) -- still a bound
+        that does not grow with the content."""
         path = self._path("new.txt")
         self.assertLess(len(crow.tool_write_file(path, "x" * 50_000)), 400)
+        self.assertLess(len(crow.tool_write_file(self._path("new.js"),
+                                                 "var a = = 1;" * 5_000)), 1000)
         crow.tool_read_file(path)
         self.assertLess(len(crow.tool_edit_file(path, old="x" * 50_000, new="y")), 200)
 
