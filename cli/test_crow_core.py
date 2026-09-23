@@ -3999,6 +3999,59 @@ class RunCommandBoundaryTests(unittest.TestCase):
         self.assertIn(r"C:\alpha\x.txt", text)
 
 
+class TheNullDeviceIsNoOutsidePathTests(unittest.TestCase):
+    """#243: `2>/dev/null` names no file -- it stands in 202 of
+    775 stored commands. Claude Code exempts the same target."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp())
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def asks(self, command):
+        outside = crow_core.run_command_boundary(json.dumps({"command": command}))
+        return outside, crow_core.stops_for("run_command", "auto", bool(outside))
+
+    @unittest.skipIf(crow_platform.IS_WINDOWS, "POSIX token")
+    def test_the_redirections_to_dev_null_do_not_ask(self):
+        for command in ("ls out/ 2>/dev/null | tail -n +3",
+                        "make >/dev/null 2>&1", "grep x a > /dev/null",
+                        "cmd &>/dev/null", "python3 run.py </dev/null",
+                        "cp a /dev/null", "v=$(cat a 2>/dev/null)"):
+            self.assertEqual(self.asks(command), ([], False), command)
+
+    @unittest.skipIf(crow_platform.IS_WINDOWS, "POSIX token")
+    def test_a_real_outside_path_beside_it_still_asks(self):
+        """NEGATIVE CONTROL: the exemption is the device, not the command."""
+        outside, stops = self.asks("cat /etc/hostname 2>/dev/null")
+        self.assertEqual(outside, ["/etc/hostname"])
+        self.assertTrue(stops)
+
+    @unittest.skipIf(crow_platform.IS_WINDOWS, "POSIX token")
+    def test_a_path_under_dev_null_or_another_device_still_asks(self):
+        """NEGATIVE CONTROL: only the exact device is exempt."""
+        for command in ("cat /dev/null/../../etc/passwd", "dd of=/dev/sda",
+                        "echo x > /dev/nullx"):
+            self.assertNotEqual(self.asks(command)[0], [], command)
+
+    def test_the_windows_null_device_does_not_ask(self):
+        with mock.patch.object(crow_core.crow_platform, "IS_WINDOWS", True):
+            self.assertTrue(crow_core.is_null_device(r"\\.\NUL"))
+            self.assertTrue(crow_core.is_null_device("nul"))
+            self.assertFalse(crow_core.is_null_device("/dev/null"))
+        with mock.patch.object(crow_core.crow_platform, "IS_WINDOWS", False):
+            self.assertTrue(crow_core.is_null_device("/dev/null"))
+            self.assertFalse(crow_core.is_null_device(r"\\.\NUL"))
+            self.assertFalse(crow_core.is_null_device("/dev/null/x"))
+
+    @unittest.skipUnless(crow_platform.IS_WINDOWS, "a UNC token is absolute "
+                         "only on Windows; on POSIX it resolves inside the root")
+    def test_a_unc_null_device_token_is_not_outside_on_windows(self):
+        self.assertEqual(crow_core.command_outside_paths(
+            r"findstr x a.txt >\\.\NUL"), [])
+
+
 class RunCommandBoundaryTurnTests(TurnLoopCase):
     """The loop half of #144: at `auto`, where nothing else asks, an outside
     path in run_command does -- and a no comes back structured."""

@@ -7063,6 +7063,32 @@ _PATH_TOKENS = re.compile(
 )
 
 
+# #243. THE NULL DEVICE NAMES NO FILE. `2>/dev/null` stood in 202 of 775
+# distinct stored run_command lines (2026-09-23 copies of the state dir); at
+# `auto` each one stops on the card unless an "always" covers it, and robin's
+# approvals.json holds `/dev/null` and -- from a `$(... 2>/dev/null)` --
+# `/dev/null)`. Claude Code
+# exempts the same target ("Targets with no file behind them aren't checked:
+# `/dev/null`", permissions docs, Redirections). Only the EXACT device: a path
+# under it, another device (`/dev/sda`) or a lookalike (`/dev/nullx`) is
+# still classified. On Windows the device is `NUL` (any case), reached as a
+# token only in its `\\.\NUL` form -- a bare `NUL` is a relative name the
+# pattern never reads.
+_NULL_DEVICES_POSIX = frozenset({"/dev/null"})
+_NULL_DEVICES_WINDOWS = frozenset({"nul", "\\\\.\\nul", "//./nul"})
+
+
+def is_null_device(token: str) -> bool:
+    """#243: is this command-line token the platform's null device?
+
+    A closing `)` is shed first: `$(cmd 2>/dev/null)` makes it part of the
+    token, and it is how `/dev/null)` reached the approvals file."""
+    raw = (token or "").strip().rstrip(")")
+    if crow_platform.IS_WINDOWS:
+        return raw.lower() in _NULL_DEVICES_WINDOWS
+    return raw in _NULL_DEVICES_POSIX
+
+
 def command_outside_paths(command: str, cwd: str | None = None) -> list[str]:
     """The outside paths one command names, resolved -- [] without a root.
 
@@ -7103,7 +7129,7 @@ def command_outside_paths(command: str, cwd: str | None = None) -> list[str]:
         note(cwd)
     for groups in _PATH_TOKENS.findall(command or ""):
         tok = next((g for g in groups if g), "")
-        if tok:
+        if tok and not is_null_device(tok.rstrip(".,;")):   # #243
             note(tok.rstrip(".,;"))
     return out
 
