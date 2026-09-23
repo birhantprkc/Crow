@@ -1006,6 +1006,38 @@ class TheSecondRolloverFiresTests(ApiCase):
         self.assertEqual(rolls, [])
         self.assertIs(seen.get("rolled"), False)
 
+    def test_a_stuck_render_loop_forces_the_roll_below_the_threshold(self):
+        """#268: six stuck captures set the flag; the next turn rolls first,
+        at 1,000 of 200,192 tokens, and the carry is the breaker's line."""
+        self._provider()
+        rolls = []
+
+        def fake_roll(conversation, base_url, context_tokens, carry=None,
+                      digest="", **_):
+            rolls.append(carry)
+            conversation.reset()
+            conversation.append("user", "note\n\n" + (carry or ""))
+            return os.path.join(crow_core.SESSION_DIR, "rollover-fake.json")
+
+        def fake_run(conversation, **kw):
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost="", context_tokens=9,
+                                        promised_warm=False, rolled=True,
+                                        stopped=False, reported=True)
+
+        api = self.api()
+        api._n_ctx = 200192
+        api._context_tokens = 1000
+        api._goal_roll_due = True
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "roll_over", fake_roll), \
+             mock.patch.object(crow_core, "rollover_digest", lambda *a, **k: ""), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
+            api._run("[Goal mode, step 2: what was tried]")
+            api._run("next line")
+        self.assertEqual(rolls, ["[Goal mode, step 2: what was tried]"])
+        self.assertFalse(api._goal_roll_due)
+
     def test_the_pre_turn_roll_carries_the_digest(self):
         """#154: der Digest entsteht VOR roll_over -- auf dem noch vollen
         Praefix, mit dem Spot des Turns -- und reist als digest= in die
@@ -10548,6 +10580,77 @@ class _Done:
 
     def __init__(self, rc=0):
         self.returncode, self.stdout, self.stderr = rc, b"", b""
+
+
+class TheGoalEngineBreaksARenderLoopTests(ApiCase):
+    """#268, 2026-09-23 22:30-22:48: seven captures of chain.html in a row at
+    99.2-99.4 % one colour, every turn calling tools, no failure -- neither
+    the brake nor the trouble classes saw it. Three stuck captures of one
+    page: the bisect nudge. Six: a forced rollover carrying what was tried."""
+
+    BLACK = ("warn: this capture looks blank \u2014 100.0%% of its pixels are "
+             "one colour; treat it as no-signal\n%s -- 4718 bytes, 1280x800, "
+             "done, software (swiftshader)\nread_image it to look at the page.")
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(crow_core.goal_write, None)
+        crow_core.goal_start("Voxel scene", ["build the scene", "verify it"],
+                             now=1000.0)
+        self.n = 0
+
+    def turn(self, api, text, renders, page="chain.html") -> None:
+        api._conversation.append("user", text)
+        for _ in range(renders):
+            self.n += 1
+            write, shot = "w%d" % self.n, "r%d" % self.n
+            api._conversation.append("assistant", "", tool_calls=[
+                {"id": write, "name": "edit_file",
+                 "arguments": json.dumps({"path": "src/pass%d.js" % self.n,
+                                          "old": "a", "new": "b"})}])
+            api._conversation.append("tool", "edited", tool_call_id=write)
+            api._conversation.append("assistant", "", tool_calls=[
+                {"id": shot, "name": "render_page",
+                 "arguments": json.dumps({"path": page})}])
+            api._conversation.append(
+                "tool", self.BLACK % ("/nowhere/render-%d.png" % self.n),
+                tool_call_id=shot)
+        api._conversation.append("assistant", "patched another pass")
+
+    def test_three_black_captures_ask_for_a_bisect_six_force_the_roll(self):
+        api = self.api()
+        self.turn(api, api._goal_nudge(), 3)
+        nudge = api._goal_nudge()
+        self.assertIn("the last 3 captures of chain.html came back the same",
+                      nudge)
+        self.assertIn("stop editing -- bisect", nudge)
+        self.assertFalse(api._goal_roll_due)
+        self.turn(api, nudge, 3)
+        carry = api._goal_nudge()
+        self.assertTrue(api._goal_roll_due)
+        self.assertIn("6 captures of chain.html in a row", carry)
+        self.assertIn("render-6.png: looks blank after writing src/pass6.js",
+                      carry)
+        notes = [m["t"] for m in self.drained(api) if m.get("k") == "note"]
+        self.assertTrue(any("the context rolls over" in t for t in notes), notes)
+
+    def test_a_new_page_is_a_changed_approach(self):
+        """NEGATIVE: two black captures, then the probe page -- no nudge."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), 2)
+        self.turn(api, api._goal_nudge(), 1, page="probe.html")
+        self.assertNotIn("bisect", api._goal_nudge())
+
+    def test_done_clears_the_streak(self):
+        api = self.api()
+        self.turn(api, api._goal_nudge(), 2)
+        crow_core.tool_goal_step(1, "failed", "black")
+        api._conversation.append("assistant", "", tool_calls=[
+            {"id": "g", "name": "goal_step",
+             "arguments": json.dumps({"step": 1, "status": "done"})}])
+        api._conversation.append("tool", "{}", tool_call_id="g")
+        self.turn(api, "[Goal mode, step 1 still open. Continue.]", 1)
+        self.assertNotIn("bisect", api._goal_nudge() or "")
 
 
 class TheCopyButtonPutsTextBackTests(ApiCase):

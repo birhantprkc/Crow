@@ -17351,6 +17351,223 @@ def goal_trouble_nudge(step: int, due: "list[dict]") -> str:
                "\n".join("- " + goal_trouble_line(entry) for entry in due)))
 
 
+# --------------------------------- #268, der Debug-Kreis, den keiner sieht ----
+#
+# WAS WEDER DIE BREMSE NOCH DIE FEHLERKLASSEN SEHEN, am 2026-09-23 gemessen:
+# ein Modell, das arbeitet -- jeder Zug ruft Werkzeuge, keine zwei Antworten
+# gleich, kein einziger Fehlschlag --, und trotzdem kommt dasselbe Bild
+# zurueck. 22:30:28-22:48:12 sieben Fangs in Folge zu 99,2-99,4 % einer Farbe
+# (ein schwarzer Rahmen mit fps-Zeile), 20:07-21:03 fuenfmal der 13.622-Byte-
+# Fang, 21:17-21:24 dreimal 424 kB mit derselben Farbverteilung. Dazwischen
+# Edit auf Edit an den Passes, statt zu halbieren.
+#
+# GEZAEHLT WIRD DER FANG, NICHT DER FEHLER: ein Fang ist "fest", wenn er leer
+# aussieht (#213-Warnung, #175 byte-gleich, #TBD-image-crop "only N distinct
+# colours", oder selbst dekodiert >= 98 % einer Farbe) oder wenn er dem
+# vorigen Fang DERSELBEN Seite fast gleicht -- die `metrics:`-Zahlen von
+# #TBD-image-crop, wo es sie gibt, sonst Farbanteil und Groesse. Bei drei in
+# Folge ein Anstoss: halbieren statt editieren. Bei sechs ein erzwungener
+# Rollover, dessen erste Zeile auflistet, was schon versucht wurde -- Claude
+# Code's eigene Regel: "If you've corrected Claude more than twice on the
+# same issue ... the context is cluttered with failed approaches ... start
+# fresh with a more specific prompt that incorporates what you learned."
+#
+# DER KERN ZAEHLT UND FORMULIERT, die Oberflaeche entscheidet und rollt --
+# dieselbe Teilung wie bei #202.
+GOAL_RENDER_NUDGE = 3
+GOAL_RENDER_ROLL = 6
+# Ein Fang, der zu so viel einer Farbe ist, zeigt kein Bild (gemessen:
+# die schwarzen Diorama-Fangs 0,987-0,998, der fertige Rahmen 0,598-0,704).
+_RENDER_NEAR_BLANK = 0.98
+_RENDER_SHOT = re.compile(r"^(\S+\.png) -- (\d+) bytes", re.M)
+_RENDER_STUCK_WARNS = ("looks blank", "almost one colour", "byte-identical",
+                       "distinct colours in the capture")
+_RENDER_METRIC_NUM = re.compile(r"-?\d+(?:\.\d+)?")
+_RENDER_WRITES = ("write_file", "append_file", "edit_file")
+
+
+def render_signature(result: str, target: str = "") -> "dict | None":
+    """What one render_page result says about its capture, or None when it
+    captured nothing (a failed render is #202's business, not this one's)."""
+    text = result if isinstance(result, str) else ""
+    shot = _RENDER_SHOT.search(text)
+    if text.startswith("error") or shot is None:
+        return None
+    path, size = shot.group(1), int(shot.group(2))
+    metrics: "list[float]" = []
+    for line in text.splitlines():
+        if line.startswith("metrics:") and not line.startswith("metrics: crop"):
+            metrics.extend(float(n) for n in _RENDER_METRIC_NUM.findall(line))
+    share = None
+    try:
+        with open(path, "rb") as fh:
+            share = _png_dominant_share(fh.read(_PNG_DECODE_BUDGET))
+    except OSError:
+        pass
+    warned = next((w for w in _RENDER_STUCK_WARNS if w in text), None)
+    blank = None
+    if warned:
+        blank = warned
+    elif share is not None and share >= _RENDER_NEAR_BLANK:
+        blank = "%.1f %% one colour" % (100 * share)
+    return {"target": target, "path": path, "size": size, "share": share,
+            "metrics": metrics, "blank": blank}
+
+
+def _render_close(a: float, b: float, rel: float, floor: float) -> bool:
+    return abs(a - b) <= max(floor, rel * max(abs(a), abs(b)))
+
+
+def render_same(prev: "dict | None", cur: "dict | None") -> bool:
+    """Is `cur` near-identical to `prev`, the same page captured again?"""
+    if not prev or not cur or prev.get("target") != cur.get("target"):
+        return False
+    pm, cm = prev.get("metrics") or [], cur.get("metrics") or []
+    if pm and cm:
+        return len(pm) == len(cm) and all(
+            _render_close(a, b, 0.03, 2.0) for a, b in zip(pm, cm))
+    if prev.get("share") is not None and cur.get("share") is not None:
+        return (abs(prev["share"] - cur["share"]) <= 0.005
+                and _render_close(prev["size"], cur["size"], 0.03, 0))
+    return _render_close(prev["size"], cur["size"], 0.01, 0)
+
+
+def goal_render_scan(messages: "list | None", start: int,
+                     state: "dict | None" = None,
+                     new_step: bool = False) -> dict:
+    """Count the render_page captures from `start` into `state` and return it.
+
+    `state` belongs to the step. Per page (`targets`): `last` (the previous
+    capture's signature), `streak` (stuck captures of that page in a row) and
+    `tried` (one line per stuck capture: its verdict and what was written
+    before it). Beside them: `edits` (paths written since the last capture),
+    `current` (the page captured last) and `rolls` (forced rollovers in this
+    step). PER PAGE, because the 2026-09-23 loop rendered the same black
+    index.html seven times with other pages in between; a page never
+    captured before in this step is a changed approach and starts at zero.
+    A `goal_step` 'done' clears it mid-turn, and `new_step` skips the turn
+    up to that call -- the rules of `goal_trouble_scan`."""
+    state = state if state is not None else {}
+    state.setdefault("targets", {})
+    state.setdefault("edits", [])
+    state.setdefault("rolls", 0)
+    state.setdefault("current", None)
+    calls: dict = {}
+    counting = not new_step
+    for message in (messages or [])[max(0, start):]:
+        role = message.get("role")
+        if role == "assistant":
+            for call in message.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                calls[call.get("id")] = (fn.get("name") or "",
+                                         fn.get("arguments") or "")
+            continue
+        if role != "tool":
+            continue
+        name, arguments = calls.get(message.get("tool_call_id"), ("", ""))
+        try:
+            args = json.loads(arguments or "{}")
+        except ValueError:
+            args = {}
+        args = args if isinstance(args, dict) else {}
+        if name == "goal_step":
+            if args.get("status") == GOAL_DONE:
+                state.update(targets={}, edits=[], current=None)
+                counting = True
+            continue
+        if not counting:
+            continue
+        content = message.get("content")
+        content = content if isinstance(content, str) else goal_message_text(message)
+        if name in _RENDER_WRITES:
+            path = str(canonical_arguments(name, args).get("path") or "")
+            if path and not content.startswith("error") \
+                    and path not in state["edits"]:
+                state["edits"].append(path)
+            continue
+        if name != "render_page":
+            continue
+        target = str(args.get("path") or "")
+        sig = render_signature(content, target)
+        if sig is None:
+            continue
+        page = state["targets"].setdefault(
+            target, {"last": None, "streak": 0, "tried": [], "said": 0})
+        same = render_same(page["last"], sig)
+        if sig["blank"] or same:
+            if page["streak"] == 0:
+                page["tried"] = []
+                if same and not sig["blank"]:
+                    page["streak"] = 1
+                    page["tried"].append(_render_tried(page["last"], []))
+            page["streak"] += 1
+            page["tried"].append(_render_tried(sig, state["edits"]))
+        else:
+            page.update(streak=0, tried=[], said=0)
+        page["last"] = sig
+        state["edits"] = []
+        state["current"] = target
+    return state
+
+
+def _render_page_state(state: "dict | None") -> "dict | None":
+    """The per-page entry of the page captured last, or None."""
+    if not state or state.get("current") is None:
+        return None
+    return (state.get("targets") or {}).get(state["current"])
+
+
+def _render_tried(sig: dict, edits: "list[str]") -> str:
+    verdict = sig.get("blank") or "same as the capture before"
+    after = (" after writing %s" % ", ".join(edits[-4:])) if edits else ""
+    return "%s: %s%s" % (os.path.basename(sig["path"]), verdict, after)
+
+
+def goal_render_due(state: "dict | None") -> "str | None":
+    """'roll', 'nudge' or None for the page captured last -- and marks it
+    said. One forced roll per step; past it, the nudge again at every
+    further multiple of three."""
+    page = _render_page_state(state)
+    if page is None:
+        return None
+    streak = page.get("streak", 0)
+    if streak >= GOAL_RENDER_ROLL and not state.get("rolls"):
+        state["rolls"] = state.get("rolls", 0) + 1
+        page["said"] = streak
+        return "roll"
+    if streak >= GOAL_RENDER_NUDGE and streak // GOAL_RENDER_NUDGE \
+            > page.get("said", 0) // GOAL_RENDER_NUDGE:
+        page["said"] = streak
+        return "nudge"
+    return None
+
+
+GOAL_BISECT = ("stop editing -- bisect: render a minimal probe (the clear "
+               "colour only, then one lit cube), then re-enable the passes one "
+               "by one and render after each; the pass that breaks the picture "
+               "is the bug.")
+
+
+def goal_render_nudge(step: int, state: dict, rolled: bool = False) -> str:
+    """The nudge for a stuck streak; with `rolled`, the carry of the forced
+    rollover, listing what was tried. `step` counts from 1."""
+    page = _render_page_state(state) or {}
+    tried, streak = page.get("tried") or [], page.get("streak", 0)
+    where = os.path.basename(str(state.get("current") or "")) or "the page"
+    if not rolled:
+        return ("%s, step %d: the last %d captures of %s came back the same "
+                "(%s) -- %s]" % (GOAL_NUDGE_MARK, step, streak, where,
+                         "; ".join(t.split(": ", 1)[-1].split(" after ")[0]
+                                   for t in tried[-3:]), GOAL_BISECT))
+    return ("%s, step %d: %d captures of %s in a row came back the same, so "
+            "the context was cut to leave that loop behind. What was tried "
+            "(Crow's record from the render_page results):\n%s\n"
+            "Do not repeat these edits. %s]"
+            % (GOAL_NUDGE_MARK, step, streak, where,
+               "\n".join("- " + t for t in tried[-8:]),
+               GOAL_BISECT[0].upper() + GOAL_BISECT[1:]))
+
+
 def needs_approval(name: str, mode: str) -> bool:
     """Does this tool stop and ask at this level?
 

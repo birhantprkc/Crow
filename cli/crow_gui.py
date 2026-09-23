@@ -10354,6 +10354,10 @@ class Api:
         # Die Fehlerklassen des laufenden Schritts, gezaehlt von
         # `crow_core.goal_trouble_scan` (#202).
         self._goal_trouble: dict = {}
+        # #268: die Fang-Serie des Schritts (`crow_core.goal_render_scan`) und
+        # ob der naechste Zug zuerst rollen soll.
+        self._goal_renders: dict = {}
+        self._goal_roll_due = False
 
     def _goal_cut(self, turns: int) -> int:
         """Die letzten `turns` Motorzuege aus der Geschichte nehmen. #202.
@@ -10510,6 +10514,7 @@ class Api:
             self._goal_step, self._goal_step_turns = nxt, 0
             # Die Fehlerklassen gehoeren dem Schritt wie der Zaehler (#202).
             self._goal_trouble = {}
+            self._goal_renders = {}                            # #268
         self._goal_step_turns += 1
         if self._goal_step_turns > self.GOAL_STEP_TURN_CAP:
             self.push({"k": "note",
@@ -10547,6 +10552,31 @@ class Api:
                             % (nxt + 1, "; ".join(crow_core.goal_trouble_label(e)
                                                   for e in due))})
             return crow_core.goal_trouble_nudge(nxt + 1, due)
+        # #268. DERSELBE FANG, IMMER WIEDER: drei feste Fangs in Folge ein
+        # Anstoss zum Halbieren, sechs ein erzwungener Rollover, dessen
+        # erste Zeile auflistet, was versucht wurde. Nach dem Trouble-Block,
+        # damit #202 unveraendert zuerst spricht.
+        if start is not None:
+            crow_core.goal_render_scan(payload, start, self._goal_renders,
+                                       new_step=new_step)
+        stuck = crow_core.goal_render_due(self._goal_renders)
+        if stuck is not None:
+            text = crow_core.goal_render_nudge(nxt + 1, self._goal_renders,
+                                               rolled=stuck == "roll")
+            page = crow_core._render_page_state(self._goal_renders) or {}
+            self.push({"k": "note",
+                       "t": "goal mode, step %d: %d captures in a row came "
+                            "back the same -- %s"
+                            % (nxt + 1, page.get("streak", 0),
+                               "the context rolls over, carrying what was "
+                               "tried" if stuck == "roll"
+                               else "the nudge says to bisect")})
+            if stuck == "roll":
+                self._goal_roll_due = True
+                # The cut leaves the loop behind; the one roll stays spent.
+                self._goal_renders = {
+                    "rolls": self._goal_renders.get("rolls", 0)}
+            return text
         # #202. NICHT HUNDERTMAL DERSELBE BLOCK. Der volle Anstoss ist 330 Byte
         # Anweisung; byteweise identisch vor jedem Zug wiederholt ist er selbst
         # schon das Muster, das das Modell dann fortsetzt -- und er sagt beim
@@ -13476,8 +13506,11 @@ class Api:
                       # siehe `_surface`.
                       surface_reload=self._surface)
         rolled = False
-        if crow_core.should_roll(self._context_tokens, self._n_ctx,
-                                 crow_core.ROLLOVER_AT):
+        # #268: a stuck render loop asks for the cut below the threshold too.
+        forced = getattr(self, "_goal_roll_due", False)
+        self._goal_roll_due = False
+        if forced or crow_core.should_roll(self._context_tokens, self._n_ctx,
+                                           crow_core.ROLLOVER_AT):
             spot0 = self._endpoint()
             sampling0 = crow_core.sampling_for(self._model, self._reasoning)
             # #154: VOR roll_over, auf dem noch warmen Praefix.

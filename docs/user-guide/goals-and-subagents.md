@@ -148,6 +148,29 @@ when the step changes, when the model marks it `done`, and when you type a line.
 `failed` keeps them, because Crow nudges that same step again. Counting happens between turns, so
 a single turn can still spend its 24 tool rounds on the wall before the line arrives.
 
+*The same picture, again (#268).* A debug loop can fail nothing and still go nowhere. Seen on
+2026-09-23, 22:30–22:48: seven captures of `chain.html` in a row at 99.2–99.4 % one colour (a
+black frame with an fps line), with an edit to another pass before each one. Every turn called
+tools and no result was an error, so neither mechanism above fired. Crow therefore also counts,
+per page, the `render_page` captures that came back **stuck**. A capture is stuck when it carries
+a blank verdict (#213 blank or almost one colour, #175 byte-identical, "only N distinct colours"
+from the pixel metrics), when its decoded frame is at least 98 % one colour, or when it nearly
+matches the previous capture of the same page. "Nearly matches" uses the `metrics:` numbers
+within 3 % (or ±2) when the render wrote them. Without them it uses the dominant-colour share
+within 0.005 and the size within 3 %. A page never captured before in the step counts as a changed
+approach and starts at zero.
+
+| Stuck captures of one page | What happens |
+|---|---|
+| 3 | one nudge: *stop editing — bisect: render a minimal probe (the clear colour only, then one lit cube), then re-enable the passes one by one and render after each* |
+| 6 | a forced rollover, even below the threshold. The line it carries lists each stuck capture with its verdict and the files written before it ("render-….png: 99.4 % one colour after writing src/03.js"). One per step; after that, the nudge again every third capture |
+
+The count belongs to the step and is cleared by `goal_step … done`, like the failure classes. The
+flow shows a note each time. It is replayed on the four session files of 2026-09-23: nudges before
+messages 35 and 295 (rollover-210418, `index.html`, three near-identical and then three black
+captures) and 314 (rollover-225111, `chain.html`, the 22:30 streak). No forced roll: each time the
+model moved to another page (`verify-trace.html`, `probe.html`) before a sixth capture.
+
 **The counters are the goal's, not the steps' sum.** Wall clock runs from the first step that
 started, and tokens are what the goal cost across every context it lived in — thinking, tool
 calls and the rollover itself included. Reading the step column instead inherited every error in

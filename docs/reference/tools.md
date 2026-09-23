@@ -66,6 +66,10 @@ measured, it appears only in the SwiftShader arm, and the string is in the `chro
 binary and in no `libnvidia-*`. The result opens as a tab in the
 [browser panel](../user-guide/browser.md).
 
+In goal mode, a run of `render_page` captures of one page that come back blank or nearly the same
+is counted: after 3 the next nudge says to bisect, and after 6 the context rolls over with a list
+of what was tried (#268, see [goals and subagents](../user-guide/goals-and-subagents.md)).
+
 ### `run_command` (#207, #218)
 
 `run_command(command, cwd=<working area>)` — one shell line, bash on Linux, cmd.exe on

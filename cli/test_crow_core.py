@@ -15416,6 +15416,81 @@ class TheJudgeHasFreshEyesTests(unittest.TestCase):
         self.assertIs(crow_core.TOOL_IMPL["judge"], crow_core.tool_judge)
 
 
+class TheRenderLoopIsCountedTests(unittest.TestCase):
+    """#268. What makes a capture "stuck": a blank verdict, a decoded frame
+    at 98 % one colour or more, or near-identical metrics of the same page."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-loop-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def black_png(self, name, size=8):
+        import zlib
+        raw = b"".join(b"\x00" + b"\x00\x00\x00" * size for _ in range(size))
+
+        def chunk(kind, body):
+            return (len(body).to_bytes(4, "big") + kind + body
+                    + (zlib.crc32(kind + body) & 0xFFFFFFFF).to_bytes(4, "big"))
+        head = size.to_bytes(4, "big") * 2 + bytes([8, 2, 0, 0, 0])
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head)
+                     + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+        return path
+
+    def result(self, path, size=18244, metrics=""):
+        return ("%s -- %d bytes, 1280x720, done, software (swiftshader)\n"
+                "%sread_image it to look at the page." % (path, size, metrics))
+
+    def test_a_decoded_black_frame_is_stuck_without_any_warning(self):
+        """The 22:30 frames were 99.2-99.4 % one colour: under #213's 99.9 %
+        blank line, so no warning -- the decoded share still says it."""
+        sig = crow_core.render_signature(self.result(self.black_png("a.png")),
+                                         "chain.html")
+        self.assertEqual(sig["blank"], "100.0 % one colour")
+
+    def test_a_failed_render_is_not_a_capture(self):
+        self.assertIsNone(crow_core.render_signature(
+            "error: the browser wrote no screenshot (timed out)", "x.html"))
+
+    def test_metrics_decide_when_both_captures_have_them(self):
+        m1 = ("metrics: content box x 530-760, y 220-510 of 1280x720 -- "
+              "coverage 7.2 %% (~65 of the frame's ~895 visual tokens)\n"
+              "metrics: 1480 distinct colours in 9216 sampled px; luma mean "
+              "14/255; luma histogram (8 bins of 32, %%): 93 4 2 1 0 0 0 0\n")
+        m2 = m1.replace("1480 distinct", "1502 distinct")
+        m3 = m1.replace("coverage 7.2", "coverage 61.0")
+        a = crow_core.render_signature(self.result("/x/r1.png", 700000, m1 % ()), "i.html")
+        b = crow_core.render_signature(self.result("/x/r2.png", 400000, m2 % ()), "i.html")
+        c = crow_core.render_signature(self.result("/x/r3.png", 700000, m3 % ()), "i.html")
+        self.assertTrue(crow_core.render_same(a, b), "size differs, metrics agree")
+        self.assertFalse(crow_core.render_same(a, c))
+        other = dict(b, target="other.html")
+        self.assertFalse(crow_core.render_same(a, other), "another page")
+
+    def test_without_metrics_size_decides(self):
+        a = crow_core.render_signature(self.result("/x/r1.png", 424358), "v.html")
+        b = crow_core.render_signature(self.result("/x/r2.png", 424369), "v.html")
+        c = crow_core.render_signature(self.result("/x/r3.png", 451481), "v.html")
+        self.assertTrue(crow_core.render_same(a, b))
+        self.assertFalse(crow_core.render_same(b, c))
+
+    def test_due_nudges_at_three_rolls_once_at_six(self):
+        state = {"current": "p", "rolls": 0,
+                 "targets": {"p": {"streak": 3, "said": 0, "tried": ["x"]}}}
+        self.assertEqual(crow_core.goal_render_due(state), "nudge")
+        self.assertIsNone(crow_core.goal_render_due(state))
+        state["targets"]["p"]["streak"] = 6
+        self.assertEqual(crow_core.goal_render_due(state), "roll")
+        state["targets"]["p"].update(streak=6, said=0)
+        self.assertEqual(crow_core.goal_render_due(state), "nudge",
+                         "one roll per step, then the nudge")
+        text = crow_core.goal_render_nudge(4, state, rolled=True)
+        self.assertTrue(text.startswith(crow_core.GOAL_NUDGE_MARK))
+        self.assertIn("- x", text)
+        self.assertIn("bisect", text)
+
+
 class AVisualStepNeedsAPictureTests(unittest.TestCase):
     """#267. 2026-09-23: 9/9 `done`, every note "verified on
     screen", over a small purple box in a black frame. A visual step's
