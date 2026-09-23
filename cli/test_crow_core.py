@@ -4242,6 +4242,81 @@ class CwdGuardTests(unittest.TestCase):
         self.assertIsNone(crow_core.run_command_cwd_refusal("{not json"))
 
 
+class ANearMissDirectoryIsAskedOnceTests(unittest.TestCase):
+    """#244: write_file/append_file created any missing parent in
+    silence. Measured: 2026-09-18 msg 238 wrote `testcases/w/fs.py` while the
+    file's own text named `testcases/work`; 2026-09-19 msg 51 wrote under
+    `build/gen_scene2.py\\nparameter>\\n<parameter name="path">/...` and
+    the next call found no file."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-nearmiss-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(crow_core._NEW_DIR_ASKED.clear)
+        for d in ("work", "src", "test"):
+            os.mkdir(os.path.join(self.root, d))
+
+    def at(self, *parts):
+        return os.path.join(self.root, *parts)
+
+    def test_a_truncated_sibling_is_refused_and_named(self):
+        out = crow_core.tool_write_file(self.at("w", "fs.py"), "x = 1\n")
+        self.assertTrue(out.startswith("error:"), out)
+        self.assertIn(self.at("work", "fs.py"), out)
+        self.assertFalse(os.path.exists(self.at("w")), "the directory was created")
+
+    def test_a_typo_of_a_sibling_is_refused_and_named(self):
+        out = crow_core.tool_write_file(self.at("wrok", "a.py"), "1")
+        self.assertTrue(out.startswith("error:"), out)
+        self.assertIn(self.at("work", "a.py"), out)
+        self.assertFalse(os.path.exists(self.at("wrok")))
+
+    def test_the_same_call_again_creates_it_and_says_so(self):
+        """A NEW DIRECTORY STILL WORKS: the second identical call goes through."""
+        crow_core.tool_write_file(self.at("tests", "t.py"), "1")
+        out = crow_core.tool_write_file(self.at("tests", "t.py"), "1")
+        self.assertTrue(out.startswith("wrote 1 bytes to"), out)
+        self.assertIn("new directory: %s" % self.at("tests"), out)
+        self.assertTrue(os.path.isfile(self.at("tests", "t.py")))
+
+    def test_a_new_directory_with_no_lookalike_is_created_at_once(self):
+        """POSITIVE CONTROL: the common case costs nothing -- and is said."""
+        out = crow_core.tool_write_file(self.at("docs", "api", "index.md"), "#\n")
+        self.assertTrue(out.startswith("wrote 2 bytes to"), out)
+        self.assertIn("new directory: %s" % self.at("docs"), out)
+        self.assertTrue(os.path.isfile(self.at("docs", "api", "index.md")))
+
+    def test_an_existing_directory_is_unchanged(self):
+        """POSITIVE CONTROL: the result stays the exact line it was."""
+        path = self.at("work", "a.py")
+        self.assertEqual(crow_core.tool_write_file(path, "1"),
+                         "wrote 1 bytes to %s" % path)
+
+    def test_a_control_character_in_the_path_is_refused_always(self):
+        bad = self.at("src", "gen.py\nparameter>\n<parameter name=\"path\">",
+                      "x.py")
+        for _ in range(2):
+            out = crow_core.tool_write_file(bad, "1")
+            self.assertTrue(out.startswith("error:"), out)
+        self.assertEqual(os.listdir(self.at("src")), [])
+
+    def test_a_trailing_newline_is_refused_and_the_clean_path_named(self):
+        """Measured 4x: `pipeline.py\\n` became a second file beside
+        `pipeline.py`, and the model then checked the stale one."""
+        path = self.at("work", "pipeline.py")
+        out = crow_core.tool_write_file(path + "\n", "1")
+        self.assertTrue(out.startswith("error:"), out)
+        self.assertIn("did you mean: %s" % path, out)
+        self.assertEqual(os.listdir(self.at("work")), [])
+
+    def test_append_file_follows_the_same_rule(self):
+        out = crow_core.tool_append_file(self.at("w", "log.txt"), "a")
+        self.assertTrue(out.startswith("error:"), out)
+        self.assertFalse(os.path.exists(self.at("w")))
+
+
 class FilesystemRootIsNoMandateTests(unittest.TestCase):
     """#221: a lone `/` in a user-role message mandated `/`, and a
     mandate on `/` releases every path. Measured on the 2026-09-22 diorama

@@ -9768,6 +9768,101 @@ def tool_read_file(path: str, start_line: int | None = None, end_line: int | Non
     return _clip(data)
 
 
+# #244. A WRITE DOES NOT INVENT A PLACE IN SILENCE. Both writers ran
+# `os.makedirs(..., exist_ok=True)`, so a wrong path became disk state and the
+# success line hid it. Measured in the stored sessions (2026-09-23 copies):
+# `testcases/w/fs.py` written beside `testcases/work/` (2026-09-18 msg 238,
+# the file's own text named `work`); six write paths with a control
+# character, four of them `name\n` -- a second FILE beside the meant one,
+# after which the model checked the stale original (`pipeline.py`,
+# `src/terrain.js`); one `gen_scene2.py\nparameter>\n<parameter ...>/...`
+# directory chain from a leaked tool-call tail. aider asks the user before any
+# new file ("Create new file?"), OpenHands' editor never creates parents,
+# Claude Code prompts per write; `auto` has none of those gates, so the check
+# is here: control characters always refused, a lookalike of an existing
+# directory refused ONCE (the identical call again means it), and every
+# directory a write creates is said in its result.
+_NEW_DIR_ASKED: "set[str]" = set()
+
+
+def _control_refusal(path: str) -> "str | None":
+    """#244: the refusal for a path holding U+0000-U+001F, or None."""
+    if not any(ord(ch) < 32 for ch in path):
+        return None
+    lines = ["error: refusing to write %r: the path holds a control character "
+             "(a newline or tab), which no file here is meant to have. Nothing "
+             "was created." % path]
+    clean = path.strip()
+    if clean and not any(ord(ch) < 32 for ch in clean):
+        lines.append("did you mean: %s" % clean)
+    return "\n".join(lines)
+
+
+def _first_missing_dir(path: str) -> "tuple[str, str] | None":
+    """#244: (the deepest existing directory, the first missing name under it)
+    on the way to `path`'s parent, or None when the parent exists."""
+    here = os.path.dirname(os.path.abspath(path))
+    missing = None
+    while not os.path.isdir(here):
+        up = os.path.dirname(here)
+        if up == here:
+            return None
+        missing, here = os.path.basename(here), up
+    return (here, missing) if missing else None
+
+
+def _lookalike_dir(name: str, parent: str) -> "str | None":
+    """#244: the one existing directory in `parent` that `name` is a near miss
+    of (#221's metric) or a proper prefix of (`w` for `work`), else None."""
+    try:
+        with os.scandir(parent) as it:
+            dirs = []
+            for entry in it:
+                if entry.is_dir():
+                    dirs.append(entry.name)
+                if len(dirs) > NEAR_MISS_SCAN:
+                    return None
+    except OSError:
+        return None
+    key = _name_key(name)
+    cap = _near_edits(name)
+    scored = sorted((_edits(key, _name_key(d), cap), d) for d in dirs)
+    scored = [(n, d) for n, d in scored if n <= cap]
+    if scored and (len(scored) == 1 or scored[1][0] > scored[0][0]):
+        return scored[0][1]
+    longer = [d for d in dirs if _name_key(d).startswith(key) and _name_key(d) != key]
+    return longer[0] if len(longer) == 1 else None
+
+
+def new_dir_check(path: str, tool: str) -> "tuple[str | None, str | None]":
+    """#244: (refusal or None, the first directory this write would create).
+
+    Called after the boundary, before anything touches the disk."""
+    refused = _control_refusal(path)
+    if refused:
+        return refused, None
+    gap = _first_missing_dir(path)
+    if gap is None:
+        return None, None
+    parent, name = gap
+    made = os.path.join(parent, name)
+    near = _lookalike_dir(name, parent)
+    if near is None or _resolve(made) in _NEW_DIR_ASKED:
+        return None, made
+    _NEW_DIR_ASKED.add(_resolve(made))
+    rest = os.path.relpath(os.path.abspath(path), made)
+    meant = os.path.join(parent, near, rest)
+    return ("error: %s was not written: the directory %s does not exist, and "
+            "%s beside it does.\ndid you mean: %s\nNothing was created. If a "
+            "new directory `%s` is really meant, call %s again with the same "
+            "path." % (path, made, os.path.join(parent, near), meant, name,
+                       tool)), None
+
+
+def _said_new_dir(made: "str | None") -> str:
+    return " (new directory: %s)" % made if made else ""
+
+
 def tool_write_file(path: str, content: str = "", **_) -> str:
     # THE BOUNDARY GOES FIRST, ahead of read-before-write, and the order is not
     # cosmetic: reads are NOT bounded, so a path outside the root would answer
@@ -9788,6 +9883,9 @@ def tool_write_file(path: str, content: str = "", **_) -> str:
                 f"this conversation{READ_SCOPE_HINT}. Call read_file on it, then write.")
     if state[0] == "changed":
         return f"error: refusing to overwrite {path}: {READ_STALE}"
+    refused, made = new_dir_check(path, "write_file")          # #244
+    if refused:
+        return refused
     try:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "w", encoding="utf-8", newline="") as fh:
@@ -9795,7 +9893,7 @@ def tool_write_file(path: str, content: str = "", **_) -> str:
     except OSError as exc:
         return f"error: could not write {path}: {exc}"
     _mark_read(path)                                # #215-H: crow knows these bytes
-    return f"wrote {len(content)} bytes to {path}"
+    return f"wrote {len(content)} bytes to {path}" + _said_new_dir(made)
 
 
 def tool_append_file(path: str, content: str = "", **_) -> str:
@@ -9815,6 +9913,9 @@ def tool_append_file(path: str, content: str = "", **_) -> str:
     known = _read_state(path)[0] == "fresh"
     if content and not content.endswith("\n"):
         content += "\n"
+    refused, made = new_dir_check(path, "append_file")         # #244
+    if refused:
+        return refused
     try:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "a", encoding="utf-8", newline="") as fh:
@@ -9825,7 +9926,8 @@ def tool_append_file(path: str, content: str = "", **_) -> str:
         _mark_read(path)
     total = os.path.getsize(path)
     verb = "appended to" if existed else "created"
-    return f"{verb} {path} (+{len(content)} bytes, file now {total} bytes)"
+    return (f"{verb} {path} (+{len(content)} bytes, file now {total} bytes)"
+            + _said_new_dir(made))
 
 
 def tool_edit_file(path: str, old: str = "", new: "str | None" = None, **_) -> str:
