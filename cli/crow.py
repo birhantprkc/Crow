@@ -902,22 +902,29 @@ class TerminalTurnEvents(TurnEvents):
         print(f"\n{crow_core.ABORT_NOTE}\n", file=self._out)
 
     def turn_note(self, message: str) -> None:
-        # #217: THE TERMINAL HEARS THE SAME NOTES THE WINDOW DRAWS. Without
-        # this a discarded degenerate round left its stub on screen and the
-        # re-request streamed behind it with nothing saying why.
+        # #217: THE TERMINAL HEARS THE SAME NOTES THE WINDOW DRAWS -- today the
+        # server reboot and load-wait lines. A log-only status note (see
+        # crow_core.LOG_ONLY_NOTE_PREFIXES) goes to crow.log instead.
+        if crow_core.note_is_log_only(message):
+            crow_core.log_note(message, "turn")
+            return
         print(f"{DIM}[{message}]{RESET}\n", file=self._out)
 
     def round_finished(self, timings: dict) -> None:
         line_out = format_timings(timings) if self._rounds else ""
         print(f"\n\n[{line_out}]\n" if line_out else "\n", file=self._out)
 
+    # #262: THE SAME RULE AS THE WINDOW. Crow's own status lines
+    # about its machinery go to crow.log with a timestamp, not onto the screen
+    # between the answers. The forced round that follows a spent budget is
+    # still drawn; only the grey line about it moved.
     def cache_promise_broken(self) -> None:
-        print(f"{DIM}[the restored cache did not hold -- that prefill was the whole "
-              f"conversation, not a resume]{RESET}\n", file=self._out)
+        crow_core.log_note("the restored cache did not hold -- that prefill was "
+                           "the whole conversation, not a resume", "turn")
 
     def budget_spent(self, budget: int) -> None:
-        print(f"{DIM}[tool budget spent after {budget} rounds -- answering from what it "
-              f"has; --max-tool-rounds raises it]{RESET}\n", file=self._out)
+        crow_core.log_note(f"tool budget spent after {budget} rounds -- answering "
+                           f"from what it has; --max-tool-rounds raises it", "turn")
 
     def tool_started(self, name: str, arguments: str) -> None:
         arg_note = format_tool_args(arguments)

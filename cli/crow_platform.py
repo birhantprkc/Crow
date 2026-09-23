@@ -32,6 +32,7 @@ THE LAYOUT, and Windows does not move:
     session/, booted.json,     %LOCALAPPDATA%\Crow\...      ~/.local/state/crow/...
       git_events.json
     llama-server boot logs     <cwd>\runs\                  ~/.local/state/crow/log/
+    crow.log (Crow's own)      %LOCALAPPDATA%\Crow\log\     ~/.local/state/crow/log/
     models                     <install>\models             $CROW_MODELS, else
                                                             <install>/models
     llama-server binary        <install>\bin\               <install>/bin/, then

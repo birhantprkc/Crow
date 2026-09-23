@@ -132,6 +132,8 @@ crow_core.SESSION_DIR = os.path.join(_NOWHERE, "session")
 crow_core.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
 crow_core.SKILLS_DIR = os.path.join(_NOWHERE, "skills")
 crow_core.USER_PATH = os.path.join(_NOWHERE, "USER.md")
+# #262: Crow's own log file, never the real one under the state dir.
+crow_core.LOG_FILE = os.path.join(_SANDBOX, "log", "crow.log")
 crow_gui.PASTE_DIR = os.path.join(_NOWHERE, "pastes")
 crow_gui.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
 crow_gui.SETTINGS_FILE = os.path.join(_SANDBOX, "has-no-settings", "settings.json")
@@ -9884,13 +9886,24 @@ class TheGoalEngineBrakesOnAnEmptyLoopTests(ApiCase):
         self.assertIn("tool call", recovery)
         self.assertNotIn("Do it now.", recovery)
 
-    def test_robin_is_told_that_history_disappeared(self):
-        """Geschichte still zu loeschen waere schlimmer als der Kreis: beim
-        naechsten Blick fehlten Nachrichten und nichts sagte warum."""
+    def test_the_dropped_history_is_logged_not_drawn(self):
+        """Geschichte still zu loeschen waere schlimmer als der Kreis -- also
+        steht es mit Zeitstempel in crow.log. #262 (robin,
+        2026-09-23): NICHT im Verlauf und nicht im Notizband des Chats, dort
+        stand "157 messages of an empty loop dropped" als Unordnung."""
         api = self.api()
+        logs = tempfile.mkdtemp(prefix="crow-log-")
+        self.addCleanup(shutil.rmtree, logs, True)
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        crow_core.LOG_FILE = os.path.join(logs, "crow.log")
         self.looped(api)
-        self.assertTrue(any("dropped from the history" in n
-                            for n in self.notes(api)), self.notes(api))
+        self.assertFalse(any("dropped from the history" in n
+                             for n in self.notes(api)))
+        self.assertFalse(any("dropped from the history" in n.get("t", "")
+                             for n in api._notes), "saved with the chat")
+        with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+            self.assertIn("[goal] goal mode: 6 messages of an empty loop "
+                          "dropped from the history", fh.read())
 
     def test_an_empty_answer_after_the_recovery_stops_the_goal(self):
         """Kein zweiter Versuch: wer auch auf eine frisch geschnittene
@@ -9971,6 +9984,97 @@ class TheGoalEngineBrakesOnAnEmptyLoopTests(ApiCase):
         self.assertIn("Next is step 2: write the fix", api._goal_nudge())
 
 
+class CrowStatusNotesGoToTheLogTests(ApiCase):
+    """#262 (robin, 2026-09-23): Crow's own grey status lines about
+    its machinery clutter a long session. They go to crow.log; the rollover
+    card, its "rolled over" line, "goal mode stopped/paused", the reboot lines
+    and every answer to a command stay in the chat."""
+
+    LOG_ONLY = (
+        "goal mode: 157 messages of an empty loop dropped from the history",
+        "goal mode, step 4: the same failure keeps coming back -- edit_file "
+        "refused 3\u00d7 the same way. The nudge names the way around it.",
+        "discarded a degenerate reply (stub, 15 chars, seed 7) -- asking "
+        "again with a new seed",
+        "kept the re-asked reply although it looks unfinished (stub again)",
+        "the restored cache did not hold -- that prefill was the whole history",
+    )
+    KEPT = (
+        "rolled over at 179,000 tokens -> rollover-20260923-195925.json",
+        "goal mode stopped: the model repeated an empty answer 3 times at "
+        "127,690 tokens; 6 of 9 steps done",
+        "goal mode stopped after 60 turns -- 2 of 5 steps done. `/goal` shows "
+        "where it stands.",
+        "goal mode paused: step 1 has taken 25 turns. `/goal` shows where it "
+        "stands -- a typed line carries on.",
+        "the server on port 8080 is still loading -- waiting",
+        "goal: Neon night market voxel diorama -- 9 steps.",
+        "working directory: /tmp/x (bound)",
+        "carried across the cut: edit_file",
+    )
+
+    def setUp(self) -> None:
+        super().setUp()
+        logs = tempfile.mkdtemp(prefix="crow-log-")
+        self.addCleanup(shutil.rmtree, logs, True)
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        crow_core.LOG_FILE = os.path.join(logs, "crow.log")
+
+    def logged(self) -> str:
+        try:
+            with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+                return fh.read()
+        except OSError:
+            return ""
+
+    def test_a_log_only_note_pushed_anywhere_is_neither_drawn_nor_saved(self):
+        api = self.api()
+        for text in self.LOG_ONLY:
+            api.push({"k": "note", "t": text})
+        self.assertEqual(self.drained(api), [])
+        self.assertEqual(api._notes, [])
+        for text in self.LOG_ONLY:
+            self.assertIn(" ".join(text.split()), self.logged())
+
+    def test_everything_else_still_reaches_the_page_and_the_band(self):
+        """NEGATIVE: nothing else disappears."""
+        api = self.api()
+        for text in self.KEPT:
+            api.push({"k": "note", "t": text})
+        api.push({"k": "alarm", "t": "! the working area was refused"})
+        api.push({"k": "memory", "t": "Memory updated", "n": 1})
+        drawn = self.drained(api)
+        self.assertEqual([m.get("t") for m in drawn],
+                         list(self.KEPT) + ["! the working area was refused",
+                                            "Memory updated"])
+        self.assertEqual(len(api._notes), len(self.KEPT) + 2)
+        self.assertEqual(self.logged(), "")
+
+    def test_a_reopened_chat_does_not_draw_the_notes_an_old_build_saved(self):
+        """(2): session.json of 2026-09-23 carries six of these at index
+        88..212. The band drops them on read; the kept ones stay in order."""
+        band = [{"k": "note", "at": 1, "t": t}
+                for t in self.LOG_ONLY + self.KEPT]
+        band.append({"k": "memory", "at": 1, "t": "Memory updated", "n": 2})
+        clean = crow_core.clean_notes(band)
+        self.assertEqual([n["t"] for n in clean],
+                         list(self.KEPT) + ["Memory updated"])
+        api = self.api()
+        api._replay([{"role": "user", "content": "hi"}], band)
+        drawn = [m.get("t") for m in self.drained(api)
+                 if m.get("k") == "note"]
+        for text in self.LOG_ONLY:
+            self.assertNotIn(text, drawn)
+        for text in self.KEPT:
+            self.assertIn(text, drawn)
+
+    def test_the_sink_logs_a_broken_cache_promise(self):
+        put = []
+        crow_gui.Turn(put.append).cache_promise_broken()
+        self.assertEqual(put, [])
+        self.assertIn("[turn] the restored cache did not hold", self.logged())
+
+
 class TheGoalEngineNamesTheWallTests(ApiCase):
     """#202, 2026-09-22: 48 blinde Runden mit toter Suche und toten
     Delegaten, und in der Sitzung danach 22 edit_file, von denen keiner
@@ -10016,9 +10120,14 @@ class TheGoalEngineNamesTheWallTests(ApiCase):
                       "api.tavily.com, 3×) -- stop calling it", nudge)
         self.assertNotIn("read the log", nudge)
         self.assertNotIn("Continue.", nudge)
-        self.assertIn("goal mode, step 1: the same failure keeps coming back -- "
-                      "web_search dead (HTTP 401 from api.tavily.com, 3×). The "
-                      "nudge names the way around it.", self.notes(api))
+        # #262: robin's copy goes to crow.log, not into the flow;
+        # the nudge above is what the model reads, unchanged.
+        self.assertEqual(self.notes(api), [])
+        with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+            self.assertIn("[goal] goal mode, step 1: the same failure keeps "
+                          "coming back -- web_search dead (HTTP 401 from "
+                          "api.tavily.com, 3×). The nudge names the way around "
+                          "it.", fh.read())
 
     def test_a_class_spread_over_turns_counts_for_the_step(self):
         """Gezaehlt wird im Schritt, nicht im Zug: zwei, dann einer."""

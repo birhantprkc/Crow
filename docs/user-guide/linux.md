@@ -73,6 +73,7 @@ unset, which is what the specification asks for.
 | `index.db` (session search) | `~/.local/share/crow/` | `%LOCALAPPDATA%\Crow\` |
 | `session/`, `booted.json`, `git_events.json` | `~/.local/state/crow/` | `%LOCALAPPDATA%\Crow\` |
 | `llama-server` boot logs | `~/.local/state/crow/log/` | `<cwd>\runs\` |
+| Crow's own log, `crow.log` (rotated, 1 MiB × 4) | `~/.local/state/crow/log/` | `%LOCALAPPDATA%\Crow\log\` |
 | models | `<install>/models`, a link to the tree; `$CROW_MODELS` overrides it | `<install>\models` |
 | `llama-server` binary | `<install>/bin/`, then `PATH`, then `~/.local/share/crow/bin` | `<install>\bin\llama-server.exe` |
 | fonts | `~/.local/share/fonts/crow/` + `fc-cache` | `%LOCALAPPDATA%\Microsoft\Windows\Fonts` + winreg |

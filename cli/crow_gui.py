@@ -8079,9 +8079,10 @@ class Turn(TurnEvents):
             self.share = 100.0 * self._reasoning_chars / total
 
     def cache_promise_broken(self) -> None:
-        self._put({"k": "note",
-                   "t": "the restored cache did not hold -- "
-                        "that prefill was the whole history"})
+        # #262: a diagnostic about the server's cache, not about
+        # the conversation -- it goes to crow.log, not into the flow.
+        crow_core.log_note("the restored cache did not hold -- "
+                           "that prefill was the whole history", "turn")
 
     def tool_started(self, name: str, arguments: str) -> None:
         # DIE ROHEN ARGUMENTE REISEN MIT, nicht nur die gekuerzte Zeile. Die
@@ -8932,6 +8933,14 @@ class Api:
         # vergessen, sich einzutragen. `at` ist die Zahl der Nachrichten vor der
         # Marke -- das ist ihr Ort, und er gilt auch nach einem Neustart, weil
         # die Nachrichten selbst gespeichert werden.
+        # #262. DIE LETZTE TUER FUER CROWS EIGENE STATUSZEILEN: was
+        # `note_is_log_only` erkennt, geht in crow.log statt auf die Seite und
+        # ins Notizband -- auch wenn eine neue Aufrufstelle es doch pusht.
+        if (message.get("k") == "note"
+                and crow_core.note_is_log_only(message.get("t"))):
+            if not self._replaying:
+                crow_core.log_note(str(message.get("t")), "note")
+            return
         if (not self._replaying
                 and message.get("k") in crow_core.SESSION_NOTE_KINDS):
             self._notes.append(dict(message, at=len(self._conversation)))
@@ -10381,12 +10390,14 @@ class Api:
             return 0
         self._notes = [n for n in self._notes if n.get("at", 0) <= cut]
         self._timings = [t for t in self._timings if t.get("at", 0) <= cut]
-        # ROBIN SIEHT, DASS ETWAS VERSCHWUNDEN IST. Geschichte still zu
-        # loeschen waere schlimmer als der Kreis: beim naechsten Blick fehlten
-        # Nachrichten, und nichts sagte warum.
-        self.push({"k": "note",
-                   "t": "goal mode: %d message%s of an empty loop dropped from "
-                        "the history" % (dropped, "" if dropped == 1 else "s")})
+        # NICHT STILL, ABER NICHT IM CHAT (#262, robin 2026-09-23):
+        # die Zeile stand bis hier im Verlauf und fuellte ihn -- "157 messages
+        # of an empty loop dropped" und gleich danach 52 mehr. Sie ist ein
+        # Diagnosefakt und steht jetzt mit Zeitstempel in crow.log. Was robin
+        # sieht, ist "goal mode stopped", wenn die Bremse endgueltig greift.
+        crow_core.log_note("goal mode: %d message%s of an empty loop dropped "
+                           "from the history"
+                           % (dropped, "" if dropped == 1 else "s"), "goal")
         return dropped
 
     def _goal_brake(self, goal: dict, nxt: int) -> "tuple[bool, str | None]":
@@ -10541,11 +10552,14 @@ class Api:
                                         new_step=new_step)
         due = crow_core.goal_trouble_due(self._goal_trouble)
         if due:
-            self.push({"k": "note",
-                       "t": "goal mode, step %d: the same failure keeps coming "
-                            "back -- %s. The nudge names the way around it."
-                            % (nxt + 1, "; ".join(crow_core.goal_trouble_label(e)
-                                                  for e in due))})
+            # #262: the NUDGE is unchanged and still goes to the
+            # model; only robin's copy of it moved from the flow to crow.log.
+            crow_core.log_note("goal mode, step %d: the same failure keeps "
+                               "coming back -- %s. The nudge names the way "
+                               "around it."
+                               % (nxt + 1, "; ".join(
+                                   crow_core.goal_trouble_label(e)
+                                   for e in due)), "goal")
             return crow_core.goal_trouble_nudge(nxt + 1, due)
         # #202. NICHT HUNDERTMAL DERSELBE BLOCK. Der volle Anstoss ist 330 Byte
         # Anweisung; byteweise identisch vor jedem Zug wiederholt ist er selbst

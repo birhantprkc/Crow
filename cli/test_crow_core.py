@@ -123,6 +123,8 @@ crow_core.SESSION_DIR = os.path.join(_NOWHERE, "session")
 crow_core.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
 crow_core.SKILLS_DIR = os.path.join(_NOWHERE, "skills")
 crow_core.USER_PATH = os.path.join(_NOWHERE, "USER.md")
+# #262: Crow's own log file, never the real one under the state dir.
+crow_core.LOG_FILE = os.path.join(_SANDBOX, "log", "crow.log")
 
 # THE PALETTE IS PINNED FOR THIS WHOLE MODULE (#102). `crow_core._TTY` is decided
 # ONCE, at import, out of `sys.stdout.isatty()`, and the colour constants are
@@ -19680,6 +19682,70 @@ class _NotingRecorder(_TurnRecorder):
         self.log.append(("note", message))
 
 
+class CrowLogFileTests(unittest.TestCase):
+    """#262: Crow's own log file -- where it lives, what a line
+    looks like, that it rotates, and that it can never break a turn."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-log-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        crow_core.LOG_FILE = os.path.join(self.dir, "log", "crow.log")
+
+    def read(self) -> list:
+        with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+            return fh.read().splitlines()
+
+    @unittest.skipIf(sys.platform == "win32", "the XDG layout is Linux's")
+    def test_the_default_lives_under_the_state_directory(self):
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": self.dir}):
+            self.assertEqual(crow_core.default_log_file(),
+                             os.path.join(self.dir, "crow", "log", "crow.log"))
+
+    def test_a_line_carries_a_local_timestamp_with_offset_and_its_kind(self):
+        crow_core.log_note("goal mode: 2 messages\nof an empty loop", "goal")
+        (line,) = self.read()
+        self.assertRegex(line, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d{4} "
+                               r"\[goal\] goal mode: 2 messages of an empty loop$")
+
+    def test_it_rotates_and_keeps_three_backups(self):
+        self.addCleanup(setattr, crow_core, "LOG_MAX_BYTES", crow_core.LOG_MAX_BYTES)
+        crow_core.LOG_MAX_BYTES = 200
+        crow_core.LOG_FILE = os.path.join(self.dir, "rot", "crow.log")
+        for n in range(40):
+            crow_core.log_note("line %02d " % n + "x" * 60)
+        names = sorted(os.listdir(os.path.dirname(crow_core.LOG_FILE)))
+        self.assertEqual(names, ["crow.log", "crow.log.1", "crow.log.2",
+                                 "crow.log.3"])
+        self.assertIn("line 39", self.read()[-1])
+
+    def test_an_unwritable_log_never_raises(self):
+        blocker = os.path.join(self.dir, "a-file")
+        with open(blocker, "w") as fh:
+            fh.write("x")
+        crow_core.LOG_FILE = os.path.join(blocker, "log", "crow.log")
+        crow_core.log_note("the restored cache did not hold")   # no raise
+
+    def test_only_crows_machinery_notes_are_log_only(self):
+        for text in ("goal mode: 157 messages of an empty loop dropped from "
+                     "the history",
+                     "goal mode, step 4: the same failure keeps coming back",
+                     "discarded a degenerate reply (markup, 40 chars)",
+                     "kept the re-asked reply although it looks unfinished",
+                     "the restored cache did not hold -- that prefill",
+                     "tool budget spent after 24 rounds"):
+            self.assertTrue(crow_core.note_is_log_only(text), text)
+        for text in ("goal mode stopped: the model repeated an empty answer",
+                     "goal mode stopped after 60 turns -- 2 of 5 steps done.",
+                     "goal mode paused: step 1 has taken 25 turns.",
+                     "rolled over at 179000 tokens -> rollover-x.json",
+                     "carried across the cut: edit_file",
+                     "the crow-booted server on port 8080 is gone -- booting",
+                     "the server on port 8080 is still loading -- waiting",
+                     "goal: Ship it -- 2 steps.", "", None):
+            self.assertFalse(crow_core.note_is_log_only(text), text)
+
+
 class ADegenerateRoundIsAskedAgainTests(_FinishingLoopCase):
     """#217: not stored, re-requested once on the same prefix with a new
     seed, and a second one ends the turn loudly."""
@@ -19687,6 +19753,18 @@ class ADegenerateRoundIsAskedAgainTests(_FinishingLoopCase):
     def setUp(self):
         super().setUp()
         self.events = _NotingRecorder()
+        # #262: the two notes of this class go to crow.log now.
+        logs = tempfile.mkdtemp(prefix="crow-log-")
+        self.addCleanup(shutil.rmtree, logs, True)
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        crow_core.LOG_FILE = os.path.join(logs, "crow.log")
+
+    def logged(self) -> list:
+        try:
+            with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+                return fh.read().splitlines()
+        except OSError:
+            return []
 
     def _stored(self, talk):
         return [m.get("content") for m in talk.payload()
@@ -19703,8 +19781,11 @@ class ADegenerateRoundIsAskedAgainTests(_FinishingLoopCase):
         self.assertIsInstance(self.bodies[0]["seed"], int)
         self.assertNotEqual(self.bodies[0]["seed"], self.bodies[1]["seed"])
         self.assertFalse(result.stopped)
-        self.assertEqual(len(self.notes()), 1)
-        self.assertIn("markup", self.notes()[0])
+        # #262: not a line in the chat, a line in crow.log.
+        self.assertEqual(self.notes(), [])
+        self.assertEqual(len(self.logged()), 1)
+        self.assertIn("[turn] discarded a degenerate reply (markup",
+                      self.logged()[0])
         self.assertTrue(any("degenerate" in i for i in result.incidents))
         self.assertEqual(result.cost.seeds,
                          [self.bodies[0]["seed"], self.bodies[1]["seed"]])
@@ -19759,7 +19840,8 @@ class ADegenerateRoundIsAskedAgainTests(_FinishingLoopCase):
                 self.assertEqual([e for e in self.events.log if e[0] == "failed"], [])
                 self.assertEqual(self._stored(talk), ["The full picture is"])
                 self.assertNotIn(first, json.dumps(talk.payload()))
-                self.assertIn("kept the re-asked reply", self.notes()[-1])
+                self.assertEqual(self.notes(), [])
+                self.assertIn("kept the re-asked reply", self.logged()[-1])
 
     def test_the_think_only_nudge_is_unchanged(self):
         """#150 is the detector's first class; it still nudges, it does not
