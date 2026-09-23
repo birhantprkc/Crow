@@ -12724,21 +12724,40 @@ def mcp_tool_name(server: str, tool: str) -> str:
 
 # `${VAR}` IN A BLOCK, RESOLVED WHEN THE SERVER IS USED AND NEVER STORED.
 # A token written into `mcp.json` sits in a file two surfaces draw and a person
-# edits; a token named `${GITHUB_TOKEN}` sits in the environment, and what the
-# sheet shows is the placeholder. Crow already keeps `CROW_TAVILY_KEY` this way
-# -- this is the same rule for a foreign server's credentials.
+# edits; a token named `${GITHUB_TOKEN}` sits in the secret store (or, as the
+# fallback, the environment), and what the sheet shows is the placeholder.
+# Crow keeps `CROW_TAVILY_KEY` this way -- this is the same rule for a foreign
+# server's credentials.
+#
+# #195: THROUGH `secret()`, the store before the environment. Before, the
+# lookup was `os.environ` alone, so a token moved into the store by #193's
+# migration was "nothing is set" and the server was refused.
 _MCP_VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
+def _mcp_var(name: str) -> "str | None":
+    """The value for `${name}`: `secret()` -- store, then environment -- or
+    None when neither has it. `name in os.environ` keeps a variable set to ""
+    SET, as it was before #195: it expands to nothing and refuses nothing."""
+    value = secret(name)
+    if value or name in os.environ:
+        return value
+    return None
+
+
 def _mcp_expand(value) -> str:
-    """`${VAR}` from the environment. An unresolved one is left ALONE here and
-    caught in `start`, where it can be named -- silently sending the literal
-    `${GITHUB_TOKEN}` as a bearer token is a 401 nobody can explain."""
-    return _MCP_VAR.sub(lambda m: os.environ.get(m.group(1), m.group(0)), str(value))
+    """`${VAR}` from the store, else the environment. An unresolved one is
+    left ALONE here and caught in `start`, where it can be named -- silently
+    sending the literal `${GITHUB_TOKEN}` as a bearer token is a 401 nobody
+    can explain."""
+    def one(match):
+        got = _mcp_var(match.group(1))
+        return match.group(0) if got is None else got
+    return _MCP_VAR.sub(one, str(value))
 
 
 def _mcp_missing(block: dict) -> list:
-    """Which `${VAR}` in a block names nothing in the environment.
+    """Which `${VAR}` in a block names nothing in the store or the environment.
 
     ONLY THE SIX KEYS THAT REACH A PROCESS OR A REQUEST. `schema` is the
     server's own words and may legitimately contain a `${...}` in a description;
@@ -12749,7 +12768,8 @@ def _mcp_missing(block: dict) -> list:
 
     def walk(value):
         if isinstance(value, str):
-            found.extend(n for n in _MCP_VAR.findall(value) if n not in os.environ)
+            found.extend(n for n in _MCP_VAR.findall(value)
+                         if _mcp_var(n) is None)
         elif isinstance(value, list):
             for item in value:
                 walk(item)
@@ -13265,8 +13285,9 @@ class McpServer:
         # no hint of what went wrong.
         missing = _mcp_missing(self.block)
         if missing:
-            return ("the MCP server %r wants %s from the environment, and "
-                    "nothing is set" % (self.name, ", ".join(missing)))
+            return ("the MCP server %r wants %s, and nothing is set -- put it "
+                    "in %s (the environment is the fallback)"
+                    % (self.name, ", ".join(missing), SECRETS_FILE))
         endpoint = self.url()
         if endpoint is not None:
             # ONE BLOCK IS ONE TRANSPORT. Letting one of them quietly win would

@@ -7046,6 +7046,72 @@ class TheMcpConfigurationTests(unittest.TestCase):
         self.assertEqual(crow_core._mcp_missing(
             {"url": "https://x/${NOT_A_SETTING}"}), ["NOT_A_SETTING"])
 
+    # -- #195: `${VAR}` through secret(), the store before the environment ----
+
+    MCP_NAME = "CROW_TEST_MCP_STORED"
+
+    def _mcp_store(self, entries: "dict | None") -> str:
+        """A temporary store with fake entries; the real one is never read."""
+        folder = tempfile.mkdtemp(prefix="crow-mcp-secret-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "secrets.json")
+        if entries is not None:
+            with io.open(path, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(entries))
+        self.addCleanup(setattr, crow_core, "SECRETS_FILE", crow_core.SECRETS_FILE)
+        crow_core.SECRETS_FILE = path
+        os.environ.pop(self.MCP_NAME, None)
+        self.addCleanup(os.environ.pop, self.MCP_NAME, None)
+        return path
+
+    def _mcp_bearer(self) -> "crow_core.McpServer":
+        return crow_core.McpServer("x", {
+            "url": "https://example.invalid/mcp",
+            "headers": {"Authorization": "Bearer ${%s}" % self.MCP_NAME}})
+
+    def test_a_variable_only_in_the_store_expands_and_is_not_missing(self):
+        """#195: the store is where #193 put secrets. A server whose token is
+        only there was refused as "nothing is set" before anything expanded."""
+        self._mcp_store({self.MCP_NAME: "store-token-fake"})
+        server = self._mcp_bearer()
+        self.assertEqual(crow_core._mcp_missing(server.block), [])
+        self.assertEqual(server._headers()["Authorization"],
+                         "Bearer store-token-fake")
+
+    def test_a_variable_only_in_the_environment_still_expands(self):
+        """Every installation today has the variable and no store entry."""
+        self._mcp_store(None)
+        os.environ[self.MCP_NAME] = "env-token-fake"
+        server = self._mcp_bearer()
+        self.assertEqual(crow_core._mcp_missing(server.block), [])
+        self.assertEqual(server._headers()["Authorization"],
+                         "Bearer env-token-fake")
+
+    def test_the_store_wins_over_the_environment_for_a_variable(self):
+        self._mcp_store({self.MCP_NAME: "store-token-fake"})
+        os.environ[self.MCP_NAME] = "env-token-fake"
+        self.assertEqual(crow_core._mcp_expand("${%s}" % self.MCP_NAME),
+                         "store-token-fake")
+
+    def test_an_empty_environment_value_is_still_set(self):
+        """NEGATIVE: an environment variable set to "" was valid before #195
+        (it expanded to nothing and the server started). secret() answers ""
+        for it, which must not turn into a refusal."""
+        self._mcp_store(None)
+        os.environ[self.MCP_NAME] = ""
+        self.assertEqual(crow_core._mcp_missing(self._mcp_bearer().block), [])
+        self.assertEqual(crow_core._mcp_expand("a${%s}b" % self.MCP_NAME), "ab")
+
+    def test_a_variable_in_neither_place_is_refused_naming_both(self):
+        path = self._mcp_store({})
+        problem = self._mcp_bearer().start()
+        self.assertIsNotNone(problem)
+        self.assertIn(self.MCP_NAME, problem)
+        self.assertIn(path, problem)
+        self.assertIn("environment", problem)
+        self.assertIn("${%s}" % self.MCP_NAME,
+                      crow_core._mcp_expand("${%s}" % self.MCP_NAME))
+
     def test_exclude_drops_one_and_leaves_the_rest(self):
         self._write(self._server(tools={"exclude": ["get_issue"]}))
         self.assertIn("mcp_github_create_issue", self._names())
