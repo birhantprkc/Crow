@@ -14286,6 +14286,225 @@ class TheRenderBudgetCanBeMetTests(unittest.TestCase):
         self.assertNotIn("no-signal", warns[0])
 
 
+class TheConsoleSaysWhoseSpellingFailedTests(unittest.TestCase):
+    """#253. Diorama run 2026-09-23 (serve 70a69e3, Crow c4f1b3c):
+    the model's `gl2.texImage33D(...)` (a digit corruption, crow-nest#91)
+    drew Chromium's correct `texImage33D is not a function`, and the model
+    concluded "this SwiftShader has no texImage3D" while its own probe in the
+    same console printed `texImage3D=function`; `renderbufferStorage` with
+    five arguments drew INVALID_ENUM and became "no renderbuffer can be
+    created here". The console lines below are the real ones from
+    ~/.local/state/crow/session (rollover-20260923-082406 #147, session.json
+    #61/#91/#123/#127); the names are the subset of a live dump that they
+    touch (Chromium on this machine, 2026-09-23)."""
+
+    SRC = "file:///w/work/%s (%d)"
+    API = {
+        "WebGL2RenderingContext": {
+            "texImage3D": 10, "texStorage3D": 6, "texSubImage3D": 11,
+            "renderbufferStorage": 4, "renderbufferStorageMultisample": 5,
+            "clearDepth": 1, "checkFramebufferStatus": 1, "useProgram": 1,
+            "RGBA8": -1, "TEXTURE_3D": -1},
+        "WebGLRenderingContext": {
+            "renderbufferStorage": 4, "clearDepth": 1,
+            "checkFramebufferStatus": 1, "useProgram": 1},
+        "Array": {"push": 1, "map": 1},
+    }
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-hint-t-")
+        self.page = os.path.join(self.dir, "p5.html")
+        with open(self.page, "w", encoding="utf-8") as fh:
+            fh.write("<script>\n" * 12 +
+                     "  try { gl.renderbufferStorage(gl.RENDERBUFFER, 0, fmt, "
+                     "w, h); }\n"
+                     "gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, 4, 4);\n")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def line(self, text: str, name: str = "chain_api.html", n: int = 23) -> str:
+        return '"%s", source: %s' % (text, self.SRC % (name, n))
+
+    def test_the_digit_corruption_gets_the_real_name_and_the_own_probe(self):
+        console = [
+            self.line("3D ERR: gl2.texImage33D is not a function"),
+            self.line("API 3D: texImage3D=function texStorage3D=function "
+                      "texSubImage3D=function texSub3D=undefined 2D=function "
+                      "arr=yes", n=27)]
+        hints = crow_core._console_hints(console, self.API)
+        self.assertEqual(len(hints), 1, hints)
+        self.assertIn("texImage33D is not a name in this browser", hints[0])
+        self.assertIn("WebGL2RenderingContext has texImage3D, 1 edit away "
+                      '(one "3" too many)', hints[0])
+        self.assertIn("The page's own console reports texImage3D=function "
+                      "(chain_api.html:27)", hints[0])
+        self.assertIn("in the page's code, not a missing platform feature",
+                      hints[0])
+
+    def test_without_live_names_the_page_probe_alone_carries_it(self):
+        """Windows (no devtools pipe) or an evaluate with no answer: only
+        what the page itself printed is claimed."""
+        console = [
+            self.line("3D ERR: gl2.texImage33D is not a function"),
+            self.line("API 3D: texImage3D=function", n=27)]
+        hints = crow_core._console_hints(console, None)
+        self.assertEqual(len(hints), 1, hints)
+        self.assertIn("texImage33D failed here, while texImage3D", hints[0])
+        self.assertNotIn("not a name in this browser", hints[0])
+        self.assertEqual(crow_core._console_hints(
+            [self.line("Uncaught TypeError: gl.clearDepthf is not a "
+                       "function")], None), [],
+            "no live names and no probe line: nothing to claim")
+
+    def test_opengl_es_names_map_to_their_webgl_names(self):
+        hints = crow_core._console_hints([self.line(
+            "Uncaught TypeError: gl.clearDepthf is not a function",
+            "draw_test.html", 20)], self.API)
+        self.assertEqual(len(hints), 1, hints)
+        self.assertIn("WebGL2RenderingContext has clearDepth", hints[0])
+        self.assertIn('one "f" too many', hints[0])
+
+    def test_an_invented_name_is_named_as_not_api(self):
+        hints = crow_core._console_hints([self.line(
+            "Uncaught TypeError: gl.checkTextureStatus is not a function",
+            "qB.html", 17)], self.API)
+        self.assertEqual(len(hints), 1, hints)
+        self.assertIn("checkTextureStatus exists on no interface", hints[0])
+        self.assertIn("the platform is not missing a feature", hints[0])
+        self.assertIn("checkFramebufferStatus", hints[0])
+
+    def test_a_real_name_on_the_wrong_object_says_so(self):
+        hints = crow_core._console_hints([self.line(
+            "Uncaught TypeError: gl.texImage3D is not a function")],
+            self.API)
+        self.assertEqual(len(hints), 1, hints)
+        self.assertIn("texImage3D is a real name in this browser, on "
+                      "WebGL2RenderingContext", hints[0])
+        self.assertIn('ask for "webgl2"', hints[0])
+
+    def test_the_page_own_functions_and_short_names_get_no_api_hint(self):
+        """A bare `useProgramm()` is the page's own name; the browser's names
+        answer only a member call or a probe line; a name under four
+        characters is too short for a near match to mean anything."""
+        self.assertEqual(crow_core._console_hints([
+            self.line("Uncaught TypeError: useProgramm is not a function"),
+            self.line("Uncaught TypeError: a.ma is not a function")],
+            self.API), [])
+
+    def test_five_arguments_to_renderbuffer_storage_are_counted(self):
+        line = ('"WebGL: INVALID_ENUM: renderbufferStorage: invalid '
+                'internalformat", source: file://%s (13)' % self.page)
+        hints = crow_core._console_hints([line, line, line], self.API,
+                                         self.page)
+        self.assertEqual(len(hints), 1, "one hint per call site: %r" % hints)
+        h = hints[0]
+        self.assertIn("p5.html:13 calls renderbufferStorage with 5 arguments "
+                      "(gl.RENDERBUFFER, 0, fmt, w, h)", h)
+        self.assertIn("WebGL2RenderingContext.renderbufferStorage takes 4", h)
+        self.assertIn("it read (gl.RENDERBUFFER, 0, fmt, w)", h)
+        self.assertIn("renderbufferStorageMultisample takes 5", h)
+        self.assertIn("not from the platform", h)
+
+    def test_a_call_with_the_right_count_gets_no_signature_hint(self):
+        """session.json #135: `useProgram: program not valid` is a real
+        shader failure, not a signature slip -- and line 14 here is a
+        four-argument call."""
+        line = ('"WebGL: INVALID_ENUM: renderbufferStorage: invalid '
+                'internalformat", source: file://%s (14)' % self.page)
+        self.assertEqual(crow_core._console_hints([line], self.API,
+                                                  self.page), [])
+
+    def test_a_source_outside_the_page_folder_is_not_read(self):
+        outside = tempfile.mkdtemp(prefix="crow-hint-out-")
+        self.addCleanup(shutil.rmtree, outside, True)
+        other = os.path.join(outside, "x.html")
+        shutil.copy(self.page, other)
+        line = ('"WebGL: INVALID_ENUM: renderbufferStorage: invalid '
+                'internalformat", source: file://%s (13)' % other)
+        self.assertEqual(crow_core._console_hints([line], self.API,
+                                                  self.page), [])
+
+    def test_call_arguments_respect_brackets_strings_and_a_trailing_comma(self):
+        split = crow_core._call_args(
+            "a.f(g(1, 2), [3, 4], 'x,y', {k: 5},); f(); b.f(7", "f")
+        self.assertEqual(split, [["g(1, 2)", "[3, 4]", "'x,y'", "{k: 5}"], []])
+
+    def test_edit_distance_counts_a_swap_as_one(self):
+        self.assertEqual(crow_core._edit_distance("texImage33D",
+                                                  "texImage3D", 2), 1)
+        self.assertEqual(crow_core._edit_distance("ab", "ba", 2), 1)
+        self.assertEqual(crow_core._edit_distance("checkTextureStatus",
+                                                  "checkFramebufferStatus",
+                                                  2), 3)
+
+    # -- the live names -------------------------------------------------
+
+    PNG = TheRenderBudgetCanBeMetTests.PNG
+    _peer = TheRenderBudgetCanBeMetTests._peer
+
+    def _run_with(self, value):
+        import base64 as _b64
+        self.seen: list[dict] = []
+        shot = os.path.join(self.dir, "shot.png")
+
+        def answer(msg):
+            method, mid = msg.get("method"), msg.get("id")
+            if method == "Target.createTarget":
+                return [{"id": mid, "result": {"targetId": "T1"}}]
+            if method == "Target.attachToTarget":
+                return [{"id": mid, "result": {"sessionId": "S1"}}]
+            if method == "Page.navigate":
+                return [{"id": mid, "result": {}, "sessionId": "S1"},
+                        {"method": "Page.loadEventFired", "params": {},
+                         "sessionId": "S1"}]
+            if method == "Page.captureScreenshot":
+                return [{"id": mid, "sessionId": "S1", "result": {
+                    "data": _b64.b64encode(self.PNG).decode()}}]
+            if method == "Runtime.evaluate":
+                return ([] if value is None else
+                        [{"id": mid, "sessionId": "S1",
+                          "result": {"result": {"type": "object",
+                                                "value": value}}}])
+            return [{"id": mid, "result": {}}]
+        dt, _ = self._peer(answer)
+        api: dict = {}
+        real = crow_core.RENDER_PROBE_S
+        crow_core.RENDER_PROBE_S = 0.5
+        try:
+            got = crow_core._render_over_devtools(
+                dt, "file:///x/index.html", 640, 360, 200, shot,
+                load_s=0.6, capture_s=0.6, api=api)
+        finally:
+            crow_core.RENDER_PROBE_S = real
+        return got, api
+
+    def test_the_names_come_from_the_page_after_the_capture(self):
+        (captured, reason), api = self._run_with(self.API)
+        self.assertTrue(captured, reason)
+        self.assertEqual(api, self.API)
+        methods = [m.get("method") for m in self.seen]
+        self.assertLess(methods.index("Page.captureScreenshot"),
+                        methods.index("Runtime.evaluate"))
+        ev = [m for m in self.seen if m.get("method") == "Runtime.evaluate"][0]
+        self.assertTrue(ev["params"]["returnByValue"])
+        self.assertTrue(ev["params"]["silent"])
+        self.assertIn("getOwnPropertyNames(globalThis)",
+                      ev["params"]["expression"])
+
+    def test_a_page_that_never_answers_keeps_its_capture(self):
+        (captured, reason), api = self._run_with(None)
+        self.assertTrue(captured, reason)
+        self.assertEqual(api, {})
+
+    def test_the_tool_puts_the_hints_under_the_warnings(self):
+        src = inspect.getsource(crow_core.tool_render_page)
+        self.assertIn("_console_hints(_console_lines(log_text, 0), api,", src)
+        self.assertIn("api=api", src)
+        self.assertLess(src.index("said = _capture_warnings("),
+                        src.index("said.extend(hints)"))
+
+
 class TheModelCanLookAtAnImageTests(unittest.TestCase):
     """#170. Das Werkzeug, mit dem das Modell selbst ein Bild aufmacht.
 
