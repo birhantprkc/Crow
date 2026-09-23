@@ -666,14 +666,17 @@ def _systemctl_user(*args: str) -> str:
         return ""
 
 
-def scope_result(unit: str, settle: float = 0.5) -> str:
+def scope_result(unit: str, settle: float = 2.0) -> str:
     """How the named scope ended: systemd's Result= ("oom-kill", "success", ...).
 
     A FACT FROM THE UNIT, NOT A GUESS FROM THE EXIT CODE. -9 is also what a
     `kill -9 $$` gives, and a reason the model acts on has to be the real one.
     Measured 2026-09-22, 8 of 8: the first query right after the shell's -9
     already read `failed oom-kill`; `settle` covers a unit still marked
-    active/deactivating. A failed unit stays loaded until reset-failed -- it is
+    active/deactivating. 2 s and not 0.5: on CI (systemd 255, 2026-09-23) the
+    journal logged "Failed with result 'oom-kill'" for a scope this query had
+    already given up on. It is paid only after a -9, and only while systemd
+    still calls the unit active. A failed unit stays loaded until reset-failed -- it is
     reset here, so the kill leaves no row in `systemctl --user --failed`.
     """
     import time
@@ -708,12 +711,16 @@ def session_oom_kills() -> "int | None":
     """
     if IS_WINDOWS:
         return None
+    # CACHED ONLY ONCE KNOWN. Before the first scope lands in session.slice
+    # the slice is not loaded and ControlGroup reads "" -- measured on CI
+    # 2026-09-23, where caching that "" left the count None for good.
     if not _SLICE_CGROUP:
-        _SLICE_CGROUP.append(_systemctl_user(
-            "show", "session.slice", "-p", "ControlGroup", "--value").strip())
+        path = _systemctl_user(
+            "show", "session.slice", "-p", "ControlGroup", "--value").strip()
+        if not path.startswith("/"):
+            return None
+        _SLICE_CGROUP.append(path)
     path = _SLICE_CGROUP[0]
-    if not path.startswith("/"):
-        return None
     try:
         with open("/sys/fs/cgroup" + path + "/memory.events", encoding="ascii") as fh:
             for line in fh:
