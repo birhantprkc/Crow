@@ -13363,6 +13363,9 @@ class Api:
         # #154: der Digest-Cap, gleiche Tuer -- fehlt der Schluessel, gilt der
         # Kern-Default; 0 schaltet ab. Der Setter frisst Unsinn selbst.
         crow_core.rollover_digest_set(doc.get("rollover_digest_tokens"))
+        # #263: tool-result clearing, same door. Missing key: the endpoint
+        # default (on at home, off remote); 0 switches it off.
+        crow_core.context_clear_set(doc.get("context_clear_at"))
         try:
             return max(0, int(doc.get("turn_token_budget") or 0))
         except (TypeError, ValueError):

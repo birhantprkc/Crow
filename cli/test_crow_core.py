@@ -20060,6 +20060,237 @@ class AnAbortIsNeverAnAnswerTests(unittest.TestCase):
         self.assertEqual(self._review("stop"), ["memory"])
 
 
+def _png_url(width: int, height: int) -> str:
+    """A data URL whose PNG header says width x height -- all `_image_tokens` reads."""
+    import base64
+    head = (b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR"
+            + struct.pack(">II", width, height) + b"\x08\x02\x00\x00\x00")
+    return "data:image/png;base64," + base64.b64encode(head + b"\x00" * 16).decode()
+
+
+def _rounds_talk(n_rounds: int, size: int = 4000, head: str = "SYS") -> "crow_core.Conversation":
+    """A goal-run shape: one user line, then `n_rounds` of read_file + result."""
+    talk = crow_core.Conversation(head)
+    talk.append("user", "build the thing")
+    for r in range(n_rounds):
+        talk.append("assistant", "", reasoning="thinking %d" % r, tool_calls=[
+            {"id": "c0", "name": "read_file",
+             "arguments": json.dumps({"path": "src/f%d.js" % r})}])
+        talk.append("tool", ("line %d\n" % r) * (size // 7), tool_call_id="c0")
+    return talk
+
+
+class ToolResultClearingTests(unittest.TestCase):
+    """#263. Old tool results become stubs below the rollover, in batches.
+
+    Measured on robin's diorama run (2026-09-23): 33-40 % of a full window was
+    tool output, 97 % of it behind the last five rounds. What must hold: only
+    tool CONTENT changes, the last K rounds and the head never do, a batch
+    too small to pay its prefill is not applied, and the originals are on disk
+    before any stub points at them.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-clear-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", crow_core.SESSION_DIR)
+        crow_core.SESSION_DIR = os.path.join(self.dir, "session")
+        self.addCleanup(crow_core.context_clear_set, crow_core.CONTEXT_CLEAR_AT)
+        crow_core.context_clear_set(None)
+        self._read_before = dict(crow_core._READ)
+        self.addCleanup(self._restore_read)
+        self.addCleanup(setattr, crow_core, "_GOAL_REBASE", crow_core._GOAL_REBASE)
+        self.addCleanup(setattr, crow_core, "GOAL_TOKENS_NOW", crow_core.GOAL_TOKENS_NOW)
+
+    def _restore_read(self):
+        crow_core._READ.clear()
+        crow_core._READ.update(self._read_before)
+
+    def test_only_results_behind_the_last_k_rounds_are_clearable(self):
+        talk = _rounds_talk(8)
+        picked = crow_core.clearable_results(talk.payload(), keep_rounds=5)
+        # rounds 0..2 are behind the last five (3..7)
+        self.assertEqual([args["path"] for _, _, args in picked],
+                         ["src/f0.js", "src/f1.js", "src/f2.js"])
+        self.assertTrue(all(name == "read_file" for _, name, _ in picked))
+
+    def test_the_round_nobody_answered_is_never_clearable(self):
+        """keep 0 is read as 1: the newest results have not been acted on."""
+        talk = _rounds_talk(3)
+        picked = crow_core.clearable_results(talk.payload(), keep_rounds=0)
+        self.assertNotIn(len(talk) - 1, [i for i, _, _ in picked])
+        self.assertEqual(len(picked), 2)
+
+    def test_small_results_stubs_and_state_tools_are_left_alone(self):
+        talk = _rounds_talk(1, size=100)                  # small
+        talk.append("assistant", "", tool_calls=[
+            {"id": "c0", "name": "goal_step", "arguments": "{}"}])
+        talk.append("tool", "x" * 5000, tool_call_id="c0")  # state, not output
+        talk.append("assistant", "", tool_calls=[
+            {"id": "c0", "name": "run_command", "arguments": "{}"}])
+        talk.append("tool", crow_core.CONTEXT_CLEAR_MARK + "1 of 2 tokens ...]" + "y" * 900,
+                    tool_call_id="c0")                     # already a stub
+        for _ in range(6):
+            talk.append("assistant", "next")
+            talk.append("user", "go on")
+        self.assertEqual(crow_core.clearable_results(talk.payload(), 5), [])
+
+    def test_below_the_trigger_nothing_happens(self):
+        talk = _rounds_talk(10)
+        before = talk.payload()
+        self.assertIsNone(crow_core.clear_old_results(talk, 600, 1000, at=0.65,
+                                                      at_least=0.0))
+        self.assertEqual(talk.payload(), before)
+
+    def test_a_batch_too_small_for_its_prefill_is_not_applied(self):
+        talk = _rounds_talk(10)
+        before = talk.payload()
+        self.assertIsNone(crow_core.clear_old_results(talk, 150_000, 200_000, at=0.65,
+                                                      at_least=0.10))
+        self.assertEqual(talk.payload(), before)
+        self.assertFalse(os.path.exists(os.path.join(crow_core.SESSION_DIR, "cleared")))
+
+    def test_a_batch_stubs_content_and_touches_nothing_else(self):
+        talk = _rounds_talk(10)
+        before = talk.payload()
+        done = crow_core.clear_old_results(talk, 700, 1000, at=0.65, at_least=0.0)
+        self.assertIsNotNone(done)
+        self.assertEqual(done["results"], 5)
+        after = talk.payload()
+        self.assertEqual(len(after), len(before))
+        for old, new in zip(before, after):
+            if old["content"] != new["content"]:
+                self.assertEqual(old["role"], "tool")
+                self.assertEqual({k: v for k, v in old.items() if k != "content"},
+                                 {k: v for k, v in new.items() if k != "content"})
+            else:
+                self.assertEqual(old, new)
+        self.assertEqual(after[0], before[0], "the head moved")
+        stub = after[3]["content"]
+        self.assertTrue(stub.startswith(crow_core.CONTEXT_CLEAR_MARK), stub)
+        for part in ("read_file", "`src/f0.js`", "read it again", done["path"],
+                     "700 of 1,000 tokens"):
+            self.assertIn(part, stub)
+        # the last five rounds are whole
+        self.assertEqual(after[-10:], before[-10:])
+        with open(done["path"], encoding="utf-8") as fh:
+            saved = json.load(fh)
+        self.assertEqual(saved["results"][0]["message"], before[3])
+        self.assertEqual(saved["results"][0]["tool"], "read_file")
+        self.assertLess(done["after"], 700)
+
+    def test_an_image_result_becomes_a_string_stub_and_counts_its_grid(self):
+        self.assertEqual(crow_core._image_tokens(
+            {"type": "image_url", "image_url": {"url": _png_url(984, 624)}}), 620)
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "look")
+        talk.append("assistant", "", tool_calls=[
+            {"id": "c0", "name": "read_image", "arguments": json.dumps({"path": "a.png"})}])
+        talk.append("tool", [{"type": "text", "text": "a.png -- 9 bytes"},
+                             {"type": "image_url", "image_url": {"url": _png_url(984, 624)}}],
+                    tool_call_id="c0")
+        for _ in range(5):
+            talk.append("assistant", "next")
+            talk.append("user", "go on")
+        done = crow_core.clear_old_results(talk, 900, 1000, at=0.5, at_least=0.1)
+        self.assertIsNotNone(done)
+        self.assertIsInstance(talk.payload()[3]["content"], str)
+        self.assertIn("`a.png`", talk.payload()[3]["content"])
+
+    def test_the_default_is_on_at_home_and_off_remote_and_zero_is_off(self):
+        crow_core.context_clear_set(None)
+        self.assertEqual(crow_core.context_clear_share(remote=False),
+                         crow_core.CONTEXT_CLEAR_DEFAULT)
+        self.assertEqual(crow_core.context_clear_share(remote=True), 0.0)
+        crow_core.context_clear_set(0.7)
+        self.assertEqual(crow_core.context_clear_share(remote=True), 0.7)
+        for off in (0, "0", -1, 1.0, 2):
+            crow_core.context_clear_set(off)
+            self.assertEqual(crow_core.context_clear_share(remote=False), 0.0, off)
+        crow_core.context_clear_set("nonsense")
+        self.assertEqual(crow_core.context_clear_share(), crow_core.CONTEXT_CLEAR_DEFAULT)
+        crow_core.context_clear_set(0)
+        talk = _rounds_talk(10)
+        self.assertEqual(crow_core.clear_before_roll(talk, 190_000, 200_000), 190_000)
+
+    def test_the_turn_loop_call_logs_one_line_and_forgets_cleared_reads(self):
+        talk = _rounds_talk(10, size=60_000)
+        crow_core._READ[crow_core._key("src/f0.js")] = (1, 1)
+        crow_core._READ[crow_core._key("src/f9.js")] = (1, 1)
+        after = crow_core.clear_before_roll(talk, 150_000, 200_000)
+        self.assertLess(after, 150_000)
+        self.assertNotIn(crow_core._key("src/f0.js"), crow_core._READ)
+        self.assertIn(crow_core._key("src/f9.js"), crow_core._READ, "a kept read was dropped")
+        log = os.path.join(os.path.dirname(crow_core.SESSION_DIR), "logs", "crow.log")
+        with open(log, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("context-clear: 5 tool results", lines[0])
+        self.assertIn("tokens freed", lines[0])
+        # the next round sets a new base instead of booking the drop as spend
+        self.assertTrue(crow_core._GOAL_REBASE)
+
+    def test_a_second_batch_does_not_clear_the_stubs_again(self):
+        talk = _rounds_talk(10)
+        first = crow_core.clear_old_results(talk, 700, 1000, at=0.65, at_least=0.0)
+        for r in range(10, 13):
+            talk.append("assistant", "", tool_calls=[
+                {"id": "c0", "name": "read_file",
+                 "arguments": json.dumps({"path": "src/f%d.js" % r})}])
+            talk.append("tool", "z" * 4000, tool_call_id="c0")
+        done = crow_core.clear_old_results(talk, 700, 1000, at=0.65, at_least=0.0)
+        self.assertEqual(done["results"], 3)
+        self.assertNotEqual(done["path"], first["path"], "the first batch's originals were overwritten")
+        self.assertTrue(os.path.exists(first["path"]))
+
+
+class ToolResultClearingInTheTurnTests(TurnLoopCase):
+    """#263 inside `run_turn`: the batch lands before the next request and
+    before the rollover check, and it says nothing in the chat."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(crow_core.context_clear_set, crow_core.CONTEXT_CLEAR_AT)
+        crow_core.context_clear_set(None)
+
+    def test_a_round_past_the_trigger_clears_before_the_next_request(self):
+        talk = _rounds_talk(10, size=4000)
+        talk.append("user", "carry on")
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))],
+                   {"prompt_n": 700, "predicted_n": 0})
+        self.serve([{"content": "done"}], {"prompt_n": 1, "predicted_n": 0})
+        result = self.turn(talk, n_ctx=1000, rollover_at=0.9)
+        self.assertNotIn("rolled", self.events.names)
+        second = self.bodies[1]["messages"]
+        stubs = [m for m in second if m["role"] == "tool"
+                 and isinstance(m["content"], str)
+                 and m["content"].startswith(crow_core.CONTEXT_CLEAR_MARK)]
+        self.assertEqual(len(stubs), 6)
+        # the first request went out untouched: the trigger had not been seen yet
+        self.assertFalse(any(isinstance(m["content"], str)
+                             and m["content"].startswith(crow_core.CONTEXT_CLEAR_MARK)
+                             for m in self.bodies[0]["messages"]))
+        self.assertPrefixIsWhole(talk)
+        self.assertFalse(result.stopped)
+        # every assistant message went out as it was
+        a0 = [m for m in self.bodies[0]["messages"] if m["role"] == "assistant"]
+        a1 = [m for m in second if m["role"] == "assistant"][:len(a0)]
+        self.assertEqual(a0, a1)
+        log = os.path.join(self.dir, "logs", "crow.log")
+        self.assertTrue(os.path.exists(log))
+
+    def test_a_remote_endpoint_is_not_cleared_by_default(self):
+        talk = _rounds_talk(10, size=4000)
+        talk.append("user", "carry on")
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))],
+                   {"prompt_n": 700, "predicted_n": 0})
+        self.serve([{"content": "done"}], {"prompt_n": 1, "predicted_n": 0})
+        self.turn(talk, n_ctx=1000, rollover_at=0.9, remote=True)
+        self.assertFalse(any(isinstance(m["content"], str)
+                             and m["content"].startswith(crow_core.CONTEXT_CLEAR_MARK)
+                             for m in self.bodies[1]["messages"]))
+
+
 class ConversationFreshTests(unittest.TestCase):
     """#209. `fresh` is the question `restore()` asks, asked by its callers
     first; the raise stays for anyone who does not."""

@@ -3207,6 +3207,271 @@ def should_roll(context_tokens: int, n_ctx: int, at: float = ROLLOVER_AT) -> boo
     return context_tokens >= n_ctx * at
 
 
+# #263. CLEAR OLD TOOL RESULTS BEFORE THE WINDOW HAS TO BE CUT.
+#
+# The rollover above is a cliff: everything goes, a note comes back, and the
+# model re-orients (#210). Measured on robin's diorama run (2026-09-23, the two
+# rollover archives and session.json, rendered with the model's own template
+# and tokenizer, within 0.05 % of the server's count): a third of every full
+# window -- 33.0 to 39.9 % -- is tool output, and 97 % of it sits behind the
+# last five rounds, i.e. results the model has already read and acted on.
+#
+# SO BELOW THE CUT, THOSE RESULTS ARE REPLACED BY A STUB that names the tool,
+# its target, the size and where the text is again (Anthropic's
+# `clear_tool_uses`, Claude Code's microcompact, "observation masking" in
+# arXiv 2508.21433). Every assistant message, its reasoning and its calls
+# stay byte for byte; the head is never touched.
+#
+# IN BATCHES, NEVER PER ROUND. The server reuses the longest common prefix, so
+# an edit at message i re-reads everything behind i. Replayed on the same run:
+# clearing every round costs 66 re-prefills (568k tokens); clearing only when
+# a batch frees at least `CONTEXT_CLEAR_AT_LEAST` of the window costs 4 (283k)
+# and saves the same rollover. Anthropic's `clear_at_least` is the same rule.
+CONTEXT_CLEAR_DEFAULT = 0.65
+# None: the default for the endpoint (on at home, off remote -- a provider
+# bills a cache write per batch, and that was not measured). 0 is off.
+CONTEXT_CLEAR_AT: "float | None" = None
+CONTEXT_CLEAR_KEEP_ROUNDS = 5
+CONTEXT_CLEAR_AT_LEAST = 0.10
+# Below this a result is about the size of its stub; clearing it buys nothing.
+CONTEXT_CLEAR_MIN_CHARS = 600
+# chars/token, measured on the 150 tool results >= 500 chars of that run with
+# the model's tokenizer: 1.49 .. 4.01, median 2.72. TWO USES, TWO VALUES. The
+# window count after a batch uses 4, which under-states the freed tokens of
+# every one of the 150, so the window reads fuller than it is until the
+# server's next usage block replaces it -- the safe direction for the rollover
+# check. Whether a batch is worth its prefill (`CONTEXT_CLEAR_AT_LEAST`) uses
+# the median: with 4 there, the replay skipped batches that would have freed
+# 20k and rolled over instead.
+CONTEXT_CLEAR_CHARS_PER_TOKEN = 4
+CONTEXT_CLEAR_CHARS_PER_TOKEN_TYPICAL = 2.7
+CONTEXT_CLEAR_MARK = "[cleared at "
+# State, not output: what a later round needs to know the plan and the work.
+CONTEXT_CLEAR_KEEP_TOOLS = frozenset({"goal_set", "goal_step", "memory", "skill",
+                                      "subtasks"})
+# Where to get the text again, per tool. Anything else: the archive file.
+CONTEXT_CLEAR_AGAIN = {
+    "read_file": "The file is on disk: read it again if you need it.",
+    "read_image": "The image is on disk: read it again if you need it.",
+    "render_page": "Render the page again if you need to see it.",
+    "run_command": "Run it again if you need the output.",
+    "search_text": "Search again if you need the hits.",
+    "find_files": "Search again if you need the list.",
+    "list_dir": "List it again if you need it.",
+    "fetch_url": "Fetch it again if you need it.",
+    "web_search": "Search again if you need the hits.",
+}
+CONTEXT_CLEAR_STUB = ("[cleared at {at:,} of {n_ctx:,} tokens to keep the window: "
+                      "{name}{target} -- {chars:,} chars, ~{tokens:,} tokens. "
+                      "{again} Original: {path}]")
+
+
+def context_clear_set(at) -> None:
+    """settings.json's `context_clear_at`, per turn like the digest cap.
+
+    None restores the endpoint default; nonsense reads as the default too; 0 (or
+    anything <= 0) is off; a share at or above 1 would never fire and is off.
+    """
+    global CONTEXT_CLEAR_AT
+    try:
+        CONTEXT_CLEAR_AT = None if at is None else max(0.0, float(at))
+    except (TypeError, ValueError):
+        CONTEXT_CLEAR_AT = None
+
+
+def context_clear_share(remote: bool = False) -> float:
+    """The trigger that applies to this endpoint. 0.0 means off."""
+    if CONTEXT_CLEAR_AT is None:
+        return 0.0 if remote else CONTEXT_CLEAR_DEFAULT
+    return CONTEXT_CLEAR_AT if 0 < CONTEXT_CLEAR_AT < 1 else 0.0
+
+
+def _image_tokens(block: dict) -> int:
+    """Visual tokens of one PNG block, Qwen3-VL's grid (one per 32x32 px).
+
+    Checked against engine.log: 984x624 -> `grid (1, 40, 62), 620 visual
+    tokens`. An image this cannot read counts 0: an estimate that frees less.
+    """
+    import base64
+    import struct
+    try:
+        url = (block.get("image_url") or {}).get("url") or ""
+        raw = base64.b64decode(url.split(",", 1)[1][:64] + "==")
+        if raw[:8] != b"\x89PNG\r\n\x1a\n":
+            return 0
+        w, h = struct.unpack(">II", raw[16:24])
+        return max(1, round(h / 32)) * max(1, round(w / 32))
+    except Exception:                       # noqa: BLE001 - an estimate
+        return 0
+
+
+def _clear_target(name: str, args: dict) -> str:
+    """' `path`' or ' `command`' -- what the stub says the call was about."""
+    for key in ("path", "command", "url", "query", "pattern", "name"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            value = " ".join(value.split())
+            if len(value) > 160:
+                value = value[:157] + "..."
+            return " `%s`" % value
+    return ""
+
+
+def clearable_results(messages: list, keep_rounds: int = CONTEXT_CLEAR_KEEP_ROUNDS
+                      ) -> "list[tuple[int, str, dict]]":
+    """(index, tool name, arguments) of every result a batch may clear.
+
+    Only results BEHIND the last `keep_rounds` assistant messages -- so every
+    one of them has been answered by at least `keep_rounds` rounds, and the
+    round that has not been answered yet is never among them. At least one
+    round is always kept, whatever the setting says. Names come by POSITION
+    (the calls of the assistant message in front), because call ids repeat
+    across rounds on this server.
+    """
+    keep = max(1, int(keep_rounds))
+    rounds = [i for i, m in enumerate(messages) if m.get("role") == "assistant"]
+    if len(rounds) <= keep:
+        return []
+    cut = rounds[-keep]
+    out, pending = [], []
+    for i, message in enumerate(messages[:cut]):
+        role = message.get("role")
+        if role == "assistant":
+            pending = list(message.get("tool_calls") or [])
+            continue
+        if role != "tool":
+            pending = []
+            continue
+        call = pending.pop(0) if pending else {}
+        fn = call.get("function") or {}
+        name = fn.get("name") or "tool"
+        if name in CONTEXT_CLEAR_KEEP_TOOLS:
+            continue
+        content = message.get("content")
+        text = message_text(content)
+        if text.startswith(CONTEXT_CLEAR_MARK):
+            continue
+        if len(text) < CONTEXT_CLEAR_MIN_CHARS and not message_images(content):
+            continue
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except (TypeError, ValueError):
+            args = {}
+        out.append((i, name, args if isinstance(args, dict) else {}))
+    return out
+
+
+def context_clear_path(stamp: "str | None" = None) -> str:
+    """Where a batch's originals go. Beside the archives, in their own folder,
+    so the rail (which lists `chat-*` and `rollover-*`) never shows them."""
+    base = os.path.join(SESSION_DIR, "cleared",
+                        stamp or time.strftime('%Y%m%d-%H%M%S'))
+    path, n = base + ".json", 1
+    while os.path.exists(path):         # two batches in one second
+        n += 1
+        path = "%s-%d.json" % (base, n)
+    return path
+
+
+def crow_log(line: str) -> None:
+    """One line to `logs/crow.log` beside the engine's log. Never raises.
+
+    #263 needs one place to say what it did that is not the chat; #262 is the
+    ticket for moving Crow's other status lines here.
+    """
+    try:
+        folder = os.path.join(os.path.dirname(SESSION_DIR), "logs")
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "crow.log"), "a", encoding="utf-8") as fh:
+            fh.write("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), line))
+    except Exception:                       # noqa: BLE001 - a log is not a turn
+        pass
+
+
+def clear_old_results(conversation: "Conversation", context_tokens: int, n_ctx: int,
+                      *, at: "float | None" = None, remote: bool = False,
+                      keep_rounds: "int | None" = None,
+                      at_least: "float | None" = None,
+                      path: "str | None" = None) -> "dict | None":
+    """One batch of #263, or None when nothing was cleared.
+
+    Fires at `at * n_ctx` (the endpoint default when None), clears every
+    result `clearable_results` names, and only if the estimate frees at least
+    `at_least * n_ctx` -- a batch that small would buy a re-prefill for almost
+    nothing. Returns {"freed" (the safe, low estimate), "typical" (the median
+    one), "results", "before", "after", "path", "reads"}.
+    """
+    share = context_clear_share(remote) if at is None else at
+    if n_ctx <= 0 or not share or share <= 0 or context_tokens < n_ctx * share:
+        return None
+    keep = CONTEXT_CLEAR_KEEP_ROUNDS if keep_rounds is None else keep_rounds
+    least = CONTEXT_CLEAR_AT_LEAST if at_least is None else at_least
+    messages = conversation.payload()
+    picked = clearable_results(messages, keep)
+    if not picked:
+        return None
+    path = path or context_clear_path()
+    stubs, originals, freed, typical, reads = {}, [], 0, 0, []
+    for i, name, args in picked:
+        content = messages[i].get("content")
+        text = message_text(content)
+        images = sum(_image_tokens(b) for b in message_images(content))
+        tokens = int(len(text) / CONTEXT_CLEAR_CHARS_PER_TOKEN_TYPICAL) + images
+        stub = CONTEXT_CLEAR_STUB.format(
+            at=int(context_tokens), n_ctx=int(n_ctx), name=name,
+            target=_clear_target(name, args), chars=len(text), tokens=tokens,
+            again=CONTEXT_CLEAR_AGAIN.get(name, "The full text is kept on disk."),
+            path=path)
+        freed += max(0, len(text) // CONTEXT_CLEAR_CHARS_PER_TOKEN + images
+                     - int(len(stub) / CONTEXT_CLEAR_CHARS_PER_TOKEN_TYPICAL))
+        typical += max(0, tokens - len(stub) // CONTEXT_CLEAR_CHARS_PER_TOKEN)
+        stubs[i] = stub
+        originals.append({"index": i, "tool": name, "arguments": args,
+                          "message": messages[i]})
+        if name == "read_file" and isinstance(args.get("path"), str):
+            reads.append(args["path"])
+    if typical < n_ctx * least:
+        return None
+    # THE ORIGINALS FIRST. A batch whose originals could not be written is not
+    # applied: the stub would point at nothing.
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"context_tokens": int(context_tokens), "n_ctx": int(n_ctx),
+                       "results": originals}, fh)
+    except OSError:
+        return None
+    conversation.clear_results(stubs)
+    return {"freed": freed, "typical": typical, "results": len(stubs),
+            "before": int(context_tokens),
+            "after": max(0, int(context_tokens) - freed), "path": path,
+            "reads": reads}
+
+
+def clear_before_roll(conversation: "Conversation", context_tokens: int, n_ctx: int,
+                      *, remote: bool = False, forget_reads: bool = True) -> int:
+    """The turn loop's call: one batch if due, the log line, the new estimate.
+
+    A cleared `read_file` is a file the model no longer holds, which is the
+    moment #215-H empties the read-state for; its path is forgotten here so a
+    write after the clear reads first. Only by the thread that owns `_READ`.
+    """
+    done = clear_old_results(conversation, context_tokens, n_ctx, remote=remote)
+    if done is None:
+        return context_tokens
+    if forget_reads:
+        root = get_root()
+        for p in done["reads"]:
+            for full in {p, os.path.join(root, p) if root else p}:
+                _READ.pop(_key(full), None)
+    goal_tokens_rebase(done["after"])
+    crow_log("context-clear: %d tool results older than %d rounds cleared at "
+             "%d/%d tokens, ~%d tokens freed (estimate, at least %d), originals %s"
+             % (done["results"], CONTEXT_CLEAR_KEEP_ROUNDS, done["before"],
+                n_ctx, done["typical"], done["freed"], done["path"]))
+    return done["after"]
+
+
 def rollover_path(stamp: str | None = None) -> str:
     """Where an archive goes. Named by time, because there will be several."""
     return os.path.join(SESSION_DIR, f"rollover-{stamp or time.strftime('%Y%m%d-%H%M%S')}.json")
@@ -4620,8 +4885,9 @@ def split_root_notice(text: str) -> "tuple[str | None, str]":
 class Conversation:
     """The message list. Append-only by construction -- see module docstring.
 
-    There is deliberately no method to EDIT a message, and only one to remove
-    any: `cut_to` drops a TAIL, whole turns at a time, for the one case #202
+    There is deliberately no method to EDIT a turn -- `clear_results` (#263)
+    replaces the content of old TOOL results and nothing else -- and only one
+    to remove any: `cut_to` drops a TAIL, whole turns at a time, for the one case #202
     describes -- a goal loop that has written its own degenerate answers into
     the history and would otherwise keep reading them back as examples. Nothing
     in the middle is ever touched, and nothing is rewritten. Beside it,
@@ -4884,6 +5150,28 @@ class Conversation:
         dropped = len(self._messages) - n
         del self._messages[n:]
         return dropped
+
+    def clear_results(self, stubs: "dict[int, str]") -> int:
+        """#263: replace the CONTENT of the given tool messages. Returns how many.
+
+        THE SECOND EXCEPTION TO APPEND-ONLY, and narrower than `cut_to`: only
+        `tool` messages, only their content, never a turn's order, an assistant
+        message, its reasoning or its calls. The caller (`clear_old_results`)
+        picks results the model answered rounds ago and writes their originals
+        to disk first.
+
+        IT COSTS A PREFILL FROM THE FIRST CLEARED MESSAGE ON, the bill every
+        edit here pays -- which is why the caller clears in rare, large
+        batches and never per round.
+        """
+        done = 0
+        for i, stub in stubs.items():
+            if 0 <= i < len(self._messages) and self._messages[i].get("role") == "tool":
+                message = dict(self._messages[i])
+                message["content"] = stub
+                self._messages[i] = message
+                done += 1
+        return done
 
     def reset(self) -> None:
         # #121. THE PIN GOES WITH THE CONVERSATION, because `reset` is not a
@@ -18765,6 +19053,11 @@ def run_turn(
     # with nothing appended behind BUDGET_SPENT. Only `continue` paths can
     # reach it; a tool round past the budget is forced, and a forced round
     # always breaks.
+    # #263: a turn that STARTS above the trigger (a resumed chat, a long
+    # answer last turn) clears before its first request, not after it.
+    context_tokens = clear_before_roll(conversation, context_tokens, n_ctx,
+                                       remote=remote,
+                                       forget_reads=owns_turn_state)
     for round_no in range(budget + 3):
         seed = None if remote else draw_seed(avoid=seed)
         try:
@@ -19291,6 +19584,13 @@ def run_turn(
         # At the end of a round, never in the middle of one: the assistant
         # message and its tool results are both in by now, so what gets
         # archived is a conversation and not half of one.
+        #
+        # #263: OLD TOOL RESULTS GO FIRST, the cut stays the last resort. A
+        # batch fires at 0.65 of the window by default and only when it frees
+        # a tenth of it; below that this is a no-op that reads no file.
+        context_tokens = clear_before_roll(conversation, context_tokens, n_ctx,
+                                           remote=remote,
+                                           forget_reads=owns_turn_state)
         if should_roll(context_tokens, n_ctx, rollover_at):
             if rolled:
                 # Twice in one turn means the question itself does not fit.
@@ -21926,6 +22226,16 @@ GOAL_TOKENS_NOW = 0
 _GOAL_LOCK = threading.Lock()
 
 
+_GOAL_REBASE = False
+
+
+def goal_tokens_rebase(total: int) -> None:
+    """#263: the context shrank by an ESTIMATE; the next round sets the base."""
+    global GOAL_TOKENS_NOW, _GOAL_REBASE
+    GOAL_TOKENS_NOW = max(0, int(total or 0))
+    _GOAL_REBASE = True
+
+
 def goal_tokens_mark(total: int) -> None:
     """Den Zaehler setzen, OHNE die Differenz zu verbuchen.
 
@@ -21954,9 +22264,15 @@ def goal_tokens_seen(total: int, now: "float | None" = None) -> None:
     und ueberlebt den Schnitt -- das ist die Zahl, die #174 im Kopf verlangt, und
     sie ist nicht die Summe der Schrittspalte.
     """
-    global GOAL_TOKENS_NOW
+    global GOAL_TOKENS_NOW, _GOAL_REBASE
     total = max(0, int(total or 0))
     before, GOAL_TOKENS_NOW = GOAL_TOKENS_NOW, total
+    if _GOAL_REBASE:
+        # #263: the first count after a clearing batch is a new baseline --
+        # the drop is freed context, not a new one, and the difference to
+        # the estimate is not output either. That round's growth goes unbooked.
+        _GOAL_REBASE = False
+        return
     grew = total - before if total >= before else total
     if grew <= 0:
         return

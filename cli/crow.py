@@ -1949,6 +1949,7 @@ def repl(args: argparse.Namespace) -> int:
     if sampling is None:
         return 2
     rollover_digest_set(args.rollover_digest_tokens)   # #154, None ist der Default
+    crow_core.context_clear_set(args.context_clear_at)  # #263, None: endpoint default
     # The repository used to be printed here. It sits beside the wordmark now,
     # under the commands, so the endpoint block is the endpoint and the model.
     print("")
@@ -2378,6 +2379,15 @@ def build_parser() -> argparse.ArgumentParser:
                         help="token cap for the model's own digest in the rollover note,"
                              " asked on the still-warm prefix before the cut; 0 switches"
                              " it off (default: %d)" % crow_core.ROLLOVER_DIGEST_DEFAULT)
+    parser.add_argument("--context-clear-at", dest="context_clear_at",
+                        type=float, default=None, metavar="SHARE",
+                        help="replace tool results older than the last %d rounds with a"
+                             " short stub once the prompt reaches this share of the window,"
+                             " in batches that free at least %d%%%% of it; 0 switches it off"
+                             " (default: %s on the local server, off on a remote one)"
+                             % (crow_core.CONTEXT_CLEAR_KEEP_ROUNDS,
+                                int(crow_core.CONTEXT_CLEAR_AT_LEAST * 100),
+                                crow_core.CONTEXT_CLEAR_DEFAULT))
     # NOT REMOVED, MOVED BEHIND A SWITCH (#70). The per-round line is the instrument this loop was
     # built with -- it is what showed the prefix holding round by round. Deleting it would cost the
     # next person debugging the cache the only view they had; leaving it on cost every user twelve

@@ -17,7 +17,7 @@ python -m unittest test_crow_gui
 | | cases | covers |
 |---|---|---|
 | `test_crow.py` | 451 | the terminal client |
-| `test_crow_core.py` | 1315 | the shared core |
+| `test_crow_core.py` | 1327 | the shared core |
 | `test_crow_gui.py` | 756 | the window's API and page |
 
 No test writes into a real installation. `test_crow_gui.py` carries a case that
