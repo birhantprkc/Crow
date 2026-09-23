@@ -3590,7 +3590,14 @@ const crow = {
 
   // A NEW BLOCK PER OPEN, never one reused: the model re-enters reasoning
   // mid-answer, and a single block would swallow the answer that came between.
+  // #209. A STREAM WITH NO ROUND OPENS ONE. `col` is null on a page that
+  // never saw this turn's "start" -- #204's reload lands in the middle of a
+  // streaming turn -- and every token threw `this.col.insertBefore` back
+  // into the push channel. The rest of the turn gets a round of its own.
+  here(){ if(!this.col) this.start(); return this.col; },
+
   thinkOpen(){
+    this.here();
     const d=document.createElement("details"); d.className="think";
     d.innerHTML='<summary><span class="caret">&#9654;</span><span class="dur">'+
       (this.col.querySelectorAll("details").length? "Thought again":"Thought")+
@@ -3605,8 +3612,11 @@ const crow = {
   answer(p){
     this.think=null;
     if(this.fence!==null){ this.fence.textContent+=p; this.bottom(); return; }
-    if(!this.say){ this.say=document.createElement("div"); this.say.className="say";
-      this.col.insertBefore(this.say,this.cursor); }
+    // here() FIRST: opening a round resets `say`, so it must not run
+    // between the creation below and the insert.
+    if(!this.say){ const col=this.here();
+      this.say=document.createElement("div"); this.say.className="say";
+      col.insertBefore(this.say,this.cursor); }
     this.say.textContent+=p; this.bottom();
   },
 
@@ -3830,12 +3840,12 @@ const crow = {
         btn.textContent = ok ? "copied" : "failed";
         btn.classList.toggle("done", !!ok);
         setTimeout(()=>{btn.textContent="copy";btn.classList.remove("done");},1400);});};
-    this.col.insertBefore(d,this.cursor); this.fence=pre; this.bottom();
+    this.here().insertBefore(d,this.cursor); this.fence=pre; this.bottom();
   },
   codeClose(closed){
     if(!closed && this.fence){ const n=document.createElement("div");
       n.className="note"; n.textContent="… the block was never closed";
-      this.col.insertBefore(n,this.cursor); }
+      this.here().insertBefore(n,this.cursor); }
     // robin, 2026-08-24: ab funfzehn Zeilen klappbar. ERST HIER, weil die
     // Laenge vorher nicht feststeht -- ein Block, der beim dritten Zeichen
     // einen Klappknopf bekaeme, haette ihn oft umsonst.
@@ -4167,7 +4177,9 @@ const crow = {
     // spread that over all of them. Blocks cannot carry a per-round figure anyway -- the model
     // re-enters reasoning mid-answer, so one round can open two of them and there is no index
     // that maps one to the other.
-    if(share!==null && share!==undefined){
+    // #209: no round on this page (a reload mid-turn) -- the line goes
+    // under the flow, like `fail`, and there is no block to put a share on.
+    if(this.col && share!==null && share!==undefined){
       this.col.querySelectorAll("details.think .dur").forEach(el=>{
         if(!el.parentNode.querySelector(".pct")){
           const s=document.createElement("span"); s.className="pct";
@@ -4182,7 +4194,7 @@ const crow = {
         const s=document.createElement("span"); s.className="subshare";
         s.textContent=sub+"]"; d.appendChild(s); }
       else d.textContent=line;
-      this.col.appendChild(d); }
+      (this.col||flow).appendChild(d); }
     this.bottom();
   },
 
@@ -8571,6 +8583,11 @@ class Api:
         # das es zurueckbringen koennte; `main` legt die fertige Seite hier
         # ab, und `_recover_window` laedt genau sie neu.
         self._page = ""
+        # #209. WIE OFT DIE SEITE `ready()` GERUFEN HAT. Einmal pro geladener
+        # Seite -- und der #204-Reload laedt sie ein zweites Mal. Der zweite
+        # Ruf zeichnet den laufenden Chat neu, statt session.json noch einmal
+        # in eine Conversation zu legen, die laengst nicht mehr frisch ist.
+        self._page_loads = 0
         self._out: "queue.Queue" = queue.Queue()
         # #135. THE WINDOW IS WHERE A SERVER'S QUESTION LANDS. Installed once,
         # here, because `crow_core` reads the name at call time -- and read from
@@ -8956,11 +8973,15 @@ class Api:
         return self._tools_cleared
 
     def ready(self) -> None:
+        self._page_loads += 1
         self.push({"k": "meta", "rail": rail_width_setting(),
                    "version": client_version() or "",
                    "url": self._args.base_url, "tools": len(TOOLS),
                    "execute": bool(self._args.execute_tools)})
         threading.Thread(target=self._mic_probe, daemon=True).start()
+        if self._page_loads > 1:
+            self._ready_again()
+            return
         # #88: the level and its menu, in the same breath as the rest of the
         # header. The button has to show what is live before the first turn --
         # a release level nobody can see is one nobody can trust.
@@ -8989,6 +9010,29 @@ class Api:
         # der erste Blick auf das Fenster nicht darauf warten darf.
         self.git_refresh()
         threading.Thread(target=self._probe, daemon=True).start()
+
+    def _ready_again(self) -> None:
+        """#209: THE SAME WINDOW, A NEW PAGE. `pywebviewready` fires once per
+        loaded page, and #204's recovery reload loads one while this process
+        -- its conversation, its bound working area -- lives on.
+
+        Live 2026-09-22 09:17 the second `ready()` ran the first one's whole
+        start-up again: `adopt_root` re-bound the template from roots.json
+        over the chat's own folder, and a second `_probe` handed session.json
+        to `Conversation.restore` after the first had filled it -- the
+        RuntimeError in `_probe`'s thread, and on a local endpoint a /slots
+        restore under the running chat's cache. None of that belongs to a
+        reload: the state is here, only the page is new. So the page gets the
+        state back -- level, boundary, git, the live chat as `view_live`
+        draws it -- and the probe only re-asks the endpoint for the header.
+        """
+        self.push({"k": "mode", "name": self._args.mode, "modes": self.mode_menu()})
+        self.push_root()
+        self.git_refresh()
+        self._view_path = None
+        self._draw_live()
+        threading.Thread(target=self._probe, kwargs={"redraw": True},
+                         daemon=True).start()
 
     # ---- #92: the working directory ------------------------------------
 
@@ -9615,7 +9659,7 @@ class Api:
         return ("ready", spot["model"],
                 crow_core.provider_context(spot["provider"], spot["model"]))
 
-    def _probe(self) -> None:
+    def _probe(self, redraw: bool = False) -> None:
         spot = self._endpoint()
         try:
             state, name, window = self._look(spot)
@@ -9630,7 +9674,11 @@ class Api:
             # NOT ASKED OF A REMOTE SLUG. The levels come from a manifest of
             # models this machine can boot, and `z-ai/glm-5.2:free` is not one of
             # them -- a lookup there would answer about a model nobody is running.
-            if spot["remote"]:
+            if redraw:
+                # #209: THE LIVE CHAT'S LEVEL STANDS -- a reload is not a
+                # start, and the file may be older than the chat.
+                note = ""
+            elif spot["remote"]:
                 self._reasoning, note = None, ""
             else:
                 self._reasoning, note = crow_core.reasoning_for_chat(name, SESSION_FILE)
@@ -9658,7 +9706,15 @@ class Api:
         except Exception as exc:           # noqa: BLE001 - shown, never raised
             self.push({"k": "down", "why": str(exc)[:120]})
             return
-        if not self._args.session:
+        if redraw or not self._args.session:
+            return
+        # #209: ONLY A FRESH CONVERSATION TAKES A SAVED ONE, and the question
+        # is asked twice. Here, BEFORE `load_session`, because that call POSTs
+        # the saved KV into /slots/0 -- under a chat that is already running.
+        # And again after it, because the read is network time and a line
+        # typed meanwhile makes the conversation just as non-fresh.
+        if not self._conversation.fresh:
+            self._late_session()
             return
         try:
             # #121. The pin is read before the payload -- see the same two lines
@@ -9686,6 +9742,9 @@ class Api:
         # this line sat below that early return, the name was never read back.
         # Identity and content are two questions, and only one of them depends on
         # the conversation being non-empty.
+        if not self._conversation.fresh:
+            self._late_session()
+            return
         self._current_path, self._current_title = self._pointer()
         if not restored:
             # #119: THE ONE CALLER WITH NO CLEAR TO HANG ON. A launch that finds
@@ -9726,6 +9785,18 @@ class Api:
         self._pin_memory(SESSION_FILE)
         self.push({"k": "up", "model": None, "n_ctx": self._n_ctx,
                    "tokens": self._context_tokens})
+
+    def _late_session(self) -> None:
+        """#209: session.json met a conversation that is no longer fresh.
+
+        `Conversation.restore` refuses that by raising, and on this thread
+        the raise killed the probe mid-start. The contract stays; the caller
+        keeps it: the running chat wins, nothing of the saved one is taken --
+        not even its pointer, or the running chat's next save would land in
+        the saved chat's file -- and one line says so.
+        """
+        self.push({"k": "note",
+                   "t": "session arrived late - kept the running conversation"})
 
     @staticmethod
     def tools_listing() -> str:
@@ -11314,6 +11385,11 @@ class Api:
         self._view_path = None
         self._done_paths.discard(self._current_path or "")
         self.push({"k": "clear"})
+        self._draw_live()
+
+    def _draw_live(self) -> None:
+        """The live chat, drawn from memory: `view_live` after its clear, and
+        #209's reloaded page, which starts empty."""
         self._hello()
         # #173: AUS DEM BAND IM SPEICHER, nicht von Platte -- aus demselben
         # Grund, aus dem die Nachrichten aus `payload()` kommen: die Datei ist

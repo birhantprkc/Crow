@@ -4712,6 +4712,19 @@ class Conversation:
     def pending_notice(self) -> "str | None":
         return self._notice
 
+    @property
+    def fresh(self) -> bool:
+        """True while nothing but the head is in here -- what `restore` needs.
+
+        #209: THE CALLERS ASK FIRST. The window restores on a probe thread,
+        and a page reload or a line typed before the probe answered can fill
+        the conversation in the meantime; the raise below is the contract,
+        this is how a caller keeps it without catching it.
+        """
+        # A fresh Conversation already holds the system prompt, so "empty" is one
+        # message, not zero. Checking for zero rejected every real resume.
+        return len(self._messages) <= (1 if self._system else 0)
+
     def restore(self, messages: list[dict]) -> None:
         """Adopt a saved history wholesale, at construction time only.
 
@@ -4719,9 +4732,7 @@ class Conversation:
         request of a session, so no prefix exists yet to break. Calling it
         mid-session would be exactly the edit this class refuses to allow.
         """
-        # A fresh Conversation already holds the system prompt, so "empty" is one
-        # message, not zero. Checking for zero rejected every real resume.
-        if len(self._messages) > (1 if self._system else 0):
+        if not self.fresh:
             raise RuntimeError("restore() is for a fresh conversation, not a running one")
         self._messages = [dict(m) for m in messages]
         # #215-H: the saved history may show reads, but not the files as they

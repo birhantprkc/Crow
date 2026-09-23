@@ -19066,5 +19066,29 @@ class AnAbortIsNeverAnAnswerTests(unittest.TestCase):
         self.assertEqual(self._review("stop"), ["memory"])
 
 
+class ConversationFreshTests(unittest.TestCase):
+    """#209. `fresh` is the question `restore()` asks, asked by its callers
+    first; the raise stays for anyone who does not."""
+
+    def test_fresh_until_the_first_turn_with_and_without_a_head(self):
+        for head in ("SYS", None):
+            talk = crow_core.Conversation(head)
+            self.assertTrue(talk.fresh)
+            talk.append("user", "hi")
+            self.assertFalse(talk.fresh)
+            talk.reset()
+            self.assertTrue(talk.fresh)
+
+    def test_restore_still_refuses_a_running_chat(self):
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "running")
+        with self.assertRaises(RuntimeError):
+            talk.restore([{"role": "user", "content": "saved"}])
+        talk = crow_core.Conversation("SYS")
+        talk.restore([{"role": "system", "content": "SYS"},
+                      {"role": "user", "content": "saved"}])   # a saved payload
+        self.assertFalse(talk.fresh)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

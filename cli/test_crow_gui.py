@@ -11743,5 +11743,156 @@ class TheCodeBlockKeepsItsCopyButtonTests(unittest.TestCase):
         self.assertIn('class="cwcopy"', tpl)
 
 
+# -- #209: a second restore, and a stream with no round to write into --------
+
+class _RunsNow:
+    """`threading.Thread`, run on the spot: `ready()` starts its probes on
+    threads, and an exception there has to reach the case, not the excepthook."""
+
+    def __init__(self, target=None, args=(), kwargs=None, daemon=None, **_):
+        self._target, self._args, self._kwargs = target, args, kwargs or {}
+
+    def start(self) -> None:
+        self._target(*self._args, **self._kwargs)
+
+
+class ARestoreNeverMeetsARunningChatTests(ApiCase):
+    """#209. Live 2026-09-22 09:17: the window died on boot with
+    `RuntimeError: restore() is for a fresh conversation, not a running one`
+    in `_probe`'s thread, beside the #204 GError 601 flood and an
+    `insertBefore` TypeError. The #204 recovery reloads the page, the reloaded
+    page fires `pywebviewready` again, and `ready()` started a SECOND `_probe`
+    that restored session.json into the conversation the first one had
+    already filled. The same raise is reachable without a reload: a line
+    typed before a slow probe arrives. `Conversation.restore` keeps its
+    guard (#121 leans on it); the callers learn the contract."""
+
+    def _saved_chat(self, first="the restored question", reply="its answer"):
+        """session.json written the way the window writes it."""
+        old = self.api()
+        self.a_chat(old, first, reply)
+        old._persist_live()
+        self.assertTrue(os.path.exists(self.session))
+
+    def _endpoint_up(self):
+        return (mock.patch.object(crow_gui, "check_endpoint", return_value="ok"),
+                mock.patch.object(crow_gui, "fetch_model_name", return_value="m"),
+                mock.patch.object(crow_gui, "fetch_n_ctx", return_value=1000))
+
+    def test_a_probe_that_arrives_after_the_first_line_keeps_that_line(self):
+        self._saved_chat()
+        api = self.api()
+        api._conversation.append("user", "typed before the probe answered")
+        a, b, c = self._endpoint_up()
+        with a, b, c:
+            api._probe()                        # raised before #209
+        payload = [m for m in api._conversation.payload() if m["role"] != "system"]
+        self.assertEqual([m["content"] for m in payload],
+                         ["typed before the probe answered"],
+                         "the running chat was replaced or merged")
+        out = self.drained(api)
+        notes = [m["t"] for m in out if m.get("k") == "note"]
+        self.assertTrue(any("kept the running conversation" in t for t in notes),
+                        notes)
+        # THE OLD CHAT'S IDENTITY IS NOT TAKEN EITHER: with it, the running
+        # chat's next save would land in the old chat's file.
+        self.assertIsNone(api._current_path)
+        self.assertIsNone(api._current_title)
+
+    def test_a_reloaded_page_is_redrawn_not_restored_twice(self):
+        self._saved_chat()
+        api = self.api()
+        api._mic_probe = lambda: None
+        api.git_refresh = lambda: None
+        adopt = mock.MagicMock(wraps=crow_core.adopt_root)
+        a, b, c = self._endpoint_up()
+        with a, b, c, mock.patch.object(crow_gui.threading, "Thread", _RunsNow), \
+                mock.patch.object(crow_core, "adopt_root", adopt):
+            api.ready()                         # the page's first pywebviewready
+            first = self.drained(api)
+            self.assertIn("the restored question",
+                          [m.get("t") for m in first if m.get("k") == "user"])
+            before = api._conversation.payload()
+            api.ready()                         # #204's reload fires it again
+        after = self.drained(api)
+        self.assertEqual(api._conversation.payload(), before)
+        self.assertEqual(adopt.call_count, 1,
+                         "the reload re-bound the working area from roots.json")
+        kinds = [m.get("k") for m in after]
+        # THE NEW PAGE IS EMPTY, so it gets the live chat again ...
+        self.assertIn("the restored question",
+                      [m.get("t") for m in after if m.get("k") == "user"])
+        for k in ("meta", "mode", "root", "up", "rail"):
+            self.assertIn(k, kinds)
+        # ... and not a note about a late session: nothing arrived late.
+        self.assertFalse([m for m in after if m.get("k") == "note"
+                          and "kept the running" in m.get("t", "")])
+
+
+class AStreamWithoutARoundTests(unittest.TestCase):
+    """#209. `answer()` did `this.col.insertBefore(...)` with `col` null --
+    a reloaded page (#204) that meets a turn already streaming has no round
+    open, and every token threw `null is not an object (evaluating
+    'this.col.insertBefore')` back into the push channel. Run in node."""
+
+    FAKE_DOM = r"""
+function mk(tag){ const e={tag, children:[], textContent:"", className:"",
+  _html:"", parentNode:null,
+  appendChild(c){ this.children.push(c); c.parentNode=this; return c; },
+  insertBefore(c,ref){ const i=ref?this.children.indexOf(ref):-1;
+    if(i<0) this.children.push(c); else this.children.splice(i,0,c);
+    c.parentNode=this; return c; },
+  querySelector(sel){ if(sel===".col") return this._col||(this._col=mk("div"));
+    if(sel===".tbody") return mk("div"); return null; },
+  querySelectorAll(){ return []; }, remove(){},
+  set innerHTML(v){ this._html=v; }, get innerHTML(){ return this._html; } };
+  return e; }
+const document={ createElement:mk, querySelectorAll(){ return []; } };
+const flow=mk("div");
+"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.node = _node()
+        cls.page = crow_gui.PAGE
+
+    def setUp(self):
+        if not self.node:
+            self.skipTest("no node on this machine")
+
+    def _members(self, first: str, stop: str) -> str:
+        start = self.page.index(first)
+        return self.page[start:self.page.index(stop, start)]
+
+    def _run(self, calls: str) -> str:
+        import subprocess
+        body = (self._members("  start(){", "  // -- markdown, drawn")
+                + self._members("  cost(line,share,sub){", "  fail(msg){"))
+        prog = (self.FAKE_DOM
+                + "const o={ running:false, col:null, say:null, think:null,"
+                  " fence:null, blocks:[], cursor:null,"
+                  " fold(){}, bottom(){}, ctx(){},"
+                  " turn(){ const t=mk('div'); flow.appendChild(t); return t; },\n"
+                + body + "};\n" + calls)
+        done = subprocess.run([self.node, "-e", prog], capture_output=True,
+                              text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout.strip()
+
+    def test_text_with_no_round_opens_one(self):
+        out = self._run('o.answer("hi"); o.answer(" there");'
+                        'console.log(o.col.children.filter(c=>c.className==="say")'
+                        '.map(c=>c.textContent).join("|"));')
+        self.assertEqual(out, "hi there")
+
+    def test_thinking_with_no_round_opens_one(self):
+        out = self._run('o.thinkText("hm"); console.log(o.think ? "ok" : "none");')
+        self.assertEqual(out, "ok")
+
+    def test_a_cost_line_with_no_round_does_not_throw(self):
+        out = self._run('o.cost("[1 s]", 50); console.log(flow.children.length);')
+        self.assertEqual(out, "1")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
