@@ -16057,6 +16057,28 @@ class RunCommandIsBoundedLikeTheRenderTests(unittest.TestCase):
         self.stray.append(pid)
         return pid
 
+    def _witnesses(self) -> str:
+        """What the machine says about the kill, for a failure message: a CI
+        runner's systemd and cgroup tree are not this machine's."""
+        def run(*argv):
+            try:
+                return subprocess.run(list(argv), capture_output=True, text=True,
+                                      timeout=10).stdout.strip()
+            except (OSError, subprocess.SubprocessError) as exc:
+                return "(%s)" % exc
+        slice_cg = run("systemctl", "--user", "show", "session.slice", "-p",
+                       "ControlGroup", "--value")
+        events = run("cat", "/sys/fs/cgroup%s/memory.events" % slice_cg)
+        return "\n".join([
+            "systemd: " + run("systemctl", "--version").splitlines()[0:1].__str__(),
+            "slice cgroup: %r (cached %r)" % (slice_cg, crow_platform._SLICE_CGROUP),
+            "slice memory.events: " + events.replace("\n", "; "),
+            "oom kills now: %r" % crow_platform.session_oom_kills(),
+            "self cgroup: " + run("cat", "/proc/self/cgroup"),
+            "journal: " + run("journalctl", "--user", "-u", "crow-cmd-*", "-n", "15", "--no-pager",
+                              "-o", "cat"),
+            "kernel: " + run("sh", "-c", "dmesg 2>&1 | tail -n 8")])
+
     def _hog(self):
         """200 MB touched page by page -- twice a 100M ceiling, never more."""
         path = os.path.join(self.dir, "hog.py")
@@ -16075,7 +16097,7 @@ class RunCommandIsBoundedLikeTheRenderTests(unittest.TestCase):
                                          cwd=self.dir)
         self.assertTrue(out.startswith(
             "error: command exceeded its memory ceiling (MemoryMax=100M, no swap) "
-            "and was killed"), out)
+            "and was killed"), out + "\n" + self._witnesses())
         printed = out.split("\n", 1)[1]
         self.assertEqual(printed, "before")     # how far it got; OOMPolicy=kill:
                                                 # the shell died with the hog
