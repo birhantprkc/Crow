@@ -37,7 +37,7 @@ A fourth server, DeepSeek-V4-Flash-0731 on `:8081`, is still set up by `install.
 | KV | `q8_0` / `q8_0` |
 | Vision | `--mmproj mmproj-F16.gguf`, 904,004,000 B (#170) |
 | Reasoning | fixed: `high` (the template's xhigh) on every request; the window offers no level. Accepted words `none` `low` `medium` `high`; `max`, `minimal` and an explicit `off` return HTTP 500 (#160). See [thinking and sampling](#thinking-and-sampling-per-point) |
-| Thinking cap | `reasoning_budget` 1024 per request, from the manifest (#176) |
+| Thinking cap | `reasoning_budget` 1024 per request, from the manifest (#176). Looked up by the model the server reports, not by the wire label `"crow"` (#220, 2026-09-22): before that, no local turn, review or digest without `--model` carried it |
 | GPU | RTX 5090, 32,607 MiB. **30,984 MiB in use**, 1,059 MiB left |
 | Decode | **41.76 tok/s** (40.34–42.76) |
 | Prefill | **727.65 tok/s** |
@@ -273,6 +273,21 @@ The card allows up to 262,144 reasoning tokens for agentic work, and this repo h
 measurement above 1024 with the cap on. Without a cap, 21 of 30 xhigh generations on crow-nest
 ended at `max_tokens` 16384 with no answer text (#80). `tools/check_operating_point.py` checks
 that this table matches the manifest.
+
+Two questions about this table are open and unmeasured:
+
+- **The 1024 budget binds** (#245). In a replay of the 2026-09-22 diorama session on crow-nest
+  (branch `meas-0923`, 2026-09-22 22:51-23:08 UTC; thinking high = xhigh, budget 1024, min_p 0.0,
+  presence 0.0, `max_tokens` 16384; 8 seeds + greedy per point) the budget force-closed the
+  thinking block in 0 of 9 rounds at K=2 (6,774 prompt tokens), 8 of 9 at K=26 (24,446) and 1 of 9
+  at K=69 (39,309). All 8 closed rounds at K=26 still made a tool call; the one closed round at
+  K=69 (seed 2) was the only round of 27 that ended without one. No budget other than 1024 has
+  been measured with thinking on at this point.
+- **`presence_penalty` 1.5 in `sampling_no_thinking`** (#246). The unused non-thinking row is
+  the card's and is what Crow would send the moment a point is flipped to `none`. crow-nest #91
+  removed the same 1.5 from serve's absent-field default on the suspicion that it pushes digits
+  off the answer; no measurement at 1.5 exists for tool-call corruption. Decide before flipping
+  a point to `none`.
 
 ## DeepSeek-V4-Flash-0731
 

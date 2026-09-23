@@ -32,6 +32,7 @@ own class.
 | memory | Linux: its own user scope, `MemoryMax=6G`, swap 0 (#213). A browser started through `run_command` instead runs under that tool's 8G scope (#218) |
 | kill | `proc.kill()` on its own handle, then its session. Never by name, never a process list (#158) |
 | pipes | stdout and stderr go to a file: `communicate()` hangs on Windows after a kill when a grandchild holds the write end. The two DevTools pipes are Crow's own ends, read with `select` and a deadline |
+| API hints (#253) | after the capture, one `Runtime.evaluate` (3 s, `RENDER_PROBE_S`) lists the page's own interface prototypes with each member's `length` (WebIDL: the required argument count). Every console line is then read against it: `X.name is not a function` gets a `hint:` line naming the nearest real member within 1-2 edits and the interface that has it (or says the name is real on another object, or exists nowhere), plus the page's own `name=function` probe line when there is one; `WebGL: INVALID_*: fn: …` gets the call's top-level argument count from the source line the console names (the page or its own folder only) against the live `fn.length`, and a sibling with that arity. Linux only: without the pipe (Windows) or without an answer, only the page's own probe lines and the argument count are claimed |
 
 A failed capture says which rasterer ran and that a larger `wait_ms` will not help —
 the old `timed out after 20000 ms` read as "give it more", and a model escalated
@@ -48,6 +49,12 @@ Measured 2026-09-22, Chromium 152.0.7977.82, RTX 5090 free:
 | page settling at 300 ms, `wait_ms=1500` | 1.8 s | settled text; "almost one colour" note (99.96 % white) |
 | endless `fetch` loop, `wait_ms=1200` | 1.5 s | capture (old path, measured 2026-08-31: no image after 9.3 s) |
 | `while(true){}` | 25.1 s | `error: ... no frame within 10 s of the capture request, and no load event within 15 s before it` plus the rasterer advice |
+
+The #253 hints, replayed over the 47 real `render_page` results of 2026-09-23 (the diorama run,
+where the model's own code called `gl2.texImage33D` and read Chromium's correct error as a
+missing API): 18 carried a failing name or WebGL error; a hint was given for 0 of 18 before and
+17 of 18 after with the live names (the 18th is a real shader failure), 10 of 18 in the fallback
+without names.
 
 Under the old virtual clock the GPU arm drew **no** `requestAnimationFrame` frame at all
 (a page-side counter stayed below 10 while the budget ran out in ~10 ms of real time);
@@ -68,6 +75,7 @@ Windows, stdin closed.
 |---|---|
 | class | `executing` — outside paths ask first ([Outside paths ask](#outside-paths-ask-144)) |
 | clock | `COMMAND_TIMEOUT` = 120 s |
+| `cwd` (#221) | resolved against the working area, `~` expanded. A `cwd` that is not an existing directory runs nothing and asks nobody -- it is refused before the approval card: `error: no such directory: … -- the command did not run.` (or `cwd is a file, not a directory`), with the working area and a near miss found on disk (per path component, edit distance 1-2 against the existing siblings, the unique best match, case-insensitive on Windows only): `'nibor11896' is 'nibor1896' here`. `read_file` (missing parent), `list_dir` and the outside-root write refusal carry the same hint. Measured over every stored session (2026-09-22): 5 of 18 distinct `cwd` calls named a home that does not exist, and each cost a `pwd` round after a bare Errno 2 |
 | capture | 32 MiB per stream in the reader threads (#207); 16 KB of it reach the model |
 | memory (Linux) | its own user scope per call, `crow-cmd-<pid>-<hex>.scope` in `session.slice`: `MemoryMax=8G`, `MemoryHigh=7G`, `MemorySwapMax=0`, `OOMPolicy=kill` (#218). `CROW_COMMAND_MEMORY_MAX` moves the kill bound (any systemd size), `none` keeps only the swap cap; `CROW_COMMAND_SCOPE=0` runs the shell bare |
 | why 8G | measured 2026-09-22 as each scope's `memory.peak`: diorama three.js esbuild bundle 106 MiB, `npm ls --all` 46 MiB, node importing three 21 MiB, gcc 9 MiB, `test_crow` 60 MiB, `test_crow_core` 109 MiB. 8G stops the 54 GiB software-WebGL runaway a seventh of the way and leaves a node build room up to V8's own ~4 GiB heap |
@@ -142,6 +150,9 @@ while a turn is running](../user-guide/window.md). A failed spot falls forward b
 its error means: sick (429/5xx/timeout) and refusing (403, no endpoints, 402 on a paid
 favourite) spots are skipped, while 401, a free spot's 402 and schema errors stop the chain.
 The failure names every spot tried and why each one failed ([details](../user-guide/goals-and-subagents.md)).
+Up to six refusing spots are skipped without counting against the three transient retries.
+Known and open (#242, found offline, not seen live): a subtask stopped while its current spot's
+request is failing ends `failed` instead of `interrupted` and marks that spot dead for the session.
 
 | release level | asks before |
 |---|---|
@@ -160,6 +171,17 @@ plan sits in the pinned head of every prompt, so writing one costs a full prefil
 a step off writes only `<root>/.crow/goal.json` and moves no byte of the prompt. The head carries
 the plan, the file carries the state — see
 [goals and subagents](../user-guide/goals-and-subagents.md).
+
+A `done` is not taken on the model's word alone (#250). `goal_step(…, "done", note)` is refused
+when its own note reports a failure ("in spirit", "with deviation", "cannot be created",
+"unreachable", …), and when it has no note on a step last reported `failed`. A user's plan may
+end in `check: <command>` (`/goal title | step | step | check: <command>`): the `done` that would
+close the goal runs that command through `run_command` (its clock, capture cap and memory scope),
+and a non-zero exit refuses the `done` and keeps the goal open. The check lives in the session
+directory (`goal-checks.json`), not in the working area's `goal.json`, because the model can write
+there and a command it wrote would run unasked at `allowedit`; a model's replan keeps it, `/goal
+off` drops it. Replayed on the 10 real `done` calls of 2026-09-23: 6 refused, the 4 with positive
+notes passed.
 
 ### Git (#156)
 
@@ -182,6 +204,38 @@ polls in the background — the browser leg takes minutes and no tool call may h
 turn that long. The token lands in `provider_keys.json`, owner-only, and is never
 handed to a surface; what a surface shows is the login name. Needs a client id, see
 [the window's git panel](../user-guide/window.md).
+
+### `write_file` and `append_file` (#244, #251, #252, #254)
+
+`write_file(path, content)` replaces a file whole; `append_file(path, content)` adds to its end
+(a missing final newline is added) and carries no read-first guard, because appending destroys
+nothing. Both run the working-area boundary first, then (write only) [the read rule](#read-before-write-215),
+then the directory check, and only then touch the disk.
+
+| | |
+|---|---|
+| how much one call carries (#254) | `whole_write_bytes()` = half the output cap divided by 0.75 tokens per byte, rounded down to whole KB: **10 KB at the default cap of 16384**, 5 KB at 8192 (`CROW_MAX_TOKENS`). Both descriptions state the number and the cap, filled in once at import so the tool list stays byte-stable. A file up to that size goes whole through `write_file`; only a larger one is `write_file` of the first part plus `append_file` parts of up to that size, never "one append per section". An append that leaves a file at or under the limit says once per path: `note: the whole file is N bytes -- one write_file carries up to about 10 KB …`. A call cut at the cap (#203, `TRUNCATED_CALL`) names `append_file` and the part size |
+| why that number | measured 2026-09-23 on robin's diorama run (crow-nest, cap 16384, three session files): 61 `write_file` (median 940 B) and 50 `append_file` (median 319 B), each alone in its round, 0 cut off; 49 of the 50 appends left a file of at most 10 KB. With the model's own tokenizer the 111 calls were 0.456 tokens/byte overall and 0.735 at the densest call of 1 KB or more; the reasoning in the same round was at most 1,042 tokens. Half the cap stays free for that |
+| the receipt (#252) | `wrote N bytes to P` / `appended to P (+N bytes, file now M bytes)` counts **bytes** of the UTF-8 content (it counted characters until #252; 32 of 112 writes on 2026-09-23 held non-ASCII text). The file is read back and the result adds `(sha256 <12 hex>, file N bytes). Byte-exact: the file holds [ends with] exactly the bytes this call sent; a later read returns them. A mistake in them was in the content.` A read-back that does not end with the bytes sent says `WARNING: the file does not end with the bytes sent` instead |
+| the syntax check (#251) | `.js .mjs .cjs` through `node --check <file>`; `.html .htm` inline scripts (no `src`, a classic or `module` type, not a data block such as `importmap` or `x-shader/*`) one by one through stdin, padded so the line number is the page's. One 5 s deadline for the whole check through `_bounded_run`, files over 8 MiB and scripts past the 16th skipped, the first error only: line, message and a 160-char window of the source line with the caret. The result then ends `syntax check (node --check) FAILED -- the error is in the content this file was given:`; an append that does not parse adds that a file still built in pieces may not parse yet. **No `node` on `PATH`, no word**: the check is a help, not a gate, and the write always stands. Replayed on 2026-09-23: 20 of 98 JS/HTML writes would have carried their error |
+| directories (#244) | a path holding a control character (`pipeline.py\n`) is refused every time, naming the stripped path when that is clean. When the parent is missing, the first missing name is compared with the directories beside it (#221's edit metric, or a proper prefix of exactly one: `w` → `work`) and refused **once** with `did you mean: …` and `Nothing was created`; the identical call again creates it. Every created directory is said: `(new directory: X)`. Measured in the stored sessions: `testcases/w/fs.py` beside `testcases/work` (2026-09-18), 6 of 111 write paths held a control character, 4 of them a trailing newline |
+| arguments | `file_path` is taken as `path`, and for `write_file` `file_text` as `content` ([Argument names](#argument-names-207-214-215)) |
+
+### `search_text` and `find_files` (#207, #215)
+
+Both walk the tree with one shared prune list (`.git node_modules __pycache__ .venv venv build
+dist target .cache`) and one deadline, and both stop at 200 hits or 16,000 bytes of result.
+
+| | |
+|---|---|
+| binary | `search_text` reads the first 4 KiB of a file; a NUL there means binary, and the file is skipped |
+| size | a file over 2 MiB is skipped **before** it is opened (the `--max-filesize` contract) |
+| skipped | counted and said: `[skipped N file(s) over 2 MiB or binary -- a hit in them is not a hit you can use this way]` |
+| deadline | 30 s over the walk (`SEARCH_DEADLINE`), checked per directory: the hits so far come back with `[stopped after N s -- the walk over R did not finish; narrow the root …]` |
+| a file as root | `search_text` searches that file (#215); the glob does not filter it out again |
+
+The incident (filed 2026-09-21): a pattern without hits walked the working area with the 105 GB CNQ
+container in it, read every byte as text, and the turn hung until the app was killed (#207).
 
 ### Read before write (#215)
 
@@ -211,6 +265,19 @@ level — one card, every outside path named. An approval covers ALL outside pat
 command, not just the first; `always` is kept in `approvals.json` — under
 `%LOCALAPPDATA%\Crow\` on Windows, `~/.config/crow/` on Linux — and survives the restart. Directories the conversation was pointed at pass without asking.
 An obfuscated path does not ask — the gate is a question, not a sandbox.
+
+What counts as "pointed at" is what the **user** named. Four things that look like the user's
+words are not (#221, #223, #240, #241): a bare filesystem root in prose (`4120 / package`, which
+had released `/` for a whole session on 2026-09-22), the rollover note (a record written by Crow
+and the model; only the user's carried lines and the typed line count), goal-mode nudges (they
+carry the model's own plan text; a `/goal` plan the user typed still counts, recorded as `by` in
+`goal.json`), and the working-area notice of #224 or an image-only turn's notice.
+
+The null device is no outside path (#243): exactly `/dev/null` on POSIX, `nul`, `\\.\nul` or
+`//./nul` on Windows (any case), with a trailing `)` from `$(… 2>/dev/null)` shed first. A real
+path beside it, a path under it, `/dev/sda` and `/dev/nullx` still ask, and the `cwd` argument is
+not exempted. Measured 2026-09-23: 202 of 775 distinct stored `run_command` lines carried
+`/dev/null` and stopped at `auto` for it.
 
 ### Argument names (#207, #214, #215)
 

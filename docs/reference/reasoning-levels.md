@@ -8,6 +8,13 @@ Per model, out of the manifest. Names that render the same prompt are one row in
 |---|---|
 | `high` (default), `low`, `medium` | `off` renders as `high` |
 
+**A point can fix its level** (#225, 2026-09-22). A manifest entry with `reasoning_fixed` sends
+that word on every request -- turn, rollover digest, the turn after the cut and the review --
+whatever the chat stored, and the window offers no level for it (`/reasoning` has nothing to
+pick). Both Qwen3.8-Flash-Next entries carry `reasoning_fixed: "high"` today; `none` would
+switch to the entry's `sampling_no_thinking` row. Details and the open questions:
+[thinking and sampling](../operating-points.md#thinking-and-sampling-per-point).
+
 ## Thinking budget
 
 **On by default, out of the manifest.** Flash-Next `UD-Q2_K_XL` and the CNQ container ship
