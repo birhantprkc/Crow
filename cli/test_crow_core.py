@@ -15846,6 +15846,112 @@ class AppendFileBuildsLargeFilesInPartsTests(unittest.TestCase):
         self.assertTrue(crow_core.needs_approval("append_file", "manual"))
 
 
+class WholeWritesUnderTheCapTests(unittest.TestCase):
+    """#254. robin's diorama run, 2026-09-23 (crow-nest, cap
+    16384): 61 write_file (median 940 B) and 50 append_file calls (median
+    319 B), one per round, 0 cut off -- the descriptions said "one append per
+    section" and never what "large" is. The limit is now a number derived
+    from the cap, and #203's recovery names append_file and that number."""
+
+    def setUp(self):
+        self._old = os.getcwd()
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-whole-"))
+        crow_core.set_root(self.root)
+        os.chdir(self.root)
+        crow_core._WHOLE_HINTED.clear()
+
+    def tearDown(self):
+        os.chdir(self._old)
+        crow_core.set_root(None)
+        crow_core._WHOLE_HINTED.clear()
+        import shutil
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _description(self, name):
+        return next(t["function"]["description"] for t in crow_core.TOOLS
+                    if t["function"]["name"] == name)
+
+    def test_the_limit_is_derived_from_the_cap_on_both_operating_points(self):
+        """16384 is what Crow sends on both points since 6301e0e; 8192 is the
+        cap #203 was cut at and crow-nest's default for a body without one."""
+        self.assertEqual(crow_core.whole_write_bytes(16384), 10 * 1024)
+        self.assertEqual(crow_core.whole_write_bytes(8192), 5 * 1024)
+        self.assertEqual(crow_core.whole_write_bytes(),
+                         crow_core.whole_write_bytes(crow_core.MAX_TOKENS))
+        self.assertEqual(crow_core.whole_write_bytes(100), 1024)
+
+    def test_the_limit_leaves_half_the_cap_at_the_densest_measured_content(self):
+        """0.735 tokens/byte was the densest call of 1 KB or more on the run;
+        the limit at 0.75 must stay within half of every cap."""
+        for cap in (4096, 8192, 16384, 32768):
+            limit = crow_core.whole_write_bytes(cap)
+            self.assertLessEqual(limit * crow_core.WHOLE_WRITE_TOKENS_PER_BYTE,
+                                 cap / 2, cap)
+            if cap >= 8192:     # and not so timid it halves the cap again
+                self.assertGreater(limit * 0.735, cap / 2 * 0.8, cap)
+
+    def test_the_descriptions_state_the_live_numbers_not_the_section_rule(self):
+        kb = "%d KB" % (crow_core.whole_write_bytes() // 1024)
+        cap = "%d-token output limit" % crow_core.MAX_TOKENS
+        for name in ("write_file", "append_file"):
+            desc = self._description(name)
+            self.assertIn(kb, desc, name)
+            self.assertIn(cap, desc, name)
+            self.assertNotIn("<WHOLE_KB>", desc, name)
+            self.assertNotIn("<CAP>", desc, name)
+            self.assertNotIn("one append per section", desc, name)
+            self.assertNotIn("skeleton", desc, name)
+        self.assertIn("WHOLE file in this one call", self._description("write_file"))
+        self.assertIn("not one small append per function or section",
+                      self._description("append_file"))
+
+    def test_the_limit_follows_crow_max_tokens(self):
+        """CROW_MAX_TOKENS is the documented override; the descriptions must
+        say the cap that override sends, not 16384."""
+        import subprocess
+        env = dict(os.environ, CROW_MAX_TOKENS="8192")
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import crow_core as c; print(next(t['function']['description'] "
+             "for t in c.TOOLS if t['function']['name'] == 'write_file')); "
+             "print(c.TRUNCATED_CALL)"],
+            cwd=os.path.dirname(os.path.abspath(crow_core.__file__)),
+            env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("about 5 KB", out.stdout)
+        self.assertIn("8192-token output limit", out.stdout)
+        self.assertIn("at most about 5 KB", out.stdout)
+
+    def test_the_203_recovery_names_append_file_and_the_part_size(self):
+        """#203's protection stays: the cut call does not run and must not be
+        re-sent. What changed is the road: append_file, not a heredoc."""
+        said = crow_core.TRUNCATED_CALL
+        self.assertIn("did not run", said)
+        self.assertIn("Do not send the same call again", said)
+        self.assertIn("append_file", said)
+        self.assertNotIn("cat >>", said)
+        self.assertIn("at most about %d KB" % (crow_core.whole_write_bytes() // 1024),
+                      said)
+
+    def test_a_small_file_grown_by_appends_hears_it_once(self):
+        first = crow_core.tool_append_file("src/math.js", "export const a = 1;\n")
+        self.assertIn("note: the whole file is 20 bytes", first)
+        second = crow_core.tool_append_file("src/math.js", "export const b = 2;\n")
+        self.assertNotIn("note:", second)
+        self.assertIn("file now 40 bytes", second)
+
+    def test_a_file_past_the_limit_hears_nothing(self):
+        big = "x" * crow_core.whole_write_bytes() + "\n"
+        out = crow_core.tool_append_file("big.html", big)
+        self.assertNotIn("note:", out)
+
+    def test_a_new_context_hears_it_again(self):
+        crow_core.tool_append_file("notes.md", "one\n")
+        crow_core.adopt_read_state(crow_core.Conversation())
+        out = crow_core.tool_append_file("notes.md", "two\n")
+        self.assertIn("note: the whole file is 8 bytes", out)
+
+
 class SiblingArgumentNamesAreTakenAndSaidTests(unittest.TestCase):
     """#215. MEASURED 2026-09-22, session.json after the
     17:12 rollover: 22 of 22 `edit_file` calls carried `old_string` and

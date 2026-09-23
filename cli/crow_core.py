@@ -960,17 +960,22 @@ TOOLS = [
     _fn("write_file",
         "Write a file whole, creating directories as needed. An existing file must "
         "have been read in this conversation and be unchanged on disk since; "
-        "otherwise the call is refused. For a "
-        "file too large for one call, write the skeleton here and grow it with "
-        "append_file -- never shell-heredoc big content.",
+        "otherwise the call is refused. Send the WHOLE file in this one call "
+        "when it is up to about <WHOLE_KB> KB: that fits the <CAP>-token output "
+        "limit with room to spare, and one call is one round and no half-built "
+        "file in between. Only a larger file is built in parts: this call with "
+        "the first ~<WHOLE_KB> KB, then append_file. Never shell-heredoc big "
+        "content.",
         {"path": dict(_STR, description="Path to write."),
          "content": dict(_STR, description="Full new contents.")}, ["path", "content"]),
     _fn("append_file",
         "Append content to a file, creating it if missing, and return the new total "
-        "size. THE way to build a large file in parts: write_file the head, then one "
-        "append per section -- each append is a clean round instead of a shell "
-        "heredoc that breaks mid-escape. No read-first guard: appending destroys "
-        "nothing.",
+        "size. For a file larger than about <WHOLE_KB> KB, more than one "
+        "write_file sends safely inside the <CAP>-token output limit: write_file the first "
+        "part, then append the rest in parts of up to ~<WHOLE_KB> KB each -- not "
+        "one small append per function or section. A smaller file goes whole "
+        "through write_file. Also for adding to a log or notes file. No "
+        "read-first guard: appending destroys nothing.",
         {"path": dict(_STR, description="Path to append to."),
          "content": dict(_STR, description="Text to append at the end.")}, ["path", "content"]),
     _fn("edit_file",
@@ -4969,6 +4974,49 @@ TRANSPORT_MESSAGES = "anthropic_messages"
 # without an edit here.
 MAX_TOKENS = int(os.environ.get("CROW_MAX_TOKENS") or 16384)
 
+# #254. HOW MUCH ONE write_file CARRIES, DERIVED FROM THE CAP
+# ABOVE rather than left to the model. The write_file/append_file wording of
+# 2026-09-20 (6301e0e) was written for a 2.4 MB page under an 8192 cap and
+# told the model to build "a large file" as a head plus "one append per
+# section" without saying what large is. On robin's diorama run (2026-09-23,
+# crow-nest, cap 16384, the three session files) that produced 61 write_file
+# (median 940 B) and 50 append_file calls (median 319 B), each alone in its
+# round; 49 of the 50 appends left a file of at most 10 KB, and none of the
+# 111 calls came near the cap (0 cut-off results).
+#
+# THE DERIVATION, measured on the same 111 calls with the model's own
+# tokenizer (Qwen3.8-Flash-Next tokenizer.json): 144,423 content bytes were
+# 65,909 tokens, 0.456 tokens/byte; per call of 1 KB or more the densest was
+# 0.735 (a numeric material table). The reasoning emitted in the same round
+# as a write, which the cap also pays for, was at most 1,042 tokens. So: half
+# the cap is kept for reasoning, call framing and denser content than
+# measured, and the other half is divided by 0.75 tokens/byte, rounded down
+# to whole KB -- 10 KB at 16384 (worst measured density 7.5k tokens, 46 % of
+# the cap) and 5 KB at 8192, the cap #203 was cut at (3.8k tokens, 46 %).
+WHOLE_WRITE_TOKENS_PER_BYTE = 0.75
+
+
+def whole_write_bytes(cap: "int | None" = None) -> int:
+    """#254: the size one write_file carries under `cap` (the
+    module cap when None) with half the cap to spare."""
+    cap = cap or MAX_TOKENS
+    return max(1024, int(cap / 2 / WHOLE_WRITE_TOKENS_PER_BYTE) // 1024 * 1024)
+
+
+def _state_whole_write_limit() -> None:
+    """Put the live limit into the two descriptions that name it, once at
+    import: the cap is fixed for the process (CROW_MAX_TOKENS is read once),
+    so the tool list -- part of every cached prefix -- stays byte-stable."""
+    kb, cap = str(whole_write_bytes() // 1024), str(MAX_TOKENS)
+    for tool in TOOLS:
+        fn = tool["function"]
+        if fn["name"] in ("write_file", "append_file"):
+            fn["description"] = (fn["description"].replace("<WHOLE_KB>", kb)
+                                 .replace("<CAP>", cap))
+
+
+_state_whole_write_limit()
+
 # The name the surfaces and the tests already say, kept as one: the cap no
 # longer depends on where the turn is going.
 REMOTE_MAX_TOKENS = MAX_TOKENS
@@ -6635,6 +6683,9 @@ class TurnCost:
 # dict's get/set/clear are single bytecode-level operations under the GIL.
 _READ: dict[str, tuple[int, int]] = {}
 _READ_EPOCH: "object | None" = None
+# #254: the paths whose append result already said "this file
+# fits one write_file" -- once per path per context, emptied with `_READ`.
+_WHOLE_HINTED: "set[str]" = set()
 
 # THE SCOPE, SAID IN THE REFUSAL ITSELF, so a correct read is not mistaken for
 # a broken guard (#215): what counts, and what starts it over.
@@ -6687,6 +6738,7 @@ def adopt_read_state(conversation: "Conversation") -> None:
     epoch = getattr(conversation, "read_epoch", None)
     if epoch is not _READ_EPOCH:
         _READ.clear()
+        _WHOLE_HINTED.clear()                   # #254, same scope
         _READ_EPOCH = epoch
 
 
@@ -9927,7 +9979,22 @@ def tool_append_file(path: str, content: str = "", **_) -> str:
     total = os.path.getsize(path)
     verb = "appended to" if existed else "created"
     return (f"{verb} {path} (+{len(content)} bytes, file now {total} bytes)"
-            + _said_new_dir(made))
+            + _said_new_dir(made) + _whole_write_hint(path, total))
+
+
+def _whole_write_hint(path: str, total: int) -> str:
+    """#254. A soft word, once per path, when an append leaves a
+    file that one write_file would have carried whole. Measured 2026-09-23:
+    49 of 50 appends left a file of at most 10 KB. It refuses nothing -- a
+    log or notes file is appended to legitimately -- and says it once, so
+    a file grown on purpose does not hear it every round."""
+    limit = whole_write_bytes()
+    if total > limit or _key(path) in _WHOLE_HINTED:
+        return ""
+    _WHOLE_HINTED.add(_key(path))
+    return (f"\nnote: the whole file is {total} bytes -- one write_file carries "
+            f"up to about {limit // 1024} KB inside the output limit, so a "
+            "file this size is written whole, not grown by appends.")
 
 
 def tool_edit_file(path: str, old: str = "", new: "str | None" = None, **_) -> str:
@@ -12469,16 +12536,19 @@ DECLINED = "error: declined by the user"
 # `wrong arguments for write_file`, a sentence with no instruction in it.
 # `classify_arguments` reads both shapes, and `run_turn` answers either with
 # the same structured result. What the model is told to DO has to work with
-# the tools that exist: `write_file` replaces whole contents and has no
-# append mode, so the instruction names the two roads -- parts via
-# `edit_file`, or a shell append.
+# the tools that exist. When this was written `write_file` had no append
+# mode and the sentence named `edit_file` or a shell heredoc; append_file
+# exists since 6301e0e and the write_file description forbids the heredoc, so
+# the instruction names append_file and the part size the cap allows
+# (#254) -- a number, so the recovery does not overshoot into
+# fifty tiny appends either.
 TRUNCATED_CALL = (
     "error: this tool call was cut off at the output token limit before its "
     "arguments were complete, so it did not run. Do not send the same call "
-    "again -- the limit will cut it in the same place. Build large content "
-    "in parts instead: one write_file with the first part, then extend the "
-    "file with edit_file or a shell append (cat >> <path> <<'EOF'), keeping "
-    "each call small enough to finish inside the limit.")
+    "again -- the limit will cut it in the same place. Build the file in "
+    "parts instead: one write_file with the first part, then append_file for "
+    "the rest, each part at most about %d KB so it finishes inside the "
+    "limit." % (whole_write_bytes() // 1024))
 UNPARSEABLE_CALL = (
     "error: this tool call's arguments were not valid JSON and were dropped "
     "from the history, so it did not run. Re-send the call as one valid "
