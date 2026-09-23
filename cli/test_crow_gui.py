@@ -8187,22 +8187,47 @@ class NothingOverhangsOrClipsTests(unittest.TestCase):
         self.assertIn('"--comph"', fit)
 
     def test_the_column_makes_room_for_the_cards_by_the_same_amount(self):
-        """Spalte und Maske bleiben buendig: #flow bekommt rechts genau das
-        dazu, was #composer an seiner rechten Kante einzieht -- und das ist
-        die Kartenbreite plus ihr Rand."""
+        """Spalte und Maske bleiben buendig: #flow bekommt auf JEDER Seite genau
+        das dazu, was #composer an JEDER Kante einzieht -- und das ist die
+        Kartenbreite plus ihr Rand."""
         self.assertIn("container:chat/inline-size", self._rule("#main{"))
         block = self.css[self.css.index("@container chat"):]
         block = block[:block.index("}\n}")]
-        flow = re.search(r"#flow\{padding-right:calc\(10px \+ (\d+)px\)", block)
-        comp = re.search(r"#composer\{right:calc\(var\(--sbw\) \+ (\d+)px\)", block)
+        flow = re.search(r"#flow\{\s*padding-inline:calc\(10px \+ var\(--sbw\) \+ (\d+)px\) "
+                         r"calc\(10px \+ (\d+)px\)", block)
+        comp = re.search(r"#composer\{\s*left:calc\(var\(--sbw\) \+ (\d+)px\);"
+                         r"right:calc\(var\(--sbw\) \+ (\d+)px\)", block)
         self.assertIsNotNone(flow)
         self.assertIsNotNone(comp)
         panels = self._rule("#panels{")
         reserve = self._px(panels, "width") + self._px(panels, "right")
-        self.assertEqual(int(flow.group(1)), reserve)
-        self.assertEqual(int(comp.group(1)), reserve)
-        # Die 10 px vor dem Plus sind die padding-inline von #flow.
-        self.assertIn("padding-inline:10px", self._rule("#flow{"))
+        self.assertEqual({int(g) for g in flow.groups()}, {reserve})
+        self.assertEqual({int(g) for g in comp.groups()}, {reserve})
+
+    def test_the_composer_is_centred_in_the_window_not_left_of_it(self):
+        """#256, robin 2026-09-23: "die Eingabemaske ist nicht mittig,
+        sie steht mehr links als rechts". Die #233-Reserve stand nur RECHTS
+        und schob Spalte und Maske um (306 + --sbw)/2 = 158 px nach links
+        (gemessen, Chromium 1920x900, Git-Panel offen); ohne Karte blieben
+        5 px, weil #flow links 10 und rechts 10 + Rinnstein hatte.
+
+        Die Mitte der Maske ist die Mitte von #main genau dann, wenn ihre
+        linke und rechte Kante gleich weit innen stehen; die der Spalte, wenn
+        die Inhaltsbox von #flow links um den Rinnstein (--sbw, den
+        scrollbar-gutter:stable rechts reserviert) mehr Polster traegt. Beides
+        muss ohne und mit Karten gelten -- jede einseitige Zahl ist dieser Bug."""
+        sbw = self._px(self._rule(":root{"), "--sbw")
+        composer = self._rule("#composer{position:absolute")
+        self.assertIn("left:var(--sbw)", composer)
+        self.assertIn("right:var(--sbw)", composer)
+        flow = self._rule("#flow{")
+        self.assertIn("scrollbar-gutter:stable", flow)
+        self.assertIn("padding-inline:calc(10px + var(--sbw)) 10px", flow)
+        self.assertEqual(sbw, 10)
+        block = self.css[self.css.index("@container chat"):]
+        block = block[:block.index("}\n}")]
+        self.assertNotIn("padding-right", block, "die Reserve steht wieder nur rechts")
+        self.assertNotRegex(block, r"#composer\{\s*right:", "die Maske zieht nur rechts ein")
 
     def test_a_squeezed_side_column_shows_nothing_rather_than_half(self):
         self.assertIn("container:side/inline-size", self.css)

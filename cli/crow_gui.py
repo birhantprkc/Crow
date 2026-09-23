@@ -1613,7 +1613,13 @@ details.rollcard pre.rtp{max-height:220px;overflow:auto;white-space:pre-wrap;
    Scrollbalken; der Rinnstein daneben haelt die Spalte ruhig, aber er ist kein
    Abstand. Zehn Pixel sind es, und `#composer` traegt dieselben zehn, damit
    Spalte und Eingabemaske weiter auf derselben Kante stehen. */
-#flow{overflow-y:auto;padding:22px 0 26px;padding-inline:10px;flex:1;
+/* #256. LINKS DIESELBE BREITE WIE DER RINNSTEIN RECHTS. Mit 10/10
+   stand die Inhaltsbox von #flow zwischen 10 und (#main - 10 - Rinnstein),
+   ihre Mitte also --sbw/2 = 5 px links der Fenstermitte -- und die Maske,
+   die sich an diese Mitte haelt, mit ihr. Links `10px + --sbw` macht die
+   Box symmetrisch in #main: Spalte und Maske stehen auf der Mitte von #main. */
+#flow{overflow-y:auto;padding:22px 0 26px;
+  padding-inline:calc(10px + var(--sbw)) 10px;flex:1;
   min-height:0;scroll-behavior:smooth;user-select:text;
   scrollbar-gutter:stable}
 /* CENTRED, NOT LEFT-HUGGING. max-width alone pins the column to the left edge
@@ -2245,7 +2251,9 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    (elementFromPoint: #gitbranchname ueber der Modellzeile, 1180x800). Hebt man
    den ganzen Composer, heben sich die Menues mit; die Karten enden seit
    `--comph` oberhalb, also teilen sich beide sonst kein Pixel. */
-#composer{position:absolute;left:0;right:var(--sbw);bottom:0;z-index:6;
+/* #256: BEIDE SEITEN --sbw, aus demselben Grund wie links an #flow --
+   die Maske steht auf der Mitte von #main, nicht 5 px links davon. */
+#composer{position:absolute;left:var(--sbw);right:var(--sbw);bottom:0;z-index:6;
   padding:26px 40px 14px;
   background:linear-gradient(to bottom,transparent,var(--bg) 26px)}
 /* #233. WO PLATZ IST, WEICHT DIE SPALTE DEN KARTEN AUS. Die Karten
@@ -2257,12 +2265,22 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    dieselben 306 px ein: Spalte und Maske bleiben buendig und mittig im freien
    Raum (Mitte beider: (#main - --sbw - 306)/2). Darunter bleibt das Schweben,
    wie es war -- eine reservierte Spalte waere dort schmaler als die Karte.
-   Nur solange eine Karte STEHT: das Git-Panel offen oder ein Ziel gesetzt. */
+   Nur solange eine Karte STEHT: das Git-Panel offen oder ein Ziel gesetzt.
+   #256 (robin, 2026-09-23): "die Eingabemaske ist nicht mittig". Die
+   Reserve nur RECHTS schob Spalte und Maske um 306/2 = 153 px (+ 5 px Rinnstein)
+   links der Fenstermitte -- gemessen 158 px, Chromium, 1920x900, Git offen.
+   Jetzt reserviert #flow die Kartenbreite auf BEIDEN Seiten und die Maske
+   zieht beide Kanten um dieselben 306 px ein: die Mitte bleibt die von #main,
+   und die Karten liegen trotzdem nie ueber dem Text. Die Spalte wird dabei nur
+   schmaler, wo 960 + 2 x 316 + 2 x --sbw nicht passen (#main < 1612 px);
+   darueber ist die Reserve wirkungslos, weil .turn ohnehin 960 breit ist. */
 @container chat (min-width:1100px){
   body:not([data-git="shut"]) #flow,
-  #main:has(#goalpanel:not([hidden])) #flow{padding-right:calc(10px + 306px)}
+  #main:has(#goalpanel:not([hidden])) #flow{
+    padding-inline:calc(10px + var(--sbw) + 306px) calc(10px + 306px)}
   body:not([data-git="shut"]) #composer,
-  #main:has(#goalpanel:not([hidden])) #composer{right:calc(var(--sbw) + 306px)}
+  #main:has(#goalpanel:not([hidden])) #composer{
+    left:calc(var(--sbw) + 306px);right:calc(var(--sbw) + 306px)}
 }
 /* DAS BAND LIEGT UEBER DEM PLATZHALTER, NICHT UEBER DER ZEILE (robin,
    2026-08-23). Eine eigene Zeile machte die Maske hoeher, sobald jemand zu
