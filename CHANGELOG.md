@@ -59,6 +59,27 @@ Nothing here is live-accepted yet; acceptance is robin's GUI replay.
 
 ### Fixed
 
+- **A reloaded window no longer restores the session twice and closes** (#209, `e47a620`). #204's recovery reload
+  fired `pywebviewready` again, and `ready()` re-ran start-up: `_probe` restored session.json into the running
+  chat (`RuntimeError: restore() is for a fresh conversation`), posted the saved KV into `/slots/0` mid-chat and
+  re-bound the roots. A second page load now only redraws the live chat. `_probe` restores only into a fresh
+  conversation, and a streamed token with no open round opens one (`this.col` null). 7 new tests, which failed
+  on 3d26875 with the live errors. Not run live in WebKit.
+- **Secrets are named where they live** (#194, #195, `4f94f2f`, `c4167f1`). Search hints and the Tavily 401/403
+  refusal name the store by its real per-platform path first (the refusal also says which source the refused
+  key came from) and the environment as fallback. MCP `${VAR}` credentials are read through `secret()`, store
+  before environment; `_mcp_missing` no longer refuses a server whose token is only in the store. 13 new tests.
+- **Goal-mode nudges mandate nothing** (#240, `a90b126`). Nudges are user-role messages carrying the model's own
+  plan text, so their paths counted as user-named. A `/goal` plan the user typed still counts (`by` in goal.json).
+- **A reopened chat draws only the typed line** (#241, `3bcc07b`). #224's rebind notice no longer shows in the
+  user's bubble, and an image-only turn's notice no longer marks both folders as user-named.
+- **The null device is not an outside path** (#243, `edc3d82`). `2>/dev/null` (and `\\.\NUL`) stopped at `auto`.
+  202 of 775 distinct stored commands contain it.
+- **write_file refuses lookalike directories once and control characters always** (#244, `7dc7c3c`). A
+  missing directory that looks like an existing sibling (`w` beside `work`) is refused once with "did you mean".
+  Repeating the identical call creates it. Every created directory is reported. Measured in stored writes: 6 of
+  111 paths carried a control character (`pipeline.py\n`).
+
 - **A finished code block keeps its copy button** (#239). `codeFinish` emptied the whole head row (`.cwh`) to
   write the path, taking #156's copy button with it; the path now goes into the name slot `.cwn`.
 - **Drags and window resizes follow the pointer in long chats** (#236, #237, #238). Measured on a 200-turn chat
