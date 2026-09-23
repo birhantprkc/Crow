@@ -34,6 +34,13 @@
 | `client_name` | what dynamic registration calls this client. Default `Crow` |
 | `redirect_host` | `127.0.0.1` (default) or `localhost` in the redirect URI. The listener binds loopback either way |
 
+**`${VAR}` in `command`, `args`, `cwd`, `env`, `url` and `headers`** is filled in from the
+[secret store](settings.md#the-secret-store-193) first and the environment second (#195), the
+same order every other secret follows. A name found in neither is left as written and the server
+is refused with the name, rather than sending the literal `${GITHUB_TOKEN}` as a bearer token. A
+token that lives only in the store no longer makes the server count as missing its variable.
+`schema` is the server's own text and is never expanded.
+
 The classification is pre-filled from `annotations`: `readOnlyHint: true` → `reading`,
 `destructiveHint: false` → `writing`, anything else → `executing`. The specification's own defaults
 are `readOnlyHint: false` and `destructiveHint: true`, so a server that says nothing gets the

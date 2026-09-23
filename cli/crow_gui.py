@@ -812,6 +812,17 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--line);border-radius:99px}
 ::-webkit-scrollbar-thumb:hover{background:var(--bevel)}
+/* #235. DIE LEISTE BLEIBT AUS DEN RUNDEN ECKEN. Ein Scrollcontainer,
+   der selbst (oder dessen Rahmen) gerundet ist, legt seine Leiste bis in die
+   Ecke; gerendert in WebKitGTK 2.52 lief der Daumen der Zielkarte in deren
+   10-px-Rundung und der von #flow in die 12-px-Ecke von #main, sichtbar
+   angeschnitten. Der Spurrand in Hoehe des Radius haelt sie gerade.
+   (Headless-Chromium blendet Leisten aus -- dort war davon nichts zu sehen.) */
+#flow::-webkit-scrollbar-track{margin-top:12px}
+#goalpanel::-webkit-scrollbar-track{margin:10px 0}
+#gitbody::-webkit-scrollbar-track{margin-bottom:10px}
+#spane::-webkit-scrollbar-track{margin-bottom:12px}
+.code pre::-webkit-scrollbar-track{margin:0 8px}
 
 /* -- title bar: ours, because the frame is off ------------------------- */
 /* THE CAPTION DRAGS THE WINDOW, and the hook is pywebview's own class.
@@ -868,10 +879,16 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 /* A LAYER IN THIS WINDOW, NOT A SECOND WINDOW. A second pywebview window would
    need its own bridge, its own theme attribute and its own close path, for a
    panel that is only ever open on top of this one. */
+/* #234. UNTER DER TITELLEISTE ZENTRIERT, nicht im ganzen Fenster.
+   Bei 1130x520 war das Blatt 468 px hoch (90vh) und begann bei y=26 -- die
+   34 px hohe #bar lag mit ihren Fensterknoepfen 8 px darunter. `padding-top`
+   in #bar-Hoehe verschiebt die Mitte, die dritte Grenze im `min()` haelt
+   darunter 12 px Luft; der Schleier dimmt die Leiste weiterhin. */
 #settings{position:fixed;inset:0;z-index:80;display:grid;place-items:center;
-  background:var(--shadow-strong)}
+  background:var(--shadow-strong);padding-top:34px}
 #settings[hidden]{display:none}
-#settings .sheet{width:min(1040px,94vw);height:min(780px,90vh);display:flex;
+#settings .sheet{width:min(1040px,94vw);
+  height:min(780px,90vh,calc(100vh - 58px));display:flex;
   flex-direction:column;background:var(--panel);border:1px solid var(--bevel);
   border-radius:12px;box-shadow:0 24px 60px var(--shadow-strong);overflow:hidden}
 #settings .shead{display:flex;align-items:center;gap:10px;padding:13px 16px;
@@ -920,6 +937,28 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
 #g-ne{top:0;right:0;width:8px;height:8px;cursor:nesw-resize}
 #g-sw{bottom:0;left:0;width:8px;height:8px;cursor:nesw-resize}
 #g-se{bottom:0;right:0;width:8px;height:8px;cursor:nwse-resize}
+/* #237. WAEHREND SICH DIE CHATBREITE AENDERT, WIRD NUR DAS SICHTBARE
+   GESETZT. Jede Breite -- Rail-Griff, Panel-Griff, Fensterkante -- bricht
+   jede Zeile des ganzen Verlaufs neu um, auch die tausend Zeilen ueber dem
+   Bildschirm. Gemessen 2026-09-23 an 200 Runden (12 968 Knoten): WebKitGTK
+   2.52 16 ms Layout pro Schritt, Chromium 13 ms; mit `content-visibility`
+   3.3 ms. NUR WAEHREND DER GESTE und nicht immer, weil WebKitGTK 2.52 kein
+   Scroll-Anchoring kann (`CSS.supports("overflow-anchor","auto")` = false):
+   dauerhaft eingeschaltet sprang die Sicht beim Hochscrollen in 24 von 40
+   Schritten, und das Ende lag 581 px unter dem Ende. `auto` in der
+   Platzhaltergroesse ist die zuletzt gezeichnete Hoehe jeder Runde -- also
+   steht waehrend der Geste alles ueber dem Bildschirm genau so hoch wie davor,
+   und `sizing.end` setzt die Sicht danach selbst wieder an ihren Anker. */
+#flow > .turn{contain-intrinsic-size:auto 240px}
+#flow.sizing > .turn{content-visibility:auto}
+/* A CONTAINED BOX DOES NOT LET ITS CHILDREN'S MARGINS COLLAPSE THROUGH IT:
+   under .sizing a turn whose first or last child carries a margin (.alarm 6px,
+   .fail, .code, details.rollcard) grew by it -- measured 17.8 -> 23.8 px in
+   Chromium, everything below dropped 6 px for the length of a drag (re-audit of
+   the integration, 2026-09-23). Those margins already collapsed into the 26px
+   .turn+.turn gap, so dropping them keeps the look and makes both states equal. */
+#flow > .turn > :first-child{margin-top:0}
+#flow > .turn > :last-child{margin-bottom:0}
 
 /* -- rail --------------------------------------------------------------- */
 #rail{width:var(--railw,242px);flex:none;
@@ -956,6 +995,16 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
   display:flex;flex-direction:column;min-height:0;background:var(--rail);
   transition:width .16s ease}
 #side.dragging{transition:none}
+/* #234. EIN GEQUETSCHTES PANEL ZEIGT NICHTS STATT EIN HALBES. Die
+   Spalte darf nachgeben (#138c) -- bei 1130x520 mit Rail 520 bis auf 48 px --,
+   und dann stand dort "CO" ueber "Tool Cal" und ein um 60 px abgeschnittenes
+   "clear all". Unter 150 px passt der Kopf nicht mehr; die Spalte bleibt eine
+   Flaeche in Rail-Farbe, bis sie wieder Platz hat. Nur inline-size-
+   Containment: die Breite kommt aus --codew und dem Flex-Algorithmus, nie
+   aus dem Inhalt. `visibility` statt `display`, damit Klappzustand und
+   Scrollstand der Panels das Quetschen ueberleben. */
+#side{container:side/inline-size}
+@container side (max-width:150px){#side>*{visibility:hidden}}
 /* DIE ZUSAGE DES PANELS BLEIBT SEINE EIGENE. `min-width:0` und `flex:0 1 auto`
    stehen weiter hier, wo #138c sie hingeschrieben hat: das Panel gibt nach,
    bevor die Eingabemaske es tut. Dass es jetzt in einer Spalte liegt, aendert
@@ -1059,18 +1108,26 @@ body[data-code="shut"][data-browser="shut"] #codegrip{display:none}
 #brtabs{display:flex;gap:4px;padding:0 8px 6px;overflow-x:auto;flex:none;
   scrollbar-width:none}
 #brtabs::-webkit-scrollbar{display:none}
-.brtab{display:flex;align-items:center;gap:6px;flex:0 0 auto;max-width:150px;
+.brtab{display:flex;align-items:center;gap:6px;flex:0 1 auto;min-width:64px;max-width:150px;
   font:inherit;font-size:11px;color:var(--dim);background:transparent;
   border:1px solid var(--line);border-radius:6px;padding:3px 6px 3px 9px;
   cursor:pointer}
 .brtab.on{background:var(--raised);color:var(--text);border-color:var(--bevel)}
-.brtab .t{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.brtab .t{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;min-width:0}
+/* TABS SHRINK BEFORE THEY SCROLL: at flex 0 0 auto three tabs were 345 px in a
+   260 px strip with its scrollbar hidden, and the active (new) tab sat outside
+   it, invisible. 64 px keeps a favicon-less title readable; from about four tabs
+   the strip scrolls. */
 .brtab .x{flex:none;color:var(--dimmer);padding:0 2px}
 .brtab .x:hover{color:var(--bad)}
-#brbar{display:flex;align-items:center;gap:5px;padding:0 8px 7px;flex:none}
+/* #235: STRETCH, aus dem Grund, den #acts aufgeschrieben hat -- eine
+   Zeile, eine Hoehe. Mit `center` standen 20 px hohe Pfeile neben einem 28 px
+   hohen Adressfeld. Die Knoepfe zentrieren ihr Zeichen selbst. */
+#brbar{display:flex;align-items:stretch;gap:5px;padding:0 8px 7px;flex:none}
 .brnav{font:inherit;font-size:12px;line-height:1;color:var(--dimmer);
   background:transparent;border:1px solid var(--line);border-radius:6px;
-  padding:3px 7px;cursor:pointer}
+  padding:3px 7px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;min-width:26px}
 .brnav:hover{border-color:var(--bevel);color:var(--accent)}
 #brurl{flex:1;min-width:0;font:inherit;font-size:11.5px;font-family:var(--mono);
   background:var(--bg);border:1px solid var(--line);border-radius:6px;
@@ -1224,10 +1281,18 @@ body[data-git="shut"] #git{display:none}
    DIE HOEHE IST DIE ALTE, EINMAL: 60 % gehoerten dem Ziel allein, jetzt teilen
    sich zwei Karten 70 % minus dem Rand -- der Abstand zur Eingabemaske bleibt
    damit derselbe, den das Zielpanel seit #164 haelt. */
+/* #233. UND NIE UEBER DIE EINGABEMASKE. 70 % setzte voraus, dass der
+   Composer nie mehr als 30 % von #main belegt; mit Speicherleiste und zwei
+   Bildchips waren es bei 1130x520 190 von 486 px, und die Git-Karte lag ueber
+   Textfeld, Ordner-, Stufen- und Mikrofonknopf. `--comph` ist die Hoehe, die
+   `fitFlow` ohnehin misst (inklusive der 26-px-Blende, die so den Abstand
+   stellt); ohne sie gilt die alte Rechnung. */
 #panels{position:absolute;top:14px;right:16px;z-index:5;width:290px;
-  height:calc(70% - 14px);display:flex;flex-direction:column;gap:10px;
+  height:min(calc(70% - 14px),calc(100% - var(--comph,0px) - 14px));
+  display:flex;flex-direction:column;gap:10px;
   pointer-events:none}
 #panels>*{pointer-events:auto}
+
 
 /* -- #164: das Zielpanel ------------------------------------------------- */
 /* ORT UND BREITE GEHOEREN `#panels`. Was hier steht, ist die Karte selbst --
@@ -1272,7 +1337,11 @@ body[data-git="shut"] #git{display:none}
    ohne Leerzeichen umbrechen laesst, statt das Panel zu sprengen. */
 #goalpanel li{display:flex;gap:9px;padding:7px 0 9px;align-items:flex-start;
   color:var(--text-faint);line-height:1.45}
-#goalpanel li>span:last-child{min-width:0;overflow-wrap:anywhere}
+#goalpanel li>span:last-child{min-width:0;overflow-wrap:anywhere;
+  /* #235: DIE SPALTE FUELLT DIE ZEILE, sonst ist sie so breit wie
+     ihr Text -- und mit ihr die gestrichelte Linie ueber der Kostenzeile:
+     unter "Audit rendern" ein Stummel, unter einem langen Schritt volle Breite. */
+  flex:1}
 #goalpanel li .m{flex:none;margin-top:2px;display:flex;color:var(--dimmer)}
 /* ERLEDIGT WIRD DURCHGESTRICHEN UND GRUEN, LAUFEND AMBER -- dieselben zwei
    Farben, die die Rail fuer laufend und fertig benutzt, damit ein Blick von
@@ -1435,6 +1504,13 @@ body:not([data-git="shut"]) #gittoggle{color:var(--accent);
 .sess.inproj{padding-left:24px}
 .sess.inproj::after{content:"";position:absolute;left:14px;top:0;bottom:0;
   width:1px;background:var(--line-soft)}
+/* #235: IM PROJEKT LIEGT DER BALKEN AUF DER LINIE. Bei `left:2px`
+   standen in einer markierten Projektzeile zwei Senkrechte 12 px nebeneinander
+   -- Akzent links, Baumlinie rechts. Auf 13 px deckt der 2-px-Balken die
+   1-px-Linie bei 14 und wird zu ihrem hervorgehobenen Stueck. `z-index:1`,
+   weil `::after` spaeter gemalt wird und sonst die halbe Balkenbreite in
+   Linienfarbe uebermalt -- der Akzent las sich dann grau. */
+.sess.inproj.on::before,.sess.inproj.done::before{left:13px;z-index:1}
 /* The rename field replaces the row in place, so the list never jumps. */
 .sess input{width:100%;font:inherit;font-size:12px;color:var(--model);
   background:var(--bg);border:1px solid var(--accent);border-radius:4px;
@@ -1479,7 +1555,12 @@ body:not([data-git="shut"]) #gittoggle{color:var(--accent);
      Fensterhintergrund, und eine Ecke, die beim Zuklappen aufspringt, macht
      aus dem Falten eine Formaenderung. */
   border-top-right-radius:12px;overflow:hidden;
-  position:relative}
+  position:relative;
+  /* #233: der Abfragecontainer fuer #panels (siehe dort). Nur
+     inline-size, also Stil- und Breiten-Containment, KEIN Layout-Containment:
+     kein neuer Bezugsblock fuer `fixed`, kein neuer Stapelkontext. Die Breite
+     kommt ohnehin aus `flex:1` und min-width 560, nie aus dem Inhalt. */
+  container:chat/inline-size}
 /* #125. THE STATUS BAR IS GONE, not hidden. Both chips it carried moved into
    the settings sheet -- the connection with its address, and the tool switch --
    and an empty bar is a band of nothing between the ribbon and the first line
@@ -1501,6 +1582,29 @@ body:not([data-git="shut"]) #gittoggle{color:var(--accent);
 #tools{cursor:pointer;transition:color .15s,border-color .15s}
 #tools:hover{border-color:var(--bevel)}
 
+/* #211. DIE BANDGRENZE ALS KARTE. Der Rollover-Schnitt im Band: eingeklappt
+   eine Zeile, die sagt wie gross das Archiv ist, ausgeklappt der Zeiger und
+   auf einen Klick das Ende des Transkripts. Dieselben Farben wie die Chips
+   -- es ist eine Fussnote zum Gespraech, kein Ereignis im Gespraech. */
+details.rollcard{margin:8px 0;border:1px solid var(--line);
+  border-left:3px solid var(--dimmer);border-radius:8px}
+details.rollcard summary{display:flex;gap:8px;align-items:center;
+  padding:6px 10px;cursor:pointer;font-size:12px;color:var(--dim);
+  list-style:none;user-select:none}
+details.rollcard summary::-webkit-details-marker{display:none}
+details.rollcard[open] summary .caret{transform:rotate(90deg)}
+details.rollcard .caret{transition:transform .12s}
+details.rollcard .rn{margin-left:auto;white-space:nowrap}
+details.rollcard .rc{padding:0 10px 8px;font-size:12px;color:var(--text-soft)}
+details.rollcard .rt{margin:2px 0 8px;word-break:break-all}
+details.rollcard button{font:inherit;font-size:12px;padding:2px 10px;
+  margin-right:6px;color:var(--text-soft);background:none;
+  border:1px solid var(--line);border-radius:999px;cursor:pointer}
+details.rollcard button:hover{border-color:var(--bevel)}
+details.rollcard pre.rtp{max-height:220px;overflow:auto;white-space:pre-wrap;
+  font-size:11px;color:var(--dim);margin:8px 0 0}
+
+
 
 /* STABLE GUTTER, so the column does not shift sideways the moment a chat grows
    past one screen -- and so the composer below can line up against one number
@@ -1509,14 +1613,28 @@ body:not([data-git="shut"]) #gittoggle{color:var(--accent);
    Scrollbalken; der Rinnstein daneben haelt die Spalte ruhig, aber er ist kein
    Abstand. Zehn Pixel sind es, und `#composer` traegt dieselben zehn, damit
    Spalte und Eingabemaske weiter auf derselben Kante stehen. */
-#flow{overflow-y:auto;padding:22px 0 26px;padding-inline:10px;flex:1;
+/* #256. LINKS DIESELBE BREITE WIE DER RINNSTEIN RECHTS. Mit 10/10
+   stand die Inhaltsbox von #flow zwischen 10 und (#main - 10 - Rinnstein),
+   ihre Mitte also --sbw/2 = 5 px links der Fenstermitte -- und die Maske,
+   die sich an diese Mitte haelt, mit ihr. Links `10px + --sbw` macht die
+   Box symmetrisch in #main: Spalte und Maske stehen auf der Mitte von #main. */
+#flow{overflow-y:auto;padding:22px 0 26px;
+  padding-inline:calc(10px + var(--sbw)) 10px;flex:1;
   min-height:0;scroll-behavior:smooth;user-select:text;
   scrollbar-gutter:stable}
 /* CENTRED, NOT LEFT-HUGGING. max-width alone pins the column to the left edge
    and leaves the rest of a wide window empty; the auto margins are what put it
    in the middle. 960 includes the 30px padding, so the text runs 900 wide --
    the same 900 #box is held to, which is what makes the two flush. */
-.turn{padding:0 30px;max-width:960px;margin-inline:auto}
+/* #232. `overflow-wrap:anywhere`, VERERBT AN ALLES IM ZUG. Ein Pfad,
+   eine URL, ein deutsches Kompositum oder ein langer Inline-Code hatte keine
+   Bruchstelle und machte die Spalte breiter als das Fenster: gemessen #flow
+   891 px Inhalt in 666 (1180x800), die Nutzerblase 808 in 673 selbst bei
+   2560x1440. `anywhere` und nicht `break-word`: nur `anywhere` senkt die
+   min-content-Breite, und `.you .txt` ist ein Grid-Item in einer `1fr`-Spur
+   (= minmax(auto,1fr)) -- mit `break-word` bliebe die Blase so breit wie das
+   Wort. Code-Bloecke sind `pre` und brechen weiterhin nie. */
+.turn{padding:0 30px;max-width:960px;margin-inline:auto;overflow-wrap:anywhere}
 .turn+.turn{margin-top:26px}
 /* #131. NO LABEL. The bubble says whose the line is; a three-letter prefix in
    front of it says it a second time, and the model's own turns never had one. */
@@ -1584,10 +1702,42 @@ details.think[open] .caret{transform:rotate(90deg)}
 .md code{font-family:var(--mono);font-size:12px;background:var(--raised);
   border-radius:4px;padding:1px 5px}
 .md a.lnk{color:var(--accent);text-decoration:underline;cursor:pointer}
+/* -- #228: what can be selected, in BOTH spellings ------------------------
+   WEBKITGTK DROPS THE UNPREFIXED PROPERTY. Measured 2026-09-23, WebKitGTK
+   2.52.6: CSS.supports("user-select","text") is false, and computed
+   -webkit-user-select is "none" on every answer paragraph -- pywebview
+   (text_select=False) injects `body{-webkit-user-select:none}`, and Crow's
+   `#flow{user-select:text}` never reached the engine. A synthesised mouse drag
+   over an answer selected "" there. Blink knows both spellings, which is why
+   the chat selected on Windows and the side panels did not (they had no rule
+   at all). ONE BLOCK STATES THE POLICY so the eleven rules above stay as they
+   are; test_crow_gui holds every `user-select` in this page to a `-webkit-`
+   twin. Content is text, the controls inside it are not. */
+body,button,summary,#menu,.code .hd,#toolcalls .tool .hd,#toolcalls .tchd,
+#codefiles .tchd,.gitgrp .tchd,.code.foldable .hd,details.rollcard summary
+  {-webkit-user-select:none;user-select:none}
+#flow,#spane,#in,input,textarea,.code pre,.ghcode,#tclist .tsec,#cflist .cwp,
+#cflist .cwh{-webkit-user-select:text;user-select:text;cursor:auto}
+/* -- #229: links and paths in the output ---------------------------------
+   NOT DRAGGED AWAY: pywebview cancels dragstart on <a> anyway (draggable=False),
+   and a link that looks draggable and is not is a gesture that does nothing. */
+a.lnk{color:var(--accent);text-decoration:underline;cursor:pointer;
+  -webkit-user-drag:none}
+.pth{text-decoration:underline dotted;text-underline-offset:2px;
+  text-decoration-color:var(--dimmer);cursor:context-menu}
+.pth:hover{text-decoration-color:var(--accent)}
+a.lnk:focus-visible,.pth:focus-visible
+  {outline:1px solid var(--accent);outline-offset:1px;border-radius:3px}
+/* the menu's own buttons keep their 5px radius: the ring sits inside them */
+#menu button:focus-visible{outline:1px solid var(--accent);outline-offset:-1px}
 /* A WIDE TABLE SCROLLS INSIDE ITSELF rather than widening the chat: the column
    is what every other block is measured against. */
 .md table{display:block;overflow-x:auto;border-collapse:collapse;margin:0 0 9px;
-  font-size:12.5px}
+  font-size:12.5px;
+  /* #232: die Tabelle nimmt das `anywhere` von .turn NICHT an --
+     sonst braeche jede Zelle mitten im Wort, statt dass die Tabelle wie oben
+     versprochen in sich scrollt. */
+  overflow-wrap:normal}
 .md th,.md td{border:1px solid var(--line);padding:5px 9px;text-align:left;
   vertical-align:top}
 .md th{background:var(--raised);color:var(--text-hi);font-weight:600}
@@ -1662,6 +1812,12 @@ details.think[open] .caret{transform:rotate(90deg)}
    es haengen koennte. */
 .gitgrp .tchd{align-items:baseline}
 .gitgrp .tcx{align-self:center}
+/* #235. EINE KOPFZEILE BLEIBT EINE ZEILE. Ein langer Zweigname
+   (`t-gui-layout-with-a-long-branch-name`) brach auf zwei Zeilen um, und
+   `↑3 ↓1` daneben auf zwei weitere. Der Name kuerzt jetzt am Ende (voll im
+   `title` und in der Zweigliste darunter), die Zahlen stehen fest. */
+.gitgrp .tct{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gitgrp .gcount{flex:none;white-space:nowrap}
 
 /* #138b. JEDE ZEILE IST IHRE EIGENE KLAPPE. Der Kopf bleibt eine Zeile -- er
    ist der Index -- und alles, was Platz braucht, liegt darunter und nur dann,
@@ -1989,7 +2145,10 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   color:var(--dim);font-size:11.5px;display:flex;align-items:center;gap:10px}
 #viewbar[hidden]{display:none}
 #viewbar b{color:var(--text);font-weight:600}
-#viewbar button{margin-left:auto;background:none;border:1px solid var(--line);
+/* #235: `flex:none` + `nowrap` -- bei 2560x600 brach der Knopf zu
+   "back to / it" um, weil der lange Satz daneben ihn zusammendrueckte. */
+#viewbar button{flex:none;white-space:nowrap;
+  margin-left:auto;background:none;border:1px solid var(--line);
   border-radius:7px;color:var(--accent);font:inherit;padding:2px 9px;cursor:pointer}
 #viewbar button:hover{border-color:var(--accent)}
 #pendbar .top{display:flex;align-items:center;gap:10px}
@@ -2086,9 +2245,45 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    in Chromium, so it fades to nothing rather than through grey -- and 26px of it
    is why the gap #flow keeps below is measured from offsetHeight, which
    INCLUDES the fade: the last line comes to rest above it, never inside it. */
-#composer{position:absolute;left:0;right:var(--sbw);bottom:0;
+/* #233: z-index 6, EINE STUFE UEBER #panels (5). #box ist mit
+   `z-index:1` ein eigener Stapelkontext, also galt das `z-index:40` der Menues
+   nur darin -- Modell-, Stufen- und Ordnermenue oeffneten UNTER der Git-Karte
+   (elementFromPoint: #gitbranchname ueber der Modellzeile, 1180x800). Hebt man
+   den ganzen Composer, heben sich die Menues mit; die Karten enden seit
+   `--comph` oberhalb, also teilen sich beide sonst kein Pixel. */
+/* #256: BEIDE SEITEN --sbw, aus demselben Grund wie links an #flow --
+   die Maske steht auf der Mitte von #main, nicht 5 px links davon. */
+#composer{position:absolute;left:var(--sbw);right:var(--sbw);bottom:0;z-index:6;
   padding:26px 40px 14px;
   background:linear-gradient(to bottom,transparent,var(--bg) 26px)}
+/* #233. WO PLATZ IST, WEICHT DIE SPALTE DEN KARTEN AUS. Die Karten
+   bleiben absolut (#164), aber ueber der Leseflaeche lagen sie bei jeder
+   Breite: 1920x1080 (#main 1418 px) endet die 960er-Spalte bei 1189, die
+   Karten beginnen bei 1112 -- 77 px jedes Zuges und der Kopierknopf jedes
+   Code-Blocks darunter. Ab 1100 px #main bekommt #flow rechts die Breite der
+   Karten (290 + 16 Rand) dazu, und #composer zieht seine rechte Kante um
+   dieselben 306 px ein: Spalte und Maske bleiben buendig und mittig im freien
+   Raum (Mitte beider: (#main - --sbw - 306)/2). Darunter bleibt das Schweben,
+   wie es war -- eine reservierte Spalte waere dort schmaler als die Karte.
+   Nur solange eine Karte STEHT: das Git-Panel offen oder ein Ziel gesetzt.
+   #256 (robin, 2026-09-23): "die Eingabemaske ist nicht mittig". Die
+   Reserve nur RECHTS schob Spalte und Maske um 306/2 = 153 px (+ 5 px Rinnstein)
+   links der Fenstermitte -- gemessen 158 px, Chromium, 1920x900, Git offen.
+   Jetzt reserviert #flow die Kartenbreite auf BEIDEN Seiten und die Maske
+   zieht beide Kanten um dieselben 306 px ein: die Mitte bleibt die von #main,
+   und die Karten liegen trotzdem nie ueber dem Text. Die Spalte wird dabei nur
+   schmaler, wo 960 + 2 x 316 + 2 x --sbw nicht passen (#main < 1612 px);
+   darueber ist die Reserve wirkungslos, weil .turn ohnehin 960 breit ist. */
+@container chat (min-width:1100px){
+  body:not([data-git="shut"]) #flow,
+  #main:has(#goalpanel:not([hidden])) #flow,
+  #main:has(#subpanel:not([hidden])) #flow{
+    padding-inline:calc(10px + var(--sbw) + 306px) calc(10px + 306px)}
+  body:not([data-git="shut"]) #composer,
+  #main:has(#goalpanel:not([hidden])) #composer,
+  #main:has(#subpanel:not([hidden])) #composer{
+    left:calc(var(--sbw) + 306px);right:calc(var(--sbw) + 306px)}
+}
 /* DAS BAND LIEGT UEBER DEM PLATZHALTER, NICHT UEBER DER ZEILE (robin,
    2026-08-23). Eine eigene Zeile machte die Maske hoeher, sobald jemand zu
    sprechen anfaengt, und schoebe alles darunter -- dieselbe Bewegung, die der
@@ -2174,7 +2369,12 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 #foot{display:flex;align-items:center;gap:10px;margin-top:9px;font-size:11px;
   color:var(--dimmer);min-width:0}
 #ctx{font-size:11.5px;white-space:nowrap;min-width:0;overflow:hidden;
-  text-overflow:ellipsis;flex:0 1 auto}
+  text-overflow:ellipsis;
+  /* #231: .2 STATT 1, damit die Rangfolge oben stimmt. Schrumpfen
+     verteilt sich nach Faktor MAL Basis; mit 1 verlor die kurze Zahl anteilig
+     so viel wie der lange Chip und stand bei 1130x520 als "48.…" da. So gibt
+     erst der Modell-Chip nach, die Zahl erst, wenn er es nicht mehr kann. */
+  flex:0 .2 auto}
 #modelwrap{min-width:0;flex:0 1 auto;display:inline-flex}
 /* JEDES KIND, NICHT NUR DAS ERSTE. Der Chip ist ein `inline-flex` aus zwei
    Teilen -- dem Modellnamen und dem Grad dahinter -- und eine Regel nur auf
@@ -2195,8 +2395,18 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    each would be the fix that goes stale the first time a font-size moves --
    `stretch` is the initial value of align-items for a reason: the row gets ONE
    height, from its tallest control, and the rest adopt it. */
+/* #231. DIE GRUPPE SELBST GIBT NICHT NACH -- sie WAECHST. Mit
+   `flex:0 1 auto; min-width:0` war #acts ein schrumpfendes Kind von #foot,
+   und Schrumpfen verteilt sich nach flex-shrink MAL Basis: #acts hatte mit
+   307 px die groesste Basis und bekam den groessten Schnitt, seine starren
+   Knoepfe liefen hinaus. Gemessen (Chromium, Harness mit langem Ordnernamen):
+   1180x800 #acts 307 in 251 px, #go 46 px rechts NEBEN der Maske; 1130x520
+   #go von #main um 18 px abgeschnitten. Jetzt ist die Basis nur die Knoepfe
+   (der Hinweis traegt 0 bei, siehe #hint), #acts schrumpft nie darunter und
+   nimmt allen Rest der Zeile -- den der Hinweis fuellt. Der Mangel landet bei
+   #ctx und #modelwrap, die dafuer min-width:0 und Ellipse haben. */
 #acts{margin-left:auto;display:flex;gap:8px;align-items:stretch;
-  min-width:0;flex:0 1 auto}
+  min-width:0;flex:1 0 auto}
 /* #138c. DIE KNOEPFE GEBEN NICHT NACH. Sie sind das Angeklickte, und ein
    halber Knopf ist schlimmer als ein gekuerztes Wort -- also schrumpft in
    dieser Reihe nur der Hinweis. */
@@ -2206,9 +2416,18 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 #hint{color:var(--dimmer);font-size:10.5px;align-self:center;
   /* #138c. GIBT ALS ERSTES NACH, bis auf null. Er sagt "read timeout 600 s"
      oder worauf eine gepufferte Zeile wartet -- entbehrlich neben einem Knopf,
-     den jemand treffen muss. */
-  min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;
-  white-space:nowrap}
+     den jemand treffen muss.
+     #231: `width:0` + `flex:1 1 0` ist, was das WAHR macht. Eine
+     feste Breite 0 traegt 0 zur Eigenbreite von #acts bei, also bekommt der
+     Hinweis nur, was nach allen Knoepfen UND Chips uebrig ist -- er geht als
+     Erster, vor dem Modell-Chip. Rechtsbuendig, damit er am Ordnerknopf steht
+     statt links im leeren Raum. */
+  min-width:0;width:0;flex:1 1 0;text-align:right;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+/* #235. EINE ZEILE, wie jede Zahl in dieser Reihe: ohne Regel brach
+   "1234 tok · 23.4 tok/s" waehrend eines Zuges auf zwei Zeilen um (1280x720)
+   und machte die Fusszeile hoeher, genau in dem Moment, in dem gelesen wird. */
+#turnstate{white-space:nowrap;flex:none}
 /* A FLEX BOX SO THE GLYPH STAYS ON THE CENTRE LINE once #acts stretches this
    button past its own line box. Left as a plain button it would grow at the
    bottom and the arrow would ride high in it. */
@@ -2382,6 +2601,12 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 /* THE LEVEL IS DIMMER THAN THE MODEL because it is the setting, not the subject -- the same
    split #modelmenu draws between a model row and the level rows under it. */
 #model .lvl{color:var(--dimmer)}
+/* #235. `pre`, WEIL DER RAUM VOR DEM PUNKT SONST STIRBT. `levelLabel`
+   liefert " · high", und `.lvl` ist ein eigenes Flex-Item -- also eine eigene
+   Zeile, an deren Anfang CSS Text Phase II zusammenfallende Leerzeichen
+   streicht. Gezeichnet stand "(llama.cpp)· high". `pre` haelt das Leerzeichen
+   und bricht so wenig um wie das `nowrap` davor; die Ellipse bleibt. */
+#model .lvl{white-space:pre}
 /* #117 LEFT ITS SLIDER HERE AND #119 TOOK THE SECOND PANEL WITH IT. There were two menus with
    one rule set; now there is one menu with two kinds of row, because a thinking level was never
    a second subject -- it is how the model in the row above it thinks.
@@ -2422,6 +2647,43 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    the running state is the one that must be seen, not the finished one. */
 .subcard{border:1px solid var(--line);border-left:3px solid var(--sub);border-radius:10px;
   background:var(--panel);padding:10px 14px;margin:0 0 10px;max-width:760px}
+/* #255. DIE KARTEN WOHNEN IN #subpanel, der dritten Karte der
+   `#panels`-Spalte (#164/#233) -- nicht mehr im Fluss, wo sie mit dem
+   Transkript wegscrollten. Das Panel ist gebaut wie das Zielpanel: eigene
+   Scrollflaeche (`min-height:0` + `overflow:auto`), Kopf klappt. Laufende
+   stehen oben in `.splive`, fertige in `.spdone`, ZU per Default: die aktive
+   Flaeche zeigt nur, was gerade arbeitet. `position:relative` macht das Panel
+   zum offsetParent, damit ein Sprung die Karte IM PANEL einrollt und nie
+   #main verschiebt. */
+#subpanel{flex:0 1 auto;min-height:0;position:relative;
+  overflow:auto;background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;box-shadow:0 6px 24px var(--shadow);font-size:11.5px;
+  padding:0 10px 4px}
+#subpanel[hidden]{display:none}
+#subpanel .sph{display:flex;align-items:center;gap:8px;padding:13px 5px 11px;
+  cursor:pointer}
+#subpanel .sph b{color:var(--text-faint);font-weight:600;letter-spacing:.2px}
+#subpanel .sph .st{margin-left:auto;color:var(--dimmer);font-family:var(--mono);
+  font-size:10.5px}
+#subpanel .subcard{max-width:none;margin:0 0 8px;padding:8px 11px;
+  background:var(--bg)}
+#subpanel .subcard .shead{font-size:11.5px;gap:7px}
+#subpanel .subcard .stask{font-size:12px;display:-webkit-box;
+  -webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+#subpanel .subcard .sstat{margin-left:0;flex-basis:100%}
+#subpanel .spfold{display:block;width:100%;background:none;border:0;
+  border-top:1px solid var(--line);padding:8px 5px;margin:0 0 4px;font:inherit;
+  font-size:11px;color:var(--dim);text-align:left;cursor:pointer}
+#subpanel .spfold[hidden]{display:none}
+#subpanel .spfold:hover{color:var(--text-soft)}
+#subpanel .spfold .caret{display:inline-block;font-size:8px;margin-right:6px;
+  color:var(--dimmer);transition:transform .12s}
+#subpanel .spfold.open .caret{transform:rotate(90deg)}
+#subpanel.shut .splive,#subpanel.shut .spfold,#subpanel.shut .spdone{display:none}
+@keyframes subseen{0%{box-shadow:0 0 0 2px var(--sub)}100%{box-shadow:0 0 0 2px transparent}}
+#subpanel .subcard.seen{animation:subseen 1.4s ease-out}
+@media (prefers-reduced-motion: reduce){#subpanel .subcard.seen{animation:none;
+  box-shadow:0 0 0 2px var(--sub)}}
 .subcard .shead{display:flex;align-items:center;gap:9px;font-size:12.5px;flex-wrap:wrap}
 .subcard .glyph{color:var(--sub);font-weight:700}
 .subcard .sname{font-family:var(--mono);font-size:11.5px;color:var(--dim)}
@@ -2791,6 +3053,18 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
          VERSTECKT OHNE ZIEL (robin, 2026-08-30): kein leerer Rahmen. -->
     <div id="panels">
       <div id="goalpanel" hidden></div>
+      <!-- #255. DIE SUBTASKS, gepinnt wie Ziel und Git: eine Karte
+           im Chatfenster, nicht im Verlauf. Im Fluss scrollten sie mit dem
+           Transkript weg (robin, 2026-09-23). Laufende oben, fertige in einer
+           zugeklappten Gruppe darunter. Versteckt, solange der offene Chat
+           nichts delegiert hat. -->
+      <div id="subpanel" hidden>
+        <div class="sph" onclick="crow.subPanelFold()"><b>Subtasks</b>
+          <span class="st"></span></div>
+        <div class="splive"></div>
+        <button class="spfold" onclick="crow.subDoneFold()" hidden></button>
+        <div class="spdone" hidden></div>
+      </div>
       <!-- #156. DAS GIT-PANEL. Was der Chat als Karten zeigt -- Aenderungen, ein
            Commit, ein Push -- steht hier als Zustand: was ist offen, auf welchem
            Zweig, und was ist passiert. Der Chat erzaehlt den Verlauf, das Panel
@@ -3150,6 +3424,103 @@ const HL = {
   }
 };
 
+// -- #229: links and paths, found in text ------------------------------------
+//
+// A PURE FUNCTION OF A STRING, like HL above, so test_crow_gui runs it in node.
+// `split` hands back pieces whose `s` put together IS the input, character for
+// character -- a selection copied across a mark must read like the text did.
+//
+// STRICT BY DESIGN. Only `http(s)://` is a URL (linkify-it keeps scheme-less
+// "fuzzy" links behind an option for the same false-positive reason); `file:`,
+// `javascript:` and `data:` never become links. A path is marked by spelling,
+// not by looking at the disk -- VS Code's terminal stats before it underlines,
+// which here would be a bridge call per line of an `ls`; the disk is asked
+// once, when somebody acts on the mark (`Api.path_info` / `reveal_path`).
+const LINK = {
+  MAX: 200000,
+  // url | windows drive or UNC | posix absolute, ~/ ./ ../ | relative a/b.ext
+  RE: /(https?:\/\/[^\s<>"` ]+)|((?:[A-Za-z]:[\\\/]|\\\\[\w.$-]+\\)[^\s<>"'`|*?:;,()\[\]{} ]*)|((?:~|\.\.?)?\/[\w.@%+=~#$&!-]+(?:\/[\w.@%+=~#$&!-]*)*)|([\w.@+-]+(?:\/[\w.@+-]+)+)/g,
+  // WHAT MAY STAND BEFORE A PATH. A letter may not: that is `km/h`, `and/or`,
+  // the `/s` in `tok/s` -- and a slash or dot in front means we are inside
+  // something that did not match as a whole.
+  GATE: /^$|[\s(\[{<"'`=,;:>|*]/,
+
+  split(text){
+    const out=[], RE=this.RE; let at=0, m;
+    const push=seg=>{
+      if(seg.t==="text"){ if(!seg.s) return;
+        const last=out[out.length-1];
+        if(last && last.t==="text"){ last.s+=seg.s; return; } }
+      out.push(seg); };
+    RE.lastIndex=0;
+    while((m=RE.exec(text))){
+      const i=m.index, prev=i ? text.charAt(i-1) : "";
+      let s=m[0], seg=null;
+      if(m[1]){
+        if(!/[A-Za-z0-9]/.test(prev)){ s=this.trimUrl(s);
+          if(/^https?:\/\/[^\/?#\s]+/i.test(s)) seg={t:"url", s:s, href:s}; }
+      } else if(this.GATE.test(prev)){
+        s=s.replace(/[.,!?]+$/,"");
+        const ok = m[4] ? this.relOk(s) : (s.length>1 && s!=="~/");
+        if(ok){
+          // `file:12` and `file:12:3`, the suffix every compiler and grep -n
+          // prints. It belongs to the mark but not to the path.
+          const tail=/^:(\d+)(?::(\d+))?/.exec(text.slice(i+s.length));
+          seg={t:"path", s:s+(tail ? tail[0] : ""), path:s,
+               line:tail ? tail[1] : "", col:tail && tail[2] ? tail[2] : ""}; }
+      }
+      // ONE CHARACTER ON, not past the refused match: `path:/tmp/a.log` first
+      // matches `h:/tmp/a.log` as a drive letter, which the gate refuses --
+      // and the real path starts two characters later.
+      if(!seg){ RE.lastIndex=i+1; continue; }
+      push({t:"text", s:text.slice(at,i)}); push(seg);
+      at=i+seg.s.length; RE.lastIndex=at;
+    }
+    push({t:"text", s:text.slice(at)});
+    return out; },
+
+  // GFM's autolink rules (spec 6.9): trailing ? ! . , : * _ ~ are prose, an
+  // unmatched closing bracket belongs to the sentence around the link, and a
+  // trailing `&name;` is an entity. `'` `"` `;` go too -- a URL ending in them
+  // is rarer than a sentence that puts them after one.
+  trimUrl(s){
+    const n=(str,ch)=>str.split(ch).length-1;
+    for(;;){ const was=s;
+      s=s.replace(/&[A-Za-z0-9]+;$/,"");
+      s=s.replace(/[?!.,:*_~'";]+$/,"");
+      [["(",")"],["[","]"],["{","}"]].forEach(([o,c])=>{
+        while(s.endsWith(c) && n(s,c)>n(s,o)) s=s.slice(0,-1); });
+      if(s===was) return s; } },
+
+  // A RELATIVE PATH HAS TO LOOK LIKE ONE: a letter first (not `1/2`, not
+  // `2026/09/23`), no segment ending in a dot (`e.g./i.e.`), not a host
+  // (`example.org/x.html` is a URL without its scheme), and a file extension
+  // with a letter in it at the end -- `TCP/IP` and `and/or` have none.
+  relOk(s){
+    if(!/^[A-Za-z_.]/.test(s)) return false;
+    const parts=s.split("/");
+    if(parts.some(p=>p!=="." && p!==".." && /\.$/.test(p))) return false;
+    if(/^[^._][^\/]*\.[A-Za-z]{2,}$/.test(parts[0]) && parts.length>1
+       && !/_/.test(parts[0])) return false;
+    const last=parts[parts.length-1];
+    return /^[\w@+.-]*[\w@+-]\.[A-Za-z][A-Za-z0-9]{0,9}$/.test(last)
+        || /^\.[A-Za-z][\w.-]*$/.test(last); },
+
+  // INLINE CODE THAT IS ONE URL OR ONE PATH, the way models write paths most
+  // often. Backticks delimit, so here a path may carry spaces -- but only when
+  // it ends in a file name and holds no ` -`, or `/usr/bin/env python` and
+  // `/bin/ls -la` would be marked as files.
+  whole(text){
+    const t=String(text||"");
+    const segs=this.split(t);
+    if(segs.length===1 && segs[0].t!=="text") return segs[0];
+    const m=/^((?:~|\.\.?)?\/[^\n\0:]*[^\s:]|[A-Za-z]:[\\\/][^\n\0:*?"<>|]*[^\s:])(?::(\d+)(?::(\d+))?)?$/.exec(t);
+    if(m && /\s/.test(m[1]) && !/\s-/.test(m[1])
+       && /[^\s\\\/]\.[A-Za-z][A-Za-z0-9]{0,9}$/.test(m[1]))
+      return {t:"path", s:t, path:m[1], line:m[2]||"", col:m[3]||""};
+    return null; }
+};
+
 const crow = {
   running:false, col:null, say:null, think:null, fence:null, fenceLang:"",
   cursor:null, blocks:[],
@@ -3187,6 +3558,43 @@ const crow = {
     const t=this.turn(""); t.innerHTML=
       '<div class="you"><div class="txt"></div></div>';
     t.querySelector(".txt").textContent=text; this.bottom(true);
+  },
+
+  // #211. DIE KARTE AM SCHNITT. Der Kern erkennt die Notiz (ein Ort, eine
+  // Wahrheit -- `crow_core.rollover_note_split`) und schickt ihre Teile als
+  // `roll`-Ereignis: live vom Schnitt selbst, beim Wiederoffnen vom Replay.
+  // Die Seite zeichnet nur, was ihr gegeben wird -- keine zweite Erkennung,
+  // kein zweiter Wortlaut, der auseinanderlaufen koennte.
+  rollCard(e){
+    this.endTrace();
+    const t=this.turn("");
+    const d=document.createElement("details"); d.className="rollcard";
+    const s=document.createElement("summary");
+    s.innerHTML='<span class="caret"></span><span class="rl"></span>'
+      +'<span class="rn"></span>';
+    s.querySelector(".caret").textContent=String.fromCharCode(9654);
+    s.querySelector(".rl").textContent="archived before the cut";
+    s.querySelector(".rn").textContent=
+      (e.lines||0).toLocaleString("en-US")+" lines · "
+      +(e.tokens||0).toLocaleString("en-US")+" tok";
+    const b=document.createElement("div"); b.className="rc";
+    b.innerHTML='<div class="rt"></div>'
+      +'<button class="ropen"></button><button class="rtail"></button>'
+      +'<pre class="rtp" hidden></pre>';
+    b.querySelector(".rt").textContent=
+      "The earlier conversation is archived at "+(e.path||"?")
+      +" -- oldest first; the END is where things stood.";
+    b.querySelector(".ropen").textContent="open transcript";
+    const path=e.path||"";
+    b.querySelector(".ropen").onclick=()=>pywebview.api.roll_show(path);
+    const pre=b.querySelector(".rtp");
+    const tail=b.querySelector(".rtail"); tail.textContent="show the last 40 lines";
+    tail.onclick=()=>{ if(pre.hidden){
+      pywebview.api.roll_tail(path).then(tx=>{
+        pre.textContent=tx||"(the transcript is empty)"; pre.hidden=false; });
+    } else { pre.hidden=true; } };
+    d.appendChild(s); d.appendChild(b); t.appendChild(d);
+    this.bottom(true);
   },
 
   // #142. A SEPARATE CALL, NOT A SECOND PARAMETER: four cases anchor the whole
@@ -3251,7 +3659,14 @@ const crow = {
 
   // A NEW BLOCK PER OPEN, never one reused: the model re-enters reasoning
   // mid-answer, and a single block would swallow the answer that came between.
+  // #209. A STREAM WITH NO ROUND OPENS ONE. `col` is null on a page that
+  // never saw this turn's "start" -- #204's reload lands in the middle of a
+  // streaming turn -- and every token threw `this.col.insertBefore` back
+  // into the push channel. The rest of the turn gets a round of its own.
+  here(){ if(!this.col) this.start(); return this.col; },
+
   thinkOpen(){
+    this.here();
     const d=document.createElement("details"); d.className="think";
     d.innerHTML='<summary><span class="caret">&#9654;</span><span class="dur">'+
       (this.col.querySelectorAll("details").length? "Thought again":"Thought")+
@@ -3266,8 +3681,11 @@ const crow = {
   answer(p){
     this.think=null;
     if(this.fence!==null){ this.fence.textContent+=p; this.bottom(); return; }
-    if(!this.say){ this.say=document.createElement("div"); this.say.className="say";
-      this.col.insertBefore(this.say,this.cursor); }
+    // here() FIRST: opening a round resets `say`, so it must not run
+    // between the creation below and the insert.
+    if(!this.say){ const col=this.here();
+      this.say=document.createElement("div"); this.say.className="say";
+      col.insertBefore(this.say,this.cursor); }
     this.say.textContent+=p; this.bottom();
   },
 
@@ -3280,19 +3698,162 @@ const crow = {
   // region and refuses the one property that would allow it.
   span(sp){
     let node=document.createTextNode(sp.s||"");
-    if(sp.c){ const c=document.createElement("code"); c.textContent=sp.s||""; node=c; }
+    if(sp.c){ const c=document.createElement("code"); c.textContent=sp.s||""; node=c;
+      // #229. `/home/x/a.py` IN BACKTICKS is how models write a path, so a
+      // code span that is ONE url or ONE path becomes that mark, code look kept.
+      const w=sp.href ? null : LINK.whole(sp.s||"");
+      if(w) node = w.t==="url" ? this.linkNode(c, w.href) : this.pathNode(c, w); }
+    else if(!sp.href) node=this.linkify(document.createDocumentFragment(), sp.s||"");
     if(sp.b){ const b=document.createElement("strong"); b.appendChild(node); node=b; }
     if(sp.i){ const i=document.createElement("em"); i.appendChild(node); node=i; }
     // THE SECOND GATE ON A TARGET. The core already refuses to name anything
     // but http and https; this one is here because the text is a stranger's and
     // a link that navigates would replace the whole window, which has no way
-    // back -- so it never navigates, it asks the browser outside.
-    if(sp.href && /^https?:\/\//i.test(sp.href)){
-      const a=document.createElement("a"); a.className="lnk"; a.title=sp.href;
-      a.appendChild(node);
-      a.onclick=ev=>{ ev.preventDefault(); pywebview.api.open_url(sp.href); };
-      node=a; }
+    // back -- so it never navigates: `linkNode` cancels every click.
+    if(sp.href && /^https?:\/\//i.test(sp.href)) node=this.linkNode(node, sp.href);
     return node; },
+
+  // #229. TEXT IN, TEXT AND MARKS OUT, never markup: every piece goes in as a
+  // text node, and `LINK.split` guarantees the pieces ARE the text.
+  linkify(el, text){
+    const t=String(text||"");
+    if(t.length>LINK.MAX){ el.appendChild(document.createTextNode(t)); return el; }
+    LINK.split(t).forEach(seg=>{ const label=document.createTextNode(seg.s);
+      el.appendChild(seg.t==="url" ? this.linkNode(label, seg.href)
+        : seg.t==="path" ? this.pathNode(label, seg) : label); });
+    return el; },
+
+  // AN HREF NOW, which the old link did not have: without one an <a> takes no
+  // focus and ignores Enter. It still never navigates -- the click is always
+  // cancelled and routed (`linkClick`); only http(s) ever reaches here.
+  linkNode(label, url){
+    const a=document.createElement("a"); a.className="lnk";
+    a.href=url; a.title=url; a.dataset.href=url; a.appendChild(label);
+    // A DRAG IS NOT A CLICK. Measured in Chromium 152: a drag across a link's
+    // text fired `click` on release, so trying to select part of a URL opened
+    // it. `linkClick` now drops a click whose pointer travelled; not draggable,
+    // so the drag does not carry the link off either. (Selecting a link's text
+    // starts beside it, as in any browser -- a drag begun ON a link selected
+    // "" in Chromium with or without this.)
+    a.draggable=false;
+    a.onmousedown=ev=>{ this.linkAt=[ev.clientX, ev.clientY]; };
+    a.onclick=ev=>this.linkClick(ev, url);
+    a.onauxclick=ev=>{ if(ev.button===1){ ev.preventDefault(); this.linkOut(url); } };
+    return a; },
+
+  pathNode(label, seg){
+    const p=document.createElement("span"); p.className="pth"; p.tabIndex=0;
+    p.dataset.path=seg.path||"";
+    if(seg.line) p.dataset.line=seg.line;
+    if(seg.col) p.dataset.col=seg.col;
+    p.title="right-click: copy path"; p.appendChild(label);
+    return p; },
+
+  // #229. A PLAIN CLICK OPENS IN CROW'S OWN BROWSER PANEL -- where #175 put
+  // the pages the model renders and #201/#227 keep browsing -- and the system
+  // browser is one modifier away (Ctrl/Cmd/Shift-click, middle click, menu).
+  // A CLICK THAT ENDS A SELECTION INSIDE THE LINK IS A SELECTION: mousedown and
+  // mouseup on the same <a> fire `click` even after a drag across its text.
+  linkClick(ev, url){
+    ev.preventDefault();
+    const at=this.linkAt; this.linkAt=null;
+    if(at && Math.abs(ev.clientX-at[0])+Math.abs(ev.clientY-at[1])>4) return;
+    const s=window.getSelection();
+    if(s && !s.isCollapsed && s.containsNode(ev.currentTarget, true)) return;
+    if(ev.ctrlKey || ev.metaKey || ev.shiftKey) return this.linkOut(url);
+    this.linkIn(url); },
+  // #201 decides where: `Api.open_url` opens the in-window panel when there is
+  // one and the system browser otherwise (Windows' pane window, the fallback),
+  // so the click has ONE rule on every platform instead of a second copy here.
+  linkIn(url){ pywebview.api.open_url(url, false); },
+  linkOut(url){ pywebview.api.open_url(url, true); },
+
+  // #228. THE SELECTION AS TEXT, or "" -- and never the menu's own labels.
+  selText(){
+    const s=window.getSelection();
+    if(!s || s.isCollapsed) return "";
+    const a=s.anchorNode, el=a && (a.nodeType===1 ? a : a.parentElement);
+    if(el && el.closest && el.closest("#menu")) return "";
+    return s.toString(); },
+
+  // #228. THROUGH PYTHON FIRST, the route `Api.copy` documents and robin's
+  // code-block button proves every day: `navigator.clipboard` refuses on
+  // WebView2 (no secure context). If Python says no, `execCommand("copy")`,
+  // which WebKitGTK allows because pywebview sets javascript-can-access-clipboard.
+  clip(text){
+    const local=()=>{ try{
+      const ta=document.createElement("textarea"); ta.value=text;
+      ta.style.position="fixed"; ta.style.opacity="0";
+      document.body.appendChild(ta); ta.select();
+      const ok=document.execCommand("copy"); ta.remove(); return ok;
+    }catch(err){ return false; } };
+    if(!text) return Promise.resolve(false);
+    const via = window.pywebview && pywebview.api && pywebview.api.copy
+      ? pywebview.api.copy(text).then(ok=>ok || local(), ()=>local())
+      : Promise.resolve(local());
+    return via.then(ok=>{ if(!ok) this.note("the clipboard did not take it"); return ok; }); },
+
+  // #228/#229. RIGHT-CLICK ON CONTENT. True when this menu took the event.
+  // Rows are built from a plan with textContent, the rail menu's rule: a URL or
+  // a path is a stranger's text and only ever a label. Nothing to offer, no
+  // menu -- the old guard then cancels the engine's, as it always did.
+  textMenu(e){
+    const t=e.target;
+    if(!t || !t.closest || t.closest("#menu")) return false;
+    const lnk=t.closest("a.lnk"), pth=t.closest(".pth"), sel=this.selText();
+    const rows=[];
+    if(sel) rows.push({label:"Copy", run:()=>this.clip(sel)});
+    if(lnk){ const u=lnk.dataset.href||"";
+      if(rows.length) rows.push({sep:true});
+      rows.push({label:"Open in Crow's browser", run:()=>this.linkIn(u)},
+                {label:"Open in system browser", run:()=>this.linkOut(u)},
+                {label:"Copy link", run:()=>this.clip(u)}); }
+    if(pth){ const p=pth.dataset.path||"", ln=pth.dataset.line, col=pth.dataset.col;
+      if(rows.length) rows.push({sep:true});
+      rows.push({label:"Copy path", run:()=>this.clip(p)});
+      if(ln){ const at=p+":"+ln+(col ? ":"+col : "");
+        rows.push({label:"Copy "+(col ? "path:line:col" : "path:line"),
+                   run:()=>this.clip(at)}); }
+      rows.push({label:"Show in file manager", run:()=>
+        pywebview.api.reveal_path(p).then(why=>{ if(why) this.note(why); })});
+      // ONLY WHAT THE PANEL SHOWS AS A PAGE, and never "open with the default
+      // program": that can execute a `.desktop`, `.sh` or `.exe` (see
+      // `crow_platform.reveal_command`).
+      if(/\.(html?|svg)$/i.test(p)) rows.push({label:"Open in Crow's browser", run:()=>
+        pywebview.api.path_info(p).then(i=>{
+          if(i && i.exists) this.linkIn(this.fileUrl(i.path));
+          else this.note("not on this disk: "+(i && i.path || p)); })}); }
+    if(!rows.length) return false;
+    e.preventDefault();
+    const m=$("#menu"); m.textContent=""; m.setAttribute("role","menu");
+    rows.forEach(r=>{
+      if(r.sep){ const d=document.createElement("div"); d.className="sep";
+        m.appendChild(d); return; }
+      const b=document.createElement("button"); b.setAttribute("role","menuitem");
+      const l=document.createElement("b"); l.textContent=r.label; b.appendChild(l);
+      b.onclick=()=>{ this.closeMenu(); this.menuBack(); r.run(); };
+      m.appendChild(b); });
+    // APG menu keys: Up/Down/Home/End move, Escape closes and gives focus back.
+    m.onkeydown=ev=>{
+      const btns=[...m.querySelectorAll("button")], i=btns.indexOf(document.activeElement);
+      const go=j=>{ ev.preventDefault(); btns[(j+btns.length)%btns.length].focus(); };
+      if(ev.key==="ArrowDown") go(i+1); else if(ev.key==="ArrowUp") go(i-1);
+      else if(ev.key==="Home") go(0); else if(ev.key==="End") go(btns.length-1);
+      else if(ev.key==="Escape" || ev.key==="Tab"){ ev.preventDefault();
+        this.closeMenu(); this.menuBack(); } };
+    this.menuFrom=document.activeElement;
+    m.classList.add("on");
+    // A KEYBOARD-OPENED MENU (ContextMenu key, Shift+F10) may arrive at 0,0;
+    // it opens at the mark then, not in the corner of the window.
+    let x=e.clientX, y=e.clientY;
+    if(!x && !y){ const r=(lnk||pth||t).getBoundingClientRect(); x=r.left; y=r.bottom; }
+    const w=m.offsetWidth||170, h=m.offsetHeight||110;
+    m.style.left=Math.max(0, Math.min(x, innerWidth-w-6))+"px";
+    m.style.top=Math.max(0, Math.min(y, innerHeight-h-6))+"px";
+    const first=m.querySelector("button"); if(first) first.focus();
+    return true; },
+  menuBack(){ const f=this.menuFrom; this.menuFrom=null;
+    if(f && f.focus && f!==document.body && f.isConnected) f.focus(); },
   spansInto(el,spans){ (spans||[]).forEach(sp=>el.appendChild(this.span(sp)));
     return el; },
   cellsInto(row,cells,tag){ (cells||[]).forEach(cell=>this.spansInto(
@@ -3348,12 +3909,12 @@ const crow = {
         btn.textContent = ok ? "copied" : "failed";
         btn.classList.toggle("done", !!ok);
         setTimeout(()=>{btn.textContent="copy";btn.classList.remove("done");},1400);});};
-    this.col.insertBefore(d,this.cursor); this.fence=pre; this.bottom();
+    this.here().insertBefore(d,this.cursor); this.fence=pre; this.bottom();
   },
   codeClose(closed){
     if(!closed && this.fence){ const n=document.createElement("div");
       n.className="note"; n.textContent="… the block was never closed";
-      this.col.insertBefore(n,this.cursor); }
+      this.here().insertBefore(n,this.cursor); }
     // robin, 2026-08-24: ab funfzehn Zeilen klappbar. ERST HIER, weil die
     // Laenge vorher nicht feststeht -- ein Block, der beim dritten Zeichen
     // einen Klappknopf bekaeme, haette ihn oft umsonst.
@@ -3490,8 +4051,14 @@ const crow = {
       const body = (got.content!==undefined) ? got.content : got.new;
       if(typeof body==="string" && pre) pre.textContent=body;
       if(got.path){
-        const head=box.querySelector(".cwh");
-        if(head) head.textContent=got.path;
+        // #239. THE NAME SLOT, NOT THE WHOLE HEAD: `.cwh` also holds this
+        // block's copy button (#156), and emptying the head took it with it --
+        // every finished write_file/edit_file block lost its "copy". `.cwn` is
+        // the slot the template made for the name. #229: as a path mark.
+        const nm=box.querySelector(".cwn");
+        if(nm){ nm.textContent=""; nm.title=String(got.path);
+          nm.appendChild(this.pathNode(document.createTextNode(got.path),
+                                       {path:String(got.path)})); }
         const dot=String(got.path).lastIndexOf(".");
         if(dot>=0) lang=String(got.path).slice(dot+1); }
     }catch(err){ /* unvollstaendig oder nicht JSON: der rohe Strom bleibt */ }
@@ -3543,7 +4110,8 @@ const crow = {
     const head=document.createElement("div"); head.className="tsh";
     head.textContent = bad ? "error" : "result";
     const pre=document.createElement("pre"); pre.className="tsp";
-    pre.textContent = text || "(nothing)";
+    // #229: `grep -n` lines, `ls` listings, URLs -- marked, text unchanged.
+    this.linkify(pre, text || "(nothing)");
     wrap.appendChild(head); wrap.appendChild(pre);
     if(cut>0){
       const more=document.createElement("div"); more.className="tsmore";
@@ -3678,7 +4246,9 @@ const crow = {
     // spread that over all of them. Blocks cannot carry a per-round figure anyway -- the model
     // re-enters reasoning mid-answer, so one round can open two of them and there is no index
     // that maps one to the other.
-    if(share!==null && share!==undefined){
+    // #209: no round on this page (a reload mid-turn) -- the line goes
+    // under the flow, like `fail`, and there is no block to put a share on.
+    if(this.col && share!==null && share!==undefined){
       this.col.querySelectorAll("details.think .dur").forEach(el=>{
         if(!el.parentNode.querySelector(".pct")){
           const s=document.createElement("span"); s.className="pct";
@@ -3693,7 +4263,7 @@ const crow = {
         const s=document.createElement("span"); s.className="subshare";
         s.textContent=sub+"]"; d.appendChild(s); }
       else d.textContent=line;
-      this.col.appendChild(d); }
+      (this.col||flow).appendChild(d); }
     this.bottom();
   },
 
@@ -4549,16 +5119,23 @@ const crow = {
     ev.preventDefault();
     const rail=$("#rail"), grip=$("#railgrip");
     grip.classList.add("on"); rail.classList.add("dragging");
+    sizing.begin();
     const left=rail.getBoundingClientRect().left;
     const move=e=>{
       // GEKLEMMT IN DER SEITE UND NOCH EINMAL IN PYTHON. Der Wert kommt aus
       // einer Maus, und eine Rail von zwoelf Pixeln ist keine Rail.
       const w=Math.max(180,Math.min(520,Math.round(e.clientX-left)));
-      document.documentElement.style.setProperty("--railw",w+"px"); };
+      // #236. AUF DIE RAIL, NICHT AUF <html>. Eine Custom Property erbt
+      // sich, und an der Wurzel gesetzt rechnete jeder Mausschritt den Stil
+      // ALLER 12 968 Knoten neu -- gemessen 2026-09-23: 1249 ms Stil fuer
+      // einen Zug von 80 Schritten (Chromium), WebKitGTK 38.5 -> 16.1 ms pro
+      // Schritt. Gelesen wird `--railw` nur von `#rail` selbst.
+      rail.style.setProperty("--railw",w+"px"); };
     const up=()=>{
       document.removeEventListener("mousemove",move);
       document.removeEventListener("mouseup",up);
       grip.classList.remove("on"); rail.classList.remove("dragging");
+      sizing.end();
       pywebview.api.rail_width(Math.round(
         rail.getBoundingClientRect().width)); };
     document.addEventListener("mousemove",move);
@@ -4573,6 +5150,7 @@ const crow = {
     // Panels darin liegen -- gezogen wird eine Kante, und die gehoert beiden.
     const panel=$("#side"), grip=$("#codegrip");
     grip.classList.add("on"); panel.classList.add("dragging");
+    sizing.begin();
     const right=panel.getBoundingClientRect().right;
     // #175. DIE DECKE HAENGT DAVON AB, WAS IN DER SPALTE STEHT. 612 ist die
     // Decke fuer ein Code-Panel; steht der Browser darin, ist sie weg und es
@@ -4583,11 +5161,13 @@ const crow = {
                    : 612;
     const move=e=>{
       const w=Math.max(260,Math.min(cap,Math.round(right-e.clientX)));
-      document.documentElement.style.setProperty("--codew",w+"px"); };
+      // #236. Aus demselben Grund auf `#side`, das `--codew` als einziges liest.
+      panel.style.setProperty("--codew",w+"px"); };
     const up=()=>{
       document.removeEventListener("mousemove",move);
       document.removeEventListener("mouseup",up);
       grip.classList.remove("on"); panel.classList.remove("dragging");
+      sizing.end();
       pywebview.api.code_width(Math.round(
         panel.getBoundingClientRect().width)); };
     document.addEventListener("mousemove",move);
@@ -5409,7 +5989,9 @@ const crow = {
 
   ghOpen(btn){
     const card=btn.closest(".askcard");
-    pywebview.api.open_url(card.dataset.url||""); },
+    // OUTSIDE ON PURPOSE (#201): the code is typed where the user is
+    // signed in to GitHub, and that is their own browser, not the panel.
+    pywebview.api.open_url(card.dataset.url||"", true); },
 
   ghCopy(btn){
     const card=btn.closest(".askcard");
@@ -5721,16 +6303,16 @@ const crow = {
   subs(items){
     this.subItems=items||[];
     this.subItems.forEach(it=>this.subCard(it));
+    this.subPanel(this.subItems);
     this.subChip(this.subItems);
     this.subMenuDraw(this.subItems);
     this.subRail();
     // A jump that had to open the parent chat first lands here, one snapshot
     // later, when the replayed cards exist again.
     if(this.subPending){
-      const d=flow.querySelector('.subcard[data-sub="'
+      const d=$("#subpanel").querySelector('.subcard[data-sub="'
         +CSS.escape(this.subPending)+'"]');
-      if(d){ d.scrollIntoView({behavior:"smooth",block:"center"});
-        this.subPending=null; }
+      if(d){ this.subReveal(d); this.subPending=null; }
     }
   },
 
@@ -5747,7 +6329,9 @@ const crow = {
   // one that must be seen -- and is then updated in place, never rebuilt, so
   // an open result fold survives every tick.
   subCard(it){
-    let d=flow.querySelector('.subcard[data-sub="'+CSS.escape(it.i)+'"]');
+    // getElementById: the no-money guard below reads this block for the dollar sign.
+    const p=document.getElementById("subpanel");
+    let d=p.querySelector('.subcard[data-sub="'+CSS.escape(it.i)+'"]');
     if(!d){
       // ONLY THE OPEN CHAT'S OWN SUBTASKS GET A CARD. Python computes `here`
       // from parent and open chat in the same breath -- the page comparing
@@ -5763,16 +6347,18 @@ const crow = {
       d.querySelector(".dlabel").textContent="delegate · "+it.i;
       d.querySelector(".sname").textContent=it.model||"";
       d.querySelector(".stask").textContent=it.task||"";
-      // INTO THE FLOW, NEVER INTO A ROUND'S COLUMN. A card appended to
-      // `this.col` folded away with its round the moment the next one began
-      // -- robin, 2026-08-27: "die sollen bleiben". `fold()` only ever moves
-      // the round element it tracks, so an own `.turn` wrapper is safe from
-      // it -- and it is WHAT ALIGNS THE CARD TO THE CHAT: same centred
-      // column, same padding as every other block ("jetzt nur noch an den
-      // chat ausrichten").
-      const wrap=document.createElement("div"); wrap.className="turn subrow";
-      wrap.appendChild(d); flow.appendChild(wrap); this.bottom();
+      // #255. INTO THE PINNED PANEL, NEVER INTO THE FLOW. A card
+      // in `#flow` was a block of the transcript and scrolled away with it
+      // (robin, 2026-09-23 on 9a59872); in a round's column it folded away
+      // with the round (2026-08-27, "die sollen bleiben"). `#subpanel` sits
+      // in `#panels` beside goal and git: it stays put while the chat
+      // scrolls, and the chat gains no block, so nothing below it moves.
     }
+    // RUNNING ABOVE, FINISHED IN THE FOLD. appendChild MOVES an existing
+    // node, so a card that finishes changes group once and keeps its open
+    // result; a card already in the right group stays where it is.
+    const group=p.querySelector(it.st==="running" ? ".splive" : ".spdone");
+    if(d.parentNode!==group) group.appendChild(d);
     // robins letzte Fassung 2026-08-28: die LAUFENDE Karte atmet als Zeile;
     // fertig steht sie still. Die Klasse traegt den Zustand, das CSS den Atem.
     d.classList.toggle("run", it.st==="running");
@@ -5875,9 +6461,47 @@ const crow = {
     });
   },
 
+  // #255. THE PANEL'S FRAME: drop the cards that are not this chat's
+  // (a chat switch flips `here`, a deleted chat drops its rows), count the
+  // two groups, and hide the whole card when the open chat delegated nothing.
+  subPanel(items){
+    const p=$("#subpanel"); if(!p) return;
+    const here=new Set(items.filter(x=>x.here).map(x=>x.i));
+    p.querySelectorAll(".subcard").forEach(d=>{
+      if(!here.has(d.dataset.sub)) d.remove(); });
+    const run=p.querySelectorAll(".splive .subcard").length;
+    const fin=p.querySelectorAll(".spdone .subcard").length;
+    p.hidden=!(run+fin);
+    p.querySelector(".sph .st").textContent=run+" running · "+fin+" finished";
+    const fold=p.querySelector(".spfold"), done=p.querySelector(".spdone");
+    fold.hidden=!fin;
+    // THE HOUSE CARET, not U+25B8/U+25BE: neither is in the shipped Google Sans Code
+    // faces (check_gui_prereqs, 2026-09-23), while &#9654; is, and every other
+    // fold in this file turns that one by 90 degrees.
+    fold.classList.toggle("open", !done.hidden);
+    fold.innerHTML='<span class="caret">&#9654;</span>finished · '+fin;
+  },
+
+  subPanelFold(){ $("#subpanel").classList.toggle("shut"); },
+
+  subDoneFold(){ const p=$("#subpanel"), done=p.querySelector(".spdone");
+    done.hidden=!done.hidden; this.subPanel(this.subItems||[]); },
+
+  // A jump opens whatever hides the card and rolls it into view INSIDE the
+  // panel -- the element-level jump would also scroll #main, which clips on
+  // purpose, so the panel's own scrollTop is set instead.
+  subReveal(d){
+    const p=$("#subpanel"); p.classList.remove("shut");
+    const done=p.querySelector(".spdone");
+    if(done.contains(d) && done.hidden){ done.hidden=false;
+      this.subPanel(this.subItems||[]); }
+    p.scrollTop=Math.max(0, d.offsetTop-p.clientHeight/2+d.offsetHeight/2);
+    d.classList.remove("seen"); void d.offsetWidth; d.classList.add("seen");
+  },
+
   subJump(i){
-    const d=flow.querySelector('.subcard[data-sub="'+CSS.escape(i)+'"]');
-    if(d){ d.scrollIntoView({behavior:"smooth",block:"center"}); return; }
+    const d=$("#subpanel").querySelector('.subcard[data-sub="'+CSS.escape(i)+'"]');
+    if(d){ this.subReveal(d); return; }
     // No card in this flow: the subtask belongs to another chat. Open THAT
     // chat -- the parent, never the subtask itself -- and finish the jump
     // when the replayed snapshot has drawn its cards.
@@ -6030,6 +6654,7 @@ const crow = {
   toggleRail(){ const el=document.body;
     const open=el.dataset.rail!=="shut";
     el.dataset.rail=open ? "shut" : "open";
+    sizing.pulse();                        // #237: .16s Breitenuebergang
     pywebview.api.set_rail_open(!open); },
 
   // #138. DASSELBE FUER RECHTS. Eigene Methode statt eines Parameters: die
@@ -6038,6 +6663,7 @@ const crow = {
   toggleCode(){ const el=document.body;
     const open=el.dataset.code!=="shut";
     el.dataset.code=open ? "shut" : "open";
+    sizing.pulse();                        // #237: .16s Breitenuebergang
     pywebview.api.set_code_open(!open); },
 
   // #175. DASSELBE FUER DEN BROWSER. Eigene Methode statt eines Parameters,
@@ -6048,6 +6674,7 @@ const crow = {
   toggleBrowser(){ const el=document.body;
     const open=el.dataset.browser!=="shut";
     el.dataset.browser=open ? "shut" : "open";
+    sizing.pulse();                        // #237: .16s Breitenuebergang
     pywebview.api.set_browser_open(!open);
     if(open) return;                       // zugeklappt: `set_browser_open` versteckt
     if(!this.tabs.length){ this.brNew(); return; }
@@ -6072,7 +6699,11 @@ const crow = {
     this.tabs.push({id:id, hist:[], at:-1});
     this.tabOn=id;
     this.brDraw();
-    if(url) this.brGo(url); else { this.brBlank(); $("#brurl").focus(); }
+    // #227. A BLANK TAB HAS A BLANK BAR. The bar is one field for all tabs,
+    // so without this the new tab showed the address of the one before it --
+    // and Enter there reloaded that page into the tab meant to be empty.
+    if(url) this.brGo(url);
+    else { this.brBlank(); $("#brurl").value=""; $("#brurl").focus(); }
   },
 
   // EIN REITER OHNE ADRESSE ZEIGT NICHTS -- und "nichts" heisst hier: die
@@ -6091,14 +6722,21 @@ const crow = {
   // DAS PANEL KLAPPT SICH DAFUER AUF. Ein Tab, das in einem zugeklappten Panel
   // entsteht, ist ein Ereignis, von dem niemand erfaehrt.
   brRendered(url, shot){
-    if(document.body.dataset.browser==="shut"){
-      document.body.dataset.browser="open";
-      pywebview.api.set_browser_open(true); }
-    const id=++this.tabSeq;
+    this.brUnfold();
+    // #230: EIN REITER FUER DIE RENDERS DES MODELLS, nicht einer je Aufruf.
+    // robin, 2026-09-23: "every time Crow opens a website it opens a new tab".
+    // Zehn Renders waren zehn Reiter, die niemand schliesst. Der Render-Reiter
+    // wird wiederverwendet und bekommt je Render einen Eintrag in seiner
+    // Historie, also geht Zurueck durch die frueheren Renders.
     // DIE ECHTE ADRESSE IN DER HISTORIE, nicht der Screenshot: ein Klick auf
     // Neu laden holt die Seite, nicht noch einmal das Bild.
-    this.tabs.push({id:id, hist:[url||""], at:0});
-    this.tabOn=id;
+    let t=this.tabs.find(x=>x.model);
+    if(t){ t.hist=t.hist.slice(0, t.at+1); t.hist.push(url||""); t.at=t.hist.length-1; }
+    else { t={id:++this.tabSeq, hist:[url||""], at:0, model:true}; this.tabs.push(t); }
+    // DAS BILD STEHT, NICHT DIE ADRESSE: die Meldung "brnav" ueber die
+    // geladene PNG-Datei darf den Eintrag nicht ueberschreiben (#227).
+    t.shot=true;
+    this.tabOn=t.id;
     this.brDraw();
     $("#brurl").value=url||"";
     // DAS BILD ZUERST, weil es das ist, was das Modell gesehen hat -- die Seite
@@ -6184,6 +6822,7 @@ const crow = {
     this.brShow(t, url); },
 
   brShow(t, url){
+    t.shot=false;
     $("#brurl").value=url;
     this.brSend(url);
     this.brDraw(); },
@@ -6199,11 +6838,75 @@ const crow = {
   // legt die Fensterecke darauf -- das Hauptfenster ist rahmenlos, also ist
   // seine Ecke zugleich die Ecke dieser Flaeche.
   brPlace(){
+    // #238 und #201 zusammen: T3 liess diesen Aufruf auf GTK aus, weil
+    // `_pane_apply` dort sofort umkehrte (Wayland kennt keine globalen
+    // Koordinaten). Seit #201 liegt das Panel aber IM Fenster, und
+    // der Bruecken-Aufruf unten setzt genau dieses Rechteck auf die eingebettete WebKitWebView
+    // (`_inwin.place`) -- ohne den Aufruf bliebe die Seite beim Ziehen stehen.
+    // Die Kosten haelt die Rechteck-Sperre unten klein: ein Aufruf pro
+    // tatsaechlich geaenderter Lage, nicht pro Layout.
     if(!window.pywebview) return;
     const b=$("#brbody"); if(!b) return;
     const r=b.getBoundingClientRect();
     if(r.width<2 || r.height<2) return;
-    pywebview.api.pane_place(r.left, r.top, r.width, r.height); },
+    // DASSELBE RECHTECK WIRD NICHT ZWEIMAL GESCHICKT (#201): der Beobachter
+    // feuert bei jedem Layout, und jeder Aufruf ist ein Bruecken-Thread.
+    const key=[r.left,r.top,r.width,r.height].map(Math.round).join(",");
+    if(key===this.brSent) return;
+    this.brSent=key;
+    pywebview.api.pane_place(r.left, r.top, r.width, r.height);
+    this.brCover(); },
+  brSent: "",
+
+  // #201. DAS PANEL AUFKLAPPEN, wenn es zu ist -- ein Reiter, der in einem
+  // zugeklappten Panel entsteht, ist ein Ereignis, von dem niemand erfaehrt.
+  brUnfold(){
+    if(document.body.dataset.browser!=="shut") return;
+    document.body.dataset.browser="open";
+    pywebview.api.set_browser_open(true); },
+
+  // #201. EIN LINK AUS EINER ANTWORT, im Panel statt in einem zweiten
+  // Fenster. Ein neuer Reiter, weil der Link neben dem steht, was gerade
+  // offen ist, und es nicht ersetzen soll.
+  brOpen(url){ if(!url) return; this.brUnfold(); this.brNew(url); },
+
+  // #227. DIE SEITE IST SELBST GEGANGEN (Link, Formular, Umleitung). "replace"
+  // heisst: die Last kam von hier (getippt, Zurueck, Reiterwechsel) und ihre
+  // Umleitungen landen im selben Eintrag. "push" heisst: ein neuer Eintrag,
+  // alles davor Vorwaerts faellt weg, wie in jedem Browser.
+  brNav(url, how){
+    const t=this.brTab(this.tabOn); if(!t || !url) return;
+    if(how==="replace"){
+      if(t.shot) return;
+      if(t.at>=0) t.hist[t.at]=url; else { t.hist=[url]; t.at=0; }
+    } else {
+      t.shot=false;
+      if(t.at>=0 && t.hist[t.at]===url) return;
+      t.hist=t.hist.slice(0, t.at+1); t.hist.push(url); t.at=t.hist.length-1;
+    }
+    $("#brurl").value=url;
+    this.brDraw(); },
+
+  // #201. LIEGT ETWAS VON CROW UEBER DER FLAECHE? Die Scheibe ist ein
+  // natives Widget und liegt ueber der GANZEN Seite -- ein Einstellungsblatt
+  // oder ein Menue, das ueber `#brbody` aufgeht, verschwaende darunter. Neun
+  // Proben, 14 px nach innen, damit die Fenstergriffe am Rand nicht zaehlen.
+  brCovered(r){
+    const box=$("#browser");
+    for(const fx of [0,.5,1]) for(const fy of [0,.5,1]){
+      const x=r.left+14+fx*(r.width-28), y=r.top+14+fy*(r.height-28);
+      const el=document.elementFromPoint(x, y);
+      if(el && !box.contains(el)) return true; }
+    return false; },
+  brCover(){
+    if(!window.pywebview) return;
+    const b=$("#brbody"); if(!b) return;
+    const r=b.getBoundingClientRect();
+    const c = r.width>=30 && r.height>=30 && this.brCovered(r);
+    if(c===this.brWasCovered) return;
+    this.brWasCovered=c;
+    pywebview.api.pane_cover(c); },
+  brWasCovered: false,
 
   brBack(){ const t=this.brTab(this.tabOn);
     if(t && t.at>0){ t.at--; this.brShow(t, t.hist[t.at]); } },
@@ -6320,6 +7023,7 @@ const crow = {
       staged.appendChild(row); }
 
     $("#gitbranchname").textContent = "⎇ " + (state.branch || "(detached)");
+    $("#gitbranchname").title = state.branch || "";
     const ab=$("#gitab");
     ab.textContent = (state.ahead||state.behind)
       ? ("↑"+state.ahead+" ↓"+state.behind) : (state.upstream || "");
@@ -6451,8 +7155,7 @@ const crow = {
       // be copied into the sheet when it opened; the ribbon is a name and three
       // window buttons now, so the number goes where somebody looks it up.
       case "meta": $("#aboutver").textContent=e.version;
-        if(e.rail) document.documentElement.style.setProperty(
-          "--railw", e.rail+"px");
+        if(e.rail) $("#rail").style.setProperty("--railw", e.rail+"px");
         // THE TITLE, NOT A CHIP (#119). Set rather than interpolated for the same reason every
         // other name here is: it is a string that arrived over the bridge.
         $("#conn").title=e.url;
@@ -6466,6 +7169,9 @@ const crow = {
       case "ask": this.ask(e.name, e.args, e.scope); break;
       // #175. Ein Render des Modells oeffnet sein Tab im Browser-Panel.
       case "page": this.brRendered(e.url, e.shot); break;
+      // #227: the pane moved (a link, a redirect); #201: a link to open here.
+      case "brnav": this.brNav(e.url, e.how); break;
+      case "bropen": this.brOpen(e.url); break;
       case "rail": this.rail(e);
         this.archive(e.archived||[]); break;
       // THE PAGE CLEARS ITSELF ON "new", because the click is here. A DELETE of
@@ -6485,6 +7191,8 @@ const crow = {
       case "thoughts": document.querySelectorAll("details.think")
         .forEach(d=>{ d.open=e.open; }); break;
       case "user": this.user(e.t); if(e.i) this.userImages(e.i); break;
+      // #211. DIE BANDGRENZE ALS KARTE -- vom Schnitt selbst oder vom Replay.
+      case "roll": this.rollCard(e); break;
       case "start": this.start(); break;
       case "think_open": this.thinkOpen(); break;
       case "think": this.thinkText(e.t); break;
@@ -6583,6 +7291,9 @@ const fitFlow = () => {
   // changed would ask whether we are at a bottom that has already moved.
   const atBottom = flow.scrollHeight - flow.scrollTop - flow.clientHeight < 4;
   flow.style.paddingBottom = (composer.offsetHeight + 10) + "px";
+  // #233: DIESELBE ZAHL FUER DIE KARTEN. #panels endet dort, wo der
+  // Composer anfaengt, statt bei festen 70 % -- siehe die Regel an #panels.
+  composer.parentNode.style.setProperty("--comph", composer.offsetHeight + "px");
   // RE-PIN, or typing a third line pushes the answer you were reading up and
   // out of sight -- the padding grows downwards and the view does not follow.
   if(atBottom) flow.scrollTop = flow.scrollHeight;
@@ -6590,6 +7301,52 @@ const fitFlow = () => {
 // The observer covers the window resize too: a narrower window rewraps the foot
 // row, which changes the composer's height, which is the thing being watched.
 new ResizeObserver(fitFlow).observe(composer);
+
+// #237. DIE GESTE, IN DER SICH DIE CHATBREITE AENDERT. `begin` schaltet
+// `#flow.sizing` ein (nur die sichtbaren Runden werden gesetzt, siehe die
+// CSS-Regel bei den Griffen), `end` schaltet es ab und bezahlt EIN volles
+// Layout statt eines pro Schritt. Danach steht die Sicht dort, wo sie stand:
+// wer unten war, ist wieder unten; sonst bleibt die oberste sichtbare Runde auf
+// ihrem Pixel. Das ist Scroll-Anchoring von Hand, und es ist noetig, weil
+// WebKitGTK 2.52 es nicht selbst kann (Safari 27 bringt es erst) -- ohne es
+// wanderte die Sicht nach jedem Umbruch darueber, wie sie es vorher bei jedem
+// einzelnen Schritt tat.
+const sizing = (function(){
+  let pin = null, timer = 0;
+  const begin = () => {
+    clearTimeout(timer);
+    if(pin) return;
+    // GELESEN, BEVOR DIE KLASSE SITZT: das Layout ist hier noch sauber, also
+    // kostet keine dieser Abfragen einen erzwungenen Umbruch.
+    if(crow.atBottom()) pin = {bottom: true};
+    else {
+      const top = flow.getBoundingClientRect().top;
+      const t = Array.prototype.find.call(flow.children,
+        c => c.getBoundingClientRect().bottom > top);
+      pin = {turn: t || null, y: t ? t.getBoundingClientRect().top : 0};
+    }
+    flow.classList.add("sizing");
+  };
+  const end = () => {
+    clearTimeout(timer);
+    if(!pin) return;
+    const p = pin; pin = null;
+    flow.classList.remove("sizing");
+    // SOFORT, NICHT WEICH: `#flow` scrollt mit `scroll-behavior:smooth`, und
+    // eine Korrektur, die man gleiten sieht, ist der Sprung, den sie verhindert.
+    const was = flow.style.scrollBehavior;
+    flow.style.scrollBehavior = "auto";
+    if(p.bottom) flow.scrollTop = flow.scrollHeight;
+    else if(p.turn && p.turn.isConnected)
+      flow.scrollTop += p.turn.getBoundingClientRect().top - p.y;
+    flow.style.scrollBehavior = was;
+  };
+  // Fuer Gesten ohne eigenes Ende: die Fensterkante (der Compositor zieht sie,
+  // die Seite sieht nur `resize`) und die .16s-Uebergaenge der Panel-Knoepfe.
+  const pulse = () => { begin(); timer = setTimeout(end, 250); };
+  return {begin, end, pulse};
+})();
+window.addEventListener("resize", () => sizing.pulse());
 // The grips: press, drag, and Python moves the window. `screenX/screenY` are
 // used rather than clientX so the numbers stay right while the window itself is
 // moving underneath the pointer.
@@ -6609,11 +7366,29 @@ new ResizeObserver(fitFlow).observe(composer);
       // mousedown to the compositor instead: it resizes for as long as the
       // button is held, and there is no per-step message at all. See
       // `Api.begin_resize`.
+      // #237: the page learns of the new size only through `resize`, so the
+      // cheap layout mode is switched on at the press, before the first step.
+      sizing.pulse();
       if(NATIVEDRAG){ pywebview.api.begin_resize(map[id]); return; }
       drag={edge:map[id],x:e.screenX,y:e.screenY};
       pywebview.api.geometry().then(g=>{ if(drag) drag.start=g; });
     });
   });
+  // #238. ONE STEP IN FLIGHT, AND IT IS ALWAYS THE LATEST. Every
+  // mousemove used to be its own bridge call -- a worker thread in pywebview
+  // and a synchronous resize on the UI thread each -- so a fast drag queued
+  // steps faster than the window could take them, and the window then
+  // replayed the backlog after the pointer had stopped. Now a step waits for
+  // the one before it and carries only the newest rectangle; steps in
+  // between are dropped because the window would pass through them anyway.
+  // Windows only: under NATIVEDRAG the compositor resizes and none of this runs.
+  let want=null, busy=false;
+  const flush=()=>{
+    if(busy || !want) return;
+    const r=want; want=null; busy=true;
+    Promise.resolve(pywebview.api.set_geometry(r[0],r[1],r[2],r[3]))
+      .catch(()=>{}).then(()=>{ busy=false; flush(); });
+  };
   window.addEventListener("mousemove",e=>{
     if(!drag||!drag.start) return;
     const dx=e.screenX-drag.x, dy=e.screenY-drag.y, s=drag.start, k=drag.edge;
@@ -6622,8 +7397,8 @@ new ResizeObserver(fitFlow).observe(composer);
     if(k.includes("s")) h=s.h+dy;
     if(k.includes("w")){ x=s.x+dx; w=s.w-dx; }
     if(k.includes("n")){ y=s.y+dy; h=s.h-dy; }
-    pywebview.api.set_geometry(Math.round(x),Math.round(y),
-                               Math.round(w),Math.round(h));
+    want=[Math.round(x),Math.round(y),Math.round(w),Math.round(h)];
+    flush();
   });
   window.addEventListener("mouseup",()=>{ drag=null; });
 })();
@@ -6686,7 +7461,25 @@ window.addEventListener("mousedown",e=>{
 // reason "new chat" and "new project" had nowhere to live.
 window.addEventListener("contextmenu",e=>{
   if(e.target.closest("#sessions")){ crow.railMenu(e); return; }
+  if(crow.textMenu(e)) return;                     // #228/#229: content
   if(!e.target.closest(".sess")) e.preventDefault(); });
+// #228. CTRL+C STAYS THE ENGINE'S, AND PYTHON COPIES TOO. Nothing in this page
+// blocked the key -- nothing could be selected. WebView2 keeps Ctrl+C with
+// browser accelerators off (Microsoft: editing keys are not affected), and
+// WebKitGTK copies natively; whether GTK's clipboard reaches Hyprland from the
+// WebKit process was NOT measured (that would write robin's live clipboard),
+// so the selection also goes the way the copy button proves works. Not in a
+// field: there the engine's own copy is the whole story. A focused link or
+// path with nothing selected copies its target, the keyboard's "Copy path".
+document.addEventListener("keydown",e=>{
+  if(!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey
+     || (e.key!=="c" && e.key!=="C")) return;
+  const a=document.activeElement;
+  if(a && (a.tagName==="INPUT" || a.tagName==="TEXTAREA" || a.isContentEditable)) return;
+  const sel=crow.selText();
+  if(sel){ crow.clip(sel); return; }
+  const mark=a && a.closest ? a.closest("a.lnk,.pth") : null;
+  if(mark){ e.preventDefault(); crow.clip(mark.dataset.path || mark.dataset.href || ""); } });
 
 // #131. THE TILE IS THERE BEFORE THE FIRST CALL IS, because "always present"
 // is what makes it a place to look rather than something that appears once and
@@ -6702,6 +7495,12 @@ crow.brDraw();
 // tippt. Ein Beobachter auf dem Element erwischt alle drei; ihn an `resize` zu
 // haengen haette die anderen zwei verpasst.
 new ResizeObserver(() => crow.brPlace()).observe($("#brbody"));
+// #201. EIN BLATT UEBER DEM PANEL schiebt die Scheibe beiseite. Nur die zwei
+// Ebenen, die ueber `#brbody` aufgehen koennen, werden beobachtet, und nur ihre
+// Attribute -- ein Beobachter auf dem ganzen Baum liefe bei jedem Token mit.
+["#settings","#menu"].forEach(sel => { const el=$(sel); if(el)
+  new MutationObserver(() => requestAnimationFrame(() => crow.brCover()))
+    .observe(el, {attributes:true, attributeFilter:["hidden","class","style"]}); });
 // KEINE STARTBREITEN-AUTOMATIK MEHR. #138c richtete eine nie gezogene Breite
 // an der halben Flaeche aus -- auf robins Fenster am 2026-08-27 war genau das
 // der zu breite Start, und die Icons standen wieder neben der Maske. Seine
@@ -7217,11 +8016,19 @@ class Sink(ReplyEvents, FenceEvents):
 class Turn(TurnEvents):
     """The core's turn callbacks. Every one of them ends up on the screen."""
 
-    def __init__(self, put, git_reload=None, goal_reload=None) -> None:
+    def __init__(self, put, git_reload=None, goal_reload=None,
+                 surface_reload=None) -> None:
         self._put = put
         self._sink = Sink(put)
         # #165: dasselbe Muster wie `git_reload` -- ein Callable, kein Fenster.
         self._goal_reload = goal_reload
+        # #211. WAS DER SCHNITT DER SEITE NACHSAGT, oder None. Ein Callable
+        # wie die beiden daneben: dieses Objekt schreibt in eine Warteschlange
+        # und weiss sonst nichts vom Fenster -- der Schnitt ruft es, und die
+        # Seite zieht ihre Chips aus derselben Quelle, die sie beim Start
+        # fuellt. Ohne das stand nach einem Roll da, was zuletzt stand, und
+        # ein Neuaufbau der Seite liess die Chips leer.
+        self._surface_reload = surface_reload
         # #156. WAS DAS PANEL NACHLESEN LAESST, oder None. Ein Callable und
         # keine Api-Referenz: dieses Objekt schreibt in eine Warteschlange und
         # weiss sonst nichts vom Fenster -- so bleibt es in der Suite baubar,
@@ -7360,6 +8167,20 @@ class Turn(TurnEvents):
             self.tool_started(call.get("name", "?"), call.get("arguments", ""))
 
     def rolled_over(self, tokens: int, path: str) -> None:
+        # #211. DIE KARTE ZUERST: der Schnitt erscheint im Band genau dort,
+        # wo die Geschichte endete -- mit den Zahlen des Archivs und dem
+        # Zeiger auf sein Ende. Der Kern hat die Teile schon einmal geformt
+        # (`rollover_note_split`); hier ist der live Augenblick, und die
+        # Zeilenzahl steht im Transkript, das der Roll eben geschrieben hat.
+        transcript = (path[:-5] + ".md" if path.endswith(".json")
+                      else path + ".md")
+        try:
+            with open(transcript, encoding="utf-8", errors="replace") as fh:
+                lines = len(fh.read().splitlines())
+        except OSError:
+            lines = 0
+        self._put({"k": "roll", "tokens": tokens, "path": transcript,
+                   "lines": lines})
         self._put({"k": "note", "t": "rolled over at %d tokens -> %s"
                                      % (tokens, os.path.basename(path))})
         # robins Live-Test 2026-08-29: unten links stand bis zum Turn-Ende der
@@ -7368,6 +8189,12 @@ class Turn(TurnEvents):
         # als `cost`: cost() raeumt den Stream-Cursor ab, und der Turn laeuft
         # noch. Das Turn-Ende schreibt danach den echten neuen Fuellstand.
         self._put({"k": "ctx", "tokens": 0, "n_ctx": 0})
+        # #211. DER SCHNITT NENNT DER SEITE ALLES, WAS SIE WEISS -- Mode,
+        # Modell, Panel. Bis hier war diese Notiz fast das Einzige, was die
+        # Seite vom Roll erfuhr, und jede Neudarstellung liess die Chips leer
+        # (gemessen 2026-09-22: Modell-Chip und Berechtigungsstufe fort).
+        if self._surface_reload is not None:
+            self._surface_reload()
 
     def rollover_refused(self) -> None:
         # #152: die Verweigerung war ein No-op der Basisklasse -- der Turn
@@ -7535,6 +8362,305 @@ class _DuringPush:
         return False
 
 
+# -- #201 #226 #227: the browser panel INSIDE the window (GTK) ----------------
+#
+# WHY THIS EXISTS. Up to here the panel on Linux was a second pywebview
+# toplevel ("crow-browser"). Wayland gives a client no way to place its own
+# toplevel (xdg_toplevel has no set_position; `gtk_window_move` is a no-op,
+# measured 2026-09-16), so the pane could never sit on `#brbody`. It also has
+# Crow's app id, so robin's live rule set (`~/.config/hypr/crow.lua`: float,
+# center, size 1180x800 for `^([Cc]row)$`) turns it into a second 1180x800
+# window centred over Crow. XEmbed (GtkSocket/GtkPlug) is X11-only, and the
+# rules cannot place one window relative to another (the Hyprland wiki's
+# expression variables are the window's own geometry, the monitor and the
+# cursor). Research and the full comparison are in #201.
+#
+# SO THE PANE IS A WIDGET, NOT A WINDOW: a second WebKitWebView in the SAME
+# GtkWindow. pywebview builds GtkWindow > GtkScrolledWindow > WebKitWebView
+# (gtk.py:134-265) and offers no second view (r0x0r/pywebview#1730, "Multiple
+# webviews per window are not planned"). So `before_show`, which pywebview
+# fires synchronously on the GTK main thread after the tree is built and before
+# it is shown, moves the ScrolledWindow into a GtkOverlay. The pane view is
+# then an overlay child placed on the CSS rectangle of `#brbody` by
+# `get-child-position`. The window is frameless and the page is not zoomed, so
+# CSS px of the main page are GTK logical px of the overlay; no screen
+# coordinate is involved and none is invented.
+#
+# ITS OWN CONTEXT (#226). The pywebview pane shared Crow's UI context, which is
+# ephemeral because pywebview defaults `private_mode=True`. That meant logins
+# lost on every start, no memory kill (WebKit's default kill threshold is 0.0,
+# "never killed", read on this machine), no sandbox (WebKitWebProcess not
+# under bwrap), and pywebview's bridge injected into every foreign page. This
+# view gets a persistent profile of its own, a memory kill, bwrap, and no
+# UserContentManager, so there is no bridge at all.
+
+# THE CEILING, WITH THE KILL SWITCHED ON. WebKit's default limit is 3072 MB
+# (min(3 GiB, RAM)), but its default kill threshold is 0.0, "never killed",
+# read on this machine. The 54 GiB run (#208/#213) was exactly the page kind
+# the panel shows: the model's own WebGL build.
+# THE KILL OVERSHOOTS BY ONE POLL OF GROWTH, measured 2026-09-23 with a page
+# allocating 512 MB every 300 ms (about 1.7 GB/s): limit 400 MB, poll 1 s ->
+# killed at 1709 MB; limit 400 MB, poll 2 s -> killed at 2734 MB, the note
+# 4.1 s after the load. So the poll is 1 s, not WebKit's 30 s, and the limit
+# is 2048 MB rather than 3072: with an engine holding most of the machine
+# (about 10 GiB free here during a run) a 3 GiB limit plus a poll's growth is
+# too close to the edge. 2 GiB is far above what the #201 run needed: ten
+# cross-site loads kept the pane AND Crow's own view under 420 MB PSS in
+# total. Whether a heavy real site (maps, video) needs more is unmeasured.
+PANE_MEMORY_LIMIT_MB = 2048
+PANE_KILL_FRACTION = 1.0
+PANE_POLL_S = 1.0
+
+# WHAT THE PANE LOADS. `javascript:` would run in whatever page is up; `data:`
+# is refused as a top-level navigation by browsers for phishing reasons.
+# `file://` stays because render screenshots and local builds are what the
+# panel is for (#175).
+_PANE_SCHEMES = ("http://", "https://", "file://")
+
+
+def pane_url_ok(url) -> bool:
+    """May the in-window pane load this address? http(s), file, about:blank."""
+    if not isinstance(url, str):
+        return False
+    low = url.strip().lower()
+    return low == "about:blank" or low.startswith(_PANE_SCHEMES)
+
+
+class InWindowPane:
+    """The browser panel as an overlay child of Crow's own GtkWindow (#201).
+
+    EVERY PUBLIC METHOD MAY BE CALLED FROM ANY THREAD. pywebview runs each
+    js_api call on a fresh worker thread, and GTK may only be touched from the
+    thread running its loop, so the public methods record state and hand the
+    widget work to `idle_add`. The state is plain attributes so the suite can
+    check the decisions without a display.
+    """
+
+    def __init__(self, on_event, idle_add=None) -> None:
+        self._on_event = on_event
+        self._idle = idle_add or (lambda fn, *a: fn(*a))
+        self.rect = None          # (x, y, w, h) in CSS px == overlay px
+        self.wanted = False       # the page wants a page visible
+        self.covered = False      # something of Crow's lies over the rect
+        self.own = 0              # loads Crow asked for and not yet committed
+        self.last = ""            # the last address reported to the page
+        self._overlay = None
+        self._view = None
+        self._ctx = None
+
+    # -- installing ---------------------------------------------------------
+
+    @classmethod
+    def install(cls, native, on_event) -> "InWindowPane":
+        """Wrap pywebview's content in a GtkOverlay. GTK main thread only.
+
+        Called from `before_show`, so nothing is realized yet and nothing
+        flickers; the WebView itself is built on first use, because a web
+        process at start costs memory for everyone who never opens the panel.
+        """
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import GLib, Gtk
+        child = native.get_child()
+        if child is None:
+            raise RuntimeError("the window has no content to wrap")
+        pane = cls(on_event, idle_add=GLib.idle_add)
+        overlay = Gtk.Overlay()
+        native.remove(child)
+        overlay.add(child)
+        native.add(overlay)
+        overlay.show()
+        overlay.connect("get-child-position", pane._position)
+        pane._overlay = overlay
+        return pane
+
+    def _position(self, _overlay, widget, alloc) -> bool:
+        if widget is not self._view or self.rect is None:
+            return False
+        alloc.x, alloc.y, alloc.width, alloc.height = self.rect
+        return True
+
+    def _build(self) -> "object":
+        """The view, its own context, its limits. GTK main thread only."""
+        if self._view is not None:
+            return self._view
+        import gi
+        gi.require_version("WebKit2", "4.1")
+        from gi.repository import WebKit2
+        data = os.path.join(crow_platform.state_dir(), "browser")
+        cache = os.path.join(crow_platform.cache_dir(), "browser")
+        os.makedirs(data, exist_ok=True)
+        manager = WebKit2.WebsiteDataManager(base_data_directory=data,
+                                             base_cache_directory=cache)
+        limits = WebKit2.MemoryPressureSettings.new()
+        limits.set_memory_limit(PANE_MEMORY_LIMIT_MB)
+        limits.set_poll_interval(PANE_POLL_S)
+        limits.set_kill_threshold(PANE_KILL_FRACTION)
+        ctx = WebKit2.WebContext(website_data_manager=manager,
+                                 memory_pressure_settings=limits)
+        ctx.get_cookie_manager().set_persistent_storage(
+            os.path.join(data, "cookies.sqlite"),
+            WebKit2.CookiePersistentStorage.SQLITE)
+        # BWRAP WHEN THERE IS ONE. Measured 2026-09-23: enabling it on this
+        # context works after Crow's own web process already exists, and the
+        # pane's WebKitWebProcess then runs under `bwrap`. Without bwrap
+        # WebKit cannot spawn a sandboxed process at all, so no bwrap means no
+        # sandbox rather than no panel.
+        # NO PATHS ARE ADDED, and file:// still works: a PNG under ~/Projects
+        # loaded in the sandboxed pane with nothing added (title "... 1786x1119
+        # pixels") -- presumably because the unsandboxed network process reads
+        # files, not the web process (inferred, not traced). Adding $HOME is refused anyway ("Attempted to add
+        # disallowed path to sandbox: /home/...", a g_critical on the terminal).
+        if shutil.which("bwrap") and os.environ.get("CROW_PANE_SANDBOX") != "0":
+            try:
+                ctx.set_sandbox_enabled(True)
+            except Exception:          # noqa: BLE001 -- older WebKit: no sandbox
+                pass
+        ctx.connect("download-started", self._download)
+        view = WebKit2.WebView(web_context=ctx)
+        # NOT SHOWN BY `show_all`. pywebview calls `window.show_all()` from
+        # its `show()`, and without this a hidden pane came back with it.
+        # Measured in the prototype: after hide() + show_all(), visible False.
+        view.set_no_show_all(True)
+        view.connect("load-changed", self._load_changed)
+        view.connect("notify::uri", self._uri_changed)
+        view.connect("create", self._new_window)
+        view.connect("web-process-terminated", self._terminated)
+        self._overlay.add_overlay(view)
+        self._ctx, self._view = ctx, view
+        return view
+
+    # -- what the page asks for (any thread) --------------------------------
+
+    def place(self, x, y, w, h) -> None:
+        self.rect = (int(round(x)), int(round(y)),
+                     max(1, int(round(w))), max(1, int(round(h))))
+        self._idle(self._apply)
+
+    def go(self, url: str) -> None:
+        self.wanted = True
+        self.own += 1
+        self._idle(self._load, url)
+
+    def hide(self) -> None:
+        self.wanted = False
+        self._idle(self._apply)
+
+    def show(self) -> None:
+        # ONLY A PANE THAT HAS A PAGE COMES BACK. `pane_show` is also what an
+        # unfolded panel with an empty tab calls, and an empty view would be a
+        # white rectangle in a dark panel -- the reason `brBlank` exists.
+        if self._view is not None and self.last:
+            self.wanted = True
+        self._idle(self._apply)
+
+    def cover(self, covered: bool) -> None:
+        self.covered = bool(covered)
+        self._idle(self._apply)
+
+    def visible(self) -> bool:
+        return self.wanted and not self.covered and self.rect is not None
+
+    # -- GTK main thread ----------------------------------------------------
+
+    def _load(self, url: str) -> bool:
+        try:
+            self._build().load_uri(url)
+        except Exception as exc:       # noqa: BLE001 -- said, never silent
+            self.own = 0
+            self._on_event({"k": "note",
+                            "t": "the browser panel could not open %s: %s"
+                                 % (url, exc)})
+        self._apply()
+        return False
+
+    def _apply(self) -> bool:
+        view = self._view
+        if view is None:
+            return False
+        if self.visible():
+            view.show()
+            if self._overlay is not None:
+                self._overlay.queue_resize()
+        else:
+            view.hide()
+        return False
+
+    def committed(self, uri: str) -> "dict | None":
+        """What the page is told about a committed navigation, or None.
+
+        #227. "replace" when the load was Crow's own (typed, Back, a tab
+        switch -- and the redirects in front of it, which commit only once);
+        "push" when the page moved by itself: a link, a form, pushState. The
+        page keeps the per-tab history and needs to know which one it was.
+        """
+        if not uri:
+            return None
+        if self.own > 0:
+            self.own = 0
+            how = "replace"
+        elif uri == self.last:
+            return None
+        else:
+            how = "push"
+        self.last = uri
+        return {"k": "brnav", "url": uri, "how": how}
+
+    def _load_changed(self, view, event) -> None:
+        if getattr(event, "value_nick", "") == "committed":
+            said = self.committed(view.get_uri() or "")
+            if said:
+                self._on_event(said)
+
+    def _uri_changed(self, view, _spec) -> None:
+        # SAME-DOCUMENT NAVIGATION (pushState, #hash) changes the URI without
+        # a load. A real load is reported at commit instead, and only there.
+        if view.is_loading():
+            return
+        said = self.committed(view.get_uri() or "")
+        if said:
+            self._on_event(said)
+
+    def _new_window(self, _view, action) -> None:
+        """#227. target=_blank and window.open land in the panel.
+
+        pywebview sent these to `webbrowser.open` (gtk.py:460), which on
+        robin's machine is Chromium in a window of its own. Returning None
+        refuses the second view; the address is loaded here instead and
+        reported as the page's own navigation.
+        """
+        try:
+            uri = action.get_request().get_uri()
+        except Exception:              # noqa: BLE001
+            uri = ""
+        if pane_url_ok(uri):
+            self._idle(lambda: (self._view.load_uri(uri), False)[1])
+        return None
+
+    def _terminated(self, _view, reason) -> None:
+        why = getattr(reason, "value_nick", str(reason))
+        if why == "exceeded-memory-limit":
+            text = ("the page in the browser panel was stopped: it grew past "
+                    "the panel's %d MB ceiling (#226)" % PANE_MEMORY_LIMIT_MB)
+        else:
+            text = "the page in the browser panel stopped (%s)" % why
+        self.last = ""
+        self._on_event({"k": "note", "t": text})
+
+    def _download(self, _ctx, download) -> None:
+        """WHERE IT WENT, SAID ONCE. WebKit's default destination is the XDG
+        download directory under the suggested name; a panel that saved a
+        file without a word would leave it for someone to stumble over."""
+        def done(d, *_) -> None:
+            self._on_event({"k": "note",
+                            "t": "downloaded to %s" % (d.get_destination() or "?")})
+
+        def failed(_d, err, *_) -> None:
+            self._on_event({"k": "note", "t": "the download failed: %s" % err})
+        download.connect("finished", done)
+        download.connect("failed", failed)
+
+
 class Api:
     """What the page may call. Nothing here touches a widget; it queues."""
 
@@ -7568,6 +8694,11 @@ class Api:
         # das es zurueckbringen koennte; `main` legt die fertige Seite hier
         # ab, und `_recover_window` laedt genau sie neu.
         self._page = ""
+        # #209. WIE OFT DIE SEITE `ready()` GERUFEN HAT. Einmal pro geladener
+        # Seite -- und der #204-Reload laedt sie ein zweites Mal. Der zweite
+        # Ruf zeichnet den laufenden Chat neu, statt session.json noch einmal
+        # in eine Conversation zu legen, die laengst nicht mehr frisch ist.
+        self._page_loads = 0
         self._out: "queue.Queue" = queue.Queue()
         # #135. THE WINDOW IS WHERE A SERVER'S QUESTION LANDS. Installed once,
         # here, because `crow_core` reads the name at call time -- and read from
@@ -7626,6 +8757,16 @@ class Api:
         # Verhalten etwas geaendert haette.
         self._queued_to: str | None = None
         self._queue_lock = threading.Lock()
+        # #211. DER GEWARTE LEVEL, oder None. `set_mode` weigert sich zu Recht
+        # MITTEN in einem Zug -- `run_turn` liest die Grenze durch die Werkzeuge
+        # hindurch, ein Wechsel darunter liesse die erste Haelfte eines Zuges
+        # dort schreiben, wo die zweite nicht mehr darf. Aber der Goal-Motor
+        # haelt den Worker STUNDEN am Leben (ein Zug nach dem anderen, kein
+        # Spalt zum Zugreifen -- gemessen 2026-09-22: der Level war unveraender-
+        # lich, "weil goal aktiv"). Eine Zeile kann warten, also kann ein Level
+        # warten: gepuffert wie `_queued`, angewendet in dem einen Spalt, den
+        # die Pumpe zwischen zwei Zuegen ohnehin hat.
+        self._mode_queued: str | None = None
         # #162. WELCHER CHAT ANGEZEIGT WIRD, WENN ES NICHT DER LAUFENDE IST.
         #
         # `None` heisst: die Ansicht zeigt den Chat, in dem gearbeitet wird --
@@ -7677,6 +8818,10 @@ class Api:
         self._browser_win = None
         self._browser_rect = None
         self._browser_shown = False
+        # #201. AUF GTK STATTDESSEN EIN WIDGET IM EIGENEN FENSTER, siehe
+        # `InWindowPane`. None heisst: der Fensterweg oben (Windows, oder ein
+        # GTK, auf dem das Einhaengen scheiterte).
+        self._inwin = None
         # #171. WAS JEDER ZUG DIESES CHATS GEKOSTET HAT, als Zahlen. Dieselbe
         # Bauart wie das Band darueber und aus demselben Grund: die Timing-Zeile
         # war reine Bildschirmausgabe, also nahm der Rollover sie nicht mit, und
@@ -7939,11 +9084,15 @@ class Api:
         return self._tools_cleared
 
     def ready(self) -> None:
+        self._page_loads += 1
         self.push({"k": "meta", "rail": rail_width_setting(),
                    "version": client_version() or "",
                    "url": self._args.base_url, "tools": len(TOOLS),
                    "execute": bool(self._args.execute_tools)})
         threading.Thread(target=self._mic_probe, daemon=True).start()
+        if self._page_loads > 1:
+            self._ready_again()
+            return
         # #88: the level and its menu, in the same breath as the rest of the
         # header. The button has to show what is live before the first turn --
         # a release level nobody can see is one nobody can trust.
@@ -7972,6 +9121,29 @@ class Api:
         # der erste Blick auf das Fenster nicht darauf warten darf.
         self.git_refresh()
         threading.Thread(target=self._probe, daemon=True).start()
+
+    def _ready_again(self) -> None:
+        """#209: THE SAME WINDOW, A NEW PAGE. `pywebviewready` fires once per
+        loaded page, and #204's recovery reload loads one while this process
+        -- its conversation, its bound working area -- lives on.
+
+        Live 2026-09-22 09:17 the second `ready()` ran the first one's whole
+        start-up again: `adopt_root` re-bound the template from roots.json
+        over the chat's own folder, and a second `_probe` handed session.json
+        to `Conversation.restore` after the first had filled it -- the
+        RuntimeError in `_probe`'s thread, and on a local endpoint a /slots
+        restore under the running chat's cache. None of that belongs to a
+        reload: the state is here, only the page is new. So the page gets the
+        state back -- level, boundary, git, the live chat as `view_live`
+        draws it -- and the probe only re-asks the endpoint for the header.
+        """
+        self.push({"k": "mode", "name": self._args.mode, "modes": self.mode_menu()})
+        self.push_root()
+        self.git_refresh()
+        self._view_path = None
+        self._draw_live()
+        threading.Thread(target=self._probe, kwargs={"redraw": True},
+                         daemon=True).start()
 
     # ---- #92: the working directory ------------------------------------
 
@@ -8003,7 +9175,11 @@ class Api:
         stored = crow_core.read_root_mode(path)
         wanted = mode or stored or getattr(self._args, "mode", DEFAULT_MODE)
         crow_core.write_root_mode(path, wanted)
+        was = crow_core.get_root()
         crow_core.set_root(path)
+        # #224: the next request says the area moved, in one line,
+        # instead of the history silently pointing at the old one.
+        self._conversation.note_root_change(was, crow_core.get_root())
         self._root_chosen = True                 # #101: a person picked, for THIS chat
         crow_core.remember_root(path)
         # #92: AND THIS IS WHERE THE NEXT START READS FROM. `remember_root` fills
@@ -8315,8 +9491,17 @@ class Api:
         """
         if self._worker and self._worker.is_alive():
             return
+        was = crow_core.get_root()
         crow_core.set_root(None)
         self._root_chosen = True                 # #101: "none" is a choice too
+        # #224: the head named the old area (`working_area_line`),
+        # so it follows the unbind like it follows a bind -- cost said first --
+        # and the next request says the area is gone.
+        if self._conversation.memory is not None:
+            if self._conversation.repin_memory(
+                    crow_core.prompt_head(crow_core.get_root())):
+                self.push({"k": "note", "t": crow_core.MEMORY_COST_NOTE})
+        self._conversation.note_root_change(was, None)
         # #92: "NONE" IS A CHOICE AND SURVIVES A RESTART. Written as an explicit
         # null rather than by deleting the key: an absent key means nobody ever
         # chose, and collapsing the two would make this decision evaporate on the
@@ -8585,7 +9770,7 @@ class Api:
         return ("ready", spot["model"],
                 crow_core.provider_context(spot["provider"], spot["model"]))
 
-    def _probe(self) -> None:
+    def _probe(self, redraw: bool = False) -> None:
         spot = self._endpoint()
         try:
             state, name, window = self._look(spot)
@@ -8600,7 +9785,11 @@ class Api:
             # NOT ASKED OF A REMOTE SLUG. The levels come from a manifest of
             # models this machine can boot, and `z-ai/glm-5.2:free` is not one of
             # them -- a lookup there would answer about a model nobody is running.
-            if spot["remote"]:
+            if redraw:
+                # #209: THE LIVE CHAT'S LEVEL STANDS -- a reload is not a
+                # start, and the file may be older than the chat.
+                note = ""
+            elif spot["remote"]:
                 self._reasoning, note = None, ""
             else:
                 self._reasoning, note = crow_core.reasoning_for_chat(name, SESSION_FILE)
@@ -8617,15 +9806,26 @@ class Api:
                                   for k in crow_core.bootable_models()],
                        "model_key": "" if spot["remote"] else crow_core.model_key_for(name),
                        "reasoning": self._reasoning or "",
-                       "levels": [] if spot["remote"] else list(crow_core.reasoning_levels_for(name)),
+                       # #225: a point whose manifest entry fixes
+                       # its thinking offers no level -- the chip then shows
+                       # none (`levelLabel` is empty on an empty list).
+                       "levels": [] if spot["remote"] else list(crow_core.reasoning_menu_for(name)),
                        # #117. Which of those levels render the SAME prompt, measured. Empty
                        # means unmeasured, and the page collapses nothing on an empty list.
                        "groups": [] if spot["remote"] else
-                                 [list(g) for g in crow_core.reasoning_groups_for(name)]})
+                                 [list(g) for g in crow_core.reasoning_menu_groups_for(name)]})
         except Exception as exc:           # noqa: BLE001 - shown, never raised
             self.push({"k": "down", "why": str(exc)[:120]})
             return
-        if not self._args.session:
+        if redraw or not self._args.session:
+            return
+        # #209: ONLY A FRESH CONVERSATION TAKES A SAVED ONE, and the question
+        # is asked twice. Here, BEFORE `load_session`, because that call POSTs
+        # the saved KV into /slots/0 -- under a chat that is already running.
+        # And again after it, because the read is network time and a line
+        # typed meanwhile makes the conversation just as non-fresh.
+        if not self._conversation.fresh:
+            self._late_session()
             return
         try:
             # #121. The pin is read before the payload -- see the same two lines
@@ -8653,6 +9853,9 @@ class Api:
         # this line sat below that early return, the name was never read back.
         # Identity and content are two questions, and only one of them depends on
         # the conversation being non-empty.
+        if not self._conversation.fresh:
+            self._late_session()
+            return
         self._current_path, self._current_title = self._pointer()
         if not restored:
             # #119: THE ONE CALLER WITH NO CLEAR TO HANG ON. A launch that finds
@@ -8693,6 +9896,18 @@ class Api:
         self._pin_memory(SESSION_FILE)
         self.push({"k": "up", "model": None, "n_ctx": self._n_ctx,
                    "tokens": self._context_tokens})
+
+    def _late_session(self) -> None:
+        """#209: session.json met a conversation that is no longer fresh.
+
+        `Conversation.restore` refuses that by raising, and on this thread
+        the raise killed the probe mid-start. The contract stays; the caller
+        keeps it: the running chat wins, nothing of the saved one is taken --
+        not even its pointer, or the running chat's next save would land in
+        the saved chat's file -- and one line says so.
+        """
+        self.push({"k": "note",
+                   "t": "session arrived late - kept the running conversation"})
 
     @staticmethod
     def tools_listing() -> str:
@@ -8735,7 +9950,7 @@ class Api:
         "/help": "this list.",
         "/tools": "what the model can call.",
         "/mcp": "the tool servers; /mcp fetch|use|drop <server> to change them.",
-        "/mode": "the release level; /mode manual|allowedit|auto to switch.",
+        "/mode": "the release level; /mode manual|allowedit|auto|yolo to switch.",
         "/model": "the model that is up; /model <key> restarts on another one.",
         "/reasoning": "this chat's thinking level; /reasoning <level>|off to set it.",
         "/budget": "cap the thinking per request; /budget <tokens>|off to set "
@@ -9057,9 +10272,9 @@ class Api:
         if changed:
             self._reasoning = level
             self.push({"k": "reasoning", "level": level or "",
-                       "levels": list(crow_core.reasoning_levels_for(self._model)),
+                       "levels": list(crow_core.reasoning_menu_for(self._model)),
                        "groups": [list(g)
-                                  for g in crow_core.reasoning_groups_for(self._model)]})
+                                  for g in crow_core.reasoning_menu_groups_for(self._model)]})
         return said
 
     def _budget_command(self, rest: list) -> str:
@@ -9136,6 +10351,9 @@ class Api:
         # Ob die zuletzt geschickte Zeile die EINE Erholungszeile war. Danach
         # gibt es keinen zweiten Versuch (#202).
         self._goal_recovery = False
+        # Die Fehlerklassen des laufenden Schritts, gezaehlt von
+        # `crow_core.goal_trouble_scan` (#202).
+        self._goal_trouble: dict = {}
 
     def _goal_cut(self, turns: int) -> int:
         """Die letzten `turns` Motorzuege aus der Geschichte nehmen. #202.
@@ -9248,6 +10466,11 @@ class Api:
                              ist ein Fenster, das den Rechner die Nacht ueber
                              beschaeftigt
 
+        UND EIN ANDERER ANSTOSS STATT DES SCHRITTS, wenn dieselbe
+        Fehlerklasse im Schritt dreimal kam (#202): toter Dienst, dieselbe
+        Weigerung, ein Pfad, den es nie gab, derselbe Timeout, dieselbe
+        Ausnahme. Der Anstoss nennt die Klasse, die Zahl und den Ausweg.
+
         DIE REIHENFOLGE IST DIE DES SCHADENS: die Bremse steht vor den Deckeln,
         weil ein Kreis, der auf einen Deckel wartet, bis dahin den Kontext mit
         den Beispielen fuellt, aus denen er sich naehrt.
@@ -9282,8 +10505,11 @@ class Api:
         # #202. DER ZWEITE DECKEL, auf EINEN Schritt. Der Zaehler gehoert dem
         # Schritt und nicht dem Ziel, also faengt er bei jedem Wechsel neu an --
         # ein Plan, der voranschreitet, sieht ihn nie.
-        if nxt != self._goal_step:
+        new_step = nxt != self._goal_step
+        if new_step:
             self._goal_step, self._goal_step_turns = nxt, 0
+            # Die Fehlerklassen gehoeren dem Schritt wie der Zaehler (#202).
+            self._goal_trouble = {}
         self._goal_step_turns += 1
         if self._goal_step_turns > self.GOAL_STEP_TURN_CAP:
             self.push({"k": "note",
@@ -9300,6 +10526,27 @@ class Api:
         if goal["steps"][nxt]["status"] != crow_core.GOAL_RUNNING:
             crow_core.goal_step_begin(nxt)
             self.push_goal()
+        # #202. DIESELBE FEHLERKLASSE, NICHT DERSELBE SCHRITTTEXT. Gezaehlt
+        # wird der Zug, der gerade zu Ende ging -- ab seinem Anfang, Crows
+        # Anstoss oder robins Zeile --, in die Zaehler des Schritts; hat der
+        # Schritt gerade gewechselt, nur was nach dem Abschluss des alten kam.
+        # Hat eine Klasse die Schwelle erreicht und kam seitdem wieder,
+        # bekommt das Modell statt des Schritts, der es an dieselbe Wand
+        # schickt, die Wand beim Namen und den Weg darum herum. robin sieht es
+        # als Notiz, wie die Bremse.
+        payload = self._conversation.payload()
+        start = crow_core.goal_turn_start(payload)
+        if start is not None:
+            crow_core.goal_trouble_scan(payload, start, self._goal_trouble,
+                                        new_step=new_step)
+        due = crow_core.goal_trouble_due(self._goal_trouble)
+        if due:
+            self.push({"k": "note",
+                       "t": "goal mode, step %d: the same failure keeps coming "
+                            "back -- %s. The nudge names the way around it."
+                            % (nxt + 1, "; ".join(crow_core.goal_trouble_label(e)
+                                                  for e in due))})
+            return crow_core.goal_trouble_nudge(nxt + 1, due)
         # #202. NICHT HUNDERTMAL DERSELBE BLOCK. Der volle Anstoss ist 330 Byte
         # Anweisung; byteweise identisch vor jedem Zug wiederholt ist er selbst
         # schon das Muster, das das Modell dann fortsetzt -- und er sagt beim
@@ -9329,6 +10576,36 @@ class Api:
         self.push_goal(force=True)
         self._conversation.repin_memory(
             crow_core.prompt_head(crow_core.get_root()))
+
+    def _surface(self) -> None:
+        """#211. Der Schnitt sagt der Seite, was sie weiss -- einmal, gebuendelt.
+
+        EINE METHODE FUER DEN ROLL: Mode, Modell, Panel. Die Chips der Seite
+        sind Fensterzustand, kein Gespraechszustand -- nach dem Roll stand da,
+        was zuletzt stand, und jede Neudarstellung liess sie leer (gemessen
+        2026-09-22 in robins Test: Modell-Chip und Berechtigungsstufe fort,
+        bis der naechste Neustart sie neu fuellte). Dieselben Formen, die der
+        Start und die Probe schicken -- keine zweite Schreibweise fuer
+        dieselben Tatsachen, sonst laufen Seite und Wahrheit auseinander.
+        """
+        self.push({"k": "mode", "name": getattr(self._args, "mode",
+                                                crow_core.DEFAULT_MODE),
+                   "modes": self.mode_menu()})
+        remote = crow_core.provider_endpoint()
+        spot = remote or {}
+        name = self._model or ""
+        self.push({"k": "up", "model": name, "n_ctx": self._n_ctx,
+                   "tokens": 0, "state": "ok",
+                   "models": [[k, crow_core.model_label(k)]
+                              for k in crow_core.bootable_models()],
+                   "model_key": "" if spot.get("remote")
+                   else crow_core.model_key_for(name),
+                   "reasoning": self._reasoning or "",
+                   "levels": [] if spot.get("remote")
+                   else list(crow_core.reasoning_menu_for(name)),
+                   "groups": [] if spot.get("remote")
+                   else [list(g) for g in crow_core.reasoning_menu_groups_for(name)]})
+        self.push_goal(force=True)
 
     def push_goal(self, force: bool = False) -> None:
         """Was die Seite ueber das Ziel wissen muss. Ohne Ziel: nichts.
@@ -9608,20 +10885,109 @@ class Api:
         underneath would leave the screen and the loop with two different
         opinions about what was released.
 
+        #211. GEWARTE, NICHT ABGEWIESEN. Der Goal-Motor faehrt Zug um Zug auf
+        einem Worker, der dazwischen nicht stirbt -- die Weigerung hatte also
+        kein Ende, solange ein Ziel lief (robins Live-Befund 2026-09-22). Ein
+        Level, das mitten im Zug gewaehlt wird, wartet auf den Spalt zwischen
+        zwei Zuegen und heisst das auch in der Notiz.
+
         SWITCHING DROPS STANDING APPROVALS. Going to `manual` while keeping the
         directories released under `allowedit` would hand back a level that asks
         less than its name says.
         """
         if name not in crow_core.MODES:
             return
+        if name == getattr(self._args, "mode", None) and self._mode_queued is None:
+            return                      # schon gesetzt -- nichts zu warten
         if self._worker and self._worker.is_alive():
-            self.push({"k": "note", "t": "the level does not change mid-turn"})
+            self._mode_queued = name
+            self.push({"k": "note",
+                       "t": "the level does not change mid-turn -- "
+                            "%s applies after this one" % name})
             return
+        self._apply_mode(name)
+
+    def _apply_mode(self, name: str) -> None:
+        """#211. Den Level wirklich setzen -- eine Stelle, zwei Tueren.
+
+        Der direkten Taste und dem nachgetragenen Wartenden darf nichts
+        Unterschiedliches passieren: dieselben zwei Pushes, in derselben
+        Reihenfolge, sonst zweifelt die Seite je nach Weg etwas anderes.
+        """
+        self._mode_queued = None
         self._args.mode = name
         crow_core.forget_approvals()
         self.push({"k": "mode", "name": name, "modes": self.mode_menu()})
         self.push({"k": "note", "t": "mode %s -- %s" % (
             name, next(m["what"] for m in self.mode_menu() if m["name"] == name))})
+
+    def _drain_mode_queue(self) -> None:
+        """#211. Der Spalt zwischen zwei Zuegen: der gewarte Level wird jetzt.
+
+        NUR VON DER PUMPE GERUFEN, zwischen `_run`-Ruecke und naechstem Zug --
+        der eine Ort, an dem sicher niemand die Grenze durch laufende
+        Werkzeuge liest. Auch beim ENDEN der Pumpe: ein Level, das auf den
+        letzten Zug wartete, darf nicht mit ihm sterben.
+        """
+        if self._mode_queued is None:
+            return
+        name = self._mode_queued
+        self._mode_queued = None
+        if name != getattr(self._args, "mode", None):
+            self._apply_mode(name)
+
+    # #211. DIE ZWEI TUEREN DER KARTE. Die Archiv-Karte im Band nennt den Pfad
+    # des Transkripts; diese beiden Methoden sind, was hinter ihren Knoepfen
+    # steht. Beide lesen NUR Dateien, die der Roll selbst geschrieben hat --
+    # der Pfad kommt aus der Notiz im Gespraech, aber gegengecheckt wird er
+    # gegen das Verzeichnis, in dem ausschliesslich crow schreibt.
+    def _roll_transcript(self, path: str) -> "str | None":
+        """Der gepruefte Pfad eines Transkripts, oder None mit einer Zeile.
+
+        EINE .MD IM EIGENEN SITZUNGSORDNER, sonst nichts: der Klick kam von
+        einer Karte, deren Text im Gespraech steht -- ein Gespraech, das
+        jemand bearbeitet hat, darf kein beliebiger Datei-Oeffner sein.
+        """
+        full = os.path.abspath(os.path.expanduser(str(path or "")))
+        folder = os.path.dirname(crow_core.rollover_path("x.json"))
+        if (not full.endswith(".md") or not os.path.isfile(full)
+                or os.path.dirname(full) != folder):
+            self.push({"k": "fail", "t": "that transcript is not there"})
+            return None
+        return full
+
+    def roll_show(self, path: str) -> None:
+        """#211. Das Transkript des Schnitts im Sichtprogramm der Umgebung.
+        Der WIE-Satz steht in crow_platform -- die Antwort auf "welches
+        Programm" gehoert dorthin, nicht hierher."""
+        full = self._roll_transcript(path)
+        if full is None:
+            return
+        argv = crow_platform.opener_command(full)
+        try:
+            if argv is None:
+                os.startfile(full)            # noqa: S606 - Windows' eigene Tuere
+            else:
+                subprocess.Popen(argv)
+        except OSError:
+            self.push({"k": "fail", "t": "no viewer took the transcript"})
+
+    def roll_tail(self, path: str) -> str:
+        """#211. Die letzten 40 Zeilen des Transkripts -- wo die Arbeit stand.
+
+        DAS ENDE, NICHT DER ANFANG: die Notiz selbst sagt schon, dass dort
+        zu lesen ist, wo die Dinge standen; die Karte legt es frei, ohne
+        den Viewer zu brauchen.
+        """
+        full = self._roll_transcript(path)
+        if full is None:
+            return ""
+        try:
+            with open(full, encoding="utf-8", errors="replace") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            return ""
+        return "\n".join(lines[-40:])
 
     def reset(self) -> None:
         """Put the current conversation aside and start an empty one.
@@ -10130,6 +11496,11 @@ class Api:
         self._view_path = None
         self._done_paths.discard(self._current_path or "")
         self.push({"k": "clear"})
+        self._draw_live()
+
+    def _draw_live(self) -> None:
+        """The live chat, drawn from memory: `view_live` after its clear, and
+        #209's reloaded page, which starts empty."""
         self._hello()
         # #173: AUS DEM BAND IM SPEICHER, nicht von Platte -- aus demselben
         # Grund, aus dem die Nachrichten aus `payload()` kommen: die Datei ist
@@ -10812,6 +12183,57 @@ class Api:
         except Exception:                  # noqa: BLE001 - reported as False
             return False
 
+    # -- #229: a path in the output, right-clicked ---------------------------
+    #
+    # THE PAGE MARKS PATHS BY SPELLING, NOT BY LOOKING. A bridge call per path
+    # per render would be one per line of an `ls`; VS Code's terminal verifies
+    # before it underlines, Crow verifies when somebody asks for the path --
+    # which is here, once, for the one that was clicked.
+
+    def _path_abs(self, path: str) -> "str | None":
+        """The mark's path as an absolute one, or None when it cannot be one.
+
+        RELATIVE AGAINST THE CHAT'S WORKING AREA, because that is what the tools
+        that printed it resolved against. No working area, no guess: the process
+        directory of the GUI is nothing the model ever saw.
+        """
+        if not isinstance(path, str) or not path.strip() or "\0" in path:
+            return None
+        full = os.path.expanduser(path.strip())
+        if not os.path.isabs(full):
+            root = crow_core.get_root()
+            if not root:
+                return None
+            full = os.path.join(root, full)
+        return os.path.normpath(full)
+
+    def path_info(self, path: str) -> dict:
+        """`{path, exists, dir}` for a marked path; `path` is "" when unusable."""
+        full = self._path_abs(path)
+        if full is None:
+            return {"path": "", "exists": False, "dir": False}
+        return {"path": full, "exists": os.path.exists(full),
+                "dir": os.path.isdir(full)}
+
+    def reveal_path(self, path: str) -> str:
+        """Show the path in the file manager. "" when it went, else why not.
+
+        NEVER THE FILE ITSELF -- see `crow_platform.reveal_command`: the path is
+        a stranger's text, and opening it with the default program can run it.
+        """
+        full = self._path_abs(path)
+        if full is None:
+            return "a relative path needs a working area"
+        if not os.path.exists(full):
+            return "not on this disk: " + full
+        argv = crow_platform.reveal_command(full, os.path.isdir(full))
+        try:
+            subprocess.Popen(argv, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except OSError:
+            return "no file manager took " + full
+        return ""
+
     def update_check(self) -> dict:
         """What the About pane asks when it opens. Never raises.
 
@@ -10910,8 +12332,16 @@ class Api:
         doc["rail_width"] = width
         return write_settings(doc)
 
-    def open_url(self, url: str) -> bool:
-        """A link in an answer, opened OUTSIDE this window. True when it went.
+    def open_url(self, url: str, outside: bool = False) -> bool:
+        """A link in an answer, opened in the panel or outside. True when it went.
+
+        #201. IN THE PANEL WHEN THE PANEL IS IN THE WINDOW: robin, 2026-09-23,
+        the browser belongs inside Crow and not in an extra window, and on his
+        machine `webbrowser.open` is Chromium (`xdg-settings get
+        default-web-browser` -> chromium.desktop) in a window Hyprland places
+        on its own. `outside=True` (Ctrl-click, middle click, and the GitHub
+        device code, which has to be entered where the user is signed in to
+        GitHub) still goes to the system browser.
 
         NEVER IN THE WEBVIEW. Following a link in here would replace the client
         with a web page, and a frameless window has no back button -- the chat,
@@ -10926,6 +12356,9 @@ class Api:
             return False
         if not url.lower().startswith(("http://", "https://")):
             return False
+        if self._inwin is not None and not outside:
+            self.push({"k": "bropen", "url": url})
+            return True
         try:
             return bool(webbrowser.open(url))
         except Exception:                  # noqa: BLE001 - a link, never fatal
@@ -11286,9 +12719,9 @@ class Api:
                    "model_key": "" if spot["remote"] else crow_core.model_key_for(name),
                    "reasoning": self._reasoning or "",
                    "levels": [] if spot["remote"] else
-                             list(crow_core.reasoning_levels_for(name)),
+                             list(crow_core.reasoning_menu_for(name)),
                    "groups": [] if spot["remote"] else
-                             [list(g) for g in crow_core.reasoning_groups_for(name)]})
+                             [list(g) for g in crow_core.reasoning_menu_groups_for(name)]})
 
     def set_theme(self, name: str) -> bool:
         """The picker in Aussehen. True when the choice reached the disk.
@@ -11395,6 +12828,9 @@ class Api:
         """Das Rechteck, auf dem die Scheibe liegt -- in CSS-Pixeln der Seite."""
         self._browser_rect = (float(left), float(top),
                               max(1.0, float(width)), max(1.0, float(height)))
+        if self._inwin is not None:
+            self._inwin.place(*self._browser_rect)
+            return True
         self._pane_apply()
         return True
 
@@ -11429,6 +12865,14 @@ class Api:
         was hier scheitert, faellt sonst in die JS-Bruecke und hinterlaesst ein
         leeres Panel ohne eine einzige Zeile darueber, warum.
         """
+        if self._inwin is not None:
+            # #201: DAS WIDGET IM FENSTER. Das Schema wird hier geprueft und
+            # nicht erst in WebKit: `javascript:` liefe sonst in der Seite, die
+            # gerade dasteht.
+            if not pane_url_ok(url):
+                return "error: the browser panel opens http, https and file only"
+            self._inwin.go(url)
+            return url
         try:
             win = self._pane()
             win.load_url(url)
@@ -11446,6 +12890,9 @@ class Api:
     def pane_hide(self) -> bool:
         """Weg, ohne zerstoert zu werden -- eine Scheibe, die neu gebaut wird,
         verliert die Seite, auf der jemand gerade war."""
+        if self._inwin is not None:
+            self._inwin.hide()
+            return True
         self._browser_shown = False
         if self._browser_win is not None:
             try:
@@ -11455,6 +12902,9 @@ class Api:
         return True
 
     def pane_show(self) -> bool:
+        if self._inwin is not None:
+            self._inwin.show()
+            return True
         if self._browser_win is None or self._browser_shown:
             return True
         self._browser_shown = True
@@ -11490,6 +12940,42 @@ class Api:
     def pane_follow(self, *_) -> None:
         """Das Hauptfenster ist gewandert oder hat die Groesse geaendert."""
         self._pane_apply()
+
+    def pane_embed(self) -> bool:
+        """#201. Hang the pane into Crow's own GtkWindow. True when it is in.
+
+        WIRED TO pywebview's `before_show`, which fires synchronously on the
+        GTK main thread once the widget tree exists and before it is shown --
+        the one moment the content can be rewrapped without a realized
+        WebView being moved. Anything that goes wrong leaves the old window
+        pane in place (it still works, it only floats), and says so once.
+        `CROW_PANE_WINDOW=1` keeps the old pane for a comparison.
+        """
+        if crow_platform.IS_WINDOWS or os.environ.get("CROW_PANE_WINDOW") == "1":
+            return False
+        native = self._gtk_window()
+        if native is None:
+            return False
+        try:
+            self._inwin = InWindowPane.install(native, self.push)
+        except Exception as exc:       # noqa: BLE001 -- the old pane remains
+            self._inwin = None
+            self.push({"k": "note",
+                       "t": "the browser panel opens as its own window: %s" % exc})
+            return False
+        return True
+
+    def pane_cover(self, covered: bool) -> bool:
+        """#201. Something of Crow's (settings, a menu) lies over the panel.
+
+        A native view is drawn above the whole page, so a sheet that opens
+        over `#brbody` would be hidden under the web page. The page tells us
+        and the view steps aside until the sheet is gone. The window pane on
+        Windows has the same problem and is not covered by this (#201).
+        """
+        if self._inwin is not None:
+            self._inwin.cover(bool(covered))
+        return bool(covered)
 
     def set_git_open(self, open_: bool) -> bool:
         """#156. Remember whether the git panel is folded away.
@@ -11928,6 +13414,12 @@ class Api:
                     if text is None:
                         self._busy = False
                         stop = True
+                # #211. DER GEWARTE LEVEL WIRD JETZT ECHT. Dieser Spalt --
+                # voriger Zug zurueck, naechster noch nicht angefasst -- ist
+                # der einzige Moment zwischen zwei Zuegen, und auch der
+                # letzte Durchlauf faellt hierher: ein Level, das auf das
+                # Zugende wartete, stirbt nicht mit der Pumpe.
+                self._drain_mode_queue()
                 if stop:
                     # #162. DIE RAIL ERFAEHRT VOM ENDE, UND ZWAR HIER. `_run`
                     # zeichnet sie am Zugende -- da steht `_busy` aber noch auf
@@ -11976,12 +13468,15 @@ class Api:
         # existiert schon hier, damit der Roll dieselbe Notiz und dasselbe
         # Zaehler-Reset bekommt wie ein Mid-Turn-Roll.
         events = Turn(self.push, git_reload=self.git_refresh,
-                      goal_reload=self.push_goal)
+                      goal_reload=self.push_goal,
+                      # #211: der Schnitt buendelt den Fensterzustand neu --
+                      # siehe `_surface`.
+                      surface_reload=self._surface)
         rolled = False
         if crow_core.should_roll(self._context_tokens, self._n_ctx,
                                  crow_core.ROLLOVER_AT):
             spot0 = self._endpoint()
-            sampling0 = crow_core.sampling_for(self._model)
+            sampling0 = crow_core.sampling_for(self._model, self._reasoning)
             # #154: VOR roll_over, auf dem noch warmen Praefix.
             # #205: DIESELBE STUFE UND DERSSELBE DECKEL WIE DER ZUG -- ein
             # Digest-Koerper ohne die Reasoning-Felder rendert einen anderen
@@ -11997,10 +13492,16 @@ class Api:
                 presence_penalty=sampling0.get("presence_penalty"),
                 reasoning_effort=self._reasoning,
                 reasoning_budget=self._budget,
+                served_name=self._model,
                 prompt_tokens=self._context_tokens,
                 extra_headers=spot0.get("headers") or None,
                 transport=spot0.get("transport") or crow_core.TRANSPORT_CHAT,
-                remote=spot0["remote"])
+                remote=spot0["remote"],
+                # #217: DER SEED DER LEG GEHT IN DIE LETZTE BILANZ, und die
+                # geht mit ins Archiv -- der Digest gehoert zum Kontext, der
+                # hier weggelegt wird.
+                seeds=(self._timings[-1].setdefault("leg_seeds", [])
+                       if self._timings else None))
             archived = crow_core.roll_over(
                 self._conversation, spot0["base_url"],
                 self._context_tokens, carry=text, digest=digest,
@@ -12008,7 +13509,10 @@ class Api:
             # #163: derselbe Kopf, den dieser Chat vor dem Schnitt trug --
             # Gedaechtnis, Faehigkeiten, Ziel. Ohne ihn beginnt die zweite
             # Haelfte einer Sitzung ohne alles, was ihre erste wusste.
-            crow_core.repin_head(self._conversation, crow_core.get_root())
+            # #210: MIT DEN MARKEN DES ZIELS -- der gratis bewegte Kopf traegt
+            # einmal den Stand des Schnitts mit (siehe crow_core.goal_block).
+            crow_core.repin_head(self._conversation, crow_core.get_root(),
+                                 include_status=True)
             if archived:
                 # #173/#171. BEIDE BAENDER GEHEN MIT INS ARCHIV UND HIER WEG --
                 # ihre Positionen zaehlen Nachrichten, und die sind soeben alle
@@ -12071,7 +13575,8 @@ class Api:
         # outlives a server restart -- the endpoint can be pointed at a
         # different model while the window stays open, and a value cached at
         # launch would keep sending the old model's min_p.
-        sampling = sampling_for(self._model)
+        # #225: the row of the mode this turn sends.
+        sampling = sampling_for(self._model, self._reasoning)
         # RESOLVED ONCE FOR THE WHOLE TURN, and handed to BOTH senders below.
         # The reply is the one a person is waiting for; the review at the end is
         # the one that goes without being asked, with its own body and its own
@@ -12127,6 +13632,10 @@ class Api:
                 reasoning_effort=self._reasoning,
                 # #176: dasselbe fuer den Denkdeckel -- None schickt kein Feld.
                 reasoning_budget=self._budget,
+                # #220: the manifest is asked about what /props
+                # reported -- the name `sampling` above came from -- and not
+                # about the wire label, which is `crow` and names no entry.
+                served_name=self._model,
                 timeout=READ_TIMEOUT_S, context_tokens=self._context_tokens,
                 n_ctx=self._n_ctx, promised_warm=self._promised_warm,
                 # #152: frisch je Turn, gesetzt allein vom Vor-Turn-Roll oben
@@ -12236,7 +13745,12 @@ class Api:
                 presence_penalty=sampling.get("presence_penalty"),
                 reasoning_effort=self._reasoning,
                 reasoning_budget=self._budget,
+                served_name=self._model,
                 incidents=result.incidents,
+                # #217: der Seed des Nachlaufs in die Bilanz des Zuges, dem
+                # er folgt (gerade oben angehaengt, wenn es eine gab).
+                seeds=(self._timings[-1].setdefault("leg_seeds", [])
+                       if line and self._timings else None),
                 gate=getattr(self._args, "memory_approval",
                              crow_core.MEMORY_APPROVAL_DEFAULT),
                 events=events)
@@ -12407,11 +13921,21 @@ def main(argv: list[str] | None = None) -> int:
     # und ein minimiertes Crow darf keine Webseite auf dem Desktop stehen
     # lassen. Ohne diese vier Zeilen liegt sie beim ersten Verschieben neben
     # dem Panel und sieht aus wie ein fremdes Fenster.
-    window.events.moved += api.pane_follow
-    window.events.resized += api.pane_follow
+    #
+    # #238. NUR AUF WINDOWS, weil nur dort `_pane_apply` etwas tut: auf GTK
+    # kehrt es sofort um, und pywebview startet fuer JEDES `moved`/`resized`
+    # einen eigenen Thread auf dem GTK-Hauptthread (`Event.set`) -- gemessen
+    # 2026-09-23 44 us pro Ereignis, zwei pro Konfigurationsschritt des
+    # Compositors, fuer einen Aufruf, der nichts tut.
+    if crow_platform.IS_WINDOWS:
+        window.events.moved += api.pane_follow
+        window.events.resized += api.pane_follow
     window.events.minimized += (lambda *_: api.pane_hide())
     window.events.restored += (lambda *_: api.pane_show())
     window.events.closing += (lambda *_: api.pane_hide())
+    # #201. BEFORE THE FIRST SHOW, ON THE GTK THREAD: see `Api.pane_embed`.
+    if not crow_platform.IS_WINDOWS:
+        window.events.before_show += api.pane_embed
     threading.Thread(target=api.pump, daemon=True).start()
     # The styles can only be set once the window exists, so this runs as the
     # start-up callback rather than beside create_window.
@@ -12504,6 +14028,19 @@ def _replay_rows(api, messages: list, upto) -> None:
             # the line, the images go back as images -- the ticket's "the
             # same image is still there after a restart".
             words = crow_core.message_text(body)
+            # #211. DIE NOTIZ IST KEINE FRAGE. Der Spalter ist der Kerns
+            # (`rollover_note_split`, der eine Ort): eine Rollover-Notiz
+            # wird als Karte gezeichnet und die Zeile, die mit ihr reiste,
+            # als das, was sie ist -- die getippte Frage des Menschen.
+            # #241. #224's notice opens the stored message; live, the bubble
+            # showed the composer text only, so the replay drops it too.
+            words = crow_core.split_root_notice(words)[1]
+            parts, carry = crow_core.rollover_note_split(words)
+            if parts is not None:
+                api.push({"k": "roll", "tokens": parts["tokens"],
+                          "path": parts["transcript"],
+                          "lines": parts["lines"]})
+                words = carry
             urls = [u for u in
                     (((p.get("image_url") or {}).get("url") or "")
                      for p in crow_core.message_images(body)) if u]
@@ -12522,6 +14059,16 @@ def _replay_rows(api, messages: list, upto) -> None:
         # reopened chat shows two thoughts with nothing between them.
         calls = message.get("tool_calls") or []
         if not body.strip() and not thought.strip() and not calls:
+            continue
+        # #214. EINE GETRAGENE RUNDE IST KEIN NEUER AUFRUF. Sie lief vor dem
+        # Schnitt und steht dort im Archiv; hinter der Karte als Werkzeugzeile
+        # gezeichnet saehe sie aus, als haette das Modell sie eben noch
+        # einmal gemacht. Gezaehlt wird sie trotzdem -- `seen` folgt jedem
+        # Aufruf der Konversation, wie `tools_cleared` ihn zaehlt.
+        if calls and crow_core.carried_round(messages, index):
+            seen += len(calls)
+            api.push({"k": "note", "t": "carried across the cut: " + ", ".join(
+                (c.get("function") or {}).get("name") or "?" for c in calls)})
             continue
         sink = Sink(api.push, live=False)
         sink.reply_started()

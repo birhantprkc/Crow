@@ -5,7 +5,8 @@
 ## Suites
 
 Run from `cli/`, one file per interpreter — each suite's preamble owns the sandbox
-redirect, and a combined run leaves the isolation guards red. Counts collected 2026-09-16.
+redirect, and a combined run leaves the isolation guards red. Case counts collected 2026-09-23
+on `release-2026-09-23` (0311d0d) with `unittest`'s loader, under the runtime venv's Python.
 
 ```
 python -m unittest test_crow
@@ -15,9 +16,9 @@ python -m unittest test_crow_gui
 
 | | cases | covers |
 |---|---|---|
-| `test_crow.py` | 434 | the terminal client |
-| `test_crow_core.py` | 883 | the shared core |
-| `test_crow_gui.py` | 636 | the window's API and page |
+| `test_crow.py` | 451 | the terminal client |
+| `test_crow_core.py` | 1315 | the shared core |
+| `test_crow_gui.py` | 756 | the window's API and page |
 
 No test writes into a real installation. `test_crow_gui.py` carries a case that
 walks every path constant in both modules and rejects any pointing into a real
@@ -25,6 +26,19 @@ installation. It asks `crow_platform` where that is rather than naming a path:
 one directory on Windows (`%LOCALAPPDATA%\Crow`), four on Linux (config, data,
 state, cache). A guard that only knew the Windows spelling would not be strict
 there — it would be empty.
+
+Run them under the runtime venv (`~/.local/share/crow/venv/bin/python` on Linux), not the
+system Python: that venv is made with `--system-site-packages`, which puts pip's `webview` and
+the distribution's PyGObject in one interpreter. `just test` does exactly that, and `just check`
+runs lint, the three suites, `check_shared_core`, `check_operating_point`, `check_gui_prereqs`
+and `bash install.sh --selftest` in that order.
+
+`AWriteParsesWhatItWroteTests` (#251) calls the real `node --check` and is skipped when `node`
+is not on `PATH`; the skipped count in a run's `OK (skipped=N)` line includes it then.
+
+CI (`.github/workflows/ci.yml`) runs ruff, the suites, `check_shared_core` and
+`check_operating_point` on `ubuntu-latest` and `windows-latest` (Windows without
+`test_crow_gui`), and `install.sh --selftest` on Linux only. `check_gui_prereqs` is not in CI.
 
 The window's own suite needs `pywebview` importable; without it the folder-picker
 cases error out on `No module named 'webview'` and the rest still runs.
@@ -42,7 +56,11 @@ Run from the repo root.
 | `tools/check_operating_point.py` | the server command line was spelled out in three places and they disagreed. Held against `manifests/operating-point.json`. **It reads the documents as raw text**, not as a second copy of the manifest: `install.ps1` must carry every key, and every key must be printed correctly by at least one live page — today that is [`docs/operating-points.md`](../operating-points.md). `README.md` stays in the list for its version badge and for the day a server line comes back to it. `tools/test_check_operating_point.py` drives 20 cases, including the ones that must go red |
 | `tools/check_chat_template.py` | DeepSeek-V4-Flash ships no Jinja template. The hand-written one is held against the vectors DeepSeek published, byte for byte |
 | `tools/check_routing_tables.py` | REAP-pruned checkpoints can carry duplicate expert ids, which crashes CUDA `ggml_mul_mat_id()` on the tokens that hit them. Reads the static routing table without loading the model |
-| `tools/check_gui_prereqs.py` | what the window stands on: font, glyph coverage, runtime versions |
+| `tools/check_gui_prereqs.py` | what the window stands on: font, glyph coverage, runtime versions. It checks the machine it runs on, not the code, and is not run in CI |
+
+The checkers carry their own suites: `tools/test_check_operating_point.py`,
+`tools/test_check_shared_core.py`, `tools/test_check_gui_prereqs.py`, plus
+`tools/test_gguf_header.py` and `tools/test_run_server_block.py`.
 
 ## The manifest
 

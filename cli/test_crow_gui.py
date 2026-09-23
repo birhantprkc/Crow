@@ -50,6 +50,7 @@ import threading
 import time
 from unittest import mock
 import unittest
+import types
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -663,6 +664,211 @@ class TheCounterFollowsTheRolloverTests(unittest.TestCase):
         self.assertIn('case "ctx": this.ctx(e.tokens,e.n_ctx); break;', sw)
 
 
+class TheSeamReassertsTheSurfaceTests(unittest.TestCase):
+    """#211. Der Roll sagte der Seite bis hier genau EINE Sache (die Notiz)
+    -- Modell-Chip und Berechtigungsstufe standen danach auf dem, was zufaell-
+    ig zuletzt stand, und jede Neudarstellung liess sie leer (robins Test
+    2026-09-22). Der Schnitt ruft den Fensterzustand NACH, gebuendelt."""
+
+    def test_rolled_over_calls_the_surface_after_the_counter(self):
+        """POSITIV: Karte, Notiz, ctx 0 -- und DANN der Burst; die Reihenfolge
+        ist der Vertrag, denn die Karte steht im Band, bevor irgendwer von
+        Zahlen spricht, und der Burst schreibt Zahlen, die die Notiz nennt."""
+        collected: list[dict] = []
+        fired: list[bool] = []
+        turn = crow_gui.Turn(collected.append,
+                             surface_reload=lambda: fired.append(True))
+        turn.rolled_over(180145, "rollover-x.json")
+        kinds = [m["k"] for m in collected]
+        self.assertEqual(kinds, ["roll", "note", "ctx"])
+        self.assertEqual(collected[0]["tokens"], 180145)
+        self.assertTrue(collected[0]["path"].endswith("rollover-x.md"))
+        self.assertEqual(collected[kinds.index("ctx")]["tokens"], 0)
+        self.assertEqual(fired, [True], "der Schnitt ruft den Zustand nach")
+
+    def test_without_a_surface_the_roll_rolls_as_before(self):
+        """NEGATIV: die Suite und das Terminal bauen Turn ohne Fenster --
+        kein Rueckruf darf dort zum AttributeError werden."""
+        crow_gui.Turn(lambda m: None).rolled_over(1, "rollover-x.json")
+
+
+class TheLevelWaitsForTheGapTests(unittest.TestCase):
+    """#211. Der Goal-Motor haelt den Worker stundenlang am Leben -- die
+    Weigerung "mid-turn" hatte kein Ende, solange ein Ziel lief (robins
+    Live-Befund: die Berechtigungsstufe war unveraenderlich). Ein Level,
+    das mitten im Zug gewaehlt wird, wartet auf den Spalt zwischen zwei
+    Zuegen und wird dort echt."""
+
+    def _api(self, mode: str = "auto") -> "crow_gui.Api":
+        api = crow_gui.Api.__new__(crow_gui.Api)
+        api._mode_queued = None
+        api._args = types.SimpleNamespace(mode=mode)
+        api._worker = None
+        api.push = self.out.append
+        return api
+
+    def setUp(self) -> None:
+        self.out: list[dict] = []
+
+    def test_mid_turn_the_level_queues_instead_of_refusing(self):
+        """POSITIV: der Klick wird angenommen, wartet, und die Notiz nennt
+        den Moment, an dem er gilt -- kein Abweisungston mehr ohne Ende."""
+        api = self._api()
+        api._worker = types.SimpleNamespace(is_alive=lambda: True)
+        applied: list[str] = []
+        api._apply_mode = applied.append          # der Spalt selbst, hier gefakt
+        api.set_mode("yolo")
+        self.assertEqual(applied, [], "mitten im Zug gilt noch nichts")
+        self.assertEqual(api._mode_queued, "yolo")
+        self.assertTrue(any("yolo applies after this one" in m.get("t", "")
+                            for m in self.out if m.get("k") == "note"))
+
+    def test_the_gap_applies_the_queued_level_once(self):
+        """POSITIV: `_drain_mode_queue` ist der Spalt -- angewandt wird nur,
+        was noch nicht gilt, und genau ein Mal."""
+        api = self._api()
+        api._mode_queued = "yolo"
+        applied: list[str] = []
+        api._apply_mode = applied.append
+        api._drain_mode_queue()
+        self.assertEqual(applied, ["yolo"])
+        self.assertIsNone(api._mode_queued)
+        api._drain_mode_queue()
+        self.assertEqual(applied, ["yolo"], "zweimal ziehen aendert nichts")
+
+    def test_a_level_that_already_stands_needs_no_gap(self):
+        """NEGATIV: derselbe Name ist keine Aenderung -- die Notiz wuerde von
+        einem Wechsel sprechen, der keiner ist."""
+        api = self._api(mode="yolo")
+        api._mode_queued = "yolo"
+        applied: list[str] = []
+        api._apply_mode = applied.append
+        api._drain_mode_queue()
+        self.assertEqual(applied, [])
+        self.assertIsNone(api._mode_queued)
+
+
+class TheArchiveCardBacksItsButtonsTests(ApiCase):
+    """#211. Die Karte am Schnitt nennt den Transkriptpfad; ihre Knoepfen
+    lesen NUR Dateien, die der Roll selbst in den Sitzungsordner geschrieben
+    hat -- ein Gespraech, das jemand bearbeitet hat, darf kein beliebiger
+    Datei-Oeffner sein."""
+
+    def _api(self) -> "crow_gui.Api":
+        api = crow_gui.Api.__new__(crow_gui.Api)
+        api.push = self.out.append
+        return api
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.out: list[dict] = []
+
+    def _write_transcript(self, lines: int = 60) -> str:
+        path = crow_core.rollover_path("card.json")[:-5] + ".md"
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join("zeile %d" % n for n in range(1, lines + 1)))
+        return path
+
+    def test_the_tail_is_the_end_of_the_file(self):
+        """POSITIV: 40 Zeilen vom Ende -- die Notiz selbst sagt, dass DORT zu
+        lesen ist, wo die Dinge standen."""
+        path = self._write_transcript()
+        tail = self._api().roll_tail(path)
+        self.assertEqual(tail.splitlines()[0], "zeile 21")
+        self.assertEqual(tail.splitlines()[-1], "zeile 60")
+        self.assertEqual(len(tail.splitlines()), 40)
+
+    def test_a_path_outside_the_session_folder_is_refused(self):
+        """NEGATIV: die Karte steht im Gespraech, und Gespraechstext ist kein
+        Pfadvertrauen -- nur das eigene Verzeichnis, nur .md. (ApiCase biegt
+        SESSION_DIR auf das Temp-Verzeichnis; 'daneben' ist darum ein
+        eigenes.)"""
+        elsewhere = tempfile.mkdtemp(prefix="crow-card-out-")
+        self.addCleanup(shutil.rmtree, elsewhere, True)
+        outside = os.path.join(elsewhere, "notes.md")
+        with open(outside, "w", encoding="utf-8") as fh:
+            fh.write("nichts fuer die Karte")
+        self.assertEqual(self._api().roll_tail(outside), "")
+        self.assertTrue(any(m.get("k") == "fail" for m in self.out))
+
+    def test_show_opens_nothing_when_the_file_is_gone(self):
+        """NEGATIV: ein verschwundenes Transkript ist eine Zeile, kein
+        Oeffnen daneben -- der Klick kam von einer alten Karte."""
+        gone = crow_core.rollover_path("gone.json")[:-5] + ".md"
+        with mock.patch.object(crow_gui.subprocess, "Popen") as popen:
+            self._api().roll_show(gone)
+        popen.assert_not_called()
+        self.assertTrue(any(m.get("k") == "fail" for m in self.out))
+
+
+class TheReplayDrawsTheBoundaryTests(unittest.TestCase):
+    """#211. Ein wieder geoeffneter Chat zeigt seine Grenze: die Notiz wird
+    zur Karte, die Zeile, die mit ihr reiste, zur getippten Frage -- derselbe
+    Spalter wie live, dasselbe Ereignis fuer die Seite."""
+
+    def test_a_restored_note_becomes_a_card_and_its_carry_a_line(self):
+        note = crow_core.ROLLOVER_NOTE.format(
+            tokens=180145, transcript="/x/rollover-1.md", lines=5223,
+            path="/x/rollover-1.json", where="", spoken="", digest="")
+        messages = [{"role": "system", "content": "SYS"},
+                    {"role": "user", "content": note + "\n\nweiter so"},
+                    {"role": "user", "content": "eine zweite Frage"}]
+        out: list[dict] = []
+
+        class _Collector:
+            """Der Sammler, von dem `Api._replay` sagt, dass die ihn so baut:
+            nur `push`, kein Fenster."""
+            def __init__(self_inner):
+                self_inner.push = out.append
+
+        crow_gui._replay_rows(_Collector(), messages, lambda n: None)
+        kinds = [m["k"] for m in out]
+        self.assertEqual(kinds, ["roll", "user", "user"])
+        self.assertEqual(out[0]["tokens"], 180145)
+        self.assertEqual(out[0]["path"], "/x/rollover-1.md")
+        self.assertEqual(out[0]["lines"], 5223)
+        self.assertEqual(out[1]["t"], "weiter so")
+        self.assertEqual(out[2]["t"], "eine zweite Frage")
+
+
+class TheReplayDropsTheWorkingAreaNoticeTests(unittest.TestCase):
+    """#241: #224's notice opens the stored user message, but live the
+    bubble showed only the typed line -- a reopened chat must draw the same."""
+
+    def _drawn(self, messages):
+        out: list[dict] = []
+
+        class _Collector:
+            def __init__(self_inner):
+                self_inner.push = out.append
+                self_inner._context_tokens = 0
+                self_inner._n_ctx = 0
+
+        crow_gui._replay_rows(_Collector(), messages, lambda n: None)
+        return out
+
+    def test_the_bubble_holds_only_the_typed_line(self):
+        out = self._drawn([
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": crow_core.ROOT_NOTICE.format(
+                new="/a/new", old="/a/old") + "go on"}])
+        users = [m["t"] for m in out if m["k"] == "user"]
+        self.assertEqual(users, ["hi", "go on"])
+
+    def test_an_image_turn_without_words_draws_no_notice(self):
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "hi")
+        talk.append("assistant", "hello")
+        talk.note_root_change("/a", "/b")
+        talk.append("user", [{"type": "image_url", "image_url": {"url": "data:x"}}])
+        out = self._drawn(talk.payload())
+        last = [m for m in out if m["k"] == "user"][-1]
+        self.assertEqual(last["t"], "")
+        self.assertEqual(last["i"], ["data:x"])
+
+
 class TheSecondRolloverFiresTests(ApiCase):
     """#152, robins Live-Nacht 2026-08-29: der erste Rollover griff, danach
     verweigerte jeder Folgeturn den naechsten Roll -- stumm -- bis der Server
@@ -832,6 +1038,247 @@ class TheSecondRolloverFiresTests(ApiCase):
              mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
             api._run("weiter im Text")
         self.assertEqual(seen.get("digest"), "DIGEST-TEXT")
+
+    def test_the_pre_turn_roll_sends_the_goal_marks(self):
+        """#210, Audit 2026-09-22 17:12: der ECHTE `roll_over`, der echte
+        `repin_head`, eine gebundene Wurzel mit goal.json unter `.crow/` --
+        und der Kopf, den der erste Zug nach dem Schnitt bekommt, traegt die
+        Marken und den naechsten Schritt."""
+        self._provider()
+        root = os.path.join(self.dir, "work")
+        os.makedirs(root)
+        heads = []
+
+        def fake_run(conversation, **kw):
+            heads.append(conversation.payload()[0]["content"])
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost="", context_tokens=9,
+                                        promised_warm=False, rolled=True,
+                                        stopped=False, reported=True)
+
+        api = self.api()
+        crow_core.set_root(root)
+        self.addCleanup(crow_core.set_root, None)
+        crow_core.goal_start("Ship", ["read", "write", "prove"], now=1000.0)
+        crow_core.goal_step_end(0, now=1010.0)
+        api._conversation.append("user", "erste Frage")
+        api._conversation.append("assistant", "erste Antwort")
+        api._n_ctx = 200192
+        api._context_tokens = 190000
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "rollover_digest",
+                               lambda *a, **k: ""), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
+            api._run("weiter im Text")
+        self.assertEqual(len(heads), 1)
+        for line in ("1. [done] read", "2. [open] write",
+                     "Next: step 2. write", crow_core.GOAL_SEAM_NOTE):
+            self.assertIn(line, heads[0])
+
+
+    def test_the_pre_turn_roll_carries_the_last_good_round(self):
+        """#214: der ECHTE `roll_over` im Vor-Turn-Roll des Fensters -- der
+        erste Zug nach dem Schnitt sieht das letzte gelungene `edit_file`
+        woertlich hinter der Notiz, gepaart, und die getippte Zeile zuletzt."""
+        self._provider()
+        sent = []
+
+        def fake_run(conversation, **kw):
+            sent.append(conversation.payload())
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost="", context_tokens=9,
+                                        promised_warm=False, rolled=True,
+                                        stopped=False, reported=True)
+
+        api = self.api()
+        edit = json.dumps({"path": "src/app.js", "old": "a", "new": "b"})
+        api._conversation.append("user", "erste Frage")
+        api._conversation.append("assistant", "", tool_calls=[
+            {"id": "call_0", "name": "edit_file", "arguments": edit}])
+        api._conversation.append("tool", "replaced 1 occurrence",
+                                 tool_call_id="call_0")
+        api._conversation.append("assistant", "erste Antwort")
+        api._n_ctx = 200192
+        api._context_tokens = 190000
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "rollover_digest",
+                               lambda *a, **k: ""), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
+            api._run("weiter im Text")
+        self.assertEqual(len(sent), 1)
+        after = sent[0]
+        self.assertEqual([m["role"] for m in after],
+                         ["system", "user", "assistant", "tool", "user"])
+        self.assertEqual(after[2]["tool_calls"][0]["function"]["arguments"],
+                         edit)
+        self.assertEqual(after[3]["tool_call_id"], "call_0")
+        self.assertTrue(after[3]["content"].startswith(
+            crow_core.ROLLOVER_CARRY_MARK))
+        self.assertEqual(after[-1]["content"], "weiter im Text")
+
+
+class TheReplayDrawsACarriedRoundAsCarriedTests(unittest.TestCase):
+    """#214: eine getragene Runde lief VOR dem Schnitt. Beim Wiederoeffnen
+    steht sie hinter der Karte als Hinweis, nicht als neue Werkzeugzeile."""
+
+    def test_a_carried_round_is_a_note_and_a_real_one_a_row(self):
+        note = crow_core.ROLLOVER_NOTE.format(
+            tokens=180145, transcript="/x/rollover-1.md", lines=5223,
+            path="/x/rollover-1.json", where="", spoken="", digest="")
+        call = {"id": "call_0", "type": "function", "function": {
+            "name": "edit_file",
+            "arguments": '{"path": "p", "old": "a", "new": "b"}'}}
+        messages = [
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": note},
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": "call_0",
+             "content": crow_core.ROLLOVER_CARRY_MARK + "]\nreplaced 1"},
+            {"role": "user", "content": "weiter so"},
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": "call_0", "content": "replaced 1"}]
+        out: list[dict] = []
+
+        class _Collector:
+            def __init__(self_inner):
+                self_inner.push = out.append
+                self_inner._context_tokens = 0
+                self_inner._n_ctx = 0
+
+        crow_gui._replay_rows(_Collector(), messages, lambda n: None)
+        kinds = [m["k"] for m in out]
+        self.assertEqual(kinds[:3], ["roll", "note", "user"])
+        self.assertEqual(out[1]["t"], "carried across the cut: edit_file")
+        tools = [m for m in out if m["k"] == "tool"]
+        self.assertEqual(len(tools), 1, "the carried call was drawn as a row")
+
+
+class TheWindowAsksTheManifestAboutTheServedModelTests(ApiCase):
+    """#220, the window half. `_endpoint` answers `model: "crow"`
+    for the local provider (DEFAULT_MODEL through provider_endpoint), sampling
+    and levels came from `self._model` -- what /props reported -- and the #176
+    budget came from "crow", which names no entry: the CNQ container's 1024
+    never reached the wire from this window. The REAL `run_turn` and the REAL
+    `rollover_digest` run here; only the transport is scripted."""
+
+    CNQ = crow_core.model_display_name("/m/Qwen3.8-Flash-Next-CNQ4.5-M.cnq")
+
+    def setUp(self) -> None:
+        # THE LOCAL PROVIDER, WHATEVER RAN BEFORE: a case that picks OpenRouter
+        # in the module sandbox leaves it chosen, and this class is about the
+        # local path -- same fence as the rollover class above.
+        super().setUp()
+        for name in ("PROVIDERS_FILE", "PROVIDER_KEYS_FILE", "PROVIDER_TOKEN_FILE"):
+            self.addCleanup(setattr, crow_core, name, getattr(crow_core, name))
+            setattr(crow_core, name, os.path.join(self.dir, name.lower() + ".json"))
+
+    def _window(self, **state):
+        api = self.api()
+        api._model = self.CNQ
+        api._n_ctx = 200192
+        for name, value in state.items():
+            setattr(api, name, value)
+        return api
+
+    def _turn_bodies(self, api, text="hello") -> list[dict]:
+        bodies = []
+
+        def fake(url, body, api_key, timeout):
+            bodies.append(json.loads(json.dumps(body)))
+            yield from chunks_for([{"content": "ok"}], {"predicted_n": 1})
+        crow_core._post_stream = fake
+        api._conversation.append("user", text)
+        with mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
+            api._run(text)
+        self.assertTrue(bodies, "the turn never reached the transport")
+        return bodies
+
+    def test_the_turn_for_the_container_carries_what_its_entry_declares(self):
+        body = self._turn_bodies(self._window(_reasoning="high"))[0]
+        self.assertEqual(body["model"], crow_core.DEFAULT_MODEL,
+                         "the wire label moved -- serve only echoes it")
+        self.assertEqual(body["reasoning_budget_tokens"],
+                         crow_core.reasoning_budget_for(self.CNQ))
+        self.assertEqual(body["reasoning_budget_tokens"], 1024)
+        self.assertEqual(body["reasoning_budget_message"],
+                         crow_core.REASONING_BUDGET_MESSAGE)
+        self.assertEqual(body["reasoning_effort"], "high")
+        self.assertIn(body["reasoning_effort"],
+                      crow_core.reasoning_levels_for(self.CNQ))
+        # The sampling half was right before; held here so the two lookups
+        # stay on one name.
+        for name, value in crow_core.sampling_for(self.CNQ).items():
+            self.assertEqual(body[name], value, name)
+
+    def test_a_never_chosen_chat_sends_thinking_explicitly(self):
+        """#225: `_reasoning` None used to send no key -- serve read
+        that as thinking OFF. The fixed word goes on the wire now, with the
+        card's thinking row."""
+        body = self._turn_bodies(self._window(_reasoning=None))[0]
+        self.assertEqual(body["reasoning_effort"], "high")
+        for name, value in (("temperature", 1.0), ("top_p", 0.95), ("top_k", 20),
+                            ("min_p", 0.0), ("presence_penalty", 0.0)):
+            self.assertEqual(body[name], value, name)
+
+    def test_a_stored_level_does_not_move_a_fixed_point(self):
+        body = self._turn_bodies(self._window(_reasoning="low"))[0]
+        self.assertEqual(body["reasoning_effort"], "high")
+
+    def test_the_window_offers_no_level_for_a_fixed_point(self):
+        """#225: the chip's level menu is empty for a fixed point."""
+        api = self._window()
+        self.drained(api)
+        api._surface()
+        up = [m for m in self.drained(api) if m.get("k") == "up"][-1]
+        self.assertEqual((up["levels"], up["groups"]), ([], []))
+        self.assertIn("fixed", api._reasoning_command([]))
+
+    def test_a_model_that_is_not_fixed_keeps_its_levels(self):
+        """NEGATIVE: the 27B keeps the chip as it was."""
+        api = self._window(_model="Qwen3.8-27B")
+        self.drained(api)
+        api._surface()
+        up = [m for m in self.drained(api) if m.get("k") == "up"][-1]
+        self.assertEqual(up["levels"],
+                         list(crow_core.reasoning_levels_for("Qwen3.8-27B")))
+        self.assertTrue(up["levels"])
+
+    def test_a_lifted_cap_is_lifted_in_the_window_too(self):
+        body = self._turn_bodies(self._window(
+            _budget=crow_core.BUDGET_LIFTED))[0]
+        self.assertNotIn("reasoning_budget_tokens", body)
+        self.assertNotIn("reasoning_budget_message", body)
+
+    def test_the_pre_turn_digest_asks_the_same_name(self):
+        legs = []
+        answer = json.dumps({"choices": [{"finish_reason": "stop", "message": {
+            "content": "state: the work stands where the transcript ends. " * 8}}]})
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def leg(request, timeout=None):
+            legs.append(json.loads(request.data.decode("utf-8")))
+            return _Resp(answer.encode("utf-8"))
+
+        def fake_roll(conversation, base_url, context_tokens, carry=None, **_):
+            conversation.reset()
+            conversation.append("user", "note\n\n" + (carry or ""))
+            return os.path.join(crow_core.SESSION_DIR, "rollover-fake.json")
+
+        api = self._window(_context_tokens=190000)
+        self.a_chat(api)
+        with mock.patch.object(crow_core.urllib.request, "urlopen", leg), \
+             mock.patch.object(crow_core, "roll_over", fake_roll):
+            body = self._turn_bodies(api, "weiter")[0]
+        self.assertEqual(len(legs), 1, "one digest question")
+        for sent in (legs[0], body):
+            self.assertEqual(sent["model"], crow_core.DEFAULT_MODEL)
+            self.assertEqual(sent["reasoning_budget_tokens"], 1024)
 
 
 class APastedScreenshotBecomesAChipTests(unittest.TestCase):
@@ -3610,6 +4057,38 @@ class ProjectsInTheRailTests(ApiCase):
         self.drained(api)
         api.clear_root()
         self.assertIn("rail", self.kinds(api))
+
+    def test_a_rebind_mid_chat_is_said_at_the_next_request(self):
+        """#224: the move is one line in front of the next user
+        message, and the head follows it."""
+        first, second = self.project("Crow"), self.project("Nest")
+        api = self.api()
+        self.addCleanup(crow_core.set_root, None)
+        api._bind_root(first)
+        api._conversation.pin_memory(crow_core.prompt_head())
+        api._conversation.append("user", "hi")
+        api._conversation.append("assistant", "hello")
+        api._bind_root(second)
+        self.assertIn("Working area: %s" % crow_core.get_root(),
+                      api._conversation.system)
+        api._conversation.append("user", "go on")
+        self.assertEqual(api._conversation.payload()[-1]["content"],
+                         "[Working area is now %s (was %s).]\n\ngo on"
+                         % (crow_core.get_root(), first))
+
+    def test_an_unbind_mid_chat_moves_the_head_and_is_said(self):
+        root = self.project("Crow")
+        api = self.api()
+        self.addCleanup(crow_core.set_root, None)
+        api._bind_root(root)
+        api._conversation.pin_memory(crow_core.prompt_head())
+        api._conversation.append("user", "hi")
+        api._conversation.append("assistant", "hello")
+        self.drained(api)
+        api.clear_root()
+        self.assertNotIn("Working area", api._conversation.system or "")
+        self.assertIn("now none (was %s)" % root,
+                      api._conversation.pending_notice)
 
     def test_the_live_chat_without_a_file_can_be_discarded(self):
         """robin: the new chat could not be deleted.
@@ -7635,7 +8114,17 @@ class NothingSticksOutOfTheComposerTests(unittest.TestCase):
         for selector in ("#hint{", "#ctx{", "#modelwrap{"):
             self.assertIn("min-width:0", self._rule(selector),
                           "%s muss nachgeben koennen" % selector)
-        self.assertIn("flex:0 1 auto", self._rule("#hint{"))
+        # #231: DIE RANGFOLGE, WIE SIE GEMESSEN WURDE. Hier stand
+        # `flex:0 1 auto` auf #hint -- und #acts selbst schrumpfte mit, weil
+        # Schrumpfen nach Faktor MAL Basis verteilt: bei 1180x800 lag #go
+        # 46 px neben der Maske. Der Hinweis nimmt jetzt nur den Rest (feste
+        # Breite 0, Basis 0), #acts waechst und schrumpft nie, und die
+        # Kontextzahl gibt nach dem Modell-Chip nach.
+        hint = self._rule("#hint{")
+        self.assertIn("width:0", hint)
+        self.assertIn("flex:1 1 0", hint)
+        self.assertIn("flex:1 0 auto", self._rule("#acts{"))
+        self.assertIn("flex:0 .2 auto", self._rule("#ctx{"))
 
     def test_the_long_chip_is_clipped_in_both_halves(self):
         """Der Chip ist ein `inline-flex` aus Modellname UND Grad. Eine Regel
@@ -7647,6 +8136,143 @@ class NothingSticksOutOfTheComposerTests(unittest.TestCase):
         ein Umbruch macht die Maske hoeher, sobald ein Chip nicht passt, und
         bewegt alles darueber."""
         self.assertNotIn("flex-wrap", self._rule("#foot{"))
+
+
+class NothingOverhangsOrClipsTests(unittest.TestCase):
+    """#231-#235. Die Befunde des Layout-Audits als Regeln im Blatt.
+
+    GEMESSEN WURDE GERENDERT (headless Chromium ueber alle Groessen von
+    1130x520 bis 2560x1440, drei Themes, Menues offen, Rail/Code an beiden
+    Anschlaegen; die schlimmsten Faelle nachgerendert in WebKitGTK 2.52).
+    Diese Suite hat keinen Browser, also haelt sie fest, was die Messung
+    herbeigefuehrt hat -- und rechnet dort nach, wo zwei Zahlen an zwei
+    Stellen zusammenpassen muessen.
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):
+                               self.source.index("</style>")]
+
+    def _rule(self, selector: str) -> str:
+        found = self.css[self.css.index(selector):]
+        return found[:found.index(chr(125))]
+
+    def _px(self, rule: str, prop: str) -> float:
+        match = re.search(r"(?:^|[;{\s])" + re.escape(prop) + r":\s*(-?[\d.]+)px", rule)
+        self.assertIsNotNone(match, "%s fehlt in %r" % (prop, rule[:80]))
+        return float(match.group(1))
+
+    def test_a_long_word_breaks_inside_the_column(self):
+        """Pfad, URL, Kompositum: #flow hatte 891 px Inhalt in 666. `anywhere`,
+        nicht `break-word` -- nur `anywhere` senkt min-content, und die
+        Nutzerblase ist ein Grid-Item in einer 1fr-Spur."""
+        self.assertIn("overflow-wrap:anywhere", self._rule("\n.turn{"))
+        self.assertIn("overflow-wrap:normal", self._rule(".md table{"))
+
+    def test_the_composers_menus_open_above_the_cards(self):
+        """#box ist ein Stapelkontext; die Menues darin koennen nur ueber die
+        Karten, wenn der ganze Composer ueber #panels liegt."""
+        composer = self._rule("#composer{position:absolute")
+        panels = self._rule("#panels{")
+        z = lambda rule: int(re.search(r"z-index:(\d+)", rule).group(1))  # noqa: E731
+        self.assertGreater(z(composer), z(panels))
+
+    def test_the_cards_end_where_the_composer_begins(self):
+        """70 % galt nur, solange der Composer unter 30 % blieb. Die Hoehe, die
+        fitFlow ohnehin misst, ist dieselbe Zahl fuer die Karten."""
+        self.assertIn("var(--comph", self._rule("#panels{"))
+        fit = self.source[self.source.index("const fitFlow"):]
+        fit = fit[:fit.index("};")]
+        self.assertIn('"--comph"', fit)
+
+    def test_the_column_makes_room_for_the_cards_by_the_same_amount(self):
+        """Spalte und Maske bleiben buendig: #flow bekommt auf JEDER Seite genau
+        das dazu, was #composer an JEDER Kante einzieht -- und das ist die
+        Kartenbreite plus ihr Rand."""
+        self.assertIn("container:chat/inline-size", self._rule("#main{"))
+        block = self.css[self.css.index("@container chat"):]
+        block = block[:block.index("}\n}")]
+        flow = re.search(r"#flow\{\s*padding-inline:calc\(10px \+ var\(--sbw\) \+ (\d+)px\) "
+                         r"calc\(10px \+ (\d+)px\)", block)
+        comp = re.search(r"#composer\{\s*left:calc\(var\(--sbw\) \+ (\d+)px\);"
+                         r"right:calc\(var\(--sbw\) \+ (\d+)px\)", block)
+        self.assertIsNotNone(flow)
+        self.assertIsNotNone(comp)
+        panels = self._rule("#panels{")
+        reserve = self._px(panels, "width") + self._px(panels, "right")
+        self.assertEqual({int(g) for g in flow.groups()}, {reserve})
+        self.assertEqual({int(g) for g in comp.groups()}, {reserve})
+
+    def test_the_composer_is_centred_in_the_window_not_left_of_it(self):
+        """#256, robin 2026-09-23: "die Eingabemaske ist nicht mittig,
+        sie steht mehr links als rechts". Die #233-Reserve stand nur RECHTS
+        und schob Spalte und Maske um (306 + --sbw)/2 = 158 px nach links
+        (gemessen, Chromium 1920x900, Git-Panel offen); ohne Karte blieben
+        5 px, weil #flow links 10 und rechts 10 + Rinnstein hatte.
+
+        Die Mitte der Maske ist die Mitte von #main genau dann, wenn ihre
+        linke und rechte Kante gleich weit innen stehen; die der Spalte, wenn
+        die Inhaltsbox von #flow links um den Rinnstein (--sbw, den
+        scrollbar-gutter:stable rechts reserviert) mehr Polster traegt. Beides
+        muss ohne und mit Karten gelten -- jede einseitige Zahl ist dieser Bug."""
+        sbw = self._px(self._rule(":root{"), "--sbw")
+        composer = self._rule("#composer{position:absolute")
+        self.assertIn("left:var(--sbw)", composer)
+        self.assertIn("right:var(--sbw)", composer)
+        flow = self._rule("#flow{")
+        self.assertIn("scrollbar-gutter:stable", flow)
+        self.assertIn("padding-inline:calc(10px + var(--sbw)) 10px", flow)
+        self.assertEqual(sbw, 10)
+        block = self.css[self.css.index("@container chat"):]
+        block = block[:block.index("}\n}")]
+        self.assertNotIn("padding-right", block, "die Reserve steht wieder nur rechts")
+        self.assertNotRegex(block, r"#composer\{\s*right:", "die Maske zieht nur rechts ein")
+
+    def test_a_squeezed_side_column_shows_nothing_rather_than_half(self):
+        self.assertIn("container:side/inline-size", self.css)
+        self.assertRegex(self.css, r"@container side \(max-width:\d+px\)\{#side>\*"
+                                   r"\{visibility:hidden\}\}")
+
+    def test_the_settings_sheet_starts_below_the_title_bar(self):
+        bar = self._px(self._rule("#bar{"), "height")
+        settings = self._rule("#settings{position:fixed")
+        self.assertEqual(self._px(settings, "padding-top"), bar)
+
+    def test_the_level_keeps_the_space_before_its_dot(self):
+        """`.lvl` ist ein Flex-Item, sein fuehrendes Leerzeichen stuende am
+        Zeilenanfang und fiele weg: gezeichnet stand "(llama.cpp)· high"."""
+        self.assertIn('" · "', self.source[self.source.index("  levelLabel(){"):][:300])
+        self.assertIn("white-space:pre", self._rule("#model .lvl{white-space"))
+
+    def test_single_line_things_stay_single_line(self):
+        self.assertIn("white-space:nowrap", self._rule("#turnstate{"))
+        self.assertIn("white-space:nowrap", self._rule("#viewbar button{"))
+        self.assertIn("text-overflow:ellipsis", self._rule(".gitgrp .tct{min-width"))
+        self.assertIn("white-space:nowrap", self._rule(".gitgrp .gcount{flex:none"))
+
+    def test_rows_line_up(self):
+        """Die Kostenlinie eines Zielschritts ist so breit wie die Zeile, und
+        die Browserknoepfe sind so hoch wie das Adressfeld."""
+        self.assertIn("flex:1", self._rule("#goalpanel li>span:last-child{"))
+        self.assertIn("align-items:stretch", self._rule("#brbar{"))
+
+    def test_the_accent_bar_sits_on_the_tree_line(self):
+        """2 px Balken auf 1 px Linie: der Balken beginnt einen Pixel links der
+        Linie und deckt sie."""
+        line = self._px(self._rule(".sess.inproj::after{"), "left")
+        bar = self._rule(".sess.inproj.on::before,.sess.inproj.done::before{")
+        self.assertEqual(self._px(bar, "left"), line - 1)
+        self.assertIn("z-index:1", bar)
+
+    def test_scrollbars_stay_out_of_rounded_corners(self):
+        """Der Spurrand ist der Radius, gegen den die Leiste laeuft."""
+        main = self._px(self._rule("#main{"), "border-top-right-radius")
+        self.assertEqual(self._px(self._rule("#flow::-webkit-scrollbar-track{"),
+                                  "margin-top"), main)
+        goal = self._px(self._rule("#goalpanel{"), "border-radius")
+        self.assertIn("margin:%dpx 0" % goal,
+                      self._rule("#goalpanel::-webkit-scrollbar-track{"))
 
 
 class ALineTypedDuringTheReviewIsNotLostTests(ApiCase):
@@ -7985,8 +8611,8 @@ class TheDelegationWearsTheMockupTests(unittest.TestCase):
                            self.source.index("subChip(items){")]
         # An den Chat ausgerichtet: der Wrapper traegt DIESELBE Spaltenklasse
         # wie jeder Block -- keine zweite Geometrie, die driften kann.
-        self.assertIn('wrap.className="turn subrow"', card)
-        self.assertIn("flow.appendChild(wrap)", card)
+        self.assertNotIn("turn subrow", card)
+        self.assertNotIn("flow.appendChild", card)
         self.assertNotIn("col.appendChild", card)
         # `here` entscheidet, und PYTHON rechnet es -- die Seite verglich
         # zuvor ihre eigene live-Kopie gegen parent, zwei eingefrorene Werte,
@@ -8003,6 +8629,48 @@ class TheDelegationWearsTheMockupTests(unittest.TestCase):
         self.assertIn('self._subs_sig = ""', fresh)
         self.assertIn("self._push_subs()", fresh)
         self.assertIn("this.subPending=i; crow.open(it.parent);", self.source)
+
+    def test_the_cards_are_pinned_beside_goal_and_git_not_in_the_flow(self):
+        """#255 (robin, 2026-09-23 on 9a59872): die Subtask-Kacheln scrollten
+        mit dem Verlauf weg, weil `subCard` sie in `#flow` haengte. Sie wohnen
+        jetzt in `#subpanel`, der dritten Karte der `#panels`-Spalte: laufende
+        oben, fertige in einer zugeklappten Gruppe, und der Fluss bekommt nie
+        einen Block dafuer."""
+        panels = self.source[self.source.index('<div id="panels">'):
+                             self.source.index('<aside id="git">')]
+        self.assertIn('<div id="subpanel" hidden>', panels)
+        for part in ('class="splive"', 'class="spfold"',
+                     'class="spdone" hidden'):
+            self.assertIn(part, panels)
+        whole = self.source[self.source.index("  subs(items){"):
+                            self.source.index("chatRow(r,inproj){")]
+        # NEGATIV: kein Weg fuehrt eine Karte mehr in den Fluss, und kein
+        # Sprung scrollt ueber scrollIntoView #main mit.
+        self.assertNotIn("flow.appendChild", whole)
+        self.assertNotIn("flow.querySelector('.subcard", whole)
+        self.assertNotIn("scrollIntoView", whole)
+        card = self.source[self.source.index("  subCard(it){"):
+                           self.source.index("  subChip(items){")]
+        self.assertIn('p.querySelector(it.st==="running" ? ".splive" : ".spdone")',
+                      card)
+        self.assertIn("group.appendChild(d)", card)
+        self.assertNotIn("this.bottom()", card)
+        frame = self.source[self.source.index("  subPanel(items){"):
+                            self.source.index("  subPanelFold(){")]
+        self.assertIn("x.here", frame)
+        self.assertIn("d.remove()", frame)
+        self.assertIn("p.hidden=!(run+fin)", frame)
+        self.assertIn("this.subPanel(this.subItems);", whole)
+        # Die Karte ist eine eigene Scrollflaeche in der Spalte wie das Ziel,
+        # und die Spalte weicht ihr ab 1100 px aus wie Ziel und Git (#233).
+        rule = self.css[self.css.index("#subpanel{"):]
+        rule = rule[:rule.index(chr(125))]
+        self.assertIn("min-height:0", rule)
+        self.assertIn("overflow:auto", rule)
+        self.assertIn("position:relative", rule)
+        self.assertIn("#main:has(#subpanel:not([hidden])) #flow", self.css)
+        self.assertIn("#main:has(#subpanel:not([hidden])) #composer", self.css)
+        self.assertIn("#subpanel .subcard.seen{animation:none", self.css)
 
     def test_the_transcript_shelf_is_not_the_chat_folder(self):
         """NEGATIV auf der Kern-Seite, hier verankert, weil das Fenster der
@@ -9303,6 +9971,108 @@ class TheGoalEngineBrakesOnAnEmptyLoopTests(ApiCase):
         self.assertIn("Next is step 2: write the fix", api._goal_nudge())
 
 
+class TheGoalEngineNamesTheWallTests(ApiCase):
+    """#202, 2026-09-22: 48 blinde Runden mit toter Suche und toten
+    Delegaten, und in der Sitzung danach 22 edit_file, von denen keiner
+    landete. Jeder Zug rief Werkzeuge, keine zwei Antworten glichen sich --
+    die Bremse sah nichts, und der Anstoss wiederholte nur den Schritt. Hier:
+    dieselbe Fehlerklasse dreimal im Schritt, und der naechste Anstoss nennt
+    sie statt des Schritts.
+    """
+
+    TAVILY = ("error: https://api.tavily.com/search answered HTTP 401 "
+              "Unauthorized\nCROW_TAVILY_KEY was refused.")
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(crow_core.goal_write, None)
+        crow_core.goal_start("Ship it", ["read the log", "write the fix"],
+                             now=1000.0)
+
+    def turn(self, api, text, results) -> None:
+        """Ein gefahrener Zug: Crows Zeile, je Ergebnis ein Aufruf und seine
+        Antwort, und ein Schlusssatz."""
+        api._conversation.append("user", text)
+        for n, (name, args, result) in enumerate(results):
+            api._conversation.append(
+                "assistant", "", tool_calls=[{"id": "t%d" % n, "name": name,
+                                              "arguments": args}])
+            api._conversation.append("tool", result, tool_call_id="t%d" % n)
+        api._conversation.append("assistant", "tried again")
+
+    def searches(self, *queries):
+        return [("web_search", '{"query": "%s"}' % q, self.TAVILY) for q in queries]
+
+    def notes(self, api) -> list:
+        return [m["t"] for m in self.drained(api) if m.get("k") == "note"]
+
+    def test_three_dead_searches_turn_the_nudge_into_the_way_around(self):
+        """POSITIV: statt "Continue" oder des Schritttexts die Klasse, die Zahl
+        und der Ausweg -- und robin sieht es als Notiz, wie die Bremse."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), self.searches("a", "b", "c"))
+        nudge = api._goal_nudge()
+        self.assertIn("web_search is dead this session (HTTP 401 from "
+                      "api.tavily.com, 3×) -- stop calling it", nudge)
+        self.assertNotIn("read the log", nudge)
+        self.assertNotIn("Continue.", nudge)
+        self.assertIn("goal mode, step 1: the same failure keeps coming back -- "
+                      "web_search dead (HTTP 401 from api.tavily.com, 3×). The "
+                      "nudge names the way around it.", self.notes(api))
+
+    def test_a_class_spread_over_turns_counts_for_the_step(self):
+        """Gezaehlt wird im Schritt, nicht im Zug: zwei, dann einer."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), self.searches("a", "b"))
+        second = api._goal_nudge()
+        self.assertEqual(second, "[Goal mode, step 1 still open. Continue.]")
+        self.turn(api, second, self.searches("c"))
+        self.assertIn("web_search is dead", api._goal_nudge())
+
+    def test_the_line_is_not_repeated_when_nothing_failed_again(self):
+        """Wer nach der Zeile aufhoert, hoert sie nicht noch einmal -- sonst
+        stuende sie vor jedem Zug, wie der 105-mal-Block."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), self.searches("a", "b", "c"))
+        trouble = api._goal_nudge()
+        self.turn(api, trouble, [("read_file", '{"path": "README.md"}', "# docs")])
+        self.assertEqual(api._goal_nudge(),
+                         "[Goal mode, step 1 still open. Continue.]")
+
+    def test_the_next_step_starts_with_clean_counts(self):
+        """Counts reset on step change: zwei Fehlschlaege in Schritt 1, der
+        Schritt wird fertig, einer in Schritt 2 -- das sind keine drei."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), self.searches("a", "b"))
+        crow_core.goal_step_end(0, now=1010.0)
+        nudge = api._goal_nudge()
+        self.assertIn("Next is step 2: write the fix", nudge)
+        self.turn(api, nudge, self.searches("c"))
+        self.assertNotIn("dead", api._goal_nudge())
+
+    def test_what_failed_after_the_step_closed_counts_for_the_next(self):
+        """Der Zug, in dem ein Schritt fertig wird, arbeitet oft schon am
+        naechsten: was NACH dem `goal_step` 'done' scheiterte, gehoert ihm."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), self.searches("a", "b"))
+        nudge = api._goal_nudge()
+        crow_core.goal_step_end(0, now=1010.0)
+        self.turn(api, nudge, [("goal_step", '{"step": 1, "status": "done"}',
+                                '{"ok": true}')] + self.searches("c", "d", "e"))
+        self.assertIn("[Goal mode, step 2 still open -- the same failure keeps "
+                      "coming back:\n- web_search is dead this session (HTTP 401 "
+                      "from api.tavily.com, 3×)", api._goal_nudge())
+
+    def test_a_typed_line_starts_the_count_over(self):
+        """robin hat eingegriffen -- vielleicht mit einem Schluessel. Was davor
+        gezaehlt war, zaehlt nicht mehr (`_goal_reset`, wie jeder Zaehler)."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), self.searches("a", "b"))
+        api._goal_reset()
+        self.turn(api, "here is a new key", self.searches("c"))
+        self.assertNotIn("dead", api._goal_nudge())
+
+
 # ============================================================== the Linux port
 
 class _FakeGtkWindow:
@@ -10154,6 +10924,193 @@ class TheBrowserPaneOnACompositorTests(ApiCase):
         self.assertTrue(api.pane_show())
 
 
+class ThePaneLivesInsideTheWindowTests(ApiCase):
+    """#201 #226 #227. Auf GTK ist die Scheibe ein WIDGET im eigenen Fenster,
+    kein zweites Toplevel. Die Faelle hier pruefen die Entscheidungen ohne
+    Display: welcher Weg, welches Schema, welche Meldung an die Seite. Dass
+    GtkOverlay das Kind dorthin legt, wurde unter broadwayd gemessen (#201)."""
+
+    class _Pane:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def __getattr__(self, name):
+            return lambda *a: self.calls.append((name, a))
+
+    def _api(self):
+        api = self.api()
+        api._inwin = self._Pane()
+        return api
+
+    def test_only_http_https_file_and_blank_reach_the_pane(self):
+        for good in ("https://x.org", "http://127.0.0.1:8000/", "file:///h/a.png",
+                     "about:blank", " HTTPS://X.ORG "):
+            self.assertTrue(crow_gui.pane_url_ok(good), good)
+        for bad in ("javascript:alert(1)", "data:text/html,x", "ftp://x", "",
+                    None, "about:config", "chrome://settings"):
+            self.assertFalse(crow_gui.pane_url_ok(bad), bad)
+
+    def test_go_place_hide_show_go_to_the_widget_not_a_window(self):
+        api = self._api()
+        api._pane = lambda: self.fail("a second window was built")
+        self.assertEqual(api.pane_go("https://example.com"), "https://example.com")
+        api.pane_place(10, 20, 300, 200)
+        api.pane_hide()
+        api.pane_show()
+        api.pane_cover(True)
+        self.assertEqual([c[0] for c in api._inwin.calls],
+                         ["go", "place", "hide", "show", "cover"])
+        self.assertEqual(api._inwin.calls[1][1], (10.0, 20.0, 300.0, 200.0))
+
+    def test_a_script_address_is_refused_before_webkit(self):
+        api = self._api()
+        self.assertTrue(api.pane_go("javascript:alert(1)").startswith("error:"))
+        self.assertEqual(api._inwin.calls, [])
+
+    def test_an_answer_link_opens_in_the_panel_and_ctrl_sends_it_out(self):
+        api = self._api()
+        opened = []
+        real = crow_gui.webbrowser.open
+        crow_gui.webbrowser.open = lambda url: opened.append(url) or True
+        self.addCleanup(setattr, crow_gui.webbrowser, "open", real)
+        self.assertTrue(api.open_url("https://example.com/a"))
+        self.assertEqual(opened, [])
+        said = self.drained(api)
+        self.assertEqual([(m["k"], m["url"]) for m in said],
+                         [("bropen", "https://example.com/a")])
+        self.assertTrue(api.open_url("https://example.com/b", True))
+        self.assertEqual(opened, ["https://example.com/b"])
+        self.assertFalse(api.open_url("javascript:x"))
+
+    def test_no_native_window_no_embedding(self):
+        api = self.api()
+        api._gtk_window = lambda: None
+        self.assertFalse(api.pane_embed())
+        self.assertIsNone(api._inwin)
+
+    def test_a_failed_embedding_keeps_the_window_pane_and_says_so(self):
+        api = self.api()
+        api._gtk_window = lambda: object()
+        real = crow_gui.InWindowPane.install
+        crow_gui.InWindowPane.install = classmethod(
+            lambda cls, native, on_event: (_ for _ in ()).throw(RuntimeError("no gi")))
+        self.addCleanup(setattr, crow_gui.InWindowPane, "install", real)
+        old = os.environ.pop("CROW_PANE_WINDOW", None)
+        self.addCleanup(lambda: old is None or os.environ.__setitem__(
+            "CROW_PANE_WINDOW", old))
+        if crow_gui.crow_platform.IS_WINDOWS:
+            self.skipTest("the embedding is GTK only")
+        self.assertFalse(api.pane_embed())
+        self.assertIsNone(api._inwin)
+        said = self.drained(api)
+        self.assertEqual(said[0]["k"], "note")
+        self.assertIn("no gi", said[0]["t"])
+
+    def test_the_escape_hatch_keeps_the_old_pane(self):
+        api = self.api()
+        api._gtk_window = lambda: self.fail("looked at the window")
+        os.environ["CROW_PANE_WINDOW"] = "1"
+        self.addCleanup(os.environ.pop, "CROW_PANE_WINDOW", None)
+        self.assertFalse(api.pane_embed())
+
+
+class TheInWindowPaneDecidesTests(unittest.TestCase):
+    """#201 #227. Die Zustandsentscheidungen von `InWindowPane`, ohne GTK."""
+
+    def _pane(self):
+        said = []
+        return crow_gui.InWindowPane(said.append, idle_add=lambda fn, *a: None), said
+
+    def test_crows_own_load_replaces_and_the_pages_own_pushes(self):
+        pane, _ = self._pane()
+        pane.go("http://a/")
+        self.assertEqual(pane.committed("https://a/")["how"], "replace",
+                         "a redirect of our own load is not a new entry")
+        self.assertEqual(pane.committed("https://a/b")["how"], "push")
+        self.assertIsNone(pane.committed("https://a/b"), "said twice")
+        self.assertIsNone(pane.committed(""))
+
+    def test_visible_needs_a_wish_a_rect_and_nothing_on_top(self):
+        pane, _ = self._pane()
+        pane.go("https://a/")
+        self.assertFalse(pane.visible(), "no rectangle yet")
+        pane.place(1.4, 2.6, 300.2, 0)
+        self.assertEqual(pane.rect, (1, 3, 300, 1))
+        self.assertTrue(pane.visible())
+        pane.cover(True)
+        self.assertFalse(pane.visible())
+        pane.cover(False)
+        pane.hide()
+        self.assertFalse(pane.visible())
+
+    def test_show_brings_back_only_a_pane_with_a_page(self):
+        pane, _ = self._pane()
+        pane.place(0, 0, 10, 10)
+        pane.show()
+        self.assertFalse(pane.wanted, "an empty view is a white hole")
+        pane._view, pane.last = object(), "https://a/"
+        pane.show()
+        self.assertTrue(pane.wanted)
+
+    def test_a_memory_kill_is_said_with_the_ceiling(self):
+        pane, said = self._pane()
+        pane.last = "https://a/"
+        pane._terminated(None, mock.Mock(value_nick="exceeded-memory-limit"))
+        self.assertIn("%d MB" % crow_gui.PANE_MEMORY_LIMIT_MB, said[0]["t"])
+        self.assertEqual(pane.last, "")
+
+    def test_a_new_window_is_refused_and_loaded_here(self):
+        pane, _ = self._pane()
+        action = mock.Mock()
+        action.get_request.return_value.get_uri.return_value = "https://b/"
+        self.assertIsNone(pane._new_window(None, action))
+
+    def test_the_view_has_its_own_limits_and_no_bridge(self):
+        """#226. Quelle statt Display: eigener Kontext, Kill an, bwrap, und
+        kein UserContentManager -- also keine pywebview-Bruecke."""
+        src = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        body = src[src.index("    def _build(self)"):src.index("    # -- what the page asks for")]
+        for need in ("set_kill_threshold(PANE_KILL_FRACTION)",
+                     "memory_pressure_settings=limits",
+                     "WebsiteDataManager(base_data_directory=data",
+                     "set_sandbox_enabled(True)", "set_no_show_all(True)",
+                     '"web-process-terminated"', '"create"'):
+            self.assertIn(need, body, need)
+        self.assertNotIn("UserContentManager", body)
+        self.assertGreater(crow_gui.PANE_KILL_FRACTION, 0.5,
+                           "WebKit wants kill above strict (0.5)")
+
+
+class ThePageFollowsThePaneTests(unittest.TestCase):
+    """#201 #227, auf der Seite: die Meldungen haben Empfaenger, ein Render
+    macht keinen neuen Reiter je Aufruf, und GitHub bleibt draussen."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.src = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def test_the_messages_have_a_case(self):
+        self.assertIn('case "brnav": this.brNav(e.url, e.how)', self.src)
+        self.assertIn('case "bropen": this.brOpen(e.url)', self.src)
+
+    def test_renders_reuse_one_tab(self):
+        body = self.src[self.src.index("  brRendered(url, shot){"):]
+        body = body[:body.index("  brSelect(id)")]
+        self.assertIn("this.tabs.find(x=>x.model)", body)
+        self.assertEqual(body.count("this.tabs.push("), 1)
+
+    def test_the_github_code_goes_outside(self):
+        self.assertIn('pywebview.api.open_url(card.dataset.url||"", true)',
+                      self.src)
+
+    def test_the_embedding_is_wired_before_show(self):
+        self.assertIn("window.events.before_show += api.pane_embed", self.src)
+
+    def test_a_sheet_over_the_panel_moves_the_pane_aside(self):
+        self.assertIn("pywebview.api.pane_cover(c)", self.src)
+        self.assertIn('["#settings","#menu"]', self.src)
+
+
 class TheDropSaysWhenItCarriedNoPathTests(ApiCase):
     """A10. Der Pfad haengt pywebview an, aus dem, was der Drag-Handler des
     Toolkits eingesammelt hat. Eine Quelle, die nur Bytes uebergibt -- ein Bild
@@ -10509,6 +11466,537 @@ class ThePumpSurvivesADeadWebprocessTests(ApiCase):
         self.assertEqual(err.getvalue(), "")
         self.assertFalse(api._push_dead)
         self.assertEqual(api._out.get_nowait().get("t"), "never reached")
+
+
+class TheWindowFollowsADragTests(unittest.TestCase):
+    """#236 #237 #238. Drags and resizes stuttered in a long chat.
+
+    Measured 2026-09-23 on a 200-turn chat (12 968 nodes), WebKitGTK 2.52:
+    38.8 ms per rail-drag step before, 3.6 ms after. These tests pin the three
+    causes so that none of them comes back unnoticed.
+    """
+
+    def _drag(self, name: str) -> str:
+        page = crow_gui.PAGE
+        start = page.index("\n  %s(ev){" % name)
+        return page[start:page.index("document.addEventListener(\"mouseup\",up); }", start)]
+
+    def test_a_drag_step_does_not_restyle_the_whole_document(self):
+        # T1: an inherited custom property on <html> restyled every node per
+        # mousemove (1249 ms of style for 80 steps in Chromium).
+        page = crow_gui.PAGE
+        self.assertNotIn('documentElement.style.setProperty("--railw"', page)
+        self.assertNotIn('documentElement.style.setProperty("--codew"', page)
+        self.assertIn('rail.style.setProperty("--railw",w+"px")', self._drag("railDrag"))
+        self.assertIn('panel.style.setProperty("--codew",w+"px")', self._drag("codeDrag"))
+        # The start-up value lands on the same element, so there is one owner.
+        self.assertIn('$("#rail").style.setProperty("--railw", e.rail+"px")', page)
+
+    def test_a_drag_step_neither_calls_python_nor_reads_layout(self):
+        # No bridge call (and so no settings write) per step: the width is
+        # handed over once, on mouseup. No layout read after the write either.
+        for name in ("railDrag", "codeDrag"):
+            body = self._drag(name)
+            move = body[body.index("const move="):body.index("const up=")]
+            self.assertNotIn("pywebview", move, name)
+            for read in ("getBoundingClientRect", "offsetWidth", "offsetHeight",
+                         "scrollHeight", "clientWidth"):
+                self.assertNotIn(read, move, name)
+            up = body[body.index("const up="):]
+            self.assertEqual(up.count("pywebview.api."), 1, name)
+
+    def test_the_drag_widths_do_not_transition(self):
+        page = crow_gui.PAGE
+        self.assertIn("#rail.dragging{transition:none}", page)
+        self.assertIn("#side.dragging{transition:none}", page)
+
+    def test_only_the_visible_turns_are_laid_out_while_the_width_changes(self):
+        # T2: content-visibility ONLY during the gesture -- permanently on, the
+        # view jumped while scrolling up (WebKitGTK 2.52 has no scroll anchoring).
+        page = crow_gui.PAGE
+        self.assertIn("#flow.sizing > .turn{content-visibility:auto}", page)
+        self.assertIn("#flow > .turn{contain-intrinsic-size:auto 240px}", page)
+        css = page[:page.index("</style>")]
+        self.assertEqual(css.count("content-visibility:auto"), 1)
+        for name in ("railDrag", "codeDrag"):
+            body = self._drag(name)
+            self.assertLess(body.index("sizing.begin()"), body.index("const move="), name)
+            self.assertIn("sizing.end()", body[body.index("const up="):], name)
+        self.assertIn('window.addEventListener("resize", () => sizing.pulse());', page)
+
+    def test_the_view_keeps_its_place_when_the_gesture_ends(self):
+        page = crow_gui.PAGE
+        helper = page[page.index("const sizing = (function(){"):]
+        helper = helper[:helper.index("})();")]
+        self.assertIn("crow.atBottom()", helper)
+        self.assertIn("flow.scrollTop = flow.scrollHeight", helper)
+        self.assertIn("p.turn.getBoundingClientRect().top - p.y", helper)
+        # The correction must not glide: #flow scrolls smoothly otherwise.
+        self.assertIn('flow.style.scrollBehavior = "auto"', helper)
+
+    def test_the_pane_is_not_followed_where_it_cannot_move(self):
+        # T3: pywebview starts a thread per moved/resized event, and on GTK
+        # `_pane_apply` returns at once -- so the subscription is Windows-only.
+        source = inspect.getsource(crow_gui.main)
+        guard = source.index("if crow_platform.IS_WINDOWS:\n        window.events.moved")
+        self.assertLess(guard, source.index("window.events.moved += api.pane_follow"))
+        self.assertLess(guard, source.index("window.events.resized += api.pane_follow"))
+        page = crow_gui.PAGE
+        place = page[page.index("\n  brPlace(){"):]
+        place = place[:place.index("pane_place")]
+        # #201: on GTK the panel is embedded IN the window and `pane_place` moves
+        # it, so the call must survive NATIVEDRAG; the same-rectangle gate keeps
+        # it to one bridge call per real change.
+        self.assertNotIn("NATIVEDRAG) return;", place)
+        self.assertIn("if(key===this.brSent) return;", place)
+
+    def test_the_window_grips_keep_one_resize_in_flight(self):
+        page = crow_gui.PAGE
+        grips = page[page.index("(function grips(){"):]
+        grips = grips[:grips.index("})();")]
+        self.assertEqual(grips.count("pywebview.api.set_geometry("), 1)
+        flush = grips[grips.index("const flush="):grips.index('window.addEventListener("mousemove"')]
+        self.assertIn("if(busy || !want) return;", flush)
+        self.assertIn("pywebview.api.set_geometry(", flush)
+        move = grips[grips.index('window.addEventListener("mousemove"'):]
+        self.assertNotIn("pywebview.api.set_geometry(", move)
+
+
+class TheSelectionPolicyTests(unittest.TestCase):
+    """#228. Text in the window can be selected -- in WebKitGTK too.
+
+    MEASURED 2026-09-23, WebKitGTK 2.52.6: `CSS.supports("user-select","text")`
+    is false. pywebview (text_select=False) injects `body{-webkit-user-select:
+    none}`, so every unprefixed `user-select:text` in this page was dropped and a
+    real (GDK-synthesised) mouse drag over an answer selected "". The cases hold
+    the policy in the spelling the engine reads.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        page = crow_gui.PAGE
+        cls.css = page[page.index("<style>"):page.index("</style>")]
+
+    def _rules(self, prop):
+        """{selector: value} for every rule in the page that sets `prop`."""
+        found = {}
+        css = re.sub(r"/\*.*?\*/", "", self.css, flags=re.S)   # comments quote rules
+        for sels, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+            for m in re.finditer(r"(?<![\w-])" + re.escape(prop) + r"\s*:\s*(\w+)", body):
+                for sel in sels.split(","):
+                    found[" ".join(sel.split())] = m.group(1)
+        return found
+
+    def test_every_user_select_has_its_webkit_twin(self):
+        """THE REGRESSION ITSELF: a rule WebKitGTK cannot read is a rule the
+        Linux window does not have. Every unprefixed `user-select` needs a
+        `-webkit-user-select` with the same value for the same selector."""
+        plain = self._rules("user-select")
+        webkit = self._rules("-webkit-user-select")
+        missing = {sel: v for sel, v in plain.items() if webkit.get(sel) != v}
+        self.assertEqual(missing, {}, "no -webkit- twin (WebKitGTK ignores these)")
+
+    def test_content_is_text_and_its_controls_are_not(self):
+        webkit = self._rules("-webkit-user-select")
+        for sel in ("#flow", "#spane", "#tclist .tsec", "#cflist .cwp", ".code pre",
+                    "#in", "textarea"):
+            self.assertEqual(webkit.get(sel), "text", sel)
+        for sel in ("body", "button", "summary", ".code .hd", "#toolcalls .tool .hd",
+                    "#menu"):
+            self.assertEqual(webkit.get(sel), "none", sel)
+
+    def test_the_content_menu_is_asked_before_the_engine_menu_is_cancelled(self):
+        """The old guard cancelled every context menu outside the rail; the
+        content menu gets the event first, and the guard still stands after it."""
+        guard = self.source[self.source.index('window.addEventListener("contextmenu"'):]
+        guard = guard[:guard.index("});")]
+        self.assertLess(guard.index("crow.textMenu(e)"), guard.index("e.preventDefault()"))
+
+    def test_copy_goes_through_python_first(self):
+        """`navigator.clipboard` refuses on WebView2 (no secure context, see
+        `Api.copy`); the page's copy is the bridge, `execCommand` its fallback."""
+        clip = self.source[self.source.index("  clip(text){"):]
+        clip = clip[:clip.index("\n  // #228/#229. RIGHT-CLICK")]
+        self.assertIn("pywebview.api.copy(text)", clip)
+        self.assertIn('document.execCommand("copy")', clip)
+        self.assertNotIn("navigator.clipboard", clip)
+
+    def test_ctrl_c_leaves_fields_alone(self):
+        """In the composer the engine's own copy is the whole story -- a second
+        copy of a field's selection through Python would be the wrong text."""
+        key = self.source[self.source.index('document.addEventListener("keydown",e=>{\n  if(!(e.ctrlKey'):]
+        key = key[:key.index("});")]
+        self.assertLess(key.index('a.tagName==="TEXTAREA"'), key.index("crow.clip(sel)"))
+
+
+class TheLinkifierTests(unittest.TestCase):
+    """#229. URLs and paths found in text -- the finder is RUN, in node.
+
+    The same reason as the highlighter's cases: this is logic, and a string in
+    the source proves nothing about what it marks.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.node = _node()
+        cls.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def _run(self, expr):
+        import subprocess
+        start = self.source.index("const LINK = {")
+        js = self.source[start:self.source.index("\n};", start) + 3]
+        done = subprocess.run([self.node, "-e", js + "\nconsole.log(JSON.stringify(" + expr + "));"],
+                              capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    def _marks(self, text):
+        """[(kind, target, line, col)] for every mark in `text`."""
+        segs = self._run("LINK.split(" + json.dumps(text) + ")")
+        self.assertEqual("".join(x["s"] for x in segs), text, "the text changed")
+        return [(x["t"], x.get("href") or x.get("path"), x.get("line", ""), x.get("col", ""))
+                for x in segs if x["t"] != "text"]
+
+    def setUp(self):
+        if not self.node:
+            self.skipTest("no node on this machine")
+
+    def test_nothing_is_lost_and_nothing_is_invented(self):
+        """A selection copied across marks must read exactly like the text."""
+        for text in ("", "plain", "See https://x.org/a_(b). and /home/r/x.py:12 now",
+                     "C:\\Users\\r\\a.txt, \\\\srv\\share\\x.log.", "a/b/c/d/e " * 50,
+                     "path:/tmp/a.log; ~/x ./y.sh ../z.md", "https://", "////", "üñî/çø.py"):
+            self._marks(text)
+
+    def test_urls_follow_the_gfm_trailing_rules(self):
+        self.assertEqual(self._marks("see https://example.org/a_(b)."),
+                         [("url", "https://example.org/a_(b)", "", "")])
+        self.assertEqual(self._marks("(https://x.org/y)"), [("url", "https://x.org/y", "", "")])
+        self.assertEqual(self._marks("www.google.com https://www.google.com/search?q=Markup+(business)))"),
+                         [("url", "https://www.google.com/search?q=Markup+(business)", "", "")])
+        self.assertEqual(self._marks("x https://x.org/?a=1&hl; y"), [("url", "https://x.org/?a=1", "", "")])
+        self.assertEqual(self._marks("'https://x.org'"), [("url", "https://x.org", "", "")])
+
+    def test_no_other_scheme_ever_becomes_a_link(self):
+        """NEGATIVE: script, data and the reader's own disk are not links."""
+        marks = self._marks("javascript:alert(1) data:text/html,x file:///etc/passwd "
+                            "xhttps://evil.org ftp://x.org/y")
+        self.assertEqual([m for m in marks if m[0] == "url"], [])
+
+    def test_paths_are_marked_with_their_line_and_column(self):
+        self.assertEqual(self._marks("grep: src/a.py:3:14: bad"), [("path", "src/a.py", "3", "14")])
+        self.assertEqual(self._marks("at /home/r/x.py:12, then"),
+                         [("path", "/home/r/x.py", "12", "")])
+        self.assertEqual([m[1] for m in self._marks("~/Projects/crow ./run.sh ../x/y.md docs/.env")],
+                         ["~/Projects/crow", "./run.sh", "../x/y.md", "docs/.env"])
+        self.assertEqual([m[1] for m in self._marks("open C:\\Users\\r\\a.txt, or \\\\srv\\share\\x.log.")],
+                         ["C:\\Users\\r\\a.txt", "\\\\srv\\share\\x.log"])
+        self.assertEqual(self._marks("path:/tmp/a.log; done"), [("path", "/tmp/a.log", "", "")])
+
+    def test_prose_with_slashes_is_not_a_path(self):
+        """NEGATIVE, the false positives a naive finder makes."""
+        self.assertEqual(self._marks("and/or TCP/IP km/h 12 tok/s 1/2 2026/09/23 e.g./i.e. "
+                                     "example.org/x.html github.com/a/b.py /"), [])
+
+    def test_a_code_span_may_be_one_path_with_spaces(self):
+        """Backticks delimit, so `/My Docs/a b.txt` is one path -- but a command
+        is not: `/usr/bin/env python` and `/bin/ls -la` stay code."""
+        w = self._run('["/home/r/My Docs/a b.txt","/usr/bin/env python","/bin/ls -la",'
+                      '"https://x.org","ls"].map(t=>LINK.whole(t))')
+        self.assertEqual(w[0]["path"], "/home/r/My Docs/a b.txt")
+        self.assertEqual(w[1:3], [None, None])
+        self.assertEqual(w[3]["href"], "https://x.org")
+        self.assertIsNone(w[4])
+
+
+class TheLinkAndPathMarkTests(ApiCase):
+    """#229. What the page does with a mark, and what Python does for it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    def _js(self, head, stop):
+        js = self.source[self.source.index(head):]
+        return js[:js.index(stop)]
+
+    def test_a_link_click_never_navigates_and_routes_by_modifier(self):
+        click = self._js("  linkClick(ev, url){", "\n  linkIn(url){")
+        self.assertTrue(click.split("\n")[1].strip().startswith("ev.preventDefault();"),
+                        "the click is cancelled first, before anything can throw")
+        self.assertIn("ev.ctrlKey || ev.metaKey || ev.shiftKey", click)
+        self.assertIn("this.linkOut(url)", click)
+        self.assertIn("this.linkIn(url)", click)
+        node = self._js("  linkNode(label, url){", "\n  pathNode(")
+        self.assertIn("ev.button===1", node)          # middle click: outside
+        # #201 decides panel vs outside in Python (`Api.open_url(url, outside)`):
+        # a plain click asks for the panel, a modifier or middle click for outside.
+        self.assertIn("pywebview.api.open_url(url, true)", self._js("  linkOut(url){", "\n"))
+        self.assertIn("pywebview.api.open_url(url, false)", self._js("  linkIn(url){", "\n  linkOut("))
+
+    def test_fenced_code_and_arguments_are_not_linkified(self):
+        """Highlighted blocks keep their text nodes; the copy button covers them."""
+        for head, stop in (("  codeOpen(lang){", "\n  codeClose("),
+                           ("  toolArgBlock(row, name, raw){", "\n  toolEnd(")):
+            self.assertNotIn("linkify", self._js(head, stop))
+        self.assertIn("this.linkify(pre,", self._js("  toolRes(name,text,cut){", "this.openCall=null;"))
+
+    def test_the_menu_offers_no_way_to_run_a_path(self):
+        """A path is a stranger's text: copy it, show its folder, show a page in
+        Crow's panel -- never hand it to the default program."""
+        menu = self._js("  textMenu(e){", "\n  menuBack(){")
+        self.assertNotIn("innerHTML", menu)
+        self.assertNotIn("roll_show", menu)
+        self.assertIn("reveal_path", menu)
+        self.assertIn(r"/\.(html?|svg)$/i", menu)
+
+    def test_path_info_resolves_against_the_working_area(self):
+        api = self.api()
+        self.addCleanup(crow_core.set_root, crow_core.get_root())
+        crow_core.set_root(None)
+        self.assertEqual(api.path_info("a/b.py")["path"], "")
+        crow_core.set_root(self.dir)
+        open(os.path.join(self.dir, "b.py"), "w").close()
+        got = api.path_info("b.py")
+        self.assertEqual(got["path"], os.path.join(self.dir, "b.py"))
+        self.assertTrue(got["exists"]); self.assertFalse(got["dir"])
+        self.assertTrue(api.path_info(self.dir)["dir"])
+        self.assertEqual(api.path_info("x\0y")["path"], "")
+
+    def test_reveal_opens_the_folder_never_the_file(self):
+        api = self.api()
+        self.addCleanup(crow_core.set_root, crow_core.get_root())
+        crow_core.set_root(self.dir)
+        script = os.path.join(self.dir, "evil.sh")
+        with open(script, "w") as f:
+            f.write("#!/bin/sh\n")
+        ran = []
+        real = crow_gui.subprocess.Popen
+        crow_gui.subprocess.Popen = lambda argv, **kw: ran.append(argv)
+        self.addCleanup(setattr, crow_gui.subprocess, "Popen", real)
+        self.assertEqual(api.reveal_path("evil.sh"), "")
+        self.assertEqual(ran, [crow_platform.reveal_command(script, False)])
+        self.assertIn("not on this disk", api.reveal_path("gone.py"))
+        self.assertEqual(len(ran), 1)
+
+    def test_reveal_command_is_a_folder_on_every_platform(self):
+        real = (crow_platform.IS_WINDOWS, crow_platform.sys.platform)
+        self.addCleanup(lambda: (setattr(crow_platform, "IS_WINDOWS", real[0]),
+                                 setattr(crow_platform.sys, "platform", real[1])))
+        crow_platform.IS_WINDOWS = False
+        crow_platform.sys.platform = "linux"
+        self.assertEqual(crow_platform.reveal_command("/a/b/c.sh", False), ["xdg-open", "/a/b"])
+        self.assertEqual(crow_platform.reveal_command("/a/b", True), ["xdg-open", "/a/b"])
+        crow_platform.sys.platform = "darwin"
+        self.assertEqual(crow_platform.reveal_command("/a/c.sh", False), ["open", "-R", "/a/c.sh"])
+        crow_platform.IS_WINDOWS = True
+        self.assertEqual(crow_platform.reveal_command("C:\\a\\c.bat", False),
+                         ["explorer", "/select,C:\\a\\c.bat"])
+
+
+class TheIntegrationSeamsHoldTests(unittest.TestCase):
+    """Re-audit of the four GUI branches together (2026-09-23)."""
+
+    def test_a_drag_does_not_change_a_turn_height(self):
+        # content-visibility under .sizing stops margins collapsing through a
+        # turn; the first/last child margins are dropped so both states match.
+        page = crow_gui.PAGE
+        self.assertIn("#flow > .turn > :first-child{margin-top:0}", page)
+        self.assertIn("#flow > .turn > :last-child{margin-bottom:0}", page)
+
+    def test_browser_tabs_shrink_before_they_scroll(self):
+        page = crow_gui.PAGE
+        tab = page[page.index("\n.brtab{"):]
+        tab = tab[:tab.index("}")]
+        self.assertIn("flex:0 1 auto", tab)
+        self.assertIn("min-width:64px", tab)
+
+    def test_the_menu_focus_ring_keeps_the_button_radius(self):
+        page = crow_gui.PAGE
+        self.assertIn("#menu button:focus-visible{outline:1px solid var(--accent);outline-offset:-1px}", page)
+        self.assertNotIn(".pth:focus-visible,#menu button:focus-visible", page)
+
+
+class TheBlankTabHasABlankBarTests(unittest.TestCase):
+    """#227. `brNew()` without an address cleared nothing: the one shared
+    address field kept the previous tab's URL (integration re-audit 2026-09-23)."""
+
+    def test_a_new_blank_tab_empties_and_focuses_the_bar(self):
+        src = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        body = src[src.index("  brNew(url){"):]
+        body = body[:body.index("\n  },")]
+        blank = body[body.index("else {"):]
+        self.assertIn('$("#brurl").value=""', blank)
+        self.assertLess(blank.index('$("#brurl").value=""'), blank.index('$("#brurl").focus()'))
+
+
+class TheCodeBlockKeepsItsCopyButtonTests(unittest.TestCase):
+    """#239. codeFinish emptied `.cwh`, which also holds the copy button."""
+
+    def test_the_finished_path_goes_into_the_name_slot(self):
+        page = crow_gui.PAGE
+        fin = page[page.index("  codeFinish(name,raw){"):]
+        fin = fin[:fin.index("\n  // #138b.")]
+        self.assertNotIn('head.textContent=""', fin)
+        self.assertNotIn("head.textContent=got.path", fin)
+        self.assertIn('box.querySelector(".cwn")', fin)
+        tpl = page[page.index('<template id="cwtpl">'):]
+        tpl = tpl[:tpl.index("</template>")]
+        # the button lives in .cwh, beside .cwn -- so only .cwn may be rewritten
+        self.assertIn('<span class="cwn"></span>', tpl)
+        self.assertIn('class="cwcopy"', tpl)
+
+
+# -- #209: a second restore, and a stream with no round to write into --------
+
+class _RunsNow:
+    """`threading.Thread`, run on the spot: `ready()` starts its probes on
+    threads, and an exception there has to reach the case, not the excepthook."""
+
+    def __init__(self, target=None, args=(), kwargs=None, daemon=None, **_):
+        self._target, self._args, self._kwargs = target, args, kwargs or {}
+
+    def start(self) -> None:
+        self._target(*self._args, **self._kwargs)
+
+
+class ARestoreNeverMeetsARunningChatTests(ApiCase):
+    """#209. Live 2026-09-22 09:17: the window died on boot with
+    `RuntimeError: restore() is for a fresh conversation, not a running one`
+    in `_probe`'s thread, beside the #204 GError 601 flood and an
+    `insertBefore` TypeError. The #204 recovery reloads the page, the reloaded
+    page fires `pywebviewready` again, and `ready()` started a SECOND `_probe`
+    that restored session.json into the conversation the first one had
+    already filled. The same raise is reachable without a reload: a line
+    typed before a slow probe arrives. `Conversation.restore` keeps its
+    guard (#121 leans on it); the callers learn the contract."""
+
+    def _saved_chat(self, first="the restored question", reply="its answer"):
+        """session.json written the way the window writes it."""
+        old = self.api()
+        self.a_chat(old, first, reply)
+        old._persist_live()
+        self.assertTrue(os.path.exists(self.session))
+
+    def _endpoint_up(self):
+        return (mock.patch.object(crow_gui, "check_endpoint", return_value="ok"),
+                mock.patch.object(crow_gui, "fetch_model_name", return_value="m"),
+                mock.patch.object(crow_gui, "fetch_n_ctx", return_value=1000))
+
+    def test_a_probe_that_arrives_after_the_first_line_keeps_that_line(self):
+        self._saved_chat()
+        api = self.api()
+        api._conversation.append("user", "typed before the probe answered")
+        a, b, c = self._endpoint_up()
+        with a, b, c:
+            api._probe()                        # raised before #209
+        payload = [m for m in api._conversation.payload() if m["role"] != "system"]
+        self.assertEqual([m["content"] for m in payload],
+                         ["typed before the probe answered"],
+                         "the running chat was replaced or merged")
+        out = self.drained(api)
+        notes = [m["t"] for m in out if m.get("k") == "note"]
+        self.assertTrue(any("kept the running conversation" in t for t in notes),
+                        notes)
+        # THE OLD CHAT'S IDENTITY IS NOT TAKEN EITHER: with it, the running
+        # chat's next save would land in the old chat's file.
+        self.assertIsNone(api._current_path)
+        self.assertIsNone(api._current_title)
+
+    def test_a_reloaded_page_is_redrawn_not_restored_twice(self):
+        self._saved_chat()
+        api = self.api()
+        api._mic_probe = lambda: None
+        api.git_refresh = lambda: None
+        adopt = mock.MagicMock(wraps=crow_core.adopt_root)
+        a, b, c = self._endpoint_up()
+        with a, b, c, mock.patch.object(crow_gui.threading, "Thread", _RunsNow), \
+                mock.patch.object(crow_core, "adopt_root", adopt):
+            api.ready()                         # the page's first pywebviewready
+            first = self.drained(api)
+            self.assertIn("the restored question",
+                          [m.get("t") for m in first if m.get("k") == "user"])
+            before = api._conversation.payload()
+            api.ready()                         # #204's reload fires it again
+        after = self.drained(api)
+        self.assertEqual(api._conversation.payload(), before)
+        self.assertEqual(adopt.call_count, 1,
+                         "the reload re-bound the working area from roots.json")
+        kinds = [m.get("k") for m in after]
+        # THE NEW PAGE IS EMPTY, so it gets the live chat again ...
+        self.assertIn("the restored question",
+                      [m.get("t") for m in after if m.get("k") == "user"])
+        for k in ("meta", "mode", "root", "up", "rail"):
+            self.assertIn(k, kinds)
+        # ... and not a note about a late session: nothing arrived late.
+        self.assertFalse([m for m in after if m.get("k") == "note"
+                          and "kept the running" in m.get("t", "")])
+
+
+class AStreamWithoutARoundTests(unittest.TestCase):
+    """#209. `answer()` did `this.col.insertBefore(...)` with `col` null --
+    a reloaded page (#204) that meets a turn already streaming has no round
+    open, and every token threw `null is not an object (evaluating
+    'this.col.insertBefore')` back into the push channel. Run in node."""
+
+    FAKE_DOM = r"""
+function mk(tag){ const e={tag, children:[], textContent:"", className:"",
+  _html:"", parentNode:null,
+  appendChild(c){ this.children.push(c); c.parentNode=this; return c; },
+  insertBefore(c,ref){ const i=ref?this.children.indexOf(ref):-1;
+    if(i<0) this.children.push(c); else this.children.splice(i,0,c);
+    c.parentNode=this; return c; },
+  querySelector(sel){ if(sel===".col") return this._col||(this._col=mk("div"));
+    if(sel===".tbody") return mk("div"); return null; },
+  querySelectorAll(){ return []; }, remove(){},
+  set innerHTML(v){ this._html=v; }, get innerHTML(){ return this._html; } };
+  return e; }
+const document={ createElement:mk, querySelectorAll(){ return []; } };
+const flow=mk("div");
+"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.node = _node()
+        cls.page = crow_gui.PAGE
+
+    def setUp(self):
+        if not self.node:
+            self.skipTest("no node on this machine")
+
+    def _members(self, first: str, stop: str) -> str:
+        start = self.page.index(first)
+        return self.page[start:self.page.index(stop, start)]
+
+    def _run(self, calls: str) -> str:
+        import subprocess
+        body = (self._members("  start(){", "  // -- markdown, drawn")
+                + self._members("  cost(line,share,sub){", "  fail(msg){"))
+        prog = (self.FAKE_DOM
+                + "const o={ running:false, col:null, say:null, think:null,"
+                  " fence:null, blocks:[], cursor:null,"
+                  " fold(){}, bottom(){}, ctx(){},"
+                  " turn(){ const t=mk('div'); flow.appendChild(t); return t; },\n"
+                + body + "};\n" + calls)
+        done = subprocess.run([self.node, "-e", prog], capture_output=True,
+                              text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done.stdout.strip()
+
+    def test_text_with_no_round_opens_one(self):
+        out = self._run('o.answer("hi"); o.answer(" there");'
+                        'console.log(o.col.children.filter(c=>c.className==="say")'
+                        '.map(c=>c.textContent).join("|"));')
+        self.assertEqual(out, "hi there")
+
+    def test_thinking_with_no_round_opens_one(self):
+        out = self._run('o.thinkText("hm"); console.log(o.think ? "ok" : "none");')
+        self.assertEqual(out, "ok")
+
+    def test_a_cost_line_with_no_round_does_not_throw(self):
+        out = self._run('o.cost("[1 s]", 50); console.log(flow.children.length);')
+        self.assertEqual(out, "1")
 
 
 if __name__ == "__main__":

@@ -566,6 +566,28 @@ EOF
     else warn "no wl-clipboard and no xclip: pasting an image into the window will not work"
     fi
 
+    # The optional helpers, install.ps1's Node row and its two Linux siblings.
+    # None of them blocks: each costs one feature, and each feature says so
+    # itself when it runs without it.
+    #   node        -- MCP servers started with npx/node; write_file/append_file
+    #                  run `node --check` over JS and inline HTML scripts (#251)
+    #                  and SKIP the check without node; build_bundle finds
+    #                  esbuild in the npx cache or node_modules (#212).
+    #   bwrap       -- the in-window browser panel's web process runs sandboxed
+    #                  only when bwrap exists (#226); without it, no sandbox.
+    #   systemd-run -- the render browser and run_command get a user scope with
+    #                  a memory ceiling (#213, #218); without a reachable user
+    #                  manager they run unscoped.
+    if command -v node >/dev/null 2>&1; then ok "node ($(command -v node)) -- MCP via npx, the JS syntax check, build_bundle"
+    else warn "no node: MCP servers via npx, write_file's JS syntax check (#251) and build_bundle's npx esbuild are unavailable"
+    fi
+    if command -v bwrap >/dev/null 2>&1; then ok "bwrap -- the browser panel runs sandboxed"
+    else warn "no bwrap: the browser panel runs without a sandbox (bubblewrap package)"
+    fi
+    if command -v systemd-run >/dev/null 2>&1; then ok "systemd-run -- render_page and run_command get a memory ceiling"
+    else warn "no systemd-run: render_page and run_command run without a memory ceiling"
+    fi
+
     # The card. This one CAN refuse the machine, and it is asked before a byte
     # is downloaded.
     if command -v nvidia-smi >/dev/null 2>&1; then

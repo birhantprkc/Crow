@@ -27,8 +27,8 @@ when its `crow_root` points there, and nothing else records it.
 | key | default | what |
 |---|---|---|
 | `turn_token_budget` | `0` (off) | decoded tokens one window turn may spend; spent forces the answer, same protocol as the round budget |
-| `subtask_max_tokens` | `0` (= `REMOTE_MAX_TOKENS`, 8192) | output cap per delegated subtask; nonsense clamps to the default, never to unlimited |
-| `rollover_digest_tokens` | `400` | cap for the model's own digest in the rollover note, asked on the still-warm prefix before the cut; `0` switches it off (#154) |
+| `subtask_max_tokens` | `0` (= `REMOTE_MAX_TOKENS`, which is the output cap `MAX_TOKENS`: 16384 unless `CROW_MAX_TOKENS` sets it; 8192 before 6301e0e, 2026-09-20) | output cap per delegated subtask; nonsense clamps to the default, never to unlimited |
+| `rollover_digest_tokens` | `400` | cap for the model's own digest in the rollover note, asked on the still-warm prefix before the cut; the leg sends at least 2000 (#205), and an answer cut off at the cap is marked as cut (#210); `0` switches it off (#154) |
 
 The delegate favourites live in `providers.json` (`delegate_favorites`), not here — set them
 from the OpenRouter page of the settings sheet.
@@ -50,6 +50,8 @@ lives in a file instead.
 | the environment still works | and says so once, on a console, naming the file to move the value into. Every installation that exists today has the variable and no file |
 | what is in it today | `CROW_TAVILY_KEY`, the general web index for `web_search`. `CROW_SEARXNG_URL` is a URL, not a secret, and stays an environment variable |
 | writing it | `powershell -ExecutionPolicy Bypass -File tools\migrate-secrets.ps1 -Names CROW_TAVILY_KEY` — it writes the file, sets the ACL and takes the variable out of the user scope |
+| writing it on Linux | by hand: `{"CROW_TAVILY_KEY": "..."}` in `~/.config/crow/secrets.json` (`$XDG_CONFIG_HOME/crow/` when that is set). The migration script is Windows-only |
+| what the texts say (#194) | `web_search`'s upgrade hint, its refusal and the SearXNG hint name this file by its resolved path first and the environment as the fallback; a refused Tavily key says whether it came from the store or the environment |
 | moving it | `CROW_SECRETS_FILE`; the only caller that needs it is a test |
 
 A broken store is reported by **path** and never by content: a parser error that quoted the line

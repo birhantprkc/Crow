@@ -52,10 +52,13 @@ Standard library only, same as the client.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
+import random
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -110,6 +113,8 @@ DEFAULT_MODEL = "crow"
 # of the prefix: a session saved in one directory would then be worthless when
 # resumed from another. `list_dir` with no argument answers the same question
 # and costs one round only when the model actually needs it.
+# #222: the working area now travels in the PINNED HEAD instead
+# (`working_area_line`) -- per chat, like its memory, never in this string.
 DEFAULT_SYSTEM = (
     "You are Crow, a local coding assistant. You have tools to read, write, "
     "search and run commands -- look instead of guessing paths. "
@@ -179,6 +184,45 @@ MAX_TOOL_BYTES = 16_000
 MAX_TOOL_ROUNDS = 24
 MAX_HITS = 200
 COMMAND_TIMEOUT = 120
+# #207, second incident, same class. 2026-09-21 13:26:37, live acceptance of
+# the search bounds: round 6's tool ran a command whose output ran into the
+# container class; `capture_output=True` accumulates EVERYTHING the child
+# prints at pipe speed, and `_clip` runs only after the whole thing sits in
+# python. Crow's python ballooned until the kernel had 13.6 GiB of it swapped,
+# then the global OOM killer shot `serve` -- the biggest RSS on the machine at
+# 46.8 GiB pinned -- and the session died with it. The cap kills the child at
+# 32 MiB of combined output: far above what a legitimate command prints before
+# `_clip` shows 16 KB of it (a `cargo build`'s progress noise fits), and five
+# orders of magnitude below the GiB that kill the desktop's engine.
+COMMAND_CAPTURE_BYTES = 32 * 1024 * 1024
+# read_image hands the file's bytes to the wire as-is; the extension table
+# already refuses non-images, and this refuses the pathological sizes -- a
+# reader with no bound is a reader that can take the machine down (#207).
+IMAGE_MAX_BYTES = 32 * 1024 * 1024
+
+# #207. THE THREE BOUNDS EVERY PRODUCTION GREP HAS, and search_text had none of
+# them. Measured 2026-09-21, live: a search_text over the crow-nest tree opened
+# the 105 GB CNQ container (`errors="replace"` makes a blob "text" that never
+# raises) and the turn hung mid-pair -- spinner forever, no follow-up request,
+# only killing the app ended it. The MAX_HITS/MAX_TOOL_BYTES caps fire only when
+# a HIT is found, so a pattern without hits in the binary read every byte first.
+# ripgrep's contract, all three defaults there: a NUL byte means binary and the
+# file is skipped (--text turns it off); --max-filesize skips oversized files
+# BEFORE they are read; and a search that cannot finish returns what it has.
+#
+# 2 MiB sits above every source file this tree has produced; 30 s is a cold
+# cache reading well over a gigabyte of small files, which is already a search
+# gone wrong; 4 KiB of head is enough to see a NUL in every container format --
+# they are NUL-dense from byte one, which is what retires the 105 GB file.
+SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024
+SEARCH_DEADLINE = 30.0
+SEARCH_SNIFF_BYTES = 4096
+# Shared by find_files and search_text, which walked the same tree with two
+# copies of this list before #207 -- and `target` (the Rust build tree, tens of
+# GB of small artifacts) was in neither. The set says what it said when it was
+# written: directories nobody means when they say "find the source file".
+SEARCH_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv",
+                    "build", "dist", "target", ".cache"}
 
 # WHICH SHELL THE MODEL IS TALKING TO, said in the tool's own description
 # because guessing it costs a round in either direction: on Windows an `ls`
@@ -340,12 +384,42 @@ def secret(name: str) -> str:
         return found
     from_env = os.environ.get(name, "")
     if from_env and _secret_console():
+        # #194: the script is PowerShell 5.1 and Windows ACLs -- named on Windows
+        # only. On Linux the file is written by hand.
+        how = (" with tools\\migrate-secrets.ps1" if crow_platform.IS_WINDOWS
+               else " (a flat JSON object, one entry per name)")
         _secret_note(
             "env:%s" % name,
-            "crow: %s was read from the environment. Move it into %s with "
-            "tools/migrate-secrets.ps1 -- every child process inherits it "
-            "where it is.\n" % (name, SECRETS_FILE))
+            "crow: %s was read from the environment. Move it into %s%s -- "
+            "every child process inherits it where it is.\n"
+            % (name, SECRETS_FILE, how))
     return from_env
+
+
+def secret_origin(name: str) -> str:
+    """#194: where `secret(name)` takes its value from -- "store",
+    "environment" or "". The same order as `secret()`, and silent: it is
+    asked for a sentence, not for the value."""
+    found = _secret_stored().get(name)
+    if isinstance(found, str) and found:
+        return "store"
+    return "environment" if os.environ.get(name) else ""
+
+
+def secret_place(name: str) -> str:
+    """#194: the one phrase every text uses to say where `name` belongs.
+
+    THE STORE FIRST, BY ITS REAL PATH. `SECRETS_FILE` is what the reader
+    opens -- `crow_platform.config_dir()`, `XDG_CONFIG_HOME` and
+    `CROW_SECRETS_FILE` included -- so a text cannot name a place the reader
+    does not look. The environment is named last, as the fallback it is
+    since #193. The migration script is Windows-only (PowerShell 5.1 and
+    Windows ACLs), so it is named there and nowhere else.
+    """
+    script = (r" (tools\migrate-secrets.ps1 moves it there from the environment)"
+              if crow_platform.IS_WINDOWS else "")
+    return ("%s in %s%s; the environment variable %s is the fallback"
+            % (name, SECRETS_FILE, script, name))
 
 
 # WHERE THE SEARCH RUNS, AND WHY IT IS NOT A SELF-HOSTED SERVICE BY DEFAULT.
@@ -380,6 +454,9 @@ def secret(name: str) -> str:
 # its own sentence rather than a JSONDecodeError.
 TAVILY_URL = "https://api.tavily.com/search"
 TAVILY_KEY = secret("CROW_TAVILY_KEY")
+# #194: which source that key came from, for the refusal sentence -- the live
+# case of 2026-09-22 was a refused key from the environment with an empty store.
+TAVILY_FROM = secret_origin("CROW_TAVILY_KEY")
 SEARXNG_URL = os.environ.get("CROW_SEARXNG_URL", "")
 
 # Per keyless source. Shorter than WEB_TIMEOUT because several run at once and
@@ -393,7 +470,7 @@ KEYLESS_TIMEOUT = 8
 # the open web. A question outside that is a reason to offer the upgrade, not to
 # report a fault.
 # SAID ON EVERY KEYLESS ANSWER, not only on the empty one -- and that gap was
-# the defect. `NO_GENERAL_INDEX` below is the honest sentence, but it only ever
+# the defect. `no_general_index()` below is the honest sentence, but it only ever
 # reached the model when the federation found NOTHING. It almost always finds
 # something: measured 2026-08-22, `was kostet ein rtx 5090` came back with
 # github issue #5090 at rank one, because the number matched an issue NUMBER.
@@ -405,18 +482,29 @@ KEYLESS_TIMEOUT = 8
 # FIRST, NOT LAST, for the reason the registry notes below already carry: a line
 # about what the whole list is worth, printed under the list, is read after the
 # list has already been believed.
-KEYLESS_SCOPE = (
-    "note: this index covers code, packages and reference -- NOT the open web. "
-    "A hit here may be a keyword match rather than an answer; weigh it before "
-    "using it. For a general index set CROW_TAVILY_KEY (free, no credit card, "
-    "https://tavily.com) or CROW_SEARXNG_URL to your own instance."
-)
+#
+# #194: THE KEY GOES INTO THE STORE, and the sentence says so -- built at call
+# time from `secret_place`, because the store's path is `SECRETS_FILE` and
+# that is resolved per platform. Tool RESULTS, not the tool description, so
+# the prefix fingerprint does not move with the machine.
+def search_upgrade_hint() -> str:
+    """The one sentence that offers a general index."""
+    return ("For a general index get a Tavily key (free, no credit card, "
+            "https://tavily.com) and put %s. Or set CROW_SEARXNG_URL to your "
+            "own instance." % secret_place("CROW_TAVILY_KEY"))
 
-NO_GENERAL_INDEX = (
-    "\n[these sources cover code, packages and reference, not the open web. "
-    "For a general index set CROW_TAVILY_KEY (free, no credit card, "
-    "https://tavily.com) or CROW_SEARXNG_URL to your own instance.]"
-)
+
+def keyless_scope() -> str:
+    """The first line of every keyless answer."""
+    return ("note: this index covers code, packages and reference -- NOT the "
+            "open web. A hit here may be a keyword match rather than an "
+            "answer; weigh it before using it. " + search_upgrade_hint())
+
+
+def no_general_index() -> str:
+    """What an empty keyless search says."""
+    return ("\n[these sources cover code, packages and reference, not the "
+            "open web. " + search_upgrade_hint() + "]")
 
 # Archive the conversation and start a fresh one at this share of the window.
 #
@@ -515,7 +603,55 @@ def model_key_for(model: str | None, manifest: dict | None = None) -> str | None
     return None
 
 
-def sampling_for(model: str | None) -> dict:
+def _entry_for(model: "str | None", manifest: "dict | None" = None) -> dict:
+    """The manifest entry of the model the server has open, or {}."""
+    manifest = manifest if manifest is not None else _manifest()
+    key = model_key_for(model, manifest)
+    return ((((manifest.get("models") or {}).get("entries") or {}).get(key)
+             or {}) if key else {})
+
+
+# #225. THINKING IS SENT, NOT INHERITED. Measured 2026-09-22: Crow
+# sent no `reasoning_effort` on a never-chosen chat, so the operating point
+# decided -- llama-server left the key to Qwen3.8's template, whose default is
+# xhigh (chat_template.jinja: `reasoning_effort|default('xhigh')`), while
+# crow-nest's `serve` reads an absent key as thinking OFF (serve.rs, `None =>
+# (kw_thinking.unwrap_or(false), None)`; engine.log: 2,962 requests logged
+# "thinking off"). One model, two engines, two modes, and nobody had chosen
+# either -- while Crow sent the card's THINKING sampling row to both. An entry
+# that declares `reasoning_fixed` gets that word on every request of every
+# sender (turn, digest leg, review), whatever the chat stored, and the window
+# offers no choice for it. robin, 2026-09-22: both Qwen3.8-Flash-Next points
+# think at the template default -- `high`, which renders as xhigh on both
+# engines (llama: the off/high group, #160; serve: `map_reasoning_effort`).
+# Flipping a point is one manifest value.
+def reasoning_fixed_for(model: "str | None") -> "str | None":
+    """#225: the word this model is always sent, or None."""
+    entry = _entry_for(model)
+    word = entry.get("reasoning_fixed")
+    levels = entry.get("reasoning_levels") or ()
+    if isinstance(word, str) and word in levels:
+        return word
+    return None
+
+
+def effective_reasoning(model: "str | None",
+                        chosen: "str | None") -> "str | None":
+    """#225: what goes on the wire -- the fixed word, else the chat's."""
+    return reasoning_fixed_for(model) or chosen
+
+
+def reasoning_menu_for(model: "str | None") -> "tuple[str, ...]":
+    """#225: the levels the window OFFERS -- none for a fixed point."""
+    return () if reasoning_fixed_for(model) else reasoning_levels_for(model)
+
+
+def reasoning_menu_groups_for(model: "str | None") -> "tuple[tuple[str, ...], ...]":
+    """#225: the groups the window draws -- none for a fixed point."""
+    return () if reasoning_fixed_for(model) else reasoning_groups_for(model)
+
+
+def sampling_for(model: str | None, level: "str | None" = None) -> dict:
     """The sampling values for one model: the shared block, then its own.
 
     THE OVERRIDE CARRIES ONLY WHAT DIFFERS, and the reason is the checker rather
@@ -536,7 +672,17 @@ def sampling_for(model: str | None) -> dict:
     key = model_key_for(model, manifest)
     if key:
         entry = ((manifest.get("models") or {}).get("entries") or {}).get(key) or {}
-        blocks.append(entry.get("sampling") or {})
+        # #225: THE ROW OF THE MODE ACTUALLY SENT. `sampling` is the
+        # thinking row; a request that turns thinking off (`none`) takes the
+        # entry's `sampling_no_thinking` when it declares one -- the card's
+        # two rows differ in temperature, top_p and presence_penalty.
+        # `level` is the chat's choice; a fixed entry overrides it, exactly
+        # as it does on the wire (`effective_reasoning`).
+        word = reasoning_fixed_for(model) or level
+        row = entry.get("sampling") or {}
+        if word == "none" and isinstance(entry.get("sampling_no_thinking"), dict):
+            row = entry["sampling_no_thinking"]
+        blocks.append(row)
     for block in blocks:
         for name, value in block.items():
             # FILTERED AGAINST A FIXED LIST, and not merely against a leading
@@ -550,14 +696,15 @@ def sampling_for(model: str | None) -> dict:
     return out
 
 
-def resolve_sampling(model: str | None, overrides: dict | None = None) -> dict:
+def resolve_sampling(model: str | None, overrides: dict | None = None,
+                     level: "str | None" = None) -> dict:
     """The model's sampling, with anything the user typed on top.
 
     `overrides` carries ONLY what was actually given -- see `_Explicit` in
     cli/crow.py. A dict of every flag with its default would put the terminal's
     idea of min_p back on top of the model's and undo the whole stage.
     """
-    out = sampling_for(model)
+    out = sampling_for(model, level)
     for name, value in (overrides or {}).items():
         if name in SAMPLING_FIELDS and value is not None:
             out[name] = value
@@ -574,6 +721,12 @@ def reasoning_problem(model: str | None, level: str | None) -> str | None:
     """
     if level is None:
         return None
+    fixed = reasoning_fixed_for(model)
+    if fixed is not None and level != fixed:
+        # #225: named, not silently overridden.
+        return ("--reasoning-effort %s: thinking is fixed at %s for %s "
+                "(reasoning_fixed in manifests/operating-point.json)"
+                % (level, fixed, model or "this model"))
     levels = reasoning_levels_for(model)
     if level in levels:
         return None
@@ -794,31 +947,42 @@ TOOLS = [
         "Open a local page or a URL in a real browser and get back a screenshot plus the "
         "console output. Use it to SEE what you built -- then read_image the screenshot. "
         "Do not drive a browser through run_command; this one is supervised and always "
-        "comes back.",
+        "comes back. A local file opens as file://, where module imports are blocked "
+        "-- render the build_bundle output, not the module source page.",
         {"path": dict(_STR, description="A file in the working area, or an http(s) URL."),
          "wait_ms": {"type": "integer",
-                     "description": "How long the page may take to settle. Default 4000."},
+                     "description": "How long the page runs after loading before the "
+                                    "screenshot, in real milliseconds. Default 4000, "
+                                    "max 20000. A larger value never rescues a page "
+                                    "too heavy to draw -- make the scene cheaper."},
          "width": {"type": "integer", "description": "Viewport width, default 1280."},
          "height": {"type": "integer", "description": "Viewport height, default 800."}},
         ["path"]),
     _fn("write_file",
         "Write a file whole, creating directories as needed. An existing file must "
-        "have been read first in this session; otherwise the call is refused. For a "
-        "file too large for one call, write the skeleton here and grow it with "
-        "append_file -- never shell-heredoc big content.",
+        "have been read in this conversation and be unchanged on disk since; "
+        "otherwise the call is refused. Send the WHOLE file in this one call "
+        "when it is up to about <WHOLE_KB> KB: that fits the <CAP>-token output "
+        "limit with room to spare, and one call is one round and no half-built "
+        "file in between. Only a larger file is built in parts: this call with "
+        "the first ~<WHOLE_KB> KB, then append_file. Never shell-heredoc big "
+        "content.",
         {"path": dict(_STR, description="Path to write."),
          "content": dict(_STR, description="Full new contents.")}, ["path", "content"]),
     _fn("append_file",
         "Append content to a file, creating it if missing, and return the new total "
-        "size. THE way to build a large file in parts: write_file the head, then one "
-        "append per section -- each append is a clean round instead of a shell "
-        "heredoc that breaks mid-escape. No read-first guard: appending destroys "
-        "nothing.",
+        "size. For a file larger than about <WHOLE_KB> KB, more than one "
+        "write_file sends safely inside the <CAP>-token output limit: write_file the first "
+        "part, then append the rest in parts of up to ~<WHOLE_KB> KB each -- not "
+        "one small append per function or section. A smaller file goes whole "
+        "through write_file. Also for adding to a log or notes file. No "
+        "read-first guard: appending destroys nothing.",
         {"path": dict(_STR, description="Path to append to."),
          "content": dict(_STR, description="Text to append at the end.")}, ["path", "content"]),
     _fn("edit_file",
         "Replace one exact occurrence of 'old' with 'new'. The file must have been read "
-        "first. Fails if 'old' is absent or appears more than once.",
+        "in this conversation and be unchanged on disk since. Fails if 'old' is "
+        "absent or appears more than once.",
         {"path": dict(_STR, description="File to edit."),
          "old": dict(_STR, description="Exact text to replace, unique in the file."),
          "new": dict(_STR, description="Replacement text.")}, ["path", "old", "new"]),
@@ -833,9 +997,44 @@ TOOLS = [
          "glob": dict(_STR, description="Only files matching this glob, e.g. *.py")}, ["pattern"]),
     _fn("run_command",
         f"Run a shell command locally and return its exit code and output. "
-        f"Killed after {COMMAND_TIMEOUT}s. {SHELL_HINT}",
+        f"Killed after {COMMAND_TIMEOUT}s, with everything it started; on Linux it "
+        f"also runs under a memory ceiling (8G by default, no swap) and a kill there "
+        f"says so. For a screenshot of a page use render_page, not a browser here. "
+        f"{SHELL_HINT}",
         {"command": dict(_STR, description="The command line."),
          "cwd": dict(_STR, description="Working directory.")}, ["command"]),
+    # #212. THE DESCRIPTION CARRIES THE RULE THE TWO LOST AFTERNOONS DID NOT
+    # HAVE: the browser's file:// wall, the shape that gets through it, and the
+    # instruction not to build that shape by hand. The model plans from this
+    # text; a rule it first meets in a console error costs the afternoon.
+    _fn("build_bundle",
+        "Bundle a web app into ONE self-contained offline file with the esbuild "
+        "already on this machine (found for you: project node_modules, PATH, "
+        "deno/npx caches -- no network). A page opened from file:// CANNOT load "
+        "ES modules: the browser blocks every import between local files (CORS, "
+        "origin null), and import maps do not help. The offline shape is one "
+        "classic <script> holding the whole graph, bundled as an IIFE -- this "
+        "tool makes it. Never flatten or concatenate a library by hand. For a "
+        "PAGE, make the entry an .html file: write the page as HTML (its canvas "
+        "and markup) with a <script type=\"module\"> that imports and starts "
+        "your app, then bundle THAT -- its module scripts, import map and local "
+        "stylesheets are bundled and inlined. Entry a .js/.ts module: out .js "
+        "gives the IIFE; out .html wraps it in an EMPTY page -- no markup, no "
+        "call to any export. Bare imports ('three', "
+        "'three/addons/...') resolve from node_modules; shaders (.glsl/.vert/"
+        ".frag) import as text, images and models as data URLs. Edit the "
+        "sources and build again -- never patch the output.",
+        {"entry": dict(_STR, description="The page (.html) -- the entry for "
+                                         "anything a browser shows -- or the main "
+                                         "module (.js/.mjs/.ts)."),
+         "out": dict(_STR, description="The file to write, .html or .js. "
+                                       "Default: <entry>.bundle.html / .js."),
+         "global_name": dict(_STR, description="For a module entry: the global "
+                                               "its exports land on, e.g. APP. "
+                                               "Without it the exports of a .js "
+                                               "out are unreachable."),
+         "minify": {"type": "boolean", "description": "Default true."}},
+        ["entry"]),
     # #156. GIT AS ITS OWN GROUP, NOT AS SHELL LINES. A `git push` through
     # run_command is one more "executing" ask with no context; these five carry
     # branch, paths and counts, run a fixed argv with no shell -- and the two
@@ -2367,7 +2566,10 @@ REASONING_COST_NOTE = "the level changes the head of every prompt -- the next tu
 # #121. THE SAME BILL FOR THE SAME REASON, said the same way round: before the
 # change, not after it. Binding a different folder to an open chat swaps that
 # chat's project memory, and the memory sits in the head.
-MEMORY_COST_NOTE = "the project memory changed -- the next turn pays a full prefill"
+# #224: so does the working area now (`working_area_line`), so any
+# bind to a different folder moves the head, memory or not.
+MEMORY_COST_NOTE = ("the working area and its project memory changed -- the "
+                    "next turn pays a full prefill")
 
 # #124. The same bill again, and said the same way round: before the change.
 SKILL_COST_NOTE = "the skill list changed -- the next turn pays a full prefill"
@@ -2422,7 +2624,9 @@ def reasoning_for_chat(model: str | None,
     a choice on the strength of a server that happens to be up right now.
     """
     level = session_reasoning(path)
-    if level is None:
+    # #225: a fixed point ignores the stored level (and leaves it in
+    # the file) -- the wire gets the fixed word from `effective_reasoning`.
+    if level is None or reasoning_fixed_for(model) is not None:
         return None, None
     levels = reasoning_levels_for(model)
     if level in levels:
@@ -2445,6 +2649,12 @@ def reasoning_command(argument: str, model: str | None,
     "send nothing", which is the state every existing chat is in and the only
     one whose prompt is byte-identical to a client without this feature.
     """
+    fixed = reasoning_fixed_for(model)
+    if fixed is not None:
+        # #225: nothing to choose on this point; say what is sent.
+        return ("reasoning: %s, fixed for %s (reasoning_fixed in "
+                "manifests/operating-point.json)" % (fixed, model or "this model"),
+                current, False)
     levels = reasoning_levels_for(model)
     groups = reasoning_groups_for(model)
     known = ", ".join(levels)
@@ -2817,6 +3027,14 @@ def clean_timings(timings: "list | None") -> list:
                 keep[name] = round(float(turn[name]), 3)
         if isinstance(turn.get("finish"), str) and turn["finish"]:
             keep["finish"] = turn["finish"]
+        # #217: DIE SEEDS DER RUNDEN, Zahlen wie alles hier -- ohne sie ist
+        # eine Runde nach dem Wegfall des festen Seeds nicht mehr nachspielbar.
+        for name in ("seeds", "leg_seeds"):
+            seeds = turn.get(name)
+            if isinstance(seeds, list) and seeds and all(
+                    isinstance(x, int) and not isinstance(x, bool)
+                    for x in seeds):
+                keep[name] = list(seeds)
         # EIN ZUG OHNE RUNDEN IST KEIN ZUG. Eine leere Bilanz im Archiv liest
         # sich wie ein Zug, der nichts gekostet hat -- dieselbe Luege wie die
         # stille 0 in der Tokenspalte.
@@ -3071,6 +3289,206 @@ THINK_ONLY_NUDGE = (
 # the suite checks is that it reaches the conversation at all.
 
 
+# #217. ONE DETECTOR FOR EVERY ROUND THAT IS NOT AN ANSWER, and #150's
+# think-only case is its first class, not a second detector beside it. Until
+# here a round with no call and some text was a finished answer whatever the
+# text was -- measured 2026-09-22 in the 42 minutes after the 17:12 cut: five
+# rounds of bare tool markup (`<tool_call>\n\n</function>\n</tool_call>`, 7-11
+# tokens, finish stop) and one stub (`The full picture is`) ended their turns,
+# were STORED as the assistant's answer and re-sent on every later request,
+# and the markup shape came back four times in 30 minutes: a degenerate round
+# in the prefix is a demonstration, not a record (#202, crow-nest #67/#68).
+#
+# THE MARKUP CLASS: tool-call markup at the start of a line, outside a code
+# fence, in a round that carries no parsed call. A call the parser gave up on
+# lands in `content` as its raw tags (crow-nest #99's give_up path; vLLM
+# #22975 is the same leak on another server), and whatever prose stands in
+# front of it was an announcement of a call that never ran. Line-anchored and
+# fence-blind so an answer that QUOTES the tags in a code block or inline
+# stays an answer.
+ROUND_MARKUP_RE = re.compile(
+    r"(?m)^[ \t]*(?:</?tool_call>|</?function\b|function=|<parameter=|</parameter>)")
+_ROUND_FENCE_RE = re.compile(r"(?ms)^[ \t]*```.*?(?:^[ \t]*```|\Z)")
+# THE STUB CLASS, measured on every stored round of 2026-09-18..22 (session.json,
+# the rollover archives, the backup of the clean test: 3,155 assistant rounds
+# in 27 files, 299 of them without a call). The rule below flags 79: 78 were
+# followed by a goal nudge, 1 is a greeting cut off at "I can see the" --
+# "Let me verify:", "Let me stop re-", "The full picture is", "Step 4 -- the
+# concrete plan:". Not one healthy answer is flagged. 27 rounds that were cut
+# too stay unflagged, most of them the one-phrase answers of the 2026-09-20
+# loop ("Same", "Re-audit", "Step 6 re-audited") that #202's brake catches:
+# without punctuation and without a word that cannot end a sentence they look
+# exactly like "Erledigt", and a real short answer must never be refused.
+# 200 chars for the mid-sentence evidence because the measured stubs run to
+# 196 ("... Let me stop routing around it and" is a cut at 166); an announce
+# ending on a colon counts at any length.
+STUB_MAX_CHARS = 200
+# WHAT ENDS A SENTENCE, after trailing emphasis/inline-code closers are taken
+# off. A colon is NOT here: an answer that ends on one announced something
+# that never came.
+_STUB_TERMINAL = frozenset(".!?…)]}\"'»。！？")
+# A LAST LINE THAT IS A LIST ITEM, A TABLE ROW OR A HEADING ends an answer
+# without punctuation by design ("- update the docs"), and is never a cut.
+_STUB_STRUCTURED_RE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|\||#)")
+# NO PUNCTUATION IS NOT EVIDENCE (lead review of ba48641): robin writes German,
+# and "Ja", "Erledigt", "Fertig", "ok", "42" or a bare `src/app.js` are whole
+# answers. A stub needs POSITIVE evidence of a sentence that stopped: a
+# trailing comma, dash or opening bracket, an inline span or `**` left open,
+# or a last word that cannot end a sentence. The words are the ones that
+# CANNOT close one in either language -- articles, conjunctions, possessives.
+# Left out on purpose: German prepositions that double as separable particles
+# ("Ich fange an", "Kommst du mit"), demonstratives ("genau das", "nimm die"),
+# pronouns ("Das mache ich"), English particles ("log in", "if you want
+# to") and English "an", which is German "an" ("Ich fange an"). A form of
+# "to be" counts only after a noun: "The full picture is" is
+# cut, "here it is" is not.
+_STUB_OPEN_ENDINGS = frozenset(",-\u2013\u2014([{")
+_STUB_DANGLING_WORDS = frozenset((
+    "the", "a", "and", "or", "but", "of", "because", "my", "your",
+    "its", "their", "our",
+    "und", "oder", "aber", "dass", "weil", "wenn", "des", "einen", "einem",
+    "einer", "eines", "zum", "zur"))
+_STUB_BE = frozenset(("is", "are", "was", "were", "be"))
+_STUB_BE_OK_AFTER = frozenset((
+    "it", "that", "this", "what", "how", "where", "there", "here", "he",
+    "she", "they", "we", "you", "i", "which", "who", "one", "so"))
+# The classes `run_turn` re-requests instead of storing (see there).
+DEGENERATE_ROUNDS = ("markup", "stub")
+
+
+def classify_round(reply: "str | None", calls: "list | None",
+                   finish: "str | None", reasoning: "str | None" = None,
+                   tools: bool = True,
+                   malformed: "list | None" = None) -> "str | None":
+    """#217: what kind of round this is, before it may enter the history.
+
+    `"markup"`  no parsed call, and either the engine says an abandoned call's
+                raw markup went out as content (`malformed`, crow-nest #99's
+                `crow_malformed_calls` with `raw_in_content`) or -- for an
+                engine that does not report, llama-server and every remote
+                one -- the text carries tool-call markup (any finish -- a
+                leaked call is never an answer);
+    `"stub"`    no call, finish `stop`, tools declared, and the visible text
+                ends on a colon (any length) or -- within STUB_MAX_CHARS --
+                shows that a sentence stopped: a comma, dash or opening
+                bracket last, an inline span or `**` left open, or a last
+                word that cannot end a sentence (see _STUB_DANGLING_WORDS);
+    `"think_only"`  #150: reasoning and no visible text at all;
+    None        an answer, a tool round, or something this cannot judge.
+
+    THE STUB RULE IS OFF WITHOUT TOOLS (a subtask declares none, and a short
+    answer there is the whole job) AND FOR ANY FINISH BUT `stop`: a `length`
+    cut is the output cap's, and an unknown finish is not evidence.
+    """
+    if calls:
+        return None
+    # THE ENGINE'S WORD FIRST: it parsed the markup and knows where every
+    # abandoned byte went (crow-nest #99, 7.11.21). The text reading below is
+    # the fallback, and it runs whenever the key is absent -- which is also
+    # every round of an engine that has nothing to report.
+    if any(r.get("raw_in_content") for r in malformed or []
+           if isinstance(r, dict)):
+        return "markup"
+    visible = _strip_think(reply or "")
+    if ROUND_MARKUP_RE.search(_ROUND_FENCE_RE.sub("", visible)):
+        return "markup"
+    text = visible.strip()
+    if not text:
+        return "think_only" if (reasoning or "").strip() else None
+    if not tools or finish != "stop":
+        return None
+    core = text.rstrip("*_` \t\n")
+    if core.endswith(":"):
+        return "stub"
+    if len(text) > STUB_MAX_CHARS:
+        return None
+    if _STUB_STRUCTURED_RE.match(text.rsplit("\n", 1)[-1]):
+        return None
+    if text.count("`") % 2 or text.count("**") % 2:
+        return "stub"
+    if not core:
+        return "stub"
+    last = core[-1]
+    if last in _STUB_TERMINAL:
+        return None
+    if last in _STUB_OPEN_ENDINGS:
+        return "stub"
+    words = re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", core)
+    if not words or not core[-1].isalpha():
+        return None
+    word = words[-1]
+    if word in _STUB_DANGLING_WORDS or (len(words) == 1 and word == "The"):
+        return "stub"
+    if (word in _STUB_BE and len(words) >= 2
+            and words[-2].lower() not in _STUB_BE_OK_AFTER):
+        return "stub"
+    return None
+
+
+def strip_call_markup(reply: str) -> str:
+    """#217 point 3: the raw markup of a call that ALSO arrived parsed.
+
+    Measured 2026-09-22 10:23: a `read_image` whose `path` ran into a 6,986-
+    token URL came back as the salvaged call AND as its own raw markup in
+    `content` (crow-nest #99), and both sat in the prefix until the next
+    rollover. The call travels structurally; its text form is pure prefix
+    cost, so everything from the first line-anchored tag outside a fence on is
+    cut. A reply without such a tag comes back unchanged.
+    """
+    text = reply or ""
+    fenced = [(m.start(), m.end()) for m in _ROUND_FENCE_RE.finditer(text)]
+    for match in ROUND_MARKUP_RE.finditer(text):
+        if not any(a <= match.start() < b for a, b in fenced):
+            return text[:match.start()].rstrip()
+    return text
+
+
+# #217. EVERY LOCAL ROUND CARRIES ITS OWN SEED, and the seed is recorded.
+# crow-nest samples with seed 0 when a request names none (serve.rs
+# DEFAULT_SEED, "a warm process draws what a cold one draws"), and Crow named
+# none: every round of every session drew from the same stream, so asking the
+# same prefix again returned the same tokens -- the #91 replay reproduced the
+# stored bad rounds byte for byte under seed 0, and seeds 1-7 were clean at
+# the same points. A retry without a new seed is the same round twice. Drawn
+# per round rather than per session so that ANY re-request (this ticket's, the
+# #151 stream retry, the reboot) resamples; written into the round's timings
+# and the turn's bill so a round stays replayable -- which is what seed 0 gave
+# the #91 probe for free. llama-server reads `seed` as uint32 with 0xFFFFFFFF
+# meaning "pick one", so the range stays inside 31 bits.
+SEED_MAX = 2 ** 31 - 1
+
+
+def draw_seed(avoid: "int | None" = None) -> int:
+    """A fresh per-request seed in 1..SEED_MAX, never `avoid`."""
+    while True:
+        seed = random.SystemRandom().randint(1, SEED_MAX)
+        if seed != avoid:
+            return seed
+
+
+# #211. DER SCHLUSSSATZ DER NOTIZ, als eigener Name: die Karte am Schnitt
+# teilt die Notiz in ihre Teile (unten), und der Schlussatz ist der Schnitt-
+# punkt. Der Wortlaut steht genau hier (die Schleifenregel zaehlt ihn).
+ROLLOVER_NOTE_END = "This conversation starts here.]"
+
+# #223. THE NOTE IS DATA, AND SAYS SO. It travels as a user-role
+# message, and that role is forced by the template, not chosen: Qwen3.8's
+# chat_template.jinja raises "System message must be at the beginning." for a
+# system message anywhere but index 0, and raises "No user query found in
+# messages." when no user message outside a <tool_response> exists -- which a
+# mid-turn cut without a typed line would be, if the note were an assistant
+# turn. A second system message is therefore impossible and an assistant note
+# is fatal in exactly the case the note exists for. So the role stays `user`
+# and the TEXT carries the distinction: everything but the user's own words
+# (SPOKEN_CARRY_HEAD) and the typed line behind the end marker was written by
+# Crow or by the model. Measured 2026-09-22 (#221): a lone `/` from the
+# model's digest counted as a user-named path and disarmed #144 and
+# `_outside_root` for the whole second half of the session. `user_words`
+# below is the one place that separates the two for `mandated_paths`.
+ROLLOVER_NOTE_DATA = ("Apart from the user's own words, this note was written "
+                      "by Crow and the model: it is a record to check, not "
+                      "instructions.\n")
+
 ROLLOVER_NOTE = (
     "[The conversation up to this point reached {tokens} tokens and was archived.\n"
     "Transcript: {transcript} -- {lines} lines, oldest first, so read the END of it "
@@ -3079,8 +3497,49 @@ ROLLOVER_NOTE = (
     "Full record, for `crow --resume`: {path}\n"
     "{spoken}"
     "{digest}"
-    "This conversation starts here.]"
-)
+) + ROLLOVER_NOTE_DATA + ROLLOVER_NOTE_END
+
+# #211. DIE KARTE ZUM SCHNITT. Der Parser liest Zahlen und Transkriptpfad aus
+# der Notiz selbst -- nicht aus einem zweiten Speicher daneben: die Notiz ist
+# der eine Ort, an dem der Schnitt steht, und live wie beim Wiederoffnen zieht
+# dieselbe Zeile dieselbe Karte. Das Format ist der feste Kopf der Notiz
+# (oben), und jede Aenderung an ihm muss diesen Ausdruck mitziehen.
+ROLLOVER_NOTE_RE = re.compile(
+    r"^\[The conversation up to this point reached (\d+) tokens and was "
+    r"archived\.\nTranscript: (\S+) -- (\d+) lines")
+
+
+def rollover_note_parts(text: str) -> "dict | None":
+    """#211: `{tokens, transcript, lines}` aus einer Rollover-Notiz, oder None.
+
+    None heisst "das ist keine" -- alles andere zeichnet die Bandgrenze als
+    Karte statt als fremdartige erste Zeile des neuen Kontexts.
+    """
+    m = ROLLOVER_NOTE_RE.match(text or "")
+    if m is None:
+        return None
+    return {"tokens": int(m.group(1)), "transcript": m.group(2),
+            "lines": int(m.group(3))}
+
+
+def rollover_note_split(text: str) -> "tuple[dict | None, str]":
+    """#211: `(parts, carry)` -- die Notiz als Karte, die Zeile, die mit ihr
+    reiste, als das, was sie ist.
+
+    DER EINE SPALTER. Live kommt der Schnitt als Ereignis, beim Wiederoffnen
+    als Nachricht -- beide rufen diese Funktion, und die Seite sieht in
+    beiden Faellen denselben Zug. Die getippte Zeile gehoert dem Menschen:
+    sie steht nach dem Schlusssatz der Notiz, weil `roll_over` sie dort
+    anhaengt, und sie als Teil der Karte zu zeichnen waere die Antwort auf
+    eine Frage, die niemand gestellt hat.
+    """
+    parts = rollover_note_parts(text)
+    if parts is None:
+        return None, ""
+    text = text or ""
+    end = text.find(ROLLOVER_NOTE_END)
+    carry = text[end + len(ROLLOVER_NOTE_END):].strip() if end >= 0 else ""
+    return parts, carry
 
 # #154. DIE VERDICHTUNG VOR DEM SCHNITT. In dem Moment, in dem der Roll
 # ansteht, liegt der volle Praefix noch warm im Server-Cache -- EINE kurze
@@ -3098,13 +3557,103 @@ ROLLOVER_DIGEST_TOKENS = ROLLOVER_DIGEST_DEFAULT   # 0 schaltet den Digest ab
 # wird NACH der Antwort aus dem Content gewaschen, statt es vorher zu
 # verbieten -- Verbieten war der Fehler, der den warmen Praefix brach.
 ROLLOVER_DIGEST_MIN_TOKENS = 2000
-DIGEST_HEAD = ("What the model itself noted before the cut "
-               "(its own words, unverified):\n")
+# #223: named as the model's, as unverified, and as not-an-order --
+# the digest is where the 2026-09-22 note's stray `/` came from (#221).
+DIGEST_HEAD = ("What the model itself noted before the cut (its own words, "
+               "unverified -- check paths and claims before acting on them):\n")
 DIGEST_ASK = (
     "[This conversation is about to be archived and reset. For the fresh "
     "context that follows, state in plain text: the current state, the "
     "decisions taken with their reasons, and the concrete open steps. "
-    "No tool calls. Be dense -- every line must still be true after the cut.]")
+    "No tool calls. Stay under 500 words: a longer answer is cut off. "
+    "Be dense -- every line must still be true after the cut.]")
+
+# #210. DIE EINEN WIEDERHOLUNG. Gemessen am 2026-09-22 in robins Test: die Leg
+# schickt die Werkzeugtabelle mit (sie muss, siehe Rumpf -- der warme Praefix
+# rendert sie), der Prompt sagt "No tool calls", und das Modell rief TROTZDEM
+# `goal_step` auf -- finish=tool_calls, 482 Tokens, und das, was als Digest
+# ueber den Schnitt trug, war der eine Halbsatz, der dem Aufruf vorausging.
+# Ein Tool-Call ist keine Antwort auf diese Frage, aber er ist auch kein
+# dauerhafter Zustand: dieselbe Frage, ein Satz schaerfer gestellt, auf
+# demselben (weiter warmen) Praefix beantwortet sie das Modell richtig.
+# Die Wiederholung tauscht NUR die Frage am Ende aus -- der Rumpf bleibt
+# byte-gleich, der Cache bleibt warm bis auf die letzten Dutzend Tokens,
+# und kein halbfertiger Tool-Call haengt unbeantwortet im Protokoll.
+DIGEST_ASK_RETRY = (
+    "[This conversation is about to be archived and reset. Your last answer "
+    "was a tool call -- this question wants TEXT, and no tool will be run for "
+    "it. State in plain text: the current state, the decisions taken with "
+    "their reasons, and the concrete open steps. No tool calls. Stay under "
+    "500 words: a longer answer is cut off. Be dense -- every line must "
+    "still be true after the cut.]")
+
+# #210. DAS LAUTE SCHEITERN. Bis hier stand der Halbtruth der Leg ungeprueft
+# unter der Ueberschrift "What the model itself noted": ein abgebrochener
+# Gedankenanfang, gelesen wie die zusammenfassende Erwaegung des Modells.
+# Wer den Zustand nicht tragen kann, muss das sagen -- die Notiz nennt das
+# Scheitern, und der Status-Kopf (#210, `goal_block`) traegt den Plan.
+DIGEST_FAILED = "[digest failed: the model did not answer in plain text]"
+DIGEST_MIN_CHARS = 200
+
+# #210. DER DECKEL IST KEIN SCHLUSSPUNKT. Gemessen am 2026-09-22, Schnitt um
+# 17:12 (Engine-Log 15:12:55Z): die Leg lief mit finish=length, generated
+# 2000 von 2000 -- der #205-Boden --, und der Digest endete nach 6.795 Zeichen
+# mitten in einem Aufzaehlungspunkt ("## The two tool bugs ... - **`"). Die
+# Leg wiederholte nur bei einem Tool-Call; ein gekappter Text war >= 200
+# Zeichen und ging als VOLLSTAENDIGE Erwaegung des Modells ueber den Schnitt.
+# KEINE WIEDERHOLUNG dafuer, anders als beim Tool-Call: der gekappte Text IST
+# Zustand (6,8k Zeichen echter Plan), eine zweite Frage kostete noch einmal
+# ~40 s Decode (2000 Tokens bei 50 tok/s, gemessen), waehrend der Roll
+# wartet, und warf das Vorhandene fuer eine Hoffnung weg. Stattdessen: die
+# halbe letzte Zeile faellt, und der Satz sagt, dass und wo gekappt wurde --
+# das Modell weiss danach, dass hinter der letzten Zeile noch etwas stand und
+# wo es liegt (das Transkript steht zwei Zeilen hoeher in derselben Notiz).
+# Die Frage nennt den Deckel jetzt selbst ("under 500 words", oben): 500
+# Woerter passen in den 2000er-Boden auch dann, wenn gedacht wird --
+# UNGEMESSEN, das kann nur ein Live-Schnitt zeigen.
+DIGEST_TRUNCATED = ("[digest cut off at the {cap}-token cap -- the unfinished "
+                    "last line was dropped; the transcript holds the rest]")
+# chat_completions sagt "length", der Messages-Dialekt "max_tokens".
+DIGEST_CAPPED = ("length", "max_tokens")
+# #217 / crow-nest #99. EIN ABGEBROCHENER LAUF IST KEIN ENDE. Seit #99 schreibt
+# serve `abort`, wenn der Client ging oder der Server herunterfuhr -- vorher
+# stand dort `length`, und ein geschlossenes Fenster las sich als verbrauchtes
+# Budget. Ein Strom bekommt dann gar keinen Schlusschunk, das `stream:false`-
+# Dokument aber wird noch geschrieben, mit diesem Wert. Was bis dahin kam, ist
+# ein Bruchstueck: jeder Leser hier (Zug, Digest, Nachlauf) nimmt es als
+# Scheitern, nie als fertige Antwort. Ein unbekannter Wert galt bisher als
+# "nicht gekappt", also als fertig -- genau das darf `abort` nicht sein.
+FINISH_ABORT = "abort"
+
+
+def _digest_trim(text: str, cap: int) -> str:
+    """#210: ein gekappter Digest endet an seiner letzten ganzen Zeile und
+    SAGT, dass er gekappt ist.
+
+    Die halbe Zeile faellt nur, wenn davor noch ein Zustandsbericht steht
+    (DIGEST_MIN_CHARS) -- ein einziger langer Absatz ohne Umbruch bleibt
+    ganz stehen, der Satz dahinter markiert den Schnitt trotzdem."""
+    cut = text.rfind("\n")
+    if cut >= 0 and len(text[:cut].rstrip()) >= DIGEST_MIN_CHARS:
+        text = text[:cut].rstrip()
+    return text + "\n" + DIGEST_TRUNCATED.format(cap=cap)
+
+
+def _digest_block(digest: str) -> str:
+    """#210: der {digest}-Block der Rollover-Notiz, an einer Stelle geformt.
+
+    Leer bleibt leer -- ausgeschaltet ist ausgeschaltet (#154), und eine
+    Ueberschrift ueber nichts laese "geprueft und nichts gewesen". Das
+    Scheitern traegt seinen eigenen Satz OHNE die Ueberschrift des Modells:
+    DIGEST_FAILED ist kein Modelltext und darf nicht als einer gelesen
+    werden, genau wie der Halbsatz davor es nicht haette duerfen.
+    """
+    d = (digest or "").strip()
+    if not d:
+        return ""
+    if d == DIGEST_FAILED:
+        return d + "\n"
+    return DIGEST_HEAD + d + "\n"
 
 
 def rollover_digest_set(tokens) -> None:
@@ -3136,7 +3685,10 @@ def _spoken_carry(conversation: "Conversation", carry: "str | None") -> str:
     for message in conversation.payload():
         if message.get("role") != "user":
             continue
-        text = message_text(message.get("content") or "").strip()
+        text = message_text(message.get("content") or "")
+        # #224: a working-area notice in front is Crow's, the line
+        # behind it the user's.
+        text = split_root_notice(text)[1].strip()
         # Protocol notes -- budget spent, an earlier rollover -- speak in
         # brackets and are Crow's own words, not the user's.
         if not text or text.startswith("["):
@@ -3154,6 +3706,197 @@ def _spoken_carry(conversation: "Conversation", carry: "str | None") -> str:
         return ""
     tail = ("- (+%d more in the transcript)\n" % skipped) if skipped else ""
     return SPOKEN_CARRY_HEAD + "\n".join(lines) + "\n" + tail
+
+
+# #214. DER SCHWANZ GEHT MIT UEBER DEN SCHNITT. Gemessen am 2026-09-22, Schnitt
+# um 17:12: vor dem Schnitt standen 221 eigene, beantwortete Aufrufe im Fenster,
+# und 15/15 `edit_file` trugen `path, old, new`; danach sah das Modell eine
+# Notiz aus Prosa und KEINEN einzigen Aufruf -- und 22/22 `edit_file` trugen
+# `old_string`/`new_string`. Jedes reife Harness ausser Codex behaelt darum
+# einen woertlichen Schwanz: Anthropics Context Editing haelt die letzten
+# `keep` = 3 Tool-Use/Result-Paare (clear_tool_uses_20250919), OpenHands'
+# Condenser die juengsten Ereignisse, Claude Code raeumt alte Ausgaben vor den
+# neuen. Codex (`build_compacted_history`) wirft die Aufrufe weg -- dieselbe
+# Form wie die Notiz bisher, dieselbe Luecke.
+#
+# DREI, NICHT MEHR: Anthropics Vorgabe, und genug, um eine Form zu zeigen,
+# ohne den neuen Praefix mit altem Zustand zu fuellen -- der Stand gehoert dem
+# Digest und dem Transkript, nicht dem Schwanz.
+ROLLOVER_CARRY_ROUNDS = 3
+# JE ERGEBNIS 2000 ZEICHEN: das Beispiel ist der AUFRUF, das Ergebnis zeigt
+# nur, dass er antwortete. Der Rest steht im Transkript, auf das die Notiz zeigt.
+ROLLOVER_CARRY_RESULT_CHARS = 2000
+# DAS BUDGET DES SCHWANZES, gegen den der Schwanz ganz gezaehlt wird --
+# Argumente, Namen, Ergebnisse. Gemessen am Archiv von 17:12: 515.387 Zeichen
+# Text auf 180.969 Tokens, 2,85 Zeichen je Token; 3 ist die runde Zahl darueber,
+# die Schaetzung liegt also eher zu hoch als zu niedrig. 3000 Tokens sind 1,5 %
+# eines 200k-Fensters: der Schwanz kann den Schnitt nie in Richtung der
+# naechsten Schwelle schieben. Was nicht passt, wird uebersprungen, nie
+# gekuerzt -- ein halbes Argument ist ein kaputtes Beispiel.
+ROLLOVER_CARRY_TOKENS = 3000
+ROLLOVER_CARRY_CHARS_PER_TOKEN = 3
+# DIE AUFRUFE, DIE DRIFTEN, zuerst: `edit_file` ist der, dessen Namen andere
+# Harnesses anders schreiben (old_string/new_string, #214/#215). Liegt unter
+# den letzten Runden keine davon, ersetzt die juengste passende die aelteste.
+ROLLOVER_CARRY_PREFER = ("edit_file", "write_file", "append_file")
+# DIE MARKE AM ERGEBNIS. Sie sagt dem Modell, dass es ein getragenes Ergebnis
+# liest, und dem Fenster beim Wiederoeffnen, dass die Runde getragen ist
+# (`carried_round`) -- ohne ein Feld, das an den Server ginge.
+ROLLOVER_CARRY_MARK = "[carried across the cut"
+ROLLOVER_CARRY_HEAD = (
+    "The last {n} tool round(s) before the cut follow this note verbatim -- "
+    "calls that ran and were answered, results clipped. They show this "
+    "harness's tool arguments as they worked.\n")
+
+
+def _carried_result_failed(text: str) -> bool:
+    """#214: ein Ergebnis, das ein Fehlschlag war -- `error: ...` (auch hinter
+    den #207-Klammerzeilen) oder ein Befehl, der nicht mit 0 endete."""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("[exit "):
+            return line != "[exit 0]"
+        if line.startswith("["):
+            continue              # #207/#215-Notizen: weiterlesen
+        return line.startswith("error")
+    return False
+
+
+def _carried_call_shaped(call: dict) -> bool:
+    """#214: ein Aufruf, den das Modell abschreiben darf -- ein deklariertes
+    Werkzeug, ein JSON-Objekt, nur deklarierte Schluessel, alle Pflichtschluessel.
+    Ein Aufruf mit `old_string` lief dank #215 zwar, lehrte aber den falschen
+    Namen; ein Aufruf mit `parameter name` lehrte gar keinen."""
+    function = call.get("function") or {}
+    name = function.get("name") or ""
+    declared = _declared_properties(name)
+    if not declared:
+        return False
+    try:
+        args = json.loads(function.get("arguments") or "")
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(args, dict):
+        return False
+    return (all(key in declared for key in args)
+            and all(key in args for key in _declared_required(name)))
+
+
+def _carried_result(content) -> str:
+    """#214: ein Ergebnis in seiner getragenen Form -- markiert, geklippt,
+    ein Bild durch einen Satz ersetzt (ein Bildblock ist der teuerste Teil
+    und zeigt keine Argumentform)."""
+    text = message_text(content)
+    image = ("\n[an image rode this result and was not carried]"
+             if message_images(content) else "")
+    if len(text) > ROLLOVER_CARRY_RESULT_CHARS:
+        mark = "%s -- clipped to the first %d of %d chars]\n" % (
+            ROLLOVER_CARRY_MARK, ROLLOVER_CARRY_RESULT_CHARS, len(text))
+        text = text[:ROLLOVER_CARRY_RESULT_CHARS]
+    else:
+        mark = ROLLOVER_CARRY_MARK + "]\n"
+    return mark + text + image
+
+
+def _answered_rounds(messages: list) -> list:
+    """#214: jede Runde, die getragen werden darf, aelteste zuerst.
+
+    Eine Runde ist eine Assistenten-Nachricht mit `tool_calls` und die
+    `tool`-Nachrichten DIREKT dahinter. Gepaart wird je Runde, nicht global --
+    llama-server vergibt `call_0` in jeder Runde neu (so im Archiv von 17:12).
+    Getragen wird nur eine Runde, deren Aufrufe ALLE genau eine Antwort haben,
+    keine davon ein Fehler, und deren Aufrufe alle wohlgeformt sind: eine
+    offene `tool_call_id` waere ein Request, den das Template verwirft.
+    """
+    rounds = []
+    for i, message in enumerate(messages):
+        calls = message.get("tool_calls") or []
+        if message.get("role") != "assistant" or not calls:
+            continue
+        results = []
+        for follower in messages[i + 1:]:
+            if follower.get("role") != "tool":
+                break
+            results.append(follower)
+        ids = [c.get("id") for c in calls]
+        if (not all(ids) or len(set(ids)) != len(ids)
+                or sorted(ids) != sorted(r.get("tool_call_id") or ""
+                                         for r in results)):
+            continue
+        texts = [message_text(r.get("content") or "") for r in results]
+        if any(t.startswith(ROLLOVER_CARRY_MARK) for t in texts):
+            continue              # schon einmal getragen: nicht zweimal
+        if any(_carried_result_failed(t) for t in texts):
+            continue
+        if not all(_carried_call_shaped(c) for c in calls):
+            continue
+        # DAS DENKEN UND DIE PROSA BLEIBEN ZURUECK: die Prosa erzaehlt einen
+        # Stand, den der Digest traegt, und vor der Zeile des Menschen gelesen
+        # klaenge sie wie eine Antwort darauf.
+        carried = [{"role": "assistant", "content": "",
+                    "tool_calls": [dict(c) for c in calls]}]
+        by_id = {r.get("tool_call_id"): r for r in results}
+        for call_id in ids:
+            carried.append({"role": "tool", "tool_call_id": call_id,
+                            "content": _carried_result(
+                                by_id[call_id].get("content") or "")})
+        names = [(c.get("function") or {}).get("name") or "" for c in calls]
+        size = sum(len(json.dumps(m, ensure_ascii=False)) for m in carried)
+        rounds.append({"at": i, "names": names, "chars": size,
+                       "messages": carried})
+    return rounds
+
+
+def carry_rounds(messages: list) -> list:
+    """#214: die Nachrichten, die hinter der Rollover-Notiz stehen.
+
+    Die juengsten `ROLLOVER_CARRY_ROUNDS` tragbaren Runden, zusammen unter
+    `ROLLOVER_CARRY_TOKENS`; eine zu grosse wird uebersprungen, nicht gekuerzt.
+    Zeigt keine davon einen der Aufrufe aus `ROLLOVER_CARRY_PREFER`, tritt die
+    juengste Runde, die einen zeigt und ins Budget passt, an die Stelle der
+    aeltesten. Aelteste zuerst, wie sie liefen. `[]`, wenn nichts taugt.
+    """
+    budget = ROLLOVER_CARRY_TOKENS * ROLLOVER_CARRY_CHARS_PER_TOKEN
+    rounds = _answered_rounds(messages)
+    picked: list = []
+    used = 0
+    for r in reversed(rounds):
+        if len(picked) >= ROLLOVER_CARRY_ROUNDS:
+            break
+        if used + r["chars"] <= budget:
+            picked.append(r)
+            used += r["chars"]
+    if (picked and not any(n in ROLLOVER_CARRY_PREFER
+                           for r in picked for n in r["names"])):
+        oldest = picked[-1]
+        spare = budget - used + (oldest["chars"]
+                                 if len(picked) >= ROLLOVER_CARRY_ROUNDS else 0)
+        found = None
+        for name in ROLLOVER_CARRY_PREFER:
+            found = next((r for r in reversed(rounds)
+                          if name in r["names"] and r["chars"] <= spare), None)
+            if found is not None:
+                break
+        if found is not None:
+            if len(picked) >= ROLLOVER_CARRY_ROUNDS:
+                picked.pop()
+            picked.append(found)
+    picked.sort(key=lambda r: r["at"])
+    return [m for r in picked for m in r["messages"]]
+
+
+def carried_round(messages: list, index: int) -> bool:
+    """#214: ist die Assistenten-Nachricht bei `index` eine getragene Runde?
+    Das Fenster zeichnet sie beim Wiederoeffnen als getragen, nicht als neue
+    Aufrufe -- erkannt an der Marke ihres ersten Ergebnisses."""
+    if index + 1 >= len(messages):
+        return False
+    follower = messages[index + 1]
+    return (follower.get("role") == "tool"
+            and message_text(follower.get("content") or "")
+            .startswith(ROLLOVER_CARRY_MARK))
 
 
 # #205. DAS TIMEOUT WEISS, WAS EIN KALTER PREFILL KOSTET. Gemessen im
@@ -3218,6 +3961,7 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
                     reasoning_effort: "str | None" = None,
                     reasoning_budget: "int | None" = None,
                     reasoning_budget_message: "str | None" = None,
+                    served_name: "str | None" = None,
                     # #205: DIE KONTEXTSCHAETZUNG, die der Aufrufer ohnehin
                     # an `should_roll` uebergibt. Sie skaliert das Timeout
                     # (unten); hier angenommen statt gesucht, weil eine zweite
@@ -3230,7 +3974,11 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
                     # bei der Definition aus, nicht beim Aufruf.
                     transport: "str | None" = None,
                     remote: bool = False,
-                    routing: "dict | None" = None) -> str:
+                    routing: "dict | None" = None,
+                    # #217: WHERE THE SEEDS OF THIS LEG ARE RECORDED, or None.
+                    # A list the caller keeps (the turn's bill); each request
+                    # of the leg appends the seed it sent.
+                    seeds: "list | None" = None) -> str:
     """#154. One short question on the still-warm prefix, BEFORE the cut.
 
     A sibling of `review_turn`, and it keeps the same three promises: the
@@ -3252,8 +4000,12 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
     if ROLLOVER_DIGEST_TOKENS <= 0 or len(conversation) < 2:
         return ""
     transport = transport or TRANSPORT_CHAT
-    messages = conversation.payload() + [{"role": "user", "content": DIGEST_ASK}]
-    body = {"messages": messages, "tools": TOOLS, "stream": False,
+    # #210: DER RUMPF OHNE DIE FRAGE. Die Frage steht nicht mehr fest in den
+    # `messages`, weil die Wiederholung sie am Ende austauscht -- Rumpf und
+    # Frage sind zwei Dinge, und nur die zweite aendert sich zwischen den
+    # Versuchen. Der Cache bleibt dadurch bis auf die Frage selbst warm.
+    conversation_messages = conversation.payload()
+    body = {"messages": [], "tools": TOOLS, "stream": False,
             "temperature": temperature, "top_p": top_p, "min_p": min_p,
             # #205: DER DECKEL HEBELT SICH SONST SELBST AUF. 400 waren genug,
             # solange die Leg nicht dachte; seit sie denkt, frisst das Denken
@@ -3262,12 +4014,18 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
             # beiden Werte -- der Boden lebt von der Messung oben.
             "max_tokens": max(ROLLOVER_DIGEST_TOKENS,
                               ROLLOVER_DIGEST_MIN_TOKENS)}
+    # #210: der Deckel, den die Kappungszeile nennt -- vor `anthropic_body`
+    # gelesen, das den Koerper in seinen Dialekt umschreibt.
+    cap = body["max_tokens"]
     if model:
         body["model"] = model
     if top_k is not None:
         body["top_k"] = top_k
     if presence_penalty is not None:
         body["presence_penalty"] = presence_penalty
+    # #225: the same fixed word as the turn, or the leg renders
+    # another head than the warm prefix (#205) -- `effective_reasoning`.
+    reasoning_effort = effective_reasoning(served_name or model, reasoning_effort)
     if reasoning_effort:
         # #205/#176: DIESELBE TUER WIE DER ZUG, aus demselben Grund wie bei
         # review_turn. Ein Koerper, der seine Stufe auf der anderen Tuer
@@ -3277,7 +4035,7 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
         # wieder in die kwargs ab, der Prompt-Cache eines laufenden Chats
         # bleibt unberuehrt.
         body["reasoning_effort"] = reasoning_effort
-    capped = resolve_reasoning_budget(model, reasoning_budget)
+    capped = resolve_reasoning_budget(served_name or model, reasoning_budget)
     if capped is not None:
         # #205/#176: DERSELBE DECKEL WIE DER ZUG, dieselbe Einspeisung
         # darunter. Die Felder gehen in den Sampler, nicht ins Template --
@@ -3317,34 +4075,72 @@ def rollover_digest(conversation: "Conversation", *, base_url: str,
         # wirkte nicht) -- der Kwarg war dort inert und nur im
         # chat_completions-Dialekt eine Waffe.
         url = f"{base_url.rstrip('/')}/chat/completions"
-    try:
-        request = urllib.request.Request(
-            url, data=json.dumps(body).encode("utf-8"), method="POST",
-            headers=dict(_stream_headers(api_key, extra_headers),
-                         **{"Accept": "application/json"}))
-        with urllib.request.urlopen(
-                request, timeout=_digest_timeout(prompt_tokens, timeout)) as resp:
-            answer = json.loads(resp.read().decode("utf-8") or "{}")
-        if transport == TRANSPORT_MESSAGES:
-            text = "".join(block.get("text") or ""
-                           for block in answer.get("content") or []
-                           if block.get("type") == "text")
-        else:
-            # #205: DAS DENKEN WIRD NICHT GELESEN. llama-server legt die
-            # Gedanken in `message.reasoning_content` und die Antwort in
-            # `message.content` -- indem hier nur `content` geerntet wird,
-            # ist der Nicht-Strom-Arm des Feldtrenners schon erledigt.
-            text = ((answer.get("choices") or [{}])[0]
-                    .get("message", {}).get("content") or "")
-    except Exception:              # noqa: BLE001 - Beifang, nie der Roll selbst
-        return ""
+    # #210. ZWEI VERSCHE, KEIN DRITTER. Der erste stellt die Frage, der
+    # zweite stellt sie schaerfer, nachdem das Modell sie mit einem Tool-Call
+    # beantwortet hat (gemessen 2026-09-22: finish=tool_calls, 482 Tokens,
+    # ein Halbsatz als Digest). Ein dritter Versuch bewiese nichts mehr, was
+    # die ersten beiden nicht schon bewiesen haben -- und der Roll wartet.
+    text = ""
+    for ask in (DIGEST_ASK, DIGEST_ASK_RETRY):
+        body["messages"] = conversation_messages + [
+            {"role": "user", "content": ask}]
+        # #217: DIE LEG ZIEHT IHREN EIGENEN SEED, wie jede Runde des Zuges --
+        # ohne ihn sampelt crow-nest mit Seed 0, genau dem Seed, der die
+        # Korruption vom 2026-09-22 Byte fuer Byte reproduziert hat. Der Seed
+        # geht in den Sampler, nicht ins Template: der warme Praefix bleibt,
+        # wofuer die Leg existiert (#154/#205). Lokal und im Chat-Dialekt nur,
+        # aus demselben Grund wie beim Zug (`_REMOTE_DROPS`).
+        if not remote and transport != TRANSPORT_MESSAGES:
+            body["seed"] = draw_seed(avoid=body.get("seed"))
+            if seeds is not None:
+                seeds.append(body["seed"])
+        try:
+            request = urllib.request.Request(
+                url, data=json.dumps(body).encode("utf-8"), method="POST",
+                headers=dict(_stream_headers(api_key, extra_headers),
+                             **{"Accept": "application/json"}))
+            with urllib.request.urlopen(
+                    request,
+                    timeout=_digest_timeout(prompt_tokens, timeout)) as resp:
+                answer = json.loads(resp.read().decode("utf-8") or "{}")
+            if transport == TRANSPORT_MESSAGES:
+                text = "".join(block.get("text") or ""
+                               for block in answer.get("content") or []
+                               if block.get("type") == "text")
+                finish = answer.get("stop_reason") or ""
+            else:
+                choice = (answer.get("choices") or [{}])[0]
+                # #205: DAS DENKEN WIRD NICHT GELESEN. llama-server legt die
+                # Gedanken in `message.reasoning_content` und die Antwort in
+                # `message.content` -- indem hier nur `content` geerntet wird,
+                # ist der Nicht-Strom-Arm des Feldtrenners schon erledigt.
+                text = (choice.get("message", {}).get("content") or "")
+                finish = choice.get("finish_reason") or ""
+        except Exception:          # noqa: BLE001 - Beifang, nie der Roll selbst
+            return DIGEST_FAILED
+        # #217 / crow-nest #99: ein abgebrochenes Dokument ist kein Digest.
+        if finish == FINISH_ABORT:
+            return DIGEST_FAILED
+        if finish not in ("tool_calls", "tool_use"):
+            break
     # #205: UND DER REST DENKT IN <think>-BLOECKEN IM CONTENT SELBST, je
     # nach Template -- gewaschen wird bei der Ausgabe, gemeinsam fuer beide
-    # Faelle. Der Vertrag bleibt: nie raise, "" bei Scheitern, kurzer Text.
-    return _strip_think(text).strip()
+    # Faelle. Der Vertrag bleibt: nie raise. Seit #210 lautet das Scheitern
+    # nicht mehr "" (der Halbtruth unter der Ueberschrift des Modells war
+    # das Messergebnis), sondern der eine ehrliche Satz.
+    text = _strip_think(text).strip()
+    if len(text) < DIGEST_MIN_CHARS:
+        return DIGEST_FAILED
+    # #210: GEKAPPT IST NICHT FERTIG -- siehe DIGEST_TRUNCATED. Nach dem
+    # Waschen geprueft, damit ein vom Deckel gekoepftes Denken (#205) weiter
+    # als Scheitern zaehlt und nicht als gekappter Zustandsbericht.
+    if finish in DIGEST_CAPPED:
+        return _digest_trim(text, cap)
+    return text
 
 
-def repin_head(conversation: "Conversation", root: "str | None" = None) -> bool:
+def repin_head(conversation: "Conversation", root: "str | None" = None,
+               include_status: bool = False) -> bool:
     """Den Kopf dieses Chats nach einem Schnitt wieder setzen. True, wenn er sich
     bewegt hat.
 
@@ -3359,8 +4155,13 @@ def repin_head(conversation: "Conversation", root: "str | None" = None) -> bool:
     Kopf. Der Rollover ist damit der einzige Moment, an dem ein Kopf gratis
     bewegt werden kann -- ueberall sonst ist es die Rechnung, die
     `MEMORY_COST_NOTE` ansagt.
+
+    #210. `include_status` NUR HIER, NUR VOM SCHNITT: der gratis bewegte Kopf
+    traegt einmal die Marken des Ziels (siehe `goal_block`). Alle anderen
+    Aufrufer pinnen weiter ohne Stand -- dort kostet jede Marke einen Prefill.
     """
-    return conversation.repin_memory(prompt_head(root))
+    return conversation.repin_memory(prompt_head(root,
+                                                 include_status=include_status))
 
 
 def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
@@ -3397,6 +4198,8 @@ def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
     where = recent_paths(conversation)
 
     spoken = _spoken_carry(conversation, carry)
+    # #214: vor dem Reset gewaehlt -- danach gibt es keine Runde mehr zu lesen.
+    rounds = carry_rounds(conversation.payload())
     conversation.reset()
     # #163. DEN KOPF SETZT DER AUFRUFER WIEDER, NICHT DIESE FUNKTION -- und das
     # ist keine Bequemlichkeit, sondern die Zustaendigkeit: was oben steht,
@@ -3411,14 +4214,39 @@ def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
         tokens=context_tokens, path=path, transcript=transcript, lines=lines,
         where=f"Last worked on: {', '.join(where)}\n" if where else "",
         spoken=spoken,
-        # #154: als Modelltext gekennzeichnet, nie als Fakt -- und ein leerer
-        # Digest laesst keine Ueberschrift zurueck, die wie "geprueft und
-        # nichts gewesen" laese.
-        digest=(DIGEST_HEAD + digest.strip() + "\n") if digest.strip() else "")
-    # ONE message, not two. Consecutive turns of the same role are merged or
-    # rejected depending on the chat template, and neither is a thing to find
-    # out at 180k tokens.
-    conversation.append("user", f"{note}\n\n{carry}" if carry else note)
+        # #154: als Modelltext gekennzeichnet, nie als Fakt -- und seit #210
+        # formt `_digest_block` den Block: leer bleibt leer, Scheitern heisst
+        # Scheitern, und nur echter Modelltext traegt die Ueberschrift.
+        # #214: der Satz ueber den Schwanz steht am Ende des Digest-Blocks,
+        # vor dem Schlusssatz -- ein eigener Platzhalter haette jede Stelle
+        # gebrochen, die die Notiz mit ihren sieben Feldern formt.
+        digest=_digest_block(digest) + (
+            ROLLOVER_CARRY_HEAD.format(
+                n=sum(1 for m in rounds if m["role"] == "assistant"))
+            if rounds else ""))
+    if not rounds:
+        # ONE message, not two. Consecutive turns of the same role are merged
+        # or rejected depending on the chat template, and neither is a thing
+        # to find out at 180k tokens.
+        conversation.append("user", f"{note}\n\n{carry}" if carry else note)
+        return path
+    # #214. DIE NOTIZ, DER SCHWANZ, DANN DIE ZEILE DES MENSCHEN. Die Runden
+    # sind Geschichte und stehen darum VOR der Zeile, die gerade getippt wurde
+    # -- dahinter lasen sie sich wie die Antwort auf sie. Die Regel oben haelt
+    # trotzdem: zwischen den beiden Nutzer-Nachrichten stehen Assistent und
+    # Werkzeug, nie zwei gleiche Rollen hintereinander.
+    conversation.append("user", note)
+    for message in rounds:
+        if message["role"] == "assistant":
+            conversation.append("assistant", message["content"], tool_calls=[
+                {"id": c["id"], "name": c["function"]["name"],
+                 "arguments": c["function"]["arguments"]}
+                for c in message["tool_calls"]])
+        else:
+            conversation.append("tool", message["content"],
+                                tool_call_id=message["tool_call_id"])
+    if carry:
+        conversation.append("user", carry)
     return path
 
 
@@ -3759,6 +4587,36 @@ def message_images(content) -> list:
     return []
 
 
+# #224. A MOVED WORKING AREA IS SAID, ONCE, IN ONE LINE. Until now a
+# rebind re-pinned the head (and only when the memory moved) and said nothing
+# in the conversation: the model kept reading tool results full of the old
+# root with no line telling it they are stale. The notice rides in front of
+# the NEXT user message -- not as its own message (two user turns in a row are
+# a template question, see `roll_over`) and not as a system message (Qwen3.8's
+# template raises on one past index 0). It is appended with that message,
+# never edited into history, so no sent prefix moves. A chat with no turns yet
+# gets none: its head already names the new root (`working_area_line`).
+ROOT_NOTICE = "[Working area is now {new} (was {old}).]\n\n"
+ROOT_NOTICE_NONE = "none"
+# #241: the blank line is absent when the turn had no text block and the
+# notice became its only one (`append`), so the end of the text counts too.
+ROOT_NOTICE_RE = re.compile(r"\A\[Working area is now [^\n]*\](?:\n\n|\Z)")
+
+
+def split_root_notice(text: str) -> "tuple[str | None, str]":
+    """#241: (#224's notice or None, the rest -- the user's typed line).
+
+    The one place that tells the two apart, for the mandate rule
+    (`user_words`), the rollover carry (`_spoken_carry`) and the window's
+    replay, which draws only the rest, as the live bubble did.
+    """
+    text = text or ""
+    hit = ROOT_NOTICE_RE.match(text)
+    if not hit:
+        return None, text
+    return hit.group(0).strip(), text[hit.end():]
+
+
 class Conversation:
     """The message list. Append-only by construction -- see module docstring.
 
@@ -3794,6 +4652,18 @@ class Conversation:
         self._messages: list[dict[str, str]] = []
         if system:
             self._messages.append({"role": "system", "content": system})
+        # #215-H. WHICH CONTEXT THE READ-STATE BELONGS TO. A new token here, in
+        # `reset()` and in `restore()` -- the three places the model stops
+        # holding what it read -- and `adopt_read_state` empties `_READ` when
+        # the turn's conversation carries a token it has not seen. A token, not
+        # a clear: this object must not reach into module state itself, or a
+        # delegate's own Conversation would wipe the parent's reads.
+        self.read_epoch = object()
+        # #224: the working-area notice waiting for the next user
+        # message, and the root it moved away from (kept across two rebinds
+        # before a request, so A -> B -> C says "C (was A)").
+        self._notice: "str | None" = None
+        self._notice_from: "str | None" = None
         if memory is not None:
             self.pin_memory(memory)
 
@@ -3887,6 +4757,40 @@ class Conversation:
         elif self._system:
             self._messages.append({"role": "system", "content": self._system})
 
+    def note_root_change(self, old: "str | None", new: "str | None") -> bool:
+        """#224: queue "working area is now X (was Y)". True when queued.
+
+        Nothing is queued for a chat without turns, or when the root ends up
+        where the model last saw it; a pending notice is then withdrawn.
+        """
+        if self._notice is not None:
+            old = self._notice_from
+        if (old or None) == (new or None) or len(self._messages) <= (
+                1 if self._system else 0):
+            self._notice = self._notice_from = None
+            return False
+        self._notice_from = old
+        self._notice = ROOT_NOTICE.format(new=new or ROOT_NOTICE_NONE,
+                                          old=old or ROOT_NOTICE_NONE)
+        return True
+
+    @property
+    def pending_notice(self) -> "str | None":
+        return self._notice
+
+    @property
+    def fresh(self) -> bool:
+        """True while nothing but the head is in here -- what `restore` needs.
+
+        #209: THE CALLERS ASK FIRST. The window restores on a probe thread,
+        and a page reload or a line typed before the probe answered can fill
+        the conversation in the meantime; the raise below is the contract,
+        this is how a caller keeps it without catching it.
+        """
+        # A fresh Conversation already holds the system prompt, so "empty" is one
+        # message, not zero. Checking for zero rejected every real resume.
+        return len(self._messages) <= (1 if self._system else 0)
+
     def restore(self, messages: list[dict]) -> None:
         """Adopt a saved history wholesale, at construction time only.
 
@@ -3894,11 +4798,12 @@ class Conversation:
         request of a session, so no prefix exists yet to break. Calling it
         mid-session would be exactly the edit this class refuses to allow.
         """
-        # A fresh Conversation already holds the system prompt, so "empty" is one
-        # message, not zero. Checking for zero rejected every real resume.
-        if len(self._messages) > (1 if self._system else 0):
+        if not self.fresh:
             raise RuntimeError("restore() is for a fresh conversation, not a running one")
         self._messages = [dict(m) for m in messages]
+        # #215-H: the saved history may show reads, but not the files as they
+        # stand now -- a resumed chat reads again before it writes.
+        self.read_epoch = object()
         # #121. A PINNED CONVERSATION OWNS ITS HEAD, so the restored payload's
         # system message is brought into line with it. Not tidiness: the head is
         # what the next request will actually send and what the next save will
@@ -3921,6 +4826,19 @@ class Conversation:
         # `content` is a LIST exactly when a user turn carries images (#142) --
         # the OpenAI block shape from user_content(). Everything else stays the
         # bare string it always was.
+        if role == "user" and self._notice is not None:
+            # #224: the queued working-area notice opens the next
+            # user message -- appended with it, so no sent byte moves.
+            if isinstance(content, list):
+                content = [dict(b) for b in content]
+                first = next((b for b in content if b.get("type") == "text"), None)
+                if first is None:
+                    content.insert(0, {"type": "text", "text": self._notice.rstrip()})
+                else:
+                    first["text"] = self._notice + (first.get("text") or "")
+            else:
+                content = self._notice + (content or "")
+            self._notice = self._notice_from = None
         message = {"role": role, "content": content}
         # Absent rather than empty: a turn that produced no reasoning has to
         # serialise exactly as it did before this field existed.
@@ -3981,6 +4899,10 @@ class Conversation:
         self._reviewed = 0.0
         self._system = self._base_system
         self._messages = []
+        self.read_epoch = object()      # #215-H: rollover and new chat alike
+        # #224: a fresh context has nothing stale to correct; its
+        # head names the root.
+        self._notice = self._notice_from = None
         if self._system:
             self._messages.append({"role": "system", "content": self._system})
 
@@ -4053,6 +4975,49 @@ TRANSPORT_MESSAGES = "anthropic_messages"
 # without an edit here.
 MAX_TOKENS = int(os.environ.get("CROW_MAX_TOKENS") or 16384)
 
+# #254. HOW MUCH ONE write_file CARRIES, DERIVED FROM THE CAP
+# ABOVE rather than left to the model. The write_file/append_file wording of
+# 2026-09-20 (6301e0e) was written for a 2.4 MB page under an 8192 cap and
+# told the model to build "a large file" as a head plus "one append per
+# section" without saying what large is. On robin's diorama run (2026-09-23,
+# crow-nest, cap 16384, the three session files) that produced 61 write_file
+# (median 940 B) and 50 append_file calls (median 319 B), each alone in its
+# round; 49 of the 50 appends left a file of at most 10 KB, and none of the
+# 111 calls came near the cap (0 cut-off results).
+#
+# THE DERIVATION, measured on the same 111 calls with the model's own
+# tokenizer (Qwen3.8-Flash-Next tokenizer.json): 144,423 content bytes were
+# 65,909 tokens, 0.456 tokens/byte; per call of 1 KB or more the densest was
+# 0.735 (a numeric material table). The reasoning emitted in the same round
+# as a write, which the cap also pays for, was at most 1,042 tokens. So: half
+# the cap is kept for reasoning, call framing and denser content than
+# measured, and the other half is divided by 0.75 tokens/byte, rounded down
+# to whole KB -- 10 KB at 16384 (worst measured density 7.5k tokens, 46 % of
+# the cap) and 5 KB at 8192, the cap #203 was cut at (3.8k tokens, 46 %).
+WHOLE_WRITE_TOKENS_PER_BYTE = 0.75
+
+
+def whole_write_bytes(cap: "int | None" = None) -> int:
+    """#254: the size one write_file carries under `cap` (the
+    module cap when None) with half the cap to spare."""
+    cap = cap or MAX_TOKENS
+    return max(1024, int(cap / 2 / WHOLE_WRITE_TOKENS_PER_BYTE) // 1024 * 1024)
+
+
+def _state_whole_write_limit() -> None:
+    """Put the live limit into the two descriptions that name it, once at
+    import: the cap is fixed for the process (CROW_MAX_TOKENS is read once),
+    so the tool list -- part of every cached prefix -- stays byte-stable."""
+    kb, cap = str(whole_write_bytes() // 1024), str(MAX_TOKENS)
+    for tool in TOOLS:
+        fn = tool["function"]
+        if fn["name"] in ("write_file", "append_file"):
+            fn["description"] = (fn["description"].replace("<WHOLE_KB>", kb)
+                                 .replace("<CAP>", cap))
+
+
+_state_whole_write_limit()
+
 # The name the surfaces and the tests already say, kept as one: the cap no
 # longer depends on where the turn is going.
 REMOTE_MAX_TOKENS = MAX_TOKENS
@@ -4114,9 +5079,15 @@ _ANTHROPIC_DROPS = ("temperature", "top_p", "min_p", "top_k",
 # `presence_penalty` (2026-09-18) GOES FOR THE REASON `min_p` DOES: it is a
 # per-model value out of the local manifest, a remote model has no entry, and a
 # broker on `require_parameters` finds no upstream for a field it never listed.
+#
+# `seed` (#217) GOES BECAUSE IT IS THE MACHINE'S ANSWER TO THE MACHINE'S
+# PROBLEM: crow-nest's fixed default seed is what made a local re-request
+# return the same round. A remote endpoint samples as it likes, OpenAI calls
+# the field best-effort, and a broker on `require_parameters` would have one
+# more field to find no upstream for -- the 404 above, again.
 _REMOTE_DROPS = ("min_p", "presence_penalty", "timings_per_token",
                  "chat_template_kwargs", "reasoning_effort",
-                 "reasoning_budget_tokens", "reasoning_budget_message")
+                 "reasoning_budget_tokens", "reasoning_budget_message", "seed")
 
 # WHAT IS LEFT, AND IT IS SPLIT BECAUSE ONE HALF IS NEGOTIABLE AND THE OTHER IS
 # NOT. `provider.require_parameters` asks a broker to route only to upstreams
@@ -4864,11 +5835,27 @@ _MD_RULE = re.compile(r"^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)
 # backticks is a star: `a**b` is a glob or a pointer, not the start of a bold
 # run. Emphasis takes no newline, which is what keeps a lone star in "2 * 3"
 # from pairing with one two lines further down.
+#
+# #229. A BARE URL IS ONE PIECE, and it sits before emphasis for the reason code
+# does: `https://github.com/o/r/blob/main/cli/crow_gui.py?plain=1` was cut at
+# the first `_` into a link to `.../cli/crow` and italics after it (measured on
+# the integrated GUI, 2026-09-23). The URL goes out as plain text; the window's
+# finder makes it a link, the terminal prints it whole.
+#
+# AN UNDERSCORE INSIDE A WORD IS NOT EMPHASIS. CommonMark 0.31.2, 6.2: a `_`
+# run opens only if it is not preceded by an alphanumeric and closes only if it
+# is not followed by one ("foo_bar_" stays text), while `*` may sit intraword.
+# `\w` rather than "alphanumeric" because a run is read whole there and one
+# character at a time here: `a__b__c` would otherwise open at its second `_`.
+# Without it `datei_mit_langem_namen` rendered `datei` + italic `mit` + `langem`.
 _MD_INLINE = re.compile(
     r"(?P<fence>`+)(?P<code>.+?)(?P=fence)"
     r"|\[(?P<text>[^\]\n]*)\]\((?P<href>[^)\s]+)\)"
-    r"|(?P<strong>\*\*|__)(?P<bold>[^\s\n](?:[^\n]*?[^\s\n])?)(?P=strong)"
-    r"|(?P<slant>[*_])(?P<italic>[^\s*_\n](?:[^*_\n]*[^\s*_\n])?)(?P=slant)")
+    r"|(?P<url>https?://[^\s<>\"`]+)"
+    r"|\*\*(?P<bold>[^\s\n](?:[^\n]*?[^\s\n])?)\*\*"
+    r"|(?<!\w)__(?P<ubold>[^\s\n](?:[^\n]*?[^\s\n])?)__(?!\w)"
+    r"|\*(?P<italic>[^\s*\n](?:[^*\n]*[^\s*\n])?)\*"
+    r"|(?<!\w)_(?P<uitalic>[^\s_\n](?:[^\n]*?[^\s\n])?)_(?!\w)")
 
 # THE EDGES OF EMPHASIS MAY NOT BE WHITESPACE, and that is the spec rather than
 # taste: CommonMark 0.31.2 calls an opener a "left-flanking delimiter run" and
@@ -4925,10 +5912,16 @@ def _md_spans(text: str, bold: bool = False, italic: bool = False,
                 out.extend(_md_spans(found.group("text"), bold, italic, target))
             else:
                 _md_plain(out, found.group(0), bold, italic, href)
-        elif found.group("bold") is not None:
-            out.extend(_md_spans(found.group("bold"), True, italic, href))
+        elif found.group("url") is not None:
+            _md_plain(out, found.group("url"), bold, italic, href)
+        elif found.group("bold") is not None or found.group("ubold") is not None:
+            inner = found.group("bold")
+            out.extend(_md_spans(inner if inner is not None else found.group("ubold"),
+                                 True, italic, href))
         else:
-            out.extend(_md_spans(found.group("italic"), bold, True, href))
+            inner = found.group("italic")
+            out.extend(_md_spans(inner if inner is not None else found.group("uitalic"),
+                                 bold, True, href))
         at = found.end()
     _md_plain(out, text[at:], bold, italic, href)
     return out
@@ -5026,6 +6019,14 @@ def stream_reply(
     # ein Deckel ohne sie die Antwort koepft.
     reasoning_budget: "int | None" = None,
     reasoning_budget_message: "str | None" = None,
+    # #220. WHICH MODEL THE SERVER HAS OPEN, and the one name the
+    # manifest is asked about. NOT `model`: that is the wire label, `crow`
+    # unless somebody typed --model (see `fetch_model_name`), and it names no
+    # entry -- so a budget looked up by it was None for every local turn since
+    # #176. The surfaces pass what /props reported, the name their sampling
+    # and reasoning levels already come from. None falls back to `model`,
+    # which is the remote case: there the slug on the wire IS the served name.
+    served_name: "str | None" = None,
     timeout: float,
     extra_headers: "dict | None" = None,
     # WHICH DIALECT THE ENDPOINT SPEAKS, and it is a parameter rather than
@@ -5052,6 +6053,12 @@ def stream_reply(
     # model that must not use any invites the call this client would then have
     # to refuse.
     send_tools: bool = True,
+    # #217. THE SAMPLER SEED OF THIS REQUEST. None draws a fresh one -- every
+    # local request names its seed now, see SEED_MAX -- and a number is sent
+    # as given, which is how `run_turn` makes its re-request differ. Either
+    # way it lands in the timings as `_seed`. Never sent away from home
+    # (`_REMOTE_DROPS`), and then not recorded either.
+    seed: "int | None" = None,
     events: "ReplyEvents | None" = None,
 ) -> tuple[str, str, dict]:
     """Stream one assistant turn. Returns (text, reasoning, timings).
@@ -5150,6 +6157,8 @@ def stream_reply(
         # absent field as 1.5 over the whole answer, llama-server as 0.0 -- see
         # SAMPLING_FIELDS. 0.0 IS A VALUE and must travel, hence `is not None`.
         body["presence_penalty"] = presence_penalty
+    # #225: a fixed point is sent its word on every request.
+    reasoning_effort = effective_reasoning(served_name or model, reasoning_effort)
     if reasoning_effort is not None:
         # Only when asked for. Sending nothing keeps the prompt byte-identical to a client that
         # predates the switch, which is what the prompt cache wants.
@@ -5185,7 +6194,7 @@ def stream_reply(
     # Antworten auf dieselbe Frage waeren -- dieselbe Regel, der `transport` und
     # `remote` folgen. Ein entferntes Modell hat keinen Manifesteintrag, bekommt
     # also keinen Deckel, und `remote_body` nimmt ihn ohnehin wieder heraus.
-    capped = resolve_reasoning_budget(model, reasoning_budget)
+    capped = resolve_reasoning_budget(served_name or model, reasoning_budget)
     if capped is not None:
         # ZWEI FELDER, EINE ENTSCHEIDUNG (#176). Der Deckel ohne die Einspeisung
         # ist gemessen schaedlich, also reisen sie zusammen oder gar nicht. Der
@@ -5208,10 +6217,17 @@ def stream_reply(
     # taken before today.
     if routing and transport != TRANSPORT_MESSAGES:
         body.update(routing)
+    # #217: EVERY LOCAL REQUEST NAMES ITS SEED. Set before `remote_body` like
+    # every other field, so the one place that decides what leaves the machine
+    # still decides this one.
+    body["seed"] = draw_seed() if seed is None else int(seed)
     # THE LAST THING THAT HAPPENS TO THE BODY. Put here rather than beside each
     # field so a field added above cannot travel by being forgotten.
     if remote:
         remote_body(body)
+    # WHAT WAS SENT IS WHAT IS RECORDED: `anthropic_body` builds its own object
+    # and carries no seed, so that dialect records none either.
+    sent_seed = body.get("seed") if transport != TRANSPORT_MESSAGES else None
 
     text_parts: list[str] = []
     # THE THOUGHT BLOCKS, and this used to be a flat list plus an `in_reasoning`
@@ -5227,6 +6243,7 @@ def stream_reply(
     first_token_at: float | None = None
     first_content_at: float | None = None
     finish_reason: str | None = None
+    malformed: "list | None" = None
 
     events.reply_started()
 
@@ -5306,6 +6323,29 @@ def stream_reply(
             if isinstance(chunk.get("timings"), dict):
                 timings = chunk["timings"]
 
+            # #216. AN ERROR AFTER THE HEADERS IS STILL AN
+            # ERROR. OpenRouter documents it: a failure mid-stream arrives as
+            # a chunk with a top-level `error` object and finish_reason
+            # "error", "the HTTP status remains 200 OK". Read as a delta it is
+            # an empty reply -- "the model answered nothing" -- and its code
+            # and words were gone. Raised in the HTTP shape `_post_stream`
+            # writes, so one classifier reads both doors. Remote only: the
+            # local server's stream is not what OpenRouter documented.
+            problem = chunk.get("error")
+            if remote and isinstance(problem, dict):
+                raise CrowError("HTTP %s mid-stream from %s: %s"
+                                % (problem.get("code") or "?", model,
+                                   strip_tag_characters(
+                                       str(problem.get("message") or problem))[:500]))
+
+            # #217 / crow-nest #99: THE ENGINE'S OWN ACCOUNT OF EVERY CALL IT
+            # ABANDONED, on the final chunk and only when there was one. It is
+            # what `classify_round` and the cut answers read first; the text
+            # heuristics stand in for engines that do not send it.
+            abandoned = chunk.get("crow_malformed_calls")
+            if isinstance(abandoned, list):
+                malformed = [r for r in abandoned if isinstance(r, dict)]
+
             # The absolute size of the conversation, straight from the server's
             # tokeniser. It arrives on the last chunk only, and only one chunk
             # carries it, so it is read wherever it turns up rather than assumed
@@ -5380,6 +6420,14 @@ def stream_reply(
         thoughts.finish()
         events.reply_finished()
 
+    # #217 / crow-nest #99: `abort` IS A BROKEN STREAM, NOT AN ANSWER. serve
+    # never puts it on a stream it can still write to, so seeing it means a
+    # relay or a future server did; either way what came before it is a
+    # fragment. Raised in the words the #151 retry already recognises, before
+    # anything of this round can be appended.
+    if finish_reason == FINISH_ABORT:
+        raise CrowError("stream broke: the server aborted the generation "
+                        "(finish abort) -- nothing of this round was kept")
     elapsed = time.monotonic() - started
     # ttft is the FIRST token of any kind. Before 2026-08-07 it was the first
     # content token, so it silently included the whole reasoning decode and
@@ -5401,6 +6449,10 @@ def stream_reply(
         timings.setdefault("_reasoning_blocks", len(thoughts.blocks))
     if finish_reason:
         timings.setdefault("_finish_reason", finish_reason)
+    if sent_seed is not None:
+        timings["_seed"] = sent_seed
+    if malformed:
+        timings["_malformed_calls"] = malformed
     if context_tokens is not None:
         timings.setdefault("_context_tokens", context_tokens)
     if cached_tokens is not None:
@@ -5468,9 +6520,18 @@ class TurnCost:
         self.cached: int | None = None
         self.cached_of: int | None = None
         self.finish: str | None = None
+        # #217: THE SEED OF EVERY ROUND, in the order they ran -- a discarded
+        # degenerate round included, because it is the one a replay wants.
+        self.seeds: list[int] = []
+        # #217: the seeds of the requests that are not rounds -- the mid-turn
+        # rollover digest -- kept apart so `seeds` stays one per round.
+        self.leg_seeds: list[int] = []
 
     def add_round(self, timings: dict) -> None:
         self.rounds += 1
+        seed = timings.get("_seed")
+        if isinstance(seed, int):
+            self.seeds.append(seed)
         for key, attr in (("predicted_n", "decoded"), ("prompt_n", "prefilled")):
             value = timings.get(key)
             if value is not None:
@@ -5565,6 +6626,11 @@ class TurnCost:
             out["cached"], out["cached_of"] = self.cached, self.cached_of
         if self.finish:
             out["finish"] = self.finish
+        # #217: what makes each round of this turn replayable (see SEED_MAX).
+        if self.seeds:
+            out["seeds"] = list(self.seeds)
+        if self.leg_seeds:
+            out["leg_seeds"] = list(self.leg_seeds)
         return out
 
 
@@ -5574,28 +6640,107 @@ class TurnCost:
 # that overwrites a file it never read destroys work it cannot see, and at this
 # decode rate nobody is watching closely enough to catch it.
 #
-# ITS LIFETIME IS ONE USER TURN (E6), and that is a decided scope rather than an
-# inherited one. Until E6 there was no clear() and no del anywhere, so "read in
-# this session" in fact meant "read in this PROCESS" -- true only for as long as
-# a process IS a session, which stops being true the moment a second surface can
-# close one session and open another without exiting.
+# ITS LIFETIME WAS ONE USER TURN (E6), and #215-H replaced it. Until E6 there
+# was no clear() and no del anywhere, so "read in this session" in fact meant
+# "read in this PROCESS" -- true only for as long as a process IS a session,
+# which stops being true the moment a second surface can close one session and
+# open another without exiting. E6 measured 2026-08-12 (3 rollover/session
+# files, 25 user turns, 31 read_file calls, 4 write_file/edit_file calls): 0
+# writes landed on a file last read in an earlier turn, so the turn scope was
+# free -- in a CLI where a person types every turn.
 #
-# THE THRESHOLD WAS WRITTEN DOWN BEFORE THE COUNT, so the number could decide
-# rather than confirm: null cases of a write landing on a file last read in an
-# EARLIER turn makes the turn scope free; one or more, and the scope is the
-# session. MEASURED 2026-08-12 over every rollover archive and session.json on
-# this machine -- 3 distinct files (one archive counted once, not twice: the
-# session-backup copy is byte-identical), 25 user turns, 31 read_file calls,
-# 4 write_file/edit_file calls -- RESULT 0. Every one of the four writes was
-# preceded by a read of the same file INSIDE ITS OWN TURN. So the turn scope
-# costs nothing that has ever actually happened here, and it is the narrower of
-# the two on a rule whose failure mode is losing someone's work.
+# #215. "IN THIS TURN" WAS TRUE AND NOT ENOUGH. A turn is one user message, and
+# in goal mode crow sends those itself -- "[Goal mode, step 9 still open.
+# Continue.]" and the spent-budget note both opened a new turn and emptied the
+# set. Measured 2026-09-22: 4 of the 15 read-rule refusals that session were
+# edits of src/app.js, read one such nudge earlier. The turn was a stand-in for
+# the question the rule actually asks -- DOES THE MODEL KNOW WHAT IT IS ABOUT
+# TO OVERWRITE -- and a nudge changes nothing about that answer.
 #
-# What the user pays for it is one extra refusal where there was none, and the
-# way out is the same one the rule already asks for on a file it has never seen:
-# read it again, then write. It is named in the refusal itself, which is why
-# both messages below say "in this turn" rather than just "first".
-_READ: set[str] = set()
+# #215-H (robin, 2026-09-22): THE STATE IS THE FILE'S, NOT THE CLOCK'S. Per
+# canonical path, the (mtime_ns, size) the file had when the model read it --
+# or when crow itself wrote it, since crow then knows the bytes. write_file and
+# edit_file go through only while the file on disk still carries that stamp:
+#
+#   never read in this conversation ....... refused, "read it first"
+#   read, and changed on disk since ....... refused, "read it again"
+#   read, and unchanged ................... allowed, across any number of turns
+#
+# The shape Claude Code's readFileState ("File has been modified since read")
+# and opencode's FileTime BLOCK on, both keyed on mtime; Cline's
+# FileContextTracker compares mtime too but only warns. Size rides along
+# because mtime alone misses a rewrite inside one timestamp tick, and a rewrite
+# that changes the length is the common one; same tick AND same size stays a
+# residual (see #215).
+#
+# THE SET EMPTIES WHERE THE MODEL STOPS HOLDING THE CONTENTS, not at a turn:
+# a rollover and a new chat (`Conversation.reset`), a resumed or switched chat
+# (`restore`, a new `Conversation`). Each gives the conversation a new
+# `read_epoch`; `adopt_read_state` empties the set when the turn's epoch is not
+# the one it holds. A delegation thread (`owns_turn_state=False`) never adopts,
+# so it neither inherits nor clobbers the parent's reads -- it runs no tools.
+#
+# NO LOCK, as before: the one writer is the turn's own worker thread, and a
+# dict's get/set/clear are single bytecode-level operations under the GIL.
+_READ: dict[str, tuple[int, int]] = {}
+_READ_EPOCH: "object | None" = None
+# #254: the paths whose append result already said "this file
+# fits one write_file" -- once per path per context, emptied with `_READ`.
+_WHOLE_HINTED: "set[str]" = set()
+
+# THE SCOPE, SAID IN THE REFUSAL ITSELF, so a correct read is not mistaken for
+# a broken guard (#215): what counts, and what starts it over.
+READ_SCOPE_HINT = (" (a read counts across turns and crow's own [Goal mode ...] "
+                   "nudges; a rollover, a new chat or a resumed one starts over)")
+
+# #215-H. The second refusal, written once for write_file and edit_file alike.
+READ_STALE = ("it changed on disk since you read it -- read it again, "
+              "then retry the call.")
+
+
+def _stamp(st: os.stat_result) -> "tuple[int, int]":
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _disk_stamp(path: str) -> "tuple[int, int] | None":
+    try:
+        return _stamp(os.stat(path))
+    except OSError:
+        return None
+
+
+def _mark_read(path: str, stamp: "tuple[int, int] | None" = None) -> None:
+    """The model now knows these bytes: record the stamp they carry.
+
+    A read passes the stamp it took from the OPEN handle before reading, so a
+    write that lands mid-read leaves a stamp older than the bytes -- the next
+    edit is refused and re-read, the safe direction. A write of crow's own is
+    stamped from disk after the handle closed."""
+    stamp = stamp or _disk_stamp(path)
+    if stamp is None:
+        _READ.pop(_key(path), None)
+    else:
+        _READ[_key(path)] = stamp
+
+
+def _read_state(path: str) -> "tuple":
+    """("unread",), ("changed", stamp) or ("fresh", stamp) -- #215-H's verdict,
+    and the value `_cache_key` carries, so a read between two identical calls
+    is a different call."""
+    stamp = _READ.get(_key(path))
+    if stamp is None:
+        return ("unread",)
+    return ("fresh" if _disk_stamp(path) == stamp else "changed", stamp)
+
+
+def adopt_read_state(conversation: "Conversation") -> None:
+    """Empty `_READ` if it belongs to another context than this conversation's."""
+    global _READ_EPOCH
+    epoch = getattr(conversation, "read_epoch", None)
+    if epoch is not _READ_EPOCH:
+        _READ.clear()
+        _WHOLE_HINTED.clear()                   # #254, same scope
+        _READ_EPOCH = epoch
 
 
 def _key(path: str) -> str:
@@ -5727,6 +6872,197 @@ def _rooted(path: str) -> str:
     return os.path.join(_ROOT, path)
 
 
+# #221. A PATH THAT DOES NOT EXIST IS USUALLY ONE CHARACTER AWAY FROM
+# ONE THAT DOES, and the error that said so was the OS's, not Crow's. Measured
+# over every stored session on this machine (2026-09-22): 18 distinct
+# run_command calls carried a `cwd`, and 5 of them named a home that is not
+# there -- the account name spelled `nibor11896` three times and `nibor11899`
+# twice, for the real `nibor1896`. crow-nest #91's replay puts the digit at logprob
+# -0.013 against -4.41 for the right one: a confident error, so a sampler
+# cannot be relied on to avoid it and the tool has to answer it. What came
+# back each time was `[Errno 2] No such file or directory: '<the wrong
+# path>'` -- the fabricated string a second time, and the right one nowhere.
+#
+# THE DISK IS THE WITNESS, as in `_extend_over_spaces`: each missing component
+# is compared against the names that DO exist in its parent, and only a
+# single closest one within NEAR_MISS_EDITS counts. Two equally close names
+# are a guess, and a guess is not offered. A directory with more than
+# NEAR_MISS_SCAN entries is not scanned (a `/usr/lib` must not cost a call a
+# second); the hint then stops there and says the nearest existing ancestor.
+NEAR_MISS_SCAN = 4096
+
+
+def _near_edits(name: str) -> int:
+    """How many edits still count as the same name: 1 below 8 characters,
+    2 from there. `nibor11899` -> `nibor1896` is two, and a 3-letter `src`
+    must not turn into `bin`."""
+    return 1 if len(name) < 8 else 2
+
+
+def _name_key(name: str) -> str:
+    """Windows compares names without case (NTFS does), POSIX does not."""
+    return name.casefold() if crow_platform.IS_WINDOWS else name
+
+
+def _edits(a: str, b: str, cap: int) -> int:
+    """Levenshtein with adjacent transpositions (OSA), `cap + 1` once over."""
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev2: "list[int]" = []
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1,
+                         prev[j - 1] + (ca != cb))
+            if (i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb):
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        if min(cur) > cap:
+            return cap + 1
+        prev2, prev = prev, cur
+    return prev[-1]
+
+
+def _near_name(name: str, parent: str) -> "str | None":
+    """The one existing entry of `parent` that `name` is a near miss of."""
+    try:
+        with os.scandir(parent) as it:
+            entries = []
+            for entry in it:
+                entries.append(entry.name)
+                if len(entries) > NEAR_MISS_SCAN:
+                    return None
+    except OSError:
+        return None
+    cap = _near_edits(name)
+    key = _name_key(name)
+    scored = sorted((_edits(key, _name_key(e), cap), e) for e in entries)
+    scored = [(d, e) for d, e in scored if d <= cap]
+    if not scored or (len(scored) > 1 and scored[1][0] == scored[0][0]):
+        return None
+    return scored[0][1]
+
+
+def path_near_miss(path: str) -> "dict | None":
+    """#221: where a path that does not exist was probably meant to go.
+
+    None when the path exists. Otherwise:
+      `existing`  the deepest ancestor of the path AS WRITTEN that exists;
+      `fixed`     the path with each near-miss component swapped for the
+                  existing name, as far as the swaps reach (None without one);
+      `swaps`     the (written, existing) name pairs;
+      `whole`     True when `fixed` is the complete path and exists.
+    """
+    if not path:
+        return None
+    full = os.path.normpath(os.path.abspath(path))
+    if os.path.exists(full):
+        return None
+    existing = full
+    while not os.path.isdir(existing):
+        up = os.path.dirname(existing)
+        if up == existing:
+            break
+        existing = up
+    drive, rest = os.path.splitdrive(full)
+    parts = [p for p in re.split(r"[\\/]", rest) if p]
+    here = drive + os.sep
+    swaps: "list[tuple[str, str]]" = []
+    whole = True
+    first = None
+    for part in parts:
+        step = os.path.join(here, part)
+        if os.path.exists(step):
+            here = step
+            continue
+        near = _near_name(part, here)
+        if near is None:
+            whole = False
+            break
+        swaps.append((part, near))
+        here = os.path.join(here, near)
+        if first is None:
+            first = here
+    # A CHAIN OF SWAPS IS OFFERED ONLY WHEN IT LANDS. Measured on this machine:
+    # #91's K=2 cwd (the home as `nibor11896`, then `/work/git/work-portfolio`)
+    # swaps the home, then `work` for an unrelated `Work` beside it, then stops -- a second guess stacked
+    # on the first, pointing at a folder the call never meant. When the whole
+    # path does not resolve, the hint stops at the FIRST swap, which is the
+    # one the evidence carries.
+    if swaps and not whole:
+        here, swaps = first, swaps[:1]
+    return {"existing": existing, "fixed": here if swaps else None,
+            "swaps": swaps, "whole": bool(swaps) and whole}
+
+
+def near_miss_hint(path: str) -> str:
+    """The lines a refusal appends for a path that does not exist, or ""."""
+    miss = path_near_miss(path)
+    if not miss:
+        return ""
+    lines = []
+    if miss["fixed"]:
+        said = ", ".join("`%s` is `%s` here" % pair for pair in miss["swaps"])
+        if miss["whole"]:
+            lines.append("did you mean: %s  (%s)" % (miss["fixed"], said))
+        else:
+            lines.append("closest existing: %s  (%s)" % (miss["fixed"], said))
+    elif os.path.dirname(miss["existing"]) != miss["existing"]:
+        # A filesystem root as "nearest" says nothing the path did not.
+        lines.append("nearest existing directory: %s" % miss["existing"])
+    return "\n".join(lines)
+
+
+def cwd_refusal(cwd: "str | None") -> "str | None":
+    """#221: the result for a run_command whose `cwd` is no directory.
+
+    ANSWERED BEFORE ANYTHING RUNS AND BEFORE ANYONE IS ASKED. Until here a
+    missing cwd went to Popen and came back as the OS's `[Errno 2]`, which
+    names the wrong path and nothing else; and #144's guard, reading the same
+    cwd as an outside path, would first have put it on an approval card -- a
+    question to the user about a directory that does not exist, for a call
+    that could not have run whatever they answered. The answer names the
+    working area (where an omitted cwd runs) and the near miss, so the model
+    can correct in one round instead of spending one on `pwd`, which is what
+    it did after all five measured cases.
+
+    None for no cwd or an existing directory. The same expansion the tool
+    uses (`~`, then `_rooted`), so what is checked is what would run.
+    """
+    if not isinstance(cwd, str) or not cwd:
+        return None
+    where = _rooted(os.path.expanduser(cwd))
+    if os.path.isdir(where):
+        return None
+    if os.path.exists(where):
+        head = "error: cwd is a file, not a directory: %s" % where
+    else:
+        head = "error: no such directory: %s" % where
+    lines = [head + " -- the command did not run."]
+    hint = near_miss_hint(where)
+    if hint:
+        lines.append(hint)
+    root = get_root()
+    if root:
+        lines.append("working area: %s -- omit cwd to run there." % root)
+    else:
+        lines.append("Omit cwd to run in the current directory, or pass one "
+                     "that exists.")
+    return "\n".join(lines)
+
+
+def run_command_cwd_refusal(arguments: str) -> "str | None":
+    """`cwd_refusal` for one call's raw arguments -- None when they do not parse
+    (the tool call then fails on its own terms, as before)."""
+    try:
+        args = json.loads(arguments or "{}")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(args, dict):
+        return None
+    return cwd_refusal(args.get("cwd"))
+
+
 # #144. The tokens the guard can see: drive-absolute (bare or quoted), UNC,
 # %VAR%-prefixed, and ..\ escapes. A bare relative name is NOT a token -- it
 # resolves inside the cwd by construction, and flagging it would turn every
@@ -5780,6 +7116,32 @@ _PATH_TOKENS = re.compile(
 )
 
 
+# #243. THE NULL DEVICE NAMES NO FILE. `2>/dev/null` stood in 202 of 775
+# distinct stored run_command lines (2026-09-23 copies of the state dir); at
+# `auto` each one stops on the card unless an "always" covers it, and robin's
+# approvals.json holds `/dev/null` and -- from a `$(... 2>/dev/null)` --
+# `/dev/null)`. Claude Code
+# exempts the same target ("Targets with no file behind them aren't checked:
+# `/dev/null`", permissions docs, Redirections). Only the EXACT device: a path
+# under it, another device (`/dev/sda`) or a lookalike (`/dev/nullx`) is
+# still classified. On Windows the device is `NUL` (any case), reached as a
+# token only in its `\\.\NUL` form -- a bare `NUL` is a relative name the
+# pattern never reads.
+_NULL_DEVICES_POSIX = frozenset({"/dev/null"})
+_NULL_DEVICES_WINDOWS = frozenset({"nul", "\\\\.\\nul", "//./nul"})
+
+
+def is_null_device(token: str) -> bool:
+    """#243: is this command-line token the platform's null device?
+
+    A closing `)` is shed first: `$(cmd 2>/dev/null)` makes it part of the
+    token, and it is how `/dev/null)` reached the approvals file."""
+    raw = (token or "").strip().rstrip(")")
+    if crow_platform.IS_WINDOWS:
+        return raw.lower() in _NULL_DEVICES_WINDOWS
+    return raw in _NULL_DEVICES_POSIX
+
+
 def command_outside_paths(command: str, cwd: str | None = None) -> list[str]:
     """The outside paths one command names, resolved -- [] without a root.
 
@@ -5820,7 +7182,7 @@ def command_outside_paths(command: str, cwd: str | None = None) -> list[str]:
         note(cwd)
     for groups in _PATH_TOKENS.findall(command or ""):
         tok = next((g for g in groups if g), "")
-        if tok:
+        if tok and not is_null_device(tok.rstrip(".,;")):   # #243
             note(tok.rstrip(".,;"))
     return out
 
@@ -6732,7 +8094,8 @@ def memory_block(root: "str | None" = None) -> str:
     return "\n\n".join(blocks)
 
 
-def prompt_head(root: "str | None" = None) -> str:
+def prompt_head(root: "str | None" = None,
+                include_status: bool = False) -> str:
     """Everything this chat carries above the conversation: memory, then skills.
 
     ONE FUNCTION, BECAUSE ONE STRING IS PINNED. The chat file holds a single
@@ -6748,9 +8111,51 @@ def prompt_head(root: "str | None" = None) -> str:
     wird -- das Fluechtigste von dreien und deshalb hinten, wo eine Aenderung
     den kuerzesten Praefix entwertet. Es traegt nur den PLAN: der Stand steht in
     `goal.json`, weil ein Haken hier einen vollen Prefill kosten wuerde.
+
+    #210. `include_status` NUR VOM SCHNITT gesetzt: derselbe Kopf, einmal mit
+    den Marken des Schnittzeitpunkts (siehe `goal_block`). Zwei Stellen
+    rufen das -- repin nach `roll_over`, beide Oberflaechen.
+
+    #222: the working area opens the head (`working_area_line`).
     """
-    parts = [p for p in (memory_block(root), skill_block(), goal_block()) if p]
+    here = get_root() if root is None else root
+    parts = [p for p in (working_area_line(here), memory_block(root),
+                         skill_block(),
+                         goal_block(include_status=include_status)) if p]
     return "\n\n".join(parts)
+
+
+# #222. THE HEAD NAMES THE WORKING AREA, on every request.
+# Measured 2026-09-22 (crow-nest #91, replay point K=2 of the diorama session):
+# the first request after the 17:12 rollover carried base prompt + skills + the
+# goal block + the note -- no working directory anywhere in the 6,738 prompt
+# tokens. The model's first call invented one: the home directory with one
+# wrong digit (`nibor11896`) plus `/work/git/work-portfolio`, and under greedy
+# the wrong digit was the argmax (logprob -0.013 against -4.41 for the right
+# one); the rest of the path appears nowhere in the context. Before the cut the root had
+# only ever reached the model through tool results, and the cut drops those.
+#
+# IN THE PINNED HEAD, NOT IN DEFAULT_SYSTEM, and that keeps the rule written
+# there: the base prompt stays the same for every folder, while the head is
+# already per chat (`memory_block` reads the same root) and is re-pinned
+# exactly when the root moves (`_bind_root`) and at the cut (`repin_head`).
+# FIRST in the head: it is a fact, the order is facts before actions, and in
+# first place it sits inside the common prefix of the heads before and after
+# the cut -- the goal marks (#210) only change what comes behind it.
+#
+# A CHAT WITHOUT A ROOT GETS NO LINE, so its head stays byte-identical to what
+# it was before this change -- and a sentence about where relative paths land
+# without a boundary would be a claim this file has not measured.
+WORKING_AREA_LINE = ("Working area: {root}\n"
+                     "Relative paths and a run_command without cwd resolve "
+                     "here. Use this exact path; do not retype it from memory.")
+
+
+def working_area_line(root: "str | None") -> str:
+    """#222: the head's working-area block, or "" without a root."""
+    if not root:
+        return ""
+    return WORKING_AREA_LINE.format(root=root)
 
 
 def system_with_memory(system: "str | None", block: "str | None") -> "str | None":
@@ -7083,7 +8488,8 @@ def tool_session_search(query: str, limit: int | None = None) -> str:
 # unrelated command in the same turn; it cannot under-report the #98 sequence,
 # and a marker that is wrong in the safe direction is the only kind worth having.
 #
-# Lifetime is `_READ`'s and `_SEEN`'s: ONE USER TURN, cleared in `run_turn`.
+# Lifetime is `_SEEN`'s: ONE USER TURN, cleared in `run_turn`. (`_READ` left
+# that pair with #215-H: it lives as long as the conversation's context.)
 _REFUSED: set[str] = set()
 
 
@@ -7208,7 +8614,10 @@ def _mandates_in(text: str) -> "list[str]":
         if any(a <= hit.start() and hit.end() <= b for a, b in spans):
             continue                      # steht schon zitiert in der Liste
         base = hit.group(0).rstrip(".,;:!?\"')")
-        if not base:
+        # #221: a lone `/` in prose ("4120 / die 8237") is a
+        # separator, not a place -- neither a mandate nor a named-but-
+        # ambiguous prefix (see mandated_paths).
+        if not base or os.path.dirname(_resolve(base)) == _resolve(base):
             continue
         rest = text[hit.end():]
         if not rest[:1].isspace() or not rest.strip():
@@ -7306,6 +8715,39 @@ def named_but_ambiguous(path: str) -> bool:
     return any(here.startswith(os.path.normcase(prefix)) for prefix in _AMBIGUOUS)
 
 
+
+
+def user_words(text: str) -> str:
+    """#223: the part of a user-role message the USER wrote.
+
+    A rollover note is a user-role message whose text is mostly Crow's and the
+    model's (see ROLLOVER_NOTE_DATA): only the carried lines under
+    SPOKEN_CARRY_HEAD and the typed line behind ROLLOVER_NOTE_END are the
+    user's. A working-area notice (ROOT_NOTICE_RE) in front of a typed line is
+    Crow's too. A goal-mode nudge (GOAL_NUDGE_MARK) is Crow's frame around the
+    plan's step text or the model's own failed paths: none of it is the
+    user's (#240). Every other message comes back unchanged.
+    """
+    text = text or ""
+    # #240: all three nudge forms open with the mark, and a typed line never
+    # rides inside one (the nudge IS the turn's opening message).
+    if text.startswith(GOAL_NUDGE_MARK):
+        return ""
+    _notice, text = split_root_notice(text)
+    parts, carry = rollover_note_split(text)
+    if parts is None:
+        return text
+    spoken: "list[str]" = []
+    at = text.find(SPOKEN_CARRY_HEAD)
+    if at >= 0:
+        for line in text[at + len(SPOKEN_CARRY_HEAD):].splitlines():
+            if not line.startswith("- "):
+                break
+            if not line.startswith("- (+"):
+                spoken.append(line[2:])
+    return "\n".join(spoken + ([carry] if carry else []))
+
+
 def mandated_paths(conversation: "Conversation") -> set[str]:
     """Every location the USER spelled out in this conversation, resolved.
 
@@ -7319,13 +8761,45 @@ def mandated_paths(conversation: "Conversation") -> set[str]:
     # Nachricht, die inzwischen aus dem Kontext gerollt ist, darf keine
     # Ablehnung von heute erklaeren.
     _AMBIGUOUS.clear()
+    texts: "list[str]" = []
     for message in conversation.payload():
         if message.get("role") != "user":
             continue
-        for hit in _mandates_in(message_text(message.get("content") or "")):
+        # #223: only what the user wrote -- not the rollover note's
+        # digest, transcript path or "Last worked on" (`user_words`).
+        texts.append(user_words(message_text(message.get("content") or "")))
+    # #240. A PLAN THE USER TYPED (`/goal`) IS THE USER'S WORD. Its paths used
+    # to reach this set only through the nudge that echoes the step, which is
+    # no longer read; the plan itself is, when the user wrote it. A plan the
+    # model wrote (`goal_set`), or one from before `by` existed, mandates
+    # nothing -- the safe direction, at the cost of one approval card.
+    goal = goal_load()
+    if goal and goal.get("by") == GOAL_BY_USER:
+        texts.append("\n".join([str(goal.get("title") or "")]
+                               + [str(step.get("text") or "")
+                                  for step in goal.get("steps") or []
+                                  if isinstance(step, dict)]))
+    for words in texts:
+        for hit in _mandates_in(words):
             hit = hit.rstrip(".,;:!?\"')")
-            if hit:
-                found.add(_resolve(hit))
+            if not hit:
+                continue
+            here = _resolve(hit)
+            # #221. A FILESYSTEM ROOT IS NOT A PLACE ANYONE NAMED.
+            # Measured on the 2026-09-22 diorama session: the rollover note
+            # (a user-role message) carried "`substrate 4120 / package 11036
+            # / die 8237`", the POSIX branch read the lone `/` as a path,
+            # `die` as German prose after it, and `/` became a mandate --
+            # which releases EVERY path. From msg 2 on #144's card
+            # could not fire and `_outside_root` could not refuse: the
+            # invented cwd (`nibor11896` for the home + `/three-staging`) went
+            # straight to Popen, and msg 69's write_file to `/\n` + that home
+            # went to the disk and died on `Permission denied`, not on the
+            # fence. Naming a whole drive is naming no folder; the user who
+            # means one names it.
+            if os.path.dirname(here) == here:
+                continue
+            found.add(here)
     return found
 
 
@@ -7376,9 +8850,13 @@ def _outside_root(path: str) -> str | None:
                "directory nor named anywhere in this conversation by the user. Do not "
                "reach it by other means either. Write inside the root, or ask for the "
                "path you need and let the user name it.")
+    # #221: A PATH OUTSIDE THAT DOES NOT EXIST is most often the
+    # home with a wrong digit (see NEAR_MISS_SCAN) -- the refusal then says
+    # which one exists, so the retry does not re-type the same invention.
+    hint = near_miss_hint(resolved)
     return (f"error: refusing to write outside the working directory.\n"
             f"  root: {_ROOT}\n"
-            f"  path: {resolved}\n" + why)
+            f"  path: {resolved}\n" + why + ("\n" + hint if hint else ""))
 
 
 def escaped_the_working_area(name: str) -> bool:
@@ -7502,19 +8980,137 @@ def _console_lines(log_text: str, limit: int = 10) -> "list[str]":
     Seite, die "scene voxels: 10577" in die Konsole schreibt, gibt dem
     Agenten TEXTHINWEISE darauf, dass ihr Skript lief, unabhaengig davon,
     ob der Compositor den Frame geschafft hat. Rein textlich, damit die
-    Suite den Parser ohne Browser pruefen kann."""
+    Suite den Parser ohne Browser pruefen kann.
+
+    #213-NACHTRAG: OHNE DAS GCM-RAUSCHEN DES PROFILS. Im Lauf vom 2026-09-22
+    standen "Registration response error" und "Failed to log in to GCM"
+    zwischen den Zeilen, die das Modell als Beweis bekommt -- sie kommen aus
+    google_apis/gcm, nie aus der Seite. Kein Schalter bringt sie verlaesslich
+    zum Schweigen (gemessen, je 1 Lauf: ohne 3, --disable-background-networking
+    3, dazu --disable-sync 5, dazu --disable-features=PushMessaging,... 1
+    Zeile), also bleiben sie hier am Kopf haengen, bevor der gekuerzt wird.
+    Dasselbe fuer die Klagen des Rohrs selbst (devtools_pipe_handler), falls
+    ein Browser beim Schliessen noch liest: Crows Leitung, nicht die Seite."""
     out = []
     for line in log_text.splitlines():
         stripped = line.strip()
+        if ":google_apis/" in stripped or "devtools_pipe_handler" in stripped:
+            continue
         if "CONSOLE" in stripped or ":ERROR:" in stripped:
             out.append(_CHROME_LOG_HEAD.sub("", stripped))
     return out[-limit:] if limit else out
 
 
+# #213. WANN EIN FANG KEIN SIGNAL IST. Der Anteil der haeufigsten Farbe, ab dem
+# der Fang als leer gilt: 99,9 %. Die gemessenen Leerfaenge vom 2026-09-22
+# waren 4.6-4.7 KB reines Weiss (heute nachgebaut: 4.714 B fuer eine weisse
+# Leinwand), ein Seitenframe mit Inhalt liegt selbst bei dunklem Grund weit
+# darunter -- und die Schwelle greift nur als WARN, nie als Fehler: eine Seite,
+# die wirklich nur eine Farbe zeigen will, verliert das Bild nicht, sie kriegt
+# die Gegenmeinung neben ihren Pixeln.
+_BLANK_SHARE = 0.999
+
+# DAS DEKODIER-BUDGET: 16 MiB rohe Scanlines (1280x800 RGBA sind 4,1 MiB,
+# 2560x1440 sind 14,7). Ein 4k-Fang waere eine Minute Python, und ein Werkzeug,
+# das den Zug verlangsamt, um sein eigenes Bild zu bewerten, tauscht eine
+# Blindheit gegen die andere. Ueber dem Budget gibt es kein Urteil.
+_PNG_DECODE_BUDGET = 16 * 1024 * 1024
+
+
+def _png_dominant_share(data: bytes) -> "float | None":
+    """#213. Der Farben-Anteil des Fangs: welcher Bruchteil aller Pixel GENAU
+    die haeufigste Farbe traegt, oder None, wenn sich das nicht sagen laesst.
+
+    Rein rechnerisch ueber die PNG-Bytes selbst -- Signatur, Chunks, zlib,
+    Filter --, damit die Suite echte Bytes ohne Browser pruefen kann. Nur was
+    ein Screenshot hier wirklich ist (8 Bit Tiefe, kein Interlace, Grau/RGB/
+    RGBA) wird dekodiert; Palette und 16 Bit sind None und damit KEIN Urteil.
+    Gezaehlt wird hoch maximal 100.000 gleichmaessig gestreute Pixel: der
+    Anteil der herrschenden Farbe ist auf dieser Grundlage auf ein Zehntel
+    Prozent genau, und die Zahl, die ihn faellt, uebersteht jede Stichprobe.
+    """
+    import zlib
+
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    head: "bytes | None" = None
+    idat: list[bytes] = []
+    pos = 8
+    while pos + 12 <= len(data):
+        size = int.from_bytes(data[pos:pos + 4], "big")
+        kind = data[pos + 4:pos + 8]
+        body = data[pos + 8:pos + 8 + size]
+        pos += 12 + size
+        if kind == b"IHDR":
+            head = body
+        elif kind == b"IDAT":
+            idat.append(body)
+        elif kind == b"IEND":
+            break
+    if head is None or len(head) < 13 or not idat:
+        return None
+    width = int.from_bytes(head[0:4], "big")
+    height = int.from_bytes(head[4:8], "big")
+    depth, colour, interlace = head[8], head[9], head[12]
+    if depth != 8 or interlace != 0 or colour not in (0, 2, 6):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    channels = {0: 1, 2: 3, 6: 4}[colour]
+    stride = width * channels
+    if height * (stride + 1) > _PNG_DECODE_BUDGET:
+        return None
+    try:
+        raw = zlib.decompress(b"".join(idat))
+    except zlib.error:
+        return None
+    if len(raw) < height * (stride + 1):
+        return None
+    counts: "dict[bytes, int]" = {}
+    prev = bytearray(stride)
+    step = max(1, (width * height) // 100_000)
+    for y in range(height):
+        off = y * (stride + 1)
+        # Der Filtertyp steht vor jeder Scanline; die vier Arme sind die
+        # PNG-Spezifikation, unverdichtet.
+        filter_type = raw[off]
+        line = raw[off + 1:off + 1 + stride]
+        cur = bytearray(line)
+        if filter_type == 1:                    # Sub: plus linker Nachbar
+            for i in range(channels, stride):
+                cur[i] = (cur[i] + cur[i - channels]) & 255
+        elif filter_type == 2:                  # Up: plus Vorzeile
+            for i in range(stride):
+                cur[i] = (cur[i] + prev[i]) & 255
+        elif filter_type == 3:                  # Average: plus Mitte aus links/oben
+            for i in range(stride):
+                left = cur[i - channels] if i >= channels else 0
+                cur[i] = (cur[i] + ((left + prev[i]) >> 1)) & 255
+        elif filter_type == 4:                  # Paeth: plus bester Predictor
+            for i in range(stride):
+                a = cur[i - channels] if i >= channels else 0
+                b = prev[i]
+                c = prev[i - channels] if i >= channels else 0
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                best = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                cur[i] = (cur[i] + best) & 255
+        elif filter_type != 0:
+            return None
+        for x in range(0, width, step):
+            key = bytes(cur[x * channels:x * channels + channels])
+            counts[key] = counts.get(key, 0) + 1
+        prev = cur
+    if not counts:
+        return None
+    return max(counts.values()) / sum(counts.values())
+
+
 def _capture_warnings(previous: "bytes | None", current: bytes,
                       console: "list[str]") -> "list[str]":
-    """#175-NACHTRAG: DAS EHRLICHKEITSURTEIL zum Fang, als Liste von
-    WARN-Zeilen in fester Reihenfolge -- byte-identischer Fang zuerst, dann
+    """#175-Nachtrag + #213: DAS EHRLICHKEITSURTEIL zum Fang, als Liste von
+    WARN-Zeilen in fester Reihenfolge -- der leere Fang zuerst (das staerkere
+    Urteil: die Leinwand hat nichts empfangen), dann der byte-identische, dann
     je Fehlerzeile der Konsole eine.
 
     Rein rechnerisch und ohne Dateisystem, damit die Suite beide Faelle
@@ -7522,6 +9118,22 @@ def _capture_warnings(previous: "bytes | None", current: bytes,
     dieser Seite im Lauf: dagegen gibt es nichts, womit man vergleichen
     koennte, und byte-gleich mit NICHTS ist kein Verdacht."""
     warns: list[str] = []
+    share = _png_dominant_share(current)
+    # #213-NACHTRAG: EINE FARBE IST LEER, FAST EINE FARBE IST NUR FAST. Eine
+    # Zeile Text auf weissem Grund liegt ueber der Schwelle (gemessen,
+    # Seite mit "SETTLED" in 1280x720: 99,96 % Weiss, Referenz-Dekoder ueber
+    # jedes Pixel: 99,959 %) und bekam dasselbe "no-signal" wie ein Fang, in
+    # dem die Leinwand nie gezeichnet hat (4.718 B, 100,0 % #060912). Die
+    # zweite Form sagt, was die Zahl hergibt: wenig drauf -- nicht nichts.
+    if share is not None and share >= 1.0:
+        warns.append("warn: this capture looks blank \u2014 %.1f%% of its "
+                     "pixels are one colour; treat it as no-signal and rely "
+                     "on the console lines" % (100.0 * share))
+    elif share is not None and share >= _BLANK_SHARE:
+        warns.append("warn: this capture is almost one colour \u2014 %.2f%% "
+                     "of its pixels; a line of text fits that, a drawn scene "
+                     "does not -- if you expected one, it did not reach the "
+                     "screenshot" % (100.0 * share))
     if previous is not None and current == previous:
         warns.append("warn: this capture is byte-identical to the previous "
                      "one \u2014 animated/canvas content is probably NOT "
@@ -7531,6 +9143,349 @@ def _capture_warnings(previous: "bytes | None", current: bytes,
         if any(mark in line for mark in _CONSOLE_ERROR_MARKS):
             warns.append("warn: the page logged an error: %s" % line)
     return warns
+
+
+# #253. THE FAILING CALL IS THE PAGE'S OWN, AND THE RESULT SAYS SO. In the
+# diorama run of 2026-09-23 (serve 70a69e3, Crow c4f1b3c) the model's code
+# called `gl2.texImage33D(...)` -- a digit-insertion corruption from the engine
+# (crow-nest#91) -- and read Chromium's correct `texImage33D is not a
+# function` as "this SwiftShader has no texImage3D", while its OWN probe in the
+# same console printed `texImage3D=function` (rollover-20260923-082406 tool
+# results 147, 151, 203, 333). `renderbufferStorage(gl.RENDERBUFFER, 0, fmt,
+# w, h)` -- the five-argument signature of renderbufferStorageMultisample --
+# drew `INVALID_ENUM: invalid internalformat` and became "no renderbuffer can
+# be created on this machine" (session.json 58-91). Hours of goal steps were
+# closed on a platform limit that did not exist.
+#
+# THE NAMES COME FROM THE PAGE'S OWN BROWSER, NOT FROM A LIST HERE. After the
+# capture, one Runtime.evaluate dumps every interface prototype on the page's
+# global object with each member's `length` (WebIDL "create an operation
+# function": the length of the shortest argument list, i.e. the required
+# arguments). A static WebGL IDL list would be a second copy of the browser
+# that nobody updates and knows nothing of Canvas2D, WebGPU or the DOM; edit
+# distance alone has nothing to measure against. Without the pipe (Windows)
+# or when the evaluate fails, the hints fall back to the names the page's own
+# console reported as `name=function`, and to the call's argument count read
+# from the page's source line -- facts, never a guess.
+_API_DUMP_JS = r"""(() => {
+  const out = {};
+  for (const k of Object.getOwnPropertyNames(globalThis)) {
+    if (!/^[A-Z]/.test(k)) continue;
+    const d = Object.getOwnPropertyDescriptor(globalThis, k);
+    const v = d && d.value;
+    if (typeof v !== 'function' || !v.prototype) continue;
+    const members = {};
+    let names;
+    try { names = Object.getOwnPropertyNames(v.prototype); } catch (e) { continue; }
+    for (const n of names) {
+      if (n === 'constructor') continue;
+      const m = Object.getOwnPropertyDescriptor(v.prototype, n);
+      members[n] = (m && typeof m.value === 'function') ? m.value.length : -1;
+    }
+    if (Object.keys(members).length) out[k] = members;
+  }
+  return out;
+})()"""
+
+# Seconds for that one evaluate. A page whose main thread never yields gets no
+# names and loses nothing else: the screenshot is already on disk.
+RENDER_PROBE_S = 3
+
+# "gl2.texImage33D is not a function" -- Chromium's TypeError text. The
+# receiver is whatever expression stood before the dot; only its last name
+# is used.
+_NOT_A_FUNCTION = re.compile(
+    r"(?:([\w$\]\)]+)\.)?([A-Za-z_$][\w$]*) is not a function")
+# "texSub3D=undefined" / "texSub3D: undefined" -- the shape of a page's own
+# API probe; a hint is given only when a real name is near it.
+_PROBE_UNDEFINED = re.compile(r"\b([A-Za-z_$][\w$]*)\s*[=:]\s*undefined\b")
+# "WebGL: INVALID_ENUM: renderbufferStorage: invalid internalformat"
+_WEBGL_ERROR = re.compile(
+    r"WebGL: (INVALID_ENUM|INVALID_VALUE|INVALID_OPERATION): (\w+): ([^\"]*)")
+# the tail Chromium puts on a console line: `, source: <url> (<line>)`
+_CONSOLE_SOURCE = re.compile(r"source: (\S+) \((\d+)\)\s*$")
+
+# Interfaces a hint names first when a name lives on several.
+_HINT_PREFER = ("WebGL2RenderingContext", "WebGLRenderingContext",
+                "CanvasRenderingContext2D", "OffscreenCanvasRenderingContext2D",
+                "GPUDevice", "GPUCommandEncoder")
+_HINT_MAX = 6
+
+
+def _edit_distance(a: str, b: str, cap: int) -> int:
+    """Optimal-string-alignment distance (a swap of neighbours is one edit),
+    or `cap + 1` as soon as it is certain to exceed `cap`."""
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev2: "list[int]" = []
+    prev = list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        cur = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            if (i > 1 and j > 1 and a[i - 1] == b[j - 2]
+                    and a[i - 2] == b[j - 1]):
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        if min(cur) > cap:
+            return cap + 1
+        prev2, prev = prev, cur
+    return prev[-1]
+
+
+def _edit_said(wrong: str, right: str) -> str:
+    """One edit, in words: the reader sees WHICH character is off."""
+    if len(wrong) == len(right) + 1:
+        for i in range(len(wrong)):
+            if wrong[:i] + wrong[i + 1:] == right:
+                return 'one "%s" too many' % wrong[i]
+    if len(wrong) + 1 == len(right):
+        for i in range(len(right)):
+            if right[:i] + right[i + 1:] == wrong:
+                return 'a "%s" missing' % right[i]
+    if len(wrong) == len(right):
+        diff = [i for i in range(len(wrong)) if wrong[i] != right[i]]
+        if len(diff) == 1:
+            i = diff[0]
+            return '"%s" where it has "%s"' % (wrong[i], right[i])
+        if (len(diff) == 2 and diff[1] == diff[0] + 1
+                and wrong[diff[0]] == right[diff[1]]):
+            return "two letters swapped"
+    return "%d edits" % _edit_distance(wrong, right, 9)
+
+
+def _camel_words(name: str) -> "list[str]":
+    return re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name)
+
+
+def _where(api: "dict[str, dict]", name: str) -> "list[str]":
+    """The interfaces that have `name`, preferred ones first."""
+    have = [k for k, members in api.items() if name in members]
+    return sorted(have, key=lambda k: (_HINT_PREFER.index(k)
+                                       if k in _HINT_PREFER else 99, k))
+
+
+def _source_label(line: str) -> str:
+    m = _CONSOLE_SOURCE.search(line)
+    if not m:
+        return ""
+    return "%s:%s" % (m.group(1).rsplit("/", 1)[-1], m.group(2))
+
+
+def _probe_says(console: "list[str]", name: str) -> str:
+    """Where the page's own console reported `name=function`, or ''."""
+    said = re.compile(r"(?<![\w$])%s\s*[=:]\s*function\b" % re.escape(name))
+    for line in console:
+        if said.search(line):
+            label = _source_label(line)
+            return ("the page's own console reports %s=function%s"
+                    % (name, " (%s)" % label if label else ""))
+    return ""
+
+
+def _source_line(line: str, page: "str | None") -> "tuple[str, str] | None":
+    """(label, text) of the page-source line a console line points at.
+
+    Read only when the console line names a file:// source inside the rendered
+    page's own folder -- the page and its local scripts, nothing else."""
+    m = _CONSOLE_SOURCE.search(line)
+    if not m or not page or not m.group(1).startswith("file://"):
+        return None
+    from urllib.parse import unquote
+    path = unquote(m.group(1)[len("file://"):])
+    if os.name == "nt":
+        path = path.lstrip("/")
+    path = os.path.realpath(path)
+    home = os.path.dirname(os.path.realpath(page))
+    if not (path == os.path.realpath(page)
+            or path.startswith(home + os.sep)) or not os.path.isfile(path):
+        return None
+    want = int(m.group(2))
+    try:
+        if os.path.getsize(path) > 8 * 1024 * 1024:
+            return None
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for n, text in enumerate(fh, 1):
+                if n == want:
+                    return _source_label(line), text
+    except OSError:
+        return None
+    return None
+
+
+def _call_args(text: str, fn: str) -> "list[list[str]]":
+    """The argument lists of every call `fn(...)` on one line of source,
+    split at top-level commas (brackets and string literals respected)."""
+    calls = []
+    for m in re.finditer(r"(?<![\w$])%s\s*\(" % re.escape(fn), text):
+        i, depth, quote, cur, args = m.end(), 1, "", "", []
+        while i < len(text):
+            c = text[i]
+            if quote:
+                cur += c
+                if c == "\\" and i + 1 < len(text):
+                    cur += text[i + 1]
+                    i += 1
+                elif c == quote:
+                    quote = ""
+            elif c in "'\"`":
+                quote = c
+                cur += c
+            elif c in "([{":
+                depth += 1
+                cur += c
+            elif c in ")]}":
+                depth -= 1
+                if depth == 0:
+                    args.append(cur.strip())
+                    break
+                cur += c
+            elif c == "," and depth == 1:
+                args.append(cur.strip())
+                cur = ""
+            else:
+                cur += c
+            i += 1
+        else:
+            continue                     # the call runs past this line
+        if args and args[-1] == "":
+            args.pop()                   # f(a, b,) and f() alike
+        calls.append(args)
+    return calls
+
+
+def _near_names(api: "dict[str, dict]", extra: "set[str]", name: str,
+                functions_only: bool) -> "list[tuple[int, str]]":
+    """(distance, name) of the real names within reach of `name`."""
+    cap = 1 if len(name) <= 5 else 2
+    pool = set(extra)
+    for members in api.values():
+        for member, length in members.items():
+            if not functions_only or length >= 0:
+                pool.add(member)
+    pool.discard(name)
+    found = []
+    for real in pool:
+        d = _edit_distance(name, real, cap)
+        if d <= cap:
+            found.append((d, real))
+    return sorted(found, key=lambda x: (x[0], x[1].lower() != name.lower(),
+                                        x[1]))
+
+
+def _console_hints(console: "list[str]", api: "dict[str, dict] | None",
+                   page: "str | None" = None) -> "list[str]":
+    """#253. One `hint:` line per failing name or WebGL call in the page's
+    console, saying what the browser really has -- the near real name, the
+    page's own probe line, the argument count against the signature.
+
+    Pure text in, text out (the source line is the only read), so the suite
+    replays the real 2026-09-23 console lines without a browser."""
+    api = api or {}
+    probed = set()
+    for line in console:
+        probed.update(re.findall(r"(?<![\w$])([A-Za-z_$][\w$]*)\s*[=:]\s*function\b",
+                                 line))
+    hints: "list[str]" = []
+    seen: "set[tuple]" = set()
+
+    def missing(name: str, receiver: str, line: str, called: bool) -> None:
+        if ("name", name) in seen or len(name) < 4:
+            return
+        seen.add(("name", name))
+        # A bare `init()` is the page's own function, not a browser API: the
+        # browser's names answer only a member call (`gl.x`) or a probe line.
+        names = api if (receiver or not called) else {}
+        where = _where(names, name)
+        if where:
+            if not called:
+                return
+            shown = ", ".join(where[:3]) + (" and %d more" % (len(where) - 3)
+                                            if len(where) > 3 else "")
+            hints.append("hint: %s is a real name in this browser, on %s -- "
+                         "so `%s` is not one of those objects%s."
+                         % (name, shown, receiver or name,
+                            " (a \"webgl\" context has no WebGL2 methods; "
+                            "ask for \"webgl2\")"
+                            if where[0] == "WebGL2RenderingContext"
+                            and "WebGLRenderingContext" not in where else ""))
+            return
+        near = _near_names(names, probed, name, functions_only=called)
+        if not near:
+            if not called or not names:
+                return
+            words = _camel_words(name)
+            kin = sorted({m for k in _HINT_PREFER if k in api
+                          for m in api[k]
+                          if len(words) > 1 and _camel_words(m)[:1] == words[:1]
+                          and _camel_words(m)[-1:] == words[-1:]})
+            hints.append("hint: %s exists on no interface in this browser, "
+                         "and no real name is within 2 edits of it -- the "
+                         "name is not part of the API, the platform is not "
+                         "missing a feature.%s"
+                         % (name, (" Names with the same first and last word: "
+                                   "%s." % ", ".join(kin[:3])) if kin else ""))
+            return
+        dist, real = near[0]
+        on = _where(names, real)
+        away = "%s away (%s)" % ("1 edit" if dist == 1 else "%d edits" % dist,
+                                 _edit_said(name, real))
+        probe = _probe_says(console, real)
+        if on:
+            said = ("hint: %s is not a name in this browser; %s has %s, %s."
+                    % (name, on[0], real, away))
+        else:
+            # No live names (no devtools pipe, or the evaluate got no answer):
+            # only what the page itself printed is claimed.
+            said = "hint: %s failed here, while %s, %s, did not." % (
+                name, real, away)
+        hints.append("%s%s The misspelling is in the page's code, not a "
+                     "missing platform feature."
+                     % (said, " The page's own console reports %s=function%s."
+                        % (real, probe.split("=function", 1)[1])
+                        if probe else ""))
+
+    for line in console:
+        if len(hints) >= _HINT_MAX:
+            break
+        for m in _NOT_A_FUNCTION.finditer(line):
+            missing(m.group(2), (m.group(1) or "") and
+                    "%s.%s" % (m.group(1), m.group(2)), line, True)
+        for m in _PROBE_UNDEFINED.finditer(line):
+            missing(m.group(1), "", line, False)
+        m = _WEBGL_ERROR.search(line)
+        if not m:
+            continue
+        fn = m.group(2)
+        src = _source_line(line, page)
+        if not src or ("call", fn, src[0]) in seen:
+            continue
+        seen.add(("call", fn, src[0]))
+        on = [k for k in _where(api, fn) if api[k].get(fn, -1) >= 0]
+        takes = api[on[0]][fn] if on else None
+        for args in _call_args(src[1], fn):
+            if takes is not None and len(args) == takes:
+                continue
+            said = ("hint: %s calls %s with %d arguments (%s)"
+                    % (src[0], fn, len(args), ", ".join(args)))
+            if takes is None:
+                hints.append(said + "; check them against its signature -- "
+                             "the %s is about the call, not the platform."
+                             % m.group(1))
+                break
+            said += ("; in this browser %s.%s takes %d"
+                     % (on[0], fn, takes))
+            if len(args) > takes:
+                said += (", and JavaScript drops the rest -- it read (%s)"
+                         % ", ".join(args[:takes]))
+            kin = sorted(k for k, n in api[on[0]].items()
+                         if n == len(args) and k != fn and k.startswith(fn))
+            if kin:
+                said += ". %s takes %d" % (kin[0], len(args))
+            hints.append(said + ". The %s comes from this call's arguments, "
+                         "not from the platform." % m.group(1))
+            break
+    return hints[:_HINT_MAX]
 
 
 def take_render_ride() -> "tuple | None":
@@ -7575,6 +9530,226 @@ def _render_dir() -> str:
     return out
 
 
+# #213-NACHTRAG (2026-09-22): EIN BUDGET, DAS SICH EINHALTEN LAESST. Im Lauf
+# vom 2026-09-22 kamen 9 von 11 Renders der Diorama-Seite ohne Bild zurueck,
+# bei wait_ms 4000 bis 20000 -- und das Modell drehte wait_ms hoch, bis es
+# sich am Ende selbst einen Chromium ueber run_command baute (220 Aufrufe).
+# GEMESSEN, Chromium 152, dieselbe Seite, Kommandozeilen-Screenshot mit
+# --virtual-time-budget, swiftshader-Arm:
+#   Budget 1000 / 2000 / 4000 ms  ->  32,7 / 32,8 / 32,8 s Wandzeit
+# FLACH: die virtuelle Uhr ist gar nicht der Posten. Die Zeit geht in die
+# Frames, 0,345 s echte Zeit je Frame in Software, rund 90 davon, bevor der
+# Kommandozeilen-Pfad zeichnet -- und das Zeitfenster war wait/1000 + 8, also
+# 12 s bei 4000 und 28 s bei 20000. Ein hoeheres wait_ms konnte NIE helfen.
+# Der angle-Arm brauchte fuer dasselbe 1,5 s, und dort lief unter der
+# virtuellen Uhr kein einziger rAF-Frame (die Probe der Seite zaehlte keinen).
+#
+# DARUM WARTET DER RENDER JETZT IN ECHTER ZEIT UND FAENGT AUF DEN TERMIN:
+# ueber --remote-debugging-pipe (dieselbe Leitung, mit der puppeteer und
+# playwright ihren Browser fahren) laedt die Seite, laeuft wait_ms ECHTE
+# Millisekunden, und dann wird Page.captureScreenshot gerufen -- was die
+# Seite bis dahin gezeichnet hat, kommt zurueck. Gemessen auf derselben Seite
+# (Software, wait 4000): Last 1,65 s, Fang bei 6,6 s, 230 KB, ~11 Frames; die
+# endlos animierende Variante gleich schnell -- auf dem alten Pfad kam sie
+# einmal nach 31 s und einmal gar nicht (40-s-Deckel, kein Bild).
+#
+# DREI FENSTER, UND KEINES WAECHST MIT DEM ANDEREN: Laden, wait_ms, ein Frame.
+# Die Summe ist der harte Deckel des ganzen Aufrufs.
+RENDER_LOAD_S = 15          # bis zum load-Ereignis, danach wird trotzdem gefangen
+RENDER_CAPTURE_S = 10       # fuer den EINEN Frame des Fangs (Software: ~0,8 s gemessen)
+RENDER_WAIT_MAX_MS = 20000  # echte Zeit; mehr kauft keinen Frame, nur Warten
+
+
+def _render_stall_advice(gl: str, wait: int) -> str:
+    """#213-NACHTRAG: WAS DAS MODELL NACH EINEM FEHLGESCHLAGENEN FANG TUN SOLL,
+    in einem Satz, der den Arm nennt. Der alte Satz ("timed out after 12000
+    ms") las sich wie "gib mehr Zeit" -- und genau das hat das Modell von 6000
+    ueber 12000 auf 20000 getrieben. Rein textlich, damit die Suite ihn gegen
+    Eskalationswoerter pruefen kann."""
+    arm = ("the GPU rasterer (angle)" if gl == "angle"
+           else "the software rasterer (swiftshader)")
+    return ("The page (wait_ms %d) could not deliver a frame in time in %s. "
+            "A larger wait_ms will NOT help -- it only delays the capture; a "
+            "lower one returns sooner. The page is too heavy for this "
+            "rasterer or its main thread is blocked: render it cheaper (fewer "
+            "draw calls, a smaller canvas, stop the animation loop after a few "
+            "frames), check for an endless loop, and read the console lines "
+            "below." % (wait, arm))
+
+
+class _Devtools:
+    """Ein CDP-Gespraech ueber die zwei Rohre von --remote-debugging-pipe.
+
+    #213-NACHTRAG. Das Protokoll auf dem Rohr ist JSON, je Nachricht mit
+    einem NUL-Byte abgeschlossen -- nichts weiter, keine Bibliothek. Jedes
+    Warten hat einen Termin (monotone Uhr), und ein geschlossenes Rohr ist
+    eine Antwort (`None`), keine Ausnahme: ein toter Browser muss als Grund
+    ankommen, nicht als Traceback."""
+
+    def __init__(self, to_fd: int, from_fd: int) -> None:
+        self.to_fd, self.from_fd = to_fd, from_fd
+        self.buf = b""
+        self.last = 0
+        self.closed = False
+        # WINDOWS: select() takes sockets only (WinError 10038 on a pipe, CI
+        # 2026-09-23), so a daemon thread reads the pipe into a queue and
+        # wait_for takes from it with the same half-second slices. b"" is
+        # the end of the pipe. POSIX keeps select(), unchanged.
+        self.chunks: "queue.Queue[bytes] | None" = None
+        if os.name == "nt":
+            import queue as _queue
+            import threading as _threading
+            self.chunks = _queue.Queue()
+            _threading.Thread(target=self._pump, daemon=True,
+                              name="crow-devtools-read").start()
+
+    def _pump(self) -> None:
+        while True:
+            try:
+                chunk = os.read(self.from_fd, 1 << 20)
+            except OSError:
+                chunk = b""
+            self.chunks.put(chunk)
+            if not chunk:
+                return
+
+    def send(self, method: str, params: "dict | None" = None,
+             session: "str | None" = None) -> int:
+        self.last += 1
+        msg: dict = {"id": self.last, "method": method, "params": params or {}}
+        if session:
+            msg["sessionId"] = session
+        try:
+            os.write(self.to_fd, json.dumps(msg).encode("utf-8") + b"\0")
+        except OSError:
+            self.closed = True
+        return self.last
+
+    def wait_for(self, match: "Callable[[dict], bool]",
+                 until: float) -> "dict | None":
+        import select as _select
+        while True:
+            while b"\0" in self.buf:
+                raw, self.buf = self.buf.split(b"\0", 1)
+                try:
+                    msg = json.loads(raw.decode("utf-8", errors="replace"))
+                except ValueError:
+                    continue
+                if isinstance(msg, dict) and match(msg):
+                    return msg
+            left = until - time.monotonic()
+            if self.closed or left <= 0:
+                return None
+            if self.chunks is not None:
+                import queue as _queue
+                try:
+                    chunk = self.chunks.get(timeout=min(left, 0.5))
+                except _queue.Empty:
+                    continue
+                if not chunk:
+                    self.closed = True
+                    return None
+                self.buf += chunk
+                continue
+            ready, _, _ = _select.select([self.from_fd], [], [], min(left, 0.5))
+            if ready:
+                try:
+                    chunk = os.read(self.from_fd, 1 << 20)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    self.closed = True
+                    return None
+                self.buf += chunk
+
+    def call(self, method: str, params: "dict | None" = None,
+             session: "str | None" = None,
+             until: float = 0.0) -> "dict | None":
+        wanted = self.send(method, params, session)
+        return self.wait_for(lambda m: m.get("id") == wanted, until)
+
+
+def _render_over_devtools(dt: _Devtools, url: str, w: int, h: int, wait: int,
+                          shot: str, load_s: float = RENDER_LOAD_S,
+                          capture_s: float = RENDER_CAPTURE_S,
+                          api: "dict | None" = None) -> "tuple[bool, str]":
+    """Laden, wait ECHTE Millisekunden laufen lassen, fangen (#213-Nachtrag).
+
+    (gefangen, Grund). Der Fang kommt auch dann, wenn die Seite nie fertig
+    laedt -- dann ohne Wartezeit, denn sie lief schon `load_s` lang: das ist
+    die Aufnahme auf den Termin, die der Kommandozeilen-Pfad nicht kann.
+    Kein Fang heisst: die Seite hat binnen `capture_s` keinen Frame
+    geliefert, oder der Browser ist weg -- beides steht im Grund.
+
+    #253: after a capture, `api` (when given) is filled with the
+    page's own interface names and their `length`s (_API_DUMP_JS), for the
+    console hints. No answer within RENDER_PROBE_S leaves it empty."""
+    t0 = time.monotonic()
+    gone = "the browser closed its devtools pipe before the capture"
+    made = dt.call("Target.createTarget", {"url": "about:blank"},
+                   until=t0 + load_s)
+    target = ((made or {}).get("result") or {}).get("targetId")
+    if not target:
+        return False, gone if dt.closed else "the browser opened no page"
+    joined = dt.call("Target.attachToTarget",
+                     {"targetId": target, "flatten": True}, until=t0 + load_s)
+    sid = ((joined or {}).get("result") or {}).get("sessionId")
+    if not sid:
+        return False, gone if dt.closed else "the browser let no one attach"
+    # DIE GROESSE GILT FUER DIE SEITE, NICHT FUERS FENSTER: ohne das bekam
+    # der Fang 1280x633 statt 1280x720 (gemessen) -- --window-size zaehlt
+    # den Rahmen mit.
+    dt.call("Emulation.setDeviceMetricsOverride",
+            {"width": w, "height": h, "deviceScaleFactor": 1, "mobile": False},
+            sid, until=t0 + load_s)
+    dt.call("Page.enable", session=sid, until=t0 + load_s)
+    went = dt.call("Page.navigate", {"url": url}, sid, until=t0 + load_s)
+    failed = ((went or {}).get("result") or {}).get("errorText")
+    if failed:
+        return False, "the page did not load: %s" % failed
+    loaded = dt.wait_for(lambda m: m.get("method") == "Page.loadEventFired"
+                         and m.get("sessionId") == sid, until=t0 + load_s)
+    if dt.closed:
+        return False, gone
+    if loaded:
+        reason = "done"
+        settle = time.monotonic() + wait / 1000.0
+        # Das Rohr wird waehrend des Wartens geleert, damit der Browser
+        # nie an einem vollen Puffer haengt.
+        dt.wait_for(lambda m: False, until=settle)
+        if dt.closed:
+            return False, gone
+    else:
+        reason = ("captured while still loading -- no load event within "
+                  "%d s" % load_s)
+        dt.call("Page.stopLoading", session=sid, until=time.monotonic() + 2)
+    asked = time.monotonic()
+    got = dt.call("Page.captureScreenshot", {"format": "png"}, sid,
+                  until=asked + capture_s)
+    data = ((got or {}).get("result") or {}).get("data")
+    if not data:
+        if dt.closed:
+            return False, gone
+        return False, ("no frame within %d s of the capture request%s"
+                       % (capture_s, "" if loaded else
+                          ", and no load event within %d s before it"
+                          % load_s))
+    import base64 as _b64
+    with open(shot, "wb") as fh:
+        fh.write(_b64.b64decode(data))
+    if api is not None:
+        got = dt.call("Runtime.evaluate",
+                      {"expression": _API_DUMP_JS, "returnByValue": True,
+                       "silent": True, "timeout": RENDER_PROBE_S * 1000},
+                      sid, until=time.monotonic() + RENDER_PROBE_S)
+        value = ((((got or {}).get("result") or {}).get("result") or {})
+                 .get("value"))
+        if isinstance(value, dict):
+            api.update(value)
+    return True, "%s, captured %.1f s after start" % (reason,
+                                                     time.monotonic() - t0)
+
+
 def tool_render_page(path: str, wait_ms: int | None = None,
                      width: int | None = None, height: int | None = None,
                      **_) -> str:
@@ -7602,6 +9777,20 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     Timeout. Ein Browser startet genau solche Enkel. Dateien haben dieses
     Problem nicht.
 
+    UND ES TRAEGT SEINEN EIGENEN DECKEL (#213, 2026-09-21). Der Lauf auf der
+    2-MB-three.js-Seite wuchs auf 54 GiB Software-WebGL, die Maschine fror
+    ein, und der Kernel schoss den SERVER -- der Browser lag in keiner Cgroup,
+    die ihn allein getroffen haette. Heute laeuft er in einem Scope mit
+    MemoryMax (crow_platform.render_memory_bounds), stirbt am Deckel als EIN
+    Prozess mit einem Grund in der Antwort, und seine Leiche wird GEMESSEN und
+    nicht angenommen. Die Karte entscheidet mit, wenn sie frei ist (gemessen
+    2026-09-22: --use-gl=angle nimmt die RTX 5090, beide Budgets zeichnen;
+    SwiftShader bleibt der Rueckfall). Und ein Fang, der fast nur eine Farbe
+    enthaelt, wird als das benannt, was er ist: kein Signal -- die Leerfaenge
+    vom 2026-09-22 waren 4,6 KB weisses Nichts, vom Modell als
+    "environment-blocked, page correct" ausgelegt, und zwei Nachmittage Arbeit
+    liefen auf einem kaputten Messgeraet.
+
     EIN EIGENES PROFIL JE LAUF, und das ist keine Hygiene, sondern die
     Bedingung dafuer, dass ueberhaupt etwas passiert: ohne `--user-data-dir`
     reicht Chrome den Auftrag an eine bereits laufende Instanz weiter und kehrt
@@ -7619,6 +9808,13 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     durchgereicht, und die letzten Konsolenzeilen selbst reisen im Text mit
     -- "scene voxels: 10577" ist ein Beweis, den kein Compositor
     unterschlagen kann.
+
+    UND SEIN BUDGET LAESST SICH EINHALTEN (#213-Nachtrag, 2026-09-22). Die
+    virtuelle Uhr war nie der Posten -- Software-Frames sind es, und das
+    Zeitfenster wuchs mit wait_ms, die Kosten nicht. Wo es die Leitung gibt
+    (--remote-debugging-pipe, POSIX), laeuft die Seite wait_ms ECHTE
+    Millisekunden und wird dann gefangen, auch eine, die nie fertig laedt;
+    ein Fehlschlag nennt den Arm und sagt, dass mehr wait_ms nicht hilft.
     """
     import shutil as _shutil
     import tempfile as _tempfile
@@ -7640,6 +9836,7 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         if bad:
             return bad
         url = target
+        page_file = None
     else:
         target = _rooted(target)                    # #177
         if not os.path.isfile(target):
@@ -7647,13 +9844,16 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         # lstrip, damit ein POSIX-Pfad nicht `file:////tmp/...` ergibt: unter
         # Windows beginnt der Pfad mit dem Laufwerk, unter Linux mit `/`.
         url = "file:///" + target.replace(os.sep, "/").lstrip("/")
+        page_file = target
 
     exe = find_browser()
     if exe is None:
         return ("error: no Chromium browser on this machine. render_page needs "
                 "Chrome or Edge; neither was found in the usual places.")
 
-    wait = max(200, min(int(wait_ms or 4000), 60000))
+    # #213-NACHTRAG: wait_ms ist ECHTE Zeit nach dem Laden und hat einen
+    # Deckel, der kein Eskalationsraum ist (siehe RENDER_WAIT_MAX_MS).
+    wait = max(200, min(int(wait_ms or 4000), RENDER_WAIT_MAX_MS))
     w = max(200, min(int(width or 1280), 4096))
     h = max(200, min(int(height or 800), 4096))
 
@@ -7662,34 +9862,71 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     profile = _tempfile.mkdtemp(prefix="crow-render-")
     log = os.path.join(profile, "browser.log")
 
-    argv = [exe, "--headless=new", "--disable-gpu",
-            # #175-NACHTRAG (2026-09-20): DIE ZWEI SWIFTSHADER-SCHALTER. Bis
-            # heute stand hier nur --disable-gpu, und die Folge war messbar:
-            # unter der virtuellen Uhr lief requestAnimationFrame NIE an, drei
-            # Varianten einer animierten WebGL-Seite ergaben byte-identische
-            # 92.027-Byte-Fangs nach 8 echten Sekunden Wartezeit, und das
-            # Modell auditete diese Leinwaende als "environment-blocked,
-            # page correct" -- das MESSGERAET war kaputt, nicht die Seite.
-            # Dazu kam Chromium 144: der automatische SwiftShader-Fallback
-            # fuer WebGL wurde gestrichen (chromestatus "Remove SwiftShader
-            # fallback"), ohne --enable-unsafe-swiftshader scheitert in
-            # Headless die WebGL-Kontexterzeugung. GEMESSEN hier (Chromium
-            # 152, dieselbe Testseite mit fahrendem Balken und fps-Zaehler,
-            # Budget 2000 gegen 8000):
-            #   alt  (--disable-gpu):        5.138 B @ rAF 3 == 5.138 B @ rAF 3
-            #   neu  (+ --use-angle=swiftshader
-            #         + --enable-unsafe-swiftshader):
-            #                                5.138 B @ rAF 3 != 5.117 B @ rAF 5
-            # Die Animation ZIEHT unter der virtuellen Uhr, und zwei Budgets
-            # liefern verschiedene Bilder. Alles bleibt CPU: SwiftShader ist
-            # Software-Rasterung, --disable-gpu bleibt und haelt die Karte
-            # draussen.
-            "--enable-unsafe-swiftshader", "--use-angle=swiftshader",
+    # #213. WELCHER RASTERER, UND DIE KARTE ENTSCHEIDET MIT. Gemessen hier
+    # 2026-09-22 am selben Kriterien wie #175-Nachtrag (zwei Budgets, zwei
+    # verschiedene Bilder): die swiftshader-Paarung unten rendert weiter
+    # softwareseitig ("ANGLE (Google, Vulkan ... SwiftShader driver)"),
+    # --use-gl=angle nimmt die Karte ("ANGLE (NVIDIA ... RTX 5090, OpenGL ES
+    # 3.2)") -- aber nur, wenn freie VRAM da ist, denn der Server zuerst ist
+    # die Regel, nicht die Ausnahme. Die Antwort steht im Ergebnis mit dabei,
+    # weil ein Modell, das seinen Spiegel kennt, ihn auch nicht
+    # bezweifeln kann.
+    #
+    # #213-NACHTRAG: DAS ETIKETT STIMMT, AUCH WENN DIE KONSOLE ANDERS KLINGT.
+    # "GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU
+    # stall due to ReadPixels" sieht nach NVIDIA aus und ist es nicht:
+    # gemessen auf einer Probeseite kommt die Zeile NUR im swiftshader-Arm
+    # (Renderer "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device ...))"),
+    # der angle-Arm auf der RTX 5090 schreibt sie nicht; der Text steht im
+    # chromium-Binary (ANGLEs eigene Performance-Warnung) und in keiner
+    # libnvidia-*. GL_CLOSE_PATH_NV ist nur der Name, den Chromiums
+    # Enum-Tabelle fuer die Meldungs-ID 0 findet. Der GPU-Prozess des
+    # Software-Arms haelt /dev/nvidiactl offen, aber keinen VRAM (nicht in
+    # nvidia-smi) -- gerastert wird in SwiftShader.
+    gl = crow_platform.render_gl_mode()
+    gl_flags = (["--use-gl=angle"] if gl == "angle" else
+                # #175-NACHTRAG (2026-09-20): DIE ZWEI SWIFTSHADER-SCHALTER. Bis
+                # heute stand hier nur --disable-gpu, und die Folge war messbar:
+                # unter der virtuellen Uhr lief requestAnimationFrame NIE an, drei
+                # Varianten einer animierten WebGL-Seite ergaben byte-identische
+                # 92.027-Byte-Fangs nach 8 echten Sekunden Wartezeit, und das
+                # Modell auditierte diese Leinwaende als "environment-blocked,
+                # page correct" -- das MESSGERAET war kaputt, nicht die Seite.
+                # Dazu kam Chromium 144: der automatische SwiftShader-Fallback
+                # fuer WebGL wurde gestrichen (chromestatus "Remove SwiftShader
+                # fallback"), ohne --enable-unsafe-swiftshader scheitert in
+                # Headless die WebGL-Kontexterzeugung. GEMESSEN hier (Chromium
+                # 152, dieselbe Testseite mit fahrendem Balken und fps-Zaehler,
+                # Budget 2000 gegen 8000):
+                #   alt  (--disable-gpu):        5.138 B @ rAF 3 == 5.138 B @ rAF 3
+                #   neu  (+ --use-angle=swiftshader
+                #         + --enable-unsafe-swiftshader):
+                #                                5.138 B @ rAF 3 != 5.117 B @ rAF 5
+                # Die Animation ZIEHT unter der virtuellen Uhr, und zwei Budgets
+                # liefern verschiedene Bilder. SwiftShader bleibt Software: die
+                # Karte wird nicht angefasst, solange sie nicht frei ist.
+                ["--disable-gpu",
+                 "--enable-unsafe-swiftshader", "--use-angle=swiftshader"])
+
+    # #213-NACHTRAG: DIE LEITUNG, WO ES SIE GIBT. Mit ihr faehrt Crow die
+    # Seite selbst (_render_over_devtools); ohne sie (Windows) bleibt der
+    # Kommandozeilen-Screenshot mit der virtuellen Uhr.
+    pipe = crow_platform.devtools_pipe()
+    argv = [exe, "--headless=new"] + gl_flags + [
             "--hide-scrollbars",
             "--no-first-run", "--no-default-browser-check",
             "--disable-extensions", "--mute-audio",
             "--user-data-dir=" + profile,
             "--window-size=%d,%d" % (w, h),
+            # --v UND NICHT DER ALTE SCHALTER: die Verbositaet des
+            # Chromium-Loggers regelt --v, und nur mit ihr landen die
+            # CONSOLE-Zeilen der Seite im browser.log -- der TEXT-Beweis
+            # dafuer, dass ihr Skript lief (#175-Nachtrag, siehe oben).
+            "--enable-logging=stderr", "--v=0"]
+    if pipe:
+        argv += ["--remote-debugging-pipe", "about:blank"]
+    else:
+        argv += [
             # DER DECKEL IST IM BROWSER UND NICHT NUR DRAUSSEN. Eine Seite, die
             # nie fertig laedt, wuerde sonst nur vom Timeout getroffen -- und
             # das liefert KEIN Bild. Die virtuelle Uhr laesst ihn nach dieser
@@ -7706,30 +9943,75 @@ def tool_render_page(path: str, wait_ms: int | None = None,
             # ("ends the call by itself, with a reason"), und nicht der, den es
             # bebildert.
             "--run-all-compositor-stages-before-draw",
-            # --v UND NICHT DER ALTE SCHALTER: die Verbositaet des
-            # Chromium-Loggers regelt --v, und nur mit ihr landen die
-            # CONSOLE-Zeilen der Seite im browser.log -- der TEXT-Beweis
-            # dafuer, dass ihr Skript lief (#175-Nachtrag, siehe oben).
-            "--enable-logging=stderr", "--v=0",
             "--screenshot=" + shot, url]
 
+    # #213. DER BROWSER IN EINEM EIGENEN DECKEL. Der Lauf vom 2026-09-21 wuchs
+    # auf 54 GiB und fror die Maschine ein, weil der Renderprozess in keiner
+    # Cgroup lag, die ihn allein getroffen haette -- der Kernel beantwortete
+    # "groesster Prozess" mit dem SERVER. Der Praefix stellt ihn in
+    # session.slice mit MemoryMax aus render_memory_bounds; alles in argv ist
+    # absolut, und NUR deshalb ist das sicher: die Unit startet in $HOME, nicht
+    # im cwd des Aufrufers (gemessen 2026-09-22, ein stiller ENOENT).
+    # Das Trampolin der Leitung steht HINTER dem Scope: es ersetzt sich durch
+    # den Browser, die pid im Scope ist seine.
+    scope = crow_platform.render_scope_prefix()
+    if pipe:
+        argv = pipe[0] + argv
+    if scope:
+        argv = scope + argv
+
+    # #213-NACHTRAG: EIN DECKEL FUER DEN GANZEN AUFRUF, UND ER HAENGT NICHT
+    # AN DER SEITE. Laden + wait_ms + ein Frame, auf beiden Pfaden dieselbe
+    # Summe -- vorher wait/1000 + 8, das auf der Diorama-Seite 12 s bei
+    # wait 4000 ergab, gegen 32,7 s echten Bedarf.
+    ceiling = RENDER_LOAD_S + wait / 1000.0 + RENDER_CAPTURE_S
+
     detach = crow_platform.spawn_kwargs(detached=True)
+    if pipe:
+        detach["pass_fds"] = pipe[1]
     reason = "done"
+    captured = False
+    api: dict = {}              # #253: the page's own names
     try:
         with open(log, "w", encoding="utf-8", errors="replace") as sink:
-            proc = subprocess.Popen(argv, stdout=sink, stderr=subprocess.STDOUT,
-                                    **detach)
             try:
-                # Das Zeitfenster ist der Deckel der Seite plus Luft fuer Start
-                # und Schreiben -- nicht der Deckel selbst, sonst schlaegt das
-                # Timeout genau in dem Moment zu, in dem gezeichnet wird.
-                # ACHT SEKUNDEN LUFT, NICHT ZWANZIG. Der Deckel gehoert der
-                # Seite; das hier ist nur der Start des Browsers und das
-                # Schreiben der Datei. Mit 20 kostete eine haengende Seite 21 s
-                # bei einem Deckel von 1,2 -- gemessen, und das ist die Sorte
-                # Wartezeit, wegen der jemand wieder anfaengt, selbst zu
-                # basteln.
-                proc.wait(timeout=wait / 1000.0 + 8)
+                proc = subprocess.Popen(argv, stdout=sink,
+                                        stderr=subprocess.STDOUT, **detach)
+            except OSError:
+                if pipe:
+                    for fd in (pipe[2], pipe[3]):
+                        os.close(fd)
+                raise
+            finally:
+                if pipe:
+                    for fd in pipe[1]:
+                        os.close(fd)
+            if pipe:
+                dt = _Devtools(pipe[2], pipe[3])
+                try:
+                    captured, reason = _render_over_devtools(
+                        dt, url, w, h, wait, shot, api=api)
+                    # Der hoefliche Weg zuerst, und das Rohr bleibt offen, bis
+                    # er gegangen ist -- sonst schreibt der Browser "Connection
+                    # terminated while reading from pipe" in den Konsolen-
+                    # schwanz (gemessen). Was danach noch lebt, trifft der
+                    # Zweig darunter wie jeden anderen Browser.
+                    dt.send("Browser.close")
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                finally:
+                    for fd in (pipe[2], pipe[3]):
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+            try:
+                # Kommandozeile: das Zeitfenster ist der ganze Deckel. Leitung:
+                # das Bild ist schon da oder nicht, hier geht es nur noch ums
+                # Aufraeumen -- fuenf Sekunden fuer ein Browser.close.
+                proc.wait(timeout=5 if pipe else ceiling)
             except subprocess.TimeoutExpired:
                 proc.kill()                          # SEIN Kind, nie ein Name
                 # UND SEINE ENKEL, auf Linux: ein Chromium startet Zonen- und
@@ -7737,8 +10019,35 @@ def tool_render_page(path: str, wait_ms: int | None = None,
                 # Es ist dieselbe Regel -- die Sitzung, die DIESER Aufruf selbst
                 # aufgemacht hat, nie eine Prozessliste und nie ein Name.
                 crow_platform.terminate_tree(proc)
-                proc.wait(timeout=10)
-                reason = "timed out after %d ms and was stopped" % wait
+                # #213. UND DAS WARTEN AUF DIE LEICHE DARF KEINEN FEHLER
+                # WERFEN. Der Lauf vom 2026-09-21 ueberlebte den Werkzeugruf
+                # um 20 Minuten; ab hier heisst "was stopped" auch, dass der
+                # Tod GEMESSEN wurde -- und wenn er nicht eintritt, STEHT ER
+                # DA, als Grund, den das Modell lesen kann.
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    reason = ("%s; the browser (pid %d) would not die and may "
+                              "still be running"
+                              % (reason if pipe else "timed out after %d s"
+                                 % ceiling, proc.pid))
+                else:
+                    if not pipe:
+                        reason = ("timed out after %d s and was stopped"
+                                  % ceiling)
+            else:
+                # #213. EIN DECKEL-TOT SIEHT WIE ERFOLG AUS. Der Kernel
+                # ueberhoeht den Browser innerhalb seiner Scope-Cgroup, der
+                # Rueckgabewert ist nur ein Signal -- aber "done" waere die
+                # Luege, mit der das Modell einen halben Frame liest.
+                # -9 ist das Signal des Popen-Handles, 137 (128+9) die Zahl,
+                # mit der systemd-run ihn weiterreicht.
+                code = proc.returncode
+                if scope and code is not None and code in (-9, 137) and not captured:
+                    cap = crow_platform.render_memory_bounds().get("MemoryMax")
+                    reason = ("stopped by the render's memory ceiling%s -- "
+                              "the scene outgrew the browser"
+                              % (" (%s)" % cap if cap else ""))
         log_text = ""
         try:
             with open(log, encoding="utf-8", errors="replace") as fh:
@@ -7746,10 +10055,24 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         except OSError:
             pass
         console = _console_lines(log_text)
+        # #253: every console line, not the last ten -- the page's
+        # own probe line that contradicts the error may be further up.
+        hints = _console_hints(_console_lines(log_text, 0), api,
+                               page_file)
         if not os.path.isfile(shot):
-            return ("error: the browser wrote no screenshot (%s). Console:\n%s"
-                    % (reason, "\n".join(_console_lines(log_text, 20))
-                       or "(empty)"))
+            # #213-NACHTRAG: DER GRUND UND DANN DER RAT, DER DEN ARM NENNT --
+            # nie "timed out after 20000 ms" allein, das las sich als "gib
+            # mehr". Ein Speicherdeckel-Tod und eine falsche Adresse haben ihre
+            # eigene Antwort und brauchen den Rat nicht.
+            advice = ("" if ("memory ceiling" in reason
+                             or "did not load" in reason)
+                      else " " + _render_stall_advice(gl, wait))
+            return _clip("error: the browser wrote no screenshot (%s).%s%s "
+                         "Console:\n%s"
+                         % (reason, advice,
+                            "".join("\n" + x for x in hints),
+                            "\n".join(_console_lines(log_text, 20))
+                            or "(empty)"))
         # #175-NACHTRAG: DAS URTEIL VOR DEM FANG. Die Bytes DIESER Datei
         # gegen den letzten Fang DIESER Seite -- byte-gleich ist ein
         # Verdachtsmoment gegen die eigenen Pixel, kein Erfolg. Die Warnung
@@ -7767,8 +10090,14 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         _RENDER_RIDE.clear()
         _RENDER_RIDE.append((url, shot))
         said = _capture_warnings(previous, pixels, console)
-        said.append("%s -- %d bytes, %dx%d, %s"
-                    % (shot, os.path.getsize(shot), w, h, reason))
+        # #253: right under the error warnings they answer.
+        said.extend(hints)
+        # #213. DER RASTERER IM ERGEBNIS: software-gerasterte Fangs einer
+        # WebGL-Seite sehen anders aus als GPU-gerasterte, und ein Modell, das
+        # seinen Spiegel kennt, bezweifelt ihn auch.
+        gl_said = ("gpu (angle)" if gl == "angle" else "software (swiftshader)")
+        said.append("%s -- %d bytes, %dx%d, %s, %s"
+                    % (shot, os.path.getsize(shot), w, h, reason, gl_said))
         said.append("read_image it to look at the page.")
         if console:
             said.append("console (last %d of the page's log):" % len(console))
@@ -7796,12 +10125,20 @@ def tool_read_image(path: str, **_) -> str:
 
     KEINE ZWEITE GROESSENREGEL. `image_part` schickt die Bytes, wie sie auf der
     Platte liegen; der Server kappt selbst bei `--image-max-tokens` (4.096), und
-    eine eigene Zahl hier waere eine, die niemand nachzieht.
+    eine eigene Zahl hier waere eine, die niemand nachzieht. DIE EINE AUSNAHME
+    IST KEINE GROESSENREGEL FUERS MODELL, sondern eine fuer den ARBEITSSPEICHER
+    (#207): der Server kappt, was ANKOMMT, aber vorher lesen wir hier schon die
+    ganze Datei -- ein Leser ohne Grenze ist ein Leser, der die Maschine nehmen
+    kann. 32 MiB liegt ueber jedem Bild, das dieses Programm je gesehen hat.
     """
     path = _rooted(path)                            # #177
     if not os.path.isfile(path):
         return "error: no such image: %s" % path
     try:
+        if os.path.getsize(path) > IMAGE_MAX_BYTES:
+            return ("error: image is over %d MiB and was not read -- "
+                    "the size is the bound, crop or resize it first: %s"
+                    % (IMAGE_MAX_BYTES >> 20, path))
         part = image_part(path)
     except CrowError as exc:
         return "error: %s" % exc
@@ -7831,6 +10168,7 @@ def tool_read_file(path: str, start_line: int | None = None, end_line: int | Non
         try:
             out, total = [], 0
             with open(path, encoding="utf-8", errors="replace") as fh:
+                stamp = _stamp(os.fstat(fh.fileno()))     # #215-H, before the bytes
                 for n, line in enumerate(fh, 1):
                     total = n
                     if lo <= n <= hi:
@@ -7845,11 +10183,12 @@ def tool_read_file(path: str, start_line: int | None = None, end_line: int | Non
         if not out:
             return f"error: {path} has no lines in {lo}-{hi}" + (
                 f" (the file has {total})" if total else "")
-        _READ.add(_key(path))
+        _mark_read(path, stamp)
         return _clip("\n".join(out))
 
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
+            stamp = _stamp(os.fstat(fh.fileno()))         # #215-H, before the bytes
             data = fh.read(MAX_TOOL_BYTES + 1)
     except FileNotFoundError:
         # Near-misses only, not the whole directory. Forty names came back on
@@ -7866,6 +10205,12 @@ def tool_read_file(path: str, start_line: int | None = None, end_line: int | Non
             near = []
         if near:
             return f"error: no such file: {path}\ndid you mean: {', '.join(near)}"
+        # #221: the stem rule above needs the parent to exist; a
+        # parent that does not is the invented-directory case, and gets the
+        # same near-miss answer run_command's cwd gets.
+        hint = near_miss_hint(path) if not os.path.isdir(parent) else ""
+        if hint:
+            return f"error: no such file: {path}\n{hint}"
         return f"error: no such file: {path} (use find_files or list_dir to locate it)"
     except IsADirectoryError:
         return f"error: {path} is a directory -- use list_dir"
@@ -7873,8 +10218,226 @@ def tool_read_file(path: str, start_line: int | None = None, end_line: int | Non
         return f"error: permission denied: {path}"
     except OSError as exc:
         return f"error: could not read {path}: {exc}"
-    _READ.add(_key(path))
+    _mark_read(path, stamp)
     return _clip(data)
+
+
+# #244. A WRITE DOES NOT INVENT A PLACE IN SILENCE. Both writers ran
+# `os.makedirs(..., exist_ok=True)`, so a wrong path became disk state and the
+# success line hid it. Measured in the stored sessions (2026-09-23 copies):
+# `testcases/w/fs.py` written beside `testcases/work/` (2026-09-18 msg 238,
+# the file's own text named `work`); six write paths with a control
+# character, four of them `name\n` -- a second FILE beside the meant one,
+# after which the model checked the stale original (`pipeline.py`,
+# `src/terrain.js`); one `gen_scene2.py\nparameter>\n<parameter ...>/...`
+# directory chain from a leaked tool-call tail. aider asks the user before any
+# new file ("Create new file?"), OpenHands' editor never creates parents,
+# Claude Code prompts per write; `auto` has none of those gates, so the check
+# is here: control characters always refused, a lookalike of an existing
+# directory refused ONCE (the identical call again means it), and every
+# directory a write creates is said in its result.
+_NEW_DIR_ASKED: "set[str]" = set()
+
+
+def _control_refusal(path: str) -> "str | None":
+    """#244: the refusal for a path holding U+0000-U+001F, or None."""
+    if not any(ord(ch) < 32 for ch in path):
+        return None
+    lines = ["error: refusing to write %r: the path holds a control character "
+             "(a newline or tab), which no file here is meant to have. Nothing "
+             "was created." % path]
+    clean = path.strip()
+    if clean and not any(ord(ch) < 32 for ch in clean):
+        lines.append("did you mean: %s" % clean)
+    return "\n".join(lines)
+
+
+def _first_missing_dir(path: str) -> "tuple[str, str] | None":
+    """#244: (the deepest existing directory, the first missing name under it)
+    on the way to `path`'s parent, or None when the parent exists."""
+    here = os.path.dirname(os.path.abspath(path))
+    missing = None
+    while not os.path.isdir(here):
+        up = os.path.dirname(here)
+        if up == here:
+            return None
+        missing, here = os.path.basename(here), up
+    return (here, missing) if missing else None
+
+
+def _lookalike_dir(name: str, parent: str) -> "str | None":
+    """#244: the one existing directory in `parent` that `name` is a near miss
+    of (#221's metric) or a proper prefix of (`w` for `work`), else None."""
+    try:
+        with os.scandir(parent) as it:
+            dirs = []
+            for entry in it:
+                if entry.is_dir():
+                    dirs.append(entry.name)
+                if len(dirs) > NEAR_MISS_SCAN:
+                    return None
+    except OSError:
+        return None
+    key = _name_key(name)
+    cap = _near_edits(name)
+    scored = sorted((_edits(key, _name_key(d), cap), d) for d in dirs)
+    scored = [(n, d) for n, d in scored if n <= cap]
+    if scored and (len(scored) == 1 or scored[1][0] > scored[0][0]):
+        return scored[0][1]
+    longer = [d for d in dirs if _name_key(d).startswith(key) and _name_key(d) != key]
+    return longer[0] if len(longer) == 1 else None
+
+
+def new_dir_check(path: str, tool: str) -> "tuple[str | None, str | None]":
+    """#244: (refusal or None, the first directory this write would create).
+
+    Called after the boundary, before anything touches the disk."""
+    refused = _control_refusal(path)
+    if refused:
+        return refused, None
+    gap = _first_missing_dir(path)
+    if gap is None:
+        return None, None
+    parent, name = gap
+    made = os.path.join(parent, name)
+    near = _lookalike_dir(name, parent)
+    if near is None or _resolve(made) in _NEW_DIR_ASKED:
+        return None, made
+    _NEW_DIR_ASKED.add(_resolve(made))
+    rest = os.path.relpath(os.path.abspath(path), made)
+    meant = os.path.join(parent, near, rest)
+    return ("error: %s was not written: the directory %s does not exist, and "
+            "%s beside it does.\ndid you mean: %s\nNothing was created. If a "
+            "new directory `%s` is really meant, call %s again with the same "
+            "path." % (path, made, os.path.join(parent, near), meant, name,
+                       tool)), None
+
+
+def _said_new_dir(made: "str | None") -> str:
+    return " (new directory: %s)" % made if made else ""
+
+
+# ------------------------------------------------ corruption follow-ups -----
+# 2026-09-23 (crow-nest#91): the model wrote corrupt numbers into its own code
+# (`o[13]`->`o[113]`, `texImage3D`->`texImage33D`, `[0,0,0]`->`[0,0,00]`), the
+# bytes on disk equalled its write_file arguments, and it blamed the tools --
+# "the read channel is byte-unstable" -- for hours. Two answers from the
+# harness: say that a write is byte-exact, with the numbers to check it by,
+# and parse what was written, so the first error is in the model's own result.
+
+def _write_receipt(path: str, sent: bytes, whole: bool = True) -> str:
+    """#252. What a write result says about the bytes: the count in
+    BYTES (the old `len(content)` counted characters -- 32 of 112 writes on
+    2026-09-23 held non-ASCII text, so the number disagreed with the file),
+    a short sha256 of the file as it now is, and that it is byte-exact. The
+    file is read back, so the claim is measured, not assumed."""
+    try:
+        with open(path, "rb") as fh:
+            disk = fh.read()
+    except OSError as exc:
+        return " (could not read it back: %s)" % exc
+    digest = hashlib.sha256(disk).hexdigest()[:12]
+    if not disk.endswith(sent):
+        return (" (sha256 %s) -- WARNING: the file does not end with the bytes "
+                "sent; read it back" % digest)
+    return (" (sha256 %s, file %d bytes). Byte-exact: the file %s exactly "
+            "the bytes this call sent; a later read returns them. A mistake "
+            "in them was in the content." % (
+                digest, len(disk), "holds" if whole else "ends with"))
+
+
+# #251. A CHEAP PARSE OF WHAT WAS WRITTEN. `node --check` parses
+# without running (nodejs.org/api/cli.html, -c/--check). An HTML page's
+# inline scripts are parsed one by one through stdin, padded with newlines so
+# the line number is the page's. No node, no word: the check is a help, not
+# a gate, and a write never fails because of it.
+SYNTAX_CHECK_SECONDS = 5.0
+SYNTAX_CHECK_BYTES = 8 << 20
+SYNTAX_CHECK_SCRIPTS = 16
+_SYNTAX_JS = (".js", ".mjs", ".cjs")
+_SYNTAX_HTML = (".html", ".htm")
+_INLINE_SCRIPT = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.I | re.S)
+_SCRIPT_SRC = re.compile(r"\bsrc\s*=", re.I)
+_SCRIPT_TYPE = re.compile(r"""\btype\s*=\s*["']?([^"'\s>]*)""", re.I)
+# The HTML standard's classic-script types and "module"; anything else
+# (importmap, x-shader/x-fragment, application/json) is a data block.
+_SCRIPT_JS_TYPES = ("", "text/javascript", "application/javascript",
+                    "text/ecmascript", "application/ecmascript", "module")
+_NODE_WHERE = re.compile(r"^\S.*:(\d+)$")
+_NODE_ERROR = re.compile(r"^[A-Za-z]*Error\b.*?: ")
+
+
+def _node_first_error(stderr: str) -> str:
+    """node's report cut to its first error: the line, the source line with
+    the caret (a window of it, for minified code), and the message."""
+    lines = stderr.splitlines()
+    msg = next((ln for ln in lines if _NODE_ERROR.match(ln)), None)
+    if msg is None:
+        return (lines[-1] if lines else "node --check failed").strip()[:300]
+    at = next((i for i, ln in enumerate(lines) if _NODE_WHERE.match(ln)), None)
+    if at is None or at + 1 >= len(lines):
+        return msg.strip()[:300]
+    code = lines[at + 1]
+    caret = lines[at + 2] if at + 2 < len(lines) and "^" in lines[at + 2] else ""
+    col = caret.find("^") if caret else 0
+    lo = max(0, col - 80)
+    shown = code[lo:col + 80]
+    out = "line %s: %s" % (_NODE_WHERE.match(lines[at]).group(1),
+                           msg.strip()[:300])
+    if not shown.strip():
+        return out
+    out += "\n  " + shown
+    if caret:
+        out += "\n  " + " " * (col - lo) + "^"
+    return out
+
+
+def syntax_check(path: str) -> str:
+    """#251. '' when there is nothing to say (not JS/HTML, no node, too
+    big, nothing to parse), else one line starting with a newline."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in _SYNTAX_JS + _SYNTAX_HTML:
+        return ""
+    node = shutil.which("node")
+    try:
+        if not node or os.path.getsize(path) > SYNTAX_CHECK_BYTES:
+            return ""
+        deadline = time.monotonic() + SYNTAX_CHECK_SECONDS
+        cwd = os.path.dirname(os.path.abspath(path))
+        if ext in _SYNTAX_JS:
+            jobs = [([node, "--check", path], None)]
+        else:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                page = fh.read()
+            jobs = []
+            for m in _INLINE_SCRIPT.finditer(page):
+                typed = _SCRIPT_TYPE.search(m.group(1))
+                kind = typed.group(1).lower() if typed else ""
+                if _SCRIPT_SRC.search(m.group(1)) or kind not in _SCRIPT_JS_TYPES:
+                    continue
+                pad = "\n" * page.count("\n", 0, m.start(2))
+                jobs.append(([node, "--check", "--input-type=%s" % (
+                    "module" if kind == "module" else "commonjs"), "-"],
+                    pad + m.group(2)))
+            if not jobs:
+                return ""
+        what = ("node --check" if ext in _SYNTAX_JS else
+                "node --check, %d inline script%s" % (
+                    min(len(jobs), SYNTAX_CHECK_SCRIPTS),
+                    "" if len(jobs) == 1 else "s"))
+        for argv, stdin_text in jobs[:SYNTAX_CHECK_SCRIPTS]:
+            code, _out, err, stopped = _bounded_run(argv, cwd, deadline,
+                                                    stdin_text)
+            if stopped:
+                return ("\nsyntax check (%s): not finished within %gs -- not "
+                        "checked" % (what, SYNTAX_CHECK_SECONDS))
+            if code != 0:
+                return ("\nsyntax check (%s) FAILED -- the error is in the "
+                        "content this file was given:\n%s"
+                        % (what, _node_first_error(err)))
+    except OSError:
+        return ""
+    return "\nsyntax check (%s): ok" % what
 
 
 def tool_write_file(path: str, content: str = "", **_) -> str:
@@ -7889,17 +10452,27 @@ def tool_write_file(path: str, content: str = "", **_) -> str:
     outside = _outside_root(path)
     if outside:
         return outside
-    if os.path.exists(path) and _key(path) not in _READ:
+    # #215-H: A FILE THAT DOES NOT EXIST HAS NOTHING TO LOSE, whatever the
+    # set says about an earlier version of it.
+    state = _read_state(path) if os.path.exists(path) else ("new",)
+    if state[0] == "unread":
         return (f"error: refusing to overwrite {path} without reading it first in "
-                f"this turn. Call read_file on it, then write.")
+                f"this conversation{READ_SCOPE_HINT}. Call read_file on it, then write.")
+    if state[0] == "changed":
+        return f"error: refusing to overwrite {path}: {READ_STALE}"
+    refused, made = new_dir_check(path, "write_file")          # #244
+    if refused:
+        return refused
     try:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(content)
     except OSError as exc:
         return f"error: could not write {path}: {exc}"
-    _READ.add(_key(path))
-    return f"wrote {len(content)} bytes to {path}"
+    _mark_read(path)                                # #215-H: crow knows these bytes
+    sent = content.encode("utf-8")
+    return (f"wrote {len(sent)} bytes to {path}" + _said_new_dir(made)
+            + _write_receipt(path, sent) + syntax_check(path))
 
 
 def tool_append_file(path: str, content: str = "", **_) -> str:
@@ -7913,20 +10486,52 @@ def tool_append_file(path: str, content: str = "", **_) -> str:
     if outside:
         return outside
     existed = os.path.exists(path)
+    # #215-H: AN APPEND TO A FILE THE MODEL KNOWS KEEPS IT KNOWN -- it is what
+    # was read plus what was just sent. One it had not read stays unread:
+    # appending is not reading.
+    known = _read_state(path)[0] == "fresh"
     if content and not content.endswith("\n"):
         content += "\n"
+    refused, made = new_dir_check(path, "append_file")         # #244
+    if refused:
+        return refused
     try:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, "a", encoding="utf-8", newline="") as fh:
             fh.write(content)
     except OSError as exc:
         return f"error: could not append to {path}: {exc}"
-    total = os.path.getsize(path)
+    if known:
+        _mark_read(path)
+    sent = content.encode("utf-8")
     verb = "appended to" if existed else "created"
-    return f"{verb} {path} (+{len(content)} bytes, file now {total} bytes)"
+    total = os.path.getsize(path)
+    checked = syntax_check(path)
+    if "FAILED" in checked:
+        checked += ("\n(this parsed the whole file as it stands now; a file "
+                    "still being built in pieces may not parse yet)")
+    return (f"{verb} {path} (+{len(sent)} bytes, file now {total} bytes)"
+            + _said_new_dir(made)
+            + _write_receipt(path, sent, whole=False) + checked
+            + _whole_write_hint(path, total))
 
 
-def tool_edit_file(path: str, old: str = "", new: str = "", **_) -> str:
+def _whole_write_hint(path: str, total: int) -> str:
+    """#254. A soft word, once per path, when an append leaves a
+    file that one write_file would have carried whole. Measured 2026-09-23:
+    49 of 50 appends left a file of at most 10 KB. It refuses nothing -- a
+    log or notes file is appended to legitimately -- and says it once, so
+    a file grown on purpose does not hear it every round."""
+    limit = whole_write_bytes()
+    if total > limit or _key(path) in _WHOLE_HINTED:
+        return ""
+    _WHOLE_HINTED.add(_key(path))
+    return (f"\nnote: the whole file is {total} bytes -- one write_file carries "
+            f"up to about {limit // 1024} KB inside the output limit, so a "
+            "file this size is written whole, not grown by appends.")
+
+
+def tool_edit_file(path: str, old: str = "", new: "str | None" = None, **_) -> str:
     """Exact-match replacement, and it refuses an ambiguous one.
 
     A patch format would be more expressive and needs fuzzy matching to survive
@@ -7937,10 +10542,26 @@ def tool_edit_file(path: str, old: str = "", new: str = "", **_) -> str:
     outside = _outside_root(path)                   # #92, and before the read rule
     if outside:
         return outside
-    if _key(path) not in _READ:
-        return f"error: read {path} before editing it, in this turn"
+    # #215. THE ARGUMENT CHECK GOES BEFORE THE READ RULE, for
+    # the reason the boundary does: it needs no state. Measured 2026-09-22 after
+    # a rollover: 22 of 22 edit_file calls carried old_string/new_string, 15 of
+    # them were answered "read it first" -- the model read, retried the same
+    # shape, and concluded the GUARD was the obstacle. A call that cannot run
+    # whatever was read has to hear that first.
+    #
+    # A MISSING 'new' IS NOT AN EMPTY ONE. The old default of "" made an edit
+    # without it a silent deletion of `old`; deleting stays possible, it just
+    # has to be said as new="".
     if not old:
         return "error: edit_file needs 'old' -- to create a file use write_file"
+    if new is None:
+        return "error: edit_file needs 'new' -- pass new=\"\" to delete 'old'"
+    state = _read_state(path)                       # #215-H
+    if state[0] == "unread":
+        return (f"error: read {path} before editing it, in this conversation"
+                f"{READ_SCOPE_HINT}. Call read_file on it, then edit.")
+    if state[0] == "changed":
+        return f"error: refusing to edit {path}: {READ_STALE}"
     try:
         with open(path, encoding="utf-8") as fh:
             data = fh.read()
@@ -7956,6 +10577,9 @@ def tool_edit_file(path: str, old: str = "", new: str = "", **_) -> str:
             fh.write(data.replace(old, new, 1))
     except OSError as exc:
         return f"error: could not write {path}: {exc}"
+    # #215-H: THE EDIT MOVED THE STAMP, and crow made the move -- without this
+    # the model's own second edit would read as someone else's change.
+    _mark_read(path)
     return f"replaced 1 occurrence in {path}"
 
 
@@ -7964,7 +10588,8 @@ def tool_list_dir(path: str = ".", **_) -> str:
     try:
         entries = sorted(os.listdir(path))
     except FileNotFoundError:
-        return f"error: no such directory: {path}"
+        hint = near_miss_hint(path)                 # #221
+        return f"error: no such directory: {path}" + ("\n" + hint if hint else "")
     except NotADirectoryError:
         return f"error: {path} is a file -- use read_file"
     except OSError as exc:
@@ -7989,11 +10614,11 @@ def tool_find_files(root: str = ".", pattern: str = "*", **_) -> str:
 
     root = _rooted(root)                            # #177
     hits, size = [], 0
+    started = time.monotonic()
     for base, dirs, files in os.walk(root):
         # Directories nobody means when they say "find the source file", and
         # walking them turns a search into minutes.
-        dirs[:] = [d for d in dirs if d not in
-                   {".git", "node_modules", "__pycache__", ".venv", "venv", "build", "dist"}]
+        dirs[:] = [d for d in dirs if d not in SEARCH_SKIP_DIRS]
         for name in files:
             if fnmatch.fnmatch(name, pattern):
                 hit = os.path.join(base, name)
@@ -8003,6 +10628,16 @@ def tool_find_files(root: str = ".", pattern: str = "*", **_) -> str:
                 # few hits can still be long paths, many short ones still add up.
                 if len(hits) >= MAX_HITS or size >= MAX_TOOL_BYTES:
                     return "\n".join(hits) + "\n[stopped -- narrow the pattern or the root]"
+        # #207. THE WALK ITSELF IS BOUNDED, not only the result: a deep or huge
+        # tree spends its minutes in os.walk before any hit exists, and the
+        # ceilings above cannot see that. A deadline checked per directory makes
+        # "still walking" a state that ends, with the partial truth as the result.
+        took = time.monotonic() - started
+        if took >= SEARCH_DEADLINE:
+            head = "\n".join(hits)
+            tail = ("[stopped after %.0f s -- the walk over %s did not finish; "
+                    "narrow the root]" % (took, root))
+            return head + "\n" + tail if head else tail
     return "\n".join(hits) or f"no file matching {pattern} under {root}"
 
 
@@ -8017,15 +10652,43 @@ def tool_search_text(root: str = ".", pattern: str = "", glob: str = "*", **_) -
         rx = _re.compile(pattern)
     except _re.error as exc:
         return f"error: bad regular expression: {exc}"
-    hits, size = [], 0
-    for base, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in
-                   {".git", "node_modules", "__pycache__", ".venv", "venv", "build", "dist"}]
+    hits, size, skipped = [], 0, 0
+    started = time.monotonic()
+    stopped = None
+    # #215. A FILE AS ROOT IS SEARCHED, NOT WALKED. os.walk over
+    # a file yields nothing, so the answer was "no match" -- a false negative,
+    # not an error. Measured 2026-09-22: twice with `path: build/entry.mjs`,
+    # the name grep and ripgrep take a file under. The file was named, so the
+    # glob does not filter it out again.
+    if os.path.isfile(root):
+        walk = [(os.path.dirname(root) or ".", [], [os.path.basename(root)])]
+        glob = "*"
+    else:
+        walk = os.walk(root)
+    for base, dirs, files in walk:
+        dirs[:] = [d for d in dirs if d not in SEARCH_SKIP_DIRS]
         for name in files:
             if not fnmatch.fnmatch(name, glob):
                 continue
             full = os.path.join(base, name)
             try:
+                # #207. THE TWO SKIPS THAT MADE THIS TOOL HAZARDOUS TO LEAVE
+                # OUT, and both are ripgrep's defaults rather than taste. The
+                # measured incident: glob "*" matched the 105 GB CNQ container,
+                # `errors="replace"` read it as "text" without ever raising,
+                # and the hit caps below could not fire because the pattern had
+                # no hits in binary -- so the tool read every byte of it. A
+                # file over the cap is never opened (stat first, the
+                # --max-filesize contract), and a NUL in the first bytes means
+                # binary, not text -- the containers are NUL-dense from byte
+                # one, which is what retires them here.
+                if os.path.getsize(full) > SEARCH_MAX_FILE_BYTES:
+                    skipped += 1
+                    continue
+                with open(full, "rb") as probe:
+                    if b"\0" in probe.read(SEARCH_SNIFF_BYTES):
+                        skipped += 1
+                        continue
                 with open(full, encoding="utf-8", errors="replace") as fh:
                     for n, line in enumerate(fh, 1):
                         if rx.search(line):
@@ -8040,7 +10703,176 @@ def tool_search_text(root: str = ".", pattern: str = "", glob: str = "*", **_) -
                                         + "\n[stopped -- narrow the pattern, or pass a glob]")
             except OSError:
                 continue
-    return "\n".join(hits) or f"no match for {pattern}"
+        # #207. THE WALK IS BOUNDED, NOT ONLY THE RESULT -- a tree that spends
+        # its minutes in files the caps cannot see (many small files, no hits)
+        # ends here with the partial truth as a result, and the model narrows
+        # the search instead of the session dying mid-pair.
+        took = time.monotonic() - started
+        if took >= SEARCH_DEADLINE:
+            stopped = ("[stopped after %.0f s -- the walk over %s did not "
+                       "finish; narrow the root, or pass a glob]" % (took, root))
+            break
+    out = "\n".join(hits) or f"no match for {pattern}"
+    if skipped:
+        out += ("\n[skipped %d file(s) over %d MiB or binary -- a hit in them "
+                "is not a hit you can use this way]" % (skipped, SEARCH_MAX_FILE_BYTES >> 20))
+    if stopped:
+        out += "\n" + stopped
+    return out
+
+
+def _child_env() -> "dict[str, str]":
+    """The environment a tool's child gets: nothing that looks like a secret.
+
+    It is a blocklist, so it is not airtight -- it stops the accident, not an
+    attacker."""
+    return {k: v for k, v in os.environ.items()
+            if not any(s in k.upper() for s in ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"))}
+
+
+# How long the bounded runner waits for its readers after the child is gone.
+# A reader whose pipe hit EOF finishes in microseconds; one that does not has a
+# grandchild holding the pipe (`server &`) and would wait for IT, so the wait
+# is short and a reader still blocked is left behind as the daemon it is.
+BOUNDED_RUN_SETTLE = 0.25
+
+
+def _bounded_run(cmd: "str | list[str]", cwd: "str | None", deadline: float,
+                 stdin_text: str | None = None, *, shell: bool = False,
+                 prefix: "list[str] | None" = None,
+                 unit: str | None = None) -> "tuple[int | None, str, str, str]":
+    """(exit code, stdout, stderr, stopped) -- #207's bounded child, once.
+
+    `stopped` is "" when the child ended by itself, "clock" when `deadline`
+    (a time.monotonic() value) passed, "cap" when one stream went over
+    COMMAND_CAPTURE_BYTES; the code is None then, and the caller says which
+    in its own words. A child that cannot be started raises OSError.
+
+    #212 FOLLOW-UP: ONE RUNNER, NOT TWO. run_command (#207) and build_bundle
+    (#212) each carried this reader-thread loop, and the copies had already
+    drifted: build_bundle closed its pipes after a 2 s join, and a pipe whose
+    reader is still blocked cannot be closed -- the close takes the lock the
+    read holds. Measured with a shim that leaves its work to a grandchild
+    holding stdout (the shape of esbuild's node wrapper): a 1 s deadline
+    returned after 8.01 s, when the grandchild ended, and a grandchild that
+    never ends would have held the build forever. run_command never closed and
+    never had that hang. So here a pipe is closed only once its reader is done.
+    The esbuild `--version` probe was a third caller in #207's other shape,
+    `subprocess.run(capture_output=True)` on binaries found in caches; it
+    runs through here too.
+
+    THE CAPTURE IS BOUNDED, NOT JUST THE RESULT. `subprocess.run(capture_output
+    =True)` accumulates everything the child prints at pipe speed and `_clip`
+    runs only afterwards -- measured live, a command that printed into the GiB
+    scale took Crow's python to 13.6 GiB swapped and the kernel's OOM killer
+    then shot `serve`. Readers on threads (a pipe has no portable non-blocking
+    read -- the same sentence `_pump` stands on) and a poll loop that watches
+    BOTH bounds, the clock and the bytes. Whichever trips first kills the
+    child -- the handle this call started, never a name (#158).
+
+    `shell=True` is run_command's: `executable` names bash where it exists and
+    stays None on Windows, which means COMSPEC -- cmd.exe, as it always was.
+    `prefix` goes in front of the command (#218: run_command's memory scope);
+    a shell command then becomes the explicit argv `shell_argv` builds, the
+    same bash -c the shell=True path runs. `unit` names that scope, and a kill
+    sweeps it too (kill_scope): a descendant that left the group by setsid
+    is still in the cgroup -- and until it dies it holds the pipe, measured:
+    swept only after the runner had returned, its reader was left behind.
+
+    #218. THE KILL TAKES THE GROUP, NOT THE HANDLE ALONE. `proc.kill()` on a
+    shell signals the shell; `sleep 300 & sleep 300` or `timeout 40 chromium
+    ... | grep` kept running after it, holding the pipe and the memory. On
+    POSIX the child starts a session of its own (start_new_session, setsid --
+    so the pgid IS proc.pid) and the clock and the cap SIGKILL that whole
+    group: every process the shell started that did not leave the group by
+    itself. Codex had the same hang (openai/codex#4337, "only kills the shell
+    wrapper") and the same remedy. A child that exits by itself is left
+    alone, and so is whatever it put in the background -- `server &` is a
+    thing a command may mean. Windows keeps `proc.kill()`: cmd.exe's children
+    survive it there, as they always did.
+    """
+    argv = cmd
+    if prefix:
+        argv = list(prefix) + (crow_platform.shell_argv(cmd) if shell else list(cmd))
+        shell = False
+    proc = subprocess.Popen(
+        argv, shell=shell, cwd=cwd, env=_child_env(),
+        executable=crow_platform.shell_executable() if shell else None,
+        stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, errors="replace",
+        **({} if crow_platform.IS_WINDOWS else {"start_new_session": True}))
+    drained = {"out": [], "err": [], "over": False}
+
+    def _kill() -> None:
+        try:
+            if crow_platform.IS_WINDOWS:
+                proc.kill()
+            else:
+                os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass                           # the group is already gone
+        if unit:
+            crow_platform.kill_scope(unit)
+
+    def _drain(which: str) -> None:
+        pipe = proc.stdout if which == "out" else proc.stderr
+        held = 0
+        try:
+            while True:
+                chunk = pipe.read(65536)
+                if not chunk:
+                    break
+                drained[which].append(chunk)
+                # THE CAP LIVES IN THE READER, NOT THE POLL LOOP. A child
+                # can push a burst through the pipe faster than any poll
+                # interval; the reader is the only place that sees every
+                # chunk the moment it lands, so it is where "too much"
+                # becomes a kill and a stopped accumulation.
+                held += len(chunk)
+                if held > COMMAND_CAPTURE_BYTES:
+                    drained["over"] = True
+                    _kill()
+                    break
+        except (OSError, ValueError):
+            pass
+
+    readers = [threading.Thread(target=_drain, args=(which,), daemon=True,
+                                name="bounded-run-%s" % which)
+               for which in ("out", "err")]
+    for reader in readers:
+        reader.start()
+    if stdin_text is not None:
+        try:
+            proc.stdin.write(stdin_text)
+            proc.stdin.close()
+        except OSError:
+            pass
+    timed_out = False
+    while proc.poll() is None and not drained["over"]:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            timed_out = True
+            break
+        try:
+            proc.wait(timeout=min(left, 0.25))
+        except subprocess.TimeoutExpired:
+            pass
+    if timed_out or drained["over"]:
+        _kill()
+    proc.wait()
+    settle = time.monotonic() + BOUNDED_RUN_SETTLE
+    for reader, pipe in zip(readers, (proc.stdout, proc.stderr)):
+        reader.join(timeout=max(0.0, settle - time.monotonic()))
+        if not reader.is_alive():
+            try:
+                pipe.close()
+            except OSError:
+                pass
+    stopped = "clock" if timed_out else "cap" if drained["over"] else ""
+    if stopped:
+        return None, "", "", stopped
+    return proc.returncode, "".join(drained["out"]), "".join(drained["err"]), ""
 
 
 def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
@@ -8060,15 +10892,19 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
     # same split that turned `write_file("x")` into a refusal -- and #144's
     # guard was reading a command line whose bare names it believed to
     # "resolve inside the cwd by construction". They did. It was the wrong cwd.
-    cwd = _rooted(cwd) if cwd else get_root()
-    # The child does not inherit anything that looks like a secret. It is a
-    # blocklist, so it is not airtight -- it stops the accident, not an attacker.
-    env = {k: v for k, v in os.environ.items()
-           if not any(s in k.upper() for s in ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL"))}
+    # #221: A CWD THAT IS NO DIRECTORY RUNS NOTHING, and says where
+    # the working area and the near miss are (cwd_refusal). `~` expands here
+    # because #144's guard expands it too: the approval card showed
+    # `/home/u/x` while the tool would have run in `<root>/~/x`.
+    refused = cwd_refusal(cwd)
+    if refused:
+        return refused
+    cwd = _rooted(os.path.expanduser(cwd)) if cwd else get_root()
+    # The child does not inherit anything that looks like a secret (_child_env).
     try:
         # DAS KIND BEKOMMT KEINE TASTATUR (2026-08-29, live gefunden). Ein
         # `Invoke-WebRequest` ohne `-UseBasicParsing` stellt in PS 5.1 eine
-        # Sicherheitsrueckfrage -- und die erschien in dem Terminal, aus dem
+        # Sicherheitsruefrage -- und die erschien in dem Terminal, aus dem
         # das FENSTER gestartet war, wo niemand sie erwartet und robin sie erst
         # nach Minuten fand. Der Zug stand still, ohne dass irgendwo etwas
         # dazu stand: die Frage ging an die Konsole, nicht durch die Rohre,
@@ -8087,16 +10923,729 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
         # steht, und das Modell schreibt bash (`[[`, `$'...'`). `executable`
         # benennt sie deshalb, und nur wenn es sie wirklich gibt; auf Windows ist
         # die Antwort None und der Aufruf bleibt Zeichen fuer Zeichen der alte.
-        done = subprocess.run(command, shell=True, cwd=cwd, env=env, timeout=COMMAND_TIMEOUT,
-                              executable=crow_platform.shell_executable(),
-                              stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, errors="replace")
-    except subprocess.TimeoutExpired:
-        return f"error: command exceeded {COMMAND_TIMEOUT}s and was killed: {command}"
+        #
+        # #207. THE CAPTURE IS BOUNDED, NOT JUST THE RESULT -- the clock
+        # (COMMAND_TIMEOUT) and the bytes (COMMAND_CAPTURE_BYTES), in
+        # _bounded_run, the one runner build_bundle uses too. Whichever trips
+        # first kills the child, and the result says which -- a fact the
+        # model can act on, never an exception out of the tool.
+        #
+        # #218. AND THE MEMORY, IN A SCOPE OF THE SHELL'S OWN. The shell runs
+        # in a user scope named for this call (command_scope_prefix: 8G, no
+        # swap, OOMPolicy=kill); without systemd-run or on Windows the prefix
+        # is empty and the call is what it was.
+        unit = "crow-cmd-%d-%s" % (os.getpid(), os.urandom(4).hex())
+        prefix = crow_platform.command_scope_prefix(unit)
+        oom_before = crow_platform.session_oom_kills() if prefix else None
+        code, out, err, stopped = _bounded_run(
+            command, cwd, time.monotonic() + COMMAND_TIMEOUT, shell=True,
+            prefix=prefix, unit=unit if prefix else None)
     except OSError as exc:
         return f"error: could not run: {exc}"
-    out = (done.stdout or "") + (("\n[stderr]\n" + done.stderr) if done.stderr else "")
-    return _clip(f"[exit {done.returncode}]\n{out}".rstrip())
+    note = _headless_browser_note(command, bool(prefix))
+    if stopped == "clock":
+        return f"error: command exceeded {COMMAND_TIMEOUT}s and was killed: {command}" + note
+    if stopped == "cap":
+        return ("error: command printed more than %d MiB and was killed -- "
+                "pipe it through head, or write it to a file and read the "
+                "range: %s" % (COMMAND_CAPTURE_BYTES >> 20, command)) + note
+    # #218. A CEILING KILL IS NAMED AS ONE -- asked of the unit, not read
+    # off the -9, which a `kill -9 $$` gives too (scope_result). The output up
+    # to the kill stays: it says how far the command got. Where systemd lost
+    # the race and reports success (255, CI 2026-09-23), the kernel's own
+    # count for the slice says it (session_oom_kills); a `kill -9` moves
+    # neither.
+    if prefix and code in (-9, 137) and (
+            crow_platform.scope_result(unit) == "oom-kill"
+            or (oom_before is not None
+                and (crow_platform.session_oom_kills() or 0) > oom_before)):
+        cap = crow_platform.command_memory_bounds().get("MemoryMax")
+        head = ("error: command exceeded its memory ceiling (%sno swap) and was "
+                "killed, with everything it started: %s"
+                % ("MemoryMax=%s, " % cap if cap else "", command))
+        return _clip(head + (f"\n{out}".rstrip())
+                     + (f"\n[stderr]\n{err}" if err.strip() else "")) + note
+    return _clip(f"[exit {code}]\n{out}".rstrip()
+                 + (f"\n[stderr]\n{err}" if err.strip() else "")) + note
+
+
+# #218. THE BOUNDED WAY TO A SCREENSHOT, SAID WHERE THE UNBOUNDED ONE IS TAKEN.
+# 2026-09-22: 20 run_command calls started `/usr/bin/chromium --headless=new
+# ... --screenshot=` after render_page timed out, 18 of them with the software-
+# WebGL flags of the 54 GiB runaway. A note, not a refusal: with the shell in
+# its own scope the browser is bounded here too, a headless browser has uses
+# render_page does not cover (--dump-dom, --print-to-pdf, a project's own test
+# runner), and a refused command line comes back as a script file the pattern
+# cannot see. A browser name as a word, and a headless or screenshot switch.
+_HEADLESS_BROWSER = re.compile(
+    r"(?i)(?:^|[\s/\\\"'=])(?:chromium(?:-browser)?|google-chrome(?:-stable)?|"
+    r"chrome(?:\.exe)?|chrome-headless-shell|headless_shell|msedge(?:\.exe)?|"
+    r"microsoft-edge|brave(?:-browser)?|firefox)(?=[\s\"']|$)")
+_HEADLESS_SWITCH = re.compile(r"(?i)(?:^|\s)--?(?:headless|screenshot)\b")
+
+
+def _headless_browser_note(command: str, scoped: bool) -> str:
+    """The line run_command appends when its command starts a headless browser.
+
+    `scoped` says whether this call's shell had its memory scope; without one
+    the note says so instead of naming a bound that was not there."""
+    if not (_HEADLESS_BROWSER.search(command) and _HEADLESS_SWITCH.search(command)):
+        return ""
+    cap = crow_platform.command_memory_bounds().get("MemoryMax") if scoped else None
+    return ("\nnote: render_page takes this screenshot inside the render's own "
+            "memory ceiling and returns the page's console; a headless browser "
+            "here runs %s."
+            % ("only under run_command's bound (MemoryMax=%s)" % cap if cap
+               else "with no memory bound but the clock"))
+
+
+# ---------------------------------------------------------------- #212 -----
+# ONE OFFLINE PAGE IS ONE BUNDLE, AND THE BUNDLER WAS ON THE MACHINE.
+#
+# 2026-09-21 and 2026-09-22, two multi-hour sessions (476 and 763 requests):
+# "one self-contained offline HTML with the vendored three.js" died both times
+# hand-flattening a 2 MB split-build library with regex "bundlers" the model
+# wrote itself -- five ~2 MB variants on disk, each pass moving a SyntaxError
+# one name deeper, one closure scan dropping EffectComposer for ~15 rounds.
+# The wall it was fighting is Chromium's and correct: a page opened from
+# file:// has origin null, module scripts are fetched in CORS mode, and every
+# `import` between local files is refused ("Cross origin requests are only
+# supported for protocol schemes: ... http, https"). A classic `<script>` is
+# not subject to that rule. So the only shape that works offline is one
+# classic script with the whole graph in it -- which is what a bundler emits
+# with `--format=iife`, and what esbuild's own docs describe as "intended to
+# be run in the browser".
+#
+# The evening session proved the other half: `esbuild --bundle --format=iife
+# --global-name=APP --minify` on the full app graph gave 0 errors and 957 KB,
+# twice -- after most of 220 run_command calls spent rediscovering that
+# esbuild sat in the deno cache since 09-19 and in the project's node_modules.
+# This tool is that one call, found without searching.
+#
+# WHY A TOOL AND NOT A SENTENCE IN run_command. Knowing the flags is not the
+# expensive part; finding the binary is (the aborted predecessor went through
+# another program's node_modules under ~/.hermes), and assembling the page is
+# where #91's corruption bites -- every literal the model re-types into an
+# inlined page is one more chance for `mediumploat`. Here the bytes go from the
+# source files through esbuild into the page without passing the model's hand.
+#
+# BOUNDS, #207's shape. One clock for the whole build (every esbuild call draws
+# from it), a capture cap in the reader threads, a size cap on what gets
+# inlined, and the write fence `write_file` has. esbuild itself never touches
+# the network (no plugins run here), so a remote import is an error in the
+# result, not a download.
+BUNDLE_TIMEOUT = COMMAND_TIMEOUT
+# Far above the measured target (957 KB for three.js plus post-processing)
+# and far below what a browser tab still opens without a fight.
+BUNDLE_MAX_BYTES = 64 * 1024 * 1024
+# The entry page is read whole; a page that is already this large is not a
+# source page, it is a previous build.
+BUNDLE_PAGE_MAX_BYTES = 8 * 1024 * 1024
+# `--version` on a binary that answers in milliseconds; ten seconds is a cold
+# disk, anything past it is not an esbuild.
+BUNDLE_PROBE_TIMEOUT = 10
+# What an import of a non-JS file becomes. Text for shader sources -- the
+# three.js shape, and exactly what the sessions re-typed and corrupted
+# (`"a:"` -> `"a "`); data URLs for images, fonts and models, because a page
+# that fetches a sibling file is not self-contained and a data URL loads
+# through the same `loader.load(url)` call.
+BUNDLE_LOADERS = (
+    tuple((ext, "text") for ext in (".glsl", ".vert", ".frag", ".vs", ".fs",
+                                   ".wgsl", ".txt")) +
+    tuple((ext, "dataurl") for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp",
+                                      ".avif", ".svg", ".woff", ".woff2",
+                                      ".ttf", ".otf", ".glb", ".gltf", ".hdr",
+                                      ".exr", ".ktx2", ".bin", ".wasm")))
+# The mark a build leaves, so the next build may replace it without the
+# read-first guard -- see `_bundle_may_replace`.
+BUNDLE_MARK = "crow build_bundle"
+# #212: `--version` answers, per resolved path; a binary does not change its
+# version between two calls of one process.
+_ESBUILD_VERSION: "dict[str, str]" = {}
+
+
+def _esbuild_version(path: str) -> str | None:
+    """The version a candidate answers with, or None when it is no esbuild."""
+    real = os.path.realpath(path)
+    if real in _ESBUILD_VERSION:
+        return _ESBUILD_VERSION[real]
+    # Through the bounded runner, not a run with `capture_output=True`:
+    # every candidate here is a binary nobody has vouched for, and that call
+    # is #207's unbounded capture.
+    try:
+        code, stdout, _err, _stopped = _bounded_run(
+            [path, "--version"], None, time.monotonic() + BUNDLE_PROBE_TIMEOUT)
+    except OSError:
+        return None
+    answer = stdout.strip()
+    if code != 0 or not re.fullmatch(r"\d+\.\d+\.\d+\S*", answer):
+        return None
+    _ESBUILD_VERSION[real] = answer
+    return answer
+
+
+def _version_key(version: str) -> tuple:
+    return tuple(int(n) for n in re.findall(r"\d+", version)[:3])
+
+
+def _esbuild_in_node_modules(folder: str) -> "list[str]":
+    """The esbuild binaries one node_modules holds, native package first.
+
+    `@esbuild/<platform>` IS THE BINARY ITSELF and needs no node; `esbuild/bin/
+    esbuild` is either the same binary (npm's optimised install copies it
+    there, measured in diorama-test) or a node shim; `.bin/esbuild` is a link
+    to one of the two. On Windows the package carries `esbuild.exe` at its top
+    level instead of under bin/.
+    """
+    import glob as _glob
+
+    nm = os.path.join(folder, "node_modules")
+    if not os.path.isdir(nm):
+        return []
+    found = sorted(_glob.glob(os.path.join(nm, "@esbuild", "*", "bin", "esbuild")))
+    found += sorted(_glob.glob(os.path.join(nm, "@esbuild", "*", "esbuild.exe")))
+    found += [os.path.join(nm, "esbuild", "bin", "esbuild"),
+              os.path.join(nm, ".bin", "esbuild")]
+    return found
+
+
+def _esbuild_caches() -> "list[tuple[str, str]]":
+    """(glob, label) for the caches a runtime fills without asking.
+
+    MEASURED ON THIS MACHINE 2026-09-22: deno keeps the binary it downloaded
+    for `deno bundle` as `~/.cache/deno/dl/esbuild-0.25.5-1/esbuild-linux-x64`
+    (dated 09-19 -- the one #212 names), and npx keeps its packages under
+    `~/.npm/_npx/<hash>/node_modules` (esbuild 0.28.1 there). Both honour an
+    override variable, which is read first.
+    """
+    home = os.path.expanduser("~")
+    if crow_platform.IS_WINDOWS:
+        local = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+        deno = os.environ.get("DENO_DIR") or os.path.join(local, "deno")
+        npm = os.environ.get("npm_config_cache") or os.path.join(local, "npm-cache")
+        exe = "esbuild.exe"
+    else:
+        default = (os.path.join(home, "Library", "Caches", "deno")
+                   if sys.platform == "darwin"
+                   else os.path.join(crow_platform.cache_dir(), "deno"))
+        deno = os.environ.get("DENO_DIR") or default
+        npm = os.environ.get("npm_config_cache") or os.path.join(home, ".npm")
+        exe = os.path.join("bin", "esbuild")
+    return [(os.path.join(deno, "dl", "esbuild-*", "esbuild-*"), "deno cache"),
+            (os.path.join(npm, "_npx", "*", "node_modules", "@esbuild", "*", exe),
+             "npx cache")]
+
+
+def find_esbuild(start: str) -> "tuple[str | None, str, str, list[str]]":
+    """(path, version, where it was found, everything searched).
+
+    THE ORDER IS A STATEMENT ABOUT WHOSE ESBUILD IT IS. `CROW_ESBUILD` pins one
+    for a measurement. Then the project's own, nearest node_modules first,
+    walking up the way node's resolution does -- a pinned project version is
+    the one its lockfile was written against. Then one on PATH, which somebody
+    installed on purpose. The runtime caches come last and the newest version
+    among them wins, because nobody chose any of them.
+    """
+    import glob as _glob
+
+    searched: "list[str]" = []
+
+    def _try(path: str, where: str) -> "tuple[str, str] | None":
+        if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+            return None
+        version = _esbuild_version(path)
+        return (version, where) if version else None
+
+    pinned = os.environ.get("CROW_ESBUILD")
+    if pinned:
+        searched.append("CROW_ESBUILD=%s" % pinned)
+        hit = _try(pinned, "CROW_ESBUILD")
+        if hit:
+            return pinned, hit[0], hit[1], searched
+    here = os.path.abspath(start if os.path.isdir(start) else os.path.dirname(start))
+    while True:
+        searched.append(os.path.join(here, "node_modules"))
+        for candidate in _esbuild_in_node_modules(here):
+            hit = _try(candidate, "project node_modules")
+            if hit:
+                return candidate, hit[0], hit[1], searched
+        parent = os.path.dirname(here)
+        if parent == here:
+            break
+        here = parent
+    searched.append("PATH")
+    on_path = shutil.which("esbuild")
+    if on_path:
+        hit = _try(on_path, "PATH")
+        if hit:
+            return on_path, hit[0], hit[1], searched
+    best: "tuple[str, str, str] | None" = None
+    for pattern, label in _esbuild_caches():
+        searched.append(pattern)
+        for candidate in sorted(_glob.glob(pattern))[:16]:
+            hit = _try(candidate, label)
+            if hit and (best is None or _version_key(hit[0]) > _version_key(best[1])):
+                best = (candidate, hit[0], label)
+    if best:
+        return best[0], best[1], best[2], searched
+    return None, "", "", searched
+
+
+def _bundle_run(argv: "list[str]", cwd: str, deadline: float,
+                stdin_text: str | None = None) -> "tuple[int | None, str, str]":
+    """(exit code, stdout, stderr) of one esbuild call through _bounded_run;
+    None as the code means the clock or the cap stopped it, and stderr then
+    says which. esbuild writes its output to a file and its log is bounded by
+    `--log-limit`, so neither bound is expected to fire -- they are here
+    because a binary found in a cache is a binary nobody has vouched for."""
+    try:
+        code, out, err, stopped = _bounded_run(argv, cwd, deadline, stdin_text)
+    except OSError as exc:
+        return None, "", f"could not start {argv[0]}: {exc}"
+    if stopped == "clock":
+        return None, "", f"the build exceeded {BUNDLE_TIMEOUT}s and was killed"
+    if stopped == "cap":
+        return None, "", ("the bundler printed more than %d MiB and was killed"
+                          % (COMMAND_CAPTURE_BYTES >> 20))
+    return code, out, err
+
+
+def _esbuild_argv(exe: str, entry: str | None, outfile: str, aliases: "dict[str, str]",
+                  minify: bool, global_name: str | None, sourcefile: str = "",
+                  fmt: str = "iife", metafile: str = "") -> "list[str]":
+    argv = [exe] + ([entry] if entry else []) + [
+        "--bundle", "--format=" + fmt, "--platform=browser", "--charset=utf8",
+        "--outfile=" + outfile, "--log-level=warning", "--log-limit=20",
+        "--color=false"]
+    argv += ["--loader:%s=%s" % pair for pair in BUNDLE_LOADERS]
+    argv += ["--alias:%s=%s" % pair for pair in sorted(aliases.items())]
+    if minify:
+        argv.append("--minify")
+    if global_name:
+        argv.append("--global-name=" + global_name)
+    if sourcefile:
+        argv.append("--sourcefile=" + sourcefile)
+    if metafile:
+        argv.append("--metafile=" + metafile)
+    return argv
+
+
+def _log_counts(log: str) -> "tuple[int, int]":
+    """(errors, warnings) in an esbuild log: one `[ERROR]`/`[WARNING]` head per
+    message, after a glyph that differs by terminal (measured: `✘` and `▲`)."""
+    errors = len(re.findall(r"^\S*\s*\[ERROR\]", log, re.M))
+    warnings = len(re.findall(r"^\S*\s*\[WARNING\]", log, re.M))
+    return errors, warnings
+
+
+def _html_attr(attrs: str, name: str) -> str | None:
+    match = re.search(r"""\b%s\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""" % name,
+                      attrs, re.I)
+    if not match:
+        return None
+    return next(g for g in match.groups() if g is not None)
+
+
+def _local_ref(ref: str | None) -> bool:
+    """A reference a file:// page would load from disk: not a URL, not data."""
+    if not ref:
+        return False
+    ref = ref.strip()
+    return not re.match(r"^(?:[a-z][a-z0-9+.-]*:|//|#)", ref, re.I)
+
+
+def _import_map_aliases(body: str, base: str) -> "tuple[dict[str, str], list[str]]":
+    """An import map's bare specifiers as esbuild aliases, plus what was skipped.
+
+    THE VENDORED-LIBRARY PAGE CARRIES ITS RESOLUTION HERE: `"three":
+    "./vendor/three.module.js"`, `"three/addons/": "./vendor/jsm/"`. esbuild
+    resolves an alias in its WORKING DIRECTORY, not beside the importing file
+    (esbuild docs, "alias"), so every target is made absolute against the page.
+    A trailing-slash prefix becomes the alias of the package path without it;
+    measured with esbuild 0.28.1: `three` and `three/addons` side by side, and
+    `three/addons/sub/a.js` lands in the longer one.
+    """
+    try:
+        imports = (json.loads(body) or {}).get("imports") or {}
+    except (ValueError, AttributeError):
+        return {}, ["an import map that is not valid JSON"]
+    aliases, skipped = {}, []
+    for key, target in imports.items():
+        if (not isinstance(target, str) or not _local_ref(target)
+                or key.startswith((".", "/")) or ":" in key):
+            skipped.append(key)
+            continue
+        aliases[key.rstrip("/")] = os.path.normpath(os.path.join(base, target.rstrip("/")))
+    return aliases, skipped
+
+
+def _bundle_may_replace(path: str) -> bool:
+    """May a build overwrite what stands at `path`?
+
+    A BUILD OUTPUT IS REGENERATED, A HAND-WRITTEN PAGE IS NOT. write_file's
+    read-first guard exists because an overwrite destroys what nobody looked
+    at; a previous build destroys nothing, its sources are still there. So a
+    file carrying BUNDLE_MARK near its top is replaced freely, anything else
+    -- the model's hand-written index.html -- only after a read, the rule
+    write_file keeps.
+    """
+    if not os.path.exists(path) or _read_state(path)[0] == "fresh":
+        return True
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(65536)
+    except OSError:
+        return False
+    return BUNDLE_MARK in head
+
+
+def _flag(value, default: bool) -> bool:
+    """A model sends `"false"` as often as `false`."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower() not in ("false", "0", "no", "off")
+    return default
+
+
+def _entry_exports(exe: str, entry: str, base: str, deadline: float,
+                   scratch: str) -> "list[str] | None":
+    """The names the entry module exports, or None when they could not be read.
+
+    esbuild's metafile lists `exports` per output only for `--format=esm`; for
+    the IIFE it is `[]` whatever the module exports (measured, esbuild 0.28.2:
+    diorama's src/app.js `export function boot` -> [] as IIFE, ["boot"] as
+    esm). So this is a second, esm run of the same graph, unminified, into the
+    scratch directory -- 0.06 s on that three.js graph, the same as the IIFE.
+    Its log is not the build's: a probe that fails says "could not be read"
+    and costs the build nothing.
+    """
+    meta = os.path.join(scratch, "exports.json")
+    argv = _esbuild_argv(exe, entry, os.path.join(scratch, "exports.mjs"), {}, False,
+                         None, fmt="esm", metafile=meta)
+    code, _stdout, _log = _bundle_run(argv, base, deadline)
+    if code != 0:
+        return None
+    try:
+        with open(meta, encoding="utf-8") as fh:
+            outputs = (json.load(fh) or {}).get("outputs") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    for output in outputs.values():
+        if isinstance(output, dict) and output.get("entryPoint"):
+            names = output.get("exports")
+            return [str(n) for n in names] if isinstance(names, list) else None
+    return None
+
+
+def _bare_page_warning(entry: str, exports: "list[str] | None", global_name: str) -> str:
+    """What a .js entry built to an .html page does NOT contain, said plainly.
+
+    #212 FOLLOW-UP, THE .js-ENTRY TRAP. The acceptance run bundled diorama's
+    src/app.js to an .html out: 0 errors, "self-contained" -- and render_page
+    showed one colour, 100 %. The app exports `boot(canvas, opts)` and needs
+    `<canvas id="c">`; the generated page has neither the canvas nor a call.
+    The same graph behind an .html source page (the canvas plus `<script
+    type="module">import {boot} ...; boot(...)</script>`) rendered the scene.
+    A model reads the blank as a broken build and starts patching the bundle.
+
+    WARNED, NOT REFUSED. A module that builds its own DOM and starts itself on
+    load -- the three.js-example shape, `document.body.appendChild(renderer.
+    domElement)` at top level -- works through exactly this path, and nothing
+    short of running it tells the two apart. Refusing would push those onto a
+    wrapper page they do not need; the result naming what is missing, and the
+    exports nobody calls, costs them nothing and tells the boot()-shaped app
+    what to build instead.
+    """
+    name = os.path.basename(entry)
+    on = " (on window.%s)" % global_name if global_name else ""
+    if exports is None:
+        what = "its exports could not be read"
+    elif exports:
+        what = "%s exports%s: %s -- nothing calls %s" % (
+            name, on, ", ".join(exports)[:300], "it" if len(exports) == 1 else "them")
+    else:
+        what = ("%s exports nothing -- it has to create its own elements and start "
+                "itself on load" % name)
+    return ("warn: this page holds ONLY the bundle -- no markup (an empty <body>, no "
+            "<canvas>) and no call to any export; %s. Unless the module starts "
+            "itself, it renders blank. For a page, write it as HTML with its markup "
+            "and a <script type=\"module\"> that imports and starts your app, then "
+            "bundle THAT .html as the entry." % what)
+
+
+def _unreachable_exports_warning(entry: str, exports: "list[str]") -> str:
+    """A .js out without global_name, from a module that exports something.
+
+    #212 FOLLOW-UP. `--format=iife` without `--global-name` wraps the module in
+    `(() => { ... })();` and its exports go nowhere: nothing outside the bundle
+    can call them, and the build says 0 errors. Same trap as the bare page, one
+    step earlier -- the classic script that loads this file finds no `boot`.
+
+    WARNED, NOT DEFAULTED. A global name derived from the entry (`app`, `main`,
+    `index`) would change the output nobody asked to change and put a short
+    common name on `window`, where it can shadow a global the page already
+    has; and a module that starts itself needs none. So the build stays as
+    asked, and when the esm probe -- the same one the bare page uses, run only
+    in this case, 0.06 s on the diorama graph -- finds exports, the result
+    names them and the argument that reaches them. No exports, or a probe that
+    failed, says nothing: the first is a module that starts itself, the second
+    is no fact.
+    """
+    return ("warn: no global_name -- %s exports %s, and an IIFE without a global "
+            "leaves %s unreachable from outside the bundle. Pass global_name (e.g. "
+            "\"APP\") to put %s on window.APP, or bundle an .html entry page that "
+            "imports and starts the app." % (
+                os.path.basename(entry), ", ".join(exports)[:300],
+                "it" if len(exports) == 1 else "them",
+                "it" if len(exports) == 1 else "them"))
+
+
+def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
+                      minify=True, **_) -> str:
+    """#212. Entry page or module -> one self-contained offline file."""
+    if not entry:
+        return "error: build_bundle needs an 'entry' -- an .html page or a .js/.ts module"
+    entry = _rooted(entry)
+    if not os.path.isfile(entry):
+        return f"error: no such file: {entry}"
+    stem, ext = os.path.splitext(entry)
+    ext = ext.lower()
+    page = ext in (".html", ".htm")
+    out = _rooted(out) if out else stem + (".bundle.html" if page else ".bundle.js")
+    out_html = os.path.splitext(out)[1].lower() in (".html", ".htm")
+    if page and not out_html:
+        return f"error: an .html entry builds an .html page; name out as one, not {out}"
+    if _resolve(out) == _resolve(entry):
+        return ("error: out is the entry itself -- the build would replace its own "
+                "source. Name another file.")
+    outside = _outside_root(out)
+    if outside:
+        return outside
+    if not _bundle_may_replace(out):
+        return (f"error: refusing to replace {out}: it is not an earlier build_bundle "
+                f"output, and it was not read in this conversation or changed on "
+                f"disk since. Read it first, or build to another name.")
+    minify = _flag(minify, True)
+    started = time.monotonic()
+    deadline = started + BUNDLE_TIMEOUT
+    exe, version, where, searched = find_esbuild(entry)
+    if not exe:
+        return ("error: no bundler found -- no esbuild answered in any of these "
+                "places:\n  " + "\n  ".join(searched) + "\nDo not flatten the "
+                "library by hand: tell the user a bundler is missing (a project "
+                "node_modules with esbuild is enough), or pin one with "
+                "CROW_ESBUILD=/path/to/esbuild.")
+    base = os.path.dirname(entry)
+    logs: "list[str]" = []
+    counts = [0, 0]
+    inlined: "list[str]" = []
+    bare_page, exports = False, None
+    with tempfile.TemporaryDirectory(prefix="crow-bundle-") as scratch:
+        serial = [0]
+
+        def _build(src: str | None, aliases: "dict[str, str]", stdin_text: str | None = None,
+                   name: str = "") -> "tuple[str | None, str]":
+            """One esbuild run -> (js or None, css)."""
+            serial[0] += 1
+            outfile = os.path.join(scratch, "part%d%s" % (serial[0], ".css" if (
+                src or "").lower().endswith(".css") else ".js"))
+            argv = _esbuild_argv(exe, src, outfile, aliases, minify,
+                                 None if page else (global_name or None), name)
+            code, _stdout, log = _bundle_run(argv, base, deadline, stdin_text)
+            errors, warnings = _log_counts(log)
+            if code is None:
+                errors = max(errors, 1)
+            counts[0] += errors
+            counts[1] += warnings
+            if log.strip():
+                logs.append(log.strip())
+            if code != 0 or not os.path.isfile(outfile):
+                if code not in (None, 0) and not errors:
+                    counts[0] += 1
+                return None, ""
+            with open(outfile, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+            css_file = os.path.splitext(outfile)[0] + ".css"
+            css = ""
+            if outfile.endswith(".js") and os.path.isfile(css_file):
+                with open(css_file, encoding="utf-8", errors="replace") as fh:
+                    css = fh.read()
+            return text, css
+
+        if not page:
+            js, css = _build(entry, {})
+            if js is None:
+                result = None
+            elif out_html:
+                result = ("<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n"
+                          "<meta name=\"generator\" content=\"%s\">\n%s</head>\n<body>\n"
+                          "<script>\n%s</script>\n</body>\n</html>\n"
+                          % (BUNDLE_MARK, ("<style>\n%s</style>\n" % css) if css else "", js))
+                inlined.append("1 module graph (%s)" % os.path.basename(entry))
+                bare_page = True
+                exports = _entry_exports(exe, entry, base, deadline, scratch)
+            else:
+                result = "/* %s from %s */\n%s" % (BUNDLE_MARK, os.path.basename(entry), js)
+                if css:
+                    logs.append("note: the graph imports CSS (%d bytes); a .js out cannot "
+                                "carry it -- build to an .html out to inline it" % len(css))
+                if not global_name:
+                    exports = _entry_exports(exe, entry, base, deadline, scratch)
+        else:
+            if os.path.getsize(entry) > BUNDLE_PAGE_MAX_BYTES:
+                return (f"error: {entry} is over {BUNDLE_PAGE_MAX_BYTES >> 20} MiB -- that "
+                        f"is a built page, not a source page. Bundle from the source.")
+            with open(entry, encoding="utf-8", errors="replace") as fh:
+                html = fh.read()
+            script_rx = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.I | re.S)
+            aliases: "dict[str, str]" = {}
+            for attrs, body in script_rx.findall(html):
+                if (_html_attr(attrs, "type") or "").lower() == "importmap":
+                    found, skipped = _import_map_aliases(body, base)
+                    aliases.update(found)
+                    inlined.append("1 import map (%d alias%s)"
+                                   % (len(found), "" if len(found) == 1 else "es"))
+                    if skipped:
+                        logs.append("note: import map entries left alone (not local "
+                                    "packages): " + ", ".join(skipped)[:300])
+            modules: "list[str]" = []
+            styles: "list[str]" = []
+            failed = [False]
+
+            def _script(match) -> str:
+                attrs, body = match.group(1), match.group(2)
+                kind = (_html_attr(attrs, "type") or "").lower()
+                src = _html_attr(attrs, "src")
+                if kind == "importmap":
+                    return ""
+                if kind != "module":
+                    if not _local_ref(src):
+                        return match.group(0)
+                    path = os.path.join(base, src.split("?")[0].split("#")[0])
+                    try:
+                        with open(path, encoding="utf-8", errors="replace") as fh:
+                            text = fh.read()
+                    except OSError as exc:
+                        logs.append(f"error: could not read the classic script {src}: {exc}")
+                        counts[0] += 1
+                        failed[0] = True
+                        return match.group(0)
+                    inlined.append("1 classic script (%s)" % src)
+                    return "<script>\n%s\n</script>" % re.sub(r"</(script)", r"<\\/\1",
+                                                              text, flags=re.I)
+                if src and not _local_ref(src):
+                    logs.append(f"note: the module {src} is remote and stays a network load")
+                    return match.group(0)
+                if src:
+                    path = os.path.join(base, src.split("?")[0].split("#")[0])
+                    js, css = _build(path, aliases)
+                    label = src
+                else:
+                    js, css = _build(None, aliases, body, "inline-module.js")
+                    label = "inline module"
+                if js is None:
+                    failed[0] = True
+                    return match.group(0)
+                # MODULE SCRIPTS ARE DEFERRED, CLASSIC ONES ARE NOT. A module in
+                # <head> runs after the document is parsed; the same code inlined
+                # there as a classic script would run before <canvas> exists. So
+                # every bundle moves to the end of <body>, in document order --
+                # the order and the moment a module would have had.
+                modules.append(js)
+                if css:
+                    styles.append(css)
+                inlined.append("1 module script (%s)" % label)
+                return ""
+
+            html = script_rx.sub(_script, html)
+
+            def _link(match) -> str:
+                attrs = match.group(0)
+                href = _html_attr(attrs, "href")
+                if "stylesheet" not in (_html_attr(attrs, "rel") or "").lower() \
+                        or not _local_ref(href):
+                    return attrs
+                css, _ = _build(os.path.join(base, href.split("?")[0].split("#")[0]), {})
+                if css is None:
+                    failed[0] = True
+                    return attrs
+                inlined.append("1 stylesheet (%s)" % href)
+                return "<style>\n%s</style>" % re.sub(r"</(style)", r"<\\/\1", css, flags=re.I)
+
+            html = re.sub(r"<link\b[^>]*>", _link, html, flags=re.I)
+            if failed[0]:
+                result = None
+            elif not modules and not inlined:
+                return (f"error: nothing to bundle in {entry} -- it has no module script, "
+                        f"import map, local script or local stylesheet. Give the page a "
+                        f"<script type=\"module\"> (src=... or inline) that imports and "
+                        f"starts the app -- pointing entry at the module instead builds a "
+                        f"page with no markup and no call to it.")
+            else:
+                if styles:
+                    block = "<style>\n%s</style>\n" % "\n".join(styles)
+                    head_end = re.search(r"</head\s*>", html, re.I)
+                    html = (html[:head_end.start()] + block + html[head_end.start():]
+                            if head_end else block + html)
+                tail = "".join("<script>\n%s</script>\n" % js for js in modules)
+                body_end = None
+                for body_end in re.finditer(r"</body\s*>", html, re.I):
+                    pass
+                html = (html[:body_end.start()] + tail + html[body_end.start():]
+                        if body_end else html + tail)
+                mark = '<meta name="generator" content="%s">' % BUNDLE_MARK
+                head = re.search(r"<head\b[^>]*>", html, re.I)
+                result = (html[:head.end()] + "\n" + mark + html[head.end():]
+                          if head else mark + "\n" + html)
+    took = time.monotonic() - started
+    errors, warnings = counts
+    log = "\n\n".join(logs)
+    tail = f"\n[log]\n{log}" if log else ""
+    tool = f"esbuild {version} ({where}: {exe})"
+    if result is None:
+        return _clip(f"error: the bundle did not build -- {errors} error(s), {warnings} "
+                     f"warning(s), nothing was written. {tool}, {took:.2f}s. Fix the "
+                     f"source files and build again; do not patch the output.{tail}")
+    data = result.encode("utf-8")
+    if len(data) > BUNDLE_MAX_BYTES:
+        return (f"error: the bundle is {len(data)} bytes, over the "
+                f"{BUNDLE_MAX_BYTES >> 20} MiB cap -- nothing was written. {tool}.")
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+        with open(out, "wb") as fh:
+            fh.write(data)
+    except OSError as exc:
+        return f"error: could not write {out}: {exc}"
+    _mark_read(out)
+    # WHAT THE PAGE STILL LOADS FROM DISK, said rather than discovered in the
+    # browser: a leftover module script or local src is the file:// wall again.
+    left = []
+    if out_html:
+        text = result
+        if re.search(r"<script\b[^>]*\btype\s*=\s*[\"']?module", text, re.I):
+            left.append("a <script type=\"module\"> (blocked on file://)")
+        for tag in re.findall(r"<script\b[^>]*>|<link\b[^>]*>", text, re.I):
+            if tag[1:5].lower() == "link" and \
+                    "stylesheet" not in (_html_attr(tag, "rel") or "").lower():
+                continue
+            ref = _html_attr(tag, "src") or _html_attr(tag, "href")
+            if _local_ref(ref):
+                left.append(ref)
+    lines = [f"built {out} -- {len(data)} bytes, {errors} error(s), {warnings} "
+             f"warning(s), {took:.2f}s, {tool}"]
+    if bare_page:
+        lines.append(_bare_page_warning(entry, exports, global_name))
+    elif not page and not out_html and not global_name and exports:
+        lines.append(_unreachable_exports_warning(entry, exports))
+    if inlined:
+        lines.append("inlined: " + "; ".join(inlined))
+    if left:
+        lines.append("warn: the page still loads from disk: " + ", ".join(left)[:400])
+    elif out_html:
+        lines.append("self-contained: no module script, no local file reference -- "
+                     "it opens from file:// as it is.")
+    return _clip("\n".join(lines) + tail)
 
 
 # ---------------------------------------------------------------- #156 -----
@@ -9116,7 +12665,7 @@ def _src_ddg_answer(query: str, want: int) -> list[dict]:
 # github reported 7,356 repositories and 245 issues, wikipedia 10 articles,
 # pypi `requests 2.34.2`, stackexchange quota_remaining 298 of 300.
 #
-# For general web search beyond these, CROW_TAVILY_KEY or CROW_SEARXNG_URL take
+# For general web search beyond these, CROW_TAVILY_KEY (the store, #193/#194) or CROW_SEARXNG_URL take
 # over -- an upgrade the user may choose, not a setup step they must complete.
 # THE ORDER IS AUTHORITY, AND IT IS LOAD-BEARING. Measured live on 2026-08-14:
 # concatenating the sources put github first unconditionally, so "requests
@@ -9188,10 +12737,20 @@ def _search_tavily(query: str, want: int) -> dict | str:
     if isinstance(got, str):
         # A rejected key is an HTTP 401, and "unauthorized" alone would leave the
         # user guessing which of their env vars is wrong.
+        #
+        # #194: AND WHICH SOURCE IT CAME FROM. The live case of 2026-09-22
+        # was a key from the environment with no entry in the store; a text
+        # that did not say so sent the reader to look in the wrong place.
         if "401" in got or "403" in got:
-            return (f"{got}\nCROW_TAVILY_KEY was refused. Check it at "
-                    f"https://tavily.com, or unset it and set CROW_SEARXNG_URL "
-                    f"to your own instance.")
+            if TAVILY_FROM == "store":
+                came = f"CROW_TAVILY_KEY from {SECRETS_FILE} was refused."
+            else:
+                came = (f"CROW_TAVILY_KEY from the environment was refused "
+                        f"({SECRETS_FILE} has no entry for it).")
+            return (f"{got}\n{came} Put a valid key (https://tavily.com) "
+                    f"into {SECRETS_FILE} -- the store wins over the "
+                    f"environment -- or set CROW_SEARXNG_URL to your own "
+                    f"instance.")
         return got
     _, text = got
     try:
@@ -9207,8 +12766,8 @@ def _search_searxng(query: str) -> dict | str:
     got = _http_text(url)
     if isinstance(got, str):
         return (f"{got}\n(Crow is set to search through a SearXNG at "
-                f"{SEARXNG_URL}. Change CROW_SEARXNG_URL, or unset it and set "
-                f"CROW_TAVILY_KEY instead.)")
+                f"{SEARXNG_URL}. Change CROW_SEARXNG_URL, or unset it and put "
+                f"{secret_place('CROW_TAVILY_KEY')}.)")
     _, body = got
     try:
         return json.loads(body)
@@ -9267,7 +12826,7 @@ def tool_web_search(query: str = "", count: int = SEARCH_RESULTS, **_) -> str:
     # keyless path -- with a real index configured the results ARE a web search
     # and the warning would be a lie in the other direction.
     if not (SEARXNG_URL or TAVILY_KEY):
-        lines.append(KEYLESS_SCOPE)
+        lines.append(keyless_scope())
     # Before the results, because a registry saying "this does not exist" outranks
     # every keyword match underneath it -- and underneath is where it would be
     # read last, if at all.
@@ -9295,7 +12854,7 @@ def tool_web_search(query: str = "", count: int = SEARCH_RESULTS, **_) -> str:
             return (f"no result for {query} -- and {len(dead)} engine(s) did not "
                     f"answer: {dead}. This may be the instance, not the query.")
         if not (SEARXNG_URL or TAVILY_KEY):
-            return f"no result for {query}" + NO_GENERAL_INDEX
+            return f"no result for {query}" + no_general_index()
         return f"no result for {query}"
     lines.append(f"\n[the snippets answer most questions; fetch_url at most "
                  f"{MAX_FETCHES} of these, each costs ~2 min]")
@@ -9313,6 +12872,7 @@ TOOL_IMPL = {
     "find_files": tool_find_files,
     "search_text": tool_search_text,
     "run_command": tool_run_command,
+    "build_bundle": tool_build_bundle,
     "git_status": tool_git_status,
     "git_diff": tool_git_diff,
     "git_log": tool_git_log,
@@ -9353,6 +12913,11 @@ TOOL_CLASS = {
     "append_file": "writing",
     "edit_file": "writing",
     "run_command": "executing",
+    # #212. `executing`, render_page's reasoning: it starts a process and
+    # writes a file. It replaces exactly the run_command lines a session used
+    # to find and drive esbuild, so it asks where those asked -- no level that
+    # asked before a shell stops asking because the shell got a name.
+    "build_bundle": "executing",
     # #96. A FOURTH CLASS, because neither of the three fits. Fetching destroys
     # nothing, so it is not `writing`; it starts no shell, so it is not
     # `executing`. But it is not `reading` either, and calling it that would be
@@ -9512,20 +13077,104 @@ DECLINED = "error: declined by the user"
 # `wrong arguments for write_file`, a sentence with no instruction in it.
 # `classify_arguments` reads both shapes, and `run_turn` answers either with
 # the same structured result. What the model is told to DO has to work with
-# the tools that exist: `write_file` replaces whole contents and has no
-# append mode, so the instruction names the two roads -- parts via
-# `edit_file`, or a shell append.
+# the tools that exist. When this was written `write_file` had no append
+# mode and the sentence named `edit_file` or a shell heredoc; append_file
+# exists since 6301e0e and the write_file description forbids the heredoc, so
+# the instruction names append_file and the part size the cap allows
+# (#254) -- a number, so the recovery does not overshoot into
+# fifty tiny appends either.
 TRUNCATED_CALL = (
     "error: this tool call was cut off at the output token limit before its "
     "arguments were complete, so it did not run. Do not send the same call "
-    "again -- the limit will cut it in the same place. Build large content "
-    "in parts instead: one write_file with the first part, then extend the "
-    "file with edit_file or a shell append (cat >> <path> <<'EOF'), keeping "
-    "each call small enough to finish inside the limit.")
+    "again -- the limit will cut it in the same place. Build the file in "
+    "parts instead: one write_file with the first part, then append_file for "
+    "the rest, each part at most about %d KB so it finishes inside the "
+    "limit." % (whole_write_bytes() // 1024))
 UNPARSEABLE_CALL = (
     "error: this tool call's arguments were not valid JSON and were dropped "
     "from the history, so it did not run. Re-send the call as one valid "
     "JSON object, and split large content into several smaller calls.")
+# #217. A CUT IS NOT ALWAYS THE CAP. crow-nest marks every abandoned call
+# `_truncated`, whether the output limit ended it or the model's own EOS did,
+# and TRUNCATED_CALL above blamed the limit for both. Measured 2026-09-22
+# 10:23 (engine.log): a `read_image` whose `path` ran into a 6,986-token
+# hallucinated URL, `finish stop`, far under max_tokens -- and the model was
+# told the limit had cut it and to "build large content in parts", the wrong
+# cause and the wrong remedy for a path. At finish `stop` the generation
+# ended on its own inside the arguments; the cure is the short, exact value.
+UNCLOSED_CALL = (
+    "error: the generation stopped inside this call's arguments{where}, so it "
+    "did not run. This was not the output token limit -- the reply ended on "
+    "its own before the call was closed. Re-send the call with the exact, "
+    "short value{name}.")
+
+
+# crow-nest #99's `bad-param-name`: the call was named, then a parameter name
+# the parser could not read ended it. Neither the cap nor a stop -- the cure is
+# the declared names, which is what the sentence says.
+BAD_PARAMETER_CALL = (
+    "error: this call used a parameter name the server could not read, so it "
+    "was abandoned and did not run. Re-send it with exactly the parameter "
+    "names the tool declares.")
+
+
+def cut_answer(why: str, finish: "str | None", record: "dict | None",
+               parameter: "tuple[str, int] | None") -> "tuple[str, str]":
+    """#217: the tool result for a call that must not run, and its kind.
+
+    THE ENGINE'S RECORD DECIDES WHEN THERE IS ONE (crow-nest #99): `end-in-
+    call` is a stop (`finish` stop) or the cap (`length`), `bad-param-name`
+    is neither. Without a record the finish alone decides, as it did for the
+    10:23 round: `stop` is the model's own end inside the arguments, anything
+    else keeps the limit's answer (llama-server's `tool_calls` masks a cap
+    cut, see TRUNCATED_CALL). Returns (result, "unclosed" | "truncated" |
+    "bad-parameter" | "unparseable").
+    """
+    kind = (record or {}).get("kind")
+    if kind == "bad-param-name":
+        return BAD_PARAMETER_CALL, "bad-parameter"
+    if why == "truncated" and finish == "stop":
+        return unclosed_call(parameter), "unclosed"
+    if why == "truncated":
+        return TRUNCATED_CALL, "truncated"
+    return UNPARSEABLE_CALL, "unparseable"
+
+
+def unclosed_call(parameter: "tuple[str, int] | None") -> str:
+    """UNCLOSED_CALL naming the parameter the stop landed in, when known."""
+    if not parameter:
+        return UNCLOSED_CALL.format(where="", name="")
+    name, length = parameter
+    return UNCLOSED_CALL.format(
+        where=" (`%s` had run to %d chars)" % (name, length),
+        name=" for `%s`" % name)
+
+
+def cut_parameter(arguments: "str | None") -> "tuple[str, int] | None":
+    """#217: which argument a cut call was writing, and how far it got.
+
+    READ BEFORE `salvage_cut_calls` replaces an unparseable string with `{}`.
+    Two shapes: crow-nest's closed object with `_truncated` (the parameter is
+    the last key before the marker) and llama.cpp's unterminated string (the
+    last `"key": "` opener and whatever follows it). None when neither says.
+    """
+    raw = arguments or ""
+    try:
+        parsed = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        opener = None
+        for opener in re.finditer(r'"([A-Za-z_][\w-]*)"\s*:\s*"', raw):
+            pass
+        if opener is None:
+            return None
+        return opener.group(1), len(raw) - opener.end()
+    if not isinstance(parsed, dict):
+        return None
+    keys = [k for k in parsed if k != "_truncated"]
+    if not keys:
+        return None
+    value = parsed[keys[-1]]
+    return keys[-1], len(value if isinstance(value, str) else json.dumps(value))
 
 
 def classify_arguments(arguments: "str | None") -> "str | None":
@@ -9847,21 +13496,40 @@ def mcp_tool_name(server: str, tool: str) -> str:
 
 # `${VAR}` IN A BLOCK, RESOLVED WHEN THE SERVER IS USED AND NEVER STORED.
 # A token written into `mcp.json` sits in a file two surfaces draw and a person
-# edits; a token named `${GITHUB_TOKEN}` sits in the environment, and what the
-# sheet shows is the placeholder. Crow already keeps `CROW_TAVILY_KEY` this way
-# -- this is the same rule for a foreign server's credentials.
+# edits; a token named `${GITHUB_TOKEN}` sits in the secret store (or, as the
+# fallback, the environment), and what the sheet shows is the placeholder.
+# Crow keeps `CROW_TAVILY_KEY` this way -- this is the same rule for a foreign
+# server's credentials.
+#
+# #195: THROUGH `secret()`, the store before the environment. Before, the
+# lookup was `os.environ` alone, so a token moved into the store by #193's
+# migration was "nothing is set" and the server was refused.
 _MCP_VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
+def _mcp_var(name: str) -> "str | None":
+    """The value for `${name}`: `secret()` -- store, then environment -- or
+    None when neither has it. `name in os.environ` keeps a variable set to ""
+    SET, as it was before #195: it expands to nothing and refuses nothing."""
+    value = secret(name)
+    if value or name in os.environ:
+        return value
+    return None
+
+
 def _mcp_expand(value) -> str:
-    """`${VAR}` from the environment. An unresolved one is left ALONE here and
-    caught in `start`, where it can be named -- silently sending the literal
-    `${GITHUB_TOKEN}` as a bearer token is a 401 nobody can explain."""
-    return _MCP_VAR.sub(lambda m: os.environ.get(m.group(1), m.group(0)), str(value))
+    """`${VAR}` from the store, else the environment. An unresolved one is
+    left ALONE here and caught in `start`, where it can be named -- silently
+    sending the literal `${GITHUB_TOKEN}` as a bearer token is a 401 nobody
+    can explain."""
+    def one(match):
+        got = _mcp_var(match.group(1))
+        return match.group(0) if got is None else got
+    return _MCP_VAR.sub(one, str(value))
 
 
 def _mcp_missing(block: dict) -> list:
-    """Which `${VAR}` in a block names nothing in the environment.
+    """Which `${VAR}` in a block names nothing in the store or the environment.
 
     ONLY THE SIX KEYS THAT REACH A PROCESS OR A REQUEST. `schema` is the
     server's own words and may legitimately contain a `${...}` in a description;
@@ -9872,7 +13540,8 @@ def _mcp_missing(block: dict) -> list:
 
     def walk(value):
         if isinstance(value, str):
-            found.extend(n for n in _MCP_VAR.findall(value) if n not in os.environ)
+            found.extend(n for n in _MCP_VAR.findall(value)
+                         if _mcp_var(n) is None)
         elif isinstance(value, list):
             for item in value:
                 walk(item)
@@ -10388,8 +14057,9 @@ class McpServer:
         # no hint of what went wrong.
         missing = _mcp_missing(self.block)
         if missing:
-            return ("the MCP server %r wants %s from the environment, and "
-                    "nothing is set" % (self.name, ", ".join(missing)))
+            return ("the MCP server %r wants %s, and nothing is set -- put it "
+                    "in %s (the environment is the fallback)"
+                    % (self.name, ", ".join(missing), SECRETS_FILE))
         endpoint = self.url()
         if endpoint is not None:
             # ONE BLOCK IS ONE TRANSPORT. Letting one of them quietly win would
@@ -12582,21 +16252,35 @@ def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
         if goal_load() is None:
             return ("no goal to clear.", None, False)
         goal_write(None)
+        goal_check_set(None)                                   # #250
         return ("goal cleared.", None, True)
     lines = [p.strip() for p in text.splitlines() if p.strip()]
     if len(lines) == 1:
         lines = [p.strip() for p in lines[0].split("|") if p.strip()]
+    # #250: `check: <command>` is the acceptance check, not a step.
+    checks = [ln[len(GOAL_CHECK_PREFIX):].strip() for ln in lines
+              if ln.lower().startswith(GOAL_CHECK_PREFIX)]
+    lines = [ln for ln in lines if not ln.lower().startswith(GOAL_CHECK_PREFIX)]
     if len(lines) < 2:
         return ("a goal needs steps: `/goal <title>` then one step per line, "
                 "or `title | step | step`.", goal_load(), False)
-    goal = goal_start(lines[0], lines[1:])
+    goal = goal_start(lines[0], lines[1:], by=GOAL_BY_USER)
     if goal is None:
         return ("that is not a goal I can hold.", goal_load(), False)
+    check = next((c for c in reversed(checks) if c), None)
+    goal_check_set(check)
     # DIE KOSTEN STEHEN VOR DER TAT, wie bei jeder Kopfaenderung: das Ziel geht
     # in den gepinnten Block, also zahlt der naechste Zug einen vollen Prefill.
-    return ("goal: %s -- %d steps.\n%s"
-            % (goal["title"], len(goal["steps"]), GOAL_COST_NOTE), goal, True)
+    return ("goal: %s -- %d steps%s.\n%s"
+            % (goal["title"], len(goal["steps"]),
+               ", acceptance check: %s" % check if check else "",
+               GOAL_COST_NOTE), goal, True)
 
+
+# #240: who wrote a plan -- the user through `/goal`, or the model through
+# `goal_set`. Only the user's plan names places the user named.
+GOAL_BY_USER = "user"
+GOAL_BY_MODEL = "model"
 
 GOAL_COST_NOTE = ("the goal goes into the head of every prompt -- "
                   "the next turn pays a full prefill")
@@ -12670,6 +16354,51 @@ def goal_steps_from(steps) -> "tuple[list[str] | None, str | None]":
     return out, None
 
 
+def _goal_step_norm(text: str) -> str:
+    """#210: Kleinschreibung und Weite gefaltet -- derselbe Schritt, anders
+    getippt, ist fuer die Marken-Uebertragung derselbe Schritt."""
+    return " ".join(str(text or "").lower().split())
+
+
+def _carry_goal_marks(old: "dict | None", new: "dict") -> "dict | None":
+    """#210. Die Haken eines laufenden Ziels auf den neuen Plan uebertragen.
+
+    GEMESSEN AM 2026-09-22: nach einem Rollover (der Stand stand nirgends --
+    siehe `goal_block`) baute das Modell denselben Plan drei Mal neu, und
+    jeder `goal_set` loeschte alle Haken des Ziels, an dem es gerade sass.
+    `goal_start` ersetzt ein laufendes Ziel absichtlich (eines zur Zeit) --
+    aber ERSETZEN heisst nicht VERGESSEN: ein Schritt, der da steht und
+    wieder da steht, war fertig und bleibt es.
+
+    GETROFFEN WIRD NACH TEXT, normalisiert. Ein Modell, das neu plant,
+    formuliert Schritte um; exakte Gleichheit finge fast nichts. Gross- und
+    Kleinschreibung und Leerraum sind keine anderen Schritte, inhaltliche
+    Umstellungen sind es -- und die bleiben dann ehrlich offen.
+
+    NUR DONE UND FAILED REITEN. Ein `running` gehoert zu dem Zug, der gerade
+    abgeschnitten oder beendet wurde -- der neue Plan sagt selbst, wo er
+    anfaengt. Und niemand schreibt Zeiten oder Token um: Die Bilanz des
+    neuen Plans beginnt bei 0, das getragene Zeichen ist die Marke, nicht
+    die Rechnung.
+    """
+    steps_old = (old or {}).get("steps") or []
+    marks = {_goal_step_norm(s.get("text")): s.get("status")
+             for s in steps_old
+             if s.get("status") in (GOAL_DONE, GOAL_FAILED)}
+    if not marks:
+        return None
+    hits = 0
+    for step in new.get("steps") or []:
+        status = marks.get(_goal_step_norm(step.get("text")))
+        if status is not None:
+            step["status"] = status
+            hits += 1
+    if not hits:
+        return None
+    return {"done": sum(1 for s in steps_old if s.get("status") == GOAL_DONE),
+            "of": len(steps_old), "matched": hits}
+
+
 def tool_goal_set(title: str, steps: "list | None" = None) -> str:
     """#165. Das Modell schreibt seinen eigenen Plan. Gibt JSON zurueck.
 
@@ -12681,6 +16410,10 @@ def tool_goal_set(title: str, steps: "list | None" = None) -> str:
     UND OB ES UEBERHAUPT EINE LISTE IST (#196). `run_tool` faengt die verpackte
     Form schon an der Naht ab; dieser Handler prueft trotzdem selbst, weil er
     auch direkt gerufen wird und ein Ziel aus einem String nie entstehen darf.
+
+    #210. EIN LAUFENDES ZIEL WIRD ERSETZT, ABER NICHT VERGESSEN: Haken auf
+    treffende Schritte reiten mit, und die Antwort sagt es dem Modell -- es
+    liest daraus, wie weit der alte Plan war, ohne ihn neu zu erraten.
     """
     packed = isinstance(steps, str)
     steps, bad = goal_steps_from(steps)
@@ -12690,12 +16423,26 @@ def tool_goal_set(title: str, steps: "list | None" = None) -> str:
     if len(clean) < 2:
         return json.dumps({"ok": False,
                            "error": "a plan needs at least two steps"})
-    goal = goal_start(str(title or "").strip() or "the task", clean)
+    # #210. DER ALTE PLAN VOR DEM NEUEN GELESEN -- `goal_start` ueberschreibt
+    # goal.json, und was dann noch in ihm stand, steht nur noch hier.
+    before = goal_load()
+    goal = goal_start(str(title or "").strip() or "the task", clean,
+                      by=GOAL_BY_MODEL)
     if goal is None:
         return json.dumps({"ok": False, "error": "could not write the plan"})
+    carried = _carry_goal_marks(before, goal)
+    if carried:
+        goal_write(goal)
+    # #210. `next` NENNT DEN ERSTEN OFFENEN SCHRITT, nicht blind den ersten:
+    # ein getragener Haken vorn im Plan waere eine Anweisung, Fertigtes noch
+    # einmal zu tun -- genau die Schleife, die das Panel zeigen wuerde.
+    nxt = next((n for n, s in enumerate(goal["steps"], 1)
+                if s.get("status") != GOAL_DONE), 1)
     out = {"ok": True, "title": goal["title"],
            "steps": len(goal["steps"]),
-           "next": 1, "first": goal["steps"][0]["text"]}
+           "next": nxt, "first": goal["steps"][nxt - 1]["text"]}
+    if carried:
+        out["carried"] = carried
     if packed:
         out["note"] = ("steps arrived as a JSON string and was parsed into an "
                        "array of %d" % len(clean))
@@ -12720,6 +16467,11 @@ def tool_goal_step(step: int, status: str, note: str = "") -> str:
     if state == GOAL_RUNNING:
         goal = goal_step_begin(index)
     elif state in (GOAL_DONE, GOAL_FAILED):
+        passed = None
+        if state == GOAL_DONE:
+            refused, passed = goal_done_refusal(index, note)   # #250
+            if refused:
+                return json.dumps({"ok": False, "error": refused})
         goal = goal_step_end(index, ok=(state == GOAL_DONE), note=note)
     else:
         return json.dumps({"ok": False,
@@ -12730,10 +16482,108 @@ def tool_goal_step(step: int, status: str, note: str = "") -> str:
                                     "another step is still running"})
     done, total = goal_counts(goal)
     nxt = goal_next_open(goal)
-    return json.dumps({"ok": True, "done": done, "total": total,
-                       "complete": goal.get("status") == GOAL_DONE,
-                       "next_step": None if nxt is None else nxt + 1,
-                       "next": None if nxt is None else goal["steps"][nxt]["text"]})
+    out = {"ok": True, "done": done, "total": total,
+           "complete": goal.get("status") == GOAL_DONE,
+           "next_step": None if nxt is None else nxt + 1,
+           "next": None if nxt is None else goal["steps"][nxt]["text"]}
+    if state == GOAL_DONE and passed:
+        out["acceptance_check"] = "passed: %s" % passed
+    return json.dumps(out)
+
+
+# #250. `done` WITHOUT EVIDENCE. 2026-09-23, diorama run: step 4 went
+# `done` with the note "Step treated as done-with-deviation only in spirit",
+# step 3 with "the 128^3 3D texture literally cannot be created here", and
+# step 9 went `failed` ("no fps figure can be read") and then `done` with no
+# note two messages later -- 9/9 "complete" over a 1.4 KB index.html that
+# draws nothing. The tool took every word. Two checks, both on what the call
+# itself carries: a `done` whose own note says it is not done, and a `done`
+# with no note on a step whose last report was `failed`. Narrow on purpose:
+# a false refusal costs a round and teaches the model to drop its caveats.
+_GOAL_NOT_DONE = re.compile(
+    r"(?i)\b(?:in spirit|not done|is not (?:done|finished|working|verified)|"
+    r"not verified|unverified|could not (?:be )?verif\w*|"
+    r"(?:cannot|can't|could not) be (?:built|drawn|created|verified|done|bound|"
+    r"linked|finished|measured|reached|rendered)|impossible|unreachable|"
+    r"with[- ]deviation|does not work|doesn't work|paints nothing|"
+    r"nothing draws)\b")
+
+# THE ACCEPTANCE CHECK IS THE USER'S WORD, so it lives where the model's
+# write_file cannot reach: goal.json sits in the working area, and a command
+# the model wrote there would run unasked at `allowedit`. One file in
+# SESSION_DIR, keyed by the goal's path.
+GOAL_CHECK_PREFIX = "check:"
+GOAL_CHECKS_FILE = "goal-checks.json"
+
+
+def _goal_checks_path() -> str:
+    return os.path.join(SESSION_DIR, GOAL_CHECKS_FILE)
+
+
+def _goal_checks() -> dict:
+    try:
+        with open(_goal_checks_path(), encoding="utf-8") as fh:
+            found = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
+def goal_check_get() -> "str | None":
+    """The acceptance check the user set for the goal in this working area."""
+    check = _goal_checks().get(os.path.abspath(goal_path()))
+    return check if isinstance(check, str) and check.strip() else None
+
+
+def goal_check_set(check: "str | None") -> None:
+    """Set (or with None, drop) this working area's acceptance check."""
+    checks = _goal_checks()
+    key = os.path.abspath(goal_path())
+    if check:
+        checks[key] = check
+    elif checks.pop(key, None) is None:
+        return
+    try:
+        os.makedirs(SESSION_DIR, exist_ok=True)
+        tmp = _goal_checks_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(checks, fh, indent=1, ensure_ascii=False)
+        os.replace(tmp, _goal_checks_path())
+    except OSError:
+        pass
+
+
+def goal_done_refusal(index: int, note: str = "",
+                      goal: "dict | None" = None) -> "tuple[str | None, str | None]":
+    """(why `done` on step `index` is refused, or None; the check that passed,
+    or None). The acceptance check runs only on the `done` that would close
+    the goal, through run_command -- its clock, capture cap and memory scope."""
+    goal = goal if goal is not None else goal_load()
+    if not goal or not 0 <= index < len(goal.get("steps") or []):
+        return None, None
+    step = goal["steps"][index]
+    said = str(note or "")
+    hit = _GOAL_NOT_DONE.search(said)
+    if hit:
+        return ("refused: the note says this step is not done (\"%s\"). 'done' "
+                "means verified working. Finish it and report done with what "
+                "proves it, or call goal_step with 'failed' and this note."
+                % hit.group(0)), None
+    if not said.strip() and step.get("status") == GOAL_FAILED:
+        return ("refused: step %d was last reported failed (\"%s\"). A 'done' "
+                "after that needs a note saying what proves it works now."
+                % (index + 1, str(step.get("note") or "")[:160])), None
+    check = goal_check_get()
+    closes = all(s.get("status") == GOAL_DONE
+                 for n, s in enumerate(goal["steps"]) if n != index)
+    if not check or not closes:
+        return None, None
+    result = tool_run_command(check)
+    if result.startswith("[exit 0]"):
+        return None, check
+    return ("refused: this would close the goal, and its acceptance check "
+            "failed. The goal stays open until it passes.\ncheck: %s\n%s"
+            % (check, _clip(result, 2000))), None
 
 
 def goal_next_open(goal: "dict | None" = None) -> "int | None":
@@ -12884,6 +16734,388 @@ def goal_worked_on_nudge(messages: "list | None") -> bool:
     return False
 
 
+# ------------------------------- #202, dieselbe Fehlerklasse je Schritt ----
+#
+# WAS DIE BREMSE OBEN NICHT SIEHT, am 2026-09-22 zweimal gemessen: ein Modell,
+# das ARBEITET -- jeder Zug ruft Werkzeuge, keine zwei Antworten gleich --, und
+# trotzdem seit Stunden gegen dieselbe Wand laeuft. 48 blinde Runden mit toter
+# Suche (Tavily 401) und toten Delegaten (403); in der 655-Nachrichten-Sitzung
+# 22 edit_file-Aufrufe, von denen keiner landete, sechs Pfade, die das Modell
+# nie angelegt hatte, und render_page-Fehlschlaege, auf die es mit wait_ms 6000
+# -> 12000 -> 20000 antwortete und dann mit einem eigenen chromium ueber
+# run_command. Der Anstoss dazwischen wiederholte jedes Mal nur den Schritt.
+#
+# DER FINGERABDRUCK DER ANTWORT hilft hier nicht: web_search mit drei
+# verschiedenen Fragen sind drei verschiedene Zuege und EIN toter Dienst.
+# Gezaehlt wird deshalb die KLASSE des Ergebnisses, nicht der Aufruf -- und das
+# ist auch der Unterschied zu dem, was andere Harnesses zaehlen: OpenHands'
+# StuckDetector verlangt dieselbe Aktion mit denselben Argumenten (action_error,
+# Schwelle 3), Clines MistakeTracker zaehlt jeden Fehler gleich
+# (maxConsecutiveMistakes), Aider (max_reflections 3) und SWE-agent
+# (max_requeries 3) begrenzen Wiederholungen ohne sie zu benennen. Keiner sagt
+# dem Modell, WAS tot ist und was es stattdessen tun soll.
+#
+# DER KERN KLASSIFIZIERT UND FORMULIERT, die Oberflaeche zaehlt pro Schritt und
+# entscheidet, wann ein Anstoss faellig ist -- dieselbe Teilung wie bei der
+# Bremse oben.
+
+# WIE OFT DIESELBE KLASSE IN EINEM SCHRITT KOMMEN DARF, bevor der Anstoss sie
+# beim Namen nennt. Dieselbe Drei wie `GOAL_LOOP_ANSWERS`, und aus demselben
+# Grund: zweimal ist ein Zufall (ein 401 kann ein Tippfehler im Schluessel
+# sein, der gleich behoben ist), dreimal ist ein Zustand. Es ist auch die Zahl,
+# die OpenHands, Aider und SWE-agent unabhaengig voneinander gewaehlt haben.
+# Gemessen: die drei web_search-401 vom 2026-09-22 kamen in EINEM Zug -- bei
+# drei ist der naechste Anstoss der erste, der es sagt.
+GOAL_TROUBLE_TRIPS = 3
+
+# DIE KLASSEN, in der Reihenfolge, in der ein Ergebnis gegen sie geprueft wird.
+# Die Reihenfolge ist Absicht: ein 401 ist kein Verweigern des Werkzeugs, ein
+# ENOENT ist keine beliebige Ausnahme, und ein Fang-Timeout keine Weigerung --
+# die spezifischere Klasse hat den besseren Rat.
+GOAL_TROUBLE_DEAD = "dead"          # externer Dienst antwortet 401/402/403
+GOAL_TROUBLE_PHANTOM = "phantom"    # ENOENT auf einen Pfad, den nie jemand anlegte
+GOAL_TROUBLE_TIMEOUT = "timeout"    # Render/Pruefung lief in die Zeit
+GOAL_TROUBLE_REFUSED = "refused"    # ein Werkzeug sagt wieder dasselbe Nein
+GOAL_TROUBLE_ERROR = "error"        # dieselbe Ausnahme im Befehl, wieder und wieder
+
+# Eine Zeile, die Crow selbst vor ein Ergebnis setzt ("[took old_string as
+# old]", vor #215 "[unknown argument(s) ignored: ...]") -- sie verdeckt, ob
+# darunter ein Fehler steht.
+_TROUBLE_NOTE = re.compile(r"^\[[^\]\n]*\]\n")
+_TROUBLE_HTTP = re.compile(r"\bHTTP (40[123])\b")
+_TROUBLE_HOST = re.compile(r"https?://([^/\s:'\"]+)")
+_TROUBLE_EXIT = re.compile(r"^\[exit (-?\d+)\]")
+# DIE FORMEN, IN DENEN EIN FEHLENDER PFAD ANKOMMT, jede so, wie sie in den
+# Transkripten steht: node (`ENOENT: ..., open '/tmp/water.js'`), Python
+# (`[Errno 2] No such file or directory: '...'`), Crows eigene Werkzeuge
+# (`no such file: ...`, `no such page: ...`) und die coreutils.
+_TROUBLE_MISSING = (
+    re.compile(r"ENOENT: no such file or directory, \w+ '([^']+)'"),
+    re.compile(r"No such file or directory: '([^']+)'"),
+    re.compile(r"^error: no such (?:file|page|directory): (\S+)", re.M),
+    re.compile(r"cannot (?:access|open|stat|create regular file) '([^']+)'"),
+    re.compile(r"^[\w.-]+: ([^\s:']+): No such file or directory", re.M),
+)
+# DIE SIGNATUR EINER AUSNAHME: die Zeile, an der ein Mensch sie wiedererkennt.
+# esbuilds `✘ [ERROR] ...`, eine Python-/JS-Ausnahme `XyzError: ...`, und die
+# Shell, die an einer offenen Anfuehrung scheitert.
+_TROUBLE_SIGNATURE = (
+    re.compile(r"✘ \[ERROR\] (.+)"),
+    re.compile(r"^\s*((?:[A-Za-z_][\w.]*)?(?:Error|Exception)\b:?.*)$", re.M),
+    re.compile(r"(unexpected EOF while looking for matching .+)"),
+)
+_TROUBLE_PATHLIKE = re.compile(
+    r"(?:~|\.{1,2})?/[^\s'\"`,;:()]+|\b[\w.-]+/[\w./-]+")
+
+
+def _trouble_norm(text: str) -> str:
+    """Eine Zeile ohne das, was sich von Mal zu Mal aendert: Pfade und Zahlen.
+
+    "read src/app.js before editing it" und "read /tmp/shot2/index.html before
+    editing it" sind DIESELBE Weigerung -- gemessen 2026-09-22, elf Mal mit
+    wechselnden Pfaden. Wer sie nach Pfad trennte, zaehlte elf Einzelfaelle.
+    """
+    text = _TROUBLE_PATHLIKE.sub("<path>", text.strip())
+    return re.sub(r"\d+", "N", text)[:160]
+
+
+def _trouble_tool(name: str) -> str:
+    """`collect` meldet, was `delegate` losschickte: ein toter Delegat ist
+    EINE Klasse, egal an welchem der beiden Aufrufe er sichtbar wird."""
+    return "delegate" if name in ("delegate", "collect") else name
+
+
+def _trouble_first_line(text: str) -> str:
+    return (text.strip().splitlines() or [""])[0][:200]
+
+
+def goal_trouble_of(name: str, result: str, seen: "Callable[[str], bool]"
+                    ) -> "tuple[str, str, str] | None":
+    """Die Fehlerklasse eines Werkzeugergebnisses: `(klasse, schluessel,
+    detail)`, oder None fuer ein Ergebnis, das kein Fehler ist.
+
+    `seen(pfad)` sagt, ob ein Pfad VOR diesem Aufruf schon irgendwo im
+    Gespraech stand. Der Kern liest das Gespraech nicht selbst, damit dieselbe
+    Funktion live und in der Nachrechnung eines gespeicherten Verlaufs laeuft.
+
+    NUR FEHLSCHLAEGE WERDEN GEZAEHLT: `error: ...` von einem Werkzeug oder ein
+    run_command mit Exit ungleich 0. Ein grep, der "HTTP 401" in einer Quelle
+    findet, ist Arbeit und kein toter Dienst.
+    """
+    text = result if isinstance(result, str) else json.dumps(result)
+    # Das Exit-Praefix von run_command steht auch in eckigen Klammern -- es
+    # ist aber das Ergebnis und keine Notiz davor, also wird es nicht
+    # abgeschaelt.
+    while _TROUBLE_NOTE.match(text) and not _TROUBLE_EXIT.match(text):
+        text = _TROUBLE_NOTE.sub("", text, count=1)
+    exit_code = _TROUBLE_EXIT.match(text)
+    failed = text.startswith("error") or (exit_code is not None
+                                          and exit_code.group(1) != "0")
+    if not failed:
+        return None
+    tool = _trouble_tool(name)
+    # 1. EIN TOTER DIENST. Nur an Crows eigenem Fehlerpraefix: ein 401 im
+    # Ausgabetext eines Befehls sagt nichts ueber einen Dienst dieses Laufs.
+    http = _TROUBLE_HTTP.search(text) if text.startswith("error") else None
+    if http:
+        host = _TROUBLE_HOST.search(text)
+        host = host.group(1) if host else ""
+        return (GOAL_TROUBLE_DEAD, "%s|%s|%s" % (tool, host, http.group(1)),
+                "HTTP %s%s" % (http.group(1), " from " + host if host else ""))
+    # 2. EIN PFAD, DEN ES NIE GAB. Der Pfad steht zum ERSTEN Mal im Aufruf, der
+    # an ihm scheitert -- gemessen in allen sechs Faellen vom 2026-09-22.
+    missing = []
+    for pattern in _TROUBLE_MISSING:
+        for path in pattern.findall(text):
+            path = path.strip().rstrip(".")
+            if path and path not in missing and not seen(path):
+                missing.append(path)
+    if missing:
+        return (GOAL_TROUBLE_PHANTOM, GOAL_TROUBLE_PHANTOM, "\n".join(missing))
+    # 3. EIN FANG, DER NICHT KAM. render_page sagt es in eigenen Worten, alles
+    # andere mit "timed out" oder dem Deckel von run_command.
+    if (text.startswith("error: the browser wrote no screenshot")
+            or (text.startswith("error") and ("timed out" in text
+                                              or "and was killed" in text))):
+        # Der Grund steht in der ersten Klammer ("timed out after 9000 ms and
+        # was stopped"); die Konsolenzeilen dahinter hat das Modell schon.
+        reason = re.search(r"\(([^()\n]+)\)", text)
+        return (GOAL_TROUBLE_TIMEOUT, tool,
+                reason.group(1) if reason else _trouble_first_line(text))
+    # 4. DAS WERKZEUG SAGT NEIN, und zwar dasselbe.
+    if text.startswith("error"):
+        line = re.sub(r"^error:\s*", "", _trouble_first_line(text))
+        return (GOAL_TROUBLE_REFUSED, "%s|%s" % (tool, _trouble_norm(line)), line)
+    # 5. DIESELBE AUSNAHME IM BEFEHL. Ein Exit ungleich 0 ohne erkennbare
+    # Signatur zaehlt nicht: `grep` ohne Treffer ist Exit 1 und kein Fehler.
+    for pattern in _TROUBLE_SIGNATURE:
+        hit = pattern.search(text)
+        if hit:
+            line = hit.group(1).strip()[:200]
+            return (GOAL_TROUBLE_ERROR, _trouble_norm(line), line)
+    return None
+
+
+def _trouble_mentions(message: dict) -> str:
+    """Was in einer Nachricht an Pfaden stehen KANN: Text und Aufrufargumente."""
+    parts = [goal_message_text(message)]
+    for call in message.get("tool_calls") or []:
+        parts.append((call.get("function") or {}).get("arguments") or "")
+    return "\n".join(p for p in parts if p)
+
+
+def _trouble_phantoms(counts: dict) -> "set[str]":
+    return {path for entry in counts.values()
+            if entry["cls"] == GOAL_TROUBLE_PHANTOM
+            for path in entry["detail"].split("\n") if path}
+
+
+def _trouble_mentioned(path: str, text: str) -> bool:
+    """Steht `path` als PFAD in `text`, nicht als Teil eines anderen?
+
+    GEMESSEN 2026-09-22: `/tmp/water.js` stand vorher nur als Ende von
+    `~/.local/state/crow/tmp/water.js` im Gespraech -- einer anderen Datei.
+    Ein absoluter Pfad braucht deshalb eine Grenze davor; ein relativer darf
+    das Ende eines laengeren sein (`src/app.js` in `/home/.../src/app.js`),
+    denn so schreibt man ihn aus dem Arbeitsverzeichnis heraus. Dahinter
+    duerfen weder Pfadzeichen noch eine Endung folgen: `src/water.js` ist
+    nicht `src/water.js.bak`.
+    """
+    lead = r"(?<![\w.~-])" if path[:1] in ("/", "~") else ""
+    return re.search(lead + re.escape(path) + r"(?![\w/-]|\.\w)", text) is not None
+
+
+def goal_trouble_scan(messages: "list | None", start: int,
+                      counts: "dict | None" = None,
+                      new_step: bool = False) -> dict:
+    """Die Werkzeugergebnisse ab `start` in `counts` zaehlen und es zurueckgeben.
+
+    `counts` gehoert dem Schritt: `{schluessel: {"cls", "tool", "n", "detail",
+    "at", "said"}}`. `at` ist der Index des Ergebnisses, an dem die Klasse die
+    Schwelle erreichte -- das, was die Nachrechnung berichtet.
+
+    EIN `goal_step` MIT 'done' LEERT DIE ZAEHLER mitten im Zug: ein Schritt,
+    der abgeschlossen wurde, vererbt seine Fehler nicht dem naechsten, auch
+    wenn beide im selben Zug liegen. 'failed' NICHT: ein gescheiterter Schritt
+    bleibt der naechste offene, Crow stoesst ihn wieder an -- gemessen
+    2026-09-22, [97] 'failed' auf Schritt 9 und danach 550 Nachrichten
+    Schritt 9. Wer dort die Zaehler leerte, vergaesse die Wand genau dann,
+    wenn das Modell selbst gesagt hat, dass es an ihr scheitert.
+
+    `new_step`: der Schritt hat seit dem letzten Anstoss gewechselt. Dann
+    gehoert der Zug bis zum abschliessenden `goal_step` dem ALTEN Schritt und
+    wird nicht gezaehlt -- ohne einen solchen Aufruf im Zug (robin hat im
+    Panel gewechselt) gar nichts davon.
+
+    WAS "SCHON GESEHEN" HEISST, fuer einen Pfad: er steht in irgendeiner
+    Nachricht VOR der Antwort, die den scheiternden Aufruf enthielt -- als
+    Text, als Werkzeugergebnis oder als Argument. Der Text davor wird erst
+    gebaut, wenn ein Pfad fehlt: ein gesunder Lauf zahlt nichts dafuer.
+    """
+    counts = counts if counts is not None else {}
+    messages = messages or []
+    calls: dict = {}
+    counting = not new_step
+    for n in range(max(0, start), len(messages)):
+        message = messages[n]
+        role = message.get("role")
+        if role == "assistant":
+            for call in message.get("tool_calls") or []:
+                fn = call.get("function") or {}
+                calls[call.get("id")] = (n, fn.get("name") or "",
+                                         fn.get("arguments") or "")
+            continue
+        if role != "tool":
+            continue
+        at, name, arguments = calls.get(message.get("tool_call_id"), (n, "", ""))
+        if name == "goal_step":
+            try:
+                status = (json.loads(arguments or "{}") or {}).get("status")
+            except (ValueError, AttributeError):
+                status = None
+            if status == GOAL_DONE:
+                counts.clear()
+                counting = True
+            continue
+        if not counting:
+            continue
+        before: "list[str]" = []
+
+        def seen(path: str, _at: int = at) -> bool:
+            # EIN PFAD, DER SCHON EINMAL INS LEERE GING, BLEIBT EIN PHANTOM,
+            # auch wenn er inzwischen im Gespraech steht: gemessen 2026-09-22,
+            # `cp` nach /tmp/s21/index.html scheiterte (kein mkdir), und der
+            # naechste Aufruf, render_page auf genau diesen Pfad, erwaehnte
+            # ihn damit "schon".
+            if path in _trouble_phantoms(counts):
+                return False
+            if not before:
+                before.append("\n".join(_trouble_mentions(m)
+                                        for m in messages[:_at]))
+            return _trouble_mentioned(path, before[0])
+
+        kind = goal_trouble_of(name, message.get("content") or "", seen)
+        if kind is None:
+            continue
+        cls, key, detail = kind
+        entry = counts.setdefault(cls + "|" + key, {
+            "cls": cls, "tool": _trouble_tool(name), "n": 0, "detail": "",
+            "at": None, "said": 0})
+        entry["n"] += 1
+        if cls == GOAL_TROUBLE_PHANTOM:
+            paths = entry["detail"].split("\n") if entry["detail"] else []
+            entry["detail"] = "\n".join(paths + [p for p in detail.split("\n")
+                                                 if p not in paths])
+        else:
+            entry["detail"] = detail
+        if entry["n"] == GOAL_TROUBLE_TRIPS:
+            entry["at"] = n
+    return counts
+
+
+# WAS STATT DES TOTEN DIENSTES ZU TUN IST, je Werkzeug. Nur fuer die, deren
+# Ausweg feststeht; jedes andere bekommt den allgemeinen Satz.
+_TROUBLE_DEAD_INSTEAD = {
+    "web_search": "work from local sources (files on disk, installed docs, "
+                  "--help) or ask the user for a working key",
+    "fetch_url": "work from local sources or ask the user to fetch it",
+    "delegate": "do the work yourself in this conversation",
+}
+
+
+def goal_trouble_line(entry: dict) -> str:
+    """Die EINE Zeile, die eine ausgeloeste Klasse im Anstoss bekommt: Klasse,
+    Zahl und der Ausweg -- nicht der Schritt noch einmal."""
+    cls, tool, n, detail = entry["cls"], entry["tool"], entry["n"], entry["detail"]
+    if cls == GOAL_TROUBLE_DEAD:
+        return ("%s is dead this session (%s, %d×) -- stop calling it; %s."
+                % (tool, detail, n, _TROUBLE_DEAD_INSTEAD.get(
+                    tool, "do the step without it or ask the user")))
+    if cls == GOAL_TROUBLE_PHANTOM:
+        paths = detail.split("\n")
+        return ("these paths were never created in this conversation (%d "
+                "failures): %s -- create them first, or use the files that "
+                "exist (list_dir, find_files)."
+                % (n, ", ".join(paths[-5:])))
+    if cls == GOAL_TROUBLE_TIMEOUT:
+        if tool == "render_page":
+            return ("render_page failed to capture %d× (%s) -- a larger "
+                    "wait_ms will not help: lower wait_ms or make the scene "
+                    "cheaper (fewer draw calls, a smaller canvas); do not "
+                    "drive a browser through run_command." % (n, detail))
+        return ("%s timed out %d× (%s) -- make the work smaller instead of "
+                "running it again." % (tool, n, detail))
+    if cls == GOAL_TROUBLE_REFUSED:
+        return ("%s refused %d× the same way: %s -- do what that message "
+                "names before calling it again." % (tool, n, detail))
+    return ("the same error came back %d× from %s: %s -- the approach is "
+            "wrong, not the detail; change it instead of patching the same "
+            "spot again." % (n, tool, detail))
+
+
+def goal_trouble_due(counts: "dict | None") -> "list[dict]":
+    """Die Klassen, die in den naechsten Anstoss gehoeren, und merkt sie sich.
+
+    FAELLIG IST EINE KLASSE, die die Schwelle erreicht hat UND seit dem letzten
+    Anstoss wieder vorkam. Wer nach der Zeile aufhoert, hoert sie nicht noch
+    einmal -- dieselbe Zeile vor jedem Zug waere wieder der 105-mal-Block, den
+    #202 abgeschafft hat. Wer weitermacht, hoert sie mit der neuen Zahl.
+    """
+    due = []
+    for entry in (counts or {}).values():
+        if entry["n"] >= GOAL_TROUBLE_TRIPS and entry["n"] > entry["said"]:
+            due.append(entry)
+            entry["said"] = entry["n"]
+    return due
+
+
+def goal_trouble_label(entry: dict) -> str:
+    """Die kurze Form fuer robins Notiz: was ausgeloest hat, wie oft."""
+    cls, tool, n = entry["cls"], entry["tool"], entry["n"]
+    if cls == GOAL_TROUBLE_DEAD:
+        return "%s dead (%s, %d×)" % (tool, entry["detail"], n)
+    if cls == GOAL_TROUBLE_PHANTOM:
+        return "%d calls on paths never created" % n
+    if cls == GOAL_TROUBLE_TIMEOUT:
+        return "%s timed out %d×" % (tool, n)
+    if cls == GOAL_TROUBLE_REFUSED:
+        return "%s refused %d× the same way" % (tool, n)
+    return "the same error %d× from %s" % (n, tool)
+
+
+def goal_turn_start(messages: "list | None") -> "int | None":
+    """Wo der letzte Zug anfing: Crows Anstoss oder robins getippte Zeile.
+
+    NICHT JEDE NUTZERZEILE BEGINNT EINEN ZUG. Die Notiz ueber das verbrauchte
+    Werkzeugbudget und die Rollover-Notiz stehen mitten in einem -- beide in
+    eckigen Klammern, wie Crows eigene Zeilen, aber ohne dessen Praefix. Wer
+    ab ihnen zaehlte, verloere alles, was der Zug davor gerufen hat.
+    """
+    for n in range(len(messages or []) - 1, -1, -1):
+        message = messages[n]
+        if message.get("role") != "user":
+            continue
+        if goal_is_nudge(message) or not goal_message_text(message).startswith("["):
+            return n
+    return None
+
+
+def goal_trouble_nudge(step: int, due: "list[dict]") -> str:
+    """Der Anstoss, wenn eine Klasse ausgeloest hat: je Klasse eine Zeile aus
+    `goal_trouble_line`. `step` zaehlt ab 1.
+
+    DER SCHRITTTEXT STEHT NICHT DRIN. Das Modell kennt ihn -- es arbeitet seit
+    mindestens drei Fehlschlaegen daran --, und ihn noch einmal zu schicken
+    hiesse, dieselbe Aufgabe vor dieselbe Wand zu stellen. Was es nicht weiss,
+    ist, dass die Wand eine ist.
+    """
+    return ("%s, step %d still open -- the same failure keeps coming back:\n"
+            "%s\nDo not repeat what failed. If the step cannot be done "
+            "another way, call goal_step with 'failed' and say why.]"
+            % (GOAL_NUDGE_MARK, step,
+               "\n".join("- " + goal_trouble_line(entry) for entry in due)))
+
+
 def needs_approval(name: str, mode: str) -> bool:
     """Does this tool stop and ask at this level?
 
@@ -12985,7 +17217,7 @@ def approval_scope(name: str, arguments: str) -> tuple[str, str] | None:
         return None
 
     if name in ("write_file", "append_file", "edit_file"):
-        path = args.get("path")
+        path = canonical_arguments(name, args).get("path")   # #215
         if not isinstance(path, str) or not path.strip():
             return None
         return ("writing", os.path.dirname(os.path.abspath(path)).lower())
@@ -13004,6 +17236,16 @@ def approval_scope(name: str, arguments: str) -> tuple[str, str] | None:
         # The program, not the line: `git status` and `git log` share a key,
         # `git` and `rm` do not.
         return ("executing", command.split()[0].lower())
+
+    # #212: one fixed program with a fixed argv, and its write is fenced by
+    # the tool itself -- so an "always" can safely cover the tool, the way it
+    # covers one program under run_command. Its own key: it never releases
+    # `run_command esbuild ...` with arguments nobody saw.
+    if name == "build_bundle":
+        entry = args.get("entry")
+        if not isinstance(entry, str) or not entry.strip():
+            return None
+        return ("executing", "build_bundle")
 
     return None
 
@@ -13601,9 +17843,11 @@ _SEEN: dict[tuple, str] = {}
 # inputs is wrong whatever the text says, so the inputs go into the key:
 #
 #   run_command           depends on everything a shell can reach -> never cached
-#   write_file/edit_file  depend on `_READ` -> the key carries whether this
-#                         path has been read in this turn, so a read between two
-#                         identical calls IS a different call
+#   write_file/edit_file  depend on `_READ` -> the key carries the path's read
+#                         state (#215-H: unread, or the stamp and whether the
+#                         disk still matches it), so a read between two
+#                         identical calls IS a different call, and so is an
+#                         edit of crow's own -- it moved the stamp
 #   everything else       is a function of its arguments -> keyed as before
 #
 # That last line is what keeps the 2026-08-09 loop closed: it happened on
@@ -13620,9 +17864,13 @@ _SEEN: dict[tuple, str] = {}
 # working tree as it stood before the commit the model just made. `github_connect`
 # is here for the same reason in time rather than in state: the answer changes
 # the moment somebody types the code on github.com.
+# #212: `build_bundle` is #93's run_command-after-edit_file case exactly. Edit a
+# source, build again with the same arguments -- the ordinary loop -- and a
+# cached answer would report the bundle from before the fix.
 NEVER_CACHED = frozenset({"run_command", "memory", "skill",
                           "git_status", "git_diff", "git_log",
-                          "git_commit", "git_push", "github_connect"})
+                          "git_commit", "git_push", "github_connect",
+                          "build_bundle"})
 READ_GATED = frozenset({"write_file", "edit_file"})
 
 
@@ -13652,11 +17900,14 @@ def _cache_key(name: str, arguments: str) -> tuple | None:
         args = json.loads(arguments or "{}")
     except json.JSONDecodeError:
         args = None
-    path = args.get("path") if isinstance(args, dict) else None
+    # #215: read under the name the handler will see, or a
+    # `file_path` call keys as never-read forever and replays its refusal
+    # after the read that should have lifted it.
+    path = canonical_arguments(name, args).get("path") if isinstance(args, dict) else None
     # A call whose path is missing or not a string cannot have been read, and it
     # is about to fail on its arguments -- which IS a function of its arguments,
-    # so caching it under `seen=False` is correct rather than a fallback.
-    seen = _key(path) in _READ if isinstance(path, str) else False
+    # so caching it under `("unread",)` is correct rather than a fallback.
+    seen = _read_state(path) if isinstance(path, str) else ("unread",)
     return (name, arguments, seen)
 
 
@@ -13711,6 +17962,17 @@ def _declared_properties(name: str) -> dict:
     return {}
 
 
+def _declared_required(name: str) -> list:
+    """Die Pflichtschluessel eines Werkzeugs, in der deklarierten Reihenfolge.
+    `[]` fuer einen unbekannten Namen -- dieselbe Nachsicht wie oben."""
+    for entry in TOOLS:
+        function = entry.get("function") or {}
+        if function.get("name") == name:
+            required = (function.get("parameters") or {}).get("required")
+            return list(required) if isinstance(required, list) else []
+    return []
+
+
 def _shape_phrase(spec: dict) -> str:
     """"a JSON array of strings" -- die deklarierte Form, wie ein Fehler sie nennt."""
     if spec.get("type") == "object":
@@ -13742,6 +18004,80 @@ def coerce_declared_containers(name: str, args: dict) -> "tuple[str | None, list
     return None, notes
 
 
+# ---------------------------------------------------- #215 -----
+# A SIBLING SCHEMA'S NAME IS TAKEN, AND SAID. After the rollover of 2026-09-22
+# the model wrote edit_file as the edit tool it was trained on -- 22 of 22
+# calls with `old_string`/`new_string`, Claude Code's names -- and #207's note
+# ("unknown argument(s) ignored") told it so 22 times without it ever changing
+# the call. The names are not a misunderstanding of intent: the value under
+# `old_string` IS the old text, and refusing it only buys rounds.
+#
+# A DECLARED TABLE, NOT A FUZZY MATCH. Every entry is a name a major harness
+# documents for the same argument (Claude Code: file_path/old_string/
+# new_string; Anthropic's and OpenHands' text editor: old_str/new_str/
+# file_text; grep, ripgrep and Claude Code's Grep/Glob: path for the search
+# root) or one measured in a crow transcript (`new_text` on memory, twice).
+# A name nobody declared stays #207's business: ignored and said, and when a
+# required argument is missing with it, the signature is the answer and
+# nothing runs (#214, below in run_tool).
+#
+# SAID, NOT SWALLOWED -- the #207 rule holds. Every mapping puts one bracket
+# note ahead of the result ("[took old_string as old]"), so the model sees
+# the real name on the call that worked. Two names for one argument with
+# DIFFERENT values is an error, not a pick: there is no right one to guess.
+ARGUMENT_ALIASES: dict = {
+    "read_file":   {"file_path": "path"},
+    "write_file":  {"file_path": "path", "file_text": "content"},
+    "append_file": {"file_path": "path"},
+    "edit_file":   {"file_path": "path",
+                    "old_string": "old", "old_str": "old",
+                    "new_string": "new", "new_str": "new"},
+    "search_text": {"path": "root"},
+    "find_files":  {"path": "root"},
+    "memory":      {"new_text": "content"},
+}
+
+
+def resolve_argument_aliases(name: str, args: dict) -> "tuple[str | None, list[str]]":
+    """Renames declared sibling names in place. (Error, notes) -- the error
+    names both keys when they disagree, and then nothing has been renamed
+    that the caller would act on: the call does not run."""
+    table = ARGUMENT_ALIASES.get(name) or {}
+    origin: dict = {}                               # canonical -> key it came from
+    taken, same = [], []
+    for alias, canonical in table.items():
+        if alias not in args:
+            continue
+        value = args.pop(alias)
+        if canonical in args:
+            seen = origin.get(canonical, canonical)
+            if args[canonical] != value:
+                return ("%s and %s both given with different values -- %s is "
+                        "one argument, send it once as %s"
+                        % (seen, alias, canonical, canonical)), []
+            same.append(alias)
+            continue
+        args[canonical] = value
+        origin[canonical] = alias
+        taken.append("%s as %s" % (alias, canonical))
+    notes = []
+    if taken:
+        notes.append("took %s" % ", ".join(taken))
+    if same:
+        notes.append("dropped %s, the same value as its declared name"
+                     % ", ".join(same))
+    return None, notes
+
+
+def canonical_arguments(name: str, args: dict) -> dict:
+    """The arguments as the handler will see them, for the readers that look
+    at a call without running it -- the repeat cache, the approval key,
+    /verify. A copy; a conflict leaves them as sent, and run_tool refuses it."""
+    copy = dict(args)
+    bad, _notes = resolve_argument_aliases(name, copy)
+    return dict(args) if bad else copy
+
+
 def run_tool(name: str, arguments: str) -> str:
     """Execute one tool call and return what the model gets back.
 
@@ -13760,9 +18096,49 @@ def run_tool(name: str, arguments: str) -> str:
     impl = TOOL_IMPL.get(name)
     if impl is None:
         return f"error: no tool named {name!r}. Available: {', '.join(sorted(TOOL_IMPL))}"
+    bad, taken = resolve_argument_aliases(name, args)
+    if bad is not None:
+        return f"error: wrong arguments for {name}: {bad}"
     bad, notes = coerce_declared_containers(name, args)
     if bad is not None:
         return f"error: {bad}"
+    notes = taken + notes
+    # #207. UNKNOWN KEYS ARE SAID, NOT SWALLOWED. The live incident rode in on
+    # `search_text` arguments carrying `pattern`, `pattern_2: "placeholder"`
+    # and `regex` -- three keys for one argument, two of them declared by no
+    # tool, and `**_` absorbed both without a trace. The corruption stayed
+    # invisible on every surface until the session transcript was read by
+    # hand. One bracket note, the same shape as the coercion notes, makes it a
+    # fact the model and the screen both see; no declaration, no note.
+    declared = _declared_properties(name)
+    extra = sorted(k for k in args if k not in declared)
+    # #214. UNBEKANNT UND FEHLEND ZUGLEICH IST KEIN
+    # STOWAWAY, SONDERN EIN FALSCHER NAME -- und dann laeuft nichts. Gemessen
+    # in robins Sitzung vom 2026-09-22 nach dem Schnitt um 17:12: 22 von 22
+    # `edit_file`-Aufrufen kamen mit `old_string`/`new_string` (der Name eines
+    # anderen Harness), 22 von 22 scheiterten, keiner korrigierte sich. 15 der
+    # 22 Antworten sagten zuerst "read ... before editing it" -- die
+    # Lese-Sperre im Werkzeug lief VOR jeder Pruefung der Argumente, also las
+    # das Modell brav und schickte dieselben falschen Schluessel noch einmal.
+    # Die Note oben stand zwar davor, nannte aber nur, was ignoriert wurde,
+    # nicht, wie es richtig heisst. Hier steht die Signatur im Fehler, vor
+    # dem Werkzeug und vor seiner Sperre -- dieselbe Form, in der Claude Code
+    # ein Schema-Fehler meldet (InputValidationError, "The required parameter
+    # `content` is missing"). Nur wenn BEIDES zutrifft: ein fehlender Pflicht-
+    # schluessel allein bleibt die Sache des Werkzeugs und seiner Saetze.
+    #
+    # #215: WAS HIER ANKOMMT, IST SCHON UEBERSETZT. Die Namen
+    # anderer Harnesses, die `ARGUMENT_ALIASES` deklariert (old_string,
+    # old_str, file_path ...), sind oben uebernommen und gesagt worden; diese
+    # Pruefung sieht nur noch, was niemand deklariert hat.
+    missing = [k for k in _declared_required(name) if k not in args]
+    if declared and extra and missing:
+        return ("error: %s was called with unknown argument(s) %s and without "
+                "the required %s -- nothing was run. Its arguments are: %s."
+                % (name, ", ".join(extra)[:120], ", ".join(missing),
+                   ", ".join(declared)))
+    if declared and extra:
+        notes.append("unknown argument(s) ignored: %s" % ", ".join(extra)[:120])
     try:
         out = impl(**args)
     except TypeError as exc:
@@ -13852,6 +18228,7 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                 presence_penalty: "float | None" = None,
                 reasoning_budget: "int | None" = None,
                 reasoning_budget_message: "str | None" = None,
+                served_name: "str | None" = None,
                 timeout: float = 180.0, gate: bool = False,
                 extra_headers: "dict | None" = None,
                 transport: str = TRANSPORT_CHAT,
@@ -13859,7 +18236,10 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                 remote: bool = False,
                 routing: "dict | None" = None,
                 incidents: "list[str] | None" = None,
-                events: "TurnEvents | None" = None) -> "list[str]":
+                events: "TurnEvents | None" = None,
+                # #217: where this pass's seed is recorded, or None -- see
+                # `rollover_digest`.
+                seeds: "list | None" = None) -> "list[str]":
     """Ask once whether this turn left anything worth keeping. Returns what was saved.
 
     IT IS CALLED AFTER THE TURN IS OVER ON SCREEN, never inside it. It sat
@@ -13895,11 +18275,13 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
         body["top_k"] = top_k
     if presence_penalty is not None:
         body["presence_penalty"] = presence_penalty
+    # #225: the review asks with the turn's fixed word, too.
+    reasoning_effort = effective_reasoning(served_name or model, reasoning_effort)
     if reasoning_effort:
         # #176: dieselbe Tuer wie der Zug, aus demselben Grund. Ein Nachlauf, der
         # eine andere Tuer benutzt, waere ein zweiter Prompt-Stil im selben Chat.
         body["reasoning_effort"] = reasoning_effort
-    capped = resolve_reasoning_budget(model, reasoning_budget)
+    capped = resolve_reasoning_budget(served_name or model, reasoning_budget)
     if capped is not None:
         # #176: derselbe Deckel wie der Zug, aus demselben Grund wie die Stufe
         # eine Zeile darueber. Ein Nachlauf, der ohne Deckel denkt, ist der
@@ -13914,10 +18296,17 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
     # Hermes shipped exactly that gap and fixed it as their #70820.
     if routing and transport != TRANSPORT_MESSAGES:
         body.update(routing)
+    # #217: A SEED OF ITS OWN, like every round of the turn. Without it
+    # crow-nest samples this pass at seed 0 -- the seed that reproduced the
+    # 2026-09-22 corruption byte for byte. Set before the gate below, which
+    # takes it back out for a remote endpoint.
+    body["seed"] = draw_seed()
     # THE SAME GATE THE TURN PASSES. This body is built here and not there, so
     # a fix applied once would leave this the only request still carrying them.
     if remote:
         remote_body(body)
+    if seeds is not None and "seed" in body and transport != TRANSPORT_MESSAGES:
+        seeds.append(body["seed"])
     # THE UNASKED PASS SPEAKS THE SAME DIALECT AS THE TURN IT FOLLOWS. It builds
     # its own body and its own headers -- that is what makes it the one easiest
     # to forget -- so the translation happens here as well or this pass alone
@@ -13937,6 +18326,13 @@ def review_turn(conversation: "Conversation", *, base_url: str, model: str,
                          **{"Accept": "application/json"}))
         with urllib.request.urlopen(request, timeout=timeout) as resp:
             answer = json.loads(resp.read().decode("utf-8") or "{}")
+        # #217 / crow-nest #99: A PASS THE SERVER ABORTED WRITES NOTHING. Its
+        # calls are whatever stood when the generation was cut, and this pass
+        # has nobody at the keyboard to notice half a memory entry.
+        if transport != TRANSPORT_MESSAGES and (
+                (answer.get("choices") or [{}])[0].get("finish_reason")
+                == FINISH_ABORT):
+            return []
         calls = (anthropic_calls(answer) if transport == TRANSPORT_MESSAGES else
                  (answer.get("choices") or [{}])[0].get("message", {}).get("tool_calls") or [])
     except Exception:                       # noqa: BLE001 - see the docstring
@@ -14180,6 +18576,9 @@ def run_turn(
     # `budget_command`, und wo er wirkt, sagt `stream_reply`.
     reasoning_budget: "int | None" = None,
     reasoning_budget_message: "str | None" = None,
+    # #220. The model the server HAS OPEN, for the manifest
+    # lookups -- see `stream_reply`. Passed through to both senders.
+    served_name: "str | None" = None,
     timeout: float,
     carry: str | None = None,
     context_tokens: int = 0,
@@ -14213,9 +18612,10 @@ def run_turn(
     # no tools declared at all. See the parameter there for why `[]` would not do.
     send_tools: bool = True,
     # #143. TRUE FOR EVERY TURN A USER RUNS, FALSE ONLY ON A DELEGATION THREAD.
-    # The per-turn state this loop clears -- `_READ`, `_SEEN`, `_REFUSED`,
-    # `_MANDATED`, and the INTERRUPT flag -- is module state, owned by the ONE
-    # turn a surface runs at a time. A subtask's `run_turn` rides beside that
+    # The per-turn state this loop clears -- `_SEEN`, `_REFUSED`, `_MANDATED`,
+    # and the INTERRUPT flag -- is module state, owned by the ONE turn a
+    # surface runs at a time; so is `_READ`, which since #215-H this loop
+    # does not clear but ADOPTS (`adopt_read_state`). A subtask's `run_turn` rides beside that
     # turn on its own thread: clearing here would wipe the read-permissions of
     # the turn that spawned it mid-round, and consuming the INTERRUPT flag would
     # swallow a Ctrl+C meant for the turn the user is watching. A subtask still
@@ -14287,16 +18687,18 @@ def run_turn(
     # cleared for the CLI and never for anybody else, and every later turn of a
     # second surface would be answered out of a stale result, forever.
     #
-    # E6 ANSWERED THE LIFETIME QUESTION THIS LINE LEFT OPEN, and the answer put
-    # the second name beside it: ONE USER TURN, for both. The measurement behind
-    # that choice is written out where `_READ` is declared.
+    # E6 ANSWERED THE LIFETIME QUESTION THIS LINE LEFT OPEN, and put `_READ`
+    # beside it for one user turn. #215-H TOOK `_READ` BACK OUT: a read counts
+    # while the file still carries the stamp it was read with, and the set
+    # empties when the model stops holding the contents -- a rollover, a new or
+    # resumed chat -- which `adopt_read_state` learns from the conversation's
+    # `read_epoch`. The reasons are written out where `_READ` is declared.
     #
-    # THE THREE CLEARS ARE ONE STATEMENT GROUP AND MUST STAY ONE. Split them and
-    # the half-state is a live configuration rather than a mistake somebody has
-    # to make: `_READ` emptied without `_SEEN` refuses the write correctly while
-    # still handing back a tool result from the turn before, and `_SEEN` emptied
-    # without `_READ` lets a stale permission outlive the results that earned
-    # it. Neither is a state anyone would choose, and neither announces itself.
+    # THE HALF-STATE E6 FEARED IS GONE WITH THE PAIRING, not ignored. `_SEEN`
+    # emptied while `_READ` stays was "a stale permission outliving the results
+    # that earned it"; the permission is now the file's stamp, checked against
+    # the disk at every call, and `_cache_key` keys on that verdict -- so no
+    # cached answer can outlive a read-state change inside a turn either.
     #
     # `_REFUSED` JOINED THEM WITH #98 and fails the same way: left behind, the
     # next turn's first `run_command` is marked as an escape from a refusal that
@@ -14307,7 +18709,7 @@ def run_turn(
     # runs no tools -- none are declared on it -- so it needs none of the four,
     # and touching them from a second thread is the race the parameter names.
     if owns_turn_state:
-        _READ.clear()
+        adopt_read_state(conversation)      # #215-H: not a clear
         _SEEN.clear()
         _REFUSED.clear()
         # NOT CLEARED -- REBUILT, and from the conversation rather than this turn's
@@ -14350,7 +18752,18 @@ def run_turn(
     # model"), wartet ihn EINMAL aus, statt am Boot zu sterben.
     reboots = 0
     waited_ready = False
-    for round_no in range(budget + 2):
+    # #217: the one re-request a degenerate round may spend, and the seed of
+    # the round before -- so the next one is guaranteed a different draw.
+    degenerate: "list[tuple[str, int | None]]" = []
+    seed: "int | None" = None
+    # ONE MORE INDEX THAN THE BUDGET NEEDS, and it belongs to #217: a
+    # degenerate round that arrives as the forced answer (the last index
+    # before this) still gets its one re-request instead of ending the loop
+    # with nothing appended behind BUDGET_SPENT. Only `continue` paths can
+    # reach it; a tool round past the budget is forced, and a forced round
+    # always breaks.
+    for round_no in range(budget + 3):
+        seed = None if remote else draw_seed(avoid=seed)
         try:
             reply, reasoning, timings = stream_reply(
                 conversation,
@@ -14365,6 +18778,7 @@ def run_turn(
                 reasoning_effort=reasoning_effort,
                 reasoning_budget=reasoning_budget,
                 reasoning_budget_message=reasoning_budget_message,
+                served_name=served_name,
                 timeout=timeout,
                 extra_headers=extra_headers,
                 transport=transport,
@@ -14372,6 +18786,7 @@ def run_turn(
                 remote=remote,
                 routing=routing,
                 send_tools=send_tools,
+                seed=seed,
                 events=events.reply_events(),
             )
         except CrowError as exc:
@@ -14478,13 +18893,88 @@ def run_turn(
             break
 
         calls = timings.get("_tool_calls") or []
+        finish = timings.get("_finish_reason")
+        # #217. CLASSIFIED BEFORE ANYTHING IS APPENDED, because the append is
+        # what made a degenerate round a lesson: stored as the answer, re-sent
+        # on every later request, imitated (the markup shape four times in 30
+        # minutes on 2026-09-22), and -- in goal mode -- answered by a nudge.
+        malformed = timings.get("_malformed_calls") or []
+        kind = classify_round(reply, calls, finish, reasoning, tools=send_tools,
+                              malformed=malformed)
+        note = getattr(events, "turn_note", lambda _t: None)
+        if kind == "stub" and degenerate:
+            # A STUB ON THE RE-REQUEST IS KEPT, NOT REFUSED (lead review of
+            # ba48641). Two short, unpunctuated answers in a row from two
+            # different seeds are as likely the answer -- "Erledigt", a
+            # file name -- as a cut, and refusing an answer twice is the one
+            # failure that must not happen to a real one. It is stored below
+            # like any answer; the note and the incident say what it was.
+            note("kept the re-asked reply although it looks unfinished "
+                 "(stub again%s)" % (", seed %s" % timings.get("_seed")
+                                     if timings.get("_seed") is not None
+                                     else ""))
+            incidents.append("the re-asked round was a stub again and was "
+                             "kept as the answer")
+        elif kind in DEGENERATE_ROUNDS:
+            # THE TOKENS WERE SPENT, so the round is billed and drawn like any
+            # other; only the conversation never hears of it.
+            cost.add_round(timings)
+            events.round_finished(timings)
+            degenerate.append((kind, timings.get("_seed")))
+            if len(degenerate) == 1:
+                # ONCE, IN THE SAME TURN, ON THE SAME PREFIX. No user message
+                # is added, so the read ledger, the goal step and the prompt
+                # cache all stand where they stood; the loop head draws a
+                # seed that differs from this round's, which is the whole
+                # difference between a resample and a replay.
+                said = ("discarded a degenerate reply (%s, %d chars%s) -- "
+                        "asking again with a new seed"
+                        % (kind, len((reply or "").strip()),
+                           ", seed %s" % degenerate[0][1]
+                           if degenerate[0][1] is not None else ""))
+                note(said)
+                incidents.append("a degenerate round (%s) was discarded "
+                                 "unstored and asked again" % kind)
+                continue
+            # MARKUP ON THE RE-REQUEST (a stub never gets here, see above):
+            # TWICE IS THE MODEL'S ANSWER, NOT BAD LUCK -- and a third try is
+            # the silent loop #202 had to brake. One loud line, one
+            # placeholder so the history keeps its alternation (a user line
+            # after a user line is what the next nudge would otherwise make),
+            # and the turn ends.
+            placeholder = "[no usable reply: %s]" % kind
+            conversation.append("assistant", placeholder)
+            seeds = [s for _k, s in degenerate if s is not None]
+            line = ("the model sent no usable reply twice (%s, then %s%s) -- "
+                    "neither was stored, the turn stops here"
+                    % (degenerate[0][0], kind,
+                       "; seeds " + " and ".join(map(str, seeds))
+                       if seeds else ""))
+            incidents.append(line)
+            events.turn_failed(line)
+            stopped = True
+            break
         # #203: THE CUT CALLS ARE MADE SAFE TO STORE BEFORE THE TURN THAT
         # CARRIES THEM EXISTS. An unterminated arguments string in the stored
         # assistant turn kills every later request against the llama.cpp arm
         # with a 500 the history cannot recover from; here it never gets in.
         # The calls named in `cut` do not run -- the loop below answers each
         # with the structured result instead.
+        # #217: which argument each cut call was writing -- read before the
+        # salvage below may replace an unparseable string with `{}`.
+        cut_params = {c.get("id") or "": cut_parameter(c.get("arguments"))
+                      for c in calls}
+        # THE ENGINE'S RECORD PER CALL, by stream index. `_tool_calls` is the
+        # stream's slots in index order and serve numbers the calls it emits
+        # without gaps, so the position in the list is the index.
+        records = {r.get("index"): r for r in malformed
+                   if isinstance(r.get("index"), int)}
+        record_of = {c.get("id") or "": records.get(n)
+                     for n, c in enumerate(calls)}
         cut = salvage_cut_calls(calls)
+        # #217 point 3: A CALL THAT ARRIVED PARSED IS NOT ALSO KEPT AS TEXT.
+        if calls:
+            reply = strip_call_markup(reply)
         # CALLS THAT WILL NEVER RUN ARE NOT APPENDED, and that is not
         # tidiness. An assistant turn whose tool_calls have no `tool` message
         # behind them is a broken prefix for every later turn of the session.
@@ -14536,8 +19026,8 @@ def run_turn(
             # turn: the model is told to say it visibly. If the second attempt
             # is silent too, the turn ends and the incident says so -- looping
             # on a model that will not speak would spend the window on nothing.
-            if (not calls and not forced and not nudged
-                    and not (reply or "").strip() and (reasoning or "").strip()):
+            # #217: the same question `classify_round` answered above.
+            if not forced and not nudged and kind == "think_only":
                 nudged = True
                 conversation.append("user", THINK_ONLY_NUDGE)
                 continue
@@ -14601,8 +19091,16 @@ def run_turn(
             # #98's mandate carries over: a path the USER spelled out is not
             # asked about -- the guard protects the inattentive user from the
             # model, never from their own typed address.
+            # #221: A CWD THAT DOES NOT EXIST IS ANSWERED HERE,
+            # before the card. Its path would otherwise stand on the card as
+            # an outside path -- a question about a place that is not there,
+            # for a call that runs nothing whatever the answer (cwd_refusal).
+            cwd_refused = (run_command_cwd_refusal(call["arguments"])
+                           if cut_why is None and call["name"] == "run_command"
+                           else None)
             outside = (run_command_boundary(call["arguments"])
-                       if call["name"] == "run_command" else [])
+                       if call["name"] == "run_command" and cwd_refused is None
+                       else [])
             outside = [p for p in outside
                        if not any(_inside(m, p) for m in _MANDATED)]
             # #156: `git_commit` and `git_push` join `outside` here rather than
@@ -14612,7 +19110,7 @@ def run_turn(
             # predicate: `stops_for` keeps git_push on at every level, lets
             # yolo silence the outside-path ask and the git_commit ask, and
             # leaves every other level exactly where #88 put it.
-            if (cut_why is None
+            if (cut_why is None and cwd_refused is None
                     and (stops_for(call["name"], mode, bool(outside))
                          and not remembered(call["name"], call["arguments"]))):
                 answer = "no"
@@ -14656,16 +19154,40 @@ def run_turn(
                 result, repeated = retry_capped(call["name"]), False
                 incidents.append("%s failed %d times with identical arguments "
                                  "and was capped" % (call["name"], RETRY_CAP))
+            elif cwd_refused is not None:
+                # #221: nothing ran and nobody was asked; the
+                # incident keeps the record on the user's side too.
+                result, repeated = cwd_refused, False
+                incidents.append("a run_command named a cwd that is not an "
+                                 "existing directory and did not run")
             elif cut_why is not None:
                 # #203: THE RECOVERY SIGNAL. The call never ran, the result
                 # says why and what to do instead, and the incident keeps a
                 # record that does not depend on the model choosing to
                 # mention it. `failed` counts it below through the "error: "
                 # prefix.
-                result, repeated = (TRUNCATED_CALL if cut_why == "truncated"
-                                    else UNPARSEABLE_CALL), False
-                incidents.append("a %s call was cut off at the output token "
-                                 "limit and did not run" % call["name"])
+                # #217: WHICH CUT -- the engine's record when it sent one,
+                # else the finish. `stop` is the model's own EOS inside the
+                # arguments, and blaming the limit for it sent the model
+                # splitting a path into parts. `length`, and llama-server's
+                # `tool_calls` that masks a cap cut (see TRUNCATED_CALL),
+                # keep the limit's answer. `cut_answer` holds the table.
+                cid = call.get("id") or ""
+                result, cut_kind = cut_answer(cut_why, finish,
+                                              record_of.get(cid),
+                                              cut_params.get(cid))
+                if cut_kind == "unclosed":
+                    incidents.append("a %s call stopped inside its arguments "
+                                     "(finish stop, not the output limit) and "
+                                     "did not run" % call["name"])
+                elif cut_kind == "bad-parameter":
+                    incidents.append("a %s call was abandoned on an unreadable "
+                                     "parameter name and did not run"
+                                     % call["name"])
+                else:
+                    incidents.append("a %s call was cut off at the output token "
+                                     "limit and did not run" % call["name"])
+                repeated = False
             else:
                 result, repeated = run_tool_cached(call["name"], call["arguments"])
             took = time.monotonic() - started
@@ -14790,9 +19312,11 @@ def run_turn(
                 reasoning_effort=reasoning_effort,
                 reasoning_budget=reasoning_budget,
                 reasoning_budget_message=reasoning_budget_message,
+                served_name=served_name,
                 prompt_tokens=context_tokens,
                 extra_headers=extra_headers,
-                transport=transport, remote=remote, routing=routing)
+                transport=transport, remote=remote, routing=routing,
+                seeds=cost.leg_seeds)
             # #173: DIE MARKEN DES SCHREIBERS, wenn er welche fuehrt. Sie sind
             # eine Liste, die dem Aufrufer gehoert -- sie wandert ins Archiv und
             # wird DANN geleert, weil ihre Positionen Nachrichten zaehlen, die
@@ -14801,7 +19325,16 @@ def run_turn(
                                  carry=carry, digest=digest, notes=notes,
                                  timings=bills)
             # #163: der Kopf gilt weiter -- Gedaechtnis, Faehigkeiten, Ziel.
-            repin_head(conversation, get_root())
+            # #210: MIT DEN MARKEN -- der Zug, der den Stand sagt, ist der,
+            # der gerade weggeschnitten wurde; ohne sie im Kopf steht der
+            # Stand nirgends (Messung 2026-09-22: drei Neu-Planungen).
+            repin_head(conversation, get_root(), include_status=True)
+            # #215-H: THE REST OF THIS TURN WRITES FROM THE NOTE, NOT FROM
+            # WHAT WAS READ -- the reads went into the archive. `reset()` gave
+            # the conversation a new epoch; adopting it empties the set now,
+            # not at the next user line.
+            if owns_turn_state:
+                adopt_read_state(conversation)
             if archived:
                 if notes is not None:
                     del notes[:]
@@ -16520,6 +21053,10 @@ class Subtask:
         # 2026-08-28 spaetnachts: der Chat, der diese Aufgabe delegiert hat --
         # vom Fenster gestampt, mit persistiert; "" ist der dateilose Live-Chat.
         self.parent = ""
+        # #216: every failed attempt, in order --
+        # `{"model", "class", "reason", "detail"}`. Persisted with the record,
+        # so the first spot's own words survive the card and the restart.
+        self.chain: "list[dict]" = []
         self.thread: "threading.Thread | None" = None
 
     @property
@@ -16585,7 +21122,8 @@ def _subtask_persist() -> None:
              "failure": s.failure, "seconds": round(s.clock(), 1),
              "prompt_tokens": s.prompt_tokens, "reply_tokens": s.reply_tokens,
              "usage_tokens": s.usage_tokens, "transcript": s.transcript,
-             "collected": s.collected, "parent": getattr(s, "parent", "")}
+             "collected": s.collected, "parent": getattr(s, "parent", ""),
+             "chain": list(getattr(s, "chain", []))}
             for s in subs]
     path = _subtask_registry_path()
     try:
@@ -16631,6 +21169,8 @@ def subtasks_recall() -> int:
             sub.transcript = str(row.get("transcript") or "")
             sub.collected = bool(row.get("collected"))
             sub.parent = str(row.get("parent") or "")
+            sub.chain = [c for c in (row.get("chain") or [])
+                         if isinstance(c, dict)]
             if sub.status == "running":
                 sub.status = "interrupted"
                 sub.failure = "crow was closed while it ran"
@@ -16768,6 +21308,10 @@ def _subtask_transcript(sub: Subtask, conversation: Conversation,
                                 "model": spot["model"],
                                 "seconds": round(time.monotonic() - sub.started, 1),
                                 "tokens": sub.tokens}
+        # #216: a result that landed after a fallback says in
+        # its own file which spots failed first, and with what words.
+        if sub.chain:
+            data["crow_subtask"]["chain"] = list(sub.chain)
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
         with open(path, encoding="utf-8") as fh:
@@ -16803,10 +21347,65 @@ _RETRYABLE = ("429", "shared_pool", "timed out", "timeout", "answered nothing",
               "temporarily", "connection", "unavailable", "502", "503",
               "provider returned error", "no endpoints found")
 
+# #216. THREE VERDICTS, NOT TWO. The live run of 2026-09-22
+# fell forward from the primary onto `thinkingmachines/inkling-small:free`,
+# which OpenRouter serves "only on agentic harnesses" -- HTTP 403 -- and a 403
+# was "would fail identically anywhere", so the chain STOPPED on the one spot
+# that was nobody's choice. It is the opposite: a 403 is THIS spot refusing
+# THIS client, and the next spot answers. Measured the same evening against
+# the catalogue on disk: the two largest free windows (1,048,576) are both
+# Thinking Machines, so behind any primary the first two fallbacks refuse.
+#
+#   transient -- this spot is sick right now (429, timeouts, 5xx, "provider
+#                returned error"): memo it, next spot.
+#   spot      -- this spot will not serve this client (403 gating/moderation,
+#                "no endpoints found", 402 on a PAID spot): memo it with the
+#                reason, next spot, and it costs no transient attempt -- a
+#                refusal is instant and did no work.
+#   global    -- the request or the account is wrong (401 key, 402 on a FREE
+#                spot = negative balance, schema/400): every spot answers the
+#                same, the chain stops and the spot is NOT memoed.
+#
+# 402 SPLITS ON WHAT WAS ASKED, per OpenRouter's limits page: "If your account
+# has a negative credit balance, you may see 402 errors, including for free
+# models." A free spot's 402 is therefore the account, not the spot; a paid
+# favourite's 402 is its price, and the free spots behind it bill nothing.
+_SPOT_REFUSED = ("no endpoints found",)
+_TRANSIENT_CODES = (408, 429, 500, 502, 503, 504)
+
+
+def _http_code(detail: str) -> "int | None":
+    """The status `_post_stream` and the mid-stream door write, or None."""
+    hit = re.search(r"\bHTTP (\d{3})\b", detail or "")
+    return int(hit.group(1)) if hit else None
+
+
+def _spot_verdict(detail: str, model: str = "") -> "tuple[str, str]":
+    """(class, reason) for one failed attempt -- see the table above."""
+    low = (detail or "").lower()
+    code = _http_code(detail)
+    if code == 401:
+        return "global", "the key was refused (401)"
+    if code == 402:
+        if model.endswith(FREE_MODEL_SUFFIX):
+            return "global", "the account is out of credits (402, free models included)"
+        return "spot", "no credits for this paid model (402)"
+    if code == 403:
+        if "harness" in low or "only available" in low:
+            return "spot", "gated for this client (403)"
+        if "moderation" in low or "flagged" in low:
+            return "spot", "moderation flag (403)"
+        return "spot", "forbidden for this client (403)"
+    if any(m in low for m in _SPOT_REFUSED):
+        return "spot", "no provider serves it%s" % (" (%d)" % code if code else "")
+    if code in _TRANSIENT_CODES or any(m in low for m in _RETRYABLE):
+        return "transient", ("HTTP %d" % code) if code else "no answer"
+    return "global", ("HTTP %d" % code) if code else "refused"
+
 
 def _spot_retryable(detail: str) -> bool:
-    low = (detail or "").lower()
-    return any(m in low for m in _RETRYABLE)
+    """Whether another spot is worth asking -- both non-global verdicts."""
+    return _spot_verdict(detail)[0] != "global"
 
 
 def delegate_fallbacks(spot: dict, doc: "dict | None" = None) -> "list[dict]":
@@ -16914,14 +21513,19 @@ def _run_subtask(sub: Subtask, spot: dict) -> None:
     place `collect` can trust.
 
     #146: A RETRYABLE FAILURE FALLS TO THE NEXT FREE SPOT, at most three
-    attempts, and the record says where it landed -- a card that silently
+    sick spots, and the record says where it landed -- a card that silently
     swapped its model would be a spot nobody can trust twice. The health memo
     keeps the dead spot out of every later resolution this session.
+
+    #216: a spot that REFUSES this client (403, 402 on a paid
+    spot, no endpoints) falls forward too, outside the three; only a global
+    verdict (401, a free spot's 402, a schema error) stops the chain. Every
+    attempt lands in `sub.chain`, and the failure sentence names them all.
     """
     current = spot
     detail = ""
-    tried: list[str] = []
-    for attempt in range(3):
+    transient = refused = 0
+    for _ in range(_CHAIN_TRANSIENT + _CHAIN_REFUSALS):
         state, detail = _subtask_attempt(sub, current)
         if state == "done":
             # The fallback note survives a good landing: a card that says
@@ -16929,20 +21533,73 @@ def _run_subtask(sub: Subtask, spot: dict) -> None:
             # models silently.
             _subtask_close(sub, "done", sub.failure)
             return
-        if state == "interrupted" or not _spot_retryable(detail):
-            _subtask_close(sub, state, detail)
+        model = str(current.get("model"))
+        if state == "interrupted":
+            _subtask_close(sub, state, _chain_said(detail, sub.chain))
             return
-        _SPOT_DEAD[str(current.get("model"))] = detail
-        tried.append(str(current.get("model")))
+        verdict, reason = _spot_verdict(detail, model)
+        # #216: EVERY attempt is written down with its own
+        # words before anything is decided -- the first spot's error was
+        # the one the live run of 2026-09-22 lost, the card said "403".
+        sub.chain.append({"model": model, "class": verdict, "reason": reason,
+                          "detail": _chain_detail(detail)})
+        if verdict == "global":
+            _subtask_close(sub, "failed", "%s -- the chain stops here, every "
+                           "spot would answer the same: %s"
+                           % (reason, _chain_said(detail, sub.chain[:-1])))
+            return
+        _SPOT_DEAD[model] = "%s: %s" % (reason, _chain_detail(detail))
+        if verdict == "transient":
+            transient += 1
+        else:
+            refused += 1
+        if transient >= _CHAIN_TRANSIENT or refused >= _CHAIN_REFUSALS:
+            break
         nxt = delegate_fallbacks(current)
         if not nxt or sub.cancelled:
             break
         current = nxt[0]
         sub.model = current["model"]
         sub.label = current["label"]
-        sub.failure = "fell back from %s (%s)" % (tried[-1], detail)
-    _subtask_close(sub, "failed",
-                   "%s -- tried %s" % (detail, ", ".join(tried) or "one spot"))
+        sub.failure = "fell back from " + _chain_story(sub.chain)
+        # Mid-chain the record is on disk too: a crash between two spots
+        # must not lose what the first one said.
+        _subtask_persist()
+    _subtask_close(sub, "failed", "no spot answered -- tried "
+                   + _chain_story(sub.chain))
+
+
+# #216. The attempt budget, split by verdict: THREE spots that
+# were sick (the #146 figure, unchanged -- each can cost a 600 s timeout), and
+# up to SIX that refused. A refusal is one instant HTTP answer and did no work;
+# counting it against the three is what ended the 2026-09-22 chain on the
+# second gated Thinking Machines spot before any healthy one was asked.
+_CHAIN_TRANSIENT = 3
+_CHAIN_REFUSALS = 6
+
+# What one attempt keeps of its error. `_post_stream` already cuts the body at
+# 500; the card shows 4000 chars, and nine attempts must fit in it.
+_CHAIN_DETAIL = 240
+
+
+def _chain_detail(detail: str) -> str:
+    """One line, bounded -- the story is read as a first line in the terminal."""
+    flat = " ".join(str(detail or "").split())
+    return flat if len(flat) <= _CHAIN_DETAIL else flat[:_CHAIN_DETAIL] + "..."
+
+
+def _chain_story(chain: "list[dict]") -> str:
+    """`model (reason: detail); model (...)` -- every spot and why it failed."""
+    return "; ".join("%s (%s: %s)" % (c.get("model"), c.get("reason"),
+                                      c.get("detail"))
+                     for c in chain) or "one spot"
+
+
+def _chain_said(detail: str, earlier: "list[dict]") -> str:
+    """The last detail, and the spots that failed before it when there were."""
+    if not earlier:
+        return detail
+    return "%s -- after %s" % (detail, _chain_story(earlier))
 
 
 # #149. THE MAKER IS NOT THE CHECKER. A model grading its own diff approves
@@ -16983,6 +21640,9 @@ def verify_material(conversation: "Conversation") -> str:
                 args = json.loads(fn.get("arguments") or "{}")
             except json.JSONDecodeError:
                 continue
+            if not isinstance(args, dict):
+                continue
+            args = canonical_arguments(name, args)  # #215
             path = str(args.get("path") or "")
             if not path:
                 continue
@@ -17122,9 +21782,13 @@ def tool_collect(id: str = "all", **_) -> str:
     for sub in picked:
         sub.collected = True
         if sub.status == "done":
-            parts.append("== %s | %s | %.1f s | %s tok\n%s"
+            # #216: the fallback note rides along -- the model
+            # that reads this result should know it came from a second spot.
+            parts.append("== %s | %s | %.1f s | %s tok%s\n%s"
                          % (sub.ident, sub.model, sub.seconds,
-                            format(sub.tokens, ","), sub.result.strip()))
+                            format(sub.tokens, ","),
+                            " | " + sub.failure if sub.failure else "",
+                            sub.result.strip()))
         else:
             parts.append("== %s %s after %.1f s -- %s"
                          % (sub.ident, sub.status, sub.seconds, sub.failure))
@@ -17456,7 +22120,8 @@ def goal_write(goal: "dict | None") -> None:
 
 
 def goal_start(title: str, steps: "list[str]",
-               now: "float | None" = None) -> "dict | None":
+               now: "float | None" = None,
+               by: "str | None" = None) -> "dict | None":
     """Ein neues Ziel. Ersetzt ein laufendes -- eines zur Zeit.
 
     LEERE SCHRITTE SIND KEIN ZIEL. Ein Titel ohne Plan waere eine Ueberschrift,
@@ -17469,6 +22134,11 @@ def goal_start(title: str, steps: "list[str]",
         return None
     started = float(now if now is not None else time.time())
     goal = {"title": title,
+            # #240: WHO WROTE THE PLAN. `/goal` is the user's word and its
+            # paths are mandates (`mandated_paths`); `goal_set` is the model's
+            # and mandates nothing. None (a caller that did not say, or a
+            # file from before this key) reads as the model's.
+            "by": by if by in (GOAL_BY_USER, GOAL_BY_MODEL) else None,
             "created": started,
             # WANN ZULETZT ETWAS PASSIERTE, und wieviel Kontext da stand. Beides
             # gemessen am 2026-08-30 gebraucht: das Modell ruft `goal_step` fast
@@ -17658,22 +22328,59 @@ def goal_seconds(goal: "dict | None" = None,
 GOAL_HEAD_NOTE = ("This goal outlives a context rollover: if the conversation "
                   "above was cut, the plan below still stands.")
 
+# #210. DIE SEAM-VARIANTE DES HINWEISES. Der normale Kopf nennt nur den Plan
+# (#163: der Stand steht in goal.json, eine Marke im Kopf kaeme einen Prefill
+# je Haken). Der Kopf NACH DEM SCHNITT traegt die Marken des Schnittzeitpunkts
+# -- dort ist der Prefill ohnehin verloren (#163, "der einzige Moment, an dem
+# ein Kopf gratis bewegt werden kann"), und der Zug, der den Stand sagt, ist
+# genau der, der weggeschnitten wurde. Gemessen am 2026-09-22: ohne die Marken
+# baute das Modell den Plan drei Mal neu und loeschte mit jedem `goal_set` die
+# Haken. Die Marken altern bewusst nicht -- sie dokumentieren den Schnitt, bis
+# der naechste sie neu setzt.
+GOAL_SEAM_NOTE = ("This goal outlives a context rollover: the plan above still "
+                  "stands, each step with its status as it was at the cut. "
+                  "Continue at the first step not marked done.")
 
-def goal_block(goal: "dict | None" = None) -> "str | None":
+
+def goal_block(goal: "dict | None" = None,
+               include_status: bool = False) -> "str | None":
     """Der Text, der in den gepinnten Kopf gehoert. None, wenn es kein Ziel gibt.
 
     OHNE JEDEN STAND, und das ist keine Sparsamkeit, sondern die Rechnung: der
     Block ist Teil des Prompt-Kopfes, und jede Aenderung daran kostet einen
     vollen Prefill. Ein abgehakter Schritt im Text waere ein Prefill je Schritt.
     Was das Modell hier braucht, ist der PLAN; wo es steht, sagt ihm der Zug.
+
+    #210. AUSSER AM SCHNITT (`include_status`). Dort ist der Prefill bereits
+    verloren und der Stand nirgends mehr zu lesen -- der Digest, der ihn haette
+    tragen koennen, war an einem Tool-Call gestorben. Die Marken reiten einmal
+    mit und altern dann bewusst: Sie sind der Stand des Schnitts, nicht des
+    Zuges, und der naechste Schnitt setzt sie neu.
     """
     goal = goal if goal is not None else goal_load()
     if not goal:
         return None
     lines = ["Active goal: %s" % goal["title"], "Steps:"]
-    lines += ["%d. %s" % (n, s["text"])
-              for n, s in enumerate(goal.get("steps") or [], 1)]
-    lines.append(GOAL_HEAD_NOTE)
+    steps = goal.get("steps") or []
+    if include_status:
+        marks = {GOAL_DONE: "[done]", GOAL_FAILED: "[failed]",
+                 GOAL_RUNNING: "[running]"}
+        lines += ["%d. %s %s" % (n, marks.get(s.get("status"), "[open]"),
+                                 s["text"])
+                  for n, s in enumerate(steps, 1)]
+        nxt = next(((n, s) for n, s in enumerate(steps, 1)
+                    if s.get("status") != GOAL_DONE), None)
+        if nxt is not None:
+            lines.append("Next: step %d. %s" % (nxt[0], nxt[1]["text"]))
+        lines.append(GOAL_SEAM_NOTE)
+    else:
+        lines += ["%d. %s" % (n, s["text"])
+                  for n, s in enumerate(steps, 1)]
+        lines.append(GOAL_HEAD_NOTE)
+    check = goal_check_get()                                   # #250
+    if check:
+        lines.append("Acceptance check, run when the last step is reported "
+                     "done; the goal closes only if it passes: %s" % check)
     return "\n".join(lines)
 
 

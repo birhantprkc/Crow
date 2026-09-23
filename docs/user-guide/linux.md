@@ -45,6 +45,9 @@ headers — so the installer **prints** the line and never runs it:
 sudo pacman -S --needed python-gobject gtk3 webkit2gtk-4.1 wl-clipboard
 ```
 
+`node`, `bwrap` and `systemd-run` are optional and only warned about — see
+[Optional helpers](#optional-helpers).
+
 The venv it creates is a `--system-site-packages` one, and that is the whole trick: pywebview
 comes from pip, PyGObject and the typelibs come from pacman, and both have to be visible to one
 interpreter. `pywebview[gtk]` is never installed — the extra pulls a PyGObject wheel that
@@ -213,11 +216,11 @@ reload.
 `Gtk.Window.begin_move_drag` and one on any of the eight edge grips calls `begin_resize_drag`,
 on the GTK main thread. The compositor runs the drag; Crow never computes a rectangle.
 
-**The browser pane is a window of its own.** On Windows it is a second WebView2 over the panel
-rect; under Wayland a child window cannot be glued to a parent's coordinates, so it is a
-separate floating toplevel carrying the same `crow` app id — the float rule above catches it
-too. `hl.window_rule({ ..., pin = true })` is commented out in `crow.lua`: "stays with me" is a
-preference, not a requirement.
+**The browser pane is inside the window (#201).** It is a second WebKitWebView in Crow's own
+GtkWindow, placed on the panel through a `GtkOverlay`, not a toplevel. No window rule is involved.
+Before #201 it was a separate toplevel with the `crow` app id. The float, center and
+`size 1180 800` rules then made it a second 1180×800 window centred over Crow.
+`CROW_PANE_WINDOW=1` brings that window back for comparison.
 
 **The app id is `crow`.** `GLib.set_prgname("crow")` runs before the window opens, which is what
 `xdg_toplevel.set_app_id` falls back to. Without it `hyprctl clients -j` reports the class as
@@ -243,6 +246,52 @@ bash install.sh --voice
 `faster-whisper` and `sounddevice` into the same venv. The dictation model (`faster-whisper-small`,
 ~486 MB) is fetched by the window on the first click on the microphone, not by the installer.
 `sounddevice` needs PortAudio from the distribution (`sudo pacman -S --needed portaudio`).
+
+---
+
+## The tools get a ceiling of their own (#213, #218)
+
+The server is not the only process that gets a scope. When `systemd-run` is on the PATH and the
+user manager answers, two tools start their children in a transient user scope as well:
+
+| | `render_page`'s browser (#213) | `run_command`'s shell (#218) |
+|---|---|---|
+| bounds | `MemoryHigh=5G`, `MemoryMax=6G`, `MemorySwapMax=0` | `MemoryHigh=7G`, `MemoryMax=8G`, `MemorySwapMax=0`, `OOMPolicy=kill` |
+| move the bound | `CROW_RENDER_MEMORY_MAX=<size>` (`none` keeps only the swap cap) | `CROW_COMMAND_MEMORY_MAX=<size>` (`none` keeps only the swap cap) |
+| switch off | `CROW_RENDER_SCOPE=0` | `CROW_COMMAND_SCOPE=0` |
+| GPU or software | `CROW_RENDER_GL=angle\|swiftshader`; default: the GPU when at least 512 MiB of VRAM are free | — |
+
+Why: on 2026-09-21 a software-WebGL render of a 2 MB three.js page grew its headless Chromium to
+54 GiB, froze the desktop, and the kernel's OOM killer shot the engine instead; on 2026-09-22 the
+model started the same kind of browser 20 times through `run_command`. Why 8G for a command,
+measured 2026-09-22 as each scope's own `memory.peak`: the diorama's three.js esbuild bundle
+106 MiB, `npm ls --all` 46 MiB, node importing three 21 MiB, `test_crow_core` 109 MiB. With
+`OOMPolicy=kill` a command at the ceiling dies whole, and the result says it was the ceiling; a
+timeout or capture-cap kill takes the whole process group and the scope. systemd-run's own
+`${VAR}`/`$$` expansion is switched off (`--expand-environment=no`, systemd 254 or newer).
+
+Without `systemd-run` both run as before, bounded by their clocks and capture caps only;
+`install.sh` warns about it in the preflight. The 8G ceiling does not scale with the machine's
+RAM. Windows has no such scope (no Job Object yet).
+
+---
+
+## Optional helpers
+
+None of these is installed by `install.sh`, and none is required. The preflight names each one
+that is missing as a warning.
+
+| | used for | without it |
+|---|---|---|
+| `node` | MCP servers started with `npx`/`node`; `node --check` over what `write_file`/`append_file` wrote to a `.js`/`.mjs`/`.cjs` file or into an HTML page's inline scripts (#251) | MCP servers that need it cannot start; writes carry no syntax line, and the write itself is unaffected |
+| an `esbuild` | `build_bundle` (#212): `$CROW_ESBUILD`, a project's `node_modules`, `PATH`, the deno and npx caches — never downloaded | `build_bundle` answers "no bundler found" with every place it looked, and writes nothing |
+| `bwrap` | the in-window browser panel's web process runs sandboxed (#226); `CROW_PANE_SANDBOX=0` turns it off | the panel runs without a sandbox |
+| `systemd-run` | the scopes above, and the server's own | no memory ceiling for render, command or server |
+
+The syntax check parses without running (`node --check`), within one 5 s deadline per write,
+skips files over 8 MiB and scripts past the 16th, and reports the first error only (line, message,
+a 160-character window with a caret). Replayed on 2026-09-23: 20 of 98 JS/HTML writes of that
+day's session would have carried their error.
 
 ---
 

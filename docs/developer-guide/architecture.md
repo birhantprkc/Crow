@@ -2,14 +2,14 @@
 
 # Architecture
 
-Five modules under `cli/`. Line counts measured 2026-09-16.
+Five modules under `cli/`. Line counts measured 2026-09-23 on `release-2026-09-23` (0311d0d).
 
 | | lines | holds |
 |---|---|---|
-| `crow_core.py` | 16652 | every rule both surfaces obey: tools, the turn loop, memory, skills, MCP, remote providers, sessions |
-| `crow_gui.py` | 12012 | the window. Page, pywebview API, the browser pane, and nothing a rule depends on |
-| `crow.py` | 2497 | the terminal client. Screen, slash commands, `VERSION` |
-| `crow_platform.py` | 637 | the platform seam: where things live, how a process is found and killed, per OS |
+| `crow_core.py` | 22361 | every rule both surfaces obey: tools, the turn loop, memory, skills, MCP, remote providers, sessions |
+| `crow_gui.py` | 14096 | the window. Page, pywebview API, the browser pane, and nothing a rule depends on |
+| `crow.py` | 2579 | the terminal client. Screen, slash commands, `VERSION` |
+| `crow_platform.py` | 1098 | the platform seam: where things live, how a process is found and killed, per OS |
 | `crow_voice.py` | 238 | dictation: microphone and recogniser only |
 
 ## The split
@@ -38,9 +38,30 @@ system: XDG directories, install and models roots, the server binary name and
 search order, `/proc`-based server discovery without `psutil`, spawn flags, kill
 by process group, the shell, the browser candidates, the font store, the updater
 argv. Standard library only, and **one-way** — it never imports the core.
-`crow_core.py` calls it at 45 sites and no longer mentions `sys.platform` or
-`os.name`. Where the paths it resolves land:
+`crow_core.py` calls it at 69 sites (counted 2026-09-23). Two direct OS tests have come back
+since 2.2.0 and are the exceptions, not the rule: `sys.platform == "darwin"` for the deno cache
+in `build_bundle`'s esbuild search (#212) and `os.name == "nt"` for a `file:///C:/…` console
+source path in `render_page`'s API hints (#253). Where the paths it resolves land:
 [Install](../user-guide/install.md) and [Linux](../user-guide/linux.md).
+
+## One bounded runner
+
+Every child a tool starts goes through `_bounded_run` in `crow_core.py` (#207, #212, #218):
+`run_command`'s shell, every esbuild call of `build_bundle` including its `--version` probes,
+and the `node --check` of `write_file`/`append_file` (#251). It owns the one deadline, the
+capture cap in the reader threads and the kill of the child's whole process group; on Linux
+`run_command` adds its own systemd user scope around it. A goal's acceptance check (#250) runs
+through `run_command`, so it gets the same clock, cap and scope. `render_page` is the one
+exception: it drives its browser over its own DevTools pipe under its own scope (#213).
+
+## The browser panel (Linux, #201)
+
+On Linux the browser panel is a second `WebKit2.WebView` inside the window's own GTK window,
+built in `crow_gui.py` with its own `WebsiteDataManager` (a lasting profile), a
+`MemoryPressureSettings` kill, a `bwrap` sandbox for its web process when `bwrap` is installed
+(`CROW_PANE_SANDBOX=0` switches it off; no `bwrap` means no sandbox, not no panel) and no
+pywebview bridge. `CROW_PANE_WINDOW=1` falls back to the
+separate pane window, which is still what Windows uses. See [the browser](../user-guide/browser.md).
 
 ## Registries
 

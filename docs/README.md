@@ -10,12 +10,12 @@ is here.
 | | |
 |---|---|
 | [Install](user-guide/install.md) | requirements, both installers, the model download, updating, where everything lands |
-| [Window](user-guide/window.md) | the client, panel by panel |
-| [Linux](user-guide/linux.md) | install, the paths table, the engine build, the window on Wayland, troubleshooting |
+| [Window](user-guide/window.md) | the client, panel by panel: pinned cards, selection and links, layout |
+| [Linux](user-guide/linux.md) | install, the paths table, the engine build, memory scopes for server, render and command, optional helpers, the window on Wayland, troubleshooting |
 | [Memory](user-guide/memory.md) | what is written, by whom, and the gate |
 | [Skills](user-guide/skills.md) | using and writing one |
-| [Goals and subagents](user-guide/goals-and-subagents.md) | the plan a model writes for itself, and the tasks it hands out |
-| [Browser panel](user-guide/browser.md) | tabs, the address bar, `render_page` |
+| [Goals and subagents](user-guide/goals-and-subagents.md) | the plan a model writes for itself, what `done` has to prove, and the tasks it hands out |
+| [Browser panel](user-guide/browser.md) | the in-window panel on Linux, tabs, the address bar, `render_page`, what is unverified on Windows |
 | [Session search](user-guide/session-search.md) | the index over every archived conversation |
 | [MCP servers](user-guide/mcp.md) | stdio, elicitation, commands |
 | [MCP over HTTP](user-guide/mcp-http.md) | headers, OAuth, sessions |
@@ -25,7 +25,7 @@ is here.
 
 | | |
 |---|---|
-| [Tools](reference/tools.md) | the twenty-five built in, plus MCP |
+| [Tools](reference/tools.md) | the twenty-seven built in, plus MCP |
 | [Server flags](reference/server-flags.md) | what the inference server is started with, and why each flag is there |
 | [Client flags](reference/client-flags.md) | what `crow` and the window take |
 | [Reasoning levels](reference/reasoning-levels.md) | `low`, `medium`, `high`, and the thinking budget |
@@ -38,6 +38,7 @@ is here.
 |---|---|
 | [Operating points](operating-points.md) | the four measured lines, the engine patches, and the by-hand server commands |
 | [Measurements](measurements/README.md) | every number with the conditions it was taken under |
+| [Acceptance: #207](acceptance/issue-207.md) | the live acceptance protocol of the bounded search and capture |
 | [Flash-Next placement](measurements/flash-next-placement.md) | the `-ncmoe` / `-ub` sweep, 27 runs |
 | [MCP cost](measurements/mcp-cost.md) | what tool declarations cost per request |
 

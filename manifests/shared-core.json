@@ -55,6 +55,11 @@
    "why": "The one tool whose drift costs data: #10 measured hermes-agent resolving read-before-write to last-write-wins in two independent code paths, one warning and one writing anyway. Two implementations here is that same defect with a different name."
   },
   {
+   "name": "tool_append_file",
+   "kind": "def",
+   "why": "The one write that carries no read guard, because appending destroys nothing -- and the only thing standing between it and a file outside the working area is the _outside_root check it shares with write_file. A second copy is where that check gets dropped, or where the missing trailing newline is handled differently and two rounds run together on one line."
+  },
+  {
    "name": "tool_edit_file",
    "kind": "def",
    "why": "Exact match plus a uniqueness check. A copy that fuzzy-matches instead would silently edit the wrong occurrence in whichever surface carries it."
@@ -78,6 +83,11 @@
    "name": "tool_run_command",
    "kind": "def",
    "why": "Local execution with a timeout and a secret-stripped environment. A surface that ships its own would be shipping its own idea of what a child process may see."
+  },
+  {
+   "name": "tool_build_bundle",
+   "kind": "def",
+   "why": "#212. The one place that decides which esbuild runs (project node_modules, PATH, then the runtime caches) and how a module graph becomes one offline page. A second copy would find a different bundler, or inline a module script as a classic one in <head> where the canvas does not exist yet."
   },
   {
    "name": "tool_git_status",
@@ -379,8 +389,13 @@
   },
   {
    "id": "edit_file demands a read first",
-   "text": "before editing it, in this turn",
-   "why": "The second refusal. The words 'in this turn' are the scope E6 decided; a copy that says 'first' describes a rule nobody implemented."
+   "text": "before editing it, in this conversation",
+   "why": "The second refusal. The words 'in this conversation' are the scope #215-H decided (E6's 'in this turn' before it); a copy that says 'first' describes a rule nobody implemented."
+  },
+  {
+   "id": "a read file changed on disk",
+   "text": "it changed on disk since you read it",
+   "why": "#215-H. The refusal write_file and edit_file share when the file no longer carries the (mtime_ns, size) it was read with. A surface with its own wording would be a surface with its own idea of what 'read' still means."
   },
   {
    "id": "edit_file refuses an ambiguous match",

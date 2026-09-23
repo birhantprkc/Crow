@@ -2,11 +2,11 @@
 
 ## Tools
 
-25 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured. `/tools` lists
+27 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured. `/tools` lists
 them in either surface, derived from the declarations themselves rather than written beside them.
 
-`read_file` `read_image` `render_page` `write_file` `edit_file` `list_dir` `find_files`
-`search_text` `run_command` `web_search` `fetch_url` `memory` `skill` `session_search`
+`read_file` `read_image` `render_page` `write_file` `append_file` `edit_file` `list_dir` `find_files`
+`search_text` `run_command` `build_bundle` `web_search` `fetch_url` `memory` `skill` `session_search`
 `delegate` `subtasks` `collect` `goal_set` `goal_step` `git_status` `git_diff` `git_log`
 `git_commit` `git_push` `github_connect`.
 
@@ -24,20 +24,102 @@ own class.
 | target | a file in the working area, or an `http(s)` URL |
 | output | `<root>/.crow/renders/render-<stamp>.png`, plus the console lines from stderr |
 | isolation | its own `--user-data-dir` per run. Without it Chrome hands the job to a running instance and returns exit 0 with no screenshot |
-| caps | `--virtual-time-budget` in the page, `wait_ms/1000 + 8 s` on the process |
-| kill | `proc.kill()` on its own handle. Never by name, never a process list (#158) |
-| pipes | none. stdout and stderr go to a file: `communicate()` hangs on Windows after a kill when a grandchild holds the write end |
+| driving (Linux) | `--remote-debugging-pipe` (fd 3/4, NUL-separated CDP JSON, no library): load, run `wait_ms` **real** milliseconds, `Page.captureScreenshot`. A page with no load event after 15 s is captured anyway |
+| driving (Windows) | the command-line `--screenshot` with `--virtual-time-budget=wait_ms`; the pipe there needs handle inheritance nobody has measured yet |
+| `wait_ms` | real time after load, 200–20,000. A larger value never rescues a page too heavy to draw |
+| caps | one ceiling for the whole call: 15 s load + `wait_ms` + 10 s for the frame. It does not grow with anything the page does |
+| rasterer | `gpu (angle)` when the card has ≥ 512 MiB free, else `software (swiftshader)`; named in every result |
+| memory | Linux: its own user scope, `MemoryMax=6G`, swap 0 (#213). A browser started through `run_command` instead runs under that tool's 8G scope (#218) |
+| kill | `proc.kill()` on its own handle, then its session. Never by name, never a process list (#158) |
+| pipes | stdout and stderr go to a file: `communicate()` hangs on Windows after a kill when a grandchild holds the write end. The two DevTools pipes are Crow's own ends, read with `select` and a deadline |
+| API hints (#253) | after the capture, one `Runtime.evaluate` (3 s, `RENDER_PROBE_S`) lists the page's own interface prototypes with each member's `length` (WebIDL: the required argument count). Every console line is then read against it: `X.name is not a function` gets a `hint:` line naming the nearest real member within 1-2 edits and the interface that has it (or says the name is real on another object, or exists nowhere), plus the page's own `name=function` probe line when there is one; `WebGL: INVALID_*: fn: …` gets the call's top-level argument count from the source line the console names (the page or its own folder only) against the live `fn.length`, and a sibling with that arity. Linux only: without the pipe (Windows) or without an answer, only the page's own probe lines and the argument count are claimed |
 
-Measured 2026-08-31, Chrome 151.0.7922.175:
+A failed capture says which rasterer ran and that a larger `wait_ms` will not help —
+the old `timed out after 20000 ms` read as "give it more", and a model escalated
+6000 → 12000 → 20000 on a page whose cost did not depend on it.
+
+Measured 2026-09-22, Chromium 152.0.7977.82, RTX 5090 free:
 
 | case | wall clock | result |
 |---|---|---|
-| page settling at 300 ms, `wait_ms=1500` | 0.5 s | screenshot shows the settled text |
-| page settling at 3 s, `wait_ms=6000` | 0.5 s | not killed; the virtual clock runs the page forward |
-| endless `fetch`, `wait_ms=1200` | 9.3 s | `error: the browser wrote no screenshot (timed out after 1200 ms and was stopped)` |
+| WebGL voxel diorama (23k voxels), software, old path, virtual budget 1000 / 2000 / 4000 | 32.7 / 32.8 / 32.8 s | flat: 0.345 s per software frame, ~90 frames before the CLI draws. The old deadline was 9 / 10 / 12 s |
+| same page, software, `wait_ms=4000` | 6.9 s | 1280×720 capture of the scene |
+| same page, GPU, `wait_ms=4000` | 5.7 s | capture; the page's own 90-frame loop settled |
+| same page with an endless animation loop, software, `wait_ms=20000` | 22.8 s | capture (old path: once 31 s, once no image in 40 s) |
+| page settling at 300 ms, `wait_ms=1500` | 1.8 s | settled text; "almost one colour" note (99.96 % white) |
+| endless `fetch` loop, `wait_ms=1200` | 1.5 s | capture (old path, measured 2026-08-31: no image after 9.3 s) |
+| `while(true){}` | 25.1 s | `error: ... no frame within 10 s of the capture request, and no load event within 15 s before it` plus the rasterer advice |
 
-`--run-all-compositor-stages-before-draw` does **not** rescue the hanging page. The result opens
-as a tab in the [browser panel](../user-guide/browser.md).
+The #253 hints, replayed over the 47 real `render_page` results of 2026-09-23 (the diorama run,
+where the model's own code called `gl2.texImage33D` and read Chromium's correct error as a
+missing API): 18 carried a failing name or WebGL error; a hint was given for 0 of 18 before and
+17 of 18 after with the live names (the 18th is a real shader failure), 10 of 18 in the fallback
+without names.
+
+Under the old virtual clock the GPU arm drew **no** `requestAnimationFrame` frame at all
+(a page-side counter stayed below 10 while the budget ran out in ~10 ms of real time);
+real time is what an animated page actually needs.
+
+The console line `GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU
+stall due to ReadPixels` comes from Chromium's bundled ANGLE, not from the NVIDIA driver:
+measured, it appears only in the SwiftShader arm, and the string is in the `chromium`
+binary and in no `libnvidia-*`. The result opens as a tab in the
+[browser panel](../user-guide/browser.md).
+
+### `run_command` (#207, #218)
+
+`run_command(command, cwd=<working area>)` — one shell line, bash on Linux, cmd.exe on
+Windows, stdin closed.
+
+| | |
+|---|---|
+| class | `executing` — outside paths ask first ([Outside paths ask](#outside-paths-ask-144)) |
+| clock | `COMMAND_TIMEOUT` = 120 s |
+| `cwd` (#221) | resolved against the working area, `~` expanded. A `cwd` that is not an existing directory runs nothing and asks nobody -- it is refused before the approval card: `error: no such directory: … -- the command did not run.` (or `cwd is a file, not a directory`), with the working area and a near miss found on disk (per path component, edit distance 1-2 against the existing siblings, the unique best match, case-insensitive on Windows only): `'nibor11896' is 'nibor1896' here`. `read_file` (missing parent), `list_dir` and the outside-root write refusal carry the same hint. Measured over every stored session (2026-09-22): 5 of 18 distinct `cwd` calls named a home that does not exist, and each cost a `pwd` round after a bare Errno 2 |
+| capture | 32 MiB per stream in the reader threads (#207); 16 KB of it reach the model |
+| memory (Linux) | its own user scope per call, `crow-cmd-<pid>-<hex>.scope` in `session.slice`: `MemoryMax=8G`, `MemoryHigh=7G`, `MemorySwapMax=0`, `OOMPolicy=kill` (#218). `CROW_COMMAND_MEMORY_MAX` moves the kill bound (any systemd size), `none` keeps only the swap cap; `CROW_COMMAND_SCOPE=0` runs the shell bare |
+| why 8G | measured 2026-09-22 as each scope's `memory.peak`: diorama three.js esbuild bundle 106 MiB, `npm ls --all` 46 MiB, node importing three 21 MiB, gcc 9 MiB, `test_crow` 60 MiB, `test_crow_core` 109 MiB. 8G stops the 54 GiB software-WebGL runaway a seventh of the way and leaves a node build room up to V8's own ~4 GiB heap |
+| at the ceiling | the kernel kills every process in the scope at once (`OOMPolicy=kill` = `memory.oom.group`); the result reads `error: command exceeded its memory ceiling (MemoryMax=8G, no swap) and was killed, with everything it started: <command>` followed by the output up to the kill. The reason comes from the unit's `Result=oom-kill`, not from the exit code — `kill -9 $$` stays `[exit -9]`. The failed unit is reset |
+| kill | the clock and the capture cap SIGKILL the shell's whole process group (`start_new_session`, `killpg`), then the scope (`systemctl --user kill`), which also takes a descendant that left the group with `setsid`. A command that ends by itself keeps what it put in the background (`server &`); that process stays in its scope and under its ceiling |
+| literal | `--expand-environment=no` on systemd ≥ 254: systemd-run expands `${VAR}` and `$$` in its own command line (measured on 261: `${X}` came out empty) |
+| without systemd | no `systemd-run` or no reachable user manager (container, CI, SSH without a session): no scope, no ceiling; the process-group kill still holds |
+| Windows | no scope and no group: the clock kills `cmd.exe` by its handle, and what it started can outlive it — a Job Object would be the fix, not built |
+| headless browser | a browser name and `--headless`/`--screenshot` in the line add `note: render_page takes this screenshot inside the render's own memory ceiling …` to the result. A note, not a refusal: the browser is bounded here too, a headless browser has uses `render_page` does not cover (`--dump-dom`, `--print-to-pdf`), and a refused line comes back as a script file no pattern sees |
+| background output | a process left in the background that still holds stdout keeps its reader: the runner waits 0.25 s (`BOUNDED_RUN_SETTLE`) and returns without what it prints later. Redirect it (`server >log 2>&1 &`) and read the file |
+
+### `build_bundle` (#212)
+
+`build_bundle(entry, out=<entry>.bundle.html|.js, global_name="", minify=true)` — a module
+graph as ONE offline file, built by the esbuild already on the machine.
+
+The rule it exists for: a page opened from `file://` has origin `null`, and Chromium fetches
+module scripts in CORS mode, so every `import` between local files is refused ("Cross origin
+requests are only supported for protocol schemes: … http, https"). Import maps do not change
+that. A classic `<script>` is not affected — so the offline shape is one classic script holding
+the whole graph, which is esbuild's `--format=iife`. The tool description says this to the
+model, together with "never flatten a library by hand".
+
+| | |
+|---|---|
+| class | `executing` — it starts a process and writes a file; an "always" is keyed to the tool, never to `run_command esbuild` |
+| entry `.html` | every `<script type="module">` (`src` or inline) bundled and inlined at the end of `<body>` in document order (modules are deferred; a classic script in `<head>` would run before the canvas exists); the import map becomes `--alias` pairs (targets made absolute: esbuild resolves an alias in its working directory); local stylesheets bundled into `<style>`; local classic scripts inlined as they are |
+| entry `.js/.mjs/.ts` | `out` `.js` → the IIFE (`global_name` names its exports; without it an IIFE's exports are unreachable, and when the same esm probe as below finds any, the result says so under the `built` line: "warn: no global_name -- app.js exports boot, and an IIFE without a global leaves it unreachable ..." — warned, not defaulted: a derived name would put `app`/`main` on `window` where it can shadow a page global, and a module that starts itself needs none; no exports or a failed probe say nothing. Measured on the diorama graph: 0.07 s → 0.13 s with the probe); `out` `.html` → the IIFE wrapped in an EMPTY page: no markup, no call to any export. The result then says so right under the `built` line and names the entry's exports ("app.js exports: boot -- nothing calls it"), read from a second, unminified `--format=esm --metafile` run into the temp directory — esbuild's metafile lists `exports` only for esm, for the IIFE it is `[]`. A failed probe says "could not be read" and costs the build nothing |
+| a page = an `.html` entry | the tool description says it: write the page as HTML (canvas, markup) with a `<script type="module">` that imports and starts the app, then bundle THAT. A `.js` entry to `.html` is warned, not refused: a module that builds its own DOM and starts itself on load (the three.js-example shape) works through it, and nothing short of running it tells that apart from a `boot()`-shaped one |
+| argv | `--bundle --format=iife --platform=browser --charset=utf8 --log-level=warning --log-limit=20`, `--minify` by default, text loader for `.glsl .vert .frag .vs .fs .wgsl .txt`, data URLs for images, fonts, `.glb .gltf .hdr .exr .ktx2 .bin .wasm` |
+| esbuild, in order | `CROW_ESBUILD`; `node_modules` walking up from the entry (`@esbuild/<platform>`, `esbuild/bin`, `.bin`); `esbuild` on `PATH`; the deno cache (`$DENO_DIR/dl/esbuild-*/`) and the npx cache (`~/.npm/_npx/*/node_modules/@esbuild/`), newest version wins there. Every candidate must answer `--version` |
+| none found | the result lists every place searched and says not to hand-flatten |
+| caps | one clock for the whole build (`BUNDLE_TIMEOUT` = 120 s), the #207 capture cap in the reader threads, 64 MiB on the result, 8 MiB on the entry page. Every esbuild call, the `--version` probes included, runs through `_bounded_run` — the one runner `run_command` uses; a grandchild left holding the pipe (a node wrapper's shape) does not hold the clock, and a kill takes esbuild's whole process group (#218) |
+| write | esbuild writes to a temporary directory; Crow writes `out` behind `write_file`'s fence. A file carrying the `crow build_bundle` mark (a `<meta name="generator">` / a first-line comment) is replaced freely; any other existing file only after a read in this conversation, unchanged on disk since ([Read before write](#read-before-write-215)) |
+| result | path, bytes, errors, warnings, seconds, which esbuild and where from, what was inlined, and whether the page still loads anything from disk. On errors nothing is written and the esbuild log comes back |
+| cache | never answered from the repeat cache: an edit to a source changes the result of the same call |
+
+Measured 2026-09-22 on a copy of the diorama-test app graph (three.js 0.186 plus post-processing,
+esbuild 0.28.2 from its `node_modules`): 957,335 bytes as an IIFE and 957,410 bytes as a page,
+0 errors, 0 warnings, 0.07 s wall. The page rendered the scene through `render_page`; the
+module source page next to it logged the CORS refusal above. The same graph with `src/app.js`
+as the entry and an `.html` out built just as clean and rendered one colour: the app exports
+`boot(canvas, opts)` and needs `<canvas id="c">`, and that page has neither — the trap the
+warning above names (0.13 s with the exports probe, `exports: boot`).
 
 ### `read_image` (#170)
 
@@ -64,7 +146,13 @@ delivers is dropped and the card ends `interrupted`. Tokens are counted from the
 `usage` block — remote endpoints send no llama timings. The default spot is the free
 pool's best answer, pinned only after a model answered twice in a row and carried a real
 delegation; the user's own `/delegate <task>` does the same from the composer, [also
-while a turn is running](../user-guide/window.md).
+while a turn is running](../user-guide/window.md). A failed spot falls forward by what
+its error means: sick (429/5xx/timeout) and refusing (403, no endpoints, 402 on a paid
+favourite) spots are skipped, while 401, a free spot's 402 and schema errors stop the chain.
+The failure names every spot tried and why each one failed ([details](../user-guide/goals-and-subagents.md)).
+Up to six refusing spots are skipped without counting against the three transient retries.
+Known and open (#242, found offline, not seen live): a subtask stopped while its current spot's
+request is failing ends `failed` instead of `interrupted` and marks that spot dead for the session.
 
 | release level | asks before |
 |---|---|
@@ -83,6 +171,17 @@ plan sits in the pinned head of every prompt, so writing one costs a full prefil
 a step off writes only `<root>/.crow/goal.json` and moves no byte of the prompt. The head carries
 the plan, the file carries the state — see
 [goals and subagents](../user-guide/goals-and-subagents.md).
+
+A `done` is not taken on the model's word alone (#250). `goal_step(…, "done", note)` is refused
+when its own note reports a failure ("in spirit", "with deviation", "cannot be created",
+"unreachable", …), and when it has no note on a step last reported `failed`. A user's plan may
+end in `check: <command>` (`/goal title | step | step | check: <command>`): the `done` that would
+close the goal runs that command through `run_command` (its clock, capture cap and memory scope),
+and a non-zero exit refuses the `done` and keeps the goal open. The check lives in the session
+directory (`goal-checks.json`), not in the working area's `goal.json`, because the model can write
+there and a command it wrote would run unasked at `allowedit`; a model's replan keeps it, `/goal
+off` drops it. Replayed on the 10 real `done` calls of 2026-09-23: 6 refused, the 4 with positive
+notes passed.
 
 ### Git (#156)
 
@@ -106,6 +205,59 @@ turn that long. The token lands in `provider_keys.json`, owner-only, and is neve
 handed to a surface; what a surface shows is the login name. Needs a client id, see
 [the window's git panel](../user-guide/window.md).
 
+### `write_file` and `append_file` (#244, #251, #252, #254)
+
+`write_file(path, content)` replaces a file whole; `append_file(path, content)` adds to its end
+(a missing final newline is added) and carries no read-first guard, because appending destroys
+nothing. Both run the working-area boundary first, then (write only) [the read rule](#read-before-write-215),
+then the directory check, and only then touch the disk.
+
+| | |
+|---|---|
+| how much one call carries (#254) | `whole_write_bytes()` = half the output cap divided by 0.75 tokens per byte, rounded down to whole KB: **10 KB at the default cap of 16384**, 5 KB at 8192 (`CROW_MAX_TOKENS`). Both descriptions state the number and the cap, filled in once at import so the tool list stays byte-stable. A file up to that size goes whole through `write_file`; only a larger one is `write_file` of the first part plus `append_file` parts of up to that size, never "one append per section". An append that leaves a file at or under the limit says once per path: `note: the whole file is N bytes -- one write_file carries up to about 10 KB …`. A call cut at the cap (#203, `TRUNCATED_CALL`) names `append_file` and the part size |
+| why that number | measured 2026-09-23 on robin's diorama run (crow-nest, cap 16384, three session files): 61 `write_file` (median 940 B) and 50 `append_file` (median 319 B), each alone in its round, 0 cut off; 49 of the 50 appends left a file of at most 10 KB. With the model's own tokenizer the 111 calls were 0.456 tokens/byte overall and 0.735 at the densest call of 1 KB or more; the reasoning in the same round was at most 1,042 tokens. Half the cap stays free for that |
+| the receipt (#252) | `wrote N bytes to P` / `appended to P (+N bytes, file now M bytes)` counts **bytes** of the UTF-8 content (it counted characters until #252; 32 of 112 writes on 2026-09-23 held non-ASCII text). The file is read back and the result adds `(sha256 <12 hex>, file N bytes). Byte-exact: the file holds [ends with] exactly the bytes this call sent; a later read returns them. A mistake in them was in the content.` A read-back that does not end with the bytes sent says `WARNING: the file does not end with the bytes sent` instead |
+| the syntax check (#251) | `.js .mjs .cjs` through `node --check <file>`; `.html .htm` inline scripts (no `src`, a classic or `module` type, not a data block such as `importmap` or `x-shader/*`) one by one through stdin, padded so the line number is the page's. One 5 s deadline for the whole check through `_bounded_run`, files over 8 MiB and scripts past the 16th skipped, the first error only: line, message and a 160-char window of the source line with the caret. The result then ends `syntax check (node --check) FAILED -- the error is in the content this file was given:`; an append that does not parse adds that a file still built in pieces may not parse yet. **No `node` on `PATH`, no word**: the check is a help, not a gate, and the write always stands. Replayed on 2026-09-23: 20 of 98 JS/HTML writes would have carried their error |
+| directories (#244) | a path holding a control character (`pipeline.py\n`) is refused every time, naming the stripped path when that is clean. When the parent is missing, the first missing name is compared with the directories beside it (#221's edit metric, or a proper prefix of exactly one: `w` → `work`) and refused **once** with `did you mean: …` and `Nothing was created`; the identical call again creates it. Every created directory is said: `(new directory: X)`. Measured in the stored sessions: `testcases/w/fs.py` beside `testcases/work` (2026-09-18), 6 of 111 write paths held a control character, 4 of them a trailing newline |
+| arguments | `file_path` is taken as `path`, and for `write_file` `file_text` as `content` ([Argument names](#argument-names-207-214-215)) |
+
+### `search_text` and `find_files` (#207, #215)
+
+Both walk the tree with one shared prune list (`.git node_modules __pycache__ .venv venv build
+dist target .cache`) and one deadline, and both stop at 200 hits or 16,000 bytes of result.
+
+| | |
+|---|---|
+| binary | `search_text` reads the first 4 KiB of a file; a NUL there means binary, and the file is skipped |
+| size | a file over 2 MiB is skipped **before** it is opened (the `--max-filesize` contract) |
+| skipped | counted and said: `[skipped N file(s) over 2 MiB or binary -- a hit in them is not a hit you can use this way]` |
+| deadline | 30 s over the walk (`SEARCH_DEADLINE`), checked per directory: the hits so far come back with `[stopped after N s -- the walk over R did not finish; narrow the root …]` |
+| a file as root | `search_text` searches that file (#215); the glob does not filter it out again |
+
+The incident (filed 2026-09-21): a pattern without hits walked the working area with the 105 GB CNQ
+container in it, read every byte as text, and the turn hung until the app was killed (#207).
+
+### Read before write (#215)
+
+`write_file` (on an existing file) and `edit_file` refuse a file the model does not know.
+Per path Crow keeps the `(mtime_ns, size)` the file had when `read_file` read it — a line
+range counts — or when Crow itself last wrote it (`write_file`, `edit_file`, `build_bundle`;
+`append_file` keeps an already-known file known). The call goes through while the file on
+disk still carries that stamp.
+
+| state | answer |
+|---|---|
+| never read in this conversation | `refusing to overwrite … without reading it first in this conversation` / `read … before editing it, in this conversation` |
+| read, then changed on disk (another program, the user, a deletion) | `… it changed on disk since you read it -- read it again, then retry the call.` |
+| read or written by Crow, unchanged | allowed, across any number of turns |
+
+A read counts for the conversation, not the turn: goal mode's `[Goal mode ...]` nudges are
+user messages, and until #215 each of them emptied the state (measured 2026-09-22: 4 of 15
+read-rule refusals were edits of a file read one nudge earlier). The state empties where the
+model stops holding the contents: a rollover (mid-turn too), a new chat or `/reset`, a
+model switch, `--resume` and a chat switch in the window. A delegated subtask neither sees
+nor changes it. A rewrite that keeps both the size and the modification time is not seen.
+
 ### Outside paths ask (#144)
 
 `run_command` touching paths outside the working directory asks first, at every release
@@ -113,6 +265,120 @@ level — one card, every outside path named. An approval covers ALL outside pat
 command, not just the first; `always` is kept in `approvals.json` — under
 `%LOCALAPPDATA%\Crow\` on Windows, `~/.config/crow/` on Linux — and survives the restart. Directories the conversation was pointed at pass without asking.
 An obfuscated path does not ask — the gate is a question, not a sandbox.
+
+What counts as "pointed at" is what the **user** named. Four things that look like the user's
+words are not (#221, #223, #240, #241): a bare filesystem root in prose (`4120 / package`, which
+had released `/` for a whole session on 2026-09-22), the rollover note (a record written by Crow
+and the model; only the user's carried lines and the typed line count), goal-mode nudges (they
+carry the model's own plan text; a `/goal` plan the user typed still counts, recorded as `by` in
+`goal.json`), and the working-area notice of #224 or an image-only turn's notice.
+
+The null device is no outside path (#243): exactly `/dev/null` on POSIX, `nul`, `\\.\nul` or
+`//./nul` on Windows (any case), with a trailing `)` from `$(… 2>/dev/null)` shed first. A real
+path beside it, a path under it, `/dev/sda` and `/dev/nullx` still ask, and the `cwd` argument is
+not exempted. Measured 2026-09-23: 202 of 775 distinct stored `run_command` lines carried
+`/dev/null` and stopped at `auto` for it.
+
+### Argument names (#207, #214, #215)
+
+A tool is called with the names its declaration gives. Three cases fall outside that, and
+each one is said, never swallowed.
+
+**A sibling harness's name** for the same argument is taken — declared in
+`ARGUMENT_ALIASES`, not guessed — and the result opens with what was taken:
+`[took old_string as old, new_string as new]`.
+
+| tool | taken as declared |
+|---|---|
+| `edit_file` | `file_path` → `path`, `old_string` / `old_str` → `old`, `new_string` / `new_str` → `new` |
+| `read_file` `append_file` | `file_path` → `path` |
+| `write_file` | `file_path` → `path`, `file_text` → `content` |
+| `search_text` `find_files` | `path` → `root` |
+| `memory` | `new_text` → `content` |
+
+Two names for one argument with different values are an error, not a pick; the same value
+twice runs, with `[dropped …]`.
+
+**A key no declaration names** is ignored, and the result opens with
+`[unknown argument(s) ignored: …]` (#207).
+
+**A key that is unknown while a required one is missing** is a misnamed argument, and then
+nothing runs. The answer names the signature, and it comes before the tool's own checks —
+the read-before-edit gate included:
+
+```
+error: edit_file was called with unknown argument(s) replace, search and without the
+required old, new -- nothing was run. Its arguments are: path, old, new.
+```
+
+A required key missing on its own gets the tool's own sentence; `edit_file` says a missing
+`old` or `new` before its read rule (`new=""` deletes, a missing `new` no longer does).
+`search_text` given a file as its root searches that file.
+
+Measured 2026-09-22 after a rollover: 22 of 22 `edit_file` calls arrived as
+`old_string`/`new_string`, all 22 failed, and 15 of them were first told to read the file —
+so the model read it and sent the same wrong keys again. 4 of those 15 had read the file one
+`[Goal mode ...]` nudge earlier — the read rule was per turn then, and every nudge opened
+one. It now lasts the conversation and ends where the file changes
+([Read before write](#read-before-write-215)).
+
+The request after a rollover declares the same `tools` array, the same sampler and the same
+thinking fields as the one before; only the messages, the pinned head and the per-round
+`seed` differ (pinned by `TheSeamKeepsTheRequestTests`; the seed is drawn fresh for every
+round, see below).
+
+Since #214 the messages after the cut also show calls that worked. Behind the rollover note
+come the last 3 tool rounds before the cut, verbatim: each is the assistant's call(s) and
+every matching result, with no dangling `tool_call_id`. A round is carried only when every
+call names a declared tool with only declared keys and all required ones, and when no
+result was an error (`error: ...`, also behind the bracket notes, or a non-zero `[exit N]`).
+So an `old_string` call that #215 resolved is not carried, since it would teach the wrong
+name. Reasoning and prose stay behind. Results start with `[carried across the cut]` and
+are clipped to 2000 chars (`-- clipped to the first 2000 of N chars`). An image is replaced
+by a sentence. The rounds share a budget of 3000 tokens (at 3 chars per token; measured
+2.85 on the 17:12 archive). A round that does not fit is skipped whole, never cut. If none
+of the three shows `edit_file`, `write_file` or `append_file`, the latest one that does
+and fits takes the oldest one's place. The typed line comes after the rounds. Without
+rounds the note and the line stay one message. `_READ` stays per turn, so a carried read
+grants no edit. At the 17:12 cut this would have carried two `run_command` rounds and the
+final `edit_file` (`path, old, new`): 3,755 JSON chars, about 1,250 tokens.
+
+### Rounds that are not answers (#217)
+
+Every round is classified before it may enter the history (`classify_round`):
+
+| class | what it is | what happens |
+|---|---|---|
+| `markup` | no parsed call, and tool-call markup in the content: crow-nest's `crow_malformed_calls` says `raw_in_content`, or (any other engine) a line starting `<tool_call>`, `</function>`, `<function=`, `function=` or `<parameter=` outside a code fence | not stored; asked again once |
+| `stub` | no call, finish `stop`, tools declared, and the text ends on a colon, or shows within 200 chars that a sentence stopped: a comma, dash or opening bracket last, an inline code span or `**` left open, or a last word that cannot end a sentence (an article, a conjunction, a possessive; a form of "to be" right after a noun). No punctuation alone is not enough: `Ja`, `Erledigt`, `42`, `src/app.js` are answers | not stored; asked again once; a stub again on the retry is kept as the answer |
+| `think_only` | reasoning and no visible text (#150) | the one visible-answer nudge, as before |
+
+The re-request is on the same prefix — no message is added, so the read ledger, the goal step
+and the prompt cache stand — with a new `seed`. A note says `discarded a degenerate reply
+(<class>, N chars, seed S) -- asking again with a new seed`. If the retry is a stub, it is
+stored as the answer with a note (`kept the re-asked reply although it looks unfinished`):
+a short answer is never refused twice. If the retry is markup, the turn ends with one red
+line naming both classes and both seeds, and the history gets `[no usable reply: markup]`
+instead of either round. Replayed over the stored rounds of 2026-09-18..22 (3,155 assistant
+rounds in 27 files): 8 markup and 79 stub rounds flagged, 86 of them followed by a goal
+nudge; no healthy answer flagged.
+
+Every local request now carries `seed`, drawn per round (1..2^31-1) and recorded as
+`_seed` in the round's timings and as `seeds` in the turn's bill in `session.json`. The
+rollover digest and the memory pass draw their own and record them as `leg_seeds` in a bill
+(the window; the terminal keeps no bills). The seed goes to the sampler, not the template,
+so the digest still asks on the warm prefix. crow-nest
+samples with seed 0 when none is sent, so a re-request of the same prefix returned the same
+tokens. Remote requests carry no seed (`_REMOTE_DROPS`).
+
+A call's raw markup that arrived beside the parsed call is cut out of the stored content.
+A call the generation left open gets one of three results, chosen by crow-nest's record for
+that call when there is one, else by `finish_reason`: at `stop`,
+`error: the generation stopped inside this call's arguments (`path` had run to N chars) ...
+This was not the output token limit`; at `length`, the output-limit answer (#203) as before;
+a `bad-param-name` record, the declared-names answer. A `finish_reason` of `abort` (crow-nest
+#99: the client left or the server shut down) is never an answer: the turn treats it as a
+broken stream (one retry, #151), the rollover digest as failed, the memory pass writes nothing.
 
 ---
 

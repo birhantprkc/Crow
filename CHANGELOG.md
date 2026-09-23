@@ -3,6 +3,312 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## Unreleased
+
+Everything on `release-2026-09-23` since origin/main (6301e0e, 2026-09-20): 65 commits,
+2026-09-21 to 2026-09-23. Most measurements are against the 2026-09-22 diorama session (655 messages after a
+rollover at 17:12 CEST, 474 before) and the three 2026-09-23 diorama session files. Suites on the branch head
+(0311d0d, runtime venv, Linux): test_crow_core OK (skipped=2), test_crow 451 OK (skipped=3), test_crow_gui 756 OK
+(skipped=2), ruff clean.
+
+Ticket state on 2026-09-23 (nibor1896/crow): **closed** -- #194, #201, #207, #208, #211, #213, #214, #215, #219,
+#220, #221, #222, #225, #226-#239, #243, #244. **Still open, awaiting robin's live check or review** -- #195, #202,
+#209, #210, #212, #216, #217, #218, #223, #224, #240, #241, #248 (windows-latest CI needs a push), #250, #251,
+#252, #253, #254, #255, #256. #207 is the only one with a written live acceptance
+(`docs/acceptance/issue-207.md`, attempt 2, 2026-09-21); for the rest acceptance is robin's GUI replay.
+
+### Added
+
+- **Subtask cards live in a pinned panel beside goal and git** (#255, `4be49fc`, `0311d0d`). `subCard` appended
+  every delegate card into the chat (`#flow`, d994265), so the tiles scrolled away with the transcript. They now
+  live in `#subpanel`, a third card in the `#panels` column between goal and git: header
+  `N running · M finished`, running cards on top, finished/failed/interrupted ones in a collapsed
+  `finished · N` fold; a jump opens the fold and scrolls only the panel; a chat switch drops foreign cards and
+  hides the panel. The #233 reserve at >= 1100 px of chat width applies to it too. Measured 2026-09-23, headless
+  Chromium, 1180x800, 40 turns, one `subs` event: `#flow.scrollHeight` +185 px -> 0 px; card movement when the
+  chat scrolls 5027 px: -5027 px -> 0 px.
+- **Goal mode: an acceptance check the user writes** (#250, `d46690f`). `/goal title | step | step | check:
+  <command>` (or a `check:` line): the `done` that would close the goal runs the command through `run_command`
+  (120 s clock, capture cap, #218 memory scope, cwd = working area); a non-zero exit refuses the `done` with the
+  output and the goal stays open. The check is stored in `SESSION_DIR/goal-checks.json`, not in goal.json (the
+  working area is writable by the model, and a command there would run unasked at `allowedit`). A model replan
+  keeps it, `/goal off` drops it; the head names it.
+- **write_file/append_file parse what they wrote** (#251, `bbb5260`). `.js/.mjs/.cjs` through
+  `node --check <file>`; `.html/.htm` inline classic and module scripts (no `src`, no data-block type) through
+  stdin, padded so the line number is the page's. One 5 s deadline through `_bounded_run`, files over 8 MiB
+  and scripts past the 16th skipped, the first error only (line, message, a 160-char window with the caret).
+  The write always stands; an append that does not parse yet says the file may still be in pieces. Replayed
+  2026-09-23 over every JS/HTML write in the three session files: 58 writes -> 14 FAILED (5 .js + 9 .html),
+  where before 0 said anything (the ticket's count over all 98 JS/HTML writes: 20 did not pass `node --check`).
+- **render_page names the real API member and the argument count** (#253, `94f3bb8`). After the capture one
+  `Runtime.evaluate` over the DevTools pipe (3 s) dumps the page's interface prototypes with each member's
+  `length`. `X.name is not a function` gets the nearest real member (1-2 edits), the interface that has it and
+  the page's own probe line; `WebGL: INVALID_*: fn` gets the source line's top-level argument count against the
+  live `fn.length`. At most 6 `hint:` lines, every console line scanned. Replay of the 47 real render_page
+  results of 2026-09-23 (Chromium 152.0.7977.82, SwiftShader arm): 18 carry a failing name or WebGL error;
+  hints 0/18 -> 17/18 with live names (the 18th is a real shader failure), 10/18 in the fallback without them.
+- **The browser panel lives inside Crow's window on Linux** (#201, #226, #227, #230, `5399a82`, `0b66dee`). A
+  second WebKitWebView in Crow's own GTK window replaces the separate `crow-browser` window that Hyprland placed on
+  its own. It has its own lasting profile under `<state>/crow/browser`, a 2048 MB memory kill checked every
+  second (WebKit's default kill threshold is 0 = never; the chat says so), a bwrap sandbox when bwrap is present
+  and no pywebview bridge. In-page navigation updates the bar, tab and Back; `_blank` and `window.open` stay in the
+  panel; an answer link opens as a panel tab (Ctrl/middle click and the GitHub device code go to the system
+  browser); renders reuse one tab; a new blank tab empties the address bar. Measured: Chromium tabs opened per
+  link held ~73 MB each and were never closed (271 -> 1012 MB PSS over 10 loads); the panel stays flat at
+  ~370 MB. Verified under broadwayd in a 3G scope: 17/17 end-to-end checks; a 400 MB test limit killed the page
+  with the note after 4.1 s. Fallback: the old window (`CROW_PANE_WINDOW=1`). Windows keeps the old pane (#247).
+- **Text selects and copies; links and paths are marked** (#228, #229, `a7a5248`, `e49509a`). WebKitGTK 2.52.6
+  ignores unprefixed `user-select`, and pywebview's `text_select=False` injected
+  `body{-webkit-user-select:none}`: nothing could be selected. One policy block in both spellings (content text,
+  controls none); a right-click menu (Copy, Copy path, Copy path:line, Show in file manager, Open link) with APG
+  keyboard support; Ctrl+C also copies through `Api.copy`. http(s) URLs and POSIX/Windows paths (with
+  `:line:col`) are linkified in answers, inline code and tool results; a bare URL is one piece, and `_` inside a
+  word or URL is no longer emphasis (CommonMark 0.31.2 6.2).
+- **`build_bundle` tool** (#212, `0e22c51`, `b4ecf57`, `c7de871`). Bundles a page's ES modules, or one module,
+  into a single self-contained offline HTML/IIFE with the esbuild already on the machine: `CROW_ESBUILD`, project
+  `node_modules`, PATH, then the deno/npx caches. No network. Import maps become aliases, shaders import as text
+  (bytes are never re-typed, the #91 escape hatch), images and models as data URLs. Bounded by one 120 s build
+  clock, the #207 capture cap and write_file's fence. Its description tells the model that a file:// page cannot
+  load ES modules and that a library is never flattened by hand. Measured on a scratch copy of the diorama app
+  graph (2026-09-22): 957,410 B page, 0 errors, 0 warnings, 0.07 s. A `.js` entry built to `.html` names the
+  module's exports nobody calls; a `.js` out without `global_name` names the exports nothing can reach.
+- **The head names the working area on every request** (#222, `3ccecdf`). `prompt_head` opens with
+  `Working area: <root>` and one sentence on how relative paths and a cwd-less `run_command` resolve there. It is
+  byte-identical and at the same offset on both sides of the rollover cut. The 2026-09-22 K=2 head (6,738 tokens)
+  had no working directory, and the model invented one (crow-nest#91).
+- **A moved working area is said once** (#224, `c1033bd`): `[Working area is now X (was Y).]` opens the next user
+  message (no sent byte moves). A->B->A withdraws it, reset drops it; `clear_root` re-pins the head too.
+- **The #202 brake names the wall** (#202, `6b9f54b`). Each failed tool result of the running goal step is
+  sorted into a class -- dead service (same HTTP 401/402/403 per tool and host), refusal loop, phantom path
+  (ENOENT on a path first named by the failing call), render/command timeout, same exception signature -- and at
+  three in one step the next nudge carries the class, the count and the way around instead of the step text;
+  the flow shows a note. Replayed on the 2026-09-22 session: web_search 401 named at the first nudge after [29],
+  phantom paths at [296], edit_file refusals at [348], render timeouts at [522] -- before the 12000/20000
+  escalation.
+- **Rollover carries its last good tool calls** (#214, `94e0c33`). Behind the rollover note the fresh context
+  opens with the last 3 answered, successful, correctly shaped tool rounds (verbatim calls, results clipped to
+  2000 chars and marked `[carried across the cut]`, images replaced by a sentence, 3000-token budget, an edit
+  preferred). At the 2026-09-22 17:12 cut: 2 run_command rounds and an edit_file with `path, old, new`, ~1,250
+  tokens. A regression test holds the tool list, sampling, thinking fields and `max_tokens` identical across the
+  seam, and the digest request identical to the turn's.
+- **The rollover seam carries the working state, and the window keeps what it knew** (#210, #211, `f692838`).
+  The seam head carries the goal's step statuses; `goal_set` carries done-marks onto matching steps and names
+  the first open one, so a post-cut replan no longer zeroes a 9/15 goal; the seam re-asserts mode, model, context
+  and panel to the page, the chat band draws an archive card at the cut (live and on replay), and a level picked
+  mid-goal queues for the between-turn gap instead of being refused. The digest leg retries a tool-call answer
+  once on the same warm prefix (measured 2026-09-22: `finish=tool_calls`, 482 tokens, one half sentence rode
+  across the cut) and fails loud under 200 chars.
+
+### Changed
+
+- **The installers name node, bwrap and systemd-run as optional helpers** (`1505865`). install.sh gains three
+  warn-only preflight rows: node (MCP servers via npx, #251's `node --check`, #212's esbuild from the npx cache),
+  bwrap (the #226 panel sandbox) and systemd-run (the #213/#218 memory ceiling). install.ps1's Node row no longer
+  says every built-in tool runs without it. Nothing blocks the install. `install.sh --selftest` 26/26 (2026-09-23);
+  install.ps1 reviewed statically only (no PowerShell on the Linux machine).
+- **Thinking fixed on for Qwen3.8-Flash-Next, sent explicitly** (#225, `297a05b`, robin 2026-09-22). Both entries
+  carry `reasoning_fixed: "high"` (llama: same bytes as the absent key, #160; serve: the template's xhigh). The
+  turn, the digest leg, the turn after the cut and the review all send it; a stored chat level is ignored, a
+  contradicting `--reasoning-effort` is refused with the reason, and the window shows no level for these points.
+  **crow-nest changes from thinking OFF (2,962 of 2,962 requests on 2026-09-22) to xhigh with the 1024 cap.** The
+  budget stays 1024 until measured (#245). `sampling_no_thinking` holds the card's non-thinking row
+  (0.7/0.8/20/0.0/1.5) for a later flip (#246).
+- **min_p on both Flash-Next arms: 0.01 for one day, then 0.0 again** (`e7d10a7` 2026-09-21, corrected by #225
+  `297a05b` 2026-09-22). e7d10a7 moved both arms from 0.0 to 0.01 on the claim that 0.01 is the model card's
+  operating point, after crow-nest #83 made the device sampler honour the field. Re-reading the card for #225:
+  its Best Practices say min_p 0.0 in both rows, so both arms send 0.0 again. Both arms always moved together
+  (one-sampler rule; `check_operating_point` 10/10).
+- **write_file carries a whole file up to a stated limit; append_file only above it** (#254, `27f71b9`,
+  `9a59872`). The descriptions of 6301e0e said "one append per section" and never what "large" is; the
+  2026-09-23 diorama run (cap 16384) built 1-5 KB files from a head plus up to 10 appends: 61 write_file (median
+  940 B), 50 append_file (median 319 B), 0 cut off. `whole_write_bytes()` keeps half the cap for reasoning (max
+  1,042 tokens measured in a write round) and divides the rest by 0.75 tokens/byte (densest measured call >= 1 KB:
+  0.735 with the model's own tokenizer): **10 KB at 16384, 5 KB at 8192**. Both descriptions state the number and
+  the cap, written once at import (`CROW_MAX_TOKENS` moves it). An append that leaves a file at or under the
+  limit says so once per path; #203's `TRUNCATED_CALL` names append_file and the part size.
+- **A write result counts bytes and says it is byte-exact** (#252, `907f941`). `wrote N bytes` was `len(content)`
+  -- characters; 32 of 112 writes on 2026-09-23 held non-ASCII text (`"ä—"`: 2 -> 5 bytes). The result reads the
+  file back and adds `(sha256 <12 hex>, file N bytes). Byte-exact: ...`; a read-back that does not match is said as
+  a WARNING. With #251 and #254 the append line reads e.g. `(+3 bytes, file now 5 bytes)` plus the receipt.
+- **The composer and the chat column stand on the window's centre** (#256, `3287dc1`, `0311d0d`). #233 reserved
+  the 306 px card width on the right only, so with a goal, git or subtask card and >= 1100 px of chat width both
+  sat 158 px left of centre (5 px left without a card: the scrollbar gutter). The reserve is now symmetric, and
+  `#flow`'s left padding carries the gutter width. Measured 2026-09-23, headless Chromium 1234, rail/code/git
+  open/shut x 1180/1440/1920/2560 x 900 (32 combos): composer centre - window centre -158.0 / -5.0 px -> 0.0 px in
+  all 32; column right edge >= 20 px clear of the cards in all 10 card combos. Cost: the column narrows with a
+  card while the chat is under 1612 px (at 1116 px: 780 -> 464 px).
+- **`run_command` is bounded like the render** (#218, `f813557`, `a56a2f0`). On Linux the shell runs in its own
+  user scope (`MemoryMax=8G`, no swap, `OOMPolicy=kill`; `CROW_COMMAND_MEMORY_MAX`, `CROW_COMMAND_SCOPE=0`); a
+  ceiling kill says so, and a timeout or capture-cap kill takes the whole process group and the scope. A headless
+  browser in the command gets a note pointing to render_page. systemd-run's `${VAR}`/`$$` expansion is switched
+  off (`--expand-environment=no`, systemd >= 254) -- it had emptied them. The tool description says what the
+  scope does.
+- **render_page's `wait_ms` is real time** (#213 follow-up, `d84cf9a`). On Linux the page runs `wait_ms` of real
+  time over `--remote-debugging-pipe` and is captured when that time is up, even if it never finishes loading; one
+  ceiling (15 s load + wait_ms + 10 s frame), `wait_ms` at most 20000. The old virtual-time path needed 32.7 s on
+  the diorama page at every budget while its deadline was `wait/1000 + 8` -- raising wait_ms could never help.
+  Now 5.6 s (software) / 5.8 s (GPU) at wait_ms 4000. A failed capture names the rasterer.
+- **Every local request sends its own seed** (#217, `b0f2514`, `c9ff31f`): turn rounds, the rollover digest and
+  the memory pass (crow-nest defaulted to seed 0, the seed that reproduced the 2026-09-22 corruption byte for
+  byte). Seeds are recorded as `seeds`/`leg_seeds` in the turn bill.
+- The thinking budget is looked up by the model the server reports, not the request's `"crow"` label (#220,
+  `140a4f9`): the manifest's `reasoning_budget` now reaches local turns, reviews and digests from window and
+  terminal. The terminal's rollover digest uses the turn's `--api-key` and `--model` (#214).
+- `run_command`, `build_bundle` and the esbuild `--version` probe run through one bounded runner (#212/#207,
+  `8e96b1f`); a grandchild holding the pipe no longer holds `build_bundle` past its clock (1 s deadline: 8.01 s ->
+  1.25 s).
+
+### Fixed
+
+- **search_text no longer reads a 105 GB model container as text** (#207, `a045caf`, live-accepted 2026-09-21,
+  `260cc87`). Live 2026-09-21: a pattern with no hits walked the CNQ container byte by byte and the turn hung
+  mid-pair (spinner forever, only killing the app ended it). The walk now has the three bounds of a production
+  grep: a NUL in the first 4 KiB means binary, files over 2 MiB are never opened (the result counts them), and
+  past 30 s `search_text`/`find_files` return what they have with a note. `target` and `.cache` join one prune
+  list both tools share. `run_tool` names unknown argument keys (`pattern_2`, `regex` rode in on the live call)
+  instead of swallowing them.
+- **run_command's capture is bounded while it is read** (#207 second incident, `d22f3a2`). Live 2026-09-21 a
+  round-6 tool printed at pipe speed; Crow's python grew until 13.6 GiB were swapped and the kernel OOM killer
+  shot serve (46.8 GiB pinned). The cap now lives in the reader threads, 32 MiB per stream, and kills the child
+  with a result the model can act on; `read_image` refuses oversized files before reading.
+- **The render browser has its own ceiling, reaper and blank verdict** (#208, #213, `3dbc015`). The 54 GiB
+  software-WebGL runaway of 2026-09-21 ran in no cgroup of its own, and the kernel killed the server. The browser
+  now starts in a scope in `session.slice` with `MemoryMax=6G`/`MemoryHigh=5G`/`MemorySwapMax=0` (verified on the
+  cgroup: memory.max 6442450944, swap 0); a ceiling kill is returned as the reason. A timeout waits for the
+  process it killed (wedged `while(true)` page: 9.2 s total, nothing left behind). A >= 99.9 % one-colour capture
+  warns first ("treat it as no-signal"; reproduced blank: share 1.0 at 4714 B). The GPU is used (`--use-gl=angle`)
+  at >= 512 MiB free VRAM per nvidia-smi, SwiftShader otherwise; the result names the rasterer. Pins:
+  `CROW_RENDER_MEMORY_MAX`, `CROW_RENDER_SCOPE`, `CROW_RENDER_GL`.
+- render_page: a capture that is almost but not entirely one colour (one line of text on white measured
+  99.96 %) says "almost one colour" instead of "no-signal"; GCM login noise and DevTools pipe messages no
+  longer crowd out the page's console lines (#213 follow-up).
+- **Goal mode refuses a `done` whose own note says it is not done** (#250, `d46690f`). A note like "in spirit",
+  "with deviation", "cannot be created", "unreachable" is refused, and so is a `done` without a note on a step
+  last reported failed. Replayed on the 10 real `done` calls of 2026-09-23: 10/10 accepted before, 6 refused
+  after; the 4 with positive notes pass.
+- **windows-latest CI** (#248, `a90b962`). Two YoloTurnTests used `cat /etc/os-release` as the outside command,
+  which Windows by design does not read as a path; they failed on windows-latest in every run since 2026-09-19
+  (run 35438718703). The fixture is now a file beside the working area, `type` on Windows and `cat` elsewhere;
+  a new case asserts it is outside on the running platform. Linux green; Windows not run (needs the push).
+- **A reloaded window no longer restores the session twice and closes** (#209, `5753377`). #204's recovery
+  reload fired `pywebviewready` again, and `ready()` re-ran start-up: `_probe` restored session.json into the
+  running chat (`RuntimeError: restore() is for a fresh conversation`), posted the saved KV into `/slots/0`
+  mid-chat and re-bound the roots. A second page load now only redraws the live chat. `_probe` restores only into
+  a fresh conversation, and a streamed token with no open round opens one. 7 new tests, which failed on 3d26875
+  with the live errors. Not run live in WebKit.
+- **Secrets are named where they live** (#194, #195, `bdbe280`, `036925e`). Search hints and the Tavily 401/403
+  refusal name the store by its real per-platform path first (the refusal also says which source the refused
+  key came from) and the environment as fallback. MCP `${VAR}` credentials are read through `secret()`, store
+  before environment; `_mcp_missing` no longer refuses a server whose token is only in the store. 13 new tests.
+- **Goal-mode nudges mandate nothing** (#240, `9110044`). Nudges are user-role messages carrying the model's
+  own plan text, so their paths counted as user-named. A `/goal` plan the user typed still counts (`by` in
+  goal.json).
+- **A reopened chat draws only the typed line** (#241, `3f83e86`). #224's rebind notice no longer shows in the
+  user's bubble, and an image-only turn's notice no longer marks both folders as user-named.
+- **The null device is not an outside path** (#243, `944a8e1`). `2>/dev/null` (and `\\.\NUL`) stopped at
+  `auto`. 202 of 775 distinct stored commands contain it.
+- **write_file refuses lookalike directories once and control characters always** (#244, `c4b642b`). A
+  missing directory that looks like an existing sibling (`w` beside `work`) is refused once with "did you mean".
+  Repeating the identical call creates it. Every created directory is reported. Measured in stored writes: 6 of
+  111 paths carried a control character (`pipeline.py\n`).
+- **A finished code block keeps its copy button** (#239, `3d26875`). `codeFinish` emptied the whole head row
+  (`.cwh`) to write the path, taking #156's copy button with it; the path now goes into the name slot `.cwn`.
+- **Drags and window resizes follow the pointer in long chats** (#236, #237, #238, `8362087`). Measured on a
+  200-turn chat (12,968 nodes), WebKitGTK 2.52.6: rail drag 38.8 -> 3.6 ms per step, code grip 40.5 -> 3.5 ms,
+  window resize 16.9 -> 4.0 ms, 0 px view drift after a mid-chat drag (was 2,079 px: WebKitGTK has no scroll
+  anchoring); Chromium 152: rail drag 42 -> 16.4 ms per step, long tasks 7 -> 0. The rail widths are set on the
+  elements that read them, not on `<html>` (#236); turns use `content-visibility:auto` only during a gesture and
+  the view is restored afterwards (#237); per-event bridge work is gone on GTK (76 -> 0 bridge calls per drag)
+  and coalesced on Windows (#238).
+- **Nothing overhangs or clips** (#231-#235, `65b741c`). Composer buttons stay inside the box (477 -> 0 audit
+  findings); long paths, URLs and compounds wrap in the column (1950 -> 0); menus open above the goal/git cards
+  and the cards no longer cover the composer or, from 1100 px of chat width, the column; a squeezed code panel
+  (< 150 px) hides instead of clipping; the settings sheet stays under the 34 px title bar; alignment, scrollbar
+  corners, tab strip and focus rings. Audited over 185 Chromium and 12 WebKitGTK renders before and after.
+- Integration re-audit of the GUI wave (`93aba43`, `5d59ebe`, `dffdeb6`): a drag no longer moves turns 6 px
+  (margins under `content-visibility`); browser tabs shrink before they scroll (the active tab was hidden); the
+  menu focus ring keeps its 5 px radius; `brPlace` keeps calling the bridge under `NATIVEDRAG`, because #201's
+  in-window panel is placed by it on GTK (one call per real change).
+- **The rollover note is data, not the user's words** (#223, `b405de1`). It is framed as a record written by Crow
+  and the model; only the user's carried lines and the typed line count as user-named paths. The Qwen3.8
+  template allows no other role for it (a late system message raises, and so does a turn with no user query).
+- **An invented `cwd` never runs** (#221, `4791598`). `run_command` refuses a cwd that is not an existing
+  directory before anything runs and before the approval card. The refusal names the working area and the near
+  miss found on disk (edit distance 1-2, unique best match, case-insensitive on Windows):
+  `'nibor11896' is 'nibor1896' here`. read_file, list_dir and the outside-root write refusal carry the same hint;
+  `~` in cwd is expanded. A bare filesystem root in prose (`4120 / package`) no longer counts as a user-named
+  path. That `/` in the 2026-09-22 rollover note had disarmed #144 and `_outside_root` for the whole session.
+  Measured over all stored sessions: 5 of 18 cwd calls named a home that does not exist, and each cost a `pwd`
+  round after a bare Errno 2.
+- **Tool arguments under another harness's names are taken and said** (#215, `d3b5585`). `edit_file` accepts
+  `old_string`/`old_str`, `new_string`/`new_str` and `file_path`; `read_file`/`write_file`/`append_file`
+  accept `file_path` (write_file also `file_text`); `search_text`/`find_files` accept `path` as `root`;
+  `memory` accepts `new_text` as `content`. The result opens with `[took old_string as old, ...]`; two names
+  with different values are an error. After the 2026-09-22 rollover, 22 of 22 edit_file calls had failed on
+  Claude Code's names, 15 of them first told to read the file.
+- A call with an unknown key and a missing required one runs nothing and returns the tool's argument list,
+  before the tool's own checks (#214, `95c2f0f`). `edit_file` checks `old`/`new` before the read-first rule,
+  and a missing `new` is an error instead of silently deleting `old` (`new=""` still deletes) (#215).
+- **Read-before-write is the file's state, not the turn** (#215, `fbc05e7`). A read counts across turns and
+  goal-mode nudges while the file keeps the mtime and size it was read with; refusals say "never read in this
+  conversation" or "it changed on disk since you read it". Crow's own writes keep the file counted. The state
+  empties at a rollover (mid-turn included -- it did not before), a new chat, a model switch or a resume.
+- `search_text` given a file as root searches that file instead of answering "no match" (#215).
+- The terminal's between-turn rollover keeps the chat's memory, skills and goal (#214).
+- **Rollover digest cut off at its token cap** no longer passes as complete (#210, `b9e54b0`): the unfinished
+  last line is dropped and the note says `[digest cut off at the N-token cap ...]`; the digest prompt names a
+  500-word budget (unmeasured). Measured 2026-09-22 17:12: 2000 tokens, finish length, 6,795 chars ending
+  mid-bullet.
+- **Delegation: a gated fallback spot is skipped** (#216, `f25f27a`). HTTP 403 (e.g. a model OpenRouter serves
+  only to agentic harnesses), "no endpoints found" and 402 on a paid favourite mark the spot dead and try the
+  next; up to six such refusals don't count against the three transient retries. 401, 402 on a free model and
+  schema errors stop the chain at once. A failed delegate names every spot it tried and why, saved in
+  `subtasks-registry.json` and the transcript. A mid-stream error chunk from a remote endpoint reports its
+  code instead of "the model answered nothing".
+- **Degenerate rounds stay out of the history** (#217, `b0f2514`, `c9ff31f`). A round that is bare tool-call
+  markup, or a stub that visibly stopped (ends on a colon, a dangling word, comma or dash), is not stored; it is
+  asked again once on the same prefix with a fresh seed. A stub on the retry is kept; markup twice ends the turn
+  with one red line. Short answers ("Ja", "Erledigt", "42") are never touched. Replayed over 27 session files:
+  8 markup + 79 stub rounds flagged, 0 false positives. A call cut by the model's own stop gets `UNCLOSED_CALL`
+  naming the parameter instead of blaming the output limit; crow-nest's `finish: abort` and
+  `crow_malformed_calls` are read.
+- `check_shared_core` is green again (82/82): `tool_append_file` was never declared since 2026-09-20 (#219,
+  `d528a5b`).
+
+### Known limitations
+
+- **#251 needs node on PATH.** `syntax_check` looks node up with `shutil.which("node")`; without it (the default
+  on a Windows or Linux machine with no Node.js) it returns nothing: no line in the result, no warning, the
+  write stands. Neither installer installs node. The 7 #251 tests are skipped when node is absent.
+  Windows (`node.exe`, `_bounded_run`'s Windows path without a process group) is unverified. Whether the model
+  acts on a FAILED line live is unmeasured.
+- #250: the not-done phrases are a fixed list; live behaviour in a goal run is unverified (robin: add a
+  `check:` to the next diorama `/goal`).
+- #253: without the DevTools pipe (Windows) or without an answer only the page's own probe lines and the
+  argument count are claimed (10/18 in the replay instead of 17/18).
+- #254: whether the model now writes whole files up to the limit is unmeasured; the limit is fixed per process.
+- #255/#256 were measured in headless Chromium only; WebKitGTK 2.52 is unmeasured (#256 assumes WebKitGTK
+  reserves the 10 px scrollbar gutter like Chromium). Below 1100 px of chat width goal, git and subtask cards
+  still float over the column (#233, needs a design decision). No real delegate run against the panel yet.
+- **Windows is unverified** for #201/#226 (old pane window, `on_top`), #238 grip coalescing, #228 copy/context
+  menu and #229 `explorer /select` (#247); #248's CI fix waits for a push.
+- render_page on Windows keeps the command-line capture under the virtual clock (now with the fixed ceiling);
+  it cannot capture on the deadline. A page with a blocked main thread now costs 25 s (was 9.2 s).
+- `wait_ms` changed meaning from virtual to real time: light pages cost about `wait_ms` of real time.
+- The render GPU arm has not been run against a loaded card; no Windows Job Object for the render (#213).
+- run_command on Windows has no scope and no process group (no Job Object yet); the 8G ceiling does not scale
+  with the machine's RAM.
+- The #202 class counting runs between turns; one turn can still spend its tool rounds on one wall.
+- The #220 budget now caps every default turn on the llama arm (absent level = high there). The 1024 budget
+  binds at the operating point (8 of 9 rounds at K=26 in MEAS-0923, #245); budget and closing sentence are
+  unmeasured with thinking on.
+- `sampling_no_thinking` carries presence_penalty 1.5, undecided (#246); decide before a point is flipped to
+  `none`.
+- #217's live escape rate (does a fresh-seed retry avoid the bad round?) is unmeasured.
+- A subtask stopped while its spot is failing ends `failed` and memos the spot dead instead of `interrupted`
+  (#242, found by reading, not observed live).
+- Not in this release: `/remote` phone mirror (#249), the Windows installer bundle (#196).
+
 ## 2.4.0 — 2026-09-19
 
 ### Added

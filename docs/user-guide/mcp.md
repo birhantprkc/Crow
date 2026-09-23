@@ -33,7 +33,7 @@ its declarations cost in every prompt, `ask again`, `remove`, and a field to add
 | Classes | empty until you set them. An unclassified tool is `executing` |
 | Client capabilities | `elicitation` only. `sampling` gets `-32601` naming what is missing |
 | Invisible U+E0000–U+E007F | stripped from names, descriptions, schemas and results. Emoji flags survive |
-| `${VAR}` | in `command`, `args`, `cwd`, `env`, `url`, `headers`. Read from the environment when the server is used, never stored. An unset one refuses the server by name |
+| `${VAR}` | in `command`, `args`, `cwd`, `env`, `url`, `headers`. Read when the server is used, never written into `mcp.json`: from the [secret store](../reference/settings.md#the-secret-store-193) first, the environment as the fallback (#195). An unset one refuses the server by name and names the store |
 | Credential redaction | on **errors** only. A server that quotes the request it refused would otherwise put the token in the prompt, the chat and the session file. A successful result is untouched |
 | Timeouts | `connect_timeout` 20 s, `timeout` 60 s. Per block, `0` and below fall back to the default |
 

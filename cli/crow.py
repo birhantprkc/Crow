@@ -901,6 +901,12 @@ class TerminalTurnEvents(TurnEvents):
     def turn_interrupted(self) -> None:
         print(f"\n{crow_core.ABORT_NOTE}\n", file=self._out)
 
+    def turn_note(self, message: str) -> None:
+        # #217: THE TERMINAL HEARS THE SAME NOTES THE WINDOW DRAWS. Without
+        # this a discarded degenerate round left its stub on screen and the
+        # re-request streamed behind it with nothing saying why.
+        print(f"{DIM}[{message}]{RESET}\n", file=self._out)
+
     def round_finished(self, timings: dict) -> None:
         line_out = format_timings(timings) if self._rounds else ""
         print(f"\n\n[{line_out}]\n" if line_out else "\n", file=self._out)
@@ -1232,17 +1238,20 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
             # old one's, and #112 exists because sending one model's sampling to
             # another is a change nothing on screen reports. The dict is edited
             # in place because repl() splats the same object into every turn.
+            # #220: the name the next body's budget is looked up
+            # by. Left on the old model, `/model` would carry its cap across.
+            args.served_name = fetch_model_name(url)
             if sampling is not None:
                 # #116 RIDES ALONG HERE, and it has to: a level bound under the
                 # old model is not necessarily one the new one takes -- `max` is
                 # fine for 0731 and RAISES against unsloth's template. The
                 # request would fail after the prefill was already paid for.
                 kept = args.reasoning_effort
-                if kept and crow_core.reasoning_problem(fetch_model_name(url), kept):
+                if kept and crow_core.reasoning_problem(args.served_name, kept):
                     args.reasoning_effort = None
                     print(f"{DIM}{kept} is not a level {url} takes -- sending"
                           f" nothing until it is set again{RESET}")
-                fresh = sampling_for_run(args, fetch_model_name(url))
+                fresh = sampling_for_run(args, args.served_name)
                 if fresh is not None:
                     sampling.clear()
                     sampling.update(fresh)
@@ -1706,6 +1715,11 @@ def sampling_for_run(args: argparse.Namespace, model: str | None) -> dict | None
 
     Returns the four fields `run_turn` takes, ready to splat.
     """
+    # #220: KEPT ON `args`, beside the level, because this is the
+    # one call that sees every model the run is pointed at -- the start and
+    # every `/model`. The senders read it for the manifest's budget; the wire
+    # label stays args.model.
+    args.served_name = model
     problem = crow_core.reasoning_problem(model, args.reasoning_effort)
     if problem is not None:
         print(f"crow: {problem}", file=sys.stderr)
@@ -1727,7 +1741,8 @@ def sampling_for_run(args: argparse.Namespace, model: str | None) -> dict | None
     # which is the difference between "the user chose 0.01" and "the terminal
     # has always said 0.01", and the second must not beat the model's own.
     return crow_core.resolve_sampling(
-        model, {name: getattr(args, name) for name in args.sampling_given})
+        model, {name: getattr(args, name) for name in args.sampling_given},
+        level=args.reasoning_effort)
 
 
 def resume_into(conversation: "crow_core.Conversation", args: argparse.Namespace,
@@ -1826,7 +1841,17 @@ def spend_staged(line: str, staged_images: list, base_url: str):
     return content
 
 
-def _roll_with_digest(conversation, args, loaded, sampling, context_tokens, line):
+def _turn_endpoint(args) -> dict:
+    """#214: wohin und mit welchem Schluessel ein Zug dieses Terminals fragt --
+    EIN Ort fuer den Zug und die Digest-Leg davor. Das Terminal kennt keine
+    Provider-Datei; was es spricht, sind `--base-url`, `--model` und
+    `--api-key`, und der Transport ist der Standard (`TRANSPORT_CHAT`, keine
+    eigenen Header), den `run_turn` und `rollover_digest` beide annehmen."""
+    return {"base_url": args.base_url, "model": args.model,
+            "api_key": args.api_key}
+
+
+def _roll_with_digest(conversation, args, sampling, context_tokens, line):
     """#154 vor dem Schnitt: erst der Digest auf dem noch warmen Praefix --
     danach waere dieselbe Frage ein voller Prefill -- dann der Roll. Ein
     Modulhelfer, kein repl-Block: repl() traegt einen Zeilendeckel, und
@@ -1835,16 +1860,36 @@ def _roll_with_digest(conversation, args, loaded, sampling, context_tokens, line
     # derselbe Deckel, derselbe Prompt-Kopf, sonst bricht der warme Cache.
     # `context_tokens` skaliert das Timeout (ein kalter Praefix braucht
     # grob 700 tok/s Prefill, kein fester 120s-Wert haelt dem stand).
+    # #214: UND DERSELBE ENDPUNKT WIE DER ZUG (`_turn_endpoint`). Bis hier
+    # fragte die Leg ohne `api_key` und mit dem von /props gelesenen Namen
+    # statt `--model` -- gemessen auf 0e65d70: `Authorization: Bearer ` (leer)
+    # und `"model": <der geladene Name>`. Ein entfernter Endpunkt, der den
+    # Schluessel prueft, lehnt das ab, und der Digest endete still als
+    # "[digest failed ...]".
     digest = rollover_digest(
-        conversation, base_url=args.base_url, model=loaded or None,
+        conversation, **_turn_endpoint(args),
+        # #220: the served name beside the wire label, for the
+        # manifest -- the leg asks the same entry its turn asks.
+        served_name=getattr(args, "served_name", None),
         temperature=sampling["temperature"], top_p=sampling["top_p"],
         min_p=sampling["min_p"], top_k=sampling.get("top_k"),
         presence_penalty=sampling.get("presence_penalty"),
         reasoning_effort=args.reasoning_effort,
         reasoning_budget=args.reasoning_budget,
         prompt_tokens=context_tokens)
-    return roll_over(conversation, args.base_url, context_tokens,
-                     carry=line, digest=digest)
+    archived = roll_over(conversation, args.base_url, context_tokens,
+                         carry=line, digest=digest)
+    # #214: DER KOPF GEHT MIT UEBER DEN SCHNITT, wie im
+    # Fenster und im Mid-Turn-Roll des Kerns. Bis hier fehlte die Zeile nur
+    # an dieser einen Stelle: `roll_over` ruft `reset()`, `reset()` laesst den
+    # Pin fallen, und der Terminal-Chat lief nach dem Schnitt ohne Gedaechtnis,
+    # Faehigkeiten und Ziel weiter -- der einzige Unterschied im Request vor
+    # und nach dem Schnitt, der nicht die Nachrichten selbst waren. Der Pin
+    # vom Start (`conversation.memory is None`) greift danach nicht mehr, weil
+    # er nur beim Oeffnen laeuft.
+    crow_core.repin_head(conversation, crow_core.get_root(),
+                         include_status=True)
+    return archived
 
 
 def repl(args: argparse.Namespace) -> int:
@@ -1978,7 +2023,7 @@ def repl(args: argparse.Namespace) -> int:
         # instead of being the last thing in a file nobody reads.
         rolled = False
         if should_roll(context_tokens, n_ctx, args.rollover_at):
-            archived = _roll_with_digest(conversation, args, loaded, sampling, context_tokens, line)
+            archived = _roll_with_digest(conversation, args, sampling, context_tokens, line)
             if archived:
                 # Printed while context_tokens still HOLDS the number. Zeroing
                 # first and interpolating after is how this reads "archived at
@@ -2009,12 +2054,10 @@ def repl(args: argparse.Namespace) -> int:
         # it -- and it owns them for every surface, not just this one.
         turn = run_turn(
             conversation,
-            base_url=args.base_url,
-            model=args.model,
-            api_key=args.api_key,
+            **_turn_endpoint(args),
             **sampling,
             reasoning_effort=args.reasoning_effort, reasoning_budget=args.reasoning_budget,
-            timeout=args.timeout,
+            served_name=args.served_name, timeout=args.timeout,
             carry=line,
             context_tokens=context_tokens,
             n_ctx=n_ctx,
@@ -2058,9 +2101,9 @@ def repl(args: argparse.Namespace) -> int:
             crow_core.review_turn(
                 conversation, base_url=args.base_url, model=args.model,
                 api_key=args.api_key, **sampling, reasoning_budget=args.reasoning_budget,
-                reasoning_effort=args.reasoning_effort, incidents=turn.incidents,
-                gate=getattr(args, "memory_approval",
-                             crow_core.MEMORY_APPROVAL_DEFAULT),
+                reasoning_effort=args.reasoning_effort, served_name=args.served_name,
+                incidents=turn.incidents, gate=getattr(args, "memory_approval",
+                                                       crow_core.MEMORY_APPROVAL_DEFAULT),
                 events=TerminalTurnEvents(rounds=args.rounds,
                                           show_reasoning=show_reasoning))
             # AFTER IT RETURNED. With the gate off this finds nothing and costs

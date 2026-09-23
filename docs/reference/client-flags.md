@@ -8,7 +8,7 @@
 | `--reasoning-effort` | unset | per chat via `/reasoning`. Levels come from the manifest |
 | `--reasoning-budget N` | the model's | cap the thinking per request; per chat via `/budget`, `/budget off` lifts it. The default comes from the manifest, so nothing has to be typed. Carries its own end-of-thinking message -- a cap without one cuts the answer in half (#176) |
 | `--rollover-at` | `0.9` | archive and start fresh at this share of the window. `0` disables |
-| `--rollover-digest-tokens N` | `400` | cap for the model's own digest in the rollover note, asked on the still-warm prefix before the cut. `0` disables (#154) |
+| `--rollover-digest-tokens N` | `400` | cap for the model's own digest in the rollover note, asked on the still-warm prefix before the cut. The leg sends at least 2000 (#205); an answer cut off at the cap is marked as cut (#210). The leg asks with the same `--base-url`, `--model` and `--api-key` as the turn (#214; before, it sent no key and the model name read from the server). `0` disables (#154) |
 | `--max-tool-rounds` | `24` | `0` answers without running any tool |
 | `--mode` | `auto` | `manual` asks before writing and executing, `allowedit` before executing, `yolo` asks for nothing and means it -- outside paths and git commit included; `git_push` still asks, and the level never outlives the process |
 | `--no-review` | off | stop the model saving memories and skills after a turn |
@@ -17,14 +17,15 @@
 | `--show-reasoning` | off | stream the reasoning. `/thoughts` toggles it |
 | `--no-session` | off | do not resume the last session, do not save this one |
 | `--language NAME` | `$CROW_LANGUAGE`, else unset | pin the language of the model's replies, e.g. `--language English`. Unset keeps the rule "reply in the language the user wrote in", which the FIRST message decides: a chat opened with "Hey" was answered in German and stayed German through an English task (2026-09-19, both engines). It replaces that sentence in the system prompt, so a session resumed under another language pays one full prefill |
-| temperature / top_p / min_p | `1.0` / `0.95` / `0.01` | written once, in `cli/crow_core.py` |
+| temperature / top_p / min_p | `1.0` / `0.95` / `0.01` | the floor, written once in `cli/crow_core.py`. The manifest's shared block and the served model's entry override it: the two Qwen3.8-Flash-Next points send `min_p` 0.0, `top_k` 20, `presence_penalty` 0.0 ([thinking and sampling](../operating-points.md#thinking-and-sampling-per-point)) |
+| output cap | `16384` | `max_tokens` on every request, local and remote (`MAX_TOKENS`). No flag: `CROW_MAX_TOKENS` sets it once per process. It also sets how large a file one `write_file` carries ([tools](tools.md#write_file-and-append_file-244-251-252-254)) |
 
 ## #145 — the terminal's budget flags
 
 | flag | default | what |
 |---|---|---|
 | `--turn-token-budget N` | `0` (off) | decoded tokens one turn may spend before it is told to answer |
-| `--subtask-max-tokens N` | `0` (= 8192) | output cap for one delegated subtask |
+| `--subtask-max-tokens N` | `0` (= the output cap, 16384 unless `CROW_MAX_TOKENS` sets it) | output cap for one delegated subtask |
 
 The retry cap needs no flag: the fourth identical failing call to an uncached tool is refused
 before it runs, always.

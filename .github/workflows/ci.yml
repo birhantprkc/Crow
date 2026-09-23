@@ -7,7 +7,7 @@
 # has no Windows wheel (it wants the GObject headers and the typelibs, which come
 # from a distribution, not from pip), so on windows-latest that case cannot pass
 # and the whole suite is run on Linux only. The two suites that DO run on Windows
-# are the ones the Windows product is made of: 1,313 cases over the core and the
+# are the ones the Windows product is made of: 1,766 cases over the core and the
 # terminal client.
 #
 # NOT `continue-on-error`. A step that is allowed to fail is a step nobody reads;

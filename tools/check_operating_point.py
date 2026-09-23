@@ -513,6 +513,51 @@ def builds_a_body(text):
             and re.search(r"[\"']stream[\"']\s*:", text) is not None)
 
 
+# ---------------------------------------------------------------------------
+# #225: thinking per operating point.
+#
+# An entry that declares `reasoning_fixed` is sent that word on every request
+# (crow_core.effective_reasoning). Four ways to get that wrong, each measured
+# or one keystroke away: a word the entry does not offer (the engine answers
+# 400/500 and the turn dies), `none` without the card's non-thinking row (the
+# 2026-09-22 state: thinking off under the thinking row), a thinking point
+# without a documented cap (#80: 21 of 30 uncapped xhigh generations ended
+# with zero answer characters), and a docs table that says another word.
+SAMPLING_ROW = ("temperature", "top_p", "top_k", "min_p", "presence_penalty")
+
+
+def check_thinking(repo, manifest):
+    """Problems with the fixed-thinking entries, or []."""
+    problems = []
+    entries = ((manifest.get("models") or {}).get("entries") or {})
+    doc_path = os.path.join(repo, "docs", "operating-points.md")
+    doc = read(doc_path) if os.path.exists(doc_path) else ""
+    fixed = 0
+    for key, entry in sorted(entries.items()):
+        word = (entry or {}).get("reasoning_fixed")
+        if word is None:
+            continue
+        fixed += 1
+        if word not in (entry.get("reasoning_levels") or []):
+            problems.append("%s: reasoning_fixed %r is not one of its "
+                            "reasoning_levels" % (key, word))
+        if word == "none":
+            row = entry.get("sampling_no_thinking") or {}
+            missing = [f for f in SAMPLING_ROW if f not in row]
+            if missing:
+                problems.append("%s: fixed at none without a full "
+                                "sampling_no_thinking row (missing %s)"
+                                % (key, ", ".join(missing)))
+        elif not entry.get("reasoning_budget") or not entry.get("_reasoning_budget_note"):
+            problems.append("%s: thinks at %s without a documented "
+                            "reasoning_budget" % (key, word))
+        if not re.search(r"\|\s*`%s`\s*\|\s*`%s`\s*\|"
+                         % (re.escape(key), re.escape(word)), doc):
+            problems.append("%s: docs/operating-points.md has no row "
+                            "'| `%s` | `%s` |'" % (key, key, word))
+    return fixed, problems
+
+
 def check_sampling(repo, sampling):
     """Count the sampling defaults across the client sources.
 
@@ -743,11 +788,21 @@ def main(argv):
         print("  OK       %-34s %s, once each in %s"
               % ("sampling defaults", triple, core))
 
+    fixed, tprob = check_thinking(args.repo, manifest)
+    if tprob:
+        failed += 1
+        print("  FAILED   %-34s %d problem(s)" % ("thinking per point", len(tprob)))
+        for p in tprob:
+            print("             %s" % p)
+    else:
+        print("  OK       %-34s %d fixed point(s), word offered, cap and docs row"
+              % ("thinking per point", fixed))
+
     print()
     # `checked` and not len(copies): the unit is one (file, model key) pair, so
     # adding a model to the manifest raises this number and a copy that never
     # learned about it shows up as a missing pair rather than as nothing.
-    total = checked + 2
+    total = checked + 3
     print("RESULT: %d of %d sources agree with manifests/operating-point.json"
           % (total - failed, total))
     return 1 if failed else 0

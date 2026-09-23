@@ -449,6 +449,36 @@ def user_manager_reachable(runtime_dir: str | None = None) -> bool:
         return False
 
 
+_RENDER_MEMORY_DEFAULT = "6G"
+
+
+def render_memory_bounds() -> dict:
+    """The memory properties the render browser's scope gets, as systemd sizes.
+
+    #213. The 2026-09-21 incident: a software-WebGL render of the 2 MB three.js
+    page grew its headless chromium to 54 GiB, the desktop froze, and the
+    kernel's OOM killer shot the ENGINE -- the browser sat in no cgroup of its
+    own, so "largest process" was answered with somebody else's server.
+    MemoryMax=6G kills that runaway one ninth of the way up while leaving a
+    healthy software render of the same page ten times its usual size to
+    finish; MemoryHigh one below it makes the kernel reclaim first. The swap
+    cap carries the server's reason unchanged: on this machine's zram the
+    browser's anonymous memory is the freeze, and without the cap it goes
+    exactly there. $CROW_RENDER_MEMORY_MAX moves the kill bound (any systemd
+    size); `none` drops the size bounds and keeps the swap cap.
+    """
+    out = {"MemorySwapMax": "0"}
+    raw = (os.environ.get("CROW_RENDER_MEMORY_MAX") or "").strip()
+    if raw.lower() in ("0", "none", "off"):
+        return out
+    if raw:
+        out["MemoryMax"] = raw
+        return out
+    out["MemoryHigh"] = "5G"
+    out["MemoryMax"] = _RENDER_MEMORY_DEFAULT
+    return out
+
+
 def server_scope_prefix() -> list[str]:
     """What to put in front of llama-server's argv so it runs in its own scope.
 
@@ -488,13 +518,286 @@ def server_scope_prefix() -> list[str]:
     """
     if IS_WINDOWS or (os.environ.get("CROW_SERVER_SCOPE") or "").strip().lower() in ("0", "off", "none"):
         return []
+    return _user_scope_prefix(server_memory_bounds())
+
+
+_SYSTEMD_VERSIONS: dict = {}
+
+
+def _systemd_version(run: str) -> int:
+    """The major version `systemd-run --version` reports (0 if unreadable), once per binary."""
+    if run not in _SYSTEMD_VERSIONS:
+        try:
+            first = subprocess.run([run, "--version"], capture_output=True, text=True,
+                                   timeout=5, stdin=subprocess.DEVNULL).stdout.split()
+            _SYSTEMD_VERSIONS[run] = int(first[1]) if first[:1] == ["systemd"] else 0
+        except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+            _SYSTEMD_VERSIONS[run] = 0
+    return _SYSTEMD_VERSIONS[run]
+
+
+def _user_scope_prefix(properties: dict, unit: str | None = None,
+                       literal: bool = False) -> list[str]:
+    """The shared builder: a user scope in session.slice with these properties.
+
+    The callers differ only in their bounds and their switch -- the shape
+    (user manager, --scope so the Popen pid stays the waitable one, the slice
+    oomd does not watch, --quiet, `--` before the payload) is what #158 and the
+    2026-09-16 oomd kills paid for, and it belongs in one place like every
+    other OS fact in this file. Verified here (2026-09-22): the scoped process
+    lands in session.slice/run-*.scope with memory.max/memory.high/
+    memory.swap.max exactly as given. `unit` names the scope (`--unit=`) for a
+    caller that has to ask it afterwards how it ended (scope_result) or stop
+    what is left in it (kill_scope); without it systemd picks run-*.scope.
+
+    `literal` is for a payload that carries a model's shell text. systemd-run
+    EXPANDS ITS COMMAND LINE: measured 2026-09-22 on systemd 261, `bash -c
+    'X=secret; echo "[$X]" "[${X}]"'` printed `[secret] []` with "Referenced
+    but unset environment variable" on stderr, and `$$` arrived as `$`.
+    `--expand-environment=no` turns that off; it exists from systemd 254 on,
+    and before 254 a scope did no expansion (systemd NEWS 254/258: off by
+    default for --scope until 258 flipped it on), so older ones get nothing.
+    The render's and the server's argv hold no `${`, and stay as they were.
+    """
     run = shutil.which("systemd-run")
     if not run or not user_manager_reachable():
         return []
     prefix = [run, "--user", "--scope", "--slice=session.slice", "--quiet"]
-    for name, value in server_memory_bounds().items():
+    if unit:
+        prefix.append("--unit=" + unit)
+    if literal and _systemd_version(run) >= 254:
+        prefix.append("--expand-environment=no")
+    for name, value in properties.items():
         prefix += ["-p", "%s=%s" % (name, value)]
     return prefix + ["--"]
+
+
+def render_scope_prefix() -> list[str]:
+    """What to put in front of the render browser's argv (#213).
+
+    The 2026-09-21 runaway (54 GiB software-WebGL render, frozen desktop, the
+    kernel shooting the ENGINE instead) ended in no cgroup of the browser's
+    own; this prefix gives it one, sized by render_memory_bounds, so the next
+    runaway dies alone inside it. Empty on Windows and everywhere systemd-run
+    cannot reach the user manager -- then the browser runs as before, bounded
+    only by the wall-clock kill. `CROW_RENDER_SCOPE=0` switches it off for a
+    measurement that wants the bare process.
+
+    THE UNIT STARTS IN $HOME, NOT IN THE CALLER'S CWD -- measured 2026-09-22:
+    a systemd-run probe launched from ~ resolved its relative path against ~
+    and died of ENOENT without one retry line. render_page's argv carries only
+    absolute paths (the found browser, mkdtemp's profile, the rooted target),
+    which is what makes this prefix safe to prepend there.
+    """
+    if IS_WINDOWS or (os.environ.get("CROW_RENDER_SCOPE") or "").strip().lower() in ("0", "off", "none"):
+        return []
+    return _user_scope_prefix(render_memory_bounds())
+
+
+_COMMAND_MEMORY_DEFAULT = "8G"
+
+
+def command_memory_bounds() -> dict:
+    """The memory properties run_command's shell scope gets, as systemd sizes.
+
+    #218. 2026-09-22 evening: after render_page kept timing out, the model ran
+    the SAME software-WebGL headless chromium (--enable-unsafe-swiftshader
+    --no-sandbox) 20 times through run_command -- the one tool with no memory
+    bound, so the runaway #213 had just fenced in was one shell away. The
+    bound goes on the shell, not on a binary: the model reaches any binary
+    through it.
+
+    WHY 8G. Measured 2026-09-22 as each scope's own memory.peak: the
+    diorama's three.js esbuild bundle 106 MiB, `npm ls --all` 46 MiB, node
+    importing three 21 MiB, gcc 9 MiB, Crow's own test_crow 60 MiB and
+    test_crow_core 109 MiB. 8G is ~75x the largest of those and above a node
+    build at V8's own heap ceiling (~4 GiB); it stops the 54 GiB runaway at a
+    seventh of the way. MemoryHigh one below makes the kernel reclaim first,
+    the swap cap is render_memory_bounds' reason unchanged (on zram the
+    anonymous memory IS the freeze). $CROW_COMMAND_MEMORY_MAX moves the kill
+    bound (any systemd size); `none` drops the size bounds, keeps the swap cap.
+    """
+    out = {"MemorySwapMax": "0"}
+    raw = (os.environ.get("CROW_COMMAND_MEMORY_MAX") or "").strip()
+    if raw.lower() in ("0", "none", "off"):
+        return out
+    if raw:
+        out["MemoryMax"] = raw
+        return out
+    out["MemoryHigh"] = "7G"
+    out["MemoryMax"] = _COMMAND_MEMORY_DEFAULT
+    return out
+
+
+def command_scope_prefix(unit: str) -> list[str]:
+    """What to put in front of run_command's shell argv (#218): its own scope.
+
+    Sized by command_memory_bounds, named `unit` so the caller can ask how it
+    ended (scope_result) and sweep it after a kill (kill_scope). OOMPolicy=kill
+    sets memory.oom.group: at the ceiling the kernel kills EVERY process in
+    the scope at once. Measured 2026-09-22 (200 MB hog against MemoryMax=100M,
+    `hog; echo after`): with the default OOMPolicy=stop the shell went on and
+    printed "after rc=137" before systemd's stop reached it; with kill the
+    shell died with the hog (-9) and printed nothing more -- a command either
+    ran or was killed whole, never half.
+
+    The scope inherits the caller's cwd: measured 2026-09-22, `pwd` under the
+    prefix from a scratch directory printed that directory -- `--scope` execs
+    the payload in systemd-run's own process. Empty on Windows, empty where
+    systemd-run cannot reach the user manager (then the shell runs as before,
+    bounded by the clock and the capture cap only), and with
+    `CROW_COMMAND_SCOPE=0`.
+    """
+    if IS_WINDOWS or (os.environ.get("CROW_COMMAND_SCOPE") or "").strip().lower() in ("0", "off", "none"):
+        return []
+    # CollectMode: a scope the ceiling killed is unloaded, not kept "failed".
+    # CI 2026-09-23 (systemd 255): the unit sat in deactivating past
+    # scope_result's settle and turned failed afterwards, a row in
+    # `systemctl --user --failed` nobody resets. The kill is still named:
+    # session_oom_kills is the witness that does not depend on the unit.
+    return _user_scope_prefix(dict(command_memory_bounds(), OOMPolicy="kill",
+                                   CollectMode="inactive-or-failed"), unit,
+                              literal=True)
+
+
+def _systemctl_user(*args: str) -> str:
+    """`systemctl --user <args>` stdout, "" on any failure. Short and bounded."""
+    ctl = shutil.which("systemctl")
+    if not ctl:
+        return ""
+    try:
+        return subprocess.run([ctl, "--user", *args], capture_output=True, text=True,
+                              timeout=5, stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def scope_result(unit: str, settle: float = 2.0) -> str:
+    """How the named scope ended: systemd's Result= ("oom-kill", "success", ...).
+
+    A FACT FROM THE UNIT, NOT A GUESS FROM THE EXIT CODE. -9 is also what a
+    `kill -9 $$` gives, and a reason the model acts on has to be the real one.
+    Measured 2026-09-22, 8 of 8: the first query right after the shell's -9
+    already read `failed oom-kill`; `settle` covers a unit still marked
+    active/deactivating. 2 s and not 0.5: on CI (systemd 255, 2026-09-23) the
+    journal logged "Failed with result 'oom-kill'" for a scope this query had
+    already given up on. It is paid only after a -9, and only while systemd
+    still calls the unit active. A failed unit stays loaded until reset-failed -- it is
+    reset here, so the kill leaves no row in `systemctl --user --failed`.
+    """
+    import time
+    deadline = time.monotonic() + settle
+    while True:
+        fields = _systemctl_user("show", unit + ".scope", "-p", "ActiveState",
+                                 "-p", "Result", "--value").split()
+        state, result = (fields + ["", ""])[:2]
+        if state == "failed":
+            _systemctl_user("reset-failed", unit + ".scope")
+            return result
+        if state not in ("active", "deactivating", "reloading") or time.monotonic() >= deadline:
+            return result
+        time.sleep(0.05)
+
+
+_SLICE_CGROUP: "list[str]" = []
+
+
+def session_oom_kills() -> "int | None":
+    """The kernel's oom_kill count for session.slice, or None where unreadable.
+
+    #218, CI 2026-09-23. scope_result asks systemd for Result=oom-kill, and on
+    systemd 255 (ubuntu-latest) that answer loses a race: OOMPolicy=kill
+    empties the scope at once, the cgroup-empty event is handled before the
+    OOM event, the scope goes dead with Result=success and is collected -- the
+    ceiling kill came back as a bare "[exit -9]". systemd 261 here always read
+    `failed oom-kill` (8 of 8, 2026-09-22). The kernel's count does not race:
+    memory.events is hierarchical (cgroup-v2.rst: "all fields in this file are
+    hierarchical"), so a kill in any scope under session.slice raises the
+    slice's oom_kill. The caller reads it before and after its own scope ran.
+    """
+    if IS_WINDOWS:
+        return None
+    # CACHED ONLY ONCE KNOWN. Before the first scope lands in session.slice
+    # the slice is not loaded and ControlGroup reads "" -- measured on CI
+    # 2026-09-23, where caching that "" left the count None for good.
+    if not _SLICE_CGROUP:
+        path = _systemctl_user(
+            "show", "session.slice", "-p", "ControlGroup", "--value").strip()
+        if not path.startswith("/"):
+            return None
+        _SLICE_CGROUP.append(path)
+    path = _SLICE_CGROUP[0]
+    try:
+        with open("/sys/fs/cgroup" + path + "/memory.events", encoding="ascii") as fh:
+            for line in fh:
+                key, _, value = line.partition(" ")
+                if key == "oom_kill":
+                    return int(value)
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def kill_scope(unit: str) -> None:
+    """SIGKILL whatever is still in the named scope -- the sweep after a kill.
+
+    The process-group kill reaches everything the shell started EXCEPT a
+    descendant that left the group (setsid, a daemonizer). The scope's cgroup
+    it cannot leave. The unit is the one this caller named, never a pattern
+    (#158)."""
+    _systemctl_user("kill", "--signal=SIGKILL", unit + ".scope")
+
+
+def devtools_pipe() -> "tuple[list[str], tuple[int, int], int, int] | None":
+    """The two pipes of `--remote-debugging-pipe`, or None where they cannot be had (#213).
+
+    Chromium reads DevTools commands from fd 3 and writes answers to fd 4 --
+    the transport puppeteer's and playwright's `pipe` launch use. Returns
+    (argv prefix, fds for Popen's pass_fds, our write end, our read end);
+    the caller closes the pass_fds pair after Popen and its own pair when
+    the render is over.
+
+    A TRAMPOLINE PROCESS AND NOT preexec_fn: the GUI calls render_page from a
+    worker thread, and preexec_fn is documented unsafe with threads. The
+    child ends are lifted to fds >= 10 first, because moving fd 3 onto 3 and
+    then closing the original closes what was just placed -- measured
+    2026-09-22: a fresh os.pipe() hands out fd 3, and the browser then logged
+    "Remote debugging pipe file descriptors are not open". The prefix goes
+    AFTER the scope prefix: the trampoline execs the browser in place, so the
+    pid the scope holds is the browser.
+
+    None on Windows: there the pipe needs handle inheritance through
+    --remote-debugging-io-pipes, which nobody has measured here; the caller
+    keeps the command-line screenshot path.
+    """
+    if IS_WINDOWS:
+        return None
+    import fcntl
+
+    def lifted(fd: int) -> int:
+        high = fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 10)
+        os.close(fd)
+        return high
+
+    child_in, ours_out = os.pipe()
+    ours_in, child_out = os.pipe()
+    child_in, ours_out, ours_in, child_out = (
+        lifted(child_in), lifted(ours_out), lifted(ours_in), lifted(child_out))
+    # THE TRAMPOLINE IS PYTHON, NOT sh. It was `sh -c 'exec "$@" 3<&10 ...'`
+    # until CI on ubuntu-latest (2026-09-23) read b"" where the echo child
+    # should have answered: /bin/sh there is dash, and dash takes only
+    # single-digit fds in a redirection ("Bad fd number") -- so on every
+    # Debian/Ubuntu machine the browser never started and every render was
+    # "closed its devtools pipe". Arch's sh is bash, which is why it passed
+    # here. The interpreter running Crow is always at hand; it moves the two
+    # ends onto 3 and 4, closes the originals and execs in place, so the pid
+    # the scope holds is still the browser's.
+    hop = ("import os,sys;a,b=int(sys.argv[1]),int(sys.argv[2]);"
+           "os.dup2(a,3);os.dup2(b,4);os.close(a);os.close(b);"
+           "os.execvp(sys.argv[3],sys.argv[3:])")
+    prefix = [sys.executable, "-I", "-S", "-c", hop,
+              str(child_in), str(child_out)]
+    return prefix, (child_in, child_out), ours_out, ours_in
 
 
 def kill_pid(pid) -> bool:
@@ -659,6 +962,78 @@ def find_browser_path() -> "str | None":
     return None
 
 
+# #213. GPU WHEN THE CARD IS FREE, SWIFTSHADER OTHERWISE. Measured here
+# 2026-09-22, headless, one animated WebGL page, budgets 2000 vs 8000:
+#
+#   --disable-gpu --enable-unsafe-swiftshader --use-angle=swiftshader
+#       renderer "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)),
+#       SwiftShader driver)" -- software, as it has been since #175-Nachtrag;
+#       both budgets drew (14260 != 14162 bytes).
+#   --use-gl=angle (no --disable-gpu)
+#       renderer "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 5090/PCIe/
+#       SSE2, OpenGL ES 3.2)" -- the card, and both budgets drew too
+#       (13836 != 13261 bytes). Its own VRAM draw stayed inside ~150 MiB on
+#       that page; the runaway memory class of software WebGL never started.
+#
+# The gate is FREE VRAM, not presence: the engine may hold the card, and a
+# render that guesses itself onto a busy one trades a frozen desktop for a
+# shot engine. 512 MiB free is comfortably above the measured draw of a
+# headless render while being small enough to let the common card-free case
+# through.
+_GPU_HEADROOM_MIB = 512
+
+
+def gpu_free_mib(query=None) -> "int | None":
+    """Free VRAM in MiB on the first card, or None when there is no answer.
+
+    nvidia-smi is the only reader -- the machine this was measured on answers
+    with an NVIDIA card, and a generic probe would be a second opinion nobody
+    asked for. A probe that cannot run or cannot be parsed is None, and None
+    means SOFTWARE (swiftshader): the render may not guess itself onto a card
+    whose state it could not read. `query` is the injection point for the
+    suite, the same seam find_servers has.
+    """
+    if query is None:
+        exe = shutil.which("nvidia-smi")
+        if not exe:
+            return None
+
+        def query():
+            try:
+                done = subprocess.run(
+                    [exe, "--query-gpu=memory.free",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                    timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                return ""
+            return done.stdout if done.returncode == 0 else ""
+
+    try:
+        first = (query() or "").strip().splitlines()[0]
+        return int(round(float(first.strip().split(",")[0])))
+    except (IndexError, ValueError):
+        return None
+
+
+def render_gl_mode(free_mib: "int | None" = None) -> str:
+    """"angle" when the card has headroom, else "swiftshader" (#213).
+
+    $CROW_RENDER_GL forces the answer (`angle`/`gpu` or `swiftshader`/
+    `software`/`cpu`) -- the honest way to pin an arm for a measurement;
+    default `auto` asks the card and falls back to software on every doubt.
+    """
+    forced = (os.environ.get("CROW_RENDER_GL") or "").strip().lower()
+    if forced in ("angle", "gpu"):
+        return "angle"
+    if forced in ("swiftshader", "software", "cpu"):
+        return "swiftshader"
+    if free_mib is None:
+        free_mib = gpu_free_mib()
+    return "angle" if (free_mib is not None
+                       and free_mib >= _GPU_HEADROOM_MIB) else "swiftshader"
+
+
 # --------------------------------------------------------------- the fonts ---
 
 def font_store() -> str:
@@ -726,6 +1101,39 @@ def install_fonts(source_dir: str, names: "list[str]", family: str = "") -> int:
 
 
 # ------------------------------------------------------------- the updater ---
+
+def opener_command(path: str) -> "list[str] | None":
+    """How this platform shows a file to the person, as data. Nothing runs here.
+
+    #211. DIE KARTE AM SCHNITT braucht einen Weg, das Transkript zu zeigen:
+    Windows hat `os.startfile` (kein argv -- None heisst hier "die eigene
+    Tuere", der Aufrufer kennt sie), macOS `open`, alles andere `xdg-open`.
+    Dasselbe Warum wie bei `updater_command`: die Plattformentscheidung
+    gehoert in dieses Modul, nicht zwanzigmal in den Aufrufern.
+    """
+    if IS_WINDOWS:
+        return None
+    if sys.platform == "darwin":
+        return ["open", path]
+    return ["xdg-open", path]
+
+
+def reveal_command(path: str, is_dir: bool) -> list[str]:
+    """#229. How this platform shows a path IN ITS FOLDER, as data. Runs nothing.
+
+    A FOLDER IS WHAT GETS OPENED, NEVER THE FILE. The path comes out of a
+    model's text, and `xdg-open` / `os.startfile` on a `.desktop`, `.sh`, `.exe`
+    or `.bat` can run it -- so the file manager is shown the folder (Windows and
+    macOS select the file in it; freedesktop's `xdg-open` has no "select", so
+    Linux opens the parent). A directory handler runs nothing it is pointed at.
+    """
+    if IS_WINDOWS:
+        # `explorer /select,<path>` is ONE argument to explorer, comma and all.
+        return ["explorer", path] if is_dir else ["explorer", "/select," + path]
+    if sys.platform == "darwin":
+        return ["open", path] if is_dir else ["open", "-R", path]
+    return ["xdg-open", path if is_dir else os.path.dirname(path) or "/"]
+
 
 def updater_command(script: str, install: str | None = None) -> list[str]:
     """How this platform runs the installer, as data. Nothing is executed here.
