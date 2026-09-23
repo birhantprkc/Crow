@@ -172,7 +172,9 @@ collecting in turn waits exactly as long as doing the work would have.
 | Tokens | counted from the remote's `usage` block — remote endpoints send no llama timings |
 | Stop | cancels the local turn **and** the subtasks; whatever a stream still delivers is dropped and the card ends `interrupted` |
 
-**In the window.** A subtask is a card in the flow — spot, state, token count — and a child row
+**In the window.** A subtask is a card in the pinned **Subtasks** panel (top right, with the goal and git
+cards; it does not scroll with the chat) — spot, state, token count; running cards on top,
+finished ones folded under `finished · N` — and a child row
 under its root chat in the rail, marked `⑂`. Clicking either jumps to the card; a subtask is never
 opened as a chat. Cards keep breathing outside a turn, and they come back after a restart from
 `session/subtasks-registry.json`: a `running` one becomes `interrupted`, the numbering continues,

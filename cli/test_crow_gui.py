@@ -8586,8 +8586,8 @@ class TheDelegationWearsTheMockupTests(unittest.TestCase):
                            self.source.index("subChip(items){")]
         # An den Chat ausgerichtet: der Wrapper traegt DIESELBE Spaltenklasse
         # wie jeder Block -- keine zweite Geometrie, die driften kann.
-        self.assertIn('wrap.className="turn subrow"', card)
-        self.assertIn("flow.appendChild(wrap)", card)
+        self.assertNotIn("turn subrow", card)
+        self.assertNotIn("flow.appendChild", card)
         self.assertNotIn("col.appendChild", card)
         # `here` entscheidet, und PYTHON rechnet es -- die Seite verglich
         # zuvor ihre eigene live-Kopie gegen parent, zwei eingefrorene Werte,
@@ -8604,6 +8604,48 @@ class TheDelegationWearsTheMockupTests(unittest.TestCase):
         self.assertIn('self._subs_sig = ""', fresh)
         self.assertIn("self._push_subs()", fresh)
         self.assertIn("this.subPending=i; crow.open(it.parent);", self.source)
+
+    def test_the_cards_are_pinned_beside_goal_and_git_not_in_the_flow(self):
+        """#255 (robin, 2026-09-23 on 9a59872): die Subtask-Kacheln scrollten
+        mit dem Verlauf weg, weil `subCard` sie in `#flow` haengte. Sie wohnen
+        jetzt in `#subpanel`, der dritten Karte der `#panels`-Spalte: laufende
+        oben, fertige in einer zugeklappten Gruppe, und der Fluss bekommt nie
+        einen Block dafuer."""
+        panels = self.source[self.source.index('<div id="panels">'):
+                             self.source.index('<aside id="git">')]
+        self.assertIn('<div id="subpanel" hidden>', panels)
+        for part in ('class="splive"', 'class="spfold"',
+                     'class="spdone" hidden'):
+            self.assertIn(part, panels)
+        whole = self.source[self.source.index("  subs(items){"):
+                            self.source.index("chatRow(r,inproj){")]
+        # NEGATIV: kein Weg fuehrt eine Karte mehr in den Fluss, und kein
+        # Sprung scrollt ueber scrollIntoView #main mit.
+        self.assertNotIn("flow.appendChild", whole)
+        self.assertNotIn("flow.querySelector('.subcard", whole)
+        self.assertNotIn("scrollIntoView", whole)
+        card = self.source[self.source.index("  subCard(it){"):
+                           self.source.index("  subChip(items){")]
+        self.assertIn('p.querySelector(it.st==="running" ? ".splive" : ".spdone")',
+                      card)
+        self.assertIn("group.appendChild(d)", card)
+        self.assertNotIn("this.bottom()", card)
+        frame = self.source[self.source.index("  subPanel(items){"):
+                            self.source.index("  subPanelFold(){")]
+        self.assertIn("x.here", frame)
+        self.assertIn("d.remove()", frame)
+        self.assertIn("p.hidden=!(run+fin)", frame)
+        self.assertIn("this.subPanel(this.subItems);", whole)
+        # Die Karte ist eine eigene Scrollflaeche in der Spalte wie das Ziel,
+        # und die Spalte weicht ihr ab 1100 px aus wie Ziel und Git (#233).
+        rule = self.css[self.css.index("#subpanel{"):]
+        rule = rule[:rule.index(chr(125))]
+        self.assertIn("min-height:0", rule)
+        self.assertIn("overflow:auto", rule)
+        self.assertIn("position:relative", rule)
+        self.assertIn("#main:has(#subpanel:not([hidden])) #flow", self.css)
+        self.assertIn("#main:has(#subpanel:not([hidden])) #composer", self.css)
+        self.assertIn("#subpanel .subcard.seen{animation:none", self.css)
 
     def test_the_transcript_shelf_is_not_the_chat_folder(self):
         """NEGATIV auf der Kern-Seite, hier verankert, weil das Fenster der

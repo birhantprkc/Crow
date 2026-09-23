@@ -2260,9 +2260,11 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    Nur solange eine Karte STEHT: das Git-Panel offen oder ein Ziel gesetzt. */
 @container chat (min-width:1100px){
   body:not([data-git="shut"]) #flow,
-  #main:has(#goalpanel:not([hidden])) #flow{padding-right:calc(10px + 306px)}
+  #main:has(#goalpanel:not([hidden])) #flow,
+  #main:has(#subpanel:not([hidden])) #flow{padding-right:calc(10px + 306px)}
   body:not([data-git="shut"]) #composer,
-  #main:has(#goalpanel:not([hidden])) #composer{right:calc(var(--sbw) + 306px)}
+  #main:has(#goalpanel:not([hidden])) #composer,
+  #main:has(#subpanel:not([hidden])) #composer{right:calc(var(--sbw) + 306px)}
 }
 /* DAS BAND LIEGT UEBER DEM PLATZHALTER, NICHT UEBER DER ZEILE (robin,
    2026-08-23). Eine eigene Zeile machte die Maske hoeher, sobald jemand zu
@@ -2627,6 +2629,40 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    the running state is the one that must be seen, not the finished one. */
 .subcard{border:1px solid var(--line);border-left:3px solid var(--sub);border-radius:10px;
   background:var(--panel);padding:10px 14px;margin:0 0 10px;max-width:760px}
+/* #255. DIE KARTEN WOHNEN IN #subpanel, der dritten Karte der
+   `#panels`-Spalte (#164/#233) -- nicht mehr im Fluss, wo sie mit dem
+   Transkript wegscrollten. Das Panel ist gebaut wie das Zielpanel: eigene
+   Scrollflaeche (`min-height:0` + `overflow:auto`), Kopf klappt. Laufende
+   stehen oben in `.splive`, fertige in `.spdone`, ZU per Default: die aktive
+   Flaeche zeigt nur, was gerade arbeitet. `position:relative` macht das Panel
+   zum offsetParent, damit ein Sprung die Karte IM PANEL einrollt und nie
+   #main verschiebt. */
+#subpanel{flex:0 1 auto;min-height:0;position:relative;
+  overflow:auto;background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;box-shadow:0 6px 24px var(--shadow);font-size:11.5px;
+  padding:0 10px 4px}
+#subpanel[hidden]{display:none}
+#subpanel .sph{display:flex;align-items:center;gap:8px;padding:13px 5px 11px;
+  cursor:pointer}
+#subpanel .sph b{color:var(--text-faint);font-weight:600;letter-spacing:.2px}
+#subpanel .sph .st{margin-left:auto;color:var(--dimmer);font-family:var(--mono);
+  font-size:10.5px}
+#subpanel .subcard{max-width:none;margin:0 0 8px;padding:8px 11px;
+  background:var(--bg)}
+#subpanel .subcard .shead{font-size:11.5px;gap:7px}
+#subpanel .subcard .stask{font-size:12px;display:-webkit-box;
+  -webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+#subpanel .subcard .sstat{margin-left:0;flex-basis:100%}
+#subpanel .spfold{display:block;width:100%;background:none;border:0;
+  border-top:1px solid var(--line);padding:8px 5px;margin:0 0 4px;font:inherit;
+  font-size:11px;color:var(--dim);text-align:left;cursor:pointer}
+#subpanel .spfold[hidden]{display:none}
+#subpanel .spfold:hover{color:var(--text-soft)}
+#subpanel.shut .splive,#subpanel.shut .spfold,#subpanel.shut .spdone{display:none}
+@keyframes subseen{0%{box-shadow:0 0 0 2px var(--sub)}100%{box-shadow:0 0 0 2px transparent}}
+#subpanel .subcard.seen{animation:subseen 1.4s ease-out}
+@media (prefers-reduced-motion: reduce){#subpanel .subcard.seen{animation:none;
+  box-shadow:0 0 0 2px var(--sub)}}
 .subcard .shead{display:flex;align-items:center;gap:9px;font-size:12.5px;flex-wrap:wrap}
 .subcard .glyph{color:var(--sub);font-weight:700}
 .subcard .sname{font-family:var(--mono);font-size:11.5px;color:var(--dim)}
@@ -2996,6 +3032,18 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
          VERSTECKT OHNE ZIEL (robin, 2026-08-30): kein leerer Rahmen. -->
     <div id="panels">
       <div id="goalpanel" hidden></div>
+      <!-- #255. DIE SUBTASKS, gepinnt wie Ziel und Git: eine Karte
+           im Chatfenster, nicht im Verlauf. Im Fluss scrollten sie mit dem
+           Transkript weg (robin, 2026-09-23). Laufende oben, fertige in einer
+           zugeklappten Gruppe darunter. Versteckt, solange der offene Chat
+           nichts delegiert hat. -->
+      <div id="subpanel" hidden>
+        <div class="sph" onclick="crow.subPanelFold()"><b>Subtasks</b>
+          <span class="st"></span></div>
+        <div class="splive"></div>
+        <button class="spfold" onclick="crow.subDoneFold()" hidden></button>
+        <div class="spdone" hidden></div>
+      </div>
       <!-- #156. DAS GIT-PANEL. Was der Chat als Karten zeigt -- Aenderungen, ein
            Commit, ein Push -- steht hier als Zustand: was ist offen, auf welchem
            Zweig, und was ist passiert. Der Chat erzaehlt den Verlauf, das Panel
@@ -6234,16 +6282,16 @@ const crow = {
   subs(items){
     this.subItems=items||[];
     this.subItems.forEach(it=>this.subCard(it));
+    this.subPanel(this.subItems);
     this.subChip(this.subItems);
     this.subMenuDraw(this.subItems);
     this.subRail();
     // A jump that had to open the parent chat first lands here, one snapshot
     // later, when the replayed cards exist again.
     if(this.subPending){
-      const d=flow.querySelector('.subcard[data-sub="'
+      const d=$("#subpanel").querySelector('.subcard[data-sub="'
         +CSS.escape(this.subPending)+'"]');
-      if(d){ d.scrollIntoView({behavior:"smooth",block:"center"});
-        this.subPending=null; }
+      if(d){ this.subReveal(d); this.subPending=null; }
     }
   },
 
@@ -6260,7 +6308,9 @@ const crow = {
   // one that must be seen -- and is then updated in place, never rebuilt, so
   // an open result fold survives every tick.
   subCard(it){
-    let d=flow.querySelector('.subcard[data-sub="'+CSS.escape(it.i)+'"]');
+    // getElementById: the no-money guard below reads this block for the dollar sign.
+    const p=document.getElementById("subpanel");
+    let d=p.querySelector('.subcard[data-sub="'+CSS.escape(it.i)+'"]');
     if(!d){
       // ONLY THE OPEN CHAT'S OWN SUBTASKS GET A CARD. Python computes `here`
       // from parent and open chat in the same breath -- the page comparing
@@ -6276,16 +6326,18 @@ const crow = {
       d.querySelector(".dlabel").textContent="delegate · "+it.i;
       d.querySelector(".sname").textContent=it.model||"";
       d.querySelector(".stask").textContent=it.task||"";
-      // INTO THE FLOW, NEVER INTO A ROUND'S COLUMN. A card appended to
-      // `this.col` folded away with its round the moment the next one began
-      // -- robin, 2026-08-27: "die sollen bleiben". `fold()` only ever moves
-      // the round element it tracks, so an own `.turn` wrapper is safe from
-      // it -- and it is WHAT ALIGNS THE CARD TO THE CHAT: same centred
-      // column, same padding as every other block ("jetzt nur noch an den
-      // chat ausrichten").
-      const wrap=document.createElement("div"); wrap.className="turn subrow";
-      wrap.appendChild(d); flow.appendChild(wrap); this.bottom();
+      // #255. INTO THE PINNED PANEL, NEVER INTO THE FLOW. A card
+      // in `#flow` was a block of the transcript and scrolled away with it
+      // (robin, 2026-09-23 on 9a59872); in a round's column it folded away
+      // with the round (2026-08-27, "die sollen bleiben"). `#subpanel` sits
+      // in `#panels` beside goal and git: it stays put while the chat
+      // scrolls, and the chat gains no block, so nothing below it moves.
     }
+    // RUNNING ABOVE, FINISHED IN THE FOLD. appendChild MOVES an existing
+    // node, so a card that finishes changes group once and keeps its open
+    // result; a card already in the right group stays where it is.
+    const group=p.querySelector(it.st==="running" ? ".splive" : ".spdone");
+    if(d.parentNode!==group) group.appendChild(d);
     // robins letzte Fassung 2026-08-28: die LAUFENDE Karte atmet als Zeile;
     // fertig steht sie still. Die Klasse traegt den Zustand, das CSS den Atem.
     d.classList.toggle("run", it.st==="running");
@@ -6388,9 +6440,43 @@ const crow = {
     });
   },
 
+  // #255. THE PANEL'S FRAME: drop the cards that are not this chat's
+  // (a chat switch flips `here`, a deleted chat drops its rows), count the
+  // two groups, and hide the whole card when the open chat delegated nothing.
+  subPanel(items){
+    const p=$("#subpanel"); if(!p) return;
+    const here=new Set(items.filter(x=>x.here).map(x=>x.i));
+    p.querySelectorAll(".subcard").forEach(d=>{
+      if(!here.has(d.dataset.sub)) d.remove(); });
+    const run=p.querySelectorAll(".splive .subcard").length;
+    const fin=p.querySelectorAll(".spdone .subcard").length;
+    p.hidden=!(run+fin);
+    p.querySelector(".sph .st").textContent=run+" running · "+fin+" finished";
+    const fold=p.querySelector(".spfold"), done=p.querySelector(".spdone");
+    fold.hidden=!fin;
+    fold.textContent=(done.hidden ? "▸ " : "▾ ")+"finished · "+fin;
+  },
+
+  subPanelFold(){ $("#subpanel").classList.toggle("shut"); },
+
+  subDoneFold(){ const p=$("#subpanel"), done=p.querySelector(".spdone");
+    done.hidden=!done.hidden; this.subPanel(this.subItems||[]); },
+
+  // A jump opens whatever hides the card and rolls it into view INSIDE the
+  // panel -- the element-level jump would also scroll #main, which clips on
+  // purpose, so the panel's own scrollTop is set instead.
+  subReveal(d){
+    const p=$("#subpanel"); p.classList.remove("shut");
+    const done=p.querySelector(".spdone");
+    if(done.contains(d) && done.hidden){ done.hidden=false;
+      this.subPanel(this.subItems||[]); }
+    p.scrollTop=Math.max(0, d.offsetTop-p.clientHeight/2+d.offsetHeight/2);
+    d.classList.remove("seen"); void d.offsetWidth; d.classList.add("seen");
+  },
+
   subJump(i){
-    const d=flow.querySelector('.subcard[data-sub="'+CSS.escape(i)+'"]');
-    if(d){ d.scrollIntoView({behavior:"smooth",block:"center"}); return; }
+    const d=$("#subpanel").querySelector('.subcard[data-sub="'+CSS.escape(i)+'"]');
+    if(d){ this.subReveal(d); return; }
     // No card in this flow: the subtask belongs to another chat. Open THAT
     // chat -- the parent, never the subtask itself -- and finish the jump
     // when the replayed snapshot has drawn its cards.
