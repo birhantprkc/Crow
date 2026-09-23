@@ -17382,7 +17382,9 @@ _RENDER_NEAR_BLANK = 0.98
 _RENDER_SHOT = re.compile(r"^(\S+\.png) -- (\d+) bytes", re.M)
 _RENDER_STUCK_WARNS = ("looks blank", "almost one colour", "byte-identical",
                        "distinct colours in the capture")
-_RENDER_METRIC_NUM = re.compile(r"-?\d+(?:\.\d+)?")
+# Unsigned: the metrics lines write ranges as "x 530-760", and a minus
+# there is a dash, not a sign.
+_RENDER_METRIC_NUM = re.compile(r"\d+(?:\.\d+)?")
 _RENDER_WRITES = ("write_file", "append_file", "edit_file")
 
 

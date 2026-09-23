@@ -15464,6 +15464,7 @@ class TheRenderLoopIsCountedTests(unittest.TestCase):
         b = crow_core.render_signature(self.result("/x/r2.png", 400000, m2 % ()), "i.html")
         c = crow_core.render_signature(self.result("/x/r3.png", 700000, m3 % ()), "i.html")
         self.assertTrue(crow_core.render_same(a, b), "size differs, metrics agree")
+        self.assertEqual(a["metrics"][:2], [530.0, 760.0], "a range, not a sign")
         self.assertFalse(crow_core.render_same(a, c))
         other = dict(b, target="other.html")
         self.assertFalse(crow_core.render_same(a, other), "another page")
