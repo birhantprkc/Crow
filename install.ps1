@@ -303,8 +303,13 @@ function Test-Preflight {
     }
 
     # NODE IS THE THIRD PREREQUISITE AND THE ONLY WHOLLY OPTIONAL ONE, which is
-    # why it warns here and blocks nowhere. Nothing in Crow itself needs it --
-    # MCP servers do, and nearly every published one starts with npx. Decided
+    # why it warns here and blocks nowhere. Nothing in Crow needs it to run --
+    # MCP servers do (nearly every published one starts with npx), and two
+    # built-in tools get better with it: write_file/append_file run
+    # `node --check` over JS and inline HTML scripts and put the first syntax
+    # error into the result (#251; without node the check is skipped and the
+    # result says nothing about syntax), and build_bundle finds esbuild in the
+    # npx cache or a project's node_modules (#212). Decided
     # 2026-08-22: a preflight line, not a requirement. Refusing a machine over a
     # feature it may never configure charges everybody for the few, and the two
     # rows above already set the precedent for a prerequisite that costs one
@@ -314,7 +319,7 @@ function Test-Preflight {
     # can have Python and no Node, and a user who reads "python missing" and
     # nothing else would find out about Node from a failed tool call instead.
     if (-not $NodePath) {
-        $warnings += "node is not on the PATH. Only MCP servers started with npx or node need it; the clients, the model and every built-in tool run without it"
+        $warnings += "node is not on the PATH. MCP servers started with npx or node need it; write_file/append_file skip their JS syntax check (#251) and build_bundle finds no esbuild from npx without it. The clients and the model run without it"
     }
 
     return [pscustomobject]@{
@@ -1240,7 +1245,7 @@ Write-Item "Python"   $(if ($facts.PythonPath) { $facts.PythonPath } else { "not
 # leave the other half wondering which client the install is short of.
 Write-Item "WebView2" $(if ($facts.WebView2Version) { "$($facts.WebView2Version), the window renders in it" } else { "not found -- the terminal client does not need it" }) `
                       $(if ($facts.WebView2Version) { "ok" } else { "warn" })
-Write-Item "Node"     $(if ($facts.NodePath) { "$($facts.NodePath), MCP servers can use npx" } else { "not on the PATH -- only MCP servers need it" }) `
+Write-Item "Node"     $(if ($facts.NodePath) { "$($facts.NodePath), for MCP servers, the JS syntax check and build_bundle" } else { "not on the PATH -- MCP servers, the JS syntax check and build_bundle want it" }) `
                       $(if ($facts.NodePath) { "ok" } else { "warn" })
 # SAID HERE AND NOT AT THE DOWNLOAD, for the reason at the top of this file: a
 # cost first mentioned after the package has landed is a cost mentioned at the
