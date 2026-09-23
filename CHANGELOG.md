@@ -59,6 +59,8 @@ Nothing here is live-accepted yet; acceptance is robin's GUI replay.
 
 ### Fixed
 
+- **A finished code block keeps its copy button** (#239). `codeFinish` emptied the whole head row (`.cwh`) to
+  write the path, taking #156's copy button with it; the path now goes into the name slot `.cwn`.
 - **Drags and window resizes follow the pointer in long chats** (#236, #237, #238). Measured on a 200-turn chat
   (12,968 nodes), WebKitGTK 2.52: rail drag 38.8 -> 3.6 ms per step, window resize 16.9 -> 4.0 ms, 0 px view
   drift after a mid-chat drag (was 2,079 px: WebKitGTK has no scroll anchoring). The rail widths are set on the

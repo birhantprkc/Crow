@@ -11726,5 +11726,22 @@ class TheBlankTabHasABlankBarTests(unittest.TestCase):
         self.assertLess(blank.index('$("#brurl").value=""'), blank.index('$("#brurl").focus()'))
 
 
+class TheCodeBlockKeepsItsCopyButtonTests(unittest.TestCase):
+    """#239. codeFinish emptied `.cwh`, which also holds the copy button."""
+
+    def test_the_finished_path_goes_into_the_name_slot(self):
+        page = crow_gui.PAGE
+        fin = page[page.index("  codeFinish(name,raw){"):]
+        fin = fin[:fin.index("\n  // #138b.")]
+        self.assertNotIn('head.textContent=""', fin)
+        self.assertNotIn("head.textContent=got.path", fin)
+        self.assertIn('box.querySelector(".cwn")', fin)
+        tpl = page[page.index('<template id="cwtpl">'):]
+        tpl = tpl[:tpl.index("</template>")]
+        # the button lives in .cwh, beside .cwn -- so only .cwn may be rewritten
+        self.assertIn('<span class="cwn"></span>', tpl)
+        self.assertIn('class="cwcopy"', tpl)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -3972,11 +3972,14 @@ const crow = {
       const body = (got.content!==undefined) ? got.content : got.new;
       if(typeof body==="string" && pre) pre.textContent=body;
       if(got.path){
-        const head=box.querySelector(".cwh");
-        // #229: the file being written, as a path mark (right-click: copy).
-        if(head){ head.textContent="";
-          head.appendChild(this.pathNode(document.createTextNode(got.path),
-                                         {path:String(got.path)})); }
+        // #239. THE NAME SLOT, NOT THE WHOLE HEAD: `.cwh` also holds this
+        // block's copy button (#156), and emptying the head took it with it --
+        // every finished write_file/edit_file block lost its "copy". `.cwn` is
+        // the slot the template made for the name. #229: as a path mark.
+        const nm=box.querySelector(".cwn");
+        if(nm){ nm.textContent=""; nm.title=String(got.path);
+          nm.appendChild(this.pathNode(document.createTextNode(got.path),
+                                       {path:String(got.path)})); }
         const dot=String(got.path).lastIndexOf(".");
         if(dot>=0) lang=String(got.path).slice(dot+1); }
     }catch(err){ /* unvollstaendig oder nicht JSON: der rohe Strom bleibt */ }
