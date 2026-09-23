@@ -3184,7 +3184,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
                 <rect x="9" y="2" width="6" height="11" rx="3"></rect>
                 <path d="M5 10a7 7 0 0 0 14 0"></path>
                 <line x1="12" y1="17" x2="12" y2="21"></line></svg></button>
-            <button id="go" onclick="crow.go()" title="send">&#8593;</button></div>
+            <button id="go" onclick="crow.press()" title="send">&#8593;</button></div>
         </div>
       </div>
     </div>
@@ -3539,6 +3539,8 @@ const crow = {
   // WHAT `fold` WILL MOVE NEXT TIME. Set by `start`, cleared by anything that
   // ends the trace: a new user line, a reset, a reopened chat.
   round: null, trace: null, traceN: 0,
+  // #264: {t, i} -- a line typed mid-turn, queued, drawn at the turn's end.
+  held: null,
   endTrace(){ this.round=null; this.trace=null; this.traceN=0; },
 
   // DRAWN, NOT RUN: the line carries the user's login name, which is a string
@@ -5361,6 +5363,8 @@ const crow = {
   },
 
   idle(){ this.running=false; go.textContent="↑"; go.classList.remove("stop");
+    // #264: the turn is over, so the line held behind it goes in now.
+    this.release();
     // #172: auch ein Zug, der scheitert oder abgebrochen wird, laesst keine
     // tickende Kachel zurueck -- sie behauptete sonst einen laufenden Aufruf.
     this.toolClockStop();
@@ -5391,6 +5395,7 @@ const crow = {
     $("#turnstate").textContent="…";
     $("#hint").textContent = this.viewingOther
       ? "queued for this chat -- it runs when the other turn is done"
+      : this.held ? "queued -- it goes in when this turn ends"
       : "queued -- the memory review is finishing"; },
 
   // #164. DAS ZIELPANEL. Ohne Ziel bleibt es weg -- kein leerer Rahmen.
@@ -5536,6 +5541,9 @@ const crow = {
   viewBar(e){ const b=$("#viewbar");
     if(e.live){ b.hidden=true; b.textContent=""; this.viewingOther=false; return; }
     this.viewingOther=true;
+    // #264: a held line belongs to the chat it was typed in; this flow is
+    // another one. It runs there anyway and is drawn by that chat's replay.
+    this.held=null;
     b.textContent="";
     const what=document.createElement("span");
     // TEXTCONTENT, WEIL BEIDE NAMEN VON PLATTE KOMMEN -- dieselbe Regel, der die
@@ -5590,7 +5598,15 @@ const crow = {
     // gehoert einem anderen Chat; ihn von hier aus abzubrechen waere ein Stop
     // fuer etwas, das gar nicht auf dem Schirm steht. Getippt wird fuer DIESEN
     // Chat, und die Zeile wird eingereiht.
-    if(this.running && !this.viewingOther){ pywebview.api.stop(); return; }
+    // #264. A PLAIN LINE MID-TURN IS QUEUED, NOT A STOP. #165 promised it --
+    // "a typed line always has priority; the engine only runs when the queue
+    // is empty" -- and send()/_pump carry it out, but this gate sent every
+    // Enter to stop() since 4860300, so from the live chat the queue was
+    // unreachable. The button and Escape stay Stop (press()); an empty Enter
+    // and a slash line other than the delegation pair keep the old gesture.
+    if(this.running && !this.viewingOther){
+      if(text && text[0]!=="/"){ this.hold(text); return; }
+      pywebview.api.stop(); return; }
     if(!text) return;
     input.value=""; input.style.height="auto";
     this.user(text);
@@ -5606,6 +5622,26 @@ const crow = {
     pywebview.api.send(text).then(
       started => started ? this.busy() : this.idle(),
       () => this.idle()); },
+
+  // #264. THE HELD LINE. Drawn at the turn's `idle`, not now: drawn now it
+  // would stand in the middle of an answer that is still streaming. Two lines
+  // held are ONE message on the wire (send() joins them), so they are one
+  // bubble here too. Staged images ride the held line, as they would a sent one.
+  hold(text){
+    input.value=""; input.style.height="auto";
+    const imgs=this.stagedUrls(); this.stageRender([]);
+    this.held = this.held
+      ? {t:this.held.t+"\n\n"+text, i:this.held.i.concat(imgs)}
+      : {t:text, i:imgs};
+    pywebview.api.send(text).then(()=>this.queuedLine(), ()=>this.queuedLine()); },
+
+  release(){ const h=this.held; if(!h) return;
+    this.held=null; this.user(h.t); this.userImages(h.i); },
+
+  // #264. THE BUTTON IS STOP WHILE IT SAYS STOP, whatever is in the box --
+  // Enter with a line queues it (go()), a click on "Stop" stops.
+  press(){ if(this.running && !this.viewingOther){ pywebview.api.stop(); return; }
+    this.go(); },
 
   // #88: THE RELEASE LEVEL, and the menu is built from what the CORE says the
   // levels are -- never from a list written out here. A second copy of the
@@ -10729,6 +10765,12 @@ class Api:
                 # der gerade rechnet. Ohne das Ziel liefe die Zeile im falschen
                 # Gespraech und waere von aussen nicht von einem Versehen zu
                 # unterscheiden.
+                # #264. A SECOND LINE JOINS THE FIRST, it does not replace it.
+                # The page drew both; replacing lost the first silently. Only
+                # for the same chat -- a line meant for another one is a new
+                # decision about where the next turn runs, as before.
+                if self._queued is not None and self._queued_to == self._view_path:
+                    text = self._queued + "\n\n" + text
                 self._queued, self._queued_to = text, self._view_path
                 self.push({"k": "queued"})
                 return True
@@ -13403,6 +13445,11 @@ class Api:
                 with self._queue_lock:
                     text, self._queued = self._queued, None
                     target, self._queued_to = self._queued_to, None
+                    if text is not None:
+                        # #264 / #165: a queued line is a typed line, and a
+                        # typed line resets the engine's caps and counters --
+                        # until now only the idle `send` path did.
+                        self._goal_reset()
                     if text is None:
                         # #165. DER MOTOR. Eine getippte Zeile hat immer Vorrang
                         # -- sie steht oben --, aber wenn keine wartet und der

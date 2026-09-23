@@ -11999,5 +11999,165 @@ const flow=mk("div");
         self.assertEqual(out, "1")
 
 
+class ALineTypedMidTurnIsQueuedTests(ApiCase):
+    """#264. robin, live 2026-09-23 ~23:00: in goal mode a line typed while the
+    model works could not be sent -- `go()` turned every Enter mid-turn into
+    `stop()` (since 4860300), so #165's "a typed line always has priority" was
+    unreachable from the live chat. The page half is RUN in node; the Python
+    half drives `send()` and `_pump()` with `_run` as the double."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.node = _node()
+        cls.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    # ---- the page, in node
+
+    def _page(self, script):
+        """go(), hold(), release(), press() out of the page, over stubs that log
+        what the page does. `script` drives them; the log comes back."""
+        import subprocess
+        if not self.node:
+            self.skipTest("no node on this machine")
+        start = self.source.index("  go(){ const text=input.value.trim();")
+        end = self.source.index("  // #88: THE RELEASE LEVEL")
+        js = (
+            "const log=[];\n"
+            "const input={value:'',style:{}};\n"
+            "const settle=[];\n"
+            "const pywebview={api:{stop(){log.push(['stop']);},\n"
+            "  send(t){log.push(['send',t]);return {then(ok){settle.push(ok);}};}}};\n"
+            "const crow={running:false,viewingOther:false,held:null,\n"
+            "  user(t){log.push(['user',t]);}, userImages(i){},\n"
+            "  stagedUrls(){return [];}, stageRender(){}, installBar(){},\n"
+            "  fanout(t){log.push(['fanout',t]);}, busy(){log.push(['busy']);},\n"
+            "  idle(){this.running=false;this.release();log.push(['idle']);},\n"
+            "  queuedLine(){log.push(['queued']);},\n"
+            + self.source[start:end] + "};\n"
+            "function type(t){input.value=t; crow.go();}\n"
+            + script + "\nsettle.forEach(f=>f(true));\n"
+            "console.log(JSON.stringify({log, held:crow.held, box:input.value}));\n")
+        done = subprocess.run([self.node, "-e", js], capture_output=True,
+                              text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    def test_enter_mid_turn_queues_the_line_and_does_not_stop(self):
+        """POSITIVE, the defect itself: the line reaches send(), the turn is
+        not stopped, and nothing is drawn into the answer still streaming."""
+        out = self._page("crow.running=true; type('steer: use three.js');")
+        self.assertIn(["send", "steer: use three.js"], out["log"])
+        self.assertNotIn(["stop"], out["log"])
+        self.assertNotIn("user", [x[0] for x in out["log"]])
+        self.assertEqual(out["held"]["t"], "steer: use three.js")
+        self.assertEqual(out["box"], "")
+        self.assertIn(["queued"], out["log"])
+
+    def test_the_held_line_is_drawn_when_the_turn_ends(self):
+        out = self._page("crow.running=true; type('a'); type('b'); crow.idle();")
+        users = [x for x in out["log"] if x[0] == "user"]
+        self.assertEqual(users, [["user", "a\n\nb"]],
+                         "two held lines are one message, so one bubble")
+        self.assertIsNone(out["held"])
+        self.assertLess(out["log"].index(["user", "a\n\nb"]), out["log"].index(["idle"]))
+
+    def test_the_stop_gesture_is_kept_where_it_was(self):
+        """NEGATIVE: an empty Enter, a slash line other than the delegation
+        pair, and a click on the Stop button still stop -- the button even
+        with a line in the box."""
+        for script in ("crow.running=true; type('');",
+                       "crow.running=true; type('/reset');",
+                       "crow.running=true; input.value='half a line'; crow.press();"):
+            out = self._page(script)
+            self.assertIn(["stop"], out["log"], script)
+            self.assertNotIn("send", [x[0] for x in out["log"]], script)
+        self.assertIn('onclick="crow.press()"', self.source)
+        self.assertIn('if(e.key==="Escape" && crow.running) pywebview.api.stop();',
+                      self.source)
+
+    def test_an_idle_composer_and_another_chats_view_are_unchanged(self):
+        """NEGATIVE: outside a turn the line is drawn and sent at once; in
+        another chat's view it is drawn at once and queued there (#162)."""
+        for script in ("type('hello');",
+                       "crow.running=true; crow.viewingOther=true; type('hello');"):
+            out = self._page(script)
+            self.assertEqual(out["log"][0], ["user", "hello"], script)
+            self.assertIn(["send", "hello"], out["log"], script)
+            self.assertIsNone(out["held"], script)
+        out = self._page("crow.running=true; type('/delegate look it up');")
+        self.assertEqual(out["log"], [["fanout", "/delegate look it up"]])
+
+    def test_the_page_releases_on_idle_and_forgets_on_a_view_switch(self):
+        idle = self.source[self.source.index("  idle(){ this.running=false;"):]
+        self.assertIn("this.release();", idle[:idle.index("\n  busy(){")])
+        view = self.source[self.source.index("  viewBar(e){"):]
+        self.assertIn("this.held=null;", view[:view.index("back.onclick")])
+        self.assertIn("queued -- it goes in when this turn ends", self.source)
+
+    # ---- the window, in python
+
+    def _api(self):
+        api = self.api()
+        api._seen = []
+        api.push = lambda message: api._seen.append(message)
+        return api
+
+    def test_a_second_queued_line_joins_the_first(self):
+        """The page drew both; replacing the first lost it silently."""
+        api = self._api()
+        api._busy = True
+        api.send("eins")
+        api.send("zwei")
+        self.assertEqual(api._queued, "eins\n\nzwei")
+
+    def test_a_line_for_another_chat_still_replaces(self):
+        """NEGATIVE: a line meant for another chat is a new decision about
+        where the next turn runs, not an addendum (#162 unchanged)."""
+        api = self._api()
+        api._busy = True
+        api._queued, api._queued_to = "alt", "/somewhere/else"
+        api.send("neu")
+        self.assertEqual(api._queued, "neu")
+
+    def test_the_queued_line_wins_over_the_goal_nudge(self):
+        """#165, now reachable: a line typed during goal turn N runs as turn
+        N+1 instead of Crow's nudge, resets the engine, and the goal goes on
+        after it."""
+        api = self._api()
+        ran, nudges, resets = [], ["[Goal mode, step 2]"], []
+        api._goal_nudge = lambda: nudges.pop(0) if nudges else None
+        real_reset = api._goal_reset
+        api._goal_reset = lambda: (resets.append(len(ran)), real_reset())
+
+        def run(text):
+            ran.append(text)
+            if text == "[Goal mode, step 1]":
+                api.send("steer: stop polishing, ship it")
+
+        api._run = run
+        api._busy = True
+        api._goal_turns = 40
+        api._pump("[Goal mode, step 1]")
+        self.assertEqual(ran, ["[Goal mode, step 1]",
+                               "steer: stop polishing, ship it",
+                               "[Goal mode, step 2]"])
+        self.assertEqual(resets, [1], "the queued line resets the engine once")
+        self.assertEqual(api._goal_turns, 0)
+        self.assertFalse(api._busy)
+
+    def test_no_queued_line_no_reset(self):
+        """NEGATIVE: the engine's own turns do not reset its caps -- that is
+        what the 60-turn cap is for."""
+        api = self._api()
+        ran, nudges, resets = [], ["n2"], []
+        api._goal_nudge = lambda: nudges.pop(0) if nudges else None
+        api._goal_reset = lambda: resets.append(1)
+        api._run = ran.append
+        api._busy = True
+        api._pump("n1")
+        self.assertEqual(ran, ["n1", "n2"])
+        self.assertEqual(resets, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
