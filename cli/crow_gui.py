@@ -10561,8 +10561,9 @@ class Api:
         return ("[Goal mode. %d of %d steps done. Next is step %d: %s\n"
                 "Do it now. Call goal_step with 'done' only once you have "
                 "verified it, then continue with the step after that. If it "
-                "cannot be done, call goal_step with 'failed' and say why.]"
-                % (done, total, nxt + 1, goal["steps"][nxt]["text"]))
+                "cannot be done, call goal_step with 'failed' and say why.%s]"
+                % (done, total, nxt + 1, goal["steps"][nxt]["text"],
+                   crow_core.goal_nudge_evidence(goal, nxt)))  # #267
 
     def close_goal(self) -> None:
         """Das Ziel wegraeumen. Das Gegenstueck zum Setzen, im Panel selbst.
@@ -13363,6 +13364,8 @@ class Api:
         # #154: der Digest-Cap, gleiche Tuer -- fehlt der Schluessel, gilt der
         # Kern-Default; 0 schaltet ab. Der Setter frisst Unsinn selbst.
         crow_core.rollover_digest_set(doc.get("rollover_digest_tokens"))
+        # #267: the judge's bar, same door; nonsense is the default.
+        crow_core.judge_threshold_set(doc.get("judge_threshold"))
         try:
             return max(0, int(doc.get("turn_token_budget") or 0))
         except (TypeError, ValueError):

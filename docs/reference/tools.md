@@ -183,6 +183,12 @@ there and a command it wrote would run unasked at `allowedit`; a model's replan 
 off` drops it. Replayed on the 10 real `done` calls of 2026-09-23: 6 refused, the 4 with positive
 notes passed.
 
+On a visual goal (#267), `done` on a step that makes something to look at must cite a capture
+written during this goal (a path, or a bare `render-….png` name from `.crow/renders/`). If `judge`
+scored the step, its lowest score must reach `judge_threshold` (default 8). Steps that only plan
+are exempt. `"visual": true|false` in `goal.json` overrides the keyword guess. See
+[goals and subagents](../user-guide/goals-and-subagents.md).
+
 ### Git (#156)
 
 `git_status` `git_diff` `git_log` read; `git_commit` `git_push` write. All five run a

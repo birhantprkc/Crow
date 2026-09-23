@@ -15073,7 +15073,8 @@ class TheRolloverNoteIsParsableTests(unittest.TestCase):
 class GoalDoneNeedsEvidenceTests(unittest.TestCase):
     """#250. 2026-09-23: goal mode closed 9/9 over a 1.4 KB index.html
     that draws nothing. Step 4's `done` note said "done-with-deviation only in
-    spirit"; step 9 went `failed`, then `done` with no note."""
+    spirit"; step 9 went `failed`, then `done` with no note. The goals here
+    are not visual on purpose: the picture gate has its own class below."""
 
     def setUp(self):
         self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-goaldone-"))
@@ -15089,7 +15090,7 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
         return json.loads(crow_core.tool_goal_step(n, status, note))
 
     def test_a_note_that_says_not_done_is_refused(self):
-        crow_core.goal_command("diorama | build it | verify it")
+        crow_core.goal_command("parser | build it | verify it")
         out = self.step(1, "done", "Step treated as done-with-deviation only "
                                    "in spirit; the GLSL work remains queued.")
         self.assertFalse(out["ok"])
@@ -15099,12 +15100,12 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
     def test_a_note_with_evidence_passes(self):
         """POSITIVE CONTROL: a plain proof, and a note that mentions a
         failure it fixed, are not refused."""
-        crow_core.goal_command("diorama | build it | verify it")
+        crow_core.goal_command("parser | build it | verify it")
         self.assertTrue(self.step(1, "done", "node --check ok; 0 failed of 12 "
                                              "tests; render shows the scene")["ok"])
 
     def test_done_after_failed_needs_a_note(self):
-        crow_core.goal_command("diorama | build it | verify it")
+        crow_core.goal_command("parser | build it | verify it")
         self.step(1, "done", "built")
         self.step(2, "failed", "no fps figure can be read")
         out = self.step(2, "done")
@@ -15114,7 +15115,7 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
 
     def test_the_acceptance_check_holds_the_goal_open(self):
         said, _goal, _ch = crow_core.goal_command(
-            "diorama | build it | verify it | check: exit 3")
+            "parser | build it | verify it | check: exit 3")
         self.assertIn("acceptance check: exit 3", said)
         self.assertIn("Acceptance check", crow_core.goal_block())
         self.assertTrue(self.step(1, "done", "built")["ok"])
@@ -15125,14 +15126,14 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
         self.assertNotEqual(crow_core.goal_load().get("status"), "done")
 
     def test_a_passing_check_closes_the_goal(self):
-        crow_core.goal_command("diorama | build it | verify it | check: exit 0")
+        crow_core.goal_command("parser | build it | verify it | check: exit 0")
         self.step(1, "done", "built")
         out = self.step(2, "done", "verified")
         self.assertTrue(out["ok"] and out["complete"], out)
         self.assertEqual(out["acceptance_check"], "passed: exit 0")
 
     def test_the_check_runs_only_on_the_closing_done(self):
-        crow_core.goal_command("diorama | a | b | c | check: exit 0")
+        crow_core.goal_command("parser | a | b | c | check: exit 0")
         with mock.patch.object(crow_core, "tool_run_command",
                                return_value="[exit 0]") as ran:
             self.step(1, "done", "a")
@@ -15144,7 +15145,7 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
     def test_the_check_is_not_in_the_working_area(self):
         """NEGATIVE: goal.json is writable by the model's write_file; a
         command put there runs nothing."""
-        crow_core.goal_command("diorama | a | b | check: exit 0")
+        crow_core.goal_command("parser | a | b | check: exit 0")
         with open(crow_core.goal_path(), encoding="utf-8") as fh:
             self.assertNotIn("exit 0", fh.read())
         crow_core.goal_check_set(None)
@@ -15159,11 +15160,118 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
         ran.assert_not_called()
 
     def test_a_replan_keeps_the_users_check_and_off_drops_it(self):
-        crow_core.goal_command("diorama | a | b | check: exit 3")
-        crow_core.tool_goal_set("diorama", ["a", "b", "c"])
+        crow_core.goal_command("parser | a | b | check: exit 3")
+        crow_core.tool_goal_set("parser", ["a", "b", "c"])
         self.assertEqual(crow_core.goal_check_get(), "exit 3")
         crow_core.goal_command("off")
         self.assertIsNone(crow_core.goal_check_get())
+
+
+class AVisualStepNeedsAPictureTests(unittest.TestCase):
+    """#267. 2026-09-23: 9/9 `done`, every note "verified on
+    screen", over a small purple box in a black frame. A visual step's
+    `done` must cite a capture made during this goal, and a judge's lowest
+    score, when there is one, must reach the bar."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-visual-"))
+        self.state = tempfile.mkdtemp(prefix="crow-visual-state-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.state, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", crow_core.SESSION_DIR)
+        crow_core.SESSION_DIR = self.state
+        self.addCleanup(crow_core.judge_threshold_set, None)
+        crow_core.goal_command("Neon night market voxel diorama | Think and "
+                               "plan: read this file, write PLAN.md | Build "
+                               "geometry and camera | Verify offline")
+
+    def step(self, n, status, note=""):
+        return json.loads(crow_core.tool_goal_step(n, status, note))
+
+    def capture(self, name="render-20260924-101010.png", age=0.0):
+        path = os.path.join(crow_core._render_dir(), name)
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG")
+        if age:
+            then = time.time() - age
+            os.utime(path, (then, then))
+        return path
+
+    def test_a_visual_step_without_a_capture_is_refused(self):
+        out = self.step(2, "done", "Verified on screen: the composed frame "
+                                   "shows the diorama through the full chain")
+        self.assertFalse(out["ok"])
+        self.assertIn("cites no capture", out["error"])
+        self.assertIn("judge", out["error"])
+        self.assertIn(".crow/renders/render-", out["error"])
+        self.assertNotEqual(crow_core.goal_load()["steps"][1]["status"], "done")
+
+    def test_a_capture_from_this_goal_passes_by_path_or_by_name(self):
+        path = self.capture()
+        self.assertTrue(self.step(2, "done", "see %s" % path)["ok"])
+        self.capture("render-20260924-111111.png")
+        self.assertTrue(self.step(3, "done", "render-20260924-111111.png "
+                                             "shows it")["ok"])
+
+    def test_a_capture_older_than_the_goal_proves_nothing(self):
+        self.capture(age=3600)
+        out = self.step(2, "done", "render-20260924-101010.png shows it")
+        self.assertFalse(out["ok"])
+        self.assertIn("cites no capture", out["error"])
+
+    def test_a_planning_step_needs_no_picture(self):
+        self.assertTrue(self.step(1, "done", "PLAN.md written")["ok"])
+
+    def test_a_non_visual_goal_is_unchanged(self):
+        """NEGATIVE: a parser is not asked for a screenshot."""
+        crow_core.goal_command("tokenizer | build it | test it")
+        self.assertTrue(self.step(1, "done", "12 of 12 tests pass")["ok"])
+
+    def test_the_visual_flag_overrides_the_guess(self):
+        with open(crow_core.goal_path(), encoding="utf-8") as fh:
+            raw = json.load(fh)
+        raw["goal"]["visual"] = False
+        with open(crow_core.goal_path(), "w", encoding="utf-8") as fh:
+            json.dump(raw, fh)
+        self.assertTrue(self.step(2, "done", "built")["ok"])
+
+    def judged(self, index, low):
+        goal = crow_core.goal_load()
+        goal["steps"][index]["judge"] = {
+            "model": "vision-x", "min": low,
+            "scores": {"detail density": low, "lighting mood": 9},
+            "weakest": ["the scene fills 7 % of the frame", "black ground",
+                        "no neon"]}
+        crow_core.goal_write(goal)
+
+    def test_a_judge_score_under_the_bar_refuses(self):
+        path = self.capture()
+        self.judged(1, 3)
+        out = self.step(2, "done", "see %s" % path)
+        self.assertFalse(out["ok"])
+        self.assertIn("under the bar of 8", out["error"])
+        self.assertIn("detail density 3", out["error"])
+        self.assertIn("fills 7 %", out["error"])
+
+    def test_a_judge_score_at_the_bar_passes_and_the_bar_moves(self):
+        path = self.capture()
+        self.judged(1, 7)
+        self.assertFalse(self.step(2, "done", "see %s" % path)["ok"])
+        crow_core.judge_threshold_set(7)
+        self.assertTrue(self.step(2, "done", "see %s" % path)["ok"])
+
+    def test_the_threshold_setter_takes_no_nonsense(self):
+        crow_core.judge_threshold_set("x")
+        self.assertEqual(crow_core.JUDGE_THRESHOLD, 8)
+        crow_core.judge_threshold_set(42)
+        self.assertEqual(crow_core.JUDGE_THRESHOLD, 10)
+
+    def test_the_nudge_says_the_rule_on_a_visual_step_only(self):
+        goal = crow_core.goal_load()
+        self.assertIn("judge", crow_core.goal_nudge_evidence(goal, 1))
+        self.assertEqual(crow_core.goal_nudge_evidence(goal, 0), "")
 
 
 class TheGoalOutlivesEverythingTests(unittest.TestCase):

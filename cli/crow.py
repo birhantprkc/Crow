@@ -1949,6 +1949,7 @@ def repl(args: argparse.Namespace) -> int:
     if sampling is None:
         return 2
     rollover_digest_set(args.rollover_digest_tokens)   # #154, None ist der Default
+    crow_core.judge_threshold_set(args.judge_threshold)   # #267
     # The repository used to be printed here. It sits beside the wordmark now,
     # under the commands, so the endpoint block is the endpoint and the model.
     print("")
@@ -2378,6 +2379,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="token cap for the model's own digest in the rollover note,"
                              " asked on the still-warm prefix before the cut; 0 switches"
                              " it off (default: %d)" % crow_core.ROLLOVER_DIGEST_DEFAULT)
+    parser.add_argument("--judge-threshold", dest="judge_threshold", type=int,
+                        default=None, metavar="N",
+                        help="lowest judge score (1-10) a visual goal step needs before"
+                             " goal_step accepts 'done' (default: %d)"
+                             % crow_core.JUDGE_THRESHOLD_DEFAULT)
     # NOT REMOVED, MOVED BEHIND A SWITCH (#70). The per-round line is the instrument this loop was
     # built with -- it is what showed the prefix holding round by round. Deleting it would cost the
     # next person debugging the cache the only view they had; leaving it on cost every user twelve

@@ -1240,7 +1240,9 @@ TOOLS = [
                   "description": "1-based number of the step, as listed by "
                                  "goal_set."},
          "status": dict(_STR, description="running, done or failed."),
-         "note": dict(_STR, description="For done: what proves it. For failed: "
+         "note": dict(_STR, description="For done: what proves it -- on "
+                                        "visual work the path of the "
+                                        "render_page capture. For failed: "
                                         "why.")},
         ["step", "status"]),
 ]
@@ -16576,6 +16578,9 @@ def goal_done_refusal(index: int, note: str = "",
         return ("refused: step %d was last reported failed (\"%s\"). A 'done' "
                 "after that needs a note saying what proves it works now."
                 % (index + 1, str(step.get("note") or "")[:160])), None
+    evidence = goal_evidence_refusal(goal, index, said)        # #267
+    if evidence:
+        return evidence, None
     check = goal_check_get()
     closes = all(s.get("status") == GOAL_DONE
                  for n, s in enumerate(goal["steps"]) if n != index)
@@ -16587,6 +16592,153 @@ def goal_done_refusal(index: int, note: str = "",
     return ("refused: this would close the goal, and its acceptance check "
             "failed. The goal stays open until it passes.\ncheck: %s\n%s"
             % (check, _clip(result, 2000))), None
+
+
+# #267. A VISUAL STEP IS DONE ON A PICTURE, NOT ON A SENTENCE.
+# 2026-09-23, diorama run: 9/9 `done`, every note "verified on screen", and
+# the deliverable was a small purple box in a black frame. #250 refuses a
+# note that SAYS it is not done; it cannot refuse a note that says "verified"
+# about nothing. Anthropic's long-running-agent harness gates "done" on
+# evidence the harness can check, not on the agent's own report
+# ("Effective harnesses for long-running agents", 2025) -- here the evidence
+# is a capture made during this goal, named in the note, and, when a judge
+# with fresh eyes scored it, that judge's lowest score.
+#
+# WHICH GOALS: the ones whose title or steps name visual work. A goal that
+# builds a parser is not asked for a screenshot. `visual: true|false` in
+# goal.json overrides the guess either way.
+_GOAL_VISUAL = re.compile(
+    r"(?i)\b(?:render(?:s|ed|ing)?|screenshots?|visual(?:ly)?|webgl2?|html|"
+    r"css|canvas|web ?page|website|landing page|scene|diorama|voxels?|3d|"
+    r"shaders?|svg|sprites?|ui)\b")
+# A STEP THAT ONLY PLANS makes no picture: "Think and plan: read this file,
+# research ..., write PLAN.md" was step 1 of the diorama goal. Exempt only
+# when it builds nothing -- "plan and build the scene" still needs one.
+_GOAL_PLANNING = re.compile(r"(?i)^\W*(?:think|plan|research|read|outline|"
+                            r"design doc|write (?:the |a )?plan)\b")
+_GOAL_BUILDS = re.compile(r"(?i)\b(?:build|implement|render|draw|code|write "
+                          r"(?:the )?(?:page|html|shader|scene)|fix|verify)\b")
+_GOAL_IMAGE_CITED = re.compile(r"[^\s'\"`(),;<>\[\]]+\.(?:png|jpe?g|webp)\b",
+                               re.I)
+
+# THE JUDGE'S BAR. 8 of 10 by default: the diorama prompt asked for 9+ from
+# the model's own eyes and got a black frame; a fresh judge at 8 is the
+# stricter test. `judge_threshold` in settings.json (window) or
+# --judge-threshold (terminal) moves it.
+JUDGE_THRESHOLD_DEFAULT = 8
+JUDGE_THRESHOLD = JUDGE_THRESHOLD_DEFAULT
+
+
+def judge_threshold_set(value) -> None:
+    """None or nonsense restores the default; a number is clamped to 1..10."""
+    global JUDGE_THRESHOLD
+    try:
+        JUDGE_THRESHOLD = (JUDGE_THRESHOLD_DEFAULT if value is None
+                           else max(1, min(10, int(value))))
+    except (TypeError, ValueError):
+        JUDGE_THRESHOLD = JUDGE_THRESHOLD_DEFAULT
+
+
+def goal_nudge_evidence(goal: "dict | None", index: int) -> str:
+    """The sentence the step nudge adds on a visual step, or "". Said where
+    the step is handed out, so the gate's first refusal is not the first
+    time the model hears the rule."""
+    if not goal_step_needs_render(goal, index):
+        return ""
+    return (" This is visual work: render_page it, read_image the capture, "
+            "call judge on it, and put the capture's path in the done note.")
+
+
+def goal_is_visual(goal: "dict | None") -> bool:
+    """Does this goal make something to be looked at?"""
+    if not goal:
+        return False
+    flag = goal.get("visual")
+    if isinstance(flag, bool):
+        return flag
+    text = " ".join([str(goal.get("title") or "")]
+                    + [str(s.get("text") or "") for s in goal.get("steps") or []])
+    return _GOAL_VISUAL.search(text) is not None
+
+
+def goal_step_needs_render(goal: "dict | None", index: int) -> bool:
+    """Must `done` on this step cite a capture? Visual goal, not a pure
+    planning step."""
+    if not goal_is_visual(goal):
+        return False
+    steps = goal.get("steps") or []
+    if not 0 <= index < len(steps):
+        return False
+    text = str(steps[index].get("text") or "")
+    return not (_GOAL_PLANNING.search(text) and not _GOAL_BUILDS.search(text))
+
+
+def _render_candidates(cited: str) -> "list[str]":
+    """Where a cited image may be: as written, under the working area, or by
+    its name in the render folder -- the diorama notes wrote the bare name."""
+    expanded = os.path.expanduser(cited)
+    if os.path.isabs(expanded):
+        return [expanded]
+    out = []
+    root = get_root()
+    if root:
+        out.append(os.path.join(root, expanded))
+    out.append(os.path.join(_render_dir(), os.path.basename(expanded)))
+    return out
+
+
+def goal_note_renders(note: str, goal: "dict | None") -> "list[str]":
+    """The images the note cites that exist and were written during this
+    goal (mtime at or after its creation). An old capture proves nothing
+    about today's page."""
+    since = float((goal or {}).get("created") or 0.0)
+    found: "list[str]" = []
+    for cited in _GOAL_IMAGE_CITED.findall(str(note or "")):
+        for path in _render_candidates(cited.rstrip(".:")):
+            try:
+                fresh = os.path.getmtime(path) >= since - 1.0
+            except OSError:
+                continue
+            if fresh and os.path.isfile(path):
+                if path not in found:
+                    found.append(path)
+                break
+    return found
+
+
+def goal_evidence_refusal(goal: "dict | None", index: int,
+                          note: str = "") -> "str | None":
+    """Why `done` on a visual step is refused, or None. Two rules, in order:
+    a cited capture from this goal, and -- only when a judge scored this step
+    -- a lowest score at or over `JUDGE_THRESHOLD`."""
+    if not goal_step_needs_render(goal, index):
+        return None
+    if not goal_note_renders(note, goal):
+        where = os.path.relpath(_render_dir(), get_root()) if get_root() \
+            else _render_dir()
+        return ("refused: step %d is visual work, and 'done' needs a picture "
+                "you can point at. The note cites no capture made during this "
+                "goal. Call render_page on the deliverable, read_image the "
+                "capture, call judge on it, then report done with the capture's "
+                "path in the note (e.g. %s/render-YYYYMMDD-HHMMSS.png). If "
+                "nothing can be rendered, call goal_step with 'failed' and say "
+                "why." % (index + 1, where.replace(os.sep, "/")))
+    verdict = goal["steps"][index].get("judge")
+    low = verdict.get("min") if isinstance(verdict, dict) else None
+    if isinstance(low, (int, float)) and low < JUDGE_THRESHOLD:
+        scores = verdict.get("scores") or {}
+        worst = sorted(scores.items(), key=lambda kv: kv[1])[:3]
+        weakest = verdict.get("weakest") or []
+        return ("refused: the judge (%s, fresh context) scored step %d at %s "
+                "lowest -- under the bar of %d. Lowest: %s. Its weakest "
+                "points: %s. Fix those, render again, call judge again; 'done' "
+                "passes once every criterion scores %d or more."
+                % (verdict.get("model") or "?", index + 1, low,
+                   JUDGE_THRESHOLD,
+                   ", ".join("%s %s" % kv for kv in worst) or "?",
+                   "; ".join(str(w) for w in weakest[:3]) or "none given",
+                   JUDGE_THRESHOLD))
+    return None
 
 
 def goal_next_open(goal: "dict | None" = None) -> "int | None":
