@@ -16401,6 +16401,14 @@ def _goal_step_norm(text: str) -> str:
     return " ".join(str(text or "").lower().split())
 
 
+# #260: what a carried step keeps -- everything but its text.
+_GOAL_CARRIED_FIELDS = ("status", "note", "started", "started_tokens",
+                        "seconds", "tokens", "delegated")
+# ... and what the goal keeps: its clock and its bill, in pairs.
+_GOAL_CARRIED_TOTALS = ("spent", "last_spent", "delegated", "created",
+                        "started", "last_at")
+
+
 def _carry_goal_marks(old: "dict | None", new: "dict") -> "dict | None":
     """#210. Die Haken eines laufenden Ziels auf den neuen Plan uebertragen.
 
@@ -16418,24 +16426,43 @@ def _carry_goal_marks(old: "dict | None", new: "dict") -> "dict | None":
 
     NUR DONE UND FAILED REITEN. Ein `running` gehoert zu dem Zug, der gerade
     abgeschnitten oder beendet wurde -- der neue Plan sagt selbst, wo er
-    anfaengt. Und niemand schreibt Zeiten oder Token um: Die Bilanz des
-    neuen Plans beginnt bei 0, das getragene Zeichen ist die Marke, nicht
-    die Rechnung.
+    anfaengt.
+
+    #260: DER GANZE SCHRITT REITET, NICHT NUR SEIN HAKEN.
+    Bis hierher stand: "niemand schreibt Zeiten oder Token um, das getragene
+    Zeichen ist die Marke, nicht die Rechnung" -- und mit der Rechnung ging
+    die NOTIZ. Gemessen am 2026-09-23 (Diorama-Lauf): ein `goal_set` mitten
+    im Ziel meldete "carried: done 6/9", und danach stand in goal.json bei
+    allen neun Schritten `note: ""` -- die Belege ("Verified by screenshot:
+    ...") waren weg, und #250s Pruefung "done nach failed braucht eine Notiz"
+    liest genau dieses Feld. Getragen wird deshalb alles, was der Schritt
+    ueber sich weiss (`_GOAL_CARRIED_FIELDS`), und die Bilanz des Ziels
+    (`_GOAL_CARRIED_TOTALS`) mit: sonst stuende in der Schrittspalte mehr,
+    als das Ziel gekostet haben will. `last_at`/`last_spent` gehen PAARWEISE
+    mit `spent`: `goal_step_end` rechnet dem naechsten Schritt `spent -
+    last_spent` an, und ein getragenes `spent` ueber einem frischen
+    `last_spent` 0 schriebe ihm die Kosten des ganzen Ziels zu. Der Text bleibt der
+    des neuen Plans -- er ist das, was das Modell gerade geschrieben hat.
     """
     steps_old = (old or {}).get("steps") or []
-    marks = {_goal_step_norm(s.get("text")): s.get("status")
+    marks = {_goal_step_norm(s.get("text")): s
              for s in steps_old
              if s.get("status") in (GOAL_DONE, GOAL_FAILED)}
     if not marks:
         return None
     hits = 0
     for step in new.get("steps") or []:
-        status = marks.get(_goal_step_norm(step.get("text")))
-        if status is not None:
-            step["status"] = status
+        found = marks.get(_goal_step_norm(step.get("text")))
+        if found is not None:
+            for field in _GOAL_CARRIED_FIELDS:
+                if field in found:
+                    step[field] = found[field]
             hits += 1
     if not hits:
         return None
+    for field in _GOAL_CARRIED_TOTALS:
+        if (old or {}).get(field) is not None:
+            new[field] = old[field]
     return {"done": sum(1 for s in steps_old if s.get("status") == GOAL_DONE),
             "of": len(steps_old), "matched": hits}
 

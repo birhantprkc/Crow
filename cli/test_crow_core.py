@@ -15108,6 +15108,59 @@ class TheReplannedGoalKeepsItsMarksTests(unittest.TestCase):
         self.assertEqual([s["status"] for s in goal["steps"]],
                          ["open", "open"])
 
+    def test_notes_and_step_bills_ride_with_the_mark(self):
+        """#260, the live case: `carried: done 6/9` and then
+        `note: ""` on all nine steps. The whole step record rides."""
+        crow_core.goal_start(
+            "Old plan", ["read the code", "write it", "prove it"], now=1000.0)
+        crow_core.goal_tokens_seen(0)
+        crow_core.goal_step_begin(0, now=1001.0)
+        crow_core.goal_step_end(0, tokens=10,
+                                note="Verified by screenshot: a.png", now=1010.0)
+        crow_core.goal_step_end(1, ok=False, note="the build fails at line 3",
+                                now=1020.0)
+        before = crow_core.goal_load()
+        out = json.loads(crow_core.tool_goal_set(
+            "New plan", ["Read the code", "write it", "prove it"]))
+        self.assertEqual(out["carried"], {"done": 1, "of": 3, "matched": 2})
+        after = crow_core.goal_load()
+        for n in (0, 1):
+            for field in crow_core._GOAL_CARRIED_FIELDS:
+                self.assertEqual(after["steps"][n].get(field),
+                                 before["steps"][n].get(field),
+                                 "step %d lost %s" % (n + 1, field))
+        self.assertEqual(after["steps"][0]["note"], "Verified by screenshot: a.png")
+        self.assertEqual(after["steps"][0]["text"], "Read the code",
+                         "the new plan's wording was replaced by the old")
+        self.assertEqual(after["steps"][2]["note"], "")
+        for field in crow_core._GOAL_CARRIED_TOTALS:
+            self.assertEqual(after.get(field), before.get(field), field)
+
+    def test_a_carried_failed_note_still_guards_done(self):
+        """#250 reads the note of a failed step; carried without it, a bare
+        `done` after the replan slipped through."""
+        crow_core.goal_start("Old", ["read the code", "write it"], now=1000.0)
+        crow_core.goal_step_end(0, ok=False, note="no 3D here", now=1010.0)
+        crow_core.tool_goal_set("New", ["read the code", "write it"])
+        out = json.loads(crow_core.tool_goal_step(1, "done"))
+        self.assertFalse(out["ok"])
+        self.assertIn("no 3D here", out["error"])
+
+    def test_the_next_step_is_not_billed_the_whole_goal(self):
+        """`spent` rides with `last_spent`: the next step is billed what came
+        after the last transition, not everything the goal ever cost."""
+        crow_core.goal_start("Old", ["read the code", "write it"], now=1000.0)
+        goal = crow_core.goal_load()
+        goal["spent"] = goal["last_spent"] = 5000
+        crow_core.goal_write(goal)
+        crow_core.goal_step_end(0, now=1010.0)
+        crow_core.tool_goal_set("New", ["read the code", "write it"])
+        goal = crow_core.goal_load()
+        goal["spent"] += 30
+        crow_core.goal_write(goal)
+        crow_core.goal_step_end(1, now=1020.0)
+        self.assertEqual(crow_core.goal_load()["steps"][1]["tokens"], 30)
+
     def test_no_goal_before_no_carry(self):
         out = json.loads(crow_core.tool_goal_set(
             "Fresh", ["step one", "step two"]))
