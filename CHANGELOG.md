@@ -10,6 +10,20 @@ Nothing here is live-accepted yet; acceptance is robin's GUI replay.
 
 ### Added
 
+- **The browser panel lives inside Crow's window on Linux** (#201, #226, #227, #230). A second WebKitWebView in
+  Crow's own GTK window replaces the separate `crow-browser` window that Hyprland placed on its own. It has its
+  own lasting profile, a 2 GB memory kill checked every second (the chat says so), a bwrap sandbox and no
+  pywebview bridge. In-page navigation updates the bar, tab and Back; `_blank` and `window.open` stay in the
+  panel; an answer link opens as a panel tab (Ctrl/middle click and the GitHub device code go to the system
+  browser); renders reuse one tab. Measured: Chromium tabs opened per link held ~73 MB each and were never
+  closed (271 -> 1012 MB PSS over 10 loads); the panel stays flat at ~370 MB. Fallback: the old window
+  (`CROW_PANE_WINDOW=1`). Windows keeps the old pane, not verified.
+- **Text selects and copies; links and paths are marked** (#228, #229). WebKitGTK 2.52 ignores unprefixed
+  `user-select`, and pywebview's `text_select=False` injected `body{-webkit-user-select:none}`: nothing could
+  be selected. One policy block in both spellings (content text, controls none); a right-click menu (Copy,
+  Copy path, Copy path:line, Show in file manager, Open link) with keyboard support; Ctrl+C also copies through
+  `Api.copy`. http(s) URLs and POSIX/Windows paths (with `:line:col`) are linkified in answers, inline code and
+  tool results; `_` inside a word or URL is no longer emphasis (CommonMark 6.2).
 - **The head names the working area on every request** (#222). `prompt_head` opens with `Working area: <root>`
   and one sentence on how relative paths and a cwd-less `run_command` resolve there. It is byte-identical and at
   the same offset on both sides of the rollover cut. The 2026-09-22 K=2 head (6,738 tokens) had no working
@@ -45,6 +59,17 @@ Nothing here is live-accepted yet; acceptance is robin's GUI replay.
 
 ### Fixed
 
+- **Drags and window resizes follow the pointer in long chats** (#236, #237, #238). Measured on a 200-turn chat
+  (12,968 nodes), WebKitGTK 2.52: rail drag 38.8 -> 3.6 ms per step, window resize 16.9 -> 4.0 ms, 0 px view
+  drift after a mid-chat drag (was 2,079 px: WebKitGTK has no scroll anchoring). The rail widths are set on the
+  elements that read them, not on `<html>` (#236); turns use `content-visibility:auto` only during a gesture and
+  the view is restored afterwards (#237); per-event bridge work is gone on GTK and coalesced on Windows (#238).
+- **Nothing overhangs or clips** (#231-#235). Composer buttons stay inside the box (477 -> 0 audit findings);
+  long paths, URLs and compounds wrap in the column (1950 -> 0); menus open above the goal/git cards and the
+  cards no longer cover the composer or, from 1100 px of chat width, the column; a squeezed code panel hides
+  instead of clipping; the settings sheet stays under the title bar; alignment, scrollbar corners, tab strip
+  and focus rings. Audited over 185 Chromium and 12 WebKitGTK renders before and after. Open: cards over the
+  column below 1100 px (#233, needs a design decision).
 - **The rollover note is data, not the user's words** (#223). It is framed as a record written by Crow and the
   model; only the user's carried lines and the typed line count as user-named paths. The Qwen3.8 template allows
   no other role for it (a late system message raises, and so does a turn with no user query).
