@@ -36,6 +36,7 @@ from __future__ import annotations
 import ast
 import copy
 import atexit
+import hashlib
 import http.server
 import importlib.util
 import inspect
@@ -4242,6 +4243,42 @@ class CwdGuardTests(unittest.TestCase):
         self.assertIsNone(crow_core.run_command_cwd_refusal("{not json"))
 
 
+class AWriteSaysItIsByteExactTests(unittest.TestCase):
+    """#252. 2026-09-23: the bytes on disk equalled the model's own
+    write_file arguments, and the model spent hours blaming "the read
+    channel". The result now says the write is byte-exact, in bytes, with a
+    short sha256 of the file read back."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-exact-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+
+    def test_the_count_is_bytes_not_characters(self):
+        """The old line said len(content): 2 for "ä—", which is 5 bytes."""
+        path = os.path.join(self.root, "u.txt")
+        out = crow_core.tool_write_file(path, "ä—")
+        self.assertTrue(out.startswith("wrote 5 bytes to %s" % path), out)
+        self.assertEqual(os.path.getsize(path), 5)
+
+    def test_the_sha256_is_the_files(self):
+        path = os.path.join(self.root, "a.txt")
+        out = crow_core.tool_write_file(path, "o[13] = 1;\n")
+        with open(path, "rb") as fh:
+            want = hashlib.sha256(fh.read()).hexdigest()[:12]
+        self.assertIn("sha256 %s" % want, out)
+        self.assertIn("Byte-exact: the file holds exactly the bytes", out)
+
+    def test_an_append_says_the_file_ends_with_the_bytes(self):
+        path = os.path.join(self.root, "log.txt")
+        crow_core.tool_append_file(path, "a")
+        out = crow_core.tool_append_file(path, "é")
+        self.assertIn("(+3 bytes)", out)          # "é\\n"
+        self.assertIn("file 5 bytes", out)
+        self.assertIn("Byte-exact: the file ends with exactly the bytes", out)
+
+
 class ANearMissDirectoryIsAskedOnceTests(unittest.TestCase):
     """#244: write_file/append_file created any missing parent in
     silence. Measured: 2026-09-18 msg 238 wrote `testcases/w/fs.py` while the
@@ -4291,8 +4328,9 @@ class ANearMissDirectoryIsAskedOnceTests(unittest.TestCase):
     def test_an_existing_directory_is_unchanged(self):
         """POSITIVE CONTROL: the result stays the exact line it was."""
         path = self.at("work", "a.py")
-        self.assertEqual(crow_core.tool_write_file(path, "1"),
-                         "wrote 1 bytes to %s" % path)
+        out = crow_core.tool_write_file(path, "1")
+        self.assertTrue(out.startswith("wrote 1 bytes to %s (sha256 " % path), out)
+        self.assertNotIn("new directory", out)
 
     def test_a_control_character_in_the_path_is_refused_always(self):
         bad = self.at("src", "gen.py\nparameter>\n<parameter name=\"path\">",

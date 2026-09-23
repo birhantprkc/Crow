@@ -52,6 +52,7 @@ Standard library only, same as the client.
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import random
@@ -9863,6 +9864,36 @@ def _said_new_dir(made: "str | None") -> str:
     return " (new directory: %s)" % made if made else ""
 
 
+# ------------------------------------------------ corruption follow-ups -----
+# 2026-09-23 (crow-nest#91): the model wrote corrupt numbers into its own code
+# (`o[13]`->`o[113]`, `texImage3D`->`texImage33D`, `[0,0,0]`->`[0,0,00]`), the
+# bytes on disk equalled its write_file arguments, and it blamed the tools --
+# "the read channel is byte-unstable" -- for hours. Two answers from the
+# harness: say that a write is byte-exact, with the numbers to check it by
+# (#252), and parse what was written, so the first error is in the model's
+# own result (#251).
+
+def _write_receipt(path: str, sent: bytes, whole: bool = True) -> str:
+    """#252. What a write result says about the bytes: the count in
+    BYTES (the old `len(content)` counted characters -- 32 of 112 writes on
+    2026-09-23 held non-ASCII text, so the number disagreed with the file),
+    a short sha256 of the file as it now is, and that it is byte-exact. The
+    file is read back, so the claim is measured, not assumed."""
+    try:
+        with open(path, "rb") as fh:
+            disk = fh.read()
+    except OSError as exc:
+        return " (could not read it back: %s)" % exc
+    digest = hashlib.sha256(disk).hexdigest()[:12]
+    if not disk.endswith(sent):
+        return (" (sha256 %s) -- WARNING: the file does not end with the bytes "
+                "sent; read it back" % digest)
+    return (" (sha256 %s, file %d bytes). Byte-exact: the file %s exactly "
+            "the bytes this call sent; a later read returns them. A mistake "
+            "in them was in the content." % (
+                digest, len(disk), "holds" if whole else "ends with"))
+
+
 def tool_write_file(path: str, content: str = "", **_) -> str:
     # THE BOUNDARY GOES FIRST, ahead of read-before-write, and the order is not
     # cosmetic: reads are NOT bounded, so a path outside the root would answer
@@ -9893,7 +9924,9 @@ def tool_write_file(path: str, content: str = "", **_) -> str:
     except OSError as exc:
         return f"error: could not write {path}: {exc}"
     _mark_read(path)                                # #215-H: crow knows these bytes
-    return f"wrote {len(content)} bytes to {path}" + _said_new_dir(made)
+    sent = content.encode("utf-8")
+    return (f"wrote {len(sent)} bytes to {path}" + _said_new_dir(made)
+            + _write_receipt(path, sent))
 
 
 def tool_append_file(path: str, content: str = "", **_) -> str:
@@ -9924,10 +9957,10 @@ def tool_append_file(path: str, content: str = "", **_) -> str:
         return f"error: could not append to {path}: {exc}"
     if known:
         _mark_read(path)
-    total = os.path.getsize(path)
+    sent = content.encode("utf-8")
     verb = "appended to" if existed else "created"
-    return (f"{verb} {path} (+{len(content)} bytes, file now {total} bytes)"
-            + _said_new_dir(made))
+    return (f"{verb} {path} (+{len(sent)} bytes)" + _said_new_dir(made)
+            + _write_receipt(path, sent, whole=False))
 
 
 def tool_edit_file(path: str, old: str = "", new: "str | None" = None, **_) -> str:
