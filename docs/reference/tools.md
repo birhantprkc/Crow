@@ -2,12 +2,12 @@
 
 ## Tools
 
-27 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured. `/tools` lists
+28 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured. `/tools` lists
 them in either surface, derived from the declarations themselves rather than written beside them.
 
 `read_file` `read_image` `render_page` `write_file` `append_file` `edit_file` `list_dir` `find_files`
 `search_text` `run_command` `build_bundle` `web_search` `fetch_url` `memory` `skill` `session_search`
-`delegate` `subtasks` `collect` `goal_set` `goal_step` `git_status` `git_diff` `git_log`
+`delegate` `subtasks` `collect` `goal_set` `goal_step` `judge` `git_status` `git_diff` `git_log`
 `git_commit` `git_push` `github_connect`.
 
 An MCP tool joins the same list as `mcp_<server>_<tool>`, above the built-ins, and carries its
@@ -188,6 +188,46 @@ written during this goal (a path, or a bare `render-….png` name from `.crow/re
 scored the step, its lowest score must reach `judge_threshold` (default 8). Steps that only plan
 are exempt. `"visual": true|false` in `goal.json` overrides the keyword guess. See
 [goals and subagents](../user-guide/goals-and-subagents.md).
+
+### `judge` (#266)
+
+`judge(images="", criteria="", step=None)` has a separate model with fresh eyes score a capture of
+visual work. The judge receives **one** request containing the image(s), the rubric, the goal's
+title and the step's text. It never receives the conversation: the maker's own story ("the black
+screen was a viewport leak, now fixed") is exactly what talked the maker into its own score.
+Seen on 2026-09-23: "Every criterion reads 9+ on the capture" over a small box in a black frame.
+
+| | |
+|---|---|
+| Images | default: the newest `render-*.png` in `.crow/renders/`, plus its `-crop.png` when the render wrote one (the content enlarged); up to 4 |
+| Rubric | the user's `accept:` lines from `/goal`, else criteria written in `PLAN.md` (a heading naming criteria or a rubric with bullets, or a sentence "score … against: a, b, c."), else `criteria`, else a default visual rubric. The model can only supply a rubric where none is written down |
+| Answer | JSON: `scores` (1–10 per criterion), `min`, `threshold`, `passes`, `weakest` (three points), `verdict`, `judge` and `chosen_as`, `rubric_from`, `images`, `step` |
+| Stored | on the step in `goal.json` (`judge`: model, scores, min, weakest, verdict, images, rubric source, time), where [`goal_step`](#goals-165) reads it (#267) |
+| Class | `network`: the capture leaves the machine when a remote model judges |
+
+**Who judges**, strongest reachable first, and never inside the maker's context:
+
+1. `providers.json` → `"judge": {"provider": "…", "model": "…"}` when it is set
+   (`{"provider": "local"}` means the local model only);
+2. the delegate spot, then its fallbacks (your favourites first, then free models by window), at
+   most three remote tries. A model whose catalogue row declares it cannot take images is skipped.
+   A row that does not say gets tried. The catalogue records `vision` from OpenRouter's
+   `architecture.input_modalities` after its next refresh (289 of 458 models listed `image` on
+   2026-09-24);
+3. this conversation's own model, in a **fresh** request with the images and the rubric only. It is
+   refused up front when the server's `/props` says it cannot see. On a one-slot local server it
+   also costs the next turn a cold prefill, and the result says so.
+
+A spot that fails (rate limit, 403, no JSON, fewer than half the criteria scored) hands on to the
+next one, and the answer lists it under `tried_first`.
+
+Measured on 2026-09-24 on `render-20260923-232855.png` (the diorama frame the model had scored
+9+), with the prompt's seven criteria and four free OpenRouter vision models pinned in turn. All
+four returned `min` 2: nemotron-3-nano-omni (26 s), nex-n2.5-pro (26 s), dots-3-note-preview
+(22 s) and nex-n2.5-mini (2 s). Each weakest list named the empty black frame, the tiny scene or
+the missing reflections. On the same day `inclusionai/ling-3.0-flash-vl:free` (the configured
+favourite) answered 404 "unavailable for free", both `inkling` models answered 403, and gemma-4
+and qwen3.8 answered 429.
 
 ### Git (#156)
 

@@ -17,7 +17,7 @@ while it keeps going.
 | | |
 |---|---|
 | Tools | `goal_set(title, steps)` writes the plan, `goal_step(step, status, note)` moves one step |
-| From the composer | `/goal <title>` then one step per line, or `title \| step \| step`. A line `check: <command>` (or a `\| check: <command>` part) is the acceptance check, not a step (#250). `/goal` alone shows where it stands, `/goal off` clears it and its check |
+| From the composer | `/goal <title>` then one step per line, or `title \| step \| step`. A line `check: <command>` (or a `\| check: <command>` part) is the acceptance check, not a step (#250). A line `accept: <criterion>, <criterion>` is the rubric the [judge](../reference/tools.md#judge-266) scores against, not a step (#266). `/goal` alone shows where it stands, `/goal off` clears it and its check |
 | Panel | the first of the pinned cards at the top right of the chat (goal, subtasks, git): title, `done/total`, wall clock, tokens, delegated tokens, and one row per step |
 | Store | `<root>/.crow/goal.json`, beside `MEMORY.md` — the goal belongs to the folder the work is in |
 | States | `open` · `running` · `done` · `failed` |

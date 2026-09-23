@@ -1245,6 +1245,25 @@ TOOLS = [
                                         "render_page capture. For failed: "
                                         "why.")},
         ["step", "status"]),
+    # #266. THE MAKER IS NOT THE CHECKER, for pictures too.
+    _fn("judge",
+        "Have a separate model with fresh eyes score a capture of visual "
+        "work. It sees only the image(s) and the rubric -- never this "
+        "conversation -- and returns JSON: a 1-10 score per criterion, the "
+        "lowest, and the three weakest points, stored on the goal step. Call "
+        "it after render_page on every visual step, before goal_step 'done': "
+        "a lowest score under the bar (default 8) refuses 'done'. Default "
+        "image: the newest render_page capture and its crop. The rubric is "
+        "the user's accept lines, else PLAN.md's criteria, else criteria.",
+        {"images": dict(_STR, description="Image paths, comma-separated. "
+                                          "Default: the newest capture."),
+         "criteria": dict(_STR, description="Comma-separated criteria, used "
+                                            "only when neither the user nor "
+                                            "PLAN.md wrote any."),
+         "step": {"type": "integer",
+                  "description": "1-based goal step the score belongs to. "
+                                 "Default: the running step."}},
+        []),
 ]
 
 # THE BUILT-INS AS SHIPPED -- twelve until #143 added the delegation three --
@@ -12954,6 +12973,8 @@ TOOL_CLASS = {
     # registry -- the network round trip already happened on the delegate
     # thread, and classing the hand-over as network would gate the wrong call.
     "delegate": "network",
+    # #266: the capture leaves the machine for a remote judge, like a task.
+    "judge": "network",
     "subtasks": "reading",
     "collect": "reading",
     # #165. DER PLAN IST `reading`, und das ist eine Entscheidung ueber den
@@ -16258,6 +16279,7 @@ def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
             return ("no goal to clear.", None, False)
         goal_write(None)
         goal_check_set(None)                                   # #250
+        goal_accept_set(None)                                  # #266
         return ("goal cleared.", None, True)
     lines = [p.strip() for p in text.splitlines() if p.strip()]
     if len(lines) == 1:
@@ -16266,6 +16288,11 @@ def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
     checks = [ln[len(GOAL_CHECK_PREFIX):].strip() for ln in lines
               if ln.lower().startswith(GOAL_CHECK_PREFIX)]
     lines = [ln for ln in lines if not ln.lower().startswith(GOAL_CHECK_PREFIX)]
+    # #266: `accept: <criterion>` is the judge's rubric, not a step.
+    accepts = [ln[len(GOAL_ACCEPT_PREFIX):].strip() for ln in lines
+               if ln.lower().startswith(GOAL_ACCEPT_PREFIX)]
+    accepts = [a for a in accepts if a]
+    lines = [ln for ln in lines if not ln.lower().startswith(GOAL_ACCEPT_PREFIX)]
     if len(lines) < 2:
         return ("a goal needs steps: `/goal <title>` then one step per line, "
                 "or `title | step | step`.", goal_load(), False)
@@ -16274,11 +16301,15 @@ def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
         return ("that is not a goal I can hold.", goal_load(), False)
     check = next((c for c in reversed(checks) if c), None)
     goal_check_set(check)
+    goal_accept_set(accepts)                                   # #266
     # DIE KOSTEN STEHEN VOR DER TAT, wie bei jeder Kopfaenderung: das Ziel geht
     # in den gepinnten Block, also zahlt der naechste Zug einen vollen Prefill.
-    return ("goal: %s -- %d steps%s.\n%s"
+    return ("goal: %s -- %d steps%s%s.\n%s"
             % (goal["title"], len(goal["steps"]),
                ", acceptance check: %s" % check if check else "",
+               ", %d accept line%s for the judge"
+               % (len(accepts), "" if len(accepts) == 1 else "s")
+               if accepts else "",
                GOAL_COST_NOTE), goal, True)
 
 
@@ -16739,6 +16770,55 @@ def goal_evidence_refusal(goal: "dict | None", index: int,
                    "; ".join(str(w) for w in weakest[:3]) or "none given",
                    JUDGE_THRESHOLD))
     return None
+
+
+# #266. `accept: <criterion>` LINES in `/goal` are the user's rubric
+# for the judge. Beside the acceptance check and for the same reason: the
+# model's `goal_set` rewrites goal.json, and the user's word must outlive it.
+GOAL_ACCEPT_PREFIX = "accept:"
+GOAL_ACCEPT_FILE = "goal-accept.json"
+
+
+def _goal_accept_path() -> str:
+    return os.path.join(SESSION_DIR, GOAL_ACCEPT_FILE)
+
+
+def goal_accept_get() -> "list[str]":
+    """The user's accept lines for the goal in this working area."""
+    try:
+        with open(_goal_accept_path(), encoding="utf-8") as fh:
+            found = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    lines = found.get(os.path.abspath(goal_path())) if isinstance(found, dict) \
+        else None
+    return [str(x) for x in lines if str(x).strip()] \
+        if isinstance(lines, list) else []
+
+
+def goal_accept_set(lines: "list[str] | None") -> None:
+    """Set (or with an empty list / None, drop) this area's accept lines."""
+    try:
+        with open(_goal_accept_path(), encoding="utf-8") as fh:
+            found = json.load(fh)
+    except (OSError, ValueError):
+        found = {}
+    if not isinstance(found, dict):
+        found = {}
+    key = os.path.abspath(goal_path())
+    clean = [str(x).strip() for x in lines or [] if str(x).strip()]
+    if clean:
+        found[key] = clean
+    elif found.pop(key, None) is None:
+        return
+    try:
+        os.makedirs(SESSION_DIR, exist_ok=True)
+        tmp = _goal_accept_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(found, fh, indent=1, ensure_ascii=False)
+        os.replace(tmp, _goal_accept_path())
+    except OSError:
+        pass
 
 
 def goal_next_open(goal: "dict | None" = None) -> "int | None":
@@ -18864,6 +18944,14 @@ def run_turn(
     # runs no tools -- none are declared on it -- so it needs none of the four,
     # and touching them from a second thread is the race the parameter names.
     if owns_turn_state:
+        # #266: where this turn goes, for `judge`'s last fallback -- the same
+        # endpoint in a FRESH context (images and rubric, no transcript).
+        _TURN_SPOT.clear()
+        _TURN_SPOT.update({"base_url": base_url, "model": model,
+                           "api_key": api_key, "remote": remote,
+                           "headers": dict(extra_headers or {}),
+                           "transport": transport,
+                           "served": served_name or model})
         adopt_read_state(conversation)      # #215-H: not a clear
         _SEEN.clear()
         _REFUSED.clear()
@@ -19882,6 +19970,15 @@ def provider_fetch_models(name: str, key: "str | None" = None,
                        "params": sorted(str(p) for p
                                         in (row.get("supported_parameters") or [])
                                         if isinstance(p, str))})
+        # #266: WHETHER IT CAN SEE, as the catalogue declares it
+        # (OpenRouter: `architecture.input_modalities`, 289 of 458 list
+        # "image" on 2026-09-24). Absent means "did not say" -- the judge
+        # tries such a model rather than guessing from its name (#142).
+        arch = row.get("architecture") if isinstance(row.get("architecture"),
+                                                     dict) else {}
+        inputs = arch.get("input_modalities", row.get("input_modalities"))
+        if isinstance(inputs, list):
+            models[-1]["vision"] = "image" in inputs
     if not models:
         return [], "%s listed no models" % (spec.get("label") or name)
     return models, None
@@ -21831,6 +21928,445 @@ def verify_start(conversation: "Conversation") -> str:
     return tool_delegate(task=VERIFY_PROMPT + material)
 
 
+# #266. THE JUDGE HAS FRESH EYES, AND ONLY EYES. 2026-09-23, diorama run:
+# the model scored its own capture "9+ on every criterion" and the capture
+# was a small purple box in a black frame. Anthropic's harness for long
+# apps puts a SEPARATE evaluator in front of the page because "agents tend
+# to respond by confidently praising the work -- even when ... the quality
+# is obviously mediocre"; ArtifactsBench (arXiv 2507.04952) scores rendered
+# artifacts with a multimodal judge and a per-task checklist. `/verify`
+# (#149) is the text sibling: user-triggered, asynchronous, diffs only --
+# it cannot gate a `done` in the same turn and it cannot see a render.
+#
+# WHAT THE JUDGE GETS: the capture(s), the rubric, the goal's title and the
+# step's text. Never the conversation -- the maker's narrative ("the black
+# screen was a viewport leak, now fixed") is exactly what talked the maker
+# into its own score.
+#
+# WHO JUDGES, strongest reachable first and never the maker's context:
+# a `judge` block in providers.json, then the delegate spot and its chain
+# (a catalogue row that says it cannot take images is skipped; one that
+# does not say is tried), then this turn's own endpoint in a FRESH request
+# -- images and rubric only -- refused up front when /props says it is
+# blind. That last one is the same weights with none of the history; on a
+# one-slot local server it also costs the next turn a cold prefill, and the
+# result says so.
+
+# Where the running turn goes (set by `run_turn` for the turn that owns the
+# state), for the judge's last fallback.
+_TURN_SPOT: dict = {}
+
+JUDGE_TIMEOUT = 240.0
+JUDGE_MAX_IMAGES = 4
+JUDGE_MAX_TOKENS = 4096
+# How many remote spots one call tries before the fresh local request.
+JUDGE_REMOTE_TRIES = 3
+JUDGE_MAX_CRITERIA = 10
+PLAN_FILE = "PLAN.md"
+
+JUDGE_DEFAULT_RUBRIC = (
+    "matches what the task asks for",
+    "detail density",
+    "lighting and colour",
+    "composition: the subject fills the frame",
+    "image cleanliness: no artefacts, no blank or black areas",
+    "looks finished, not a placeholder",
+)
+
+JUDGE_PROMPT = (
+    "You are a strict visual reviewer. You did not make this work and you "
+    "have not seen how it was made; judge only what the image(s) show.\n\n"
+    "Task: %(task)s\n\n"
+    "Score each criterion from 1 to 10. 10: a professional would ship it. "
+    "5: visibly unfinished. 1-2: the criterion is absent -- a blank, black "
+    "or mostly empty frame scores 1-2 on every criterion it cannot show. "
+    "Give no credit for anything the image does not show.%(crop)s\n\n"
+    "Criteria:\n%(criteria)s\n\n"
+    "Answer with JSON only, nothing around it:\n"
+    '{"scores": {"<criterion exactly as written>": <1-10>, ...}, '
+    '"weakest": ["<weakest point>", "<second>", "<third>"], '
+    '"verdict": "<one sentence>"}')
+
+_RUBRIC_HEAD = re.compile(r"(?im)^#{1,6}\s+.*\b(?:criteria|rubric)\b.*$")
+_RUBRIC_INLINE = re.compile(
+    r"(?i)(?:\b(?:criteria|rubric)\b|\bscor\w*\b[^\n:.]{0,80}?\bagainst\b)"
+    r"\s*:\s*")
+_RUBRIC_BULLET = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?(.+)$")
+
+
+def _rubric_split(text: str) -> "list[str]":
+    """`a, b (x, y), and c.` -> [a, b (x, y), c]: commas and semicolons
+    outside brackets, a leading "and", markdown emphasis and the full stop
+    dropped."""
+    parts, depth, cur = [], 0, ""
+    for ch in str(text or ""):
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+        if ch in ",;" and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    out = []
+    for part in parts:
+        item = re.sub(r"\s+", " ", part.replace("*", "").replace("`", ""))
+        item = re.sub(r"(?i)^\s*(?:and|or)\s+", "", item).strip(" .:\t")
+        if item and len(item) <= 120 and item not in out:
+            out.append(item)
+    return out
+
+
+def rubric_from_text(text: str) -> "list[str]":
+    """Criteria written down in a plan or a prompt, or []. Two shapes: a
+    heading naming criteria or a rubric with a bullet list under it, and a
+    sentence "score each 1-10 against: a, b, c." (the diorama prompt's own,
+    wrapped over two lines)."""
+    text = str(text or "")
+    for head in _RUBRIC_HEAD.finditer(text):
+        items: "list[str]" = []
+        for line in text[head.end():].splitlines()[1:]:
+            hit = _RUBRIC_BULLET.match(line)
+            if hit:
+                name = re.split(r"\s+[—–-]\s+|:\s", hit.group(1).replace(
+                    "*", "").replace("`", ""), maxsplit=1)[0].strip(" .")
+                if name:
+                    items.append(name[:120])
+            elif line.strip() and items or line.lstrip().startswith("#"):
+                break
+        if len(items) >= 2:
+            return items[:JUDGE_MAX_CRITERIA]
+    for hit in _RUBRIC_INLINE.finditer(text):
+        rest = text[hit.end():]
+        # THE SENTENCE, NOT THE LINE: it ends at a blank line, the next list
+        # item, or a full stop outside brackets.
+        stop = re.search(r"\n\s*\n|\n\s*(?:\d+[.)]|[-*+])\s", rest)
+        rest = rest[:stop.start()] if stop else rest
+        depth, end = 0, len(rest)
+        for n, ch in enumerate(rest):
+            depth += ch in "(["
+            depth -= ch in ")]" and depth > 0
+            if ch == "." and depth == 0 and (n + 1 == len(rest)
+                                             or rest[n + 1].isspace()):
+                end = n
+                break
+        items = _rubric_split(rest[:end])
+        if len(items) >= 2:
+            return items[:JUDGE_MAX_CRITERIA]
+    return []
+
+
+def judge_rubric(criteria=None) -> "tuple[list[str], str]":
+    """(criteria, where they came from). The user's `accept:` lines win,
+    then PLAN.md, then the caller's own, then the default visual rubric --
+    the model may only supply a rubric where none is written down."""
+    accept = [c for line in goal_accept_get() for c in _rubric_split(line)]
+    if accept:
+        return accept[:JUDGE_MAX_CRITERIA], "the user's accept lines"
+    root = get_root()
+    if root:
+        try:
+            with open(os.path.join(root, PLAN_FILE), encoding="utf-8",
+                      errors="replace") as fh:
+                found = rubric_from_text(fh.read(200_000))
+        except OSError:
+            found = []
+        if found:
+            return found, PLAN_FILE
+    if isinstance(criteria, (list, tuple)):
+        given = [str(c).strip() for c in criteria if str(c).strip()]
+    else:
+        given = _rubric_split(criteria or "")
+    if given:
+        return given[:JUDGE_MAX_CRITERIA], "the caller"
+    return list(JUDGE_DEFAULT_RUBRIC), "the default visual rubric"
+
+
+def judge_images(images=None) -> "tuple[list[str], str | None]":
+    """The files to judge, or an error. Default: the newest render_page
+    capture. A capture's `-crop.png` (the content, enlarged -- #TBD-image-crop)
+    rides along when it exists."""
+    picked: "list[str]" = []
+    if images:
+        items = images if isinstance(images, (list, tuple)) \
+            else re.split(r"[,\n]", str(images))
+        for item in items:
+            item = str(item).strip()
+            if not item:
+                continue
+            path = _rooted(item)
+            if not os.path.isfile(path):
+                return [], "error: no such image: %s" % path
+            if os.path.splitext(path)[1].lower() not in IMAGE_TYPES:
+                return [], "error: not an image: %s" % path
+            picked.append(path)
+    else:
+        folder = _render_dir()
+        try:
+            names = [n for n in os.listdir(folder) if n.startswith("render-")
+                     and n.endswith(".png") and not n.endswith("-crop.png")]
+        except OSError:
+            names = []
+        if not names:
+            return [], ("error: no capture to judge -- call render_page on "
+                        "the deliverable first, or pass images")
+        newest = max(names, key=lambda n: os.path.getmtime(
+            os.path.join(folder, n)))
+        picked.append(os.path.join(folder, newest))
+    out: "list[str]" = []
+    for path in picked:
+        if path not in out:
+            out.append(path)
+        crop = os.path.splitext(path)[0] + "-crop.png"
+        if not path.endswith("-crop.png") and os.path.isfile(crop) \
+                and crop not in out:
+            out.append(crop)
+    for path in out:
+        if os.path.getsize(path) > IMAGE_MAX_BYTES:
+            return [], "error: image is over %d MiB: %s" % (
+                IMAGE_MAX_BYTES >> 20, path)
+    return out[:JUDGE_MAX_IMAGES], None
+
+
+def _catalogue_vision(provider: str, model: str,
+                      doc: "dict | None" = None) -> "bool | None":
+    """What the stored catalogue declares about a model's eyes: True, False,
+    or None for "did not say"."""
+    for row in provider_models(provider, doc):
+        if str(row.get("id")) == model:
+            seen = row.get("vision")
+            return seen if isinstance(seen, bool) else None
+    return None
+
+
+def judge_spots(doc: "dict | None" = None) -> "list[dict]":
+    """Where a judgement is asked, in order. Each spot carries `how`."""
+    doc = provider_doc() if doc is None else doc
+    remote: "list[dict]" = []
+    seen: set = set()
+
+    def add(spot: "dict | None", how: str) -> None:
+        if not spot or not spot.get("model") or len(remote) >= JUDGE_REMOTE_TRIES:
+            return
+        key = (spot.get("provider"), spot.get("model"))
+        if key in seen or _catalogue_vision(key[0], key[1], doc) is False:
+            return
+        seen.add(key)
+        remote.append(dict(spot, how=how))
+
+    block = doc.get("judge") if isinstance(doc.get("judge"), dict) else {}
+    local_only = block.get("provider") == LOCAL_PROVIDER
+    if block.get("provider") and not local_only:
+        pinned, _why = delegate_target(dict(doc, delegate=block))
+        add(pinned, "pinned as judge in providers.json")
+    if not local_only:
+        spot, _why = delegate_target(doc)
+        if spot:
+            add(spot, "the delegate spot")
+            for other in delegate_fallbacks(spot, doc):
+                add(other, "a delegate fallback")
+    own = dict(_TURN_SPOT) if _TURN_SPOT.get("base_url") else None
+    if own is None:
+        end = provider_endpoint()
+        own = {"base_url": end["base_url"], "model": end["model"],
+               "api_key": end["api_key"], "remote": end["remote"],
+               "headers": end.get("headers") or {},
+               "transport": end.get("transport") or TRANSPORT_CHAT,
+               "served": end["model"]}
+    own.setdefault("provider", "this turn's endpoint")
+    own["how"] = "this conversation's own model, in a fresh context"
+    return remote + [own]
+
+
+def _judge_ask(spot: dict, prompt: str, paths: "list[str]") -> str:
+    """One request, no history: the prompt and the images. The answer's
+    text, or raise."""
+    if not spot.get("remote"):
+        blind = refuse_images(spot["base_url"])
+        if blind:
+            raise CrowError(blind)
+    content = [{"type": "text", "text": prompt}] + [image_part(p) for p in paths]
+    sampling = sampling_for(spot.get("served") or spot["model"])
+    body = {"model": spot["model"], "stream": False,
+            "messages": [{"role": "user", "content": content}],
+            "temperature": sampling["temperature"], "top_p": sampling["top_p"],
+            "min_p": sampling["min_p"], "max_tokens": JUDGE_MAX_TOKENS}
+    if sampling.get("top_k") is not None:
+        body["top_k"] = sampling["top_k"]
+    transport = spot.get("transport") or TRANSPORT_CHAT
+    if spot.get("remote"):
+        remote_body(body)
+    base = str(spot["base_url"]).rstrip("/")
+    if transport == TRANSPORT_MESSAGES:
+        body = anthropic_body(body)
+        url = base + "/messages"
+    else:
+        url = base + "/chat/completions"
+    request = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"), method="POST",
+        headers=dict(_stream_headers(spot.get("api_key") or "",
+                                     spot.get("headers") or None),
+                     **{"Accept": "application/json"}))
+    try:
+        with urllib.request.urlopen(request, timeout=JUDGE_TIMEOUT) as resp:
+            answer = json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            said = exc.read().decode("utf-8", "replace")
+            said = str(((json.loads(said) or {}).get("error") or {})
+                       .get("message") or said)
+        except Exception:                   # noqa: BLE001 - detail only
+            said = ""
+        finally:
+            exc.close()
+        raise CrowError("HTTP %s %s" % (exc.code, said.strip()[:200]))
+    if transport == TRANSPORT_MESSAGES:
+        text = "".join(b.get("text") or "" for b in answer.get("content") or []
+                       if b.get("type") == "text")
+    else:
+        text = (((answer.get("choices") or [{}])[0].get("message") or {})
+                .get("content") or "")
+    return _strip_think(text).strip()
+
+
+def _judge_key(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(text).lower()).strip()
+
+
+def judge_parse(text: str, criteria: "list[str]") -> "tuple[dict | None, str | None]":
+    """The judge's JSON as `{scores, min, weakest, verdict, missing}`, or an
+    error. Fences and prose around the object are tolerated; scores are
+    matched to the rubric by normalised name and clamped to 1..10. More than
+    half the rubric unscored is no verdict."""
+    raw = str(text or "")
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end <= start:
+        return None, "the judge answered without JSON: %r" % raw[:160]
+    try:
+        doc = json.loads(raw[start:end + 1])
+    except ValueError as exc:
+        return None, "the judge's JSON does not parse (%s): %r" % (exc, raw[:160])
+    given = doc.get("scores") if isinstance(doc, dict) else None
+    if not isinstance(given, dict):
+        return None, "the judge's JSON has no scores object"
+    by_key = {_judge_key(k): v for k, v in given.items()}
+    scores, missing = {}, []
+    for name in criteria:
+        key = _judge_key(name)
+        value = by_key.get(key)
+        if value is None:
+            value = next((v for k, v in by_key.items()
+                          if k and (k.startswith(key) or key.startswith(k))), None)
+        try:
+            scores[name] = max(1, min(10, int(round(float(value)))))
+        except (TypeError, ValueError):
+            missing.append(name)
+    if not scores or len(missing) * 2 > len(criteria):
+        return None, "the judge scored %d of %d criteria" % (len(scores),
+                                                            len(criteria))
+    weakest = doc.get("weakest")
+    weakest = [str(w)[:240] for w in weakest if str(w).strip()][:3] \
+        if isinstance(weakest, list) else []
+    if not weakest:
+        weakest = [k for k, _v in sorted(scores.items(), key=lambda kv: kv[1])][:3]
+    return ({"scores": scores, "min": min(scores.values()), "weakest": weakest,
+             "verdict": str(doc.get("verdict") or "")[:400],
+             "missing": missing}, None)
+
+
+def _judge_step(goal: "dict | None", step) -> "int | None":
+    """The 0-based step a verdict belongs to: the one named, else the
+    running one, else the first open one."""
+    steps = (goal or {}).get("steps") or []
+    if not steps:
+        return None
+    try:
+        index = int(step) - 1
+        if 0 <= index < len(steps):
+            return index
+    except (TypeError, ValueError):
+        pass
+    running = next((n for n, s in enumerate(steps)
+                    if s.get("status") == GOAL_RUNNING), None)
+    return running if running is not None else goal_next_open(goal)
+
+
+def judge_store(index: int, verdict: dict) -> bool:
+    """Write the verdict onto step `index` of the goal on disk."""
+    with _GOAL_LOCK:
+        goal = goal_load()
+        if not goal or not 0 <= index < len(goal["steps"]):
+            return False
+        goal["steps"][index]["judge"] = verdict
+        goal_write(goal)
+        return True
+
+
+def tool_judge(images=None, criteria=None, step=None, **_) -> str:
+    """#266. Score a capture with fresh eyes against the rubric. JSON."""
+    paths, bad = judge_images(images)
+    if bad:
+        return json.dumps({"ok": False, "error": bad})
+    goal = goal_load()
+    index = _judge_step(goal, step)
+    rubric, source = judge_rubric(criteria)
+    task = "a visual deliverable"
+    if goal:
+        task = goal.get("title") or task
+        if index is not None:
+            task += " -- current step: %s" % goal["steps"][index]["text"]
+    prompt = JUDGE_PROMPT % {
+        "task": task, "criteria": "\n".join("- " + c for c in rubric),
+        "crop": (" The second image is an enlarged crop of the first "
+                 "image's content." if any(p.endswith("-crop.png")
+                                            for p in paths[1:]) else "")}
+    root = get_root()
+    shown = [os.path.relpath(p, root) if root and p.startswith(root) else p
+             for p in paths]
+    failures = []
+    for spot in judge_spots():
+        name = "%s/%s" % (spot.get("provider") or "?", spot.get("model") or "?")
+        try:
+            text = _judge_ask(spot, prompt, paths)
+        except Exception as exc:            # noqa: BLE001 - next spot
+            failures.append("%s: %s" % (name, str(exc)[:200]))
+            continue
+        verdict, why = judge_parse(text, rubric)
+        if verdict is None:
+            failures.append("%s: %s" % (name, why))
+            continue
+        verdict.update({"model": name, "how": spot.get("how"),
+                        "images": shown, "rubric_from": source,
+                        "at": round(time.time(), 1)})
+        stored = index is not None and judge_store(index, verdict)
+        out = {"ok": True, "judge": name, "chosen_as": spot.get("how"),
+               "fresh_context": True, "scores": verdict["scores"],
+               "min": verdict["min"], "threshold": JUDGE_THRESHOLD,
+               "passes": verdict["min"] >= JUDGE_THRESHOLD,
+               "weakest": verdict["weakest"], "verdict": verdict["verdict"],
+               "rubric_from": source, "images": shown,
+               "step": index + 1 if stored else None}
+        if verdict["missing"]:
+            out["unscored"] = verdict["missing"]
+        if failures:
+            out["tried_first"] = failures
+        if not spot.get("remote"):
+            out["note"] = ("judged by this conversation's own model in a "
+                           "fresh request; the next turn re-reads the "
+                           "conversation cold")
+        if not out["passes"]:
+            out["next"] = ("fix the weakest points, render again, and call "
+                           "judge again -- 'done' on this step waits for %d"
+                           % JUDGE_THRESHOLD)
+        return json.dumps(out, ensure_ascii=False)
+    return json.dumps({"ok": False, "error": (
+        "no judge answered: %s. Pin a vision model as `judge` "
+        "({\"provider\": ..., \"model\": ...}) in providers.json, or run the "
+        "local server with its projector." % "; ".join(failures))})
+
+
 def tool_delegate(task: str = "", context: str = "", **_) -> str:
     global _SUBTASK_SEQ
     # Vor der ersten Nummernvergabe: die geladenen Nummern zaehlen mit,
@@ -22021,7 +22557,8 @@ TOOL_IMPL.update({"delegate": tool_delegate,
                   "subtasks": tool_subtasks,
                   "collect": tool_collect,
                   "goal_set": tool_goal_set,
-                  "goal_step": tool_goal_step})
+                  "goal_step": tool_goal_step,
+                  "judge": tool_judge})                        # #266
 
 
 # ---------------------------------------------------------------- #163 -----
@@ -22536,6 +23073,10 @@ def goal_block(goal: "dict | None" = None,
     if check:
         lines.append("Acceptance check, run when the last step is reported "
                      "done; the goal closes only if it passes: %s" % check)
+    accept = goal_accept_get()                                 # #266
+    if accept:
+        lines.append("Accept criteria (the judge scores captures against "
+                     "these): %s" % "; ".join(accept))
     return "\n".join(lines)
 
 

@@ -31,7 +31,8 @@ when its `crow_root` points there, and nothing else records it.
 | `rollover_digest_tokens` | `400` | cap for the model's own digest in the rollover note, asked on the still-warm prefix before the cut; the leg sends at least 2000 (#205), and an answer cut off at the cap is marked as cut (#210); `0` switches it off (#154) |
 
 The delegate favourites live in `providers.json` (`delegate_favorites`), not here — set them
-from the OpenRouter page of the settings sheet.
+from the OpenRouter page of the settings sheet. So does the judge's pin (#266):
+`"judge": {"provider": "openrouter", "model": "<a vision model>"}`, or `{"provider": "local"}`.
 
 ---
 

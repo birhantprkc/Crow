@@ -10565,6 +10565,19 @@ class TheProviderCatalogueTests(unittest.TestCase):
         self.assertEqual(models[1]["context"], 8000)
         self.assertEqual(models[1]["name"], "a/b")
 
+    def test_the_catalogue_keeps_whether_a_model_can_see(self):
+        """#266: `architecture.input_modalities` as OpenRouter declares it;
+        a row that does not say stays without the key."""
+        _FakeCatalogue.body = json.dumps({"data": [
+            {"id": "v/eyes", "architecture": {"input_modalities": ["text", "image"]}},
+            {"id": "t/text", "architecture": {"input_modalities": ["text"]}},
+            {"id": "u/unsaid"}]})
+        models, _problem = crow_core.provider_fetch_models("openrouter", "k")
+        by = {m["id"]: m for m in models}
+        self.assertIs(by["v/eyes"]["vision"], True)
+        self.assertIs(by["t/text"]["vision"], False)
+        self.assertNotIn("vision", by["u/unsaid"])
+
     def test_the_request_says_who_is_asking(self):
         """The lesson of 2026-08-22, applied at the FIRST build of an outgoing
         path rather than after the first 403: `Python-urllib` is on Cloudflare's
@@ -15165,6 +15178,242 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
         self.assertEqual(crow_core.goal_check_get(), "exit 3")
         crow_core.goal_command("off")
         self.assertIsNone(crow_core.goal_check_get())
+
+
+class _JudgeAnswer:
+    """A fake HTTP answer for `urlopen`, a context manager like the real one."""
+
+    def __init__(self, doc):
+        self.raw = json.dumps(doc).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self.raw
+
+
+def _judge_reply(scores, weakest=("tiny", "black", "flat"), fence=True):
+    text = json.dumps({"scores": scores, "weakest": list(weakest),
+                       "verdict": "a small box in a black frame"})
+    if fence:
+        text = "Here you go:\n```json\n%s\n```" % text
+    return {"choices": [{"message": {"content": text}}]}
+
+
+class TheJudgeHasFreshEyesTests(unittest.TestCase):
+    """#266. 2026-09-23: the model scored its own black frame 9+ on every
+    criterion. `judge` sends only the capture and the rubric to a model that
+    never saw the conversation, and stores its scores on the step."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-judge-"))
+        self.state = tempfile.mkdtemp(prefix="crow-judge-state-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.state, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", crow_core.SESSION_DIR)
+        crow_core.SESSION_DIR = self.state
+        self.addCleanup(crow_core._TURN_SPOT.clear)
+        crow_core._TURN_SPOT.clear()
+        crow_core._TURN_SPOT.update({
+            "base_url": "http://127.0.0.1:9/v1", "model": "local-maker",
+            "api_key": "x", "remote": False, "headers": {},
+            "transport": crow_core.TRANSPORT_CHAT, "served": "local-maker"})
+
+    def capture(self, name="render-20260924-101010.png", crop=False):
+        path = os.path.join(crow_core._render_dir(), name)
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + os.urandom(16))
+        if crop:
+            with open(path[:-4] + "-crop.png", "wb") as fh:
+                fh.write(b"\x89PNG\r\n\x1a\n")
+        return path
+
+    # -- the rubric ----------------------------------------------------------
+
+    def test_the_diorama_sentence_is_a_rubric_even_wrapped(self):
+        text = ("2. Look at them critically and score each 1\u201310 against: "
+                "detail density, lighting mood, material realism\n   (wetness), "
+                "reflections, composition, colour harmony, and image "
+                "cleanliness (aliasing, banding, artefacts).\n3. Write the "
+                "scores into PLAN.md")
+        self.assertEqual(crow_core.rubric_from_text(text), [
+            "detail density", "lighting mood", "material realism (wetness)",
+            "reflections", "composition", "colour harmony",
+            "image cleanliness (aliasing, banding, artefacts)"])
+
+    def test_a_criteria_heading_with_bullets_is_a_rubric(self):
+        text = ("# Plan\n\n## Review criteria\n\n- **detail density** \u2014 "
+                "many voxels\n- lighting mood: warm\n- composition\n\n"
+                "## Next\n- not a criterion\n")
+        self.assertEqual(crow_core.rubric_from_text(text),
+                         ["detail density", "lighting mood", "composition"])
+
+    def test_the_users_accept_lines_win_then_plan_then_caller(self):
+        self.assertEqual(crow_core.judge_rubric("a, b")[1], "the caller")
+        self.assertEqual(crow_core.judge_rubric()[0],
+                         list(crow_core.JUDGE_DEFAULT_RUBRIC))
+        with open(os.path.join(self.root, "PLAN.md"), "w") as fh:
+            fh.write("Score each against: depth, mood.\n")
+        self.assertEqual(crow_core.judge_rubric("a, b"), (["depth", "mood"],
+                                                          "PLAN.md"))
+        said, _g, _c = crow_core.goal_command(
+            "scene | build it | check it | accept: neon glows, ground reads wet")
+        self.assertIn("1 accept line for the judge", said)
+        self.assertEqual([s["text"] for s in crow_core.goal_load()["steps"]],
+                         ["build it", "check it"])
+        self.assertEqual(crow_core.judge_rubric("a, b"),
+                         (["neon glows", "ground reads wet"],
+                          "the user's accept lines"))
+        self.assertIn("neon glows", crow_core.goal_block())
+
+    def test_a_replan_keeps_the_accept_lines_and_off_drops_them(self):
+        crow_core.goal_command("scene | a | b | accept: neon glows")
+        crow_core.tool_goal_set("scene", ["a", "b", "c"])
+        self.assertEqual(crow_core.goal_accept_get(), ["neon glows"])
+        crow_core.goal_command("off")
+        self.assertEqual(crow_core.goal_accept_get(), [])
+
+    # -- the images ----------------------------------------------------------
+
+    def test_the_newest_capture_and_its_crop_are_judged(self):
+        old = self.capture("render-20260924-090000.png")
+        os.utime(old, (1, 1))
+        new = self.capture(crop=True)
+        paths, bad = crow_core.judge_images()
+        self.assertIsNone(bad)
+        self.assertEqual(paths, [new, new[:-4] + "-crop.png"])
+
+    def test_no_capture_is_an_error_that_names_render_page(self):
+        paths, bad = crow_core.judge_images()
+        self.assertEqual(paths, [])
+        self.assertIn("render_page", bad)
+        self.assertIn("no such image", crow_core.judge_images("nope.png")[1])
+
+    # -- the answer ----------------------------------------------------------
+
+    def test_a_fenced_answer_is_parsed_matched_and_clamped(self):
+        text = _judge_reply({"Detail density": 12, "lighting-mood": "3",
+                             "composition": 2.4})["choices"][0]["message"]["content"]
+        verdict, bad = crow_core.judge_parse(
+            text, ["detail density", "lighting mood", "composition"])
+        self.assertIsNone(bad)
+        self.assertEqual(verdict["scores"], {"detail density": 10,
+                                             "lighting mood": 3,
+                                             "composition": 2})
+        self.assertEqual(verdict["min"], 2)
+        self.assertEqual(verdict["weakest"], ["tiny", "black", "flat"])
+
+    def test_an_answer_that_scores_too_little_is_no_verdict(self):
+        verdict, bad = crow_core.judge_parse(
+            '{"scores": {"a": 9}}', ["a", "b", "c"])
+        self.assertIsNone(verdict)
+        self.assertIn("1 of 3", bad)
+        self.assertIsNone(crow_core.judge_parse("looks great!", ["a"])[0])
+
+    # -- who judges ----------------------------------------------------------
+
+    def spot(self, model, provider="openrouter"):
+        return {"provider": provider, "model": model, "remote": True,
+                "base_url": "https://example.invalid/v1", "api_key": "k",
+                "headers": {}, "transport": crow_core.TRANSPORT_CHAT}
+
+    def test_the_order_is_pin_then_delegate_chain_then_own_model(self):
+        doc = {"judge": {"provider": "openrouter", "model": "pin/eyes"},
+               "catalog": {"openrouter": {"models": [
+                   {"id": "text/only", "vision": False},
+                   {"id": "fav/eyes", "vision": True}]}}}
+
+        def target(d=None):
+            return self.spot((d.get("delegate") or {}).get("model")
+                             or "fav/eyes"), None
+        with mock.patch.object(crow_core, "delegate_target", side_effect=target), \
+                mock.patch.object(crow_core, "delegate_fallbacks",
+                                  return_value=[self.spot("text/only"),
+                                                self.spot("unsaid/model")]):
+            spots = crow_core.judge_spots(doc)
+        self.assertEqual([s["model"] for s in spots],
+                         ["pin/eyes", "fav/eyes", "unsaid/model", "local-maker"])
+        self.assertIn("fresh context", spots[-1]["how"])
+
+    def test_a_local_pin_asks_no_remote(self):
+        with mock.patch.object(crow_core, "delegate_target") as target:
+            spots = crow_core.judge_spots({"judge": {"provider": "local"}})
+        target.assert_not_called()
+        self.assertEqual([s["model"] for s in spots], ["local-maker"])
+
+    # -- the whole call ------------------------------------------------------
+
+    def test_the_judge_sees_one_message_and_its_scores_land_on_the_step(self):
+        crow_core.goal_command("Neon diorama | plan it | build the scene")
+        crow_core.tool_goal_step(2, "running")
+        self.capture(crop=True)
+        sent = []
+
+        def urlopen(request, timeout=None):
+            sent.append((request.full_url, json.loads(request.data)))
+            return _JudgeAnswer(_judge_reply({"x": 2, "y": 3}))
+        with mock.patch.object(crow_core, "judge_spots",
+                               return_value=[dict(self.spot("v/eyes"),
+                                                  how="the delegate spot")]), \
+                mock.patch.object(crow_core.urllib.request, "urlopen", urlopen):
+            out = json.loads(crow_core.tool_judge(criteria="x, y"))
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["min"], 2)
+        self.assertFalse(out["passes"])
+        self.assertEqual(out["step"], 2)
+        self.assertEqual(out["rubric_from"], "the caller")
+        url, body = sent[0]
+        self.assertTrue(url.endswith("/chat/completions"))
+        self.assertEqual(len(body["messages"]), 1)
+        parts = body["messages"][0]["content"]
+        self.assertEqual([p["type"] for p in parts],
+                         ["text", "image_url", "image_url"])
+        self.assertIn("build the scene", parts[0]["text"])
+        self.assertIn("enlarged crop", parts[0]["text"])
+        self.assertNotIn("min_p", body)             # remote_body ran
+        stored = crow_core.goal_load()["steps"][1]["judge"]
+        self.assertEqual(stored["min"], 2)
+        self.assertEqual(stored["model"], "openrouter/v/eyes")
+
+    def test_a_dead_spot_falls_through_and_a_blind_local_server_refuses(self):
+        self.capture()
+        calls = []
+
+        def urlopen(request, timeout=None):
+            calls.append(request.full_url)
+            if "example.invalid" in request.full_url:
+                raise urllib.error.HTTPError(
+                    request.full_url, 429, "busy", {},
+                    io.BytesIO(b'{"error": {"message": "rate-limited"}}'))
+            return _JudgeAnswer(_judge_reply({"a": 9, "b": 8}, fence=False))
+        own = dict(crow_core._TURN_SPOT, provider="local", how="own")
+        with mock.patch.object(crow_core, "judge_spots",
+                               return_value=[self.spot("v/eyes"), own]), \
+                mock.patch.object(crow_core.urllib.request, "urlopen", urlopen), \
+                mock.patch.object(crow_core, "refuse_images", return_value=None):
+            out = json.loads(crow_core.tool_judge(criteria="a, b"))
+        self.assertTrue(out["ok"], out)
+        self.assertTrue(out["passes"])
+        self.assertIn("rate-limited", out["tried_first"][0])
+        self.assertIn("fresh request", out["note"])
+        with mock.patch.object(crow_core, "judge_spots", return_value=[own]), \
+                mock.patch.object(crow_core, "refuse_images",
+                                  return_value="this server cannot see"):
+            out = json.loads(crow_core.tool_judge(criteria="a, b"))
+        self.assertFalse(out["ok"])
+        self.assertIn("cannot see", out["error"])
+
+    def test_judge_is_a_declared_network_tool(self):
+        names = [t["function"]["name"] for t in crow_core.TOOLS]
+        self.assertIn("judge", names)
+        self.assertEqual(crow_core.TOOL_CLASS["judge"], "network")
+        self.assertIs(crow_core.TOOL_IMPL["judge"], crow_core.tool_judge)
 
 
 class AVisualStepNeedsAPictureTests(unittest.TestCase):
