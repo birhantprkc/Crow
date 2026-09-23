@@ -8629,9 +8629,15 @@ def user_words(text: str) -> str:
     model's (see ROLLOVER_NOTE_DATA): only the carried lines under
     SPOKEN_CARRY_HEAD and the typed line behind ROLLOVER_NOTE_END are the
     user's. A working-area notice (ROOT_NOTICE_RE) in front of a typed line is
-    Crow's too. Every other message comes back unchanged.
+    Crow's too. A goal-mode nudge (GOAL_NUDGE_MARK) is Crow's frame around the
+    plan's step text or the model's own failed paths: none of it is the
+    user's (#240). Every other message comes back unchanged.
     """
     text = text or ""
+    # #240: all three nudge forms open with the mark, and a typed line never
+    # rides inside one (the nudge IS the turn's opening message).
+    if text.startswith(GOAL_NUDGE_MARK):
+        return ""
     notice = ROOT_NOTICE_RE.match(text)
     if notice:
         text = text[notice.end():]
@@ -8662,12 +8668,25 @@ def mandated_paths(conversation: "Conversation") -> set[str]:
     # Nachricht, die inzwischen aus dem Kontext gerollt ist, darf keine
     # Ablehnung von heute erklaeren.
     _AMBIGUOUS.clear()
+    texts: "list[str]" = []
     for message in conversation.payload():
         if message.get("role") != "user":
             continue
         # #223: only what the user wrote -- not the rollover note's
         # digest, transcript path or "Last worked on" (`user_words`).
-        words = user_words(message_text(message.get("content") or ""))
+        texts.append(user_words(message_text(message.get("content") or "")))
+    # #240. A PLAN THE USER TYPED (`/goal`) IS THE USER'S WORD. Its paths used
+    # to reach this set only through the nudge that echoes the step, which is
+    # no longer read; the plan itself is, when the user wrote it. A plan the
+    # model wrote (`goal_set`), or one from before `by` existed, mandates
+    # nothing -- the safe direction, at the cost of one approval card.
+    goal = goal_load()
+    if goal and goal.get("by") == GOAL_BY_USER:
+        texts.append("\n".join([str(goal.get("title") or "")]
+                               + [str(step.get("text") or "")
+                                  for step in goal.get("steps") or []
+                                  if isinstance(step, dict)]))
+    for words in texts:
         for hit in _mandates_in(words):
             hit = hit.rstrip(".,;:!?\"')")
             if not hit:
@@ -15487,7 +15506,7 @@ def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
     if len(lines) < 2:
         return ("a goal needs steps: `/goal <title>` then one step per line, "
                 "or `title | step | step`.", goal_load(), False)
-    goal = goal_start(lines[0], lines[1:])
+    goal = goal_start(lines[0], lines[1:], by=GOAL_BY_USER)
     if goal is None:
         return ("that is not a goal I can hold.", goal_load(), False)
     # DIE KOSTEN STEHEN VOR DER TAT, wie bei jeder Kopfaenderung: das Ziel geht
@@ -15495,6 +15514,11 @@ def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
     return ("goal: %s -- %d steps.\n%s"
             % (goal["title"], len(goal["steps"]), GOAL_COST_NOTE), goal, True)
 
+
+# #240: who wrote a plan -- the user through `/goal`, or the model through
+# `goal_set`. Only the user's plan names places the user named.
+GOAL_BY_USER = "user"
+GOAL_BY_MODEL = "model"
 
 GOAL_COST_NOTE = ("the goal goes into the head of every prompt -- "
                   "the next turn pays a full prefill")
@@ -15640,7 +15664,8 @@ def tool_goal_set(title: str, steps: "list | None" = None) -> str:
     # #210. DER ALTE PLAN VOR DEM NEUEN GELESEN -- `goal_start` ueberschreibt
     # goal.json, und was dann noch in ihm stand, steht nur noch hier.
     before = goal_load()
-    goal = goal_start(str(title or "").strip() or "the task", clean)
+    goal = goal_start(str(title or "").strip() or "the task", clean,
+                      by=GOAL_BY_MODEL)
     if goal is None:
         return json.dumps({"ok": False, "error": "could not write the plan"})
     carried = _carry_goal_marks(before, goal)
@@ -21230,7 +21255,8 @@ def goal_write(goal: "dict | None") -> None:
 
 
 def goal_start(title: str, steps: "list[str]",
-               now: "float | None" = None) -> "dict | None":
+               now: "float | None" = None,
+               by: "str | None" = None) -> "dict | None":
     """Ein neues Ziel. Ersetzt ein laufendes -- eines zur Zeit.
 
     LEERE SCHRITTE SIND KEIN ZIEL. Ein Titel ohne Plan waere eine Ueberschrift,
@@ -21243,6 +21269,11 @@ def goal_start(title: str, steps: "list[str]",
         return None
     started = float(now if now is not None else time.time())
     goal = {"title": title,
+            # #240: WHO WROTE THE PLAN. `/goal` is the user's word and its
+            # paths are mandates (`mandated_paths`); `goal_set` is the model's
+            # and mandates nothing. None (a caller that did not say, or a
+            # file from before this key) reads as the model's.
+            "by": by if by in (GOAL_BY_USER, GOAL_BY_MODEL) else None,
             "created": started,
             # WANN ZULETZT ETWAS PASSIERTE, und wieviel Kontext da stand. Beides
             # gemessen am 2026-08-30 gebraucht: das Modell ruft `goal_step` fast

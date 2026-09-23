@@ -4275,6 +4275,73 @@ class TheRolloverNoteIsDataTests(unittest.TestCase):
         self.assertEqual(crow_core.user_words("see /tmp/x"), "see /tmp/x")
 
 
+class AGoalNudgeIsNoMandateTests(unittest.TestCase):
+    """#240: a goal-mode nudge is a user-role message whose text is
+    Crow's frame around the model's own step text (goal_set) or the model's
+    own failed paths (#202's phantom line). Neither is the user's word."""
+
+    def setUp(self):
+        self.addCleanup(crow_core._AMBIGUOUS.clear)
+        self.dir = os.path.realpath(tempfile.mkdtemp(prefix="crow-nudge-"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        before = crow_core.SESSION_DIR
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", before)
+        crow_core.SESSION_DIR = self.dir
+        root = crow_core.get_root()
+        self.addCleanup(crow_core.set_root, root)
+        crow_core.set_root(None)
+        self.planned = os.path.join(self.dir, "planned")
+        self.typed = os.path.join(self.dir, "typed")
+        for d in (self.planned, self.typed):
+            os.mkdir(d)
+
+    def _talk(self, nudge: str):
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "build the diorama")
+        talk.append("assistant", "ok")
+        talk.append("user", nudge)
+        return talk
+
+    def test_a_model_planned_step_path_is_no_mandate(self):
+        json.loads(crow_core.tool_goal_set(
+            "Build", ["write %s/index.html and check it" % self.planned,
+                      "verify it"]))
+        nudge = ("[Goal mode. 0 of 2 steps done. Next is step 1: write "
+                 "%s/index.html and check it\nDo it now.]" % self.planned)
+        found = crow_core.mandated_paths(self._talk(nudge))
+        self.assertNotIn(self.planned, found)
+        self.assertNotIn(os.path.join(self.planned, "index.html"), found)
+
+    def test_a_phantom_path_in_the_trouble_nudge_is_no_mandate(self):
+        nudge = crow_core.goal_trouble_nudge(3, [{
+            "cls": crow_core.GOAL_TROUBLE_PHANTOM, "tool": "read_file", "n": 3,
+            "detail": os.path.join(self.planned, "ghost.js")}])
+        self.assertTrue(nudge.startswith(crow_core.GOAL_NUDGE_MARK))
+        found = crow_core.mandated_paths(self._talk(nudge))
+        self.assertNotIn(os.path.join(self.planned, "ghost.js"), found)
+        self.assertFalse(crow_core.named_but_ambiguous(
+            os.path.join(self.planned, "ghost.js")),
+            "the model's phantom path would be refused as 'named by the user'")
+
+    def test_user_words_of_a_nudge_is_empty(self):
+        self.assertEqual(crow_core.user_words(
+            "[Goal mode, step 2 still open. Continue.]"), "")
+
+    def test_a_goal_the_user_typed_still_mandates_its_paths(self):
+        """POSITIVE CONTROL: `/goal` is the user's own text."""
+        crow_core.goal_command("Build | write %s/index.html and check it "
+                               "| verify it" % self.typed)
+        nudge = ("[Goal mode. 0 of 2 steps done. Next is step 1: write "
+                 "%s/index.html and check it\nDo it now.]" % self.typed)
+        found = crow_core.mandated_paths(self._talk(nudge))
+        self.assertIn(os.path.join(self.typed, "index.html"), found)
+
+    def test_a_typed_line_still_mandates(self):
+        """POSITIVE CONTROL: an ordinary user line is untouched."""
+        found = crow_core.mandated_paths(self._talk("now put it in %s" % self.typed))
+        self.assertIn(self.typed, found)
+
+
 class TheWorkingAreaNoticeTests(unittest.TestCase):
     """#224: a rebind mid-chat is said once, in front of the next
     user message, never edited into history."""
