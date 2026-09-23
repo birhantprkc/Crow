@@ -9920,7 +9920,7 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     # session.slice mit MemoryMax aus render_memory_bounds; alles in argv ist
     # absolut, und NUR deshalb ist das sicher: die Unit startet in $HOME, nicht
     # im cwd des Aufrufers (gemessen 2026-09-22, ein stiller ENOENT).
-    # Das Trampolin der Leitung steht HINTER dem Scope: sh ersetzt sich durch
+    # Das Trampolin der Leitung steht HINTER dem Scope: es ersetzt sich durch
     # den Browser, die pid im Scope ist seine.
     scope = crow_platform.render_scope_prefix()
     if pipe:
@@ -10601,7 +10601,7 @@ def tool_find_files(root: str = ".", pattern: str = "*", **_) -> str:
         # ceilings above cannot see that. A deadline checked per directory makes
         # "still walking" a state that ends, with the partial truth as the result.
         took = time.monotonic() - started
-        if took > SEARCH_DEADLINE:
+        if took >= SEARCH_DEADLINE:
             head = "\n".join(hits)
             tail = ("[stopped after %.0f s -- the walk over %s did not finish; "
                     "narrow the root]" % (took, root))
@@ -10676,7 +10676,7 @@ def tool_search_text(root: str = ".", pattern: str = "", glob: str = "*", **_) -
         # ends here with the partial truth as a result, and the model narrows
         # the search instead of the session dying mid-pair.
         took = time.monotonic() - started
-        if took > SEARCH_DEADLINE:
+        if took >= SEARCH_DEADLINE:
             stopped = ("[stopped after %.0f s -- the walk over %s did not "
                        "finish; narrow the root, or pass a glob]" % (took, root))
             break
@@ -10904,6 +10904,7 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
         # is empty and the call is what it was.
         unit = "crow-cmd-%d-%s" % (os.getpid(), os.urandom(4).hex())
         prefix = crow_platform.command_scope_prefix(unit)
+        oom_before = crow_platform.session_oom_kills() if prefix else None
         code, out, err, stopped = _bounded_run(
             command, cwd, time.monotonic() + COMMAND_TIMEOUT, shell=True,
             prefix=prefix, unit=unit if prefix else None)
@@ -10918,8 +10919,14 @@ def tool_run_command(command: str = "", cwd: str | None = None, **_) -> str:
                 "range: %s" % (COMMAND_CAPTURE_BYTES >> 20, command)) + note
     # #218. A CEILING KILL IS NAMED AS ONE -- asked of the unit, not read
     # off the -9, which a `kill -9 $$` gives too (scope_result). The output up
-    # to the kill stays: it says how far the command got.
-    if prefix and code in (-9, 137) and crow_platform.scope_result(unit) == "oom-kill":
+    # to the kill stays: it says how far the command got. Where systemd lost
+    # the race and reports success (255, CI 2026-09-23), the kernel's own
+    # count for the slice says it (session_oom_kills); a `kill -9` moves
+    # neither.
+    if prefix and code in (-9, 137) and (
+            crow_platform.scope_result(unit) == "oom-kill"
+            or (oom_before is not None
+                and (crow_platform.session_oom_kills() or 0) > oom_before)):
         cap = crow_platform.command_memory_bounds().get("MemoryMax")
         head = ("error: command exceeded its memory ceiling (%sno swap) and was "
                 "killed, with everything it started: %s"

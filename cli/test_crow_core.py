@@ -3904,11 +3904,16 @@ class RunCommandBoundaryTests(unittest.TestCase):
     def test_an_escape_sequence_grants_no_mandate(self):
         """Dieselbe Haertung fuer die Gegenrichtung: ein \\\\x-Escape in
         robins eigener Nachricht darf keine Freigabe erzeugen, ein echter
-        UNC-Pfad weiterhin schon."""
+        UNC-Pfad weiterhin schon.
+
+        A FOLDER ON THE SHARE, NOT THE SHARE ITSELF: on Windows `\\\\server\\share`
+        is the volume's root (ntpath.dirname returns it unchanged), and #221
+        releases no filesystem root -- naming a whole drive is naming no
+        folder. CI on windows-latest (2026-09-23) caught the old spelling."""
         conversation = crow_core.Conversation("SYS", memory="")
         conversation.append("user", "suche nach 'n\\\\xe4chste' im Text")
         self.assertEqual(crow_core.mandated_paths(conversation), set())
-        conversation.append("user", r"du darfst nach \\server\share schreiben")
+        conversation.append("user", r"du darfst nach \\server\share\docs schreiben")
         self.assertTrue(any("server" in p for p in
                             crow_core.mandated_paths(conversation)))
 
@@ -14126,7 +14131,17 @@ class TheRenderBudgetCanBeMetTests(unittest.TestCase):
     def _peer(self, answer):
         """Ein Browser-Stellvertreter: liest NUL-getrennte Befehle, fragt
         `answer(msg)` nach der Liste der Antworten (leere Liste = Schweigen,
-        None = Rohr zu). Gibt (Devtools, Thread) zurueck."""
+        None = Rohr zu). Gibt (Devtools, Thread) zurueck.
+
+        POSIX ONLY, LIKE THE PATH IT STANDS IN FOR. On Windows
+        crow_platform.devtools_pipe() is None and render_page takes the
+        command-line screenshot, so _Devtools never runs there -- and
+        select() on Windows takes sockets only (WinError 10038 on a pipe,
+        CI 2026-09-23). The Windows path is pinned by
+        test_windows_takes_the_command_line_path instead."""
+        if sys.platform == "win32":
+            self.skipTest("no devtools pipe on Windows; render_page takes "
+                          "the command-line screenshot there")
         import threading as _th
         to_r, to_w = os.pipe()
         from_r, from_w = os.pipe()
@@ -14281,6 +14296,16 @@ class TheRenderBudgetCanBeMetTests(unittest.TestCase):
         self.assertIn("real milliseconds", text)
         self.assertIn("never rescues", text)
 
+    @unittest.skipUnless(sys.platform == "win32", "the Windows path")
+    def test_windows_takes_the_command_line_path(self):
+        """No pipe on Windows: render_page must fall back to the virtual-time
+        command-line screenshot, never reach _Devtools (whose select() takes
+        sockets only there)."""
+        self.assertIsNone(crow_platform.devtools_pipe())
+        src = inspect.getsource(crow_core.tool_render_page)
+        self.assertIn("--virtual-time-budget=", src)
+        self.assertIn("--screenshot=", src)
+
     @unittest.skipIf(sys.platform == "win32", "the pipe is POSIX-only")
     def test_the_trampoline_puts_the_pipes_on_three_and_four(self):
         """GEMESSEN 2026-09-22: ein frisches os.pipe() liefert fd 3, und
@@ -14292,6 +14317,9 @@ class TheRenderBudgetCanBeMetTests(unittest.TestCase):
         self.assertIsNotNone(pipe)
         prefix, pass_fds, ours_out, ours_in = pipe
         self.assertTrue(all(fd >= 10 for fd in pass_fds + (ours_out, ours_in)))
+        # CI 2026-09-23: dash (Ubuntu's /bin/sh) refuses "10<&-" with "Bad fd
+        # number", so a shell trampoline never started the browser there.
+        self.assertEqual(prefix[0], sys.executable)
         echo = [sys.executable, "-c",
                 "import os; os.write(4, os.read(3, 64)[::-1])"]
         proc = subprocess.Popen(prefix + echo, pass_fds=pass_fds,
@@ -16055,6 +16083,26 @@ class RunCommandIsBoundedLikeTheRenderTests(unittest.TestCase):
             ["systemctl", "--user", "list-units", "--failed", "--no-legend", "--plain",
              "crow-cmd-%d-*" % os.getpid()], capture_output=True, text=True).stdout
         self.assertEqual(failed.strip(), "", "the killed scope was left failed")
+
+    @unittest.skipUnless(_scoped_here(), "needs systemd-run and a reachable user manager")
+    def test_the_kernel_count_names_the_kill_when_systemd_lost_the_race(self):
+        """CI 2026-09-23, systemd 255: the scope went dead with
+        Result=success before the OOM event was handled, and the ceiling
+        kill came back as "[exit -9]". The slice's oom_kill count (kernel,
+        hierarchical) is the second witness; here both are stood in for."""
+        from unittest import mock
+        counts = iter([7, 8])
+        with mock.patch.object(crow_platform, "scope_result", return_value="success"), \
+                mock.patch.object(crow_platform, "session_oom_kills",
+                                  side_effect=lambda: next(counts)):
+            out = crow_core.tool_run_command("kill -9 $$", cwd=self.dir)
+        self.assertTrue(out.startswith(
+            "error: command exceeded its memory ceiling"), out)
+        # A count that did not move leaves a plain -9 a plain -9.
+        with mock.patch.object(crow_platform, "scope_result", return_value="success"), \
+                mock.patch.object(crow_platform, "session_oom_kills", return_value=7):
+            out = crow_core.tool_run_command("kill -9 $$", cwd=self.dir)
+        self.assertEqual(out, "[exit -9]")
 
     @unittest.skipUnless(_scoped_here(), "needs systemd-run and a reachable user manager")
     def test_a_minus_nine_that_is_not_the_ceiling_is_not_called_one(self):

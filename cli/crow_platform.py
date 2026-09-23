@@ -690,6 +690,41 @@ def scope_result(unit: str, settle: float = 0.5) -> str:
         time.sleep(0.05)
 
 
+_SLICE_CGROUP: "list[str]" = []
+
+
+def session_oom_kills() -> "int | None":
+    """The kernel's oom_kill count for session.slice, or None where unreadable.
+
+    #218, CI 2026-09-23. scope_result asks systemd for Result=oom-kill, and on
+    systemd 255 (ubuntu-latest) that answer loses a race: OOMPolicy=kill
+    empties the scope at once, the cgroup-empty event is handled before the
+    OOM event, the scope goes dead with Result=success and is collected -- the
+    ceiling kill came back as a bare "[exit -9]". systemd 261 here always read
+    `failed oom-kill` (8 of 8, 2026-09-22). The kernel's count does not race:
+    memory.events is hierarchical (cgroup-v2.rst: "all fields in this file are
+    hierarchical"), so a kill in any scope under session.slice raises the
+    slice's oom_kill. The caller reads it before and after its own scope ran.
+    """
+    if IS_WINDOWS:
+        return None
+    if not _SLICE_CGROUP:
+        _SLICE_CGROUP.append(_systemctl_user(
+            "show", "session.slice", "-p", "ControlGroup", "--value").strip())
+    path = _SLICE_CGROUP[0]
+    if not path.startswith("/"):
+        return None
+    try:
+        with open("/sys/fs/cgroup" + path + "/memory.events", encoding="ascii") as fh:
+            for line in fh:
+                key, _, value = line.partition(" ")
+                if key == "oom_kill":
+                    return int(value)
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 def kill_scope(unit: str) -> None:
     """SIGKILL whatever is still in the named scope -- the sweep after a kill.
 
@@ -709,13 +744,14 @@ def devtools_pipe() -> "tuple[list[str], tuple[int, int], int, int] | None":
     the caller closes the pass_fds pair after Popen and its own pair when
     the render is over.
 
-    A SHELL TRAMPOLINE AND NOT preexec_fn: the GUI calls render_page from a
+    A TRAMPOLINE PROCESS AND NOT preexec_fn: the GUI calls render_page from a
     worker thread, and preexec_fn is documented unsafe with threads. The
-    child ends are lifted to fds >= 10 first, because `exec 3<&3 3<&-`
-    closes what it just placed -- measured 2026-09-22: a fresh os.pipe()
-    hands out fd 3, and the browser then logged "Remote debugging pipe file
-    descriptors are not open". The prefix goes AFTER the scope prefix: sh
-    execs the browser in place, so the pid the scope holds is the browser.
+    child ends are lifted to fds >= 10 first, because moving fd 3 onto 3 and
+    then closing the original closes what was just placed -- measured
+    2026-09-22: a fresh os.pipe() hands out fd 3, and the browser then logged
+    "Remote debugging pipe file descriptors are not open". The prefix goes
+    AFTER the scope prefix: the trampoline execs the browser in place, so the
+    pid the scope holds is the browser.
 
     None on Windows: there the pipe needs handle inheritance through
     --remote-debugging-io-pipes, which nobody has measured here; the caller
@@ -734,9 +770,20 @@ def devtools_pipe() -> "tuple[list[str], tuple[int, int], int, int] | None":
     ours_in, child_out = os.pipe()
     child_in, ours_out, ours_in, child_out = (
         lifted(child_in), lifted(ours_out), lifted(ours_in), lifted(child_out))
-    sh = shutil.which("sh") or "/bin/sh"
-    prefix = [sh, "-c", 'exec "$@" 3<&%d 4>&%d %d<&- %d>&-'
-              % (child_in, child_out, child_in, child_out), "sh"]
+    # THE TRAMPOLINE IS PYTHON, NOT sh. It was `sh -c 'exec "$@" 3<&10 ...'`
+    # until CI on ubuntu-latest (2026-09-23) read b"" where the echo child
+    # should have answered: /bin/sh there is dash, and dash takes only
+    # single-digit fds in a redirection ("Bad fd number") -- so on every
+    # Debian/Ubuntu machine the browser never started and every render was
+    # "closed its devtools pipe". Arch's sh is bash, which is why it passed
+    # here. The interpreter running Crow is always at hand; it moves the two
+    # ends onto 3 and 4, closes the originals and execs in place, so the pid
+    # the scope holds is still the browser's.
+    hop = ("import os,sys;a,b=int(sys.argv[1]),int(sys.argv[2]);"
+           "os.dup2(a,3);os.dup2(b,4);os.close(a);os.close(b);"
+           "os.execvp(sys.argv[3],sys.argv[3:])")
+    prefix = [sys.executable, "-I", "-S", "-c", hop,
+              str(child_in), str(child_out)]
     return prefix, (child_in, child_out), ours_out, ours_in
 
 
