@@ -3,7 +3,7 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
-## Unreleased
+## 2.5.0 — 2026-09-23
 
 Everything on `release-2026-09-23` since origin/main (6301e0e, 2026-09-20): 65 commits,
 2026-09-21 to 2026-09-23. Most measurements are against the 2026-09-22 diorama session (655 messages after a
