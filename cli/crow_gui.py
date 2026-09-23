@@ -9943,7 +9943,7 @@ class Api:
         "/help": "this list.",
         "/tools": "what the model can call.",
         "/mcp": "the tool servers; /mcp fetch|use|drop <server> to change them.",
-        "/mode": "the release level; /mode manual|allowedit|auto to switch.",
+        "/mode": "the release level; /mode manual|allowedit|auto|yolo to switch.",
         "/model": "the model that is up; /model <key> restarts on another one.",
         "/reasoning": "this chat's thinking level; /reasoning <level>|off to set it.",
         "/budget": "cap the thinking per request; /budget <tokens>|off to set "
