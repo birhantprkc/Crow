@@ -10407,12 +10407,11 @@ class Api:
         und der naechste Anstoss waere nur der naechste Kreis.
         """
         payload = self._conversation.payload()
-        answer = crow_core.goal_last_answer(payload)
-        mark = crow_core.goal_answer_mark(answer)
+        mark = crow_core.goal_turn_mark(payload)
         if mark is None:
             # Noch keine Antwort in diesem Gespraech: nichts zu beurteilen.
             return (True, None)
-        empty = crow_core.goal_answer_empty(answer)
+        empty = crow_core.goal_turn_empty(payload)
         if self._goal_recovery:
             # Das hier ist die Antwort auf die Erholungszeile.
             self._goal_recovery = False

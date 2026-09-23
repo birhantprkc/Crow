@@ -3277,6 +3277,44 @@ THINK_ONLY_NUDGE = (
     "the tool call you were planning. Do not think again without doing one of "
     "the two.]"
 )
+# #259. THE LAST ROUND OF A TURN MUST SAY SOMETHING VISIBLE, and
+# a prompt cannot guarantee it. Measured 2026-09-23 (diorama goal run, session
+# messages 262-263, engine.log 20:14:38Z): after BUDGET_SPENT the forced round
+# came back `content chunks 0, reasoning chunks 710, finish tool_calls` -- a
+# complete 2,247-character report written INSIDE the think block, then a tool
+# call that was discarded. The window showed nothing, and goal mode's brake
+# read the turn as an empty answer. What the model wrote is the answer it
+# gave; the turn now shows it, marked as what it is, instead of nothing. No
+# extra round: a re-request costs a round on the same prefix and is not
+# guaranteed to speak either (this model: 119 of 130 assistant messages of
+# that session had empty content).
+SURFACED_MARK = "[Crow: no visible answer"
+# THE TAIL, NOT THE HEAD, when a remote model thinks without a cap: the end of
+# a think block is where it concludes. The local operating point caps
+# reasoning at 1024 tokens, which stays far under this.
+SURFACED_CHARS = 6000
+
+
+def surfaced_answer(reasoning: "str | None", forced: bool,
+                    tool_calls: int = 0) -> str:
+    """The visible answer for a final round whose content is empty."""
+    why = (" after the tool budget was spent" if forced else "")
+    thought = (reasoning or "").strip()
+    if thought:
+        if len(thought) > SURFACED_CHARS:
+            thought = "..." + thought[-SURFACED_CHARS:]
+        return ("%s%s -- the model wrote this only in its reasoning]\n\n%s"
+                % (SURFACED_MARK, why, thought))
+    return ("%s%s, and no reasoning either. %d tool call%s ran this turn; "
+            "their results are above.]"
+            % (SURFACED_MARK, why, tool_calls, "" if tool_calls == 1 else "s"))
+
+
+def is_surfaced(text: "str | None") -> bool:
+    """Is this answer Crow's surfaced stand-in rather than the model's words?"""
+    return str(text or "").startswith(SURFACED_MARK)
+
+
 # #165, gemessen am 2026-08-30: der Satz hiess "Do not call a tool", und genau
 # das las das Modell woertlich -- "right now I should state the answer in plain
 # text and not call any tools" stand in seinem Denktext, waehrend es gerade
@@ -16691,7 +16729,61 @@ def goal_answer_empty(message: "dict | None") -> bool:
     """
     if message is None or message.get("tool_calls"):
         return False
-    return len(goal_message_text(message).strip()) <= GOAL_EMPTY_CHARS
+    text = goal_message_text(message)
+    # #259: CROW'S STAND-IN IS NOT THE MODEL SPEAKING. A final
+    # round with no visible text now shows its reasoning under SURFACED_MARK;
+    # for the brake that answer is as empty as it was before.
+    if is_surfaced(text):
+        return True
+    return len(text.strip()) <= GOAL_EMPTY_CHARS
+
+
+def goal_turn_mark(messages: "list | None") -> "str | None":
+    """#259: the fingerprint of the LAST TURN, not of its last
+    message. None when there is no answer yet.
+
+    `goal_answer_mark` of the last message alone made every turn that ended on
+    an empty forced answer the SAME answer -- sha of ("", no calls) -- however
+    different the 24 calls before it were. The last answer's text plus every
+    call of the turn, with arguments: the same text over the same calls is
+    still a loop; different work is not.
+    """
+    answer = goal_last_answer(messages)
+    if answer is None:
+        return None
+    import hashlib
+
+    start = goal_turn_start(messages) or 0
+    calls = [[(call.get("function") or {}).get("name") or "",
+              (call.get("function") or {}).get("arguments") or ""]
+             for message in (messages or [])[start:]
+             if message.get("role") == "assistant"
+             for call in message.get("tool_calls") or []]
+    material = json.dumps([goal_message_text(answer).strip(), calls],
+                          sort_keys=True)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def goal_turn_empty(messages: "list | None") -> bool:
+    """#259: was the LAST TURN empty -- not only its last message?
+
+    THE BRAKE READ ONE MESSAGE AND JUDGED A WHOLE TURN BY IT. Measured
+    2026-09-23 (diorama goal run): turns of 24-26 rounds that ran tools and
+    wrote files each ended on the forced answer after BUDGET_SPENT, which came
+    back reasoning-only -- and three of them in a row counted as "three empty
+    answers": the brake cut 157 messages of real work from the history, sent
+    the recovery line, and when the answer to THAT (24 tool calls, message
+    263 reasoning-only again) was judged empty too, goal mode stopped at 6/9.
+
+    A turn that ran a tool worked, whatever its last message says. Only a
+    turn with no tool result anywhere since it began is judged by its answer.
+    """
+    start = goal_turn_start(messages)
+    for message in (messages or [])[(start or 0):]:
+        if message.get("role") == "tool" or (
+                message.get("role") == "assistant" and message.get("tool_calls")):
+            return False
+    return goal_answer_empty(goal_last_answer(messages))
 
 
 def goal_is_nudge(message: "dict | None") -> bool:
@@ -18978,6 +19070,28 @@ def run_turn(
         # #217 point 3: A CALL THAT ARRIVED PARSED IS NOT ALSO KEPT AS TEXT.
         if calls:
             reply = strip_call_markup(reply)
+        # #259: THE ROUND THAT ENDS THE TURN SPEAKS. Decided
+        # before the append, because the conversation has no edit: a forced
+        # round (tool or token budget), or a final round whose #150 nudge is
+        # spent or does not apply, and nothing visible in it. The reasoning is
+        # kept beside it, so the prefix the server holds stays valid up to the
+        # end of the think block.
+        final = execute_tools and (forced or not calls) and not (
+            not forced and not nudged and kind == "think_only")
+        if final and not _strip_think(reply or "").strip():
+            reply = surfaced_answer(reasoning, forced, cost.tool_calls)
+            sink = events.reply_events()
+            if sink is not None:
+                sink.reply_started()
+                sink.answer_started()
+                sink.answer_text(reply)
+                sink.reply_finished()
+            incidents.append(
+                "the turn ended with no visible answer%s%s"
+                % (" after the budget stop" if forced
+                   else " despite the nudge" if nudged else "",
+                   "; its reasoning was shown as the answer"
+                   if (reasoning or "").strip() else " and no reasoning"))
         # CALLS THAT WILL NEVER RUN ARE NOT APPENDED, and that is not
         # tidiness. An assistant turn whose tool_calls have no `tool` message
         # behind them is a broken prefix for every later turn of the session.
@@ -19034,9 +19148,6 @@ def run_turn(
                 nudged = True
                 conversation.append("user", THINK_ONLY_NUDGE)
                 continue
-            if not (reply or "").strip() and not stopped:
-                incidents.append("the turn ended with no visible answer"
-                                 + (" despite the nudge" if nudged else ""))
             break
 
         # THE BUDGET BUYS TOOL ROUNDS, NOT THE TURN. Until 2026-08-10 this
