@@ -15641,20 +15641,29 @@ def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
         if goal_load() is None:
             return ("no goal to clear.", None, False)
         goal_write(None)
+        goal_check_set(None)                                   # #250
         return ("goal cleared.", None, True)
     lines = [p.strip() for p in text.splitlines() if p.strip()]
     if len(lines) == 1:
         lines = [p.strip() for p in lines[0].split("|") if p.strip()]
+    # #250: `check: <command>` is the acceptance check, not a step.
+    checks = [ln[len(GOAL_CHECK_PREFIX):].strip() for ln in lines
+              if ln.lower().startswith(GOAL_CHECK_PREFIX)]
+    lines = [ln for ln in lines if not ln.lower().startswith(GOAL_CHECK_PREFIX)]
     if len(lines) < 2:
         return ("a goal needs steps: `/goal <title>` then one step per line, "
                 "or `title | step | step`.", goal_load(), False)
     goal = goal_start(lines[0], lines[1:], by=GOAL_BY_USER)
     if goal is None:
         return ("that is not a goal I can hold.", goal_load(), False)
+    check = next((c for c in reversed(checks) if c), None)
+    goal_check_set(check)
     # DIE KOSTEN STEHEN VOR DER TAT, wie bei jeder Kopfaenderung: das Ziel geht
     # in den gepinnten Block, also zahlt der naechste Zug einen vollen Prefill.
-    return ("goal: %s -- %d steps.\n%s"
-            % (goal["title"], len(goal["steps"]), GOAL_COST_NOTE), goal, True)
+    return ("goal: %s -- %d steps%s.\n%s"
+            % (goal["title"], len(goal["steps"]),
+               ", acceptance check: %s" % check if check else "",
+               GOAL_COST_NOTE), goal, True)
 
 
 # #240: who wrote a plan -- the user through `/goal`, or the model through
@@ -15847,6 +15856,11 @@ def tool_goal_step(step: int, status: str, note: str = "") -> str:
     if state == GOAL_RUNNING:
         goal = goal_step_begin(index)
     elif state in (GOAL_DONE, GOAL_FAILED):
+        passed = None
+        if state == GOAL_DONE:
+            refused, passed = goal_done_refusal(index, note)   # #250
+            if refused:
+                return json.dumps({"ok": False, "error": refused})
         goal = goal_step_end(index, ok=(state == GOAL_DONE), note=note)
     else:
         return json.dumps({"ok": False,
@@ -15857,10 +15871,108 @@ def tool_goal_step(step: int, status: str, note: str = "") -> str:
                                     "another step is still running"})
     done, total = goal_counts(goal)
     nxt = goal_next_open(goal)
-    return json.dumps({"ok": True, "done": done, "total": total,
-                       "complete": goal.get("status") == GOAL_DONE,
-                       "next_step": None if nxt is None else nxt + 1,
-                       "next": None if nxt is None else goal["steps"][nxt]["text"]})
+    out = {"ok": True, "done": done, "total": total,
+           "complete": goal.get("status") == GOAL_DONE,
+           "next_step": None if nxt is None else nxt + 1,
+           "next": None if nxt is None else goal["steps"][nxt]["text"]}
+    if state == GOAL_DONE and passed:
+        out["acceptance_check"] = "passed: %s" % passed
+    return json.dumps(out)
+
+
+# #250. `done` WITHOUT EVIDENCE. 2026-09-23, diorama run: step 4 went
+# `done` with the note "Step treated as done-with-deviation only in spirit",
+# step 3 with "the 128^3 3D texture literally cannot be created here", and
+# step 9 went `failed` ("no fps figure can be read") and then `done` with no
+# note two messages later -- 9/9 "complete" over a 1.4 KB index.html that
+# draws nothing. The tool took every word. Two checks, both on what the call
+# itself carries: a `done` whose own note says it is not done, and a `done`
+# with no note on a step whose last report was `failed`. Narrow on purpose:
+# a false refusal costs a round and teaches the model to drop its caveats.
+_GOAL_NOT_DONE = re.compile(
+    r"(?i)\b(?:in spirit|not done|is not (?:done|finished|working|verified)|"
+    r"not verified|unverified|could not (?:be )?verif\w*|"
+    r"(?:cannot|can't|could not) be (?:built|drawn|created|verified|done|bound|"
+    r"linked|finished|measured|reached|rendered)|impossible|unreachable|"
+    r"with[- ]deviation|does not work|doesn't work|paints nothing|"
+    r"nothing draws)\b")
+
+# THE ACCEPTANCE CHECK IS THE USER'S WORD, so it lives where the model's
+# write_file cannot reach: goal.json sits in the working area, and a command
+# the model wrote there would run unasked at `allowedit`. One file in
+# SESSION_DIR, keyed by the goal's path.
+GOAL_CHECK_PREFIX = "check:"
+GOAL_CHECKS_FILE = "goal-checks.json"
+
+
+def _goal_checks_path() -> str:
+    return os.path.join(SESSION_DIR, GOAL_CHECKS_FILE)
+
+
+def _goal_checks() -> dict:
+    try:
+        with open(_goal_checks_path(), encoding="utf-8") as fh:
+            found = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
+def goal_check_get() -> "str | None":
+    """The acceptance check the user set for the goal in this working area."""
+    check = _goal_checks().get(os.path.abspath(goal_path()))
+    return check if isinstance(check, str) and check.strip() else None
+
+
+def goal_check_set(check: "str | None") -> None:
+    """Set (or with None, drop) this working area's acceptance check."""
+    checks = _goal_checks()
+    key = os.path.abspath(goal_path())
+    if check:
+        checks[key] = check
+    elif checks.pop(key, None) is None:
+        return
+    try:
+        os.makedirs(SESSION_DIR, exist_ok=True)
+        tmp = _goal_checks_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(checks, fh, indent=1, ensure_ascii=False)
+        os.replace(tmp, _goal_checks_path())
+    except OSError:
+        pass
+
+
+def goal_done_refusal(index: int, note: str = "",
+                      goal: "dict | None" = None) -> "tuple[str | None, str | None]":
+    """(why `done` on step `index` is refused, or None; the check that passed,
+    or None). The acceptance check runs only on the `done` that would close
+    the goal, through run_command -- its clock, capture cap and memory scope."""
+    goal = goal if goal is not None else goal_load()
+    if not goal or not 0 <= index < len(goal.get("steps") or []):
+        return None, None
+    step = goal["steps"][index]
+    said = str(note or "")
+    hit = _GOAL_NOT_DONE.search(said)
+    if hit:
+        return ("refused: the note says this step is not done (\"%s\"). 'done' "
+                "means verified working. Finish it and report done with what "
+                "proves it, or call goal_step with 'failed' and this note."
+                % hit.group(0)), None
+    if not said.strip() and step.get("status") == GOAL_FAILED:
+        return ("refused: step %d was last reported failed (\"%s\"). A 'done' "
+                "after that needs a note saying what proves it works now."
+                % (index + 1, str(step.get("note") or "")[:160])), None
+    check = goal_check_get()
+    closes = all(s.get("status") == GOAL_DONE
+                 for n, s in enumerate(goal["steps"]) if n != index)
+    if not check or not closes:
+        return None, None
+    result = tool_run_command(check)
+    if result.startswith("[exit 0]"):
+        return None, check
+    return ("refused: this would close the goal, and its acceptance check "
+            "failed. The goal stays open until it passes.\ncheck: %s\n%s"
+            % (check, _clip(result, 2000))), None
 
 
 def goal_next_open(goal: "dict | None" = None) -> "int | None":
@@ -21654,6 +21766,10 @@ def goal_block(goal: "dict | None" = None,
         lines += ["%d. %s" % (n, s["text"])
                   for n, s in enumerate(steps, 1)]
         lines.append(GOAL_HEAD_NOTE)
+    check = goal_check_get()                                   # #250
+    if check:
+        lines.append("Acceptance check, run when the last step is reported "
+                     "done; the goal closes only if it passes: %s" % check)
     return "\n".join(lines)
 
 

@@ -14725,6 +14725,102 @@ class TheRolloverNoteIsParsableTests(unittest.TestCase):
         self.assertEqual(crow_core.rollover_note_split("frage"), (None, ""))
 
 
+class GoalDoneNeedsEvidenceTests(unittest.TestCase):
+    """#250. 2026-09-23: goal mode closed 9/9 over a 1.4 KB index.html
+    that draws nothing. Step 4's `done` note said "done-with-deviation only in
+    spirit"; step 9 went `failed`, then `done` with no note."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-goaldone-"))
+        self.state = tempfile.mkdtemp(prefix="crow-goaldone-state-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.state, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", crow_core.SESSION_DIR)
+        crow_core.SESSION_DIR = self.state
+
+    def step(self, n, status, note=""):
+        return json.loads(crow_core.tool_goal_step(n, status, note))
+
+    def test_a_note_that_says_not_done_is_refused(self):
+        crow_core.goal_command("diorama | build it | verify it")
+        out = self.step(1, "done", "Step treated as done-with-deviation only "
+                                   "in spirit; the GLSL work remains queued.")
+        self.assertFalse(out["ok"])
+        self.assertIn("not done", out["error"])
+        self.assertEqual(crow_core.goal_load()["steps"][0]["status"], "open")
+
+    def test_a_note_with_evidence_passes(self):
+        """POSITIVE CONTROL: a plain proof, and a note that mentions a
+        failure it fixed, are not refused."""
+        crow_core.goal_command("diorama | build it | verify it")
+        self.assertTrue(self.step(1, "done", "node --check ok; 0 failed of 12 "
+                                             "tests; render shows the scene")["ok"])
+
+    def test_done_after_failed_needs_a_note(self):
+        crow_core.goal_command("diorama | build it | verify it")
+        self.step(1, "done", "built")
+        self.step(2, "failed", "no fps figure can be read")
+        out = self.step(2, "done")
+        self.assertFalse(out["ok"])
+        self.assertIn("last reported failed", out["error"])
+        self.assertTrue(self.step(2, "done", "renders at 61 fps")["ok"])
+
+    def test_the_acceptance_check_holds_the_goal_open(self):
+        said, _goal, _ch = crow_core.goal_command(
+            "diorama | build it | verify it | check: exit 3")
+        self.assertIn("acceptance check: exit 3", said)
+        self.assertIn("Acceptance check", crow_core.goal_block())
+        self.assertTrue(self.step(1, "done", "built")["ok"])
+        out = self.step(2, "done", "looks right")
+        self.assertFalse(out["ok"])
+        self.assertIn("acceptance check failed", out["error"])
+        self.assertIn("[exit 3]", out["error"])
+        self.assertNotEqual(crow_core.goal_load().get("status"), "done")
+
+    def test_a_passing_check_closes_the_goal(self):
+        crow_core.goal_command("diorama | build it | verify it | check: exit 0")
+        self.step(1, "done", "built")
+        out = self.step(2, "done", "verified")
+        self.assertTrue(out["ok"] and out["complete"], out)
+        self.assertEqual(out["acceptance_check"], "passed: exit 0")
+
+    def test_the_check_runs_only_on_the_closing_done(self):
+        crow_core.goal_command("diorama | a | b | c | check: exit 0")
+        with mock.patch.object(crow_core, "tool_run_command",
+                               return_value="[exit 0]") as ran:
+            self.step(1, "done", "a")
+            self.step(2, "done", "b")
+            self.assertEqual(ran.call_count, 0)
+            self.step(3, "done", "c")
+            self.assertEqual(ran.call_count, 1)
+
+    def test_the_check_is_not_in_the_working_area(self):
+        """NEGATIVE: goal.json is writable by the model's write_file; a
+        command put there runs nothing."""
+        crow_core.goal_command("diorama | a | b | check: exit 0")
+        with open(crow_core.goal_path(), encoding="utf-8") as fh:
+            self.assertNotIn("exit 0", fh.read())
+        crow_core.goal_check_set(None)
+        with open(crow_core.goal_path(), encoding="utf-8") as fh:
+            raw = json.load(fh)
+        raw["goal"]["check"] = "exit 7"
+        with open(crow_core.goal_path(), "w", encoding="utf-8") as fh:
+            json.dump(raw, fh)
+        with mock.patch.object(crow_core, "tool_run_command") as ran:
+            self.step(1, "done", "a")
+            self.assertTrue(self.step(2, "done", "b")["ok"])
+        ran.assert_not_called()
+
+    def test_a_replan_keeps_the_users_check_and_off_drops_it(self):
+        crow_core.goal_command("diorama | a | b | check: exit 3")
+        crow_core.tool_goal_set("diorama", ["a", "b", "c"])
+        self.assertEqual(crow_core.goal_check_get(), "exit 3")
+        crow_core.goal_command("off")
+        self.assertIsNone(crow_core.goal_check_get())
+
+
 class TheGoalOutlivesEverythingTests(unittest.TestCase):
     """#163. Der Zielspeicher, und die vier Lebensdauern, die er ueberstehen muss.
 
