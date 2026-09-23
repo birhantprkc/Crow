@@ -17362,10 +17362,10 @@ def goal_trouble_nudge(step: int, due: "list[dict]") -> str:
 # Edit auf Edit an den Passes, statt zu halbieren.
 #
 # GEZAEHLT WIRD DER FANG, NICHT DER FEHLER: ein Fang ist "fest", wenn er leer
-# aussieht (#213-Warnung, #175 byte-gleich, #TBD-image-crop "only N distinct
+# aussieht (#213-Warnung, #175 byte-gleich, #265 "only N distinct
 # colours", oder selbst dekodiert >= 98 % einer Farbe) oder wenn er dem
 # vorigen Fang DERSELBEN Seite fast gleicht -- die `metrics:`-Zahlen von
-# #TBD-image-crop, wo es sie gibt, sonst Farbanteil und Groesse. Bei drei in
+# #265, wo es sie gibt, sonst Farbanteil und Groesse. Bei drei in
 # Folge ein Anstoss: halbieren statt editieren. Bei sechs ein erzwungener
 # Rollover, dessen erste Zeile auflistet, was schon versucht wurde -- Claude
 # Code's eigene Regel: "If you've corrected Claude more than twice on the
@@ -22303,7 +22303,7 @@ def judge_rubric(criteria=None) -> "tuple[list[str], str]":
 
 def judge_images(images=None) -> "tuple[list[str], str | None]":
     """The files to judge, or an error. Default: the newest render_page
-    capture. A capture's `-crop.png` (the content, enlarged -- #TBD-image-crop)
+    capture. A capture's `-crop.png` (the content, enlarged -- #265)
     rides along when it exists."""
     picked: "list[str]" = []
     if images:
