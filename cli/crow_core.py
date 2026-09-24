@@ -2544,6 +2544,11 @@ LOG_ONLY_NOTE_PREFIXES = (
     "kept the re-asked reply although",     # #217 stub on the retry
     "the restored cache did not hold",      # cache_promise_broken
     "tool budget spent after",              # the terminal's budget_spent
+    # #279: the panel's web process crashed. The model's render_page captures
+    # are unaffected (2026-09-24: 2 panel crashes, every capture written);
+    # robin, 2026-09-24: "nur noch ins Logfile". The memory-ceiling stop
+    # ("… was stopped: it grew past …", #226) stays in the chat.
+    "the page in the browser panel stopped (",
 )
 
 

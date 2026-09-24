@@ -21050,6 +21050,17 @@ class CrowLogFileTests(unittest.TestCase):
             self.assertFalse(crow_core.note_is_log_only(text), text)
 
 
+    def test_a_crashed_panel_page_is_a_log_line_its_memory_stop_is_not(self):
+        """#279: the panel's web process crashed while every capture was
+        written -- robin wants it in the log only. The #226 ceiling stop is
+        something to act on and stays in the chat."""
+        self.assertTrue(crow_core.note_is_log_only(
+            "the page in the browser panel stopped (crashed)"))
+        self.assertFalse(crow_core.note_is_log_only(
+            "the page in the browser panel was stopped: it grew past the "
+            "panel's 2048 MB ceiling (#226)"))
+
+
 class ADegenerateRoundIsAskedAgainTests(_FinishingLoopCase):
     """#217: not stored, re-requested once on the same prefix with a new
     seed, and a second one ends the turn loudly."""
