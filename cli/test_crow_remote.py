@@ -512,8 +512,12 @@ class RemoteServerTests(unittest.TestCase):
         port = self.h.remote.port
         self.h.remote.stop()
         self.assertFalse(self.h.remote.running())
-        with self.assertRaises(ConnectionRefusedError):
-            socket.create_connection(("127.0.0.1", port), timeout=2).close()
+        # Nothing accepts any more. Windows answers a closed loopback port
+        # only after ~2 s of SYN retries (windows-latest CI, 2026-09-24:
+        # TimeoutError at timeout=2), so any refusal counts, not only the
+        # POSIX ConnectionRefusedError -- a connection that opens still fails.
+        with self.assertRaises(OSError):
+            socket.create_connection(("127.0.0.1", port), timeout=5).close()
         self.assertEqual(len(self.h.remote.devices()), 1)     # still paired
 
     def test_stop_ends_open_streams(self):
@@ -677,11 +681,11 @@ class TailnetListenerTests(unittest.TestCase):
     def test_no_tailnet_no_loopback_and_stop_closes_both(self):
         plain = Harness(self, host="127.0.0.2")
         self.assertEqual(plain.remote.tailnet_url, "")
-        with self.assertRaises(ConnectionRefusedError):
+        with self.assertRaises(OSError):
             ts_request(plain.remote.port, "GET", "/", TS_NAME)
         self.h.remote.stop()
         self.assertEqual(self.h.remote.tailnet_url, "")
-        with self.assertRaises(ConnectionRefusedError):
+        with self.assertRaises(OSError):
             ts_request(self.port, "GET", "/", TS_NAME)
 
     def test_a_taken_loopback_port_leaves_the_lan_mirror_running(self):
