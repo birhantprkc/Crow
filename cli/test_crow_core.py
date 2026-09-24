@@ -16055,6 +16055,27 @@ class TheJudgeHasFreshEyesTests(unittest.TestCase):
                           "the user's accept lines"))
         self.assertIn("neon glows", crow_core.goal_block())
 
+    def test_the_step_text_leads_and_the_callers_criteria_only_add(self):
+        """#286: step 3 'G-buffer and voxel volume' passed on step 2's
+        structure/camera criteria the model re-supplied (8/9/8)."""
+        self.assertEqual(
+            crow_core.judge_rubric(["camera framing"],
+                                   step_text="G-buffer and voxel volume"),
+            (["delivers: G-buffer and voxel volume", "camera framing"],
+             "the step + the caller"))
+        rubric, source = crow_core.judge_rubric(step_text="build it")
+        self.assertEqual(rubric, ["delivers: build it"]
+                         + list(crow_core.JUDGE_DEFAULT_RUBRIC))
+        self.assertEqual(source, "the step + the default visual rubric")
+        with open(os.path.join(self.root, "PLAN.md"), "w") as fh:
+            fh.write("Score each against: depth, mood.\n")
+        self.assertEqual(crow_core.judge_rubric("a", step_text="build it"),
+                         (["delivers: build it", "depth", "mood"],
+                          "the step + PLAN.md"))
+        crow_core.goal_command("scene | build it | accept: neon glows, wet")
+        self.assertEqual(crow_core.judge_rubric("a", step_text="build it"),
+                         (["neon glows", "wet"], "the user's accept lines"))
+
     def test_a_replan_keeps_the_accept_lines_and_off_drops_them(self):
         crow_core.goal_command("scene | a | b | accept: neon glows")
         crow_core.tool_goal_set("scene", ["a", "b", "c"])
@@ -16140,7 +16161,8 @@ class TheJudgeHasFreshEyesTests(unittest.TestCase):
 
         def urlopen(request, timeout=None):
             sent.append((request.full_url, json.loads(request.data)))
-            return _JudgeAnswer(_judge_reply({"x": 2, "y": 3}))
+            return _JudgeAnswer(_judge_reply({"delivers: build the scene": 7,
+                                              "x": 2, "y": 3}))
         with mock.patch.object(crow_core, "judge_spots",
                                return_value=[dict(self.spot("v/eyes"),
                                                   how="the delegate spot")]), \
@@ -16150,7 +16172,8 @@ class TheJudgeHasFreshEyesTests(unittest.TestCase):
         self.assertEqual(out["min"], 2)
         self.assertFalse(out["passes"])
         self.assertEqual(out["step"], 2)
-        self.assertEqual(out["rubric_from"], "the caller")
+        self.assertEqual(out["rubric_from"], "the step + the caller")
+        self.assertIn("delivers: build the scene", out["scores"])
         url, body = sent[0]
         self.assertTrue(url.endswith("/chat/completions"))
         self.assertEqual(len(body["messages"]), 1)
@@ -16163,6 +16186,11 @@ class TheJudgeHasFreshEyesTests(unittest.TestCase):
         stored = crow_core.goal_load()["steps"][1]["judge"]
         self.assertEqual(stored["min"], 2)
         self.assertEqual(stored["model"], "openrouter/v/eyes")
+        # #286: the verdict says what was judged, the step's own text first.
+        self.assertEqual(stored["criteria"],
+                         ["delivers: build the scene", "x", "y"])
+        self.assertEqual(stored["rubric_source"], "the step + the caller")
+        self.assertIn("- delivers: build the scene", parts[0]["text"])
 
     def test_a_dead_spot_falls_through_and_a_blind_local_server_refuses(self):
         self.capture()

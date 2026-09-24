@@ -24399,30 +24399,41 @@ def rubric_from_text(text: str) -> "list[str]":
     return []
 
 
-def judge_rubric(criteria=None) -> "tuple[list[str], str]":
+def judge_rubric(criteria=None, step_text=None) -> "tuple[list[str], str]":
     """(criteria, where they came from). The user's `accept:` lines win,
     then PLAN.md, then the caller's own, then the default visual rubric --
-    the model may only supply a rubric where none is written down."""
+    the model may only supply a rubric where none is written down. #286:
+    without accept lines the step's own text leads ("delivers: <step>");
+    what follows may add to it, never replace it -- step 3 'G-buffer and
+    voxel volume' passed on step 2's camera criteria the model re-sent."""
     accept = [c for line in goal_accept_get() for c in _rubric_split(line)]
     if accept:
         return accept[:JUDGE_MAX_CRITERIA], "the user's accept lines"
+    rubric, source = [], ""
     root = get_root()
     if root:
         try:
             with open(os.path.join(root, PLAN_FILE), encoding="utf-8",
                       errors="replace") as fh:
-                found = rubric_from_text(fh.read(200_000))
+                rubric = rubric_from_text(fh.read(200_000))
         except OSError:
-            found = []
-        if found:
-            return found, PLAN_FILE
-    if isinstance(criteria, (list, tuple)):
-        given = [str(c).strip() for c in criteria if str(c).strip()]
-    else:
-        given = _rubric_split(criteria or "")
-    if given:
-        return given[:JUDGE_MAX_CRITERIA], "the caller"
-    return list(JUDGE_DEFAULT_RUBRIC), "the default visual rubric"
+            rubric = []
+        source = PLAN_FILE if rubric else ""
+    if not rubric:
+        if isinstance(criteria, (list, tuple)):
+            rubric = [str(c).strip() for c in criteria if str(c).strip()]
+        else:
+            rubric = _rubric_split(criteria or "")
+        source = "the caller" if rubric else ""
+    if not rubric:
+        rubric = list(JUDGE_DEFAULT_RUBRIC)
+        source = "the default visual rubric"
+    step = re.sub(r"\s+", " ", str(step_text or "")).strip()
+    if step:
+        own = "delivers: " + step[:160]
+        rubric = [own] + [c for c in rubric if c != own]
+        source = "the step + " + source
+    return rubric[:JUDGE_MAX_CRITERIA], source
 
 
 def judge_images(images=None) -> "tuple[list[str], str | None]":
@@ -24652,7 +24663,8 @@ def tool_judge(images=None, criteria=None, step=None, **_) -> str:
         return json.dumps({"ok": False, "error": bad})
     goal = goal_load()
     index = _judge_step(goal, step)
-    rubric, source = judge_rubric(criteria)
+    rubric, source = judge_rubric(
+        criteria, goal["steps"][index]["text"] if index is not None else None)
     task = "a visual deliverable"
     if goal:
         task = goal.get("title") or task
@@ -24680,6 +24692,7 @@ def tool_judge(images=None, criteria=None, step=None, **_) -> str:
             continue
         verdict.update({"model": name, "how": spot.get("how"),
                         "images": shown, "rubric_from": source,
+                        "rubric_source": source, "criteria": rubric,
                         "at": round(time.time(), 1)})
         stored = index is not None and judge_store(index, verdict)
         out = {"ok": True, "judge": name, "chosen_as": spot.get("how"),

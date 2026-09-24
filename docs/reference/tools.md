@@ -224,9 +224,9 @@ Seen on 2026-09-23: "Every criterion reads 9+ on the capture" over a small box i
 | | |
 |---|---|
 | Images | default: the newest `render-*.png` in `.crow/renders/`, plus its `-crop.png` when the render wrote one (the content enlarged); up to 4 |
-| Rubric | the user's `accept:` lines from `/goal`, else criteria written in `PLAN.md` (a heading naming criteria or a rubric with bullets, or a sentence "score … against: a, b, c."), else `criteria`, else a default visual rubric. The model can only supply a rubric where none is written down |
-| Answer | JSON: `scores` (1–10 per criterion), `min`, `threshold`, `passes`, `weakest` (three points), `verdict`, `judge` and `chosen_as`, `rubric_from`, `images`, `step` |
-| Stored | on the step in `goal.json` (`judge`: model, scores, min, weakest, verdict, images, rubric source, time), where [`goal_step`](#goals-165) reads it (#267) |
+| Rubric | the user's `accept:` lines from `/goal`, else criteria written in `PLAN.md` (a heading naming criteria or a rubric with bullets, or a sentence "score … against: a, b, c."), else `criteria`, else a default visual rubric. The model can only supply a rubric where none is written down. Without `accept:` lines the step's own text leads as `delivers: <step>`; `PLAN.md`, `criteria` or the default only add to it (#286) |
+| Answer | JSON: `scores` (1–10 per criterion), `min`, `threshold`, `passes`, `weakest` (three points), `verdict`, `judge` and `chosen_as`, `rubric_from` (e.g. `the step + the caller`), `images`, `step` |
+| Stored | on the step in `goal.json` (`judge`: model, scores, min, weakest, verdict, images, `rubric_source`, `criteria` as judged, time), where [`goal_step`](#goals-165) reads it (#267) |
 | Class | `network`: the capture leaves the machine when a remote model judges |
 
 **Who judges**, strongest reachable first, and never inside the maker's context:
