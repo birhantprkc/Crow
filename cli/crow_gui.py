@@ -1381,8 +1381,12 @@ body[data-git="shut"] #git{display:none}
 #goalpanel li.running .m{color:var(--warn)}
 #goalpanel li.running .t{color:var(--text)}
 #goalpanel li.failed .m{color:var(--bad)}
+/* #289: UEBERSPRUNGEN IST NICHT ERLEDIGT -- kein Strich, kein Gruen, sondern
+   gedimmt mit dem Pfeil in Amber, derselben Farbe wie der Hinweis im Kopf. */
+#goalpanel li.skipped{color:var(--dimmer)}
+#goalpanel li.skipped .m,#goalpanel .gh .st.sk{color:var(--warn)}
 #goalpanel li.open .t{color:var(--text-faint)}
-#goalpanel li.done,#goalpanel li.failed{cursor:pointer}
+#goalpanel li.done,#goalpanel li.failed,#goalpanel li.skipped{cursor:pointer}
 /* #174: DIE KOSTENZEILE HAENGT AN IHREM SCHRITT. Sie sass mit 3px so dicht
    unter dem Text, dass sie bei einem umgebrochenen Schritt wie dessen fuenfte
    Zeile aussah; mit Luft darueber und einem eigenen Ton ist sie eine Fussnote. */
@@ -5695,6 +5699,12 @@ const crow = {
     clearInterval(this.goalTick);
     (this.stepTicks||[]).forEach(clearInterval); this.stepTicks=[];
     const done=g.status==="done";
+    // #289: ALL DONE OR SKIPPED, at least one skipped -- "complete with N
+    // skipped", never the green "Complete". The skipped steps are named in
+    // the head, so the thin phone bar shows them too.
+    const partial=g.status==="partial", skipped=g.skipped||[];
+    const skipText=!skipped.length ? ""
+      : (skipped.length===1 ? "step " : "steps ")+skipped.join(", ")+" skipped";
 
     // ZONE 1: die Kopfzeile. Nur das Wort und der Zustand -- alles Weitere hat
     // seinen eigenen Platz darunter.
@@ -5702,8 +5712,9 @@ const crow = {
     head.onclick=()=>{ p.classList.toggle("shut"); };
     const label=document.createElement("b"); label.textContent="Goal";
     const st=document.createElement("span");
-    st.className="st"+(done ? " ok" : "");
-    st.textContent=done ? "Complete" : "";
+    st.className="st"+(done ? " ok" : skipped.length ? " sk" : "");
+    st.textContent=done ? "Complete"
+      : partial ? "Complete · "+skipText : skipText;
     const shutBtn=document.createElement("button"); shutBtn.className="gx";
     shutBtn.textContent="×"; shutBtn.title="close this goal";
     shutBtn.onclick=ev=>{ ev.stopPropagation(); pywebview.api.close_goal(); };
@@ -5737,7 +5748,7 @@ const crow = {
     // #164: NUR WENN CROW ANGEFANGEN HAT. Ein Plan, der dasteht und auf die
     // Zeile wartet, die ihn anstoesst, hat noch keine Dauer -- und eine Uhr, die
     // ab dem Tippen laeuft, misst das Tippen (robin, 2026-08-31).
-    if(!done && g.begun) this.goalTick=setInterval(()=>{
+    if(!done && !partial && g.begun) this.goalTick=setInterval(()=>{
       if(!document.body.contains(meta)){ clearInterval(this.goalTick); return; }
       meta.textContent=drawMeta(base+(Date.now()-at)/1000); }, 1000);
 
@@ -5747,6 +5758,8 @@ const crow = {
     const list=document.createElement("ol");
     (g.steps||[]).forEach((s,i)=>{
       const li=document.createElement("li"); li.className=s.status;
+      // #289: why it was skipped -- the note robin or the model gave.
+      if(s.status==="skipped" && s.note) li.title=s.note;
       const mark=document.createElement("span"); mark.className="m";
       mark.innerHTML=this.svgStep(s.status);
       const body=document.createElement("span");
@@ -5807,6 +5820,8 @@ const crow = {
       +'<circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none"/></svg>';
     if(state==="failed") return o+'<circle cx="12" cy="12" r="9"/>'
       +'<path d="M9 9l6 6M15 9l-6 6"/></svg>';
+    if(state==="skipped") return o+'<circle cx="12" cy="12" r="9"/>'
+      +'<path d="M8 12h8M13 9l3 3-3 3"/></svg>';
     return o+'<circle cx="12" cy="12" r="9"/></svg>'; },
 
   // 89K statt 89234: im Kopf einer Anzeige zaehlt die Groessenordnung.
@@ -8439,14 +8454,14 @@ body:not([data-git="shut"]) #panels{z-index:95}   /* out of #panels' stacking co
   font-size:20px;padding:0}
 #goalpanel .gt .tx{font-size:14px}
 #goalpanel li{padding:9px 0 11px}
-/* collapsed: one 44 px row -- icon, title, n/m, close */
-#goalpanel.shut:not([hidden]){display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;
+/* collapsed: one 44 px row -- icon, title, n/m, state (#289), close */
+#goalpanel.shut:not([hidden]){display:grid;grid-template-columns:auto minmax(0,1fr) auto auto auto;
   align-items:center;cursor:pointer}
 #goalpanel.shut .gh{display:contents}
 #goalpanel.shut .gh b{display:none}
-#goalpanel.shut .gh .st{grid-column:3;grid-row:1;margin:0;padding-left:8px;
-  font-variant-numeric:tabular-nums}
-#goalpanel.shut .gh .gx{grid-column:4;grid-row:1}
+#goalpanel.shut .gh .st{grid-column:4;grid-row:1;margin:0;padding-left:8px;
+  font-variant-numeric:tabular-nums;white-space:nowrap}   /* #289: beside n/m */
+#goalpanel.shut .gh .gx{grid-column:5;grid-row:1}
 #goalpanel.shut .gt{display:contents}
 #goalpanel.shut .gi{grid-column:1;grid-row:1;padding-left:14px;margin:0 9px 0 0}
 #goalpanel.shut .gt .tx{grid-column:2;grid-row:1;font-size:13px;font-weight:600;
@@ -9614,6 +9629,11 @@ class Turn(TurnEvents):
                    "t": crow_core.ABORT_NOTE})
 
     def round_finished(self, timings: dict) -> None:
+        # #289: EVERY ROUND READS goal.json, and the bar moves when a step
+        # did -- whoever moved it. Until here only goal_set/goal_step results
+        # repainted, so a hand edit stayed invisible for a whole turn.
+        if self._goal_reload:
+            self._goal_reload(moved=True)
         rc, cc = timings.get("_reasoning_chars"), timings.get("_content_chars")
         if isinstance(rc, int) and isinstance(cc, int) and rc + cc > 0:
             self._reasoning_chars += rc
@@ -11936,7 +11956,8 @@ class Api:
         "/budget": "cap the thinking per request; /budget <tokens>|off to set "
                    "it. The prompt is unchanged, so it costs no prefill.",
         "/goal": "set the goal this chat works towards; /goal <title> then one "
-                 "step per line, or `title | step | step`. /goal off clears it.",
+                 "step per line, or `title | step | step`. /goal off clears it; "
+                 "/goal skip <n> [reason] gives step n up and moves on.",
         "/thoughts": "fold the reasoning blocks open, or closed again.",
         "/image": "hold an image for the next line; /image <path>, or drop one.",
         "/delegate": "hand a task to the remote subtask model; /delegate <task>. "
@@ -12298,6 +12319,10 @@ class Api:
             self._conversation.repin_memory(
                 crow_core.prompt_head(crow_core.get_root()))
             self.push_goal(force=True)
+        else:
+            # #289: `/goal` read the file -- the bar shows what it read. Live
+            # 2026-09-24 the answer said 4/9 while the bar still said 3/9.
+            self.push_goal()
         return said
 
     # #165. WIE VIELE ZUEGE EIN ZIEL OHNE EINE MENSCHLICHE ZEILE FAHREN DARF.
@@ -12533,6 +12558,9 @@ class Api:
         # ehrlicherweise noch nicht fertig ist, blieb deshalb als offener Kreis
         # stehen, waehrend das Panel minutenlang stillstand. Wer den naechsten
         # Schritt anstoesst, weiss auch, dass er ab jetzt laeuft.
+        # #289: A STEP THAT FAILED ONCE, read before `goal_step_begin` sets it
+        # running again -- the status is what says it failed.
+        retry = crow_core.goal_retry_note(goal, nxt)
         if goal["steps"][nxt]["status"] != crow_core.GOAL_RUNNING:
             crow_core.goal_step_begin(nxt)
             self.push_goal()
@@ -12559,6 +12587,12 @@ class Api:
         # Anstoss von #202 hat weiter den Vortritt.
         crow_core.goal_render_scan(payload, 0 if start is None else start,
                                    self._goal_renders, new_step=new_step)
+        # #289. THE RETRY QUOTES THE FAILURE, and it comes first: it is said
+        # once, the turn after the `failed`, and the short "still open" line
+        # below would otherwise swallow it (same step, the model worked).
+        # Counted is already, above -- #202 and #268 speak on the next turn.
+        if retry is not None:
+            return crow_core.goal_retry_nudge(goal, nxt, retry)
         due = crow_core.goal_trouble_due(self._goal_trouble)
         if due:
             # #262: the NUDGE is unchanged and still goes to the
@@ -12674,7 +12708,7 @@ class Api:
                    else [list(g) for g in crow_core.reasoning_menu_groups_for(name)]})
         self.push_goal(force=True)
 
-    def push_goal(self, force: bool = False) -> None:
+    def push_goal(self, force: bool = False, moved: bool = False) -> None:
         """Was die Seite ueber das Ziel wissen muss. Ohne Ziel: nichts.
 
         KEIN LEERER RAHMEN (robin, 2026-08-30): das Panel erscheint nur, wenn
@@ -12686,12 +12720,21 @@ class Api:
         die nichts sagt, ist der Grund, warum `_subs_sig` existiert. `force`
         zeichnet trotzdem -- fuer die Wege, die die ganze Seite neu aufbauen und
         bei denen die alte Signatur nichts mehr ueber den Bildschirm aussagt.
+
+        #289: `moved` IS THE PER-ROUND CALL (`Turn.round_finished`). It draws
+        only when a step or the goal changed state -- not for the token count,
+        which grows every round and is drawn at the turn's end. A goal.json
+        edited outside the goal tools (robin's hand skip, 2026-09-24) reached
+        the page only at the end of the NEXT turn: nothing else read the file.
         """
         goal = crow_core.goal_load()
         sig = json.dumps(goal, sort_keys=True) if goal else ""
+        shape = crow_core.goal_shape(goal)
+        if moved and not force and shape == getattr(self, "_goal_shape", None):
+            return
         if not force and sig == getattr(self, "_goal_sig", None):
             return
-        self._goal_sig = sig
+        self._goal_sig, self._goal_shape = sig, shape
         if not goal:
             self.push({"k": "goal", "goal": None})
             return
@@ -12700,6 +12743,8 @@ class Api:
             "title": goal["title"],
             "status": goal.get("status") or "open",
             "done": done, "total": total,
+            # #289: the numbers of the skipped steps, for the head of the bar.
+            "skipped": crow_core.goal_skipped(goal),
             "seconds": round(crow_core.goal_seconds(goal), 1),
             # OB DIE UHR UEBERHAUPT LAEUFT. Die Seite tickt selbst weiter (#164),
             # sonst stuende sie zwischen zwei Schritten still -- aber sie tat es
@@ -16006,6 +16051,11 @@ class Api:
                 self.push({"k": "user", "t": text})
                 self.push({"k": "busy"})
             while True:
+                # #289: THE BAR BEFORE THE TURN TOO. goal.json can change
+                # while nothing runs (edited by hand, or by another window on
+                # the same folder); the turn after would show the old plan
+                # until it ended.
+                self.push_goal()
                 self._run(text)
                 # #162. FERTIG, UND NIEMAND SAH HIN. Die Ausgabe dieses Zuges
                 # wurde verworfen, weil sie in einen Chat gehoerte, der nicht auf

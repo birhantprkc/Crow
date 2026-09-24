@@ -10320,6 +10320,97 @@ class TheGoalPanelShowsTheGoalsOwnCostTests(ApiCase):
         self.assertEqual([m["goal"] for m in said], [None])
 
 
+class AFailedStepIsRetriedOnceThenSkippedTests(ApiCase):
+    """#289, the window's half. 2026-09-24: step 4 went `failed`, the nudge
+    after it said only "step 4 still open" (session.json msg 327), and
+    after robin's hand skip the goal bar kept the old step for the whole
+    next turn -- only goal_set/goal_step results repainted it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(crow_core.goal_write, None)
+        crow_core.goal_start("Ship it", ["read the log", "write the fix",
+                                         "prove it"], now=1000.0)
+
+    def turn(self, api, text, answer="working on it") -> None:
+        """A turn that worked on the nudge: one tool call, one answer."""
+        api._conversation.append("user", text)
+        api._conversation.append(
+            "assistant", "", tool_calls=[{"id": "c0", "name": "read_file",
+                                          "arguments": "{}"}])
+        api._conversation.append("tool", "...", tool_call_id="c0")
+        api._conversation.append("assistant", answer)
+
+    def goals(self, api) -> list:
+        return [m["goal"] for m in self.drained(api) if m.get("k") == "goal"]
+
+    def test_the_nudge_after_a_failure_quotes_its_note(self):
+        """Second turn of the same step, the model worked -- the short "still
+        open" line would go out. After a `failed` the note goes out instead."""
+        api = self.api()
+        self.turn(api, api._goal_nudge())
+        crow_core.tool_goal_step(1, "failed", "the log is rotated away")
+        nudge = api._goal_nudge()
+        self.assertIn("the log is rotated away", nudge)
+        self.assertIn("different approach", nudge)
+        self.assertNotIn("still open. Continue", nudge)
+        self.turn(api, nudge)
+        # The second `failed` skips it: the engine hands out step 2.
+        crow_core.tool_goal_step(1, "failed", "still rotated away")
+        self.assertIn("Next is step 2: write the fix", api._goal_nudge())
+
+    def test_a_hand_edit_of_goal_json_repaints_the_bar_within_a_round(self):
+        api = self.api()
+        api.push_goal(force=True)
+        self.drained(api)
+        goal = crow_core.goal_load()
+        goal["steps"][0]["status"] = "skipped"
+        crow_core.goal_write(goal)
+        events = crow_gui.Turn(api.push, goal_reload=api.push_goal)
+        events.round_finished({})
+        said = self.goals(api)
+        self.assertTrue(said, "the round did not read goal.json")
+        self.assertEqual(said[-1]["steps"][0]["status"], "skipped")
+        self.assertEqual(said[-1]["skipped"], [1])
+        # GEGENPROBE: a round that only adds tokens draws nothing.
+        crow_core.goal_tokens_mark(0)
+        self.addCleanup(crow_core.goal_tokens_mark, 0)
+        crow_core.goal_tokens_seen(500)
+        events.round_finished({})
+        self.assertEqual(self.goals(api), [])
+
+    def test_goal_alone_repaints_what_it_read(self):
+        """Live: `/goal` answered 4/9 while the bar still said 3/9."""
+        api = self.api()
+        api.push_goal(force=True)
+        self.drained(api)
+        crow_core.goal_step_end(0, now=1010.0)
+        api._goal_command("")
+        said = self.goals(api)
+        self.assertTrue(said, "`/goal` did not repaint the bar")
+        self.assertEqual(said[-1]["done"], 1)
+
+    def test_goal_skip_from_the_composer_reaches_the_bar(self):
+        """Window and phone send the line through the same `send`."""
+        api = self.api()
+        api.send("/goal skip 2 cannot be checked here")
+        said = self.goals(api)
+        self.assertTrue(said)
+        self.assertEqual(said[-1]["steps"][1]["status"], "skipped")
+        self.assertEqual(said[-1]["steps"][1]["note"],
+                         "cannot be checked here")
+        self.assertEqual(said[-1]["skipped"], [2])
+        self.assertEqual(crow_core.goal_next_open(), 0)
+
+    def test_the_page_draws_skipped_steps_and_the_partial_end(self):
+        """NEGATIVPROBE AM QUELLTEXT: the bar has a mark and a head text for
+        a skipped step, and "partial" is not the green Complete."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.assertTrue('if(state==="skipped")' in source)
+        self.assertTrue('partial ? "Complete · "+skipText' in source)
+        self.assertTrue("#goalpanel li.skipped" in source)
+
+
 class TheGoalEngineBrakesOnAnEmptyLoopTests(ApiCase):
     """#202, live am 2026-09-18, 12:02: der Motor schickte denselben Anstoss
     noch einmal, das Modell antwortete mit dem einzelnen Token `I`, und das

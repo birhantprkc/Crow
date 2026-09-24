@@ -196,6 +196,12 @@ the plan, the file carries the state — see
 mark stay, so the whole stretch is billed when it closes (#275). A `note` given with `running` is
 stored on the step; `done`/`failed` replace it with theirs.
 
+`failed` sends a step back **once** (#289). The answer carries `retry`, and the next nudge quotes
+the note. A second `failed` on the same step makes it `skipped`: the answer carries `skipped`, and
+`next_step` names the step after it. A skipped step counts as not done, and the engine moves past
+it. A goal whose steps are all `done` or `skipped` ends "complete with N skipped" (`ended` in the
+answer), never `done`. The user skips a step with `/goal skip <n> [reason]`.
+
 A `done` is not taken on the model's word alone (#250). `goal_step(…, "done", note)` is refused
 when its own note reports a failure ("in spirit", "with deviation", "cannot be created",
 "unreachable", …), and when it has no note on a step last reported `failed`. A user's plan may

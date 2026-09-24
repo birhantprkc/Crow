@@ -1047,6 +1047,7 @@ HELP = """commands:
   /reasoning     this chat's thinking level, /reasoning <level>|off to set it
   /budget        cap the thinking per request, /budget <tokens>|off
   /goal          the goal this chat works towards, /goal <title> | <step> | <step>
+                 /goal skip <n> [reason] gives step n up, /goal off clears it
   /thoughts      show the model's reasoning as it arrives, or hide it again
   /image         hold an image for the next line, /image <path>
   /delegate      hand a task to the remote subtask model, /delegate <task>

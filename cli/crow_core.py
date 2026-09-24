@@ -1242,7 +1242,8 @@ TOOLS = [
         "Move one step of the plan. Call it with 'running' before you start a "
         "step and with 'done' once you have VERIFIED it -- not when you think "
         "it should work. Use 'failed' with a reason when it cannot be finished; "
-        "a failed step may be started again later. Costs nothing and does not "
+        "a failed step comes back once, and a second 'failed' skips it and "
+        "moves the goal on. Costs nothing and does not "
         "move the prompt head.",
         {"step": {"type": "integer",
                   "description": "1-based number of the step, as listed by "
@@ -17971,7 +17972,8 @@ def remote_devices_save(devices: "list[dict]") -> bool:
 
 
 def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
-    """`/goal` zeigt, `/goal <Zeilen>` setzt, `/goal off` loescht.
+    """`/goal` zeigt, `/goal <Zeilen>` setzt, `/goal off` loescht,
+    `/goal skip <n> [Grund]` gibt einen Schritt auf (#289).
 
     (Satz, Ziel, geaendert) -- dieselbe Form wie `reasoning_command`, damit beide
     Oberflaechen dasselbe Wort gleich beantworten.
@@ -17987,6 +17989,19 @@ def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
         said = goal_summary()
         return (said or "no goal. `/goal <title>` then one step per line, "
                         "or `title | step | step`.", goal_load(), False)
+    # #289: `/goal skip <n> [reason]` -- ONE LINE, a number after the word.
+    # "skip the intro | a | b" stays a goal title.
+    skip = _GOAL_SKIP.match(text)
+    if skip:
+        n, reason = int(skip.group(1)), (skip.group(2) or "").strip()
+        goal, why = goal_step_skip(n - 1, reason)
+        if goal is None:
+            return (why or "nothing skipped.", goal_load(), False)
+        nxt = goal_next_open(goal)
+        after = ("next is step %d: %s" % (nxt + 1, goal["steps"][nxt]["text"])
+                 if nxt is not None else goal_summary(goal))
+        return ("step %d skipped%s. %s"
+                % (n, " (%s)" % reason if reason else "", after), goal, True)
     if text.lower() in ("off", "clear", "done"):
         if goal_load() is None:
             return ("no goal to clear.", None, False)
@@ -18024,6 +18039,10 @@ def goal_command(argument: str) -> "tuple[str, dict | None, bool]":
                % (len(accepts), "" if len(accepts) == 1 else "s")
                if accepts else "",
                GOAL_COST_NOTE), goal, True)
+
+
+# #289: `/goal skip 4 not verifiable here`.
+_GOAL_SKIP = re.compile(r"(?i)^skip[ \t]+(\d+)(?:[ \t]+([^\n]*))?$")
 
 
 # #240: who wrote a plan -- the user through `/goal`, or the model through
@@ -18111,7 +18130,8 @@ def _goal_step_norm(text: str) -> str:
 
 # #260: what a carried step keeps -- everything but its text.
 _GOAL_CARRIED_FIELDS = ("status", "note", "started", "started_tokens",
-                        "seconds", "tokens", "delegated")
+                        "seconds", "tokens", "delegated",
+                        "failures", "skipped_by")             # #289
 # ... and what the goal keeps: its clock and its bill, in pairs.
 _GOAL_CARRIED_TOTALS = ("spent", "last_spent", "delegated", "created",
                         "started", "last_at")
@@ -18155,7 +18175,7 @@ def _carry_goal_marks(old: "dict | None", new: "dict") -> "dict | None":
     steps_old = (old or {}).get("steps") or []
     marks = {_goal_step_norm(s.get("text")): s
              for s in steps_old
-             if s.get("status") in (GOAL_DONE, GOAL_FAILED)}
+             if s.get("status") in (GOAL_DONE, GOAL_FAILED, GOAL_SKIPPED)}
     if not marks:
         return None
     hits = 0
@@ -18213,7 +18233,7 @@ def tool_goal_set(title: str, steps: "list | None" = None) -> str:
     # ein getragener Haken vorn im Plan waere eine Anweisung, Fertigtes noch
     # einmal zu tun -- genau die Schleife, die das Panel zeigen wuerde.
     nxt = next((n for n, s in enumerate(goal["steps"], 1)
-                if s.get("status") != GOAL_DONE), 1)
+                if s.get("status") not in (GOAL_DONE, GOAL_SKIPPED)), 1)
     out = {"ok": True, "title": goal["title"],
            "steps": len(goal["steps"]),
            "next": nxt, "first": goal["steps"][nxt - 1]["text"]}
@@ -18264,6 +18284,19 @@ def tool_goal_step(step: int, status: str, note: str = "") -> str:
            "next": None if nxt is None else goal["steps"][nxt]["text"]}
     if state == GOAL_DONE and passed:
         out["acceptance_check"] = "passed: %s" % passed
+    # #289: WHAT THE `failed` DID, said in the answer -- the model reads
+    # `next_step` from here, and a retry or a skip it is not told about is
+    # the same step again or a step it thinks is still open.
+    moved = goal["steps"][index].get("status")
+    if state == GOAL_FAILED and moved == GOAL_FAILED:
+        out["retry"] = ("step %d failed once; it comes back once more -- try "
+                        "a different approach. A second 'failed' skips it."
+                        % (index + 1))
+    elif state == GOAL_FAILED and moved == GOAL_SKIPPED:
+        out["skipped"] = ("step %d failed twice and is skipped; the goal "
+                          "moves on." % (index + 1))
+    if goal.get("status") == GOAL_PARTIAL:
+        out["ended"] = "complete with %d skipped" % len(goal_skipped(goal))
     return json.dumps(out)
 
 
@@ -18345,7 +18378,7 @@ def goal_done_refusal(index: int, note: str = "",
                 "means verified working. Finish it and report done with what "
                 "proves it, or call goal_step with 'failed' and this note."
                 % hit.group(0)), None
-    if not said.strip() and step.get("status") == GOAL_FAILED:
+    if not said.strip() and step.get("status") in (GOAL_FAILED, GOAL_SKIPPED):
         return ("refused: step %d was last reported failed (\"%s\"). A 'done' "
                 "after that needs a note saying what proves it works now."
                 % (index + 1, str(step.get("note") or "")[:160])), None
@@ -18588,14 +18621,44 @@ def goal_accept_set(lines: "list[str] | None") -> None:
 def goal_next_open(goal: "dict | None" = None) -> "int | None":
     """Der erste Schritt, der noch Arbeit ist -- laufend, offen oder gescheitert.
     None, wenn nichts mehr aussteht. Das ist die Frage, die der Motor nach jedem
-    Zug stellt."""
+    Zug stellt.
+
+    #289: UEBERSPRUNGEN IST KEINE ARBEIT MEHR. Ein gescheiterter Schritt kommt
+    noch einmal dran (`GOAL_STEP_TRIES`); ein uebersprungener -- zweimal
+    gescheitert, oder von robin per `/goal skip` -- nicht, sonst stuende der
+    Motor wieder vor derselben Wand wie am 2026-09-24."""
     goal = goal if goal is not None else goal_load()
     if not goal:
         return None
     for n, step in enumerate(goal.get("steps") or []):
-        if step.get("status") != GOAL_DONE:
+        if step.get("status") not in (GOAL_DONE, GOAL_SKIPPED):
             return n
     return None
+
+
+def goal_retry_note(goal: "dict | None", index: int) -> "str | None":
+    """#289. The step's failure note when it is being sent back after ONE
+    `failed`, or None. The engine quotes it in the nudge: the note is what
+    the model learned, and a retry that does not read it is the same attempt
+    again."""
+    steps = (goal or {}).get("steps") or []
+    if not 0 <= index < len(steps):
+        return None
+    step = steps[index]
+    if step.get("status") != GOAL_FAILED:
+        return None
+    return str(step.get("note") or "").strip() or "(no reason given)"
+
+
+def goal_retry_nudge(goal: dict, index: int, note: str) -> str:
+    """#289. The one nudge a failed step gets before it is retried."""
+    return ("[Goal mode. Step %d failed: \"%s\"\nTry it ONCE more with a "
+            "different approach -- not the one that failed. Step %d: %s\n"
+            "If it fails again, call goal_step with 'failed' and say why: the "
+            "step is then skipped and the goal moves on.%s]"
+            % (index + 1, _clip(note, 600), index + 1,
+               goal["steps"][index]["text"],
+               goal_nudge_evidence(goal, index)))
 
 
 # ---------------------------------------------------- #202, die Notbremse ----
@@ -24955,7 +25018,21 @@ GOAL_FORMAT = 1
 # zuliesse, beschriebe eine Maschine, die es nicht gibt.
 GOAL_OPEN, GOAL_RUNNING, GOAL_DONE, GOAL_FAILED = ("open", "running",
                                                    "done", "failed")
-GOAL_STEP_STATES = (GOAL_OPEN, GOAL_RUNNING, GOAL_DONE, GOAL_FAILED)
+# #289: A STEP THAT FAILED TWICE, or one the user skipped (`/goal skip`). It
+# counts as NOT done, and the goal moves on past it. 2026-09-24, diorama run:
+# step 4 went `failed` with an honest note (software GL cannot show ray
+# lighting), `goal_next_open` handed it back as the next step on every turn,
+# and the run sat on it for ~2 h 20 min until robin edited goal.json by hand.
+GOAL_SKIPPED = "skipped"
+GOAL_STEP_STATES = (GOAL_OPEN, GOAL_RUNNING, GOAL_DONE, GOAL_FAILED,
+                    GOAL_SKIPPED)
+# #289: THE GOAL'S OWN STATE when every step is done or skipped and at least
+# one is skipped -- "complete with N skipped", never `done`: a skipped step
+# is work that did not happen, and `done` would say it did.
+GOAL_PARTIAL = "partial"
+# #289: HOW OFTEN A STEP MAY FAIL before it is skipped. The first `failed`
+# sends it back once, with its own note in the nudge; the second one ends it.
+GOAL_STEP_TRIES = 2
 
 
 # WIEVIEL KONTEXT GERADE STEHT. Gemeldet von der Runde, die ihn gerade gelesen
@@ -25285,7 +25362,8 @@ def goal_step_begin(index: int, now: "float | None" = None,
         # DER ZAEHLER GEHT ZURUECK, WENN EIN HAKEN ZURUECKGENOMMEN WIRD, und mit
         # ihm der Zustand des Ziels: "Complete" darf nicht stehen bleiben,
         # waehrend an einem Schritt gearbeitet wird.
-        if step["status"] == GOAL_DONE:
+        # #289: and "complete with N skipped" just as little.
+        if goal.get("status") in (GOAL_DONE, GOAL_PARTIAL):
             goal["status"] = GOAL_OPEN
         # #275: A STEP THAT IS ALREADY RUNNING KEEPS ITS CLOCK. 2026-09-24,
         # diorama run: the engine began step 2 at 10:07, the model reported
@@ -25362,15 +25440,100 @@ def goal_step_end(index: int, ok: bool = True, tokens: int = 0,
         spent = int(goal.get("spent") or 0)
         _goal_close_window(goal, step, end, spent, tokens=tokens)
         goal["last_at"], goal["last_spent"] = end, spent
-        step["status"] = GOAL_DONE if ok else GOAL_FAILED
+        if ok:
+            step["status"] = GOAL_DONE
+        else:
+            # #289: ONE RETRY, THEN THE GOAL MOVES ON. The count lives on the
+            # step, because the engine sets a failed step `running` again
+            # before the retry and the status alone forgets it ever failed.
+            step["failures"] = int(step.get("failures") or 0) + 1
+            step["status"] = (GOAL_SKIPPED
+                              if step["failures"] >= GOAL_STEP_TRIES
+                              else GOAL_FAILED)
         step["note"] = str(note or "")[:400]
-        # FERTIG IST DAS ZIEL ERST, WENN KEIN SCHRITT MEHR OFFEN IST -- ein
-        # gescheiterter zaehlt nicht als erledigt, sonst hiesse "Complete" hier
-        # "es wird nichts mehr passieren" statt "es ist geschafft".
-        if all(s["status"] == GOAL_DONE for s in goal["steps"]):
-            goal["status"] = GOAL_DONE
+        _goal_settle(goal)
         goal_write(goal)
         return goal
+
+
+def _goal_settle(goal: dict) -> None:
+    """Der Zustand des Ziels aus dem seiner Schritte.
+
+    FERTIG IST DAS ZIEL ERST, WENN KEIN SCHRITT MEHR OFFEN IST -- ein
+    gescheiterter zaehlt nicht als erledigt, sonst hiesse "Complete" hier
+    "es wird nichts mehr passieren" statt "es ist geschafft".
+
+    #289: EIN UEBERSPRUNGENER AUCH NICHT. Alles erledigt oder uebersprungen,
+    und mindestens einer uebersprungen, ist `partial` -- "complete with N
+    skipped" --, nie `done`.
+    """
+    states = [s.get("status") for s in goal.get("steps") or []]
+    if states and all(x == GOAL_DONE for x in states):
+        goal["status"] = GOAL_DONE
+    elif states and all(x in (GOAL_DONE, GOAL_SKIPPED) for x in states):
+        goal["status"] = GOAL_PARTIAL
+    elif goal.get("status") in (GOAL_DONE, GOAL_PARTIAL):
+        goal["status"] = GOAL_OPEN
+
+
+def goal_step_skip(index: int, note: str = "",
+                   now: "float | None" = None) -> "tuple[dict | None, str | None]":
+    """#289. `/goal skip <n> [reason]`: robin gives a step up. (goal, None), or
+    (None, why not).
+
+    THE USER'S WORD, NOT THE MODEL'S: there is no tool for this. A step the
+    model cannot finish goes through `failed` twice; this is the way for the
+    step robin already knows cannot be done here. A `done` step is not
+    skipped -- that would take back work that happened. There is no
+    `/goal done <n>` beside it on purpose: acceptance stays with the evidence
+    gate (#250/#267).
+
+    A RUNNING STEP IS BILLED FIRST, like a parked one: its clock and tokens
+    are the time spent on it, skipped or not.
+    """
+    with _GOAL_LOCK:
+        goal = goal_load()
+        if goal is None:
+            return None, "no goal."
+        steps = goal.get("steps") or []
+        if not 0 <= index < len(steps):
+            return None, "no step %d -- the goal has %d." % (index + 1,
+                                                            len(steps))
+        step = steps[index]
+        if step.get("status") == GOAL_DONE:
+            return None, "step %d is done; there is nothing to skip." % (
+                index + 1)
+        at = float(now if now is not None else time.time())
+        if step.get("status") == GOAL_RUNNING:
+            spent = int(goal.get("spent") or 0)
+            _goal_close_window(goal, step, at, spent)
+            goal["last_at"], goal["last_spent"] = at, spent
+        step["status"] = GOAL_SKIPPED
+        step["note"] = (str(note or "").strip()
+                        or "skipped by the user")[:400]
+        step["skipped_by"] = GOAL_BY_USER
+        _goal_settle(goal)
+        goal_write(goal)
+        return goal, None
+
+
+def goal_shape(goal: "dict | None") -> str:
+    """#289. What a goal display draws apart from its running numbers: the
+    title, the goal's state, and each step's text, state and note. It moves
+    when a step moves -- through a tool, `/goal`, or a hand edit of
+    goal.json -- and not when a round only adds tokens."""
+    if not goal:
+        return ""
+    return json.dumps([goal.get("title"), goal.get("status"),
+                       [[s.get("text"), s.get("status"), s.get("note")]
+                        for s in goal.get("steps") or []]])
+
+
+def goal_skipped(goal: "dict | None" = None) -> "list[int]":
+    """#289: the one-based numbers of the skipped steps."""
+    goal = goal if goal is not None else goal_load()
+    return [n for n, s in enumerate((goal or {}).get("steps") or [], 1)
+            if s.get("status") == GOAL_SKIPPED]
 
 
 def goal_counts(goal: "dict | None" = None) -> "tuple[int, int]":
@@ -25417,7 +25580,7 @@ GOAL_HEAD_NOTE = ("This goal outlives a context rollover: if the conversation "
 # der naechste sie neu setzt.
 GOAL_SEAM_NOTE = ("This goal outlives a context rollover: the plan above still "
                   "stands, each step with its status as it was at the cut. "
-                  "Continue at the first step not marked done.")
+                  "Continue at the first step not marked done or skipped.")
 
 
 def goal_block(goal: "dict | None" = None,
@@ -25442,14 +25605,13 @@ def goal_block(goal: "dict | None" = None,
     steps = goal.get("steps") or []
     if include_status:
         marks = {GOAL_DONE: "[done]", GOAL_FAILED: "[failed]",
-                 GOAL_RUNNING: "[running]"}
+                 GOAL_RUNNING: "[running]", GOAL_SKIPPED: "[skipped]"}
         lines += ["%d. %s %s" % (n, marks.get(s.get("status"), "[open]"),
                                  s["text"])
                   for n, s in enumerate(steps, 1)]
-        nxt = next(((n, s) for n, s in enumerate(steps, 1)
-                    if s.get("status") != GOAL_DONE), None)
+        nxt = goal_next_open(goal)                             # #289
         if nxt is not None:
-            lines.append("Next: step %d. %s" % (nxt[0], nxt[1]["text"]))
+            lines.append("Next: step %d. %s" % (nxt + 1, steps[nxt]["text"]))
         lines.append(GOAL_SEAM_NOTE)
     else:
         lines += ["%d. %s" % (n, s["text"])
@@ -25476,7 +25638,14 @@ def goal_summary(goal: "dict | None" = None,
     if not goal:
         return None
     done, total = goal_counts(goal)
-    return "goal: %s -- %d/%d, %s" % (
-        goal["title"], done, total,
-        "complete" if goal.get("status") == GOAL_DONE
-        else "%d min so far" % int(goal_seconds(goal, now) // 60))
+    skipped = goal_skipped(goal)                               # #289
+    if goal.get("status") == GOAL_DONE:
+        state = "complete"
+    elif goal.get("status") == GOAL_PARTIAL:
+        state = "complete with %d skipped" % len(skipped)
+    else:
+        state = "%d min so far" % int(goal_seconds(goal, now) // 60)
+    return "goal: %s -- %d/%d, %s%s" % (
+        goal["title"], done, total, state,
+        "" if not skipped or goal.get("status") == GOAL_PARTIAL
+        else " (skipped: %s)" % ", ".join(str(n) for n in skipped))

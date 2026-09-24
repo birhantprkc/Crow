@@ -15866,6 +15866,125 @@ class TheRolloverNoteIsParsableTests(unittest.TestCase):
         self.assertEqual(crow_core.rollover_note_split("frage"), (None, ""))
 
 
+class AFailedStepIsRetriedOnceThenSkippedTests(unittest.TestCase):
+    """#289. 2026-09-24, diorama run: step 4 went `failed` with an honest
+    note (session.json msg 324), the answer named step 4 as `next_step`
+    again (msg 325), and the run sat on it for ~2 h 20 min until robin
+    edited goal.json by hand. One retry with the note in the nudge, then
+    `skipped`, and the goal moves on."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-goalskip-"))
+        self.state = tempfile.mkdtemp(prefix="crow-goalskip-state-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.state, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", crow_core.SESSION_DIR)
+        crow_core.SESSION_DIR = self.state
+        crow_core.goal_command("parser | read it | build it | test it | "
+                               "trace it | ship it")
+
+    def step(self, n, status, note=""):
+        return json.loads(crow_core.tool_goal_step(n, status, note))
+
+    def status(self, n):
+        return crow_core.goal_load()["steps"][n - 1]["status"]
+
+    def test_two_failures_skip_the_step_and_the_goal_moves_on(self):
+        """The ticket's unit: `goal_step(4, "failed")` twice -> step 4 is
+        `skipped` and `next_step` is 5."""
+        for n in (1, 2, 3):
+            self.assertTrue(self.step(n, "done", "ok, checked")["ok"])
+        first = self.step(4, "failed", "no GPU here to trace on")
+        self.assertEqual(first["next_step"], 4, "one retry, not none")
+        self.assertIn("retry", first)
+        self.assertEqual(self.status(4), "failed")
+        # The engine sets the step running before the retry, as it does live.
+        crow_core.goal_step_begin(3)
+        second = self.step(4, "failed", "still no GPU")
+        self.assertEqual(self.status(4), "skipped")
+        self.assertEqual(second["next_step"], 5)
+        self.assertIn("skipped", second)
+        self.assertEqual(crow_core.goal_next_open(), 4)
+        self.assertEqual(crow_core.goal_counts(), (3, 5),
+                         "a skipped step counted as done")
+
+    def test_the_retry_nudge_quotes_the_failure_note(self):
+        self.step(1, "failed", "the parser grammar is ambiguous at line 12")
+        goal = crow_core.goal_load()
+        note = crow_core.goal_retry_note(goal, 0)
+        self.assertEqual(note, "the parser grammar is ambiguous at line 12")
+        nudge = crow_core.goal_retry_nudge(goal, 0, note)
+        self.assertIn("the parser grammar is ambiguous at line 12", nudge)
+        self.assertIn("different approach", nudge)
+        self.assertTrue(nudge.startswith(crow_core.GOAL_NUDGE_MARK))
+        # GEGENPROBE: a step that did not fail gets no retry line.
+        self.assertIsNone(crow_core.goal_retry_note(goal, 1))
+
+    def test_a_goal_with_a_skipped_step_ends_partial_not_done(self):
+        for n in (1, 2, 3):
+            self.step(n, "done", "ok, checked")
+        self.step(4, "failed", "no GPU")
+        self.step(4, "failed", "no GPU")
+        out = self.step(5, "done", "ok, checked")
+        goal = crow_core.goal_load()
+        self.assertEqual(goal["status"], crow_core.GOAL_PARTIAL)
+        self.assertFalse(out["complete"])
+        self.assertIsNone(out["next_step"])
+        self.assertEqual(out["ended"], "complete with 1 skipped")
+        self.assertIn("complete with 1 skipped", crow_core.goal_summary(goal))
+        # Taking a skipped step up again reopens the goal.
+        crow_core.goal_step_begin(3)
+        self.assertEqual(crow_core.goal_load()["status"], crow_core.GOAL_OPEN)
+
+    def test_goal_skip_sets_skipped_with_the_users_note(self):
+        """The ticket's unit: `/goal skip 4 not verifiable here`."""
+        for n in (1, 2, 3):
+            self.step(n, "done", "ok, checked")
+        crow_core.goal_step_begin(3)
+        said, goal, changed = crow_core.goal_command("skip 4 not verifiable here")
+        self.assertTrue(changed)
+        self.assertEqual(goal["steps"][3]["status"], "skipped")
+        self.assertEqual(goal["steps"][3]["note"], "not verifiable here")
+        self.assertEqual(goal["steps"][3]["started"], None,
+                         "the running step's clock was not billed")
+        self.assertIn("step 4 skipped", said)
+        self.assertIn("next is step 5", said)
+        self.assertEqual(crow_core.goal_next_open(), 4)
+        self.assertEqual(self.status(4), "skipped")
+
+    def test_goal_skip_refuses_a_done_step_and_leaves_titles_alone(self):
+        self.step(1, "done", "ok, checked")
+        said, _goal, changed = crow_core.goal_command("skip 1")
+        self.assertFalse(changed)
+        self.assertIn("done", said)
+        self.assertEqual(self.status(1), "done")
+        said, _goal, changed = crow_core.goal_command("skip 9")
+        self.assertFalse(changed)
+        # "skip" followed by words is a goal title, not the command.
+        said, goal, changed = crow_core.goal_command("skip the intro | a | b")
+        self.assertTrue(changed)
+        self.assertEqual(goal["title"], "skip the intro")
+
+    def test_a_replan_keeps_a_skipped_step_skipped(self):
+        crow_core.goal_command("skip 2 cannot here")
+        out = json.loads(crow_core.tool_goal_set(
+            "parser", ["read it", "build it", "test it"]))
+        self.assertEqual(out["next"], 1)
+        steps = crow_core.goal_load()["steps"]
+        self.assertEqual(steps[1]["status"], "skipped")
+        self.assertEqual(steps[1]["note"], "cannot here")
+
+    def test_the_seam_head_marks_skipped_and_names_the_step_after(self):
+        for n in (1, 2, 3):
+            self.step(n, "done", "ok, checked")
+        crow_core.goal_command("skip 4")
+        block = crow_core.goal_block(include_status=True)
+        self.assertIn("4. [skipped] trace it", block)
+        self.assertIn("Next: step 5. ship it", block)
+
+
 class GoalDoneNeedsEvidenceTests(unittest.TestCase):
     """#250. 2026-09-23: goal mode closed 9/9 over a 1.4 KB index.html
     that draws nothing. Step 4's `done` note said "done-with-deviation only in

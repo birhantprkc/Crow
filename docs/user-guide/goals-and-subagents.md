@@ -17,10 +17,10 @@ while it keeps going.
 | | |
 |---|---|
 | Tools | `goal_set(title, steps)` writes the plan, `goal_step(step, status, note)` moves one step |
-| From the composer | `/goal <title>` then one step per line, or `title \| step \| step`. A line `check: <command>` (or a `\| check: <command>` part) is the acceptance check, not a step (#250). A line `accept: <criterion>, <criterion>` is the rubric the [judge](../reference/tools.md#judge-266) scores against, not a step (#266). `/goal` alone shows where it stands, `/goal off` clears it and its check |
+| From the composer | `/goal <title>` then one step per line, or `title \| step \| step`. A line `check: <command>` (or a `\| check: <command>` part) is the acceptance check, not a step (#250). A line `accept: <criterion>, <criterion>` is the rubric the [judge](../reference/tools.md#judge-266) scores against, not a step (#266). `/goal` alone shows where it stands, `/goal skip <n> [reason]` skips step n (#289), `/goal off` clears it and its check |
 | Panel | the first of the pinned cards at the top right of the chat (goal, subtasks, git): title, `done/total`, wall clock, tokens, delegated tokens, and one row per step |
 | Store | `<root>/.crow/goal.json`, beside `MEMORY.md` — the goal belongs to the folder the work is in |
-| States | `open` · `running` · `done` · `failed` |
+| States | `open` · `running` · `done` · `failed` · `skipped` (#289). The goal ends `done`, or "complete with N skipped" when a step was skipped |
 | Talking to it | a line typed while a goal turn runs is queued and runs **before** the next nudge, resetting the turn caps (#264). **Stop pauses the goal**: the turn ends, no next turn starts, a note says so, and the next line you send resumes it (#282). Escape = Stop |
 | Limits | 60 turns for the whole goal, 25 for one step, a brake on three identical or three empty answers, and the same failure class three times in one step named in the next nudge (#165, #202) |
 | `done` | refused when its note says the step is not done, and — with a `check:` set — refused on the step that would close the goal until the check exits 0 (#250); on a visual step, refused without a capture from this goal in the note or under the judge's bar (#267) |
@@ -35,12 +35,29 @@ been five full prefills.
 survives a rollover, a restart, and a window that is opened a day later on the same folder. A new
 session that finds an active goal says which one it is and how far it got, instead of leaving it
 invisible until somebody asks. At a rollover the head is re-pinned anyway, so that one head carries
-the marks — each step `[done]`, `[failed]`, `[running]` or `[open]`, plus the next open step — as
+the marks — each step `[done]`, `[failed]`, `[skipped]`, `[running]` or `[open]`, plus the next open step — as
 they stood at the cut; they are not refreshed afterwards (#210).
 
 **One step runs at a time.** The local server has one slot (`-np 1`), so a store that allowed two
-`running` steps would describe a machine that does not exist. A `failed` step may be started again
-later.
+`running` steps would describe a machine that does not exist.
+
+**A failed step is retried once, then skipped (#289).** Seen live on 2026-09-24: the model reported
+step 4 `failed` with an honest note (ray lighting cannot be checked on this machine's software GL).
+Crow still handed it back as the next step on every turn, for about 2 h 20 min.
+
+| | |
+|---|---|
+| First `failed` | the step comes back **once**. The next nudge quotes its failure note and asks for a different approach. The `goal_step` answer says `retry` |
+| Second `failed` on the same step | the step becomes `skipped`, and the answer says so. `next_step` names the step after it |
+| `/goal skip <n> [reason]` | you skip step n: window, terminal and phone. The reason becomes the step's note (default: "skipped by the user"). A `done` step cannot be skipped. There is no `/goal done <n>`: acceptance stays with the evidence gates below |
+| `skipped` | counts as not done. The engine moves past it. The goal ends "complete with N skipped", never `done`, and an acceptance check does not run for it |
+| Panel | the step shows an amber arrow and its note as a tooltip. The head (and the thin phone bar) says `step 4 skipped`, or `Complete · step 4 skipped` at the end |
+| Back to work | `goal_step(n, "running")` reopens a skipped step, the same way it reopens a `done` one |
+
+**The panel follows goal.json, not only the goal tools (#289).** Every round, before every turn and
+on `/goal`, Crow reads the file and redraws the panel when a step or the goal changed state. A hand
+edit of `goal.json` shows up at the latest after the current round. Before, only `goal_set` and
+`goal_step` redrew it during a turn, so a hand edit stayed hidden until the next turn ended.
 
 **`done` means verified working (#250).** Seen live on 2026-09-23: a goal closed at 9/9 over a
 page that drew nothing, with step notes such as "treated as done-with-deviation only in spirit".
