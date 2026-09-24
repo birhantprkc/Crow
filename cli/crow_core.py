@@ -20928,6 +20928,18 @@ def run_turn(
                 context_tokens = 0
                 rolled = True
 
+        # #278: THE BUDGET IS SAID AFTER THE LAST TOOL ROUND, NOT ONE ROUND
+        # LATE. Checked only at the start of a round, the round that spends
+        # it was decoded in full -- reasoning and a call -- and then its call
+        # was refused: 6 of 6 budget turns on 2026-09-24, 298-4,290 tokens
+        # each, 11,240 tokens / 271 s of decode for nothing. The forced answer
+        # now follows the last tool results directly. Budget 0 has no last
+        # tool round and keeps the refusal above.
+        if not forced and budget > 0 and round_no + 1 >= budget:
+            events.budget_spent(budget)
+            conversation.append("user", BUDGET_SPENT)
+            forced = True
+
     return TurnResult(cost=cost, context_tokens=context_tokens,
                       promised_warm=promised_warm, rolled=rolled,
                       stopped=stopped, reported=reported, incidents=incidents)

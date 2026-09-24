@@ -1358,6 +1358,35 @@ class SpentBudgetTests(TurnLoopCase):
         self.turn(talk, max_tool_rounds=0)
         self.assertIn(("budget", 0), self.events.log)
 
+    def test_the_budget_is_said_after_the_last_tool_round(self):
+        """#278. 2026-09-24: 6 of 6 budget turns decoded one more round --
+        reasoning and a call, 298-4,290 tokens -- only to have the call
+        refused. With budget N the turn is N tool rounds and the forced
+        answer: N + 1 requests, and BUDGET_SPENT right after a tool result."""
+        talk = self.conversation()
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))])
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.dir}),
+                                cid="c2")])
+        # A model that always asks for one more: text AND a call in round 3.
+        self.serve([{"content": "here is where I got to"},
+                    _call_delta("read_file", json.dumps({"path": "x"}),
+                                cid="c3")])
+        self.serve([{"content": "the answer after a refused round"}])
+        result = self.turn(talk, max_tool_rounds=2)
+        self.assertEqual(len(self.bodies), 3,
+                         "a round was decoded only to have its call refused")
+        self.assertEqual(result.cost.rounds, 3)
+        self.assertEqual(self.events.names.count("tool_start"), 2)
+        payload = talk.payload()
+        spent = [n for n, m in enumerate(payload)
+                 if m["role"] == "user" and m["content"] == crow_core.BUDGET_SPENT]
+        self.assertEqual(len(spent), 1)
+        self.assertEqual(payload[spent[0] - 1]["role"], "tool")
+        self.assertEqual(payload[-1]["content"], "here is where I got to")
+        self.assertIsNone(payload[-1].get("tool_calls"))
+        self.assertIn(("budget", 2), self.events.log)
+        self.assertPrefixIsWhole(talk)
+
     def test_a_turn_that_stays_inside_the_budget_never_says_it(self):
         talk = self.conversation()
         self.serve([{"content": "no tools needed"}])
