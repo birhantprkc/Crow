@@ -2863,6 +2863,26 @@ class SpotFallbackTests(unittest.TestCase):
         self.assertIn("fell back from unit/alpha:free", sub.failure)
         self.assertIn("unit/alpha:free", crow_core._SPOT_DEAD)
 
+    def test_a_stop_during_a_failing_attempt_is_interrupted_not_failed(self):
+        """#242: Stop lands while the spot's request raises -- the record
+        closes "interrupted" and the spot is not memoed dead."""
+        real = crow_core._subtask_attempt
+        self.addCleanup(setattr, crow_core, "_subtask_attempt", real)
+
+        def attempt(sub, spot):
+            # The ticket's reproduction: Stop lands while the attempt fails.
+            self.calls += 1
+            sub.cancelled = True
+            return "failed", "CrowError: HTTP 503 from u: down"
+
+        crow_core._subtask_attempt = attempt
+        crow_core.tool_delegate(task="haiku")
+        self._settle()
+        sub = crow_core.SUBTASKS["d1"]
+        self.assertEqual(sub.status, "interrupted")
+        self.assertEqual(crow_core._SPOT_DEAD, {})
+        self.assertEqual(self.calls, 1)
+
     def test_a_hard_failure_does_not_wander(self):
         """NEGATIVE CONTROL: a schema error would fail identically anywhere,
         and a fallback would just spend a second spot on it."""

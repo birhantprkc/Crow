@@ -22982,6 +22982,13 @@ def _run_subtask(sub: Subtask, spot: dict) -> None:
     transient = refused = 0
     for _ in range(_CHAIN_TRANSIENT + _CHAIN_REFUSALS):
         state, detail = _subtask_attempt(sub, current)
+        # #242: A STOP IS NOT A SPOT FAILING. An attempt that raised after the
+        # user's Stop came back "failed" -- the chain wrote it down, memoed the
+        # spot dead and closed "failed". The mark is read before the verdict.
+        if sub.cancelled:
+            _subtask_close(sub, "interrupted",
+                           _chain_said("stopped by the user", sub.chain))
+            return
         if state == "done":
             # The fallback note survives a good landing: a card that says
             # where its result CAME from is the whole point of not swapping
