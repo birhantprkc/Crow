@@ -20873,3 +20873,44 @@ class ConversationFreshTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ChatTitleSkipsCrowNotesTests(unittest.TestCase):
+    """#261: the one title rule both clients read."""
+
+    def test_every_note_head_is_recognised(self):
+        for note in (crow_core.BUDGET_SPENT, crow_core.TOKEN_BUDGET_SPENT,
+                     crow_core.THINK_ONLY_NUDGE, crow_core.ABORT_NOTE,
+                     "[Goal mode, step 2 still open. Continue.]",
+                     crow_core.ROLLOVER_NOTE.format(
+                         tokens=1, path="p.json", transcript="p.md", lines=1,
+                         where="", spoken="", digest="")):
+            self.assertTrue(crow_core.is_crow_note(note), note[:40])
+        self.assertFalse(crow_core.is_crow_note("[WIP] a typed line"))
+        self.assertFalse(crow_core.is_crow_note("Hey"))
+
+    def test_the_title_follows_the_rollover_chain(self):
+        folder = tempfile.mkdtemp(prefix="crow-title-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        conv = crow_core.Conversation("s")
+        conv.append("user", "Hey")
+        conv.append("assistant", "hi")
+        one = os.path.join(folder, "rollover-1.json")
+        self.assertEqual(crow_core.roll_over(conv, "http://127.0.0.1:1/v1", 9,
+                                             path=one), one)
+        conv.append("user", crow_core.BUDGET_SPENT)
+        conv.append("assistant", "ok")
+        two = os.path.join(folder, "rollover-2.json")
+        crow_core.roll_over(conv, "http://127.0.0.1:1/v1", 9, path=two)
+        conv.append("user", "later line")
+        self.assertEqual(crow_core.chat_title(conv.payload()), "Hey")
+
+    def test_a_broken_chain_falls_back_to_the_first_typed_line(self):
+        note = crow_core.ROLLOVER_NOTE.format(
+            tokens=1, path="/nonexistent/rollover-x.json", transcript="x.md",
+            lines=1, where="", spoken="", digest="")
+        messages = [{"role": "user", "content": note},
+                    {"role": "user", "content": crow_core.BUDGET_SPENT},
+                    {"role": "user", "content": "the typed one"}]
+        self.assertEqual(crow_core.chat_title(messages), "the typed one")
+        self.assertIsNone(crow_core.chat_title(messages[:2]))

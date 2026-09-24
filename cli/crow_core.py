@@ -4676,6 +4676,93 @@ def split_root_notice(text: str) -> "tuple[str | None, str]":
     return hit.group(0).strip(), text[hit.end():]
 
 
+# #261. CROW'S OWN USER-ROLE NOTES ARE NEVER A CHAT'S NAME.
+# Every one of these travels as a `user` message (the template forces the
+# role, see ROLLOVER_NOTE_DATA), so "the first thing the user said" met them
+# first. Measured 2026-09-23: rollover-20260923-210418.json opens with the
+# rollover note, then BUDGET_SPENT, then a goal nudge -- the rail titled it
+# "[The tool budget for this turn is ..." (#153 had only skipped the note).
+# The heads come from the constants themselves, no second copy of the wording.
+def crow_note_heads() -> tuple:
+    """The fixed openings of every note Crow sends in the user role."""
+    return (ROLLOVER_NOTE.split("{", 1)[0],
+            BUDGET_SPENT.split(" -- ", 1)[0],
+            TOKEN_BUDGET_SPENT.split(" -- ", 1)[0],
+            THINK_ONLY_NUDGE.split(" -- ", 1)[0],
+            ABORT_NOTE.split(" -- ", 1)[0],
+            GOAL_NUDGE_MARK)
+
+
+def is_crow_note(text: str) -> bool:
+    """Is this user-role text one of Crow's own notes, not a typed line?"""
+    return (text or "").lstrip().startswith(crow_note_heads())
+
+
+ROLLOVER_RECORD_RE = re.compile(r"^Full record, for `crow --resume`: (.+)$", re.M)
+_CHAIN_TITLES: dict = {}
+
+
+def rollover_record(text: str) -> "str | None":
+    """The archive a rollover note points back to, or None."""
+    if not rollover_note_parts(text):
+        return None
+    m = ROLLOVER_RECORD_RE.search(text or "")
+    return m.group(1).strip() if m else None
+
+
+def _archive_title(path: str, depth: int) -> "str | None":
+    """The title of the archive a rollover note names, cached per file stamp.
+
+    Archives are written once and read on every rail redraw; a 3 MB JSON parse
+    per redraw per link of the chain is the cost the cache removes."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (st.st_mtime_ns, st.st_size)
+    hit = _CHAIN_TITLES.get(path)
+    if hit and hit[0] == key:
+        return hit[1]
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:                      # noqa: BLE001 - no title, not an error
+        return None
+    title = ((data.get("crow_title") or "").strip()
+             or chat_title(data.get("messages") or [], _depth=depth + 1))
+    _CHAIN_TITLES[path] = (key, title)
+    return title
+
+
+def chat_title(messages: "list | None", _depth: int = 0) -> "str | None":
+    """The first line a person typed into this chat -- never one of Crow's notes.
+
+    ONE CHAT ACROSS ROLLOVERS. A segment that opens with a rollover note is the
+    same chat as the archive the note names, so it carries that archive's title
+    (followed down the chain, bounded). Only when the chain yields nothing does
+    the segment's own first typed line name it -- a live chat does not get a
+    new name at every cut. The root notice (#224) in front of a typed line is
+    stripped, the line behind it counts.
+    """
+    first = True
+    for message in messages or []:
+        if message.get("role") != "user":
+            continue
+        text = message_text(message.get("content") or "")
+        opening, first = first, False
+        if is_crow_note(text):
+            record = rollover_record(text) if opening and _depth < 16 else None
+            if record:
+                origin = _archive_title(record, _depth)
+                if origin:
+                    return origin
+            continue
+        lines = split_root_notice(text)[1].strip().splitlines()
+        if lines and lines[0].strip():
+            return lines[0].strip()
+    return None
+
+
 class Conversation:
     """The message list. Append-only by construction -- see module docstring.
 

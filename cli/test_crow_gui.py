@@ -1357,6 +1357,122 @@ class ARolloverArchiveIsNotTitledByTheNoteTests(unittest.TestCase):
         self.assertIsNone(crow_gui.Api._first_line(messages))
 
 
+class RolloversLeaveTheRailTests(ApiCase):
+    """#261 (robin, 2026-09-23): after each rollover the rail
+    listed the archived segment as a chat of its own -- "[The tool budget for
+    this turn is ..." (324 messages) and "Hey" (191 messages), both "rolled
+    over". A rollover is the live chat's earlier half: it belongs in the
+    archive drawer, and Crow's own notes are never anybody's title."""
+
+    def cut(self, api, stamp: str) -> str:
+        """One real `roll_over` of the window's conversation, like the seam."""
+        path = os.path.join(self.dir, "rollover-%s.json" % stamp)
+        archived = crow_core.roll_over(api._conversation, "http://127.0.0.1:1/v1",
+                                       180000, path=path)
+        self.assertEqual(archived, path)
+        return path
+
+    def two_rollovers(self, api) -> "tuple[str, str]":
+        api._conversation.append("user", "Hey")
+        api._conversation.append("assistant", "hi")
+        api._conversation.append("user", crow_core.BUDGET_SPENT)
+        api._conversation.append("assistant", "ran nothing")
+        first = self.cut(api, "20260923-195925")
+        api._conversation.append("user", crow_core.BUDGET_SPENT)
+        api._conversation.append("assistant", "ok")
+        api._conversation.append("user", "[Goal mode. 1 of 9 steps done. Next "
+                                         "is step 2: Build geometry]")
+        api._conversation.append("assistant", "working")
+        second = self.cut(api, "20260923-210418")
+        api._conversation.append("user", crow_core.BUDGET_SPENT)
+        api._conversation.append("assistant", "still here")
+        return first, second
+
+    def test_rollover_archives_are_not_in_the_rail(self):
+        api = self.api()
+        first, second = self.two_rollovers(api)
+        self.drained(api)
+        api._reload_rail()
+        entry = self.rail(api)
+        listed = [r["path"] for r in entry["rollovers"]]
+        self.assertNotIn(first, listed)
+        self.assertNotIn(second, listed)
+        self.assertTrue(entry["unsaved"], "the live chat is drawn as ONE entry")
+
+    def test_they_stay_on_disk_and_in_the_drawer(self):
+        api = self.api()
+        first, second = self.two_rollovers(api)
+        self.drained(api)
+        api._reload_rail()
+        drawer = self.rail(api)["archived"]
+        self.assertEqual([r["path"] for r in drawer], [second, first])
+        self.assertTrue(all(r["rollover"] for r in drawer))
+        self.assertTrue(all(r["meta"].endswith("rolled over") for r in drawer))
+        for path in (first, second):
+            self.assertTrue(os.path.isfile(path))
+            self.assertTrue(os.path.isfile(path[:-5] + ".md"))
+
+    def test_no_title_is_a_crow_note_and_the_chat_keeps_its_name(self):
+        """Both archives and the live chat are "Hey": one chat, three
+        segments. Before, the second archive read "[The tool budget ..." and
+        the live chat named itself after whatever note came first."""
+        api = self.api()
+        self.two_rollovers(api)
+        self.drained(api)
+        api._reload_rail()
+        entry = self.rail(api)
+        self.assertEqual(entry["title"], "Hey")
+        self.assertEqual([r["title"] for r in entry["archived"]], ["Hey", "Hey"])
+
+    def test_an_opened_rollover_stands_in_the_rail_once(self):
+        """The one exception: a rollover somebody opened IS the chat in the
+        window, so it is in the rail (marked) and not also in the drawer."""
+        api = self.api()
+        first, _second = self.two_rollovers(api)
+        api.open(first)
+        self.drained(api)
+        api._reload_rail()
+        entry = self.rail(api)
+        mine = [r for r in entry["rollovers"] if r["path"] == first]
+        self.assertEqual(len(mine), 1)
+        self.assertTrue(mine[0]["active"])
+        self.assertNotIn(first, [r["path"] for r in entry["archived"]])
+
+    def test_the_drawer_offers_no_restore_for_a_rollover(self):
+        src = crow_gui.PAGE
+        self.assertIn('if(!entry.rollover)\n      rows.push({act:"arch"',
+                      src)
+
+
+class CrowNotesAreNeverATitleTests(unittest.TestCase):
+    """#261: every user-role note Crow sends, not only the
+    rollover note (#153), is skipped when a chat is titled."""
+
+    def test_each_note_is_skipped(self):
+        notes = [crow_core.BUDGET_SPENT, crow_core.TOKEN_BUDGET_SPENT,
+                 crow_core.THINK_ONLY_NUDGE,
+                 "[Goal mode, step 9 still open. Continue.]",
+                 crow_core.goal_trouble_nudge(3, [])]
+        for note in notes:
+            messages = [{"role": "system", "content": "s"},
+                        {"role": "user", "content": note},
+                        {"role": "assistant", "content": "ok"},
+                        {"role": "user", "content": "build the fog"}]
+            self.assertEqual(crow_gui.Api._first_line(messages), "build the fog",
+                             note[:40])
+            self.assertIsNone(crow_gui.Api._first_line(messages[:2]), note[:40])
+
+    def test_a_typed_bracket_line_is_still_a_title(self):
+        """NEGATIV: only Crow's own heads are skipped, not every '['."""
+        messages = [{"role": "user", "content": "[WIP] fog shader"}]
+        self.assertEqual(crow_gui.Api._first_line(messages), "[WIP] fog shader")
+
+    def test_the_root_notice_is_not_the_title_the_typed_line_is(self):
+        text = crow_core.ROOT_NOTICE.format(new="/a", old="/b") + "move it"
+        messages = [{"role": "user", "content": text}]
+        self.assertEqual(crow_gui.Api._first_line(messages), "move it")
+
+
 # ----------------------------------------------------------- the rail --------
 
 class _ArchivesIntoTheLiveSession(crow_gui.Api):
