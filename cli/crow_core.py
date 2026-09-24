@@ -17501,7 +17501,7 @@ def tool_goal_step(step: int, status: str, note: str = "") -> str:
         return json.dumps({"ok": False, "error": "step must be a number"})
     state = str(status or "").strip().lower()
     if state == GOAL_RUNNING:
-        goal = goal_step_begin(index)
+        goal = goal_step_begin(index, note=note)                # #275
     elif state in (GOAL_DONE, GOAL_FAILED):
         passed = None
         if state == GOAL_DONE:
@@ -24241,7 +24241,8 @@ def _goal_begun(goal: dict, at: float) -> None:
     goal["last_at"] = at
 
 
-def goal_step_begin(index: int, now: "float | None" = None) -> "dict | None":
+def goal_step_begin(index: int, now: "float | None" = None,
+                    note: str = "") -> "dict | None":
     """Schritt `index` laeuft ab jetzt. Das Ziel danach, oder None.
 
     NUR EIN LAUFENDER SCHRITT, und das bleibt so: zwei laufende Schritte waeren
@@ -24278,13 +24279,26 @@ def goal_step_begin(index: int, now: "float | None" = None) -> "dict | None":
         # waehrend an einem Schritt gearbeitet wird.
         if step["status"] == GOAL_DONE:
             goal["status"] = GOAL_OPEN
+        # #275: A STEP THAT IS ALREADY RUNNING KEEPS ITS CLOCK. 2026-09-24,
+        # diorama run: the engine began step 2 at 10:07, the model reported
+        # it `running` again at 11:21 (session.json msg 148), and this line
+        # set `started` to 11:21 -- 73.5 min and their tokens were never
+        # billed, goal.json read `seconds 0, tokens 0`. The same state said
+        # twice is one state; nothing moves.
+        already = (step["status"] == GOAL_RUNNING
+                   and step.get("started") is not None)
         step["status"] = GOAL_RUNNING
-        # DIE SEKUNDEN BLEIBEN STEHEN, die Uhr faengt neu an: `goal_step_end`
-        # addiert, also traegt ein wieder aufgemachter Schritt am Ende beide
-        # Strecken. Dasselbe fuer die Token.
-        step["started"] = at
-        step["started_tokens"] = spent
-        goal["last_at"], goal["last_spent"] = at, spent
+        if not already:
+            # DIE SEKUNDEN BLEIBEN STEHEN, die Uhr faengt neu an:
+            # `goal_step_end` addiert, also traegt ein wieder aufgemachter
+            # Schritt am Ende beide Strecken. Dasselbe fuer die Token.
+            step["started"] = at
+            step["started_tokens"] = spent
+            goal["last_at"], goal["last_spent"] = at, spent
+        # #275: the note of a `running` call is kept (it was dropped while
+        # the tool answered ok); `done`/`failed` replace it with theirs.
+        if str(note or "").strip():
+            step["note"] = str(note)[:400]
         goal_write(goal)
         return goal
 

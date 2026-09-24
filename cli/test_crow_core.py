@@ -16320,6 +16320,44 @@ class TheGoalOutlivesEverythingTests(unittest.TestCase):
         self.assertEqual(goal["steps"][0]["seconds"], 90.0)
         self.assertEqual(goal["steps"][0]["tokens"], 700)
 
+    def test_running_said_again_keeps_the_clock_of_the_running_step(self):
+        """#275. 2026-09-24, diorama run: the engine began step 2 at 10:07,
+        the model called goal_step(2, running) at 11:21 (session.json msg
+        148), and goal.json read started 11:21, seconds 0, tokens 0 -- the
+        73.5 min before were never billed. A running step said to be running
+        is the same state; the whole window lands on the step at the end."""
+        self.counter()
+        self.a_goal()
+        crow_core.goal_tokens_seen(1000)
+        crow_core.goal_step_begin(1, now=100.0)
+        crow_core.goal_tokens_seen(5000)
+        again = json.loads(crow_core.tool_goal_step(2, "running"))
+        self.assertTrue(again["ok"], again)
+        step = crow_core.goal_load()["steps"][1]
+        self.assertEqual(step["started"], 100.0, "the running clock restarted")
+        self.assertEqual(step["started_tokens"], 1000)
+        crow_core.goal_tokens_seen(6000)
+        goal = crow_core.goal_step_end(1, note="seen", now=4600.0)
+        self.assertEqual(goal["steps"][1]["seconds"], 4500.0)
+        self.assertEqual(goal["steps"][1]["tokens"], 5000)
+
+    def test_the_note_of_a_running_call_is_kept(self):
+        """#275: the tool answered ok and threw the note away -- in the run
+        it was the one line that said step 2 was NOT verified. It stays until
+        done/failed write theirs."""
+        self.counter()
+        self.a_goal()
+        crow_core.goal_step_begin(0, now=100.0)
+        crow_core.tool_goal_step(1, "running", note="judge 1/10, not verified")
+        self.assertEqual(crow_core.goal_load()["steps"][0]["note"],
+                         "judge 1/10, not verified")
+        crow_core.tool_goal_step(1, "running")
+        self.assertEqual(crow_core.goal_load()["steps"][0]["note"],
+                         "judge 1/10, not verified",
+                         "an empty running note wiped the last one")
+        goal = crow_core.goal_step_end(0, ok=False, note="gave up", now=200.0)
+        self.assertEqual(goal["steps"][0]["note"], "gave up")
+
     def test_a_complete_goal_is_open_again_once_a_step_reopens(self):
         """"Complete" darf nicht stehen bleiben, waehrend an einem Schritt
         gearbeitet wird -- sonst liest die Wiederaufnahme nach einem Rollover
