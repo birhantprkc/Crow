@@ -13836,6 +13836,25 @@ class RemoteMirrorTests(RemoteCase):
                       [m.get("t") for m in got if m.get("k") == "user"])
         self.assertEqual(api._page_loads, 0, "a phone counted as a page load")
 
+    def test_the_home_screen_app_keeps_its_header_out_of_the_blur(self):
+        """robin's iPhone (iOS 27, home-screen app), 2026-09-24: the header
+        row sat blurred and dimmed under the status bar. black-translucent
+        puts the page under the bar and iOS fills that inset with the Liquid
+        Glass scroll-edge blur, which reaches past the bar over the header.
+        The status bar is opaque (`default`, tinted from theme-color), so the
+        web view starts below it; black-translucent must not come back."""
+        phone = crow_gui.stamped_page(remote=True)
+        self.assertIn('name="apple-mobile-web-app-status-bar-style" content="default"',
+                      phone)
+        self.assertNotIn("black-translucent", phone)
+        # the bar's tint follows the page: a theme-color tag without media
+        # comes first, stamped from the window's ground.
+        self.assertLess(phone.index('<meta id="mtheme" name="theme-color"'),
+                        phone.index("apple-mobile-web-app-status-bar-style"))
+        # NEGATIVE: the desktop page carries no web-app tags at all.
+        self.assertNotIn("apple-mobile-web-app-status-bar-style",
+                         crow_gui.stamped_page())
+
     def test_the_phone_page_brings_its_home_screen_tile(self):
         """robin's iPhone, 2026-09-24: a generic "1" tile on the home screen.
         The phone page names the tile, the manifest and the web-app title;
@@ -13848,7 +13867,7 @@ class RemoteMirrorTests(RemoteCase):
                     '<meta name="apple-mobile-web-app-capable" content="yes">',
                     '<meta name="mobile-web-app-capable" content="yes">',
                     '<meta name="apple-mobile-web-app-status-bar-style"'
-                    ' content="black-translucent">'):
+                    ' content="default">'):
             self.assertIn(tag, phone)
         self.assertNotIn("apple-touch-icon", crow_gui.stamped_page())
         tile = crow_gui.remote_icon(180)

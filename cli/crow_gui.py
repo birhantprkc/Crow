@@ -8209,16 +8209,28 @@ REMOTE_HEAD = ('<meta name="viewport" content="width=device-width,'
                '<meta name="theme-color" media="(prefers-color-scheme: dark)"'
                ' content="#181818">'
                # robin's iPhone, 2026-09-24: "Add to Home Screen" drew a
-               # generic "1" tile. The tile, the title and standalone mode;
-               # black-translucent puts the page under the status bar, and
-               # the layer's --safe-t padding keeps the header below it.
+               # generic "1" tile. The tile, the title and standalone mode.
+               #
+               # THE STATUS BAR IS OPAQUE (`default`), NOT black-translucent.
+               # robin's iPhone (iOS 27, home-screen app): with the page under
+               # a translucent bar, iOS fills that inset with the Liquid Glass
+               # scroll-edge blur, and the band reaches ~35 pt below the bar,
+               # over the header's icons -- although the page's own solid
+               # ground (body padding --safe-t) was already painted there.
+               # The blur is drawn by the system above the web view; no CSS or
+               # meta tag switches it off and safe-area-inset-top does not
+               # grow with it. With `default` the web view starts below the
+               # bar, iOS 26+ tints the bar from theme-color (the first tag
+               # above follows the page theme), and there is no inset to blur.
+               # iOS caches this with the home-screen icon: an icon added
+               # before this change keeps the old bar until it is re-added.
                '<link rel="apple-touch-icon" href="/apple-touch-icon.png">'
                '<link rel="manifest" href="/remote.webmanifest">'
                '<meta name="apple-mobile-web-app-title" content="Crow">'
                '<meta name="apple-mobile-web-app-capable" content="yes">'
                '<meta name="mobile-web-app-capable" content="yes">'
                '<meta name="apple-mobile-web-app-status-bar-style"'
-               ' content="black-translucent">')
+               ' content="default">')
 # (the stamped colour is THEME_BG's, the ground the window itself paints)
 REMOTE_CSS = """
 /* #249: auf dem Telefon bleibt die Titelleiste als Kopf -- sie traegt Rail,
