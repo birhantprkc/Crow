@@ -8964,7 +8964,11 @@ def _clip(text: str, limit: int = MAX_TOOL_BYTES) -> str:
 # ein Modulplatz, den der Aufruf fuellt und die Schleife leert. Genau EIN Block
 # passt hinein -- ein zweiter Aufruf ohne abgeholtes Bild ist ein Fehler in der
 # Schleife, kein Stapel, den man wachsen laesst.
-_IMAGE_RIDE: "list[dict]" = []
+#
+# #265: the one entry is the LIST of image blocks one read_image
+# hands over -- the file, and when its content is small on a near-uniform
+# ground, the enlarged crop of it as a second block.
+_IMAGE_RIDE: "list[list[dict]]" = []
 
 # #175. DASSELBE FUER EINEN RENDER, und aus demselben Grund: das Werkzeug hat
 # keinen Draht zum Fenster, die Schleife hat ihn. Was hier liegt, ist das Paar
@@ -9038,17 +9042,16 @@ _BLANK_SHARE = 0.999
 _PNG_DECODE_BUDGET = 16 * 1024 * 1024
 
 
-def _png_dominant_share(data: bytes) -> "float | None":
-    """#213. Der Farben-Anteil des Fangs: welcher Bruchteil aller Pixel GENAU
-    die haeufigste Farbe traegt, oder None, wenn sich das nicht sagen laesst.
+def _png_pixels(data: bytes) -> "tuple | None":
+    """#213, split out for #265: a PNG's unfiltered scanlines, or
+    None. Returns (width, height, colour_type, channels, rows) with one
+    `bytearray` per row.
 
     Rein rechnerisch ueber die PNG-Bytes selbst -- Signatur, Chunks, zlib,
     Filter --, damit die Suite echte Bytes ohne Browser pruefen kann. Nur was
     ein Screenshot hier wirklich ist (8 Bit Tiefe, kein Interlace, Grau/RGB/
     RGBA) wird dekodiert; Palette und 16 Bit sind None und damit KEIN Urteil.
-    Gezaehlt wird hoch maximal 100.000 gleichmaessig gestreute Pixel: der
-    Anteil der herrschenden Farbe ist auf dieser Grundlage auf ein Zehntel
-    Prozent genau, und die Zahl, die ihn faellt, uebersteht jede Stichprobe.
+    Ueber dem Budget (_PNG_DECODE_BUDGET) ebenfalls None.
     """
     import zlib
 
@@ -9087,16 +9090,14 @@ def _png_dominant_share(data: bytes) -> "float | None":
         return None
     if len(raw) < height * (stride + 1):
         return None
-    counts: "dict[bytes, int]" = {}
+    rows: "list[bytearray]" = []
     prev = bytearray(stride)
-    step = max(1, (width * height) // 100_000)
     for y in range(height):
         off = y * (stride + 1)
         # Der Filtertyp steht vor jeder Scanline; die vier Arme sind die
         # PNG-Spezifikation, unverdichtet.
         filter_type = raw[off]
-        line = raw[off + 1:off + 1 + stride]
-        cur = bytearray(line)
+        cur = bytearray(raw[off + 1:off + 1 + stride])
         if filter_type == 1:                    # Sub: plus linker Nachbar
             for i in range(channels, stride):
                 cur[i] = (cur[i] + cur[i - channels]) & 255
@@ -9118,13 +9119,309 @@ def _png_dominant_share(data: bytes) -> "float | None":
                 cur[i] = (cur[i] + best) & 255
         elif filter_type != 0:
             return None
-        for x in range(0, width, step):
-            key = bytes(cur[x * channels:x * channels + channels])
-            counts[key] = counts.get(key, 0) + 1
+        rows.append(cur)
         prev = cur
-    if not counts:
+    return width, height, colour, channels, rows
+
+
+def _png_dominant_share(data: bytes) -> "float | None":
+    """#213. Der Farben-Anteil des Fangs: welcher Bruchteil aller Pixel GENAU
+    die haeufigste Farbe traegt, oder None, wenn sich das nicht sagen laesst.
+
+    Gezaehlt wird hoch maximal 100.000 gleichmaessig gestreute Pixel: der
+    Anteil der herrschenden Farbe ist auf dieser Grundlage auf ein Zehntel
+    Prozent genau, und die Zahl, die ihn faellt, uebersteht jede Stichprobe.
+    """
+    img = _png_pixels(data)
+    return None if img is None else _pixel_stats(img)["share"]
+
+
+# #265. A SMALL SCENE IS A FEW TOKENS, WHATEVER ITS DETAIL. Measured
+# 2026-09-23 (diorama goal run, engine.log UTC 21:34): the served vision tower
+# turned a 984x552 render into grid (1, 34, 62) = 527 visual tokens and a
+# 1280x720 one into (1, 44, 80) = 880 -- one token per ~32x32 px. The diorama
+# filled about a tenth of the frame on a black ground, so the whole scene was
+# ~50-90 tokens, and the model rated every criterion 9+ from that. The full
+# frame keeps the composition; a SECOND view, cropped to the content and
+# enlarged, gives the scene the budget the frame already costs.
+#
+# How content is found: the frame is cut into 16 px cells and each cell's mean
+# colour compared with the background -- the per-channel median of the outer
+# ring of cells. Cell means average film grain away (the diorama page's ground
+# is noisy: its most common exact colour holds only 67 % of the pixels). A
+# cell differing by more than _CROP_TOL on any channel is content; 8-connected
+# content cells form regions, and every region at least _CROP_KEEP of the
+# largest one is kept -- a HUD line in a corner is a thin region of a few
+# dozen cells and falls out, a scene split by a dark gap stays whole.
+_CROP_CELL = 16
+_CROP_TOL = 12
+_CROP_KEEP = 0.25
+# The ground is "large and near-uniform" only when most of the outer ring IS
+# ground; a page drawn edge to edge gets no second view.
+_CROP_RING_GROUND = 0.6
+# A second view is added only when the content box is under half the frame --
+# above that the enlargement is under 1.4x and buys nothing.
+_CROP_MAX_COVER = 0.5
+# Enlarged at most 4x: nearest-neighbour past that shows blocks, not detail.
+_CROP_MAX_SCALE = 4.0
+# The crop's long edge after enlarging; see _enlarged_crop for the budget.
+_CROP_LONG_EDGE = 1024
+
+
+def _content_box(width: int, height: int, channels: int,
+                 rows: "list") -> "tuple | None":
+    """#265. The bounding box (x0, y0, x1, y1), exclusive ends, of
+    what stands out from a near-uniform ground -- or None when there is no
+    such ground (the ring is not mostly one colour) or nothing on it."""
+    cell = _CROP_CELL
+    gx = (width + cell - 1) // cell
+    gy = (height + cell - 1) // cell
+    if gx < 3 or gy < 3:
         return None
-    return max(counts.values()) / sum(counts.values())
+    colour_ch = min(channels, 3)           # alpha does not count
+    sums = [[[0] * colour_ch for _ in range(gx)] for _ in range(gy)]
+    for y, row in enumerate(rows):
+        line = sums[y // cell]
+        for cx in range(gx):
+            a = cx * cell * channels
+            b = min(width, (cx + 1) * cell) * channels
+            acc = line[cx]
+            for c in range(colour_ch):
+                acc[c] += sum(row[a + c:b:channels])
+    means = []
+    for cy in range(gy):
+        h = min(height, (cy + 1) * cell) - cy * cell
+        out = []
+        for cx in range(gx):
+            n = h * (min(width, (cx + 1) * cell) - cx * cell)
+            out.append([s / n for s in sums[cy][cx]])
+        means.append(out)
+    ring = ([(0, cx) for cx in range(gx)] + [(gy - 1, cx) for cx in range(gx)]
+            + [(cy, 0) for cy in range(1, gy - 1)]
+            + [(cy, gx - 1) for cy in range(1, gy - 1)])
+    ground = [sorted(means[cy][cx][c] for cy, cx in ring)[len(ring) // 2]
+              for c in range(colour_ch)]
+
+    def differs(m) -> bool:
+        return any(abs(m[c] - ground[c]) > _CROP_TOL for c in range(colour_ch))
+
+    on_ground = sum(1 for cy, cx in ring if not differs(means[cy][cx]))
+    if on_ground < _CROP_RING_GROUND * len(ring):
+        return None
+    hot = [[differs(means[cy][cx]) for cx in range(gx)] for cy in range(gy)]
+    seen = [[False] * gx for _ in range(gy)]
+    regions = []                            # (cells, cy0, cx0, cy1, cx1)
+    for sy in range(gy):
+        for sx in range(gx):
+            if not hot[sy][sx] or seen[sy][sx]:
+                continue
+            seen[sy][sx] = True
+            stack = [(sy, sx)]
+            n, y0, x0, y1, x1 = 0, sy, sx, sy, sx
+            while stack:
+                cy, cx = stack.pop()
+                n += 1
+                y0, y1 = min(y0, cy), max(y1, cy)
+                x0, x1 = min(x0, cx), max(x1, cx)
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        ny, nx = cy + dy, cx + dx
+                        if (0 <= ny < gy and 0 <= nx < gx and hot[ny][nx]
+                                and not seen[ny][nx]):
+                            seen[ny][nx] = True
+                            stack.append((ny, nx))
+            regions.append((n, y0, x0, y1, x1))
+    if not regions:
+        return None
+    biggest = max(r[0] for r in regions)
+    keep = [r for r in regions if r[0] >= _CROP_KEEP * biggest]
+    cy0 = min(r[1] for r in keep)
+    cx0 = min(r[2] for r in keep)
+    cy1 = max(r[3] for r in keep)
+    cx1 = max(r[4] for r in keep)
+    return (cx0 * cell, cy0 * cell,
+            min(width, (cx1 + 1) * cell), min(height, (cy1 + 1) * cell))
+
+
+def _png_encode(width: int, height: int, colour: int,
+                rows: "list") -> bytes:
+    """Rows of raw pixels as a PNG, filter 0 on every line -- the smallest
+    encoder that the decoder above (and every viewer) reads back."""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (struct.pack(">I", len(body)) + kind + body
+                + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF))
+
+    raw = b"".join(b"\x00" + bytes(r) for r in rows)
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8,
+                                         colour, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
+def _enlarged_crop(img: tuple, box: tuple) -> "tuple":
+    """#265. `box` plus a margin, enlarged (nearest neighbour) so
+    its long edge is _CROP_LONG_EDGE px, at most _CROP_MAX_SCALE times and
+    never shrunk. Returns (crop box, scale, PNG bytes).
+
+    1024 px ON THE LONG EDGE IS ~1,024 VISUAL TOKENS AT MOST (the tower bills
+    ~1,030 px per token, measured above) -- a quarter of the server's
+    --image-max-tokens 4,096, above llama.cpp's --image-min-tokens 1,024 for
+    a square crop, and about the 880 a 1280x720 frame costs, so the second
+    view doubles a look's price at most."""
+    width, height, colour, channels, rows = img
+    x0, y0, x1, y1 = box
+    # One cell plus a tenth of the box on each side: the crop is framed, not
+    # cut at the scene's own edge.
+    mx = _CROP_CELL + (x1 - x0) // 10
+    my = _CROP_CELL + (y1 - y0) // 10
+    cx0, cy0 = max(0, x0 - mx), max(0, y0 - my)
+    cx1, cy1 = min(width, x1 + mx), min(height, y1 + my)
+    cw, ch = cx1 - cx0, cy1 - cy0
+    scale = max(1.0, min(_CROP_MAX_SCALE, _CROP_LONG_EDGE / float(max(cw, ch))))
+    ow, oh = max(1, int(cw * scale)), max(1, int(ch * scale))
+    xmap = [(cx0 + min(cw - 1, int(x / scale))) * channels for x in range(ow)]
+    out_rows = []
+    last_src, last_row = -1, b""
+    for y in range(oh):
+        src = cy0 + min(ch - 1, int(y / scale))
+        if src != last_src:
+            row = bytes(rows[src])
+            last_row = b"".join(row[i:i + channels] for i in xmap)
+            last_src = src
+        out_rows.append(last_row)
+    return (cx0, cy0, cx1, cy1), scale, _png_encode(ow, oh, colour, out_rows)
+
+
+def _content_view(data: "bytes | None" = None, img: "tuple | None" = None
+                  ) -> "dict | None":
+    """#265. What the frame's content occupies, and the enlarged
+    crop of it as PNG bytes. None when the image is no decodable PNG, has no
+    near-uniform ground, or has nothing on it. Takes the bytes, or an image
+    `_png_pixels` already decoded.
+
+    Keys: size (w, h), box (content box), coverage (box area / frame area),
+    crop (box plus margin), scale, png (bytes of the enlarged crop -- None,
+    like crop and scale, when coverage is at or above _CROP_MAX_COVER)."""
+    if img is None:
+        img = _png_pixels(data or b"")
+    if img is None:
+        return None
+    width, height, _colour, channels, rows = img
+    box = _content_box(width, height, channels, rows)
+    if box is None:
+        return None
+    x0, y0, x1, y1 = box
+    coverage = (x1 - x0) * (y1 - y0) / float(width * height)
+    view = {"size": (width, height), "box": box, "coverage": coverage,
+            "crop": None, "scale": None, "png": None}
+    if coverage < _CROP_MAX_COVER:
+        crop, scale, png = _enlarged_crop(img, box)
+        view.update(crop=crop, scale=scale, png=png)
+    return view
+
+
+def _pixel_stats(img: tuple) -> dict:
+    """#213 + #265. The capture's colour facts over at most
+    100,000 evenly spread pixels: dominant share (see _png_dominant_share),
+    distinct colours in that sample, mean luma (Rec. 709, 0-255) and the
+    luma histogram in 8 bins of 32 levels, as shares of the sample."""
+    width, height, _colour, channels, rows = img
+    counts: "dict[bytes, int]" = {}
+    hist = [0] * 8
+    luma_sum = 0.0
+    step = max(1, (width * height) // 100_000)
+    for cur in rows:
+        for x in range(0, width, step):
+            px = bytes(cur[x * channels:x * channels + channels])
+            counts[px] = counts.get(px, 0) + 1
+            if channels >= 3:
+                luma = 0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2]
+            else:
+                luma = float(px[0])
+            luma_sum += luma
+            hist[min(7, int(luma) >> 5)] += 1
+    n = sum(counts.values()) or 1
+    return {"share": max(counts.values()) / n if counts else None,
+            "colours": len(counts), "sample": n, "luma": luma_sum / n,
+            "hist": [h / n for h in hist]}
+
+
+# #265. THE TWO LINES UNDER WHICH A CAPTURE IS WORTH A WARNING.
+# Coverage under a quarter: the diorama run's scene sat at 7-20 % (measured
+# on its 62 renders) and was graded 9+ from ~40-120 visual tokens. Under 16
+# distinct colours: the same 62 renders had 2 in the sample for the three
+# blank captures and 78-12,179 for every other one (a HUD line on a noisy
+# ground alone is ~80); a handful is flat fills or a clear colour.
+_WARN_COVERAGE = 0.25
+_WARN_COLOURS = 16
+
+
+def _capture_metrics(shot: str, data: bytes) -> "tuple[list, list]":
+    """#265. (warnings, `metrics:` lines) of a render_page result,
+    and the saved `<shot>-crop.png` -- one decode for all of it. Two empty
+    lists when the capture is no PNG this decoder reads."""
+    img = _png_pixels(data)
+    if img is None:
+        return [], []
+    width, height = img[0], img[1]
+    stats = _pixel_stats(img)
+    view = _content_view(img=img)
+    out: "list[str]" = []
+    warns: "list[str]" = []
+    if view is None:
+        out.append("metrics: content box: none found (no near-uniform "
+                   "background around the edges, or nothing on it)")
+    else:
+        x0, y0, x1, y1 = view["box"]
+        out.append("metrics: content box x %d-%d, y %d-%d of %dx%d -- "
+                   "coverage %.1f %% (~%d of the frame's ~%d visual tokens)"
+                   % (x0, x1, y0, y1, width, height, 100 * view["coverage"],
+                      max(1, round((x1 - x0) * (y1 - y0) / _PX_PER_TOKEN)),
+                      max(1, round(width * height / _PX_PER_TOKEN))))
+        if view["coverage"] < _WARN_COVERAGE:
+            warns.append("warn: the content fills only %.0f %% of the frame "
+                         "-- at this size a viewer (and you, in the full "
+                         "frame) cannot see its detail; judge detail on the "
+                         "crop, and consider framing the scene larger"
+                         % (100 * view["coverage"]))
+    out.append("metrics: %d distinct colours in %d sampled px; luma mean "
+               "%.0f/255; luma histogram (8 bins of 32, %%): %s"
+               % (stats["colours"], stats["sample"], stats["luma"],
+                  " ".join("%d" % round(100 * h) for h in stats["hist"])))
+    if stats["colours"] < _WARN_COLOURS:
+        warns.append("warn: only %d distinct colours in the capture -- a "
+                     "lit, shaded scene has thousands; this is flat fills, "
+                     "a clear colour or text" % stats["colours"])
+    if view is not None and view["png"] is not None:
+        crop_path = os.path.splitext(shot)[0] + "-crop.png"
+        try:
+            with open(crop_path, "wb") as fh:
+                fh.write(view["png"])
+            cx0, cy0, cx1, cy1 = view["crop"]
+            out.append("metrics: crop %s -- x %d-%d, y %d-%d enlarged %.1fx; "
+                       "read_image it for the scene's detail, the full "
+                       "frame for its framing"
+                       % (crop_path, cx0, cx1, cy0, cy1, view["scale"]))
+        except OSError as exc:
+            out.append("metrics: crop not saved: %s" % exc)
+    return warns, out
+
+
+# Measured 2026-09-23 (engine.log above): 984x552 -> 527 visual tokens,
+# 1280x720 -> 880; ~1,030 px per token.
+_PX_PER_TOKEN = 1030
+
+
+def _coverage_sentence(view: dict) -> str:
+    """#265. The one line both tools say about a small scene."""
+    w, h = view["size"]
+    x0, y0, x1, y1 = view["box"]
+    return ("the content fills %d %% of the %dx%d frame (box x %d-%d, "
+            "y %d-%d, on a near-uniform background)"
+            % (round(100 * view["coverage"]), w, h, x0, x1, y0, y1))
 
 
 def _capture_warnings(previous: "bytes | None", current: bytes,
@@ -9514,8 +9811,8 @@ def take_render_ride() -> "tuple | None":
     return _RENDER_RIDE.pop() if _RENDER_RIDE else None
 
 
-def take_image_ride() -> "dict | None":
-    """Der Bildblock des letzten `read_image`, genau einmal."""
+def take_image_ride() -> "list[dict] | None":
+    """Die Bildbloecke des letzten `read_image`, genau einmal."""
     return _IMAGE_RIDE.pop() if _IMAGE_RIDE else None
 
 
@@ -10113,12 +10410,18 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         said = _capture_warnings(previous, pixels, console)
         # #253: right under the error warnings they answer.
         said.extend(hints)
+        # #265: what the frame holds, measured, and the crop of
+        # it saved beside the capture -- the warnings with the others, the
+        # numbers under the file line.
+        metric_warns, metrics = _capture_metrics(shot, pixels)
+        said.extend(metric_warns)
         # #213. DER RASTERER IM ERGEBNIS: software-gerasterte Fangs einer
         # WebGL-Seite sehen anders aus als GPU-gerasterte, und ein Modell, das
         # seinen Spiegel kennt, bezweifelt ihn auch.
         gl_said = ("gpu (angle)" if gl == "angle" else "software (swiftshader)")
         said.append("%s -- %d bytes, %dx%d, %s, %s"
                     % (shot, os.path.getsize(shot), w, h, reason, gl_said))
+        said.extend(metrics)
         said.append("read_image it to look at the page.")
         if console:
             said.append("console (last %d of the page's log):" % len(console))
@@ -10163,10 +10466,40 @@ def tool_read_image(path: str, **_) -> str:
         part = image_part(path)
     except CrowError as exc:
         return "error: %s" % exc
-    _IMAGE_RIDE.clear()
-    _IMAGE_RIDE.append(part)
-    return "%s -- %d bytes, handed to you as an image below." % (
+    parts = [part]
+    said = "%s -- %d bytes, handed to you as an image below." % (
         os.path.basename(path), os.path.getsize(path))
+    # #265: A SMALL SCENE GETS A SECOND, ENLARGED VIEW. The frame
+    # stays first (composition, framing); the crop follows, and the text says
+    # which is which and how small the scene really is. PNG only -- the
+    # decoder is the #213 one; other formats travel alone, as before.
+    view = None
+    if path.lower().endswith(".png"):
+        try:
+            with open(path, "rb") as fh:
+                view = _content_view(fh.read())
+        except OSError:
+            view = None
+    if view is not None and view["png"] is not None:
+        import base64
+        parts.append({"type": "image_url", "image_url": {
+            "url": "data:image/png;base64,"
+                   + base64.b64encode(view["png"]).decode("ascii")}})
+        cx0, cy0, cx1, cy1 = view["crop"]
+        said = ("%s -- %d bytes, handed to you as TWO images below. "
+                "Warning: %s. Image 1 is the full frame -- judge framing and "
+                "composition there. Image 2 is x %d-%d, y %d-%d of it, "
+                "enlarged %.1fx -- judge the scene's detail there, not in "
+                "image 1, where it has only ~%d visual tokens."
+                % (os.path.basename(path), os.path.getsize(path),
+                   _coverage_sentence(view), cx0, cx1, cy0, cy1,
+                   view["scale"],
+                   max(1, round((view["box"][2] - view["box"][0])
+                                * (view["box"][3] - view["box"][1])
+                                / _PX_PER_TOKEN))))
+    _IMAGE_RIDE.clear()
+    _IMAGE_RIDE.append(parts)
+    return said
 
 
 def tool_read_file(path: str, start_line: int | None = None, end_line: int | None = None,
@@ -19735,7 +20068,7 @@ def run_turn(
                     conversation.append("tool", result, tool_call_id=call["id"])
                     continue
                 conversation.append(
-                    "tool", [{"type": "text", "text": result}, ride],
+                    "tool", [{"type": "text", "text": result}] + ride,
                     tool_call_id=call["id"])
                 continue
             conversation.append("tool", result, tool_call_id=call["id"])
