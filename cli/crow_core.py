@@ -2549,12 +2549,24 @@ LOG_ONLY_NOTE_PREFIXES = (
     # robin, 2026-09-24: "nur noch ins Logfile". The memory-ceiling stop
     # ("… was stopped: it grew past …", #226) stays in the chat.
     "the page in the browser panel stopped (",
+    # robin, 2026-09-24 (screenshots of a fresh goal chat): the chat-open and
+    # goal-setup bookkeeping lines are for the log, not the conversation.
+    "the working area and its project memory changed",   # MEMORY_COST_NOTE
+    "working directory: ",                  # the bound folder, (auto)/(chosen)
+    "mode yolo -- ",                        # the mode line at chat open
+    "archived: ",                           # the chat file moved to archiv/
+    "the goal goes into the head of every prompt",       # GOAL_COST_NOTE
 )
+# The /goal setup echo ("goal: <title> -- 9 steps, acceptance check: …") is
+# log-only too; the status answer "goal: <title> -- 3/9, 12 min so far" that
+# robin asks for with /goal is not, so the steps count decides, not the prefix.
+_LOG_ONLY_NOTE_RE = re.compile(r"^goal: .+ -- \d+ steps\b")
 
 
 def note_is_log_only(text: str) -> bool:
     """True for a Crow status note that belongs in crow.log, not in the chat."""
-    return str(text or "").startswith(LOG_ONLY_NOTE_PREFIXES)
+    text = str(text or "")
+    return text.startswith(LOG_ONLY_NOTE_PREFIXES) or bool(_LOG_ONLY_NOTE_RE.match(text))
 
 
 def log_note(text: str, kind: str = "note") -> None:

@@ -21046,9 +21046,24 @@ class CrowLogFileTests(unittest.TestCase):
                      "carried across the cut: edit_file",
                      "the crow-booted server on port 8080 is gone -- booting",
                      "the server on port 8080 is still loading -- waiting",
-                     "goal: Ship it -- 2 steps.", "", None):
+                     "goal: Ship it -- 1/2, 3 min so far", "", None):
             self.assertFalse(crow_core.note_is_log_only(text), text)
 
+
+    def test_the_chat_open_and_goal_setup_lines_are_log_lines(self):
+        """robin, 2026-09-24: these six lines of a fresh goal chat go to the log."""
+        for text in ("the working area and its project memory changed -- the next "
+                     "turn pays a full prefill",
+                     "working directory: /home/u/diorama-test (auto)",
+                     "mode yolo -- every tool runs unasked -- outside paths and git "
+                     "commit included; git_push still asks",
+                     "archived: chat-20260924-124601.json",
+                     "goal: Neon night market voxel diorama -- 9 steps, acceptance "
+                     "check: bash check.sh.\nthe goal goes into the head of every "
+                     "prompt -- the next turn pays a full prefill",
+                     "the goal goes into the head of every prompt -- the next turn "
+                     "pays a full prefill"):
+            self.assertTrue(crow_core.note_is_log_only(text), text)
 
     def test_a_crashed_panel_page_is_a_log_line_its_memory_stop_is_not(self):
         """#279: the panel's web process crashed while every capture was

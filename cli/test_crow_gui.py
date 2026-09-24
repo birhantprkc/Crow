@@ -10199,8 +10199,9 @@ class CrowStatusNotesGoToTheLogTests(ApiCase):
         "goal mode paused: step 1 has taken 25 turns. `/goal` shows where it "
         "stands -- a typed line carries on.",
         "the server on port 8080 is still loading -- waiting",
-        "goal: Neon night market voxel diorama -- 9 steps.",
-        "working directory: /tmp/x (bound)",
+        # robin 2026-09-24: the /goal setup echo and "working directory: …"
+        # went to the log; the /goal STATUS answer stays.
+        "goal: Neon night market voxel diorama -- 3/9, 12 min so far",
         "carried across the cut: edit_file",
     )
 
