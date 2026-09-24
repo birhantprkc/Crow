@@ -109,6 +109,9 @@ The Remote dialog's status line for the HTTPS choice, and the fix:
 | symptom | fix |
 |---|---|
 | phone: page does not load, device offline | open the Tailscale app, VPN toggle on; `tailscale status` on the PC lists the phone |
+| phone: Safari "cannot open the page because the server could not be found" | the phone's Tailscale is not connected, and the `ts.net` name only resolves with it on: Tailscale app → toggle **Connected**, allow the VPN profile the first time; `tailscale status` on the PC must show the phone without `offline` (seen 2026-09-24) |
+| phone: login.tailscale.com "Error 403 — user is not authorized to view this auth request" | the login link met a browser signed in to another account, or a stale link: Tailscale app → account → **Log out**; in Safari open login.tailscale.com and sign out; app → **Log in** with the **same provider and account as on the PC** (seen 2026-09-24, Safari and Chrome) |
+| phone: HTTPS address paired, LAN tile asks to pair again (or the reverse) | expected: `http://<LAN-IP>:8765` and `https://<pc>.<tailnet>.ts.net` are two origins with their own cookie; pair once on each, or use only the HTTPS one |
 | certificate warning / error | HTTPS on in the console? `CertDomains` set? the first request after `serve` may take a few seconds while the certificate is fetched — **not verified** |
 | page loads, 421 | the address is not the ts.net name (e.g. the 100.x IP) — use `https://<pc>.<tailnet>.ts.net/` |
 | 🎤 "the microphone did not open (NotAllowedError)" | iOS: Settings → Apps → Safari → Microphone → Ask/Allow; or `aA` in the address bar → Website Settings → Microphone |
