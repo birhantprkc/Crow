@@ -32,6 +32,12 @@
    "label": "voice",
    "why": "Dictation: the microphone and the recogniser, and nothing else. A HELPER and not a surface, because it is not a client of the core -- it owns audio and the text that comes out of it, never a turn, a prompt or a session. It is still held to the definition and import predicates: if it ever re-decided something crow_core.py already decides, that is exactly the drift this manifest exists to catch. It lives in cli/ for the reason crow_gui.py gives -- tools/pack-release.ps1 copies cli/ as a whole and nothing else -- and beside the window because only the window can reach it: the terminal has no button to press."
   }
+,
+  {
+   "path": "cli/crow_remote.py",
+   "label": "remote",
+   "why": "#249, the phone's way into a running window: a LAN-only HTTP server (pairing, paired devices, the /api dispatcher, the event streams) and the QR encoder for its pairing URL. A HELPER and not a surface, because it is not a client of the core -- it owns transport and pairing, never a turn, a wording or a decision: the /remote wording lives in the core, every call it forwards is answered by the window's Api, and what reaches it are callables. It never imports crow_core, so a core name appearing in here is a finding rather than a wiring. Its own status lines go to crow.log through a callable, not into the chat. It lives in cli/ for the reason crow_gui.py gives -- tools/pack-release.ps1 copies cli/ as a whole and nothing else."
+  }
  ],
  "names": [
   {
