@@ -21,6 +21,7 @@ while it keeps going.
 | Panel | the first of the pinned cards at the top right of the chat (goal, subtasks, git): title, `done/total`, wall clock, tokens, delegated tokens, and one row per step |
 | Store | `<root>/.crow/goal.json`, beside `MEMORY.md` — the goal belongs to the folder the work is in |
 | States | `open` · `running` · `done` · `failed` |
+| Talking to it | a line typed while a goal turn runs is queued and runs **before** the next nudge, resetting the turn caps (#264). **Stop pauses the goal**: the turn ends, no next turn starts, a note says so, and the next line you send resumes it (#282). Escape = Stop |
 | Limits | 60 turns for the whole goal, 25 for one step, a brake on three identical or three empty answers, and the same failure class three times in one step named in the next nudge (#165, #202) |
 | `done` | refused when its note says the step is not done, and — with a `check:` set — refused on the step that would close the goal until the check exits 0 (#250); on a visual step, refused without a capture from this goal in the note or under the judge's bar (#267) |
 

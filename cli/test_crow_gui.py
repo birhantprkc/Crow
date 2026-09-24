@@ -12544,10 +12544,13 @@ class ALineTypedMidTurnIsQueuedTests(ApiCase):
         js = (
             "const log=[];\n"
             "const input={value:'',style:{}};\n"
+            "const hint={textContent:''}; const $=s=>hint;\n"
+            "const go={textContent:'',title:'',classList:{toggle(){}}};\n"
             "const settle=[];\n"
             "const pywebview={api:{stop(){log.push(['stop']);},\n"
             "  send(t){log.push(['send',t]);return {then(ok){settle.push(ok);}};}}};\n"
             "const crow={running:false,viewingOther:false,held:null,\n"
+            "  slash:" + json.dumps(list(crow_core.SLASH_COMMANDS)) + ",\n"
             "  user(t){log.push(['user',t]);}, userImages(i){},\n"
             "  stagedUrls(){return [];}, stageRender(){}, installBar(){},\n"
             "  fanout(t){log.push(['fanout',t]);}, busy(){log.push(['busy']);},\n"
@@ -12556,7 +12559,8 @@ class ALineTypedMidTurnIsQueuedTests(ApiCase):
             + self.source[start:end] + "};\n"
             "function type(t){input.value=t; crow.go();}\n"
             + script + "\nsettle.forEach(f=>f(true));\n"
-            "console.log(JSON.stringify({log, held:crow.held, box:input.value}));\n")
+            "console.log(JSON.stringify({log, held:crow.held, box:input.value,\n"
+            "  hint:hint.textContent, button:go.textContent}));\n")
         done = subprocess.run([self.node, "-e", js], capture_output=True,
                               text=True, encoding="utf-8", timeout=30)
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -12582,18 +12586,52 @@ class ALineTypedMidTurnIsQueuedTests(ApiCase):
         self.assertLess(out["log"].index(["user", "a\n\nb"]), out["log"].index(["idle"]))
 
     def test_the_stop_gesture_is_kept_where_it_was(self):
-        """NEGATIVE: an empty Enter, a slash line other than the delegation
-        pair, and a click on the Stop button still stop -- the button even
-        with a line in the box."""
+        """NEGATIVE: an empty Enter and a click on Stop with an empty box still
+        stop; Escape stops whatever is in the box."""
         for script in ("crow.running=true; type('');",
-                       "crow.running=true; type('/reset');",
-                       "crow.running=true; input.value='half a line'; crow.press();"):
+                       "crow.running=true; input.value=''; crow.press();",
+                       "crow.running=true; input.value='/reset'; crow.press();"):
             out = self._page(script)
             self.assertIn(["stop"], out["log"], script)
             self.assertNotIn("send", [x[0] for x in out["log"]], script)
         self.assertIn('onclick="crow.press()"', self.source)
         self.assertIn('if(e.key==="Escape" && crow.running) pywebview.api.stop();',
                       self.source)
+
+    def test_no_typed_line_is_a_stop(self):
+        """#264, reopened. robin, live 2026-09-24 on 2d29fa2: a line + Enter /
+        click during a goal turn stopped the turn and the line stayed in the
+        box. The page's two stop paths with a line in the box were a line that
+        opens with "/" (a path) and the button. Neither stops now: a path is
+        queued, a line + click is queued, a Crow command waits in the box."""
+        out = self._page("crow.running=true; type('/srv/app/x.js is wrong');")
+        self.assertNotIn(["stop"], out["log"])
+        self.assertIn(["send", "/srv/app/x.js is wrong"], out["log"])
+        self.assertEqual(out["box"], "")
+        out = self._page("crow.running=true; input.value='steer'; crow.press();")
+        self.assertNotIn(["stop"], out["log"])
+        self.assertIn(["send", "steer"], out["log"])
+        self.assertEqual(out["box"], "")
+        out = self._page("crow.running=true; type('/model qwen');")
+        self.assertNotIn(["stop"], out["log"])
+        self.assertNotIn("send", [x[0] for x in out["log"]])
+        self.assertEqual(out["box"], "/model qwen")
+        self.assertIn("waits in the box until this turn ends", out["hint"])
+
+    def test_the_button_says_queue_while_the_box_holds_a_line(self):
+        """#264: the button says what a click does."""
+        out = self._page("crow.running=true; input.value='steer'; crow.face();")
+        self.assertEqual(out["button"], "↑ Queue")
+        out = self._page("crow.running=true; input.value=''; crow.face();")
+        self.assertEqual(out["button"], "■ Stop")
+        out = self._page("crow.running=true; input.value='/reset'; crow.face();")
+        self.assertEqual(out["button"], "■ Stop")
+        self.assertIn('crow.face(); });', self.source,
+                      "typing re-labels the button")
+        self.assertIn('"slash": list(crow_core.SLASH_COMMANDS)', self.source)
+
+    def test_an_enter_that_ends_a_composition_is_not_a_submit(self):
+        self.assertIn('!e.isComposing && e.keyCode!==229', self.source)
 
     def test_an_idle_composer_and_another_chats_view_are_unchanged(self):
         """NEGATIVE: outside a turn the line is drawn and sent at once; in
@@ -12678,6 +12716,93 @@ class ALineTypedMidTurnIsQueuedTests(ApiCase):
         self.assertEqual(ran, ["n1", "n2"])
         self.assertEqual(resets, [])
 
+
+
+class StopPausesTheGoalEngineTests(ApiCase):
+    """#282. robin, live 2026-09-24 on 2d29fa2: Stop during a goal
+    turn ended the turn and the engine started the next one at once, so there
+    was never a moment to type. `_goal_nudge` asked INTERRUPT, but `run_turn`
+    consumes that flag when it ends the stopped turn (`if owns_turn_state:
+    INTERRUPT.clear()`), so the question was always answered "no stop". The
+    `_run` double below does what `run_turn` does on a Stop: the click, then
+    the flag cleared on the way out."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(crow_core.goal_write, None)
+        self.addCleanup(crow_core.INTERRUPT.clear)
+        crow_core.goal_start("Ship it", ["read the log", "write the fix"],
+                             now=1000.0)
+
+    def _api(self):
+        api = self.api()
+        api._seen = []
+        api.push = lambda message: api._seen.append(message)
+        return api
+
+    def test_stop_during_a_goal_turn_pauses_the_engine(self):
+        api = self._api()
+        ran = []
+
+        def run(text):
+            ran.append(text)
+            api.stop()                       # robin clicks Stop mid-turn
+            crow_core.INTERRUPT.clear()      # run_turn consumes the flag
+        api._run = run
+        api._busy = True
+        api._pump("[Goal mode, step 1]")
+        self.assertEqual(ran, ["[Goal mode, step 1]"],
+                         "the engine started another turn after Stop")
+        self.assertFalse(api._busy)
+        notes = [m["t"] for m in api._seen if m.get("k") == "note"]
+        self.assertTrue(any(n.startswith("goal mode paused: you pressed Stop")
+                            for n in notes), notes)
+        self.assertFalse(crow_core.note_is_log_only(notes[-1]),
+                         "the pause is said in the chat, not only in crow.log")
+
+    def test_the_next_typed_line_resumes_the_engine(self):
+        """POSITIVE: after the pause, a sent line runs and the goal goes on."""
+        api = self._api()
+        api._goal_paused = True
+        ran = []
+        api._run = lambda text: ran.append(text)
+        started = []
+        api._pump = lambda text: started.append(text)
+        self.assertTrue(api.send("carry on, use three.js"))
+        self.assertEqual(started, ["carry on, use three.js"])
+        self.assertFalse(api._goal_paused)
+        self.assertIsNotNone(api._goal_nudge())
+
+    def test_a_line_queued_before_stop_runs_and_then_the_goal_goes_on(self):
+        """The queued line is a typed line: it runs next and lifts the pause."""
+        api = self._api()
+        ran = []
+
+        def run(text):
+            ran.append(text)
+            if len(ran) == 1:
+                api.send("steer")
+                api.stop()
+                crow_core.INTERRUPT.clear()
+        api._run = run
+        api._busy = True
+        api._pump("[Goal mode, step 1]")
+        self.assertEqual(ran[:2], ["[Goal mode, step 1]", "steer"])
+        self.assertGreater(len(ran), 2, "the goal resumes after the typed line")
+        self.assertTrue(ran[2].startswith("[Goal mode"), ran[2])
+
+    def test_no_stop_no_pause(self):
+        """NEGATIVE: without a Stop the engine chains as before."""
+        api = self._api()
+        ran = []
+        api._run = lambda text: ran.append(text)
+        api._busy = True
+        api._goal_nudge = (lambda real: (lambda: real() if len(ran) < 3 else None))(
+            api._goal_nudge)
+        api._pump("[Goal mode, step 1]")
+        self.assertEqual(len(ran), 3)
+        self.assertFalse(any(m.get("t", "").startswith("goal mode paused")
+                             for m in api._seen))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
