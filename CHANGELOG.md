@@ -29,6 +29,7 @@ Tickets open until robin's live check unless marked closed.
 - **A line typed during a turn is queued, not a stop** (#264, `d14046f`); in goal mode it goes before the goal nudge.
 - **Rollover archives leave the chat rail** (#261, `d1044f7`) for the archive drawer; a Crow note is never a chat title.
 - **goal_set carries the whole step record** (#260, `b165ffa`): notes, seconds and tokens of a re-declared step survive.
+- **edit_file answers a missed 'old' with the closest text** (#276): line numbers, what differs, whitespace-only named; a uniform indentation drift with one unambiguous window is applied and said. 16 of 147 edits missed on 2026-09-23/24; replayed, 3 now land, 11 of the other 12 get the region (1, state uncertain, gets 'nothing resembles').
 
 ### Fixed
 
