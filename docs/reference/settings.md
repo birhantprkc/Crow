@@ -32,6 +32,9 @@ when its `crow_root` points there, and nothing else records it.
 | `context_clear_at` | unset (= `0.65` on the local server, off on a remote provider) | share of the window at which tool results older than the last 5 rounds are replaced by a one-line stub, in batches that free at least 10 % of the window; originals go to `session/cleared/`, one line per batch to `log/crow.log` (#262's log); `0` switches it off (#263) |
 | `bundler` | unset | path to the esbuild `build_bundle` uses before its own search (project `node_modules`, `PATH`, deno/npx caches); read every turn, no restart; it still has to answer `--version`. The way to name one the search skips on purpose, e.g. another program's `node_modules`. The terminal's twin is `--bundler PATH` (#274) |
 | `syntax_checks` | unset (= built-in: `node --check` for `.js .mjs .cjs` and inline HTML scripts) | extension → argv run after `write_file`, `append_file` and `edit_file`; `{path}` is the file (appended when absent), exit 0 is ok. `{".py": ["python3", "-m", "py_compile", "{path}"]}` adds Python; `{".html": []}` switches a built-in off. Malformed rows are dropped one by one (#269) |
+| `remote_enabled` | `false` | the phone mirror (`/remote`) starts with the window; set by `/remote on` and the phone icon, cleared by `/remote off` (#249) |
+| `remote_port` | `8765` | the mirror's fixed port — fixed so a paired phone keeps its origin across restarts; values outside 1024–65535 fall back to the default (#249) |
+| `remote_host` | unset (= the first LAN address `crow_platform` ranks) | the LAN address picked in the QR dialog; never `0.0.0.0` (#249) |
 
 The delegate favourites live in `providers.json` (`delegate_favorites`), not here — set them
 from the OpenRouter page of the settings sheet. So does the judge's pin (#266):
@@ -52,7 +55,7 @@ lives in a file instead.
 | shape | a flat `{"NAME": "value"}` object, read as `utf-8-sig` so a BOM from Notepad or PowerShell 5.1 does not make it unreadable |
 | order | the store first, the environment second. An entry that is present but **empty** counts as not set |
 | the environment still works | and says so once, on a console, naming the file to move the value into. Every installation that exists today has the variable and no file |
-| what is in it today | `CROW_TAVILY_KEY`, the general web index for `web_search`. `CROW_SEARXNG_URL` is a URL, not a secret, and stays an environment variable |
+| what is in it today | `CROW_TAVILY_KEY`, the general web index for `web_search`, and `remote_devices` (#249): the paired phones as `{id, name, created, last_seen, token_sha256}`, only the hash of each cookie. `CROW_SEARXNG_URL` is a URL, not a secret, and stays an environment variable |
 | writing it | `powershell -ExecutionPolicy Bypass -File tools\migrate-secrets.ps1 -Names CROW_TAVILY_KEY` — it writes the file, sets the ACL and takes the variable out of the user scope |
 | writing it on Linux | by hand: `{"CROW_TAVILY_KEY": "..."}` in `~/.config/crow/secrets.json` (`$XDG_CONFIG_HOME/crow/` when that is set). The migration script is Windows-only |
 | what the texts say (#194) | `web_search`'s upgrade hint, its refusal and the SearXNG hint name this file by its resolved path first and the environment as the fallback; a refused Tavily key says whether it came from the store or the environment |

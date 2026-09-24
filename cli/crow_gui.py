@@ -43,6 +43,8 @@ rather than discovered at import time.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import contextvars
 import getpass
 import json
 import logging
@@ -56,6 +58,7 @@ import subprocess
 import threading
 import time
 import webbrowser
+from collections.abc import Iterator
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -695,7 +698,7 @@ MEMORY_ICON = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvm
 # ---------------------------------------------------------------- the page
 
 PAGE = r"""<!doctype html>
-<html lang="de" data-theme="__THEME__"><head><meta charset="utf-8">
+<html lang="de" data-theme="__THEME__"><head><meta charset="utf-8"><!--__REMOTE_HEAD__-->
 <style>
 :root{
   --accent:__ACCENT__; --bevel:__BEVEL__; --model:__TEXT__;
@@ -863,6 +866,10 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
    falsch: Flex teilt den Rest dann gleichmaessig und schoebe den Knopf in die
    Mitte der Leiste. */
 #codetoggle{margin-left:auto}
+/* #249. DAS TELEFON STEHT DAVOR und nimmt das `auto` mit; der Code-Knopf rueckt
+   dann dicht an seine zwei Nachbarn, die Luecke gehoert dem Telefon. */
+#remotetoggle{margin-left:auto;position:relative}
+#remotetoggle + #codetoggle{margin-left:0}
 #wbtns{display:flex;-webkit-app-region:no-drag}
 /* The buttons sit inside the drag region, so they opt out of it again --
    without this a click on 'close' starts a drag instead of closing. */
@@ -1483,11 +1490,37 @@ body[data-git="shut"] #git{display:none}
 body[data-rail="shut"] #rail{width:0;overflow:hidden}
 /* IN THE TITLE BAR, so it survives the rail it hides. It is the one control
    that must not live in the thing it folds away. */
-#railtoggle,#codetoggle,#gittoggle,#browsertoggle{font:inherit;color:var(--dimmer);
+#railtoggle,#codetoggle,#gittoggle,#browsertoggle,#remotetoggle{font:inherit;color:var(--dimmer);
   background:transparent;border:1px solid transparent;border-radius:6px;
   cursor:pointer;display:flex;align-items:center;padding:3px 5px;margin-right:2px}
 #railtoggle:hover,#codetoggle:hover,#gittoggle:hover,
-#browsertoggle:hover{color:var(--accent);border-color:var(--bevel)}
+#browsertoggle:hover,#remotetoggle:hover{color:var(--accent);border-color:var(--bevel)}
+/* #249: an = Akzent mit Toenung wie ein offenes Panel; der Punkt = ein Telefon
+   ist gerade verbunden. Die Luecke nach rechts steht HIER, hinter der
+   gemeinsamen Regel, die jedem Knopf 2px gibt. */
+#remotetoggle{margin-right:9px}
+#remotetoggle.on{color:var(--accent);
+  background:color-mix(in srgb,var(--accent) 12%,transparent)}
+#remotetoggle .rdot{display:none;position:absolute;right:1px;top:2px;width:6px;
+  height:6px;border-radius:50%;background:var(--ok)}
+#remotetoggle.live .rdot{display:block}
+/* #249: der Dialog mit dem QR-Code, und die Kopplungskarte. */
+#remotedlg{position:fixed;inset:0;z-index:40;display:grid;place-items:center;
+  background:color-mix(in srgb,var(--bg) 70%,transparent)}
+#remotedlg[hidden]{display:none}
+#remotedlg .rsheet{background:var(--bg);border:1px solid var(--line);
+  border-radius:12px;padding:18px 20px;width:340px;max-width:92vw;
+  box-shadow:0 8px 30px var(--shadow)}
+#remotedlg .rqr{background:var(--on-solid);border-radius:8px;padding:10px;
+  display:grid;place-items:center}
+#remotedlg .rqr svg{width:220px;height:220px}
+#remotedlg .rurl{font-family:var(--mono);font-size:12px;margin:10px 0;
+  word-break:break-all;-webkit-user-select:text;user-select:text}
+#remotedlg .rdev{display:flex;justify-content:space-between;gap:8px;
+  font-size:12px;padding:4px 0;border-top:1px solid var(--line)}
+#remotedlg .rhint{font-size:11px;color:var(--dim);margin-top:8px;
+  white-space:pre-wrap;-webkit-user-select:text;user-select:text}
+#remotedlg .rrow{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
 /* #156. DER KNOPF SAGT, OB DAS PANEL STEHT. Mit zwei Panels an einer Leiste ist
    das keine Verzierung mehr, sondern die Antwort auf "wo ist mein Git-Panel
    hin" -- und weil das Wegklicken NUR hier geht (robins Ansage: kein zweites
@@ -2797,7 +2830,8 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   border-top:1px solid var(--line);margin-top:3px}
 .cost .subshare{color:var(--sub)}
 .tool.sub .ico{color:var(--sub)}
-</style></head><body data-rail="__RAIL__" data-code="__CODE__" data-git="__GIT__" data-browser="__BROWSER__">
+</style>
+<style>/* __REMOTE_CSS__ */</style></head><body data-rail="__RAIL__" data-code="__CODE__" data-git="__GIT__" data-browser="__BROWSER__">
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
   <!-- #119. LEFT OF THE WORDMARK, and it has to live in the TITLE BAR rather
@@ -2828,6 +2862,20 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
        wie der Rail-Knopf daneben, nimmt `currentColor` wie alles hier, und
        braucht keine Namensnennung. Derselbe Rahmen wie links, nur ist innen ein
        Prompt statt einer Spalte. -->
+  <!-- #249. DAS TELEFON, LINKS VON DEN DREI PANEL-KNOEPFEN und durch eine
+       Luecke von ihnen getrennt: es schaltet kein Panel, sondern oeffnet den
+       QR-/Geraete-Dialog (derselbe Weg wie ein nacktes `/remote`). Gezeichnet
+       wie die Nachbarn -- 1.6 Strich, `currentColor`. Aus heisst gedimmt wie
+       sie, an heisst Akzent mit Toenung, ein gruener Punkt heisst: ein Geraet
+       ist verbunden. Der Zustand kommt als `{"k":"remote"}`. -->
+  <button id="remotetoggle" class="pywebview-no-drag" onclick="crow.remoteOpen()"
+          title="Phone mirror: pair a phone on this network">
+    <svg viewBox="0 0 20 20" width="15" height="15" fill="none"
+         stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
+         stroke-linejoin="round" aria-hidden="true">
+      <rect x="5.5" y="2.5" width="9" height="15" rx="2"></rect>
+      <line x1="8.8" y1="14.6" x2="11.2" y2="14.6"></line></svg><span
+      class="rdot" aria-hidden="true"></span></button>
   <button id="codetoggle" class="pywebview-no-drag" onclick="crow.toggleCode()"
           title="Show or hide the code panel">
     <svg viewBox="0 0 20 20" width="15" height="15" fill="none"
@@ -2872,6 +2920,14 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
     <div class="wb close" onclick="pywebview.api.close()">&#10005;</div>
   </div>
 </div>
+
+<!-- #249. DER QR-DIALOG DES TELEFON-SPIEGELS, nur auf dem Desktop. Der Inhalt
+     kommt ganz aus `{"k":"remotedlg"}`; jeder Name per textContent, nur das SVG
+     des eigenen QR-Kodierers als Markup. -->
+<div id="remotedlg" hidden onclick="if(event.target===this)crow.remoteClose()"></div>
+<!-- #249. AUF DEM TELEFON: das Warten auf das Allow des Desktops, und der Satz,
+     wenn es nicht gekoppelt ist. Auf dem Desktop bleibt es immer verborgen. -->
+<div id="remotepair" hidden></div>
 
 <div id="settings" hidden onclick="crow.settingsBackdrop(event)">
   <div class="sheet">
@@ -3206,6 +3262,12 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
                 <span class="dot"></span><span id="modename">auto</span></button>
               <div id="modemenu" hidden></div>
             </div>
+            <!-- #249: nur auf dem Telefon sichtbar -- dort gibt es kein Drop,
+                 also waehlt ein Dateifeld das Bild (Kamera oder Fotos). -->
+            <button id="remoteattach" hidden title="attach an image"
+                    onclick="document.getElementById('remotefile').click()">+</button>
+            <input id="remotefile" type="file" hidden
+                   onchange="crow.remoteUpload(this)">
             <button id="mic" onclick="crow.mic()" title="dictate">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none"
                    stroke="currentColor" stroke-width="2" stroke-linecap="round"
@@ -3309,6 +3371,95 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   </div>
 </div>
 
+<script>
+// #249. DIE TELEFONSEITE IST DIESE SEITE. `__REMOTE__` ist nur in der Fassung
+// wahr, die `crow_remote` einem gekoppelten Telefon ausliefert; auf dem Desktop
+// tut dieser Block nichts. Dort ist `pywebview.api` die Bruecke von pywebview,
+// hier ein Proxy mit denselben Namen und derselben Promise-Form: `api.x(...a)`
+// wird `POST /api/x` mit dem JSON-Array der Argumente. Keine Aufrufstelle der
+// Seite aendert sich. Was an Fenster oder Maschine des Desktops haengt
+// (`REMOTE_DESKTOP_BOUND`), beantwortet das Telefon selbst.
+window.CROW_REMOTE = __REMOTE__;
+if (window.CROW_REMOTE) (function(){
+  const BOUND = __REMOTE_BOUND__, TEXT = __REMOTE_TEXT__;
+  window.CROW_REMOTE_TEXT = TEXT;
+  const post = (path, body) => fetch(path, {method:"POST", credentials:"same-origin",
+    headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  const pairing = (on, text) => { const p=document.getElementById("remotepair");
+    if(!p) return; p.hidden=!on; p.textContent=text||""; };
+  const note = t => { if(window.crow && t) crow.note(t); };
+  const call = (name, args) => post("/api/"+name, args).then(r => {
+    if(r.status===401) pairing(true, TEXT.unpaired);
+    return r.ok ? r.json() : Promise.reject(new Error(String(r.status))); });
+  // COPY OHNE navigator.clipboard: der braucht einen sicheren Kontext, und
+  // http://192.168.x.x ist keiner. execCommand auf dem Tipp selbst geht.
+  function copyLocal(text){
+    const t=document.createElement("textarea"); t.value=String(text||"");
+    t.setAttribute("readonly",""); t.style.position="fixed"; t.style.opacity="0";
+    document.body.appendChild(t); t.select();
+    let ok=false; try{ ok=document.execCommand("copy"); }catch(_){ ok=false; }
+    t.remove(); return ok; }
+  const LOCAL = {
+    noop: () => null,
+    layout: () => true,
+    tab: () => { window.close(); return null; },
+    copy: text => copyLocal(text),
+    paste: () => "",
+    dictate: () => { note(TEXT.dictate); return null; },
+    root: () => { const p=window.prompt(TEXT.root, (window.crow && crow.root) || "");
+      return p ? call("choose_root", [p]) : null; },
+    link: url => { if(url) window.open(url, "_blank", "noopener"); return null; },
+    pane: () => null,
+    "desktop-only": () => null,
+  };
+  window.pywebview = {api: new Proxy({}, {get: (_, name) => (...args) => {
+    const how = BOUND[name];
+    if(how === "desktop") return call(name, args).then(r => { note(TEXT.ondesk); return r; });
+    const local = how === undefined ? null : LOCAL[how];
+    if(local){ try{ return Promise.resolve(local(...args)); }
+               catch(e){ return Promise.reject(e); } }
+    return call(name, args); }})};
+
+  // DER STROM. SSE, weil er nur in eine Richtung muss und `Last-Event-ID` von
+  // selbst mitbringt. iOS toetet ihn im Hintergrund stumm, also: verborgen ->
+  // zu, sichtbar -> wieder auf, mit der letzten Nummer (auch als ?last=).
+  let last = 0, es = null;
+  function feed(m){
+    if(!m || !window.crow) return;
+    if(m.k==="snapshot"){ crow.on({k:"clear"}); (m.items||[]).forEach(x => crow.on(x)); return; }
+    crow.on(m); }
+  function open(){
+    if(es || document.hidden) return;
+    es = new EventSource("/events" + (last ? "?last=" + last : ""));
+    es.onmessage = ev => { if(ev.lastEventId) last = Number(ev.lastEventId) || last;
+      let m; try { m = JSON.parse(ev.data); } catch(_) { return; }
+      feed(m); };
+    es.onerror = () => { if(es && es.readyState === 2){ es = null;
+      setTimeout(open, 3000); } }; }
+  function shut(){ if(es){ es.close(); es = null; } }
+  document.addEventListener("visibilitychange", () => document.hidden ? shut() : open());
+
+  // DAS KOPPELN. Der Code steht im Fragment (#t=...), das nie zum Server geht;
+  // er wird einmal gegen das Cookie getauscht und sofort aus der Adresse
+  // gestrichen, damit er weder im Verlauf noch auf dem Home-Bildschirm landet.
+  window.crowRemoteStart = function(){
+    document.documentElement.classList.add("remote");
+    const a=document.getElementById("remoteattach"); if(a) a.hidden=false;
+    // Kamera oder Fotos: iOS bietet beides fuer jede Bildart an.
+    const f=document.getElementById("remotefile"); if(f) f.accept="image/"+"*";
+    const go = () => { pairing(false); open();
+      window.dispatchEvent(new Event("pywebviewready")); };
+    const m = /(?:^#|&)t=([^&]+)/.exec(location.hash);
+    if(!m){ go(); return; }
+    history.replaceState(null, "", location.pathname + location.search);
+    pairing(true, TEXT.wait);
+    post("/pair", {t: decodeURIComponent(m[1])}).then(r => {
+      if(r.ok){ go(); return; }
+      pairing(true, r.status===403 ? TEXT.denied : r.status===429 ? TEXT.locked
+                                   : TEXT.expired); },
+      () => pairing(true, TEXT.unreachable)); };
+})();
+</script>
 <script>
 const $ = s => document.querySelector(s);
 const flow = $("#flow"), input = $("#in"), go = $("#go"), box = $("#box");
@@ -5420,7 +5571,13 @@ const crow = {
   // AUS DEM EIGENEN ZUSTAND, NICHT AUS DER NACHRICHT: die Seite weiss seit
   // `viewBar`, wo sie steht. Ein Feld im Push waere dieselbe Tatsache ein
   // zweites Mal, und zwei Fassungen einer Tatsache koennen sich widersprechen.
-  queuedLine(){ this.running=true; go.textContent="■ Stop";
+  // #249: MIT `t` KOMMT DER ZUSAMMENGELEGTE TEXT VOM SERVER -- beide Ansichten
+  // halten dieselbe Blase, auch die Zeile des anderen Geraets. Ohne `t` (die
+  // eigene `hold()`-Antwort) bleibt das lokale `held`. Nie in einer fremden
+  // Ansicht: dort gehoert die Zeile einem anderen Chat (#264, viewBar).
+  queuedLine(e){ if(e && e.t!=null && !this.viewingOther)
+      this.held={t:e.t, i:e.i||[]};
+    this.running=true; go.textContent="■ Stop";
     go.classList.add("stop");
     $("#turnstate").textContent="…";
     $("#hint").textContent = this.viewingOther
@@ -7246,6 +7403,103 @@ const crow = {
   toggleArchive(){ $("#arch").classList.toggle("open");
     $("#archbar").classList.toggle("open"); },
 
+  // #249. DER TELEFON-SPIEGEL, Desktopseite: der Knopf oeffnet den Dialog
+  // (derselbe Weg wie ein nacktes /remote), der Zustand faerbt ihn.
+  remoteOpen(){ pywebview.api.remote_open().then(said => { if(said) this.note(said); }); },
+  remoteState(e){ const b=$("#remotetoggle"); if(!b) return;
+    b.classList.toggle("on", !!e.on);
+    b.classList.toggle("live", !!e.on && (e.online||0) > 0);
+    if(e.t) b.title=e.t; },
+  remoteClose(){ const d=$("#remotedlg"); if(d){ d.hidden=true; d.textContent=""; } },
+  remoteDialog(e){ const d=$("#remotedlg"); if(!d) return;
+    if(!e.open){ this.remoteClose(); return; }
+    // EIN NACHZIEHEN (ein Geraet kam oder ging) OEFFNET NICHTS, was zu ist.
+    if(!e.fresh && d.hidden) return;
+    d.textContent="";
+    const sheet=document.createElement("div"); sheet.className="rsheet";
+    const head=document.createElement("div"); head.className="rrow";
+    head.style.justifyContent="space-between"; head.style.marginTop="0";
+    const h=document.createElement("b"); h.textContent="Phone mirror";
+    const x=document.createElement("button"); x.className="sclose"; x.textContent="✕";
+    x.onclick=()=>this.remoteClose(); head.append(h, x); sheet.appendChild(head);
+    // DAS SVG IST DAS EINZIGE MARKUP: es kommt aus Crows eigenem Kodierer
+    // (`crow_remote.qr_svg`), nie von aussen.
+    const qr=document.createElement("div"); qr.className="rqr"; qr.innerHTML=e.svg||"";
+    sheet.appendChild(qr);
+    const url=document.createElement("div"); url.className="rurl"; url.textContent=e.url||"";
+    sheet.appendChild(url);
+    if((e.ips||[]).length > 1){
+      const sel=document.createElement("select");
+      e.ips.forEach(([iface, ip]) => { const o=document.createElement("option");
+        o.value=ip; o.textContent=ip+"  ("+iface+")"; o.selected = ip===e.ip;
+        sel.appendChild(o); });
+      sel.onchange=()=>pywebview.api.remote_use_ip(sel.value)
+        .then(said => { if(said) this.note(said); });
+      sheet.appendChild(sel); }
+    (e.devices||[]).forEach(dev => {
+      const row=document.createElement("div"); row.className="rdev";
+      const n=document.createElement("span");
+      n.textContent=dev.name + (dev.online ? "  · online" : "");
+      const f=document.createElement("button"); f.textContent="forget";
+      f.onclick=()=>pywebview.api.remote_forget(dev.id)
+        .then(said => { if(said) this.note(said); });
+      row.append(n, f); sheet.appendChild(row); });
+    if(e.hint){ const t=document.createElement("div"); t.className="rhint";
+      t.textContent=e.hint; sheet.appendChild(t); }
+    const row=document.createElement("div"); row.className="rrow";
+    const off=document.createElement("button"); off.textContent="turn off";
+    off.onclick=()=>pywebview.api.remote_stop().then(said => { if(said) this.note(said); });
+    row.appendChild(off); sheet.appendChild(row);
+    d.appendChild(sheet); d.hidden=false; },
+  // EIN NEUES GERAET FRAGT: die Karte im Verlauf, wie eine Freigabe (#88).
+  remoteAsk(e){
+    const d=document.createElement("div"); d.className="turn ask";
+    d.innerHTML='<div class="askcard"><div class="asktop"><b>phone mirror</b>'
+      + '<code></code></div><div class="askrow">'
+      + '<button class="yes">allow</button><button class="no">deny</button></div></div>';
+    const card=d.querySelector(".askcard"); card.dataset.rid=String(e.id);
+    card.querySelector("code").textContent=e.t||e.name||"";
+    const answer = yes => { card.querySelector(".askrow").innerHTML=
+        '<span class="askdone"></span>';
+      pywebview.api.remote_allow(e.id, yes); };
+    card.querySelector(".yes").onclick=()=>answer(true);
+    card.querySelector(".no").onclick=()=>answer(false);
+    flow.appendChild(d); this.bottom(); },
+  remoteAsked(e){
+    const card=document.querySelector('.askcard[data-rid="'+String(e.id)+'"]');
+    if(!card){ if(e.t) this.note(e.t); return; }
+    card.querySelector(".askrow").innerHTML='<span class="askdone"></span>';
+    card.querySelector(".askdone").textContent=e.t||""; },
+  // #249. DIE ANDERE SEITE HAT GEANTWORTET: die offene Karte hier schliesst
+  // mit dem Satz des Kerns ("allowed -- answered on phone"), statt weiter eine
+  // Frage zu stellen, die schon entschieden ist.
+  asked(e){
+    const said=e.t||"";
+    const close = card => { const row=card.querySelector(".askrow");
+      if(!row || !row.querySelector("button")) return;
+      card.querySelectorAll("[data-field]").forEach(el => { el.disabled=true; });
+      row.innerHTML='<span class="askdone"></span>';
+      row.querySelector(".askdone").textContent=said; };
+    if(e.what==="elicit"){
+      document.querySelectorAll(".askcard[data-elicit]").forEach(c => {
+        if(e.id==null || c.dataset.elicit===String(e.id)) close(c); });
+      return; }
+    if(e.what==="ask"){
+      document.querySelectorAll(".askcard").forEach(c => {
+        if(c.dataset.elicit!==undefined || c.dataset.rid!==undefined
+           || c.classList.contains("ghcard")) return;
+        close(c); });
+      return; }
+    if(said) this.note(said); },
+  // #249, TELEFONSEITE: kein Drop, also ein Dateifeld -> /upload -> stage_image.
+  remoteUpload(el){ const f=el.files && el.files[0]; el.value=""; if(!f) return;
+    fetch("/upload", {method:"POST", credentials:"same-origin",
+      headers:{"Content-Type": f.type || "application/octet-stream"}, body:f})
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(String(r.status))))
+      .then(j => pywebview.api.stage_image(j && j.path))
+      .then(res => { if(res && res.chips) this.stageRender(res.chips); },
+            err => this.note(((window.CROW_REMOTE_TEXT || {}).upload || "") + " (" + err.message + ")")); },
+
   on(msg){
     const e=typeof msg==="string" ? JSON.parse(msg) : msg;
     // #162. WAS EIN HINTERGRUNDZUG SAGT, WIRD VERWORFEN -- nicht gepuffert. Der
@@ -7357,7 +7611,14 @@ const crow = {
       case "drop": this.dropped(e.paths); break;
       case "idle": this.idle(); break;
       case "busy": this.busy(); break;
-      case "queued": this.queuedLine(); break;
+      case "queued": this.queuedLine(e); break;
+      // #249: der Telefon-Spiegel -- Knopf, Dialog, Kopplungskarte, und die
+      // Karte, die auf der anderen Seite beantwortet wurde.
+      case "remote": this.remoteState(e); break;
+      case "remotedlg": this.remoteDialog(e); break;
+      case "remoteask": this.remoteAsk(e); break;
+      case "remoteasked": this.remoteAsked(e); break;
+      case "asked": this.asked(e); break;
       case "viewing": this.viewBar(e); break;
       case "goal": this.goalPanel(e.goal); break;
     }
@@ -7641,6 +7902,9 @@ new ResizeObserver(() => crow.brPlace()).observe($("#brbody"));
 // (min-width:0), #main traegt die Mindestbreite der Maske.
 
 window.addEventListener("pywebviewready",()=>{ pywebview.api.ready(); input.focus(); });
+// #249: kein pywebview auf dem Telefon, also kein `pywebviewready` von aussen --
+// die Bruecke oben koppelt, oeffnet den Strom und feuert es selbst.
+if(window.CROW_REMOTE) window.crowRemoteStart();
 </script></body></html>
 """
 
@@ -7656,6 +7920,248 @@ window.addEventListener("pywebviewready",()=>{ pywebview.api.ready(); input.focu
 PAGE_PLACEHOLDER = ('<!doctype html><html><head><meta charset="utf-8">'
                     '<style>html,body{margin:0;height:100%;background:__BG__}'
                     '</style></head><body></body></html>')
+
+
+# ------------------------------------------------------------- #249 remote
+#
+# EIN `Api`, MEHRERE ANSICHTEN. Das Fenster und jedes gekoppelte Telefon rufen
+# dieselben Methoden und bekommen dieselben Pushes; jedes hat nur seine eigene
+# Chat-Ansicht und sein eigenes Layout. WER GERADE RUFT, steht in einer
+# ContextVar: pywebview-Aufrufe tragen den Default "desktop", der
+# `/api`-Verteiler in `crow_remote` setzt die Geraete-ID pro Anfrage. Der
+# Worker-Thread startet mit leerem Kontext und ist damit NIEMANDES Client --
+# seine Pushes werden nach Ansicht verteilt, nicht nach Aufrufer.
+
+DESKTOP = "desktop"
+# DER ERSATZ, SOLANGE `crow_remote` FEHLT. Das Modul kommt aus einem eigenen
+# Zweig; ohne es ist jeder Aufrufer das Fenster, und genau so verhielt sich
+# diese Datei vor #249.
+_CLIENT_FALLBACK: "contextvars.ContextVar[str]" = contextvars.ContextVar(
+    "crow_client", default=DESKTOP)
+# WOHIN EIN PUSH GEHT, wenn eine Ansichtsaktion ihn auf ihren Aufrufer
+# beschraenkt (`Api._only`). None heisst: die normale Regel in `Api.push`.
+_TO: "contextvars.ContextVar[tuple | None]" = contextvars.ContextVar(
+    "crow_push_to", default=None)
+# `Api.state_snapshot` sammelt, statt zuzustellen: eine Liste hier, und jeder
+# Push dieses Kontexts landet in ihr und NIRGENDS sonst.
+_CAPTURE: "contextvars.ContextVar[list | None]" = contextvars.ContextVar(
+    "crow_push_capture", default=None)
+_REMOTE_MODULE: list = []          # [crow_remote or None], einmal aufgeloest
+
+
+def remote_module() -> object:
+    """`crow_remote`, or None where this install does not have it. Resolved
+    ONCE: a failed import searches sys.path again on every call, and `push`
+    asks for the client on every message."""
+    if not _REMOTE_MODULE:
+        try:
+            import crow_remote as found
+        except ImportError:
+            found = None
+        _REMOTE_MODULE.append(found)
+    return _REMOTE_MODULE[0]
+
+
+def _client_var() -> "contextvars.ContextVar[str]":
+    """The one ContextVar that names the caller -- the server's, if it exists,
+    so the `/api` dispatcher and this file read the same variable."""
+    found = getattr(remote_module(), "CLIENT", None)
+    return found if found is not None else _CLIENT_FALLBACK
+
+
+def _client() -> str:
+    """Who is calling: "desktop", or a paired device's id."""
+    return _client_var().get() or DESKTOP
+
+
+@contextlib.contextmanager
+def as_client(client: str) -> Iterator[None]:
+    """Run the block as `client` -- the per-client loops (rail, bar) and the
+    suite use it; the HTTP dispatcher sets the same variable itself."""
+    var = _client_var()
+    token = var.set(client or DESKTOP)
+    try:
+        yield
+    finally:
+        var.reset(token)
+
+
+# #249 DECISION 5, AS A TABLE THE SUITE COUNTS. Every `pywebview.api.<name>`
+# the page calls is in exactly ONE of the two: proxied 1:1 to this Api from a
+# phone, or bound to the desktop window/machine with what the phone does
+# instead. A method added to the page and to neither fails
+# `RemoteApiParityTests` until somebody decides.
+REMOTE_PROXIED = frozenset({
+    "answer", "answer_elicit", "answer_memory", "archive_chat", "choose_model",
+    "choose_root", "clear_root", "close_goal", "close_subtasks",
+    "create_project", "delegate_favorites_set", "delete_chat", "discard_live",
+    "drop_project", "git_commit_now", "git_refresh", "github_account_click",
+    "github_cancel", "github_client_id_set", "github_disconnect",
+    "github_view", "mcp_add", "mcp_confirm", "mcp_refresh", "mcp_remove",
+    "mcp_view", "open", "openrouter_set", "path_info", "provider_borrow",
+    "provider_key", "provider_model_set", "provider_oauth", "provider_pick",
+    "provider_refresh", "provider_signout", "provider_token", "provider_view",
+    "ready", "rename", "reopen_subtasks", "reset", "roll_tail", "send",
+    "set_chat_root", "set_mode", "set_reasoning", "set_server_key",
+    "set_tools", "skills", "stop", "toggle_server", "toggle_skill",
+    "tools_cleared", "unstage_image", "update_check", "update_start",
+    "view_live",
+})
+# WAS DAS TELEFON STATTDESSEN TUT, je Schluessel ein Satz. Die Seite liest
+# die Schluessel (`__REMOTE_BOUND__`), dieser Text ist fuer Menschen.
+REMOTE_PHONE_DOES = {
+    "noop": "nothing: the phone has no window to move, size or maximise",
+    "layout": "phone-local: each device keeps its own layout; the desktop's "
+              "settings are never written",
+    "tab": "closes the phone's tab, never the desktop window",
+    "copy": "phone clipboard via document.execCommand('copy') on the tap",
+    "paste": "the native paste in the input field",
+    "dictate": "the iOS keyboard's own dictation (no microphone over HTTP)",
+    "upload": "file input -> POST /upload -> stage_image(<temp path>)",
+    "root": "a path field (and the recent roots) -> choose_root(path)",
+    "link": "opens in a new phone tab",
+    "desktop": "runs on the desktop, where the file/browser is; the phone "
+               "shows a note",
+    "pane": "the desktop pane keeps working; the phone shows the URL and "
+            "the render_page screenshot, never a live pane",
+    "desktop-only": "never served to a phone (the pairing controls)",
+}
+REMOTE_DESKTOP_BOUND = {
+    "maximise": "noop", "minimise": "noop", "begin_move": "noop",
+    "begin_resize": "noop", "set_geometry": "noop", "geometry": "noop",
+    "rail_width": "layout", "code_width": "layout",
+    "set_rail_open": "layout", "set_code_open": "layout",
+    "set_git_open": "layout", "set_browser_open": "layout",
+    "set_project_open": "layout", "set_theme": "layout",
+    "close": "tab", "copy": "copy", "paste_clipboard": "paste",
+    "dictate_start": "dictate", "dictate_stop": "dictate",
+    "stage_image": "upload", "pick_root": "root", "open_url": "link",
+    "reveal_path": "desktop", "roll_show": "desktop",
+    "provider_authorise": "desktop",
+    "pane_go": "pane", "pane_show": "pane", "pane_hide": "pane",
+    "pane_place": "pane", "pane_cover": "pane",
+    "remote_open": "desktop-only", "remote_allow": "desktop-only",
+    "remote_forget": "desktop-only", "remote_use_ip": "desktop-only",
+    "remote_stop": "desktop-only",
+}
+# WAS EIN TELEFON UEBER HTTP RUFEN DARF: das Proxierte plus die gebundenen,
+# deren Ersatz doch auf dem Desktop landet. Alles andere beantwortet der
+# Server mit 404 -- auch die 15 oeffentlichen Methoden, die die Seite nie ruft.
+REMOTE_ALLOWED = REMOTE_PROXIED | frozenset(
+    name for name, how in REMOTE_DESKTOP_BOUND.items()
+    if how in ("upload", "desktop"))
+# ZUSTAND, DER ALLEN GEHOERT. Eine Ansichtsaktion eines Telefons (sein
+# `open`) bindet ggf. einen neuen Ordner -- das ist keine Ansicht, sondern
+# der gemeinsame Stand, und jede Sicht muss ihn lesen.
+REMOTE_SHARED_KINDS = frozenset({"mode", "root", "tools", "up", "down",
+                                 "reasoning", "git", "goal", "pend",
+                                 "chips", "thoughts"})
+# WAS EIN FRISCHES TELEFON AUS DEM GEDAECHTNIS BEKOMMT: die letzte Fassung
+# jeder dieser Nachrichten. "up"/"down" teilen sich einen Platz.
+_STICKY_KINDS = frozenset({"up", "down", "reasoning", "git", "pend",
+                           "thoughts"})
+
+# DIE HAKEN FUER DIE TELEFONSEITE. Die Desktopseite ersetzt alle drei durch
+# nichts; `stamped_page(remote=True)` fuellt sie. Die eigentliche Handy-CSS
+# kommt spaeter in `REMOTE_CSS` dazu -- hier steht nur, was der Mirror braucht.
+REMOTE_HEAD = ('<meta name="viewport" content="width=device-width,'
+               'initial-scale=1,viewport-fit=cover">')
+REMOTE_CSS = """
+/* #249: auf dem Telefon bleibt die Titelleiste als Kopf -- sie traegt Rail,
+   Code, Git, Browser und Hilfe. Weg sind nur Fensterknoepfe, Zieh- und
+   Greifzonen und der Telefonknopf selbst. */
+#wbtns,.grip,#remotetoggle{display:none !important}
+#remotetoggle + #codetoggle{margin-left:auto}
+#bar{-webkit-app-region:no-drag}
+#remotepair{position:fixed;inset:0;z-index:50;display:grid;place-items:center;
+  background:var(--bg);color:var(--text);padding:24px;text-align:center}
+#remotepair[hidden]{display:none}
+"""
+
+
+def stamped_page(remote: bool = False) -> str:
+    """PAGE with every placeholder filled -- the window's page, or (#249) the
+    phone's variant of the SAME page with `__REMOTE__` set. One chain for both,
+    so the phone cannot drift from what the desktop draws."""
+    page = (PAGE.replace("__BG__", CROW_BG)
+                .replace("__ACCENT__", CROW_ACCENT_HEX)
+                .replace("__BEVEL__", BANNER_BEVEL_HEX)
+                .replace("__TEXT__", CROW_TEXT_HEX)
+                .replace("__TIMEOUT__", "%.0f" % READ_TIMEOUT_S)
+                # ON THE ELEMENT BEFORE THE PAGE IS HANDED OVER, not applied by
+                # a script after load. A window that painted itself dark and
+                # then switched would show the wrong theme for a frame on every
+                # single start -- and the frame is exactly the moment somebody
+                # looks at it.
+                .replace("__THEME__", current_theme())
+                .replace("__MEMICON__", MEMORY_ICON)
+                # #119. THE SAME REASON THE THEME IS STAMPED HERE: a rail that
+                # was drawn open and then folded away by a script after load
+                # would do it on every start, and that frame is the moment
+                # somebody is looking at the window.
+                .replace("__RAIL__", "open" if rail_open() else "shut")
+                .replace("__CODE__", "open" if code_open() else "shut")
+                # #156: dieselbe Regel wie fuer Rail und Code -- der Zustand
+                # steht auf dem Element, bevor die Seite uebergeben wird.
+                .replace("__GIT__", "open" if git_open() else "shut")
+                .replace("__BROWSER__", "open" if browser_open() else "shut")
+                .replace("__CODEW__", str(code_width_setting()))
+                .replace("__MARKDARK__", mark_svg("dark"))
+                # WHO MOVES THE WINDOW, stamped on the page for the reason the
+                # theme is stamped on it: the answer decides what the first
+                # mousedown on the title bar does, and a script that worked it
+                # out after load would be one frame late on every start.
+                .replace("__NATIVEDRAG__",
+                         "false" if crow_platform.IS_WINDOWS else "true")
+                .replace("__MARKLIGHT__", mark_svg("light")))
+    # #249. DIE HAKEN ZULETZT, damit kein Ersatz oben in einem Haken landet.
+    return (page.replace("<!--__REMOTE_HEAD__-->", REMOTE_HEAD if remote else "")
+                .replace("/* __REMOTE_CSS__ */", REMOTE_CSS if remote else "")
+                .replace("__REMOTE_BOUND__", json.dumps(REMOTE_DESKTOP_BOUND)
+                         if remote else "{}")
+                .replace("__REMOTE_TEXT__", json.dumps(
+                    crow_core.REMOTE_PHONE_TEXT if remote else {}))
+                .replace("__REMOTE__", "true" if remote else "false"))
+
+
+def remote_enabled() -> bool:
+    """#249: `remote_enabled` in settings.json -- the mirror starts with the
+    window when true. Set by `/remote on`, cleared by `/remote off`."""
+    return read_settings().get("remote_enabled") is True
+
+
+def remote_port_setting() -> int:
+    """#249: the fixed port (`remote_port`), the core's default for anything
+    that is not a port. Fixed because the phone's cookie belongs to one
+    origin."""
+    value = read_settings().get("remote_port")
+    if isinstance(value, int) and not isinstance(value, bool) \
+            and 1024 <= value <= 65535:
+        return value
+    return crow_core.REMOTE_PORT_DEFAULT
+
+
+def remote_host_setting() -> str:
+    """#249: the LAN address last chosen in the dialog (`remote_host`), or ""
+    for "the first LAN address"."""
+    value = read_settings().get("remote_host")
+    return value if isinstance(value, str) else ""
+
+
+def lan_addresses() -> "list[tuple[str, str]]":
+    """`crow_platform.lan_addresses()`, or [] where this install lacks it."""
+    probe = getattr(crow_platform, "lan_addresses", None)
+    if probe is None:
+        return []
+    try:
+        return list(probe())
+    except Exception:                  # noqa: BLE001 -- no LAN is an answer
+        return []
+
+
+# DIE FABRIK DES SERVERS. None heisst `crow_remote.Remote`; die Suite setzt
+# hier einen Doppelgaenger ein, damit kein Fall je einen echten Port oeffnet.
+REMOTE_FACTORY = None
 
 
 ICON_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crow.ico")
@@ -8911,6 +9417,15 @@ class InWindowPane:
 class Api:
     """What the page may call. Nothing here touches a widget; it queues."""
 
+    # #249: WHAT AN Api BUILT WITHOUT `__init__` STILL NEEDS. The suite makes
+    # bare instances (`Api.__new__`) for one method at a time; `push` must not
+    # fall over on them for want of the mirror's fields. Never written through
+    # the class: the setters below write into the instance.
+    _remote = None
+    _views: dict = {}
+    _movers: frozenset = frozenset()
+    _route_lock = threading.RLock()
+
     def __init__(self, args: argparse.Namespace) -> None:
         self._args = args
         # #92: `--mode` parses to None when nobody typed it, because that is the
@@ -9027,7 +9542,13 @@ class Api:
         # Modell richtig (`-np 1`, ein Slot, #143) und fuer die OBERFLAECHE falsch:
         # lesen kostet den Server nichts. Getrennt wird deshalb die Ansicht, nie
         # der Zug.
-        self._view_path: str | None = None
+        #
+        # #249: JE CLIENT EINE ANSICHT. `_view_path` ist seitdem eine
+        # Eigenschaft, die den Eintrag des AUFRUFERS liest und schreibt
+        # (`_client()`: "desktop" oder die Geraete-ID); fehlt ein Eintrag, ist
+        # das `None` von oben -- der laufende Chat. Ein Telefon, das einen Chat
+        # wechselt, bewegt damit das Fenster nie, und umgekehrt.
+        self._views: dict[str, str | None] = {}
         # #162. WELCHE CHATS FERTIG GEWORDEN SIND, WAEHREND NIEMAND HINSAH.
         #
         # Ein Zug, der im Hintergrund endet, hat sonst keinen Ort, an dem er das
@@ -9149,10 +9670,66 @@ class Api:
         # been chosen, because from then on it would outrank the real opening
         # line forever". A borrowed root is that same guess.
         self._root_chosen: bool = False
+        # #249. DER TELEFON-SPIEGEL. `_remote` ist der laufende
+        # `crow_remote.Remote` oder None; alles andere hier ist, was ein
+        # zweiter Bildschirm braucht, um denselben Stand zu sehen.
+        self._remote = None
+        # Wer die gepufferte Zeile getippt hat -- bei #264s Zusammenlegen
+        # zwei Geraete. Sie folgen ihr in den Chat, alle anderen bleiben.
+        self._queued_by: set = set()
+        # Wer beim naechsten echten Wechsel mitgeht (`_hand_over`).
+        self._movers: frozenset = frozenset()
+        # Die offene Frage und die offene Server-Frage, als Push: ein Telefon,
+        # das spaeter dazukommt, muss dieselbe Karte sehen.
+        self._pending_ask: "dict | None" = None
+        self._pending_elicit: "dict | None" = None
+        # Die letzte Fassung der Zustaende, die nur Hintergrundfaeden kennen.
+        self._sticky: dict = {}
+        # Die Subtask-Signatur je Geraet; die des Fensters bleibt `_subs_sig`.
+        self._subs_sigs: dict = {}
+        # Offene Kopplungsfragen: id -> [Event, erlaubt].
+        self._remote_asks: dict = {}
+        self._remote_ask_n = 0
+        self._remote_seen = None
+        # EIN SCHLOSS UM ZUSTELLEN UND SCHNAPPSCHUSS: `crow_remote` nimmt die
+        # Sequenznummer VOR `state_snapshot`; baut der Schnappschuss unter
+        # demselben Schloss wie `push`, kann kein Push dazwischen landen und
+        # doppelt ankommen.
+        self._route_lock = threading.RLock()
 
     # -- outward -----------------------------------------------------------
 
-    def push(self, message: dict) -> None:
+    def push(self, message: dict, to: "tuple | list | None" = None) -> None:
+        """One message out: to the desktop's queue, and (#249) to the phones.
+
+        WHO GETS IT (#249), in this order -- the first rule that applies wins:
+
+        1. `to` given: exactly those clients ("desktop" and/or device ids).
+           Per-client messages (`rail`, `viewing`, `subs`) are built once per
+           client and pushed with `to`, each carrying its own "viewed" marker.
+        2. A kind in `REMOTE_SHARED_KINDS` (mode, root, model, goal, git ...):
+           everybody. It is state all views share, whoever caused it.
+        3. Inside `_only(...)` (a view action: `_view_other`, `view_live`, a
+           replay, a phone's `ready`): only those clients. A phone's replay
+           never reaches the desktop's `_out`.
+        4. From the worker thread (nobody's client): every client whose view
+           is the live chat. The DESKTOP keeps its #162 rule unchanged -- it
+           always gets the message, stamped `bg` while it looks elsewhere;
+           a phone looking elsewhere simply does not get it.
+        5. Anything else: everybody.
+
+        The desktop's `_out` therefore receives exactly what it received
+        before #249 whenever no phone is involved; the phones get the same
+        dicts through `Remote.publish(message, to=...)`.
+        """
+        # #249: `state_snapshot` sammelt, statt zuzustellen. Vor allem anderen,
+        # damit ein Schnappschuss weder Kostenzeilen noch Notizen mitschreibt.
+        captured = _CAPTURE.get()
+        if captured is not None:
+            if not (message.get("k") == "note"
+                    and crow_core.note_is_log_only(message.get("t"))):
+                captured.append(message)
+            return
         # #162. WAS DER LAUFENDE ZUG SAGT, GEHOERT IN SEINEN CHAT -- nicht in
         # den, der gerade offen ist. Der Absender entscheidet das, nicht der
         # Nachrichtentyp: kommt der Aufruf aus dem Worker-Thread, gehoert er zum
@@ -9191,11 +9768,121 @@ class Api:
                 and message.get("k") in crow_core.SESSION_NOTE_KINDS):
             self._notes.append(dict(message, at=len(self._conversation)))
             del self._notes[:-crow_core.SESSION_NOTES_MAX]
-        if (message.get("k") != "rail"
-                and self._view_path is not None
-                and threading.current_thread() is self._worker):
-            message = dict(message, bg=True)
-        self._out.put(message)
+        kind = message.get("k")
+        if kind in _STICKY_KINDS:
+            self._remember(message)
+        worker = threading.current_thread() is self._worker
+        with self._route_lock:
+            audience = self._audience(kind, to, worker)
+            if audience is None or DESKTOP in audience:
+                desk = message
+                # #162, UNVERAENDERT: DIE ANSICHT DES FENSTERS entscheidet den
+                # Stempel -- nicht die des Aufrufers.
+                if (kind != "rail"
+                        and self._views.get(DESKTOP) is not None
+                        and worker):
+                    desk = dict(message, bg=True)
+                self._out.put(desk)
+            remote = self._remote
+            if remote is None:
+                return
+            if audience is None:
+                remote.publish(message)
+                return
+            devices = [c for c in audience if c != DESKTOP]
+            if devices:
+                remote.publish(message, to=devices)
+
+    def _audience(self, kind, to, worker: bool) -> "tuple | None":
+        """Rules 1-5 of `push`: the clients, or None for everybody."""
+        if to is not None:
+            return tuple(to)
+        if kind in REMOTE_SHARED_KINDS:
+            return None
+        scoped = _TO.get()
+        if scoped is not None:
+            return scoped
+        if worker and kind != "rail":
+            return (DESKTOP,) + tuple(d for d in self._device_ids()
+                                      if self._views.get(d) is None)
+        return None
+
+    def _remember(self, message: dict) -> None:
+        """#249: the last word of a state only a background thread knows, for
+        `state_snapshot`. A partial `up` (a reset sends model None) is merged
+        into the last full one rather than replacing it."""
+        kind = message.get("k")
+        sticky = self.__dict__.setdefault("_sticky", {})
+        if kind in ("up", "down"):
+            last = sticky.get("conn") or {}
+            if kind == "up" and last.get("k") == "up":
+                merged = dict(last)
+                merged.update({k: v for k, v in message.items()
+                               if v is not None})
+                sticky["conn"] = merged
+            else:
+                sticky["conn"] = dict(message)
+            return
+        sticky[kind] = dict(message)
+
+    # ---- #249: wer schaut, und wohin
+
+    @property
+    def _view_path(self) -> "str | None":
+        """#162's view, per CLIENT since #249: the caller's entry."""
+        return self._views.get(_client())
+
+    @_view_path.setter
+    def _view_path(self, value: "str | None") -> None:
+        self.__dict__.setdefault("_views", {})[_client()] = value
+
+    def _set_view(self, client: str, value: "str | None") -> None:
+        self.__dict__.setdefault("_views", {})[client] = value
+
+    def _push_to(self, message: dict, clients) -> None:
+        """Rule 1 of `push`, and the old one-argument call when no phone is
+        paired -- so a desktop-only window pushes exactly as before #249."""
+        clients = tuple(clients)
+        if self._remote is None:
+            if DESKTOP in clients:
+                self.push(message)
+            return
+        if clients:
+            self.push(message, to=clients)
+
+    def _device_ids(self) -> list:
+        remote = self._remote
+        if remote is None:
+            return []
+        try:
+            return list(remote.device_ids())
+        except Exception:              # noqa: BLE001 -- no phones is an answer
+            return []
+
+    def _clients(self) -> list:
+        """The desktop and every paired device -- the views that exist."""
+        return [DESKTOP] + self._device_ids()
+
+    def _live_clients(self) -> list:
+        """The clients whose view is the live chat."""
+        return [c for c in self._clients() if self._views.get(c) is None]
+
+    def _peers(self, include_self: bool = False) -> tuple:
+        """The clients that look at the same chat as the caller."""
+        me = _client()
+        mine = self._views.get(me)
+        return tuple(c for c in self._clients()
+                     if (include_self or c != me)
+                     and self._views.get(c) == mine)
+
+    @contextlib.contextmanager
+    def _only(self, *clients) -> Iterator[None]:
+        """Rule 3 of `push`: every push in the block goes to `clients` only."""
+        token = _TO.set(tuple(clients))
+        try:
+            yield
+        finally:
+            _TO.reset(token)
 
     def announce_elicit(self, asks: list) -> None:
         """The core says a server is asking; the page gets the newest question.
@@ -9205,12 +9892,21 @@ class Api:
         window has to push and a terminal has to prompt in line.
         """
         if asks:
-            self.push({"k": "elicit", "ask": asks[-1]})
+            message = {"k": "elicit", "ask": asks[-1]}
+            self._pending_elicit = message        # #249: for a late phone
+            self.push(message)
 
     def answer_elicit(self, ident: int, action: str, values) -> str:
         """What a person typed, handed back to the waiting server. "" when it
         went through; the sentence why, when it did not."""
-        return crow_core.answer_elicitation(int(ident), str(action), values) or ""
+        said = crow_core.answer_elicitation(int(ident), str(action), values) or ""
+        if not said:
+            pending = self._pending_elicit
+            if pending and (pending.get("ask") or {}).get("id") == int(ident):
+                self._pending_elicit = None
+            self._push_asked("elicit", {"accept": "sent", "decline": "declined"}
+                             .get(str(action), "dismissed"), int(ident))
+        return said
 
     def pump(self) -> None:
         """One thread, forever: queue -> page. The only place JS is called.
@@ -9339,13 +10035,21 @@ class Api:
         return self._tools_cleared
 
     def ready(self) -> None:
+        # #249. EIN TELEFON, DAS SEINE SEITE GELADEN HAT, bekommt den Stand --
+        # und nur es. Kein zweiter Start: `adopt_root`, `_probe` und der
+        # Seitenzaehler gehoeren dem Fenster, das Telefon schaut nur zu.
+        client = _client()
+        if client != DESKTOP:
+            items = self.state_snapshot(client)
+            with self._route_lock:
+                for message in items:
+                    self._push_to(message, (client,))
+            self._remote_state_push()
+            return
         self._page_loads += 1
-        self.push({"k": "meta", "rail": rail_width_setting(),
-                   "version": client_version() or "",
-                   "url": self._args.base_url, "tools": len(TOOLS),
-                   "execute": bool(self._args.execute_tools),
-                   # #264: the page tells a command from a path mid-turn.
-                   "slash": list(crow_core.SLASH_COMMANDS)})
+        self.push(self._meta_message())
+        if self._remote is not None:
+            self._remote_state_push(force=True)
         threading.Thread(target=self._mic_probe, daemon=True).start()
         if self._page_loads > 1:
             self._ready_again()
@@ -9401,6 +10105,92 @@ class Api:
         self._draw_live()
         threading.Thread(target=self._probe, kwargs={"redraw": True},
                          daemon=True).start()
+
+    def _meta_message(self) -> dict:
+        """The page's header facts, as `ready()` sends them to a new page."""
+        return {"k": "meta", "rail": rail_width_setting(),
+                "version": client_version() or "",
+                "url": self._args.base_url, "tools": len(TOOLS),
+                "execute": bool(self._args.execute_tools),
+                # #264: the page tells a command from a path mid-turn.
+                "slash": list(crow_core.SLASH_COMMANDS)}
+
+    # ---- #249: the state a fresh phone page needs
+
+    def state_snapshot(self, client: str) -> list:
+        """#249: everything a fresh page for `client` needs, as the messages
+        that would have drawn it -- nothing here is a second rendering.
+
+        FROM THE SOURCES THAT EXIST: the header (`meta`, mode, root, the last
+        `up`/`reasoning`/`git`/`pend` any thread pushed), the chat THIS client
+        looks at replayed the way `view_live`/`_view_other` replay it, its bar
+        and counter, the rail and subtasks with its own markers, the staged
+        chips, the goal panel, and -- only while the client looks at the live
+        chat, like the desktop's #162 rule -- the open question and the turn's
+        busy/queued state.
+
+        BUILT UNDER THE ROUTING LOCK: `crow_remote` takes the stream's sequence
+        number before calling this, and a push that slipped in between would
+        arrive twice. Collected, never delivered (`_CAPTURE`)."""
+        box: list = []
+        with self._route_lock:
+            token = _CAPTURE.set(box)
+            try:
+                with as_client(client):
+                    self._snapshot_into(client)
+            finally:
+                _CAPTURE.reset(token)
+        return box
+
+    def _snapshot_into(self, client: str) -> None:
+        """`state_snapshot`'s body, run as `client` with every push captured."""
+        self.push(self._meta_message())
+        self.push({"k": "mode", "name": getattr(self._args, "mode", DEFAULT_MODE),
+                   "modes": self.mode_menu()})
+        self.push(self._root_message())
+        self.push({"k": "tools", "on": bool(self._args.execute_tools)})
+        for key in ("conn", "reasoning", "git", "pend", "thoughts"):
+            kept = self._sticky.get(key)
+            if kept:
+                self.push(dict(kept))
+        self.push({"k": "clear"})
+        self._hello()
+        view = self._views.get(client)
+        if view is None:
+            self._replay(self._conversation.payload(), self._notes, guard=False)
+            tokens = self._context_tokens
+        elif view:
+            try:
+                restored = load_session(self._endpoint()["base_url"], None,
+                                        view, model=self._model, with_kv=False)
+            except Exception:          # noqa: BLE001 -- an empty flow says it
+                restored = None
+            messages, tokens = (restored[0], restored[1]) if restored else ([], 0)
+            self._replay(messages, crow_core.session_notes(view), guard=False)
+        else:
+            tokens = 0
+        self.push(self._where_message())
+        self._push_cost_for(self._viewed_path(), tokens)
+        self.push(self._rail_message())
+        self.push({"k": "subs", "items": self._subs_items()})
+        self.push({"k": "chips", "c": self._image_chips()})
+        if view is not None:
+            return
+        if self._pending_ask is not None:
+            self.push(dict(self._pending_ask))
+        if self._pending_elicit is not None:
+            self.push(dict(self._pending_elicit))
+        if self._busy:
+            self.push({"k": "busy"})
+            # OHNE `_queue_lock`: `send` pusht unter ihm, also nimmt es erst
+            # dieses und dann das Routing-Schloss -- hier umgekehrt waere ein
+            # Deadlock. Drei Lesezugriffe, jeder fuer sich atomar.
+            queued, target = self._queued, self._queued_to
+            by = sorted(self._queued_by)
+            if queued is not None and target is None:
+                self.push({"k": "queued", "t": queued,
+                           "i": [c["url"] for c in self._image_chips()],
+                           "by": by[0] if by else DESKTOP})
 
     # ---- #92: the working directory ------------------------------------
 
@@ -9811,7 +10601,7 @@ class Api:
                    "share": (kept or {}).get("share"),
                    "tokens": tokens, "n_ctx": self._n_ctx})
 
-    def _say_where(self) -> None:
+    def _say_where(self, clients=None) -> None:
         """Was die Leiste ueber der Eingabe sagt, aus dem aktuellen Zustand.
 
         EIN ORT, WEIL SIE SONST STEHENBLEIBT. Sie wurde beim Hinsehen gesetzt
@@ -9819,17 +10609,30 @@ class Api:
         der laengst fertig war (robin, 2026-08-30). Jeder Zustandswechsel, der
         sie betrifft, ruft jetzt hierher, und sie liest, statt sich zu merken.
         """
+        # #249: JE CLIENT SEINE LEISTE. Der Worker ist niemandes Client, also
+        # sagt er es allen; jede andere Aktion nur ihrem Aufrufer -- die
+        # Ansicht, ueber die sie spricht, ist seine.
+        if clients is None:
+            clients = (self._clients()
+                       if threading.current_thread() is self._worker
+                       else (_client(),))
+        for client in clients:
+            with as_client(client):
+                message = self._where_message()
+            self._push_to(message, (client,))
+
+    def _where_message(self) -> dict:
+        """The bar's message for the CALLING client's view."""
         if self._view_path is None:
-            self.push({"k": "viewing", "live": True,
-                       "title": self._live_title(), "running": None})
-            return
+            return {"k": "viewing", "live": True,
+                    "title": self._live_title(), "running": None}
         title = ("new chat" if not self._view_path else
                  (self._stored_title(self._view_path)
                   or os.path.basename(self._view_path)))
-        self.push({"k": "viewing", "live": False, "title": title,
-                   # LEER, WENN NICHTS MEHR LAEUFT. Der Name des Chats, in dem
-                   # zuletzt gearbeitet wurde, ist keine Auskunft ueber jetzt.
-                   "running": self._live_title() if self._busy else None})
+        return {"k": "viewing", "live": False, "title": title,
+                # LEER, WENN NICHTS MEHR LAEUFT. Der Name des Chats, in dem
+                # zuletzt gearbeitet wurde, ist keine Auskunft ueber jetzt.
+                "running": self._live_title() if self._busy else None}
 
     def _mark_done(self, path: "str | None") -> None:
         """Ein Zug ist fertig geworden, waehrend jemand woanders hinsah.
@@ -10227,6 +11030,8 @@ class Api:
                    "collect fetches the verdict.",
         "/reset": "drop the context. The chat stays where it is.",
         "/context": "how much of the window the conversation is using.",
+        "/remote": "the phone mirror on this network: the QR code and the "
+                   "paired devices; /remote on|off|status|devices|forget <name>.",
         "/exit": "close the window.",
         "/quit": "close the window.",
     }
@@ -10274,6 +11079,8 @@ class Api:
             return self._drop_context()
         if word == "/context":
             return self._context_line()
+        if word == "/remote":
+            return self._remote_command(parts[1:])
         if word == "/mode":
             return self._mode_command(parts[1:])
         if word == "/model":
@@ -10305,6 +11112,10 @@ class Api:
             answer = crow_core.verify_start(self._conversation)
             self._sub_watch()
             return answer
+        # #249: from a phone, /exit leaves the phone's tab -- never the
+        # desktop window, the same rule as the close button (decision 5).
+        if _client() != DESKTOP:
+            return crow_core.REMOTE_PHONE_EXIT
         self.close()          # /exit, /quit
         return "closing."
 
@@ -11033,6 +11844,14 @@ class Api:
         # window they used to travel to the server as an ordinary question --
         # the input's own placeholder offers /tools, so the one it names is
         # answered where it is typed. #94 widened that to all of them.
+        #
+        # #249. DIE ANDEREN ANSICHTEN SEHEN DIE ZEILE AUCH. Der Absender hat sie
+        # schon gezeichnet (`go()`), also geht das `user` an die, die denselben
+        # Chat ansehen -- nie an ihn selbst, und ohne Telefon an niemanden.
+        caller = _client()
+        stripped = (text or "").strip()
+        if stripped and stripped.split()[0].lower() in crow_core.SLASH_COMMANDS:
+            self._push_to({"k": "user", "t": text}, self._peers())
         answer = self.slash_answer(text)
         if answer is not None:
             # AN EMPTY ANSWER IS "HANDLED, AND ALREADY SAID". `/mode <name>`
@@ -11075,8 +11894,16 @@ class Api:
                 # decision about where the next turn runs, as before.
                 if self._queued is not None and self._queued_to == self._view_path:
                     text = self._queued + "\n\n" + text
+                    self._queued_by.add(caller)
+                else:
+                    self._queued_by = {caller}
                 self._queued, self._queued_to = text, self._view_path
-                self.push({"k": "queued"})
+                # #249: MIT DEM TEXT. Beide Ansichten zeigen dieselbe gehaltene
+                # Blase -- die zusammengelegte, nicht die eigene Haelfte -- und
+                # zeichnen sie beim `idle`. An alle, die diesen Chat ansehen.
+                self._push_to({"k": "queued", "t": text,
+                               "i": [c["url"] for c in self._image_chips()],
+                               "by": caller}, self._peers(include_self=True))
                 return True
             # #165: EINE GETIPPTE ZEILE SETZT DEN MOTOR-ZAEHLER ZURUECK. Der
             # Deckel sichert gegen einen Plan, der ohne Aufsicht im Kreis
@@ -11090,10 +11917,27 @@ class Api:
             self._goal_reset()
             self._busy = True
             INTERRUPT.clear()
-            self._worker = threading.Thread(target=self._pump, args=(text,),
-                                            daemon=True)
-            self._worker.start()
-            return True
+            # #249: WER WOANDERS HINSIEHT, MEINT DIESEN CHAT. Die Zeile laeuft
+            # dort -- der Wechsel passiert im Worker vor dem Zug, wie bei einer
+            # gepufferten Zeile (#162), und nur der Absender geht mit.
+            target = self._view_path
+            peers = self._peers()
+            images = [c["url"] for c in self._image_chips()]
+            self._worker = threading.Thread(
+                target=self._pump, args=(text,),
+                kwargs={"target": target, "by": {caller}}
+                if target is not None else {}, daemon=True)
+            worker = self._worker
+        # #249: die anderen Ansichten zeichnen die Zeile, ihre Bilder, und
+        # stehen ab jetzt auf Stop -- wie der Absender nach seinem `go()`.
+        # VOR dem Start, sonst kaeme das erste Denken des Zuges vor der Zeile
+        # an; und ausserhalb des Locks, weil `push` sein eigenes nimmt.
+        if target is None and peers:
+            self._push_to({"k": "user", "t": text, "i": images}, peers)
+            self._push_to({"k": "chips", "c": []}, peers)
+            self._push_to({"k": "busy"}, peers)
+        worker.start()
+        return True
 
     def stop(self) -> None:
         # #143 E2: STOP REACHES THE SUBTASKS TOO. The flag stops the local
@@ -11178,17 +12022,46 @@ class Api:
         self._answer = "no"
         self._asked.clear()
         scope = crow_core.approval_scope(name, arguments)
-        self.push({"k": "ask", "name": name, "args": arguments,
-                   "scope": scope[1] if scope else ""})
+        ask = {"k": "ask", "name": name, "args": arguments,
+               "scope": scope[1] if scope else ""}
+        # #249: kept for a phone that connects while the question is open.
+        self._pending_ask = ask
+        self.push(ask)
         # Woken by answer(); the flag is also set when the window goes away, so
         # a closed window is a refusal rather than a hang.
-        self._asked.wait()
+        try:
+            self._asked.wait()
+        finally:
+            self._pending_ask = None
         return self._answer
 
     def answer(self, what: str) -> None:
-        """The page's click on an open question. Anything unknown is "no"."""
+        """The page's click on an open question. Anything unknown is "no".
+
+        #249: THE FIRST ANSWER WINS. Desktop and phone both show the card;
+        the late click finds the question already answered and changes
+        nothing, and the other view's card closes on `asked`."""
+        if self._asked.is_set():
+            return
         self._answer = what if what in ("yes", "always") else "no"
+        self._pending_ask = None
         self._asked.set()
+        self._push_asked("ask", {"yes": "allowed", "always":
+                                 "allowed, and from now on"}.get(
+                                     self._answer, "declined"))
+
+    def _push_asked(self, what: str, verdict: str = "",
+                    ident=None) -> None:
+        """#249: tell every OTHER view that this card was answered here."""
+        by = _client()
+        others = tuple(c for c in self._clients() if c != by)
+        if not others:
+            return
+        message = {"k": "asked", "what": what, "by": by,
+                   "t": crow_core.remote_answered_note(by, verdict)}
+        if ident is not None:
+            message["id"] = ident
+        self._push_to(message, others)
 
     def mode_menu(self) -> list:
         """#88's levels, for the dropdown. Built from the core, not from a list.
@@ -11224,6 +12097,7 @@ class Api:
         else:
             crow_core.decline_pending()
         self.push({"k": "pend", "items": crow_core.pending_view()})
+        self._push_asked("memory", "kept" if yes else "dropped")
 
     def set_mode(self, name: str) -> None:
         """Switch the release level, from the dropdown. Never mid-turn.
@@ -11352,71 +12226,81 @@ class Api:
         # Datei im Regal fuer einen Klick.
         if not self._switching and self._worker and self._worker.is_alive():
             self._view_path = ""
-            self.push({"k": "clear"})
-            self._hello()
-            self._say_where()
-            # Ein leerer Chat hat keinen Kontext, und das muss dastehen: der
-            # Zaehler des laufenden Chats waere hier eine Zahl ueber ein
-            # Gespraech, das es noch nicht gibt.
-            self.push({"k": "cost", "line": "", "share": None,
-                       "tokens": 0, "n_ctx": self._n_ctx})
+            # #249: eine Ansicht -- nur der Aufrufer sieht die leere Flaeche.
+            with self._only(_client()):
+                self.push({"k": "clear"})
+                self._hello()
+                self._say_where()
+                # Ein leerer Chat hat keinen Kontext, und das muss dastehen:
+                # der Zaehler des laufenden Chats waere hier eine Zahl ueber
+                # ein Gespraech, das es noch nicht gibt.
+                self.push({"k": "cost", "line": "", "share": None,
+                           "tokens": 0, "n_ctx": self._n_ctx})
             self._reload_rail()
             return
         self._view_path = None
         ok, kept = self._leave()
         if not ok:
-            self.push({"k": "fail",
-                       "t": "the chat could not be put aside -- nothing changed"})
+            with self._only(_client()):
+                self.push({"k": "fail", "t": "the chat could not be put aside "
+                                             "-- nothing changed"})
             return
-        if kept:
-            self.push({"k": "note", "t": "put aside as %s"
-                                         % os.path.basename(kept)})
-        self._conversation.reset()
-        self._current_path = None
-        self._current_title = None
-        # #143. The fresh chat needs a fresh delegation frame at once: without
-        # this push the page kept the previous chat's `here` values and drew
-        # no card for anything delegated in here -- measured 2026-08-27 as a
-        # fan-out with rail rows and no cards. Same drop `open()` does.
-        self._subs_sig = ""
-        self._push_subs()
-        # #119 OVERTURNS #101's ANSWER FOR THIS ONE EVENT. A new chat used to
-        # start from the template in roots.json; robin, on the built window:
-        # "ein neuer Chat soll immer wurzellos sein".
-        #
-        # WHY THE TEMPLATE STOPPED BEING HARMLESS. `_bind_root` writes `active`,
-        # so moving one chat into a project made that project the ground every
-        # later chat started on -- and with the rail GROUPED by the boundary,
-        # that is a new chat appearing inside a project nobody put it in. The
-        # template was invisible while it only decided what a tool could write.
-        #
-        # THE OTHER TWO CALLERS ARE UNTOUCHED: opening a chat that never chose
-        # still falls back to the template, and so does the launch -- which is
-        # the case #92 added it for. `_adopt_chat_root` is no longer one answer
-        # for three events, and the docstring there says so.
-        self._adopt_chat_root(None, fresh=True)
-        # #121. `Conversation.reset` dropped the old chat's pin; this takes the
-        # new one. A fresh chat is rootless by the decision above, so what it
-        # gets is the profile and a line saying there is no project -- until the
-        # user moves it into one, which re-pins through `_bind_root`.
-        self._pin_memory(None)
-        self._notes = []              # #173: ein neuer Chat hat keine Marken
-        self._timings = []            # #171: und keine Zuege
-        self._context_tokens = 0
-        self._promised_warm = False
-        self.push({"k": "clear"})     # the page no longer guesses; see crow.reset
-        self._hello()
-        # SESSION.JSON GOES WITH IT, and only after the chat has been read back
-        # off disk above. It still holds the conversation just put aside; left
-        # there, the next launch would restore it as the open chat AND list the
-        # archive file next to it -- the same chat twice, from one click.
-        self._forget_live()
-        self._reload_rail()
-        # #162: derselbe Nachtrag wie in `open` -- ein neuer Chat ist keine
-        # Ansicht mehr, also darf die Leiste nicht stehenbleiben.
-        self._say_where()
-        self.push({"k": "cost", "line": "", "share": None, "tokens": 0,
-                   "n_ctx": self._n_ctx})
+        # #249: WER DEN LAUFENDEN CHAT ANSAH UND NICHT MITGEHT, BLEIBT DORT --
+        # als Ansicht des eben weggelegten. Vor dem ersten Push, damit sein
+        # Bildschirm weder `clear` noch den neuen Chat bekommt.
+        pinned = self._pin_others(self._current_path or "", None)
+        with self._only(*self._live_clients()):
+            if kept:
+                self.push({"k": "note", "t": "put aside as %s"
+                                             % os.path.basename(kept)})
+            self._conversation.reset()
+            self._current_path = None
+            self._current_title = None
+            # #143. The fresh chat needs a fresh delegation frame at once: without
+            # this push the page kept the previous chat's `here` values and drew
+            # no card for anything delegated in here -- measured 2026-08-27 as a
+            # fan-out with rail rows and no cards. Same drop `open()` does.
+            self._subs_sig = ""
+            self._push_subs()
+            # #119 OVERTURNS #101's ANSWER FOR THIS ONE EVENT. A new chat used to
+            # start from the template in roots.json; robin, on the built window:
+            # "ein neuer Chat soll immer wurzellos sein".
+            #
+            # WHY THE TEMPLATE STOPPED BEING HARMLESS. `_bind_root` writes `active`,
+            # so moving one chat into a project made that project the ground every
+            # later chat started on -- and with the rail GROUPED by the boundary,
+            # that is a new chat appearing inside a project nobody put it in. The
+            # template was invisible while it only decided what a tool could write.
+            #
+            # THE OTHER TWO CALLERS ARE UNTOUCHED: opening a chat that never chose
+            # still falls back to the template, and so does the launch -- which is
+            # the case #92 added it for. `_adopt_chat_root` is no longer one answer
+            # for three events, and the docstring there says so.
+            self._adopt_chat_root(None, fresh=True)
+            # #121. `Conversation.reset` dropped the old chat's pin; this takes the
+            # new one. A fresh chat is rootless by the decision above, so what it
+            # gets is the profile and a line saying there is no project -- until the
+            # user moves it into one, which re-pins through `_bind_root`.
+            self._pin_memory(None)
+            self._notes = []              # #173: ein neuer Chat hat keine Marken
+            self._timings = []            # #171: und keine Zuege
+            self._context_tokens = 0
+            self._promised_warm = False
+            self.__dict__["_subs_sigs"] = {}
+            self.push({"k": "clear"})     # the page no longer guesses; see crow.reset
+            self._hello()
+            # SESSION.JSON GOES WITH IT, and only after the chat has been read back
+            # off disk above. It still holds the conversation just put aside; left
+            # there, the next launch would restore it as the open chat AND list the
+            # archive file next to it -- the same chat twice, from one click.
+            self._forget_live()
+            self._reload_rail()
+            # #162: derselbe Nachtrag wie in `open` -- ein neuer Chat ist keine
+            # Ansicht mehr, also darf die Leiste nicht stehenbleiben.
+            self._say_where()
+            self.push({"k": "cost", "line": "", "share": None, "tokens": 0,
+                       "n_ctx": self._n_ctx})
+        self._say_where(pinned)
 
     def _archive(self) -> str | None:
         """Write the open conversation to its own file. Its path, or None.
@@ -11656,10 +12540,55 @@ class Api:
         # Blick wieder ein Wechsel -- aber `_current_path` zeigt noch auf den
         # Chat, in dem gearbeitet wurde, und ohne diese Zeile vergliche die
         # naechste ihn mit sich selbst und taete gar nichts.
+        was = self._view_path
         self._view_path = None
         if self._current_path and os.path.abspath(path) == os.path.abspath(
                 self._current_path):
+            # #249: WER WOANDERS STAND, BEKOMMT DEN LAUFENDEN CHAT GEZEICHNET.
+            # Ohne das stand die Ansicht auf "live", der Bildschirm aber noch
+            # auf dem alten Chat -- fuer ein Telefon, das ein Wechsel am
+            # Fenster dort festgehalten hat, der Normalfall.
+            if was is not None:
+                self._view_path = was
+                self.view_live()
             return
+        # #249: bis zum Wechsel gehoert jede Meldung dem Aufrufer allein.
+        with self._only(_client()):
+            ok = self._open_read(path)
+        if ok is None:
+            return
+        restored = ok
+        pinned = self._pin_others(self._current_path or "", path)
+        with self._only(*self._live_clients()):
+            self._open_switch(path, restored)
+        self._say_where(pinned)
+
+    def _pin_others(self, left: str, new: "str | None") -> list:
+        """#249: before the live chat changes under everybody, every OTHER
+        client that was looking at it stays where it was -- as a view of the
+        chat just put aside (`left`) -- and a client that was already looking
+        at `new` is simply live in it now. The caller and `_movers` (who typed
+        the queued line) follow the switch. Returns who changed, for the bar.
+
+        robin, 2026-09-23: switching the chat on the phone never switches the
+        desktop, and the other way round."""
+        keep = set(self._movers) | {_client()}
+        changed = []
+        for client in self._clients():
+            if client in keep:
+                continue
+            view = self._views.get(client)
+            if view is None:
+                self._set_view(client, left)
+                changed.append(client)
+            elif new and self._same(view, new):
+                self._set_view(client, None)
+                changed.append(client)
+        return changed
+
+    def _open_read(self, path: str) -> "tuple | None":
+        """`open`'s first half: read the other chat, write this one away.
+        The restored tuple, or None when nothing may change."""
         # THE OTHER CHAT IS READ FIRST, and only then is this one let go of. The
         # order used to be the other way round, so an archive that turned out to
         # be unreadable had already cost the open chat a write.
@@ -11687,13 +12616,17 @@ class Api:
             # named and with nothing in it is a leftover and stays refused.
             if not self._stored_title(path):
                 self.push({"k": "fail", "t": "empty: %s" % os.path.basename(path)})
-                return
+                return None
             restored = ([], 0, False)
         ok, _ = self._leave()
         if not ok:
             self.push({"k": "fail", "t": "the open chat could not be "
                                          "put aside -- nothing changed"})
-            return
+            return None
+        return restored
+
+    def _open_switch(self, path: str, restored) -> None:
+        """`open`'s second half: the switch, drawn for the live clients."""
         messages, tokens, kv = restored
         self._conversation = Conversation(self._args.system)
         self._conversation.restore(messages)
@@ -11728,6 +12661,7 @@ class Api:
         # "Ich kann die Subtasks nicht mehr anklicken." The signature is
         # dropped so the push fires even though nothing changed.
         self._subs_sig = ""
+        self.__dict__["_subs_sigs"] = {}
         self._push_subs()
         # #162. AUCH DER ECHTE WECHSEL RAEUMT DIE MARKE WEG UND SAGT, WO MAN
         # STEHT. Beides fehlte, und beides faellt genau dann auf, wenn der Zug
@@ -11759,7 +12693,15 @@ class Api:
         einloest. Ein dritter Leser von `session_memory` waere eine dritte Stelle,
         die entscheidet, was der Kopf dieses Chats ist; der Kopienzaehler in der
         Suite haelt genau das fest, und er hat recht behalten.
+
+        #249: DIE ANSICHT DES AUFRUFERS, und nur er bekommt das Neuzeichnen.
+        Ein Telefon, das einen Chat oeffnet, bewegt das Fenster nicht.
         """
+        with self._only(_client()):
+            self._view_other_scoped(path)
+
+    def _view_other_scoped(self, path: str) -> None:
+        """`_view_other`'s body, inside the caller's `_only` scope."""
         try:
             restored = load_session(self._endpoint()["base_url"], None,
                                     path, model=self._model, with_kv=False)
@@ -11790,7 +12732,7 @@ class Api:
         self._push_cost_for(path, tokens)
         self._reload_rail()
 
-    def _hand_over(self, target: str) -> None:
+    def _hand_over(self, target: str, by=None) -> None:
         """Den Chat wechseln, weil die naechste Zeile einen anderen meint.
 
         LAEUFT IM WORKER, ZWISCHEN ZWEI ZUEGEN. `_switching` haelt die beiden
@@ -11808,6 +12750,21 @@ class Api:
         woanders, bekommt er seinen Chat zurueck: der Wechsel passiert unter ihm
         hindurch, und was er sieht, hat er selbst gewaehlt.
         """
+        # #249: WER DIE ZEILE GETIPPT HAT, GEHT MIT (`by`, bei #264s
+        # Zusammenlegen mehrere); alle anderen bleiben, wo sie sind. Der
+        # Worker selbst ist niemandes Client, also handelt er hier im Namen
+        # des ersten Tippers -- das Fenster, wenn es dabei war, wie bisher.
+        movers = frozenset(by) if by else frozenset({_client()})
+        lead = DESKTOP if DESKTOP in movers else sorted(movers)[0]
+        with as_client(lead):
+            self._movers = movers
+            try:
+                self._hand_over_as(target)
+            finally:
+                self._movers = frozenset()
+
+    def _hand_over_as(self, target: str) -> None:
+        """`_hand_over`'s body, run as the client who typed the line."""
         watching = self._view_path
         self._switching = True
         try:
@@ -11843,12 +12800,18 @@ class Api:
             return
         self._view_path = None
         self._done_paths.discard(self._current_path or "")
-        self.push({"k": "clear"})
-        self._draw_live()
+        # #249: das Neuzeichnen gehoert dem, der zurueckkehrt.
+        with self._only(_client()):
+            self.push({"k": "clear"})
+            self._draw_live()
 
     def _draw_live(self) -> None:
         """The live chat, drawn from memory: `view_live` after its clear, and
-        #209's reloaded page, which starts empty."""
+        #209's reloaded page, which starts empty. #249: for the caller only."""
+        with self._only(_client()):
+            self._draw_live_scoped()
+
+    def _draw_live_scoped(self) -> None:
         self._hello()
         # #173: AUS DEM BAND IM SPEICHER, nicht von Platte -- aus demselben
         # Grund, aus dem die Nachrichten aus `payload()` kommen: die Datei ist
@@ -11867,7 +12830,8 @@ class Api:
     # reverse, the first time either spelling changed.
     ARCHIVE_DIR = crow_core.ARCHIVE_DIR
 
-    def _replay(self, messages: list, notes: "list | None" = None) -> None:
+    def _replay(self, messages: list, notes: "list | None" = None,
+                guard: bool = True) -> None:
         """Draw a restored conversation the way a live one is drawn.
 
         THROUGH THE SAME SINK, and that is the whole fix. The first version
@@ -11900,13 +12864,18 @@ class Api:
 
         # DIE SPERRE UM DEN GANZEN DURCHLAUF: `push` schreibt jede Marke mit,
         # und ohne sie verdoppelte sich das Band bei jedem Zurueckwechseln.
-        self._replaying = True
+        # #249: `guard=False` fuer den Schnappschuss -- der sammelt nur, und
+        # die Sperre ist eine Instanz-Flagge, die sonst eine Notiz des
+        # laufenden Zuges verschluckte.
+        if guard:
+            self._replaying = True
         try:
             _replay_rows(self, messages, upto)
             # Was nach der letzten Nachricht passiert ist, steht auch nach ihr.
             upto(len(messages))
         finally:
-            self._replaying = False
+            if guard:
+                self._replaying = False
 
     def _archived(self) -> list:
         """What the user put away, out of .crow/archiv/, and the rollover
@@ -11960,9 +12929,18 @@ class Api:
         had drawn it last. They all come through here now, so the rail cannot
         contradict itself.
         """
+        # #249: JE CLIENT EINE RAIL, jede mit ihrer eigenen "angesehen"-Marke;
+        # der Inhalt ist fuer alle derselbe.
+        for client in self._clients():
+            with as_client(client):
+                message = self._rail_message()
+            self._push_to(message, (client,))
+
+    def _rail_message(self) -> dict:
+        """The rail as the CALLING client sees it (its viewed chat marked)."""
         spare = 1 if self._conversation.has_system else 0
         turns = len(self._conversation) - spare
-        self.push({"k": "rail",
+        return ({"k": "rail",
                    "title": self._live_title(),
                    "meta": ("no turn yet" if turns <= 0 else
                             "%d messages%s" % (turns, " · cache warm"
@@ -13609,6 +14587,288 @@ class Api:
         """
         self.push({"k": "mic", "state": "off", "blocked": crow_voice.available() or ""})
 
+    # ------------------------------------------------------------ #249 remote
+    #
+    # DER SPIEGEL FUERS TELEFON. Der Server ist `crow_remote`; hier steht nur,
+    # was das Fenster an ihm haelt: Start und Stopp, die Kopplungsfrage, der
+    # QR-Dialog, der Knopf in der Titelleiste und die eine Tuer, durch die ein
+    # Telefon diese Api ruft.
+
+    def remote_page(self) -> str:
+        """The phone's page: this window's PAGE with `__REMOTE__` set."""
+        return stamped_page(remote=True)
+
+    def _remote_call(self, name: str, args: list) -> object:
+        """`/api/<name>` from a phone. `crow_remote` has set the caller's id
+        and checked the allowlist; this checks it again, because a name
+        outside it reaching `getattr` would be every public method at once."""
+        if name not in REMOTE_ALLOWED:
+            raise KeyError(name)
+        return getattr(self, name)(*list(args or []))
+
+    def _remote_host(self) -> str:
+        """The LAN address to bind: the one chosen in the dialog while it is
+        still there, else the first one `crow_platform` ranks. Never 0.0.0.0."""
+        found = [ip for _iface, ip in lan_addresses()]
+        want = remote_host_setting()
+        if want and want in found:
+            return want
+        return found[0] if found else ""
+
+    def _remote_running(self) -> bool:
+        remote = self._remote
+        try:
+            return bool(remote is not None and remote.running())
+        except Exception:              # noqa: BLE001 -- a dead server is off
+            return False
+
+    def remote_start(self, persist: bool = True) -> str:
+        """Start the mirror on the LAN address and the fixed port. The
+        sentence for the person; `remote_enabled` is set only once it runs."""
+        if self._remote_running():
+            return crow_core.remote_on_line(self._remote.url)
+        module = remote_module()
+        factory = REMOTE_FACTORY or getattr(module, "Remote", None)
+        if factory is None:
+            return crow_core.REMOTE_MISSING
+        host = self._remote_host()
+        if not host:
+            return crow_core.REMOTE_NO_LAN
+        port = remote_port_setting()
+        store = (module.DeviceStore(crow_core.remote_devices_load,
+                                    crow_core.remote_devices_save)
+                 if module is not None else None)
+        remote = factory(host=host, port=port, page=self.remote_page,
+                         call=self._remote_call, allowed=REMOTE_ALLOWED,
+                         snapshot=self.state_snapshot,
+                         confirm=self._remote_confirm, store=store,
+                         upload_dir=os.path.join(PASTE_DIR, "remote"),
+                         log=lambda line: crow_core.log_note(line, "remote"))
+        try:
+            remote.start()
+        except (OSError, ValueError) as exc:
+            crow_core.log_note("remote: could not listen on %s:%d: %s"
+                               % (host, port, exc), "remote")
+            return crow_core.remote_start_failed(host, port, exc)
+        self._remote = remote
+        if persist:
+            doc = read_settings()
+            doc["remote_enabled"] = True
+            write_settings(doc)
+        crow_core.log_note("remote: listening on %s" % remote.url, "remote")
+        self._remote_state_push(force=True)
+        threading.Thread(target=self._remote_watch, args=(remote,),
+                         daemon=True).start()
+        return crow_core.remote_on_line(remote.url)
+
+    def remote_stop(self, persist: bool = True) -> str:
+        """`/remote off`: the server stops, every stream ends, the devices stay
+        paired -- they reconnect without scanning once it is on again."""
+        remote, self._remote = self._remote, None
+        if remote is not None:
+            try:
+                remote.stop()
+            except Exception:          # noqa: BLE001 -- off is off
+                pass
+            crow_core.log_note("remote: stopped", "remote")
+        if persist:
+            doc = read_settings()
+            doc["remote_enabled"] = False
+            write_settings(doc)
+        self._remote_state_push(force=True)
+        self._push_to({"k": "remotedlg", "open": False}, (DESKTOP,))
+        return crow_core.REMOTE_OFF_LINE
+
+    def remote_open(self) -> str:
+        """The phone icon and a bare `/remote`: start the mirror if it is off,
+        then show the QR dialog with a fresh single-use pairing code."""
+        said = self.remote_start()
+        if not self._remote_running():
+            return said
+        self._remote_dialog(fresh=True)
+        return said
+
+    def remote_forget(self, name: str) -> str:
+        """`/remote forget <name>` and the dialog's button: revoke one device;
+        its stream ends and its cookie is refused from now on."""
+        name = str(name or "").strip()
+        if not name:
+            return crow_core.REMOTE_USAGE
+        if self._remote is not None:
+            done = bool(self._remote.forget(name))
+        else:
+            done = self._forget_stored(name)
+        if done:
+            self._remote_dialog(fresh=False)
+            self._remote_state_push(force=True)
+        return crow_core.remote_forget_text(name, done)
+
+    @staticmethod
+    def _forget_stored(name: str) -> bool:
+        """Revoke a device while the server is off: straight out of the store,
+        matched the way `Remote.forget` matches (id, exact name, prefix)."""
+        want = name.casefold()
+        records = crow_core.remote_devices_load()
+        hit = ([r for r in records if str(r.get("id", "")).casefold() == want]
+               or [r for r in records
+                   if str(r.get("name", "")).casefold() == want]
+               or [r for r in records
+                   if str(r.get("name", "")).casefold().startswith(want)])
+        if len(hit) != 1:
+            return False
+        return crow_core.remote_devices_save(
+            [r for r in records if r is not hit[0]])
+
+    def remote_use_ip(self, ip: str) -> str:
+        """The dialog's address switch: remember the choice and listen there.
+        A phone paired on the other address scans again -- the cookie belongs
+        to the origin, and the origin is the address."""
+        if ip not in [found for _iface, found in lan_addresses()]:
+            return crow_core.REMOTE_NO_LAN
+        doc = read_settings()
+        doc["remote_host"] = ip
+        write_settings(doc)
+        if self._remote is not None:
+            self.remote_stop(persist=False)
+        said = self.remote_start()
+        if self._remote_running():
+            self._remote_dialog(fresh=True)
+        return said
+
+    def remote_allow(self, ident, yes) -> bool:
+        """The desktop's Allow / Deny on a new device. Desktop-only: a phone
+        may never answer its own -- or another phone's -- pairing."""
+        if _client() != DESKTOP:
+            return False
+        try:
+            pending = self._remote_asks.get(int(ident))
+        except (TypeError, ValueError):
+            return False
+        if pending is None:
+            return False
+        pending[1] = bool(yes)
+        pending[0].set()
+        return True
+
+    def _remote_confirm(self, name: str) -> bool:
+        """Called by the server's /pair on its own thread: put the card on the
+        desktop and WAIT, like `_ask_page`. No answer within the time is a
+        deny -- a photographed QR must not pair because nobody was there."""
+        self._remote_ask_n += 1
+        ident = self._remote_ask_n
+        pending = [threading.Event(), False]
+        self._remote_asks[ident] = pending
+        self._push_to({"k": "remoteask", "id": ident, "name": name,
+                       "t": crow_core.remote_ask_line(name)}, (DESKTOP,))
+        answered = pending[0].wait(crow_core.REMOTE_CONFIRM_S)
+        self._remote_asks.pop(ident, None)
+        allowed = bool(answered and pending[1])
+        self._push_to({"k": "remoteasked", "id": ident,
+                       "t": crow_core.remote_asked_line(name, allowed,
+                                                        answered)},
+                      (DESKTOP,))
+        if allowed:
+            self._remote_dialog(fresh=False)
+        return allowed
+
+    def _remote_devices(self) -> list:
+        """The paired devices -- live from the server, else from the store."""
+        if self._remote is not None:
+            try:
+                return list(self._remote.devices())
+            except Exception:          # noqa: BLE001 -- fall back to disk
+                pass
+        return [{k: v for k, v in d.items() if k != "token_sha256"}
+                for d in crow_core.remote_devices_load()]
+
+    def _remote_firewall(self) -> str:
+        """The one line that opens the port, if a Linux firewall is up."""
+        remote = self._remote
+        host = getattr(remote, "host", "") or self._remote_host()
+        return crow_core.remote_firewall_line(remote_port_setting(), host,
+                                              crow_core.firewall_active())
+
+    def _remote_status(self) -> str:
+        """`/remote status`."""
+        on = self._remote_running()
+        return crow_core.remote_status_text(
+            on=on, url=self._remote.url if on else "",
+            devices=self._remote_devices(),
+            firewall=self._remote_firewall())
+
+    def _remote_dialog(self, fresh: bool) -> None:
+        """The QR dialog, to the desktop only. `fresh` mints a new single-use
+        pairing code; a refresh (a device came, went, was forgotten) keeps
+        the one on screen."""
+        remote = self._remote
+        if remote is None:
+            self._push_to({"k": "remotedlg", "open": False}, (DESKTOP,))
+            return
+        if fresh or not getattr(self, "_remote_pair", ""):
+            self._remote_pair = remote.new_pairing()
+        module = remote_module()
+        qr = getattr(module, "qr_svg", None)
+        try:
+            svg = qr(self._remote_pair) if qr else ""
+        except Exception:              # noqa: BLE001 -- the URL is still there
+            svg = ""
+        devices = [{"id": d.get("id", ""), "name": d.get("name", ""),
+                    "online": bool(d.get("online"))}
+                   for d in self._remote_devices()]
+        self._push_to({"k": "remotedlg", "open": True, "fresh": bool(fresh),
+                       "url": remote.url, "svg": svg,
+                       "ip": getattr(remote, "host", ""),
+                       "ips": [[iface, ip] for iface, ip in lan_addresses()],
+                       "devices": devices, "hint": self._remote_firewall()},
+                      (DESKTOP,))
+
+    def _remote_state_push(self, force: bool = False) -> None:
+        """The title-bar icon: on or off, and how many phones are connected.
+        Desktop-only, and only on change unless `force`."""
+        on = self._remote_running()
+        online = (sum(1 for d in self._remote_devices() if d.get("online"))
+                  if on else 0)
+        state = (on, online)
+        if not force and state == self._remote_seen:
+            return
+        self._remote_seen = state
+        self._push_to({"k": "remote", "on": on, "online": online,
+                       "t": crow_core.remote_icon_title(on, online)},
+                      (DESKTOP,))
+
+    def _remote_watch(self, remote) -> None:
+        """While this server runs: the icon's dot follows who is connected,
+        and an open dialog's device list with it. A poll, because a stream
+        that a locked phone drops never says goodbye."""
+        seen = None
+        while self._remote is remote:
+            try:
+                devices = [(d.get("id"), bool(d.get("online")))
+                           for d in remote.devices()]
+            except Exception:          # noqa: BLE001 -- stopped under us
+                return
+            if devices != seen:
+                if seen is not None:
+                    self._remote_dialog(fresh=False)
+                seen = devices
+            self._remote_state_push()
+            time.sleep(2.0)
+
+    def _remote_command(self, rest: list) -> str:
+        """`/remote`, the window's answer. Bare = the icon (start, dialog)."""
+        sub = rest[0].lower() if rest else ""
+        if sub in ("", "on"):
+            return self.remote_open()
+        if sub == "off":
+            return self.remote_stop()
+        if sub == "status":
+            return self._remote_status()
+        if sub == "devices":
+            return crow_core.remote_devices_text(self._remote_devices())
+        if sub == "forget":
+            return self.remote_forget(" ".join(rest[1:]))
+        return crow_core.REMOTE_USAGE
+
     def close(self) -> None:
         """Both copies of the open chat, then the window.
 
@@ -13621,7 +14881,15 @@ class Api:
         the server's KV slot on every single turn -- the one thing the core
         says to do once, on the way out.
         """
+        # #249: A PHONE ASKING TO CLOSE CLOSES ITS TAB, never this window --
+        # the page does that itself; this is the door for anything else.
+        if _client() != DESKTOP:
+            return
         INTERRUPT.set()
+        # #249: the mirror goes with the window; `remote_enabled` stays, so it
+        # comes back with the next one.
+        if self._remote is not None:
+            self.remote_stop(persist=False)
         try:
             if self._current_path:
                 self._archive()            # the rail's copy, else a turn behind
@@ -13693,7 +14961,9 @@ class Api:
             # all in a fresh chat (robin, 2026-08-27, screenshot 2). One side
             # computing both in the same breath cannot drift, and a wrong
             # frame heals on the next tick.
-            row["here"] = parent == (self._current_path or "")
+            # #249: "DER OFFENE CHAT" IST DER DES AUFRUFERS -- das Telefon kann
+            # einen anderen offen haben als das Fenster.
+            row["here"] = parent == (self._viewed_path() or "")
             items.append(row)
         return items
 
@@ -13701,16 +14971,28 @@ class Api:
         """One `subs` event per CHANGE, never per tick. The signature carries
         the clock's whole second, so a running subtask updates about once a
         second and a settled registry is silent."""
-        items = self._subs_items()
-        # `here` is in the signature: a chat switch flips it without touching
-        # state or clock, and the page must hear about exactly that.
-        # #281: `closed` too -- the card's `×` changes nothing else.
-        sig = json.dumps([[r["i"], r["st"], int(r["s"]), r["tok"],
-                           bool(r["path"]), r["here"], r.get("closed", False)]
-                          for r in items])
-        if sig != self._subs_sig:
-            self._subs_sig = sig
-            self.push({"k": "subs", "items": items})
+        # #249: JE CLIENT, weil `here` an seiner Ansicht haengt; die Signatur
+        # des Fensters bleibt `_subs_sig`, die der Geraete stehen daneben.
+        for client in self._clients():
+            with as_client(client):
+                items = self._subs_items()
+            # `here` is in the signature: a chat switch flips it without
+            # touching state or clock, and the page must hear about exactly
+            # that. #281: `closed` too -- the card's close changes nothing else.
+            sig = json.dumps([[r["i"], r["st"], int(r["s"]), r["tok"],
+                               bool(r["path"]), r["here"],
+                               r.get("closed", False)]
+                              for r in items])
+            if client == DESKTOP:
+                if sig == self._subs_sig:
+                    continue
+                self._subs_sig = sig
+            else:
+                sigs = self.__dict__.setdefault("_subs_sigs", {})
+                if sig == sigs.get(client):
+                    continue
+                sigs[client] = sig
+            self._push_to({"k": "subs", "items": items}, (client,))
 
     def _subs_ticker(self, stopped: "threading.Event") -> None:
         """Beside the turn, because the turn thread is the one that blocks in
@@ -13766,7 +15048,8 @@ class Api:
         except (TypeError, ValueError):
             return 0
 
-    def _pump(self, text: str) -> None:
+    def _pump(self, text: str, target: "str | None" = None,
+              by: "set | None" = None) -> None:
         """#138c. Ein Zug nach dem anderen, auf einem Thread.
 
         DIE SCHLEIFE IST DER GANZE MECHANISMUS. `_run` endet erst nach dem
@@ -13788,6 +15071,13 @@ class Api:
         # on the local model server -- off again on both ways out below.
         self._pane_throttle(True)
         try:
+            # #249: eine Zeile aus einer fremden Ansicht -- erst dorthin, dann
+            # laufen. Das Neuzeichnen hat die getippte Zeile geloescht, also
+            # kommt sie hier fuer alle, die jetzt dort stehen, zurueck.
+            if target is not None:
+                self._hand_over(target, by)
+                self.push({"k": "user", "t": text})
+                self.push({"k": "busy"})
             while True:
                 self._run(text)
                 # #162. FERTIG, UND NIEMAND SAH HIN. Die Ausgabe dieses Zuges
@@ -13796,7 +15086,9 @@ class Api:
                 # er sich melden kann. Ein Sprung in den Chat waere die andere
                 # Moeglichkeit und die falsche: sie nimmt dem Nutzer den Chat
                 # weg, in dem er gerade schreibt.
-                if self._view_path is not None:
+                # #249: "NIEMAND" HEISST JETZT: kein Client sah den laufenden
+                # Chat -- ein Telefon, das zusah, hat ihn gelesen.
+                if not self._live_clients():
                     self._mark_done(self._current_path)
                 # #165. DAS PANEL NACH JEDEM ZUG, denn der Zug hat vielleicht
                 # gerade einen Schritt abgehakt.
@@ -13804,6 +15096,7 @@ class Api:
                 with self._queue_lock:
                     text, self._queued = self._queued, None
                     target, self._queued_to = self._queued_to, None
+                    by, self._queued_by = set(self._queued_by), set()
                     if text is not None:
                         # #264 / #165: a queued line is a typed line, and a
                         # typed line resets the engine's caps and counters --
@@ -13844,7 +15137,7 @@ class Api:
                 # werden darf, ohne einem laufenden Zug seine Conversation zu
                 # entziehen.
                 if target is not None:
-                    self._hand_over(target)
+                    self._hand_over(target, by)
                 INTERRUPT.clear()
                 # DIE SEITE ERFAEHRT, DASS DAS WARTEN VORBEI IST. Sie steht
                 # seit `send` auf gesperrt, aber mit dem Wartehinweis darunter;
@@ -13858,6 +15151,7 @@ class Api:
                 # #162: mit dem Text faellt auch sein Ziel. Ein Ziel ohne Zeile
                 # waere ein Wechsel, den niemand angefordert hat.
                 self._queued_to = None
+                self._queued_by = set()
             # DERSELBE GRUND WIE OBEN, und dieser Weg braucht ihn mehr: ein Zug,
             # der wirft, hinterliesse sonst eine Kachel, die ewig rechnet.
             self._reload_rail()
@@ -14261,37 +15555,9 @@ def main(argv: list[str] | None = None) -> int:
             "      The terminal client needs nothing: python cli/crow.py\n")
         return 2
 
-    page = (PAGE.replace("__BG__", CROW_BG)
-                .replace("__ACCENT__", CROW_ACCENT_HEX)
-                .replace("__BEVEL__", BANNER_BEVEL_HEX)
-                .replace("__TEXT__", CROW_TEXT_HEX)
-                .replace("__TIMEOUT__", "%.0f" % READ_TIMEOUT_S)
-                # ON THE ELEMENT BEFORE THE PAGE IS HANDED OVER, not applied by
-                # a script after load. A window that painted itself dark and
-                # then switched would show the wrong theme for a frame on every
-                # single start -- and the frame is exactly the moment somebody
-                # looks at it.
-                .replace("__THEME__", current_theme())
-                .replace("__MEMICON__", MEMORY_ICON)
-                # #119. THE SAME REASON THE THEME IS STAMPED HERE: a rail that
-                # was drawn open and then folded away by a script after load
-                # would do it on every start, and that frame is the moment
-                # somebody is looking at the window.
-                .replace("__RAIL__", "open" if rail_open() else "shut")
-                .replace("__CODE__", "open" if code_open() else "shut")
-                # #156: dieselbe Regel wie fuer Rail und Code -- der Zustand
-                # steht auf dem Element, bevor die Seite uebergeben wird.
-                .replace("__GIT__", "open" if git_open() else "shut")
-                .replace("__BROWSER__", "open" if browser_open() else "shut")
-                .replace("__CODEW__", str(code_width_setting()))
-                .replace("__MARKDARK__", mark_svg("dark"))
-                # WHO MOVES THE WINDOW, stamped on the page for the reason the
-                # theme is stamped on it: the answer decides what the first
-                # mousedown on the title bar does, and a script that worked it
-                # out after load would be one frame late on every start.
-                .replace("__NATIVEDRAG__",
-                         "false" if crow_platform.IS_WINDOWS else "true")
-                .replace("__MARKLIGHT__", mark_svg("light")))
+    # #249: the chain lives in `stamped_page`, shared with the phone's
+    # variant of the same page.
+    page = stamped_page()
 
     api = Api(args)
     # #127. BEFORE THE WINDOW: the shell reads the application id when it
@@ -14362,6 +15628,12 @@ def main(argv: list[str] | None = None) -> int:
     if not crow_platform.IS_WINDOWS:
         window.events.before_show += api.pane_embed
     threading.Thread(target=api.pump, daemon=True).start()
+    # #249: `remote_enabled` -- the mirror starts with the window, so the
+    # phone's home-screen icon works whenever Crow is open. Its sentence goes
+    # to crow.log; a window must open even when the LAN is not there.
+    if remote_enabled():
+        crow_core.log_note("remote: " + api.remote_start(persist=False),
+                           "remote")
     # The styles can only be set once the window exists, so this runs as the
     # start-up callback rather than beside create_window.
     def styles(*_) -> None:

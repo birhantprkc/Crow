@@ -1054,6 +1054,7 @@ HELP = """commands:
   /subtasks      where every delegated subtask stands
   /reset         drop the context (costs a full re-prefill)
   /context       message count in the current context
+  /remote        the phone mirror -- window-only for now
   /exit, /quit   leave
 """
 
@@ -1104,6 +1105,13 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
 
     if line == "/tools":
         print(format_tools())
+        return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
+
+    # #249. THE PHONE MIRROR IS THE WINDOW'S IN STAGE 1: the terminal prints
+    # no dict stream a phone could follow yet. Answered here rather than sent
+    # to the model as a question about the word; the sentence is the core's.
+    if line == "/remote" or line.startswith("/remote "):
+        print(crow_core.REMOTE_TUI_NOTE + "\n")
         return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
 
     # #129. THE WHOLE ANSWER IS THE CORE'S, arguments and all. The window runs

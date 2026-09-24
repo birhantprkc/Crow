@@ -137,6 +137,22 @@ crow_core.LOG_FILE = os.path.join(_SANDBOX, "log", "crow.log")
 crow_gui.PASTE_DIR = os.path.join(_NOWHERE, "pastes")
 crow_gui.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
 crow_gui.SETTINGS_FILE = os.path.join(_SANDBOX, "has-no-settings", "settings.json")
+
+
+# #249: KEIN FALL OEFFNET JE EINEN ECHTEN PORT. Der Standard-Doppelgaenger
+# weigert sich zu starten -- so beantwortet auch die Schleife ueber alle
+# Slash-Befehle ein nacktes `/remote`, ohne zu lauschen und ohne
+# `remote_enabled` in die Sandbox zu schreiben. Die Remote-Faelle setzen ihren
+# eigenen, der startet.
+class _RemoteRefuses:
+    def __init__(self, **_kw):
+        pass
+
+    def start(self):
+        raise OSError("the suite never listens")
+
+
+crow_gui.REMOTE_FACTORY = _RemoteRefuses
 import crow_voice      # noqa: E402
 
 
@@ -8665,7 +8681,8 @@ class ALineTypedDuringTheReviewIsNotLostTests(ApiCase):
         api.send("noch eine")
         self.assertEqual([m["k"] for m in api._seen], ["queued"])
         source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
-        self.assertIn('case "queued": this.queuedLine();', source)
+        # #249: the push carries the joined text now, so the case passes it on.
+        self.assertIn('case "queued": this.queuedLine(e);', source)
         self.assertIn("the memory review is finishing", source)
 
     def test_the_page_is_told_when_the_wait_is_over(self):
@@ -13077,6 +13094,686 @@ class StopPausesTheGoalEngineTests(ApiCase):
         self.assertEqual(len(ran), 3)
         self.assertFalse(any(m.get("t", "").startswith("goal mode paused")
                              for m in api._seen))
+
+
+# ======================================================================= #249
+#
+# THE PHONE MIRROR, Api side. No socket anywhere: `_FakeRemote` holds
+# `crow_remote.Remote`'s contract (publish with `to`, device ids, pairing) and
+# records what each device would have received, the desktop's page is `_out`.
+
+PHONE = "d-phone0000001"
+
+
+class _FakeRemote:
+    """`crow_remote.Remote` as the Api sees it, recording every publish."""
+
+    def __init__(self, **kw):
+        self.kw = kw
+        self.host = kw.get("host", "192.168.1.5")
+        self.port = kw.get("port", 8765)
+        self.url = "http://%s:%d/" % (self.host, self.port)
+        self.published: list = []
+        self.ids = [PHONE]
+        self.online = {PHONE: True}
+        self.names = {PHONE: "iPhone (Safari)"}
+        self.forgot: list = []
+        self._running = False
+
+    def start(self):
+        self._running = True
+
+    def stop(self):
+        self._running = False
+
+    def running(self):
+        return self._running
+
+    def new_pairing(self):
+        return self.url + "#t=pairing-token"
+
+    def publish(self, message, to=None):
+        self.published.append((dict(message), None if to is None else list(to)))
+
+    def device_ids(self):
+        return list(self.ids)
+
+    def devices(self):
+        return [{"id": i, "name": self.names.get(i, i),
+                 "online": self.online.get(i, False)} for i in self.ids]
+
+    def forget(self, name):
+        for i in list(self.ids):
+            if i == name or self.names.get(i, "").lower().startswith(
+                    name.lower()):
+                self.ids.remove(i)
+                self.forgot.append(i)
+                return True
+        return False
+
+    def got(self, device=PHONE) -> list:
+        """What `device` received, in order."""
+        return [m for m, to in self.published if to is None or device in to]
+
+
+class RemoteCase(ApiCase):
+    """An Api with one paired phone attached (no server started)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._before_remote = (crow_gui.SETTINGS_FILE, crow_gui.REMOTE_FACTORY,
+                               crow_gui.lan_addresses)
+        self.addCleanup(self._undo_remote)
+        crow_gui.SETTINGS_FILE = os.path.join(self.dir, "settings.json")
+
+    def _undo_remote(self) -> None:
+        (crow_gui.SETTINGS_FILE, crow_gui.REMOTE_FACTORY,
+         crow_gui.lan_addresses) = self._before_remote
+
+    def mirrored(self, *argv):
+        api = self.api(*argv)
+        api._remote = _FakeRemote()
+        api._remote.start()
+        self.drained(api)
+        return api
+
+    def as_phone(self, fn, *args):
+        with crow_gui.as_client(PHONE):
+            return fn(*args)
+
+    def saved_chat(self, api, first="the chat on disk"):
+        """A chat written to disk, and a different one live. Its path."""
+        self.a_chat(api, first)
+        ok, saved = api._leave()
+        self.assertTrue(ok)
+        api._conversation.reset()
+        api._current_path = None
+        self.a_chat(api, "the chat that is running")
+        self.drained(api)
+        api._remote.published.clear()
+        return saved
+
+    def worker(self, api):
+        """A running turn, seen from the bridge thread (see #162's `busy`)."""
+        gate = threading.Event()
+        thread = threading.Thread(target=gate.wait, daemon=True)
+        thread.start()
+        self.addCleanup(gate.set)
+        api._worker = thread
+        api._busy = True
+        return gate
+
+
+class RemoteApiParityTests(RemoteCase):
+    """#249 decision 5 as a table: every page method is proxied 1:1 or bound
+    to the desktop with a stated replacement -- and a call from one client
+    produces the push the other one needs."""
+
+    PAGE_METHODS = 93          # 88 at fb31ca2 + the five pairing controls
+
+    def page_methods(self) -> set:
+        page = crow_gui.PAGE
+        return set(re.findall(r"pywebview\.api\.([A-Za-z_]+)", page))
+
+    def test_every_page_method_is_classified_exactly_once(self):
+        called = self.page_methods()
+        bound = set(crow_gui.REMOTE_DESKTOP_BOUND)
+        self.assertEqual(len(called), self.PAGE_METHODS,
+                         "a page method was added or removed -- classify it "
+                         "in REMOTE_PROXIED or REMOTE_DESKTOP_BOUND")
+        self.assertFalse(crow_gui.REMOTE_PROXIED & bound, "classified twice")
+        self.assertEqual(called, crow_gui.REMOTE_PROXIED | bound,
+                         "unclassified: %s / not on the page: %s" % (
+                             sorted(called - crow_gui.REMOTE_PROXIED - bound),
+                             sorted((crow_gui.REMOTE_PROXIED | bound) - called)))
+        for name in called:
+            self.assertTrue(callable(getattr(crow_gui.Api, name, None)), name)
+
+    def test_every_bound_method_says_what_the_phone_does(self):
+        for name, how in crow_gui.REMOTE_DESKTOP_BOUND.items():
+            self.assertIn(how, crow_gui.REMOTE_PHONE_DOES, name)
+
+    def test_the_allowlist_is_the_proxied_set_plus_what_still_runs_here(self):
+        allowed = crow_gui.REMOTE_ALLOWED
+        self.assertTrue(crow_gui.REMOTE_PROXIED <= allowed)
+        self.assertEqual(allowed - crow_gui.REMOTE_PROXIED,
+                         {"stage_image", "reveal_path", "roll_show",
+                          "provider_authorise"})
+        # NEGATIVE: the window, the layout and the pairing controls never.
+        for name in ("maximise", "close", "set_theme", "rail_width",
+                     "pane_go", "remote_allow", "remote_open", "copy"):
+            self.assertNotIn(name, allowed)
+
+    def test_a_public_method_the_page_never_calls_is_refused(self):
+        api = self.mirrored()
+        for name in ("pump", "on_drop", "state_snapshot", "remote_page"):
+            self.assertNotIn(name, crow_gui.REMOTE_ALLOWED)
+            with self.assertRaises(KeyError):
+                self.as_phone(api._remote_call, name, [])
+
+    def test_a_phone_cannot_answer_a_pairing(self):
+        """Desktop-only in the table AND in the method: a paired phone must
+        not let in the next one."""
+        api = self.mirrored()
+        api._remote_asks[1] = [threading.Event(), False]
+        self.assertFalse(self.as_phone(api.remote_allow, 1, True))
+        self.assertFalse(api._remote_asks[1][0].is_set())
+        self.assertTrue(api.remote_allow(1, True))
+
+    def _png(self) -> str:
+        path = os.path.join(self.dir, "shot.png")
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + b"\0" * 32)
+        return path
+
+    def test_a_call_from_one_client_reaches_the_other(self):
+        """Table-driven: each state-changing proxied method, called from the
+        phone, puts its push on the DESKTOP's queue -- and from the desktop,
+        on the phone's stream."""
+        cases = [
+            ("set_mode", lambda api: ["manual"], "mode"),
+            ("set_tools", lambda api: [True], "tools"),
+            ("stage_image", lambda api: [self._png()], "chips"),
+            ("unstage_image", lambda api: [0], "chips"),
+            ("answer_memory", lambda api: [False], "pend"),
+            ("send", lambda api: ["/context"], "user"),
+            ("close_goal", lambda api: [], "goal"),
+        ]
+        for caller, other in ((PHONE, crow_gui.DESKTOP),
+                              (crow_gui.DESKTOP, PHONE)):
+            for name, args, kind in cases:
+                with self.subTest(name=name, caller=caller):
+                    api = self.mirrored()
+                    if name == "unstage_image":
+                        api.stage_image(self._png())
+                        self.drained(api)
+                        api._remote.published.clear()
+                    with crow_gui.as_client(caller):
+                        api._remote_call(name, args(api)) \
+                            if caller == PHONE else getattr(api, name)(*args(api))
+                    got = (self.drained(api) if other == crow_gui.DESKTOP
+                           else api._remote.got(PHONE))
+                    self.assertIn(kind, [m.get("k") for m in got],
+                                  "%s from %s never reached %s" % (name, caller, other))
+
+    def test_the_phone_bridge_proxies_and_keeps_the_desktop_bound_local(self):
+        """The page half, run in node: the Proxy POSTs a proxied call with
+        its JSON arguments, answers a layout call itself (no request -- the
+        desktop's settings are never written from a phone), and runs a
+        desktop-bound call on the desktop with a note."""
+        node = _node()
+        if not node:
+            self.skipTest("no node on this machine")
+        import subprocess
+        page = crow_gui.stamped_page(remote=True)
+        start = page.index("window.CROW_REMOTE = true;")
+        boot = page[start:page.index("</script>", start)]
+        js = ("const posts=[], notes=[];\n"
+              "const window={open(){}, close(){}, addEventListener(){},\n"
+              "  dispatchEvent(){}, prompt(){return null;}};\n"
+              "window.crow={note(t){notes.push(t);}, on(){}};\n"
+              "const document={hidden:true, addEventListener(){},\n"
+              "  getElementById(){return null;}, documentElement:{classList:{add(){}}}};\n"
+              "const location={hash:'', pathname:'/', search:''};\n"
+              "const history={replaceState(){}};\n"
+              "function fetch(path, init){ posts.push([path, init.body]);\n"
+              "  return Promise.resolve({ok:true, status:200, json(){return Promise.resolve('');}}); }\n"
+              "const crow=window.crow;\n"
+              + boot +
+              "\nconst api=window.pywebview.api;\n"
+              "Promise.all([api.set_theme('light'), api.rail_width(300),\n"
+              "  api.maximise(), api.send('hi'), api.reveal_path('/x')])\n"
+              ".then(r=>console.log(JSON.stringify({posts, notes, r})));\n")
+        done = subprocess.run([node, "-e", js], capture_output=True, text=True,
+                              encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(out["posts"], [["/api/send", '["hi"]'],
+                                        ["/api/reveal_path", '["/x"]']])
+        self.assertEqual(out["notes"], [crow_core.REMOTE_PHONE_TEXT["ondesk"]])
+
+    def test_the_phone_page_is_this_page_with_the_flag(self):
+        phone = crow_gui.stamped_page(remote=True)
+        desk = crow_gui.stamped_page()
+        self.assertIn("window.CROW_REMOTE = true;", phone)
+        self.assertIn('name="viewport"', phone)
+        self.assertIn("#wbtns,.grip,#remotetoggle{display:none", phone)
+        self.assertIn('"set_theme": "layout"', phone)
+        # NEGATIVE: the desktop's page has none of it, and no hook is left.
+        self.assertIn("window.CROW_REMOTE = false;", desk)
+        self.assertNotIn('name="viewport"', desk)
+        self.assertNotIn("#wbtns,.grip,#remotetoggle", desk)
+        for page in (phone, desk):
+            self.assertNotIn("__REMOTE", page)
+        self.assertEqual(self.mirrored().remote_page(), phone)
+
+
+class RemoteMirrorTests(RemoteCase):
+    """#249 "Expected result", RemoteMirrorTests: the eight bullets."""
+
+    # 1 -------------------------------------------------------------------
+    def test_a_line_from_the_phone_is_drawn_once_on_each_view(self):
+        api = self.mirrored()
+        ran = []
+        api._run = ran.append
+        self.assertTrue(self.as_phone(api.send, "hello"))
+        api._worker.join(5)
+        self.assertEqual(ran, ["hello"])
+        desk = [m for m in self.drained(api) if m.get("k") == "user"]
+        self.assertEqual([m["t"] for m in desk], ["hello"],
+                         "the desktop must draw the phone's line exactly once")
+        phone = [m for m in api._remote.got() if m.get("k") == "user"]
+        self.assertEqual(phone, [], "the phone drew its own line in go()")
+
+    def test_a_line_from_the_desktop_reaches_the_phone(self):
+        api = self.mirrored()
+        api._run = lambda text: None
+        api.send("from the desk")
+        api._worker.join(5)
+        self.assertEqual([m["t"] for m in api._remote.got()
+                          if m.get("k") == "user"], ["from the desk"])
+        self.assertIn("busy", [m.get("k") for m in api._remote.got()])
+        self.assertEqual([m for m in self.drained(api) if m.get("k") == "user"],
+                         [], "the desktop echoed its own line")
+
+    # 2 -------------------------------------------------------------------
+    def test_two_lines_mid_turn_are_one_queued_bubble_on_both_views(self):
+        api = self.mirrored()
+        api._busy = True
+        self.as_phone(api.send, "from the phone")
+        api.send("from the desk")
+        joined = "from the phone\n\nfrom the desk"
+        self.assertEqual(api._queued, joined)
+        desk = [m for m in self.drained(api) if m.get("k") == "queued"]
+        phone = [m for m in api._remote.got() if m.get("k") == "queued"]
+        self.assertEqual(desk[-1]["t"], joined)
+        self.assertEqual(phone[-1]["t"], joined)
+        self.assertEqual(api._queued_by, {PHONE, crow_gui.DESKTOP})
+
+        # AND IT RUNS AHEAD OF THE GOAL NUDGE (#264 unchanged).
+        ran = []
+        nudges = iter(["the nudge"])
+        api._run = ran.append
+        api._goal_nudge = lambda: next(nudges, None)
+        api._worker = threading.current_thread()
+        api._pump("the running turn")
+        self.assertEqual(ran, ["the running turn", joined, "the nudge"])
+
+    def test_the_page_holds_the_servers_text_and_draws_it_at_idle(self):
+        """The page half, run in node: `queuedLine(e)` takes the joined text
+        from the push, `idle()` releases it as the user's bubble."""
+        node = _node()
+        if not node:
+            self.skipTest("no node on this machine")
+        import subprocess
+        src = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        start = src.index("  queuedLine(e){")
+        end = src.index("  // #164. DAS ZIELPANEL")
+        rel = src.index("  release(){")
+        rel_end = src.index("  // #264. A Crow command is a first word")
+        js = ("const log=[];\n"
+              "const el={textContent:'',classList:{add(){},remove(){}}};\n"
+              "const $=s=>el; const go=el;\n"
+              "const crow={running:false,viewingOther:false,held:null,\n"
+              "  face(){}, user(t){log.push(['user',t]);}, userImages(i){},\n"
+              + src[start:end] + src[rel:rel_end] + "};\n"
+              "crow.queuedLine({k:'queued',t:'a\\n\\nb',i:[]});\n"
+              "crow.release();\n"
+              "console.log(JSON.stringify({log, held:crow.held}));\n")
+        done = subprocess.run([node, "-e", js], capture_output=True, text=True,
+                              encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(out["log"], [["user", "a\n\nb"]])
+        self.assertIsNone(out["held"])
+
+    # 3 -------------------------------------------------------------------
+    def test_the_phone_answers_and_the_desktop_card_closes(self):
+        api = self.mirrored()
+        said = []
+        thread = threading.Thread(
+            target=lambda: said.append(api._ask_page("run_command", "{}")),
+            daemon=True)
+        thread.start()
+        for _ in range(200):
+            if api._pending_ask is not None:
+                break
+            time.sleep(0.01)
+        self.assertIn("ask", [m.get("k") for m in api._remote.got()])
+        self.as_phone(api.answer, "yes")
+        thread.join(5)
+        self.assertEqual(said, ["yes"], "the blocked turn did not continue")
+        asked = [m for m in self.drained(api) if m.get("k") == "asked"]
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(asked[0]["t"], "allowed -- answered on phone")
+        # THE LATE CLICK CHANGES NOTHING: the first answer won.
+        api.answer("no")
+        self.assertEqual(api._answer, "yes")
+        self.assertEqual([m for m in api._remote.got() if m.get("k") == "asked"],
+                         [], "the phone got a card-close for its own answer")
+
+    # 4 -------------------------------------------------------------------
+    def test_yolo_from_the_phone_holds_on_both_views(self):
+        api = self.mirrored("--mode", "manual")
+        self.assertTrue(crow_core.needs_approval("run_command", api._args.mode))
+        self.as_phone(api.set_mode, "yolo")
+        self.assertEqual(api._args.mode, "yolo")
+        self.assertFalse(crow_core.needs_approval("run_command", api._args.mode),
+                         "an outside command would still ask")
+        for got in (self.drained(api), api._remote.got()):
+            modes = [m for m in got if m.get("k") == "mode"]
+            self.assertEqual(modes[-1]["name"], "yolo")
+
+    # 5 -------------------------------------------------------------------
+    def test_the_phone_opens_an_old_chat_and_the_desktop_stays(self):
+        """Mid-turn (a view) and idle (a real switch that pins the desktop):
+        either way the desktop's view is unchanged and it gets no replay."""
+        for busy in (True, False):
+            with self.subTest(busy=busy):
+                api = self.mirrored()
+                saved = self.saved_chat(api)
+                if busy:
+                    self.worker(api)
+                before = api._viewed_path()
+                desk_text = [m["content"] for m in api._conversation.payload()
+                             if m.get("role") == "user"]
+                self.as_phone(api.open, saved)
+                self.assertEqual(api._viewed_path(), before if busy
+                                 else api._views[crow_gui.DESKTOP],
+                                 "the desktop moved")
+                desk = self.drained(api)
+                kinds = [m.get("k") for m in desk]
+                for kind in ("clear", "user", "hello"):
+                    self.assertNotIn(kind, kinds, "the desktop got the replay")
+                phone = api._remote.got()
+                self.assertIn("clear", [m.get("k") for m in phone])
+                self.assertIn("the chat on disk",
+                              [m.get("t") for m in phone if m.get("k") == "user"])
+                if not busy:
+                    # PINNED to the chat it was reading -- written to disk by
+                    # the switch, so the same chat now has a path.
+                    pinned = api._views[crow_gui.DESKTOP]
+                    self.assertTrue(pinned)
+                    with open(pinned, encoding="utf-8") as fh:
+                        self.assertIn(desk_text[0], fh.read())
+                    self.assertIsNone(api._views.get(PHONE))
+                    self.assertTrue(api._same(api._current_path, saved))
+
+    # 6 -------------------------------------------------------------------
+    def test_a_worker_message_follows_each_clients_view(self):
+        api = self.mirrored()
+        saved = self.saved_chat(api)
+        api._views[PHONE] = saved                 # the phone reads elsewhere
+        api._worker = threading.current_thread()
+        api.push({"k": "text", "t": "streaming"})
+        desk = self.drained(api)
+        self.assertEqual(desk, [{"k": "text", "t": "streaming"}],
+                         "the live desktop must draw it, unstamped")
+        self.assertEqual(api._remote.got(), [], "the phone drew a turn it "
+                                                "does not look at")
+        # AND THE OTHER WAY ROUND: the desktop elsewhere keeps its #162 stamp.
+        api._views[PHONE] = None
+        api._views[crow_gui.DESKTOP] = saved
+        api.push({"k": "text", "t": "more"})
+        self.assertEqual(self.drained(api), [{"k": "text", "t": "more", "bg": True}])
+        self.assertEqual(api._remote.got(), [{"k": "text", "t": "more"}])
+
+    # 7 -------------------------------------------------------------------
+    def test_the_rail_reaches_both_with_their_own_marker(self):
+        api = self.mirrored()
+        saved = self.saved_chat(api)
+        api._views[PHONE] = saved
+        api._reload_rail()
+        desk = [m for m in self.drained(api) if m.get("k") == "rail"][-1]
+        phone = [m for m in api._remote.got() if m.get("k") == "rail"][-1]
+        self.assertTrue(desk["live_active"])
+        self.assertFalse(phone["live_active"])
+        mark = {r["path"]: r.get("active") for r in phone["rollovers"]}
+        self.assertTrue(mark.get(saved), "the phone's chat is not marked")
+        mark = {r["path"]: r.get("active") for r in desk["rollovers"]}
+        self.assertFalse(mark.get(saved), "the desktop marks the phone's chat")
+
+    # 8 -------------------------------------------------------------------
+    def test_a_log_only_note_reaches_neither_view(self):
+        api = self.mirrored()
+        note = crow_core.LOG_ONLY_NOTE_PREFIXES[0] + "12 messages dropped"
+        self.assertTrue(crow_core.note_is_log_only(note))
+        api.push({"k": "note", "t": note})
+        self.as_phone(api.push, {"k": "note", "t": note})
+        self.assertEqual(self.drained(api), [])
+        self.assertEqual(api._remote.published, [])
+        # COUNTER-PROBE: an ordinary note reaches both.
+        api.push({"k": "note", "t": "an ordinary note"})
+        self.assertEqual(len(self.drained(api)), 1)
+        self.assertEqual(len(api._remote.got()), 1)
+
+    # -- the snapshot and the late joiner -----------------------------------
+    def test_ready_from_a_phone_answers_the_phone_only(self):
+        api = self.mirrored()
+        self.a_chat(api, "what the phone must see")
+        self.as_phone(api.ready)
+        # The title-bar icon may learn that a phone is here; nothing else.
+        self.assertEqual([m for m in self.drained(api) if m.get("k") != "remote"],
+                         [], "the desktop got a phone's replay")
+        got = api._remote.got()
+        kinds = [m.get("k") for m in got]
+        for kind in ("meta", "mode", "root", "clear", "user", "rail",
+                     "viewing", "chips"):
+            self.assertIn(kind, kinds)
+        self.assertIn("what the phone must see",
+                      [m.get("t") for m in got if m.get("k") == "user"])
+        self.assertEqual(api._page_loads, 0, "a phone counted as a page load")
+
+    def test_the_snapshot_carries_an_open_question_and_the_queued_line(self):
+        api = self.mirrored()
+        api._busy = True
+        api._pending_ask = {"k": "ask", "name": "run_command", "args": "{}",
+                            "scope": ""}
+        api.send("held back")
+        snap = api.state_snapshot(PHONE)
+        kinds = [m.get("k") for m in snap]
+        self.assertIn("ask", kinds)
+        self.assertIn("busy", kinds)
+        self.assertEqual([m["t"] for m in snap if m.get("k") == "queued"],
+                         ["held back"])
+        # Collected, never delivered.
+        self.assertEqual([m for m in self.drained(api)
+                          if m.get("k") in ("meta", "clear")], [])
+
+    def test_a_phone_looking_elsewhere_gets_no_open_question(self):
+        """NEGATIVE: the ask belongs to the live turn, like the desktop's #162
+        rule -- a phone reading another chat does not get it."""
+        api = self.mirrored()
+        saved = self.saved_chat(api)
+        api._views[PHONE] = saved
+        api._pending_ask = {"k": "ask", "name": "x", "args": "", "scope": ""}
+        self.assertNotIn("ask", [m.get("k") for m in api.state_snapshot(PHONE)])
+
+
+class RemoteSlashTests(RemoteCase):
+    """#249: `/remote` on/off/status/devices/forget, the dialog and the icon."""
+
+    def started(self):
+        crow_gui.REMOTE_FACTORY = _FakeRemote
+        crow_gui.lan_addresses = lambda: [("wlan0", "192.168.1.5"),
+                                          ("eth0", "10.0.0.7")]
+        api = self.api()
+        self.drained(api)
+        # the icon's watcher polls while `_remote` is its server -- let it go
+        self.addCleanup(setattr, api, "_remote", None)
+        return api
+
+    def test_it_is_on_every_list(self):
+        self.assertIn("/remote", crow_core.SLASH_COMMANDS)
+        self.assertIn("/remote", crow_gui.Api.WHAT_THEY_DO)
+        self.assertIn("/remote", crow.HELP)
+        self.assertIsNotNone(self.api().slash_answer("/remote status"))
+
+    def test_on_starts_persists_and_opens_the_dialog(self):
+        api = self.started()
+        said = api.slash_answer("/remote on")
+        self.assertIn("http://192.168.1.5:8765/", said)
+        self.assertTrue(api._remote.running())
+        self.assertTrue(crow_gui.remote_enabled())
+        out = self.drained(api)
+        dialog = [m for m in out if m.get("k") == "remotedlg"][-1]
+        self.assertTrue(dialog["open"])
+        self.assertEqual(dialog["ips"], [["wlan0", "192.168.1.5"],
+                                         ["eth0", "10.0.0.7"]])
+        self.assertEqual([d["name"] for d in dialog["devices"]],
+                         ["iPhone (Safari)"])
+        icon = [m for m in out if m.get("k") == "remote"][-1]
+        self.assertEqual((icon["on"], icon["online"]), (True, 1))
+        # THE DIALOG IS THE DESKTOP'S: no phone ever receives it.
+        self.assertNotIn("remotedlg", [m.get("k") for m in api._remote.got()])
+
+    def test_bare_remote_is_the_icon(self):
+        api = self.started()
+        api.slash_answer("/remote")
+        self.assertTrue(api._remote.running())
+        self.assertIn("remotedlg", [m.get("k") for m in self.drained(api)])
+        # The icon's click is the same call.
+        self.assertIn("crow.remoteOpen()", crow_gui.PAGE)
+        self.assertIn("remoteOpen(){ pywebview.api.remote_open()", crow_gui.PAGE)
+
+    def test_the_port_is_fixed_and_the_host_is_a_lan_address(self):
+        api = self.started()
+        api.slash_answer("/remote on")
+        self.assertEqual(api._remote.kw["port"], crow_core.REMOTE_PORT_DEFAULT)
+        self.assertEqual(api._remote.kw["host"], "192.168.1.5")
+        self.assertEqual(api._remote.kw["allowed"], crow_gui.REMOTE_ALLOWED)
+        api.remote_use_ip("10.0.0.7")
+        self.assertEqual(api._remote.kw["host"], "10.0.0.7")
+        self.assertEqual(crow_gui.remote_host_setting(), "10.0.0.7")
+
+    def test_no_lan_means_no_server(self):
+        """NEGATIVE: never 0.0.0.0 -- no LAN address, no listener."""
+        crow_gui.REMOTE_FACTORY = _FakeRemote
+        crow_gui.lan_addresses = lambda: []
+        api = self.api()
+        self.assertEqual(api.slash_answer("/remote on"), crow_core.REMOTE_NO_LAN)
+        self.assertIsNone(api._remote)
+        self.assertFalse(crow_gui.remote_enabled())
+
+    def test_off_stops_and_devices_stay(self):
+        api = self.started()
+        api.slash_answer("/remote on")
+        remote = api._remote
+        self.assertEqual(api.slash_answer("/remote off"), crow_core.REMOTE_OFF_LINE)
+        self.assertFalse(remote.running())
+        self.assertIsNone(api._remote)
+        self.assertFalse(crow_gui.remote_enabled())
+        self.assertEqual(remote.forgot, [])
+        self.assertIn("off", api.slash_answer("/remote status"))
+
+    def test_status_devices_and_forget(self):
+        api = self.started()
+        api.slash_answer("/remote on")
+        self.assertIn("http://192.168.1.5:8765/", api.slash_answer("/remote status"))
+        self.assertIn("iPhone (Safari)", api.slash_answer("/remote devices"))
+        said = api.slash_answer("/remote forget iphone")
+        self.assertIn("forgot", said)
+        self.assertEqual(api._remote.forgot, [PHONE])
+        self.assertIn("no single paired device",
+                      api.slash_answer("/remote forget nobody"))
+        self.assertEqual(api.slash_answer("/remote sideways"),
+                         crow_core.REMOTE_USAGE)
+
+    def test_a_new_device_waits_for_the_desktop_and_times_out_as_deny(self):
+        api = self.started()
+        api.slash_answer("/remote on")
+        self.drained(api)
+        before = crow_core.REMOTE_CONFIRM_S
+        self.addCleanup(setattr, crow_core, "REMOTE_CONFIRM_S", before)
+        crow_core.REMOTE_CONFIRM_S = 0.05
+        self.assertFalse(api._remote_confirm("iPhone (Safari)"))
+        out = self.drained(api)
+        self.assertEqual(out[0]["k"], "remoteask")
+        self.assertIn("wants to connect", out[0]["t"])
+        self.assertIn("denied", [m for m in out
+                                 if m.get("k") == "remoteasked"][0]["t"])
+        # ALLOW: the desktop's click lets it in.
+        crow_core.REMOTE_CONFIRM_S = 5
+        allowed = []
+        thread = threading.Thread(target=lambda: allowed.append(
+            api._remote_confirm("iPhone (Safari)")), daemon=True)
+        thread.start()
+        for _ in range(200):
+            if api._remote_asks:
+                break
+            time.sleep(0.01)
+        api.remote_allow(next(iter(api._remote_asks)), True)
+        thread.join(5)
+        self.assertEqual(allowed, [True])
+
+    def test_the_firewall_line_opens_the_lan_only(self):
+        line = crow_core.remote_firewall_line(8765, "192.168.1.5", "ufw")
+        self.assertIn("sudo ufw allow from 192.168.1.0/24 to any port 8765 "
+                      "proto tcp", line)
+        self.assertIn("192.168.1.0/24",
+                      crow_core.remote_firewall_line(8765, "192.168.1.5",
+                                                     "firewalld"))
+        self.assertEqual(crow_core.remote_firewall_line(8765, "192.168.1.5", ""),
+                         "")
+
+    def test_the_devices_live_in_the_secrets_store_beside_the_rest(self):
+        before = crow_core.SECRETS_FILE
+        self.addCleanup(setattr, crow_core, "SECRETS_FILE", before)
+        crow_core.SECRETS_FILE = os.path.join(self.dir, "secrets.json")
+        with open(crow_core.SECRETS_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"CROW_TAVILY_KEY": "kept"}, fh)
+        record = {"id": "d-1", "name": "iPhone", "token_sha256": "ab" * 32}
+        self.assertTrue(crow_core.remote_devices_save([record]))
+        self.assertEqual(crow_core.remote_devices_load(), [record])
+        self.assertEqual(crow_core.secret("CROW_TAVILY_KEY"), "kept")
+        # NEGATIVE: a store that does not parse is never overwritten.
+        with open(crow_core.SECRETS_FILE, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        self.assertFalse(crow_core.remote_devices_save([]))
+        with open(crow_core.SECRETS_FILE, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "{not json")
+
+    def test_a_phone_exit_never_closes_the_window(self):
+        api = self.api()
+        closed = []
+        api._window = types.SimpleNamespace(destroy=lambda: closed.append(1))
+        self.assertEqual(self.as_phone(api.slash_answer, "/exit"),
+                         crow_core.REMOTE_PHONE_EXIT)
+        self.assertEqual(closed, [])
+
+    # -- the phone icon in the title bar ------------------------------------
+    def test_the_icon_sits_left_of_the_three_panel_buttons(self):
+        src = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        bar = src[src.index('<div id="bar"'):src.index('<div id="wbtns"')]
+        order = [bar.index('id="%s"' % i) for i in
+                 ("mark", "remotetoggle", "codetoggle", "gittoggle",
+                  "browsertoggle")]
+        self.assertEqual(order, sorted(order))
+        icon = bar[bar.index('id="remotetoggle"'):bar.index('id="codetoggle"')]
+        self.assertIn('stroke-width="1.6"', icon)
+        self.assertIn('stroke="currentColor"', icon)
+        css = crow_gui.PAGE
+        self.assertIn("#remotetoggle{margin-left:auto;", css)
+        self.assertIn("#remotetoggle + #codetoggle{margin-left:0}", css)
+        self.assertIn("#remotetoggle{margin-right:9px}", css)
+        self.assertIn("#remotetoggle.live .rdot{display:block}", css)
+        self.assertIn("background:var(--ok)", css[css.index("#remotetoggle .rdot"):])
+        self.assertIn('case "remote": this.remoteState(e); break;', css)
+
+    def test_the_icon_state_follows_the_server(self):
+        api = self.started()
+        api.remote_open()
+        icon = [m for m in self.drained(api) if m.get("k") == "remote"][-1]
+        self.assertTrue(icon["on"])
+        self.assertEqual(icon["online"], 1)
+        api._remote.online[PHONE] = False
+        api._remote_state_push()
+        icon = [m for m in self.drained(api) if m.get("k") == "remote"][-1]
+        self.assertEqual(icon["online"], 0)
+        api.remote_stop()
+        icon = [m for m in self.drained(api) if m.get("k") == "remote"][-1]
+        self.assertFalse(icon["on"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
