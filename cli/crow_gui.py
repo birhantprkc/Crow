@@ -5392,6 +5392,7 @@ const crow = {
   },
 
   idle(){ this.running=false; go.textContent="↑"; go.classList.remove("stop");
+    go.title="send";
     // #264: the turn is over, so the line held behind it goes in now.
     this.release();
     // #172: auch ein Zug, der scheitert oder abgebrochen wird, laesst keine
@@ -5403,7 +5404,7 @@ const crow = {
 
   busy(){ this.running=true; go.textContent="■ Stop"; go.classList.add("stop");
     $("#turnstate").textContent="…";
-    $("#hint").textContent="read timeout __TIMEOUT__ s"; },
+    $("#hint").textContent="read timeout __TIMEOUT__ s"; this.face(); },
 
   // #138c. Die Zeile ist angenommen und wartet -- auf den Memory-Nachlauf, der
   // nach `idle` noch auf demselben Thread laeuft.
@@ -5425,7 +5426,7 @@ const crow = {
     $("#hint").textContent = this.viewingOther
       ? "queued for this chat -- it runs when the other turn is done"
       : this.held ? "queued -- it goes in when this turn ends"
-      : "queued -- the memory review is finishing"; },
+      : "queued -- the memory review is finishing"; this.face(); },
 
   // #164. DAS ZIELPANEL. Ohne Ziel bleibt es weg -- kein leerer Rahmen.
   //
@@ -5619,8 +5620,7 @@ const crow = {
     pywebview.api.send(text).then(()=>this.busy(), ()=>this.busy()); },
 
   // Only the delegation pair passes the gate -- a /reset or /model through it
-  // would yank state under a running pump -- and the stop gesture (button,
-  // plain line, Escape) stays exactly what it was.
+  // would yank state under a running pump.
   go(){ const text=input.value.trim();
     if(this.running && /^\/(delegate|subtasks)\b/i.test(text)){ this.fanout(text); return; }
     // #162. IN EINER FREMDEN ANSICHT IST DER KNOPF KEIN STOP. Der laufende Zug
@@ -5631,11 +5631,21 @@ const crow = {
     // "a typed line always has priority; the engine only runs when the queue
     // is empty" -- and send()/_pump carry it out, but this gate sent every
     // Enter to stop() since 4860300, so from the live chat the queue was
-    // unreachable. The button and Escape stay Stop (press()); an empty Enter
-    // and a slash line other than the delegation pair keep the old gesture.
+    // unreachable.
+    // #264. AND NO LINE IS A STOP, whatever it starts with. #264 still stopped
+    // on a line that opened with "/", so a path (`/home/...`) typed mid-turn
+    // ended the turn and stayed in the box -- robin, live 2026-09-24. Now only
+    // an EMPTY Enter, the Stop button with an empty box, and Escape stop. A
+    // Crow command other than the delegation pair (/reset, /model, /goal ...)
+    // would yank state under the running pump, so it waits in the box and the
+    // hint says so; anything else -- a path included -- is queued.
     if(this.running && !this.viewingOther){
-      if(text && text[0]!=="/"){ this.hold(text); return; }
-      pywebview.api.stop(); return; }
+      if(!text){ pywebview.api.stop(); return; }
+      if(this.isCommand(text)){
+        $("#hint").textContent=text.split(/\s/)[0]
+          +" waits in the box until this turn ends -- Esc stops the turn";
+        return; }
+      this.hold(text); return; }
     if(!text) return;
     input.value=""; input.style.height="auto";
     this.user(text);
@@ -5662,14 +5672,34 @@ const crow = {
     this.held = this.held
       ? {t:this.held.t+"\n\n"+text, i:this.held.i.concat(imgs)}
       : {t:text, i:imgs};
+    this.face();
     pywebview.api.send(text).then(()=>this.queuedLine(), ()=>this.queuedLine()); },
 
   release(){ const h=this.held; if(!h) return;
     this.held=null; this.user(h.t); this.userImages(h.i); },
 
-  // #264. THE BUTTON IS STOP WHILE IT SAYS STOP, whatever is in the box --
-  // Enter with a line queues it (go()), a click on "Stop" stops.
-  press(){ if(this.running && !this.viewingOther){ pywebview.api.stop(); return; }
+  // #264. A Crow command is a first word on the core's own list (`meta`
+  // carries SLASH_COMMANDS) -- not a prefix test, the rule `slash_answer` keeps
+  // for the same reason: `/usr/bin/env` opens a question, not a command.
+  isCommand(text){
+    return (this.slash||[]).indexOf(text.split(/\s/)[0].toLowerCase())>=0; },
+
+  // #264. THE BUTTON SAYS WHAT A CLICK DOES. #264 kept it on Stop whatever was
+  // in the box, and robin's line + click ended the turn with the line left in
+  // the box (live 2026-09-24). While a turn runs and the box holds a line that
+  // would be queued, the button reads "Queue" and a click queues it; with an
+  // empty box it is Stop. Escape stops either way.
+  face(){ if(!this.running) return;
+    const text=input.value.trim();
+    const q=!this.viewingOther && text && !this.isCommand(text);
+    go.textContent = q ? "↑ Queue" : "■ Stop";
+    go.classList.toggle("stop", !q);
+    go.title = q ? "queue this line -- it runs when this turn ends (Esc stops the turn)"
+                 : "stop"; },
+
+  press(){ if(this.running && !this.viewingOther){
+      const text=input.value.trim();
+      if(!text || this.isCommand(text)){ pywebview.api.stop(); return; } }
     this.go(); },
 
   // #88: THE RELEASE LEVEL, and the menu is built from what the CORE says the
@@ -7239,6 +7269,7 @@ const crow = {
       // be copied into the sheet when it opened; the ribbon is a name and three
       // window buttons now, so the number goes where somebody looks it up.
       case "meta": $("#aboutver").textContent=e.version;
+        if(e.slash) this.slash=e.slash;
         if(e.rail) $("#rail").style.setProperty("--railw", e.rail+"px");
         // THE TITLE, NOT A CHIP (#119). Set rather than interpolated for the same reason every
         // other name here is: it is a string that arrived over the bridge.
@@ -7322,11 +7353,14 @@ const crow = {
 window.crow = crow;
 
 input.addEventListener("input",()=>{ input.style.height="auto";
-  input.style.height=Math.min(input.scrollHeight,140)+"px"; });
+  input.style.height=Math.min(input.scrollHeight,140)+"px"; crow.face(); });
 input.addEventListener("focus",()=>box.classList.add("focus"));
 input.addEventListener("blur",()=>box.classList.remove("focus"));
 input.addEventListener("keydown",e=>{
-  if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); crow.go(); }
+  // #264: an Enter that confirms an input method's composition is the IME's,
+  // not a submit (UI Events: isComposing; keyCode 229 on older WebKit).
+  if(e.key==="Enter" && !e.shiftKey && !e.isComposing && e.keyCode!==229){
+    e.preventDefault(); crow.go(); }
   if(e.key==="Escape" && crow.running) pywebview.api.stop(); });
 
 // BOTH HAVE TO BE PREVENTED, and dragover is the one people forget: without it
@@ -9181,7 +9215,9 @@ class Api:
         self.push({"k": "meta", "rail": rail_width_setting(),
                    "version": client_version() or "",
                    "url": self._args.base_url, "tools": len(TOOLS),
-                   "execute": bool(self._args.execute_tools)})
+                   "execute": bool(self._args.execute_tools),
+                   # #264: the page tells a command from a path mid-turn.
+                   "slash": list(crow_core.SLASH_COMMANDS)})
         threading.Thread(target=self._mic_probe, daemon=True).start()
         if self._page_loads > 1:
             self._ready_again()
@@ -10455,6 +10491,9 @@ class Api:
         # ob der naechste Zug zuerst rollen soll.
         self._goal_renders: dict = {}
         self._goal_roll_due = False
+        # #282: Stop pauses the engine until a typed line -- every
+        # caller of this method is one, or is the goal going away.
+        self._goal_paused = False
 
     def _goal_cut(self, turns: int) -> int:
         """Die letzten `turns` Motorzuege aus der Geschichte nehmen. #202.
@@ -10581,13 +10620,26 @@ class Api:
         in eckigen Klammern wie die Rollover-Notiz, damit `_spoken_carry` ihn
         beim naechsten Schnitt NICHT als robins eigene Worte mitnimmt.
         """
-        if crow_core.INTERRUPT.is_set():
-            return None
         goal = crow_core.goal_load()
         if not goal or goal.get("status") == crow_core.GOAL_DONE:
             return None
         nxt = crow_core.goal_next_open(goal)
         if nxt is None:
+            return None
+        # #282. STOP IS A PAUSE, and the flag above could not carry
+        # it: `run_turn` consumes INTERRUPT when it ends the stopped turn
+        # (crow_core.run_turn, `if owns_turn_state: INTERRUPT.clear()`), so by
+        # the time the pump asked here the flag was down and the next turn went
+        # out at once -- robin, live 2026-09-24: "Stop, and the goal engine
+        # instantly starts the next turn". `stop()` sets this one; only a typed
+        # line (`_goal_reset`) lifts it.
+        # The flag still counts when it is up: a Stop between two turns (the
+        # memory review after `idle`) lands after `run_turn` has returned.
+        if getattr(self, "_goal_paused", False) or crow_core.INTERRUPT.is_set():
+            self.push({"k": "note",
+                       "t": "goal mode paused: you pressed Stop. Step %d is "
+                            "open -- the next line you send resumes it."
+                            % (nxt + 1)})
             return None
         # #202. DIE BREMSE VOR DEN DECKELN, und vor jedem Zaehler: was zuletzt
         # zurueckkam, entscheidet, ob es ueberhaupt einen Sinn hat, noch einmal
@@ -10921,6 +10973,8 @@ class Api:
         # still delivers is dropped and its card ends "interrupted".
         INTERRUPT.set()
         crow_core.cancel_subtasks()
+        # #282: and the goal engine pauses -- see `_goal_nudge`.
+        self._goal_paused = True
 
     # ------------------------------------------------------------ #142 images
 
