@@ -13855,6 +13855,18 @@ class RemoteMirrorTests(RemoteCase):
         self.assertNotIn("apple-mobile-web-app-status-bar-style",
                          crow_gui.stamped_page())
 
+    def test_the_home_screen_app_moves_its_header_below_the_blur_band(self):
+        """robin's iPhone (iOS 27), 2026-09-24, after 76930c8: the opaque bar
+        did not help -- the home-screen app still blurred the header, the
+        Safari tab never did. Only in standalone mode the top inset grows by
+        the band, so the header sits below it; the tab keeps the plain inset."""
+        phone = crow_gui.stamped_page(remote=True)
+        at = phone.index("@media (display-mode: standalone)")
+        rule = phone[at:phone.index("}", phone.index("{", at) + 1) + 1]
+        self.assertIn("--safe-t:calc(env(safe-area-inset-top,0px) + 36px)", rule)
+        self.assertIn("--safe-t:env(safe-area-inset-top,0px);", phone)
+        self.assertNotIn("display-mode: standalone", crow_gui.stamped_page())
+
     def test_the_phone_page_brings_its_home_screen_tile(self):
         """robin's iPhone, 2026-09-24: a generic "1" tile on the home screen.
         The phone page names the tile, the manifest and the web-app title;

@@ -8263,6 +8263,14 @@ REMOTE_CSS = """
   --safe-l:env(safe-area-inset-left,0px);
   --safe-r:env(safe-area-inset-right,0px);
 }
+/* #249, robin's iPhone (iOS 27), NUR ALS HOME-BILDSCHIRM-APP: das System legt
+   seinen Blur-Streifen ~35 pt unter die Statusleiste, ueber den Kopf -- auch
+   mit der deckenden Statusleiste (76930c8 half nicht), und
+   safe-area-inset-top waechst nicht mit. Also rueckt der Kopf dort um den
+   Streifen tiefer; im Safari-Tab gibt es den Streifen nicht. */
+@media (display-mode: standalone){
+  :root{--safe-t:calc(env(safe-area-inset-top,0px) + 36px)}
+}
 html{overflow-x:clip}
 html,body{height:100dvh;overscroll-behavior:none;-webkit-text-size-adjust:100%;
   background:var(--bg)}
