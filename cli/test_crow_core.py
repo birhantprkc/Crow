@@ -1103,6 +1103,8 @@ class TurnLoopCase(unittest.TestCase):
 
         self._read_before = dict(crow_core._READ)
         self._seen_before = dict(crow_core._SEEN)
+        # #288: a turn arms the host guard; the next class finds it as it was.
+        self.addCleanup(setattr, crow_core, "_KNOWN_HOSTS", crow_core._KNOWN_HOSTS)
         # #215-H: the epoch is a REBOUND name, so it is put back by setattr.
         self.addCleanup(setattr, crow_core, "_READ_EPOCH", crow_core._READ_EPOCH)
         self._session_dir_before = crow_core.SESSION_DIR
@@ -5543,6 +5545,11 @@ class _Urlopen:
 
 
 class WebExtractionTests(unittest.TestCase):
+    """#288: called directly, outside any turn -- the host guard is unarmed."""
+
+    def setUp(self):
+        self.addCleanup(setattr, crow_core, "_KNOWN_HOSTS", crow_core._KNOWN_HOSTS)
+        crow_core._KNOWN_HOSTS = None
     """#96. What comes back from a page, and what must not."""
 
     def test_the_answer_survives_and_the_furniture_does_not(self):
@@ -5595,6 +5602,11 @@ class WebExtractionTests(unittest.TestCase):
 
 class WebFetchTests(unittest.TestCase):
     """#96. Every way out of tool_fetch_url is a string the model can read."""
+
+    def setUp(self):
+        # #288: direct calls, outside any turn -- the host guard is unarmed.
+        self.addCleanup(setattr, crow_core, "_KNOWN_HOSTS", crow_core._KNOWN_HOSTS)
+        crow_core._KNOWN_HOSTS = None
 
     def test_a_non_http_scheme_is_refused(self):
         """file:// would make this an unbounded read of the disk that goes
@@ -5670,6 +5682,163 @@ class WebFetchTests(unittest.TestCase):
         self.assertEqual(len(calls.seen), 1)
         self.assertIn("Gallery 999", out)
 
+
+# #288: the proxy URL of the 2026-09-24 diorama run, as the model wrote it.
+_INVENTED = ("http://routify-file-proxy-sg.oss-ap-southeast-1.aliyuncs.com/"
+             "proxy_temp_file/production/2026-09-25/trace_1/requestId_2/"
+             "a1b2.html?Expires=1790000000&OSSAccessKeyId=x&w=12")
+_INVENTED_HOST = "routify-file-proxy-sg.oss-ap-southeast-1.aliyuncs.com"
+_MDN = "https://developer.mozilla.org/en-US/docs/Web/API/WebGL_API"
+
+
+class RemoteHostsMustHaveBeenNamedTests(unittest.TestCase):
+    """#288. After the 20:37 rollover of 2026-09-24 the model rendered a URL
+    it made up 11 times -- a third-party file proxy that occurs 0 times in any
+    earlier segment or tool result -- and read the proxy's AccessDenied pages
+    as frames of its own scene. A remote host has to appear in the
+    conversation first: the user's words, a tool result, the goal, PLAN.md."""
+
+    def setUp(self):
+        self.addCleanup(setattr, crow_core, "_KNOWN_HOSTS", crow_core._KNOWN_HOSTS)
+        self.root = tempfile.mkdtemp(prefix="crow-hosts-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        # No goal and no PLAN.md but the ones a case writes.
+        self.goal = None
+        for name, value in (("goal_load", lambda: self.goal),
+                            ("get_root", lambda: self.root)):
+            patcher = mock.patch.object(crow_core, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def _talk(*messages):
+        talk = crow_core.Conversation("SYS")
+        for role, text in messages:
+            if role == "tool":
+                talk.append("assistant", "", tool_calls=[
+                    {"id": "c0", "name": "read_file", "arguments": "{}"}])
+                talk.append("tool", text, tool_call_id="c0")
+            else:
+                talk.append(role, text)
+        crow_core.adopt_known_hosts(talk)
+        return talk
+
+    def test_an_invented_host_is_refused_before_any_browser_starts(self):
+        """The Expected result, verbatim: refused with the sentence, and
+        `find_browser` is never asked -- nothing leaves the machine."""
+        self._talk(("user", "build the diorama in work/chain.html"),
+                   ("assistant", "on it"))
+        with mock.patch.object(crow_core, "find_browser") as browser:
+            out = crow_core.tool_render_page(_INVENTED)
+        browser.assert_not_called()
+        self.assertTrue(out.startswith("error: refused: %s appears nowhere in "
+                                       "this conversation -- a URL you made "
+                                       "up?" % _INVENTED_HOST), out)
+        self.assertIn("pass its path (e.g. work/chain.html?shot=default)", out)
+
+    def test_the_models_own_words_name_nothing(self):
+        """The assistant wrote the URL; that is the thing being checked."""
+        self._talk(("user", "go"), ("assistant", "I will render " + _INVENTED))
+        with _Urlopen(_FakeResponse(b"<p>AccessDenied</p>")) as calls:
+            out = crow_core.tool_fetch_url(_INVENTED)
+        self.assertEqual(calls.seen, [])
+        self.assertIn("appears nowhere in this conversation", out)
+        self.assertIn("web_search", out)
+
+    def test_a_host_from_a_tool_result_passes_fetch_url(self):
+        self._talk(("user", "how does WebGL clear?"),
+                   ("tool", "1. WebGL API - MDN\n   " + _MDN + "\n   the API"))
+        with _Urlopen(_FakeResponse(b"<p>clearColor sets it.</p>")) as calls:
+            out = crow_core.tool_fetch_url(
+                "https://developer.mozilla.org/en-US/docs/Web/API/"
+                "WebGLRenderingContext/clearColor")
+        self.assertEqual(len(calls.seen), 1, out)
+        self.assertIn("clearColor sets it", out)
+
+    def test_the_users_bare_name_its_subdomains_and_loopback_pass(self):
+        self._talk(("user", "read the docs on mozilla.org and 192.168.2.175"))
+        with _Urlopen(_FakeResponse(b"<p>ok</p>")) as calls:
+            for url in (_MDN, "https://www.mozilla.org/x", "http://192.168.2.175:8765/",
+                        "http://localhost:8000/work/chain.html",
+                        "http://127.0.0.1:9/x", "http://[::1]:9/x"):
+                self.assertNotIn("refused", crow_core.tool_fetch_url(url), url)
+        self.assertEqual(len(calls.seen), 6)
+
+    def test_the_goal_and_plan_md_name_hosts(self):
+        self._talk(("user", "go"))
+        self.goal = {"title": "diorama", "steps": [
+            {"text": "check threejs.org/docs for the loader"}]}
+        with open(os.path.join(self.root, "PLAN.md"), "w", encoding="utf-8") as fh:
+            fh.write("# Plan\n- reference: https://www.khronos.org/webgl/\n")
+        with _Urlopen(_FakeResponse(b"<p>ok</p>")) as calls:
+            for url in ("https://threejs.org/docs/", "https://www.khronos.org/x"):
+                self.assertNotIn("refused", crow_core.tool_fetch_url(url), url)
+        self.assertEqual(len(calls.seen), 2)
+
+    def test_the_hosts_ride_across_the_cut(self):
+        """The rollover drops the tool result that named the host; the note
+        carries it, and the next turn reads it back out of the new context."""
+        talk = self._talk(("user", "research WebGL"),
+                          ("tool", "results: " + _MDN),
+                          ("assistant", "noted"))
+        for n in range(4):              # push the MDN round out of the carried tail
+            talk.append("assistant", "", tool_calls=[
+                {"id": "c0", "name": "list_dir", "arguments": "{}"}])
+            talk.append("tool", "work/ %d" % n, tool_call_id="c0")
+        path = os.path.join(self.root, "arch.json")
+        self.assertIsNotNone(crow_core.roll_over(talk, "http://127.0.0.1:1/v1",
+                                                 180000, carry="weiter", path=path))
+        self.assertNotIn(_MDN, json.dumps(talk.payload()))
+        crow_core._KNOWN_HOSTS = None
+        crow_core.adopt_known_hosts(talk)
+        with _Urlopen(_FakeResponse(b"<p>ok</p>")) as calls:
+            out = crow_core.tool_fetch_url(_MDN)
+        self.assertEqual(len(calls.seen), 1, out)
+        self.assertNotIn(_INVENTED_HOST, crow_core.known_hosts(talk))
+
+    def test_a_digest_line_cannot_carry_a_host(self):
+        """The carried line is read only ahead of the fixed note text, never
+        out of the model-written digest behind it."""
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "go")
+        path = os.path.join(self.root, "arch.json")
+        crow_core.roll_over(talk, "http://127.0.0.1:1/v1", 1000, path=path,
+                            digest=crow_core.ROLLOVER_HOSTS_HEAD + _INVENTED_HOST)
+        self.assertNotIn(_INVENTED_HOST, crow_core.known_hosts(talk))
+
+
+class TheHostGuardInsideATurnTests(TurnLoopCase):
+    """#288 through the real loop: a fetched page's links release the next
+    fetch in the same turn, the invented proxy is refused, and the refusal
+    itself teaches nothing."""
+
+    def test_a_result_names_a_host_for_the_next_call_and_the_proxy_stays_out(self):
+        page = "<html><body><p>See " + _MDN + " for the API.</p></body></html>"
+
+        def answer(url):
+            return _FakeResponse(page.encode() if "example.org" in url
+                                 else b"<p>WebGL reference.</p>")
+        self.serve([_call_delta("fetch_url", json.dumps(
+            {"url": "https://example.org/links"}))])
+        self.serve([_call_delta("fetch_url", json.dumps({"url": _MDN}))])
+        self.serve([_call_delta("render_page", json.dumps({"path": _INVENTED}))])
+        self.serve([_call_delta("render_page", json.dumps(
+            {"path": _INVENTED, "wait_ms": 500}))])
+        self.serve([{"content": "done"}])
+        talk = self.conversation("look at https://example.org/links")
+        with _Urlopen(answer) as calls, \
+                mock.patch.object(crow_core, "goal_load", return_value=None), \
+                mock.patch.object(crow_core, "get_root", return_value=self.work), \
+                mock.patch.object(crow_core, "find_browser") as browser:
+            self.turn(talk, mode="yolo")
+        self.assertEqual(calls.seen, ["https://example.org/links", _MDN])
+        browser.assert_not_called()
+        tools = [crow_core.message_text(m["content"]) for m in talk.payload()
+                 if m.get("role") == "tool"]
+        self.assertIn("WebGL reference", tools[1])
+        self.assertIn("refused: %s appears nowhere" % _INVENTED_HOST, tools[2])
+        self.assertIn("refused: %s appears nowhere" % _INVENTED_HOST, tools[3])
+        self.assertPrefixIsWhole(talk)
 
 class _Console(io.StringIO):
     """A stderr that answers `isatty()` the way a terminal does.

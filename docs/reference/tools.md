@@ -22,6 +22,7 @@ own class.
 | class | `executing` — it starts a process and writes a file |
 | browser | Chrome, then Edge; every candidate resolved through environment variables |
 | target | a file in the working area, or an `http(s)` URL. A local page keeps a `?query` / `#fragment` (`index.html?shot=default&w=960`, #272): the file is checked without it, then the percent-encoded `file://` URL (drive letter / UNC per RFC 8089) gets it back. A file really named with `?` or `#` wins. A missing file is `no such page: <file>` |
+| remote host (#288) | an `http(s)` target's host must already appear in the conversation: the user's words (URL or bare name), a tool result (URL), the goal's title/steps or `PLAN.md` (read at the miss). A subdomain of a named host counts; loopback always passes. Otherwise `error: refused: <host> appears nowhere in this conversation -- a URL you made up?` and no browser starts. Always on, yolo included. `fetch_url` keeps the same guard. Across a rollover the note carries the hosts in one line (newest 60) and the next turn rebuilds the set from it |
 | dedupe | the byte-identical warning (#175) keys on the full URL, so `?shot=default` and `?shot=stall` are two pages |
 | output | `<root>/.crow/renders/render-<stamp>.png`, plus the console lines from stderr |
 | isolation | its own `--user-data-dir` per run. Without it Chrome hands the job to a running instance and returns exit 0 with no screenshot |

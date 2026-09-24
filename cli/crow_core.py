@@ -4646,6 +4646,9 @@ def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
     where = recent_paths(conversation)
 
     spoken = _spoken_carry(conversation, carry)
+    # #288: the hosts go across in the note, newest last; the next turn reads
+    # them back out of it (`known_hosts`). Before the reset, like the rest.
+    hosts = known_hosts(conversation)[-ROLLOVER_HOSTS_MAX:]
     # #214: vor dem Reset gewaehlt -- danach gibt es keine Runde mehr zu lesen.
     rounds = carry_rounds(conversation.payload())
     conversation.reset()
@@ -4660,7 +4663,8 @@ def roll_over(conversation: "Conversation", base_url: str, context_tokens: int,
     # weiter.
     note = ROLLOVER_NOTE.format(
         tokens=context_tokens, path=path, transcript=transcript, lines=lines,
-        where=f"Last worked on: {', '.join(where)}\n" if where else "",
+        where=(f"Last worked on: {', '.join(where)}\n" if where else "") + (
+            ROLLOVER_HOSTS_HEAD + " ".join(hosts) + "\n" if hosts else ""),
         spoken=spoken,
         # #154: als Modelltext gekennzeichnet, nie als Fakt -- und seit #210
         # formt `_digest_block` den Block: leer bleibt leer, Scheitern heisst
@@ -10890,6 +10894,11 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         bad = _url_complaint(target)
         if bad:
             return bad
+        # #288: 11 renders of a proxy URL the model invented, its error
+        # pages read as scene frames. Refused before any browser starts.
+        bad = _unnamed_host(target, "render_page")
+        if bad:
+            return bad
         url = target
         page_file = None
     else:
@@ -13955,6 +13964,187 @@ def _url_complaint(url: str) -> "str | None":
     return None
 
 
+# ---------------------------------------------------------------- #288 -----
+# A REMOTE HOST MUST HAVE BEEN NAMED BEFORE IT IS FETCHED. Measured in the
+# 2026-09-24 diorama run, after the 20:37 rollover: 11 `render_page` calls to
+# `routify-file-proxy-sg.oss-ap-southeast-1.aliyuncs.com`, a third-party file
+# proxy that occurs 0 times in either earlier segment, in `subtasks/` and in
+# every tool result before the first call. The model INVENTED the URL -- the
+# deliverable was the local `work/chain.html` -- Crow fetched every one of them
+# (yolo asks nothing), and the model read the proxy's "AccessDenied" XML pages
+# as frames of its own scene. Invented but plausible names are a documented
+# failure (Spracklen et al. 2024, arXiv:2406.10279), and the mitigation named
+# there is the one here: check against a known source before acting.
+#
+# KNOWN MEANS: in the user's own words, in a tool result (search results, a
+# fetched page, a file read), in the goal or in PLAN.md. What the MODEL wrote
+# -- its prose, its calls, the rollover digest -- is not a source, for the
+# reason `mandated_paths` gives: the thing being checked cannot vouch for
+# itself.
+#
+# ALWAYS ON, YOLO INCLUDED. It is a sanity check, not an approval: the level
+# decides who is asked, and nobody is asked here -- the call comes back as a
+# sentence the model can act on. Loopback is never refused: a page the model
+# serves itself on localhost was never anybody's to name.
+#
+# REBUILT EACH TURN FROM THE CONVERSATION like `_MANDATED`, and fed after
+# every tool result inside the turn (`note_known_hosts` in `run_turn`), so a
+# search in one call releases the fetch in the next. None means no turn has
+# described a conversation yet -- a direct call from a test or a reader
+# outside the loop -- and then there is nothing to check against.
+#
+# THE ROLLOVER: CARRIED IN THE NOTE, THEN RE-DERIVED. `roll_over` writes the
+# old context's hosts into the note (`ROLLOVER_HOSTS_HEAD`, Crow's own line
+# ahead of the digest), and the next turn reads them back from the new
+# context like everything else -- one derivation, and a resumed chat gets the
+# same answer as a live one. The goal and PLAN.md are read from disk at the
+# moment of a miss, so a plan written mid-turn counts at once.
+_KNOWN_HOSTS: "set[str] | None" = None
+
+# URL-SHAPED IN EVERY SOURCE; A BARE NAME ONLY WHERE A PERSON OR A PLAN WROTE
+# PROSE. "look it up on developer.mozilla.org" names a host without a scheme,
+# but a tool result full of `chain.html`, `crow_core.py` and `PLAN.md` would
+# fill the set (and the rollover line) with file names. File names that do
+# slip in from the user's words widen nothing anybody would fetch.
+_URL_HOST = re.compile(r"(?i)\b(?:https?|wss?)://([^\s/?#\"'<>()\[\]{}\\|^`]+)")
+_BARE_HOST = re.compile(
+    r"(?i)(?<![\w@./-])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}"
+    r"|\d{1,3}(?:\.\d{1,3}){3})(?![\w-])")
+# What rides across the cut: the newest ones, one line, never a paste.
+ROLLOVER_HOSTS_MAX = 60
+ROLLOVER_HOSTS_HEAD = "Web hosts this conversation named, carried across the cut: "
+_ROLLOVER_HOSTS_RE = re.compile("^" + re.escape(ROLLOVER_HOSTS_HEAD) + r"(.*)$", re.M)
+# The fixed line of ROLLOVER_NOTE that follows `{where}`: the carried hosts
+# are only read ahead of it, never out of the model's digest behind it.
+_ROLLOVER_HOSTS_STOP = "Full record, for `crow --resume`:"
+UNNAMED_HOST = ("error: refused: {host} appears nowhere in this conversation "
+                "-- a URL you made up? ")
+UNNAMED_HOST_NEXT = {
+    "render_page": "If the page is local, pass its path "
+                   "(e.g. work/chain.html?shot=default).",
+    "fetch_url": "web_search finds the real address; a local file is read "
+                 "with read_file.",
+}
+
+
+def _host_key(host: str) -> str:
+    """One spelling per host: lower case, no root dot, no `www.`, no port."""
+    host = (host or "").strip().lower().rstrip(".")
+    if host.startswith("[") and "]" in host:
+        return host[1:host.index("]")]
+    if host.count(":") == 1:
+        host = host.split(":", 1)[0]
+    return host[4:] if host.startswith("www.") else host
+
+
+def hosts_in(text: str, bare: bool = False) -> "list[str]":
+    """The hosts a text names, in order of appearance. URLs always; bare
+    names (`developer.mozilla.org`, `192.168.2.175`) only with `bare`."""
+    found: "list[str]" = []
+    for m in _URL_HOST.finditer(text or ""):
+        netloc = m.group(1).rsplit("@", 1)[-1]
+        host = _host_key(netloc)
+        if host:
+            found.append(host)
+    if bare:
+        found.extend(_host_key(m.group(1)) for m in _BARE_HOST.finditer(text or ""))
+    return found
+
+
+def _carried_hosts(text: str) -> "list[str]":
+    """The hosts a rollover note carried (ROLLOVER_HOSTS_HEAD), [] otherwise."""
+    if rollover_note_parts(text) is None:
+        return []
+    head = text.split(_ROLLOVER_HOSTS_STOP, 1)[0]
+    m = _ROLLOVER_HOSTS_RE.search(head)
+    return [_host_key(h) for h in m.group(1).split()] if m else []
+
+
+def known_hosts(conversation: "Conversation") -> "list[str]":
+    """Every host the user or a tool result named, oldest first, each once
+    (at its newest place). The assistant's own turns are not read."""
+    seen: dict = {}
+    for message in conversation.payload():
+        role = message.get("role")
+        text = message_text(message.get("content") or "")
+        if role == "user":
+            # `user_words` drops Crow's and the model's part of a rollover
+            # note (#223); the hosts line is Crow's and is read on its own.
+            hosts = _carried_hosts(text) + hosts_in(user_words(text), bare=True)
+        elif role == "tool":
+            hosts = hosts_in(text)
+        else:
+            continue
+        for host in hosts:
+            seen.pop(host, None)
+            seen[host] = True
+    return list(seen)
+
+
+def adopt_known_hosts(conversation: "Conversation") -> None:
+    """Arm the guard for a turn: the set, rebuilt from this conversation."""
+    global _KNOWN_HOSTS
+    _KNOWN_HOSTS = set(known_hosts(conversation))
+
+
+def note_known_hosts(result: str) -> None:
+    """A tool result just recorded: the hosts it names are named now."""
+    if _KNOWN_HOSTS is not None:
+        _KNOWN_HOSTS.update(hosts_in(message_text(result)))
+
+
+def _hosts_on_disk() -> "set[str]":
+    """The goal's title and steps and PLAN.md, read now -- asked only on a
+    miss, so a plan written earlier in this very turn already counts."""
+    texts: "list[str]" = []
+    goal = goal_load()
+    if goal:
+        texts.append(str(goal.get("title") or ""))
+        texts.extend(str(step.get("text") or "") for step in goal.get("steps") or []
+                     if isinstance(step, dict))
+    root = get_root()
+    if root:
+        try:
+            with open(os.path.join(root, PLAN_FILE), encoding="utf-8",
+                      errors="replace") as fh:
+                texts.append(fh.read(200_000))
+        except OSError:
+            pass
+    return set(hosts_in("\n".join(texts), bare=True))
+
+
+def _loopback(host: str) -> bool:
+    import ipaddress
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
+
+
+def _named(host: str, known) -> bool:
+    """The host itself, or a subdomain of one that was named: the user who
+    says mozilla.org has named developer.mozilla.org too."""
+    return any(host == k or host.endswith("." + k) for k in known if k)
+
+
+def _unnamed_host(url: str, tool: str) -> "str | None":
+    """#288: the refusal for a remote host nobody named, or None."""
+    if _KNOWN_HOSTS is None:
+        return None
+    try:
+        host = _host_key(urllib.parse.urlsplit(url).hostname or "")
+    except ValueError:
+        return None                     # `_url_complaint` has said it
+    if not host or _loopback(host) or _named(host, _KNOWN_HOSTS):
+        return None
+    if _named(host, _hosts_on_disk()):
+        return None
+    return UNNAMED_HOST.format(host=host) + UNNAMED_HOST_NEXT.get(tool, "")
+
+
 def tool_fetch_url(url: str = "", **_) -> str:
     """One page, as text. It serves the search; it is not the capability alone."""
     if not url:
@@ -13968,6 +14158,10 @@ def tool_fetch_url(url: str = "", **_) -> str:
     # BEFORE THE SOCKET, so an address the model shortened comes back as an
     # address to fix rather than as a timeout to retry -- see `_url_complaint`.
     bad = _url_complaint(url)
+    if bad:
+        return bad
+    # #288: and a host this conversation has named -- see `_KNOWN_HOSTS`.
+    bad = _unnamed_host(url, "fetch_url")
     if bad:
         return bad
     got = _http_text(url)
@@ -21284,6 +21478,10 @@ def run_turn(
         # refuse everything its user typed -- the failure #98 already recorded once.
         _MANDATED.clear()
         _MANDATED.update(mandated_paths(conversation))
+        # #288: THE SAME REBUILD for the web hosts `render_page`/`fetch_url`
+        # may reach -- from the conversation, which after a cut holds the
+        # hosts the rollover note carried.
+        adopt_known_hosts(conversation)
     stopped = False
     cost = TurnCost()
     budget = max_tool_rounds
@@ -21779,6 +21977,9 @@ def run_turn(
                 repeated = False
             else:
                 result, repeated = run_tool_cached(call["name"], call["arguments"])
+                # #288: WHERE A TOOL RESULT IS RECORDED, ITS HOSTS ARE NAMED --
+                # a search in this call releases the fetch in the next one.
+                note_known_hosts(result)
             took = time.monotonic() - started
             # TWO NAMES FOR WHAT WAS ONE LINE, and #95 is the reason. `errored`
             # is what the MODEL sees: the "error: " prefix that makes a result
