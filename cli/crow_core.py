@@ -18039,6 +18039,34 @@ REMOTE_PHONE_TEXT = {
     "root": "folder on the desktop",
 }
 
+# #249 STAGE 5: THE HTTPS ADDRESS VIA TAILSCALE, one line per state of
+# `crow_remote.tailscale_state`. Crow only reads the state; every command in
+# here is the person's to run, once.
+REMOTE_TAILNET_ADMIN = "https://login.tailscale.com/admin/dns"
+
+
+def remote_tailnet_line(state: str, name: str = "", command: str = "") -> str:
+    """The Remote dialog's status line for the HTTPS (Tailscale) address."""
+    if state == "ready":
+        return ("ready -- https://%s/ works wherever the phone has Tailscale "
+                "on. A phone paired on the LAN address pairs once more here."
+                % name)
+    if state == "serve-missing":
+        return ("one-time setup (survives reboots, the certificate renews "
+                "itself): %s" % command)
+    if state == "https-off":
+        return ("HTTPS certificates are off for this tailnet -- turn on "
+                "\"Enable HTTPS\" at %s" % REMOTE_TAILNET_ADMIN)
+    if state == "funnel":
+        return ("Tailscale Funnel is on for %s:443 -- that is public on the "
+                "internet, so Crow does not serve it. Turn it off: "
+                "sudo tailscale funnel --https=443 off" % name)
+    if state == "down":
+        return ("Tailscale is installed but not connected -- run: "
+                "sudo tailscale up")
+    return ("Tailscale is not installed -- install it and log in to reach "
+            "Crow over HTTPS from anywhere (docs/user-guide/remote.md).")
+
 
 def remote_ask_line(name: str) -> str:
     """The desktop's pairing card: a new device, named by what it said it is."""

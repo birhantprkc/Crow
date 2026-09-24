@@ -1549,6 +1549,18 @@ body[data-rail="shut"] #rail{width:0;overflow:hidden}
   background:color-mix(in srgb,var(--warn) 8%,transparent);
   border:1px solid color-mix(in srgb,var(--warn) 30%,transparent);
   border-radius:6px;padding:7px 9px;word-break:break-all;white-space:pre-wrap}
+/* #249 Stufe 5: die Zeile zur HTTPS-Adresse -- gelb, bis sie bereit ist. */
+#remotedlg .rtail{display:flex;gap:7px;align-items:flex-start;font-family:var(--mono);
+  font-size:11px;color:var(--warn);background:color-mix(in srgb,var(--warn) 8%,transparent);
+  border:1px solid color-mix(in srgb,var(--warn) 30%,transparent);
+  border-radius:6px;padding:7px 9px;word-break:break-word;white-space:pre-wrap}
+#remotedlg .rtail[hidden]{display:none}
+#remotedlg .rtail span{flex:1;min-width:0}
+#remotedlg .rtail.ok{color:var(--ok);background:transparent;border-color:var(--line)}
+#remotedlg .rtail button{font:inherit;font-size:11px;cursor:pointer;flex:none;
+  background:transparent;border:1px solid var(--line);border-radius:5px;
+  padding:2px 8px;color:var(--dim)}
+#remotedlg .rqr.none{opacity:.18}
 #remotedlg .rdevs{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}
 #remotedlg .rdev{display:flex;align-items:center;gap:10px;padding:9px 0;
   border-top:1px solid var(--raised)}
@@ -7574,6 +7586,7 @@ const crow = {
       + 'banner. You confirm the device here once.</div>'
       + '<div><h3>Address</h3><div class="rurl"><code></code><button>copy</button></div></div>'
       + '<div class="rnet" hidden><h3>Network</h3><div class="seg"></div></div>'
+      + '<div class="rtail" hidden><span></span><button hidden>copy</button></div>'
       + '<div class="rttl">code valid for <b></b> · single use · a new one each time this opens</div>'
       + '<div class="rhint" hidden></div></div></div>'
       + '<div class="rdevs"><h3>Paired devices</h3><div class="rlist"></div>'
@@ -7583,16 +7596,32 @@ const crow = {
     sheet.querySelector(".sw").onclick=()=>pywebview.api.remote_stop()
       .then(said => { if(said) this.note(said); });
     sheet.querySelector(".rqr").innerHTML=e.svg||"";
+    sheet.querySelector(".rqr").classList.toggle("none", !e.svg);
     sheet.querySelector(".rurl code").textContent=e.url||"";
     sheet.querySelector(".rurl button").onclick=()=>pywebview.api.copy(e.url||"");
-    if((e.ips||[]).length > 1){
+    // #249 STUFE 5: DIE HTTPS-ADRESSE (Tailscale) ALS DRITTE WAHL IM NETZ.
+    // Gewaehlt zeigt sie ihren QR erst, wenn `tailscale serve` hierher zeigt;
+    // bis dahin die eine Zeile mit dem fehlenden Schritt (und dem Befehl).
+    const https=e.https||null, onHttps=!!(https && https.on);
+    if((e.ips||[]).length > 1 || https){
       const net=sheet.querySelector(".rnet"), seg=net.querySelector(".seg");
-      e.ips.forEach(([iface, ip]) => { const o=document.createElement("button");
-        o.textContent=iface+" · "+ip; o.classList.toggle("on", ip===e.ip);
-        o.onclick=()=>pywebview.api.remote_use_ip(ip)
-          .then(said => { if(said) this.note(said); });
+      (e.ips||[]).forEach(([iface, ip]) => { const o=document.createElement("button");
+        o.textContent=iface+" · "+ip; o.classList.toggle("on", ip===e.ip && !onHttps);
+        o.onclick=()=> (onHttps && ip===e.ip ? pywebview.api.remote_use_https(false)
+                        : pywebview.api.remote_use_ip(ip))
+          .then(said => { if(typeof said==="string" && said) this.note(said); });
         seg.appendChild(o); });
+      if(https){ const o=document.createElement("button");
+        o.textContent="HTTPS · "+(https.name||"Tailscale"); o.classList.toggle("on", onHttps);
+        o.onclick=()=>pywebview.api.remote_use_https(true);
+        seg.appendChild(o); }
       net.hidden=false; }
+    if(onHttps){ const t=sheet.querySelector(".rtail");
+      t.querySelector("span").textContent=https.line||"";
+      t.classList.toggle("ok", https.state==="ready");
+      if(https.cmd){ const c=t.querySelector("button"); c.hidden=false;
+        c.onclick=()=>pywebview.api.copy(https.cmd); }
+      t.hidden=false; }
     if(e.hint){ const t=sheet.querySelector(".rhint"); t.textContent=e.hint; t.hidden=false; }
     const PHONE='<svg viewBox="0 0 20 20" width="18" height="18" fill="none"'
       + ' stroke="currentColor" stroke-width="1.6" stroke-linecap="round"'
@@ -8222,6 +8251,7 @@ REMOTE_DESKTOP_BOUND = {
     "pane_place": "pane", "pane_cover": "pane",
     "remote_open": "desktop-only", "remote_allow": "desktop-only",
     "remote_forget": "desktop-only", "remote_use_ip": "desktop-only",
+    "remote_use_https": "desktop-only",
     "remote_stop": "desktop-only",
 }
 # WAS EIN TELEFON UEBER HTTP RUFEN DARF: das Proxierte plus die gebundenen,
@@ -9053,6 +9083,33 @@ def remote_host_setting() -> str:
     for "the first LAN address"."""
     value = read_settings().get("remote_host")
     return value if isinstance(value, str) else ""
+
+
+def remote_https_setting() -> bool:
+    """#249 stage 5: `remote_https` -- the dialog shows the Tailscale HTTPS
+    address instead of the LAN one. Only what is SHOWN; the LAN address is
+    listened on either way."""
+    return read_settings().get("remote_https") is True
+
+
+# #249 STAGE 5: WHO ANSWERS "WHERE DOES TAILSCALE STAND". None heisst
+# `crow_remote.tailscale_state`; die Suite setzt eine Attrappe ein, damit kein
+# Fall je die echte CLI aufruft.
+TAILSCALE_PROBE = None
+
+
+def tailscale_probe(port: int) -> dict:
+    """`crow_remote.tailscale_state(port)`, or "missing" where this install
+    lacks it or the probe breaks -- a mirror without HTTPS is still a mirror."""
+    probe = TAILSCALE_PROBE or getattr(remote_module(), "tailscale_state", None)
+    fallback = {"state": "missing", "name": "", "ip": "", "command": ""}
+    if probe is None:
+        return fallback
+    try:
+        found = probe(port)
+    except Exception:                  # noqa: BLE001 -- no tailnet is an answer
+        return fallback
+    return dict(fallback, **found) if isinstance(found, dict) else fallback
 
 
 def lan_addresses() -> "list[tuple[str, str]]":
@@ -15605,6 +15662,9 @@ class Api:
         store = (module.DeviceStore(crow_core.remote_devices_load,
                                     crow_core.remote_devices_save)
                  if module is not None else None)
+        # #249 STAGE 5: the loopback listener for `tailscale serve` only while
+        # the tailnet is up and not funneled to the internet (TAILNET_BINDABLE).
+        self._remote_ts = tailscale_probe(port)
         remote = factory(host=host, port=port, page=self.remote_page,
                          call=self._remote_call, allowed=REMOTE_ALLOWED,
                          snapshot=self.state_snapshot,
@@ -15612,7 +15672,8 @@ class Api:
                          confirm_ttl=crow_core.REMOTE_CONFIRM_S, store=store,
                          upload_dir=os.path.join(PASTE_DIR, "remote"),
                          log=lambda line: crow_core.log_note(line, "remote"),
-                         icon=remote_icon)
+                         icon=remote_icon,
+                         tailnet=self._remote_tailnet(self._remote_ts))
         try:
             remote.start()
         except (OSError, ValueError) as exc:
@@ -15650,12 +15711,31 @@ class Api:
 
     def remote_open(self) -> str:
         """The phone icon and a bare `/remote`: start the mirror if it is off,
-        then show the QR dialog with a fresh single-use pairing code."""
+        then show the QR dialog with a fresh single-use pairing code.
+
+        #249 STAGE 5: Tailscale is asked again on every open, and a mirror
+        whose loopback listener no longer matches it (the tailnet came up, or
+        went to Funnel, after the start) is restarted once -- so the one-time
+        `tailscale serve` command works without a /remote off and on."""
         said = self.remote_start()
         if not self._remote_running():
             return said
+        ts = tailscale_probe(remote_port_setting())
+        if self._remote_tailnet(ts) != getattr(self._remote, "tailnet", ""):
+            self.remote_stop(persist=False)
+            said = self.remote_start()
+            if not self._remote_running():
+                return said
+        self._remote_ts = ts
         self._remote_dialog(fresh=True)
         return said
+
+    @staticmethod
+    def _remote_tailnet(ts: dict) -> str:
+        """The ts.net name to add the loopback listener for, or ""."""
+        module = remote_module()
+        bindable = getattr(module, "TAILNET_BINDABLE", frozenset())
+        return ts.get("name", "") if ts.get("state") in bindable else ""
 
     def remote_forget(self, name: str) -> str:
         """`/remote forget <name>` and the dialog's button: revoke one device;
@@ -15696,6 +15776,7 @@ class Api:
             return crow_core.REMOTE_NO_LAN
         doc = read_settings()
         doc["remote_host"] = ip
+        doc["remote_https"] = False
         write_settings(doc)
         if self._remote is not None:
             self.remote_stop(persist=False)
@@ -15703,6 +15784,20 @@ class Api:
         if self._remote_running():
             self._remote_dialog(fresh=True)
         return said
+
+    def remote_use_https(self, on) -> bool:
+        """#249 stage 5, the dialog's "HTTPS · Tailscale" choice: show that
+        address and its QR (or, until it is ready, the step that is missing).
+        Nothing restarts -- the LAN address keeps listening, the loopback
+        listener is there whenever the tailnet is. Desktop-only."""
+        if _client() != DESKTOP:
+            return False
+        doc = read_settings()
+        doc["remote_https"] = bool(on)
+        write_settings(doc)
+        self._remote_ts = tailscale_probe(remote_port_setting())
+        self._remote_dialog(fresh=False)
+        return True
 
     def remote_allow(self, ident, yes) -> bool:
         """The desktop's Allow / Deny on a new device. Desktop-only: a phone
@@ -15786,11 +15881,35 @@ class Api:
         devices = [{"id": d.get("id", ""), "name": d.get("name", ""),
                     "online": bool(d.get("online"))}
                    for d in self._remote_devices()]
+        url, hint = remote.url, self._remote_firewall()
+        # #249 STAGE 5: the HTTPS address as a network choice. Its QR carries
+        # the same single-use code on the ts.net origin, and only once
+        # `tailscale serve` points here; until then the choice shows the step
+        # that is missing instead of a code that would not open.
+        ts = getattr(self, "_remote_ts", None) or tailscale_probe(remote.port)
+        https = {"state": ts.get("state", "missing"), "name": ts.get("name", ""),
+                 "line": crow_core.remote_tailnet_line(
+                     ts.get("state", "missing"), ts.get("name", ""),
+                     ts.get("command", "")),
+                 "cmd": (ts.get("command", "")
+                         if ts.get("state") == "serve-missing" else ""),
+                 "on": remote_https_setting()}
+        if https["on"]:
+            live = getattr(remote, "tailnet_url", "")
+            ready = https["state"] == "ready" and bool(live)
+            url = live or (("https://%s/" % https["name"]) if https["name"] else "")
+            hint = ""
+            try:
+                svg = (qr(live + "#t=" + self._remote_pair.split("#t=", 1)[1])
+                       if ready and qr else "")
+            except Exception:          # noqa: BLE001 -- the URL is still there
+                svg = ""
         self._push_to({"k": "remotedlg", "open": True, "fresh": bool(fresh),
-                       "url": remote.url, "svg": svg,
+                       "url": url, "svg": svg,
                        "ip": getattr(remote, "host", ""),
                        "ips": [[iface, ip] for iface, ip in lan_addresses()],
-                       "devices": devices, "hint": self._remote_firewall(),
+                       "https": https,
+                       "devices": devices, "hint": hint,
                        "ttl": getattr(module, "PAIR_TTL", 120.0)},
                       (DESKTOP,))
 

@@ -26,6 +26,17 @@ carried only in the QR, a desktop Allow/Deny for every new device, an HttpOnly
 SameSite=Strict cookie whose sha256 is all that is stored, and a Host/Origin
 check on every route that does something. The bind is one LAN address, never
 0.0.0.0, so the model ports' 127.0.0.1-only rule is not weakened by this file.
+
+ON THE ROAD (#249 stage 5): Tailscale, and Crow never runs it. `tailscale
+serve --https=443 http://127.0.0.1:<port>` is a persistent config that
+terminates TLS for `<machine>.<tailnet>.ts.net` with a certificate tailscaled
+renews itself, and forwards to the loopback. So when the tailnet is up this
+server ALSO binds 127.0.0.1:<port> -- the proxy target, nothing else -- where
+only the ts.net name passes the Host check and only its https origin passes the
+Origin check. Plain HTTP never listens on 0.0.0.0 or on the 100.x address.
+Setting the proxy up needs root or a Tailscale operator, so the dialog shows the
+one command and `tailscale_state` only reads (`status --json`, `serve status
+--json`), without sudo.
 """
 
 from __future__ import annotations
@@ -35,7 +46,9 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -269,9 +282,13 @@ class Remote:
                  confirm_ttl: float = 60.0,
                  clock: Callable[[], float] = time.monotonic,
                  log: Callable[[str], None] = lambda s: None,
-                 icon: "Callable[[int], bytes | None] | None" = None):
+                 icon: "Callable[[int], bytes | None] | None" = None,
+                 tailnet: str = ""):
         self.host = host
         self.port = port
+        # #249 stage 5: the ts.net name `tailscale serve` answers for, or "".
+        # Set, it adds the loopback listener its proxy forwards to.
+        self.tailnet = (tailnet or "").strip().rstrip(".").lower()
         self._page = page
         self._call = call
         self._allowed = frozenset(allowed)
@@ -293,6 +310,8 @@ class Remote:
         self._locked_until = 0.0
         self._server: "ThreadingHTTPServer | None" = None
         self._thread: "threading.Thread | None" = None
+        self._tail_server: "ThreadingHTTPServer | None" = None
+        self._tail_thread: "threading.Thread | None" = None
         self._gen = 0
 
     # ------------------------------------------------------------ lifecycle --
@@ -300,6 +319,12 @@ class Remote:
     @property
     def url(self) -> str:
         return "http://%s:%d/" % (self.host, self.port)
+
+    @property
+    def tailnet_url(self) -> str:
+        """`https://<machine>.<tailnet>.ts.net/` while the loopback listener
+        for `tailscale serve` runs, else ""."""
+        return ("https://%s/" % self.tailnet) if self._tail_server is not None else ""
 
     def start(self) -> None:
         """Bind host:port and serve on daemon threads. OSError if the bind fails.
@@ -328,22 +353,53 @@ class Remote:
                                         name="crow-remote", daemon=True)
         self._thread.start()
         self._log("remote: listening on %s" % self.url)
+        if self.tailnet and self.host != "127.0.0.1":
+            self._start_tailnet(remote)
+
+    def _start_tailnet(self, remote: "Remote") -> None:
+        """The loopback listener `tailscale serve` forwards to (#249 stage 5).
+
+        A FAILED BIND HERE IS NOT A FAILED START: the LAN mirror is what the
+        person asked for, the HTTPS address is extra. It is said in crow.log
+        and `tailnet_url` stays "", so the dialog does not offer a dead link.
+        """
+        class TailHandler(_Handler):
+            owner = remote
+            via_tailnet = True
+
+        try:
+            server = _Server(("127.0.0.1", self.port), TailHandler)
+        except OSError as exc:
+            self._log("remote: no loopback listener for https://%s/ on 127.0.0.1:%d: %s"
+                      % (self.tailnet, self.port, exc))
+            return
+        with self._cond:
+            self._tail_server = server
+        self._tail_thread = threading.Thread(target=server.serve_forever, args=(0.1,),
+                                             name="crow-remote-tailnet", daemon=True)
+        self._tail_thread.start()
+        self._log("remote: listening on 127.0.0.1:%d for https://%s/ (tailscale serve)"
+                  % (self.port, self.tailnet))
 
     def stop(self) -> None:
         """Close the listener and every open stream. Devices stay paired."""
         with self._cond:
             server, self._server = self._server, None
+            tail, self._tail_server = self._tail_server, None
             self._gen += 1
             socks = [s for ch in self._chans.values() for s in ch.streams]
             self._cond.notify_all()
         if server is None:
             return
-        server.shutdown()
-        server.server_close()
+        for srv in (server, tail):
+            if srv is not None:
+                srv.shutdown()
+                srv.server_close()
         for s in socks:
             _hang_up(s)
-        if self._thread is not None:
-            self._thread.join(timeout=5)
+        for thread in (self._thread, self._tail_thread):
+            if thread is not None:
+                thread.join(timeout=5)
         self._log("remote: stopped")
 
     def running(self) -> bool:
@@ -543,7 +599,7 @@ class Remote:
         h = handler
         h.send_response(200)
         h.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        h.send_header("Set-Cookie", _cookie_header(cookie))
+        h.send_header("Set-Cookie", h.cookie_header(cookie))
         h.send_header("Connection", "close")
         h.security_headers()
         h.end_headers()
@@ -599,9 +655,13 @@ def _event(seq: int, data: str) -> str:
     return "id: %d\ndata: %s\n\n" % (seq, data)
 
 
-def _cookie_header(value: str) -> str:
-    return "%s=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=%d" % (
-        COOKIE, value, COOKIE_MAX_AGE)
+def _cookie_header(value: str, secure: bool = False) -> str:
+    """`Secure` on the https origin only: on the LAN's plain http a Secure
+    cookie would never be sent back, and the phone could never stay paired.
+    Two origins, two cookies -- a phone paired on the LAN pairs once more on
+    the ts.net name (#249 stage 5)."""
+    return "%s=%s; HttpOnly;%s SameSite=Strict; Path=/; Max-Age=%d" % (
+        COOKIE, value, " Secure;" if secure else "", COOKIE_MAX_AGE)
 
 
 def _hang_up(sock) -> None:
@@ -627,6 +687,8 @@ class _Server(ThreadingHTTPServer):
 
 class _Handler(BaseHTTPRequestHandler):
     owner: Remote
+    # True on the loopback listener `tailscale serve` forwards to (#249 stage 5).
+    via_tailnet = False
     protocol_version = "HTTP/1.1"
     server_version = "Crow"
     sys_version = ""
@@ -656,6 +718,9 @@ class _Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(data)
 
+    def cookie_header(self, value: str) -> str:
+        return _cookie_header(value, secure=self.via_tailnet)
+
     def json(self, code: int, value, extra=()) -> None:
         self.body(code, json.dumps(value, ensure_ascii=False).encode("utf-8"),
                   "application/json; charset=utf-8", extra)
@@ -666,11 +731,27 @@ class _Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------- guards --
 
     def _host_ok(self) -> bool:
+        """The LAN listener: exactly `<lan ip>:<port>`, as before stage 5.
+
+        THE LOOPBACK LISTENER: only the ts.net name, which `tailscale serve`
+        passes through unchanged (with or without `:443`). A bare
+        `127.0.0.1:<port>` or `localhost:<port>` stays a 421, as it was while
+        nothing listened on the loopback at all: a local browser tab is not a
+        paired phone, and http://127.0.0.1 counts as a secure context, so
+        letting it in would open a third origin nobody chose to pair on -- and
+        a DNS-rebinding page in the desktop's browser would reach this port
+        under its own name, which fails this check just the same.
+        """
         o = self.owner
-        return (self.headers.get("Host") or "").lower() == ("%s:%d" % (o.host, o.port)).lower()
+        host = (self.headers.get("Host") or "").lower()
+        if self.via_tailnet:
+            return bool(o.tailnet) and host in (o.tailnet, o.tailnet + ":443")
+        return host == ("%s:%d" % (o.host, o.port)).lower()
 
     def _origin_ok(self) -> bool:
         o = self.owner
+        if self.via_tailnet:
+            return bool(o.tailnet) and self.headers.get("Origin") == "https://" + o.tailnet
         return self.headers.get("Origin") == "http://%s:%d" % (o.host, o.port)
 
     def _cookie(self) -> "str | None":
@@ -805,7 +886,7 @@ class _Handler(BaseHTTPRequestHandler):
         record = self.owner._store.by_hash(_sha256(dev[1])) or {}
         self.owner._store.touch(dev[0], time.time())
         self.json(200, {"id": dev[0], "name": record.get("name", ""), "paired": True},
-                  (("Set-Cookie", _cookie_header(dev[1])),))
+                  (("Set-Cookie", self.cookie_header(dev[1])),))
 
     def _pair_wait(self):
         raw = self._read_body(MAX_BODY)
@@ -823,7 +904,7 @@ class _Handler(BaseHTTPRequestHandler):
         if code != 200:
             return self.plain(410, "no such pairing, or it timed out")
         self.json(200, {"id": record["id"], "name": record["name"]},
-                  (("Set-Cookie", _cookie_header(cookie)),))
+                  (("Set-Cookie", self.cookie_header(cookie)),))
 
     def _upload(self):
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
@@ -860,6 +941,99 @@ class _Handler(BaseHTTPRequestHandler):
         finally:
             CLIENT.reset(token)
         self.body(200, data, "application/json; charset=utf-8")
+
+
+# ================================================================ TAILNET ==
+#
+# #249 stage 5: WHERE THE HTTPS ADDRESS STANDS, read and never changed. Every
+# call is `tailscale ... --json` without sudo, answered in well under a second
+# on robin's PC (tailscale 1.102.3, 2026-09-24); a hung daemon costs at most
+# TAILSCALE_TIMEOUT per call. The states, in the order a person meets them:
+#
+#   missing        no `tailscale` on PATH
+#   down           installed, but not running or not logged in (no DNSName)
+#   https-off      HTTPS certificates are off in the admin console (no CertDomains)
+#   serve-missing  no `tailscale serve` for <name>:443 -> 127.0.0.1:<port>
+#   funnel         Funnel is on for <name>:443: the address would be PUBLIC on
+#                  the internet, so Crow does not listen for it at all
+#   ready          the proxy points here; https://<name>/ works
+#
+# `bindable` states get the loopback listener, so the command in the dialog
+# works the moment it is run, without restarting the mirror.
+
+TAILSCALE_TIMEOUT = 3.0
+TAILSCALE_ADMIN_DNS = "https://login.tailscale.com/admin/dns"
+TAILNET_BINDABLE = frozenset({"https-off", "serve-missing", "ready"})
+
+
+def tailscale_serve_command(port: int) -> str:
+    """The one-time command that points <name>:443 at this mirror. Persistent
+    (it survives reboots, --bg) and the certificate renews itself. Root or a
+    Tailscale operator runs it, never Crow."""
+    return "%stailscale serve --bg --https=443 http://127.0.0.1:%d" % (
+        "" if sys.platform == "win32" else "sudo ", int(port))
+
+
+def _tailscale_json(run, argv: list) -> "dict | None":
+    try:
+        code, out = run(argv)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if code != 0:
+        return None
+    try:
+        found = json.loads(out or "{}")
+    except ValueError:
+        return None
+    return found if isinstance(found, dict) else None
+
+
+def _tailscale_run(argv: list) -> "tuple[int, str]":
+    done = subprocess.run(argv, capture_output=True, text=True,
+                          timeout=TAILSCALE_TIMEOUT, stdin=subprocess.DEVNULL)
+    return done.returncode, done.stdout
+
+
+def tailscale_state(port: int, run: "Callable[[list], tuple[int, str]] | None" = None,
+                    which: Callable[[str], "str | None"] = shutil.which) -> dict:
+    """{"state", "name", "ip", "command"} -- see the table above. NEVER RAISES:
+    a probe that fails reads as the earliest state it could prove.
+
+    `run(argv) -> (returncode, stdout)` and `which` are the seams the suite
+    fills with fakes; nothing in the suite runs the real CLI."""
+    run = run or _tailscale_run
+    out = {"state": "missing", "name": "", "ip": "",
+           "command": tailscale_serve_command(port)}
+    exe = which("tailscale")
+    if not exe:
+        return out
+    out["state"] = "down"
+    status = _tailscale_json(run, [exe, "status", "--json"])
+    if status is None:
+        return out
+    me = status.get("Self") if isinstance(status.get("Self"), dict) else {}
+    name = str(me.get("DNSName") or "").strip().rstrip(".").lower()
+    ips = [ip for ip in (me.get("TailscaleIPs") or status.get("TailscaleIPs") or [])
+           if isinstance(ip, str) and "." in ip]
+    if status.get("BackendState") != "Running" or not name:
+        return out
+    out.update(name=name, ip=ips[0] if ips else "")
+    certs = [str(c).rstrip(".").lower() for c in (status.get("CertDomains") or [])]
+    if name not in certs:
+        out["state"] = "https-off"
+        return out
+    serve = _tailscale_json(run, [exe, "serve", "status", "--json"]) or {}
+    key = name + ":443"
+    if (serve.get("AllowFunnel") or {}).get(key):
+        out["state"] = "funnel"
+        return out
+    handlers = ((serve.get("Web") or {}).get(key) or {}).get("Handlers") or {}
+    proxy = str((handlers.get("/") or {}).get("Proxy") or "").rstrip("/").lower()
+    targets = {"%s%s:%d" % (scheme, host, int(port))
+               for scheme in ("http://", "")
+               for host in ("127.0.0.1", "localhost")}
+    out["state"] = "ready" if proxy in targets else "serve-missing"
+    return out
 
 
 # ======================================================================= QR ==

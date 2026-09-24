@@ -51,8 +51,9 @@ class Clock:
 class Harness:
     """One Remote on loopback with in-memory store and recording callables."""
 
-    def __init__(self, test, saved=None, port=None, clock=None):
+    def __init__(self, test, saved=None, port=None, clock=None, host="127.0.0.1", **extra):
         self.test = test
+        self.host = host
         self.saved = saved if saved is not None else {"records": []}
         self.clock = clock or Clock()
         self.logs = []
@@ -64,15 +65,15 @@ class Harness:
         self.store = crow_remote.DeviceStore(lambda: list(self.saved["records"]),
                                              self.save)
         self.remote = crow_remote.Remote(
-            host="127.0.0.1", port=port or free_port(),
+            host=host, port=port or free_port(),
             page=lambda: "<!doctype html><title>Crow</title>",
             call=self.call, allowed=frozenset({"echo", "boom"}),
             snapshot=lambda dev: [{"k": "hello", "dev": dev}],
             confirm=self.confirm, store=self.store, upload_dir=self.upload_dir,
-            clock=self.clock, log=self.logs.append)
+            clock=self.clock, log=self.logs.append, **extra)
         self.remote.start()
         test.addCleanup(self.remote.stop)
-        self.origin = "http://127.0.0.1:%d" % self.remote.port
+        self.origin = "http://%s:%d" % (host, self.remote.port)
 
     def save(self, records):
         self.saved["records"] = json.loads(json.dumps(records))
@@ -89,7 +90,7 @@ class Harness:
         return self.allow
 
     def conn(self, timeout=5):
-        return http.client.HTTPConnection("127.0.0.1", self.remote.port, timeout=timeout)
+        return http.client.HTTPConnection(self.host, self.remote.port, timeout=timeout)
 
     def request(self, method, path, body=None, headers=None, cookie=None, origin=True):
         h = {"User-Agent": UA_IPHONE}
@@ -592,6 +593,174 @@ class RemoteServerTests(unittest.TestCase):
         self.assertEqual([e for e, _ in got], list(range(sid + 1, sid + 201)))
         for i in range(4):
             self.assertEqual([m["n"] for _, m in got if m["k"] == "t%d" % i], list(range(50)))
+
+
+TS_NAME = "aios.tail77dcd2.ts.net"
+
+
+def ts_request(port, method, path, host, origin=None, body=None, cookie=None,
+               ctype=None):
+    """One request to the LOOPBACK listener, the way `tailscale serve` forwards
+    it: to 127.0.0.1:<port>, with the phone's Host (and Origin) untouched."""
+    h = {"User-Agent": UA_IPHONE, "Host": host}
+    if origin:
+        h["Origin"] = origin
+    if cookie:
+        h["Cookie"] = "%s=%s" % (crow_remote.COOKIE, cookie)
+    if isinstance(body, (dict, list)):
+        body = json.dumps(body).encode()
+        h["Content-Type"] = "application/json"
+    if ctype:
+        h["Content-Type"] = ctype
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    c.request(method, path, body=body, headers=h)
+    r = c.getresponse()
+    data = r.read()
+    c.close()
+    return r, data
+
+
+@unittest.skipIf(crow_platform.IS_WINDOWS, "127.0.0.2 is a Linux loopback alias")
+class TailnetListenerTests(unittest.TestCase):
+    """#249 stage 5: with a ts.net name the server ALSO binds 127.0.0.1:<port>
+    (the `tailscale serve` target) and nothing else. The "LAN" listener is
+    127.0.0.2 here, so the two can be told apart on one machine."""
+
+    def setUp(self):
+        self.h = Harness(self, host="127.0.0.2", tailnet=TS_NAME + ".")
+        self.port = self.h.remote.port
+
+    def test_the_loopback_listener_takes_only_the_ts_net_host(self):
+        self.assertEqual(self.h.remote.tailnet_url, "https://%s/" % TS_NAME)
+        for host in (TS_NAME, TS_NAME + ":443", TS_NAME.upper()):
+            self.assertEqual(ts_request(self.port, "GET", "/", host)[0].status, 200, host)
+        # NEGATIVE: a local browser on the bare loopback keeps today's 421, and
+        # the LAN host does not pass on the loopback either.
+        for host in ("127.0.0.1:%d" % self.port, "localhost:%d" % self.port,
+                     "127.0.0.2:%d" % self.port, "evil.example", TS_NAME + ":8765"):
+            self.assertEqual(ts_request(self.port, "GET", "/", host)[0].status, 421, host)
+        # ...and the ts.net name does not pass on the LAN listener.
+        r, _ = self.h.request("GET", "/", headers={"Host": TS_NAME})
+        self.assertEqual(r.status, 421)
+        self.assertEqual(self.h.request("GET", "/")[0].status, 200)
+
+    def test_the_https_origin_pairs_with_a_secure_cookie(self):
+        origin = "https://" + TS_NAME
+        r, data = ts_request(self.port, "POST", "/pair", TS_NAME, origin,
+                             {"t": self.h.token()})
+        self.assertEqual(r.status, 202, data)
+        pid = json.loads(data)["p"]
+        for _ in range(20):
+            r, data = ts_request(self.port, "POST", "/pair/wait", TS_NAME, origin, {"p": pid})
+            if r.status != 202:
+                break
+        self.assertEqual(r.status, 200, data)
+        cookie = r.getheader("Set-Cookie")
+        for part in ("HttpOnly", "Secure", "SameSite=Strict", "Max-Age=34560000"):
+            self.assertIn(part, cookie)
+        value = cookie.split(";", 1)[0].split("=", 1)[1]
+        r, data = ts_request(self.port, "POST", "/api/echo", TS_NAME, origin, [], cookie=value)
+        self.assertEqual(r.status, 200, data)
+        # NEGATIVE: the LAN origin on the loopback, the https origin on the
+        # LAN, and no origin at all are all 403.
+        for o in ("http://127.0.0.2:%d" % self.port, "http://" + TS_NAME, None):
+            r, _ = ts_request(self.port, "POST", "/api/echo", TS_NAME, o, [], cookie=value)
+            self.assertEqual(r.status, 403, o)
+        r, _ = self.h.request("POST", "/api/echo", [], cookie=value,
+                              headers={"Origin": origin}, origin=False)
+        self.assertEqual(r.status, 403)
+        # The LAN cookie stays without Secure: plain http would never send it back.
+        _, lan = self.h.pair()
+        r, _ = self.h.request("POST", "/pair", {"t": "x"}, cookie=lan)
+        self.assertNotIn("Secure", r.getheader("Set-Cookie"))
+
+    def test_no_tailnet_no_loopback_and_stop_closes_both(self):
+        plain = Harness(self, host="127.0.0.2")
+        self.assertEqual(plain.remote.tailnet_url, "")
+        with self.assertRaises(ConnectionRefusedError):
+            ts_request(plain.remote.port, "GET", "/", TS_NAME)
+        self.h.remote.stop()
+        self.assertEqual(self.h.remote.tailnet_url, "")
+        with self.assertRaises(ConnectionRefusedError):
+            ts_request(self.port, "GET", "/", TS_NAME)
+
+    def test_a_taken_loopback_port_leaves_the_lan_mirror_running(self):
+        with socket.socket() as blocker:
+            blocker.bind(("127.0.0.1", 0))
+            blocker.listen(1)
+            h = Harness(self, host="127.0.0.2", port=blocker.getsockname()[1],
+                        tailnet=TS_NAME)
+            self.assertTrue(h.remote.running())
+            self.assertEqual(h.remote.tailnet_url, "")
+            self.assertTrue(any("no loopback listener" in line for line in h.logs), h.logs)
+
+
+class _Ts:
+    """A fake `tailscale` CLI: argv -> (code, stdout). Never the real one."""
+
+    def __init__(self, status=None, serve=None, code=0):
+        self.status, self.serve, self.code, self.calls = status, serve, code, []
+
+    def __call__(self, argv):
+        self.calls.append(argv[1:])
+        if argv[1:] == ["status", "--json"]:
+            return self.code, json.dumps(self.status)
+        if argv[1:] == ["serve", "status", "--json"]:
+            return 0, json.dumps(self.serve if self.serve is not None else {})
+        raise AssertionError("unexpected tailscale call: %r" % argv)
+
+
+def ts_status(certs=True, backend="Running"):
+    return {"BackendState": backend,
+            "CertDomains": [TS_NAME] if certs else None,
+            "Self": {"DNSName": TS_NAME + ".", "HostName": "aios",
+                     "TailscaleIPs": ["100.108.49.66", "fd7a:115c:a1e0::e401:31cc"]}}
+
+
+def ts_serve(proxy="http://127.0.0.1:8765", funnel=False):
+    out = {"TCP": {"443": {"HTTPS": True}},
+           "Web": {TS_NAME + ":443": {"Handlers": {"/": {"Proxy": proxy}}}}}
+    if funnel:
+        out["AllowFunnel"] = {TS_NAME + ":443": True}
+    return out
+
+
+class TailscaleStateTests(unittest.TestCase):
+    """#249 stage 5: the six states from `tailscale ... --json`, read-only."""
+
+    def state(self, run, which="/usr/bin/tailscale"):
+        return crow_remote.tailscale_state(8765, run=run, which=lambda _n: which)
+
+    def test_the_states(self):
+        self.assertEqual(self.state(_Ts(), which=None)["state"], "missing")
+        self.assertEqual(self.state(_Ts(code=1))["state"], "down")
+        self.assertEqual(self.state(_Ts(ts_status(backend="NeedsLogin")))["state"], "down")
+        off = self.state(_Ts(ts_status(certs=False)))
+        self.assertEqual((off["state"], off["name"], off["ip"]),
+                         ("https-off", TS_NAME, "100.108.49.66"))
+        self.assertEqual(self.state(_Ts(ts_status(), {}))["state"], "serve-missing")
+        self.assertEqual(self.state(_Ts(ts_status(), ts_serve("http://127.0.0.1:9999")))
+                         ["state"], "serve-missing")
+        self.assertEqual(self.state(_Ts(ts_status(), ts_serve(funnel=True)))["state"],
+                         "funnel")
+        for proxy in ("http://127.0.0.1:8765", "http://localhost:8765/", "127.0.0.1:8765"):
+            self.assertEqual(self.state(_Ts(ts_status(), ts_serve(proxy)))["state"],
+                             "ready", proxy)
+
+    def test_it_only_reads_and_never_asks_for_root(self):
+        run = _Ts(ts_status(), {})
+        got = self.state(run)
+        self.assertEqual(run.calls, [["status", "--json"], ["serve", "status", "--json"]])
+        want = "tailscale serve --bg --https=443 http://127.0.0.1:8765"
+        self.assertTrue(got["command"].endswith(want), got["command"])
+        self.assertEqual(crow_remote.TAILNET_BINDABLE,
+                         {"https-off", "serve-missing", "ready"})
+
+    def test_a_broken_cli_is_an_answer(self):
+        def boom(argv):
+            raise OSError("no such file")
+        self.assertEqual(self.state(boom)["state"], "down")
+        self.assertEqual(self.state(lambda argv: (0, "not json"))["state"], "down")
 
 
 class DeviceNameTests(unittest.TestCase):

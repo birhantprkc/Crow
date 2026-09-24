@@ -153,6 +153,9 @@ class _RemoteRefuses:
 
 
 crow_gui.REMOTE_FACTORY = _RemoteRefuses
+# #249 STAGE 5: UND KEIN FALL RUFT JE DIE ECHTE `tailscale`-CLI. Der Standard
+# ist "nicht installiert"; die Tailnet-Faelle setzen ihre eigene Antwort.
+crow_gui.TAILSCALE_PROBE = lambda port: {"state": "missing"}
 import crow_voice      # noqa: E402
 
 
@@ -13369,6 +13372,8 @@ class _FakeRemote:
         self.host = kw.get("host", "192.168.1.5")
         self.port = kw.get("port", 8765)
         self.url = "http://%s:%d/" % (self.host, self.port)
+        self.tailnet = kw.get("tailnet", "")
+        self.tailnet_url = ("https://%s/" % self.tailnet) if self.tailnet else ""
         self.published: list = []
         self.ids = [PHONE]
         self.online = {PHONE: True}
@@ -13418,13 +13423,13 @@ class RemoteCase(ApiCase):
     def setUp(self) -> None:
         super().setUp()
         self._before_remote = (crow_gui.SETTINGS_FILE, crow_gui.REMOTE_FACTORY,
-                               crow_gui.lan_addresses)
+                               crow_gui.lan_addresses, crow_gui.TAILSCALE_PROBE)
         self.addCleanup(self._undo_remote)
         crow_gui.SETTINGS_FILE = os.path.join(self.dir, "settings.json")
 
     def _undo_remote(self) -> None:
         (crow_gui.SETTINGS_FILE, crow_gui.REMOTE_FACTORY,
-         crow_gui.lan_addresses) = self._before_remote
+         crow_gui.lan_addresses, crow_gui.TAILSCALE_PROBE) = self._before_remote
 
     def mirrored(self, *argv):
         api = self.api(*argv)
@@ -13465,7 +13470,7 @@ class RemoteApiParityTests(RemoteCase):
     to the desktop with a stated replacement -- and a call from one client
     produces the push the other one needs."""
 
-    PAGE_METHODS = 93          # 88 at fb31ca2 + the five pairing controls
+    PAGE_METHODS = 94          # 88 at fb31ca2 + the six pairing controls (#249 stage 5)
 
     def page_methods(self) -> set:
         page = crow_gui.PAGE
@@ -14645,6 +14650,130 @@ console.log(JSON.stringify(out));
         api.remote_stop()
         icon = [m for m in self.drained(api) if m.get("k") == "remote"][-1]
         self.assertFalse(icon["on"])
+
+
+# ============================================================ #249 stage 5
+#
+# THE HTTPS ADDRESS VIA TAILSCALE, Api side. The probe is a fake per case
+# (`crow_gui.TAILSCALE_PROBE`); the real CLI is never called.
+
+TS_NAME = "aios.tail77dcd2.ts.net"
+TS_CMD = "sudo tailscale serve --bg --https=443 http://127.0.0.1:8765"
+
+
+def _ts_probe(state: str):
+    named = state not in ("missing", "down")
+    return lambda port: {"state": state, "name": TS_NAME if named else "",
+                         "ip": "100.108.49.66" if named else "",
+                         "command": TS_CMD.replace("8765", str(port))}
+
+
+class RemoteTailnetTests(RemoteCase):
+    """#249 stage 5: the loopback listener while the tailnet can serve, the
+    HTTPS address as the dialog's network choice with one line per state."""
+
+    def started(self, state: str):
+        crow_gui.REMOTE_FACTORY = _FakeRemote
+        crow_gui.lan_addresses = lambda: [("wlan0", "192.168.1.5")]
+        crow_gui.TAILSCALE_PROBE = _ts_probe(state)
+        api = self.api()
+        self.drained(api)
+        self.addCleanup(setattr, api, "_remote", None)
+        return api
+
+    def dialog(self, api) -> dict:
+        return [m for m in self.drained(api) if m.get("k") == "remotedlg"][-1]
+
+    def test_the_loopback_listener_only_while_the_tailnet_can_serve(self):
+        for state, want in (("missing", ""), ("down", ""), ("https-off", TS_NAME),
+                            ("serve-missing", TS_NAME), ("ready", TS_NAME),
+                            ("funnel", "")):
+            with self.subTest(state=state):
+                api = self.started(state)
+                api.slash_answer("/remote on")
+                self.assertEqual(api._remote.kw["tailnet"], want)
+                # the chosen LAN address listens either way, never 0.0.0.0/100.x
+                self.assertEqual(api._remote.kw["host"], "192.168.1.5")
+                api.remote_stop(persist=False)
+
+    def test_the_https_choice_shows_the_missing_step_then_the_code(self):
+        import crow_remote
+        api = self.started("serve-missing")
+        with mock.patch.object(crow_remote, "qr_svg", lambda text: "QR:" + text):
+            api.slash_answer("/remote on")
+            d = self.dialog(api)
+            self.assertEqual((d["https"]["state"], d["https"]["on"]),
+                             ("serve-missing", False))
+            self.assertEqual(d["url"], "http://192.168.1.5:8765/")
+            self.assertEqual(d["svg"], "QR:http://192.168.1.5:8765/#t=pairing-token")
+            self.assertTrue(api.remote_use_https(True))
+            self.assertTrue(crow_gui.remote_https_setting())
+            d = self.dialog(api)
+            self.assertTrue(d["https"]["on"])
+            self.assertEqual(d["url"], "https://%s/" % TS_NAME)
+            self.assertEqual(d["svg"], "", "a code that would not open yet")
+            self.assertIn(TS_CMD, d["https"]["line"])
+            self.assertEqual(d["https"]["cmd"], TS_CMD)
+            self.assertEqual(d["hint"], "", "the ufw line is the LAN's")
+            # robin runs the command; the next look finds it ready, and the QR
+            # carries the SAME single-use code on the ts.net origin.
+            crow_gui.TAILSCALE_PROBE = _ts_probe("ready")
+            api.remote_use_https(True)
+            d = self.dialog(api)
+            self.assertIn("ready", d["https"]["line"])
+            self.assertEqual(d["https"]["cmd"], "")
+            self.assertEqual(d["svg"], "QR:https://%s/#t=pairing-token" % TS_NAME)
+            # back to the LAN: nothing restarts, the LAN code again
+            remote = api._remote
+            api.remote_use_https(False)
+            d = self.dialog(api)
+            self.assertIs(api._remote, remote)
+            self.assertEqual(d["svg"], "QR:http://192.168.1.5:8765/#t=pairing-token")
+
+    def test_every_state_has_its_line(self):
+        lines = {state: crow_core.remote_tailnet_line(state, TS_NAME, TS_CMD)
+                 for state in ("missing", "down", "https-off", "serve-missing",
+                               "funnel", "ready")}
+        self.assertEqual(len(set(lines.values())), 6)
+        self.assertIn("not installed", lines["missing"])
+        self.assertIn("sudo tailscale up", lines["down"])
+        self.assertIn("https://login.tailscale.com/admin/dns", lines["https-off"])
+        self.assertIn(TS_CMD, lines["serve-missing"])
+        self.assertIn("public", lines["funnel"])
+        self.assertIn("https://%s/" % TS_NAME, lines["ready"])
+        self.assertIn("pairs once more", lines["ready"])
+
+    def test_open_restarts_once_when_the_tailnet_came_up(self):
+        api = self.started("down")
+        api.slash_answer("/remote on")
+        first = api._remote
+        self.assertEqual(first.kw["tailnet"], "")
+        crow_gui.TAILSCALE_PROBE = _ts_probe("serve-missing")
+        api.remote_open()
+        self.assertIsNot(api._remote, first)
+        self.assertFalse(first.running())
+        self.assertEqual(api._remote.kw["tailnet"], TS_NAME)
+        self.assertTrue(crow_gui.remote_enabled())
+        # NEGATIVE: an unchanged tailnet restarts nothing
+        again = api._remote
+        crow_gui.TAILSCALE_PROBE = _ts_probe("ready")
+        api.remote_open()
+        self.assertIs(api._remote, again)
+
+    def test_a_phone_cannot_choose_the_address(self):
+        api = self.started("ready")
+        api.slash_answer("/remote on")
+        self.assertNotIn("remote_use_https", crow_gui.REMOTE_ALLOWED)
+        self.assertEqual(crow_gui.REMOTE_DESKTOP_BOUND["remote_use_https"],
+                         "desktop-only")
+        self.assertFalse(self.as_phone(api.remote_use_https, True))
+        self.assertFalse(crow_gui.remote_https_setting())
+
+    def test_the_dialog_draws_the_choice_and_the_line(self):
+        page = crow_gui.PAGE
+        self.assertIn('o.textContent="HTTPS · "+(https.name||"Tailscale")', page)
+        self.assertIn("pywebview.api.remote_use_https(true)", page)
+        self.assertIn('t.querySelector("span").textContent=https.line||""', page)
 
 
 if __name__ == "__main__":
