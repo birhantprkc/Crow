@@ -178,6 +178,45 @@ class RemoteServerTests(unittest.TestCase):
         self.assertEqual(r.getheader("X-Content-Type-Options"), "nosniff")
         self.assertEqual(self.h.request("GET", "/favicon.ico")[0].status, 204)
 
+    def test_the_home_screen_icon(self):
+        """robin's iPhone, 2026-09-24: "Add to Home Screen" drew a generic "1"
+        tile. /apple-touch-icon.png is a 180x180 opaque PNG (colour type 2,
+        no alpha: iOS fills transparency with black), served without a
+        cookie; the manifest lists it and the 512 one."""
+        src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "icons", "crow-256.png")
+        with open(src, "rb") as fh:
+            bird = fh.read()
+        self.h.remote._icon = lambda size: crow_remote.touch_icon(bird, size, "#0b0e17")
+        for path, px in (("/apple-touch-icon.png", 180), ("/icon-512.png", 512)):
+            r, data = self.h.request("GET", path)
+            self.assertEqual(r.status, 200, path)
+            self.assertEqual(r.getheader("Content-Type"), "image/png")
+            self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertEqual(data[12:16], b"IHDR")
+            w, h = int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+            self.assertEqual((w, h, data[24], data[25]), (px, px, 8, 2), path)
+            # the corner is the ground, the middle is the bird
+            _, _, rgba = crow_remote.png_rgba(data)
+            self.assertEqual(bytes(rgba[0:4]), bytes((0x0b, 0x0e, 0x17, 255)))
+            mid = (px // 2 * px + px // 2) * 4
+            self.assertNotEqual(bytes(rgba[mid:mid + 3]), bytes((0x0b, 0x0e, 0x17)))
+        r, data = self.h.request("GET", "/remote.webmanifest")
+        icons = json.loads(data)["icons"]
+        self.assertEqual({(i["src"], i["sizes"]) for i in icons},
+                         {("/apple-touch-icon.png", "180x180"),
+                          ("/icon-512.png", "512x512")})
+        # the Host guard holds for it too
+        r, _ = self.h.request("GET", "/apple-touch-icon.png",
+                              headers={"Host": "evil.example:%d" % self.h.remote.port})
+        self.assertEqual(r.status, 421)
+
+    def test_no_icon_is_404_not_500(self):
+        self.assertEqual(self.h.request("GET", "/apple-touch-icon.png")[0].status, 404)
+        self.h.remote._icon = lambda size: 1 / 0
+        self.h.remote._icons.clear()
+        self.assertEqual(self.h.request("GET", "/apple-touch-icon.png")[0].status, 404)
+
     def test_wrong_host_is_421(self):
         _, cookie = self.h.pair()
         for method, path in (("GET", "/"), ("GET", "/events"), ("POST", "/api/echo"),

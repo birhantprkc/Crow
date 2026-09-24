@@ -13836,6 +13836,27 @@ class RemoteMirrorTests(RemoteCase):
                       [m.get("t") for m in got if m.get("k") == "user"])
         self.assertEqual(api._page_loads, 0, "a phone counted as a page load")
 
+    def test_the_phone_page_brings_its_home_screen_tile(self):
+        """robin's iPhone, 2026-09-24: a generic "1" tile on the home screen.
+        The phone page names the tile, the manifest and the web-app title;
+        the desktop page carries none of it. The window's own drawer
+        (`remote_icon`) draws an opaque 180x180 PNG."""
+        phone = crow_gui.stamped_page(remote=True)
+        for tag in ('<link rel="apple-touch-icon" href="/apple-touch-icon.png">',
+                    '<link rel="manifest" href="/remote.webmanifest">',
+                    '<meta name="apple-mobile-web-app-title" content="Crow">',
+                    '<meta name="apple-mobile-web-app-capable" content="yes">',
+                    '<meta name="mobile-web-app-capable" content="yes">',
+                    '<meta name="apple-mobile-web-app-status-bar-style"'
+                    ' content="black-translucent">'):
+            self.assertIn(tag, phone)
+        self.assertNotIn("apple-touch-icon", crow_gui.stamped_page())
+        tile = crow_gui.remote_icon(180)
+        self.assertEqual(tile[12:16], b"IHDR")
+        self.assertEqual((int.from_bytes(tile[16:20], "big"),
+                          int.from_bytes(tile[20:24], "big"), tile[25]),
+                         (180, 180, 2))
+
     def test_a_phone_reload_does_not_record_the_notes_again(self):
         """robin's iPhone, 2026-09-24: ONE "no folder" note became 32 in
         session.json (1 at at=1, 31 at at=5) and 15+ rows in the phone's chat.

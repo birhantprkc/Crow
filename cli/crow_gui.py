@@ -8207,7 +8207,18 @@ REMOTE_HEAD = ('<meta name="viewport" content="width=device-width,'
                '<meta name="theme-color" media="(prefers-color-scheme: light)"'
                ' content="#ffffff">'
                '<meta name="theme-color" media="(prefers-color-scheme: dark)"'
-               ' content="#181818">')
+               ' content="#181818">'
+               # robin's iPhone, 2026-09-24: "Add to Home Screen" drew a
+               # generic "1" tile. The tile, the title and standalone mode;
+               # black-translucent puts the page under the status bar, and
+               # the layer's --safe-t padding keeps the header below it.
+               '<link rel="apple-touch-icon" href="/apple-touch-icon.png">'
+               '<link rel="manifest" href="/remote.webmanifest">'
+               '<meta name="apple-mobile-web-app-title" content="Crow">'
+               '<meta name="apple-mobile-web-app-capable" content="yes">'
+               '<meta name="mobile-web-app-capable" content="yes">'
+               '<meta name="apple-mobile-web-app-status-bar-style"'
+               ' content="black-translucent">')
 # (the stamped colour is THEME_BG's, the ground the window itself paints)
 REMOTE_CSS = """
 /* #249: auf dem Telefon bleibt die Titelleiste als Kopf -- sie traegt Rail,
@@ -8920,6 +8931,20 @@ ICON_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crow.ico")
 # one as the app icon would put two birds in the product.
 ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
 ICON_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
+
+
+def remote_icon(size: int) -> "bytes | None":
+    """#249: the phone's home-screen tile -- the window's own bird on the
+    crow ground, opaque (iOS fills transparency with black). None when this
+    build ships no icon; `crow_remote` answers 404 then."""
+    source = icon_png(256 if size <= 256 else 512)
+    if not source:
+        return None
+    module = remote_module()
+    if module is None:
+        return None
+    with open(source, "rb") as fh:
+        return module.touch_icon(fh.read(), size, CROW_BG)
 
 
 def icon_png(size: int = 256) -> str:
@@ -15394,7 +15419,8 @@ class Api:
                          confirm=self._remote_confirm,
                          confirm_ttl=crow_core.REMOTE_CONFIRM_S, store=store,
                          upload_dir=os.path.join(PASTE_DIR, "remote"),
-                         log=lambda line: crow_core.log_note(line, "remote"))
+                         log=lambda line: crow_core.log_note(line, "remote"),
+                         icon=remote_icon)
         try:
             remote.start()
         except (OSError, ValueError) as exc:

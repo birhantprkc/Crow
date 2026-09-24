@@ -89,6 +89,10 @@ _IMAGE_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
 
 _MERGEABLE = ("text", "think")
 
+# THE HOME-SCREEN TILE: iOS's apple-touch-icon (180 pt @3x) and the manifest's
+# large one. Both drawn by the owner's `icon(size)`, once, then kept.
+ICON_ROUTES = {"/apple-touch-icon.png": 180, "/icon-512.png": 512}
+
 _SECURITY_HEADERS = (("Referrer-Policy", "no-referrer"),
                      ("Cache-Control", "no-store"),
                      ("X-Content-Type-Options", "nosniff"))
@@ -264,7 +268,8 @@ class Remote:
                  store: DeviceStore, upload_dir: str,
                  confirm_ttl: float = 60.0,
                  clock: Callable[[], float] = time.monotonic,
-                 log: Callable[[str], None] = lambda s: None):
+                 log: Callable[[str], None] = lambda s: None,
+                 icon: "Callable[[int], bytes | None] | None" = None):
         self.host = host
         self.port = port
         self._page = page
@@ -279,6 +284,8 @@ class Remote:
         self._upload_dir = upload_dir
         self._clock = clock
         self._log = log
+        self._icon = icon
+        self._icons: dict[int, "bytes | None"] = {}
         self._cond = threading.Condition(threading.RLock())
         self._chans: dict[str, _Channel] = {r["id"]: _Channel() for r in store.records()}
         self._token: "tuple[str, float] | None" = None
@@ -343,6 +350,22 @@ class Remote:
         return self._server is not None
 
     # -------------------------------------------------------------- pairing --
+
+    def icon_bytes(self, size: int) -> "bytes | None":
+        """The tile at `size` px, drawn once by `icon` and kept; None when
+        there is no drawing. NEVER RAISES: a missing icon is a 404, not a 500."""
+        with self._cond:
+            if size in self._icons:
+                return self._icons[size]
+        data = None
+        if self._icon is not None:
+            try:
+                data = self._icon(size) or None
+            except Exception:              # noqa: BLE001 - see the docstring
+                data = None
+        with self._cond:
+            self._icons[size] = data
+        return data
 
     def new_pairing(self) -> str:
         """A fresh single-use token for the QR; the previous one stops working."""
@@ -700,8 +723,18 @@ class _Handler(BaseHTTPRequestHandler):
         if path.path == "/remote.webmanifest":
             return self.body(200, json.dumps({
                 "name": "Crow", "short_name": "Crow", "start_url": "/",
-                "display": "standalone", "background_color": "#000000"}).encode("utf-8"),
+                "display": "standalone", "background_color": "#000000",
+                "icons": [{"src": route, "sizes": "%dx%d" % (px, px),
+                           "type": "image/png"}
+                          for route, px in ICON_ROUTES.items()]}).encode("utf-8"),
                 "application/manifest+json")
+        if path.path in ICON_ROUTES:
+            # No cookie, like `/` and the manifest: iOS fetches the tile
+            # without the page's credentials when it is added.
+            data = self.owner.icon_bytes(ICON_ROUTES[path.path])
+            if not data:
+                return self.plain(404, "not found")
+            return self.body(200, data, "image/png")
         if path.path == "/me":
             # The page cannot read its HttpOnly cookie; this is how it asks
             # whether the cookie still pairs it, before it shows "expired".
@@ -1083,3 +1116,133 @@ def qr_svg(text: str, quiet: int = 4) -> str:
             'shape-rendering="crispEdges" role="img" aria-label="QR code">'
             '<rect width="%d" height="%d" fill="#fff"/>'
             '<path fill="#000" d="%s"/></svg>' % (size, size, size, size, "".join(parts)))
+
+
+# ================================================================ THE ICON ==
+#
+# THE HOME-SCREEN TILE (robin's iPhone, 2026-09-24: "Add to Home Screen" drew a
+# generic tile with a "1"). iOS reads `apple-touch-icon` and fills any
+# transparency with black, so the tile is the window's own bird (cli/icons/,
+# RGBA) composited onto an opaque ground and scaled here. Standard library
+# only, like the QR above: a PNG reader for what cli/icons holds (8-bit RGB or
+# RGBA, not interlaced) and a writer for opaque RGB.
+
+_PNG_SIG = b"\x89PNG\r\n\x1a\n"
+
+
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    import zlib
+    return (len(data).to_bytes(4, "big") + kind + data
+            + (zlib.crc32(kind + data) & 0xFFFFFFFF).to_bytes(4, "big"))
+
+
+def png_rgb(width: int, height: int, rgb: "bytes | bytearray") -> bytes:
+    """An opaque 8-bit RGB PNG (colour type 2) -- no alpha channel at all."""
+    import zlib
+    stride = width * 3
+    raw = b"".join(b"\x00" + bytes(rgb[y * stride:(y + 1) * stride])
+                   for y in range(height))
+    head = (width.to_bytes(4, "big") + height.to_bytes(4, "big")
+            + bytes((8, 2, 0, 0, 0)))
+    return (_PNG_SIG + _png_chunk(b"IHDR", head)
+            + _png_chunk(b"IDAT", zlib.compress(raw, 9)) + _png_chunk(b"IEND", b""))
+
+
+def png_rgba(data: bytes) -> "tuple[int, int, bytearray]":
+    """(width, height, RGBA bytes) of an 8-bit RGB/RGBA non-interlaced PNG.
+    ValueError for anything else -- the caller serves no icon then."""
+    import zlib
+    if not data.startswith(_PNG_SIG):
+        raise ValueError("not a PNG")
+    pos, idat, head = 8, [], None
+    while pos + 8 <= len(data):
+        size = int.from_bytes(data[pos:pos + 4], "big")
+        kind = data[pos + 4:pos + 8]
+        body = data[pos + 8:pos + 8 + size]
+        if kind == b"IHDR":
+            head = body
+        elif kind == b"IDAT":
+            idat.append(body)
+        elif kind == b"IEND":
+            break
+        pos += 12 + size
+    if head is None or len(head) != 13:
+        raise ValueError("no IHDR")
+    width, height = int.from_bytes(head[0:4], "big"), int.from_bytes(head[4:8], "big")
+    depth, ctype, interlace = head[8], head[9], head[12]
+    if depth != 8 or ctype not in (2, 6) or interlace:
+        raise ValueError("unsupported PNG layout")
+    bpp = 4 if ctype == 6 else 3
+    raw = zlib.decompress(b"".join(idat))
+    stride = width * bpp
+    prev = bytearray(stride)
+    out = bytearray(width * height * 4)
+    for y in range(height):
+        base = y * (stride + 1)
+        kind = raw[base]
+        line = bytearray(raw[base + 1:base + 1 + stride])
+        if kind == 1:
+            for i in range(bpp, stride):
+                line[i] = (line[i] + line[i - bpp]) & 0xFF
+        elif kind == 2:
+            for i in range(stride):
+                line[i] = (line[i] + prev[i]) & 0xFF
+        elif kind == 3:
+            for i in range(stride):
+                left = line[i - bpp] if i >= bpp else 0
+                line[i] = (line[i] + ((left + prev[i]) >> 1)) & 0xFF
+        elif kind == 4:
+            for i in range(stride):
+                a = line[i - bpp] if i >= bpp else 0
+                b = prev[i]
+                c = prev[i - bpp] if i >= bpp else 0
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                pred = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
+                line[i] = (line[i] + pred) & 0xFF
+        elif kind != 0:
+            raise ValueError("bad PNG filter")
+        prev = line
+        if bpp == 4:
+            out[y * width * 4:(y + 1) * width * 4] = line
+        else:
+            row = out[y * width * 4:(y + 1) * width * 4]
+            row[0::4], row[1::4], row[2::4] = line[0::3], line[1::3], line[2::3]
+            row[3::4] = b"\xff" * width
+            out[y * width * 4:(y + 1) * width * 4] = row
+    return width, height, out
+
+
+def touch_icon(source: bytes, size: int, background: str,
+               margin: float = 0.12) -> bytes:
+    """`source` (an RGBA PNG) scaled into a `size` x `size` opaque PNG on
+    `background` ("#rrggbb"), with `margin` of the edge left clear so iOS's
+    rounded corners never cut the drawing. Box-averaged in premultiplied
+    alpha, so the edges blend into the ground instead of fringing."""
+    sw, sh, px = png_rgba(source)
+    bg = tuple(int(background.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+    inner = max(1, round(size * (1 - 2 * margin)))
+    off = (size - inner) // 2
+    rgb = bytearray(bytes(bg) * (size * size))
+    for ty in range(inner):
+        y0 = ty * sh // inner
+        y1 = max(y0 + 1, (ty + 1) * sh // inner)
+        for tx in range(inner):
+            x0 = tx * sw // inner
+            x1 = max(x0 + 1, (tx + 1) * sw // inner)
+            r = g = b = a = 0
+            for sy in range(y0, y1):
+                row = sy * sw * 4
+                for sx in range(x0, x1):
+                    i = row + sx * 4
+                    alpha = px[i + 3]
+                    r += px[i] * alpha
+                    g += px[i + 1] * alpha
+                    b += px[i + 2] * alpha
+                    a += alpha
+            n = (y1 - y0) * (x1 - x0)
+            cover = a / (255 * n)
+            o = ((ty + off) * size + tx + off) * 3
+            for k, (acc, ground) in enumerate(((r, bg[0]), (g, bg[1]), (b, bg[2]))):
+                rgb[o + k] = min(255, round(acc / (255 * n) + ground * (1 - cover)))
+    return png_rgb(size, size, rgb)
