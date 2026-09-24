@@ -14249,9 +14249,30 @@ class ALocalPageKeepsItsQueryTests(unittest.TestCase):
         with mock.patch.object(crow_core, "find_browser", lambda: "/bin/chromium"), \
                 mock.patch.object(crow_platform, "devtools_pipe", lambda: None), \
                 mock.patch.object(crow_platform, "render_scope_prefix", lambda: []), \
-                mock.patch.object(crow_platform, "render_gl_mode", lambda: "swiftshader"), \
+                mock.patch.object(crow_platform, "render_gl_mode",
+                                  getattr(self, "gl", lambda *a, **k: "swiftshader")), \
+                mock.patch.object(crow_platform, "gpu_free_mib", lambda: 73), \
                 mock.patch.object(crow_core.subprocess, "Popen", Browser):
             return crow_core.tool_render_page(path)
+
+    def test_the_render_asks_with_the_windows_panel(self):
+        """#279: the core passes what the window set, and the result names
+        the panel's bound -- one card reading for the choice and the reason."""
+        seen = []
+
+        def gl(free_mib=None, panel=False):
+            seen.append((free_mib, panel))
+            return "swiftshader"
+        self.gl = gl
+        self.addCleanup(crow_core.render_panel_set, False)
+        crow_core.render_panel_set(True)
+        said = self._render("index.html")
+        self.assertEqual(seen, [(73, True)])
+        self.assertIn("73 MiB VRAM free, below the 1,536 MiB", said)
+        crow_core.render_panel_set(False)
+        said = self._render("index.html")
+        self.assertEqual(seen[-1], (73, False))
+        self.assertIn("below the 512 MiB", said)
 
     def test_the_query_reaches_the_browser(self):
         said = self._render("index.html?shot=default&w=960")
@@ -19758,6 +19779,26 @@ class ThePlatformSeamAnswersForOneSystemAtATimeTests(unittest.TestCase):
         self.assertEqual(crow_platform.render_gl_mode(), "swiftshader")
         crow_platform.gpu_free_mib = lambda: 4096
         self.assertEqual(crow_platform.render_gl_mode(), "angle")
+
+    def test_the_browser_panel_is_counted_as_a_second_gpu_client(self):
+        """#279. 2026-09-24: serve up, ~560 MiB free, the window's panel on the
+        same card holding 343 MiB -- the render took the card at #213's 512 and
+        the panel's web process segfaulted in libnvidia-eglcore twice. With
+        the panel open the bound is 1,536; without it #213's 512 stands."""
+        self._env("CROW_RENDER_GL", "")
+        self.assertEqual(crow_platform.render_gl_mode(free_mib=560, panel=True),
+                         "swiftshader")
+        self.assertEqual(crow_platform.render_gl_mode(free_mib=560, panel=False),
+                         "angle")
+        self.assertEqual(crow_platform.render_gl_mode(free_mib=1535, panel=True),
+                         "swiftshader")
+        self.assertEqual(crow_platform.render_gl_mode(free_mib=1536, panel=True),
+                         "angle")
+        why = crow_platform.render_gl_reason(free_mib=560, panel=True)
+        self.assertIn("below the 1,536 MiB", why)
+        self.assertIn("browser panel", why)
+        self.assertIn("below the 512 MiB",
+                      crow_platform.render_gl_reason(free_mib=73, panel=False))
 
     def test_the_scope_really_starts_a_child_here(self):
         """Nicht nur die Liste: wenn diese Maschine einen User-Manager hat,

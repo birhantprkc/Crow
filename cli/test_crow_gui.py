@@ -11601,6 +11601,201 @@ class TheInWindowPaneDecidesTests(unittest.TestCase):
                            "WebKit wants kill above strict (0.5)")
 
 
+class _FakeView:
+    """#279: the few WebKitWebView calls the pane makes, recorded."""
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    def show(self):
+        self.calls.append("show")
+
+    def hide(self):
+        self.calls.append("hide")
+
+    def load_uri(self, uri):
+        self.calls.append(("load", uri))
+
+    def loads(self):
+        return [c[1] for c in self.calls if isinstance(c, tuple)]
+
+
+class _FakeOverlay:
+    def __init__(self) -> None:
+        self.calls = []
+        self.top = mock.Mock()
+
+    def queue_resize(self):
+        self.calls.append("resize")
+
+    def queue_draw(self):
+        self.calls.append("draw")
+
+    def get_toplevel(self):
+        return self.top
+
+
+class AFoldedPanelHoldsNoPageTests(unittest.TestCase):
+    """#279 B/C. 2026-09-24: the panel was folded from ~13:20, yet its
+    WebKitWebProcess was spawned at 13:26:20 right after a render and kept
+    crashing; after six crashes the window stopped repainting until robin
+    moved it. Idle work runs at once here, so the decisions and the widget
+    calls can be read without a display."""
+
+    def _pane(self):
+        said = []
+        pane = crow_gui.InWindowPane(said.append, idle_add=lambda fn, *a: fn(*a))
+        pane._view, pane._overlay = _FakeView(), _FakeOverlay()
+        pane.place(0, 0, 300, 200)
+        return pane, said
+
+    def test_hide_unloads_the_page_and_show_brings_it_back(self):
+        pane, _ = self._pane()
+        pane.go("https://a/")
+        pane.committed("https://a/")
+        pane.hide()
+        self.assertEqual(pane._view.loads(), ["https://a/", "about:blank"])
+        self.assertTrue(pane.parked)
+        self.assertFalse(pane.holds_page())
+        self.assertIsNone(pane.committed("about:blank"),
+                          "the park is not a navigation of the tab")
+        pane.show()
+        self.assertEqual(pane._view.loads()[-1], "https://a/")
+        self.assertTrue(pane.holds_page())
+
+    def test_a_cover_hides_but_does_not_unload(self):
+        pane, _ = self._pane()
+        pane.go("https://a/")
+        pane.committed("https://a/")
+        pane.cover(True)
+        self.assertEqual(pane._view.loads(), ["https://a/"])
+        self.assertFalse(pane.parked)
+
+    def test_a_load_overtaken_by_a_hide_is_not_made(self):
+        queued = []
+        pane = crow_gui.InWindowPane(lambda e: None,
+                                     idle_add=lambda fn, *a: queued.append((fn, a)))
+        pane._view = _FakeView()
+        pane.go("https://a/")
+        pane.hide()
+        for fn, a in queued:
+            fn(*a)
+        self.assertEqual(pane._view.loads(), [])
+
+    def test_a_hidden_pane_opens_no_new_window(self):
+        pane, _ = self._pane()
+        action = mock.Mock()
+        action.get_request.return_value.get_uri.return_value = "https://b/"
+        pane.hide()
+        pane._new_window(None, action)
+        self.assertEqual(pane._view.loads(), [])
+        pane.go("https://a/")
+        pane._new_window(None, action)
+        self.assertEqual(pane._view.loads(), ["https://a/", "https://b/"])
+
+    def test_a_crash_redraws_and_reloads_once_at_most(self):
+        pane, said = self._pane()
+        pane.go("https://a/")
+        pane.committed("https://a/")
+        crash = mock.Mock(value_nick="crashed")
+        pane._terminated(None, crash)
+        self.assertIn("draw", pane._overlay.calls)
+        pane._overlay.top.queue_draw.assert_called()
+        self.assertEqual(pane._view.loads(), ["https://a/", "https://a/"],
+                         "one reload of the page someone was looking at")
+        pane.committed("https://a/")
+        pane._terminated(None, crash)
+        self.assertEqual(pane._view.loads(), ["https://a/", "https://a/"],
+                         "#204: never a second reload")
+        self.assertFalse(pane.wanted)
+        self.assertEqual(pane._view.calls[-1], "hide", "the dead view stays out")
+        self.assertEqual([m["t"] for m in said],
+                         ["the page in the browser panel stopped (crashed)"] * 2)
+
+    def test_a_crash_of_a_hidden_pane_loads_nothing(self):
+        pane, _ = self._pane()
+        pane.go("https://a/")
+        pane.committed("https://a/")
+        pane.hide()
+        pane._terminated(None, mock.Mock(value_nick="crashed"))
+        self.assertEqual(pane._view.loads(), ["https://a/", "about:blank"])
+
+    def test_the_memory_ceiling_is_not_reloaded(self):
+        pane, _ = self._pane()
+        pane.go("https://a/")
+        pane.committed("https://a/")
+        pane._terminated(None, mock.Mock(value_nick="exceeded-memory-limit"))
+        self.assertEqual(pane._view.loads(), ["https://a/"])
+        self.assertFalse(pane.wanted)
+
+
+class ThePanelCountsOnTheCardTests(ApiCase):
+    """#279 A and D in the window: the core learns whether the panel is a GPU
+    client, and the panel's view is throttled around local turns only."""
+
+    def test_the_turn_door_tells_the_core_about_the_panel(self):
+        self.addCleanup(crow_core.render_panel_set, False)
+        before = crow_gui.SETTINGS_FILE
+        self.addCleanup(setattr, crow_gui, "SETTINGS_FILE", before)
+        crow_gui.SETTINGS_FILE = os.path.join(self.dir, "settings.json")
+        api = self.api()
+        for open_, want in ((True, True), (False, False)):
+            with open(crow_gui.SETTINGS_FILE, "w", encoding="utf-8") as fh:
+                json.dump({"browser_open": open_}, fh)
+            api._token_budget()
+            self.assertIs(crow_core.RENDER_PANEL_OPEN, want, open_)
+
+    def test_a_folded_panel_still_holding_a_page_counts(self):
+        api = self.api()
+        pane = crow_gui.InWindowPane(lambda e: None, idle_add=lambda fn, *a: None)
+        api._inwin = pane
+        self.assertFalse(api._panel_on_card({"browser_open": False}))
+        pane._view, pane.last = object(), "https://a/"
+        self.assertTrue(api._panel_on_card({"browser_open": False}))
+        pane.parked = True
+        self.assertFalse(api._panel_on_card({"browser_open": False}))
+
+    def test_the_throttle_is_on_for_local_turns_only(self):
+        api = self.api()
+        pane = crow_gui.InWindowPane(lambda e: None, idle_add=lambda fn, *a: None)
+        api._inwin = pane
+        api._endpoint = lambda: {"remote": False}
+        api._pane_throttle(True)
+        self.assertTrue(pane.throttled)
+        api._pane_throttle(False)
+        self.assertFalse(pane.throttled)
+        api._endpoint = lambda: {"remote": True}
+        api._pane_throttle(True)
+        self.assertFalse(pane.throttled)
+
+    def test_the_pump_throttles_and_releases(self):
+        api = self.api()
+        pane = crow_gui.InWindowPane(lambda e: None, idle_add=lambda fn, *a: None)
+        api._inwin = pane
+        api._endpoint = lambda: {"remote": False}
+        seen = []
+        api._run = lambda text: seen.append(pane.throttled)
+        api._goal_nudge = lambda: None
+        api._busy = True
+        api._pump("x")
+        self.assertEqual(seen, [True])
+        self.assertFalse(pane.throttled)
+
+        def boom(text):
+            raise RuntimeError("x")
+        api._run = boom
+        with self.assertRaises(RuntimeError):
+            api._pump("x")
+        self.assertFalse(pane.throttled)
+
+    def test_the_throttle_names_the_webkit_setting(self):
+        src = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        body = src[src.index("    def _policy(self)"):]
+        body = body[:body.index("    def _park(self)")]
+        self.assertIn("set_hardware_acceleration_policy(", body)
+        self.assertIn("p.NEVER if self.throttled else p.ALWAYS", body)
+
+
 class ThePageFollowsThePaneTests(unittest.TestCase):
     """#201 #227, auf der Seite: die Meldungen haben Empfaenger, ein Render
     macht keinen neuen Reiter je Aufruf, und GitHub bleibt draussen."""
@@ -11612,6 +11807,18 @@ class ThePageFollowsThePaneTests(unittest.TestCase):
     def test_the_messages_have_a_case(self):
         self.assertIn('case "brnav": this.brNav(e.url, e.how)', self.src)
         self.assertIn('case "bropen": this.brOpen(e.url)', self.src)
+
+    def test_a_folded_panel_is_not_loaded_or_unfolded_by_a_render(self):
+        """#279 B: the one door (`brSend`) is shut while folded, and a render
+        fills its tab without unfolding the panel robin folded."""
+        send = self.src[self.src.index("  brSend(url){"):]
+        send = send[:send.index("pywebview.api.pane_go(url)")]
+        self.assertIn('if(document.body.dataset.browser==="shut") return;', send)
+        body = self.src[self.src.index("  brRendered(url, shot){"):]
+        body = body[:body.index("  brSelect(id)")]
+        self.assertNotIn("this.brUnfold()", body)
+        self.assertIn("if(folded) return;", body)
+        self.assertIn("this.brSend(this.brShown(t))", self.src)
 
     def test_renders_reuse_one_tab(self):
         body = self.src[self.src.index("  brRendered(url, shot){"):]

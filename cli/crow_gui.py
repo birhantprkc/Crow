@@ -6744,7 +6744,12 @@ const crow = {
     if(open) return;                       // zugeklappt: `set_browser_open` versteckt
     if(!this.tabs.length){ this.brNew(); return; }
     const t=this.brTab(this.tabOn);
-    if(t && t.at>=0) this.brSend(t.hist[t.at]); else pywebview.api.pane_show(); },
+    if(t && t.at>=0) this.brSend(this.brShown(t)); else pywebview.api.pane_show(); },
+
+  // #279. WHAT A TAB SHOWS: the model's capture for a render tab (the PNG,
+  // a still image), else the address. Unfolding a render tab that was filled
+  // while folded loads the capture, not the live WebGL page.
+  brShown(t){ return (t.shot && t.shotUrl) ? t.shotUrl : t.hist[t.at]; },
 
   // -- #175: die Reiter ----------------------------------------------------
   //
@@ -6784,10 +6789,13 @@ const crow = {
   // Der Screenshot ist, was das Modell wirklich gesehen hat; die Adresse steht
   // in der Zeile und laedt auf Enter live.
   //
-  // DAS PANEL KLAPPT SICH DAFUER AUF. Ein Tab, das in einem zugeklappten Panel
-  // entsteht, ist ein Ereignis, von dem niemand erfaehrt.
+  // #279: A FOLDED PANEL STAYS FOLDED. Until 2026-09-24 a render unfolded it
+  // (#201) and loaded the capture; robin had folded it to keep the card for
+  // the model, and its web process was respawned at 13:26:20 right after a
+  // render and crashed on. The render tab is filled either way; the capture
+  // is loaded when the panel is open, or when it is unfolded.
   brRendered(url, shot){
-    this.brUnfold();
+    const folded=document.body.dataset.browser==="shut";
     // #230: EIN REITER FUER DIE RENDERS DES MODELLS, nicht einer je Aufruf.
     // robin, 2026-09-23: "every time Crow opens a website it opens a new tab".
     // Zehn Renders waren zehn Reiter, die niemand schliesst. Der Render-Reiter
@@ -6801,13 +6809,15 @@ const crow = {
     // DAS BILD STEHT, NICHT DIE ADRESSE: die Meldung "brnav" ueber die
     // geladene PNG-Datei darf den Eintrag nicht ueberschreiben (#227).
     t.shot=true;
+    t.shotUrl=this.fileUrl(String(shot||""));
     this.tabOn=t.id;
     this.brDraw();
     $("#brurl").value=url||"";
+    if(folded) return;
     // DAS BILD ZUERST, weil es das ist, was das Modell gesehen hat -- die Seite
     // kann sich seitdem geaendert haben, und dann erzaehlt der Chat von etwas
     // anderem als der Schirm.
-    this.brSend(this.fileUrl(String(shot||""))); },
+    this.brSend(t.shotUrl); },
 
   // EINE SCHEIBE FUER ALLE REITER, also laedt ein Wechsel die Seite neu. Der
   // ehrliche Preis dafuer, dass ueberhaupt jede Seite geht: je Reiter ein
@@ -6816,7 +6826,7 @@ const crow = {
     const t=this.brTab(id);
     const url = t && t.at>=0 ? t.hist[t.at] : "";
     $("#brurl").value=url;
-    if(url) this.brSend(url); else this.brBlank(); },
+    if(url) this.brSend(this.brShown(t)); else this.brBlank(); },
 
   brClose(id, ev){
     if(ev) ev.stopPropagation();
@@ -6896,6 +6906,9 @@ const crow = {
   // einen Wimpernschlag lang an der Stelle, an der sie beim letzten Mal lag.
   brSend(url){
     if(!window.pywebview) return;
+    // #279: THE ONE DOOR, SHUT WHILE FOLDED. No path loads a page into a
+    // panel nobody can see; unfolding sends the tab's entry again.
+    if(document.body.dataset.browser==="shut") return;
     this.brPlace();
     pywebview.api.pane_go(url); },
 
@@ -8510,6 +8523,16 @@ class InWindowPane:
         self.covered = False      # something of Crow's lies over the rect
         self.own = 0              # loads Crow asked for and not yet committed
         self.last = ""            # the last address reported to the page
+        # #279. A PANE NOBODY SEES HOLDS NO PAGE. `parked`: hidden by a fold,
+        # an empty tab or a minimize, and the view was sent to about:blank so
+        # no WebGL keeps the card; `last` is kept so `show()` brings it back.
+        self.parked = False
+        # #279: one reload after a crash of a page someone was looking at,
+        # never a second (#204's guard) -- reset by the next load of Crow's own.
+        self.revived = False
+        # #279: a turn runs against a local model server; the view renders
+        # without the GPU until it ends (see `throttle`).
+        self.throttled = False
         self._overlay = None
         self._view = None
         self._ctx = None
@@ -8594,6 +8617,8 @@ class InWindowPane:
         view.connect("web-process-terminated", self._terminated)
         self._overlay.add_overlay(view)
         self._ctx, self._view = ctx, view
+        # #279: a view first built during a turn starts throttled.
+        self._policy()
         return view
 
     # -- what the page asks for (any thread) --------------------------------
@@ -8605,10 +8630,15 @@ class InWindowPane:
 
     def go(self, url: str) -> None:
         self.wanted = True
+        self.parked = False
+        self.revived = False
         self.own += 1
         self._idle(self._load, url)
 
     def hide(self) -> None:
+        # #279: `_apply` parks the page too -- a hidden view with a live
+        # WebGL page kept its web process on the card (2026-09-24: respawned
+        # at 13:26:20 while the panel was folded, then crashed on and on).
         self.wanted = False
         self._idle(self._apply)
 
@@ -8618,7 +8648,26 @@ class InWindowPane:
         # white rectangle in a dark panel -- the reason `brBlank` exists.
         if self._view is not None and self.last:
             self.wanted = True
+            if self.parked:
+                # #279: parked on hide, so the page is loaded again.
+                self.parked = False
+                self.own += 1
+                self._idle(self._load, self.last)
+                return
         self._idle(self._apply)
+
+    def holds_page(self) -> bool:
+        """#279: a page is loaded in the view, parked pages not counted."""
+        return self._view is not None and bool(self.last) and not self.parked
+
+    def throttle(self, on: bool) -> None:
+        """#279 D. While a turn runs against the local model server, the
+        panel's view renders without the GPU (WebKitSettings
+        hardware-acceleration-policy NEVER); ALWAYS again when it ends.
+        Only this view: the chat page is pywebview's own and keeps its
+        settings."""
+        self.throttled = bool(on)
+        self._idle(self._policy)
 
     def cover(self, covered: bool) -> None:
         self.covered = bool(covered)
@@ -8629,7 +8678,35 @@ class InWindowPane:
 
     # -- GTK main thread ----------------------------------------------------
 
+    def _policy(self) -> bool:
+        view = self._view
+        if view is None:
+            return False
+        try:
+            from gi.repository import WebKit2
+            p = WebKit2.HardwareAccelerationPolicy
+            view.get_settings().set_hardware_acceleration_policy(
+                p.NEVER if self.throttled else p.ALWAYS)
+        except Exception:              # noqa: BLE001 -- a throttle, never fatal
+            pass
+        return False
+
+    def _park(self) -> None:
+        """#279 B. Nobody sees the pane: its page goes, the web process keeps
+        nothing on the card. GTK main thread only."""
+        if self.parked or self._view is None or not self.last:
+            return
+        self.parked = True
+        try:
+            self._view.load_uri("about:blank")
+        except Exception:              # noqa: BLE001
+            pass
+
     def _load(self, url: str) -> bool:
+        if not self.wanted:
+            # #279: a load that was overtaken by a hide is not made at all.
+            self.own = 0
+            return False
         try:
             self._build().load_uri(url)
         except Exception as exc:       # noqa: BLE001 -- said, never silent
@@ -8650,6 +8727,10 @@ class InWindowPane:
                 self._overlay.queue_resize()
         else:
             view.hide()
+            if not self.wanted:
+                # #279: hidden by a fold, a blank tab or a minimize -- not
+                # merely covered by a sheet for a moment.
+                self._park()
         return False
 
     def committed(self, uri: str) -> "dict | None":
@@ -8660,7 +8741,8 @@ class InWindowPane:
         "push" when the page moved by itself: a link, a form, pushState. The
         page keeps the per-tab history and needs to know which one it was.
         """
-        if not uri:
+        if not uri or self.parked:
+            # #279: the about:blank of a park is not a navigation of the tab.
             return None
         if self.own > 0:
             self.own = 0
@@ -8699,7 +8781,9 @@ class InWindowPane:
             uri = action.get_request().get_uri()
         except Exception:              # noqa: BLE001
             uri = ""
-        if pane_url_ok(uri):
+        # #279: only a pane someone sees opens a page -- a parked or hidden
+        # view loads nothing behind the user's back.
+        if pane_url_ok(uri) and self.wanted and not self.parked:
             self._idle(lambda: (self._view.load_uri(uri), False)[1])
         return None
 
@@ -8710,8 +8794,52 @@ class InWindowPane:
                     "the panel's %d MB ceiling (#226)" % PANE_MEMORY_LIMIT_MB)
         else:
             text = "the page in the browser panel stopped (%s)" % why
-        self.last = ""
-        self._on_event({"k": "note", "t": text})
+        dead, self.last = self.last, ""
+        # #279 C. ONE RELOAD, FOR A PAGE SOMEONE WAS LOOKING AT, AFTER A
+        # CRASH. Not after the memory ceiling (it would grow again), not after
+        # Crow's own terminate, never a second time for the same load (#204):
+        # a driver that fails under a full card fails the retry as well.
+        again = (why == "crashed" and self.wanted and not self.parked
+                 and not self.revived and pane_url_ok(dead)
+                 and dead != "about:blank")
+        if again:
+            self.revived = True
+            self.last = dead
+        else:
+            self.wanted = False
+        if why != "terminated-by-api":
+            self._on_event({"k": "note", "t": text})
+        self._idle(self._after_death, dead if again else "")
+
+    def _after_death(self, url: str) -> bool:
+        """#279 C. 2026-09-24 ~13:47: after six panel crashes the window
+        stopped repainting until robin moved it. The dead view is taken out
+        of the overlay's picture and the window is asked to draw again; the
+        one reload, if any, goes after that. GTK main thread only."""
+        view = self._view
+        if view is not None:
+            try:
+                view.hide()
+            except Exception:          # noqa: BLE001
+                pass
+        overlay = self._overlay
+        if overlay is not None:
+            try:
+                overlay.queue_resize()
+                overlay.queue_draw()
+                top = overlay.get_toplevel()
+                if top is not None:
+                    top.queue_draw()
+            except Exception:          # noqa: BLE001
+                pass
+        if url and view is not None:
+            self.own += 1
+            try:
+                view.load_uri(url)
+            except Exception:          # noqa: BLE001
+                self.wanted = False
+        self._apply()
+        return False
 
     def _download(self, _ctx, download) -> None:
         """WHERE IT WENT, SAID ONCE. WebKit's default destination is the XDG
@@ -12917,7 +13045,21 @@ class Api:
         write_settings(doc)
         if not open_:
             self.pane_hide()
+        # #279: a fold mid-turn counts from the next render on, not the next turn.
+        crow_core.render_panel_set(self._panel_on_card(doc))
         return bool(open_)
+
+    def _panel_on_card(self, doc: "dict | None" = None) -> bool:
+        """#279 A. Is the browser panel a GPU client next to render_page?
+        Open (settings.json `browser_open`), or its view still holds a page."""
+        if doc is None:
+            doc = read_settings()
+        if doc.get("browser_open") is True:
+            return True
+        pane = getattr(self, "_inwin", None)
+        if pane is not None:
+            return bool(pane.holds_page())
+        return bool(getattr(self, "_browser_shown", False))
 
     # -- #175: die Scheibe -----------------------------------------------------
     #
@@ -13021,6 +13163,7 @@ class Api:
             if not pane_url_ok(url):
                 return "error: the browser panel opens http, https and file only"
             self._inwin.go(url)
+            crow_core.render_panel_set(True)          # #279
             return url
         try:
             win = self._pane()
@@ -13522,6 +13665,9 @@ class Api:
         crow_core.context_clear_set(doc.get("context_clear_at"))
         # #269: the file tools' check table, same door.
         crow_core.syntax_checks_set(doc.get("syntax_checks"))
+        # #279: the browser panel as the card's second client, same door --
+        # render_page then needs 1,536 MiB free instead of 512.
+        crow_core.render_panel_set(self._panel_on_card(doc))
         try:
             return max(0, int(doc.get("turn_token_budget") or 0))
         except (TypeError, ValueError):
@@ -13545,6 +13691,9 @@ class Api:
         einzige mehr, und nur ein Neustart loeste das.
         """
         stop = False
+        # #279 D: the panel's page renders without the GPU while the turns run
+        # on the local model server -- off again on both ways out below.
+        self._pane_throttle(True)
         try:
             while True:
                 self._run(text)
@@ -13594,6 +13743,7 @@ class Api:
                     # 2026-08-31: "zeigt weiterhin aktiver turn, obwohl turn
                     # durch". Nach dem Lock, weil ein Push kein Lock braucht.
                     self._reload_rail()
+                    self._pane_throttle(False)
                     return
                 # #162. DER WECHSEL LIEGT ZWISCHEN DEN ZUEGEN, nie in einem.
                 # Hier ist der vorige fertig und der naechste noch nicht
@@ -13618,7 +13768,22 @@ class Api:
             # DERSELBE GRUND WIE OBEN, und dieser Weg braucht ihn mehr: ein Zug,
             # der wirft, hinterliesse sonst eine Kachel, die ewig rechnet.
             self._reload_rail()
+            self._pane_throttle(False)
             raise
+
+    def _pane_throttle(self, on: bool) -> None:
+        """#279 D. The browser panel's view off the GPU while a turn runs on
+        the LOCAL model server, which holds the card; a remote endpoint leaves
+        the card free, so nothing is throttled then. Never fatal."""
+        pane = getattr(self, "_inwin", None)
+        if pane is None:
+            return
+        if on:
+            try:
+                on = not self._endpoint()["remote"]
+            except Exception:          # noqa: BLE001 -- unknown: leave it be
+                on = False
+        pane.throttle(on)
 
     def _run(self, text: str) -> None:
         # #152, zweiter Akt -- robins Retest: der Kern prueft `should_roll`

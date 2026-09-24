@@ -9557,6 +9557,21 @@ _RENDER_RIDE: "list[tuple]" = []
 # trauen und auf die Konsolenzeilen zu schauen.
 _LAST_CAPTURES: "dict[str, bytes]" = {}
 
+# #279. THE WINDOW'S BROWSER PANEL, AS A GPU CLIENT. render_page's headless
+# Chromium took the card at 512 MiB free while the window's panel (a
+# WebKitGTK view on the same card) held 343 MiB; the panel's web process then
+# segfaulted in the NVIDIA driver twice (2026-09-24). The window says whether
+# its panel is open or holds a page, per turn and on every fold, and the
+# render asks crow_platform.gpu_headroom_mib for the bound that goes with it.
+# The terminal has no panel, so it stays False there.
+RENDER_PANEL_OPEN = False
+
+
+def render_panel_set(on) -> None:
+    """The window's browser panel is open or holds a page (#279)."""
+    global RENDER_PANEL_OPEN
+    RENDER_PANEL_OPEN = bool(on)
+
 # Die Form einer Chromium-Logzeile vor der eigentlichen Meldung:
 # "[pid:tid:tttt/mm/dd.hh:mm:ss.ffffff:LEVEL:CONSOLE(n)]" -- dieser Kopf wird
 # gekuerzt, damit `console: ...` beim Modell lesbar ankommt.
@@ -10839,7 +10854,10 @@ def tool_render_page(path: str, wait_ms: int | None = None,
     # Enum-Tabelle fuer die Meldungs-ID 0 findet. Der GPU-Prozess des
     # Software-Arms haelt /dev/nvidiactl offen, aber keinen VRAM (nicht in
     # nvidia-smi) -- gerastert wird in SwiftShader.
-    gl = crow_platform.render_gl_mode()
+    # #279: ONE READING for the choice and for the reason below, and the
+    # panel counted as the card's second client when the window has one open.
+    free_mib = crow_platform.gpu_free_mib()
+    gl = crow_platform.render_gl_mode(free_mib, panel=RENDER_PANEL_OPEN)
     gl_flags = (["--use-gl=angle"] if gl == "angle" else
                 # #175-NACHTRAG (2026-09-20): DIE ZWEI SWIFTSHADER-SCHALTER. Bis
                 # heute stand hier nur --disable-gpu, und die Folge war messbar:
@@ -11060,7 +11078,8 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         if gl != "angle":
             # #271: WHY software, so the tool's limit is not read as
             # the machine's (49 of 49 captures on 2026-09-23 were software).
-            gl_said += ": " + crow_platform.render_gl_reason()
+            gl_said += ": " + crow_platform.render_gl_reason(
+                free_mib, panel=RENDER_PANEL_OPEN)
         said.append("%s -- %d bytes, %dx%d, %s, %s"
                     % (shot, os.path.getsize(shot), w, h, reason, gl_said))
         said.extend(metrics)
