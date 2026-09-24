@@ -68,6 +68,8 @@ crow_core.SESSION_DIR = os.path.join(_NOWHERE, "session")
 crow_core.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
 crow_core.SKILLS_DIR = os.path.join(_NOWHERE, "skills")
 crow_core.USER_PATH = os.path.join(_NOWHERE, "USER.md")
+# #262: Crow's own log file, never the real one under the state dir.
+crow_core.LOG_FILE = os.path.join(_SANDBOX, "log", "crow.log")
 crow.ROOTS_FILE = crow_core.ROOTS_FILE
 crow.SESSION_DIR = crow_core.SESSION_DIR
 crow.SESSION_FILE = crow_core.SESSION_FILE
@@ -715,14 +717,36 @@ class ShowReasoningTests(unittest.TestCase):
         self.assertTrue(events.reply_events()._show)
         self.assertFalse(crow.TerminalTurnEvents(out=out).reply_events()._show)
 
-    def test_the_terminal_says_why_a_round_was_asked_again(self):
-        """#217: the discarded round's stub is already on screen; the note is
-        what stops the re-request looking like a second answer."""
+    def test_status_notes_go_to_the_log_not_the_screen(self):
+        """#262 (robin, 2026-09-23): Crow's own status lines -- a
+        discarded degenerate round, a cache that did not hold, a spent tool
+        budget -- are written to crow.log with a timestamp, not printed."""
+        logs = tempfile.mkdtemp(prefix="crow-log-")
+        self.addCleanup(shutil.rmtree, logs, True)
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        crow_core.LOG_FILE = os.path.join(logs, "crow.log")
+        out = io.StringIO()
+        events = crow.TerminalTurnEvents(out=out)
+        events.turn_note("discarded a degenerate reply (stub, 15 chars, seed 7) "
+                         "-- asking again with a new seed")
+        events.cache_promise_broken()
+        events.budget_spent(24)
+        self.assertEqual(out.getvalue(), "")
+        with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertRegex(lines[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d{4} "
+                                   r"\[turn\] discarded a degenerate reply")
+        self.assertIn("the restored cache did not hold", lines[1])
+        self.assertIn("tool budget spent after 24 rounds", lines[2])
+
+    def test_a_server_reboot_note_still_reaches_the_screen(self):
+        """NEGATIVE: the reboot/load-wait lines stay visible (robin,
+        2026-08-28: a silent 70 s reboot looks like the crash it repairs)."""
         out = io.StringIO()
         crow.TerminalTurnEvents(out=out).turn_note(
-            "discarded a degenerate reply (stub, 15 chars, seed 7) -- asking "
-            "again with a new seed")
-        self.assertIn("discarded a degenerate reply (stub", out.getvalue())
+            "the server on port 8080 is still loading -- waiting")
+        self.assertIn("still loading -- waiting", out.getvalue())
 
     def test_repl_carries_the_switch_into_every_turn(self):
         """`/thoughts` flips it BETWEEN turns, so it may not be read once at

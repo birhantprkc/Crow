@@ -171,6 +171,7 @@ Nothing is installed outside the user's own directories on either platform.
 | `index.db` (session search) | `%LOCALAPPDATA%\Crow\` | `~/.local/share/crow/` |
 | `session/`, `booted.json`, `git_events.json` | `%LOCALAPPDATA%\Crow\` | `~/.local/state/crow/` |
 | server boot logs | `<cwd>\runs\` | `~/.local/state/crow/log/` |
+| Crow's own log, `crow.log` (rotated, 1 MiB × 4) | `%LOCALAPPDATA%\Crow\log\` | `~/.local/state/crow/log/` |
 | models | `<install>\models` | `<install>/models`, a link to the tree |
 | engine binary | `<install>\bin\llama-server.exe` | `<install>/bin/`, then `PATH`, then `~/.local/share/crow/bin` |
 | fonts | `%LOCALAPPDATA%\Microsoft\Windows\Fonts` + winreg | `~/.local/share/fonts/crow/` + `fc-cache` |

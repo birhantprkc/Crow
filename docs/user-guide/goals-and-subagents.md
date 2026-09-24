@@ -98,6 +98,8 @@ nudge. Four things catch that now (#202).
 — or three empty ones, where empty means at most two characters and no tool call at all, are read
 as a loop rather than as progress. Those turns are then **taken out of the history**, nudge and
 answer together, and one recovery line goes out in their place naming the step that is still open.
+How many messages were taken out is written to Crow's log file (`~/.local/state/crow/log/crow.log`,
+see [the window](window.md), *Crow log*), not into the flow.
 An empty answer to that line ends the goal, with a line in the flow saying how many times, at what
 context size, and how many of how many steps are done. There is no second recovery line. Removing
 the loop is the point: an empty answer left standing in the history is an example the next turn
@@ -142,7 +144,8 @@ Only failures count: a result that starts with `error:` or a command with a non-
 a command only when a signature can be read — a `grep` that found nothing is not an error. At
 **three** of one class in one step (the brake's number, and the one OpenHands, Aider and SWE-agent
 settled on), the next nudge carries one line per tripped class — class, count, the way around —
-**instead of** the step text, and the flow shows a note. The line comes back only when that class
+**instead of** the step text, and a line naming class and count goes to `crow.log` (not into the
+flow; the nudge itself is what the model reads). The line comes back only when that class
 came back; a model that stopped is not told again. The counts belong to the step: they start over
 when the step changes, when the model marks it `done`, and when you type a line. A step marked
 `failed` keeps them, because Crow nudges that same step again. Counting happens between turns, so

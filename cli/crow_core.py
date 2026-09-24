@@ -54,6 +54,8 @@ from __future__ import annotations
 import atexit
 import hashlib
 import json
+import logging
+import logging.handlers
 import os
 import random
 import re
@@ -2493,6 +2495,88 @@ SESSION_NOTE_KINDS = ("note", "memory", "alarm")
 # seine Datei nicht damit fuellen. Die aeltesten fallen zuerst.
 SESSION_NOTES_MAX = 400
 
+# #262. CROW'S OWN LOG FILE, and what goes there instead of the chat.
+#
+# robin, 2026-09-23: the grey status lines Crow writes about its own machinery
+# -- the goal brake's dropped loops, the same-failure streak, a discarded
+# degenerate round, a cache that did not hold, a spent tool budget -- clutter a
+# long session. Measured the same day in session.json: "goal mode: 157 messages
+# of an empty loop dropped from the history", then 52 more at the same index.
+# They are debugging facts, not conversation, so they go to a file that keeps
+# them with a timestamp and never into the flow or the saved chat's notes band.
+#
+# WHAT STAYS IN THE CHAT is everything a person acts on or asked for: the
+# rollover card and its "rolled over at N tokens" line, "goal mode stopped/
+# paused" (the goal needs a typed line to go on), the server reboot lines
+# (robin, 2026-08-28: a silent 70 s reboot looks exactly like the crash it
+# repairs), alarms, memory lines, and every answer to a command.
+#
+# UNDER THE STATE DIRECTORY ON BOTH PLATFORMS, beside the boot logs on Linux
+# (`log_dir()`), and deliberately NOT `log_dir()` on Windows: that is `runs\`
+# under the current directory, and an application log that moves with the
+# directory the window was started from is one nobody finds. XDG says state
+# holds "actions history (logs, history, ...)".
+#
+# ROTATED, 1 MiB x 3 backups: a log that grows for months is the next disk
+# problem, and four MiB of one-line notes is weeks of goal runs.
+def default_log_file() -> str:
+    """`<state>/log/crow.log`: ~/.local/state/crow/log/crow.log on Linux,
+    %LOCALAPPDATA%\\Crow\\log\\crow.log on Windows."""
+    return os.path.join(crow_platform.state_dir(), "log", "crow.log")
+
+
+LOG_FILE = default_log_file()
+LOG_MAX_BYTES = 1024 * 1024
+LOG_BACKUPS = 3
+_LOG_LOCK = threading.Lock()
+_LOG_HANDLER: "list" = []          # [(path, handler)] -- rebuilt when LOG_FILE moves
+
+# The notes that are log-only. PREFIXES, because the same list also filters
+# what earlier builds already wrote into a chat's notes band: a reopened chat
+# from this morning must not draw them either.
+LOG_ONLY_NOTE_PREFIXES = (
+    "goal mode: ",                          # "N messages of an empty loop dropped"
+    "goal mode, step ",                     # "the same failure keeps coming back"
+    "discarded a degenerate reply",         # #217 resample
+    "kept the re-asked reply although",     # #217 stub on the retry
+    "the restored cache did not hold",      # cache_promise_broken
+    "tool budget spent after",              # the terminal's budget_spent
+)
+
+
+def note_is_log_only(text: str) -> bool:
+    """True for a Crow status note that belongs in crow.log, not in the chat."""
+    return str(text or "").startswith(LOG_ONLY_NOTE_PREFIXES)
+
+
+def log_note(text: str, kind: str = "note") -> None:
+    """One timestamped line in Crow's log file. NEVER RAISES.
+
+    A diagnostic that can break the turn it describes is worse than none: a
+    full disk or a read-only state directory costs the line, not the run.
+    The timestamp is LOCAL TIME WITH ITS OFFSET, so it cannot be misread the
+    way engine.log's bare UTC has been.
+    """
+    try:
+        with _LOG_LOCK:
+            if not _LOG_HANDLER or _LOG_HANDLER[0][0] != LOG_FILE:
+                for _path, old in _LOG_HANDLER:
+                    old.close()
+                _LOG_HANDLER.clear()
+                os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+                handler = logging.handlers.RotatingFileHandler(
+                    LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS,
+                    encoding="utf-8", delay=True)
+                handler.setFormatter(logging.Formatter(
+                    "%(asctime)s %(message)s", "%Y-%m-%dT%H:%M:%S%z"))
+                _LOG_HANDLER.append((LOG_FILE, handler))
+            record = logging.LogRecord(
+                "crow", logging.INFO, __file__, 0, "[%s] %s",
+                (kind, " ".join(str(text).split())), None)
+            _LOG_HANDLER[0][1].handle(record)
+    except Exception:                       # noqa: BLE001 - see docstring
+        pass
+
 # #171. WAS EIN ZUG GEKOSTET HAT, als Zahlen und mit dem Chat gespeichert.
 # Die Timing-Zeile war bis hier reine Bildschirmausgabe: sie ist keine Nachricht,
 # also nahm `roll_over` sie nicht mit, und nach dem Schnitt waren die Zahlen jedes
@@ -3014,6 +3098,11 @@ def clean_notes(notes: "list | None") -> list:
             continue
         kind = note.get("k")
         if kind not in SESSION_NOTE_KINDS:
+            continue
+        # #262: a status note an earlier build wrote into the band
+        # is dropped here, so a reopened chat does not draw it and the next
+        # save does not carry it on. The log has the live ones.
+        if kind == "note" and note_is_log_only(note.get("t")):
             continue
         keep = {"k": kind, "at": max(0, int(note.get("at") or 0)),
                 "t": str(note.get("t") or "")}
@@ -19938,7 +20027,8 @@ def run_turn(
         malformed = timings.get("_malformed_calls") or []
         kind = classify_round(reply, calls, finish, reasoning, tools=send_tools,
                               malformed=malformed)
-        note = getattr(events, "turn_note", lambda _t: None)
+        # #262: both lines below are Crow's own diagnostics and go
+        # to crow.log; `incidents` still carries them to the memory review.
         if kind == "stub" and degenerate:
             # A STUB ON THE RE-REQUEST IS KEPT, NOT REFUSED (lead review of
             # ba48641). Two short, unpunctuated answers in a row from two
@@ -19946,10 +20036,10 @@ def run_turn(
             # file name -- as a cut, and refusing an answer twice is the one
             # failure that must not happen to a real one. It is stored below
             # like any answer; the note and the incident say what it was.
-            note("kept the re-asked reply although it looks unfinished "
-                 "(stub again%s)" % (", seed %s" % timings.get("_seed")
-                                     if timings.get("_seed") is not None
-                                     else ""))
+            log_note("kept the re-asked reply although it looks unfinished "
+                     "(stub again%s)" % (", seed %s" % timings.get("_seed")
+                                         if timings.get("_seed") is not None
+                                         else ""), "turn")
             incidents.append("the re-asked round was a stub again and was "
                              "kept as the answer")
         elif kind in DEGENERATE_ROUNDS:
@@ -19969,7 +20059,7 @@ def run_turn(
                         % (kind, len((reply or "").strip()),
                            ", seed %s" % degenerate[0][1]
                            if degenerate[0][1] is not None else ""))
-                note(said)
+                log_note(said, "turn")
                 incidents.append("a degenerate round (%s) was discarded "
                                  "unstored and asked again" % kind)
                 continue

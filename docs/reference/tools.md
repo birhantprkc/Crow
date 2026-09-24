@@ -418,9 +418,9 @@ Every round is classified before it may enter the history (`classify_round`):
 | `think_only` | reasoning and no visible text (#150) | the one visible-answer nudge, as before |
 
 The re-request is on the same prefix — no message is added, so the read ledger, the goal step
-and the prompt cache stand — with a new `seed`. A note says `discarded a degenerate reply
+and the prompt cache stand — with a new `seed`. A line in `crow.log` (not in the chat) says `discarded a degenerate reply
 (<class>, N chars, seed S) -- asking again with a new seed`. If the retry is a stub, it is
-stored as the answer with a note (`kept the re-asked reply although it looks unfinished`):
+stored as the answer with a `crow.log` line (`kept the re-asked reply although it looks unfinished`):
 a short answer is never refused twice. If the retry is markup, the turn ends with one red
 line naming both classes and both seeds, and the history gets `[no usable reply: markup]`
 instead of either round. Replayed over the stored rounds of 2026-09-18..22 (3,155 assistant
