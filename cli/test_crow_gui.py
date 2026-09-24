@@ -4772,6 +4772,151 @@ class TheHeldWriteBarTests(unittest.TestCase):
         self.assertIn("pendState([])", clear[:200])
 
 
+class AHeldWriteThatDidNotLandIsSaidTests(ApiCase):
+    """#285. robin pressed "save to memory", the file stayed as it was and the
+    window said nothing. A write that did not happen is announced as surely as
+    one that did."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(crow_core.forget_pending)
+
+    def test_an_expired_write_answers_with_a_visible_line(self):
+        entry = crow_core.stage_memory(
+            "memory", json.dumps({"action": "add", "content": "ZU SPAET"}))
+        entry["staged"] -= crow_core.PENDING_TTL + 1
+        api = self.api()
+        self.drained(api)
+        api.answer_memory(True)
+        got = self.drained(api)
+        notes = [m["t"] for m in got if m.get("k") == "note"]
+        self.assertTrue(any("not saved" in t and "expired after 5 min" in t
+                            for t in notes), got)
+        # NEGATIVE: nothing was written, so nothing glows.
+        self.assertNotIn("memory", [m.get("k") for m in got])
+
+    def test_a_mixed_answer_glows_for_the_saved_and_names_the_rest(self):
+        api = self.api()
+        self.drained(api)
+        with mock.patch.object(crow_core, "approve_pending", return_value=(
+                ["add memory"], [{"what": "add memory: x", "why": "already in memory"}])):
+            api.answer_memory(True)
+        got = self.drained(api)
+        self.assertEqual([m["n"] for m in got if m.get("k") == "memory"], [1])
+        self.assertTrue(any("already in memory" in m.get("t", "")
+                            for m in got if m.get("k") == "note"), got)
+
+
+class TheHeldWriteTileHasThreeStatesTests(unittest.TestCase):
+    """#285 point 3. Collapsed, the 160-char previews, then the whole text --
+    a replace as the entry it takes out above the one it puts in, an add
+    marked as appended. RUN in node over a small fake DOM: which row shows at
+    which click is logic, and a string in the source proves nothing about it.
+    """
+
+    FAKE_DOM = r"""
+function mk(tag){ const e={tag, children:[], className:"", _t:"", hidden:false,
+  parentNode:null, dataset:{},
+  classList:{ s:new Set(), add(...c){ c.forEach(x=>this.s.add(x)); },
+    remove(...c){ c.forEach(x=>this.s.delete(x)); },
+    contains(c){ return this.s.has(c); },
+    toggle(c,f){ const on = f===undefined ? !this.s.has(c) : !!f;
+      if(on) this.s.add(c); else this.s.delete(c); return on; } },
+  appendChild(c){ this.children.push(c); c.parentNode=this; return c; },
+  insertBefore(c,ref){ const i=ref?this.children.indexOf(ref):-1;
+    if(i<0) this.children.push(c); else this.children.splice(i,0,c);
+    c.parentNode=this; return c; },
+  get textContent(){ return this._t + this.children.map(c=>c.textContent).join(""); },
+  set textContent(v){ this._t=String(v); this.children=[]; },
+  set innerHTML(v){ this.children=[]; this._t="";
+    for(const m of String(v).matchAll(/class="([^"]+)"/g)){
+      const c=mk("span"); c.className=m[1]; this.appendChild(c); } },
+  get innerHTML(){ return ""; },
+  has(cls){ return this.className.split(" ").includes(cls) || this.classList.s.has(cls); },
+  querySelectorAll(sel){ const cls=sel.replace(/^\./,""), out=[];
+    const walk=n=>n.children.forEach(c=>{ if(c.has(cls)) out.push(c); walk(c); });
+    walk(this); return out; },
+  querySelector(sel){ return this.querySelectorAll(sel)[0] || null; },
+  closest(){ return null; } };
+  return e; }
+const document={ createElement:mk };
+const bar=mk("div"); bar.id="pendbar";
+const $=sel=>bar;
+"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.node = _node()
+        cls.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        cls.css = cls.source[cls.source.index("<style>"):cls.source.index("</style>")]
+
+    def setUp(self):
+        if not self.node:
+            self.skipTest("no node on this machine")
+
+    def _page(self, items, clicks):
+        """pendState + pendToggle out of the page; after each click, the
+        tile's state and every row's text as the CSS would show it."""
+        import subprocess
+        start = self.source.index("  pendState(items){")
+        end = self.source.index("  pendAnswer(yes)")
+        prog = (self.FAKE_DOM
+                + "const crow={\n" + self.source[start:end] + "};\n"
+                + "const seen=[];\n"
+                + "function look(){ const deep=bar.classList.contains('deep'),"
+                  " open=bar.classList.contains('open');\n"
+                  "  const hint=bar.querySelector('.hint');\n"
+                  "  seen.push({open, deep, hint: hint ? hint.textContent : '',\n"
+                  "    brief: bar.querySelectorAll('.brief').map(r=>r.textContent),\n"
+                  "    was: bar.querySelectorAll('.was').map(r=>r.textContent),\n"
+                  "    will: bar.querySelectorAll('.will').map(r=>r.textContent),\n"
+                  "    where: bar.querySelectorAll('.where').map(r=>r.textContent)}); }\n"
+                + "crow.pendState(" + json.dumps(items) + "); look();\n"
+                + "for(let i=0;i<" + str(clicks) + ";i++){ crow.pendToggle({target:bar}); look(); }\n"
+                + "console.log(JSON.stringify(seen));\n")
+        done = subprocess.run([self.node, "-e", prog], capture_output=True,
+                              text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    ITEMS = [{"action": "replace", "text": "replace memory: " + "N" * 141 + "...",
+              "full": "N" * 400, "old": "alpha " + "o" * 300, "find": "alpha"},
+             {"action": "add", "text": "add memory: " + "A" * 145 + "...",
+              "full": "A" * 400}]
+
+    def test_the_second_click_shows_old_and_new_whole(self):
+        shut, first, second, third = self._page(self.ITEMS, 3)
+        self.assertEqual((shut["open"], shut["deep"]), (False, False))
+        self.assertEqual((first["open"], first["deep"]), (True, False))
+        self.assertEqual((second["open"], second["deep"]), (True, True))
+        self.assertEqual((third["open"], third["deep"]), (False, False))
+        # NO TEXT CUT: the whole old entry and the whole new one, marked.
+        self.assertEqual(second["was"], ["\u2212 alpha " + "o" * 300])
+        self.assertEqual(second["will"], ["+ " + "N" * 400, "+ " + "A" * 400])
+        self.assertEqual(second["where"], ["appended at the end"])
+        self.assertEqual(first["brief"], [x["text"] for x in self.ITEMS])
+        self.assertEqual(len({first["hint"], second["hint"], third["hint"]}), 3)
+
+    def test_a_replace_with_no_single_match_says_so(self):
+        """NEGATIVE: the tile names what it searched for, not a guessed entry."""
+        got = self._page([{"action": "remove", "text": "remove memory: x ",
+                           "full": "", "old": None, "find": "x "}], 2)
+        self.assertEqual(len(got[2]["was"]), 1)
+        self.assertIn("no single entry contains", got[2]["was"][0])
+        self.assertEqual(got[2]["will"], [])
+
+    def test_the_css_shows_one_level_at_a_time(self):
+        """The previews and the whole text are both in the tile; which one a
+        reader sees is the CSS's job, keyed on `.deep`."""
+        self.assertIn("#pendbar .whole{display:none", self.css)
+        self.assertIn("#pendbar.deep .whole{display:block", self.css)
+        self.assertIn("#pendbar.deep .brief{display:none", self.css)
+        # #249's phone layer rearranges; it must not hide the rows #285 adds.
+        phone = crow_gui.REMOTE_CSS
+        for cls in (".whole", ".brief", ".was", ".will", ".where", ".deep"):
+            self.assertNotIn(cls, phone)
+
+
 class TheMemoryLineTests(unittest.TestCase):
     """#122: the one sign a person gets that something was remembered.
 

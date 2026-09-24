@@ -1418,8 +1418,12 @@ def ask_memory() -> None:
         print()
         answer = "n"
     if answer in ("y", "yes"):
-        saved = crow_core.approve_pending()
-        print(f"{CROW_ACCENT}[memory updated: {len(saved)}]{RESET}\n")
+        saved, failed = crow_core.approve_pending()
+        print(f"{CROW_ACCENT}[memory updated: {len(saved)}]{RESET}")
+        # #285: a write that did not land is said, not swallowed.
+        if failed:
+            print(f"{YELLOW}{crow_core.pending_failed_note(failed)}{RESET}")
+        print()
     else:
         dropped = crow_core.decline_pending()
         print(f"{DIM}[memory discarded: {dropped}]{RESET}\n")

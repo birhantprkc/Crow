@@ -7193,7 +7193,7 @@ class TheMemoryGateTests(_MemoryFixture):
         control that does nothing."""
         self._answer([self._call("memory", {"action": "add", "content": "JA"})])
         self.run_review(gate=True)
-        self.assertEqual(crow_core.approve_pending(), ["add memory"])
+        self.assertEqual(crow_core.approve_pending()[0], ["add memory"])
         self.assertEqual(self.entries(), ["JA"])
 
         self._answer([self._call("memory", {"action": "add", "content": "NEIN"})])
@@ -7209,7 +7209,7 @@ class TheMemoryGateTests(_MemoryFixture):
         crow_core.write_store(crow_core.memory_path(), ["a" * 3900])
         self._answer([self._call("memory", {"action": "add", "content": "b" * 500})])
         self.run_review(gate=True)
-        self.assertEqual(crow_core.approve_pending(), [])
+        self.assertEqual(crow_core.approve_pending()[0], [])
         self.assertEqual(self.entries(), ["a" * 3900])
 
     def test_an_expired_entry_can_never_be_approved(self):
@@ -7221,7 +7221,7 @@ class TheMemoryGateTests(_MemoryFixture):
         entry = crow_core._PENDING[0]
         entry["staged"] -= crow_core.PENDING_TTL + 1
         self.assertEqual(crow_core.pending_memory(), [])
-        self.assertEqual(crow_core.approve_pending(), [])
+        self.assertEqual(crow_core.approve_pending()[0], [])
         self.assertEqual(self.entries(), [])
 
     def test_dropping_the_chat_drops_what_was_staged(self):
@@ -7233,6 +7233,91 @@ class TheMemoryGateTests(_MemoryFixture):
         crow_core.forget_approvals()
         self.assertEqual(crow_core.pending_memory(), [])
         self.assertEqual(self.entries(), [])
+
+
+    # ---- #285: every approved write gets an outcome, and the tile shows it all
+
+    def _stage(self, **args):
+        self.addCleanup(crow_core.forget_pending)
+        return crow_core.stage_memory("memory", json.dumps(args))
+
+    def test_an_over_limit_write_comes_back_failed_with_its_reason(self):
+        """#285 (a). The file stayed as it was and the window said nothing --
+        robin's click on 2026-09-24. The limit is still the tool's; what is new
+        is that its refusal reaches the person who pressed save."""
+        crow_core.write_store(crow_core.memory_path(), ["a" * 3900])
+        self._stage(action="add", content="b" * 500)
+        saved, failed = crow_core.approve_pending()
+        self.assertEqual(saved, [])
+        self.assertEqual(len(failed), 1)
+        self.assertIn("over the 4,000-char limit", failed[0]["why"])
+        self.assertIn("add memory", failed[0]["what"])
+        self.assertEqual(self.entries(), ["a" * 3900])
+
+    def test_a_replace_that_matches_nothing_comes_back_failed(self):
+        """#285 (b). `no entry contains` was a result the loop skipped."""
+        crow_core.write_store(crow_core.memory_path(), ["alpha"])
+        self._stage(action="replace", old_text="GIBTSNICHT", content="neu")
+        saved, failed = crow_core.approve_pending()
+        self.assertEqual(saved, [])
+        self.assertIn("no entry contains", failed[0]["why"])
+        self.assertEqual(self.entries(), ["alpha"])
+
+    def test_an_expired_write_is_named_not_swallowed(self):
+        """#285 (c). Expiry still falls on the side of NOT writing -- the entry
+        never runs -- but a late "save" now says it came too late instead of
+        approving an empty list without a word."""
+        entry = self._stage(action="add", content="ZU SPAET")
+        entry["staged"] -= crow_core.PENDING_TTL + 1
+        saved, failed = crow_core.approve_pending()
+        self.assertEqual(saved, [])
+        self.assertEqual([f["why"] for f in failed], ["expired after 5 min"])
+        self.assertEqual(self.entries(), [])
+        # Reported once: a second answer has nothing left to name.
+        self.assertEqual(crow_core.approve_pending(), ([], []))
+
+    def test_a_duplicate_is_not_counted_as_saved(self):
+        """NEGATIVE PROBE. `tool_memory` answers a duplicate with success, and
+        the old loop dropped it silently because it had no action -- the most
+        likely shape of robin's click. It is a write that did not happen."""
+        crow_core.write_store(crow_core.memory_path(), ["schon da"])
+        self._stage(action="add", content="schon da")
+        saved, failed = crow_core.approve_pending()
+        self.assertEqual(saved, [])
+        self.assertEqual(failed[0]["why"], "already in memory")
+
+    def test_the_failure_line_names_the_reason(self):
+        """The line both surfaces show, and it is empty when nothing failed so
+        a caller can test the string."""
+        self.assertEqual(crow_core.pending_failed_note([]), "")
+        line = crow_core.pending_failed_note(
+            [{"what": "add memory: x", "why": "already in memory"}])
+        self.assertTrue(line.startswith("Memory: not saved -- already in memory"), line)
+
+    def test_the_view_carries_the_full_text_and_the_entry_a_replace_removes(self):
+        """#285 point 2. `text` stays the preview; `full` and `old` are whole.
+        robin could not tell an append from a swap mid-file, because the
+        preview showed only the new words, cut at 160."""
+        old_entry = "alpha " + "o" * 300
+        crow_core.write_store(crow_core.memory_path(), [old_entry, "beta"])
+        self._stage(action="replace", old_text="alpha", content="N" * 400)
+        self._stage(action="add", content="A" * 400)
+        swap, add = crow_core.pending_view()
+        self.assertLessEqual(len(swap["text"]), 180)
+        self.assertEqual(swap["full"], "N" * 400)
+        self.assertEqual(swap["old"], old_entry)
+        self.assertEqual(add["full"], "A" * 400)
+        self.assertNotIn("old", add)
+        # READ, NEVER WRITTEN: looking is not approving.
+        self.assertEqual(self.entries(), [old_entry, "beta"])
+
+    def test_the_view_does_not_guess_an_entry_that_is_not_there(self):
+        """NEGATIVE. With no single match the write will fail; showing some
+        entry as removed would announce a change that will not happen."""
+        crow_core.write_store(crow_core.memory_path(), ["x eins", "x zwei"])
+        self._stage(action="remove", old_text="x ")
+        self.assertIsNone(crow_core.pending_view()[0]["old"])
+        self.assertEqual(crow_core.pending_view()[0]["find"], "x ")
 
 
 class BackgroundReviewTests(_MemoryFixture):

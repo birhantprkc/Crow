@@ -19795,6 +19795,12 @@ PENDING_TTL = 300.0
 _PENDING: "list[dict]" = []
 _PENDING_SEQ = 0
 
+# #285. WHAT EXPIRED, KEPT ASIDE UNTIL SOMEBODY ANSWERS. Dropping an expired
+# entry on the read is right -- it must never run -- but dropping it without a
+# trace made a late "save" approve nothing and say nothing. The entry still
+# never runs; it only stays nameable, so the answer can say it came too late.
+_EXPIRED: "list[dict]" = []
+
 
 def _pending_summary(name: str, arguments: str) -> str:
     """One line naming what WOULD be written, in the note's words not the API's.
@@ -19851,8 +19857,39 @@ def pending_memory() -> "list[dict]":
     enough to be approved.
     """
     now = time.monotonic()
+    _EXPIRED.extend(e for e in _PENDING if now - e["staged"] >= PENDING_TTL)
     _PENDING[:] = [e for e in _PENDING if now - e["staged"] < PENDING_TTL]
     return list(_PENDING)
+
+
+def _pending_args(entry: dict) -> dict:
+    """The staged arguments as a dict; anything unreadable is an empty one."""
+    try:
+        args = json.loads(entry.get("arguments") or "{}")
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return {}
+    return args if isinstance(args, dict) else {}
+
+
+def _pending_old(entry: dict, args: dict) -> "str | None":
+    """#285. The whole entry a `replace`/`remove` would hit, READ, NEVER WRITTEN.
+
+    The same match `tool_memory` makes -- `old_text` inside exactly one entry
+    -- so the tile names the entry the write will actually take out. None when
+    there is no single match: then the write will fail, and the approval says
+    so; guessing an entry here would show a removal that will not happen.
+    """
+    if entry.get("name") != "memory" or not args.get("old_text"):
+        return None
+    target = str(args.get("target") or "memory")
+    if target not in MEMORY_TARGETS:
+        return None
+    try:
+        path = _store(target)[0]
+        hits = [e for e in read_store(path) if str(args["old_text"]) in e] if path else []
+    except Exception:                       # noqa: BLE001 - a preview never breaks the tile
+        return None
+    return hits[0] if len(hits) == 1 else None
 
 
 def pending_view() -> "list[dict]":
@@ -19861,32 +19898,108 @@ def pending_view() -> "list[dict]":
     ONE SHAPE FOR BOTH SURFACES and neither of them reaches into the entry. The
     window counts lines gained and lost off `action`; the terminal prints
     `text`. `arguments`, `id` and the staged clock are this module's business.
+
+    #285. `text` STAYS THE 160-CHAR PREVIEW; `full` is the untruncated body and
+    `old` the whole entry a replace or remove takes out, looked up now. robin
+    could not tell an append from a swap in the middle of the file, because the
+    preview showed only the new words and cut those. `find` is the `old_text`
+    itself, for the case where no single entry matches it.
     """
-    return [{"action": e["action"], "text": e["summary"]}
-            for e in pending_memory()]
+    out = []
+    for e in pending_memory():
+        args = _pending_args(e)
+        row = {"action": e["action"], "text": e["summary"],
+               "full": str(args.get("content") or args.get("description") or "")}
+        if e["action"] in ("replace", "remove"):
+            row["old"] = _pending_old(e, args)
+            row["find"] = str(args.get("old_text") or "")
+        out.append(row)
+    return out
 
 
-def approve_pending(ident: "int | None" = None) -> "list[str]":
-    """Run what was staged. `None` means all of it. Returns what was saved.
+def _pending_clip(text: str, n: int = 120) -> str:
+    """One line, at most `n` characters -- for a reason, not for the entry."""
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else text[:n - 3] + "..."
+
+
+def _pending_failure(result: dict) -> "str | None":
+    """#285. Why one approved write did not land, shortened; None if it did.
+
+    A SUCCESS WITHOUT AN ACTION IS NOT A SAVE. `tool_memory` answers a
+    duplicate with success -- the wanted state is already the state -- and
+    that is right for the model; for the person who pressed save, nothing was
+    written, and the reason is the one thing worth telling them.
+    """
+    if result.get("success") and result.get("action"):
+        return None
+    if result.get("success"):
+        return ("already in memory" if result.get("note") == "no duplicate added"
+                else _pending_clip(result.get("note") or "nothing changed"))
+    error = str(result.get("error") or "failed")
+    if "exceed the limit" in error:
+        usage = str(result.get("usage") or "")
+        if "/" in usage:
+            used, limit = usage.split("/", 1)
+            return "over the %s-char limit (%s used)" % (limit, used)
+        return "over the limit"
+    return _pending_clip(error)
+
+
+def approve_pending(ident: "int | None" = None) -> "tuple[list[str], list[dict]]":
+    """Run what was staged. `None` means all of it. Returns (saved, failed).
 
     THE SAME `run_tool` THE REVIEW WOULD HAVE CALLED. An approved write and an
     ungated write are one code path, so the character cap, the duplicate check
     and the injection scan all still answer -- the gate adds a question, it does
     not add a second way to write.
+
+    #285. EVERY ENTRY GETS AN OUTCOME. `failed` holds one {"what", "why"} per
+    entry that did not land: the tool's refusal, shortened, or the expiry. The
+    old version swallowed both -- robin pressed save, the file stayed as it was
+    and the window said nothing. A write that did not happen is announced as
+    surely as one that did, and the same line goes to crow.log.
     """
     ready = [e for e in pending_memory() if ident is None or e["id"] == ident]
-    saved = []
+    late = [e for e in _EXPIRED if ident is None or e["id"] == ident]
+    saved: "list[str]" = []
+    failed: "list[dict]" = []
+    for entry in late:
+        _EXPIRED.remove(entry)
+        failed.append({"what": entry["summary"],
+                       "why": "expired after %d min" % (PENDING_TTL // 60)})
     for entry in ready:
         _PENDING.remove(entry)
         try:
             result = json.loads(run_tool(entry["name"], entry["arguments"]))
-        except Exception:                   # noqa: BLE001 - failure is silence, as in review_turn
+            if not isinstance(result, dict):
+                raise ValueError("not a JSON object")
+        except Exception as exc:            # noqa: BLE001 - reported, not raised
+            failed.append({"what": entry["summary"], "why": _pending_clip("failed: %s" % exc)})
             continue
-        if result.get("success") and result.get("action"):
-            saved.append("%s %s" % (result["action"],
-                                    result.get("target") or result.get("name")
-                                    or entry["name"]))
-    return saved
+        why = _pending_failure(result)
+        if why:
+            failed.append({"what": entry["summary"], "why": why})
+            continue
+        saved.append("%s %s" % (result["action"],
+                                result.get("target") or result.get("name")
+                                or entry["name"]))
+    for miss in failed:
+        log_note("not saved (%s): %s" % (miss["why"], miss["what"]), "memory")
+    return saved, failed
+
+
+def pending_failed_note(failed: "list[dict]") -> str:
+    """#285. The one line both surfaces show for writes that did not land.
+
+    THE REASON FIRST, the entry after it, cut short: the person needs to know
+    why before which, and the full text is in crow.log. Empty for an empty
+    list, so a caller can test the string.
+    """
+    if not failed:
+        return ""
+    return "Memory: not saved -- " + " / ".join(
+        "%s (%s)" % (f["why"], _pending_clip(f["what"], 60)) for f in failed)
 
 
 def decline_pending(ident: "int | None" = None) -> int:
@@ -19894,6 +20007,8 @@ def decline_pending(ident: "int | None" = None) -> int:
     doomed = [e for e in pending_memory() if ident is None or e["id"] == ident]
     for entry in doomed:
         _PENDING.remove(entry)
+    # #285. A "no" answers the expired ones too; they were never going to run.
+    _EXPIRED[:] = [e for e in _EXPIRED if ident is not None and e["id"] != ident]
     return len(doomed)
 
 
@@ -19902,6 +20017,7 @@ def forget_pending() -> None:
     for the same reason: `/reset` and the window's new-chat button are where a
     session actually ends."""
     _PENDING.clear()
+    _EXPIRED.clear()
 
 
 # ---------------------------------------------------------------- E6 ------

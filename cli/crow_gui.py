@@ -2285,6 +2285,16 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 #pendbar.open .body{display:block}
 #pendbar .what{display:block;color:var(--dim);white-space:pre-wrap;
   word-break:break-word;margin-bottom:6px;line-height:1.4}
+/* #285. The previews, or -- one click deeper -- the whole text; never both.
+   Deep, the body scrolls rather than pushing the composer off the screen. */
+#pendbar .whole{display:none}
+#pendbar.deep .brief{display:none}
+#pendbar.deep .whole{display:block}
+#pendbar.deep .body{max-height:50vh;overflow-y:auto}
+#pendbar .was,#pendbar .will,#pendbar .where{display:block}
+#pendbar .was{color:var(--bad)}
+#pendbar .will{color:var(--ok)}
+#pendbar .where{color:var(--dimmer);font-size:10.5px}
 #pendbar .acts{display:flex;gap:8px;margin-top:9px}
 #pendbar button{font:inherit;font-size:11.5px;cursor:pointer;border-radius:6px;
   padding:4px 12px;background:transparent;border:1px solid var(--line);
@@ -6041,9 +6051,16 @@ const crow = {
   // OPEN SURVIVES A REDRAW. The review can stage a second time while the tile
   // is already open, and collapsing it under the reader's hands would hide the
   // thing they were in the middle of reading.
+  //
+  // #285. THREE STATES, one click each: collapsed (title and counts), `open`
+  // (the 160-char previews), `open deep` (the whole text). robin could not
+  // tell an append from a swap mid-file: the preview showed only the new
+  // words, cut. Deep, a replace shows the entry it takes out above the one it
+  // puts in, and an add says where it lands. Both levels are drawn every
+  // time; the CSS picks one, so a redraw keeps the level too.
   pendState(items){
     const bar = $("#pendbar"), list = items || [];
-    if(!list.length){ bar.hidden = true; bar.classList.remove("open");
+    if(!list.length){ bar.hidden = true; bar.classList.remove("open", "deep");
                       bar.innerHTML = ""; return; }
     // `replace` is a line gained AND a line lost -- it is one entry and two
     // changes, and a count that showed it as one would understate what is
@@ -6058,27 +6075,41 @@ const crow = {
       + '<span class="plus"></span><span class="minus"></span>'
       + '<span class="hint"></span></span>'
       + '<span class="body">'
-      + list.map(()=>'<span class="what"></span>').join("")
       + '<span class="acts">'
       + '<button class="yes" onclick="crow.pendAnswer(true)">save to memory</button>'
       + '<button class="no" onclick="crow.pendAnswer(false)">discard</button>'
       + '</span></span>';
     bar.querySelector(".plus").textContent = "+" + plus;
     bar.querySelector(".minus").textContent = "\u2212" + minus;
-    bar.querySelector(".hint").textContent =
-      bar.classList.contains("open") ? "click to collapse" : "click to review";
-    const rows = bar.querySelectorAll(".what");
-    list.forEach((x,i)=>{ if(rows[i]) rows[i].textContent = x.text || ""; });
+    const body = bar.querySelector(".body"), acts = bar.querySelector(".acts");
+    const line = (cls, text) => { const s = document.createElement("span");
+      s.className = cls; s.textContent = text; return s; };
+    list.forEach(x => { const a = x.action || "add";
+      const row = document.createElement("span"); row.className = "what";
+      row.appendChild(line("brief", x.text || ""));
+      const whole = line("whole", "");
+      if(a === "replace" || a === "remove")
+        whole.appendChild(line("was", "\u2212 " + (x.old ||
+          "no single entry contains: " + (x.find || ""))));
+      if(a !== "remove") whole.appendChild(line("will", "+ " + (x.full || x.text || "")));
+      if(a === "add") whole.appendChild(line("where", "appended at the end"));
+      row.appendChild(whole);
+      body.insertBefore(row, acts); });
+    this.pendHint(bar);
     bar.hidden = false; },
 
   // The buttons live inside the tile, so a click on one would bubble up and
-  // toggle it shut on the way out.
+  // toggle it shut on the way out. #285: shut -> open -> deep -> shut.
   pendToggle(e){ if(e && e.target.closest("button")) return;
     const bar = $("#pendbar");
-    bar.classList.toggle("open");
-    const hint = bar.querySelector(".hint");
-    if(hint) hint.textContent =
-      bar.classList.contains("open") ? "click to collapse" : "click to review"; },
+    if(!bar.classList.contains("open")) bar.classList.add("open");
+    else if(!bar.classList.contains("deep")) bar.classList.add("deep");
+    else bar.classList.remove("open", "deep");
+    this.pendHint(bar); },
+
+  pendHint(bar){ const hint = bar.querySelector(".hint");
+    if(hint) hint.textContent = bar.classList.contains("deep") ? "click to collapse"
+      : bar.classList.contains("open") ? "click for the full text" : "click to review"; },
 
   pendAnswer(yes){ pywebview.api.answer_memory(!!yes); },
 
@@ -12972,12 +13003,19 @@ class Api:
         THE GLOW LINE STILL FIRES on yes, through the same `memory` kind the
         ungated path uses. The gate changed who decides, not what a person sees
         afterwards -- a write that happened is still announced.
+
+        #285. AND ONE THAT DID NOT, as a note where the tile was. The empty
+        answer used to redraw an empty -- hidden -- tile and nothing else, so a
+        refused, duplicate or expired write vanished under robin's click.
         """
         if yes:
-            saved = crow_core.approve_pending()
+            saved, failed = crow_core.approve_pending()
             if saved:
                 self.push({"k": "memory", "t": "Memory updated",
                            "n": len(saved)})
+            if failed:
+                self.push({"k": "note",
+                           "t": crow_core.pending_failed_note(failed)})
         else:
             crow_core.decline_pending()
         self.push({"k": "pend", "items": crow_core.pending_view()})
