@@ -10866,6 +10866,10 @@ class TheGoalEngineBreaksARenderLoopTests(ApiCase):
 
     def test_three_black_captures_ask_for_a_bisect_six_force_the_roll(self):
         api = self.api()
+        logs = tempfile.mkdtemp(prefix="crow-log-")
+        self.addCleanup(shutil.rmtree, logs, True)
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        crow_core.LOG_FILE = os.path.join(logs, "crow.log")
         self.turn(api, api._goal_nudge(), 3)
         nudge = api._goal_nudge()
         self.assertIn("the last 3 captures of chain.html came back the same",
@@ -10878,8 +10882,12 @@ class TheGoalEngineBreaksARenderLoopTests(ApiCase):
         self.assertIn("6 captures of chain.html in a row", carry)
         self.assertIn("render-6.png: looks blank after writing src/pass6.js",
                       carry)
+        # #262: "goal mode, step N: ..." is Crow's own status line -- it goes
+        # to crow.log, not into the chat.
         notes = [m["t"] for m in self.drained(api) if m.get("k") == "note"]
-        self.assertTrue(any("the context rolls over" in t for t in notes), notes)
+        self.assertFalse(any("the context rolls over" in t for t in notes), notes)
+        with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+            self.assertIn("the context rolls over", fh.read())
 
     def test_a_new_page_is_a_changed_approach(self):
         """NEGATIVE: two black captures, then the probe page -- no nudge."""
