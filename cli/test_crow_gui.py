@@ -10893,9 +10893,11 @@ class TheGoalEngineBreaksARenderLoopTests(ApiCase):
         crow_core.LOG_FILE = os.path.join(logs, "crow.log")
         self.turn(api, api._goal_nudge(), 3)
         nudge = api._goal_nudge()
-        self.assertIn("the last 3 captures of chain.html came back the same",
+        # #277: a blank capture is no picture, and its bisect is the
+        # one-pass-in-isolation probe.
+        self.assertIn("the last 3 captures of chain.html showed no picture",
                       nudge)
-        self.assertIn("stop editing -- bisect", nudge)
+        self.assertIn("render ONE pass in isolation", nudge)
         self.assertFalse(api._goal_roll_due)
         self.turn(api, nudge, 3)
         carry = api._goal_nudge()
@@ -10927,6 +10929,48 @@ class TheGoalEngineBreaksARenderLoopTests(ApiCase):
         api._conversation.append("tool", "{}", tool_call_id="g")
         self.turn(api, "[Goal mode, step 1 still open. Continue.]", 1)
         self.assertNotIn("bisect", api._goal_nudge() or "")
+
+    def test_a_trouble_nudge_does_not_hide_the_turns_captures(self):
+        """#277, 2026-09-24 s81-s133: #202's nudge returned before the render
+        scan, and three near-black captures of index.html were never
+        counted. #202 still speaks first; the captures count anyway."""
+        api = self.api()
+        trouble = [{"class": "refused", "tool": "edit_file", "n": 3}]
+        with mock.patch.object(crow_core, "goal_trouble_due",
+                               side_effect=[[], trouble, []]), \
+             mock.patch.object(crow_core, "goal_trouble_nudge",
+                               return_value="[Goal mode, trouble]"), \
+             mock.patch.object(crow_core, "goal_trouble_label",
+                               return_value="edit_file refused"):
+            self.turn(api, api._goal_nudge(), 3)
+            self.assertEqual(api._goal_nudge(), "[Goal mode, trouble]")
+            self.turn(api, "[Goal mode, trouble]", 0)
+            nudge = api._goal_nudge()
+        self.assertIn("the last 3 captures of chain.html showed no picture",
+                      nudge)
+
+    def test_a_turn_cut_by_a_mid_turn_rollover_is_still_counted(self):
+        """#277, 2026-09-24 10:50: the rollover cut the turn; the new payload
+        began with the rollover note, `goal_turn_start` found no start and
+        the turn's captures were skipped. The carried tail is scanned, and
+        a carried capture already counted is not counted twice."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), 2)
+        self.assertNotIn("showed no picture", api._goal_nudge() or "")
+        carried = self.BLACK % ("/nowhere/render-%d.png" % self.n)
+        api._conversation.reset()
+        api._conversation.append(
+            "user", "[The conversation up to this point reached 181705 "
+                    "tokens and was archived.]")
+        api._conversation.append("assistant", "", tool_calls=[
+            {"id": "k", "name": "render_page",
+             "arguments": json.dumps({"path": "chain.html"})}])
+        api._conversation.append(
+            "tool", "[carried across the cut]\n" + carried, tool_call_id="k")
+        self.turn(api, "[The tool budget for this turn is spent]", 1)
+        nudge = api._goal_nudge()
+        self.assertIn("the last 3 captures of chain.html showed no picture",
+                      nudge)
 
 
 class TheCopyButtonPutsTextBackTests(ApiCase):

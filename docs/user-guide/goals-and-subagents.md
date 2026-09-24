@@ -174,6 +174,29 @@ messages 35 and 295 (rollover-210418, `index.html`, three near-identical and the
 captures) and 314 (rollover-225111, `chain.html`, the 22:30 streak). No forced roll: each time the
 model moved to another page (`verify-trace.html`, `probe.html`) before a sixth capture.
 
+*No picture at all (#277).* On 2026-09-24 step 2 ran more than 1.5 h with 9 near-black captures of
+`index.html` and the breaker above never fired. The frames showed a small lit patch on black: 91–96 %
+one colour, so under the 98 % line, and their coverage kept changing (7 → 40 → 25 %), so no two
+"nearly matched". A capture is therefore also stuck when its `metrics:` line says **luma mean 4/255
+or less** (decoded from the PNG when the line is missing). Measured that day: the black frames at
+0–2, the one real scene at 31, white text pages at 251–255 (a white page is a page, not "no picture").
+Three more changes to the counting:
+
+- The captures are counted every turn, also when a same-failure nudge speaks first. That turn's
+  three black captures had been skipped.
+- A turn cut by a rollover in the middle is still counted: the new context starts with the rollover
+  note, so Crow scans everything after it (the carried tail of the turn).
+- The same PNG is counted once. A repeated call answered from the first result and a result
+  carried across the cut are not new captures.
+
+When the last capture shows no picture, the nudge and the rollover line say "showed no picture"
+and the bisect is concrete: *render ONE pass in isolation straight to the screen — the albedo/base
+colour only, no lighting; then the normals as colour; then the depth. After each draw check
+`gl.getError()` and `gl.checkFramebufferStatus()`, read a few pixels back with `gl.readPixels`, and
+log those values to the console.* It names checks, not code. The thresholds (nudge at 3, roll at 6)
+are unchanged. Replayed on 2026-09-24's two session files: the nudge before session message 13 (the
+first nudge after the 10:50 rollover, 3 black captures), the forced roll before message 155 (9).
+
 **The counters are the goal's, not the steps' sum.** Wall clock runs from the first step that
 started, and tokens are what the goal cost across every context it lived in — thinking, tool
 calls and the rollover itself included. Reading the step column instead inherited every error in

@@ -16057,6 +16057,78 @@ class TheRenderLoopIsCountedTests(unittest.TestCase):
         self.assertIn("- x", text)
         self.assertIn("bisect", text)
 
+    # #277, 2026-09-24 step 2: nine index.html captures at luma mean 1-2/255,
+    # a lit patch on black at 0.908-0.964 one colour -- under 0.98, so #268
+    # saw no verdict and every one of them reset the streak.
+    DARK = ("metrics: content box x 16-432, y 16-560 of 1000x560 -- coverage "
+            "40.4 %% (~220 of the frame's ~544 visual tokens)\n"
+            "metrics: 604 distinct colours in 112000 sampled px; luma mean "
+            "%d/255; luma histogram (8 bins of 32, %%): 99 0 0 0 0 0 0 0\n")
+
+    def test_a_dark_frame_with_a_lit_patch_is_no_signal(self):
+        """#277: the metrics line's luma mean decides where the dominant
+        share (0.91 here) does not."""
+        sig = crow_core.render_signature(
+            self.result("/nowhere/render-104828.png", 58381, self.DARK % 2),
+            "index.html")
+        self.assertEqual(sig["blank"], "near-black (luma mean 2/255)")
+        self.assertTrue(crow_core.render_no_signal(sig))
+
+    def test_a_white_text_page_and_a_lit_scene_are_pictures(self):
+        """NEGATIVE: the step-1 probe pages (luma 251-255) are text pages,
+        and iso-test.html's real frame sat at 31."""
+        for luma in (254, 31, 5):
+            sig = crow_core.render_signature(
+                self.result("/nowhere/r%d.png" % luma, 9000,
+                            self.DARK % luma), "p.html")
+            self.assertIsNone(sig["blank"], luma)
+            self.assertFalse(crow_core.render_no_signal(sig), luma)
+
+    def scan_messages(self, results):
+        messages = [{"role": "user", "content": "[Goal mode, step 2 still open. Continue.]"}]
+        for n, text in enumerate(results):
+            messages.append({"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c%d" % n, "function": {
+                    "name": "render_page",
+                    "arguments": json.dumps({"path": "index.html"})}}]})
+            messages.append({"role": "tool", "tool_call_id": "c%d" % n,
+                             "content": text})
+        return messages
+
+    def test_a_replayed_or_carried_capture_is_counted_once(self):
+        """#277: s77 was s73 replayed by the duplicate-call guard, s5 was
+        r311 carried across the cut -- the same PNG, not a new capture."""
+        one = self.result("/nowhere/render-1.png", 58381, self.DARK % 2)
+        two = self.result("/nowhere/render-2.png", 58479, self.DARK % 2)
+        replay = ("[you already called render_page with these exact arguments "
+                  "this turn. The result was, and still is:]\n" + two)
+        carried = "[carried across the cut]\n" + two
+        state = crow_core.goal_render_scan(
+            self.scan_messages([one, two, replay, carried]), 0, {})
+        self.assertEqual(state["targets"]["index.html"]["streak"], 2)
+
+    def test_the_bisect_for_a_black_frame_names_the_isolation_checks(self):
+        """#277: black -> one pass in isolation and the GL checks; a lit
+        picture that stays the same keeps #268's probe."""
+        black = [self.result("/nowhere/render-%d.png" % n, 58381,
+                             self.DARK % 1) for n in range(3)]
+        state = crow_core.goal_render_scan(self.scan_messages(black), 0, {})
+        self.assertEqual(crow_core.goal_render_due(state), "nudge")
+        text = crow_core.goal_render_nudge(2, state)
+        self.assertIn("showed no picture", text)
+        for word in ("ONE pass in isolation", "albedo", "no lighting",
+                     "normals", "depth", "gl.getError()",
+                     "gl.checkFramebufferStatus()", "gl.readPixels"):
+            self.assertIn(word, text)
+        lit = [self.result("/nowhere/lit-%d.png" % n, 424358, self.DARK % 90)
+               for n in range(3)]
+        state = crow_core.goal_render_scan(self.scan_messages(lit), 0, {})
+        self.assertEqual(crow_core.goal_render_due(state), "nudge")
+        text = crow_core.goal_render_nudge(2, state)
+        self.assertIn("came back the same", text)
+        self.assertIn(crow_core.GOAL_BISECT, text)
+        self.assertNotIn("gl.readPixels", text)
+
 
 class AVisualStepNeedsAPictureTests(unittest.TestCase):
     """#267. 2026-09-23: 9/9 `done`, every note "verified on
