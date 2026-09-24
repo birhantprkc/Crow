@@ -3662,6 +3662,29 @@ class TheSubtasksOutliveTheProcessTests(TurnLoopCase):
         crow_core.forget_subtasks()
         self.assertEqual(crow_core.subtasks_recall(), 0)
 
+    def test_closing_the_card_is_a_persisted_view_mark_not_a_cancel(self):
+        """#281. The `×` of the Subtasks card marks the record `closed`: it
+        survives the restart, a running subtask stays running and uncancelled,
+        a new record starts open, and unmarking brings it back."""
+        self._seed(status="running")
+        self.assertFalse(crow_core.subtask_view()[0]["closed"])
+        self.assertEqual(crow_core.subtask_close(["d3"], True), 1)
+        self.assertEqual(crow_core.subtask_close(["d3"], True), 0,
+                         "writes only on change")
+        sub = crow_core.SUBTASKS["d3"]
+        self.assertEqual(sub.status, "running")
+        self.assertFalse(sub.cancelled)
+        self.assertTrue(crow_core.subtask_view()[0]["closed"])
+        crow_core.forget_subtasks()              # der Neustart
+        crow_core.subtasks_recall()
+        self.assertTrue(crow_core.subtask_view()[0]["closed"])
+        fresh = crow_core.Subtask("d4", "t", "", {"model": "m", "label": "L"})
+        self.assertFalse(fresh.closed)
+        crow_core.subtask_close(["d3"], False)
+        crow_core.forget_subtasks()
+        crow_core.subtasks_recall()
+        self.assertFalse(crow_core.subtask_view()[0]["closed"])
+
     def test_the_registry_recalls_itself_lazily(self):
         """Jede Oberflaeche, die auf die Registry schaut oder zugreift,
         findet die geladenen Eintraege -- ohne eigenen Init-Hook."""

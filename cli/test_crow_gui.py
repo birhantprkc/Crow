@@ -6920,6 +6920,34 @@ class ADeletedChatTakesItsSubtasksAlongTests(ApiCase):
         self.assertTrue(sub.cancelled)
         self.assertEqual(crow_core.subtask_view(), [])
 
+    def test_closing_the_card_marks_only_this_chats_and_cancels_nothing(self):
+        """#281. `close_subtasks` hides the card for the OPEN chat: its
+        records get the `closed` mark and a `subs` push says so; another
+        chat's record is untouched; a running one is neither cancelled nor
+        dropped. `reopen_subtasks` takes the mark off again."""
+        api = self.api()
+        here = self._saved_chat("chat-a.json")
+        other = self._saved_chat("chat-b.json")
+        api._current_path = other
+        self._seed("d1")
+        api._subs_items()                     # d1 belongs to chat-b
+        api._current_path = here
+        run = self._seed("d2", status="running")
+        api._subs_items()                     # d2 belongs to chat-a
+        self.drained(api)
+        api.close_subtasks()
+        rows = {r["i"]: r for r in crow_core.subtask_view()}
+        self.assertTrue(rows["d2"]["closed"])
+        self.assertFalse(rows["d1"]["closed"], "another chat's card closed")
+        self.assertEqual(run.status, "running")
+        self.assertFalse(run.cancelled)
+        subs = [m for m in self.drained(api) if m.get("k") == "subs"]
+        self.assertTrue(subs, "the close was never pushed to the page")
+        self.assertTrue({r["i"]: r for r in subs[-1]["items"]}["d2"]["closed"])
+        api.reopen_subtasks()
+        self.assertFalse({r["i"]: r for r in crow_core.subtask_view()}
+                         ["d2"]["closed"])
+
     def test_discarding_the_live_chat_drops_its_subtasks_too(self):
         api = self.api()
         self._seed("d1")
@@ -8938,6 +8966,45 @@ class TheDelegationWearsTheMockupTests(unittest.TestCase):
         self.assertIn("#main:has(#subpanel:not([hidden])) #flow", self.css)
         self.assertIn("#main:has(#subpanel:not([hidden])) #composer", self.css)
         self.assertIn("#subpanel .subcard.seen{animation:none", self.css)
+
+    def test_the_subtasks_card_closes_like_the_goal_card(self):
+        """#281 (robin, 2026-09-24): der Goal-Karte hat ein `×`, die
+        Subtasks-Karte keins. Jetzt dasselbe `.gx` in ihrem Kopf, mit Tooltip,
+        der sagt, dass nichts abgebrochen wird; `hidden` ist der ganze Zustand,
+        also laesst die #233/#256-Reserve mit los; ein Sprung oeffnet wieder."""
+        panels = self.source[self.source.index('<div id="panels">'):
+                             self.source.index('<aside id="git">')]
+        head = panels[panels.index('<div class="sph"'):
+                      panels.index('<div class="splive">')]
+        self.assertIn('class="gx"', head)
+        self.assertIn(">×</button>", head)
+        self.assertIn("running subtasks keep running", head)
+        self.assertIn('aria-label="Close subtasks card"', head)
+        self.assertIn("crow.subPanelClose(event)", head)
+        # Dieselbe Regel wie das Goal-`×`, nicht eine zweite Schreibweise.
+        self.assertIn("#goalpanel .gx,#subpanel .gx{", self.css)
+        self.assertIn("#goalpanel .gx:hover,#subpanel .gx:hover{", self.css)
+        close = self.source[self.source.index("  subPanelClose(ev){"):
+                            self.source.index("  subDoneFold(){")]
+        self.assertIn("ev.stopPropagation()", close)
+        self.assertIn('$("#subpanel").hidden=true', close)
+        self.assertIn("pywebview.api.close_subtasks()", close)
+        self.assertNotIn("cancel", close.replace("not cancelling", ""))
+        frame = self.source[self.source.index("  subPanel(items){"):
+                            self.source.index("  subPanelFold(){")]
+        self.assertIn("items.some(x=>x.here && !x.closed)", frame)
+        self.assertIn("p.hidden=!(run+fin) || !open", frame)
+        reveal = self.source[self.source.index("  subReveal(d){"):
+                             self.source.index("  subJump(i){")]
+        self.assertIn("pywebview.api.reopen_subtasks()", reveal)
+        self.assertIn("p.hidden=false", reveal)
+        # Die Python-Seite: der Mark kommt in den Push-Rahmen, sonst hoert
+        # die Seite das Schliessen nie.
+        self.assertIn("def close_subtasks(self)", self.source)
+        self.assertIn("def reopen_subtasks(self)", self.source)
+        push = self.source[self.source.index("def _push_subs(self)"):]
+        push = push[:push.index("def ", 10)]
+        self.assertIn('r.get("closed", False)', push)
 
     def test_the_transcript_shelf_is_not_the_chat_folder(self):
         """NEGATIV auf der Kern-Seite, hier verankert, weil das Fenster der
