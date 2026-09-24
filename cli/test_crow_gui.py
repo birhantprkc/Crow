@@ -13461,6 +13461,129 @@ class RemotePhoneLayerTests(unittest.TestCase):
         self.assertIn("#goalpanel.shut:not([hidden]){display:grid", css)
         self.assertNotIn("#goalpanel.shut{display:grid", css)
 
+    # A FAKE DOM, just enough for REMOTE_JS: every element records its
+    # classes, data-*, attributes and inline style, so a state can be
+    # compared as data. Timers run by hand.
+    FAKE_DOM = r"""
+const timers = []; let tid = 0;
+globalThis.setTimeout = (f, ms) => { timers.push({id: ++tid, f}); return tid; };
+globalThis.clearTimeout = id => { const i = timers.findIndex(t => t.id === id); if(i >= 0) timers.splice(i, 1); };
+const flush = () => { while(timers.length) timers.shift().f(); };
+class Style { constructor(){ this.m = {}; }
+  setProperty(k, v){ this.m[k] = String(v); } removeProperty(k){ delete this.m[k]; } }
+class CL { constructor(){ this.s = new Set(); }
+  add(c){ this.s.add(c); } remove(c){ this.s.delete(c); } contains(c){ return this.s.has(c); }
+  toggle(c, on){ if(on === undefined) on = !this.s.has(c); on ? this.s.add(c) : this.s.delete(c); return on; } }
+const listeners = [];
+class El { constructor(id){ this.id = id || ""; this.dataset = {}; this.style = new Style();
+    this.classList = new CL(); this.attrs = {}; this.children = []; this.hidden = false; }
+  appendChild(c){ this.children.push(c); return c; } append(...c){ c.forEach(x => this.appendChild(x)); }
+  prepend(c){ this.children.unshift(c); } insertBefore(c){ this.children.push(c); return c; }
+  remove(){} before(){} after(){}
+  setAttribute(k, v){ this.attrs[k] = String(v); } getAttribute(k){ return this.attrs[k] ?? null; }
+  removeAttribute(k){ delete this.attrs[k]; }
+  addEventListener(type, fn, opt){ listeners.push({el: this, type, fn, opt}); }
+  querySelector(){ return null; } querySelectorAll(){ return []; } closest(){ return null; }
+  get offsetWidth(){ return 0; } get offsetHeight(){ return 0; }
+  set innerHTML(v){ this._html = v; } get innerHTML(){ return this._html || ""; }
+  click(){ listeners.filter(l => l.el === this && l.type === "click").forEach(l => l.fn({target: this})); } }
+const byId = {};
+const el = id => byId[id] || (byId[id] = new El(id));
+const html = el("<html>"), body = el("<body>");
+globalThis.document = {documentElement: html, body, hidden: false,
+  getElementById: el, createElement: () => new El(), querySelector: () => null,
+  querySelectorAll: () => [], addEventListener(type, fn, opt){ listeners.push({el: this, type, fn, opt}); }};
+globalThis.window = globalThis;
+globalThis.addEventListener = (type, fn, opt) => listeners.push({el: window, type, fn, opt});
+globalThis.matchMedia = () => ({matches: true, addEventListener(){}});
+globalThis.innerWidth = 390;
+globalThis.localStorage = {getItem: () => null, setItem(){}};
+globalThis.getComputedStyle = () => ({backgroundColor: "rgb(24, 24, 24)"});
+globalThis.ResizeObserver = class { observe(){} unobserve(){} };
+globalThis.MutationObserver = class { observe(){} };
+for (const d of ["rail", "code", "git", "browser"]) body.dataset[d] = "open";   // the desktop's stamp
+const flip = d => function(){ body.dataset[d] = body.dataset[d] === "shut" ? "open" : "shut"; };
+globalThis.crow = {toggleRail: flip("rail"), toggleCode: flip("code"), toggleGit: flip("git"),
+  toggleBrowser: flip("browser"), open(){}, reset(){}, settingsCat(){}, goalPanel(){},
+  queuedLine(){}, release(){}, viewBar(){}, mic(){}, micState(){}, showModel(){},
+  modelPlan(){ return []; }, ctx(){}, modeIs(){}, setTheme(){}, levelLabel(){ return ""; }};
+"""
+    PROBE = r"""
+const snap = () => JSON.stringify(["<html>", "<body>", "mscrim", "rail", "side", "main"]
+  .map(id => { const e = id === "mscrim" ? body.children.find(c => c.id === "mscrim") : el(id);
+    return [id, [...e.classList.s].sort(), e.dataset, e.style.m, e.attrs]; }));
+flush();
+const loaded = snap();
+const scrim = body.children.find(c => c.id === "mscrim");
+const gone = ["rail", "side"].map(id => el(id).classList.contains("m-gone"))
+  .concat([scrim.classList.contains("m-gone")]);
+crow.toggleRail(); flush();
+const opened = snap();
+const openGone = el("rail").classList.contains("m-gone") || scrim.classList.contains("m-gone");
+scrim.click(); flush();
+const closed = snap();
+crow.toggleCode(); flush(); crow.toggleCode(); flush();
+const closedAgain = snap();
+window.mobileTools(true); window.mobileTools(false);
+const sheet = snap();
+const touch = listeners.filter(l => /^touch/.test(l.type))
+  .map(l => [l.type, !!(l.opt && l.opt.passive)]);
+console.log(JSON.stringify({loaded, opened, closed, closedAgain, sheet, gone, openGone, touch}));
+"""
+
+    def run_phone_hooks(self) -> dict:
+        node = _node()
+        if not node:
+            self.skipTest("no node on this machine")
+        import subprocess
+        js = self.FAKE_DOM + crow_gui.REMOTE_JS + self.PROBE
+        done = subprocess.run([node, "-e", js], capture_output=True, text=True,
+                              encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    def test_a_closed_drawer_leaves_the_page_as_it_was_loaded(self):
+        """robin's iPhone, 2026-09-24: after a drawer had been open, Safari's
+        bars kept another tint and the page no longer scrolled, until a
+        reload. The closed state must BE the loaded state -- every class,
+        data-* attribute, attribute and inline style on html, body, the dim
+        layer, the drawers and #main -- and closed means out of the render
+        tree (display:none via .m-gone), not merely transparent or hidden."""
+        out = self.run_phone_hooks()
+        self.assertEqual(out["gone"], [True, True, True],
+                         "a closed drawer or the dim layer is still rendered at load")
+        self.assertNotEqual(out["opened"], out["loaded"])
+        self.assertFalse(out["openGone"], "an open drawer must be rendered")
+        self.assertEqual(out["closed"], out["loaded"])
+        self.assertEqual(out["closedAgain"], out["loaded"])
+        # NEGATIVE: the + sheet leaves no inline --toolsh ("0px") behind.
+        self.assertEqual(out["sheet"], out["loaded"])
+        self.assertIn(".m-gone{display:none!important}", crow_gui.REMOTE_CSS)
+
+    def test_no_touch_handler_can_hold_the_scroll(self):
+        """A vertical swipe must stay the browser's: the phone hooks listen
+        passively, and never to touchmove."""
+        out = self.run_phone_hooks()
+        self.assertTrue(out["touch"])
+        for kind, passive in out["touch"]:
+            self.assertNotEqual(kind, "touchmove")
+            self.assertTrue(passive, kind)
+        self.assertNotIn("preventDefault", crow_gui.REMOTE_JS)
+
+    def test_safari_takes_its_bar_tint_from_the_page(self):
+        """theme-color: one tag that follows the page's theme first (stamped
+        from THEME_BG), then one per colour scheme; html and body carry the
+        page's ground themselves."""
+        phone = crow_gui.stamped_page(remote=True)
+        want = crow_gui.THEME_BG.get(crow_gui.current_theme(), "#181818")
+        self.assertIn('<meta id="mtheme" name="theme-color" content="%s">' % want, phone)
+        self.assertIn('media="(prefers-color-scheme: light)"', phone)
+        self.assertIn('media="(prefers-color-scheme: dark)"', phone)
+        self.assertLess(phone.index('id="mtheme"'),
+                        phone.index('media="(prefers-color-scheme: light)"'))
+        self.assertNotIn("theme-color", crow_gui.stamped_page())
+        self.assertIn("background:var(--bg)}", crow_gui.REMOTE_CSS)
+
     def test_the_phone_shows_no_reasoning_level(self):
         """robin, 2026-09-24: the operating point fixes the level; the phone's
         model chip and menu show none of it."""

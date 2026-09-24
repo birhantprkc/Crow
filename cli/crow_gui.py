@@ -8199,7 +8199,16 @@ _STICKY_KINDS = frozenset({"up", "down", "reasoning", "git", "pend",
 # nichts; `stamped_page(remote=True)` fuellt sie. Die eigentliche Handy-CSS
 # kommt spaeter in `REMOTE_CSS` dazu -- hier steht nur, was der Mirror braucht.
 REMOTE_HEAD = ('<meta name="viewport" content="width=device-width,'
-               'initial-scale=1,viewport-fit=cover">')
+               'initial-scale=1,viewport-fit=cover">'
+               # #249: Safari's bar tint. The first tag (no media) follows the
+               # page's theme -- stamped here, kept in step by REMOTE_JS; the
+               # two after it only speak if it is gone.
+               '<meta id="mtheme" name="theme-color" content="__THEMEBG__">'
+               '<meta name="theme-color" media="(prefers-color-scheme: light)"'
+               ' content="#ffffff">'
+               '<meta name="theme-color" media="(prefers-color-scheme: dark)"'
+               ' content="#181818">')
+# (the stamped colour is THEME_BG's, the ground the window itself paints)
 REMOTE_CSS = """
 /* #249: auf dem Telefon bleibt die Titelleiste als Kopf -- sie traegt Rail,
    Code, Git, Browser und Hilfe. Weg sind nur Fensterknoepfe, Zieh- und
@@ -8232,7 +8241,8 @@ REMOTE_CSS = """
   --safe-r:env(safe-area-inset-right,0px);
 }
 html{overflow-x:clip}
-html,body{height:100dvh;overscroll-behavior:none;-webkit-text-size-adjust:100%}
+html,body{height:100dvh;overscroll-behavior:none;-webkit-text-size-adjust:100%;
+  background:var(--bg)}
 body{padding:var(--safe-t) var(--safe-r) 0 var(--safe-l);
   -webkit-tap-highlight-color:transparent}
 
@@ -8298,7 +8308,9 @@ body:not([data-browser="shut"]) #side{transform:none;visibility:visible}
 .cwcopy{min-height:36px;padding:0 14px}
 #toolcalls .tcclear{min-height:36px;padding:0 14px;font-size:12.5px}
 
-/* The dim layer behind an open drawer (mobile.js adds #mscrim). */
+/* Closed drawers and the dim layer leave the render tree (REMOTE_JS settle). */
+.m-gone{display:none!important}
+/* The dim layer behind an open drawer (REMOTE_JS adds #mscrim). */
 #mscrim{position:fixed;inset:0;z-index:85;background:var(--shadow-strong);
   opacity:0;pointer-events:none;transition:opacity .2s}
 body.m-drawer #mscrim{opacity:1;pointer-events:auto}
@@ -8574,33 +8586,68 @@ REMOTE_JS = r"""
   const store = (k,v) => { try{ localStorage.setItem("crow."+k, v); }catch(e){} };
   const load = k => { try{ return localStorage.getItem("crow."+k); }catch(e){ return null; } };
   const theme = load("theme"); if(theme) document.documentElement.dataset.theme = theme;
+  // Safari's bars take their tint from theme-color (REMOTE_HEAD). The first
+  // tag has no media query, so it wins; it follows the page's own theme.
+  const tint = () => { const m = document.getElementById("mtheme");
+    if(m) m.setAttribute("content", getComputedStyle(document.body).backgroundColor); };
   const setTheme = crow.setTheme;
-  crow.setTheme = function(name){ store("theme", name); return setTheme.apply(this, arguments); };
+  crow.setTheme = function(name){ store("theme", name);
+    const r = setTheme.apply(this, arguments); tint(); return r; };
+  tint();
 
   // 2. DRAWERS. The page stamps data-rail/-code/-git/-browser from the desktop's
   //    settings; on the phone every drawer starts closed and one is out at most.
+  //
+  //    CLOSED MEANS GONE (robin's iPhone, iOS 26, 2026-09-24): after a drawer
+  //    had been open, Safari's bars kept a different tint and a vertical swipe
+  //    no longer moved the page, until a reload. A closed drawer and the dim
+  //    layer used to stay in the render tree -- fixed, full height, edge to
+  //    edge, `visibility:hidden` or `opacity:0` -- where Safari samples fixed
+  //    boxes for its bar tint and WebKit keeps their scrollers (#sessions,
+  //    #codebody) in its scrolling tree. Now they leave it: `.m-gone`
+  //    (display:none) once the slide-out has run, exactly as at load.
   const scrim = document.createElement("div"); scrim.id = "mscrim";
   body.appendChild(scrim);
-  function shutAll(except){
-    DRAWERS.forEach(d => { if(d!==except) body.dataset[d] = "shut"; });
-    body.classList.toggle("m-drawer", !!except && body.dataset[except]!=="shut");
+  const railEl = document.getElementById("rail"), sideEl = document.getElementById("side");
+  const SLIDE = 260, timers = new Map();
+  const isOpen = d => body.dataset[d] !== "shut";
+  const holders = () => [[railEl, isOpen("rail")],
+    [sideEl, isOpen("code") || isOpen("browser")],
+    [scrim, DRAWERS.some(isOpen)]];
+  function settle(now){
+    body.classList.toggle("m-drawer", DRAWERS.some(isOpen));
+    holders().forEach(([el, open]) => { if(!el) return;
+      clearTimeout(timers.get(el)); timers.delete(el);
+      if(open){ el.classList.remove("m-gone"); return; }
+      if(now) el.classList.add("m-gone");
+      else timers.set(el, setTimeout(() => { timers.delete(el);
+        if(phone.matches) el.classList.add("m-gone"); }, SLIDE)); });
   }
-  if(phone.matches) shutAll(null);
+  // Back into the tree BEFORE the flip, one layout in between, so the slide-in
+  // has a closed position to start from.
+  function reveal(name){
+    const el = name === "rail" ? railEl : (name === "code" || name === "browser") ? sideEl : null;
+    [el, scrim].forEach(x => { if(x){ clearTimeout(timers.get(x)); timers.delete(x);
+      x.classList.remove("m-gone"); void x.offsetWidth; } });
+  }
+  function shutAll(){ DRAWERS.forEach(d => { body.dataset[d] = "shut"; }); settle(false); }
+  if(phone.matches){ DRAWERS.forEach(d => { body.dataset[d] = "shut"; }); settle(true); }
   const wrap = (fn, name) => function(){
     if(!phone.matches) return fn.apply(this, arguments);
     DRAWERS.forEach(d => { if(d!==name) body.dataset[d] = "shut"; });
+    if(!isOpen(name)) reveal(name);
     const r = fn.apply(this, arguments);            // the page flips its own
-    body.classList.toggle("m-drawer", body.dataset[name] !== "shut");
+    settle(false);
     return r;
   };
   crow.toggleRail = wrap(crow.toggleRail, "rail");
   crow.toggleCode = wrap(crow.toggleCode, "code");
   crow.toggleGit = wrap(crow.toggleGit, "git");
   crow.toggleBrowser = wrap(crow.toggleBrowser, "browser");
-  scrim.addEventListener("click", () => shutAll(null));
+  scrim.addEventListener("click", () => shutAll());
   // Picking a chat or "new" closes the rail: the chat is what you came for.
   ["open","reset"].forEach(k => { const f = crow[k];
-    crow[k] = function(){ if(phone.matches) shutAll(null); return f.apply(this, arguments); }; });
+    crow[k] = function(){ if(phone.matches) shutAll(); return f.apply(this, arguments); }; });
 
   // The chosen settings category scrolls into the chip strip.
   const cat = crow.settingsCat;
@@ -8621,7 +8668,7 @@ REMOTE_JS = r"""
     const dx = p.clientX - t0.x, dy = p.clientY - t0.y, s = t0; t0 = null;
     if(Math.abs(dx) < 60 || Math.abs(dy) > Math.abs(dx) * 0.6) return;
     const open = DRAWERS.find(d => body.dataset[d] !== "shut");
-    if(open){ if((open==="rail") === (dx < 0)) shutAll(null); return; }
+    if(open){ if((open==="rail") === (dx < 0)) shutAll(); return; }
     if(dx > 0 && s.x < 24) crow.toggleRail();
     else if(dx < 0 && s.x > s.w - 24) crow.toggleCode();
   }, {passive:true});
@@ -8651,7 +8698,8 @@ REMOTE_JS = r"""
       .find(a => a.querySelector(".askrow button"));
     if(card !== watched){ if(watched) ro.unobserve(watched);
       watched = card || null; if(watched) ro.observe(watched); }
-    main.style.setProperty("--askh", card ? (card.offsetHeight + 8) + "px" : "0px");
+    if(card) main.style.setProperty("--askh", (card.offsetHeight + 8) + "px");
+    else main.style.removeProperty("--askh");
   }
   new MutationObserver(measure).observe(document.getElementById("flow"),
     {childList:true, subtree:true});
@@ -8677,7 +8725,8 @@ REMOTE_JS = r"""
     const r2 = row("mr2"), r3 = row("mr3"), r4 = row("mr4");
     const setOpen = on => { body.classList.toggle("m-tools", on);
       plus.setAttribute("aria-expanded", String(on));
-      main.style.setProperty("--toolsh", on ? tools.offsetHeight + 8 + "px" : "0px"); };
+      if(on) main.style.setProperty("--toolsh", tools.offsetHeight + 8 + "px");
+      else main.style.removeProperty("--toolsh"); };
     plus.addEventListener("click", () => setOpen(!body.classList.contains("m-tools")));
     document.addEventListener("click", e => {
       if(!body.classList.contains("m-tools")) return;
@@ -8761,7 +8810,9 @@ REMOTE_JS = r"""
     return cap.length > 8 ? cap.slice(0, 7) + "…" : cap;
   }
 
-  phone.addEventListener("change", () => { measure(); if(phone.matches) shutAll(null); });
+  phone.addEventListener("change", () => { measure();
+    if(phone.matches){ DRAWERS.forEach(d => { body.dataset[d] = "shut"; }); settle(true); }
+    else [railEl, sideEl, scrim].forEach(x => x && x.classList.remove("m-gone")); });
 })();
 """
 
@@ -8802,7 +8853,9 @@ def stamped_page(remote: bool = False) -> str:
                          "false" if crow_platform.IS_WINDOWS else "true")
                 .replace("__MARKLIGHT__", mark_svg("light")))
     # #249. DIE HAKEN ZULETZT, damit kein Ersatz oben in einem Haken landet.
-    return (page.replace("<!--__REMOTE_HEAD__-->", REMOTE_HEAD if remote else "")
+    head = REMOTE_HEAD.replace("__THEMEBG__",
+                               THEME_BG.get(current_theme(), THEME_BG["dark"]))
+    return (page.replace("<!--__REMOTE_HEAD__-->", head if remote else "")
                 .replace("/* __REMOTE_CSS__ */", REMOTE_CSS if remote else "")
                 .replace("/* __REMOTE_JS__ */", REMOTE_JS if remote else "")
                 .replace("__REMOTE_BOUND__", json.dumps(REMOTE_DESKTOP_BOUND)
