@@ -8354,7 +8354,26 @@ body.m-auto.m-hid #bar{top:var(--safe-t);
 body.m-auto.m-rev #bar{top:calc(var(--safe-t) + 18px);transform:none;
   background:var(--bg);border-bottom:1px solid var(--line);
   box-shadow:0 6px 18px var(--shadow)}
-@media (prefers-reduced-motion:reduce){body.m-auto #bar{transition:none}}
+/* ...and the strip above it (status bar + 18 px) is filled, or the chat shows
+   through it (robin, 2026-09-24). Only plain background lies in the blur band.
+   On .m-hid too, so it leaves with the bar instead of vanishing first. */
+body.m-auto.m-hid #bar::before,body.m-auto.m-rev #bar::before{content:"";
+  position:absolute;left:0;right:0;bottom:100%;height:calc(var(--safe-t) + 19px);
+  background:var(--bg);pointer-events:none}
+/* While it is gone, a small pill in the top middle (below the band, so
+   sharp) says "there is a header here": a tap or a pull on it brings it back.
+   The 96x44 hit area is invisible; only the 36x5 pill shows. */
+#mnudge{display:none}
+body.m-auto.m-hid #mnudge{display:flex;position:fixed;z-index:70;
+  top:calc(var(--safe-t) + 6px);left:50%;transform:translateX(-50%);
+  width:96px;height:44px;align-items:center;justify-content:center;
+  border:0;padding:0;background:none;cursor:pointer;
+  animation:mnudge-in .3s ease-out}
+#mnudge::after{content:"";width:36px;height:5px;border-radius:3px;
+  background:var(--dim);box-shadow:0 0 0 4px var(--bg)}
+@keyframes mnudge-in{from{opacity:0}to{opacity:1}}
+@media (prefers-reduced-motion:reduce){body.m-auto #bar{transition:none}
+  body.m-auto.m-hid #mnudge{animation:none}}
 
 /* git: the card from #panels becomes a right drawer of its own */
 body[data-git="shut"] #git{display:none}
@@ -8737,6 +8756,12 @@ REMOTE_JS = r"""
         body.classList.remove("m-hid"); body.classList.add("m-rev"); }
       if(body.classList.contains("m-rev")) arm(SHOWN); };
     arm(LOAD);
+    // the nudge: a pill that stands in for the gone header (REMOTE_CSS)
+    const nudge = document.createElement("button"); nudge.id = "mnudge";
+    nudge.type = "button"; nudge.setAttribute("aria-label", "Show header");
+    nudge.addEventListener("touchstart", reveal, {passive:true});
+    nudge.addEventListener("click", reveal);
+    body.appendChild(nudge);
     // any touch on the header, or a drawer/menu/sheet opened from it, restarts it
     bar.addEventListener("touchstart", () => {
       if(!body.classList.contains("m-hid"))

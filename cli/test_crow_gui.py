@@ -13615,6 +13615,11 @@ out.redrawScroll = cls();
 flowEl.fire("touchstart", {touches: [{clientX: 200, clientY: 500}]});
 flowEl.scrollTop = 500; flowEl.fire("scroll");
 out.scrolledUp = cls();
+const nudge = body.children.find(c => c.id === "mnudge");
+out.nudged = [];
+if(nudge){ advance(8000); out.nudged.push(cls()); nudge.click(); out.nudged.push(cls());
+  advance(8000); nudge.fire("touchstart", {touches: [{clientX: 200, clientY: 60}]});
+  out.nudged.push(cls()); }
 out.touch = listeners.filter(l => /^touch|^scroll/.test(l.type)).map(l => [l.type, !!(l.opt && l.opt.passive)]);
 console.log(JSON.stringify(out));
 """
@@ -13650,6 +13655,9 @@ console.log(JSON.stringify(out));
         # the page's own scroll (a redraw) is no pull; a finger's is
         self.assertEqual(out["redrawScroll"], "m-auto m-hid")
         self.assertEqual(out["scrolledUp"], "m-auto m-rev")
+        # the nudge pill (robin): a tap or a touch on it brings the header back
+        self.assertEqual(out["nudged"], ["m-auto m-hid", "m-auto m-rev", "m-auto m-rev"])
+        self.assertIn("body.m-auto.m-hid #mnudge{display:flex", crow_gui.REMOTE_CSS)
         for kind, passive in out["touch"]:
             self.assertNotEqual(kind, "touchmove")
             self.assertTrue(passive, kind)
