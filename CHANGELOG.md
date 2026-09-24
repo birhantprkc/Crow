@@ -3,6 +3,36 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## Unreleased
+
+On local `main` since 2.5.0 (origin/main 0c3e392), not pushed. From robin's 2026-09-23 diorama goal run and the
+2026-09-24 follow-ups. Suites on d4f462d (runtime venv, Linux, 2026-09-24): test_crow_core + test_crow +
+test_crow_gui 2,627 OK (skipped=8), ruff clean, check_shared_core 83/83, check_operating_point 10/10,
+`install.sh --selftest` 0. `check_gui_prereqs` fails on 12 glyphs missing from Google Sans Code, as on 0c3e392.
+Tickets open until robin's live check unless marked closed.
+
+### Added
+
+- **Fresh-eyes judge for visual work** (#266, `0c2f2a3`). The `judge` tool: a vision model in a fresh request (images + rubric, no history) scores a capture against the goal's `accept:` lines, PLAN.md or a default rubric; stored in goal.json. Without a pin it uses the local model. Live on the 2026-09-23 '9+' final frame: 4 vision models scored min 2.
+- **Evidence gate for visual steps** (#267, `6e4ae32`). `goal_step done` on a visual step needs a capture from this goal and a judge minimum of at least `judge_threshold` (default 8, `--judge-threshold`, settings `judge_threshold`).
+- **Render-loop breaker** (#268, `d742864`, `bbfcd41`). 3 captures of one page that come back the same → a bisect nudge; 6 → a forced rollover that carries what was tried.
+- **render_page metrics and an enlarged crop** (#265, `52853ae`). Coverage, colours and luma per render; a small scene gets an enlarged content crop for `read_image`. 2026-09-23: the scene filled 7–22 % of 62 renders.
+- **Context editing below the rollover** (#263, `ea4edd2`). Tool results older than the last 5 rounds become a one-line stub at 0.65 of the window, in batches that free at least 10 %; originals under `session/cleared/`. `context_clear_at` in settings, `--context-clear-at`. Replay: rollovers 55/88 rounds later.
+- **crow.log** (#262, `7e715b9`). Crow's own status lines (goal brake, same-failure streak, degenerate round, cache, budget) go to `~/.local/state/crow/log/crow.log` with local time and offset, not into the chat.
+- **One syntax-check table for all file tools** (#269, `d4f462d`). `edit_file` parses what it left (node for JS/HTML) and says whether this edit broke the file or it was broken before; settings `syntax_checks` maps an extension to a command for `write_file`, `append_file` and `edit_file`. Replay of 2026-09-23: 0 of 66 JS/HTML edits broke a file — parity, not a measured failure.
+
+### Changed
+
+- **A line typed during a turn is queued, not a stop** (#264, `d14046f`); in goal mode it goes before the goal nudge.
+- **Rollover archives leave the chat rail** (#261, `d1044f7`) for the archive drawer; a Crow note is never a chat title.
+- **goal_set carries the whole step record** (#260, `b165ffa`): notes, seconds and tokens of a re-declared step survive.
+
+### Fixed
+
+- **The goal brake judged a turn by its last message** (#258, `d0d2548`) and cut 157 + 52 messages of real work on 2026-09-23 (cold prefills of 106k). A turn that ran tools is never "empty"; two turns are the same only with the same calls and arguments.
+- **A forced answer after the tool budget could be reasoning-only** (#259, `579fd43`): the window showed nothing. The reasoning is surfaced; the brake still reads it as empty.
+- **A subtask stopped while its attempt fails closed "failed"** and memoed the spot dead (#242, `bb81d58`); it closes "interrupted" now.
+
 ## 2.5.0 — 2026-09-23
 
 Everything on `release-2026-09-23` since origin/main (6301e0e, 2026-09-20): 65 commits,
