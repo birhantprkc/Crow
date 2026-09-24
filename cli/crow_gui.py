@@ -5593,6 +5593,10 @@ const crow = {
     if(e.note){ this.note(e.note); }
   },
 
+  // #290: A PHONE'S OWN RECORDING, transcribed on the PC and pushed to that
+  // phone only. Into the box, never sent -- the rule micState states above.
+  heard(e){ if(e.text) this.attach(e.text); if(e.note) this.note(e.note); },
+
   // ONE PLACE THAT WRITES INTO THE BOX, and three callers use it: a finished
   // dictation, a dropped file, a pasted picture. Appended rather than assigned,
   // so half a typed line survives whatever arrives next.
@@ -7816,6 +7820,7 @@ const crow = {
       case "ghcode": this.ghCode(e); break;
       case "ghdone": this.ghDone(e); break;
       case "mic": this.micState(e); break;
+      case "heard": this.heard(e); break;
       case "drop": this.dropped(e.paths); break;
       case "idle": this.idle(); break;
       case "busy": this.busy(); break;
@@ -8225,7 +8230,10 @@ REMOTE_PHONE_DOES = {
     "tab": "closes the phone's tab, never the desktop window",
     "copy": "phone clipboard via document.execCommand('copy') on the tap",
     "paste": "the native paste in the input field",
-    "dictate": "the iOS keyboard's own dictation (no microphone over HTTP)",
+    "dictate": "#290: on the HTTPS (Tailscale) address the phone records "
+               "itself (MediaRecorder -> POST /upload?kind=audio -> Whisper "
+               "here -> its own input field); on plain HTTP the keyboard's "
+               "own dictation",
     "upload": "file input -> POST /upload -> stage_image(<temp path>)",
     "root": "a path field (and the recent roots) -> choose_root(path)",
     "link": "opens in a new phone tab",
@@ -8590,6 +8598,10 @@ body.m-tools #mtools{transform:none;opacity:1;visibility:visible;transition-dela
 #mic svg{width:17px;height:17px}
 #remoteattach svg{width:19px;height:19px}
 #remoteattach:active,#mic:active{background:var(--hover)}
+/* #290: the phone's own recording. The ring follows the level (--lvl 0..1,
+   set per frame from an AnalyserNode) instead of the desktop's breathing. */
+#mic.rec{animation:none;box-shadow:0 0 0 calc(2px + var(--lvl,0) * 7px) rgba(126,176,248,.35);
+  transition:box-shadow .07s linear}
 #modewrap{flex:none}
 #modelwrap{flex:1 1 0;min-width:0;display:flex}
 #rootwrap{flex:1 1 0;min-width:0;display:flex}
@@ -8926,6 +8938,8 @@ REMOTE_JS = r"""
     plus.addEventListener("click", () => setOpen(!body.classList.contains("m-tools")));
     document.addEventListener("click", e => {
       if(!body.classList.contains("m-tools")) return;
+      // #290: the sheet holds the 🎤, the only way to stop a recording
+      if($id("mic").classList.contains("rec")) return;
       if(e.target.closest("#mtools,#mplus,#modemenu,#modelmenu,#rootmenu")) return;
       setOpen(false); });
     window.mobileTools = setOpen;
@@ -8957,16 +8971,6 @@ REMOTE_JS = r"""
     ["queuedLine","release","viewBar"].forEach(k => { const f = crow[k];
       crow[k] = function(e){ const r = f.apply(this, arguments);
         drawHeld(k === "queuedLine" && e ? e.by : undefined); return r; }; });
-    // mic: the desktop microphone is not the phone's. A tap focuses the input
-    // so the dictation key on the iOS keyboard is one tap away.
-    const mic = document.getElementById("mic");
-    crow.mic = function(){ input.focus();
-      document.getElementById("hint").textContent = "dictate with the keyboard's microphone key"; };
-    const micState = crow.micState;
-    crow.micState = function(){ const r = micState.apply(this, arguments);
-      mic.disabled = false; mic.classList.remove("rec");
-      mic.title = "dictate: opens the keyboard"; return r; };
-    mic.disabled = false; mic.title = "dictate: opens the keyboard";
     // the model: a short name on the chip, the full one in the title and menu.
     const showModel = crow.showModel;
     crow.showModel = function(){ const r = showModel.apply(this, arguments);
@@ -9005,6 +9009,78 @@ REMOTE_JS = r"""
     const cap = fam.charAt(0).toUpperCase() + fam.slice(1);
     return cap.length > 8 ? cap.slice(0, 7) + "…" : cap;
   }
+
+  // 6. THE MICROPHONE (#290), on every phone width. The desktop's microphone
+  //    is not the phone's, and the desktop's dictation (its "mic" pushes) is
+  //    not this phone's either: its state and its text stay on the desktop.
+  //    HTTPS (Tailscale): the phone records itself -- MediaRecorder, first tap
+  //    starts, second tap stops, a level ring on the button -- and the clip
+  //    goes through /upload?kind=audio. The PC's Whisper answers with
+  //    {"k":"heard"} to THIS phone only (crow.heard), and the words land in
+  //    its input field, never sent. Plain HTTP has no getUserMedia (not a secure context): a tap
+  //    focuses the input so the keyboard's own 🎤 is one tap away.
+  const mic = document.getElementById("mic"), field = document.getElementById("in");
+  const WORDS = window.CROW_REMOTE_TEXT || {};
+  const canRecord = !!(window.isSecureContext && navigator.mediaDevices
+    && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+  const MAX_REC = 300000;              // crow_voice.MAX_SECONDS, in ms
+  let rec = null;
+  const micIdle = () => { mic.disabled = false; mic.classList.remove("rec");
+    mic.style.removeProperty("--lvl");
+    mic.title = canRecord ? "dictate: tap to record, tap again to stop"
+                          : "dictate: opens the keyboard"; };
+  function recStart(){
+    // THE AUDIO GRAPH IS BUILT IN THE TAP: iOS starts an AudioContext only
+    // inside a user gesture, and getUserMedia's promise is no longer one.
+    let ctx = null;
+    try { const AC = window.AudioContext || window.webkitAudioContext;
+      ctx = AC ? new AC() : null; } catch(_) { ctx = null; }
+    rec = {stop: () => {}};                        // a second tap before the grant
+    const claim = rec;
+    navigator.mediaDevices.getUserMedia({audio: true}).then(stream => {
+      if(rec !== claim){ stream.getTracks().forEach(t => t.stop()); return; }
+      const chunks = [], r = new MediaRecorder(stream);
+      let raf = 0, cap = 0;
+      if(ctx){ try { const an = ctx.createAnalyser(); an.fftSize = 512;
+          ctx.createMediaStreamSource(stream).connect(an);
+          const buf = new Float32Array(an.fftSize); let peak = 0.02;
+          // the desktop band's scale (crow.voice): a running peak that decays
+          const tick = () => { an.getFloatTimeDomainData(buf);
+            let m = 0; for(let i = 0; i < buf.length; i++) m = Math.max(m, Math.abs(buf[i]));
+            peak = Math.max(m, peak * 0.97, 0.02);
+            mic.style.setProperty("--lvl", Math.min(1, m / peak).toFixed(2));
+            raf = requestAnimationFrame(tick); };
+          if(ctx.resume) ctx.resume(); tick(); } catch(_) {} }
+      r.ondataavailable = ev => { if(ev.data && ev.data.size) chunks.push(ev.data); };
+      r.onstop = () => { clearTimeout(cap); cancelAnimationFrame(raf);
+        stream.getTracks().forEach(t => t.stop());
+        if(ctx && ctx.close) ctx.close();
+        rec = null; micIdle();
+        const type = String(r.mimeType || "audio/mp4").split(";")[0];
+        const clip = new Blob(chunks, {type});
+        if(!clip.size) return;
+        fetch("/upload?kind=audio", {method: "POST", credentials: "same-origin",
+          headers: {"Content-Type": type}, body: clip})
+          .then(res => { if(!res.ok) throw new Error(String(res.status)); })
+          .catch(err => crow.note((WORDS.micsend || "") + " (" + err.message + ")")); };
+      rec = {stop: () => { if(r.state !== "inactive") r.stop(); }};
+      r.start();
+      mic.classList.add("rec"); mic.title = "stop and write it down";
+      cap = setTimeout(() => rec && rec.stop(), MAX_REC);
+    }, err => { rec = null; micIdle(); if(ctx && ctx.close) ctx.close();
+      crow.note((WORDS.micdenied || "") + " (" + ((err && err.name) || err) + ")"); });
+  }
+  crow.mic = function(){
+    if(!canRecord){ field.focus();
+      document.getElementById("hint").textContent = WORDS.dictate || ""; return; }
+    if(rec){ const r = rec; rec = null; r.stop(); micIdle(); return; }
+    recStart(); };
+  const micState = crow.micState;
+  crow.micState = function(e){
+    const r = micState.call(this, Object.assign({}, e, {state: "off", blocked: "", text: "", note: ""}));
+    if(rec) mic.classList.add("rec"); else micIdle();
+    return r; };
+  micIdle();
 
   phone.addEventListener("change", () => { measure();
     if(phone.matches){ DRAWERS.forEach(d => { body.dataset[d] = "shut"; }); settle(true); }
@@ -15673,7 +15749,8 @@ class Api:
                          upload_dir=os.path.join(PASTE_DIR, "remote"),
                          log=lambda line: crow_core.log_note(line, "remote"),
                          icon=remote_icon,
-                         tailnet=self._remote_tailnet(self._remote_ts))
+                         tailnet=self._remote_tailnet(self._remote_ts),
+                         audio=self._remote_audio)
         try:
             remote.start()
         except (OSError, ValueError) as exc:
@@ -15798,6 +15875,32 @@ class Api:
         self._remote_ts = tailscale_probe(remote_port_setting())
         self._remote_dialog(fresh=False)
         return True
+
+    def _remote_audio(self, path: str, device: str) -> None:
+        """#290: a phone's recording is on disk. Transcribe it on a thread and
+        push the words to THAT phone only, `{"k":"heard"}` -- into its input
+        field, never sent, the desktop's rule for dictation. The clip is
+        deleted either way; nothing of it is kept."""
+        threading.Thread(target=self._remote_heard, args=(path, device),
+                         name="crow-remote-voice", daemon=True).start()
+
+    def _remote_heard(self, path: str, device: str) -> None:
+        try:
+            why = crow_voice.file_available()
+            if why:
+                said = {"k": "heard", "note": why}
+            else:
+                text = crow_voice.transcribe_file(path)
+                said = ({"k": "heard", "text": text} if text
+                        else {"k": "heard", "note": "nothing was said"})
+        except Exception as exc:       # noqa: BLE001 -- said, not raised
+            said = {"k": "heard", "note": "dictation failed: %s" % exc}
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        self._push_to(said, (device,))
 
     def remote_allow(self, ident, yes) -> bool:
         """The desktop's Allow / Deny on a new device. Desktop-only: a phone

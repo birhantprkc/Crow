@@ -192,6 +192,12 @@ def stop() -> str:
     audio = np.concatenate(blocks, axis=0).reshape(-1)
     if len(audio) < MIN_FRAMES:
         return ""
+    return _transcribe(audio)
+
+
+def _transcribe(audio) -> str:
+    """16 kHz mono float32 in, the words out -- one recogniser setting for the
+    PC's microphone and the phone's clip alike."""
     segments, _info = load_model().transcribe(
         audio, beam_size=5,
         # VAD FIRST, because Whisper writes sentences over silence -- the
@@ -201,6 +207,44 @@ def stop() -> str:
         # an English user and a German one share one build and one setting.
         vad_filter=True)
     return " ".join(s.text.strip() for s in segments).strip()
+
+
+# #290: THE PHONE'S MICROPHONE. A phone on the HTTPS (Tailscale) address records
+# itself with MediaRecorder -- audio/mp4 (AAC) from iOS Safari, WebM/Opus from
+# Chrome -- and the clip arrives here as a file. It has to be decoded to 16 kHz
+# mono first, and faster-whisper brings the decoder with it: PyAV (`av`) is one
+# of its own install requirements, so a machine that can transcribe at all can
+# decode. No sounddevice and no microphone on this PC are needed for it.
+
+
+def file_available() -> str | None:
+    """None when a phone's clip can be transcribed; otherwise the reason.
+    Cheaper than `available()`: no audio host is started."""
+    try:
+        import faster_whisper                                     # noqa: F401
+    except Exception:                      # noqa: BLE001 - reported, not raised
+        return "dictation needs faster-whisper -- pip install faster-whisper"
+    return None
+
+
+def _decode(path: str):
+    """The clip as 16 kHz mono float32, through PyAV (faster-whisper's own
+    `decode_audio`, which resamples and downmixes)."""
+    from faster_whisper.audio import decode_audio
+
+    return decode_audio(str(path), sampling_rate=SAMPLE_RATE)
+
+
+def transcribe_file(path: str) -> str:
+    """A recorded clip in, the words out; "" when it is too short or silent.
+
+    The sibling of `stop()`: the same model, the same settings, the same
+    "a mis-click pastes nothing" floor. The file is read, never deleted --
+    the caller owns it."""
+    audio = _decode(path)
+    if len(audio) < MIN_FRAMES:
+        return ""
+    return _transcribe(audio)
 
 
 def load_model():

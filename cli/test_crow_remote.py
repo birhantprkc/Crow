@@ -763,6 +763,60 @@ class TailscaleStateTests(unittest.TestCase):
         self.assertEqual(self.state(lambda argv: (0, "not json"))["state"], "down")
 
 
+class AudioUploadTests(unittest.TestCase):
+    """#290: `/upload?kind=audio` -- same cookie and guards as an image, 202
+    at once, the clip handed to the `audio` callable with the device id."""
+
+    def setUp(self):
+        self.heard = []
+        self.h = Harness(self, audio=lambda path, dev: self.heard.append((path, dev)))
+
+    def test_a_paired_phone_uploads_a_clip(self):
+        dev, cookie = self.h.pair()
+        r, data = self.h.request("POST", "/upload?kind=audio", b"\x00\x00\x00\x18ftypM4A ",
+                                 {"Content-Type": "audio/mp4"}, cookie=cookie)
+        self.assertEqual(r.status, 202, data)
+        (path, who), = self.heard
+        self.assertEqual(who, dev)
+        self.assertEqual(os.path.dirname(path), self.h.upload_dir)
+        self.assertTrue(path.endswith(".m4a"))
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), b"\x00\x00\x00\x18ftypM4A ")
+
+    def test_the_guards_hold(self):
+        _, cookie = self.h.pair()
+        r, _ = self.h.request("POST", "/upload?kind=audio", b"x", {"Content-Type": "audio/mp4"})
+        self.assertEqual(r.status, 401)
+        r, _ = self.h.request("POST", "/upload?kind=audio", b"x", {"Content-Type": "image/png"},
+                              cookie=cookie)
+        self.assertEqual(r.status, 415)
+        r, _ = self.h.request("POST", "/upload?kind=audio", b"x",
+                              {"Content-Type": "audio/mp4", "Origin": "http://evil.example"},
+                              cookie=cookie, origin=False)
+        self.assertEqual(r.status, 403)
+        self.assertEqual(self.heard, [])
+        # the image path is unchanged: no kind is an image
+        r, data = self.h.request("POST", "/upload", b"\x89PNG", {"Content-Type": "image/png"},
+                                 cookie=cookie)
+        self.assertEqual(r.status, 200, data)
+
+    def test_no_recogniser_is_501_and_a_broken_one_leaves_no_file(self):
+        plain = Harness(self)
+        _, cookie = plain.pair()
+        r, _ = plain.request("POST", "/upload?kind=audio", b"x", {"Content-Type": "audio/mp4"},
+                             cookie=cookie)
+        self.assertEqual(r.status, 501)
+
+        def broken(path, dev):
+            raise RuntimeError("no thread")
+        self.h.remote._audio = broken
+        _, cookie = self.h.pair()
+        r, _ = self.h.request("POST", "/upload?kind=audio", b"x", {"Content-Type": "audio/webm"},
+                              cookie=cookie)
+        self.assertEqual(r.status, 500)
+        self.assertEqual(os.listdir(self.h.upload_dir), [])
+
+
 class DeviceNameTests(unittest.TestCase):
 
     def test_names(self):

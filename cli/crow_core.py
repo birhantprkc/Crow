@@ -18033,8 +18033,11 @@ REMOTE_PHONE_TEXT = {
     "unreachable": "the desktop cannot be reached -- is Crow running on the "
                    "same network?",
     "ondesk": "opened on the desktop",
-    "dictate": "use the keyboard's dictation key -- the phone's microphone "
-               "needs HTTPS",
+    # #290: the plain-HTTP address has no getUserMedia (no secure context).
+    "dictate": "the phone's microphone needs the HTTPS (Tailscale) address "
+               "-- for now use the keyboard's \U0001f3a4",
+    "micdenied": "the microphone did not open",
+    "micsend": "the recording could not be sent",
     "upload": "the image could not be sent",
     "root": "folder on the desktop",
 }

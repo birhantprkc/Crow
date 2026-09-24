@@ -3347,6 +3347,50 @@ class TheVoiceModuleTests(unittest.TestCase):
                          Path(crow_voice.__file__).resolve().parent.parent,
                          "the model is not looked for beside the client")
 
+    def test_a_phone_clip_is_decoded_and_transcribed_with_the_same_model(self):
+        """#290: `transcribe_file(path)` -- the phone's recording, decoded to
+        16 kHz mono (faster-whisper's own PyAV decoder, faked here: this box
+        has no voice extra) and handed to the same model with the same
+        settings as `stop()`. Too short a clip is "" and the model is not
+        asked."""
+        asked = []
+
+        class Seg:
+            def __init__(self, text):
+                self.text = text
+
+        class Model:
+            def transcribe(self, audio, **kw):
+                asked.append((len(audio), kw))
+                return [Seg(" Hallo Crow, "), Seg("teste die Spracheingabe. ")], None
+
+        decoded = {}
+
+        def decode(path):
+            decoded["path"] = path
+            return [0.0] * (crow_voice.SAMPLE_RATE * 2)
+
+        with mock.patch.object(crow_voice, "_decode", decode), \
+                mock.patch.object(crow_voice, "load_model", Model):
+            self.assertEqual(crow_voice.transcribe_file("/tmp/clip.m4a"),
+                             "Hallo Crow, teste die Spracheingabe.")
+            self.assertEqual(decoded["path"], "/tmp/clip.m4a")
+            self.assertEqual(asked, [(32000, {"beam_size": 5, "vad_filter": True})])
+            with mock.patch.object(crow_voice, "_decode",
+                                   lambda p: [0.0] * (crow_voice.MIN_FRAMES - 1)):
+                self.assertEqual(crow_voice.transcribe_file("/tmp/tap.m4a"), "")
+            self.assertEqual(len(asked), 1)
+
+    def test_the_phone_path_needs_only_the_recogniser(self):
+        """NEGATIVE: no microphone and no sounddevice on the PC must not block
+        a phone's clip; a missing faster-whisper is named."""
+        with mock.patch.dict(sys.modules, {"sounddevice": None, "faster_whisper": None}):
+            why = crow_voice.file_available()
+        self.assertIn("faster-whisper", why)
+        with mock.patch.dict(sys.modules, {"sounddevice": None,
+                                           "faster_whisper": mock.MagicMock()}):
+            self.assertIsNone(crow_voice.file_available())
+
 class TheThemeAndTheSettingsSheetTests(unittest.TestCase):
     """Two palettes, one attribute, and the sheet that switches them."""
 
@@ -14774,6 +14818,179 @@ class RemoteTailnetTests(RemoteCase):
         self.assertIn('o.textContent="HTTPS · "+(https.name||"Tailscale")', page)
         self.assertIn("pywebview.api.remote_use_https(true)", page)
         self.assertIn('t.querySelector("span").textContent=https.line||""', page)
+
+
+# =================================================================== #290
+#
+# THE PHONE'S MICROPHONE: the clip is on disk, the Api transcribes it and the
+# words go to that phone's input field only.
+
+class RemotePhoneVoiceTests(RemoteCase):
+
+    def clip(self) -> str:
+        path = os.path.join(self.dir, "clip.m4a")
+        with open(path, "wb") as fh:
+            fh.write(b"\x00\x00\x00\x18ftypM4A ")
+        return path
+
+    def heard(self, api, text="Hallo Crow", why=None, boom=None):
+        path = self.clip()
+
+        def transcribe(p):
+            self.assertEqual(p, path)
+            if boom:
+                raise boom
+            return text
+        with mock.patch.object(crow_voice, "file_available", lambda: why), \
+                mock.patch.object(crow_voice, "transcribe_file", transcribe):
+            api._remote_heard(path, PHONE)
+        self.assertFalse(os.path.exists(path), "the clip was kept")
+        return [m for m in api._remote.got(PHONE) if m.get("k") == "heard"]
+
+    def test_the_words_go_to_that_phone_only_and_nothing_is_sent(self):
+        api = self.mirrored()
+        api._remote.ids.append("d-other")
+        before = len(api._conversation)
+        self.assertEqual(self.heard(api), [{"k": "heard", "text": "Hallo Crow"}])
+        self.assertNotIn("heard", [m.get("k") for m in api._remote.got("d-other")])
+        self.assertNotIn("heard", [m.get("k") for m in self.drained(api)])
+        self.assertEqual(len(api._conversation), before)
+        self.assertNotIn("user", [m.get("k") for m in api._remote.got(PHONE)])
+
+    def test_silence_a_missing_recogniser_and_a_failure_are_said_there(self):
+        api = self.mirrored()
+        self.assertEqual(self.heard(api, text=""),
+                         [{"k": "heard", "note": "nothing was said"}])
+        api._remote.published.clear()
+        why = "dictation needs faster-whisper -- pip install faster-whisper"
+        self.assertEqual(self.heard(api, why=why), [{"k": "heard", "note": why}])
+        api._remote.published.clear()
+        self.assertEqual(self.heard(api, boom=RuntimeError("bad clip")),
+                         [{"k": "heard", "note": "dictation failed: bad clip"}])
+
+    def test_the_server_gets_the_door_and_it_returns_at_once(self):
+        crow_gui.REMOTE_FACTORY = _FakeRemote
+        crow_gui.lan_addresses = lambda: [("wlan0", "192.168.1.5")]
+        api = self.api()
+        self.addCleanup(setattr, api, "_remote", None)
+        api.slash_answer("/remote on")
+        self.assertEqual(api._remote.kw["audio"], api._remote_audio)
+        gate, done = threading.Event(), threading.Event()
+
+        def slow(path):
+            gate.wait(5)
+            done.set()
+            return "spaet"
+        with mock.patch.object(crow_voice, "file_available", lambda: None), \
+                mock.patch.object(crow_voice, "transcribe_file", slow):
+            api._remote_audio(self.clip(), PHONE)     # returns while it waits
+            gate.set()
+            self.assertTrue(done.wait(5))
+            for _ in range(100):
+                if any(m.get("k") == "heard" for m in api._remote.got(PHONE)):
+                    break
+                time.sleep(0.02)
+        self.assertIn({"k": "heard", "text": "spaet"}, api._remote.got(PHONE))
+
+
+class RemotePhoneMicTests(unittest.TestCase):
+    """#290 on the page: in a secure context the 🎤 records (tap, tap), shows
+    the level, uploads the clip as kind audio and puts the pushed words into
+    the input without sending; on plain HTTP it keeps the keyboard hint. The
+    desktop's own dictation never lands on the phone."""
+
+    PRELUDE = r"""
+const T = __TEXT__;
+window.CROW_REMOTE_TEXT = T;
+const attached = [], notes = [], sent = [], fetched = [], passed = [], gum = [];
+let focused = false;
+crow.attach = t => attached.push(t); crow.note = t => notes.push(t);
+Object.assign(crow, {__HEARD__});
+crow.on = m => { passed.push(m.k); if(m.k === "heard") crow.heard(m); };
+crow.micState = e => passed.push(["micState", e.state, e.text, e.note]);
+el("in").focus = () => { focused = true; };
+globalThis.pywebview = {api: new Proxy({}, {get: (_, n) => (...a) => { sent.push(n); return Promise.resolve(null); }})};
+globalThis.isSecureContext = SECURE;
+const track = {stopped: false, stop(){ this.stopped = true; }};
+Object.defineProperty(globalThis, "navigator", {configurable: true, value: {
+  mediaDevices: SECURE ? {getUserMedia: c => { gum.push(c); return Promise.resolve({getTracks: () => [track]}); }} : undefined}});
+globalThis.MediaRecorder = class { constructor(){ this.state = "inactive"; this.mimeType = "audio/mp4"; }
+  start(){ this.state = "recording"; }
+  stop(){ this.state = "inactive"; this.ondataavailable({data: {size: 5}}); this.onstop(); } };
+globalThis.AudioContext = class { createAnalyser(){ return {fftSize: 0, getFloatTimeDomainData(b){ b.fill(0.25); }}; }
+  createMediaStreamSource(){ return {connect(){}}; } resume(){} close(){} };
+globalThis.requestAnimationFrame = () => 0; globalThis.cancelAnimationFrame = () => {};
+globalThis.Blob = class { constructor(parts, o){ this.size = parts.reduce((n, p) => n + (p.size || 0), 0); this.type = o.type; } };
+globalThis.fetch = (url, o) => { fetched.push([url, o.method, o.headers["Content-Type"], o.body.size, o.credentials]);
+  return Promise.resolve({ok: true, status: 202}); };
+"""
+    PROBE = r"""
+(async () => {
+  const tick = () => new Promise(r => setImmediate(r));
+  const mic = el("mic"), out = {};
+  crow.mic(); await tick(); await tick();
+  out.gum = gum.length; out.rec = mic.classList.contains("rec"); out.lvl = mic.style.m["--lvl"] || null;
+  crow.mic(); await tick(); await tick();
+  out.after = mic.classList.contains("rec"); out.track = track.stopped; out.fetched = fetched;
+  crow.on({k: "heard", text: "Hallo Crow"});
+  crow.on({k: "heard", note: "nothing was said"});
+  crow.micState({k: "mic", state: "off", text: "from the desktop", note: "desk note"});
+  crow.on({k: "text", t: "x"});
+  out.attached = attached; out.notes = notes; out.sent = sent; out.passed = passed;
+  out.focused = focused; out.hint = el("hint").textContent || ""; out.title = mic.title;
+  console.log(JSON.stringify(out));
+})();
+"""
+
+    @staticmethod
+    def heard_method() -> str:
+        """The page's own `heard(e){...}` -- the case the window's push reaches."""
+        found = re.search(r"\n  (heard\(e\)\{[^\n]*\}),\n", crow_gui.PAGE)
+        # none: an empty one, so the behaviour below is what fails, not this
+        return found.group(1) if found else "heard(e){}"
+
+    def run_mic(self, secure: bool) -> dict:
+        node = _node()
+        if not node:
+            self.skipTest("no node on this machine")
+        import subprocess
+        layer = RemotePhoneLayerTests
+        js = ("globalThis.SECURE = %s;\n" % ("true" if secure else "false")
+              + layer.FAKE_DOM
+              + self.PRELUDE.replace("__TEXT__", json.dumps(crow_core.REMOTE_PHONE_TEXT))
+                            .replace("__HEARD__", self.heard_method())
+              + crow_gui.REMOTE_JS + self.PROBE)
+        done = subprocess.run([node, "-e", js], capture_output=True, text=True,
+                              encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    def test_https_records_uploads_and_fills_the_input_without_sending(self):
+        out = self.run_mic(True)
+        self.assertEqual(out["gum"], 1, "no recording was started")
+        self.assertTrue(out["rec"])
+        self.assertEqual(out["lvl"], "1.00", "no level on the ring")
+        self.assertFalse(out["after"])
+        self.assertTrue(out["track"], "the microphone stayed open")
+        self.assertEqual(out["fetched"], [["/upload?kind=audio", "POST", "audio/mp4", 5,
+                                           "same-origin"]])
+        self.assertEqual(out["attached"], ["Hallo Crow"])
+        self.assertEqual(out["notes"], ["nothing was said"])
+        self.assertNotIn("send", out["sent"])
+        self.assertNotIn("dictate_start", out["sent"])
+        # the desktop's dictation: its state and words stay on the desktop
+        self.assertIn(["micState", "off", "", ""], out["passed"])
+        self.assertNotIn("from the desktop", out["attached"])
+        self.assertIn('case "heard": this.heard(e); break;', crow_gui.PAGE)
+
+    def test_plain_http_keeps_the_keyboard_hint(self):
+        out = self.run_mic(False)
+        self.assertEqual(out["gum"], 0)
+        self.assertEqual(out["fetched"], [])
+        self.assertTrue(out["focused"])
+        self.assertEqual(out["hint"], crow_core.REMOTE_PHONE_TEXT["dictate"])
+        self.assertIn("HTTPS (Tailscale)", out["hint"])
+        self.assertEqual(out["title"], "dictate: opens the keyboard")
 
 
 if __name__ == "__main__":

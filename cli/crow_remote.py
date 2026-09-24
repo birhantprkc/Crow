@@ -27,7 +27,7 @@ SameSite=Strict cookie whose sha256 is all that is stored, and a Host/Origin
 check on every route that does something. The bind is one LAN address, never
 0.0.0.0, so the model ports' 127.0.0.1-only rule is not weakened by this file.
 
-ON THE ROAD (#249 stage 5): Tailscale, and Crow never runs it. `tailscale
+ON THE ROAD (#249 stage 5, #290): Tailscale, and Crow never runs it. `tailscale
 serve --https=443 http://127.0.0.1:<port>` is a persistent config that
 terminates TLS for `<machine>.<tailnet>.ts.net` with a certificate tailscaled
 renews itself, and forwards to the loopback. So when the tailnet is up this
@@ -99,6 +99,12 @@ MAX_BODY = 8 * 1024 * 1024          # /pair and /api: a prompt, not a file
 MAX_UPLOAD = 20 * 1024 * 1024       # /upload: one phone photo, with room
 _IMAGE_EXT = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
               "image/webp": ".webp", "image/heic": ".heic", "image/heif": ".heif"}
+# #290: A PHONE'S RECORDING, `/upload?kind=audio`. iOS Safari's MediaRecorder
+# writes audio/mp4 (AAC), Chrome and Firefox audio/webm or audio/ogg (Opus).
+# The suffix is only a hint for the decoder; PyAV probes the container itself.
+_AUDIO_EXT = {"audio/mp4": ".m4a", "audio/x-m4a": ".m4a", "audio/aac": ".aac",
+              "audio/webm": ".webm", "audio/ogg": ".ogg", "audio/wav": ".wav",
+              "audio/x-wav": ".wav", "audio/mpeg": ".mp3"}
 
 _MERGEABLE = ("text", "think")
 
@@ -283,12 +289,16 @@ class Remote:
                  clock: Callable[[], float] = time.monotonic,
                  log: Callable[[str], None] = lambda s: None,
                  icon: "Callable[[int], bytes | None] | None" = None,
-                 tailnet: str = ""):
+                 tailnet: str = "",
+                 audio: "Callable[[str, str], None] | None" = None):
         self.host = host
         self.port = port
         # #249 stage 5: the ts.net name `tailscale serve` answers for, or "".
         # Set, it adds the loopback listener its proxy forwards to.
         self.tailnet = (tailnet or "").strip().rstrip(".").lower()
+        # #290: called with (clip path, device id) once a phone's recording is
+        # on disk; it must return at once -- the transcript goes back as a push.
+        self._audio = audio
         self._page = page
         self._call = call
         self._allowed = frozenset(allowed)
@@ -851,7 +861,7 @@ class _Handler(BaseHTTPRequestHandler):
         if dev is None:
             return self.plain(401, "not paired")
         if path == "/upload":
-            return self._upload()
+            return self._upload(dev[0])
         if path.startswith("/api/"):
             return self._api(path[len("/api/"):], dev[0])
         return self.plain(404, "not found")
@@ -906,8 +916,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.json(200, {"id": record["id"], "name": record["name"]},
                   (("Set-Cookie", self.cookie_header(cookie)),))
 
-    def _upload(self):
+    def _upload(self, dev: str):
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        kind = (parse_qs(urlsplit(self.path).query).get("kind") or ["image"])[0]
+        if kind == "audio":
+            return self._upload_audio(ctype, dev)
         if not ctype.startswith("image/"):
             return self.plain(415, "images only")
         raw = self._read_body(MAX_UPLOAD)
@@ -919,6 +932,34 @@ class _Handler(BaseHTTPRequestHandler):
         with os.fdopen(fd, "wb") as f:
             f.write(raw)
         self.json(200, {"path": target})
+
+    def _upload_audio(self, ctype: str, dev: str):
+        """#290: a phone's recording. 202 AT ONCE, the transcript follows as a
+        push to this device only: the first dictation loads the recogniser,
+        and iOS gave up on a held request after about 6 s (see PAIR_POLL).
+        The clip belongs to the `audio` callable from here on -- it deletes it."""
+        if self.owner._audio is None:
+            return self.plain(501, "no recogniser on this desktop")
+        if not ctype.startswith("audio/"):
+            return self.plain(415, "audio only")
+        raw = self._read_body(MAX_UPLOAD)
+        if raw is None:
+            return
+        os.makedirs(self.owner._upload_dir, exist_ok=True)
+        fd, target = tempfile.mkstemp(prefix="remote-voice-",
+                                      suffix=_AUDIO_EXT.get(ctype, ".audio"),
+                                      dir=self.owner._upload_dir)
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw)
+        try:
+            self.owner._audio(target, dev)
+        except Exception as exc:           # noqa: BLE001 - the page gets the reason
+            try:
+                os.remove(target)
+            except OSError:
+                pass
+            return self.plain(500, str(exc) or type(exc).__name__)
+        self.json(202, {"heard": "pending"})
 
     def _api(self, name: str, dev: str):
         if name not in self.owner._allowed:
