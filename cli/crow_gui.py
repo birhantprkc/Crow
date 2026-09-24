@@ -1564,6 +1564,7 @@ body[data-rail="shut"] #rail{width:0;overflow:hidden}
   background:linear-gradient(90deg,transparent 0%,color-mix(in srgb,var(--accent) 16%,transparent) 50%,transparent 100%),var(--raised);
   background-size:220% 100%,auto;
   animation:pendsweep 2.6s ease-in-out infinite, pendglow 2.6s ease-in-out infinite}
+#pairbar.indlg{max-width:none;margin:0 0 16px;padding:11px 13px}
 #pairbar .top{display:flex;align-items:center;gap:10px}
 #pairbar .ph{color:var(--accent);display:flex}
 #pairbar .title{font-weight:600;color:var(--text)}
@@ -3511,11 +3512,30 @@ if (window.CROW_REMOTE) (function(){
     if(!m){ go(); return; }
     history.replaceState(null, "", location.pathname + location.search);
     pairing(true, TEXT.wait);
-    post("/pair", {t: decodeURIComponent(m[1])}).then(r => {
+    // NIE EINE OFFENE ANFRAGE, WAEHREND EIN MENSCH ENTSCHEIDET (iPhone,
+    // 2026-09-24: WebKit gab ein gehaltenes /pair nach ~6 s als Netzfehler
+    // auf). /pair antwortet sofort 202 {p}, dann /pair/wait jede Sekunde.
+    // Ein einzelner Netzfehler ist kein Ende; erst MISS in Folge sind es.
+    const done = r => pairing(true, r.status===403 ? TEXT.denied
+      : r.status===429 ? TEXT.locked : TEXT.expired);
+    const MISS = 5;
+    let misses = 0;
+    const poll = pid => {
+      if(document.hidden){ setTimeout(() => poll(pid), 1000); return; }
+      post("/pair/wait", {p: pid}).then(r => {
+        misses = 0;
+        if(r.status===202){ setTimeout(() => poll(pid), 1000); return; }
+        if(r.ok){ go(); return; }
+        done(r); },
+        () => { if(++misses >= MISS){ pairing(true, TEXT.unreachable); return; }
+                setTimeout(() => poll(pid), 1000); }); };
+    const begin = t => post("/pair", {t}).then(r => {
+      if(r.status===202) return r.json().then(j => poll(j.p));
       if(r.ok){ go(); return; }
-      pairing(true, r.status===403 ? TEXT.denied : r.status===429 ? TEXT.locked
-                                   : TEXT.expired); },
-      () => pairing(true, TEXT.unreachable)); };
+      done(r); },
+      () => { if(++misses >= MISS){ pairing(true, TEXT.unreachable); return; }
+              setTimeout(() => begin(t), 1000); });
+    begin(decodeURIComponent(m[1])); };
 })();
 </script>
 <script>
@@ -7468,7 +7488,16 @@ const crow = {
     b.classList.toggle("on", !!e.on);
     b.classList.toggle("live", !!e.on && (e.online||0) > 0);
     if(e.t) b.title=e.t; },
-  remoteClose(){ const d=$("#remotedlg"); if(d){ d.hidden=true; d.textContent=""; } },
+  remoteClose(){ const d=$("#remotedlg"); if(!d) return;
+    d.hidden=true; this.remotePlaceAsk(); d.textContent=""; },
+  // #249, iPhone 2026-09-24: der Dialog (z-index 80, modal) DECKTE die Leiste
+  // ueber der Eingabe zu -- Allow war erst nach dem Schliessen erreichbar.
+  // Solange er offen ist, steht die Frage OBEN IN SEINEM KOERPER; zu, steht
+  // sie wieder ueber der Eingabe. Dasselbe Element, dieselben Knoepfe.
+  remotePlaceAsk(p){ p = p || $("#pairbar"); if(!p) return;
+    const d=$("#remotedlg"), body=d && !d.hidden ? d.querySelector(".rbody") : null;
+    if(body){ p.classList.add("indlg"); body.insertBefore(p, body.firstChild); }
+    else { p.classList.remove("indlg"); $("#composer").insertBefore(p, $("#box")); } },
   remoteDialog(e){ const d=$("#remotedlg"); if(!d) return;
     if(!e.open){ this.remoteClose(); return; }
     // EIN NACHZIEHEN (ein Geraet kam oder ging) OEFFNET NICHTS, was zu ist.
@@ -7480,6 +7509,7 @@ const crow = {
     // fremde Markup und kommt aus Crows eigenem Kodierer (`qr_svg`).
     const ttl = d.querySelector(".rttl b");
     if(e.fresh || !ttl) this.remoteUntil = Date.now() + 1000*(e.ttl||120);
+    const ask=$("#pairbar");
     d.textContent="";
     const sheet=document.createElement("div"); sheet.className="rsheet";
     sheet.innerHTML='<div class="rhead"><h2>Remote</h2>'
@@ -7528,6 +7558,7 @@ const crow = {
     if(!(e.devices||[]).length){ const n=document.createElement("div");
       n.className="rfoot"; n.textContent="none yet"; list.appendChild(n); }
     d.appendChild(sheet); d.hidden=false;
+    this.remotePlaceAsk(ask);
     const b=sheet.querySelector(".rttl b");
     const tick=()=>{ if(!b.isConnected){ clearInterval(this.remoteTick); return; }
       const left=Math.max(0, Math.round((this.remoteUntil-Date.now())/1000));
@@ -7559,7 +7590,7 @@ const crow = {
       const left=Math.max(0, Math.round((until-Date.now())/1000));
       hint.textContent="expires in "+Math.floor(left/60)+":"+String(left%60).padStart(2,"0"); };
     const t=setInterval(tick, 1000); tick();
-    $("#composer").insertBefore(p, $("#box")); },
+    this.remotePlaceAsk(p); },
   remoteAsked(e){
     const p=document.querySelector('#pairbar[data-rid="'+String(e.id)+'"]');
     if(p) p.remove();
@@ -15290,7 +15321,8 @@ class Api:
         remote = factory(host=host, port=port, page=self.remote_page,
                          call=self._remote_call, allowed=REMOTE_ALLOWED,
                          snapshot=self.state_snapshot,
-                         confirm=self._remote_confirm, store=store,
+                         confirm=self._remote_confirm,
+                         confirm_ttl=crow_core.REMOTE_CONFIRM_S, store=store,
                          upload_dir=os.path.join(PASTE_DIR, "remote"),
                          log=lambda line: crow_core.log_note(line, "remote"))
         try:
@@ -15399,10 +15431,11 @@ class Api:
         pending[0].set()
         return True
 
-    def _remote_confirm(self, name: str) -> bool:
-        """Called by the server's /pair on its own thread: put the card on the
-        desktop and WAIT, like `_ask_page`. No answer within the time is a
-        deny -- a photographed QR must not pair because nobody was there."""
+    def _remote_confirm(self, name: str) -> "bool | None":
+        """Called by the server on a thread of its own after /pair: put the
+        card on the desktop and WAIT, like `_ask_page`. True allow, False
+        deny, None nobody answered in time -- which pairs nothing either: a
+        photographed QR must not pair because nobody was there."""
         self._remote_ask_n += 1
         ident = self._remote_ask_n
         pending = [threading.Event(), False]
@@ -15419,7 +15452,7 @@ class Api:
                       (DESKTOP,))
         if allowed:
             self._remote_dialog(fresh=False)
-        return allowed
+        return allowed if answered else None
 
     def _remote_devices(self) -> list:
         """The paired devices -- live from the server, else from the store."""

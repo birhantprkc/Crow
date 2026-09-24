@@ -13332,6 +13332,67 @@ class RemoteApiParityTests(RemoteCase):
                                         ["/api/reveal_path", '["/x"]']])
         self.assertEqual(out["notes"], [crow_core.REMOTE_PHONE_TEXT["ondesk"]])
 
+    def _pairing_run(self, waits):
+        """The phone's pairing, run in node: /pair answers 202, /pair/wait
+        answers from `waits` in order ("net" is a rejected fetch). What the
+        pairing line showed, and whether the page went on to the chat."""
+        import subprocess
+        page = crow_gui.stamped_page(remote=True)
+        start = page.index("window.CROW_REMOTE = true;")
+        boot = page[start:page.index("</script>", start)]
+        js = ("const shown=[], posts=[]; let ready=0;\n"
+              "const WAITS=" + json.dumps(waits) + ";\n"
+              "const setTimeout=f=>setImmediate(f);\n"
+              "const bar={set hidden(v){}, set textContent(v){ if(v) shown.push(v); }};\n"
+              "const window={open(){}, close(){}, addEventListener(){},\n"
+              "  dispatchEvent(){ ready++; }, prompt(){return null;}};\n"
+              "window.crow={note(){}, on(){}};\n"
+              "function EventSource(){ this.close=()=>0; }\n"
+              "const document={hidden:false, addEventListener(){},\n"
+              "  getElementById(id){return id==='remotepair' ? bar : null;},\n"
+              "  documentElement:{classList:{add(){}}}};\n"
+              "const location={hash:'#t=abc', pathname:'/', search:''};\n"
+              "const history={replaceState(){}};\n"
+              "const res=(status, body)=>({ok:status>=200&&status<300, status,\n"
+              "  json(){return Promise.resolve(body);}});\n"
+              "function fetch(path, init){ posts.push([path, init.body]);\n"
+              "  if(path==='/pair') return Promise.resolve(res(202, {p:'P1'}));\n"
+              "  const w=WAITS.shift();\n"
+              "  if(w===undefined || w==='net') return Promise.reject(new TypeError('Load failed'));\n"
+              "  return Promise.resolve(res(w, {})); }\n"
+              "const crow=window.crow;\n"
+              + boot +
+              "\nwindow.crowRemoteStart();\n"
+              "let spins=0;\n"
+              "setTimeout(function end(){ if(WAITS.length && ++spins<500) return setTimeout(end);\n"
+              "  setImmediate(()=>setImmediate(()=>\n"
+              "  console.log(JSON.stringify({shown, posts, ready})))); });\n")
+        done = subprocess.run([_node(), "-e", js], capture_output=True, text=True,
+                              encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    def test_the_phone_polls_the_pairing_and_rides_out_network_blips(self):
+        """#249, iPhone 2026-09-24: WebKit gave a held-open /pair up as a
+        network error after ~6 s. Now /pair answers 202 and the page polls
+        /pair/wait; a failed fetch or two is retried, not "unreachable"."""
+        if not _node():
+            self.skipTest("no node on this machine")
+        text = crow_core.REMOTE_PHONE_TEXT
+        out = self._pairing_run([202, "net", "net", 202, 200])
+        self.assertEqual(out["ready"], 1, out)
+        self.assertNotIn(text["unreachable"], out["shown"])
+        self.assertEqual(out["posts"][0], ["/pair", '{"t":"abc"}'])
+        self.assertEqual({p for p, _ in out["posts"][1:]}, {"/pair/wait"})
+        self.assertIn('{"p":"P1"}', [b for _, b in out["posts"][1:]])
+        # Five network failures in a row: now it is unreachable.
+        out = self._pairing_run(["net"] * 5)
+        self.assertEqual(out["ready"], 0)
+        self.assertEqual(out["shown"][-1], text["unreachable"])
+        # Deny and timeout keep their own lines.
+        self.assertEqual(self._pairing_run([202, 403])["shown"][-1], text["denied"])
+        self.assertEqual(self._pairing_run([410])["shown"][-1], text["expired"])
+
     def test_the_phone_page_is_this_page_with_the_flag(self):
         phone = crow_gui.stamped_page(remote=True)
         desk = crow_gui.stamped_page()
@@ -13743,6 +13804,101 @@ class RemoteSlashTests(RemoteCase):
         api.remote_allow(next(iter(api._remote_asks)), True)
         thread.join(5)
         self.assertEqual(allowed, [True])
+
+    def test_the_allow_request_shows_inside_the_open_remote_dialog(self):
+        """#249, iPhone 2026-09-24: the Remote dialog (z-index 80, modal)
+        covered the Allow/Deny bar above the input. Run in node with a small
+        DOM: while the dialog is open the request sits at the top of its
+        body and survives a refresh; closed, it is above the input; Allow
+        calls `remote_allow`; `remoteasked` clears it wherever it is."""
+        node = _node()
+        if not node:
+            self.skipTest("no node on this machine")
+        import subprocess
+        src = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        start = src.index("  remoteClose(){")
+        end = src.index("  // #249. DIE ANDERE SEITE HAT GEANTWORTET")
+        js = r"""
+const ALL=[];
+class El{
+  constructor(tag){ this.tag=tag; this.children=[]; this.parent=null; this.id="";
+    this.hidden=false; this.dataset={}; this.q={}; this.onclick=null;
+    const cl=new Set(); this.cls=cl;
+    this.classList={add:c=>cl.add(c), remove:c=>cl.delete(c), toggle(){},
+                    contains:c=>cl.has(c)};
+    ALL.push(this); }
+  set innerHTML(v){ this.q={}; } set textContent(v){
+    this.children.forEach(c=>c.parent=null); this.children=[]; this.q={}; }
+  set className(v){ v.split(" ").forEach(c=>this.cls.add(c)); }
+  querySelector(sel){ if(!this.q[sel]){ const e=new El(sel); e.parent=this;
+      e.children=[]; this.q[sel]=e; } return this.q[sel]; }
+  get firstChild(){ return this.children[0]||null; }
+  remove(){ if(this.parent){ const i=this.parent.children.indexOf(this);
+      if(i>=0) this.parent.children.splice(i,1); } this.parent=null; }
+  insertBefore(n, ref){ n.remove(); const i=ref?this.children.indexOf(ref):-1;
+    if(i<0) this.children.push(n); else this.children.splice(i,0,n); n.parent=this; }
+  appendChild(n){ this.insertBefore(n, null); }
+  get isConnected(){ let e=this; while(e.parent) e=e.parent; return e===ROOT; }
+}
+const ROOT=new El("root");
+const mk=id=>{ const e=new El("div"); e.id=id; ROOT.appendChild(e); return e; };
+const composer=mk("composer"), dlg=mk("remotedlg"); dlg.hidden=true;
+const box=new El("div"); box.id="box"; composer.appendChild(box);
+const document={createElement:t=>new El(t), querySelector(sel){
+  const m=/^#([\w-]+)(?:\[data-rid="([^"]*)"\])?$/.exec(sel);
+  return ALL.find(e=>e.isConnected && e.id===m[1]
+                     && (m[2]===undefined || e.dataset.rid===m[2])) || null; }};
+const $=s=>document.querySelector(s);
+const setInterval=()=>0, clearInterval=()=>0;
+const allowed=[];
+const pywebview={api:{remote_allow:(id,yes)=>{ allowed.push([id,yes]); return Promise.resolve(true); }}};
+const crow={mode:"manual", note(){},
+""" + src[start:end] + r"""};
+const where=()=>{ const p=$("#pairbar"); if(!p) return "none";
+  if(p.parent===composer) return "composer";
+  if(p.parent && p.parent.tag===".rbody" && p.parent.firstChild===p
+     && p.isConnected && p.cls.has("indlg")) return "dialog";
+  return "elsewhere"; };
+const out=[];
+const DLG={k:"remotedlg", open:true, fresh:true, url:"http://x/", svg:"", ips:[], devices:[]};
+crow.remoteDialog(DLG);
+crow.remoteAsk({k:"remoteask", id:1, name:"iPhone (Chrome)", t:"iPhone (Chrome) wants to connect", ttl:60});
+out.push(where());
+crow.remoteDialog(Object.assign({}, DLG, {fresh:false}));   // a device came or went
+out.push(where());
+$("#pairbar").querySelector(".yes").onclick();
+out.push(JSON.stringify(allowed));
+crow.remoteClose();
+out.push(where());
+crow.remoteDialog(DLG);
+out.push(where());
+crow.remoteAsked({k:"remoteasked", id:1, t:""});
+out.push(where());
+crow.remoteClose();
+crow.remoteAsk({k:"remoteask", id:2, name:"iPhone", t:"iPhone wants to connect", ttl:60});
+out.push(where());
+crow.remoteAsked({k:"remoteasked", id:2, t:""});
+out.push(where());
+console.log(JSON.stringify(out));
+"""
+        done = subprocess.run([node, "-e", js], capture_output=True, text=True,
+                              encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout),
+                         ["dialog", "dialog", "[[1,true]]", "composer", "dialog",
+                          "none", "composer", "none"])
+        self.assertIn("#pairbar.indlg{", crow_gui.PAGE)
+
+    def test_no_answer_is_none_and_the_server_is_told_the_timeout(self):
+        """None, not False: the server answers the phone 410 (expired) for a
+        question nobody answered, 403 only for a real Deny."""
+        api = self.started()
+        api.slash_answer("/remote on")
+        self.assertEqual(api._remote.kw["confirm_ttl"], crow_core.REMOTE_CONFIRM_S)
+        before = crow_core.REMOTE_CONFIRM_S
+        self.addCleanup(setattr, crow_core, "REMOTE_CONFIRM_S", before)
+        crow_core.REMOTE_CONFIRM_S = 0.05
+        self.assertIsNone(api._remote_confirm("iPhone (Safari)"))
 
     def test_the_firewall_line_opens_the_lan_only(self):
         line = crow_core.remote_firewall_line(8765, "192.168.1.5", "ufw")

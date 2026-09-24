@@ -16,6 +16,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -57,6 +58,7 @@ class Harness:
         self.logs = []
         self.confirmed = []
         self.allow = True
+        self.gate = None                   # an Event: confirm waits for it, like a person
         self.upload_dir = tempfile.mkdtemp(prefix="crow-remote-test-")
         test.addCleanup(shutil.rmtree, self.upload_dir, True)
         self.store = crow_remote.DeviceStore(lambda: list(self.saved["records"]),
@@ -82,6 +84,8 @@ class Harness:
 
     def confirm(self, name):
         self.confirmed.append(name)
+        if self.gate is not None:
+            self.gate.wait(10)
         return self.allow
 
     def conn(self, timeout=5):
@@ -107,8 +111,23 @@ class Harness:
     def token(self):
         return self.remote.new_pairing().split("#t=", 1)[1]
 
+    def begin(self, token=None):
+        """POST /pair: 202 and the pending id, answered at once."""
+        r, data = self.request("POST", "/pair", {"t": token or self.token()})
+        self.test.assertEqual(r.status, 202, data)
+        self.test.assertIsNone(r.getheader("Set-Cookie"))
+        return json.loads(data)["p"]
+
+    def wait(self, pid, polls=20):
+        """POST /pair/wait until it stops saying 202; the last (response, body)."""
+        for _ in range(polls):
+            r, data = self.request("POST", "/pair/wait", {"p": pid})
+            if r.status != 202:
+                return r, data
+        return r, data
+
     def pair(self):
-        r, data = self.request("POST", "/pair", {"t": self.token()})
+        r, data = self.wait(self.begin())
         self.test.assertEqual(r.status, 200, data)
         cookie = r.getheader("Set-Cookie")
         self.test.assertIn("HttpOnly", cookie)
@@ -197,14 +216,14 @@ class RemoteServerTests(unittest.TestCase):
 
     def test_denied_on_the_desktop_pairs_nothing(self):
         self.h.allow = False
-        r, _ = self.h.request("POST", "/pair", {"t": self.h.token()})
+        r, _ = self.h.wait(self.h.begin())
         self.assertEqual(r.status, 403)
         self.assertIsNone(r.getheader("Set-Cookie"))
         self.assertEqual(self.h.remote.devices(), [])
 
     def test_token_used_twice_is_401(self):
         token = self.h.token()
-        self.assertEqual(self.h.request("POST", "/pair", {"t": token})[0].status, 200)
+        self.assertEqual(self.h.request("POST", "/pair", {"t": token})[0].status, 202)
         self.assertEqual(self.h.request("POST", "/pair", {"t": token})[0].status, 401)
 
     def test_expired_token_is_401(self):
@@ -221,7 +240,80 @@ class RemoteServerTests(unittest.TestCase):
         self.h.clock.now += 599
         self.assertEqual(self.h.request("POST", "/pair", {"t": self.h.token()})[0].status, 429)
         self.h.clock.now += 2
-        self.assertEqual(self.h.request("POST", "/pair", {"t": self.h.token()})[0].status, 200)
+        self.assertEqual(self.h.request("POST", "/pair", {"t": self.h.token()})[0].status, 202)
+
+    def test_pair_answers_at_once_and_the_poll_collects_the_allow(self):
+        """#249, iPhone 2026-09-24: /pair is never held while a person decides.
+        202 with a pending id at once, /pair/wait 202 while the desktop is
+        asked, then 200 and the cookie after Allow."""
+        self.h.gate = threading.Event()
+        started = time.monotonic()
+        pid = self.h.begin()
+        self.assertLess(time.monotonic() - started, 0.8, "/pair was held open")
+        started = time.monotonic()
+        r, data = self.h.request("POST", "/pair/wait", {"p": pid})
+        took = time.monotonic() - started
+        self.assertEqual(r.status, 202, data)
+        self.assertIsNone(r.getheader("Set-Cookie"))
+        self.assertLess(took, crow_remote.PAIR_POLL + 0.8, "the poll held too long")
+        self.assertEqual(self.h.remote.devices(), [])
+        self.h.gate.set()
+        r, data = self.h.wait(pid)
+        self.assertEqual(r.status, 200, data)
+        self.assertIn("HttpOnly", r.getheader("Set-Cookie"))
+        self.assertEqual(json.loads(data)["name"], "iPhone (Safari)")
+        self.assertEqual([d["name"] for d in self.h.remote.devices()], ["iPhone (Safari)"])
+
+    def test_a_pending_id_is_single_use(self):
+        pid = self.h.begin()
+        self.assertEqual(self.h.wait(pid)[0].status, 200)
+        r, _ = self.h.request("POST", "/pair/wait", {"p": pid})
+        self.assertEqual(r.status, 410)
+        self.assertIsNone(r.getheader("Set-Cookie"))
+        self.assertEqual(len(self.h.remote.devices()), 1)
+
+    def test_a_denied_id_is_spent_too(self):
+        self.h.allow = False
+        pid = self.h.begin()
+        self.assertEqual(self.h.wait(pid)[0].status, 403)
+        self.assertEqual(self.h.request("POST", "/pair/wait", {"p": pid})[0].status, 410)
+
+    def test_no_answer_from_the_desktop_is_410(self):
+        """confirm returns None when nobody answered in time."""
+        self.h.allow = None
+        r, _ = self.h.wait(self.h.begin())
+        self.assertEqual(r.status, 410)
+        self.assertEqual(self.h.remote.devices(), [])
+
+    def test_a_pending_pairing_expires_with_the_confirm_timeout(self):
+        self.h.gate = threading.Event()
+        self.addCleanup(self.h.gate.set)
+        pid = self.h.begin()
+        self.assertEqual(self.h.request("POST", "/pair/wait", {"p": pid})[0].status, 202)
+        self.h.clock.now += 60 + crow_remote.PAIR_CLAIM + 1
+        self.assertEqual(self.h.request("POST", "/pair/wait", {"p": pid})[0].status, 410)
+        self.h.gate.set()                  # a late Allow finds nothing to let in
+        time.sleep(0.1)
+        self.assertEqual(self.h.request("POST", "/pair/wait", {"p": pid})[0].status, 410)
+        self.assertEqual(self.h.remote.devices(), [])
+
+    def test_unknown_pending_ids_are_410_and_never_lock_pairing(self):
+        """NEGATIVE: the lockout counts bad pairing codes, not polls."""
+        for bad in ("nope", "", None, 7):
+            r, _ = self.h.request("POST", "/pair/wait", {"p": bad})
+            self.assertEqual(r.status, 410)
+        for _ in range(crow_remote.PAIR_MAX_FAILS):
+            self.h.request("POST", "/pair/wait", {"p": "guess"})
+        self.assertEqual(self.h.request("POST", "/pair", {"t": self.h.token()})[0].status, 202)
+        self.assertFalse(any("locked" in s for s in self.h.logs))
+
+    def test_pair_wait_keeps_the_host_and_origin_guards(self):
+        pid = self.h.begin()
+        r, _ = self.h.request("POST", "/pair/wait", {"p": pid}, origin=False)
+        self.assertEqual(r.status, 403)
+        r, _ = self.h.request("POST", "/pair/wait", {"p": pid},
+                              headers={"Host": "evil.example:80"})
+        self.assertEqual(r.status, 421)
 
     def test_name_outside_allowed_is_404(self):
         _, cookie = self.h.pair()

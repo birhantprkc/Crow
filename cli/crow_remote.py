@@ -64,6 +64,15 @@ COOKIE_MAX_AGE = 400 * 24 * 3600
 PAIR_TTL = 120.0             # the QR token's life, decision 7
 PAIR_MAX_FAILS = 5           # failed pairings before the lock
 PAIR_LOCK = 600.0            # ... and how long the lock holds
+# NO PAIRING REQUEST IS EVER HELD OPEN WHILE A PERSON DECIDES. /pair answers
+# 202 with a pending id at once and /pair/wait is a short poll: it holds at
+# most PAIR_POLL seconds. Measured 2026-09-24 on an iPhone (Chrome for iOS,
+# WebKit): a /pair held open for the desktop's Allow was given up by the phone
+# after about 6 s as a network error, while the desktop still showed the bar.
+PAIR_POLL = 1.0
+# A pending pairing lives as long as the desktop's question plus this much
+# room for the phone's next poll to collect the answer.
+PAIR_CLAIM = 15.0
 
 RING = 5000                  # events kept per device for a resume
 HEARTBEAT = 15.0             # an SSE comment this often keeps NATs and proxies awake
@@ -253,6 +262,7 @@ class Remote:
                  snapshot: Callable[[str], list],
                  confirm: Callable[[str], bool],
                  store: DeviceStore, upload_dir: str,
+                 confirm_ttl: float = 60.0,
                  clock: Callable[[], float] = time.monotonic,
                  log: Callable[[str], None] = lambda s: None):
         self.host = host
@@ -262,6 +272,9 @@ class Remote:
         self._allowed = frozenset(allowed)
         self._snapshot = snapshot
         self._confirm = confirm
+        self._confirm_ttl = float(confirm_ttl)
+        # pending id -> {"name", "state": wait|allow|deny|timeout, "until"}
+        self._pending: dict[str, dict] = {}
         self._store = store
         self._upload_dir = upload_dir
         self._clock = clock
@@ -359,6 +372,62 @@ class Remote:
                 self._log("remote: pairing locked for %d min after %d failed attempts"
                           % (PAIR_LOCK // 60, PAIR_MAX_FAILS))
             return 401
+
+    def _pair_begin(self, name: str) -> str:
+        """Register a pending pairing for a spent token and ask the desktop on
+        a thread of its own. The pending id is what /pair/wait polls with."""
+        pid = secrets.token_urlsafe(16)
+        with self._cond:
+            self._pending_purge()
+            self._pending[pid] = {"name": name, "state": "wait",
+                                  "until": self._clock() + self._confirm_ttl + PAIR_CLAIM}
+        threading.Thread(target=self._pair_decide, args=(pid, name),
+                         name="crow-remote-confirm", daemon=True).start()
+        return pid
+
+    def _pair_decide(self, pid: str, name: str) -> None:
+        """`confirm` returns True (allow), False (deny) or None (nobody
+        answered in time). A broken dialog is a deny."""
+        try:
+            said = self._confirm(name)
+        except Exception:                  # noqa: BLE001 - a broken dialog is a Deny
+            said = False
+        state = "timeout" if said is None else ("allow" if said else "deny")
+        with self._cond:
+            entry = self._pending.get(pid)
+            if entry is not None and entry["state"] == "wait":
+                entry["state"] = state
+            self._cond.notify_all()
+
+    def _pending_purge(self) -> None:
+        now = self._clock()
+        for pid in [p for p, e in self._pending.items() if now > e["until"]]:
+            del self._pending[pid]
+
+    def _pair_wait(self, pid) -> "tuple[int, dict | None, str]":
+        """202 while the desktop decides, 200 with the new device and its
+        cookie once allowed, 403 denied, 410 timed out or unknown. Holds at
+        most PAIR_POLL seconds; a resolved id is spent on its first answer."""
+        end = time.monotonic() + PAIR_POLL
+        with self._cond:
+            while True:
+                self._pending_purge()
+                entry = self._pending.get(pid) if isinstance(pid, str) else None
+                if entry is None:
+                    return 410, None, ""
+                left = end - time.monotonic()
+                if entry["state"] != "wait" or left <= 0:
+                    break
+                self._cond.wait(left)
+            if entry["state"] == "wait":
+                return 202, None, ""
+            del self._pending[pid]
+            if entry["state"] == "deny":
+                return 403, None, ""
+            if entry["state"] != "allow":
+                return 410, None, ""
+            record, cookie = self._add_device(entry["name"])
+            return 200, record, cookie
 
     def _add_device(self, name: str) -> tuple[dict, str]:
         cookie = secrets.token_urlsafe(16)           # 128 bits
@@ -655,6 +724,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self.plain(403, "foreign origin")
         if path == "/pair":
             return self._pair()
+        if path == "/pair/wait":
+            return self._pair_wait()
         dev = self._device()
         if dev is None:
             return self.plain(401, "not paired")
@@ -677,14 +748,24 @@ class _Handler(BaseHTTPRequestHandler):
             return self.plain(429, "pairing locked")
         if code != 200:
             return self.plain(401, "bad or expired pairing code")
-        name = device_name(self.headers.get("User-Agent", ""))
+        pid = self.owner._pair_begin(device_name(self.headers.get("User-Agent", "")))
+        self.json(202, {"p": pid})
+
+    def _pair_wait(self):
+        raw = self._read_body(MAX_BODY)
+        if raw is None:
+            return
         try:
-            allowed = bool(self.owner._confirm(name))
-        except Exception:                  # noqa: BLE001 - a broken dialog is a Deny
-            allowed = False
-        if not allowed:
+            pid = json.loads(raw or b"{}").get("p")
+        except (ValueError, AttributeError):
+            pid = None
+        code, record, cookie = self.owner._pair_wait(pid)
+        if code == 202:
+            return self.json(202, {"p": pid})
+        if code == 403:
             return self.plain(403, "denied on the desktop")
-        record, cookie = self.owner._add_device(name)
+        if code != 200:
+            return self.plain(410, "no such pairing, or it timed out")
         self.json(200, {"id": record["id"], "name": record["name"]},
                   (("Set-Cookie", _cookie_header(cookie)),))
 
