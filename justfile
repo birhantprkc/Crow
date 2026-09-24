@@ -19,7 +19,7 @@ check: lint test
     {{py}} tools/check_gui_prereqs.py
     bash install.sh --selftest
 
-# 2,627 cases (2026-09-24: 1,393 core, 452 terminal, 782 window) over the core, the terminal client and the window.
+# 2,633 cases (2026-09-24: 1,399 core, 452 terminal, 782 window) over the core, the terminal client and the window.
 test:
     cd cli && {{py}} -m unittest test_crow_core test_crow test_crow_gui
 

@@ -6988,6 +6988,68 @@ class SessionSearchTests(unittest.TestCase):
         self.assertNotIn("fts5", json.dumps(crow_core.TOOLS))
 
 
+class TheMachineIsAFactAndMemoryMayNotContradictItTests(_MemoryFixture):
+    """#270. 2026-09-24 09:53 the diorama run wrote "Machine has NO GPU:
+    Chromium is software GL" into its project memory, and its answers said
+    "no GPU" three times more -- while nvidia-smi names an RTX 5090. Nothing in
+    the context said what the machine is."""
+
+    CARD = ("NVIDIA GeForce RTX 5090", 32607)
+
+    def setUp(self) -> None:
+        super().setUp()
+        real = getattr(crow_platform, "gpu_card", None)
+        crow_platform.gpu_card = lambda query=None: self.CARD
+        if real is None:
+            self.addCleanup(delattr, crow_platform, "gpu_card")
+        else:
+            self.addCleanup(setattr, crow_platform, "gpu_card", real)
+        cache = getattr(crow_platform, "_MACHINE", [])
+        self.addCleanup(cache.clear)
+        cache.clear()
+
+    def test_the_head_names_the_machine_and_the_rule(self):
+        head = crow_core.prompt_head(self.root)
+        self.assertIn("Machine: ", head)
+        self.assertIn("GPU NVIDIA GeForce RTX 5090 (32,607 MiB VRAM)", head)
+        self.assertIn("A tool's own limits are not the machine's", head)
+        # facts first: the working area, then the machine, then memory
+        self.assertLess(head.index("Working area:"), head.index("Machine:"))
+
+    def test_the_machine_line_is_static_for_the_prefix(self):
+        first = crow_core.machine_line()
+        crow_platform.gpu_card = lambda query=None: ("other", 1)
+        self.assertEqual(crow_core.machine_line(), first, "probed once per process")
+
+    def test_the_live_entry_is_refused_with_the_fact(self):
+        out = self.call("add", content="Machine has NO GPU: Chromium is software GL, "
+                                       "so a full-res frame is too slow")
+        self.assertFalse(out["success"])
+        self.assertIn("not stored", out["error"])
+        self.assertIn("RTX 5090", out["error"])
+        self.assertEqual(crow_core.read_store(crow_core.memory_path()), [])
+
+    def test_a_precise_note_about_the_tool_passes(self):
+        out = self.call("add", content="render_page runs software GL (SwiftShader, no GPU) "
+                                       "while the model server holds the RTX 5090")
+        self.assertTrue(out["success"], out)
+
+    def test_a_tool_corruption_claim_is_refused_and_replace_is_checked_too(self):
+        out = self.call("add", content="the read channel is byte-unstable, re-read twice")
+        self.assertFalse(out["success"])
+        self.assertIn("byte-exact", out["error"])
+        self.assertTrue(self.call("add", content="esbuild lives in node_modules")["success"])
+        out = self.call("replace", old_text="esbuild", content="CPU-only box, keep it small")
+        self.assertFalse(out["success"])
+        self.assertIn("not stored", out["error"])
+
+    def test_render_page_says_why_it_rendered_in_software(self):
+        why = crow_platform.render_gl_reason(free_mib=73)
+        self.assertIn("NVIDIA GeForce RTX 5090 has 73 MiB VRAM free", why)
+        self.assertIn("below the 512 MiB", why)
+        self.assertIn("the machine HAS this GPU", why)
+
+
 class TheMemoryGateTests(_MemoryFixture):
     """#128: the review proposes, a person disposes, and nothing writes itself.
 

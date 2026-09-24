@@ -8545,6 +8545,36 @@ _MEMORY_THREATS = (
 )
 
 
+# #270. A NOTE THAT CONTRADICTS THE MACHINE IS REFUSED, with the fact.
+# Narrow on purpose, like the threats above: two claims that were written live
+# and steered a run wrong -- "the machine has no GPU" (2026-09-24 09:53, the
+# card is an RTX 5090) and "the tools corrupt bytes" (2026-09-23, every write
+# result carries its sha256 and is byte-exact, #252). A GPU claim that NAMES
+# the real card is a precise statement about a tool and passes.
+_NO_GPU = re.compile(r"\b(?:no|without(?:\s+a)?|lacks?(?:\s+a)?)\s+(?:dedicated\s+)?"
+                     r"(?:GPU|graphics\s+card|CUDA)\b|\bCPU[- ]only\b", re.I)
+_TOOL_CORRUPT = re.compile(
+    r"\bbyte[- ]unstable\b|\b(?:read|write)\s+channel\s+(?:is\s+)?(?:un)?(?:stable|reliable|corrupt)"
+    r"|\b(?:tools?|write_file|edit_file|append_file|read_file)\s+(?:silently\s+)?"
+    r"(?:corrupts?|mangles?|alters?|changes?)\s+(?:the\s+)?(?:bytes|digits|numbers|content|files?)", re.I)
+
+
+def memory_contradiction(text: str, card=None) -> "str | None":
+    """Why this entry contradicts a known fact, or None."""
+    if _NO_GPU.search(text):
+        card = crow_platform.gpu_card() if card is None else card
+        if card and card[0] and card[0].split()[-1].lower() not in text.lower():
+            return ("it says there is no GPU, but this machine has %s (%s MiB, "
+                    "nvidia-smi). If it is about a tool -- render_page rasterises "
+                    "in software while the model server holds the card -- say that, "
+                    "and name the card" % (card[0], "{:,}".format(card[1])))
+    if _TOOL_CORRUPT.search(text):
+        return ("it says a tool changes bytes, but every write result names the "
+                "file's sha256 and is byte-exact (#252): a wrong byte is in the "
+                "content that was written. Check with read_file before saving this")
+    return None
+
+
 def memory_threat(text: str) -> "str | None":
     """Why this entry may not be stored, or None when it may.
 
@@ -8642,7 +8672,7 @@ def prompt_head(root: "str | None" = None,
     #222: the working area opens the head (`working_area_line`).
     """
     here = get_root() if root is None else root
-    parts = [p for p in (working_area_line(here), memory_block(root),
+    parts = [p for p in (working_area_line(here), machine_line(), memory_block(root),
                          skill_block(),
                          goal_block(include_status=include_status)) if p]
     return "\n\n".join(parts)
@@ -8672,6 +8702,23 @@ def prompt_head(root: "str | None" = None,
 WORKING_AREA_LINE = ("Working area: {root}\n"
                      "Relative paths and a run_command without cwd resolve "
                      "here. Use this exact path; do not retype it from memory.")
+
+
+# #270. THE MACHINE, AS FACTS, right after the working area: facts
+# before actions (the head's order), static so the prefix holds. The rule
+# beside it is the lesson of 2026-09-23/24: render_page rasterised in software
+# while the model server held the card, and the model wrote "Machine has NO
+# GPU" into its memory. A tool's limit is the tool's.
+MACHINE_LINE = ("Machine: {facts}\n"
+                "A tool's own limits are not the machine's: render_page may rasterise "
+                "in software while the model server holds the GPU. Check a claim about "
+                "the hardware or a tool against this line or a command before you save "
+                "it to memory.")
+
+
+def machine_line() -> str:
+    """#270: the head's machine block; one probe per process."""
+    return MACHINE_LINE.format(facts=crow_platform.machine_facts())
 
 
 def working_area_line(root: "str | None") -> str:
@@ -8733,6 +8780,10 @@ def tool_memory(action: str, target: str = "memory",
         if why:
             return json.dumps({"success": False,
                                "error": "refused: %s" % why})
+        wrong = memory_contradiction(content)
+        if wrong:
+            return json.dumps({"success": False,
+                               "error": "not stored: %s" % wrong})
         if content in entries:
             # Success, not failure: the wanted state is already the state.
             return json.dumps({"success": True, "note": "no duplicate added",
@@ -8772,6 +8823,9 @@ def tool_memory(action: str, target: str = "memory",
         why = memory_threat(content)
         if why:
             return json.dumps({"success": False, "error": "refused: %s" % why})
+        wrong = memory_contradiction(content)
+        if wrong:
+            return json.dumps({"success": False, "error": "not stored: %s" % wrong})
         after = entries[:i] + [content] + entries[i + 1:]
         # REPLACE IS BOUND BY THE LIMIT TOO. Swapping a short entry for a long
         # one is an addition wearing another name, and letting it through here
@@ -10921,6 +10975,10 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         # WebGL-Seite sehen anders aus als GPU-gerasterte, und ein Modell, das
         # seinen Spiegel kennt, bezweifelt ihn auch.
         gl_said = ("gpu (angle)" if gl == "angle" else "software (swiftshader)")
+        if gl != "angle":
+            # #271: WHY software, so the tool's limit is not read as
+            # the machine's (49 of 49 captures on 2026-09-23 were software).
+            gl_said += ": " + crow_platform.render_gl_reason()
         said.append("%s -- %d bytes, %dx%d, %s, %s"
                     % (shot, os.path.getsize(shot), w, h, reason, gl_said))
         said.extend(metrics)

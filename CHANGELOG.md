@@ -21,6 +21,9 @@ Tickets open until robin's live check unless marked closed.
 - **crow.log** (#262, `7e715b9`). Crow's own status lines (goal brake, same-failure streak, degenerate round, cache, budget) go to `~/.local/state/crow/log/crow.log` with local time and offset, not into the chat.
 - **One syntax-check table for all file tools** (#269, `d4f462d`). `edit_file` parses what it left (node for JS/HTML) and says whether this edit broke the file or it was broken before; settings `syntax_checks` maps an extension to a command for `write_file`, `append_file` and `edit_file`. Replay of 2026-09-23: 0 of 66 JS/HTML edits broke a file — parity, not a measured failure.
 
+- **Machine facts in the prompt head, and memory may not contradict them** (#270). The head names OS, CPU, RAM, GPU and total VRAM (static, probed once per process) and says a tool's limit is not the machine's; `memory` refuses a no-GPU/CPU-only note that does not name the real card, and a "tool changes bytes" note. 2026-09-24: the diorama run had saved "Machine has NO GPU" (RTX 5090).
+- **render_page says why it rendered in software** (#271): the card's free VRAM against the 512 MiB bound, that the model server holds it, and that the machine has the GPU. 2026-09-23: 49 of 49 captures fell back.
+
 ### Changed
 
 - **A line typed during a turn is queued, not a stop** (#264, `d14046f`); in goal mode it goes before the goal nudge.

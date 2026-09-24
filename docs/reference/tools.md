@@ -28,7 +28,7 @@ own class.
 | driving (Windows) | the command-line `--screenshot` with `--virtual-time-budget=wait_ms`; the pipe there needs handle inheritance nobody has measured yet |
 | `wait_ms` | real time after load, 200–20,000. A larger value never rescues a page too heavy to draw |
 | caps | one ceiling for the whole call: 15 s load + `wait_ms` + 10 s for the frame. It does not grow with anything the page does |
-| rasterer | `gpu (angle)` when the card has ≥ 512 MiB free, else `software (swiftshader)`; named in every result |
+| rasterer | `gpu (angle)` when the card has ≥ 512 MiB free, else `software (swiftshader)`; named in every result. A software result says why (#271): the card's free VRAM against the 512 MiB, that the model server holds it, and that the machine has the GPU and the user's browser renders on it; or `CROW_RENDER_GL` forcing it, or no nvidia-smi reading |
 | memory | Linux: its own user scope, `MemoryMax=6G`, swap 0 (#213). A browser started through `run_command` instead runs under that tool's 8G scope (#218) |
 | kill | `proc.kill()` on its own handle, then its session. Never by name, never a process list (#158) |
 | pipes | stdout and stderr go to a file: `communicate()` hangs on Windows after a kill when a grandchild holds the write end. The two DevTools pipes are Crow's own ends, read with `select` and a deadline |

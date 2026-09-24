@@ -24,6 +24,7 @@ Two files. Plain text, `§` on its own line between entries, editable by hand.
 | No `read` action | the content is already in the prompt |
 | Exact duplicates | answered with success and one entry |
 | Injection and invisible Unicode | refused before the entry is written |
+| Contradicts the machine (#270) | refused with the fact: "no GPU" / "CPU-only" while nvidia-smi names a card (a note that names the card passes, e.g. "render_page runs software GL while the model server holds the RTX 5090"), and "a tool changes bytes" (every write is byte-exact, #252) |
 | No working directory bound | `memory` is refused with a reason; `user` still works |
 
 ## The head is pinned
@@ -32,6 +33,13 @@ The rendered block is written into the chat file on first open and replayed **ve
 on. `prefix_fingerprint` hashes the system prompt, llama-server reuses a prompt by common token
 prefix, and the KV cache lives on disk, so a head re-read at every start would go stale against
 every saved cache. Binding a different folder re-pins and says what the prefill costs first.
+
+## The machine line (#270)
+
+The head opens with the working area, then one line of static machine facts — OS, CPU, RAM, GPU name and total
+VRAM, probed once per process (`crow_platform.machine_facts`) — and the rule that a tool's limit is not the
+machine's. Never free memory or anything that moves: it is byte 0 of the prefix. Existing chats keep their pinned
+head; a new chat, a folder change or a rollover pins the new one.
 
 ## Who writes it
 

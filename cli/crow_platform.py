@@ -1017,6 +1017,139 @@ def gpu_free_mib(query=None) -> "int | None":
         return None
 
 
+# #270. WHAT THE MACHINE IS, as static facts for the prompt head.
+# Measured 2026-09-23/24: with the model server holding the card (73 MiB free of
+# 32,607), render_page rasterised 49 of 49 captures in software, and the model
+# concluded twice -- in its memory ("Machine has NO GPU", 09:53) and in its
+# answers -- that the MACHINE had no GPU. Nothing in its context said otherwise.
+# STATIC ONLY: names and totals, never free memory, because the head is byte 0
+# of the prefix and a number that moves would cost a full prefill per turn.
+_MACHINE: "list[str]" = []
+
+
+def gpu_card(query=None) -> "tuple[str, int] | None":
+    """(name, total MiB) of the first NVIDIA card, or None without an answer."""
+    if query is None:
+        exe = shutil.which("nvidia-smi")
+        if not exe:
+            return None
+
+        def query():
+            try:
+                done = subprocess.run(
+                    [exe, "--query-gpu=name,memory.total",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                    timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                return ""
+            return done.stdout if done.returncode == 0 else ""
+
+    try:
+        first = (query() or "").strip().splitlines()[0]
+        name, total = [p.strip() for p in first.rsplit(",", 1)]
+        return (name, int(round(float(total)))) if name else None
+    except (IndexError, ValueError):
+        return None
+
+
+def _os_name() -> str:
+    if IS_WINDOWS:
+        import platform
+        return "Windows %s" % platform.release()
+    try:
+        with open("/etc/os-release", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("PRETTY_NAME="):
+                    return "Linux (%s)" % line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return sys.platform
+
+
+def _cpu_name() -> "str | None":
+    if IS_WINDOWS:
+        import platform
+        return platform.processor() or None
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+def _ram_gib() -> "int | None":
+    if IS_WINDOWS:
+        import ctypes
+
+        class _Mem(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        mem = _Mem()
+        mem.dwLength = ctypes.sizeof(_Mem)
+        try:
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(mem)):
+                return int(round(mem.ullTotalPhys / 2 ** 30))
+        except (AttributeError, OSError):
+            return None
+        return None
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return int(round(int(line.split()[1]) / 2 ** 20))
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def machine_facts(card=None) -> str:
+    """One line: OS, CPU, RAM, GPU. Probed once per process, then fixed.
+
+    `card` is the suite's seam (a (name, MiB) tuple, or False for none).
+    """
+    if card is None and _MACHINE:
+        return _MACHINE[0]
+    if card is None:
+        card = gpu_card()
+    parts = [_os_name()]
+    cpu = _cpu_name()
+    if cpu:
+        parts.append(cpu)
+    ram = _ram_gib()
+    if ram:
+        parts.append("%d GiB RAM" % ram)
+    parts.append("GPU %s (%s MiB VRAM)" % (card[0], "{:,}".format(card[1]))
+                 if card else "no NVIDIA GPU found by nvidia-smi")
+    line = ", ".join(parts)
+    if not _MACHINE:
+        _MACHINE.append(line)
+    return line
+
+
+def render_gl_reason(free_mib: "int | None" = None) -> str:
+    """#271: why render_gl_mode chose software, in one clause."""
+    forced = (os.environ.get("CROW_RENDER_GL") or "").strip().lower()
+    if forced in ("swiftshader", "software", "cpu"):
+        return "CROW_RENDER_GL=%s forces software" % forced
+    if free_mib is None:
+        free_mib = gpu_free_mib()
+    if free_mib is None:
+        return "nvidia-smi gave no free-VRAM reading"
+    card = gpu_card()
+    name = card[0] if card else "the GPU"
+    return ("%s has %s MiB VRAM free, below the %d MiB a GPU render needs -- the "
+            "model server holds it; the machine HAS this GPU and the user's browser "
+            "renders on it, so this capture says nothing about GPU speed"
+            % (name, "{:,}".format(free_mib), _GPU_HEADROOM_MIB))
+
+
 def render_gl_mode(free_mib: "int | None" = None) -> str:
     """"angle" when the card has headroom, else "swiftshader" (#213).
 
