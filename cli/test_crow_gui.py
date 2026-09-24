@@ -992,9 +992,11 @@ class TheSecondRolloverFiresTests(ApiCase):
         self.assertEqual(rolls, [(190000, "weiter im Text")])
         self.assertIs(seen.get("rolled"), True)
         self.assertEqual(seen.get("context_tokens"), 0)
-        notes = [m["t"] for m in self.drained(api) if m.get("k") == "note"]
-        self.assertTrue(any("rolled over at 190000" in t for t in notes),
-                        "der Roll blieb unsichtbar: %r" % notes)
+        # the roll card shows it; the "rolled over at" line is log-only (robin
+        # 2026-09-24)
+        rolls_drawn = [m for m in self.drained(api) if m.get("k") == "roll"]
+        self.assertTrue(any(m.get("tokens") == 190000 for m in rolls_drawn),
+                        "der Roll blieb unsichtbar: %r" % rolls_drawn)
 
     def test_a_session_under_the_threshold_does_not_roll_before_the_turn(self):
         """NEGATIV: unter der Schwelle kein Vor-Turn-Roll -- die Zeile wird
@@ -9994,9 +9996,10 @@ class TheTurnBillsRideWithTheChatTests(ApiCase):
         self.assertEqual([n["t"] for n in handed["notes"]], ["vor dem Schnitt"])
         self.assertEqual([t["decoded"] for t in handed["timings"]], [111])
         self.assertEqual(api._timings, [], "die Bilanzen des alten Kontexts blieben stehen")
-        self.assertEqual([n.get("t") for n in api._notes],
-                         ["rolled over at 190000 tokens -> rollover-fake.json"],
-                         "nach dem Schnitt steht die Rollover-Notiz als erste Marke")
+        # robin 2026-09-24: the "rolled over at" line is log-only, so the
+        # band of the new context starts empty
+        self.assertEqual([n.get("t") for n in api._notes], [],
+                         "nach dem Schnitt steht nichts vom alten Band")
 
 
 class MarksStayWhereTheyHappenedTests(ApiCase):
@@ -10012,7 +10015,7 @@ class MarksStayWhereTheyHappenedTests(ApiCase):
         """Zwei Zuege mit einer Marke dazwischen, wie sie live entsteht."""
         api._conversation.append("user", "first")
         api._conversation.append("assistant", "answer one")
-        api.push({"k": "note", "t": "rolled over at 181501 tokens"})
+        api.push({"k": "note", "t": "goal mode paused: step 1 has taken 25 turns"})
         api._conversation.append("user", "second")
         api._conversation.append("assistant", "answer two")
 
@@ -10029,9 +10032,9 @@ class MarksStayWhereTheyHappenedTests(ApiCase):
         api._conversation.append("user", "first")
         api._conversation.append("assistant", "answer one")
         standing = len(api._conversation)
-        api.push({"k": "note", "t": "rolled over at 181501 tokens"})
+        api.push({"k": "note", "t": "goal mode paused: step 1 has taken 25 turns"})
         self.assertEqual(api._notes,
-                         [{"k": "note", "t": "rolled over at 181501 tokens",
+                         [{"k": "note", "t": "goal mode paused: step 1 has taken 25 turns",
                            "at": standing}])
         self.assertEqual(standing, len(api._conversation.payload()))
 
@@ -10369,9 +10372,14 @@ class CrowStatusNotesGoToTheLogTests(ApiCase):
         "again with a new seed",
         "kept the re-asked reply although it looks unfinished (stub again)",
         "the restored cache did not hold -- that prefill was the whole history",
+        # robin 2026-09-24 (diorama run): the rollover line and #98's
+        # explanation line go to the log; the roll card stays
+        "rolled over at 181255 tokens -> rollover-20260924-192638.json",
+        "write_file and edit_file stay inside the root; an outside path named "
+        "in run_command asks first (#144) -- this one was released, or not "
+        "named plainly",
     )
     KEPT = (
-        "rolled over at 179,000 tokens -> rollover-20260923-195925.json",
         "goal mode stopped: the model repeated an empty answer 3 times at "
         "127,690 tokens; 6 of 9 steps done",
         "goal mode stopped after 60 turns -- 2 of 5 steps done. `/goal` shows "
@@ -10407,6 +10415,18 @@ class CrowStatusNotesGoToTheLogTests(ApiCase):
         self.assertEqual(api._notes, [])
         for text in self.LOG_ONLY:
             self.assertIn(" ".join(text.split()), self.logged())
+
+    def test_the_boundary_alarm_goes_to_the_log(self):
+        """robin 2026-09-24: '! the working area was refused for <path>, and
+        run_command ran anyway' is kind `alarm`; it leaves the chat too."""
+        api = self.api()
+        crow_gui.Turn(api.push).boundary_escaped("run_command",
+                                                 ["/tmp/placeholder-ignore.js"])
+        self.assertEqual(self.drained(api), [])
+        self.assertEqual(api._notes, [])
+        self.assertIn("! the working area was refused for "
+                      "/tmp/placeholder-ignore.js, and run_command ran anyway",
+                      self.logged())
 
     def test_everything_else_still_reaches_the_page_and_the_band(self):
         """NEGATIVE: nothing else disappears."""

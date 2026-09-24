@@ -21143,12 +21143,15 @@ class CrowLogFileTests(unittest.TestCase):
                      "discarded a degenerate reply (markup, 40 chars)",
                      "kept the re-asked reply although it looks unfinished",
                      "the restored cache did not hold -- that prefill",
-                     "tool budget spent after 24 rounds"):
+                     "tool budget spent after 24 rounds",
+                     # robin 2026-09-24: the rollover line and #98's alarm
+                     "rolled over at 179000 tokens -> rollover-x.json",
+                     "! the working area was refused for /tmp/x.js, and "
+                     "run_command ran anyway"):
             self.assertTrue(crow_core.note_is_log_only(text), text)
         for text in ("goal mode stopped: the model repeated an empty answer",
                      "goal mode stopped after 60 turns -- 2 of 5 steps done.",
                      "goal mode paused: step 1 has taken 25 turns.",
-                     "rolled over at 179000 tokens -> rollover-x.json",
                      "carried across the cut: edit_file",
                      "the crow-booted server on port 8080 is gone -- booting",
                      "the server on port 8080 is still loading -- waiting",

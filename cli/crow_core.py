@@ -2512,7 +2512,8 @@ SESSION_NOTES_MAX = 400
 # them with a timestamp and never into the flow or the saved chat's notes band.
 #
 # WHAT STAYS IN THE CHAT is everything a person acts on or asked for: the
-# rollover card and its "rolled over at N tokens" line, "goal mode stopped/
+# rollover card (its "rolled over at N tokens" line is log-only since
+# 2026-09-24), "goal mode stopped/
 # paused" (the goal needs a typed line to go on), the server reboot lines
 # (robin, 2026-08-28: a silent 70 s reboot looks exactly like the crash it
 # repairs), alarms, memory lines, and every answer to a command.
@@ -2564,7 +2565,16 @@ LOG_ONLY_NOTE_PREFIXES = (
     # "the last working directory is gone: … running without one" is a `fail`,
     # not this note, and stays in the chat.
     "no working directory -- writes are unbounded",
+    # robin, 2026-09-24 (diorama run screenshots): the rollover card itself
+    # stays in the chat; its "rolled over at N tokens -> file" line and the
+    # #98 boundary alarm with its explanation go to the log. The alarm is kind
+    # `alarm`, so LOG_ONLY_NOTE_KINDS below lets the same prefixes catch it.
+    "rolled over at ",
+    "! the working area was refused for ",
+    "write_file and edit_file stay inside the root; ",
 )
+# The kinds whose text `note_is_log_only` may route to the log.
+LOG_ONLY_NOTE_KINDS = ("note", "alarm")
 # The /goal setup echo ("goal: <title> -- 9 steps, acceptance check: …") is
 # log-only too; the status answer "goal: <title> -- 3/9, 12 min so far" that
 # robin asks for with /goal is not, so the steps count decides, not the prefix.
@@ -3130,7 +3140,7 @@ def clean_notes(notes: "list | None") -> list:
         # #262: a status note an earlier build wrote into the band
         # is dropped here, so a reopened chat does not draw it and the next
         # save does not carry it on. The log has the live ones.
-        if kind == "note" and note_is_log_only(note.get("t")):
+        if kind in LOG_ONLY_NOTE_KINDS and note_is_log_only(note.get("t")):
             continue
         keep = {"k": kind, "at": max(0, int(note.get("at") or 0)),
                 "t": str(note.get("t") or "")}

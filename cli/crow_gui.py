@@ -10601,7 +10601,7 @@ class Api:
         # damit ein Schnappschuss weder Kostenzeilen noch Notizen mitschreibt.
         captured = _CAPTURE.get()
         if captured is not None:
-            if not (message.get("k") == "note"
+            if not (message.get("k") in crow_core.LOG_ONLY_NOTE_KINDS
                     and crow_core.note_is_log_only(message.get("t"))):
                 captured.append(message)
             return
@@ -10634,10 +10634,10 @@ class Api:
         # #262. DIE LETZTE TUER FUER CROWS EIGENE STATUSZEILEN: was
         # `note_is_log_only` erkennt, geht in crow.log statt auf die Seite und
         # ins Notizband -- auch wenn eine neue Aufrufstelle es doch pusht.
-        if (message.get("k") == "note"
+        if (message.get("k") in crow_core.LOG_ONLY_NOTE_KINDS
                 and crow_core.note_is_log_only(message.get("t"))):
             if not self._replaying:
-                crow_core.log_note(str(message.get("t")), "note")
+                crow_core.log_note(str(message.get("t")), message.get("k"))
             return
         if (not self._replaying
                 and message.get("k") in crow_core.SESSION_NOTE_KINDS):
