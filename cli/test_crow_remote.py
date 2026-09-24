@@ -307,6 +307,52 @@ class RemoteServerTests(unittest.TestCase):
         self.assertEqual(self.h.request("POST", "/pair", {"t": self.h.token()})[0].status, 202)
         self.assertFalse(any("locked" in s for s in self.h.logs))
 
+    def test_a_paired_phone_with_a_stale_code_stays_paired(self):
+        """#249, iPhone 2026-09-24: Chrome's autocomplete reopened the first QR
+        URL, #t= and all. A valid cookie answers /pair with 200 and the same
+        device -- the spent or bogus code is neither checked nor counted, and
+        no second device appears."""
+        token = self.h.token()
+        pid = self.h.begin(token)
+        r, data = self.h.wait(pid)
+        dev = json.loads(data)["id"]
+        cookie = r.getheader("Set-Cookie").split(";", 1)[0].split("=", 1)[1]
+        for stale in (token, "bogus", None):
+            for _ in range(crow_remote.PAIR_MAX_FAILS + 1):
+                r, data = self.h.request("POST", "/pair", {"t": stale}, cookie=cookie)
+                self.assertEqual(r.status, 200, data)
+                self.assertEqual(json.loads(data),
+                                 {"id": dev, "name": "iPhone (Safari)", "paired": True})
+                renewed = r.getheader("Set-Cookie") or ""
+                self.assertIn("%s=%s;" % (crow_remote.COOKIE, cookie), renewed)
+                self.assertIn("Max-Age=34560000", renewed)
+        self.assertEqual([d["id"] for d in self.h.remote.devices()], [dev])
+        self.assertEqual(self.h.remote._fails, 0)
+        self.assertFalse(any("locked" in s for s in self.h.logs))
+        # The live QR is untouched: a new phone still pairs with it.
+        fresh = self.h.token()
+        self.assertEqual(self.h.request("POST", "/pair", {"t": fresh})[0].status, 202)
+
+    def test_a_forged_cookie_does_not_skip_the_pairing_code(self):
+        """NEGATIVE: only a cookie the store knows skips the code."""
+        r, _ = self.h.request("POST", "/pair", {"t": "bogus"}, cookie="made-up")
+        self.assertEqual(r.status, 401)
+        self.assertEqual(self.h.remote._fails, 1)
+
+    def test_me_says_whether_the_cookie_pairs(self):
+        dev, cookie = self.h.pair()
+        r, data = self.h.request("GET", "/me", cookie=cookie)
+        self.assertEqual(r.status, 200, data)
+        self.assertEqual(json.loads(data)["id"], dev)
+        self.assertIn("HttpOnly", r.getheader("Set-Cookie"))
+        self.assertEqual(self.h.request("GET", "/me")[0].status, 401)
+        self.assertEqual(self.h.request("GET", "/me", cookie="made-up")[0].status, 401)
+        r, _ = self.h.request("GET", "/me", cookie=cookie,
+                              headers={"Host": "evil.example:%d" % self.h.remote.port})
+        self.assertEqual(r.status, 421)
+        self.h.remote.forget(dev)
+        self.assertEqual(self.h.request("GET", "/me", cookie=cookie)[0].status, 401)
+
     def test_pair_wait_keeps_the_host_and_origin_guards(self):
         pid = self.h.begin()
         r, _ = self.h.request("POST", "/pair/wait", {"p": pid}, origin=False)

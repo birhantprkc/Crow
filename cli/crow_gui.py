@@ -3508,16 +3508,24 @@ if (window.CROW_REMOTE) (function(){
     const f=document.getElementById("remotefile"); if(f) f.accept="image/"+"*";
     const go = () => { pairing(false); open();
       window.dispatchEvent(new Event("pywebviewready")); };
+    // DAS FRAGMENT GEHT ZUERST, vor jeder Anfrage: was danach geschieht,
+    // kann die Adresse samt Code nicht mehr in Verlauf oder Lesezeichen tragen.
     const m = /(?:^#|&)t=([^&]+)/.exec(location.hash);
+    if(m) history.replaceState(null, "", location.pathname + location.search);
     if(!m){ go(); return; }
-    history.replaceState(null, "", location.pathname + location.search);
     pairing(true, TEXT.wait);
     // NIE EINE OFFENE ANFRAGE, WAEHREND EIN MENSCH ENTSCHEIDET (iPhone,
     // 2026-09-24: WebKit gab ein gehaltenes /pair nach ~6 s als Netzfehler
     // auf). /pair antwortet sofort 202 {p}, dann /pair/wait jede Sekunde.
     // Ein einzelner Netzfehler ist kein Ende; erst MISS in Folge sind es.
-    const done = r => pairing(true, r.status===403 ? TEXT.denied
+    // EIN ALTER CODE IST KEIN ENDE, WENN DAS COOKIE NOCH GILT (iPhone,
+    // 2026-09-24: Chromes Autovervollstaendigung trug das erste #t= noch).
+    // Der Server antwortet einem gekoppelten Telefon schon auf /pair mit 200;
+    // /me ist die zweite Sicherung fuer jede andere Absage.
+    const say = r => pairing(true, r.status===403 ? TEXT.denied
       : r.status===429 ? TEXT.locked : TEXT.expired);
+    const done = r => fetch("/me", {credentials:"same-origin"})
+      .then(me => { if(me.ok) go(); else say(r); }, () => say(r));
     const MISS = 5;
     let misses = 0;
     const poll = pid => {
@@ -10458,7 +10466,9 @@ class Api:
                 desk = message
                 # #162, UNVERAENDERT: DIE ANSICHT DES FENSTERS entscheidet den
                 # Stempel -- nicht die des Aufrufers.
-                if (kind != "rail"
+                # #249: der Bild-Stage gehoert keinem Chat -- ein leerer Stage
+                # aus einem Hintergrundzug gilt auch fuer das Fenster.
+                if (kind not in ("rail", "chips")
                         and self._views.get(DESKTOP) is not None
                         and worker):
                     desk = dict(message, bg=True)
@@ -12614,7 +12624,6 @@ class Api:
         # an; und ausserhalb des Locks, weil `push` sein eigenes nimmt.
         if target is None and peers:
             self._push_to({"k": "user", "t": text, "i": images}, peers)
-            self._push_to({"k": "chips", "c": []}, peers)
             self._push_to({"k": "busy"}, peers)
         worker.start()
         return True
@@ -15957,6 +15966,12 @@ class Api:
         if not rolled:
             staged, self._staged_images = self._staged_images, []
             if staged:
+                # #249: DER STAGE GEHOERT ALLEN, also erfaehrt jede Ansicht,
+                # dass er leer ist -- hier, wo er leer wird, fuer alle drei
+                # Wege von `send` (frei, gepuffert, andere Ansicht). Vorher
+                # ging ein [] nur an die Mitleser des freien Wegs, und der
+                # Chip blieb auf dem Desktop stehen, den das Telefon schickte.
+                self.push({"k": "chips", "c": self._image_chips()})
                 early = self._endpoint()
                 refuse = (None if early["remote"]
                           else crow_core.refuse_images(early["base_url"]))

@@ -702,6 +702,13 @@ class _Handler(BaseHTTPRequestHandler):
                 "name": "Crow", "short_name": "Crow", "start_url": "/",
                 "display": "standalone", "background_color": "#000000"}).encode("utf-8"),
                 "application/manifest+json")
+        if path.path == "/me":
+            # The page cannot read its HttpOnly cookie; this is how it asks
+            # whether the cookie still pairs it, before it shows "expired".
+            dev = self._device()
+            if dev is None:
+                return self.plain(401, "not paired")
+            return self._paired(dev)
         if path.path == "/events":
             dev = self._device()
             if dev is None:
@@ -739,6 +746,14 @@ class _Handler(BaseHTTPRequestHandler):
         raw = self._read_body(MAX_BODY)
         if raw is None:
             return
+        # A PAIRED PHONE IS NEVER SENT BACK TO PAIRING BY A STALE CODE (iPhone,
+        # 2026-09-24): Chrome's autocomplete, a bookmark or a home-screen icon
+        # can still carry the first QR's #t=, spent long ago. A valid cookie
+        # answers before the token is looked at -- not checked, not consumed,
+        # not counted toward the lockout, and no second device.
+        dev = self._device()
+        if dev is not None:
+            return self._paired(dev)
         try:
             token = json.loads(raw or b"{}").get("t")
         except (ValueError, AttributeError):
@@ -750,6 +765,14 @@ class _Handler(BaseHTTPRequestHandler):
             return self.plain(401, "bad or expired pairing code")
         pid = self.owner._pair_begin(device_name(self.headers.get("User-Agent", "")))
         self.json(202, {"p": pid})
+
+    def _paired(self, dev: "tuple[str, str]"):
+        """200 {id, name, paired} for a phone that holds a valid cookie, which
+        is renewed on the way -- /pair and /me both answer this way."""
+        record = self.owner._store.by_hash(_sha256(dev[1])) or {}
+        self.owner._store.touch(dev[0], time.time())
+        self.json(200, {"id": dev[0], "name": record.get("name", ""), "paired": True},
+                  (("Set-Cookie", _cookie_header(dev[1])),))
 
     def _pair_wait(self):
         raw = self._read_body(MAX_BODY)

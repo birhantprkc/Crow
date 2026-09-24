@@ -13332,10 +13332,11 @@ class RemoteApiParityTests(RemoteCase):
                                         ["/api/reveal_path", '["/x"]']])
         self.assertEqual(out["notes"], [crow_core.REMOTE_PHONE_TEXT["ondesk"]])
 
-    def _pairing_run(self, waits):
-        """The phone's pairing, run in node: /pair answers 202, /pair/wait
-        answers from `waits` in order ("net" is a rejected fetch). What the
-        pairing line showed, and whether the page went on to the chat."""
+    def _pairing_run(self, waits, pair=202, me=401):
+        """The phone's pairing, run in node: /pair answers `pair`, /pair/wait
+        answers from `waits` in order ("net" is a rejected fetch), /me with
+        `me`. What the pairing line showed, and whether the page went on to
+        the chat."""
         import subprocess
         page = crow_gui.stamped_page(remote=True)
         start = page.index("window.CROW_REMOTE = true;")
@@ -13356,7 +13357,8 @@ class RemoteApiParityTests(RemoteCase):
               "const res=(status, body)=>({ok:status>=200&&status<300, status,\n"
               "  json(){return Promise.resolve(body);}});\n"
               "function fetch(path, init){ posts.push([path, init.body]);\n"
-              "  if(path==='/pair') return Promise.resolve(res(202, {p:'P1'}));\n"
+              "  if(path==='/pair') return Promise.resolve(res(" + str(pair) + ", {p:'P1'}));\n"
+              "  if(path==='/me') return Promise.resolve(res(" + str(me) + ", {}));\n"
               "  const w=WAITS.shift();\n"
               "  if(w===undefined || w==='net') return Promise.reject(new TypeError('Load failed'));\n"
               "  return Promise.resolve(res(w, {})); }\n"
@@ -13392,6 +13394,25 @@ class RemoteApiParityTests(RemoteCase):
         # Deny and timeout keep their own lines.
         self.assertEqual(self._pairing_run([202, 403])["shown"][-1], text["denied"])
         self.assertEqual(self._pairing_run([410])["shown"][-1], text["expired"])
+
+    def test_a_paired_phone_on_a_stale_code_opens_the_chat(self):
+        """#249, iPhone 2026-09-24: the first QR URL came back from Chrome's
+        autocomplete, its #t= long spent. Any refusal asks /me first; a valid
+        cookie goes to the chat, never to "this code is no longer valid"."""
+        if not _node():
+            self.skipTest("no node on this machine")
+        text = crow_core.REMOTE_PHONE_TEXT
+        for pair, waits in ((401, []), (202, [410])):
+            out = self._pairing_run(waits, pair=pair, me=200)
+            self.assertEqual(out["ready"], 1, out)
+            self.assertNotIn(text["expired"], out["shown"])
+            self.assertIn("/me", [p for p, _ in out["posts"]])
+        # NEGATIVE: no valid cookie, and the stale code still says so.
+        out = self._pairing_run([], pair=401, me=401)
+        self.assertEqual(out["ready"], 0)
+        self.assertEqual(out["shown"][-1], text["expired"])
+        # The server's own 200 for a paired phone goes straight on.
+        self.assertEqual(self._pairing_run([], pair=200)["ready"], 1)
 
     def test_the_phone_page_is_this_page_with_the_flag(self):
         phone = crow_gui.stamped_page(remote=True)
@@ -13687,6 +13708,90 @@ class RemoteMirrorTests(RemoteCase):
         api._views[PHONE] = saved
         api._pending_ask = {"k": "ask", "name": "x", "args": "", "scope": ""}
         self.assertNotIn("ask", [m.get("k") for m in api.state_snapshot(PHONE)])
+
+
+class RemoteStagedImageTests(RemoteCase):
+    """#249, iPhone 2026-09-24: an image staged and sent on the phone kept its
+    chip in the DESKTOP's strip. The stage is one state for every client, so
+    every client hears when it empties -- at the point the images leave it,
+    on all three ways `send` takes (idle, queued mid-turn, another view).
+
+    The model server here refuses images (/props: no vision), so the real
+    `_run` consumes the stage and stops right after -- the one line the fix
+    is about, without a model."""
+
+    def _server(self) -> str:
+        import http.server
+
+        class Props(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"modalities": {"vision": false}}')
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Props)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return "http://127.0.0.1:%d/v1" % server.server_address[1]
+
+    def staged(self):
+        api = self.mirrored("--base-url", self._server())
+        path = os.path.join(self.dir, "shot.png")
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + b"\0" * 32)
+        self.as_phone(api.stage_image, path)
+        chips = [m for m in self.drained(api) if m.get("k") == "chips"]
+        self.assertEqual(len(chips[-1]["c"]), 1, "the desktop never saw the chip")
+        api._remote.published.clear()
+        return api
+
+    def assert_emptied(self, api):
+        self.assertEqual(api._staged_images, [])
+        desk = [m for m in self.drained(api) if m.get("k") == "chips"]
+        self.assertTrue(desk, "the desktop was never told the stage emptied")
+        self.assertEqual(desk[-1], {"k": "chips", "c": []},
+                         "the desktop's strip keeps the sent image")
+        phone = [m for m in api._remote.got() if m.get("k") == "chips"]
+        self.assertEqual(phone[-1], {"k": "chips", "c": []})
+
+    def test_idle_the_desktop_strip_empties(self):
+        api = self.staged()
+        self.assertTrue(self.as_phone(api.send, "what is this"))
+        api._worker.join(10)
+        self.assertFalse(api._worker.is_alive())
+        self.assert_emptied(api)
+
+    def test_mid_turn_the_desktop_strip_empties_when_the_line_runs(self):
+        api = self.staged()
+        api._busy = True
+        self.assertTrue(self.as_phone(api.send, "what is this"))
+        # HELD, NOT SENT: the images still ride the queued line, so the
+        # strip keeps them until the line leaves.
+        self.assertEqual(len(api._staged_images), 1)
+        self.assertNotIn({"k": "chips", "c": []}, self.drained(api))
+        real, first = api._run, []
+        api._run = lambda text: first.append(text) if not first else real(text)
+        api._worker = threading.current_thread()
+        api._pump("the running turn")
+        self.assertEqual(first, ["the running turn"])
+        self.assert_emptied(api)
+
+    def test_from_another_view_the_desktop_strip_empties(self):
+        api = self.staged()
+        saved = self.saved_chat(api)
+        api._views[PHONE] = saved                  # the phone reads elsewhere
+        self.assertTrue(self.as_phone(api.send, "what is this"))
+        api._worker.join(10)
+        self.assertFalse(api._worker.is_alive())
+        # The desktop is pinned to its own chat by the switch; the stage is
+        # not a chat's, so the empty strip reaches it unstamped anyway.
+        self.assertIsNotNone(api._views.get(crow_gui.DESKTOP))
+        self.assert_emptied(api)
 
 
 class RemoteSlashTests(RemoteCase):
