@@ -26,6 +26,7 @@ Tickets open until robin's live check unless marked closed.
 
 ### Changed
 
+- **The Subtasks card closes like the goal card** (#281). An `×` in its head (the goal's `.gx`, same place: 16 px from the right edge, 14.9 px from the top in both, headless Chromium) hides the card and its 306 px column reserve for the open chat; nothing is cancelled. A new subtask or a jump from the chip menu or the rail brings it back; the mark persists in `subtasks-registry.json`.
 - **A line typed during a turn is queued, not a stop** (#264, `d14046f`); in goal mode it goes before the goal nudge.
 - **Rollover archives leave the chat rail** (#261, `d1044f7`) for the archive drawer; a Crow note is never a chat title.
 - **goal_set carries the whole step record** (#260, `b165ffa`): notes, seconds and tokens of a re-declared step survive.

@@ -23112,6 +23112,11 @@ class Subtask:
         # 2026-08-28 spaetnachts: der Chat, der diese Aufgabe delegiert hat --
         # vom Fenster gestampt, mit persistiert; "" ist der dateilose Live-Chat.
         self.parent = ""
+        # #281: the window's Subtasks card was closed over this record. A VIEW
+        # mark, not a state: closing never cancels. Persisted, so the card
+        # stays shut across a restart; a new subtask starts with False and so
+        # brings the card back by itself.
+        self.closed = False
         # #216: every failed attempt, in order --
         # `{"model", "class", "reason", "detail"}`. Persisted with the record,
         # so the first spot's own words survive the card and the restart.
@@ -23182,6 +23187,7 @@ def _subtask_persist() -> None:
              "prompt_tokens": s.prompt_tokens, "reply_tokens": s.reply_tokens,
              "usage_tokens": s.usage_tokens, "transcript": s.transcript,
              "collected": s.collected, "parent": getattr(s, "parent", ""),
+             "closed": bool(getattr(s, "closed", False)),
              "chain": list(getattr(s, "chain", []))}
             for s in subs]
     path = _subtask_registry_path()
@@ -23228,6 +23234,7 @@ def subtasks_recall() -> int:
             sub.transcript = str(row.get("transcript") or "")
             sub.collected = bool(row.get("collected"))
             sub.parent = str(row.get("parent") or "")
+            sub.closed = bool(row.get("closed"))
             sub.chain = [c for c in (row.get("chain") or [])
                          if isinstance(c, dict)]
             if sub.status == "running":
@@ -23260,6 +23267,26 @@ def subtask_parent_set(ident: str, parent: str) -> None:
             return
         sub.parent = parent
     _subtask_persist()
+
+
+def subtask_close(idents: "list[str]", closed: bool = True) -> int:
+    """#281. Mark (or unmark) records as closed in the window's Subtasks card.
+
+    A VIEW MARK ONLY: the status, the thread and the result are untouched, so
+    a running subtask keeps running -- closing a panel is not cancelling the
+    work it shows (the split VS Code keeps between "Close Panel" and "Kill
+    Terminal"). Writes only on change. Returns how many records changed.
+    """
+    changed = 0
+    with _SUBTASK_LOCK:
+        for ident in idents:
+            sub = SUBTASKS.get(ident)
+            if sub is not None and bool(getattr(sub, "closed", False)) != closed:
+                sub.closed = closed
+                changed += 1
+    if changed:
+        _subtask_persist()
+    return changed
 
 
 def drop_subtasks(idents: "list[str]") -> int:
@@ -24333,7 +24360,9 @@ def subtask_view() -> "list[dict]":
                     "collected": sub.collected,
                     # 2026-08-28 spaetnachts: der Eltern-Chat reist im Record
                     # mit, damit die Rail nach einem Neustart weiss, wohin.
-                    "parent": getattr(sub, "parent", "")})
+                    "parent": getattr(sub, "parent", ""),
+                    # #281: the card was closed over it (view state only).
+                    "closed": bool(getattr(sub, "closed", False))})
     return out
 
 

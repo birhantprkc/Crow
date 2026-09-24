@@ -1326,9 +1326,10 @@ body[data-git="shut"] #git{display:none}
 #goalpanel .gh b{color:var(--text-faint);font-weight:600;letter-spacing:.2px}
 #goalpanel .gh .st{margin-left:auto;color:var(--dimmer)}
 #goalpanel .gh .st.ok{color:var(--ok)}
-#goalpanel .gx{background:none;border:0;color:var(--dimmer);font:inherit;
+/* #281: dasselbe `×` schliesst die Subtasks-Karte -- eine Regel, zwei Karten. */
+#goalpanel .gx,#subpanel .gx{background:none;border:0;color:var(--dimmer);font:inherit;
   font-size:16px;line-height:1;padding:0 0 0 4px;cursor:pointer}
-#goalpanel .gx:hover{color:var(--bad)}
+#goalpanel .gx:hover,#subpanel .gx:hover{color:var(--bad)}
 /* DAS ZIEL IST DIE UEBERSCHRIFT, nicht eine Zeile unter dem Wort "Goal": es
    bricht um, statt abgeschnitten zu werden, und traegt das Zeichen neben sich. */
 #goalpanel .gt{display:flex;gap:9px;align-items:flex-start;padding:0 15px 7px}
@@ -3085,7 +3086,10 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
            nichts delegiert hat. -->
       <div id="subpanel" hidden>
         <div class="sph" onclick="crow.subPanelFold()"><b>Subtasks</b>
-          <span class="st"></span></div>
+          <span class="st"></span><button class="gx" type="button"
+            title="hide this card -- running subtasks keep running"
+            aria-label="Close subtasks card"
+            onclick="crow.subPanelClose(event)">×</button></div>
         <div class="splive"></div>
         <button class="spfold" onclick="crow.subDoneFold()" hidden></button>
         <div class="spdone" hidden></div>
@@ -6536,7 +6540,11 @@ const crow = {
       if(!here.has(d.dataset.sub)) d.remove(); });
     const run=p.querySelectorAll(".splive .subcard").length;
     const fin=p.querySelectorAll(".spdone .subcard").length;
-    p.hidden=!(run+fin);
+    // #281. CLOSED BY ITS `×` for this chat until a NEW subtask starts
+    // (born unmarked) or a jump reopens it. `hidden` is the whole state, so
+    // the #233/#256 reserve on `#subpanel:not([hidden])` lets go with it.
+    const open=items.some(x=>x.here && !x.closed);
+    p.hidden=!(run+fin) || !open;
     p.querySelector(".sph .st").textContent=run+" running · "+fin+" finished";
     const fold=p.querySelector(".spfold"), done=p.querySelector(".spdone");
     fold.hidden=!fin;
@@ -6549,6 +6557,13 @@ const crow = {
 
   subPanelFold(){ $("#subpanel").classList.toggle("shut"); },
 
+  // #281. The `×`: hidden at once here, the mark in the registry. Closing is
+  // not cancelling -- no subtask is touched.
+  subPanelClose(ev){ if(ev) ev.stopPropagation();
+    $("#subpanel").hidden=true;
+    (this.subItems||[]).forEach(x=>{ if(x.here) x.closed=true; });
+    pywebview.api.close_subtasks(); },
+
   subDoneFold(){ const p=$("#subpanel"), done=p.querySelector(".spdone");
     done.hidden=!done.hidden; this.subPanel(this.subItems||[]); },
 
@@ -6557,6 +6572,10 @@ const crow = {
   // purpose, so the panel's own scrollTop is set instead.
   subReveal(d){
     const p=$("#subpanel"); p.classList.remove("shut");
+    // #281: a jump is the way back into a closed card.
+    if(p.hidden){ p.hidden=false;
+      (this.subItems||[]).forEach(x=>{ if(x.here) x.closed=false; });
+      pywebview.api.reopen_subtasks(); }
     const done=p.querySelector(".spdone");
     if(done.contains(d) && done.hidden){ done.hidden=false;
       this.subPanel(this.subItems||[]); }
@@ -10700,6 +10719,24 @@ class Api:
         self._conversation.repin_memory(
             crow_core.prompt_head(crow_core.get_root()))
 
+    def close_subtasks(self) -> None:
+        """#281. The `×` of the Subtasks card: hide it for the open chat.
+
+        ONLY A VIEW MARK -- nothing is cancelled, a running subtask keeps
+        running and keeps its rail row and chip. Every record of the open chat
+        gets the mark, so the card stays shut through chat switches and a
+        restart; a NEW subtask is born unmarked and brings the card back.
+        """
+        crow_core.subtask_close(
+            [r["i"] for r in self._subs_items() if r["here"]], True)
+        self._push_subs()
+
+    def reopen_subtasks(self) -> None:
+        """#281. The way back: a jump from the chip menu or a rail row."""
+        crow_core.subtask_close(
+            [r["i"] for r in self._subs_items() if r["here"]], False)
+        self._push_subs()
+
     def _surface(self) -> None:
         """#211. Der Schnitt sagt der Seite, was sie weiss -- einmal, gebuendelt.
 
@@ -13470,8 +13507,10 @@ class Api:
         items = self._subs_items()
         # `here` is in the signature: a chat switch flips it without touching
         # state or clock, and the page must hear about exactly that.
+        # #281: `closed` too -- the card's `×` changes nothing else.
         sig = json.dumps([[r["i"], r["st"], int(r["s"]), r["tok"],
-                           bool(r["path"]), r["here"]] for r in items])
+                           bool(r["path"]), r["here"], r.get("closed", False)]
+                          for r in items])
         if sig != self._subs_sig:
             self._subs_sig = sig
             self.push({"k": "subs", "items": items})
