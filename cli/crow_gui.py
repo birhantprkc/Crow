@@ -13482,6 +13482,8 @@ class Api:
         # #263: tool-result clearing, same door. Missing key: the endpoint
         # default (on at home, off remote); 0 switches it off.
         crow_core.context_clear_set(doc.get("context_clear_at"))
+        # #269: the file tools' check table, same door.
+        crow_core.syntax_checks_set(doc.get("syntax_checks"))
         try:
             return max(0, int(doc.get("turn_token_budget") or 0))
         except (TypeError, ValueError):

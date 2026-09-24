@@ -4450,6 +4450,78 @@ class AWriteParsesWhatItWroteTests(unittest.TestCase):
         self.assertIn("not checked", out)
 
 
+@unittest.skipUnless(shutil.which("node"), "node is not on PATH")
+class AnEditIsCheckedAndTheTableIsOneRowPerFormatTests(unittest.TestCase):
+    """#269. edit_file ran no parse at all -- #251 covered write_file
+    and append_file -- and the formats lived in code. One table from
+    settings.json now serves all three file tools."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-checks-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(crow_core.syntax_checks_set, None)
+
+    def at(self, name):
+        return os.path.join(self.root, name)
+
+    def test_an_edit_that_breaks_a_clean_file_says_so(self):
+        crow_core.tool_write_file(self.at("a.js"), "let o = [1];\nlet b = o[1];\n")
+        out = crow_core.tool_edit_file(self.at("a.js"), old="o[1]",
+                                       new="o[1100")
+        self.assertTrue(out.startswith("replaced 1 occurrence"), out)
+        self.assertIn("syntax check (node --check) FAILED", out)
+        self.assertIn("line 2: SyntaxError", out)
+        self.assertIn("this edit broke it", out)
+
+    def test_an_edit_on_an_already_broken_file_says_it_may_be_older(self):
+        crow_core.tool_write_file(self.at("a.js"),
+                                  "let a = = 1;\nlet b = 2;\n")
+        out = crow_core.tool_edit_file(self.at("a.js"), old="b = 2",
+                                       new="b = 3")
+        self.assertIn("FAILED", out)
+        self.assertIn("did not parse before this edit either", out)
+
+    def test_a_clean_edit_says_ok_and_a_text_file_says_nothing(self):
+        crow_core.tool_write_file(self.at("a.js"), "let a = 1;\n")
+        out = crow_core.tool_edit_file(self.at("a.js"), old="1", new="2")
+        self.assertIn("syntax check (node --check): ok", out)
+        crow_core.tool_write_file(self.at("n.txt"), "a = = 1\n")
+        out = crow_core.tool_edit_file(self.at("n.txt"), old="1", new="2")
+        self.assertEqual(out, "replaced 1 occurrence in %s" % self.at("n.txt"))
+
+    def test_a_configured_row_checks_a_new_format_in_every_tool(self):
+        crow_core.syntax_checks_set(
+            {"py": [sys.executable, "-m", "py_compile", "{path}"]})
+        out = crow_core.tool_write_file(self.at("m.py"), "x = (1,\n")
+        self.assertIn("FAILED", out)
+        self.assertIn("SyntaxError", out)
+        out = crow_core.tool_write_file(self.at("m.py"), "x = (1,)\n")
+        self.assertIn("): ok", out)
+        out = crow_core.tool_edit_file(self.at("m.py"), old="(1,)", new="(1,")
+        self.assertIn("FAILED", out)
+        self.assertIn("this edit broke it", out)
+
+    def test_an_empty_row_switches_a_built_in_off(self):
+        crow_core.syntax_checks_set({".js": []})
+        out = crow_core.tool_write_file(self.at("a.js"), "let a = = 1;\n")
+        self.assertNotIn("syntax check", out)
+
+    def test_malformed_rows_are_dropped_one_by_one(self):
+        crow_core.syntax_checks_set({".py": ["python3", 1], "": ["x"],
+                                     "TS": ["tsc", "--noEmit"]})
+        self.assertEqual(crow_core.SYNTAX_CHECKS, {".ts": ["tsc", "--noEmit"]})
+        crow_core.syntax_checks_set("nonsense")
+        self.assertEqual(crow_core.SYNTAX_CHECKS, {})
+
+    def test_a_command_that_cannot_start_is_named_and_the_write_stands(self):
+        crow_core.syntax_checks_set({".py": ["/nowhere/no-such-checker"]})
+        out = crow_core.tool_write_file(self.at("m.py"), "x = 1\n")
+        self.assertIn("could not run", out)
+        self.assertTrue(os.path.isfile(self.at("m.py")))
+
+
 class ANearMissDirectoryIsAskedOnceTests(unittest.TestCase):
     """#244: write_file/append_file created any missing parent in
     silence. Measured: 2026-09-18 msg 238 wrote `testcases/w/fs.py` while the
@@ -17334,7 +17406,9 @@ class SiblingArgumentNamesAreTakenAndSaidTests(unittest.TestCase):
         crow_core.tool_read_file(self.path)
         out = crow_core.run_tool("edit_file", json.dumps(
             {"path": self.path, "old": "scene", "new": "world"}))
-        self.assertEqual(out, "replaced 1 occurrence in %s" % self.path)
+        # The syntax line (#269) follows on a .js file; no note before.
+        self.assertTrue(out.startswith("replaced 1 occurrence in %s" % self.path),
+                        out)
 
 
 FAKE_ESBUILD = r'''#!__PY__

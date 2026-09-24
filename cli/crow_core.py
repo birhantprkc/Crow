@@ -11248,10 +11248,68 @@ def _node_first_error(stderr: str) -> str:
     return out
 
 
+# #269. ONE TABLE FOR EVERY FILE TOOL, NOT A FORMAT PER TOOL. The
+# built-in check knows JS and HTML because the diorama is written in them;
+# any other format is one row in settings.json, not a code change:
+#   "syntax_checks": {".py": ["python3", "-m", "py_compile", "{path}"],
+#                     ".html": []}
+# A row is an argv; "{path}" is the file. Exit 0 is ok, anything else is
+# FAILED with the command's first lines. An empty row switches that
+# extension off, the built-ins included. Nonsense reads as no table.
+SYNTAX_CHECKS: "dict[str, list[str]]" = {}
+SYNTAX_CHECK_LINES = 12
+
+
+def syntax_checks_set(value) -> None:
+    """settings.json's `syntax_checks`; anything malformed is dropped row by
+    row, so one bad row does not cost the others."""
+    SYNTAX_CHECKS.clear()
+    if not isinstance(value, dict):
+        return
+    for ext, argv in value.items():
+        if not isinstance(ext, str) or not ext.strip():
+            continue
+        ext = ext.strip().lower()
+        ext = ext if ext.startswith(".") else "." + ext
+        if isinstance(argv, list) and all(isinstance(a, str) for a in argv):
+            SYNTAX_CHECKS[ext] = list(argv)
+
+
+def _configured_check(path: str, argv: "list[str]") -> str:
+    """One row of the table run on `path`, in the built-in's words."""
+    what = os.path.basename(argv[0])
+    cmd = [a.replace("{path}", path) for a in argv]
+    if "{path}" not in " ".join(argv):
+        cmd.append(path)
+    deadline = time.monotonic() + SYNTAX_CHECK_SECONDS
+    try:
+        code, out, err, stopped = _bounded_run(
+            cmd, os.path.dirname(os.path.abspath(path)), deadline)
+    except OSError as exc:
+        return "\nsyntax check (%s): could not run -- %s" % (what, exc)
+    if stopped:
+        return ("\nsyntax check (%s): not finished within %gs -- not checked"
+                % (what, SYNTAX_CHECK_SECONDS))
+    if code != 0:
+        said = [ln for ln in (err.strip() or out.strip()).splitlines() if ln.strip()]
+        shown = "\n".join(ln[:300] for ln in said[:SYNTAX_CHECK_LINES])
+        return ("\nsyntax check (%s) FAILED -- the error is in the content "
+                "this file was given:\n%s" % (what, shown or "exit %s" % code))
+    return "\nsyntax check (%s): ok" % what
+
+
 def syntax_check(path: str) -> str:
     """#251. '' when there is nothing to say (not JS/HTML, no node, too
     big, nothing to parse), else one line starting with a newline."""
     ext = os.path.splitext(path)[1].lower()
+    if ext in SYNTAX_CHECKS:
+        argv = SYNTAX_CHECKS[ext]
+        try:
+            if not argv or os.path.getsize(path) > SYNTAX_CHECK_BYTES:
+                return ""
+        except OSError:
+            return ""
+        return _configured_check(path, argv)
     if ext not in _SYNTAX_JS + _SYNTAX_HTML:
         return ""
     node = shutil.which("node")
@@ -11436,7 +11494,33 @@ def tool_edit_file(path: str, old: str = "", new: "str | None" = None, **_) -> s
     # #215-H: THE EDIT MOVED THE STAMP, and crow made the move -- without this
     # the model's own second edit would read as someone else's change.
     _mark_read(path)
-    return f"replaced 1 occurrence in {path}"
+    return f"replaced 1 occurrence in {path}" + _edit_check(path, data)
+
+
+def _edit_check(path: str, before: str) -> str:
+    """#269. The same parse write_file gets (#251), after an edit.
+    When the edited file fails, the text as it was before the edit is parsed
+    too, in a scratch copy -- whether THIS edit broke it or the file was
+    already broken is the first thing the model needs to know."""
+    checked = syntax_check(path)
+    if "FAILED" not in checked:
+        return checked
+    scratch = tempfile.mkdtemp(prefix="crow-check-")
+    try:
+        old_copy = os.path.join(scratch, os.path.basename(path))
+        with open(old_copy, "w", encoding="utf-8", newline="") as fh:
+            fh.write(before)
+        was = syntax_check(old_copy)
+    except OSError:
+        was = ""
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    if "FAILED" in was:
+        return checked + ("\n(the file did not parse before this edit either"
+                          " -- the error may be an older one)")
+    if was:
+        return checked + "\n(the file parsed before this edit: this edit broke it)"
+    return checked
 
 
 def tool_list_dir(path: str = ".", **_) -> str:
