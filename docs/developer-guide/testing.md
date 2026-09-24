@@ -5,20 +5,22 @@
 ## Suites
 
 Run from `cli/`, one file per interpreter — each suite's preamble owns the sandbox
-redirect, and a combined run leaves the isolation guards red. Case counts collected 2026-09-23
-on `release-2026-09-23` (0311d0d) with `unittest`'s loader, under the runtime venv's Python.
+redirect, and a combined run leaves the isolation guards red. Case counts collected 2026-09-24
+on `release-2026-09-24` (b9cac62) with `unittest`'s loader, under the runtime venv's Python.
 
 ```
 python -m unittest test_crow
 python -m unittest test_crow_core
 python -m unittest test_crow_gui
+python -m unittest test_crow_remote
 ```
 
 | | cases | covers |
 |---|---|---|
-| `test_crow.py` | 451 | the terminal client |
-| `test_crow_core.py` | 1315 | the shared core |
-| `test_crow_gui.py` | 756 | the window's API and page |
+| `test_crow.py` | 476 | the terminal client |
+| `test_crow_core.py` | 1455 | the shared core |
+| `test_crow_gui.py` | 896 | the window's API and page |
+| `test_crow_remote.py` | 53 | the phone mirror: server, pairing, devices, QR, the Tailscale state (#249, #290) |
 
 No test writes into a real installation. `test_crow_gui.py` carries a case that
 walks every path constant in both modules and rejects any pointing into a real
@@ -30,7 +32,7 @@ there — it would be empty.
 Run them under the runtime venv (`~/.local/share/crow/venv/bin/python` on Linux), not the
 system Python: that venv is made with `--system-site-packages`, which puts pip's `webview` and
 the distribution's PyGObject in one interpreter. `just test` does exactly that, and `just check`
-runs lint, the three suites, `check_shared_core`, `check_operating_point`, `check_gui_prereqs`
+runs lint, the four suites, `check_shared_core`, `check_operating_point`, `check_gui_prereqs`
 and `bash install.sh --selftest` in that order.
 
 `AWriteParsesWhatItWroteTests` (#251) calls the real `node --check` and is skipped when `node`

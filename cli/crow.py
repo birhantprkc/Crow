@@ -182,7 +182,7 @@ from crow_core import (  # noqa: F401 -- re-exported for the CLI and its suite
 # one line the README documents. tools/pack-release.ps1:254 reads the same
 # pattern to stamp the package, and tools/check_operating_point.py holds it
 # against manifests/operating-point.json.
-VERSION = "2.5.0"
+VERSION = "2.6.0"
 
 # The core carries no version of its own -- the owner of the literal hands it
 # over. Three places in there need one: the session file's `version` field, the
@@ -902,22 +902,29 @@ class TerminalTurnEvents(TurnEvents):
         print(f"\n{crow_core.ABORT_NOTE}\n", file=self._out)
 
     def turn_note(self, message: str) -> None:
-        # #217: THE TERMINAL HEARS THE SAME NOTES THE WINDOW DRAWS. Without
-        # this a discarded degenerate round left its stub on screen and the
-        # re-request streamed behind it with nothing saying why.
+        # #217: THE TERMINAL HEARS THE SAME NOTES THE WINDOW DRAWS -- today the
+        # server reboot and load-wait lines. A log-only status note (see
+        # crow_core.LOG_ONLY_NOTE_PREFIXES) goes to crow.log instead.
+        if crow_core.note_is_log_only(message):
+            crow_core.log_note(message, "turn")
+            return
         print(f"{DIM}[{message}]{RESET}\n", file=self._out)
 
     def round_finished(self, timings: dict) -> None:
         line_out = format_timings(timings) if self._rounds else ""
         print(f"\n\n[{line_out}]\n" if line_out else "\n", file=self._out)
 
+    # #262: THE SAME RULE AS THE WINDOW. Crow's own status lines
+    # about its machinery go to crow.log with a timestamp, not onto the screen
+    # between the answers. The forced round that follows a spent budget is
+    # still drawn; only the grey line about it moved.
     def cache_promise_broken(self) -> None:
-        print(f"{DIM}[the restored cache did not hold -- that prefill was the whole "
-              f"conversation, not a resume]{RESET}\n", file=self._out)
+        crow_core.log_note("the restored cache did not hold -- that prefill was "
+                           "the whole conversation, not a resume", "turn")
 
     def budget_spent(self, budget: int) -> None:
-        print(f"{DIM}[tool budget spent after {budget} rounds -- answering from what it "
-              f"has; --max-tool-rounds raises it]{RESET}\n", file=self._out)
+        crow_core.log_note(f"tool budget spent after {budget} rounds -- answering "
+                           f"from what it has; --max-tool-rounds raises it", "turn")
 
     def tool_started(self, name: str, arguments: str) -> None:
         arg_note = format_tool_args(arguments)
@@ -1040,6 +1047,7 @@ HELP = """commands:
   /reasoning     this chat's thinking level, /reasoning <level>|off to set it
   /budget        cap the thinking per request, /budget <tokens>|off
   /goal          the goal this chat works towards, /goal <title> | <step> | <step>
+                 /goal skip <n> [reason] gives step n up, /goal off clears it
   /thoughts      show the model's reasoning as it arrives, or hide it again
   /image         hold an image for the next line, /image <path>
   /delegate      hand a task to the remote subtask model, /delegate <task>
@@ -1047,6 +1055,7 @@ HELP = """commands:
   /subtasks      where every delegated subtask stands
   /reset         drop the context (costs a full re-prefill)
   /context       message count in the current context
+  /remote        the phone mirror -- window-only for now
   /exit, /quit   leave
 """
 
@@ -1097,6 +1106,13 @@ def run_slash(line: str, *, conversation, mode: str, show_reasoning: bool,
 
     if line == "/tools":
         print(format_tools())
+        return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
+
+    # #249. THE PHONE MIRROR IS THE WINDOW'S IN STAGE 1: the terminal prints
+    # no dict stream a phone could follow yet. Answered here rather than sent
+    # to the model as a question about the word; the sentence is the core's.
+    if line == "/remote" or line.startswith("/remote "):
+        print(crow_core.REMOTE_TUI_NOTE + "\n")
         return SlashResult(True, mode, show_reasoning, context_tokens, n_ctx)
 
     # #129. THE WHOLE ANSWER IS THE CORE'S, arguments and all. The window runs
@@ -1403,8 +1419,12 @@ def ask_memory() -> None:
         print()
         answer = "n"
     if answer in ("y", "yes"):
-        saved = crow_core.approve_pending()
-        print(f"{CROW_ACCENT}[memory updated: {len(saved)}]{RESET}\n")
+        saved, failed = crow_core.approve_pending()
+        print(f"{CROW_ACCENT}[memory updated: {len(saved)}]{RESET}")
+        # #285: a write that did not land is said, not swallowed.
+        if failed:
+            print(f"{YELLOW}{crow_core.pending_failed_note(failed)}{RESET}")
+        print()
     else:
         dropped = crow_core.decline_pending()
         print(f"{DIM}[memory discarded: {dropped}]{RESET}\n")
@@ -1949,6 +1969,8 @@ def repl(args: argparse.Namespace) -> int:
     if sampling is None:
         return 2
     rollover_digest_set(args.rollover_digest_tokens)   # #154, None ist der Default
+    crow_core.judge_threshold_set(args.judge_threshold)   # #267
+    crow_core.context_clear_set(args.context_clear_at)  # #263, None: endpoint default
     # The repository used to be printed here. It sits beside the wordmark now,
     # under the commands, so the endpoint block is the endpoint and the model.
     print("")
@@ -2378,6 +2400,20 @@ def build_parser() -> argparse.ArgumentParser:
                         help="token cap for the model's own digest in the rollover note,"
                              " asked on the still-warm prefix before the cut; 0 switches"
                              " it off (default: %d)" % crow_core.ROLLOVER_DIGEST_DEFAULT)
+    parser.add_argument("--judge-threshold", dest="judge_threshold", type=int,
+                        default=None, metavar="N",
+                        help="lowest judge score (1-10) a visual goal step needs before"
+                             " goal_step accepts 'done' (default: %d)"
+                             % crow_core.JUDGE_THRESHOLD_DEFAULT)
+    parser.add_argument("--context-clear-at", dest="context_clear_at",
+                        type=float, default=None, metavar="SHARE",
+                        help="replace tool results older than the last %d rounds with a"
+                             " short stub once the prompt reaches this share of the window,"
+                             " in batches that free at least %d%%%% of it; 0 switches it off"
+                             " (default: %s on the local server, off on a remote one)"
+                             % (crow_core.CONTEXT_CLEAR_KEEP_ROUNDS,
+                                int(crow_core.CONTEXT_CLEAR_AT_LEAST * 100),
+                                crow_core.CONTEXT_CLEAR_DEFAULT))
     # NOT REMOVED, MOVED BEHIND A SWITCH (#70). The per-round line is the instrument this loop was
     # built with -- it is what showed the prefix holding round by round. Deleting it would cost the
     # next person debugging the cache the only view they had; leaving it on cost every user twelve
@@ -2408,6 +2444,12 @@ def build_parser() -> argparse.ArgumentParser:
                         default=0, metavar="N",
                         help="decoded tokens one turn may spend before it is told to"
                              " answer (default: 0, off)")
+    # #274: an environment variable cannot be set from inside a session; a
+    # flag and the window's settings.json key can.
+    parser.add_argument("--bundler", dest="bundler", default=None, metavar="PATH",
+                        help="the esbuild build_bundle uses before searching the"
+                             " project, PATH and the deno/npx caches (the window:"
+                             " \"bundler\" in settings.json)")
     parser.add_argument("--subtask-max-tokens", dest="subtask_max_tokens", type=int,
                         default=0, metavar="N",
                         help="output cap for one delegated subtask"
@@ -2552,6 +2594,8 @@ def main(argv: list[str] | None = None) -> int:
     # #145: once, like set_root -- a subtask starts deep inside a turn where no
     # flag can reach it.
     crow_core.subtask_budget_set(args.subtask_max_tokens)
+    # #274: the window's `bundler` setting, as a flag -- once, like the cap.
+    crow_core.bundler_set(args.bundler)
     if args.serve is not None:
         return serve_only(args.serve)
     # #114, and BEFORE repl(): the loop's first act is to check the endpoint,

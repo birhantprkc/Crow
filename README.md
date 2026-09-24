@@ -6,11 +6,11 @@
 
 <h3>An agent, not a chat box.</h3>
 
-<p>A local model at 200k context with 27 tools and MCP, persistent memory, its own skills,<br>a browser panel, eyes, and subagents it can send out while it keeps working.<br>Runs on this machine, or on a provider you choose.</p>
+<p>A local model at 200k context with 28 tools and MCP, persistent memory, its own skills,<br>a browser panel, eyes, and subagents it can send out while it keeps working.<br>Runs on this machine, or on a provider you choose.</p>
 
 <p>
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square&logo=opensourceinitiative&logoColor=white&labelColor=000000" alt="License"></a>
-<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-2.5.0-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
+<a href="cli/crow.py"><img src="https://img.shields.io/badge/version-2.6.0-brightgreen?style=flat-square&logo=semver&logoColor=white&labelColor=000000" alt="Version"></a>
 <a href="docs/user-guide/install.md"><img src="https://img.shields.io/badge/platform-Windows%20x64%20%C2%B7%20Linux%20x86__64%20%C2%B7%20CUDA-555555?style=flat-square&logo=nvidia&logoColor=76b900&labelColor=000000" alt="Platform"></a>
 <a href="https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF"><img src="https://img.shields.io/badge/model-Qwen3.8--Flash--Next-orange?style=flat-square&logo=huggingface&logoColor=ffd21e&labelColor=000000" alt="Model"></a>
 <a href="https://github.com/ggml-org/llama.cpp"><img src="https://img.shields.io/badge/engine-llama.cpp-555555?style=flat-square&logo=cplusplus&logoColor=00599c&labelColor=000000" alt="llama.cpp"></a>
@@ -58,6 +58,13 @@ curl -fsSL https://raw.githubusercontent.com/nibor1896/Crow/main/install.sh | ba
 Five steps, a per-file sha256 manifest it re-reads on the next run, idempotent. No root — the GTK
 and WebKit bindings come from your distribution, so the installer prints that line instead of
 running it.
+
+**Optional components**
+
+| component | Windows | Linux |
+|---|---|---|
+| dictation (faster-whisper) | always installed | `curl -fsSL …/install.sh \| bash -s -- --voice` |
+| phone over HTTPS ([Tailscale](https://tailscale.com/download)) — prints only the missing steps, never runs sudo | `&([scriptblock]::Create((irm …/install.ps1))) -Tailscale` | `curl -fsSL …/install.sh \| bash -s -- --tailscale` |
 
 **Neither one downloads the model.** That is a separate command:
 
@@ -138,8 +145,8 @@ Everything below is in the screenshot at the top of this page.
 
 | | |
 |---|---|
-| [**Tools**](docs/reference/tools.md) | 27 built in, plus every MCP server you add |
-| [**Memory**](docs/user-guide/memory.md) | two plain-text stores, per project and per person, written only after you approve |
+| [**Tools**](docs/reference/tools.md) | 28 built in, plus every MCP server you add |
+| [**Memory**](docs/user-guide/memory.md) | two plain-text stores, per project and per person; the model writes its own notes, the background review asks first |
 | [**Skills**](docs/user-guide/skills.md) | procedures the model keeps and rewrites; name and description in the prompt, body on request |
 | [**Goals**](docs/user-guide/goals-and-subagents.md) | a plan in the pinned head, the state in a file — it survives a rollover and a restart |
 | [**Subagents**](docs/user-guide/goals-and-subagents.md) | `delegate` / `subtasks` / `collect`, up to 16 at once, on a remote spot |
@@ -148,12 +155,13 @@ Everything below is in the screenshot at the top of this page.
 | [**Session search**](docs/user-guide/session-search.md) | SQLite FTS5 over every archived conversation; the real messages, not a summary |
 | [**MCP**](docs/user-guide/mcp.md) | stdio and [Streamable HTTP](docs/user-guide/mcp-http.md), with OAuth, elicitation and per-tool classes |
 | [**Remote models**](docs/user-guide/remote-models.md) | OpenRouter, Anthropic, OpenAI — key or sign-in. The default is always this machine |
+| [**Phone**](docs/user-guide/remote.md) | `/remote`: the window on a paired phone — LAN, or HTTPS from anywhere [via Tailscale](docs/user-guide/remote-tailscale.md), phone 🎤 included. Tailscale: [download](https://tailscale.com/download) · [iPhone](https://apps.apple.com/app/tailscale/id1470499037) · [Android](https://play.google.com/store/apps/details?id=com.tailscale.ipn) · setup steps: `install.sh --tailscale` / `install.ps1 -Tailscale` |
 | [**Voice**](docs/user-guide/window.md) | dictation into the composer, `faster-whisper` locally, nothing written to disk |
 | [**Secrets**](docs/reference/settings.md) | a file with an ACL instead of an environment variable every child process inherits |
 
 ## Tools
 
-27 built in. `/tools` lists them in either surface; the full reference is
+28 built in. `/tools` lists them in either surface; the full reference is
 [docs/reference/tools.md](docs/reference/tools.md).
 
 | group | |
@@ -161,11 +169,11 @@ Everything below is in the screenshot at the top of this page.
 | **Files** | `read_file` a file or a line range · `write_file` a whole file (an existing file must have been read in this conversation and be unchanged since) · `append_file` only for a file above `write_file`'s size limit · `edit_file` one exact occurrence · `list_dir` · `find_files` by glob · `search_text` by regex. A write says its byte count and sha256 as read back, and a `.js` or HTML write carries `node --check`'s first error when node is installed |
 | **Shell** | `run_command` — named shell, timeout, and a path outside the working directory asks first; on Linux in a memory-bounded scope of its own (8 GiB) · `build_bundle` — a page and its ES modules as one offline file, with the esbuild already on the machine |
 | **Git** | `git_status` · `git_diff` · `git_log` · `git_commit` (stages exactly the paths given) · `git_push` · `github_connect` over the OAuth device flow |
-| **Web** | `web_search` — answer from what you read, a list of links is not an answer · `fetch_url` one page as readable text |
+| **Web** | `web_search` — answer from what you read, a list of links is not an answer · `fetch_url` one page as readable text · a host nobody named in the chat is refused |
 | **Browser** | `render_page` opens a page in a browser Crow owns and brings back a screenshot plus the console |
-| **Vision** | `read_image` — check your own work when a step says it has to look right |
-| **Memory** | `memory` add, replace, remove · `skill` read, save, remove · `session_search` over months of archives |
-| **Goals** | `goal_set` writes the plan · `goal_step` moves one step, and costs no prefill. A `done` whose note says it is not done is refused, and a `check:` you set must pass before the goal closes |
+| **Vision** | `read_image` — check your own work when a step says it has to look right · `judge` — a separate model that never saw the conversation scores the capture against the rubric (#266) |
+| **Memory** | `memory` add, replace, remove · `skill` read, save, remove · `session_search` over every past chat, archives and rollover segments included |
+| **Goals** | `goal_set` writes the plan · `goal_step` moves one step, and costs no prefill. A `done` whose note says it is not done is refused, and a `check:` you set must pass before the goal closes. A step that fails twice is skipped; `/goal skip <n>` skips one by hand |
 | **Subagents** | `delegate` hands a task out · `subtasks` where they stand · `collect` waits and returns |
 
 Every MCP tool joins the same list as `mcp_<server>_<tool>`, with its own class.
@@ -190,7 +198,7 @@ Everything is under [`docs/`](docs/README.md).
 
 | | |
 |---|---|
-| **User guide** | [Install](docs/user-guide/install.md) · [Window](docs/user-guide/window.md) · [Linux](docs/user-guide/linux.md) · [Memory](docs/user-guide/memory.md) · [Skills](docs/user-guide/skills.md) · [Goals and subagents](docs/user-guide/goals-and-subagents.md) · [Browser](docs/user-guide/browser.md) · [Session search](docs/user-guide/session-search.md) · [MCP servers](docs/user-guide/mcp.md) · [MCP over HTTP](docs/user-guide/mcp-http.md) · [Remote models](docs/user-guide/remote-models.md) |
+| **User guide** | [Install](docs/user-guide/install.md) · [Window](docs/user-guide/window.md) · [Linux](docs/user-guide/linux.md) · [Memory](docs/user-guide/memory.md) · [Skills](docs/user-guide/skills.md) · [Goals and subagents](docs/user-guide/goals-and-subagents.md) · [Browser](docs/user-guide/browser.md) · [Session search](docs/user-guide/session-search.md) · [MCP servers](docs/user-guide/mcp.md) · [MCP over HTTP](docs/user-guide/mcp-http.md) · [Remote models](docs/user-guide/remote-models.md) · [Phone](docs/user-guide/remote.md) · [Phone over Tailscale](docs/user-guide/remote-tailscale.md) |
 | **Reference** | [Tools](docs/reference/tools.md) · [Server flags](docs/reference/server-flags.md) · [Client flags](docs/reference/client-flags.md) · [Reasoning levels](docs/reference/reasoning-levels.md) · [Settings](docs/reference/settings.md) · [mcp.json](docs/reference/mcp-json.md) |
 | **Operating points** | [The four lines](docs/operating-points.md) · [Measurements](docs/measurements/README.md) · [Placement sweep](docs/measurements/flash-next-placement.md) · [MCP cost](docs/measurements/mcp-cost.md) |
 | **Developer guide** | [Architecture](docs/developer-guide/architecture.md) · [Testing](docs/developer-guide/testing.md) · [Repo](docs/developer-guide/repo.md) · [Not built](docs/developer-guide/not-built.md) |

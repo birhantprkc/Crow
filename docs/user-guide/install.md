@@ -26,9 +26,10 @@ the model — that is a separate line, printed at the end of the run.
 | **WebKitGTK** | Window only, Linux. `webkit2gtk-4.1` + `python-gobject` from the distribution — neither installer asks for root |
 | **wl-clipboard** | Linux only, and only for pasting an image into the window. `xclip` under X11 |
 | **pywebview** | Window only, ~2 MB. Installed by `install.ps1` and by `install.sh` |
-| **Node** | Optional, never required, installed by neither script. Used by MCP servers started with `npx` or `node`, and by the syntax check `write_file`/`append_file` run over `.js`/`.mjs`/`.cjs` files and inline HTML scripts (`node --check`, 5 s, first error only, #251). Without node the check is skipped and the write result has no syntax line — the write itself is unaffected, on both systems. Both preflights report it as a warning |
-| **esbuild** | Optional, for `build_bundle` only (#212). Never downloaded: Crow uses one already on the machine — `$CROW_ESBUILD`, a project's `node_modules`, `PATH`, then the deno and npx caches. Without one, `build_bundle` says so and writes nothing |
+| **Node** | Optional, never required, installed by neither script. Used by MCP servers started with `npx` or `node`, and by the syntax check `write_file`/`append_file`/`edit_file` run over `.js`/`.mjs`/`.cjs` files and inline HTML scripts (`node --check`, 5 s, first error only, #251). Without node the check is skipped and the write result has no syntax line — the write itself is unaffected, on both systems. Both preflights report it as a warning |
+| **esbuild** | Optional, for `build_bundle` only (#212). Never downloaded: Crow uses one already on the machine — `$CROW_ESBUILD`, the `bundler` setting (#274), a project's `node_modules`, `PATH`, then the deno and npx caches. Without one, `build_bundle` says so and writes nothing |
 | **bubblewrap** | Linux only, optional. The in-window browser panel's web process runs sandboxed only when `bwrap` exists (#226). The preflight warns without it |
+| **Tailscale** | Optional, for the phone over HTTPS from anywhere (#249). Installed by neither script: `install.sh --tailscale` / `install.ps1 -Tailscale` print the missing steps. [download](https://tailscale.com/download) · [iPhone](https://apps.apple.com/app/tailscale/id1470499037) · [Android](https://play.google.com/store/apps/details?id=com.tailscale.ipn) · [Linux](https://tailscale.com/kb/1031/install-linux) · [Windows](https://tailscale.com/kb/1022/install-windows) · [setup](remote-tailscale.md) |
 | **systemd-run** | Linux only, optional. With a reachable user manager, `render_page`'s browser (6 GiB) and `run_command`'s shell (8 GiB) run in a memory-bounded scope of their own (#213, #218); without it they are bounded by their clocks only. The preflight warns without it |
 
 Every check that can reject the machine runs **before** the 506 MB download starts. Finding out
@@ -57,6 +58,7 @@ with paths resolved.
 | `-SourceUrl <url\|zip>` | take the package from somewhere other than the GitHub release |
 | `-NoPause` | do not wait for ENTER at the end. The wait exists so the last screen can be read |
 | `-Selftest` | run the checks against synthetic inputs, including the ones that must fail. Downloads nothing |
+| `-Tailscale` | print what is still missing for the phone over HTTPS (`winget install --id Tailscale.Tailscale -e`, log in, Enable HTTPS, the `tailscale serve` line for an elevated shell, the phone app) and exit. Installs, downloads and elevates nothing — run it after the install: `&([scriptblock]::Create((irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1))) -Tailscale` |
 
 There is no Start-menu entry: the last step prints the two start lines instead.
 
@@ -95,6 +97,7 @@ warned about; none of them stops the install.
 |---|---|
 | `--models DIR` | where the GGUFs live. Makes `$CROW_HOME/models` a link to it |
 | `--voice` | also `faster-whisper` and `sounddevice` for the composer's microphone |
+| `--tailscale` | also print what is still missing for the phone over HTTPS: the install line (`sudo pacman -S tailscale` on Arch, else kb/1031's script), `systemctl enable --now tailscaled`, `tailscale up`, Enable HTTPS, the `tailscale serve` line, the phone app. Reads `tailscale status --json` only; never runs sudo |
 | `--build-engine` | build `llama-server` now instead of printing the line (~20 minutes) |
 | `--no-desktop` | no `.desktop` entry, no icons, no Hyprland rule |
 | `--no-engine` | do not look for the engine at all |
@@ -171,6 +174,7 @@ Nothing is installed outside the user's own directories on either platform.
 | `index.db` (session search) | `%LOCALAPPDATA%\Crow\` | `~/.local/share/crow/` |
 | `session/`, `booted.json`, `git_events.json` | `%LOCALAPPDATA%\Crow\` | `~/.local/state/crow/` |
 | server boot logs | `<cwd>\runs\` | `~/.local/state/crow/log/` |
+| Crow's own log, `crow.log` (rotated, 1 MiB × 4) | `%LOCALAPPDATA%\Crow\log\` | `~/.local/state/crow/log/` |
 | models | `<install>\models` | `<install>/models`, a link to the tree |
 | engine binary | `<install>\bin\llama-server.exe` | `<install>/bin/`, then `PATH`, then `~/.local/share/crow/bin` |
 | fonts | `%LOCALAPPDATA%\Microsoft\Windows\Fonts` + winreg | `~/.local/share/fonts/crow/` + `fc-cache` |
@@ -195,3 +199,4 @@ they are.
 | [Operating points](../operating-points.md) | the four measured lines, and the by-hand server commands |
 | [Linux](linux.md) | paths, the engine build, the window on Wayland, troubleshooting |
 | [Remote models](remote-models.md) | keys, sign-ins, dialects |
+| [Phone over Tailscale](remote-tailscale.md) | the phone from anywhere over HTTPS; `--tailscale` / `-Tailscale` print the steps |

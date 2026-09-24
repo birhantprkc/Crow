@@ -3,6 +3,199 @@
 Released history. Every number carries the conditions it was taken under, or says it is unmeasured.
 The reasoning is in the commit and on the issue.
 
+## Unreleased
+
+## 2.6.0 — 2026-09-24
+
+**The phone becomes a second view of the session, and goal runs get a fresh-eyes judge.** A paired phone mirrors
+the open session on the home LAN and, through Tailscale serve, over HTTPS from anywhere, with its own microphone
+(#249 stages 1 and 5, #290). Goal mode gains a judge that scores captures in a fresh request, an evidence gate for
+visual steps, a render-loop breaker, retry-then-skip for failed steps and `/goal skip` (#265–#268, #277, #286,
+#289). Long runs keep more of the window: old tool results are cleared below the rollover, and Crow's own status
+lines move to `crow.log` (#262, #263). The file tools share one syntax-check table and keep line endings (#269,
+#276, #283); `render_page`, `build_bundle`, memory, `session_search` and delegate each close a failure seen in the
+2026-09-23/24 diorama goal runs (#270–#275, #278, #279, #284, #285, #287, #288).
+
+Everything on local `main` since 2.5.0 (origin/main 0c3e392): 87 commits, 2026-09-23 to 2026-09-24. Most
+measurements are against robin's 2026-09-23 diorama goal run and its 2026-09-24 follow-ups. Tickets stay open until
+robin's live check unless the ticket says otherwise.
+
+### Added
+
+- **Phone mirror on the home LAN** (#249 stage 1). `/remote on` (or the phone icon left of code/git/browser in the
+  title bar) starts `cli/crow_remote.py`, a standard-library HTTP server on one LAN address and a fixed port
+  (`remote_port`, default 8765; `0.0.0.0` is refused). The Remote dialog shows a QR code with a single-use 120 s
+  pairing code; a new device waits up to 60 s for **Allow** on the desktop, otherwise it is denied. A paired phone
+  keeps an HttpOnly, SameSite=Strict cookie for 400 days, of which only the sha256 is stored (devices in
+  `secrets.json`); 5 failed pairings lock pairing for 10 minutes, and revoking a device ends its stream at once.
+  Host (421), Origin (403) and cookie (401) guards on every request. The phone gets the session over SSE (a
+  per-device replay ring of 5,000 events, snapshot otherwise, 15 s heartbeat, text coalesced to ≤ 4 updates/s) and
+  calls an allowlist of 58 proxied page methods; each client has its own view, so a phone never moves the desktop
+  and the other way round. The phone layer (below 700 px): a one-row composer, rail/code/git/browser as drawers, a
+  44 px goal bar, pinned approvals, image upload (20 MiB), its own home-screen icon and title, and an auto-hiding
+  header in the iOS home-screen app. `/remote on|off|status|devices|forget <name>`; settings `remote_enabled`,
+  `remote_port`, `remote_host`. The QR encoder (byte mode, level M, versions 1–6) matches segno module for module
+  on 20 URLs.
+- **Phone mirror over HTTPS via Tailscale** (#249 stage 5). With a tailnet up, Crow additionally listens on
+  `127.0.0.1:<remote_port>` for `tailscale serve --bg --https=443`, where only the machine's `ts.net` Host and
+  Origin pass (a bare `127.0.0.1` Host stays 421) and the cookie is `Secure`. Crow never runs a Tailscale command
+  that changes anything: it reads `tailscale status --json` and `tailscale serve status --json` without sudo into
+  six states (missing, down, https-off, serve-missing, funnel, ready), and the Remote dialog offers
+  **HTTPS · `<name>`** with one status line per state and the one-time serve command to copy (setting
+  `remote_https`). Never plain HTTP on `0.0.0.0` or the 100.x address; with Funnel on for the name there is no
+  loopback listener at all. Setup guide: `docs/user-guide/remote-tailscale.md`.
+- **Tailscale as an opt-in installer component** (#249). `install.sh --tailscale` / `install.ps1 -Tailscale` read
+  what is already done (read-only `tailscale status --json` / `tailscale serve status --json`, through the same
+  state table as the Remote dialog) and print only the missing steps: the install command for the distribution
+  (`sudo pacman -S tailscale` on Arch/Omarchy and Arch-likes, the official `curl -fsSL
+  https://tailscale.com/install.sh | sh` elsewhere, `winget install --id Tailscale.Tailscale -e` on Windows),
+  `sudo systemctl enable --now tailscaled`, `tailscale up`, **Enable HTTPS** in the admin console,
+  `tailscale serve --bg --https=443 http://127.0.0.1:<remote_port>` (in an elevated shell on Windows) and the phone
+  app when no iOS/Android device is in the tailnet yet. On Linux the section follows the install; on Windows
+  `-Tailscale` prints it and exits without downloading anything. Neither installer runs sudo or elevates.
+  `install.sh --selftest` drives every state against a fake `tailscale` on PATH (39 checks); `install.ps1
+  -Selftest` does the same through a fake seam.
+- **Phone microphone with a live transcript** (#290). On the HTTPS address the phone records with MediaRecorder
+  and uploads the clip with the same guards; the window transcribes it with `crow_voice` (same model and settings
+  as the desktop's dictation) and puts the words into that phone's input, never sent. Every 1.5 s the recording so
+  far is transcribed as a greyed partial; recording stops after 2 s of silence once speech was heard; the button
+  shows listening / writing / loading the speech model. One transcription per phone at a time, only the newest
+  partial waits, finals first. One `crow.log` line per final dictation. Measured 2026-09-24 (faster-whisper small
+  int8, CPU): 5 s clip 1.25–1.4 s, 10 s 1.4 s, 15 s 1.5 s; model load from cache 0.85 s. Plain HTTP keeps the
+  keyboard-dictation hint.
+- **Fresh-eyes judge for visual work** (#266, #286). The `judge` tool sends images and a rubric to a vision model
+  in a fresh request with no history and stores the score in goal.json; without a pin it uses the local model. The
+  rubric leads with the step's own text ("delivers: <step>"); the goal's `accept:` lines, PLAN.md, the caller's
+  criteria or a default rubric only add to it (#286: step 3 "G-buffer and voxel volume" had passed on step 2's
+  camera criteria). The verdict records its rubric source. Live on the 2026-09-23 "9+" final frame: 4 vision models
+  scored it at most 2.
+- **Evidence gate for visual steps** (#267). `goal_step done` on a visual step needs a capture from this goal and
+  a judge minimum of at least `judge_threshold` (default 8; `--judge-threshold`, settings `judge_threshold`).
+- **Render-loop breaker** (#268, #277). Three captures of one page that come back the same get a bisect nudge; six
+  force a rollover that carries what was tried. A capture with a luma mean ≤ 4/255 counts as stuck, and captures
+  are counted in every turn, including turns cut by a same-failure nudge or a mid-turn rollover (#277: on
+  2026-09-24, 9 near-black captures of one page, luma mean 1–2/255, got 0 nudges; the replay nudges at session
+  message 13 and forces the roll at 155). A black streak gets a concrete bisect (one pass in isolation; `getError`,
+  `checkFramebufferStatus`, `readPixels`).
+- **Failed goal steps are retried once, then skipped; `/goal skip`** (#289). The first `failed` sends the step back
+  with the failure note and asks for a different approach; the second marks it `skipped` and the goal moves on. A
+  goal whose steps are all done or skipped ends `partial` ("complete with N skipped"), never `done`.
+  `/goal skip <n> [reason]` works in the window, on the phone and in the terminal. The goal bar shows skipped steps
+  and follows goal.json every round, before every turn and on `/goal`, so a hand edit shows at once.
+- **render_page metrics and an enlarged crop** (#265). Coverage, colours and luma per render; a small scene gets an
+  enlarged content crop for `read_image`. 2026-09-23: the scene filled 7–22 % of 62 renders.
+- **Context editing below the rollover** (#263). At 0.65 of the window, tool results older than the last 5 rounds
+  become a one-line stub, in batches that free at least 10 %; the originals go to `session/cleared/`.
+  `context_clear_at` in settings, `--context-clear-at`. Replay: rollovers 55 and 88 rounds later.
+- **crow.log** (#262). Crow's own status lines go to `~/.local/state/crow/log/crow.log` with local time and offset,
+  rotated, instead of into the chat: goal brake, same-failure streak, degenerate round, cache, budget, context
+  clearing (#263), the rollover line and #98's boundary alarm, chat-open and `/goal` setup notes, the "no folder"
+  note, a browser-panel crash (#279) and rejected memory writes (#285). The roll card, the `/goal` status answer
+  and the #226 memory-ceiling stop stay in the chat.
+- **One syntax-check table for all file tools** (#269). `edit_file` parses what it left (node for JS/HTML) and says
+  whether this edit broke the file or it was broken before; settings `syntax_checks` maps an extension to a command
+  for `write_file`, `append_file` and `edit_file`. Replay of 2026-09-23: 0 of 66 JS/HTML edits broke a file —
+  parity, not a measured failure.
+- **Machine facts in the prompt head, and memory may not contradict them** (#270). The head names OS, CPU, RAM, GPU
+  and total VRAM (probed once per process) and says a tool's limit is not the machine's; `memory` refuses a
+  no-GPU/CPU-only note that does not name the real card, and a "tool changes bytes" note. 2026-09-24: the diorama
+  run had saved "Machine has NO GPU" on an RTX 5090.
+- **render_page says why it rendered in software** (#271): the card's free VRAM against the bound, that the model
+  server holds it, and that the machine has the GPU. 2026-09-23: 49 of 49 captures fell back.
+
+### Changed
+
+- **Version 2.6.0.**
+- **Hosts nobody named are refused** (#288). `render_page` and `fetch_url` refuse a remote host that appears nowhere
+  in the conversation (the user's words, a tool result, the goal, PLAN.md) before any socket or browser opens, with
+  a next step; loopback always passes, a subdomain of a named host counts, and it is on in every mode, yolo
+  included. Across a rollover a Crow-written line carries the newest 60 hosts.
+- **The memory gate answers every approved write** (#285). A refusal, a duplicate or an expired entry comes back as
+  "Memory: not saved -- <reason>" in the window and the terminal, and goes to `crow.log`. The Memory Consolidation
+  tile has three states (collapsed, previews, full text) and shows a replace as "- old" above "+ new".
+- **session_search covers rollover segments and chats put aside** (#287). 0 of 6 rollover segments on disk were
+  searchable, because #261 took them out of the rail the index read. A segment hit is labelled
+  "<chat title> (before the cut, <date>)", every hit prints its path, and a search in the first turn of a new chat
+  no longer drops the chat just put aside.
+- **A line typed during a turn is queued, never a stop** (#264, #282). In goal mode it goes before the goal nudge.
+  A line opening with `/` that is not a Crow command (a path) is queued too; the button reads `↑ Queue` while the
+  box holds a line; a Crow command waits in the box; an IME-confirming Enter is not a submit. **Stop pauses goal
+  mode** (#282): Stop used to end one turn while the engine started the next at once; now the engine pauses with
+  a note until the next line you send.
+- **edit_file answers a missed `old` with the closest text** (#276): line numbers, what differs, whitespace-only
+  named; a uniform indentation drift with one unambiguous window is applied and said. 16 of 147 edits missed on
+  2026-09-23/24; replayed, 3 now land and 11 of the other 12 get the region.
+- **Chat bubbles stand on the composer's edges** (#280): your bubble right-aligned on the input box's right border,
+  Crow's text on its left border (the `●` column is gone). Headless Chromium 2026-09-24, 32 layouts: 716–780 px
+  (user) and 40 px (Crow) off before, 0.0 px after.
+- **The Subtasks card closes like the goal card** (#281): an `×` in the same place hides the card and its 306 px
+  column reserve; nothing is cancelled, and a new subtask or a jump brings it back.
+- **Rollover archives leave the chat rail** (#261) for the archive drawer; a Crow note is never a chat title.
+- **goal_set carries the whole step record** (#260): notes, seconds and tokens of a re-declared step survive.
+- **Comments on `presence_penalty`** (nibor1896/crow-nest#111) no longer say crow-nest reads an absent field as 1.5
+  (it is 0 since crow-nest #91). No behaviour change: Crow sends 0.0 explicitly.
+
+### Fixed
+
+- **edit_file rewrote a whole CRLF file as LF** (#283). A one-line edit of a 40-line CRLF file left 0 CRLF
+  (measured 2026-09-24 at 57ed521). The file is now read raw and only the matched span is replaced, in the ending
+  it had: 40/0 stays 40/0, a 20/20 mixed file stays 20/20.
+- **The browser panel crashed in the NVIDIA driver next to GPU renders, and a folded panel still loaded pages**
+  (#279). 2026-09-24: the panel's WebKitWebProcess segfaulted in `libnvidia-eglcore` 5–10 s after each of two GPU
+  `render_page` captures (~560 MiB free), and after six crashes the window stopped repainting. render_page's GPU
+  bound is now 1,536 MiB while the panel is open or holds a page (512 MiB otherwise); a folded or hidden panel
+  unloads its page and loads nothing; after a crash the dead view is hidden and the window redrawn, and a watched
+  page is reloaded once; during a local-model turn the panel renders without hardware acceleration.
+- **The visual gate refused the planning step** (#267). "Think and plan: … verify findings, write PLAN.md" counted
+  as visual because of "verify"; the step's leading phrase decides now, and the refusal names the planning
+  exemption.
+- **An identical `render_page` after an edit replayed the old capture** (#273). `render_page` joins
+  `run_command`/`build_bundle` in `NEVER_CACHED`.
+- **`render_page` dropped a local page's `?query` / `#fragment`** (#272): `index.html?view=albedo` came back
+  "no such page" (2026-09-24, session.json msg 36/37), and the model stored "file:// rejects a ?query" in memory.
+  The file is checked without the suffix, which goes back onto a percent-encoded `file://` URL (RFC 8089 for drive
+  letters and UNC).
+- **build_bundle missed deno's esbuild and gave advice the model could not follow** (#274). It now looks in
+  `~/.cache/deno`, takes `bundler` in settings.json or `--bundler PATH`, and its error names the settings file and
+  the `node_modules/.bin/esbuild` link and says an `export` does not reach Crow. Measured 2026-09-24: finds
+  esbuild 0.25.5 in `~/.cache/deno/dl/` (was: none).
+- **The round that spent the tool budget was decoded and thrown away** (#278): 6 of 6 budget turns on 2026-09-24
+  decoded one more round (298–4,290 tokens, 11,240 / 271 s in total). A budget turn is now 24 tool rounds + the
+  answer (25 requests, was 26).
+- **`goal_step running` on the running step restarted its clock** (#275): step 2's 73.5 min and its tokens vanished
+  from goal.json on 2026-09-24. A repeated `running` keeps `started` and stores its note.
+- **The goal brake judged a turn by its last message** (#258) and cut 157 + 52 messages of real work on 2026-09-23
+  (cold prefills of 106k). A turn that ran tools is never "empty".
+- **A forced answer after the tool budget could be reasoning-only** (#259) and the window showed nothing; the
+  reasoning is surfaced now.
+- **A subtask stopped while its attempt fails closed "failed"** (#242) and memoed the spot dead; it closes
+  "interrupted" now.
+- **A retired free model's 404 counted as transient** (#284). "unavailable for free" matched the retry pattern, so
+  every subtask of the 2026-09-24 diorama wave spent 1 of 3 attempts on a spot that can never answer; it is a spot
+  refusal now (memoed, next spot).
+- **Phone mirror fixes found on robin's iPhone** (#249): pairing no longer holds a request open (Chrome for iOS gave
+  up after ~6 s; `POST /pair` answers 202 and the page polls `/pair/wait`), a paired phone ignores a stale pairing
+  code, a phone page load no longer re-recorded every note (1 "no folder" note became 32), and Safari's toolbar
+  tint and scrolling stay as loaded after a drawer closes.
+
+### Known limitations
+
+- **The phone on real devices** (#249, #290): pairing, the mirror, the HTTPS address and the microphone were used
+  live on robin's iPhone (iOS 27, Safari and Chrome); the auto-hiding home-screen header and the drawer fixes were
+  checked in Chromium emulation only. Android is unverified. `/remote` is window-only; the terminal answers
+  "stage 2".
+- **Tailscale on Windows is unverified** (#249 stage 5): the dialog, the serve command without `sudo` and
+  `install.ps1 -Tailscale` were not run on a Windows machine, and `install.ps1 -Selftest` was not run for this
+  release (no PowerShell on the Linux release machine).
+- **#279** is covered by unit tests only (red without the fix); not yet checked live.
+- **#288** counts a tool result's hosts by URL only: a host that appears there as a bare name, and nowhere else,
+  is refused.
+- **#269/#251 need node on PATH** for JS/HTML; neither installer installs node.
+- `check_gui_prereqs` (not in CI) reports 2 of 3 prerequisites: point (ii) fails on 13 glyphs missing from
+  Google Sans Code (both shipped faces, 26 problems) — the 12 of 2.5.0 (0c3e392) plus U+1F3A4 🎤, new with the phone
+  microphone (#290, 4d753af; `cli/crow_core.py:18037`, `cli/crow_gui.py:8740`). Measured 2026-09-24 at 0a0304b.
+- Still open from 2.5.0: the Windows installer bundle (#196); `sampling_no_thinking`'s presence_penalty 1.5 (#246).
+
 ## 2.5.0 — 2026-09-23
 
 Everything on `release-2026-09-23` since origin/main (6301e0e, 2026-09-20): 65 commits,

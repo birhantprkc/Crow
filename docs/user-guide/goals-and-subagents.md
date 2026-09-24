@@ -17,12 +17,13 @@ while it keeps going.
 | | |
 |---|---|
 | Tools | `goal_set(title, steps)` writes the plan, `goal_step(step, status, note)` moves one step |
-| From the composer | `/goal <title>` then one step per line, or `title \| step \| step`. A line `check: <command>` (or a `\| check: <command>` part) is the acceptance check, not a step (#250). `/goal` alone shows where it stands, `/goal off` clears it and its check |
+| From the composer | `/goal <title>` then one step per line, or `title \| step \| step`. A line `check: <command>` (or a `\| check: <command>` part) is the acceptance check, not a step (#250). A line `accept: <criterion>, <criterion>` is the rubric the [judge](../reference/tools.md#judge-266) scores against, not a step (#266). `/goal` alone shows where it stands, `/goal skip <n> [reason]` skips step n (#289), `/goal off` clears it and its check |
 | Panel | the first of the pinned cards at the top right of the chat (goal, subtasks, git): title, `done/total`, wall clock, tokens, delegated tokens, and one row per step |
 | Store | `<root>/.crow/goal.json`, beside `MEMORY.md` — the goal belongs to the folder the work is in |
-| States | `open` · `running` · `done` · `failed` |
+| States | `open` · `running` · `done` · `failed` · `skipped` (#289). The goal ends `done`, or "complete with N skipped" when a step was skipped |
+| Talking to it | a line typed while a goal turn runs is queued and runs **before** the next nudge, resetting the turn caps (#264). **Stop pauses the goal**: the turn ends, no next turn starts, a note says so, and the next line you send resumes it (#282). Escape = Stop |
 | Limits | 60 turns for the whole goal, 25 for one step, a brake on three identical or three empty answers, and the same failure class three times in one step named in the next nudge (#165, #202) |
-| `done` | refused when its note says the step is not done, and — with a `check:` set — refused on the step that would close the goal until the check exits 0 (#250) |
+| `done` | refused when its note says the step is not done, and — with a `check:` set — refused on the step that would close the goal until the check exits 0 (#250); on a visual step, refused without a capture from this goal in the note or under the judge's bar (#267) |
 
 **Two tools and not one, because they cost different things.** The plan goes into the pinned head
 of every prompt, so writing one costs a full prefill — the composer says so before it changes
@@ -34,12 +35,29 @@ been five full prefills.
 survives a rollover, a restart, and a window that is opened a day later on the same folder. A new
 session that finds an active goal says which one it is and how far it got, instead of leaving it
 invisible until somebody asks. At a rollover the head is re-pinned anyway, so that one head carries
-the marks — each step `[done]`, `[failed]`, `[running]` or `[open]`, plus the next open step — as
+the marks — each step `[done]`, `[failed]`, `[skipped]`, `[running]` or `[open]`, plus the next open step — as
 they stood at the cut; they are not refreshed afterwards (#210).
 
 **One step runs at a time.** The local server has one slot (`-np 1`), so a store that allowed two
-`running` steps would describe a machine that does not exist. A `failed` step may be started again
-later.
+`running` steps would describe a machine that does not exist.
+
+**A failed step is retried once, then skipped (#289).** Seen live on 2026-09-24: the model reported
+step 4 `failed` with an honest note (ray lighting cannot be checked on this machine's software GL).
+Crow still handed it back as the next step on every turn, for about 2 h 20 min.
+
+| | |
+|---|---|
+| First `failed` | the step comes back **once**. The next nudge quotes its failure note and asks for a different approach. The `goal_step` answer says `retry` |
+| Second `failed` on the same step | the step becomes `skipped`, and the answer says so. `next_step` names the step after it |
+| `/goal skip <n> [reason]` | you skip step n: window, terminal and phone. The reason becomes the step's note (default: "skipped by the user"). A `done` step cannot be skipped. There is no `/goal done <n>`: acceptance stays with the evidence gates below |
+| `skipped` | counts as not done. The engine moves past it. The goal ends "complete with N skipped", never `done`, and an acceptance check does not run for it |
+| Panel | the step shows an amber arrow and its note as a tooltip. The head (and the thin phone bar) says `step 4 skipped`, or `Complete · step 4 skipped` at the end |
+| Back to work | `goal_step(n, "running")` reopens a skipped step, the same way it reopens a `done` one |
+
+**The panel follows goal.json, not only the goal tools (#289).** Every round, before every turn and
+on `/goal`, Crow reads the file and redraws the panel when a step or the goal changed state. A hand
+edit of `goal.json` shows up at the latest after the current round. Before, only `goal_set` and
+`goal_step` redrew it during a turn, so a hand edit stayed hidden until the next turn ended.
 
 **`done` means verified working (#250).** Seen live on 2026-09-23: a goal closed at 9/9 over a
 page that drew nothing, with step notes such as "treated as done-with-deviation only in spirit".
@@ -61,6 +79,34 @@ Two guards now stand in front of `goal_step(..., "done")`:
 
 Not measured: whether the model then finishes the work instead of stopping at the refusal.
 
+**A visual step is done on a picture (#267).** Seen on 2026-09-23: 9/9 `done`, step 8's note
+"Every criterion reads 9+ on the capture", and the capture it named was a small purple box in a
+black frame. The two guards above passed all nine final notes. On a **visual goal** — its title or
+steps name visual work (render, screenshot, html, css, canvas, webgl, scene, diorama, voxel, 3d,
+shader, svg, ui, …), or `goal.json` says `"visual": true` (`false` switches it off) — a `done`
+also needs:
+
+- *A capture from this goal in the note.* A path to a `.png`/`.jpg`/`.webp` that exists and was
+  written after the goal was created. A bare name such as `render-20260923-232855.png` is looked up
+  in `.crow/renders/`. A step that only plans is exempt: its leading phrase (before the first `:`,
+  `,` or `(`) starts with think/plan/research/read/outline, and it names no making verb (build,
+  implement, render, draw, code, write the page). "verify"/"fix" later in such a step count as
+  planning when it writes a document (`.md`, plan, notes, report), so "Think and plan: …, verify
+  findings, write PLAN.md" is exempt and "Verify offline via file://, fix, report fps" is not.
+  The refusal says so.
+- *The judge's bar, when a judge scored the step.* If [`judge`](../reference/tools.md#judge-266)
+  stored a verdict on the step, its lowest score must be at least the threshold: **8** by default,
+  `judge_threshold` in `settings.json` (window) or `--judge-threshold N` (terminal). The refusal
+  names the lowest criteria and the judge's three weakest points.
+
+The refusal says what is missing and how to get it: `render_page`, `read_image`, `judge`, and the
+path in the note, or `failed` with a reason when nothing can be rendered. The step nudge says the
+same thing when it hands out a visual step, so the first refusal is not the first time the model
+hears the rule. The goal from 2026-09-23, with its final notes replayed: before 9/9 accepted, after
+6 refused (steps 2–6 with no note, and step 9 with no capture). Step 1 is exempt as planning.
+Steps 7–8 cite real captures and are held by the judge's score. Goals without visual work are
+unchanged.
+
 **Crow's nudges are not your words (#240).** Goal-mode nudges travel as user-role messages and
 carry the model's own plan text. The paths in them used to count as user-named, which released the
 outside-path question (#144) for places only the model had named. Now only a plan you typed with
@@ -74,6 +120,8 @@ nudge. Four things catch that now (#202).
 — or three empty ones, where empty means at most two characters and no tool call at all, are read
 as a loop rather than as progress. Those turns are then **taken out of the history**, nudge and
 answer together, and one recovery line goes out in their place naming the step that is still open.
+How many messages were taken out is written to Crow's log file (`~/.local/state/crow/log/crow.log`,
+see [the window](window.md), *Crow log*), not into the flow.
 An empty answer to that line ends the goal, with a line in the flow saying how many times, at what
 context size, and how many of how many steps are done. There is no second recovery line. Removing
 the loop is the point: an empty answer left standing in the history is an example the next turn
@@ -118,11 +166,58 @@ Only failures count: a result that starts with `error:` or a command with a non-
 a command only when a signature can be read — a `grep` that found nothing is not an error. At
 **three** of one class in one step (the brake's number, and the one OpenHands, Aider and SWE-agent
 settled on), the next nudge carries one line per tripped class — class, count, the way around —
-**instead of** the step text, and the flow shows a note. The line comes back only when that class
+**instead of** the step text, and a line naming class and count goes to `crow.log` (not into the
+flow; the nudge itself is what the model reads). The line comes back only when that class
 came back; a model that stopped is not told again. The counts belong to the step: they start over
 when the step changes, when the model marks it `done`, and when you type a line. A step marked
 `failed` keeps them, because Crow nudges that same step again. Counting happens between turns, so
 a single turn can still spend its 24 tool rounds on the wall before the line arrives.
+
+*The same picture, again (#268).* A debug loop can fail nothing and still go nowhere. Seen on
+2026-09-23, 22:30–22:48: seven captures of `chain.html` in a row at 99.2–99.4 % one colour (a
+black frame with an fps line), with an edit to another pass before each one. Every turn called
+tools and no result was an error, so neither mechanism above fired. Crow therefore also counts,
+per page, the `render_page` captures that came back **stuck**. A capture is stuck when it carries
+a blank verdict (#213 blank or almost one colour, #175 byte-identical, "only N distinct colours"
+from the pixel metrics), when its decoded frame is at least 98 % one colour, or when it nearly
+matches the previous capture of the same page. "Nearly matches" uses the `metrics:` numbers
+within 3 % (or ±2) when the render wrote them. Without them it uses the dominant-colour share
+within 0.005 and the size within 3 %. A page never captured before in the step counts as a changed
+approach and starts at zero.
+
+| Stuck captures of one page | What happens |
+|---|---|
+| 3 | one nudge: *stop editing — bisect: render a minimal probe (the clear colour only, then one lit cube), then re-enable the passes one by one and render after each* |
+| 6 | a forced rollover, even below the threshold. The line it carries lists each stuck capture with its verdict and the files written before it ("render-….png: 99.4 % one colour after writing src/03.js"). One per step; after that, the nudge again every third capture |
+
+The count belongs to the step and is cleared by `goal_step … done`, like the failure classes. The
+flow shows a note each time. It is replayed on the four session files of 2026-09-23: nudges before
+messages 35 and 295 (rollover-210418, `index.html`, three near-identical and then three black
+captures) and 314 (rollover-225111, `chain.html`, the 22:30 streak). No forced roll: each time the
+model moved to another page (`verify-trace.html`, `probe.html`) before a sixth capture.
+
+*No picture at all (#277).* On 2026-09-24 step 2 ran more than 1.5 h with 9 near-black captures of
+`index.html` and the breaker above never fired. The frames showed a small lit patch on black: 91–96 %
+one colour, so under the 98 % line, and their coverage kept changing (7 → 40 → 25 %), so no two
+"nearly matched". A capture is therefore also stuck when its `metrics:` line says **luma mean 4/255
+or less** (decoded from the PNG when the line is missing). Measured that day: the black frames at
+0–2, the one real scene at 31, white text pages at 251–255 (a white page is a page, not "no picture").
+Three more changes to the counting:
+
+- The captures are counted every turn, also when a same-failure nudge speaks first. That turn's
+  three black captures had been skipped.
+- A turn cut by a rollover in the middle is still counted: the new context starts with the rollover
+  note, so Crow scans everything after it (the carried tail of the turn).
+- The same PNG is counted once. A repeated call answered from the first result and a result
+  carried across the cut are not new captures.
+
+When the last capture shows no picture, the nudge and the rollover line say "showed no picture"
+and the bisect is concrete: *render ONE pass in isolation straight to the screen — the albedo/base
+colour only, no lighting; then the normals as colour; then the depth. After each draw check
+`gl.getError()` and `gl.checkFramebufferStatus()`, read a few pixels back with `gl.readPixels`, and
+log those values to the console.* It names checks, not code. The thresholds (nudge at 3, roll at 6)
+are unchanged. Replayed on 2026-09-24's two session files: the nudge before session message 13 (the
+first nudge after the 10:50 rollover, 3 black captures), the forced roll before message 155 (9).
 
 **The counters are the goal's, not the steps' sum.** Wall clock runs from the first step that
 started, and tokens are what the goal cost across every context it lived in — thinking, tool
@@ -170,7 +265,7 @@ that failed this session is skipped.
 | The spot answered | Meaning | The chain |
 |---|---|---|
 | 429, 408, 5xx, a timeout, "provider returned error", an empty reply | this spot is sick right now | next spot; at most three sick spots |
-| 403 (a model gated to agentic harnesses, a moderation flag), "no endpoints found", 402 on a **paid** favourite | this spot will not serve this client | next spot; up to six refusals, not counted against the three |
+| 403 (a model gated to agentic harnesses, a moderation flag), "no endpoints found", a retired free slug's 404 ("unavailable for free", #284), 402 on a **paid** favourite | this spot will not serve this client | next spot; up to six refusals, not counted against the three |
 | 401, 402 on a **free** spot (the account is below zero), a schema error | the key, the account or the request is wrong | stops. Every spot would answer the same way |
 
 A spot that failed is skipped for the rest of the session, with its reason. A spot that hit a stop

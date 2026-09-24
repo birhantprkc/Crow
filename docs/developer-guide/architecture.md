@@ -2,15 +2,16 @@
 
 # Architecture
 
-Five modules under `cli/`. Line counts measured 2026-09-23 on `release-2026-09-23` (0311d0d).
+Six modules under `cli/`. Line counts (`wc -l`) measured 2026-09-24 on local main (b9cac62).
 
 | | lines | holds |
 |---|---|---|
-| `crow_core.py` | 22361 | every rule both surfaces obey: tools, the turn loop, memory, skills, MCP, remote providers, sessions |
-| `crow_gui.py` | 14096 | the window. Page, pywebview API, the browser pane, and nothing a rule depends on |
-| `crow.py` | 2579 | the terminal client. Screen, slash commands, `VERSION` |
-| `crow_platform.py` | 1098 | the platform seam: where things live, how a process is found and killed, per OS |
-| `crow_voice.py` | 238 | dictation: microphone and recogniser only |
+| `crow_core.py` | 25886 | every rule both surfaces obey: tools, the turn loop, memory, skills, MCP, remote providers, sessions |
+| `crow_gui.py` | 17192 | the window. Page, pywebview API, the browser pane, and nothing a rule depends on |
+| `crow.py` | 2623 | the terminal client. Screen, slash commands, `VERSION` |
+| `crow_platform.py` | 1435 | the platform seam: where things live, how a process is found and killed, per OS |
+| `crow_voice.py` | 293 | dictation: microphone and recogniser, and the phone's recorded clip (#290) |
+| `crow_remote.py` | 1477 | the phone mirror (#249): LAN HTTP + SSE server, pairing, devices, stdlib QR, the loopback listener for `tailscale serve` and the read-only Tailscale state (stage 5), the phone's audio upload (#290) |
 
 ## The split
 

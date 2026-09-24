@@ -32,6 +32,12 @@
    "label": "voice",
    "why": "Dictation: the microphone and the recogniser, and nothing else. A HELPER and not a surface, because it is not a client of the core -- it owns audio and the text that comes out of it, never a turn, a prompt or a session. It is still held to the definition and import predicates: if it ever re-decided something crow_core.py already decides, that is exactly the drift this manifest exists to catch. It lives in cli/ for the reason crow_gui.py gives -- tools/pack-release.ps1 copies cli/ as a whole and nothing else -- and beside the window because only the window can reach it: the terminal has no button to press."
   }
+,
+  {
+   "path": "cli/crow_remote.py",
+   "label": "remote",
+   "why": "#249, the phone's way into a running window: a LAN-only HTTP server (pairing, paired devices, the /api dispatcher, the event streams) and the QR encoder for its pairing URL. A HELPER and not a surface, because it is not a client of the core -- it owns transport and pairing, never a turn, a wording or a decision: the /remote wording lives in the core, every call it forwards is answered by the window's Api, and what reaches it are callables. It never imports crow_core, so a core name appearing in here is a finding rather than a wiring. Its own status lines go to crow.log through a callable, not into the chat. It lives in cli/ for the reason crow_gui.py gives -- tools/pack-release.ps1 copies cli/ as a whole and nothing else."
+  }
  ],
  "names": [
   {
@@ -168,6 +174,11 @@
    "name": "tool_goal_step",
    "kind": "def",
    "why": "#165. The one door that moves a step, and since #168 the one that reopens a finished one. Two implementations would be two answers to what a tick means -- and the engine picks the first step that is not done, so a second answer sends it past the work that is running."
+  },
+  {
+   "name": "tool_judge",
+   "kind": "def",
+   "why": "#266. The fresh-eyes judge of a capture: one spot order (judge pin, delegate chain, own model in a fresh request), one rubric order (accept lines, PLAN.md, caller, default) and one place the verdict lands on the goal step, where goal_step's gate (#267) reads it. A second implementation would be a second answer to who judged and against what."
   },
   {
    "name": "subtask_view",

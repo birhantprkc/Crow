@@ -68,6 +68,8 @@ crow_core.SESSION_DIR = os.path.join(_NOWHERE, "session")
 crow_core.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
 crow_core.SKILLS_DIR = os.path.join(_NOWHERE, "skills")
 crow_core.USER_PATH = os.path.join(_NOWHERE, "USER.md")
+# #262: Crow's own log file, never the real one under the state dir.
+crow_core.LOG_FILE = os.path.join(_SANDBOX, "log", "crow.log")
 crow.ROOTS_FILE = crow_core.ROOTS_FILE
 crow.SESSION_DIR = crow_core.SESSION_DIR
 crow.SESSION_FILE = crow_core.SESSION_FILE
@@ -703,6 +705,12 @@ class ShowReasoningTests(unittest.TestCase):
     def test_the_flag_is_off_by_default(self):
         self.assertFalse(crow.build_parser().parse_args([]).show_reasoning)
 
+    def test_the_bundler_flag_names_an_esbuild(self):
+        """#274: the terminal's twin of the window's `bundler` setting."""
+        self.assertIsNone(crow.build_parser().parse_args([]).bundler)
+        self.assertEqual(crow.build_parser().parse_args(
+            ["--bundler", "/opt/esb/esbuild"]).bundler, "/opt/esb/esbuild")
+
     def test_the_flag_turns_it_on(self):
         self.assertTrue(crow.build_parser().parse_args(["--show-reasoning"]).show_reasoning)
 
@@ -715,14 +723,36 @@ class ShowReasoningTests(unittest.TestCase):
         self.assertTrue(events.reply_events()._show)
         self.assertFalse(crow.TerminalTurnEvents(out=out).reply_events()._show)
 
-    def test_the_terminal_says_why_a_round_was_asked_again(self):
-        """#217: the discarded round's stub is already on screen; the note is
-        what stops the re-request looking like a second answer."""
+    def test_status_notes_go_to_the_log_not_the_screen(self):
+        """#262 (robin, 2026-09-23): Crow's own status lines -- a
+        discarded degenerate round, a cache that did not hold, a spent tool
+        budget -- are written to crow.log with a timestamp, not printed."""
+        logs = tempfile.mkdtemp(prefix="crow-log-")
+        self.addCleanup(shutil.rmtree, logs, True)
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        crow_core.LOG_FILE = os.path.join(logs, "crow.log")
+        out = io.StringIO()
+        events = crow.TerminalTurnEvents(out=out)
+        events.turn_note("discarded a degenerate reply (stub, 15 chars, seed 7) "
+                         "-- asking again with a new seed")
+        events.cache_promise_broken()
+        events.budget_spent(24)
+        self.assertEqual(out.getvalue(), "")
+        with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertRegex(lines[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d{4} "
+                                   r"\[turn\] discarded a degenerate reply")
+        self.assertIn("the restored cache did not hold", lines[1])
+        self.assertIn("tool budget spent after 24 rounds", lines[2])
+
+    def test_a_server_reboot_note_still_reaches_the_screen(self):
+        """NEGATIVE: the reboot/load-wait lines stay visible (robin,
+        2026-08-28: a silent 70 s reboot looks like the crash it repairs)."""
         out = io.StringIO()
         crow.TerminalTurnEvents(out=out).turn_note(
-            "discarded a degenerate reply (stub, 15 chars, seed 7) -- asking "
-            "again with a new seed")
-        self.assertIn("discarded a degenerate reply (stub", out.getvalue())
+            "the server on port 8080 is still loading -- waiting")
+        self.assertIn("still loading -- waiting", out.getvalue())
 
     def test_repl_carries_the_switch_into_every_turn(self):
         """`/thoughts` flips it BETWEEN turns, so it may not be read once at
@@ -3061,7 +3091,8 @@ class EditFileHitCountTests(ToolLayerCase):
 
     def test_the_count_is_on_raw_text_with_no_whitespace_tolerance(self):
         """MEASURED BEHAVIOUR, and the first thing a fuzzy rebuild changes:
-        'call(a,  b)' with two spaces does not match 'call(a, b)'."""
+        'call(a,  b)' with two spaces does not match 'call(a, b)'. #276 forgives
+        leading indentation only, so this still misses."""
         path = self._make("code.py", "call(a,  b)\n")
         crow.tool_read_file(path)
         self.assertIn("does not appear",
@@ -3081,6 +3112,201 @@ class EditFileHitCountTests(ToolLayerCase):
         crow.tool_read_file(first)
         self.assertIn("before editing it",
                       crow.tool_edit_file(second, old="alpha", new="beta"))
+
+
+class EditFileMissTests(ToolLayerCase):
+    """#276. A missed 'old' is answered with the closest text and what differs,
+    and a miss on uniform indentation alone lands -- nothing wider.
+
+    Measured 2026-09-23/24 over robin's diorama runs: 16 of 147 edit_file calls
+    missed; 3 on a uniform indentation drift (1 space from read_file's "N: "
+    prefix, twice), 1 on a line wrap, the other 12 on text that is not in the
+    file. The bare "does not appear" line gave the model nothing to fix.
+    """
+
+    SRC = ("def f(a):\n"
+           "    x = a + 1\n"
+           "    y = x * 2\n"
+           "    return y\n"
+           "\n"
+           "def g():\n"
+           "    return 7\n")
+
+    def _miss(self, old, new="z = 0", text=None, name="code.py"):
+        path = self._make(name, self.SRC if text is None else text)
+        crow.tool_read_file(path)
+        return path, crow.tool_edit_file(path, old=old, new=new)
+
+    def test_the_first_line_stays_what_the_goal_brake_keys_on(self):
+        path, result = self._miss("    y = x * 3\n")
+        self.assertEqual(result.split("\n")[0], f"error: 'old' does not appear in {path}")
+        self.assertIn("\n", result)
+
+    def test_a_miss_names_the_closest_line_and_what_differs(self):
+        path, result = self._miss("    y = x * 3\n")
+        self.assertIn("closest text is at line 3", result)
+        self.assertIn("file 3:     y = x * 2", result)
+        self.assertIn("old   :     y = x * 3", result)
+        self.assertIn("3:     y = x * 2", result)
+        self.assertEqual(self._text(path), self.SRC)
+
+    def test_a_multi_line_miss_points_at_the_region(self):
+        """The measured m284 shape: 17 lines right, one token wrong."""
+        path, result = self._miss("    x = a + 1\n    y = x * 9\n    return y\n")
+        self.assertIn("closest text is at lines 2-4", result)
+        self.assertIn("file 3:     y = x * 2", result)
+        self.assertNotIn("file 2:", result)
+
+    def test_a_line_wrap_is_named_a_whitespace_difference(self):
+        text = "total = first + second + third\n"
+        path, result = self._miss("total = first +\n    second + third\n", text=text)
+        self.assertIn("differs only in whitespace", result)
+        self.assertIn("line breaks", result)
+        self.assertEqual(self._text(path), text)
+
+    def test_nothing_alike_says_so(self):
+        _path, result = self._miss("completely unrelated words here\n")
+        self.assertIn("No part of the file resembles 'old'", result)
+
+    def test_the_hint_is_bounded(self):
+        text = "".join("line_%04d = %d\n" % (n, n) for n in range(3000))
+        old = "".join("line_%04d = X%d\n" % (n, n) for n in range(100, 180))
+        _path, result = self._miss(old, text=text)
+        self.assertIn("closest text", result)
+        self.assertLessEqual(len(result.split("\n", 1)[1]), sys.modules[crow.tool_edit_file.__module__].EDIT_HINT_CHARS)
+
+    def test_uniform_extra_indentation_lands_and_new_is_shifted(self):
+        """m290: every line one space deeper than the file, 'new' likewise."""
+        path, result = self._miss("     x = a + 1\n     y = x * 2\n",
+                                  new="     x = a + 2\n     y = x * 3\n")
+        self.assertIn("replaced 1 occurrence", result)
+        self.assertIn("1 leading space too many", result)
+        self.assertIn("lines 2-3", result)
+        self.assertEqual(self._text(path), self.SRC.replace(
+            "x = a + 1\n    y = x * 2", "x = a + 2\n    y = x * 3"))
+
+    def test_uniform_missing_indentation_lands_and_new_is_indented(self):
+        path, result = self._miss("y = x * 2\nreturn y", new="y = x * 4\nif y:\n    return y")
+        self.assertIn("too few", result)
+        self.assertEqual(self._text(path), self.SRC.replace(
+            "    y = x * 2\n    return y",
+            "    y = x * 4\n    if y:\n        return y"))
+
+    def test_the_shifted_edit_is_syntax_checked_like_any_other(self):
+        """#269's check runs on this path too, on the text it left."""
+        core = sys.modules[crow.tool_edit_file.__module__]
+        with mock.patch.object(core, "syntax_check",
+                               return_value="\nsyntax check (stub): ok"):
+            path, result = self._miss("      return 7", new="      return (")
+        self.assertIn("\n    return (\n", self._text(path))
+        self.assertIn("ignoring indentation", result)
+        self.assertIn("replaced 1 occurrence", result)
+        self.assertIn("syntax check", result)
+
+    def test_two_windows_after_indentation_refuse(self):
+        text = "if a:\n    go()\nif b:\n    go()\n"
+        path, result = self._miss("      go()\n", text=text)
+        self.assertIn("does not appear", result)
+        self.assertIn("closest text", result)
+        self.assertEqual(self._text(path), text)
+
+    def test_uneven_indentation_refuses(self):
+        path, result = self._miss("     x = a + 1\n      y = x * 2\n",
+                                  new="     x = 0\n      y = 0\n")
+        self.assertIn("does not appear", result)
+        self.assertIn("closest text", result)
+        self.assertEqual(self._text(path), self.SRC)
+
+    def test_tabs_against_spaces_refuse(self):
+        path, result = self._miss("\tx = a + 1\n\ty = x * 2\n", new="\tx = 0\n")
+        self.assertIn("does not appear", result)
+        self.assertIn("differs only in whitespace", result)
+        self.assertEqual(self._text(path), self.SRC)
+
+    def test_a_new_that_cannot_take_the_shift_refuses(self):
+        """'old' one space too deep, but a line of 'new' is not: no single
+        shift exists, so nothing is guessed."""
+        path, result = self._miss("     x = a + 1\n", new="     x = 0\nq = 1\n")
+        self.assertIn("does not appear", result)
+        self.assertIn("1 leading space too many", result)
+        self.assertEqual(self._text(path), self.SRC)
+
+    def test_inner_whitespace_stays_exact(self):
+        """Only leading (and trailing) whitespace is forgiven: 'call(a,  b)'
+        with two spaces is still not 'call(a, b)'."""
+        text = "call(a,  b)\n"
+        path, result = self._miss("call(a, b)", new="x", text=text)
+        self.assertIn("does not appear", result)
+        self.assertIn("differs only in whitespace", result)
+        self.assertEqual(self._text(path), text)
+
+    def test_two_different_misses_count_as_the_same_refusal(self):
+        """#202's brake keys on the first line; the hint below it varies."""
+        _p, one = self._miss("    y = x * 3\n", name="a.py")
+        _q, two = self._miss("    return 8\n", name="b.py")
+        self.assertNotEqual(one.split("\n", 1)[1], two.split("\n", 1)[1])
+        seen = lambda _path: True  # noqa: E731
+        core = sys.modules[crow.tool_edit_file.__module__]
+        self.assertEqual(core.goal_trouble_of("edit_file", one, seen)[1],
+                         core.goal_trouble_of("edit_file", two, seen)[1])
+
+
+class EditFileKeepsLineEndingsTests(ToolLayerCase):
+    """#283. edit_file read through universal newlines and wrote with
+    newline="": one edited line of a CRLF file turned all 40 CRLF into LF
+    (measured 2026-09-24 at 57ed521). The lines an edit does not touch keep
+    their bytes, and the replacement takes the ending of what it replaces."""
+
+    CRLF = "".join("line %d\r\n" % n for n in range(1, 41))
+
+    def _edit(self, text, old, new):
+        path = self._make("f.txt", text)
+        crow.tool_read_file(path)
+        result = crow.tool_edit_file(path, old=old, new=new)
+        with open(path, "rb") as fh:
+            return result, fh.read()
+
+    @staticmethod
+    def _ends(data):
+        crlf = data.count(b"\r\n")
+        return crlf, data.count(b"\n") - crlf
+
+    def test_one_line_edit_keeps_a_crlf_file_crlf(self):
+        result, data = self._edit(self.CRLF, "line 7", "LINE 7")
+        self.assertIn("replaced 1 occurrence", result)
+        self.assertEqual(self._ends(data), (40, 0))
+        self.assertEqual(data, self.CRLF.replace("line 7\r", "LINE 7\r")
+                         .encode())
+
+    def test_a_multi_line_lf_old_matches_and_new_lines_take_crlf(self):
+        result, data = self._edit(self.CRLF, "line 7\nline 8\n",
+                                  "L7\nL8\nL8b\n")
+        self.assertIn("replaced 1 occurrence", result)
+        self.assertEqual(self._ends(data), (41, 0))
+        self.assertIn(b"line 6\r\nL7\r\nL8\r\nL8b\r\nline 9\r\n", data)
+
+    def test_the_indentation_fallback_keeps_crlf(self):
+        text = "".join("  line %d\r\n" % n for n in range(1, 41))
+        result, data = self._edit(text, "line 9\nline 10\n", "L9\nL10\n")
+        self.assertIn("ignoring indentation", result)
+        self.assertEqual(self._ends(data), (40, 0))
+        self.assertIn(b"  line 8\r\n  L9\r\n  L10\r\n  line 11\r\n", data)
+
+    def test_a_mixed_file_keeps_both_halves(self):
+        text = (self.CRLF[:len(self.CRLF) // 2]
+                + "".join("tail %d\n" % n for n in range(20)))
+        before = self._ends(text.encode())
+        result, data = self._edit(text, "tail 3\ntail 4\n", "T3\nT4\n")
+        self.assertIn("replaced 1 occurrence", result)
+        self.assertEqual(self._ends(data), before)
+        self.assertEqual(data, text.replace("tail 3\ntail 4\n", "T3\nT4\n")
+                         .encode())
+
+    def test_an_lf_file_is_unchanged_by_the_new_path(self):
+        """NEGATIVE: LF in, LF out, byte for byte what replace() gave."""
+        text = "a\nb\nc\n"
+        _result, data = self._edit(text, "b\n", "B\nB2\n")
+        self.assertEqual(data, b"a\nB\nB2\nc\n")
 
 
 class ReadKeyTests(ToolLayerCase):
@@ -5140,6 +5366,38 @@ class TheYoloAcceptTests(unittest.TestCase):
             ["--mode", "yolo"]).mode, "yolo")
 
 
+class RemoteSlashTests(unittest.TestCase):
+    """#249: `/remote` is on the shared list, so the terminal must answer it --
+    and in stage 1 the answer is the core's "window-only for now", never a
+    question to the model about the word."""
+
+    def _run(self, line):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = crow.run_slash(line, conversation=crow.Conversation("SYS"),
+                                    mode="auto", show_reasoning=False,
+                                    context_tokens=0, n_ctx=200000,
+                                    rollover_at=0.9, session=False)
+        return result, out.getvalue()
+
+    def test_it_is_on_the_shared_list_and_in_the_help(self):
+        self.assertIn("/remote", crow.SLASH_COMMANDS)
+        self.assertIn("/remote", crow.HELP)
+
+    def test_every_form_is_answered_window_only(self):
+        import crow_core
+        for line in ("/remote", "/remote on", "/remote status",
+                     "/remote forget iPhone"):
+            result, said = self._run(line)
+            self.assertTrue(result.handled, line)
+            self.assertIn(crow_core.REMOTE_TUI_NOTE, said, line)
+            self.assertIn("stage 2", said)
+
+    def test_a_longer_word_is_not_the_command(self):
+        """NEGATIVE: `/remotely` is somebody's question, not ours."""
+        result, _ = self._run("/remotely")
+        self.assertFalse(result.handled)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-

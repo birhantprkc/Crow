@@ -2,12 +2,12 @@
 
 ## Tools
 
-27 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured. `/tools` lists
+28 built in, plus whatever [MCP servers](../user-guide/mcp.md) are configured. `/tools` lists
 them in either surface, derived from the declarations themselves rather than written beside them.
 
 `read_file` `read_image` `render_page` `write_file` `append_file` `edit_file` `list_dir` `find_files`
 `search_text` `run_command` `build_bundle` `web_search` `fetch_url` `memory` `skill` `session_search`
-`delegate` `subtasks` `collect` `goal_set` `goal_step` `git_status` `git_diff` `git_log`
+`delegate` `subtasks` `collect` `goal_set` `goal_step` `judge` `git_status` `git_diff` `git_log`
 `git_commit` `git_push` `github_connect`.
 
 An MCP tool joins the same list as `mcp_<server>_<tool>`, above the built-ins, and carries its
@@ -21,17 +21,20 @@ own class.
 |---|---|
 | class | `executing` — it starts a process and writes a file |
 | browser | Chrome, then Edge; every candidate resolved through environment variables |
-| target | a file in the working area, or an `http(s)` URL |
+| target | a file in the working area, or an `http(s)` URL. A local page keeps a `?query` / `#fragment` (`index.html?shot=default&w=960`, #272): the file is checked without it, then the percent-encoded `file://` URL (drive letter / UNC per RFC 8089) gets it back. A file really named with `?` or `#` wins. A missing file is `no such page: <file>` |
+| remote host (#288) | an `http(s)` target's host must already appear in the conversation: the user's words (URL or bare name), a tool result (URL), the goal's title/steps or `PLAN.md` (read at the miss). A subdomain of a named host counts; loopback always passes. Otherwise `error: refused: <host> appears nowhere in this conversation -- a URL you made up?` and no browser starts. Always on, yolo included. `fetch_url` keeps the same guard. Across a rollover the note carries the hosts in one line (newest 60) and the next turn rebuilds the set from it |
+| dedupe | the byte-identical warning (#175) keys on the full URL, so `?shot=default` and `?shot=stall` are two pages |
 | output | `<root>/.crow/renders/render-<stamp>.png`, plus the console lines from stderr |
 | isolation | its own `--user-data-dir` per run. Without it Chrome hands the job to a running instance and returns exit 0 with no screenshot |
 | driving (Linux) | `--remote-debugging-pipe` (fd 3/4, NUL-separated CDP JSON, no library): load, run `wait_ms` **real** milliseconds, `Page.captureScreenshot`. A page with no load event after 15 s is captured anyway |
 | driving (Windows) | the command-line `--screenshot` with `--virtual-time-budget=wait_ms`; the pipe there needs handle inheritance nobody has measured yet |
 | `wait_ms` | real time after load, 200–20,000. A larger value never rescues a page too heavy to draw |
 | caps | one ceiling for the whole call: 15 s load + `wait_ms` + 10 s for the frame. It does not grow with anything the page does |
-| rasterer | `gpu (angle)` when the card has ≥ 512 MiB free, else `software (swiftshader)`; named in every result |
+| rasterer | `gpu (angle)` when the card has ≥ 512 MiB free, or ≥ 1,536 MiB while the window's browser panel is open or holds a page (it is a second GPU client on the same card, #279), else `software (swiftshader)`; named in every result. A software result says why (#271): the card's free VRAM against that bound (and the panel, when it counted), that the model server holds it, and that the machine has the GPU and the user's browser renders on it; or `CROW_RENDER_GL` forcing it, or no nvidia-smi reading |
 | memory | Linux: its own user scope, `MemoryMax=6G`, swap 0 (#213). A browser started through `run_command` instead runs under that tool's 8G scope (#218) |
 | kill | `proc.kill()` on its own handle, then its session. Never by name, never a process list (#158) |
 | pipes | stdout and stderr go to a file: `communicate()` hangs on Windows after a kill when a grandchild holds the write end. The two DevTools pipes are Crow's own ends, read with `select` and a deadline |
+| metrics (#265) | after the file line, `metrics:` lines from the capture's own pixels (the #213 decoder, PNG only): the content box on a near-uniform background, its coverage of the frame and ~visual tokens (~1,030 px per token, measured), distinct colours in a ≤100,000-px sample, mean luma and an 8-bin luma histogram. `warn:` when coverage is under 25 % or under 16 colours. Under 50 % coverage the box plus a margin is saved enlarged as `render-<stamp>-crop.png` and named — `read_image` it for detail |
 | API hints (#253) | after the capture, one `Runtime.evaluate` (3 s, `RENDER_PROBE_S`) lists the page's own interface prototypes with each member's `length` (WebIDL: the required argument count). Every console line is then read against it: `X.name is not a function` gets a `hint:` line naming the nearest real member within 1-2 edits and the interface that has it (or says the name is real on another object, or exists nowhere), plus the page's own `name=function` probe line when there is one; `WebGL: INVALID_*: fn: …` gets the call's top-level argument count from the source line the console names (the page or its own folder only) against the live `fn.length`, and a sibling with that arity. Linux only: without the pipe (Windows) or without an answer, only the page's own probe lines and the argument count are claimed |
 
 A failed capture says which rasterer ran and that a larger `wait_ms` will not help —
@@ -65,6 +68,10 @@ stall due to ReadPixels` comes from Chromium's bundled ANGLE, not from the NVIDI
 measured, it appears only in the SwiftShader arm, and the string is in the `chromium`
 binary and in no `libnvidia-*`. The result opens as a tab in the
 [browser panel](../user-guide/browser.md).
+
+In goal mode, a run of `render_page` captures of one page that come back blank or nearly the same
+is counted: after 3 the next nudge says to bisect, and after 6 the context rolls over with a list
+of what was tried (#268, see [goals and subagents](../user-guide/goals-and-subagents.md)).
 
 ### `run_command` (#207, #218)
 
@@ -106,7 +113,8 @@ model, together with "never flatten a library by hand".
 | entry `.js/.mjs/.ts` | `out` `.js` → the IIFE (`global_name` names its exports; without it an IIFE's exports are unreachable, and when the same esm probe as below finds any, the result says so under the `built` line: "warn: no global_name -- app.js exports boot, and an IIFE without a global leaves it unreachable ..." — warned, not defaulted: a derived name would put `app`/`main` on `window` where it can shadow a page global, and a module that starts itself needs none; no exports or a failed probe say nothing. Measured on the diorama graph: 0.07 s → 0.13 s with the probe); `out` `.html` → the IIFE wrapped in an EMPTY page: no markup, no call to any export. The result then says so right under the `built` line and names the entry's exports ("app.js exports: boot -- nothing calls it"), read from a second, unminified `--format=esm --metafile` run into the temp directory — esbuild's metafile lists `exports` only for esm, for the IIFE it is `[]`. A failed probe says "could not be read" and costs the build nothing |
 | a page = an `.html` entry | the tool description says it: write the page as HTML (canvas, markup) with a `<script type="module">` that imports and starts the app, then bundle THAT. A `.js` entry to `.html` is warned, not refused: a module that builds its own DOM and starts itself on load (the three.js-example shape) works through it, and nothing short of running it tells that apart from a `boot()`-shaped one |
 | argv | `--bundle --format=iife --platform=browser --charset=utf8 --log-level=warning --log-limit=20`, `--minify` by default, text loader for `.glsl .vert .frag .vs .fs .wgsl .txt`, data URLs for images, fonts, `.glb .gltf .hdr .exr .ktx2 .bin .wasm` |
-| esbuild, in order | `CROW_ESBUILD`; `node_modules` walking up from the entry (`@esbuild/<platform>`, `esbuild/bin`, `.bin`); `esbuild` on `PATH`; the deno cache (`$DENO_DIR/dl/esbuild-*/`) and the npx cache (`~/.npm/_npx/*/node_modules/@esbuild/`), newest version wins there. Every candidate must answer `--version` |
+| esbuild, in order | `CROW_ESBUILD` (Crow's own environment, a pin for one launch); the `bundler` setting / `--bundler` (#274); `node_modules` walking up from the entry (`@esbuild/<platform>`, `esbuild/bin`, `.bin`); `esbuild` on `PATH`; the deno cache (`$DENO_DIR/dl/esbuild-*/`, default `$XDG_CACHE_HOME/deno` = `~/.cache/deno` on Linux — `~/.cache/crow/deno` before #274) and the npx cache (`~/.npm/_npx/*/node_modules/@esbuild/`), newest version wins there. Every candidate must answer `--version`. Another program's `node_modules` is never searched; name it in `bundler` |
+| no esbuild | the error lists every place searched and what works: link (or copy) an esbuild into `<working area>/node_modules/.bin/esbuild`, or ask the user for `"bundler"` in `settings.json` / `--bundler`. It says that an `export` in `run_command` does not reach Crow (#274) |
 | none found | the result lists every place searched and says not to hand-flatten |
 | caps | one clock for the whole build (`BUNDLE_TIMEOUT` = 120 s), the #207 capture cap in the reader threads, 64 MiB on the result, 8 MiB on the entry page. Every esbuild call, the `--version` probes included, runs through `_bounded_run` — the one runner `run_command` uses; a grandchild left holding the pipe (a node wrapper's shape) does not hold the clock, and a kill takes esbuild's whole process group (#218) |
 | write | esbuild writes to a temporary directory; Crow writes `out` behind `write_file`'s fence. A file carrying the `crow build_bundle` mark (a `<meta name="generator">` / a first-line comment) is replaced freely; any other existing file only after a read in this conversation, unchanged on disk since ([Read before write](#read-before-write-215)) |
@@ -131,9 +139,22 @@ user's.
 | class | `reading` — asks at no level |
 | types | `.png .jpg .jpeg .gif .webp .bmp`, other extensions refused by name |
 | path | resolved against the working area, like every other reader (#177) |
-| result | tool message content becomes `[{text}, {image_url}]` — the block a pasted image travels as; the server reads it in any role |
+| result | tool message content becomes `[{text}, {image_url}]` (or `[{text}, frame, crop]`, below) — the block a pasted image travels as; the server reads it in any role |
 | no projector | `refuse_images` checks `/props` before the block is attached; without `--mmproj` the sentence comes back instead of an image (a picture to a blind server is HTTP 500, not a recoverable tool error) |
 | size | none of its own — the server caps at `--image-max-tokens` (4,096) |
+| small scene (#265) | a PNG whose content sits on a near-uniform background and covers under 50 % of the frame gets a **second** block: the content box plus a margin, nearest-neighbour enlarged to a 1024-px long edge (≤ 4×, ≤ ~1,024 visual tokens). The frame stays first and unchanged; the text says `TWO images`, the coverage (`the content fills 8 % of the 1280x720 frame`), the crop box and the scale |
+
+How the content box is found: 16-px cells, each cell's mean colour against the per-channel
+median of the outer ring of cells (the ring must be ≥ 60 % ground, else no claim); a cell off
+by more than 12 on any channel is content; 8-connected regions at least a quarter the size of the
+largest are kept, so a HUD line in a corner drops out. Cell means average film grain away — the
+diorama page's ground holds only ~67 % of its pixels in one exact colour.
+
+Measured 2026-09-24 on the 62 renders of the 2026-09-23 diorama run (the served tower bills
+~1,030 px per token: 984×552 → 527 tokens, 1280×720 → 880): frames with the scene in view
+cover 7.0–22.2 % (`render-20260923-232855.png`: box x 512–768, y 224–512, 8.0 %, ~72 tokens;
+crop x 471–809, y 180–556 at 2.7× → 920×1024), blank captures give no box, a page drawn edge to
+edge gives no crop. Decode plus detection: 0.03–0.23 s per render.
 
 ### Delegation (#143)
 
@@ -172,6 +193,16 @@ a step off writes only `<root>/.crow/goal.json` and moves no byte of the prompt.
 the plan, the file carries the state — see
 [goals and subagents](../user-guide/goals-and-subagents.md).
 
+`running` on a step that is already running changes nothing on its clock: `started` and the token
+mark stay, so the whole stretch is billed when it closes (#275). A `note` given with `running` is
+stored on the step; `done`/`failed` replace it with theirs.
+
+`failed` sends a step back **once** (#289). The answer carries `retry`, and the next nudge quotes
+the note. A second `failed` on the same step makes it `skipped`: the answer carries `skipped`, and
+`next_step` names the step after it. A skipped step counts as not done, and the engine moves past
+it. A goal whose steps are all `done` or `skipped` ends "complete with N skipped" (`ended` in the
+answer), never `done`. The user skips a step with `/goal skip <n> [reason]`.
+
 A `done` is not taken on the model's word alone (#250). `goal_step(…, "done", note)` is refused
 when its own note reports a failure ("in spirit", "with deviation", "cannot be created",
 "unreachable", …), and when it has no note on a step last reported `failed`. A user's plan may
@@ -182,6 +213,52 @@ directory (`goal-checks.json`), not in the working area's `goal.json`, because t
 there and a command it wrote would run unasked at `allowedit`; a model's replan keeps it, `/goal
 off` drops it. Replayed on the 10 real `done` calls of 2026-09-23: 6 refused, the 4 with positive
 notes passed.
+
+On a visual goal (#267), `done` on a step that makes something to look at must cite a capture
+written during this goal (a path, or a bare `render-….png` name from `.crow/renders/`). If `judge`
+scored the step, its lowest score must reach `judge_threshold` (default 8). Steps that only plan
+are exempt. `"visual": true|false` in `goal.json` overrides the keyword guess. See
+[goals and subagents](../user-guide/goals-and-subagents.md).
+
+### `judge` (#266)
+
+`judge(images="", criteria="", step=None)` has a separate model with fresh eyes score a capture of
+visual work. The judge receives **one** request containing the image(s), the rubric, the goal's
+title and the step's text. It never receives the conversation: the maker's own story ("the black
+screen was a viewport leak, now fixed") is exactly what talked the maker into its own score.
+Seen on 2026-09-23: "Every criterion reads 9+ on the capture" over a small box in a black frame.
+
+| | |
+|---|---|
+| Images | default: the newest `render-*.png` in `.crow/renders/`, plus its `-crop.png` when the render wrote one (the content enlarged); up to 4 |
+| Rubric | the user's `accept:` lines from `/goal`, else criteria written in `PLAN.md` (a heading naming criteria or a rubric with bullets, or a sentence "score … against: a, b, c."), else `criteria`, else a default visual rubric. The model can only supply a rubric where none is written down. Without `accept:` lines the step's own text leads as `delivers: <step>`; `PLAN.md`, `criteria` or the default only add to it (#286) |
+| Answer | JSON: `scores` (1–10 per criterion), `min`, `threshold`, `passes`, `weakest` (three points), `verdict`, `judge` and `chosen_as`, `rubric_from` (e.g. `the step + the caller`), `images`, `step` |
+| Stored | on the step in `goal.json` (`judge`: model, scores, min, weakest, verdict, images, `rubric_source`, `criteria` as judged, time), where [`goal_step`](#goals-165) reads it (#267) |
+| Class | `network`: the capture leaves the machine when a remote model judges |
+
+**Who judges**, strongest reachable first, and never inside the maker's context:
+
+1. `providers.json` → `"judge": {"provider": "…", "model": "…"}` when it is set
+   (`{"provider": "local"}` means the local model only);
+2. the delegate spot, then its fallbacks (your favourites first, then free models by window), at
+   most three remote tries. A model whose catalogue row declares it cannot take images is skipped.
+   A row that does not say gets tried. The catalogue records `vision` from OpenRouter's
+   `architecture.input_modalities` after its next refresh (289 of 458 models listed `image` on
+   2026-09-24);
+3. this conversation's own model, in a **fresh** request with the images and the rubric only. It is
+   refused up front when the server's `/props` says it cannot see. On a one-slot local server it
+   also costs the next turn a cold prefill, and the result says so.
+
+A spot that fails (rate limit, 403, no JSON, fewer than half the criteria scored) hands on to the
+next one, and the answer lists it under `tried_first`.
+
+Measured on 2026-09-24 on `render-20260923-232855.png` (the diorama frame the model had scored
+9+), with the prompt's seven criteria and four free OpenRouter vision models pinned in turn. All
+four returned `min` 2: nemotron-3-nano-omni (26 s), nex-n2.5-pro (26 s), dots-3-note-preview
+(22 s) and nex-n2.5-mini (2 s). Each weakest list named the empty black frame, the tiny scene or
+the missing reflections. On the same day `inclusionai/ling-3.0-flash-vl:free` (the configured
+favourite) answered 404 "unavailable for free", both `inkling` models answered 403, and gemma-4
+and qwen3.8 answered 429.
 
 ### Git (#156)
 
@@ -218,8 +295,49 @@ then the directory check, and only then touch the disk.
 | why that number | measured 2026-09-23 on robin's diorama run (crow-nest, cap 16384, three session files): 61 `write_file` (median 940 B) and 50 `append_file` (median 319 B), each alone in its round, 0 cut off; 49 of the 50 appends left a file of at most 10 KB. With the model's own tokenizer the 111 calls were 0.456 tokens/byte overall and 0.735 at the densest call of 1 KB or more; the reasoning in the same round was at most 1,042 tokens. Half the cap stays free for that |
 | the receipt (#252) | `wrote N bytes to P` / `appended to P (+N bytes, file now M bytes)` counts **bytes** of the UTF-8 content (it counted characters until #252; 32 of 112 writes on 2026-09-23 held non-ASCII text). The file is read back and the result adds `(sha256 <12 hex>, file N bytes). Byte-exact: the file holds [ends with] exactly the bytes this call sent; a later read returns them. A mistake in them was in the content.` A read-back that does not end with the bytes sent says `WARNING: the file does not end with the bytes sent` instead |
 | the syntax check (#251) | `.js .mjs .cjs` through `node --check <file>`; `.html .htm` inline scripts (no `src`, a classic or `module` type, not a data block such as `importmap` or `x-shader/*`) one by one through stdin, padded so the line number is the page's. One 5 s deadline for the whole check through `_bounded_run`, files over 8 MiB and scripts past the 16th skipped, the first error only: line, message and a 160-char window of the source line with the caret. The result then ends `syntax check (node --check) FAILED -- the error is in the content this file was given:`; an append that does not parse adds that a file still built in pieces may not parse yet. **No `node` on `PATH`, no word**: the check is a help, not a gate, and the write always stands. Replayed on 2026-09-23: 20 of 98 JS/HTML writes would have carried their error |
+| edit_file and the check table (#269) | `edit_file` runs the same check on the whole file after the edit. When it fails, the text as it was before the edit is parsed in a scratch copy, and the result adds either `the file parsed before this edit: this edit broke it` or `the file did not parse before this edit either`. Any other format is one row of `syntax_checks` in `settings.json` (see [Settings](settings.md)); a row serves `write_file`, `append_file` and `edit_file` alike, with the same 5 s deadline and 8 MiB limit, and shows the command's first 12 lines on a non-zero exit |
 | directories (#244) | a path holding a control character (`pipeline.py\n`) is refused every time, naming the stripped path when that is clean. When the parent is missing, the first missing name is compared with the directories beside it (#221's edit metric, or a proper prefix of exactly one: `w` → `work`) and refused **once** with `did you mean: …` and `Nothing was created`; the identical call again creates it. Every created directory is said: `(new directory: X)`. Measured in the stored sessions: `testcases/w/fs.py` beside `testcases/work` (2026-09-18), 6 of 111 write paths held a control character, 4 of them a trailing newline |
 | arguments | `file_path` is taken as `path`, and for `write_file` `file_text` as `content` ([Argument names](#argument-names-207-214-215)) |
+
+### `edit_file` when 'old' misses (#276)
+
+The first line stays `error: 'old' does not appear in <path>` (the goal brake counts it).
+Below it:
+
+| case | answer |
+|---|---|
+| a region resembles 'old' | `The closest text is at lines a-b (similarity r).`, then either `It differs only in whitespace: …` (indentation, tabs against spaces, line breaks) or up to 6 `file N:` / `old:` line pairs; then the file lines with 2 lines of context in `N: text` form (at most 24 lines, 160 chars each, 2,500 chars in all) |
+| nothing resembles it | `No part of the file resembles 'old'. read_file it again …` |
+| file over 2 MiB | the first line only |
+
+One inexact match is applied: 'old' is whole lines, exactly one window of the file equals it
+line by line after `strip()`, every non-blank line differs by the same leading-whitespace prefix,
+and every non-blank line of 'new' can take that shift. Then 'new' is shifted the same way and the
+result says so: `replaced 1 occurrence in P -- matched only after ignoring indentation: 'old'
+had 1 leading space too many on every line, and 'new' was shifted the same way (lines 112-129)`.
+The syntax check (#269) runs as on an exact edit. Inner whitespace, tabs against spaces, uneven
+indentation, a wrapped line and two candidate windows are never applied.
+
+Measured 2026-09-23/24 (robin's diorama runs, 147 `edit_file` calls): 16 missed. Reconstructed:
+3 uniform indentation (applied now; the m292 replay is byte-identical to the model's own retry),
+1 line wrap, 6 one-token drift, 3 non-contiguous lines, 2 stale after the model's own edit,
+1 not reconstructable. CRLF, tabs and escaped quotes: 0.
+
+### `edit_file` and line endings (#283)
+
+The file is read as it is (`newline=""`). 'old' and 'new' are matched against the file with every
+CRLF read as LF, which is what `read_file` shows. Only the matched span is replaced. Lines the edit
+does not touch keep their bytes, including a file with mixed endings. The line breaks in 'new' take
+the ending of the span they replace. When that span has no line break, they take the file's
+majority. A lone CR stays as it is.
+
+| file (40 lines) | CRLF / LF after a one-line edit, before #283 | after |
+|---|---|---|
+| CRLF | 0 / 40 | 40 / 0 |
+| 20 CRLF + 20 LF, edit in the LF half | 0 / 40 | 20 / 20 |
+
+`write_file` and `append_file` write the bytes they are given (`newline=""`). `append_file`'s
+added final `\n` is LF.
 
 ### `search_text` and `find_files` (#207, #215)
 
@@ -354,9 +472,9 @@ Every round is classified before it may enter the history (`classify_round`):
 | `think_only` | reasoning and no visible text (#150) | the one visible-answer nudge, as before |
 
 The re-request is on the same prefix — no message is added, so the read ledger, the goal step
-and the prompt cache stand — with a new `seed`. A note says `discarded a degenerate reply
+and the prompt cache stand — with a new `seed`. A line in `crow.log` (not in the chat) says `discarded a degenerate reply
 (<class>, N chars, seed S) -- asking again with a new seed`. If the retry is a stub, it is
-stored as the answer with a note (`kept the re-asked reply although it looks unfinished`):
+stored as the answer with a `crow.log` line (`kept the re-asked reply although it looks unfinished`):
 a short answer is never refused twice. If the retry is markup, the turn ends with one red
 line naming both classes and both seeds, and the history gets `[no usable reply: markup]`
 instead of either round. Replayed over the stored rounds of 2026-09-18..22 (3,155 assistant

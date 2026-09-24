@@ -12,16 +12,16 @@ py        := crow_home + "/venv/bin/python"
 default:
     @just --list
 
-# Everything a change has to survive: lint, the three suites, the three checkers and the install selftest.
+# Everything a change has to survive: lint, the four suites, the three checkers and the install selftest.
 check: lint test
     {{py}} tools/check_shared_core.py
     {{py}} tools/check_operating_point.py
     {{py}} tools/check_gui_prereqs.py
     bash install.sh --selftest
 
-# 2,522 cases (2026-09-23: 1,315 core, 451 terminal, 756 window) over the core, the terminal client and the window.
+# 2,880 cases (2026-09-24: 1,455 core, 476 terminal, 896 window, 53 phone mirror) over the core, the terminal client, the window and the phone mirror.
 test:
-    cd cli && {{py}} -m unittest test_crow_core test_crow test_crow_gui
+    cd cli && {{py}} -m unittest test_crow_core test_crow test_crow_gui test_crow_remote
 
 # E9/F63/F7/F82 only -- see the reasoning in pyproject.toml.
 lint:

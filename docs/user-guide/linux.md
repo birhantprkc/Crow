@@ -32,6 +32,7 @@ bash install.sh --models ~/Projects/models/qwen3.8-flash-next
 |---|---|
 | `--models DIR` | where the GGUFs live. Makes `$CROW_HOME/models` a link to it |
 | `--voice` | also `faster-whisper` and `sounddevice` for the composer's microphone |
+| `--tailscale` | also print what is still missing for the phone over HTTPS — see [Phone over Tailscale](#phone-over-tailscale) |
 | `--build-engine` | build `llama-server` now instead of printing the line (~20 minutes) |
 | `--no-desktop` | no `.desktop` entry, no icons, no Hyprland rule |
 | `--no-engine` | do not look for the engine at all |
@@ -73,6 +74,7 @@ unset, which is what the specification asks for.
 | `index.db` (session search) | `~/.local/share/crow/` | `%LOCALAPPDATA%\Crow\` |
 | `session/`, `booted.json`, `git_events.json` | `~/.local/state/crow/` | `%LOCALAPPDATA%\Crow\` |
 | `llama-server` boot logs | `~/.local/state/crow/log/` | `<cwd>\runs\` |
+| Crow's own log, `crow.log` (rotated, 1 MiB × 4) | `~/.local/state/crow/log/` | `%LOCALAPPDATA%\Crow\log\` |
 | models | `<install>/models`, a link to the tree; `$CROW_MODELS` overrides it | `<install>\models` |
 | `llama-server` binary | `<install>/bin/`, then `PATH`, then `~/.local/share/crow/bin` | `<install>\bin\llama-server.exe` |
 | fonts | `~/.local/share/fonts/crow/` + `fc-cache` | `%LOCALAPPDATA%\Microsoft\Windows\Fonts` + winreg |
@@ -249,6 +251,29 @@ bash install.sh --voice
 
 ---
 
+## Phone over Tailscale
+
+```bash
+bash install.sh --tailscale
+curl -fsSL https://raw.githubusercontent.com/nibor1896/Crow/main/install.sh | bash -s -- --tailscale
+```
+
+Reads `tailscale status --json` and `tailscale serve status --json` (no sudo) and prints only the
+steps still missing, in this order. It never runs them.
+
+| state | printed |
+|---|---|
+| no `tailscale` | Arch/Omarchy and Arch-likes: `sudo pacman -S tailscale`; Debian/Ubuntu/Fedora/other: `curl -fsSL https://tailscale.com/install.sh \| sh` ([kb/1031](https://tailscale.com/kb/1031/install-linux)) |
+| not running / not logged in | `sudo systemctl enable --now tailscaled`, `sudo tailscale up` |
+| HTTPS off | [admin console → DNS](https://login.tailscale.com/admin/dns) → Enable HTTPS |
+| no serve | `sudo tailscale serve --bg --https=443 http://127.0.0.1:<remote_port>` (8765 unless `remote_port` is set) |
+| no phone in the tailnet | [iPhone](https://apps.apple.com/app/tailscale/id1470499037) · [Android](https://play.google.com/store/apps/details?id=com.tailscale.ipn) |
+| ready | `https://<pc>.<tailnet>.ts.net/` |
+
+Full setup and troubleshooting: [Phone over Tailscale](remote-tailscale.md).
+
+---
+
 ## The tools get a ceiling of their own (#213, #218)
 
 The server is not the only process that gets a scope. When `systemd-run` is on the PATH and the
@@ -283,8 +308,8 @@ that is missing as a warning.
 
 | | used for | without it |
 |---|---|---|
-| `node` | MCP servers started with `npx`/`node`; `node --check` over what `write_file`/`append_file` wrote to a `.js`/`.mjs`/`.cjs` file or into an HTML page's inline scripts (#251) | MCP servers that need it cannot start; writes carry no syntax line, and the write itself is unaffected |
-| an `esbuild` | `build_bundle` (#212): `$CROW_ESBUILD`, a project's `node_modules`, `PATH`, the deno and npx caches — never downloaded | `build_bundle` answers "no bundler found" with every place it looked, and writes nothing |
+| `node` | MCP servers started with `npx`/`node`; `node --check` over what `write_file`/`append_file`/`edit_file` wrote to a `.js`/`.mjs`/`.cjs` file or into an HTML page's inline scripts (#251) | MCP servers that need it cannot start; writes carry no syntax line, and the write itself is unaffected |
+| an `esbuild` | `build_bundle` (#212): `$CROW_ESBUILD`, the `bundler` setting (#274), a project's `node_modules`, `PATH`, the deno (`~/.cache/deno`) and npx caches — never downloaded | `build_bundle` answers "no bundler found" with every place it looked, and writes nothing |
 | `bwrap` | the in-window browser panel's web process runs sandboxed (#226); `CROW_PANE_SANDBOX=0` turns it off | the panel runs without a sandbox |
 | `systemd-run` | the scopes above, and the server's own | no memory ceiling for render, command or server |
 

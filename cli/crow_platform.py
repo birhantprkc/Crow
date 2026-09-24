@@ -32,6 +32,7 @@ THE LAYOUT, and Windows does not move:
     session/, booted.json,     %LOCALAPPDATA%\Crow\...      ~/.local/state/crow/...
       git_events.json
     llama-server boot logs     <cwd>\runs\                  ~/.local/state/crow/log/
+    crow.log (Crow's own)      %LOCALAPPDATA%\Crow\log\     ~/.local/state/crow/log/
     models                     <install>\models             $CROW_MODELS, else
                                                             <install>/models
     llama-server binary        <install>\bin\               <install>/bin/, then
@@ -119,6 +120,17 @@ def state_dir() -> str:
 def cache_dir() -> str:
     """Throwaway: anything here may be deleted between two starts."""
     return _windows_base() if IS_WINDOWS else _xdg("XDG_CACHE_HOME", (".cache",))
+
+
+def user_cache_base() -> str:
+    """The XDG cache BASE (`$XDG_CACHE_HOME`, else ~/.cache), without Crow's name.
+
+    For the caches OTHER programs keep there -- deno's is `<base>/deno`. #274:
+    build_bundle joined `cache_dir()` with "deno" and looked in ~/.cache/crow/deno,
+    where no deno ever wrote, and missed the esbuild in ~/.cache/deno.
+    POSIX only; Windows callers use %LOCALAPPDATA% directly.
+    """
+    return _xdg_base("XDG_CACHE_HOME", (".cache",))
 
 
 def install_dir() -> str:
@@ -982,6 +994,24 @@ def find_browser_path() -> "str | None":
 # through.
 _GPU_HEADROOM_MIB = 512
 
+# #279. CROW'S OWN BROWSER PANEL IS A SECOND GPU CLIENT. Measured
+# 2026-09-24 (robin's diorama run, serve up, ~560 MiB free at boot): the
+# panel's WebKitWebProcess held 343 MiB of the card, and twice a GPU render
+# 5-10 s earlier was followed by a SIGSEGV of that process inside
+# libnvidia-eglcore (coredumpctl, 13:15:20 and 13:16:01 local). 512 MiB was
+# set in #213 from ONE headless render with no second client in the picture.
+# With the panel open (or holding a page) the bound is the render's measured
+# ~150 MiB + the panel's measured 343 MiB, doubled for a WebGL page that grows
+# and for the driver's own slack, rounded up to 1.5 GiB. The window says
+# whether the panel counts (crow_core.render_panel_set, read per turn).
+_GPU_HEADROOM_PANEL_MIB = 1536
+
+
+def gpu_headroom_mib(panel: bool = False) -> int:
+    """The free VRAM a GPU render needs: #213's bound, or #279's with the
+    window's browser panel on the same card."""
+    return _GPU_HEADROOM_PANEL_MIB if panel else _GPU_HEADROOM_MIB
+
 
 def gpu_free_mib(query=None) -> "int | None":
     """Free VRAM in MiB on the first card, or None when there is no answer.
@@ -1016,8 +1046,149 @@ def gpu_free_mib(query=None) -> "int | None":
         return None
 
 
-def render_gl_mode(free_mib: "int | None" = None) -> str:
+# #270. WHAT THE MACHINE IS, as static facts for the prompt head.
+# Measured 2026-09-23/24: with the model server holding the card (73 MiB free of
+# 32,607), render_page rasterised 49 of 49 captures in software, and the model
+# concluded twice -- in its memory ("Machine has NO GPU", 09:53) and in its
+# answers -- that the MACHINE had no GPU. Nothing in its context said otherwise.
+# STATIC ONLY: names and totals, never free memory, because the head is byte 0
+# of the prefix and a number that moves would cost a full prefill per turn.
+_MACHINE: "list[str]" = []
+
+
+def gpu_card(query=None) -> "tuple[str, int] | None":
+    """(name, total MiB) of the first NVIDIA card, or None without an answer."""
+    if query is None:
+        exe = shutil.which("nvidia-smi")
+        if not exe:
+            return None
+
+        def query():
+            try:
+                done = subprocess.run(
+                    [exe, "--query-gpu=name,memory.total",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                    timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                return ""
+            return done.stdout if done.returncode == 0 else ""
+
+    try:
+        first = (query() or "").strip().splitlines()[0]
+        name, total = [p.strip() for p in first.rsplit(",", 1)]
+        return (name, int(round(float(total)))) if name else None
+    except (IndexError, ValueError):
+        return None
+
+
+def _os_name() -> str:
+    if IS_WINDOWS:
+        import platform
+        return "Windows %s" % platform.release()
+    try:
+        with open("/etc/os-release", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("PRETTY_NAME="):
+                    return "Linux (%s)" % line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return sys.platform
+
+
+def _cpu_name() -> "str | None":
+    if IS_WINDOWS:
+        import platform
+        return platform.processor() or None
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+def _ram_gib() -> "int | None":
+    if IS_WINDOWS:
+        import ctypes
+
+        class _Mem(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        mem = _Mem()
+        mem.dwLength = ctypes.sizeof(_Mem)
+        try:
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(mem)):
+                return int(round(mem.ullTotalPhys / 2 ** 30))
+        except (AttributeError, OSError):
+            return None
+        return None
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return int(round(int(line.split()[1]) / 2 ** 20))
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def machine_facts(card=None) -> str:
+    """One line: OS, CPU, RAM, GPU. Probed once per process, then fixed.
+
+    `card` is the suite's seam (a (name, MiB) tuple, or False for none).
+    """
+    if card is None and _MACHINE:
+        return _MACHINE[0]
+    if card is None:
+        card = gpu_card()
+    parts = [_os_name()]
+    cpu = _cpu_name()
+    if cpu:
+        parts.append(cpu)
+    ram = _ram_gib()
+    if ram:
+        parts.append("%d GiB RAM" % ram)
+    parts.append("GPU %s (%s MiB VRAM)" % (card[0], "{:,}".format(card[1]))
+                 if card else "no NVIDIA GPU found by nvidia-smi")
+    line = ", ".join(parts)
+    if not _MACHINE:
+        _MACHINE.append(line)
+    return line
+
+
+def render_gl_reason(free_mib: "int | None" = None, panel: bool = False) -> str:
+    """#271: why render_gl_mode chose software, in one clause."""
+    forced = (os.environ.get("CROW_RENDER_GL") or "").strip().lower()
+    if forced in ("swiftshader", "software", "cpu"):
+        return "CROW_RENDER_GL=%s forces software" % forced
+    if free_mib is None:
+        free_mib = gpu_free_mib()
+    if free_mib is None:
+        return "nvidia-smi gave no free-VRAM reading"
+    card = gpu_card()
+    name = card[0] if card else "the GPU"
+    need = gpu_headroom_mib(panel)
+    # #279: the bound is named with its reason, so a capture that went to
+    # software with 900 MiB free does not read as a miscount.
+    beside = (" next to Crow's own browser panel on the same card" if panel
+              else "")
+    return ("%s has %s MiB VRAM free, below the %s MiB a GPU render needs%s -- the "
+            "model server holds it; the machine HAS this GPU and the user's browser "
+            "renders on it, so this capture says nothing about GPU speed"
+            % (name, "{:,}".format(free_mib), "{:,}".format(need), beside))
+
+
+def render_gl_mode(free_mib: "int | None" = None, panel: bool = False) -> str:
     """"angle" when the card has headroom, else "swiftshader" (#213).
+
+    `panel`: the window's browser panel is open or holds a page, so the render
+    would be the card's second client next to it (#279).
 
     $CROW_RENDER_GL forces the answer (`angle`/`gpu` or `swiftshader`/
     `software`/`cpu`) -- the honest way to pin an arm for a measurement;
@@ -1031,7 +1202,7 @@ def render_gl_mode(free_mib: "int | None" = None) -> str:
     if free_mib is None:
         free_mib = gpu_free_mib()
     return "angle" if (free_mib is not None
-                       and free_mib >= _GPU_HEADROOM_MIB) else "swiftshader"
+                       and free_mib >= gpu_headroom_mib(panel)) else "swiftshader"
 
 
 # --------------------------------------------------------------- the fonts ---
@@ -1156,3 +1327,109 @@ def updater_command(script: str, install: str | None = None) -> list[str]:
         return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                 "-File", script, "-NoPause"]
     return ["bash", script]
+
+
+# ------------------------------------------------------------ the LAN (#249) ---
+
+# Interfaces that are never "the home network": container bridges, VPN
+# tunnels, VM host-only nets. /remote binds ONE address, and binding one of
+# these would either be unreachable from the phone or reachable from further
+# away than the home Wi-Fi -- tailscale* is the second kind, and the ticket
+# rules out access from outside the LAN.
+_LAN_SKIP = ("lo", "docker", "veth", "br-", "tun", "tap", "tailscale", "vbox",
+             "virbr", "wg", "zt", "vmnet", "lxc", "lxd", "podman", "cni", "flannel")
+
+
+def _rfc1918(ip: str) -> bool:
+    import ipaddress
+    try:
+        addr = ipaddress.IPv4Address(ip)
+    except ValueError:
+        return False
+    return any(addr in ipaddress.IPv4Network(n)
+               for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+
+
+def _parse_ip_json(text: str) -> list[tuple[str, str]]:
+    """`ip -j -4 addr` output -> [(interface, IPv4)], every address, unfiltered."""
+    import json
+    try:
+        links = json.loads(text or "[]")
+    except ValueError:
+        return []
+    out = []
+    for link in links if isinstance(links, list) else []:
+        name = link.get("ifname") or ""
+        for a in link.get("addr_info") or []:
+            if a.get("family") == "inet" and a.get("local"):
+                out.append((name, a["local"]))
+    return out
+
+
+def _ioctl_addresses() -> list[tuple[str, str]]:
+    """The same list without iproute2: SIOCGIFADDR per interface, stdlib only.
+
+    One address per interface (the primary), which is all a home machine has.
+    """
+    import fcntl
+    import socket
+    import struct
+    out = []
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        for _, name in socket.if_nameindex():
+            try:
+                raw = fcntl.ioctl(s.fileno(), 0x8915,            # SIOCGIFADDR
+                                  struct.pack("256s", name.encode()[:15]))
+            except OSError:
+                continue                                         # no IPv4 on it
+            out.append((name, socket.inet_ntoa(raw[20:24])))
+    return out
+
+
+def lan_addresses(query=None, sys_net: str = "/sys/class/net") -> list[tuple[str, str]]:
+    """(interface, IPv4) pairs /remote may bind, best candidate first.
+
+    WHERE, NOT WHETHER: this lists and orders, the caller picks (the dialog
+    can switch). Loopback, link-local and the _LAN_SKIP families are dropped;
+    what remains is ordered RFC1918 before anything else, then physical
+    (/sys/class/net/<if>/device exists -- a real NIC or Wi-Fi card) before
+    virtual, then by name, so a home machine's Wi-Fi or Ethernet address is
+    first.
+
+    LINUX asks iproute2 (`ip -j -4 addr`, present on every distribution this
+    runs on) and falls back to an ioctl per interface. `query` replaces the
+    `ip` call for the tests. WINDOWS is stage 3: a best effort through the
+    host name's addresses, with no interface names.
+    """
+    if IS_WINDOWS:
+        import socket
+        try:
+            found = [("", info[4][0]) for info in
+                     socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)]
+        except OSError:
+            found = []
+    else:
+        try:
+            text = query() if query else _run_query(["ip", "-j", "-4", "addr"])
+        except Exception:                  # noqa: BLE001 - the fallback answers
+            text = None
+        found = _parse_ip_json(text) if text else []
+        if not found and query is None:
+            try:
+                found = _ioctl_addresses()
+            except Exception:              # noqa: BLE001 - no LAN is an answer, not a crash
+                found = []
+    seen, out = set(), []
+    for name, ip in found:
+        if (name, ip) in seen or ip.startswith("127.") or ip.startswith("169.254."):
+            continue
+        if name and name.startswith(_LAN_SKIP):
+            continue
+        seen.add((name, ip))
+        out.append((name, ip))
+
+    def physical(name: str) -> bool:
+        return bool(name) and os.path.exists(os.path.join(sys_net, name, "device"))
+
+    out.sort(key=lambda p: (not _rfc1918(p[1]), not physical(p[0]), p[0], p[1]))
+    return out

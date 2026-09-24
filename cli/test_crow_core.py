@@ -123,6 +123,8 @@ crow_core.SESSION_DIR = os.path.join(_NOWHERE, "session")
 crow_core.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
 crow_core.SKILLS_DIR = os.path.join(_NOWHERE, "skills")
 crow_core.USER_PATH = os.path.join(_NOWHERE, "USER.md")
+# #262: Crow's own log file, never the real one under the state dir.
+crow_core.LOG_FILE = os.path.join(_SANDBOX, "log", "crow.log")
 
 # THE PALETTE IS PINNED FOR THIS WHOLE MODULE (#102). `crow_core._TTY` is decided
 # ONCE, at import, out of `sys.stdout.isatty()`, and the colour constants are
@@ -1101,6 +1103,8 @@ class TurnLoopCase(unittest.TestCase):
 
         self._read_before = dict(crow_core._READ)
         self._seen_before = dict(crow_core._SEEN)
+        # #288: a turn arms the host guard; the next class finds it as it was.
+        self.addCleanup(setattr, crow_core, "_KNOWN_HOSTS", crow_core._KNOWN_HOSTS)
         # #215-H: the epoch is a REBOUND name, so it is put back by setattr.
         self.addCleanup(setattr, crow_core, "_READ_EPOCH", crow_core._READ_EPOCH)
         self._session_dir_before = crow_core.SESSION_DIR
@@ -1355,6 +1359,35 @@ class SpentBudgetTests(TurnLoopCase):
         self.serve([{"content": "done"}])
         self.turn(talk, max_tool_rounds=0)
         self.assertIn(("budget", 0), self.events.log)
+
+    def test_the_budget_is_said_after_the_last_tool_round(self):
+        """#278. 2026-09-24: 6 of 6 budget turns decoded one more round --
+        reasoning and a call, 298-4,290 tokens -- only to have the call
+        refused. With budget N the turn is N tool rounds and the forced
+        answer: N + 1 requests, and BUDGET_SPENT right after a tool result."""
+        talk = self.conversation()
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))])
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.dir}),
+                                cid="c2")])
+        # A model that always asks for one more: text AND a call in round 3.
+        self.serve([{"content": "here is where I got to"},
+                    _call_delta("read_file", json.dumps({"path": "x"}),
+                                cid="c3")])
+        self.serve([{"content": "the answer after a refused round"}])
+        result = self.turn(talk, max_tool_rounds=2)
+        self.assertEqual(len(self.bodies), 3,
+                         "a round was decoded only to have its call refused")
+        self.assertEqual(result.cost.rounds, 3)
+        self.assertEqual(self.events.names.count("tool_start"), 2)
+        payload = talk.payload()
+        spent = [n for n, m in enumerate(payload)
+                 if m["role"] == "user" and m["content"] == crow_core.BUDGET_SPENT]
+        self.assertEqual(len(spent), 1)
+        self.assertEqual(payload[spent[0] - 1]["role"], "tool")
+        self.assertEqual(payload[-1]["content"], "here is where I got to")
+        self.assertIsNone(payload[-1].get("tool_calls"))
+        self.assertIn(("budget", 2), self.events.log)
+        self.assertPrefixIsWhole(talk)
 
     def test_a_turn_that_stays_inside_the_budget_never_says_it(self):
         talk = self.conversation()
@@ -2370,6 +2403,82 @@ class ThinkOnlyCloseTests(TurnLoopCase):
         result = self.turn(talk)
         self.assertTrue(any("no visible answer" in i for i in result.incidents),
                         "the silent close left no incident")
+        # #259: and the second silence is SHOWN, not dropped.
+        last = [m for m in talk.payload() if m.get("role") == "assistant"][-1]
+        self.assertTrue(crow_core.is_surfaced(last["content"]))
+        self.assertIn("still head only", last["content"])
+
+
+class TheForcedAnswerIsAlwaysVisibleTests(TurnLoopCase):
+    """#259. 2026-09-23, diorama goal run, session messages
+    262-263 and engine.log 20:14:38Z: after BUDGET_SPENT the forced round came
+    back `content chunks 0, reasoning chunks 710, finish tool_calls` -- a whole
+    report written inside the think block, then a discarded call. The window
+    showed nothing. The turn now shows the reasoning, marked as such."""
+
+    class Sink(crow_core.ReplyEvents):
+        def __init__(self):
+            self.said = []
+
+        def answer_text(self, piece):
+            self.said.append(piece)
+
+    def _spent(self, forced_deltas):
+        sink = self.Sink()
+        self.events.reply_events = lambda: sink
+        talk = self.conversation()
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))])
+        self.serve(forced_deltas)
+        result = self.turn(talk, max_tool_rounds=0)
+        last = [m for m in talk.payload() if m["role"] == "assistant"][-1]
+        return result, last, sink
+
+    def test_the_live_shape_reasoning_then_a_call_is_shown(self):
+        result, last, sink = self._spent(
+            [{"reasoning_content": "What was run: list_dir. Not done: step 7."},
+             _call_delta("read_file", json.dumps({"path": "x"}), cid="c9")])
+        self.assertTrue(crow_core.is_surfaced(last["content"]), last)
+        self.assertIn("after the tool budget was spent", last["content"])
+        self.assertIn("Not done: step 7.", last["content"])
+        self.assertIn("Not done: step 7.", "".join(sink.said),
+                      "the window was not told")
+        self.assertEqual(last.get("reasoning_content"),
+                         "What was run: list_dir. Not done: step 7.",
+                         "the reasoning left the prefix")
+        self.assertIsNone(last.get("tool_calls"), "a discarded call was kept")
+        self.assertTrue(any("after the budget stop" in i
+                            for i in result.incidents), result.incidents)
+
+    def test_reasoning_only_is_shown_without_a_nudge_round(self):
+        result, last, _ = self._spent([{"reasoning_content": "all in the head"}])
+        self.assertIn("all in the head", last["content"])
+        self.assertEqual(len(self.bodies), 2, "an extra round was bought")
+
+    def test_nothing_at_all_still_says_something(self):
+        """Budget 1: the first call runs, the second is refused, the forced
+        round is empty on both channels -- the line counts what DID run."""
+        talk = self.conversation()
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))])
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.dir}))])
+        self.serve([{"content": ""}])
+        self.turn(talk, max_tool_rounds=1)
+        last = [m for m in talk.payload() if m["role"] == "assistant"][-1]
+        self.assertTrue(crow_core.is_surfaced(last["content"]))
+        self.assertIn("no reasoning either. 1 tool call ran this turn",
+                      last["content"])
+
+    def test_a_spoken_forced_answer_is_left_alone(self):
+        """NEGATIVE CONTROL: the model said it itself."""
+        result, last, sink = self._spent([{"reasoning_content": "hmm"},
+                                          {"content": "here is where I got to"}])
+        self.assertEqual(last["content"], "here is where I got to")
+        self.assertFalse(any("no visible answer" in i for i in result.incidents))
+
+    def test_a_long_think_block_keeps_its_tail(self):
+        text = "x" * 9000 + "THE CONCLUSION"
+        _, last, _ = self._spent([{"reasoning_content": text}])
+        self.assertTrue(last["content"].endswith("THE CONCLUSION"))
+        self.assertLess(len(last["content"]), crow_core.SURFACED_CHARS + 200)
 
 
 class BrokenStreamRetryTests(TurnLoopCase):
@@ -2785,6 +2894,26 @@ class SpotFallbackTests(unittest.TestCase):
         self.assertIn("fell back from unit/alpha:free", sub.failure)
         self.assertIn("unit/alpha:free", crow_core._SPOT_DEAD)
 
+    def test_a_stop_during_a_failing_attempt_is_interrupted_not_failed(self):
+        """#242: Stop lands while the spot's request raises -- the record
+        closes "interrupted" and the spot is not memoed dead."""
+        real = crow_core._subtask_attempt
+        self.addCleanup(setattr, crow_core, "_subtask_attempt", real)
+
+        def attempt(sub, spot):
+            # The ticket's reproduction: Stop lands while the attempt fails.
+            self.calls += 1
+            sub.cancelled = True
+            return "failed", "CrowError: HTTP 503 from u: down"
+
+        crow_core._subtask_attempt = attempt
+        crow_core.tool_delegate(task="haiku")
+        self._settle()
+        sub = crow_core.SUBTASKS["d1"]
+        self.assertEqual(sub.status, "interrupted")
+        self.assertEqual(crow_core._SPOT_DEAD, {})
+        self.assertEqual(self.calls, 1)
+
     def test_a_hard_failure_does_not_wander(self):
         """NEGATIVE CONTROL: a schema error would fail identically anywhere,
         and a fallback would just spend a second spot on it."""
@@ -2913,6 +3042,13 @@ class SpotFallbackTests(unittest.TestCase):
                          ("global", "the key was refused (401)"))
         self.assertEqual(verdict('HTTP 404: {"error":{"message":"No endpoints '
                                  'found for unit/x:free."}}')[0], "spot")
+        # #284: a retired free slug, the 404 of 2026-09-24's diorama run
+        self.assertEqual(verdict(
+            'HTTP 404 from https://openrouter.ai/api/v1/chat/completions: '
+            '{"error":{"message":"This model is unavailable for free. The paid '
+            'version is available now - use this slug instead: '
+            'inclusionai/ling-3.0-flash-vl","code":404}}',
+            "inclusionai/ling-3.0-flash-vl:free"), ("spot", "no longer free (404)"))
         for sick in ('HTTP 429 from u: rate-limited upstream',
                      'HTTP 404 from u: {"error":{"message":"Provider '
                      'returned error","code":404}}',
@@ -3534,6 +3670,29 @@ class TheSubtasksOutliveTheProcessTests(TurnLoopCase):
         crow_core.drop_subtasks(["d3"])
         crow_core.forget_subtasks()
         self.assertEqual(crow_core.subtasks_recall(), 0)
+
+    def test_closing_the_card_is_a_persisted_view_mark_not_a_cancel(self):
+        """#281. The `×` of the Subtasks card marks the record `closed`: it
+        survives the restart, a running subtask stays running and uncancelled,
+        a new record starts open, and unmarking brings it back."""
+        self._seed(status="running")
+        self.assertFalse(crow_core.subtask_view()[0]["closed"])
+        self.assertEqual(crow_core.subtask_close(["d3"], True), 1)
+        self.assertEqual(crow_core.subtask_close(["d3"], True), 0,
+                         "writes only on change")
+        sub = crow_core.SUBTASKS["d3"]
+        self.assertEqual(sub.status, "running")
+        self.assertFalse(sub.cancelled)
+        self.assertTrue(crow_core.subtask_view()[0]["closed"])
+        crow_core.forget_subtasks()              # der Neustart
+        crow_core.subtasks_recall()
+        self.assertTrue(crow_core.subtask_view()[0]["closed"])
+        fresh = crow_core.Subtask("d4", "t", "", {"model": "m", "label": "L"})
+        self.assertFalse(fresh.closed)
+        crow_core.subtask_close(["d3"], False)
+        crow_core.forget_subtasks()
+        crow_core.subtasks_recall()
+        self.assertFalse(crow_core.subtask_view()[0]["closed"])
 
     def test_the_registry_recalls_itself_lazily(self):
         """Jede Oberflaeche, die auf die Registry schaut oder zugreift,
@@ -4350,6 +4509,78 @@ class AWriteParsesWhatItWroteTests(unittest.TestCase):
             out = crow_core.tool_write_file(self.at("a.js"), "let a = 1;\n")
         self.assertIn("not finished within", out)
         self.assertIn("not checked", out)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is not on PATH")
+class AnEditIsCheckedAndTheTableIsOneRowPerFormatTests(unittest.TestCase):
+    """#269. edit_file ran no parse at all -- #251 covered write_file
+    and append_file -- and the formats lived in code. One table from
+    settings.json now serves all three file tools."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-checks-"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(crow_core.syntax_checks_set, None)
+
+    def at(self, name):
+        return os.path.join(self.root, name)
+
+    def test_an_edit_that_breaks_a_clean_file_says_so(self):
+        crow_core.tool_write_file(self.at("a.js"), "let o = [1];\nlet b = o[1];\n")
+        out = crow_core.tool_edit_file(self.at("a.js"), old="o[1]",
+                                       new="o[1100")
+        self.assertTrue(out.startswith("replaced 1 occurrence"), out)
+        self.assertIn("syntax check (node --check) FAILED", out)
+        self.assertIn("line 2: SyntaxError", out)
+        self.assertIn("this edit broke it", out)
+
+    def test_an_edit_on_an_already_broken_file_says_it_may_be_older(self):
+        crow_core.tool_write_file(self.at("a.js"),
+                                  "let a = = 1;\nlet b = 2;\n")
+        out = crow_core.tool_edit_file(self.at("a.js"), old="b = 2",
+                                       new="b = 3")
+        self.assertIn("FAILED", out)
+        self.assertIn("did not parse before this edit either", out)
+
+    def test_a_clean_edit_says_ok_and_a_text_file_says_nothing(self):
+        crow_core.tool_write_file(self.at("a.js"), "let a = 1;\n")
+        out = crow_core.tool_edit_file(self.at("a.js"), old="1", new="2")
+        self.assertIn("syntax check (node --check): ok", out)
+        crow_core.tool_write_file(self.at("n.txt"), "a = = 1\n")
+        out = crow_core.tool_edit_file(self.at("n.txt"), old="1", new="2")
+        self.assertEqual(out, "replaced 1 occurrence in %s" % self.at("n.txt"))
+
+    def test_a_configured_row_checks_a_new_format_in_every_tool(self):
+        crow_core.syntax_checks_set(
+            {"py": [sys.executable, "-m", "py_compile", "{path}"]})
+        out = crow_core.tool_write_file(self.at("m.py"), "x = (1,\n")
+        self.assertIn("FAILED", out)
+        self.assertIn("SyntaxError", out)
+        out = crow_core.tool_write_file(self.at("m.py"), "x = (1,)\n")
+        self.assertIn("): ok", out)
+        out = crow_core.tool_edit_file(self.at("m.py"), old="(1,)", new="(1,")
+        self.assertIn("FAILED", out)
+        self.assertIn("this edit broke it", out)
+
+    def test_an_empty_row_switches_a_built_in_off(self):
+        crow_core.syntax_checks_set({".js": []})
+        out = crow_core.tool_write_file(self.at("a.js"), "let a = = 1;\n")
+        self.assertNotIn("syntax check", out)
+
+    def test_malformed_rows_are_dropped_one_by_one(self):
+        crow_core.syntax_checks_set({".py": ["python3", 1], "": ["x"],
+                                     "TS": ["tsc", "--noEmit"]})
+        self.assertEqual(crow_core.SYNTAX_CHECKS, {".ts": ["tsc", "--noEmit"]})
+        crow_core.syntax_checks_set("nonsense")
+        self.assertEqual(crow_core.SYNTAX_CHECKS, {})
+
+    def test_a_command_that_cannot_start_is_named_and_the_write_stands(self):
+        crow_core.syntax_checks_set({".py": ["/nowhere/no-such-checker"]})
+        out = crow_core.tool_write_file(self.at("m.py"), "x = 1\n")
+        self.assertIn("could not run", out)
+        self.assertTrue(os.path.isfile(self.at("m.py")))
 
 
 class ANearMissDirectoryIsAskedOnceTests(unittest.TestCase):
@@ -5314,6 +5545,11 @@ class _Urlopen:
 
 
 class WebExtractionTests(unittest.TestCase):
+    """#288: called directly, outside any turn -- the host guard is unarmed."""
+
+    def setUp(self):
+        self.addCleanup(setattr, crow_core, "_KNOWN_HOSTS", crow_core._KNOWN_HOSTS)
+        crow_core._KNOWN_HOSTS = None
     """#96. What comes back from a page, and what must not."""
 
     def test_the_answer_survives_and_the_furniture_does_not(self):
@@ -5366,6 +5602,11 @@ class WebExtractionTests(unittest.TestCase):
 
 class WebFetchTests(unittest.TestCase):
     """#96. Every way out of tool_fetch_url is a string the model can read."""
+
+    def setUp(self):
+        # #288: direct calls, outside any turn -- the host guard is unarmed.
+        self.addCleanup(setattr, crow_core, "_KNOWN_HOSTS", crow_core._KNOWN_HOSTS)
+        crow_core._KNOWN_HOSTS = None
 
     def test_a_non_http_scheme_is_refused(self):
         """file:// would make this an unbounded read of the disk that goes
@@ -5441,6 +5682,163 @@ class WebFetchTests(unittest.TestCase):
         self.assertEqual(len(calls.seen), 1)
         self.assertIn("Gallery 999", out)
 
+
+# #288: the proxy URL of the 2026-09-24 diorama run, as the model wrote it.
+_INVENTED = ("http://routify-file-proxy-sg.oss-ap-southeast-1.aliyuncs.com/"
+             "proxy_temp_file/production/2026-09-25/trace_1/requestId_2/"
+             "a1b2.html?Expires=1790000000&OSSAccessKeyId=x&w=12")
+_INVENTED_HOST = "routify-file-proxy-sg.oss-ap-southeast-1.aliyuncs.com"
+_MDN = "https://developer.mozilla.org/en-US/docs/Web/API/WebGL_API"
+
+
+class RemoteHostsMustHaveBeenNamedTests(unittest.TestCase):
+    """#288. After the 20:37 rollover of 2026-09-24 the model rendered a URL
+    it made up 11 times -- a third-party file proxy that occurs 0 times in any
+    earlier segment or tool result -- and read the proxy's AccessDenied pages
+    as frames of its own scene. A remote host has to appear in the
+    conversation first: the user's words, a tool result, the goal, PLAN.md."""
+
+    def setUp(self):
+        self.addCleanup(setattr, crow_core, "_KNOWN_HOSTS", crow_core._KNOWN_HOSTS)
+        self.root = tempfile.mkdtemp(prefix="crow-hosts-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        # No goal and no PLAN.md but the ones a case writes.
+        self.goal = None
+        for name, value in (("goal_load", lambda: self.goal),
+                            ("get_root", lambda: self.root)):
+            patcher = mock.patch.object(crow_core, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def _talk(*messages):
+        talk = crow_core.Conversation("SYS")
+        for role, text in messages:
+            if role == "tool":
+                talk.append("assistant", "", tool_calls=[
+                    {"id": "c0", "name": "read_file", "arguments": "{}"}])
+                talk.append("tool", text, tool_call_id="c0")
+            else:
+                talk.append(role, text)
+        crow_core.adopt_known_hosts(talk)
+        return talk
+
+    def test_an_invented_host_is_refused_before_any_browser_starts(self):
+        """The Expected result, verbatim: refused with the sentence, and
+        `find_browser` is never asked -- nothing leaves the machine."""
+        self._talk(("user", "build the diorama in work/chain.html"),
+                   ("assistant", "on it"))
+        with mock.patch.object(crow_core, "find_browser") as browser:
+            out = crow_core.tool_render_page(_INVENTED)
+        browser.assert_not_called()
+        self.assertTrue(out.startswith("error: refused: %s appears nowhere in "
+                                       "this conversation -- a URL you made "
+                                       "up?" % _INVENTED_HOST), out)
+        self.assertIn("pass its path (e.g. work/chain.html?shot=default)", out)
+
+    def test_the_models_own_words_name_nothing(self):
+        """The assistant wrote the URL; that is the thing being checked."""
+        self._talk(("user", "go"), ("assistant", "I will render " + _INVENTED))
+        with _Urlopen(_FakeResponse(b"<p>AccessDenied</p>")) as calls:
+            out = crow_core.tool_fetch_url(_INVENTED)
+        self.assertEqual(calls.seen, [])
+        self.assertIn("appears nowhere in this conversation", out)
+        self.assertIn("web_search", out)
+
+    def test_a_host_from_a_tool_result_passes_fetch_url(self):
+        self._talk(("user", "how does WebGL clear?"),
+                   ("tool", "1. WebGL API - MDN\n   " + _MDN + "\n   the API"))
+        with _Urlopen(_FakeResponse(b"<p>clearColor sets it.</p>")) as calls:
+            out = crow_core.tool_fetch_url(
+                "https://developer.mozilla.org/en-US/docs/Web/API/"
+                "WebGLRenderingContext/clearColor")
+        self.assertEqual(len(calls.seen), 1, out)
+        self.assertIn("clearColor sets it", out)
+
+    def test_the_users_bare_name_its_subdomains_and_loopback_pass(self):
+        self._talk(("user", "read the docs on mozilla.org and 192.168.2.175"))
+        with _Urlopen(_FakeResponse(b"<p>ok</p>")) as calls:
+            for url in (_MDN, "https://www.mozilla.org/x", "http://192.168.2.175:8765/",
+                        "http://localhost:8000/work/chain.html",
+                        "http://127.0.0.1:9/x", "http://[::1]:9/x"):
+                self.assertNotIn("refused", crow_core.tool_fetch_url(url), url)
+        self.assertEqual(len(calls.seen), 6)
+
+    def test_the_goal_and_plan_md_name_hosts(self):
+        self._talk(("user", "go"))
+        self.goal = {"title": "diorama", "steps": [
+            {"text": "check threejs.org/docs for the loader"}]}
+        with open(os.path.join(self.root, "PLAN.md"), "w", encoding="utf-8") as fh:
+            fh.write("# Plan\n- reference: https://www.khronos.org/webgl/\n")
+        with _Urlopen(_FakeResponse(b"<p>ok</p>")) as calls:
+            for url in ("https://threejs.org/docs/", "https://www.khronos.org/x"):
+                self.assertNotIn("refused", crow_core.tool_fetch_url(url), url)
+        self.assertEqual(len(calls.seen), 2)
+
+    def test_the_hosts_ride_across_the_cut(self):
+        """The rollover drops the tool result that named the host; the note
+        carries it, and the next turn reads it back out of the new context."""
+        talk = self._talk(("user", "research WebGL"),
+                          ("tool", "results: " + _MDN),
+                          ("assistant", "noted"))
+        for n in range(4):              # push the MDN round out of the carried tail
+            talk.append("assistant", "", tool_calls=[
+                {"id": "c0", "name": "list_dir", "arguments": "{}"}])
+            talk.append("tool", "work/ %d" % n, tool_call_id="c0")
+        path = os.path.join(self.root, "arch.json")
+        self.assertIsNotNone(crow_core.roll_over(talk, "http://127.0.0.1:1/v1",
+                                                 180000, carry="weiter", path=path))
+        self.assertNotIn(_MDN, json.dumps(talk.payload()))
+        crow_core._KNOWN_HOSTS = None
+        crow_core.adopt_known_hosts(talk)
+        with _Urlopen(_FakeResponse(b"<p>ok</p>")) as calls:
+            out = crow_core.tool_fetch_url(_MDN)
+        self.assertEqual(len(calls.seen), 1, out)
+        self.assertNotIn(_INVENTED_HOST, crow_core.known_hosts(talk))
+
+    def test_a_digest_line_cannot_carry_a_host(self):
+        """The carried line is read only ahead of the fixed note text, never
+        out of the model-written digest behind it."""
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "go")
+        path = os.path.join(self.root, "arch.json")
+        crow_core.roll_over(talk, "http://127.0.0.1:1/v1", 1000, path=path,
+                            digest=crow_core.ROLLOVER_HOSTS_HEAD + _INVENTED_HOST)
+        self.assertNotIn(_INVENTED_HOST, crow_core.known_hosts(talk))
+
+
+class TheHostGuardInsideATurnTests(TurnLoopCase):
+    """#288 through the real loop: a fetched page's links release the next
+    fetch in the same turn, the invented proxy is refused, and the refusal
+    itself teaches nothing."""
+
+    def test_a_result_names_a_host_for_the_next_call_and_the_proxy_stays_out(self):
+        page = "<html><body><p>See " + _MDN + " for the API.</p></body></html>"
+
+        def answer(url):
+            return _FakeResponse(page.encode() if "example.org" in url
+                                 else b"<p>WebGL reference.</p>")
+        self.serve([_call_delta("fetch_url", json.dumps(
+            {"url": "https://example.org/links"}))])
+        self.serve([_call_delta("fetch_url", json.dumps({"url": _MDN}))])
+        self.serve([_call_delta("render_page", json.dumps({"path": _INVENTED}))])
+        self.serve([_call_delta("render_page", json.dumps(
+            {"path": _INVENTED, "wait_ms": 500}))])
+        self.serve([{"content": "done"}])
+        talk = self.conversation("look at https://example.org/links")
+        with _Urlopen(answer) as calls, \
+                mock.patch.object(crow_core, "goal_load", return_value=None), \
+                mock.patch.object(crow_core, "get_root", return_value=self.work), \
+                mock.patch.object(crow_core, "find_browser") as browser:
+            self.turn(talk, mode="yolo")
+        self.assertEqual(calls.seen, ["https://example.org/links", _MDN])
+        browser.assert_not_called()
+        tools = [crow_core.message_text(m["content"]) for m in talk.payload()
+                 if m.get("role") == "tool"]
+        self.assertIn("WebGL reference", tools[1])
+        self.assertIn("refused: %s appears nowhere" % _INVENTED_HOST, tools[2])
+        self.assertIn("refused: %s appears nowhere" % _INVENTED_HOST, tools[3])
+        self.assertPrefixIsWhole(talk)
 
 class _Console(io.StringIO):
     """A stderr that answers `isatty()` the way a terminal does.
@@ -6818,6 +7216,132 @@ class SessionSearchTests(unittest.TestCase):
         self.assertNotIn("fts5", json.dumps(crow_core.TOOLS))
 
 
+class RolloverSegmentsAreSearchableTests(unittest.TestCase):
+    """#287. A rollover moves a long chat's earlier half into
+    `session/rollover-*.json`, and #261 keeps those out of the rail. The index
+    took its list from the rail, so on 2026-09-24 0 of 6 segments on robin's
+    disk were searchable."""
+
+    _write = staticmethod(SessionSearchTests._write)
+    find = SessionSearchTests.find
+
+    def setUp(self) -> None:
+        SessionSearchTests.setUp(self)
+        self.segment = os.path.join(self.dir, "rollover-20260924-192638.json")
+        self._write(self.segment, "", [
+            ("user", "Hey"),
+            ("assistant", "GBUFFER complete, the depth pass is next.")])
+
+    def test_the_search_list_has_the_segment_and_the_rail_list_does_not(self):
+        """Two lists, two questions: which chats there are, and where
+        something was said. #261 is the first, and it must stay as it is."""
+        self.assertIn(self.segment, crow_core.index_sources(self.live))
+        self.assertIn(self.live, crow_core.index_sources(self.live))
+        self.assertIn(self.old, crow_core.index_sources(self.live))
+        self.assertNotIn(self.segment, crow_core.rail_sources(self.live))
+        self.assertTrue(all(os.path.basename(p).startswith(("session", "chat-"))
+                            for p in crow_core.rail_sources(self.live)))
+
+    def test_a_word_only_in_the_segment_is_found_there(self):
+        """The hit's path is the segment, so a following read_file lands on the
+        text that is no longer in the open context."""
+        hits = self.find("GBUFFER complete")
+        self.assertEqual([h["path"] for h in hits], [self.segment])
+        self.assertEqual(hits[0]["chat"], "Hey (before the cut, 2026-09-24 19:26)")
+
+    def test_a_segment_is_named_after_its_chat(self):
+        """The rollover note points back at the chat's archive, and the hit
+        carries that chat's name -- the rule the rail uses (#261)."""
+        note = crow_core.ROLLOVER_NOTE.format(
+            tokens=180145, transcript=self.segment[:-5] + ".md", lines=5223,
+            path=self.old, where="", spoken="", digest="")
+        self._write(self.segment, "", [
+            ("user", note),
+            ("assistant", "GBUFFER complete.")])
+        self.assertEqual([h["chat"] for h in self.find("GBUFFER")],
+                         ["Alte Messung (before the cut, 2026-09-24 19:26)"])
+
+    def test_the_tool_names_the_path(self):
+        """Without the path the model knows THAT it was said, not where to read
+        it back."""
+        real = crow_core.search_sessions
+        crow_core.search_sessions = lambda q, n: real(
+            q, n, db_path=self.db, session_file=self.live)
+        self.addCleanup(setattr, crow_core, "search_sessions", real)
+        self.assertIn(self.segment, crow_core.tool_session_search("GBUFFER"))
+
+    def test_a_chat_put_aside_is_searchable_in_the_next_chats_first_turn(self):
+        """THE MISSING session.json ROW. "neu" writes the open chat to
+        `session/chat-*.json` and deletes session.json until the new chat's
+        first turn has ended. A search inside that turn found neither."""
+        aside = os.path.join(self.dir, "chat-20260924-160100.json")
+        os.replace(self.live, aside)
+        self.assertEqual([h["path"] for h in self.find("slot-save-path")], [aside])
+        self.assertIn(aside, crow_core.rail_sources(self.live))
+
+
+class TheMachineIsAFactAndMemoryMayNotContradictItTests(_MemoryFixture):
+    """#270. 2026-09-24 09:53 the diorama run wrote "Machine has NO GPU:
+    Chromium is software GL" into its project memory, and its answers said
+    "no GPU" three times more -- while nvidia-smi names an RTX 5090. Nothing in
+    the context said what the machine is."""
+
+    CARD = ("NVIDIA GeForce RTX 5090", 32607)
+
+    def setUp(self) -> None:
+        super().setUp()
+        real = getattr(crow_platform, "gpu_card", None)
+        crow_platform.gpu_card = lambda query=None: self.CARD
+        if real is None:
+            self.addCleanup(delattr, crow_platform, "gpu_card")
+        else:
+            self.addCleanup(setattr, crow_platform, "gpu_card", real)
+        cache = getattr(crow_platform, "_MACHINE", [])
+        self.addCleanup(cache.clear)
+        cache.clear()
+
+    def test_the_head_names_the_machine_and_the_rule(self):
+        head = crow_core.prompt_head(self.root)
+        self.assertIn("Machine: ", head)
+        self.assertIn("GPU NVIDIA GeForce RTX 5090 (32,607 MiB VRAM)", head)
+        self.assertIn("A tool's own limits are not the machine's", head)
+        # facts first: the working area, then the machine, then memory
+        self.assertLess(head.index("Working area:"), head.index("Machine:"))
+
+    def test_the_machine_line_is_static_for_the_prefix(self):
+        first = crow_core.machine_line()
+        crow_platform.gpu_card = lambda query=None: ("other", 1)
+        self.assertEqual(crow_core.machine_line(), first, "probed once per process")
+
+    def test_the_live_entry_is_refused_with_the_fact(self):
+        out = self.call("add", content="Machine has NO GPU: Chromium is software GL, "
+                                       "so a full-res frame is too slow")
+        self.assertFalse(out["success"])
+        self.assertIn("not stored", out["error"])
+        self.assertIn("RTX 5090", out["error"])
+        self.assertEqual(crow_core.read_store(crow_core.memory_path()), [])
+
+    def test_a_precise_note_about_the_tool_passes(self):
+        out = self.call("add", content="render_page runs software GL (SwiftShader, no GPU) "
+                                       "while the model server holds the RTX 5090")
+        self.assertTrue(out["success"], out)
+
+    def test_a_tool_corruption_claim_is_refused_and_replace_is_checked_too(self):
+        out = self.call("add", content="the read channel is byte-unstable, re-read twice")
+        self.assertFalse(out["success"])
+        self.assertIn("byte-exact", out["error"])
+        self.assertTrue(self.call("add", content="esbuild lives in node_modules")["success"])
+        out = self.call("replace", old_text="esbuild", content="CPU-only box, keep it small")
+        self.assertFalse(out["success"])
+        self.assertIn("not stored", out["error"])
+
+    def test_render_page_says_why_it_rendered_in_software(self):
+        why = crow_platform.render_gl_reason(free_mib=73)
+        self.assertIn("NVIDIA GeForce RTX 5090 has 73 MiB VRAM free", why)
+        self.assertIn("below the 512 MiB", why)
+        self.assertIn("the machine HAS this GPU", why)
+
+
 class TheMemoryGateTests(_MemoryFixture):
     """#128: the review proposes, a person disposes, and nothing writes itself.
 
@@ -6902,7 +7426,7 @@ class TheMemoryGateTests(_MemoryFixture):
         control that does nothing."""
         self._answer([self._call("memory", {"action": "add", "content": "JA"})])
         self.run_review(gate=True)
-        self.assertEqual(crow_core.approve_pending(), ["add memory"])
+        self.assertEqual(crow_core.approve_pending()[0], ["add memory"])
         self.assertEqual(self.entries(), ["JA"])
 
         self._answer([self._call("memory", {"action": "add", "content": "NEIN"})])
@@ -6918,7 +7442,7 @@ class TheMemoryGateTests(_MemoryFixture):
         crow_core.write_store(crow_core.memory_path(), ["a" * 3900])
         self._answer([self._call("memory", {"action": "add", "content": "b" * 500})])
         self.run_review(gate=True)
-        self.assertEqual(crow_core.approve_pending(), [])
+        self.assertEqual(crow_core.approve_pending()[0], [])
         self.assertEqual(self.entries(), ["a" * 3900])
 
     def test_an_expired_entry_can_never_be_approved(self):
@@ -6930,7 +7454,7 @@ class TheMemoryGateTests(_MemoryFixture):
         entry = crow_core._PENDING[0]
         entry["staged"] -= crow_core.PENDING_TTL + 1
         self.assertEqual(crow_core.pending_memory(), [])
-        self.assertEqual(crow_core.approve_pending(), [])
+        self.assertEqual(crow_core.approve_pending()[0], [])
         self.assertEqual(self.entries(), [])
 
     def test_dropping_the_chat_drops_what_was_staged(self):
@@ -6942,6 +7466,91 @@ class TheMemoryGateTests(_MemoryFixture):
         crow_core.forget_approvals()
         self.assertEqual(crow_core.pending_memory(), [])
         self.assertEqual(self.entries(), [])
+
+
+    # ---- #285: every approved write gets an outcome, and the tile shows it all
+
+    def _stage(self, **args):
+        self.addCleanup(crow_core.forget_pending)
+        return crow_core.stage_memory("memory", json.dumps(args))
+
+    def test_an_over_limit_write_comes_back_failed_with_its_reason(self):
+        """#285 (a). The file stayed as it was and the window said nothing --
+        robin's click on 2026-09-24. The limit is still the tool's; what is new
+        is that its refusal reaches the person who pressed save."""
+        crow_core.write_store(crow_core.memory_path(), ["a" * 3900])
+        self._stage(action="add", content="b" * 500)
+        saved, failed = crow_core.approve_pending()
+        self.assertEqual(saved, [])
+        self.assertEqual(len(failed), 1)
+        self.assertIn("over the 4,000-char limit", failed[0]["why"])
+        self.assertIn("add memory", failed[0]["what"])
+        self.assertEqual(self.entries(), ["a" * 3900])
+
+    def test_a_replace_that_matches_nothing_comes_back_failed(self):
+        """#285 (b). `no entry contains` was a result the loop skipped."""
+        crow_core.write_store(crow_core.memory_path(), ["alpha"])
+        self._stage(action="replace", old_text="GIBTSNICHT", content="neu")
+        saved, failed = crow_core.approve_pending()
+        self.assertEqual(saved, [])
+        self.assertIn("no entry contains", failed[0]["why"])
+        self.assertEqual(self.entries(), ["alpha"])
+
+    def test_an_expired_write_is_named_not_swallowed(self):
+        """#285 (c). Expiry still falls on the side of NOT writing -- the entry
+        never runs -- but a late "save" now says it came too late instead of
+        approving an empty list without a word."""
+        entry = self._stage(action="add", content="ZU SPAET")
+        entry["staged"] -= crow_core.PENDING_TTL + 1
+        saved, failed = crow_core.approve_pending()
+        self.assertEqual(saved, [])
+        self.assertEqual([f["why"] for f in failed], ["expired after 5 min"])
+        self.assertEqual(self.entries(), [])
+        # Reported once: a second answer has nothing left to name.
+        self.assertEqual(crow_core.approve_pending(), ([], []))
+
+    def test_a_duplicate_is_not_counted_as_saved(self):
+        """NEGATIVE PROBE. `tool_memory` answers a duplicate with success, and
+        the old loop dropped it silently because it had no action -- the most
+        likely shape of robin's click. It is a write that did not happen."""
+        crow_core.write_store(crow_core.memory_path(), ["schon da"])
+        self._stage(action="add", content="schon da")
+        saved, failed = crow_core.approve_pending()
+        self.assertEqual(saved, [])
+        self.assertEqual(failed[0]["why"], "already in memory")
+
+    def test_the_failure_line_names_the_reason(self):
+        """The line both surfaces show, and it is empty when nothing failed so
+        a caller can test the string."""
+        self.assertEqual(crow_core.pending_failed_note([]), "")
+        line = crow_core.pending_failed_note(
+            [{"what": "add memory: x", "why": "already in memory"}])
+        self.assertTrue(line.startswith("Memory: not saved -- already in memory"), line)
+
+    def test_the_view_carries_the_full_text_and_the_entry_a_replace_removes(self):
+        """#285 point 2. `text` stays the preview; `full` and `old` are whole.
+        robin could not tell an append from a swap mid-file, because the
+        preview showed only the new words, cut at 160."""
+        old_entry = "alpha " + "o" * 300
+        crow_core.write_store(crow_core.memory_path(), [old_entry, "beta"])
+        self._stage(action="replace", old_text="alpha", content="N" * 400)
+        self._stage(action="add", content="A" * 400)
+        swap, add = crow_core.pending_view()
+        self.assertLessEqual(len(swap["text"]), 180)
+        self.assertEqual(swap["full"], "N" * 400)
+        self.assertEqual(swap["old"], old_entry)
+        self.assertEqual(add["full"], "A" * 400)
+        self.assertNotIn("old", add)
+        # READ, NEVER WRITTEN: looking is not approving.
+        self.assertEqual(self.entries(), [old_entry, "beta"])
+
+    def test_the_view_does_not_guess_an_entry_that_is_not_there(self):
+        """NEGATIVE. With no single match the write will fail; showing some
+        entry as removed would announce a change that will not happen."""
+        crow_core.write_store(crow_core.memory_path(), ["x eins", "x zwei"])
+        self._stage(action="remove", old_text="x ")
+        self.assertIsNone(crow_core.pending_view()[0]["old"])
+        self.assertEqual(crow_core.pending_view()[0]["find"], "x ")
 
 
 class BackgroundReviewTests(_MemoryFixture):
@@ -8169,6 +8778,22 @@ class TheStdioConnectionTests(unittest.TestCase):
         self.assertFalse(repeat_a)
         self.assertFalse(repeat_b)
         self.assertEqual(first, second)
+        self.assertNotIn("already called", second)
+
+    def test_a_render_after_an_edit_is_a_new_render(self):
+        """#273: edit, then the identical render_page -- the second call must
+        run, not replay the capture from before the edit (2026-09-24 msg 76)."""
+        crow_core._SEEN.clear()
+        self.addCleanup(crow_core._SEEN.clear)
+        shots = iter(["render-1.png before", "render-2.png after"])
+        real = crow_core.run_tool
+        crow_core.run_tool = lambda name, arguments: next(shots)
+        self.addCleanup(setattr, crow_core, "run_tool", real)
+        args = '{"path": "work/iso-test.html"}'
+        first, repeat_a = crow_core.run_tool_cached("render_page", args)
+        second, repeat_b = crow_core.run_tool_cached("render_page", args)
+        self.assertFalse(repeat_b)
+        self.assertEqual(second, "render-2.png after")
         self.assertNotIn("already called", second)
 
     def test_a_built_in_is_still_answered_from_the_turn_cache(self):
@@ -10564,6 +11189,19 @@ class TheProviderCatalogueTests(unittest.TestCase):
         self.assertEqual(models[0]["context"], 131072)
         self.assertEqual(models[1]["context"], 8000)
         self.assertEqual(models[1]["name"], "a/b")
+
+    def test_the_catalogue_keeps_whether_a_model_can_see(self):
+        """#266: `architecture.input_modalities` as OpenRouter declares it;
+        a row that does not say stays without the key."""
+        _FakeCatalogue.body = json.dumps({"data": [
+            {"id": "v/eyes", "architecture": {"input_modalities": ["text", "image"]}},
+            {"id": "t/text", "architecture": {"input_modalities": ["text"]}},
+            {"id": "u/unsaid"}]})
+        models, _problem = crow_core.provider_fetch_models("openrouter", "k")
+        by = {m["id"]: m for m in models}
+        self.assertIs(by["v/eyes"]["vision"], True)
+        self.assertIs(by["t/text"]["vision"], False)
+        self.assertNotIn("vision", by["u/unsaid"])
 
     def test_the_request_says_who_is_asking(self):
         """The lesson of 2026-08-22, applied at the FIRST build of an outgoing
@@ -13910,6 +14548,147 @@ class CrowOwnsTheBrowserItStartsTests(unittest.TestCase):
         self.assertIn("Edge", said)
 
 
+class ALocalPageKeepsItsQueryTests(unittest.TestCase):
+    """#272. `render_page("index.html?view=albedo")` war am 2026-09-24
+    "no such page", obwohl index.html dalag (session.json msg 36/37): die ganze
+    Zeichenkette ging an isfile. Der Diorama-Auftrag verlangt
+    `index.html?shot=<view>&w=<px>` fuer jeden Review-Screenshot. Hier laeuft
+    das Werkzeug bis zum Browserstart; der Browser ist ein Stellvertreter, der
+    die Adresse aus argv aufschreibt und ein Bild ablegt."""
+
+
+    def _browser_url(self):
+        # #271 queries nvidia-smi after a software render, so the browser is
+        # not always the last child: take the last argv that opens a page.
+        urls = [a[-1] for a in self.argv if a and str(a[-1]).startswith("file:")]
+        return urls[-1] if urls else None
+    def setUp(self) -> None:
+        self.dir = os.path.realpath(tempfile.mkdtemp(prefix="crow-q272-"))
+        self.page = os.path.join(self.dir, "index.html")
+        with open(self.page, "w", encoding="utf-8") as fh:
+            fh.write("<p>hi")
+        self.root = crow_core.get_root()
+        crow_core.set_root(self.dir)
+        self.argv: "list[list[str]]" = []
+        self.pixels = b"same"
+        crow_core._LAST_CAPTURES.clear()
+
+    def tearDown(self) -> None:
+        crow_core.set_root(self.root)
+        crow_core._LAST_CAPTURES.clear()
+        crow_core._RENDER_RIDE.clear()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _render(self, path: str) -> str:
+        test = self
+
+        class Browser:
+            pid, returncode = 4242, 0
+
+            def __init__(self, argv, **_):
+                test.argv.append(list(argv))
+                shot = [a for a in argv if a.startswith("--screenshot=")]
+                with open(shot[0].split("=", 1)[1], "wb") as fh:
+                    fh.write(test.pixels)
+
+            def wait(self, timeout=None):
+                return 0
+
+        with mock.patch.object(crow_core, "find_browser", lambda: "/bin/chromium"), \
+                mock.patch.object(crow_platform, "devtools_pipe", lambda: None), \
+                mock.patch.object(crow_platform, "render_scope_prefix", lambda: []), \
+                mock.patch.object(crow_platform, "render_gl_mode",
+                                  getattr(self, "gl", lambda *a, **k: "swiftshader")), \
+                mock.patch.object(crow_platform, "gpu_free_mib", lambda: 73), \
+                mock.patch.object(crow_core.subprocess, "Popen", Browser):
+            return crow_core.tool_render_page(path)
+
+    def test_the_render_asks_with_the_windows_panel(self):
+        """#279: the core passes what the window set, and the result names
+        the panel's bound -- one card reading for the choice and the reason."""
+        seen = []
+
+        def gl(free_mib=None, panel=False):
+            seen.append((free_mib, panel))
+            return "swiftshader"
+        self.gl = gl
+        self.addCleanup(crow_core.render_panel_set, False)
+        crow_core.render_panel_set(True)
+        said = self._render("index.html")
+        self.assertEqual(seen, [(73, True)])
+        self.assertIn("73 MiB VRAM free, below the 1,536 MiB", said)
+        crow_core.render_panel_set(False)
+        said = self._render("index.html")
+        self.assertEqual(seen[-1], (73, False))
+        self.assertIn("below the 512 MiB", said)
+
+    def test_the_query_reaches_the_browser(self):
+        said = self._render("index.html?shot=default&w=960")
+        self.assertFalse(said.startswith("error"), said)
+        self.assertEqual(self._browser_url(),
+                         Path(self.page).as_uri() + "?shot=default&w=960")
+
+    def test_the_fragment_reaches_the_browser(self):
+        said = self._render("index.html#stall")
+        self.assertFalse(said.startswith("error"), said)
+        self.assertEqual(self._browser_url(), Path(self.page).as_uri() + "#stall")
+
+    def test_a_missing_file_is_still_no_such_page_and_names_the_file(self):
+        said = self._render("gone.html?shot=default")
+        self.assertEqual(said, "error: no such page: %s"
+                         % os.path.join(self.dir, "gone.html"))
+        self.assertEqual(self.argv, [], "no browser for a missing page")
+
+    def test_a_file_really_named_with_a_query_wins(self):
+        """POSIX erlaubt `?` im Namen; die echte Datei geht vor dem Schnitt."""
+        if os.name == "nt":
+            self.skipTest("`?` is not allowed in a Windows file name")
+        odd = os.path.join(self.dir, "odd?x.html")
+        with open(odd, "w", encoding="utf-8") as fh:
+            fh.write("<p>odd")
+        said = self._render("odd?x.html")
+        self.assertFalse(said.startswith("error"), said)
+        self.assertEqual(self._browser_url(), Path(odd).as_uri())
+        self.assertTrue(self._browser_url().endswith("odd%3Fx.html"))
+
+    def test_different_queries_are_different_captures(self):
+        """#175-Nachtrag: byte-gleich gegen DIESELBE Adresse ist ein Verdacht;
+        eine andere Ansicht derselben Datei ist eine andere Seite."""
+        self._render("index.html?shot=default")
+        other = self._render("index.html?shot=stall")
+        self.assertNotIn("byte-identical", other)
+        again = self._render("index.html?shot=stall")
+        self.assertIn("byte-identical", again)
+        # #273: render_page is never cached at all, so no view can be
+        # answered from another view's (or its own earlier) capture.
+        self.assertIsNone(
+            crow_core._cache_key("render_page", '{"path":"index.html?shot=default"}'))
+
+    def test_file_url_windows_drive_unc_and_posix(self):
+        """RFC 8089 E.2/E.3, gegen die gemessene Ausgabe von
+        PureWindowsPath.as_uri() (Python 3.14.7) -- auf Linux pruefbar."""
+        self.assertEqual(crow_core._file_url(r"C:\a b\x.html", nt=True),
+                         "file:///C:/a%20b/x.html")
+        self.assertEqual(crow_core._file_url(r"C:\a b\x#y.html", nt=True),
+                         "file:///C:/a%20b/x%23y.html")
+        self.assertEqual(crow_core._file_url(r"\\srv\share\a b.html", nt=True),
+                         "file://srv/share/a%20b.html")
+        for p in ("/tmp/a b/x#1.html", "/tmp/x%.html", "/tmp/ü.html"):
+            self.assertEqual(crow_core._file_url(p, nt=False),
+                             Path(p).as_uri() if os.name != "nt" else
+                             "file://" + urllib.parse.quote(p))
+
+    def test_the_console_source_with_a_query_is_still_the_page(self):
+        """#253s Quellzeile: die Konsole nennt die Seite MIT Query."""
+        with open(self.page, "w", encoding="utf-8") as fh:
+            fh.write("line one\nline two\n")
+        line = ('[1:2:0924/110000.0:INFO:CONSOLE(2)] "x" , source: %s'
+                '?shot=default&w=960 (2)' % Path(self.page).as_uri())
+        got = crow_core._source_line(line, self.page)
+        self.assertIsNotNone(got)
+        self.assertEqual(got[1].strip(), "line two")
+
+
 class TheRenderNeverHandsOverABrokenMirrorTests(unittest.TestCase):
     """#175-Nachtrag (2026-09-20): der Fang allein luegt. Gemessen an drei
     Varianten einer animierten WebGL-Seite: byte-identische 92.027 Bytes,
@@ -14520,7 +15299,7 @@ class TheConsoleSaysWhoseSpellingFailedTests(unittest.TestCase):
 
     def test_five_arguments_to_renderbuffer_storage_are_counted(self):
         line = ('"WebGL: INVALID_ENUM: renderbufferStorage: invalid '
-                'internalformat", source: file://%s (13)' % self.page)
+                'internalformat", source: %s (13)' % crow_core._file_url(self.page))
         hints = crow_core._console_hints([line, line, line], self.API,
                                          self.page)
         self.assertEqual(len(hints), 1, "one hint per call site: %r" % hints)
@@ -14537,7 +15316,7 @@ class TheConsoleSaysWhoseSpellingFailedTests(unittest.TestCase):
         shader failure, not a signature slip -- and line 14 here is a
         four-argument call."""
         line = ('"WebGL: INVALID_ENUM: renderbufferStorage: invalid '
-                'internalformat", source: file://%s (14)' % self.page)
+                'internalformat", source: %s (14)' % crow_core._file_url(self.page))
         self.assertEqual(crow_core._console_hints([line], self.API,
                                                   self.page), [])
 
@@ -14547,7 +15326,7 @@ class TheConsoleSaysWhoseSpellingFailedTests(unittest.TestCase):
         other = os.path.join(outside, "x.html")
         shutil.copy(self.page, other)
         line = ('"WebGL: INVALID_ENUM: renderbufferStorage: invalid '
-                'internalformat", source: file://%s (13)' % other)
+                'internalformat", source: %s (13)' % crow_core._file_url(other))
         self.assertEqual(crow_core._console_hints([line], self.API,
                                                   self.page), [])
 
@@ -14671,8 +15450,12 @@ class TheModelCanLookAtAnImageTests(unittest.TestCase):
     def test_a_picture_comes_back_as_a_block_exactly_once(self):
         said = crow_core.tool_read_image(self.png)
         self.assertIn("shot.png", said)
-        part = crow_core.take_image_ride()
-        self.assertIsNotNone(part, "no image was staged for the loop")
+        parts = crow_core.take_image_ride()
+        self.assertIsNotNone(parts, "no image was staged for the loop")
+        # #265: a 1x1 picture has no ground to crop from -- one
+        # block, the file itself.
+        self.assertEqual(len(parts), 1, parts)
+        part = parts[0]
         self.assertEqual(part["type"], "image_url")
         self.assertTrue(part["image_url"]["url"].startswith("data:image/png;base64,"))
         # GENAU EINMAL. Der Platz ist kein Stapel: ein zweites Abholen muss
@@ -14713,7 +15496,7 @@ class TheModelCanLookAtAnImageTests(unittest.TestCase):
         der kostet den ganzen Zug. Also wird gefragt, BEVOR angehaengt wird."""
         src = inspect.getsource(crow_core.run_turn)
         ask = src.index("refuse_images(base_url)")
-        attach = src.index('[{"type": "text", "text": result}, ride]')
+        attach = src.index('[{"type": "text", "text": result}] + ride')
         self.assertLess(ask, attach,
                         "the projector is checked after the block is attached")
 
@@ -14730,6 +15513,135 @@ class TheModelCanLookAtAnImageTests(unittest.TestCase):
             self.assertIsNotNone(crow_core.take_image_ride())
         finally:
             crow_core.set_root(before)
+
+
+class ASmallSceneGetsAnEnlargedSecondViewTests(unittest.TestCase):
+    """#265. In the diorama run of 2026-09-23 the scene filled
+    7-20 % of a 984x552 / 1280x720 render on a black, grainy ground; the vision
+    tower bills ~1,030 px per token, so the model judged the scene from ~40-120
+    tokens and rated every criterion 9+. read_image now adds a crop of the
+    content, enlarged, and says how small the scene is; render_page states the
+    same numbers as `metrics:` lines and saves the crop beside the capture."""
+
+    @staticmethod
+    def _png(width, height, pixel):
+        """RGB, filter 0 -- written here, not with crow_core's encoder, so
+        the decoder is checked against an independent file."""
+        import zlib
+        raw = b"".join(b"\x00" + b"".join(bytes(pixel(x, y))
+                                           for x in range(width))
+                       for y in range(height))
+
+        def chunk(kind, body):
+            return (len(body).to_bytes(4, "big") + kind + body
+                    + (zlib.crc32(kind + body) & 0xFFFFFFFF).to_bytes(4, "big"))
+
+        head = (width.to_bytes(4, "big") + height.to_bytes(4, "big")
+                + bytes([8, 2, 0, 0, 0]))
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head)
+                + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+    @classmethod
+    def _scene(cls, width=320, height=200):
+        """The diorama frame in small: a grainy near-black ground, a HUD
+        line top left, and a lit block of 48x40 px at (140, 80)."""
+        def pixel(x, y):
+            grain = (x * 7 + y * 13) % 9          # 0-8, like film grain
+            if 140 <= x < 188 and 80 <= y < 120:
+                return (150 + x % 40, 90 + y % 30, 200)
+            if 4 <= x < 60 and y == 5 and x % 3:
+                return (120, 120, 130)            # a thin HUD line
+            return (grain, grain, grain + 2)
+        return cls._png(width, height, pixel)
+
+    def setUp(self) -> None:
+        self.dir = tempfile.mkdtemp(prefix="crow-crop-")
+        crow_core.take_image_ride()
+
+    def tearDown(self) -> None:
+        crow_core.take_image_ride()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_the_box_is_the_scene_not_the_grain_or_the_hud(self):
+        view = crow_core._content_view(self._scene())
+        self.assertIsNotNone(view)
+        x0, y0, x1, y1 = view["box"]
+        # Cell precision: the box snaps to 16 px cells around the block.
+        self.assertTrue(128 <= x0 <= 140 and 188 <= x1 <= 208, view["box"])
+        self.assertTrue(64 <= y0 <= 80 and 120 <= y1 <= 128, view["box"])
+        self.assertLess(view["coverage"], 0.1)
+
+    def test_the_crop_is_enlarged_to_the_budget_and_decodes(self):
+        view = crow_core._content_view(self._scene())
+        img = crow_core._png_pixels(view["png"])
+        self.assertIsNotNone(img, "the crop must be a PNG the decoder reads")
+        w, h = img[0], img[1]
+        cx0, cy0, cx1, cy1 = view["crop"]
+        # Enlarged, capped at 4x, never past the 1024-px long edge.
+        self.assertEqual(view["scale"], crow_core._CROP_MAX_SCALE)
+        self.assertEqual((w, h), (int((cx1 - cx0) * 4), int((cy1 - cy0) * 4)))
+        self.assertLessEqual(max(w, h), crow_core._CROP_LONG_EDGE)
+        # Nearest neighbour: the block's colour is in the middle of the crop.
+        mid = img[4][h // 2]
+        self.assertEqual(mid[3 * (w // 2) + 2], 200)
+
+    def test_a_frame_drawn_edge_to_edge_gets_no_second_view(self):
+        busy = self._png(64, 48, lambda x, y: (x * 4 % 256, y * 5, 128))
+        self.assertIsNone(crow_core._content_view(busy))
+        big = self._png(64, 48, lambda x, y: (
+            (220, 60, 60) if 4 <= x < 60 and 4 <= y < 44 else (0, 0, 0)))
+        view = crow_core._content_view(big)
+        self.assertIsNotNone(view)
+        self.assertGreaterEqual(view["coverage"], crow_core._CROP_MAX_COVER)
+        self.assertIsNone(view["png"], "a large scene needs no enlargement")
+
+    def test_read_image_hands_frame_then_crop_and_says_how_small(self):
+        path = os.path.join(self.dir, "render.png")
+        with open(path, "wb") as fh:
+            fh.write(self._scene())
+        said = crow_core.tool_read_image(path)
+        parts = crow_core.take_image_ride()
+        self.assertEqual(len(parts), 2, said)
+        self.assertIn("TWO images", said)
+        self.assertRegex(said, r"the content fills \d+ % of the 320x200 frame")
+        self.assertIn("Image 1 is the full frame", said)
+        self.assertIn("Image 2 is x ", said)
+        import base64
+        full = base64.b64decode(parts[0]["image_url"]["url"].split(",", 1)[1])
+        with open(path, "rb") as fh:
+            self.assertEqual(full, fh.read(), "the frame travels unchanged")
+
+    def test_render_metrics_name_box_colours_luma_and_save_the_crop(self):
+        shot = os.path.join(self.dir, "render-1.png")
+        warns, lines = crow_core._capture_metrics(shot, self._scene())
+        self.assertTrue(any(w.startswith("warn: the content fills only")
+                            for w in warns), warns)
+        self.assertTrue(all(x.startswith("metrics: ") for x in lines), lines)
+        text = "\n".join(lines)
+        self.assertRegex(text, r"content box x \d+-\d+, y \d+-\d+ of 320x200")
+        self.assertRegex(text, r"coverage \d+\.\d %")
+        self.assertRegex(text, r"\d+ distinct colours")
+        self.assertIn("luma histogram", text)
+        crop = os.path.join(self.dir, "render-1-crop.png")
+        self.assertTrue(os.path.isfile(crop))
+        self.assertIn(crop, text)
+
+    def test_few_colours_warn_and_a_full_frame_saves_no_crop(self):
+        shot = os.path.join(self.dir, "flat.png")
+        flat = self._png(64, 48, lambda x, y: (
+            (255, 0, 0) if 4 <= x < 60 and 4 <= y < 44 else (0, 0, 0)))
+        warns, lines = crow_core._capture_metrics(shot, flat)
+        self.assertTrue(any("only 2 distinct colours" in w for w in warns),
+                        warns)
+        self.assertFalse(any("fills only" in w for w in warns), warns)
+        self.assertFalse(os.path.exists(os.path.join(self.dir,
+                                                     "flat-crop.png")))
+
+    def test_render_page_puts_the_metrics_in_its_result(self):
+        src = inspect.getsource(crow_core.tool_render_page)
+        self.assertIn("_capture_metrics(shot, pixels)", src)
+        self.assertLess(src.index("said.extend(metrics)"),
+                        src.index('"read_image it to look at the page."'))
 
 
 class ATurnsBillOutlivesTheCutTests(unittest.TestCase):
@@ -15032,6 +15944,59 @@ class TheReplannedGoalKeepsItsMarksTests(unittest.TestCase):
         self.assertEqual([s["status"] for s in goal["steps"]],
                          ["open", "open"])
 
+    def test_notes_and_step_bills_ride_with_the_mark(self):
+        """#260, the live case: `carried: done 6/9` and then
+        `note: ""` on all nine steps. The whole step record rides."""
+        crow_core.goal_start(
+            "Old plan", ["read the code", "write it", "prove it"], now=1000.0)
+        crow_core.goal_tokens_seen(0)
+        crow_core.goal_step_begin(0, now=1001.0)
+        crow_core.goal_step_end(0, tokens=10,
+                                note="Verified by screenshot: a.png", now=1010.0)
+        crow_core.goal_step_end(1, ok=False, note="the build fails at line 3",
+                                now=1020.0)
+        before = crow_core.goal_load()
+        out = json.loads(crow_core.tool_goal_set(
+            "New plan", ["Read the code", "write it", "prove it"]))
+        self.assertEqual(out["carried"], {"done": 1, "of": 3, "matched": 2})
+        after = crow_core.goal_load()
+        for n in (0, 1):
+            for field in crow_core._GOAL_CARRIED_FIELDS:
+                self.assertEqual(after["steps"][n].get(field),
+                                 before["steps"][n].get(field),
+                                 "step %d lost %s" % (n + 1, field))
+        self.assertEqual(after["steps"][0]["note"], "Verified by screenshot: a.png")
+        self.assertEqual(after["steps"][0]["text"], "Read the code",
+                         "the new plan's wording was replaced by the old")
+        self.assertEqual(after["steps"][2]["note"], "")
+        for field in crow_core._GOAL_CARRIED_TOTALS:
+            self.assertEqual(after.get(field), before.get(field), field)
+
+    def test_a_carried_failed_note_still_guards_done(self):
+        """#250 reads the note of a failed step; carried without it, a bare
+        `done` after the replan slipped through."""
+        crow_core.goal_start("Old", ["read the code", "write it"], now=1000.0)
+        crow_core.goal_step_end(0, ok=False, note="no 3D here", now=1010.0)
+        crow_core.tool_goal_set("New", ["read the code", "write it"])
+        out = json.loads(crow_core.tool_goal_step(1, "done"))
+        self.assertFalse(out["ok"])
+        self.assertIn("no 3D here", out["error"])
+
+    def test_the_next_step_is_not_billed_the_whole_goal(self):
+        """`spent` rides with `last_spent`: the next step is billed what came
+        after the last transition, not everything the goal ever cost."""
+        crow_core.goal_start("Old", ["read the code", "write it"], now=1000.0)
+        goal = crow_core.goal_load()
+        goal["spent"] = goal["last_spent"] = 5000
+        crow_core.goal_write(goal)
+        crow_core.goal_step_end(0, now=1010.0)
+        crow_core.tool_goal_set("New", ["read the code", "write it"])
+        goal = crow_core.goal_load()
+        goal["spent"] += 30
+        crow_core.goal_write(goal)
+        crow_core.goal_step_end(1, now=1020.0)
+        self.assertEqual(crow_core.goal_load()["steps"][1]["tokens"], 30)
+
     def test_no_goal_before_no_carry(self):
         out = json.loads(crow_core.tool_goal_set(
             "Fresh", ["step one", "step two"]))
@@ -15070,10 +16035,130 @@ class TheRolloverNoteIsParsableTests(unittest.TestCase):
         self.assertEqual(crow_core.rollover_note_split("frage"), (None, ""))
 
 
+class AFailedStepIsRetriedOnceThenSkippedTests(unittest.TestCase):
+    """#289. 2026-09-24, diorama run: step 4 went `failed` with an honest
+    note (session.json msg 324), the answer named step 4 as `next_step`
+    again (msg 325), and the run sat on it for ~2 h 20 min until robin
+    edited goal.json by hand. One retry with the note in the nudge, then
+    `skipped`, and the goal moves on."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-goalskip-"))
+        self.state = tempfile.mkdtemp(prefix="crow-goalskip-state-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.state, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", crow_core.SESSION_DIR)
+        crow_core.SESSION_DIR = self.state
+        crow_core.goal_command("parser | read it | build it | test it | "
+                               "trace it | ship it")
+
+    def step(self, n, status, note=""):
+        return json.loads(crow_core.tool_goal_step(n, status, note))
+
+    def status(self, n):
+        return crow_core.goal_load()["steps"][n - 1]["status"]
+
+    def test_two_failures_skip_the_step_and_the_goal_moves_on(self):
+        """The ticket's unit: `goal_step(4, "failed")` twice -> step 4 is
+        `skipped` and `next_step` is 5."""
+        for n in (1, 2, 3):
+            self.assertTrue(self.step(n, "done", "ok, checked")["ok"])
+        first = self.step(4, "failed", "no GPU here to trace on")
+        self.assertEqual(first["next_step"], 4, "one retry, not none")
+        self.assertIn("retry", first)
+        self.assertEqual(self.status(4), "failed")
+        # The engine sets the step running before the retry, as it does live.
+        crow_core.goal_step_begin(3)
+        second = self.step(4, "failed", "still no GPU")
+        self.assertEqual(self.status(4), "skipped")
+        self.assertEqual(second["next_step"], 5)
+        self.assertIn("skipped", second)
+        self.assertEqual(crow_core.goal_next_open(), 4)
+        self.assertEqual(crow_core.goal_counts(), (3, 5),
+                         "a skipped step counted as done")
+
+    def test_the_retry_nudge_quotes_the_failure_note(self):
+        self.step(1, "failed", "the parser grammar is ambiguous at line 12")
+        goal = crow_core.goal_load()
+        note = crow_core.goal_retry_note(goal, 0)
+        self.assertEqual(note, "the parser grammar is ambiguous at line 12")
+        nudge = crow_core.goal_retry_nudge(goal, 0, note)
+        self.assertIn("the parser grammar is ambiguous at line 12", nudge)
+        self.assertIn("different approach", nudge)
+        self.assertTrue(nudge.startswith(crow_core.GOAL_NUDGE_MARK))
+        # GEGENPROBE: a step that did not fail gets no retry line.
+        self.assertIsNone(crow_core.goal_retry_note(goal, 1))
+
+    def test_a_goal_with_a_skipped_step_ends_partial_not_done(self):
+        for n in (1, 2, 3):
+            self.step(n, "done", "ok, checked")
+        self.step(4, "failed", "no GPU")
+        self.step(4, "failed", "no GPU")
+        out = self.step(5, "done", "ok, checked")
+        goal = crow_core.goal_load()
+        self.assertEqual(goal["status"], crow_core.GOAL_PARTIAL)
+        self.assertFalse(out["complete"])
+        self.assertIsNone(out["next_step"])
+        self.assertEqual(out["ended"], "complete with 1 skipped")
+        self.assertIn("complete with 1 skipped", crow_core.goal_summary(goal))
+        # Taking a skipped step up again reopens the goal.
+        crow_core.goal_step_begin(3)
+        self.assertEqual(crow_core.goal_load()["status"], crow_core.GOAL_OPEN)
+
+    def test_goal_skip_sets_skipped_with_the_users_note(self):
+        """The ticket's unit: `/goal skip 4 not verifiable here`."""
+        for n in (1, 2, 3):
+            self.step(n, "done", "ok, checked")
+        crow_core.goal_step_begin(3)
+        said, goal, changed = crow_core.goal_command("skip 4 not verifiable here")
+        self.assertTrue(changed)
+        self.assertEqual(goal["steps"][3]["status"], "skipped")
+        self.assertEqual(goal["steps"][3]["note"], "not verifiable here")
+        self.assertEqual(goal["steps"][3]["started"], None,
+                         "the running step's clock was not billed")
+        self.assertIn("step 4 skipped", said)
+        self.assertIn("next is step 5", said)
+        self.assertEqual(crow_core.goal_next_open(), 4)
+        self.assertEqual(self.status(4), "skipped")
+
+    def test_goal_skip_refuses_a_done_step_and_leaves_titles_alone(self):
+        self.step(1, "done", "ok, checked")
+        said, _goal, changed = crow_core.goal_command("skip 1")
+        self.assertFalse(changed)
+        self.assertIn("done", said)
+        self.assertEqual(self.status(1), "done")
+        said, _goal, changed = crow_core.goal_command("skip 9")
+        self.assertFalse(changed)
+        # "skip" followed by words is a goal title, not the command.
+        said, goal, changed = crow_core.goal_command("skip the intro | a | b")
+        self.assertTrue(changed)
+        self.assertEqual(goal["title"], "skip the intro")
+
+    def test_a_replan_keeps_a_skipped_step_skipped(self):
+        crow_core.goal_command("skip 2 cannot here")
+        out = json.loads(crow_core.tool_goal_set(
+            "parser", ["read it", "build it", "test it"]))
+        self.assertEqual(out["next"], 1)
+        steps = crow_core.goal_load()["steps"]
+        self.assertEqual(steps[1]["status"], "skipped")
+        self.assertEqual(steps[1]["note"], "cannot here")
+
+    def test_the_seam_head_marks_skipped_and_names_the_step_after(self):
+        for n in (1, 2, 3):
+            self.step(n, "done", "ok, checked")
+        crow_core.goal_command("skip 4")
+        block = crow_core.goal_block(include_status=True)
+        self.assertIn("4. [skipped] trace it", block)
+        self.assertIn("Next: step 5. ship it", block)
+
+
 class GoalDoneNeedsEvidenceTests(unittest.TestCase):
     """#250. 2026-09-23: goal mode closed 9/9 over a 1.4 KB index.html
     that draws nothing. Step 4's `done` note said "done-with-deviation only in
-    spirit"; step 9 went `failed`, then `done` with no note."""
+    spirit"; step 9 went `failed`, then `done` with no note. The goals here
+    are not visual on purpose: the picture gate has its own class below."""
 
     def setUp(self):
         self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-goaldone-"))
@@ -15089,7 +16174,7 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
         return json.loads(crow_core.tool_goal_step(n, status, note))
 
     def test_a_note_that_says_not_done_is_refused(self):
-        crow_core.goal_command("diorama | build it | verify it")
+        crow_core.goal_command("parser | build it | verify it")
         out = self.step(1, "done", "Step treated as done-with-deviation only "
                                    "in spirit; the GLSL work remains queued.")
         self.assertFalse(out["ok"])
@@ -15099,12 +16184,12 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
     def test_a_note_with_evidence_passes(self):
         """POSITIVE CONTROL: a plain proof, and a note that mentions a
         failure it fixed, are not refused."""
-        crow_core.goal_command("diorama | build it | verify it")
+        crow_core.goal_command("parser | build it | verify it")
         self.assertTrue(self.step(1, "done", "node --check ok; 0 failed of 12 "
                                              "tests; render shows the scene")["ok"])
 
     def test_done_after_failed_needs_a_note(self):
-        crow_core.goal_command("diorama | build it | verify it")
+        crow_core.goal_command("parser | build it | verify it")
         self.step(1, "done", "built")
         self.step(2, "failed", "no fps figure can be read")
         out = self.step(2, "done")
@@ -15114,7 +16199,7 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
 
     def test_the_acceptance_check_holds_the_goal_open(self):
         said, _goal, _ch = crow_core.goal_command(
-            "diorama | build it | verify it | check: exit 3")
+            "parser | build it | verify it | check: exit 3")
         self.assertIn("acceptance check: exit 3", said)
         self.assertIn("Acceptance check", crow_core.goal_block())
         self.assertTrue(self.step(1, "done", "built")["ok"])
@@ -15125,14 +16210,14 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
         self.assertNotEqual(crow_core.goal_load().get("status"), "done")
 
     def test_a_passing_check_closes_the_goal(self):
-        crow_core.goal_command("diorama | build it | verify it | check: exit 0")
+        crow_core.goal_command("parser | build it | verify it | check: exit 0")
         self.step(1, "done", "built")
         out = self.step(2, "done", "verified")
         self.assertTrue(out["ok"] and out["complete"], out)
         self.assertEqual(out["acceptance_check"], "passed: exit 0")
 
     def test_the_check_runs_only_on_the_closing_done(self):
-        crow_core.goal_command("diorama | a | b | c | check: exit 0")
+        crow_core.goal_command("parser | a | b | c | check: exit 0")
         with mock.patch.object(crow_core, "tool_run_command",
                                return_value="[exit 0]") as ran:
             self.step(1, "done", "a")
@@ -15144,7 +16229,7 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
     def test_the_check_is_not_in_the_working_area(self):
         """NEGATIVE: goal.json is writable by the model's write_file; a
         command put there runs nothing."""
-        crow_core.goal_command("diorama | a | b | check: exit 0")
+        crow_core.goal_command("parser | a | b | check: exit 0")
         with open(crow_core.goal_path(), encoding="utf-8") as fh:
             self.assertNotIn("exit 0", fh.read())
         crow_core.goal_check_set(None)
@@ -15159,11 +16244,565 @@ class GoalDoneNeedsEvidenceTests(unittest.TestCase):
         ran.assert_not_called()
 
     def test_a_replan_keeps_the_users_check_and_off_drops_it(self):
-        crow_core.goal_command("diorama | a | b | check: exit 3")
-        crow_core.tool_goal_set("diorama", ["a", "b", "c"])
+        crow_core.goal_command("parser | a | b | check: exit 3")
+        crow_core.tool_goal_set("parser", ["a", "b", "c"])
         self.assertEqual(crow_core.goal_check_get(), "exit 3")
         crow_core.goal_command("off")
         self.assertIsNone(crow_core.goal_check_get())
+
+
+class _JudgeAnswer:
+    """A fake HTTP answer for `urlopen`, a context manager like the real one."""
+
+    def __init__(self, doc):
+        self.raw = json.dumps(doc).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self.raw
+
+
+def _judge_reply(scores, weakest=("tiny", "black", "flat"), fence=True):
+    text = json.dumps({"scores": scores, "weakest": list(weakest),
+                       "verdict": "a small box in a black frame"})
+    if fence:
+        text = "Here you go:\n```json\n%s\n```" % text
+    return {"choices": [{"message": {"content": text}}]}
+
+
+class TheJudgeHasFreshEyesTests(unittest.TestCase):
+    """#266. 2026-09-23: the model scored its own black frame 9+ on every
+    criterion. `judge` sends only the capture and the rubric to a model that
+    never saw the conversation, and stores its scores on the step."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-judge-"))
+        self.state = tempfile.mkdtemp(prefix="crow-judge-state-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.state, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", crow_core.SESSION_DIR)
+        crow_core.SESSION_DIR = self.state
+        self.addCleanup(crow_core._TURN_SPOT.clear)
+        crow_core._TURN_SPOT.clear()
+        crow_core._TURN_SPOT.update({
+            "base_url": "http://127.0.0.1:9/v1", "model": "local-maker",
+            "api_key": "x", "remote": False, "headers": {},
+            "transport": crow_core.TRANSPORT_CHAT, "served": "local-maker"})
+
+    def capture(self, name="render-20260924-101010.png", crop=False):
+        path = os.path.join(crow_core._render_dir(), name)
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + os.urandom(16))
+        if crop:
+            with open(path[:-4] + "-crop.png", "wb") as fh:
+                fh.write(b"\x89PNG\r\n\x1a\n")
+        return path
+
+    # -- the rubric ----------------------------------------------------------
+
+    def test_the_diorama_sentence_is_a_rubric_even_wrapped(self):
+        text = ("2. Look at them critically and score each 1\u201310 against: "
+                "detail density, lighting mood, material realism\n   (wetness), "
+                "reflections, composition, colour harmony, and image "
+                "cleanliness (aliasing, banding, artefacts).\n3. Write the "
+                "scores into PLAN.md")
+        self.assertEqual(crow_core.rubric_from_text(text), [
+            "detail density", "lighting mood", "material realism (wetness)",
+            "reflections", "composition", "colour harmony",
+            "image cleanliness (aliasing, banding, artefacts)"])
+
+    def test_a_criteria_heading_with_bullets_is_a_rubric(self):
+        text = ("# Plan\n\n## Review criteria\n\n- **detail density** \u2014 "
+                "many voxels\n- lighting mood: warm\n- composition\n\n"
+                "## Next\n- not a criterion\n")
+        self.assertEqual(crow_core.rubric_from_text(text),
+                         ["detail density", "lighting mood", "composition"])
+
+    def test_the_users_accept_lines_win_then_plan_then_caller(self):
+        self.assertEqual(crow_core.judge_rubric("a, b")[1], "the caller")
+        self.assertEqual(crow_core.judge_rubric()[0],
+                         list(crow_core.JUDGE_DEFAULT_RUBRIC))
+        with open(os.path.join(self.root, "PLAN.md"), "w") as fh:
+            fh.write("Score each against: depth, mood.\n")
+        self.assertEqual(crow_core.judge_rubric("a, b"), (["depth", "mood"],
+                                                          "PLAN.md"))
+        said, _g, _c = crow_core.goal_command(
+            "scene | build it | check it | accept: neon glows, ground reads wet")
+        self.assertIn("1 accept line for the judge", said)
+        self.assertEqual([s["text"] for s in crow_core.goal_load()["steps"]],
+                         ["build it", "check it"])
+        self.assertEqual(crow_core.judge_rubric("a, b"),
+                         (["neon glows", "ground reads wet"],
+                          "the user's accept lines"))
+        self.assertIn("neon glows", crow_core.goal_block())
+
+    def test_the_step_text_leads_and_the_callers_criteria_only_add(self):
+        """#286: step 3 'G-buffer and voxel volume' passed on step 2's
+        structure/camera criteria the model re-supplied (8/9/8)."""
+        self.assertEqual(
+            crow_core.judge_rubric(["camera framing"],
+                                   step_text="G-buffer and voxel volume"),
+            (["delivers: G-buffer and voxel volume", "camera framing"],
+             "the step + the caller"))
+        rubric, source = crow_core.judge_rubric(step_text="build it")
+        self.assertEqual(rubric, ["delivers: build it"]
+                         + list(crow_core.JUDGE_DEFAULT_RUBRIC))
+        self.assertEqual(source, "the step + the default visual rubric")
+        with open(os.path.join(self.root, "PLAN.md"), "w") as fh:
+            fh.write("Score each against: depth, mood.\n")
+        self.assertEqual(crow_core.judge_rubric("a", step_text="build it"),
+                         (["delivers: build it", "depth", "mood"],
+                          "the step + PLAN.md"))
+        crow_core.goal_command("scene | build it | accept: neon glows, wet")
+        self.assertEqual(crow_core.judge_rubric("a", step_text="build it"),
+                         (["neon glows", "wet"], "the user's accept lines"))
+
+    def test_a_replan_keeps_the_accept_lines_and_off_drops_them(self):
+        crow_core.goal_command("scene | a | b | accept: neon glows")
+        crow_core.tool_goal_set("scene", ["a", "b", "c"])
+        self.assertEqual(crow_core.goal_accept_get(), ["neon glows"])
+        crow_core.goal_command("off")
+        self.assertEqual(crow_core.goal_accept_get(), [])
+
+    # -- the images ----------------------------------------------------------
+
+    def test_the_newest_capture_and_its_crop_are_judged(self):
+        old = self.capture("render-20260924-090000.png")
+        os.utime(old, (1, 1))
+        new = self.capture(crop=True)
+        paths, bad = crow_core.judge_images()
+        self.assertIsNone(bad)
+        self.assertEqual(paths, [new, new[:-4] + "-crop.png"])
+
+    def test_no_capture_is_an_error_that_names_render_page(self):
+        paths, bad = crow_core.judge_images()
+        self.assertEqual(paths, [])
+        self.assertIn("render_page", bad)
+        self.assertIn("no such image", crow_core.judge_images("nope.png")[1])
+
+    # -- the answer ----------------------------------------------------------
+
+    def test_a_fenced_answer_is_parsed_matched_and_clamped(self):
+        text = _judge_reply({"Detail density": 12, "lighting-mood": "3",
+                             "composition": 2.4})["choices"][0]["message"]["content"]
+        verdict, bad = crow_core.judge_parse(
+            text, ["detail density", "lighting mood", "composition"])
+        self.assertIsNone(bad)
+        self.assertEqual(verdict["scores"], {"detail density": 10,
+                                             "lighting mood": 3,
+                                             "composition": 2})
+        self.assertEqual(verdict["min"], 2)
+        self.assertEqual(verdict["weakest"], ["tiny", "black", "flat"])
+
+    def test_an_answer_that_scores_too_little_is_no_verdict(self):
+        verdict, bad = crow_core.judge_parse(
+            '{"scores": {"a": 9}}', ["a", "b", "c"])
+        self.assertIsNone(verdict)
+        self.assertIn("1 of 3", bad)
+        self.assertIsNone(crow_core.judge_parse("looks great!", ["a"])[0])
+
+    # -- who judges ----------------------------------------------------------
+
+    def spot(self, model, provider="openrouter"):
+        return {"provider": provider, "model": model, "remote": True,
+                "base_url": "https://example.invalid/v1", "api_key": "k",
+                "headers": {}, "transport": crow_core.TRANSPORT_CHAT}
+
+    def test_the_order_is_pin_then_delegate_chain_then_own_model(self):
+        doc = {"judge": {"provider": "openrouter", "model": "pin/eyes"},
+               "catalog": {"openrouter": {"models": [
+                   {"id": "text/only", "vision": False},
+                   {"id": "fav/eyes", "vision": True}]}}}
+
+        def target(d=None):
+            return self.spot((d.get("delegate") or {}).get("model")
+                             or "fav/eyes"), None
+        with mock.patch.object(crow_core, "delegate_target", side_effect=target), \
+                mock.patch.object(crow_core, "delegate_fallbacks",
+                                  return_value=[self.spot("text/only"),
+                                                self.spot("unsaid/model")]):
+            spots = crow_core.judge_spots(doc)
+        self.assertEqual([s["model"] for s in spots],
+                         ["pin/eyes", "fav/eyes", "unsaid/model", "local-maker"])
+        self.assertIn("fresh context", spots[-1]["how"])
+
+    def test_a_local_pin_asks_no_remote(self):
+        with mock.patch.object(crow_core, "delegate_target") as target:
+            spots = crow_core.judge_spots({"judge": {"provider": "local"}})
+        target.assert_not_called()
+        self.assertEqual([s["model"] for s in spots], ["local-maker"])
+
+    # -- the whole call ------------------------------------------------------
+
+    def test_the_judge_sees_one_message_and_its_scores_land_on_the_step(self):
+        crow_core.goal_command("Neon diorama | plan it | build the scene")
+        crow_core.tool_goal_step(2, "running")
+        self.capture(crop=True)
+        sent = []
+
+        def urlopen(request, timeout=None):
+            sent.append((request.full_url, json.loads(request.data)))
+            return _JudgeAnswer(_judge_reply({"delivers: build the scene": 7,
+                                              "x": 2, "y": 3}))
+        with mock.patch.object(crow_core, "judge_spots",
+                               return_value=[dict(self.spot("v/eyes"),
+                                                  how="the delegate spot")]), \
+                mock.patch.object(crow_core.urllib.request, "urlopen", urlopen):
+            out = json.loads(crow_core.tool_judge(criteria="x, y"))
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["min"], 2)
+        self.assertFalse(out["passes"])
+        self.assertEqual(out["step"], 2)
+        self.assertEqual(out["rubric_from"], "the step + the caller")
+        self.assertIn("delivers: build the scene", out["scores"])
+        url, body = sent[0]
+        self.assertTrue(url.endswith("/chat/completions"))
+        self.assertEqual(len(body["messages"]), 1)
+        parts = body["messages"][0]["content"]
+        self.assertEqual([p["type"] for p in parts],
+                         ["text", "image_url", "image_url"])
+        self.assertIn("build the scene", parts[0]["text"])
+        self.assertIn("enlarged crop", parts[0]["text"])
+        self.assertNotIn("min_p", body)             # remote_body ran
+        stored = crow_core.goal_load()["steps"][1]["judge"]
+        self.assertEqual(stored["min"], 2)
+        self.assertEqual(stored["model"], "openrouter/v/eyes")
+        # #286: the verdict says what was judged, the step's own text first.
+        self.assertEqual(stored["criteria"],
+                         ["delivers: build the scene", "x", "y"])
+        self.assertEqual(stored["rubric_source"], "the step + the caller")
+        self.assertIn("- delivers: build the scene", parts[0]["text"])
+
+    def test_a_dead_spot_falls_through_and_a_blind_local_server_refuses(self):
+        self.capture()
+        calls = []
+
+        def urlopen(request, timeout=None):
+            calls.append(request.full_url)
+            if "example.invalid" in request.full_url:
+                raise urllib.error.HTTPError(
+                    request.full_url, 429, "busy", {},
+                    io.BytesIO(b'{"error": {"message": "rate-limited"}}'))
+            return _JudgeAnswer(_judge_reply({"a": 9, "b": 8}, fence=False))
+        own = dict(crow_core._TURN_SPOT, provider="local", how="own")
+        with mock.patch.object(crow_core, "judge_spots",
+                               return_value=[self.spot("v/eyes"), own]), \
+                mock.patch.object(crow_core.urllib.request, "urlopen", urlopen), \
+                mock.patch.object(crow_core, "refuse_images", return_value=None):
+            out = json.loads(crow_core.tool_judge(criteria="a, b"))
+        self.assertTrue(out["ok"], out)
+        self.assertTrue(out["passes"])
+        self.assertIn("rate-limited", out["tried_first"][0])
+        self.assertIn("fresh request", out["note"])
+        with mock.patch.object(crow_core, "judge_spots", return_value=[own]), \
+                mock.patch.object(crow_core, "refuse_images",
+                                  return_value="this server cannot see"):
+            out = json.loads(crow_core.tool_judge(criteria="a, b"))
+        self.assertFalse(out["ok"])
+        self.assertIn("cannot see", out["error"])
+
+    def test_judge_is_a_declared_network_tool(self):
+        names = [t["function"]["name"] for t in crow_core.TOOLS]
+        self.assertIn("judge", names)
+        self.assertEqual(crow_core.TOOL_CLASS["judge"], "network")
+        self.assertIs(crow_core.TOOL_IMPL["judge"], crow_core.tool_judge)
+
+
+class TheRenderLoopIsCountedTests(unittest.TestCase):
+    """#268. What makes a capture "stuck": a blank verdict, a decoded frame
+    at 98 % one colour or more, or near-identical metrics of the same page."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-loop-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def black_png(self, name, size=8):
+        import zlib
+        raw = b"".join(b"\x00" + b"\x00\x00\x00" * size for _ in range(size))
+
+        def chunk(kind, body):
+            return (len(body).to_bytes(4, "big") + kind + body
+                    + (zlib.crc32(kind + body) & 0xFFFFFFFF).to_bytes(4, "big"))
+        head = size.to_bytes(4, "big") * 2 + bytes([8, 2, 0, 0, 0])
+        path = os.path.join(self.dir, name)
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head)
+                     + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+        return path
+
+    def result(self, path, size=18244, metrics=""):
+        return ("%s -- %d bytes, 1280x720, done, software (swiftshader)\n"
+                "%sread_image it to look at the page." % (path, size, metrics))
+
+    def test_a_decoded_black_frame_is_stuck_without_any_warning(self):
+        """The 22:30 frames were 99.2-99.4 % one colour: under #213's 99.9 %
+        blank line, so no warning -- the decoded share still says it."""
+        sig = crow_core.render_signature(self.result(self.black_png("a.png")),
+                                         "chain.html")
+        self.assertEqual(sig["blank"], "100.0 % one colour")
+
+    def test_a_failed_render_is_not_a_capture(self):
+        self.assertIsNone(crow_core.render_signature(
+            "error: the browser wrote no screenshot (timed out)", "x.html"))
+
+    def test_metrics_decide_when_both_captures_have_them(self):
+        m1 = ("metrics: content box x 530-760, y 220-510 of 1280x720 -- "
+              "coverage 7.2 %% (~65 of the frame's ~895 visual tokens)\n"
+              "metrics: 1480 distinct colours in 9216 sampled px; luma mean "
+              "14/255; luma histogram (8 bins of 32, %%): 93 4 2 1 0 0 0 0\n")
+        m2 = m1.replace("1480 distinct", "1502 distinct")
+        m3 = m1.replace("coverage 7.2", "coverage 61.0")
+        a = crow_core.render_signature(self.result("/x/r1.png", 700000, m1 % ()), "i.html")
+        b = crow_core.render_signature(self.result("/x/r2.png", 400000, m2 % ()), "i.html")
+        c = crow_core.render_signature(self.result("/x/r3.png", 700000, m3 % ()), "i.html")
+        self.assertTrue(crow_core.render_same(a, b), "size differs, metrics agree")
+        self.assertEqual(a["metrics"][:2], [530.0, 760.0], "a range, not a sign")
+        self.assertFalse(crow_core.render_same(a, c))
+        other = dict(b, target="other.html")
+        self.assertFalse(crow_core.render_same(a, other), "another page")
+
+    def test_without_metrics_size_decides(self):
+        a = crow_core.render_signature(self.result("/x/r1.png", 424358), "v.html")
+        b = crow_core.render_signature(self.result("/x/r2.png", 424369), "v.html")
+        c = crow_core.render_signature(self.result("/x/r3.png", 451481), "v.html")
+        self.assertTrue(crow_core.render_same(a, b))
+        self.assertFalse(crow_core.render_same(b, c))
+
+    def test_due_nudges_at_three_rolls_once_at_six(self):
+        state = {"current": "p", "rolls": 0,
+                 "targets": {"p": {"streak": 3, "said": 0, "tried": ["x"]}}}
+        self.assertEqual(crow_core.goal_render_due(state), "nudge")
+        self.assertIsNone(crow_core.goal_render_due(state))
+        state["targets"]["p"]["streak"] = 6
+        self.assertEqual(crow_core.goal_render_due(state), "roll")
+        state["targets"]["p"].update(streak=6, said=0)
+        self.assertEqual(crow_core.goal_render_due(state), "nudge",
+                         "one roll per step, then the nudge")
+        text = crow_core.goal_render_nudge(4, state, rolled=True)
+        self.assertTrue(text.startswith(crow_core.GOAL_NUDGE_MARK))
+        self.assertIn("- x", text)
+        self.assertIn("bisect", text)
+
+    # #277, 2026-09-24 step 2: nine index.html captures at luma mean 1-2/255,
+    # a lit patch on black at 0.908-0.964 one colour -- under 0.98, so #268
+    # saw no verdict and every one of them reset the streak.
+    DARK = ("metrics: content box x 16-432, y 16-560 of 1000x560 -- coverage "
+            "40.4 %% (~220 of the frame's ~544 visual tokens)\n"
+            "metrics: 604 distinct colours in 112000 sampled px; luma mean "
+            "%d/255; luma histogram (8 bins of 32, %%): 99 0 0 0 0 0 0 0\n")
+
+    def test_a_dark_frame_with_a_lit_patch_is_no_signal(self):
+        """#277: the metrics line's luma mean decides where the dominant
+        share (0.91 here) does not."""
+        sig = crow_core.render_signature(
+            self.result("/nowhere/render-104828.png", 58381, self.DARK % 2),
+            "index.html")
+        self.assertEqual(sig["blank"], "near-black (luma mean 2/255)")
+        self.assertTrue(crow_core.render_no_signal(sig))
+
+    def test_a_white_text_page_and_a_lit_scene_are_pictures(self):
+        """NEGATIVE: the step-1 probe pages (luma 251-255) are text pages,
+        and iso-test.html's real frame sat at 31."""
+        for luma in (254, 31, 5):
+            sig = crow_core.render_signature(
+                self.result("/nowhere/r%d.png" % luma, 9000,
+                            self.DARK % luma), "p.html")
+            self.assertIsNone(sig["blank"], luma)
+            self.assertFalse(crow_core.render_no_signal(sig), luma)
+
+    def scan_messages(self, results):
+        messages = [{"role": "user", "content": "[Goal mode, step 2 still open. Continue.]"}]
+        for n, text in enumerate(results):
+            messages.append({"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c%d" % n, "function": {
+                    "name": "render_page",
+                    "arguments": json.dumps({"path": "index.html"})}}]})
+            messages.append({"role": "tool", "tool_call_id": "c%d" % n,
+                             "content": text})
+        return messages
+
+    def test_a_replayed_or_carried_capture_is_counted_once(self):
+        """#277: s77 was s73 replayed by the duplicate-call guard, s5 was
+        r311 carried across the cut -- the same PNG, not a new capture."""
+        one = self.result("/nowhere/render-1.png", 58381, self.DARK % 2)
+        two = self.result("/nowhere/render-2.png", 58479, self.DARK % 2)
+        replay = ("[you already called render_page with these exact arguments "
+                  "this turn. The result was, and still is:]\n" + two)
+        carried = "[carried across the cut]\n" + two
+        state = crow_core.goal_render_scan(
+            self.scan_messages([one, two, replay, carried]), 0, {})
+        self.assertEqual(state["targets"]["index.html"]["streak"], 2)
+
+    def test_the_bisect_for_a_black_frame_names_the_isolation_checks(self):
+        """#277: black -> one pass in isolation and the GL checks; a lit
+        picture that stays the same keeps #268's probe."""
+        black = [self.result("/nowhere/render-%d.png" % n, 58381,
+                             self.DARK % 1) for n in range(3)]
+        state = crow_core.goal_render_scan(self.scan_messages(black), 0, {})
+        self.assertEqual(crow_core.goal_render_due(state), "nudge")
+        text = crow_core.goal_render_nudge(2, state)
+        self.assertIn("showed no picture", text)
+        for word in ("ONE pass in isolation", "albedo", "no lighting",
+                     "normals", "depth", "gl.getError()",
+                     "gl.checkFramebufferStatus()", "gl.readPixels"):
+            self.assertIn(word, text)
+        lit = [self.result("/nowhere/lit-%d.png" % n, 424358, self.DARK % 90)
+               for n in range(3)]
+        state = crow_core.goal_render_scan(self.scan_messages(lit), 0, {})
+        self.assertEqual(crow_core.goal_render_due(state), "nudge")
+        text = crow_core.goal_render_nudge(2, state)
+        self.assertIn("came back the same", text)
+        self.assertIn(crow_core.GOAL_BISECT, text)
+        self.assertNotIn("gl.readPixels", text)
+
+
+class AVisualStepNeedsAPictureTests(unittest.TestCase):
+    """#267. 2026-09-23: 9/9 `done`, every note "verified on
+    screen", over a small purple box in a black frame. A visual step's
+    `done` must cite a capture made during this goal, and a judge's lowest
+    score, when there is one, must reach the bar."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix="crow-visual-"))
+        self.state = tempfile.mkdtemp(prefix="crow-visual-state-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.state, True)
+        crow_core.set_root(self.root)
+        self.addCleanup(crow_core.set_root, None)
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", crow_core.SESSION_DIR)
+        crow_core.SESSION_DIR = self.state
+        self.addCleanup(crow_core.judge_threshold_set, None)
+        crow_core.goal_command("Neon night market voxel diorama | Think and "
+                               "plan: read this file, write PLAN.md | Build "
+                               "geometry and camera | Verify offline")
+
+    def step(self, n, status, note=""):
+        return json.loads(crow_core.tool_goal_step(n, status, note))
+
+    def capture(self, name="render-20260924-101010.png", age=0.0):
+        path = os.path.join(crow_core._render_dir(), name)
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG")
+        if age:
+            then = time.time() - age
+            os.utime(path, (then, then))
+        return path
+
+    def test_a_visual_step_without_a_capture_is_refused(self):
+        out = self.step(2, "done", "Verified on screen: the composed frame "
+                                   "shows the diorama through the full chain")
+        self.assertFalse(out["ok"])
+        self.assertIn("cites no capture", out["error"])
+        self.assertIn("judge", out["error"])
+        self.assertIn(".crow/renders/render-", out["error"])
+        self.assertNotEqual(crow_core.goal_load()["steps"][1]["status"], "done")
+
+    def test_a_capture_from_this_goal_passes_by_path_or_by_name(self):
+        path = self.capture()
+        self.assertTrue(self.step(2, "done", "see %s" % path)["ok"])
+        self.capture("render-20260924-111111.png")
+        self.assertTrue(self.step(3, "done", "render-20260924-111111.png "
+                                             "shows it")["ok"])
+
+    def test_a_capture_older_than_the_goal_proves_nothing(self):
+        self.capture(age=3600)
+        out = self.step(2, "done", "render-20260924-101010.png shows it")
+        self.assertFalse(out["ok"])
+        self.assertIn("cites no capture", out["error"])
+
+    def test_a_planning_step_needs_no_picture(self):
+        self.assertTrue(self.step(1, "done", "PLAN.md written")["ok"])
+
+    DIORAMA_STEP_1 = ("Think and plan: read DIORAMA-PROMPT.md, research open "
+                      "questions with delegate subtasks, verify findings, "
+                      "write PLAN.md (scene layout on the voxel grid, "
+                      "rendering architecture, perf budget, risks)")
+
+    def diorama(self, *steps):
+        return {"title": "Neon night market voxel diorama",
+                "steps": [{"text": t} for t in steps]}
+
+    def test_a_planning_step_that_verifies_findings_needs_no_picture(self):
+        """#267 follow-up, 2026-09-24 run: 'verify findings' in the planning
+        step made it visual, and its `done` on PLAN.md was refused."""
+        goal = self.diorama(self.DIORAMA_STEP_1)
+        self.assertFalse(crow_core.goal_step_needs_render(goal, 0))
+        crow_core.goal_command("Neon night market voxel diorama | %s | Build "
+                               "geometry + camera" % self.DIORAMA_STEP_1)
+        self.assertTrue(self.step(1, "done", "PLAN.md written")["ok"])
+
+    def test_verify_and_build_steps_keep_the_gate(self):
+        """NEGATIVE: robin's step 9 and a build step stay visual, and a
+        planning lead does not excuse a step that builds or checks the page."""
+        goal = self.diorama("Verify offline via file://, fix, report fps",
+                            "Build geometry + camera, lights and fog",
+                            "Think and plan the page, then build it",
+                            "plan and build the scene",
+                            "Plan: verify the page loads")
+        for n in range(5):
+            self.assertTrue(crow_core.goal_step_needs_render(goal, n),
+                            goal["steps"][n]["text"])
+
+    def test_the_refusal_says_planning_steps_are_exempt(self):
+        out = self.step(2, "done", "geometry done")
+        self.assertFalse(out["ok"])
+        self.assertIn("Planning steps are exempt", out["error"])
+
+    def test_a_non_visual_goal_is_unchanged(self):
+        """NEGATIVE: a parser is not asked for a screenshot."""
+        crow_core.goal_command("tokenizer | build it | test it")
+        self.assertTrue(self.step(1, "done", "12 of 12 tests pass")["ok"])
+
+    def test_the_visual_flag_overrides_the_guess(self):
+        with open(crow_core.goal_path(), encoding="utf-8") as fh:
+            raw = json.load(fh)
+        raw["goal"]["visual"] = False
+        with open(crow_core.goal_path(), "w", encoding="utf-8") as fh:
+            json.dump(raw, fh)
+        self.assertTrue(self.step(2, "done", "built")["ok"])
+
+    def judged(self, index, low):
+        goal = crow_core.goal_load()
+        goal["steps"][index]["judge"] = {
+            "model": "vision-x", "min": low,
+            "scores": {"detail density": low, "lighting mood": 9},
+            "weakest": ["the scene fills 7 % of the frame", "black ground",
+                        "no neon"]}
+        crow_core.goal_write(goal)
+
+    def test_a_judge_score_under_the_bar_refuses(self):
+        path = self.capture()
+        self.judged(1, 3)
+        out = self.step(2, "done", "see %s" % path)
+        self.assertFalse(out["ok"])
+        self.assertIn("under the bar of 8", out["error"])
+        self.assertIn("detail density 3", out["error"])
+        self.assertIn("fills 7 %", out["error"])
+
+    def test_a_judge_score_at_the_bar_passes_and_the_bar_moves(self):
+        path = self.capture()
+        self.judged(1, 7)
+        self.assertFalse(self.step(2, "done", "see %s" % path)["ok"])
+        crow_core.judge_threshold_set(7)
+        self.assertTrue(self.step(2, "done", "see %s" % path)["ok"])
+
+    def test_the_threshold_setter_takes_no_nonsense(self):
+        crow_core.judge_threshold_set("x")
+        self.assertEqual(crow_core.JUDGE_THRESHOLD, 8)
+        crow_core.judge_threshold_set(42)
+        self.assertEqual(crow_core.JUDGE_THRESHOLD, 10)
+
+    def test_the_nudge_says_the_rule_on_a_visual_step_only(self):
+        goal = crow_core.goal_load()
+        self.assertIn("judge", crow_core.goal_nudge_evidence(goal, 1))
+        self.assertEqual(crow_core.goal_nudge_evidence(goal, 0), "")
 
 
 class TheGoalOutlivesEverythingTests(unittest.TestCase):
@@ -15468,6 +17107,44 @@ class TheGoalOutlivesEverythingTests(unittest.TestCase):
         goal = crow_core.goal_step_end(0, now=230.0)
         self.assertEqual(goal["steps"][0]["seconds"], 90.0)
         self.assertEqual(goal["steps"][0]["tokens"], 700)
+
+    def test_running_said_again_keeps_the_clock_of_the_running_step(self):
+        """#275. 2026-09-24, diorama run: the engine began step 2 at 10:07,
+        the model called goal_step(2, running) at 11:21 (session.json msg
+        148), and goal.json read started 11:21, seconds 0, tokens 0 -- the
+        73.5 min before were never billed. A running step said to be running
+        is the same state; the whole window lands on the step at the end."""
+        self.counter()
+        self.a_goal()
+        crow_core.goal_tokens_seen(1000)
+        crow_core.goal_step_begin(1, now=100.0)
+        crow_core.goal_tokens_seen(5000)
+        again = json.loads(crow_core.tool_goal_step(2, "running"))
+        self.assertTrue(again["ok"], again)
+        step = crow_core.goal_load()["steps"][1]
+        self.assertEqual(step["started"], 100.0, "the running clock restarted")
+        self.assertEqual(step["started_tokens"], 1000)
+        crow_core.goal_tokens_seen(6000)
+        goal = crow_core.goal_step_end(1, note="seen", now=4600.0)
+        self.assertEqual(goal["steps"][1]["seconds"], 4500.0)
+        self.assertEqual(goal["steps"][1]["tokens"], 5000)
+
+    def test_the_note_of_a_running_call_is_kept(self):
+        """#275: the tool answered ok and threw the note away -- in the run
+        it was the one line that said step 2 was NOT verified. It stays until
+        done/failed write theirs."""
+        self.counter()
+        self.a_goal()
+        crow_core.goal_step_begin(0, now=100.0)
+        crow_core.tool_goal_step(1, "running", note="judge 1/10, not verified")
+        self.assertEqual(crow_core.goal_load()["steps"][0]["note"],
+                         "judge 1/10, not verified")
+        crow_core.tool_goal_step(1, "running")
+        self.assertEqual(crow_core.goal_load()["steps"][0]["note"],
+                         "judge 1/10, not verified",
+                         "an empty running note wiped the last one")
+        goal = crow_core.goal_step_end(0, ok=False, note="gave up", now=200.0)
+        self.assertEqual(goal["steps"][0]["note"], "gave up")
 
     def test_a_complete_goal_is_open_again_once_a_step_reopens(self):
         """"Complete" darf nicht stehen bleiben, waehrend an einem Schritt
@@ -16617,7 +18294,9 @@ class SiblingArgumentNamesAreTakenAndSaidTests(unittest.TestCase):
         crow_core.tool_read_file(self.path)
         out = crow_core.run_tool("edit_file", json.dumps(
             {"path": self.path, "old": "scene", "new": "world"}))
-        self.assertEqual(out, "replaced 1 occurrence in %s" % self.path)
+        # The syntax line (#269) follows on a .js file; no note before.
+        self.assertTrue(out.startswith("replaced 1 occurrence in %s" % self.path),
+                        out)
 
 
 FAKE_ESBUILD = r'''#!__PY__
@@ -16711,6 +18390,7 @@ class BuildBundleTests(unittest.TestCase):
         for key in ("FAKE_ARGV_LOG", "FAKE_MODE", "FAKE_CSS", "FAKE_EXPORTS", "FAKE_ORPHAN_PID"):
             os.environ.pop(key, None)
         crow_core._ESBUILD_VERSION.clear()
+        crow_core.bundler_set(None)
         for folder in (self.root, self.caches, self.empty):
             shutil.rmtree(folder, ignore_errors=True)
 
@@ -16774,6 +18454,91 @@ class BuildBundleTests(unittest.TestCase):
         self.assertIn(os.path.join(self.caches, "deno"), out)
         self.assertIn("Do not flatten the library by hand", out)
         self.assertFalse(os.path.exists(os.path.join(self.root, "app.html")))
+
+    def test_no_bundler_names_the_routes_the_model_and_the_user_actually_have(self):
+        """#274: the 2026-09-24 diorama run was told to "pin one with
+        CROW_ESBUILD=...", exported it inside run_command -- a child shell,
+        which can never reach Crow's own environment -- and got the same error
+        again. The sentence names what works: a link inside the working area,
+        and the `bundler` setting, with the file it lives in."""
+        entry = self._write("app.js", "export const x = 1;\n")
+        out = crow_core.tool_build_bundle(entry, "app.html")
+        self.assertIn(os.path.join(self.root, "node_modules", ".bin", "esbuild"), out)
+        self.assertIn('"bundler"', out)
+        self.assertIn(os.path.join(crow_platform.config_dir(), "settings.json"), out)
+        self.assertIn("--bundler", out)
+        self.assertIn("does NOT reach Crow", out)
+        self.assertNotIn("pin one with CROW_ESBUILD", out)
+
+    def test_the_bundler_setting_comes_before_the_project_copy(self):
+        """#274: `bundler` in settings.json (the window, per turn) or --bundler
+        (the terminal) names an esbuild the search would not find -- another
+        program's node_modules, which is deliberately never searched. A pin for
+        one launch, CROW_ESBUILD, still comes first."""
+        chosen = self._fake(os.path.join(self.caches, "elsewhere", "esbuild"), "0.28.1")
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"), "0.28.2")
+        entry = self._write("app.js", "")
+        crow_core.bundler_set(chosen)
+        self.assertEqual(crow_core.find_esbuild(entry)[:3],
+                         (chosen, "0.28.1", "bundler setting"))
+        pinned = self._fake(os.path.join(self.caches, "pin", "esbuild"), "0.27.0")
+        os.environ["CROW_ESBUILD"] = pinned
+        self.assertEqual(crow_core.find_esbuild(entry)[:3],
+                         (pinned, "0.27.0", "CROW_ESBUILD"))
+
+    def test_a_bundler_setting_that_does_not_answer_is_named_and_passed_over(self):
+        """NEGATIVE: the setting is not trusted blind. A path that is no esbuild
+        (here: nothing at all) falls through to the search, and the error names
+        the setting so the user sees which value is wrong."""
+        dead = os.path.join(self.caches, "gone", "esbuild")
+        crow_core.bundler_set(dead)
+        entry = self._write("app.js", "")
+        out = crow_core.tool_build_bundle(entry, "app.html")
+        self.assertTrue(out.startswith("error: no bundler found"), out)
+        self.assertIn("bundler setting: %s" % dead, out)
+        project = self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        self.assertEqual(crow_core.find_esbuild(entry)[0], project)
+
+    def test_bundler_set_takes_a_path_or_nothing(self):
+        crow_core.bundler_set("  ")
+        self.assertIsNone(crow_core.bundler_path())
+        crow_core.bundler_set(42)
+        self.assertIsNone(crow_core.bundler_path())
+        crow_core.bundler_set("~/x/esbuild")
+        self.assertEqual(crow_core.bundler_path(), os.path.expanduser("~/x/esbuild"))
+
+    @unittest.skipIf(sys.platform in ("win32", "darwin"), "the XDG default is Linux's")
+    def test_the_deno_cache_is_deno_s_own_directory_not_crow_s(self):
+        """#274, THE DEFECT THE STUB IN setUp HID: the real default was
+        `crow_platform.cache_dir()/deno` = ~/.cache/crow/deno, while deno keeps
+        its esbuild under ~/.cache/deno (`deno info`: "DENO_DIR location:
+        ~/.cache/deno"). The 2026-09-24 run missed the 0.25.5
+        there and lost four rounds."""
+        real = self._saved[1]
+        saved = {k: os.environ.get(k) for k in ("HOME", "XDG_CACHE_HOME", "DENO_DIR")}
+        try:
+            os.environ["HOME"] = self.caches
+            os.environ.pop("XDG_CACHE_HOME", None)
+            os.environ.pop("DENO_DIR", None)
+            deno = dict((label, pattern) for pattern, label in real())["deno cache"]
+            self.assertEqual(deno, os.path.join(self.caches, ".cache", "deno", "dl",
+                                                "esbuild-*", "esbuild-*"))
+            os.environ["XDG_CACHE_HOME"] = os.path.join(self.caches, "xdg")
+            deno = dict((label, pattern) for pattern, label in real())["deno cache"]
+            self.assertTrue(deno.startswith(os.path.join(self.caches, "xdg", "deno", "dl")),
+                            deno)
+            # And the search finds it there.
+            crow_core._esbuild_caches = real
+            found = self._fake(os.path.join(self.caches, "xdg", "deno", "dl",
+                                            "esbuild-0.25.5-1", "esbuild-linux-x64"), "0.25.5")
+            self.assertEqual(crow_core.find_esbuild(self._write("app.js", ""))[:3],
+                             (found, "0.25.5", "deno cache"))
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     def test_a_module_entry_runs_the_iife_argv_and_says_what_it_wrote(self):
         self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
@@ -17632,6 +19397,41 @@ class TheEngineKnowsAnEmptyLoopWhenItSeesOneTests(unittest.TestCase):
         self.assertFalse(crow_core.goal_answer_empty(
             self.answer("I read the log and it ends at line 40")))
 
+    def test_a_working_turn_that_ends_silent_is_not_empty(self):
+        """#259, the live case: 24 tool calls, then the forced
+        answer with content "" -- judged by its last message it was empty,
+        and three such turns cut 157 messages of work and stopped the goal."""
+        turn = [{"role": "user", "content": "[Goal mode, step 7 still open. Continue.]"},
+                self.answer("", [("read_file", '{"path": "a.js"}')]),
+                {"role": "tool", "content": "...", "tool_call_id": "c0"},
+                {"role": "user", "content": crow_core.BUDGET_SPENT},
+                self.answer("")]
+        self.assertTrue(crow_core.goal_answer_empty(turn[-1]))
+        self.assertFalse(crow_core.goal_turn_empty(turn))
+
+    def test_a_turn_with_no_tool_is_judged_by_its_answer(self):
+        """GEGENPROBE: `I` and nothing else is still the loop #202 brakes."""
+        turn = [{"role": "user", "content": "[Goal mode, step 1 still open. Continue.]"},
+                self.answer("I")]
+        self.assertTrue(crow_core.goal_turn_empty(turn))
+        surfaced = crow_core.surfaced_answer("thinking only", forced=False)
+        self.assertTrue(crow_core.goal_turn_empty(turn[:1] + [self.answer(surfaced)]),
+                        "a surfaced think block counted as the model speaking")
+
+    def test_the_turn_mark_sees_the_calls_before_the_last_answer(self):
+        """Two turns that both end on "" but read different files are not an
+        echo; the same text over the same calls still is."""
+        def turn(path):
+            return [{"role": "user", "content": "[Goal mode, step 1 still open. Continue.]"},
+                    self.answer("", [("read_file", json.dumps({"path": path}))]),
+                    {"role": "tool", "content": "...", "tool_call_id": "c0"},
+                    self.answer("")]
+        self.assertNotEqual(crow_core.goal_turn_mark(turn("a.js")),
+                            crow_core.goal_turn_mark(turn("b.js")))
+        self.assertEqual(crow_core.goal_turn_mark(turn("a.js")),
+                         crow_core.goal_turn_mark(turn("a.js")))
+        self.assertIsNone(crow_core.goal_turn_mark([{"role": "user", "content": "hi"}]))
+
     def test_the_cut_takes_the_nudges_with_the_answers(self):
         """Geschnitten wird am ANSTOSS: ein Zug faengt mit Crows Zeile an, und
         alles dahinter gehoert dazu. Anstoesse ohne Antworten stehenzulassen
@@ -17663,6 +19463,63 @@ class TheEngineKnowsAnEmptyLoopWhenItSeesOneTests(unittest.TestCase):
                   {"role": "tool", "content": "...", "tool_call_id": "c0"},
                   {"role": "assistant", "content": "read it"}]
         self.assertTrue(crow_core.goal_worked_on_nudge(worked))
+
+    def budget_turn(self, nudge, paths):
+        """#258: a turn that spends its tool budget, as `run_turn`
+        stores it -- one call per round, then BUDGET_SPENT and the forced
+        round, whose calls were discarded and whose content is empty."""
+        turn = [{"role": "user", "content": nudge}]
+        for n, path in enumerate(paths):
+            turn.append(self.answer("", [("read_file", '{"path": "%s"}' % path)]))
+            turn.append({"role": "tool", "content": "...", "tool_call_id": "c0"})
+        turn.append({"role": "assistant", "content": "",
+                     "reasoning_content": "I would read one more file"})
+        turn.append({"role": "user", "content": crow_core.BUDGET_SPENT})
+        turn.append({"role": "assistant", "content": "",
+                     "reasoning_content": "the forced round, calls discarded"})
+        return turn
+
+    def test_a_turn_that_spent_its_tool_budget_is_not_empty(self):
+        """#258, robin's session of 2026-09-23 in small: messages
+        212..263 were 25 tool rounds, BUDGET_SPENT and a forced round with
+        empty content. Read alone, that last message is `""` -- the brake
+        cut the whole turn (52 messages) and the engine re-prefilled 106,336
+        tokens cold. The turn is judged, not its last line."""
+        head = [{"role": "system", "content": "SYS"},
+                {"role": "user", "content": "build it"}]
+        messages = head + self.budget_turn("[Goal mode. Step 7 is open.]",
+                                           ["a.js", "b.js", "c.js"])
+        answer = crow_core.goal_last_answer(messages)
+        self.assertFalse(crow_core.goal_answer_empty(answer))
+        self.assertEqual(len(answer["tool_calls"]), 3)
+        # the stored message itself is untouched: the view is a copy
+        self.assertNotIn("tool_calls", messages[-1])
+
+    def test_two_budget_turns_on_different_files_are_different_answers(self):
+        """GEGENPROBE on the echo half: three budget-spending turns all end on
+        `""` with no calls, so their last messages hashed alike -- the brake's
+        second way to call real work a loop."""
+        one = self.budget_turn("[Goal mode, step 7 still open. Continue.]", ["a.js"])
+        two = self.budget_turn("[Goal mode, step 7 still open. Continue.]", ["b.js"])
+        self.assertNotEqual(
+            crow_core.goal_answer_mark(crow_core.goal_last_answer(one)),
+            crow_core.goal_answer_mark(crow_core.goal_last_answer(two)))
+
+    def test_a_turn_starts_at_its_nudge_not_at_the_one_before(self):
+        """GEGENPROBE: the calls of the PREVIOUS turn do not rescue an empty
+        one -- a nudge answered with `I` is still empty behind a working turn."""
+        messages = self.budget_turn("[Goal mode. Step 7 is open.]", ["a.js"])
+        messages += [{"role": "user", "content": "[Goal mode, step 7 still open. Continue.]"},
+                     self.answer("I")]
+        self.assertTrue(crow_core.goal_answer_empty(crow_core.goal_last_answer(messages)))
+        # and the think-only nudge inside a turn does not open a new one
+        worked = [{"role": "user", "content": "[Goal mode. Step 7 is open.]"},
+                  self.answer("", [("read_file", "{}")]),
+                  {"role": "tool", "content": "...", "tool_call_id": "c0"},
+                  {"role": "assistant", "content": "", "reasoning_content": "hm"},
+                  {"role": "user", "content": crow_core.THINK_ONLY_NUDGE},
+                  self.answer("I")]
+        self.assertFalse(crow_core.goal_answer_empty(crow_core.goal_last_answer(worked)))
 
     def test_a_turn_without_a_tool_call_does_not(self):
         """GEGENPROBE ZWEIMAL: wer nichts getan hat, bekommt den ganzen Block
@@ -18452,6 +20309,26 @@ class ThePlatformSeamAnswersForOneSystemAtATimeTests(unittest.TestCase):
         self.assertEqual(crow_platform.render_gl_mode(), "swiftshader")
         crow_platform.gpu_free_mib = lambda: 4096
         self.assertEqual(crow_platform.render_gl_mode(), "angle")
+
+    def test_the_browser_panel_is_counted_as_a_second_gpu_client(self):
+        """#279. 2026-09-24: serve up, ~560 MiB free, the window's panel on the
+        same card holding 343 MiB -- the render took the card at #213's 512 and
+        the panel's web process segfaulted in libnvidia-eglcore twice. With
+        the panel open the bound is 1,536; without it #213's 512 stands."""
+        self._env("CROW_RENDER_GL", "")
+        self.assertEqual(crow_platform.render_gl_mode(free_mib=560, panel=True),
+                         "swiftshader")
+        self.assertEqual(crow_platform.render_gl_mode(free_mib=560, panel=False),
+                         "angle")
+        self.assertEqual(crow_platform.render_gl_mode(free_mib=1535, panel=True),
+                         "swiftshader")
+        self.assertEqual(crow_platform.render_gl_mode(free_mib=1536, panel=True),
+                         "angle")
+        why = crow_platform.render_gl_reason(free_mib=560, panel=True)
+        self.assertIn("below the 1,536 MiB", why)
+        self.assertIn("browser panel", why)
+        self.assertIn("below the 512 MiB",
+                      crow_platform.render_gl_reason(free_mib=73, panel=False))
 
     def test_the_scope_really_starts_a_child_here(self):
         """Nicht nur die Liste: wenn diese Maschine einen User-Manager hat,
@@ -19680,6 +21557,99 @@ class _NotingRecorder(_TurnRecorder):
         self.log.append(("note", message))
 
 
+class CrowLogFileTests(unittest.TestCase):
+    """#262: Crow's own log file -- where it lives, what a line
+    looks like, that it rotates, and that it can never break a turn."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-log-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        crow_core.LOG_FILE = os.path.join(self.dir, "log", "crow.log")
+
+    def read(self) -> list:
+        with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+            return fh.read().splitlines()
+
+    @unittest.skipIf(sys.platform == "win32", "the XDG layout is Linux's")
+    def test_the_default_lives_under_the_state_directory(self):
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": self.dir}):
+            self.assertEqual(crow_core.default_log_file(),
+                             os.path.join(self.dir, "crow", "log", "crow.log"))
+
+    def test_a_line_carries_a_local_timestamp_with_offset_and_its_kind(self):
+        crow_core.log_note("goal mode: 2 messages\nof an empty loop", "goal")
+        (line,) = self.read()
+        self.assertRegex(line, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d{4} "
+                               r"\[goal\] goal mode: 2 messages of an empty loop$")
+
+    def test_it_rotates_and_keeps_three_backups(self):
+        self.addCleanup(setattr, crow_core, "LOG_MAX_BYTES", crow_core.LOG_MAX_BYTES)
+        crow_core.LOG_MAX_BYTES = 200
+        crow_core.LOG_FILE = os.path.join(self.dir, "rot", "crow.log")
+        for n in range(40):
+            crow_core.log_note("line %02d " % n + "x" * 60)
+        names = sorted(os.listdir(os.path.dirname(crow_core.LOG_FILE)))
+        self.assertEqual(names, ["crow.log", "crow.log.1", "crow.log.2",
+                                 "crow.log.3"])
+        self.assertIn("line 39", self.read()[-1])
+
+    def test_an_unwritable_log_never_raises(self):
+        blocker = os.path.join(self.dir, "a-file")
+        with open(blocker, "w") as fh:
+            fh.write("x")
+        crow_core.LOG_FILE = os.path.join(blocker, "log", "crow.log")
+        crow_core.log_note("the restored cache did not hold")   # no raise
+
+    def test_only_crows_machinery_notes_are_log_only(self):
+        for text in ("goal mode: 157 messages of an empty loop dropped from "
+                     "the history",
+                     "goal mode, step 4: the same failure keeps coming back",
+                     "discarded a degenerate reply (markup, 40 chars)",
+                     "kept the re-asked reply although it looks unfinished",
+                     "the restored cache did not hold -- that prefill",
+                     "tool budget spent after 24 rounds",
+                     # robin 2026-09-24: the rollover line and #98's alarm
+                     "rolled over at 179000 tokens -> rollover-x.json",
+                     "! the working area was refused for /tmp/x.js, and "
+                     "run_command ran anyway"):
+            self.assertTrue(crow_core.note_is_log_only(text), text)
+        for text in ("goal mode stopped: the model repeated an empty answer",
+                     "goal mode stopped after 60 turns -- 2 of 5 steps done.",
+                     "goal mode paused: step 1 has taken 25 turns.",
+                     "carried across the cut: edit_file",
+                     "the crow-booted server on port 8080 is gone -- booting",
+                     "the server on port 8080 is still loading -- waiting",
+                     "goal: Ship it -- 1/2, 3 min so far", "", None):
+            self.assertFalse(crow_core.note_is_log_only(text), text)
+
+
+    def test_the_chat_open_and_goal_setup_lines_are_log_lines(self):
+        """robin, 2026-09-24: these six lines of a fresh goal chat go to the log."""
+        for text in ("the working area and its project memory changed -- the next "
+                     "turn pays a full prefill",
+                     "working directory: /home/u/diorama-test (auto)",
+                     "mode yolo -- every tool runs unasked -- outside paths and git "
+                     "commit included; git_push still asks",
+                     "archived: chat-20260924-124601.json",
+                     "goal: Neon night market voxel diorama -- 9 steps, acceptance "
+                     "check: bash check.sh.\nthe goal goes into the head of every "
+                     "prompt -- the next turn pays a full prefill",
+                     "the goal goes into the head of every prompt -- the next turn "
+                     "pays a full prefill"):
+            self.assertTrue(crow_core.note_is_log_only(text), text)
+
+    def test_a_crashed_panel_page_is_a_log_line_its_memory_stop_is_not(self):
+        """#279: the panel's web process crashed while every capture was
+        written -- robin wants it in the log only. The #226 ceiling stop is
+        something to act on and stays in the chat."""
+        self.assertTrue(crow_core.note_is_log_only(
+            "the page in the browser panel stopped (crashed)"))
+        self.assertFalse(crow_core.note_is_log_only(
+            "the page in the browser panel was stopped: it grew past the "
+            "panel's 2048 MB ceiling (#226)"))
+
+
 class ADegenerateRoundIsAskedAgainTests(_FinishingLoopCase):
     """#217: not stored, re-requested once on the same prefix with a new
     seed, and a second one ends the turn loudly."""
@@ -19687,6 +21657,18 @@ class ADegenerateRoundIsAskedAgainTests(_FinishingLoopCase):
     def setUp(self):
         super().setUp()
         self.events = _NotingRecorder()
+        # #262: the two notes of this class go to crow.log now.
+        logs = tempfile.mkdtemp(prefix="crow-log-")
+        self.addCleanup(shutil.rmtree, logs, True)
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        crow_core.LOG_FILE = os.path.join(logs, "crow.log")
+
+    def logged(self) -> list:
+        try:
+            with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+                return fh.read().splitlines()
+        except OSError:
+            return []
 
     def _stored(self, talk):
         return [m.get("content") for m in talk.payload()
@@ -19703,8 +21685,11 @@ class ADegenerateRoundIsAskedAgainTests(_FinishingLoopCase):
         self.assertIsInstance(self.bodies[0]["seed"], int)
         self.assertNotEqual(self.bodies[0]["seed"], self.bodies[1]["seed"])
         self.assertFalse(result.stopped)
-        self.assertEqual(len(self.notes()), 1)
-        self.assertIn("markup", self.notes()[0])
+        # #262: not a line in the chat, a line in crow.log.
+        self.assertEqual(self.notes(), [])
+        self.assertEqual(len(self.logged()), 1)
+        self.assertIn("[turn] discarded a degenerate reply (markup",
+                      self.logged()[0])
         self.assertTrue(any("degenerate" in i for i in result.incidents))
         self.assertEqual(result.cost.seeds,
                          [self.bodies[0]["seed"], self.bodies[1]["seed"]])
@@ -19759,7 +21744,8 @@ class ADegenerateRoundIsAskedAgainTests(_FinishingLoopCase):
                 self.assertEqual([e for e in self.events.log if e[0] == "failed"], [])
                 self.assertEqual(self._stored(talk), ["The full picture is"])
                 self.assertNotIn(first, json.dumps(talk.payload()))
-                self.assertIn("kept the re-asked reply", self.notes()[-1])
+                self.assertEqual(self.notes(), [])
+                self.assertIn("kept the re-asked reply", self.logged()[-1])
 
     def test_the_think_only_nudge_is_unchanged(self):
         """#150 is the detector's first class; it still nudges, it does not
@@ -20060,6 +22046,243 @@ class AnAbortIsNeverAnAnswerTests(unittest.TestCase):
         self.assertEqual(self._review("stop"), ["memory"])
 
 
+def _png_url(width: int, height: int) -> str:
+    """A data URL whose PNG header says width x height -- all `_image_tokens` reads."""
+    import base64
+    head = (b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR"
+            + struct.pack(">II", width, height) + b"\x08\x02\x00\x00\x00")
+    return "data:image/png;base64," + base64.b64encode(head + b"\x00" * 16).decode()
+
+
+def _rounds_talk(n_rounds: int, size: int = 4000, head: str = "SYS") -> "crow_core.Conversation":
+    """A goal-run shape: one user line, then `n_rounds` of read_file + result."""
+    talk = crow_core.Conversation(head)
+    talk.append("user", "build the thing")
+    for r in range(n_rounds):
+        talk.append("assistant", "", reasoning="thinking %d" % r, tool_calls=[
+            {"id": "c0", "name": "read_file",
+             "arguments": json.dumps({"path": "src/f%d.js" % r})}])
+        talk.append("tool", ("line %d\n" % r) * (size // 7), tool_call_id="c0")
+    return talk
+
+
+class ToolResultClearingTests(unittest.TestCase):
+    """#263. Old tool results become stubs below the rollover, in batches.
+
+    Measured on robin's diorama run (2026-09-23): 33-40 % of a full window was
+    tool output, 97 % of it behind the last five rounds. What must hold: only
+    tool CONTENT changes, the last K rounds and the head never do, a batch
+    too small to pay its prefill is not applied, and the originals are on disk
+    before any stub points at them.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="crow-clear-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(setattr, crow_core, "SESSION_DIR", crow_core.SESSION_DIR)
+        crow_core.SESSION_DIR = os.path.join(self.dir, "session")
+        self.addCleanup(crow_core.context_clear_set, crow_core.CONTEXT_CLEAR_AT)
+        crow_core.context_clear_set(None)
+        self._read_before = dict(crow_core._READ)
+        self.addCleanup(self._restore_read)
+        self.addCleanup(setattr, crow_core, "_GOAL_REBASE", crow_core._GOAL_REBASE)
+        self.addCleanup(setattr, crow_core, "GOAL_TOKENS_NOW", crow_core.GOAL_TOKENS_NOW)
+
+    def _restore_read(self):
+        crow_core._READ.clear()
+        crow_core._READ.update(self._read_before)
+
+    def test_only_results_behind_the_last_k_rounds_are_clearable(self):
+        talk = _rounds_talk(8)
+        picked = crow_core.clearable_results(talk.payload(), keep_rounds=5)
+        # rounds 0..2 are behind the last five (3..7)
+        self.assertEqual([args["path"] for _, _, args in picked],
+                         ["src/f0.js", "src/f1.js", "src/f2.js"])
+        self.assertTrue(all(name == "read_file" for _, name, _ in picked))
+
+    def test_the_round_nobody_answered_is_never_clearable(self):
+        """keep 0 is read as 1: the newest results have not been acted on."""
+        talk = _rounds_talk(3)
+        picked = crow_core.clearable_results(talk.payload(), keep_rounds=0)
+        self.assertNotIn(len(talk) - 1, [i for i, _, _ in picked])
+        self.assertEqual(len(picked), 2)
+
+    def test_small_results_stubs_and_state_tools_are_left_alone(self):
+        talk = _rounds_talk(1, size=100)                  # small
+        talk.append("assistant", "", tool_calls=[
+            {"id": "c0", "name": "goal_step", "arguments": "{}"}])
+        talk.append("tool", "x" * 5000, tool_call_id="c0")  # state, not output
+        talk.append("assistant", "", tool_calls=[
+            {"id": "c0", "name": "run_command", "arguments": "{}"}])
+        talk.append("tool", crow_core.CONTEXT_CLEAR_MARK + "1 of 2 tokens ...]" + "y" * 900,
+                    tool_call_id="c0")                     # already a stub
+        for _ in range(6):
+            talk.append("assistant", "next")
+            talk.append("user", "go on")
+        self.assertEqual(crow_core.clearable_results(talk.payload(), 5), [])
+
+    def test_below_the_trigger_nothing_happens(self):
+        talk = _rounds_talk(10)
+        before = talk.payload()
+        self.assertIsNone(crow_core.clear_old_results(talk, 600, 1000, at=0.65,
+                                                      at_least=0.0))
+        self.assertEqual(talk.payload(), before)
+
+    def test_a_batch_too_small_for_its_prefill_is_not_applied(self):
+        talk = _rounds_talk(10)
+        before = talk.payload()
+        self.assertIsNone(crow_core.clear_old_results(talk, 150_000, 200_000, at=0.65,
+                                                      at_least=0.10))
+        self.assertEqual(talk.payload(), before)
+        self.assertFalse(os.path.exists(os.path.join(crow_core.SESSION_DIR, "cleared")))
+
+    def test_a_batch_stubs_content_and_touches_nothing_else(self):
+        talk = _rounds_talk(10)
+        before = talk.payload()
+        done = crow_core.clear_old_results(talk, 700, 1000, at=0.65, at_least=0.0)
+        self.assertIsNotNone(done)
+        self.assertEqual(done["results"], 5)
+        after = talk.payload()
+        self.assertEqual(len(after), len(before))
+        for old, new in zip(before, after):
+            if old["content"] != new["content"]:
+                self.assertEqual(old["role"], "tool")
+                self.assertEqual({k: v for k, v in old.items() if k != "content"},
+                                 {k: v for k, v in new.items() if k != "content"})
+            else:
+                self.assertEqual(old, new)
+        self.assertEqual(after[0], before[0], "the head moved")
+        stub = after[3]["content"]
+        self.assertTrue(stub.startswith(crow_core.CONTEXT_CLEAR_MARK), stub)
+        for part in ("read_file", "`src/f0.js`", "read it again", done["path"],
+                     "700 of 1,000 tokens"):
+            self.assertIn(part, stub)
+        # the last five rounds are whole
+        self.assertEqual(after[-10:], before[-10:])
+        with open(done["path"], encoding="utf-8") as fh:
+            saved = json.load(fh)
+        self.assertEqual(saved["results"][0]["message"], before[3])
+        self.assertEqual(saved["results"][0]["tool"], "read_file")
+        self.assertLess(done["after"], 700)
+
+    def test_an_image_result_becomes_a_string_stub_and_counts_its_grid(self):
+        self.assertEqual(crow_core._image_tokens(
+            {"type": "image_url", "image_url": {"url": _png_url(984, 624)}}), 620)
+        talk = crow_core.Conversation("SYS")
+        talk.append("user", "look")
+        talk.append("assistant", "", tool_calls=[
+            {"id": "c0", "name": "read_image", "arguments": json.dumps({"path": "a.png"})}])
+        talk.append("tool", [{"type": "text", "text": "a.png -- 9 bytes"},
+                             {"type": "image_url", "image_url": {"url": _png_url(984, 624)}}],
+                    tool_call_id="c0")
+        for _ in range(5):
+            talk.append("assistant", "next")
+            talk.append("user", "go on")
+        done = crow_core.clear_old_results(talk, 900, 1000, at=0.5, at_least=0.1)
+        self.assertIsNotNone(done)
+        self.assertIsInstance(talk.payload()[3]["content"], str)
+        self.assertIn("`a.png`", talk.payload()[3]["content"])
+
+    def test_the_default_is_on_at_home_and_off_remote_and_zero_is_off(self):
+        crow_core.context_clear_set(None)
+        self.assertEqual(crow_core.context_clear_share(remote=False),
+                         crow_core.CONTEXT_CLEAR_DEFAULT)
+        self.assertEqual(crow_core.context_clear_share(remote=True), 0.0)
+        crow_core.context_clear_set(0.7)
+        self.assertEqual(crow_core.context_clear_share(remote=True), 0.7)
+        for off in (0, "0", -1, 1.0, 2):
+            crow_core.context_clear_set(off)
+            self.assertEqual(crow_core.context_clear_share(remote=False), 0.0, off)
+        crow_core.context_clear_set("nonsense")
+        self.assertEqual(crow_core.context_clear_share(), crow_core.CONTEXT_CLEAR_DEFAULT)
+        crow_core.context_clear_set(0)
+        talk = _rounds_talk(10)
+        self.assertEqual(crow_core.clear_before_roll(talk, 190_000, 200_000), 190_000)
+
+    def test_the_turn_loop_call_logs_one_line_and_forgets_cleared_reads(self):
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        crow_core.LOG_FILE = os.path.join(self.dir, "log", "crow.log")
+        talk = _rounds_talk(10, size=60_000)
+        crow_core._READ[crow_core._key("src/f0.js")] = (1, 1)
+        crow_core._READ[crow_core._key("src/f9.js")] = (1, 1)
+        after = crow_core.clear_before_roll(talk, 150_000, 200_000)
+        self.assertLess(after, 150_000)
+        self.assertNotIn(crow_core._key("src/f0.js"), crow_core._READ)
+        self.assertIn(crow_core._key("src/f9.js"), crow_core._READ, "a kept read was dropped")
+        # ONE LOG (#262's): LOG_FILE, local time with offset, tagged [context]
+        with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+            lines = [ln for ln in fh.read().splitlines() if "context-clear" in ln]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("[context] context-clear: 5 tool results", lines[0])
+        self.assertRegex(lines[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d{4} ")
+        self.assertFalse(os.path.exists(os.path.join(
+            os.path.dirname(crow_core.SESSION_DIR), "logs", "crow.log")), "a second log")
+        self.assertIn("tokens freed", lines[0])
+        # the next round sets a new base instead of booking the drop as spend
+        self.assertTrue(crow_core._GOAL_REBASE)
+
+    def test_a_second_batch_does_not_clear_the_stubs_again(self):
+        talk = _rounds_talk(10)
+        first = crow_core.clear_old_results(talk, 700, 1000, at=0.65, at_least=0.0)
+        for r in range(10, 13):
+            talk.append("assistant", "", tool_calls=[
+                {"id": "c0", "name": "read_file",
+                 "arguments": json.dumps({"path": "src/f%d.js" % r})}])
+            talk.append("tool", "z" * 4000, tool_call_id="c0")
+        done = crow_core.clear_old_results(talk, 700, 1000, at=0.65, at_least=0.0)
+        self.assertEqual(done["results"], 3)
+        self.assertNotEqual(done["path"], first["path"], "the first batch's originals were overwritten")
+        self.assertTrue(os.path.exists(first["path"]))
+
+
+class ToolResultClearingInTheTurnTests(TurnLoopCase):
+    """#263 inside `run_turn`: the batch lands before the next request and
+    before the rollover check, and it says nothing in the chat."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(crow_core.context_clear_set, crow_core.CONTEXT_CLEAR_AT)
+        crow_core.context_clear_set(None)
+
+    def test_a_round_past_the_trigger_clears_before_the_next_request(self):
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        crow_core.LOG_FILE = os.path.join(self.dir, "log", "crow.log")
+        talk = _rounds_talk(10, size=4000)
+        talk.append("user", "carry on")
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))],
+                   {"prompt_n": 700, "predicted_n": 0})
+        self.serve([{"content": "done"}], {"prompt_n": 1, "predicted_n": 0})
+        result = self.turn(talk, n_ctx=1000, rollover_at=0.9)
+        self.assertNotIn("rolled", self.events.names)
+        second = self.bodies[1]["messages"]
+        stubs = [m for m in second if m["role"] == "tool"
+                 and isinstance(m["content"], str)
+                 and m["content"].startswith(crow_core.CONTEXT_CLEAR_MARK)]
+        self.assertEqual(len(stubs), 6)
+        # the first request went out untouched: the trigger had not been seen yet
+        self.assertFalse(any(isinstance(m["content"], str)
+                             and m["content"].startswith(crow_core.CONTEXT_CLEAR_MARK)
+                             for m in self.bodies[0]["messages"]))
+        self.assertPrefixIsWhole(talk)
+        self.assertFalse(result.stopped)
+        # every assistant message went out as it was
+        a0 = [m for m in self.bodies[0]["messages"] if m["role"] == "assistant"]
+        a1 = [m for m in second if m["role"] == "assistant"][:len(a0)]
+        self.assertEqual(a0, a1)
+        self.assertTrue(os.path.exists(crow_core.LOG_FILE))
+
+    def test_a_remote_endpoint_is_not_cleared_by_default(self):
+        talk = _rounds_talk(10, size=4000)
+        talk.append("user", "carry on")
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))],
+                   {"prompt_n": 700, "predicted_n": 0})
+        self.serve([{"content": "done"}], {"prompt_n": 1, "predicted_n": 0})
+        self.turn(talk, n_ctx=1000, rollover_at=0.9, remote=True)
+        self.assertFalse(any(isinstance(m["content"], str)
+                             and m["content"].startswith(crow_core.CONTEXT_CLEAR_MARK)
+                             for m in self.bodies[1]["messages"]))
+
+
 class ConversationFreshTests(unittest.TestCase):
     """#209. `fresh` is the question `restore()` asks, asked by its callers
     first; the raise stays for anyone who does not."""
@@ -20086,3 +22309,44 @@ class ConversationFreshTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class ChatTitleSkipsCrowNotesTests(unittest.TestCase):
+    """#261: the one title rule both clients read."""
+
+    def test_every_note_head_is_recognised(self):
+        for note in (crow_core.BUDGET_SPENT, crow_core.TOKEN_BUDGET_SPENT,
+                     crow_core.THINK_ONLY_NUDGE, crow_core.ABORT_NOTE,
+                     "[Goal mode, step 2 still open. Continue.]",
+                     crow_core.ROLLOVER_NOTE.format(
+                         tokens=1, path="p.json", transcript="p.md", lines=1,
+                         where="", spoken="", digest="")):
+            self.assertTrue(crow_core.is_crow_note(note), note[:40])
+        self.assertFalse(crow_core.is_crow_note("[WIP] a typed line"))
+        self.assertFalse(crow_core.is_crow_note("Hey"))
+
+    def test_the_title_follows_the_rollover_chain(self):
+        folder = tempfile.mkdtemp(prefix="crow-title-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        conv = crow_core.Conversation("s")
+        conv.append("user", "Hey")
+        conv.append("assistant", "hi")
+        one = os.path.join(folder, "rollover-1.json")
+        self.assertEqual(crow_core.roll_over(conv, "http://127.0.0.1:1/v1", 9,
+                                             path=one), one)
+        conv.append("user", crow_core.BUDGET_SPENT)
+        conv.append("assistant", "ok")
+        two = os.path.join(folder, "rollover-2.json")
+        crow_core.roll_over(conv, "http://127.0.0.1:1/v1", 9, path=two)
+        conv.append("user", "later line")
+        self.assertEqual(crow_core.chat_title(conv.payload()), "Hey")
+
+    def test_a_broken_chain_falls_back_to_the_first_typed_line(self):
+        note = crow_core.ROLLOVER_NOTE.format(
+            tokens=1, path="/nonexistent/rollover-x.json", transcript="x.md",
+            lines=1, where="", spoken="", digest="")
+        messages = [{"role": "user", "content": note},
+                    {"role": "user", "content": crow_core.BUDGET_SPENT},
+                    {"role": "user", "content": "the typed one"}]
+        self.assertEqual(crow_core.chat_title(messages), "the typed one")
+        self.assertIsNone(crow_core.chat_title(messages[:2]))

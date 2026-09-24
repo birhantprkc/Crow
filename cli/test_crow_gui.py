@@ -132,9 +132,30 @@ crow_core.SESSION_DIR = os.path.join(_NOWHERE, "session")
 crow_core.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
 crow_core.SKILLS_DIR = os.path.join(_NOWHERE, "skills")
 crow_core.USER_PATH = os.path.join(_NOWHERE, "USER.md")
+# #262: Crow's own log file, never the real one under the state dir.
+crow_core.LOG_FILE = os.path.join(_SANDBOX, "log", "crow.log")
 crow_gui.PASTE_DIR = os.path.join(_NOWHERE, "pastes")
 crow_gui.SESSION_FILE = os.path.join(_NOWHERE, "session", "session.json")
 crow_gui.SETTINGS_FILE = os.path.join(_SANDBOX, "has-no-settings", "settings.json")
+
+
+# #249: KEIN FALL OEFFNET JE EINEN ECHTEN PORT. Der Standard-Doppelgaenger
+# weigert sich zu starten -- so beantwortet auch die Schleife ueber alle
+# Slash-Befehle ein nacktes `/remote`, ohne zu lauschen und ohne
+# `remote_enabled` in die Sandbox zu schreiben. Die Remote-Faelle setzen ihren
+# eigenen, der startet.
+class _RemoteRefuses:
+    def __init__(self, **_kw):
+        pass
+
+    def start(self):
+        raise OSError("the suite never listens")
+
+
+crow_gui.REMOTE_FACTORY = _RemoteRefuses
+# #249 STAGE 5: UND KEIN FALL RUFT JE DIE ECHTE `tailscale`-CLI. Der Standard
+# ist "nicht installiert"; die Tailnet-Faelle setzen ihre eigene Antwort.
+crow_gui.TAILSCALE_PROBE = lambda port: {"state": "missing"}
 import crow_voice      # noqa: E402
 
 
@@ -974,9 +995,11 @@ class TheSecondRolloverFiresTests(ApiCase):
         self.assertEqual(rolls, [(190000, "weiter im Text")])
         self.assertIs(seen.get("rolled"), True)
         self.assertEqual(seen.get("context_tokens"), 0)
-        notes = [m["t"] for m in self.drained(api) if m.get("k") == "note"]
-        self.assertTrue(any("rolled over at 190000" in t for t in notes),
-                        "der Roll blieb unsichtbar: %r" % notes)
+        # the roll card shows it; the "rolled over at" line is log-only (robin
+        # 2026-09-24)
+        rolls_drawn = [m for m in self.drained(api) if m.get("k") == "roll"]
+        self.assertTrue(any(m.get("tokens") == 190000 for m in rolls_drawn),
+                        "der Roll blieb unsichtbar: %r" % rolls_drawn)
 
     def test_a_session_under_the_threshold_does_not_roll_before_the_turn(self):
         """NEGATIV: unter der Schwelle kein Vor-Turn-Roll -- die Zeile wird
@@ -1005,6 +1028,38 @@ class TheSecondRolloverFiresTests(ApiCase):
             api._run("weiter im Text")
         self.assertEqual(rolls, [])
         self.assertIs(seen.get("rolled"), False)
+
+    def test_a_stuck_render_loop_forces_the_roll_below_the_threshold(self):
+        """#268: six stuck captures set the flag; the next turn rolls first,
+        at 1,000 of 200,192 tokens, and the carry is the breaker's line."""
+        self._provider()
+        rolls = []
+
+        def fake_roll(conversation, base_url, context_tokens, carry=None,
+                      digest="", **_):
+            rolls.append(carry)
+            conversation.reset()
+            conversation.append("user", "note\n\n" + (carry or ""))
+            return os.path.join(crow_core.SESSION_DIR, "rollover-fake.json")
+
+        def fake_run(conversation, **kw):
+            conversation.append("assistant", "done")
+            return crow_core.TurnResult(cost="", context_tokens=9,
+                                        promised_warm=False, rolled=True,
+                                        stopped=False, reported=True)
+
+        api = self.api()
+        api._n_ctx = 200192
+        api._context_tokens = 1000
+        api._goal_roll_due = True
+        with mock.patch.object(crow_gui, "run_turn", fake_run), \
+             mock.patch.object(crow_core, "roll_over", fake_roll), \
+             mock.patch.object(crow_core, "rollover_digest", lambda *a, **k: ""), \
+             mock.patch.object(crow_core, "review_due", lambda *a, **k: None):
+            api._run("[Goal mode, step 2: what was tried]")
+            api._run("next line")
+        self.assertEqual(rolls, ["[Goal mode, step 2: what was tried]"])
+        self.assertFalse(api._goal_roll_due)
 
     def test_the_pre_turn_roll_carries_the_digest(self):
         """#154: der Digest entsteht VOR roll_over -- auf dem noch vollen
@@ -1323,6 +1378,122 @@ class ARolloverArchiveIsNotTitledByTheNoteTests(unittest.TestCase):
         Dateiname-Fallback von `_entry_of` zustaendig -- kein Erfinden."""
         messages = [{"role": "user", "content": self._note()}]
         self.assertIsNone(crow_gui.Api._first_line(messages))
+
+
+class RolloversLeaveTheRailTests(ApiCase):
+    """#261 (robin, 2026-09-23): after each rollover the rail
+    listed the archived segment as a chat of its own -- "[The tool budget for
+    this turn is ..." (324 messages) and "Hey" (191 messages), both "rolled
+    over". A rollover is the live chat's earlier half: it belongs in the
+    archive drawer, and Crow's own notes are never anybody's title."""
+
+    def cut(self, api, stamp: str) -> str:
+        """One real `roll_over` of the window's conversation, like the seam."""
+        path = os.path.join(self.dir, "rollover-%s.json" % stamp)
+        archived = crow_core.roll_over(api._conversation, "http://127.0.0.1:1/v1",
+                                       180000, path=path)
+        self.assertEqual(archived, path)
+        return path
+
+    def two_rollovers(self, api) -> "tuple[str, str]":
+        api._conversation.append("user", "Hey")
+        api._conversation.append("assistant", "hi")
+        api._conversation.append("user", crow_core.BUDGET_SPENT)
+        api._conversation.append("assistant", "ran nothing")
+        first = self.cut(api, "20260923-195925")
+        api._conversation.append("user", crow_core.BUDGET_SPENT)
+        api._conversation.append("assistant", "ok")
+        api._conversation.append("user", "[Goal mode. 1 of 9 steps done. Next "
+                                         "is step 2: Build geometry]")
+        api._conversation.append("assistant", "working")
+        second = self.cut(api, "20260923-210418")
+        api._conversation.append("user", crow_core.BUDGET_SPENT)
+        api._conversation.append("assistant", "still here")
+        return first, second
+
+    def test_rollover_archives_are_not_in_the_rail(self):
+        api = self.api()
+        first, second = self.two_rollovers(api)
+        self.drained(api)
+        api._reload_rail()
+        entry = self.rail(api)
+        listed = [r["path"] for r in entry["rollovers"]]
+        self.assertNotIn(first, listed)
+        self.assertNotIn(second, listed)
+        self.assertTrue(entry["unsaved"], "the live chat is drawn as ONE entry")
+
+    def test_they_stay_on_disk_and_in_the_drawer(self):
+        api = self.api()
+        first, second = self.two_rollovers(api)
+        self.drained(api)
+        api._reload_rail()
+        drawer = self.rail(api)["archived"]
+        self.assertEqual([r["path"] for r in drawer], [second, first])
+        self.assertTrue(all(r["rollover"] for r in drawer))
+        self.assertTrue(all(r["meta"].endswith("rolled over") for r in drawer))
+        for path in (first, second):
+            self.assertTrue(os.path.isfile(path))
+            self.assertTrue(os.path.isfile(path[:-5] + ".md"))
+
+    def test_no_title_is_a_crow_note_and_the_chat_keeps_its_name(self):
+        """Both archives and the live chat are "Hey": one chat, three
+        segments. Before, the second archive read "[The tool budget ..." and
+        the live chat named itself after whatever note came first."""
+        api = self.api()
+        self.two_rollovers(api)
+        self.drained(api)
+        api._reload_rail()
+        entry = self.rail(api)
+        self.assertEqual(entry["title"], "Hey")
+        self.assertEqual([r["title"] for r in entry["archived"]], ["Hey", "Hey"])
+
+    def test_an_opened_rollover_stands_in_the_rail_once(self):
+        """The one exception: a rollover somebody opened IS the chat in the
+        window, so it is in the rail (marked) and not also in the drawer."""
+        api = self.api()
+        first, _second = self.two_rollovers(api)
+        api.open(first)
+        self.drained(api)
+        api._reload_rail()
+        entry = self.rail(api)
+        mine = [r for r in entry["rollovers"] if r["path"] == first]
+        self.assertEqual(len(mine), 1)
+        self.assertTrue(mine[0]["active"])
+        self.assertNotIn(first, [r["path"] for r in entry["archived"]])
+
+    def test_the_drawer_offers_no_restore_for_a_rollover(self):
+        src = crow_gui.PAGE
+        self.assertIn('if(!entry.rollover)\n      rows.push({act:"arch"',
+                      src)
+
+
+class CrowNotesAreNeverATitleTests(unittest.TestCase):
+    """#261: every user-role note Crow sends, not only the
+    rollover note (#153), is skipped when a chat is titled."""
+
+    def test_each_note_is_skipped(self):
+        notes = [crow_core.BUDGET_SPENT, crow_core.TOKEN_BUDGET_SPENT,
+                 crow_core.THINK_ONLY_NUDGE,
+                 "[Goal mode, step 9 still open. Continue.]",
+                 crow_core.goal_trouble_nudge(3, [])]
+        for note in notes:
+            messages = [{"role": "system", "content": "s"},
+                        {"role": "user", "content": note},
+                        {"role": "assistant", "content": "ok"},
+                        {"role": "user", "content": "build the fog"}]
+            self.assertEqual(crow_gui.Api._first_line(messages), "build the fog",
+                             note[:40])
+            self.assertIsNone(crow_gui.Api._first_line(messages[:2]), note[:40])
+
+    def test_a_typed_bracket_line_is_still_a_title(self):
+        """NEGATIV: only Crow's own heads are skipped, not every '['."""
+        messages = [{"role": "user", "content": "[WIP] fog shader"}]
+        self.assertEqual(crow_gui.Api._first_line(messages), "[WIP] fog shader")
+
+    def test_the_root_notice_is_not_the_title_the_typed_line_is(self):
+        text = crow_core.ROOT_NOTICE.format(new="/a", old="/b") + "move it"
+        messages = [{"role": "user", "content": text}]
+        self.assertEqual(crow_gui.Api._first_line(messages), "move it")
 
 
 # ----------------------------------------------------------- the rail --------
@@ -3176,6 +3347,61 @@ class TheVoiceModuleTests(unittest.TestCase):
                          Path(crow_voice.__file__).resolve().parent.parent,
                          "the model is not looked for beside the client")
 
+    def test_a_phone_clip_is_decoded_and_transcribed_with_the_same_model(self):
+        """#290: `transcribe_file(path)` -- the phone's recording, decoded to
+        16 kHz mono (faster-whisper's own PyAV decoder, faked here: this box
+        has no voice extra) and handed to the same model with the same
+        settings as `stop()`. Too short a clip is "" and the model is not
+        asked."""
+        asked = []
+
+        class Seg:
+            def __init__(self, text):
+                self.text = text
+
+        class Model:
+            def transcribe(self, audio, **kw):
+                asked.append((len(audio), kw))
+                return [Seg(" Hallo Crow, "), Seg("teste die Spracheingabe. ")], None
+
+        decoded = {}
+
+        def decode(path):
+            decoded["path"] = path
+            return [0.0] * (crow_voice.SAMPLE_RATE * 2)
+
+        with mock.patch.object(crow_voice, "_decode", decode), \
+                mock.patch.object(crow_voice, "load_model", Model):
+            self.assertEqual(crow_voice.transcribe_file("/tmp/clip.m4a"),
+                             "Hallo Crow, teste die Spracheingabe.")
+            self.assertEqual(decoded["path"], "/tmp/clip.m4a")
+            self.assertEqual(asked, [(32000, {"beam_size": 5, "vad_filter": True})])
+            with mock.patch.object(crow_voice, "_decode",
+                                   lambda p: [0.0] * (crow_voice.MIN_FRAMES - 1)):
+                self.assertEqual(crow_voice.transcribe_file("/tmp/tap.m4a"), "")
+            self.assertEqual(len(asked), 1)
+            # #290: the clip's length, for the log line
+            stats = {}
+            crow_voice.transcribe_file("/tmp/clip.m4a", stats)
+            self.assertEqual(stats, {"seconds": 2.0})
+
+    def test_the_model_says_whether_it_is_loaded(self):
+        """#290: the phone shows "loading the speech model" until it is."""
+        with mock.patch.object(crow_voice, "_model", None):
+            self.assertFalse(crow_voice.model_loaded())
+        with mock.patch.object(crow_voice, "_model", object()):
+            self.assertTrue(crow_voice.model_loaded())
+
+    def test_the_phone_path_needs_only_the_recogniser(self):
+        """NEGATIVE: no microphone and no sounddevice on the PC must not block
+        a phone's clip; a missing faster-whisper is named."""
+        with mock.patch.dict(sys.modules, {"sounddevice": None, "faster_whisper": None}):
+            why = crow_voice.file_available()
+        self.assertIn("faster-whisper", why)
+        with mock.patch.dict(sys.modules, {"sounddevice": None,
+                                           "faster_whisper": mock.MagicMock()}):
+            self.assertIsNone(crow_voice.file_available())
+
 class TheThemeAndTheSettingsSheetTests(unittest.TestCase):
     """Two palettes, one attribute, and the sheet that switches them."""
 
@@ -3264,7 +3490,7 @@ class TheThemeAndTheSettingsSheetTests(unittest.TestCase):
         # accent, the bevel and the model's own colour are brand values out of
         # the core, and a theme that redefined them would be inventing a second
         # brand rather than choosing a ground.
-        structural = {"--mono", "--ui", "--barh", "--sbw"}
+        structural = {"--mono", "--ui", "--barh", "--sbw", "--colw", "--colpad", "--reserve"}
         carried = {"--accent", "--bevel", "--model"}
         for theme in ("light", "crow"):
             head = ':root[data-theme="%s"]{' % theme
@@ -3313,6 +3539,27 @@ class TheThemeAndTheSettingsSheetTests(unittest.TestCase):
                 self.assertEqual(crow_gui.current_theme(), crow_gui.DEFAULT_THEME)
             finally:
                 crow_gui.SETTINGS_FILE = before
+
+    def test_the_bundler_setting_is_read_every_turn(self):
+        """#274: `bundler` in settings.json reaches build_bundle through the
+        same per-turn door as the #145/#154 keys -- no restart, and a key that
+        is gone again clears it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            before = crow_gui.SETTINGS_FILE
+            crow_gui.SETTINGS_FILE = os.path.join(tmp, "settings.json")
+            try:
+                api = crow_gui.Api.__new__(crow_gui.Api)
+                with io.open(crow_gui.SETTINGS_FILE, "w", encoding="utf-8") as fh:
+                    json.dump({"bundler": "/opt/esb/esbuild"}, fh)
+                api._token_budget()
+                self.assertEqual(crow_core.bundler_path(), "/opt/esb/esbuild")
+                with io.open(crow_gui.SETTINGS_FILE, "w", encoding="utf-8") as fh:
+                    json.dump({}, fh)
+                api._token_budget()
+                self.assertIsNone(crow_core.bundler_path())
+            finally:
+                crow_gui.SETTINGS_FILE = before
+                crow_core.bundler_set(None)
 
     def test_hilfe_sits_in_the_title_bar_and_leaves_the_drag_region(self):
         """The bar moves the window. Anything clickable in it has to opt out, or
@@ -4583,6 +4830,151 @@ class TheHeldWriteBarTests(unittest.TestCase):
         self.assertIn("pendState([])", clear[:200])
 
 
+class AHeldWriteThatDidNotLandIsSaidTests(ApiCase):
+    """#285. robin pressed "save to memory", the file stayed as it was and the
+    window said nothing. A write that did not happen is announced as surely as
+    one that did."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(crow_core.forget_pending)
+
+    def test_an_expired_write_answers_with_a_visible_line(self):
+        entry = crow_core.stage_memory(
+            "memory", json.dumps({"action": "add", "content": "ZU SPAET"}))
+        entry["staged"] -= crow_core.PENDING_TTL + 1
+        api = self.api()
+        self.drained(api)
+        api.answer_memory(True)
+        got = self.drained(api)
+        notes = [m["t"] for m in got if m.get("k") == "note"]
+        self.assertTrue(any("not saved" in t and "expired after 5 min" in t
+                            for t in notes), got)
+        # NEGATIVE: nothing was written, so nothing glows.
+        self.assertNotIn("memory", [m.get("k") for m in got])
+
+    def test_a_mixed_answer_glows_for_the_saved_and_names_the_rest(self):
+        api = self.api()
+        self.drained(api)
+        with mock.patch.object(crow_core, "approve_pending", return_value=(
+                ["add memory"], [{"what": "add memory: x", "why": "already in memory"}])):
+            api.answer_memory(True)
+        got = self.drained(api)
+        self.assertEqual([m["n"] for m in got if m.get("k") == "memory"], [1])
+        self.assertTrue(any("already in memory" in m.get("t", "")
+                            for m in got if m.get("k") == "note"), got)
+
+
+class TheHeldWriteTileHasThreeStatesTests(unittest.TestCase):
+    """#285 point 3. Collapsed, the 160-char previews, then the whole text --
+    a replace as the entry it takes out above the one it puts in, an add
+    marked as appended. RUN in node over a small fake DOM: which row shows at
+    which click is logic, and a string in the source proves nothing about it.
+    """
+
+    FAKE_DOM = r"""
+function mk(tag){ const e={tag, children:[], className:"", _t:"", hidden:false,
+  parentNode:null, dataset:{},
+  classList:{ s:new Set(), add(...c){ c.forEach(x=>this.s.add(x)); },
+    remove(...c){ c.forEach(x=>this.s.delete(x)); },
+    contains(c){ return this.s.has(c); },
+    toggle(c,f){ const on = f===undefined ? !this.s.has(c) : !!f;
+      if(on) this.s.add(c); else this.s.delete(c); return on; } },
+  appendChild(c){ this.children.push(c); c.parentNode=this; return c; },
+  insertBefore(c,ref){ const i=ref?this.children.indexOf(ref):-1;
+    if(i<0) this.children.push(c); else this.children.splice(i,0,c);
+    c.parentNode=this; return c; },
+  get textContent(){ return this._t + this.children.map(c=>c.textContent).join(""); },
+  set textContent(v){ this._t=String(v); this.children=[]; },
+  set innerHTML(v){ this.children=[]; this._t="";
+    for(const m of String(v).matchAll(/class="([^"]+)"/g)){
+      const c=mk("span"); c.className=m[1]; this.appendChild(c); } },
+  get innerHTML(){ return ""; },
+  has(cls){ return this.className.split(" ").includes(cls) || this.classList.s.has(cls); },
+  querySelectorAll(sel){ const cls=sel.replace(/^\./,""), out=[];
+    const walk=n=>n.children.forEach(c=>{ if(c.has(cls)) out.push(c); walk(c); });
+    walk(this); return out; },
+  querySelector(sel){ return this.querySelectorAll(sel)[0] || null; },
+  closest(){ return null; } };
+  return e; }
+const document={ createElement:mk };
+const bar=mk("div"); bar.id="pendbar";
+const $=sel=>bar;
+"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.node = _node()
+        cls.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        cls.css = cls.source[cls.source.index("<style>"):cls.source.index("</style>")]
+
+    def setUp(self):
+        if not self.node:
+            self.skipTest("no node on this machine")
+
+    def _page(self, items, clicks):
+        """pendState + pendToggle out of the page; after each click, the
+        tile's state and every row's text as the CSS would show it."""
+        import subprocess
+        start = self.source.index("  pendState(items){")
+        end = self.source.index("  pendAnswer(yes)")
+        prog = (self.FAKE_DOM
+                + "const crow={\n" + self.source[start:end] + "};\n"
+                + "const seen=[];\n"
+                + "function look(){ const deep=bar.classList.contains('deep'),"
+                  " open=bar.classList.contains('open');\n"
+                  "  const hint=bar.querySelector('.hint');\n"
+                  "  seen.push({open, deep, hint: hint ? hint.textContent : '',\n"
+                  "    brief: bar.querySelectorAll('.brief').map(r=>r.textContent),\n"
+                  "    was: bar.querySelectorAll('.was').map(r=>r.textContent),\n"
+                  "    will: bar.querySelectorAll('.will').map(r=>r.textContent),\n"
+                  "    where: bar.querySelectorAll('.where').map(r=>r.textContent)}); }\n"
+                + "crow.pendState(" + json.dumps(items) + "); look();\n"
+                + "for(let i=0;i<" + str(clicks) + ";i++){ crow.pendToggle({target:bar}); look(); }\n"
+                + "console.log(JSON.stringify(seen));\n")
+        done = subprocess.run([self.node, "-e", prog], capture_output=True,
+                              text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    ITEMS = [{"action": "replace", "text": "replace memory: " + "N" * 141 + "...",
+              "full": "N" * 400, "old": "alpha " + "o" * 300, "find": "alpha"},
+             {"action": "add", "text": "add memory: " + "A" * 145 + "...",
+              "full": "A" * 400}]
+
+    def test_the_second_click_shows_old_and_new_whole(self):
+        shut, first, second, third = self._page(self.ITEMS, 3)
+        self.assertEqual((shut["open"], shut["deep"]), (False, False))
+        self.assertEqual((first["open"], first["deep"]), (True, False))
+        self.assertEqual((second["open"], second["deep"]), (True, True))
+        self.assertEqual((third["open"], third["deep"]), (False, False))
+        # NO TEXT CUT: the whole old entry and the whole new one, marked.
+        self.assertEqual(second["was"], ["\u2212 alpha " + "o" * 300])
+        self.assertEqual(second["will"], ["+ " + "N" * 400, "+ " + "A" * 400])
+        self.assertEqual(second["where"], ["appended at the end"])
+        self.assertEqual(first["brief"], [x["text"] for x in self.ITEMS])
+        self.assertEqual(len({first["hint"], second["hint"], third["hint"]}), 3)
+
+    def test_a_replace_with_no_single_match_says_so(self):
+        """NEGATIVE: the tile names what it searched for, not a guessed entry."""
+        got = self._page([{"action": "remove", "text": "remove memory: x ",
+                           "full": "", "old": None, "find": "x "}], 2)
+        self.assertEqual(len(got[2]["was"]), 1)
+        self.assertIn("no single entry contains", got[2]["was"][0])
+        self.assertEqual(got[2]["will"], [])
+
+    def test_the_css_shows_one_level_at_a_time(self):
+        """The previews and the whole text are both in the tile; which one a
+        reader sees is the CSS's job, keyed on `.deep`."""
+        self.assertIn("#pendbar .whole{display:none", self.css)
+        self.assertIn("#pendbar.deep .whole{display:block", self.css)
+        self.assertIn("#pendbar.deep .brief{display:none", self.css)
+        # #249's phone layer rearranges; it must not hide the rows #285 adds.
+        phone = crow_gui.REMOTE_CSS
+        for cls in (".whole", ".brief", ".was", ".will", ".where", ".deep"):
+            self.assertNotIn(cls, phone)
+
+
 class TheMemoryLineTests(unittest.TestCase):
     """#122: the one sign a person gets that something was remembered.
 
@@ -5375,8 +5767,8 @@ class TheMcpSheetTests(ApiCase):
         self.assertIn("border-radius", rule)
         self.assertIn("padding", rule)
         # HUGGING THE TEXT, not filling the column: without this a two-word
-        # message is a full-width slab.
-        self.assertIn("justify-self:start", rule)
+        # message is a full-width slab. #280: on the column's RIGHT edge.
+        self.assertIn("justify-self:end", rule)
         import re as _re
         used = _re.findall(r"var\((--[a-z-]+)\)", rule)
         self.assertIn("--raised", used)
@@ -5639,6 +6031,92 @@ class TheUserBubbleTests(unittest.TestCase):
         self.assertNotIn("max-width", rule)
         say = self.css[self.css.index(".say{"):]
         self.assertNotIn("max-width", say[:say.index(chr(125))])
+
+
+class TheBubblesStandOnTheComposersEdgesTests(unittest.TestCase):
+    """#280, robin 2026-09-24: chat and composer read as ONE column -- the
+    user's bubble with its right edge on #box's right border, Crow's text with
+    its left edge on #box's left border, with and without the #233/#255/#256
+    cards, at every width.
+
+    MEASURED in headless Chromium (real PAGE, rail open/shut x 1180/1440/1920/
+    2560 x no card/git/goal/subtasks, 32 combinations): before, the short
+    user bubble ended 716-780 px left of #box's right edge and Crow's `.say`
+    started 40 px right of its left edge, 32 of 32; after, 0.0 px in 32 of 32.
+    This suite has no browser, so it holds the rules that produced that -- and
+    recomputes the column and the box from the stylesheet's own numbers."""
+
+    def setUp(self) -> None:
+        self.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.css = self.source[self.source.index("<style>"):self.source.index("</style>")]
+
+    def _rule(self, selector: str) -> str:
+        found = self.css[self.css.index(selector):]
+        return found[:found.index(chr(125))]
+
+    def _decl(self, rule: str, prop: str) -> str:
+        match = re.search(r"(?:^|[;{\s])" + re.escape(prop) + r":([^;]+)", rule)
+        self.assertIsNotNone(match, "%s fehlt in %r" % (prop, rule[:80]))
+        return match.group(1).strip()
+
+    def test_the_users_bubble_ends_on_the_right_edge(self):
+        self.assertIn("justify-self:end", self._rule(".you .txt{"))
+        self.assertNotIn("justify-self:start", self._rule(".you .txt{"))
+        self.assertIn("justify-self:end", self._rule(".you img.sent{"))
+
+    def test_crows_text_starts_on_the_left_edge(self):
+        """The 38-px mark column put `.say`, the thoughts and the cursor 40 px
+        inside the box's left border."""
+        self.assertNotIn("grid-template-columns", self._rule(".as{"))
+        start = self.source[self.source.index("  start(){"):]
+        start = start[:start.index("this.col=")]
+        self.assertNotIn('class="m"', start)
+        self.assertNotIn(".as .m{", self.css, "a rule with no wearer is left")
+
+    def test_column_and_composer_come_from_the_same_variables(self):
+        """ONE SOURCE. Every length that places the text column (#flow,
+        .turn) and the box (#composer, #box) is a var() of the four shared
+        ones -- a px literal in any of them is a second source that can drift.
+        Then both are computed for two widths, with and without a card, and
+        must share both edges."""
+        root = self._rule(":root{")
+        env = {name: float(self._decl(root, "--" + name)[:-2])
+               for name in ("sbw", "colw", "colpad", "reserve")}
+        block = self.css[self.css.index("@container chat"):]
+        block = block[:block.index("}\n}") + 1]
+        card = float(re.search(r"\{--reserve:(\d+)px\}", block).group(1))
+
+        def ev(expr: str, reserve: float) -> float:
+            self.assertNotRegex(expr, r"\d+px", "a literal in %r" % expr)
+            code = re.sub(r"var\(--([a-z]+)\)",
+                          lambda m: repr(reserve if m.group(1) == "reserve"
+                                         else env[m.group(1)]), expr)
+            code = code.replace("calc", "")
+            self.assertRegex(code, r"^[\d.\s+*()-]+$", expr)
+            return float(eval(code))  # noqa: S307 -- digits and + * ( ) only
+
+        def split(value: str) -> list:
+            return re.findall(r"calc\([^()]*(?:\([^()]*\)[^()]*)*\)|var\([^)]*\)|\S+", value)
+
+        flow, turn = self._rule("#flow{"), self._rule("\n.turn{")
+        comp, box = self._rule("#composer{position:absolute"), self._rule("#box{border:")
+        f_left, f_right = split(self._decl(flow, "padding-inline"))
+        t_pad = split(self._decl(turn, "padding"))[1]
+        c_pad = split(self._decl(comp, "padding"))[1]
+        for width in (937.0, 1417.0, 1677.0):       # #main at 1180/1920 rail open, 1920 shut
+            for reserve in (env["reserve"], card):
+                # #flow: scrollbar-gutter:stable takes --sbw on the right.
+                lo = ev(f_left, reserve)
+                hi = width - ev(f_right, reserve) - env["sbw"]
+                w = min(ev(self._decl(turn, "max-width"), reserve), hi - lo)
+                t_lo = lo + (hi - lo - w) / 2 + ev(t_pad, reserve)
+                t_hi = t_lo + w - 2 * ev(t_pad, reserve)
+                lo = ev(self._decl(comp, "left"), reserve) + ev(c_pad, reserve)
+                hi = width - ev(self._decl(comp, "right"), reserve) - ev(c_pad, reserve)
+                w = min(ev(self._decl(box, "max-width"), reserve), hi - lo)
+                b_lo = lo + (hi - lo - w) / 2
+                self.assertAlmostEqual(t_lo, b_lo, msg="left edge, %s/%s" % (width, reserve))
+                self.assertAlmostEqual(t_hi, b_lo + w, msg="right edge, %s/%s" % (width, reserve))
 
 
 class TheTraceFoldsFinishedRoundsTests(unittest.TestCase):
@@ -6663,6 +7141,34 @@ class ADeletedChatTakesItsSubtasksAlongTests(ApiCase):
         self.assertTrue(sub.cancelled)
         self.assertEqual(crow_core.subtask_view(), [])
 
+    def test_closing_the_card_marks_only_this_chats_and_cancels_nothing(self):
+        """#281. `close_subtasks` hides the card for the OPEN chat: its
+        records get the `closed` mark and a `subs` push says so; another
+        chat's record is untouched; a running one is neither cancelled nor
+        dropped. `reopen_subtasks` takes the mark off again."""
+        api = self.api()
+        here = self._saved_chat("chat-a.json")
+        other = self._saved_chat("chat-b.json")
+        api._current_path = other
+        self._seed("d1")
+        api._subs_items()                     # d1 belongs to chat-b
+        api._current_path = here
+        run = self._seed("d2", status="running")
+        api._subs_items()                     # d2 belongs to chat-a
+        self.drained(api)
+        api.close_subtasks()
+        rows = {r["i"]: r for r in crow_core.subtask_view()}
+        self.assertTrue(rows["d2"]["closed"])
+        self.assertFalse(rows["d1"]["closed"], "another chat's card closed")
+        self.assertEqual(run.status, "running")
+        self.assertFalse(run.cancelled)
+        subs = [m for m in self.drained(api) if m.get("k") == "subs"]
+        self.assertTrue(subs, "the close was never pushed to the page")
+        self.assertTrue({r["i"]: r for r in subs[-1]["items"]}["d2"]["closed"])
+        api.reopen_subtasks()
+        self.assertFalse({r["i"]: r for r in crow_core.subtask_view()}
+                         ["d2"]["closed"])
+
     def test_discarding_the_live_chat_drops_its_subtasks_too(self):
         api = self.api()
         self._seed("d1")
@@ -7089,10 +7595,13 @@ class TheVoiceLineTests(ApiCase):
         source = self._source()
         box = source[source.index("#box{border:"):]
         box = box[:box.index("#box.focus")]
-        self.assertIn("max-width:900px", box)
+        # #280: die 900 steht einmal, als --colw, und beide lesen sie.
+        self.assertIn("--colw:900px", source)
+        self.assertIn("max-width:var(--colw)", box)
         self.assertNotIn("max-width:675px", box)
         column = source[source.index(".turn{padding:"):]
-        self.assertIn("max-width:960px", column[:column.index("}")],
+        self.assertIn("max-width:calc(var(--colw) + 2 * var(--colpad))",
+                      column[:column.index("}")],
                       "die Spalte hat sich bewegt, die Maske folgt ihr nicht mehr")
 
     def test_the_bars_are_mirrored_and_thin(self):
@@ -8192,17 +8701,23 @@ class NothingOverhangsOrClipsTests(unittest.TestCase):
         Kartenbreite plus ihr Rand."""
         self.assertIn("container:chat/inline-size", self._rule("#main{"))
         block = self.css[self.css.index("@container chat"):]
-        block = block[:block.index("}\n}")]
-        flow = re.search(r"#flow\{\s*padding-inline:calc\(10px \+ var\(--sbw\) \+ (\d+)px\) "
-                         r"calc\(10px \+ (\d+)px\)", block)
-        comp = re.search(r"#composer\{\s*left:calc\(var\(--sbw\) \+ (\d+)px\);"
-                         r"right:calc\(var\(--sbw\) \+ (\d+)px\)", block)
-        self.assertIsNotNone(flow)
-        self.assertIsNotNone(comp)
+        block = block[:block.index("}\n}") + 1]
+        # #280: EINE Deklaration fuer beide -- #flow und #composer bekommen
+        # dieselbe --reserve aus derselben Regel, und beide lesen sie links
+        # und rechts.
+        rules = re.findall(r"([^{}]*)\{--reserve:(\d+)px\}", block)
+        self.assertEqual(len(rules), 1, block)
+        selectors, amount = rules[0]
+        self.assertEqual(selectors.count("#flow"), 3)
+        self.assertEqual(selectors.count("#composer"), 3)
         panels = self._rule("#panels{")
         reserve = self._px(panels, "width") + self._px(panels, "right")
-        self.assertEqual({int(g) for g in flow.groups()}, {reserve})
-        self.assertEqual({int(g) for g in comp.groups()}, {reserve})
+        self.assertEqual(int(amount), reserve)
+        self.assertIn("padding-inline:calc(var(--sbw) + var(--reserve)) var(--reserve)",
+                      self._rule("#flow{"))
+        composer = self._rule("#composer{position:absolute")
+        self.assertIn("left:calc(var(--sbw) + var(--reserve))", composer)
+        self.assertIn("right:calc(var(--sbw) + var(--reserve))", composer)
 
     def test_the_composer_is_centred_in_the_window_not_left_of_it(self):
         """#256, robin 2026-09-23: "die Eingabemaske ist nicht mittig,
@@ -8218,11 +8733,12 @@ class NothingOverhangsOrClipsTests(unittest.TestCase):
         muss ohne und mit Karten gelten -- jede einseitige Zahl ist dieser Bug."""
         sbw = self._px(self._rule(":root{"), "--sbw")
         composer = self._rule("#composer{position:absolute")
-        self.assertIn("left:var(--sbw)", composer)
-        self.assertIn("right:var(--sbw)", composer)
+        self.assertIn("left:calc(var(--sbw) + var(--reserve))", composer)
+        self.assertIn("right:calc(var(--sbw) + var(--reserve))", composer)
         flow = self._rule("#flow{")
         self.assertIn("scrollbar-gutter:stable", flow)
-        self.assertIn("padding-inline:calc(10px + var(--sbw)) 10px", flow)
+        # #280: links der Rinnstein mehr, rechts reserviert ihn der Browser.
+        self.assertIn("padding-inline:calc(var(--sbw) + var(--reserve)) var(--reserve)", flow)
         self.assertEqual(sbw, 10)
         block = self.css[self.css.index("@container chat"):]
         block = block[:block.index("}\n}")]
@@ -8370,7 +8886,8 @@ class ALineTypedDuringTheReviewIsNotLostTests(ApiCase):
         api.send("noch eine")
         self.assertEqual([m["k"] for m in api._seen], ["queued"])
         source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
-        self.assertIn('case "queued": this.queuedLine();', source)
+        # #249: the push carries the joined text now, so the case passes it on.
+        self.assertIn('case "queued": this.queuedLine(e);', source)
         self.assertIn("the memory review is finishing", source)
 
     def test_the_page_is_told_when_the_wait_is_over(self):
@@ -8671,6 +9188,45 @@ class TheDelegationWearsTheMockupTests(unittest.TestCase):
         self.assertIn("#main:has(#subpanel:not([hidden])) #flow", self.css)
         self.assertIn("#main:has(#subpanel:not([hidden])) #composer", self.css)
         self.assertIn("#subpanel .subcard.seen{animation:none", self.css)
+
+    def test_the_subtasks_card_closes_like_the_goal_card(self):
+        """#281 (robin, 2026-09-24): der Goal-Karte hat ein `×`, die
+        Subtasks-Karte keins. Jetzt dasselbe `.gx` in ihrem Kopf, mit Tooltip,
+        der sagt, dass nichts abgebrochen wird; `hidden` ist der ganze Zustand,
+        also laesst die #233/#256-Reserve mit los; ein Sprung oeffnet wieder."""
+        panels = self.source[self.source.index('<div id="panels">'):
+                             self.source.index('<aside id="git">')]
+        head = panels[panels.index('<div class="sph"'):
+                      panels.index('<div class="splive">')]
+        self.assertIn('class="gx"', head)
+        self.assertIn(">×</button>", head)
+        self.assertIn("running subtasks keep running", head)
+        self.assertIn('aria-label="Close subtasks card"', head)
+        self.assertIn("crow.subPanelClose(event)", head)
+        # Dieselbe Regel wie das Goal-`×`, nicht eine zweite Schreibweise.
+        self.assertIn("#goalpanel .gx,#subpanel .gx{", self.css)
+        self.assertIn("#goalpanel .gx:hover,#subpanel .gx:hover{", self.css)
+        close = self.source[self.source.index("  subPanelClose(ev){"):
+                            self.source.index("  subDoneFold(){")]
+        self.assertIn("ev.stopPropagation()", close)
+        self.assertIn('$("#subpanel").hidden=true', close)
+        self.assertIn("pywebview.api.close_subtasks()", close)
+        self.assertNotIn("cancel", close.replace("not cancelling", ""))
+        frame = self.source[self.source.index("  subPanel(items){"):
+                            self.source.index("  subPanelFold(){")]
+        self.assertIn("items.some(x=>x.here && !x.closed)", frame)
+        self.assertIn("p.hidden=!(run+fin) || !open", frame)
+        reveal = self.source[self.source.index("  subReveal(d){"):
+                             self.source.index("  subJump(i){")]
+        self.assertIn("pywebview.api.reopen_subtasks()", reveal)
+        self.assertIn("p.hidden=false", reveal)
+        # Die Python-Seite: der Mark kommt in den Push-Rahmen, sonst hoert
+        # die Seite das Schliessen nie.
+        self.assertIn("def close_subtasks(self)", self.source)
+        self.assertIn("def reopen_subtasks(self)", self.source)
+        push = self.source[self.source.index("def _push_subs(self)"):]
+        push = push[:push.index("def ", 10)]
+        self.assertIn('r.get("closed", False)', push)
 
     def test_the_transcript_shelf_is_not_the_chat_folder(self):
         """NEGATIV auf der Kern-Seite, hier verankert, weil das Fenster der
@@ -9643,9 +10199,10 @@ class TheTurnBillsRideWithTheChatTests(ApiCase):
         self.assertEqual([n["t"] for n in handed["notes"]], ["vor dem Schnitt"])
         self.assertEqual([t["decoded"] for t in handed["timings"]], [111])
         self.assertEqual(api._timings, [], "die Bilanzen des alten Kontexts blieben stehen")
-        self.assertEqual([n.get("t") for n in api._notes],
-                         ["rolled over at 190000 tokens -> rollover-fake.json"],
-                         "nach dem Schnitt steht die Rollover-Notiz als erste Marke")
+        # robin 2026-09-24: the "rolled over at" line is log-only, so the
+        # band of the new context starts empty
+        self.assertEqual([n.get("t") for n in api._notes], [],
+                         "nach dem Schnitt steht nichts vom alten Band")
 
 
 class MarksStayWhereTheyHappenedTests(ApiCase):
@@ -9661,7 +10218,7 @@ class MarksStayWhereTheyHappenedTests(ApiCase):
         """Zwei Zuege mit einer Marke dazwischen, wie sie live entsteht."""
         api._conversation.append("user", "first")
         api._conversation.append("assistant", "answer one")
-        api.push({"k": "note", "t": "rolled over at 181501 tokens"})
+        api.push({"k": "note", "t": "goal mode paused: step 1 has taken 25 turns"})
         api._conversation.append("user", "second")
         api._conversation.append("assistant", "answer two")
 
@@ -9678,9 +10235,9 @@ class MarksStayWhereTheyHappenedTests(ApiCase):
         api._conversation.append("user", "first")
         api._conversation.append("assistant", "answer one")
         standing = len(api._conversation)
-        api.push({"k": "note", "t": "rolled over at 181501 tokens"})
+        api.push({"k": "note", "t": "goal mode paused: step 1 has taken 25 turns"})
         self.assertEqual(api._notes,
-                         [{"k": "note", "t": "rolled over at 181501 tokens",
+                         [{"k": "note", "t": "goal mode paused: step 1 has taken 25 turns",
                            "at": standing}])
         self.assertEqual(standing, len(api._conversation.payload()))
 
@@ -9821,6 +10378,97 @@ class TheGoalPanelShowsTheGoalsOwnCostTests(ApiCase):
         self.assertEqual([m["goal"] for m in said], [None])
 
 
+class AFailedStepIsRetriedOnceThenSkippedTests(ApiCase):
+    """#289, the window's half. 2026-09-24: step 4 went `failed`, the nudge
+    after it said only "step 4 still open" (session.json msg 327), and
+    after robin's hand skip the goal bar kept the old step for the whole
+    next turn -- only goal_set/goal_step results repainted it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(crow_core.goal_write, None)
+        crow_core.goal_start("Ship it", ["read the log", "write the fix",
+                                         "prove it"], now=1000.0)
+
+    def turn(self, api, text, answer="working on it") -> None:
+        """A turn that worked on the nudge: one tool call, one answer."""
+        api._conversation.append("user", text)
+        api._conversation.append(
+            "assistant", "", tool_calls=[{"id": "c0", "name": "read_file",
+                                          "arguments": "{}"}])
+        api._conversation.append("tool", "...", tool_call_id="c0")
+        api._conversation.append("assistant", answer)
+
+    def goals(self, api) -> list:
+        return [m["goal"] for m in self.drained(api) if m.get("k") == "goal"]
+
+    def test_the_nudge_after_a_failure_quotes_its_note(self):
+        """Second turn of the same step, the model worked -- the short "still
+        open" line would go out. After a `failed` the note goes out instead."""
+        api = self.api()
+        self.turn(api, api._goal_nudge())
+        crow_core.tool_goal_step(1, "failed", "the log is rotated away")
+        nudge = api._goal_nudge()
+        self.assertIn("the log is rotated away", nudge)
+        self.assertIn("different approach", nudge)
+        self.assertNotIn("still open. Continue", nudge)
+        self.turn(api, nudge)
+        # The second `failed` skips it: the engine hands out step 2.
+        crow_core.tool_goal_step(1, "failed", "still rotated away")
+        self.assertIn("Next is step 2: write the fix", api._goal_nudge())
+
+    def test_a_hand_edit_of_goal_json_repaints_the_bar_within_a_round(self):
+        api = self.api()
+        api.push_goal(force=True)
+        self.drained(api)
+        goal = crow_core.goal_load()
+        goal["steps"][0]["status"] = "skipped"
+        crow_core.goal_write(goal)
+        events = crow_gui.Turn(api.push, goal_reload=api.push_goal)
+        events.round_finished({})
+        said = self.goals(api)
+        self.assertTrue(said, "the round did not read goal.json")
+        self.assertEqual(said[-1]["steps"][0]["status"], "skipped")
+        self.assertEqual(said[-1]["skipped"], [1])
+        # GEGENPROBE: a round that only adds tokens draws nothing.
+        crow_core.goal_tokens_mark(0)
+        self.addCleanup(crow_core.goal_tokens_mark, 0)
+        crow_core.goal_tokens_seen(500)
+        events.round_finished({})
+        self.assertEqual(self.goals(api), [])
+
+    def test_goal_alone_repaints_what_it_read(self):
+        """Live: `/goal` answered 4/9 while the bar still said 3/9."""
+        api = self.api()
+        api.push_goal(force=True)
+        self.drained(api)
+        crow_core.goal_step_end(0, now=1010.0)
+        api._goal_command("")
+        said = self.goals(api)
+        self.assertTrue(said, "`/goal` did not repaint the bar")
+        self.assertEqual(said[-1]["done"], 1)
+
+    def test_goal_skip_from_the_composer_reaches_the_bar(self):
+        """Window and phone send the line through the same `send`."""
+        api = self.api()
+        api.send("/goal skip 2 cannot be checked here")
+        said = self.goals(api)
+        self.assertTrue(said)
+        self.assertEqual(said[-1]["steps"][1]["status"], "skipped")
+        self.assertEqual(said[-1]["steps"][1]["note"],
+                         "cannot be checked here")
+        self.assertEqual(said[-1]["skipped"], [2])
+        self.assertEqual(crow_core.goal_next_open(), 0)
+
+    def test_the_page_draws_skipped_steps_and_the_partial_end(self):
+        """NEGATIVPROBE AM QUELLTEXT: the bar has a mark and a head text for
+        a skipped step, and "partial" is not the green Complete."""
+        source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        self.assertTrue('if(state==="skipped")' in source)
+        self.assertTrue('partial ? "Complete · "+skipText' in source)
+        self.assertTrue("#goalpanel li.skipped" in source)
+
+
 class TheGoalEngineBrakesOnAnEmptyLoopTests(ApiCase):
     """#202, live am 2026-09-18, 12:02: der Motor schickte denselben Anstoss
     noch einmal, das Modell antwortete mit dem einzelnen Token `I`, und das
@@ -9884,13 +10532,24 @@ class TheGoalEngineBrakesOnAnEmptyLoopTests(ApiCase):
         self.assertIn("tool call", recovery)
         self.assertNotIn("Do it now.", recovery)
 
-    def test_robin_is_told_that_history_disappeared(self):
-        """Geschichte still zu loeschen waere schlimmer als der Kreis: beim
-        naechsten Blick fehlten Nachrichten und nichts sagte warum."""
+    def test_the_dropped_history_is_logged_not_drawn(self):
+        """Geschichte still zu loeschen waere schlimmer als der Kreis -- also
+        steht es mit Zeitstempel in crow.log. #262 (robin,
+        2026-09-23): NICHT im Verlauf und nicht im Notizband des Chats, dort
+        stand "157 messages of an empty loop dropped" als Unordnung."""
         api = self.api()
+        logs = tempfile.mkdtemp(prefix="crow-log-")
+        self.addCleanup(shutil.rmtree, logs, True)
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        crow_core.LOG_FILE = os.path.join(logs, "crow.log")
         self.looped(api)
-        self.assertTrue(any("dropped from the history" in n
-                            for n in self.notes(api)), self.notes(api))
+        self.assertFalse(any("dropped from the history" in n
+                             for n in self.notes(api)))
+        self.assertFalse(any("dropped from the history" in n.get("t", "")
+                             for n in api._notes), "saved with the chat")
+        with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+            self.assertIn("[goal] goal mode: 6 messages of an empty loop "
+                          "dropped from the history", fh.read())
 
     def test_an_empty_answer_after_the_recovery_stops_the_goal(self):
         """Kein zweiter Versuch: wer auch auf eine frisch geschnittene
@@ -9913,6 +10572,28 @@ class TheGoalEngineBrakesOnAnEmptyLoopTests(ApiCase):
         self.turn(api, self.looped(api), "read it", calls="read_file")
         self.assertIsNotNone(api._goal_nudge(), "the engine gave up on a turn "
                                                 "that did the work")
+
+    def test_working_turns_that_end_on_a_silent_forced_answer_do_not_brake(self):
+        """#259, 2026-09-23: three budget-stopped turns, each of
+        them with tool calls, each ending on a forced answer with content "".
+        The brake read three empty answers, cut 157 messages of work and --
+        after one more such turn -- stopped the goal at 6/9."""
+        api = self.api()
+        api._conversation.append("user", "start please")
+        api._conversation.append("assistant", "will do")
+        for n in range(crow_core.GOAL_LOOP_ANSWERS + 1):
+            nudge = api._goal_nudge()
+            self.assertIsNotNone(nudge, "the goal stopped after %d turns" % n)
+            self.assertNotIn("Your last answers were empty", nudge)
+            api._conversation.append("user", nudge)
+            api._conversation.append(
+                "assistant", "", tool_calls=[{"id": "c0", "name": "read_file",
+                                              "arguments": '{"path": "f%d"}' % n}])
+            api._conversation.append("tool", "...", tool_call_id="c0")
+            api._conversation.append("user", crow_core.BUDGET_SPENT)
+            api._conversation.append("assistant", "")
+        self.assertFalse(any("dropped from the history" in t
+                             for t in self.notes(api)), self.notes(api))
 
     def test_three_identical_answers_brake_even_when_they_are_not_empty(self):
         """Die zweite Tuer in dieselbe Bremse: derselbe Satz mit demselben
@@ -9971,6 +10652,115 @@ class TheGoalEngineBrakesOnAnEmptyLoopTests(ApiCase):
         self.assertIn("Next is step 2: write the fix", api._goal_nudge())
 
 
+class CrowStatusNotesGoToTheLogTests(ApiCase):
+    """#262 (robin, 2026-09-23): Crow's own grey status lines about
+    its machinery clutter a long session. They go to crow.log; the rollover
+    card, its "rolled over" line, "goal mode stopped/paused", the reboot lines
+    and every answer to a command stay in the chat."""
+
+    LOG_ONLY = (
+        "goal mode: 157 messages of an empty loop dropped from the history",
+        "goal mode, step 4: the same failure keeps coming back -- edit_file "
+        "refused 3\u00d7 the same way. The nudge names the way around it.",
+        "discarded a degenerate reply (stub, 15 chars, seed 7) -- asking "
+        "again with a new seed",
+        "kept the re-asked reply although it looks unfinished (stub again)",
+        "the restored cache did not hold -- that prefill was the whole history",
+        # robin 2026-09-24 (diorama run): the rollover line and #98's
+        # explanation line go to the log; the roll card stays
+        "rolled over at 181255 tokens -> rollover-20260924-192638.json",
+        "write_file and edit_file stay inside the root; an outside path named "
+        "in run_command asks first (#144) -- this one was released, or not "
+        "named plainly",
+    )
+    KEPT = (
+        "goal mode stopped: the model repeated an empty answer 3 times at "
+        "127,690 tokens; 6 of 9 steps done",
+        "goal mode stopped after 60 turns -- 2 of 5 steps done. `/goal` shows "
+        "where it stands.",
+        "goal mode paused: step 1 has taken 25 turns. `/goal` shows where it "
+        "stands -- a typed line carries on.",
+        "the server on port 8080 is still loading -- waiting",
+        # robin 2026-09-24: the /goal setup echo and "working directory: …"
+        # went to the log; the /goal STATUS answer stays.
+        "goal: Neon night market voxel diorama -- 3/9, 12 min so far",
+        "carried across the cut: edit_file",
+    )
+
+    def setUp(self) -> None:
+        super().setUp()
+        logs = tempfile.mkdtemp(prefix="crow-log-")
+        self.addCleanup(shutil.rmtree, logs, True)
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        crow_core.LOG_FILE = os.path.join(logs, "crow.log")
+
+    def logged(self) -> str:
+        try:
+            with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+                return fh.read()
+        except OSError:
+            return ""
+
+    def test_a_log_only_note_pushed_anywhere_is_neither_drawn_nor_saved(self):
+        api = self.api()
+        for text in self.LOG_ONLY:
+            api.push({"k": "note", "t": text})
+        self.assertEqual(self.drained(api), [])
+        self.assertEqual(api._notes, [])
+        for text in self.LOG_ONLY:
+            self.assertIn(" ".join(text.split()), self.logged())
+
+    def test_the_boundary_alarm_goes_to_the_log(self):
+        """robin 2026-09-24: '! the working area was refused for <path>, and
+        run_command ran anyway' is kind `alarm`; it leaves the chat too."""
+        api = self.api()
+        crow_gui.Turn(api.push).boundary_escaped("run_command",
+                                                 ["/tmp/placeholder-ignore.js"])
+        self.assertEqual(self.drained(api), [])
+        self.assertEqual(api._notes, [])
+        self.assertIn("! the working area was refused for "
+                      "/tmp/placeholder-ignore.js, and run_command ran anyway",
+                      self.logged())
+
+    def test_everything_else_still_reaches_the_page_and_the_band(self):
+        """NEGATIVE: nothing else disappears."""
+        api = self.api()
+        for text in self.KEPT:
+            api.push({"k": "note", "t": text})
+        api.push({"k": "alarm", "t": "! the working area was refused"})
+        api.push({"k": "memory", "t": "Memory updated", "n": 1})
+        drawn = self.drained(api)
+        self.assertEqual([m.get("t") for m in drawn],
+                         list(self.KEPT) + ["! the working area was refused",
+                                            "Memory updated"])
+        self.assertEqual(len(api._notes), len(self.KEPT) + 2)
+        self.assertEqual(self.logged(), "")
+
+    def test_a_reopened_chat_does_not_draw_the_notes_an_old_build_saved(self):
+        """(2): session.json of 2026-09-23 carries six of these at index
+        88..212. The band drops them on read; the kept ones stay in order."""
+        band = [{"k": "note", "at": 1, "t": t}
+                for t in self.LOG_ONLY + self.KEPT]
+        band.append({"k": "memory", "at": 1, "t": "Memory updated", "n": 2})
+        clean = crow_core.clean_notes(band)
+        self.assertEqual([n["t"] for n in clean],
+                         list(self.KEPT) + ["Memory updated"])
+        api = self.api()
+        api._replay([{"role": "user", "content": "hi"}], band)
+        drawn = [m.get("t") for m in self.drained(api)
+                 if m.get("k") == "note"]
+        for text in self.LOG_ONLY:
+            self.assertNotIn(text, drawn)
+        for text in self.KEPT:
+            self.assertIn(text, drawn)
+
+    def test_the_sink_logs_a_broken_cache_promise(self):
+        put = []
+        crow_gui.Turn(put.append).cache_promise_broken()
+        self.assertEqual(put, [])
+        self.assertIn("[turn] the restored cache did not hold", self.logged())
+
+
 class TheGoalEngineNamesTheWallTests(ApiCase):
     """#202, 2026-09-22: 48 blinde Runden mit toter Suche und toten
     Delegaten, und in der Sitzung danach 22 edit_file, von denen keiner
@@ -10016,9 +10806,14 @@ class TheGoalEngineNamesTheWallTests(ApiCase):
                       "api.tavily.com, 3×) -- stop calling it", nudge)
         self.assertNotIn("read the log", nudge)
         self.assertNotIn("Continue.", nudge)
-        self.assertIn("goal mode, step 1: the same failure keeps coming back -- "
-                      "web_search dead (HTTP 401 from api.tavily.com, 3×). The "
-                      "nudge names the way around it.", self.notes(api))
+        # #262: robin's copy goes to crow.log, not into the flow;
+        # the nudge above is what the model reads, unchanged.
+        self.assertEqual(self.notes(api), [])
+        with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+            self.assertIn("[goal] goal mode, step 1: the same failure keeps "
+                          "coming back -- web_search dead (HTTP 401 from "
+                          "api.tavily.com, 3×). The nudge names the way around "
+                          "it.", fh.read())
 
     def test_a_class_spread_over_turns_counts_for_the_step(self):
         """Gezaehlt wird im Schritt, nicht im Zug: zwei, dann einer."""
@@ -10548,6 +11343,129 @@ class _Done:
 
     def __init__(self, rc=0):
         self.returncode, self.stdout, self.stderr = rc, b"", b""
+
+
+class TheGoalEngineBreaksARenderLoopTests(ApiCase):
+    """#268, 2026-09-23 22:30-22:48: seven captures of chain.html in a row at
+    99.2-99.4 % one colour, every turn calling tools, no failure -- neither
+    the brake nor the trouble classes saw it. Three stuck captures of one
+    page: the bisect nudge. Six: a forced rollover carrying what was tried."""
+
+    BLACK = ("warn: this capture looks blank \u2014 100.0%% of its pixels are "
+             "one colour; treat it as no-signal\n%s -- 4718 bytes, 1280x800, "
+             "done, software (swiftshader)\nread_image it to look at the page.")
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(crow_core.goal_write, None)
+        crow_core.goal_start("Voxel scene", ["build the scene", "verify it"],
+                             now=1000.0)
+        self.n = 0
+
+    def turn(self, api, text, renders, page="chain.html") -> None:
+        api._conversation.append("user", text)
+        for _ in range(renders):
+            self.n += 1
+            write, shot = "w%d" % self.n, "r%d" % self.n
+            api._conversation.append("assistant", "", tool_calls=[
+                {"id": write, "name": "edit_file",
+                 "arguments": json.dumps({"path": "src/pass%d.js" % self.n,
+                                          "old": "a", "new": "b"})}])
+            api._conversation.append("tool", "edited", tool_call_id=write)
+            api._conversation.append("assistant", "", tool_calls=[
+                {"id": shot, "name": "render_page",
+                 "arguments": json.dumps({"path": page})}])
+            api._conversation.append(
+                "tool", self.BLACK % ("/nowhere/render-%d.png" % self.n),
+                tool_call_id=shot)
+        api._conversation.append("assistant", "patched another pass")
+
+    def test_three_black_captures_ask_for_a_bisect_six_force_the_roll(self):
+        api = self.api()
+        logs = tempfile.mkdtemp(prefix="crow-log-")
+        self.addCleanup(shutil.rmtree, logs, True)
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        crow_core.LOG_FILE = os.path.join(logs, "crow.log")
+        self.turn(api, api._goal_nudge(), 3)
+        nudge = api._goal_nudge()
+        # #277: a blank capture is no picture, and its bisect is the
+        # one-pass-in-isolation probe.
+        self.assertIn("the last 3 captures of chain.html showed no picture",
+                      nudge)
+        self.assertIn("render ONE pass in isolation", nudge)
+        self.assertFalse(api._goal_roll_due)
+        self.turn(api, nudge, 3)
+        carry = api._goal_nudge()
+        self.assertTrue(api._goal_roll_due)
+        self.assertIn("6 captures of chain.html in a row", carry)
+        self.assertIn("render-6.png: looks blank after writing src/pass6.js",
+                      carry)
+        # #262: "goal mode, step N: ..." is Crow's own status line -- it goes
+        # to crow.log, not into the chat.
+        notes = [m["t"] for m in self.drained(api) if m.get("k") == "note"]
+        self.assertFalse(any("the context rolls over" in t for t in notes), notes)
+        with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+            self.assertIn("the context rolls over", fh.read())
+
+    def test_a_new_page_is_a_changed_approach(self):
+        """NEGATIVE: two black captures, then the probe page -- no nudge."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), 2)
+        self.turn(api, api._goal_nudge(), 1, page="probe.html")
+        self.assertNotIn("bisect", api._goal_nudge())
+
+    def test_done_clears_the_streak(self):
+        api = self.api()
+        self.turn(api, api._goal_nudge(), 2)
+        crow_core.tool_goal_step(1, "failed", "black")
+        api._conversation.append("assistant", "", tool_calls=[
+            {"id": "g", "name": "goal_step",
+             "arguments": json.dumps({"step": 1, "status": "done"})}])
+        api._conversation.append("tool", "{}", tool_call_id="g")
+        self.turn(api, "[Goal mode, step 1 still open. Continue.]", 1)
+        self.assertNotIn("bisect", api._goal_nudge() or "")
+
+    def test_a_trouble_nudge_does_not_hide_the_turns_captures(self):
+        """#277, 2026-09-24 s81-s133: #202's nudge returned before the render
+        scan, and three near-black captures of index.html were never
+        counted. #202 still speaks first; the captures count anyway."""
+        api = self.api()
+        trouble = [{"class": "refused", "tool": "edit_file", "n": 3}]
+        with mock.patch.object(crow_core, "goal_trouble_due",
+                               side_effect=[[], trouble, []]), \
+             mock.patch.object(crow_core, "goal_trouble_nudge",
+                               return_value="[Goal mode, trouble]"), \
+             mock.patch.object(crow_core, "goal_trouble_label",
+                               return_value="edit_file refused"):
+            self.turn(api, api._goal_nudge(), 3)
+            self.assertEqual(api._goal_nudge(), "[Goal mode, trouble]")
+            self.turn(api, "[Goal mode, trouble]", 0)
+            nudge = api._goal_nudge()
+        self.assertIn("the last 3 captures of chain.html showed no picture",
+                      nudge)
+
+    def test_a_turn_cut_by_a_mid_turn_rollover_is_still_counted(self):
+        """#277, 2026-09-24 10:50: the rollover cut the turn; the new payload
+        began with the rollover note, `goal_turn_start` found no start and
+        the turn's captures were skipped. The carried tail is scanned, and
+        a carried capture already counted is not counted twice."""
+        api = self.api()
+        self.turn(api, api._goal_nudge(), 2)
+        self.assertNotIn("showed no picture", api._goal_nudge() or "")
+        carried = self.BLACK % ("/nowhere/render-%d.png" % self.n)
+        api._conversation.reset()
+        api._conversation.append(
+            "user", "[The conversation up to this point reached 181705 "
+                    "tokens and was archived.]")
+        api._conversation.append("assistant", "", tool_calls=[
+            {"id": "k", "name": "render_page",
+             "arguments": json.dumps({"path": "chain.html"})}])
+        api._conversation.append(
+            "tool", "[carried across the cut]\n" + carried, tool_call_id="k")
+        self.turn(api, "[The tool budget for this turn is spent]", 1)
+        nudge = api._goal_nudge()
+        self.assertIn("the last 3 captures of chain.html showed no picture",
+                      nudge)
 
 
 class TheCopyButtonPutsTextBackTests(ApiCase):
@@ -11081,6 +11999,201 @@ class TheInWindowPaneDecidesTests(unittest.TestCase):
                            "WebKit wants kill above strict (0.5)")
 
 
+class _FakeView:
+    """#279: the few WebKitWebView calls the pane makes, recorded."""
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    def show(self):
+        self.calls.append("show")
+
+    def hide(self):
+        self.calls.append("hide")
+
+    def load_uri(self, uri):
+        self.calls.append(("load", uri))
+
+    def loads(self):
+        return [c[1] for c in self.calls if isinstance(c, tuple)]
+
+
+class _FakeOverlay:
+    def __init__(self) -> None:
+        self.calls = []
+        self.top = mock.Mock()
+
+    def queue_resize(self):
+        self.calls.append("resize")
+
+    def queue_draw(self):
+        self.calls.append("draw")
+
+    def get_toplevel(self):
+        return self.top
+
+
+class AFoldedPanelHoldsNoPageTests(unittest.TestCase):
+    """#279 B/C. 2026-09-24: the panel was folded from ~13:20, yet its
+    WebKitWebProcess was spawned at 13:26:20 right after a render and kept
+    crashing; after six crashes the window stopped repainting until robin
+    moved it. Idle work runs at once here, so the decisions and the widget
+    calls can be read without a display."""
+
+    def _pane(self):
+        said = []
+        pane = crow_gui.InWindowPane(said.append, idle_add=lambda fn, *a: fn(*a))
+        pane._view, pane._overlay = _FakeView(), _FakeOverlay()
+        pane.place(0, 0, 300, 200)
+        return pane, said
+
+    def test_hide_unloads_the_page_and_show_brings_it_back(self):
+        pane, _ = self._pane()
+        pane.go("https://a/")
+        pane.committed("https://a/")
+        pane.hide()
+        self.assertEqual(pane._view.loads(), ["https://a/", "about:blank"])
+        self.assertTrue(pane.parked)
+        self.assertFalse(pane.holds_page())
+        self.assertIsNone(pane.committed("about:blank"),
+                          "the park is not a navigation of the tab")
+        pane.show()
+        self.assertEqual(pane._view.loads()[-1], "https://a/")
+        self.assertTrue(pane.holds_page())
+
+    def test_a_cover_hides_but_does_not_unload(self):
+        pane, _ = self._pane()
+        pane.go("https://a/")
+        pane.committed("https://a/")
+        pane.cover(True)
+        self.assertEqual(pane._view.loads(), ["https://a/"])
+        self.assertFalse(pane.parked)
+
+    def test_a_load_overtaken_by_a_hide_is_not_made(self):
+        queued = []
+        pane = crow_gui.InWindowPane(lambda e: None,
+                                     idle_add=lambda fn, *a: queued.append((fn, a)))
+        pane._view = _FakeView()
+        pane.go("https://a/")
+        pane.hide()
+        for fn, a in queued:
+            fn(*a)
+        self.assertEqual(pane._view.loads(), [])
+
+    def test_a_hidden_pane_opens_no_new_window(self):
+        pane, _ = self._pane()
+        action = mock.Mock()
+        action.get_request.return_value.get_uri.return_value = "https://b/"
+        pane.hide()
+        pane._new_window(None, action)
+        self.assertEqual(pane._view.loads(), [])
+        pane.go("https://a/")
+        pane._new_window(None, action)
+        self.assertEqual(pane._view.loads(), ["https://a/", "https://b/"])
+
+    def test_a_crash_redraws_and_reloads_once_at_most(self):
+        pane, said = self._pane()
+        pane.go("https://a/")
+        pane.committed("https://a/")
+        crash = mock.Mock(value_nick="crashed")
+        pane._terminated(None, crash)
+        self.assertIn("draw", pane._overlay.calls)
+        pane._overlay.top.queue_draw.assert_called()
+        self.assertEqual(pane._view.loads(), ["https://a/", "https://a/"],
+                         "one reload of the page someone was looking at")
+        pane.committed("https://a/")
+        pane._terminated(None, crash)
+        self.assertEqual(pane._view.loads(), ["https://a/", "https://a/"],
+                         "#204: never a second reload")
+        self.assertFalse(pane.wanted)
+        self.assertEqual(pane._view.calls[-1], "hide", "the dead view stays out")
+        self.assertEqual([m["t"] for m in said],
+                         ["the page in the browser panel stopped (crashed)"] * 2)
+
+    def test_a_crash_of_a_hidden_pane_loads_nothing(self):
+        pane, _ = self._pane()
+        pane.go("https://a/")
+        pane.committed("https://a/")
+        pane.hide()
+        pane._terminated(None, mock.Mock(value_nick="crashed"))
+        self.assertEqual(pane._view.loads(), ["https://a/", "about:blank"])
+
+    def test_the_memory_ceiling_is_not_reloaded(self):
+        pane, _ = self._pane()
+        pane.go("https://a/")
+        pane.committed("https://a/")
+        pane._terminated(None, mock.Mock(value_nick="exceeded-memory-limit"))
+        self.assertEqual(pane._view.loads(), ["https://a/"])
+        self.assertFalse(pane.wanted)
+
+
+class ThePanelCountsOnTheCardTests(ApiCase):
+    """#279 A and D in the window: the core learns whether the panel is a GPU
+    client, and the panel's view is throttled around local turns only."""
+
+    def test_the_turn_door_tells_the_core_about_the_panel(self):
+        self.addCleanup(crow_core.render_panel_set, False)
+        before = crow_gui.SETTINGS_FILE
+        self.addCleanup(setattr, crow_gui, "SETTINGS_FILE", before)
+        crow_gui.SETTINGS_FILE = os.path.join(self.dir, "settings.json")
+        api = self.api()
+        for open_, want in ((True, True), (False, False)):
+            with open(crow_gui.SETTINGS_FILE, "w", encoding="utf-8") as fh:
+                json.dump({"browser_open": open_}, fh)
+            api._token_budget()
+            self.assertIs(crow_core.RENDER_PANEL_OPEN, want, open_)
+
+    def test_a_folded_panel_still_holding_a_page_counts(self):
+        api = self.api()
+        pane = crow_gui.InWindowPane(lambda e: None, idle_add=lambda fn, *a: None)
+        api._inwin = pane
+        self.assertFalse(api._panel_on_card({"browser_open": False}))
+        pane._view, pane.last = object(), "https://a/"
+        self.assertTrue(api._panel_on_card({"browser_open": False}))
+        pane.parked = True
+        self.assertFalse(api._panel_on_card({"browser_open": False}))
+
+    def test_the_throttle_is_on_for_local_turns_only(self):
+        api = self.api()
+        pane = crow_gui.InWindowPane(lambda e: None, idle_add=lambda fn, *a: None)
+        api._inwin = pane
+        api._endpoint = lambda: {"remote": False}
+        api._pane_throttle(True)
+        self.assertTrue(pane.throttled)
+        api._pane_throttle(False)
+        self.assertFalse(pane.throttled)
+        api._endpoint = lambda: {"remote": True}
+        api._pane_throttle(True)
+        self.assertFalse(pane.throttled)
+
+    def test_the_pump_throttles_and_releases(self):
+        api = self.api()
+        pane = crow_gui.InWindowPane(lambda e: None, idle_add=lambda fn, *a: None)
+        api._inwin = pane
+        api._endpoint = lambda: {"remote": False}
+        seen = []
+        api._run = lambda text: seen.append(pane.throttled)
+        api._goal_nudge = lambda: None
+        api._busy = True
+        api._pump("x")
+        self.assertEqual(seen, [True])
+        self.assertFalse(pane.throttled)
+
+        def boom(text):
+            raise RuntimeError("x")
+        api._run = boom
+        with self.assertRaises(RuntimeError):
+            api._pump("x")
+        self.assertFalse(pane.throttled)
+
+    def test_the_throttle_names_the_webkit_setting(self):
+        src = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        body = src[src.index("    def _policy(self)"):]
+        body = body[:body.index("    def _park(self)")]
+        self.assertIn("set_hardware_acceleration_policy(", body)
+        self.assertIn("p.NEVER if self.throttled else p.ALWAYS", body)
+
+
 class ThePageFollowsThePaneTests(unittest.TestCase):
     """#201 #227, auf der Seite: die Meldungen haben Empfaenger, ein Render
     macht keinen neuen Reiter je Aufruf, und GitHub bleibt draussen."""
@@ -11092,6 +12205,18 @@ class ThePageFollowsThePaneTests(unittest.TestCase):
     def test_the_messages_have_a_case(self):
         self.assertIn('case "brnav": this.brNav(e.url, e.how)', self.src)
         self.assertIn('case "bropen": this.brOpen(e.url)', self.src)
+
+    def test_a_folded_panel_is_not_loaded_or_unfolded_by_a_render(self):
+        """#279 B: the one door (`brSend`) is shut while folded, and a render
+        fills its tab without unfolding the panel robin folded."""
+        send = self.src[self.src.index("  brSend(url){"):]
+        send = send[:send.index("pywebview.api.pane_go(url)")]
+        self.assertIn('if(document.body.dataset.browser==="shut") return;', send)
+        body = self.src[self.src.index("  brRendered(url, shot){"):]
+        body = body[:body.index("  brSelect(id)")]
+        self.assertNotIn("this.brUnfold()", body)
+        self.assertIn("if(folded) return;", body)
+        self.assertIn("this.brSend(this.brShown(t))", self.src)
 
     def test_renders_reuse_one_tab(self):
         body = self.src[self.src.index("  brRendered(url, shot){"):]
@@ -11997,6 +13122,2121 @@ const flow=mk("div");
     def test_a_cost_line_with_no_round_does_not_throw(self):
         out = self._run('o.cost("[1 s]", 50); console.log(flow.children.length);')
         self.assertEqual(out, "1")
+
+
+class ALineTypedMidTurnIsQueuedTests(ApiCase):
+    """#264. robin, live 2026-09-23 ~23:00: in goal mode a line typed while the
+    model works could not be sent -- `go()` turned every Enter mid-turn into
+    `stop()` (since 4860300), so #165's "a typed line always has priority" was
+    unreachable from the live chat. The page half is RUN in node; the Python
+    half drives `send()` and `_pump()` with `_run` as the double."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.node = _node()
+        cls.source = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+
+    # ---- the page, in node
+
+    def _page(self, script):
+        """go(), hold(), release(), press() out of the page, over stubs that log
+        what the page does. `script` drives them; the log comes back."""
+        import subprocess
+        if not self.node:
+            self.skipTest("no node on this machine")
+        start = self.source.index("  go(){ const text=input.value.trim();")
+        end = self.source.index("  // #88: THE RELEASE LEVEL")
+        js = (
+            "const log=[];\n"
+            "const input={value:'',style:{}};\n"
+            "const hint={textContent:''}; const $=s=>hint;\n"
+            "const go={textContent:'',title:'',classList:{toggle(){}}};\n"
+            "const settle=[];\n"
+            "const pywebview={api:{stop(){log.push(['stop']);},\n"
+            "  send(t){log.push(['send',t]);return {then(ok){settle.push(ok);}};}}};\n"
+            "const crow={running:false,viewingOther:false,held:null,\n"
+            "  slash:" + json.dumps(list(crow_core.SLASH_COMMANDS)) + ",\n"
+            "  user(t){log.push(['user',t]);}, userImages(i){},\n"
+            "  stagedUrls(){return [];}, stageRender(){}, installBar(){},\n"
+            "  fanout(t){log.push(['fanout',t]);}, busy(){log.push(['busy']);},\n"
+            "  idle(){this.running=false;this.release();log.push(['idle']);},\n"
+            "  queuedLine(){log.push(['queued']);},\n"
+            + self.source[start:end] + "};\n"
+            "function type(t){input.value=t; crow.go();}\n"
+            + script + "\nsettle.forEach(f=>f(true));\n"
+            "console.log(JSON.stringify({log, held:crow.held, box:input.value,\n"
+            "  hint:hint.textContent, button:go.textContent}));\n")
+        done = subprocess.run([self.node, "-e", js], capture_output=True,
+                              text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    def test_enter_mid_turn_queues_the_line_and_does_not_stop(self):
+        """POSITIVE, the defect itself: the line reaches send(), the turn is
+        not stopped, and nothing is drawn into the answer still streaming."""
+        out = self._page("crow.running=true; type('steer: use three.js');")
+        self.assertIn(["send", "steer: use three.js"], out["log"])
+        self.assertNotIn(["stop"], out["log"])
+        self.assertNotIn("user", [x[0] for x in out["log"]])
+        self.assertEqual(out["held"]["t"], "steer: use three.js")
+        self.assertEqual(out["box"], "")
+        self.assertIn(["queued"], out["log"])
+
+    def test_the_held_line_is_drawn_when_the_turn_ends(self):
+        out = self._page("crow.running=true; type('a'); type('b'); crow.idle();")
+        users = [x for x in out["log"] if x[0] == "user"]
+        self.assertEqual(users, [["user", "a\n\nb"]],
+                         "two held lines are one message, so one bubble")
+        self.assertIsNone(out["held"])
+        self.assertLess(out["log"].index(["user", "a\n\nb"]), out["log"].index(["idle"]))
+
+    def test_the_stop_gesture_is_kept_where_it_was(self):
+        """NEGATIVE: an empty Enter and a click on Stop with an empty box still
+        stop; Escape stops whatever is in the box."""
+        for script in ("crow.running=true; type('');",
+                       "crow.running=true; input.value=''; crow.press();",
+                       "crow.running=true; input.value='/reset'; crow.press();"):
+            out = self._page(script)
+            self.assertIn(["stop"], out["log"], script)
+            self.assertNotIn("send", [x[0] for x in out["log"]], script)
+        self.assertIn('onclick="crow.press()"', self.source)
+        self.assertIn('if(e.key==="Escape" && crow.running) pywebview.api.stop();',
+                      self.source)
+
+    def test_no_typed_line_is_a_stop(self):
+        """#264, reopened. robin, live 2026-09-24 on 2d29fa2: a line + Enter /
+        click during a goal turn stopped the turn and the line stayed in the
+        box. The page's two stop paths with a line in the box were a line that
+        opens with "/" (a path) and the button. Neither stops now: a path is
+        queued, a line + click is queued, a Crow command waits in the box."""
+        out = self._page("crow.running=true; type('/srv/app/x.js is wrong');")
+        self.assertNotIn(["stop"], out["log"])
+        self.assertIn(["send", "/srv/app/x.js is wrong"], out["log"])
+        self.assertEqual(out["box"], "")
+        out = self._page("crow.running=true; input.value='steer'; crow.press();")
+        self.assertNotIn(["stop"], out["log"])
+        self.assertIn(["send", "steer"], out["log"])
+        self.assertEqual(out["box"], "")
+        out = self._page("crow.running=true; type('/model qwen');")
+        self.assertNotIn(["stop"], out["log"])
+        self.assertNotIn("send", [x[0] for x in out["log"]])
+        self.assertEqual(out["box"], "/model qwen")
+        self.assertIn("waits in the box until this turn ends", out["hint"])
+
+    def test_the_button_says_queue_while_the_box_holds_a_line(self):
+        """#264: the button says what a click does."""
+        out = self._page("crow.running=true; input.value='steer'; crow.face();")
+        self.assertEqual(out["button"], "↑ Queue")
+        out = self._page("crow.running=true; input.value=''; crow.face();")
+        self.assertEqual(out["button"], "■ Stop")
+        out = self._page("crow.running=true; input.value='/reset'; crow.face();")
+        self.assertEqual(out["button"], "■ Stop")
+        self.assertIn('crow.face(); });', self.source,
+                      "typing re-labels the button")
+        self.assertIn('"slash": list(crow_core.SLASH_COMMANDS)', self.source)
+
+    def test_an_enter_that_ends_a_composition_is_not_a_submit(self):
+        self.assertIn('!e.isComposing && e.keyCode!==229', self.source)
+
+    def test_an_idle_composer_and_another_chats_view_are_unchanged(self):
+        """NEGATIVE: outside a turn the line is drawn and sent at once; in
+        another chat's view it is drawn at once and queued there (#162)."""
+        for script in ("type('hello');",
+                       "crow.running=true; crow.viewingOther=true; type('hello');"):
+            out = self._page(script)
+            self.assertEqual(out["log"][0], ["user", "hello"], script)
+            self.assertIn(["send", "hello"], out["log"], script)
+            self.assertIsNone(out["held"], script)
+        out = self._page("crow.running=true; type('/delegate look it up');")
+        self.assertEqual(out["log"], [["fanout", "/delegate look it up"]])
+
+    def test_the_page_releases_on_idle_and_forgets_on_a_view_switch(self):
+        idle = self.source[self.source.index("  idle(){ this.running=false;"):]
+        self.assertIn("this.release();", idle[:idle.index("\n  busy(){")])
+        view = self.source[self.source.index("  viewBar(e){"):]
+        self.assertIn("this.held=null;", view[:view.index("back.onclick")])
+        self.assertIn("queued -- it goes in when this turn ends", self.source)
+
+    # ---- the window, in python
+
+    def _api(self):
+        api = self.api()
+        api._seen = []
+        api.push = lambda message: api._seen.append(message)
+        return api
+
+    def test_a_second_queued_line_joins_the_first(self):
+        """The page drew both; replacing the first lost it silently."""
+        api = self._api()
+        api._busy = True
+        api.send("eins")
+        api.send("zwei")
+        self.assertEqual(api._queued, "eins\n\nzwei")
+
+    def test_a_line_for_another_chat_still_replaces(self):
+        """NEGATIVE: a line meant for another chat is a new decision about
+        where the next turn runs, not an addendum (#162 unchanged)."""
+        api = self._api()
+        api._busy = True
+        api._queued, api._queued_to = "alt", "/somewhere/else"
+        api.send("neu")
+        self.assertEqual(api._queued, "neu")
+
+    def test_the_queued_line_wins_over_the_goal_nudge(self):
+        """#165, now reachable: a line typed during goal turn N runs as turn
+        N+1 instead of Crow's nudge, resets the engine, and the goal goes on
+        after it."""
+        api = self._api()
+        ran, nudges, resets = [], ["[Goal mode, step 2]"], []
+        api._goal_nudge = lambda: nudges.pop(0) if nudges else None
+        real_reset = api._goal_reset
+        api._goal_reset = lambda: (resets.append(len(ran)), real_reset())
+
+        def run(text):
+            ran.append(text)
+            if text == "[Goal mode, step 1]":
+                api.send("steer: stop polishing, ship it")
+
+        api._run = run
+        api._busy = True
+        api._goal_turns = 40
+        api._pump("[Goal mode, step 1]")
+        self.assertEqual(ran, ["[Goal mode, step 1]",
+                               "steer: stop polishing, ship it",
+                               "[Goal mode, step 2]"])
+        self.assertEqual(resets, [1], "the queued line resets the engine once")
+        self.assertEqual(api._goal_turns, 0)
+        self.assertFalse(api._busy)
+
+    def test_no_queued_line_no_reset(self):
+        """NEGATIVE: the engine's own turns do not reset its caps -- that is
+        what the 60-turn cap is for."""
+        api = self._api()
+        ran, nudges, resets = [], ["n2"], []
+        api._goal_nudge = lambda: nudges.pop(0) if nudges else None
+        api._goal_reset = lambda: resets.append(1)
+        api._run = ran.append
+        api._busy = True
+        api._pump("n1")
+        self.assertEqual(ran, ["n1", "n2"])
+        self.assertEqual(resets, [])
+
+
+
+class StopPausesTheGoalEngineTests(ApiCase):
+    """#282. robin, live 2026-09-24 on 2d29fa2: Stop during a goal
+    turn ended the turn and the engine started the next one at once, so there
+    was never a moment to type. `_goal_nudge` asked INTERRUPT, but `run_turn`
+    consumes that flag when it ends the stopped turn (`if owns_turn_state:
+    INTERRUPT.clear()`), so the question was always answered "no stop". The
+    `_run` double below does what `run_turn` does on a Stop: the click, then
+    the flag cleared on the way out."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.addCleanup(crow_core.goal_write, None)
+        self.addCleanup(crow_core.INTERRUPT.clear)
+        crow_core.goal_start("Ship it", ["read the log", "write the fix"],
+                             now=1000.0)
+
+    def _api(self):
+        api = self.api()
+        api._seen = []
+        api.push = lambda message: api._seen.append(message)
+        return api
+
+    def test_stop_during_a_goal_turn_pauses_the_engine(self):
+        api = self._api()
+        ran = []
+
+        def run(text):
+            ran.append(text)
+            api.stop()                       # robin clicks Stop mid-turn
+            crow_core.INTERRUPT.clear()      # run_turn consumes the flag
+        api._run = run
+        api._busy = True
+        api._pump("[Goal mode, step 1]")
+        self.assertEqual(ran, ["[Goal mode, step 1]"],
+                         "the engine started another turn after Stop")
+        self.assertFalse(api._busy)
+        notes = [m["t"] for m in api._seen if m.get("k") == "note"]
+        self.assertTrue(any(n.startswith("goal mode paused: you pressed Stop")
+                            for n in notes), notes)
+        self.assertFalse(crow_core.note_is_log_only(notes[-1]),
+                         "the pause is said in the chat, not only in crow.log")
+
+    def test_the_next_typed_line_resumes_the_engine(self):
+        """POSITIVE: after the pause, a sent line runs and the goal goes on."""
+        api = self._api()
+        api._goal_paused = True
+        ran = []
+        api._run = lambda text: ran.append(text)
+        started = []
+        api._pump = lambda text: started.append(text)
+        self.assertTrue(api.send("carry on, use three.js"))
+        self.assertEqual(started, ["carry on, use three.js"])
+        self.assertFalse(api._goal_paused)
+        self.assertIsNotNone(api._goal_nudge())
+
+    def test_a_line_queued_before_stop_runs_and_then_the_goal_goes_on(self):
+        """The queued line is a typed line: it runs next and lifts the pause."""
+        api = self._api()
+        ran = []
+
+        def run(text):
+            ran.append(text)
+            if len(ran) == 1:
+                api.send("steer")
+                api.stop()
+                crow_core.INTERRUPT.clear()
+        api._run = run
+        api._busy = True
+        api._pump("[Goal mode, step 1]")
+        self.assertEqual(ran[:2], ["[Goal mode, step 1]", "steer"])
+        self.assertGreater(len(ran), 2, "the goal resumes after the typed line")
+        self.assertTrue(ran[2].startswith("[Goal mode"), ran[2])
+
+    def test_no_stop_no_pause(self):
+        """NEGATIVE: without a Stop the engine chains as before."""
+        api = self._api()
+        ran = []
+        api._run = lambda text: ran.append(text)
+        api._busy = True
+        api._goal_nudge = (lambda real: (lambda: real() if len(ran) < 3 else None))(
+            api._goal_nudge)
+        api._pump("[Goal mode, step 1]")
+        self.assertEqual(len(ran), 3)
+        self.assertFalse(any(m.get("t", "").startswith("goal mode paused")
+                             for m in api._seen))
+
+
+# ======================================================================= #249
+#
+# THE PHONE MIRROR, Api side. No socket anywhere: `_FakeRemote` holds
+# `crow_remote.Remote`'s contract (publish with `to`, device ids, pairing) and
+# records what each device would have received, the desktop's page is `_out`.
+
+PHONE = "d-phone0000001"
+
+
+class _FakeRemote:
+    """`crow_remote.Remote` as the Api sees it, recording every publish."""
+
+    def __init__(self, **kw):
+        self.kw = kw
+        self.host = kw.get("host", "192.168.1.5")
+        self.port = kw.get("port", 8765)
+        self.url = "http://%s:%d/" % (self.host, self.port)
+        self.tailnet = kw.get("tailnet", "")
+        self.tailnet_url = ("https://%s/" % self.tailnet) if self.tailnet else ""
+        self.published: list = []
+        self.ids = [PHONE]
+        self.online = {PHONE: True}
+        self.names = {PHONE: "iPhone (Safari)"}
+        self.forgot: list = []
+        self._running = False
+
+    def start(self):
+        self._running = True
+
+    def stop(self):
+        self._running = False
+
+    def running(self):
+        return self._running
+
+    def new_pairing(self):
+        return self.url + "#t=pairing-token"
+
+    def publish(self, message, to=None):
+        self.published.append((dict(message), None if to is None else list(to)))
+
+    def device_ids(self):
+        return list(self.ids)
+
+    def devices(self):
+        return [{"id": i, "name": self.names.get(i, i),
+                 "online": self.online.get(i, False)} for i in self.ids]
+
+    def forget(self, name):
+        for i in list(self.ids):
+            if i == name or self.names.get(i, "").lower().startswith(
+                    name.lower()):
+                self.ids.remove(i)
+                self.forgot.append(i)
+                return True
+        return False
+
+    def got(self, device=PHONE) -> list:
+        """What `device` received, in order."""
+        return [m for m, to in self.published if to is None or device in to]
+
+
+class RemoteCase(ApiCase):
+    """An Api with one paired phone attached (no server started)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._before_remote = (crow_gui.SETTINGS_FILE, crow_gui.REMOTE_FACTORY,
+                               crow_gui.lan_addresses, crow_gui.TAILSCALE_PROBE)
+        self.addCleanup(self._undo_remote)
+        crow_gui.SETTINGS_FILE = os.path.join(self.dir, "settings.json")
+
+    def _undo_remote(self) -> None:
+        (crow_gui.SETTINGS_FILE, crow_gui.REMOTE_FACTORY,
+         crow_gui.lan_addresses, crow_gui.TAILSCALE_PROBE) = self._before_remote
+
+    def mirrored(self, *argv):
+        api = self.api(*argv)
+        api._remote = _FakeRemote()
+        api._remote.start()
+        self.drained(api)
+        return api
+
+    def as_phone(self, fn, *args):
+        with crow_gui.as_client(PHONE):
+            return fn(*args)
+
+    def saved_chat(self, api, first="the chat on disk"):
+        """A chat written to disk, and a different one live. Its path."""
+        self.a_chat(api, first)
+        ok, saved = api._leave()
+        self.assertTrue(ok)
+        api._conversation.reset()
+        api._current_path = None
+        self.a_chat(api, "the chat that is running")
+        self.drained(api)
+        api._remote.published.clear()
+        return saved
+
+    def worker(self, api):
+        """A running turn, seen from the bridge thread (see #162's `busy`)."""
+        gate = threading.Event()
+        thread = threading.Thread(target=gate.wait, daemon=True)
+        thread.start()
+        self.addCleanup(gate.set)
+        api._worker = thread
+        api._busy = True
+        return gate
+
+
+class RemoteApiParityTests(RemoteCase):
+    """#249 decision 5 as a table: every page method is proxied 1:1 or bound
+    to the desktop with a stated replacement -- and a call from one client
+    produces the push the other one needs."""
+
+    PAGE_METHODS = 94          # 88 at fb31ca2 + the six pairing controls (#249 stage 5)
+
+    def page_methods(self) -> set:
+        page = crow_gui.PAGE
+        return set(re.findall(r"pywebview\.api\.([A-Za-z_]+)", page))
+
+    def test_every_page_method_is_classified_exactly_once(self):
+        called = self.page_methods()
+        bound = set(crow_gui.REMOTE_DESKTOP_BOUND)
+        self.assertEqual(len(called), self.PAGE_METHODS,
+                         "a page method was added or removed -- classify it "
+                         "in REMOTE_PROXIED or REMOTE_DESKTOP_BOUND")
+        self.assertFalse(crow_gui.REMOTE_PROXIED & bound, "classified twice")
+        self.assertEqual(called, crow_gui.REMOTE_PROXIED | bound,
+                         "unclassified: %s / not on the page: %s" % (
+                             sorted(called - crow_gui.REMOTE_PROXIED - bound),
+                             sorted((crow_gui.REMOTE_PROXIED | bound) - called)))
+        for name in called:
+            self.assertTrue(callable(getattr(crow_gui.Api, name, None)), name)
+
+    def test_every_bound_method_says_what_the_phone_does(self):
+        for name, how in crow_gui.REMOTE_DESKTOP_BOUND.items():
+            self.assertIn(how, crow_gui.REMOTE_PHONE_DOES, name)
+
+    def test_the_allowlist_is_the_proxied_set_plus_what_still_runs_here(self):
+        allowed = crow_gui.REMOTE_ALLOWED
+        self.assertTrue(crow_gui.REMOTE_PROXIED <= allowed)
+        self.assertEqual(allowed - crow_gui.REMOTE_PROXIED,
+                         {"stage_image", "reveal_path", "roll_show",
+                          "provider_authorise"})
+        # NEGATIVE: the window, the layout and the pairing controls never.
+        for name in ("maximise", "close", "set_theme", "rail_width",
+                     "pane_go", "remote_allow", "remote_open", "copy"):
+            self.assertNotIn(name, allowed)
+
+    def test_a_public_method_the_page_never_calls_is_refused(self):
+        api = self.mirrored()
+        for name in ("pump", "on_drop", "state_snapshot", "remote_page"):
+            self.assertNotIn(name, crow_gui.REMOTE_ALLOWED)
+            with self.assertRaises(KeyError):
+                self.as_phone(api._remote_call, name, [])
+
+    def test_a_phone_cannot_answer_a_pairing(self):
+        """Desktop-only in the table AND in the method: a paired phone must
+        not let in the next one."""
+        api = self.mirrored()
+        api._remote_asks[1] = [threading.Event(), False]
+        self.assertFalse(self.as_phone(api.remote_allow, 1, True))
+        self.assertFalse(api._remote_asks[1][0].is_set())
+        self.assertTrue(api.remote_allow(1, True))
+
+    def _png(self) -> str:
+        path = os.path.join(self.dir, "shot.png")
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + b"\0" * 32)
+        return path
+
+    def test_a_call_from_one_client_reaches_the_other(self):
+        """Table-driven: each state-changing proxied method, called from the
+        phone, puts its push on the DESKTOP's queue -- and from the desktop,
+        on the phone's stream."""
+        cases = [
+            ("set_mode", lambda api: ["manual"], "mode"),
+            ("set_tools", lambda api: [True], "tools"),
+            ("stage_image", lambda api: [self._png()], "chips"),
+            ("unstage_image", lambda api: [0], "chips"),
+            ("answer_memory", lambda api: [False], "pend"),
+            ("send", lambda api: ["/context"], "user"),
+            ("close_goal", lambda api: [], "goal"),
+        ]
+        for caller, other in ((PHONE, crow_gui.DESKTOP),
+                              (crow_gui.DESKTOP, PHONE)):
+            for name, args, kind in cases:
+                with self.subTest(name=name, caller=caller):
+                    api = self.mirrored()
+                    if name == "unstage_image":
+                        api.stage_image(self._png())
+                        self.drained(api)
+                        api._remote.published.clear()
+                    with crow_gui.as_client(caller):
+                        api._remote_call(name, args(api)) \
+                            if caller == PHONE else getattr(api, name)(*args(api))
+                    got = (self.drained(api) if other == crow_gui.DESKTOP
+                           else api._remote.got(PHONE))
+                    self.assertIn(kind, [m.get("k") for m in got],
+                                  "%s from %s never reached %s" % (name, caller, other))
+
+    def test_the_phone_bridge_proxies_and_keeps_the_desktop_bound_local(self):
+        """The page half, run in node: the Proxy POSTs a proxied call with
+        its JSON arguments, answers a layout call itself (no request -- the
+        desktop's settings are never written from a phone), and runs a
+        desktop-bound call on the desktop with a note."""
+        node = _node()
+        if not node:
+            self.skipTest("no node on this machine")
+        import subprocess
+        page = crow_gui.stamped_page(remote=True)
+        start = page.index("window.CROW_REMOTE = true;")
+        boot = page[start:page.index("</script>", start)]
+        js = ("const posts=[], notes=[];\n"
+              "const window={open(){}, close(){}, addEventListener(){},\n"
+              "  dispatchEvent(){}, prompt(){return null;}};\n"
+              "window.crow={note(t){notes.push(t);}, on(){}};\n"
+              "const document={hidden:true, addEventListener(){},\n"
+              "  getElementById(){return null;}, documentElement:{classList:{add(){}}}};\n"
+              "const location={hash:'', pathname:'/', search:''};\n"
+              "const history={replaceState(){}};\n"
+              "function fetch(path, init){ posts.push([path, init.body]);\n"
+              "  return Promise.resolve({ok:true, status:200, json(){return Promise.resolve('');}}); }\n"
+              "const crow=window.crow;\n"
+              + boot +
+              "\nconst api=window.pywebview.api;\n"
+              "Promise.all([api.set_theme('light'), api.rail_width(300),\n"
+              "  api.maximise(), api.send('hi'), api.reveal_path('/x')])\n"
+              ".then(r=>console.log(JSON.stringify({posts, notes, r})));\n")
+        done = subprocess.run([node, "-e", js], capture_output=True, text=True,
+                              encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(out["posts"], [["/api/send", '["hi"]'],
+                                        ["/api/reveal_path", '["/x"]']])
+        self.assertEqual(out["notes"], [crow_core.REMOTE_PHONE_TEXT["ondesk"]])
+
+    def _pairing_run(self, waits, pair=202, me=401):
+        """The phone's pairing, run in node: /pair answers `pair`, /pair/wait
+        answers from `waits` in order ("net" is a rejected fetch), /me with
+        `me`. What the pairing line showed, and whether the page went on to
+        the chat."""
+        import subprocess
+        page = crow_gui.stamped_page(remote=True)
+        start = page.index("window.CROW_REMOTE = true;")
+        boot = page[start:page.index("</script>", start)]
+        js = ("const shown=[], posts=[]; let ready=0;\n"
+              "const WAITS=" + json.dumps(waits) + ";\n"
+              "const setTimeout=f=>setImmediate(f);\n"
+              "const bar={set hidden(v){}, set textContent(v){ if(v) shown.push(v); }};\n"
+              "const window={open(){}, close(){}, addEventListener(){},\n"
+              "  dispatchEvent(){ ready++; }, prompt(){return null;}};\n"
+              "window.crow={note(){}, on(){}};\n"
+              "function EventSource(){ this.close=()=>0; }\n"
+              "const document={hidden:false, addEventListener(){},\n"
+              "  getElementById(id){return id==='remotepair' ? bar : null;},\n"
+              "  documentElement:{classList:{add(){}}}};\n"
+              "const location={hash:'#t=abc', pathname:'/', search:''};\n"
+              "const history={replaceState(){}};\n"
+              "const res=(status, body)=>({ok:status>=200&&status<300, status,\n"
+              "  json(){return Promise.resolve(body);}});\n"
+              "function fetch(path, init){ posts.push([path, init.body]);\n"
+              "  if(path==='/pair') return Promise.resolve(res(" + str(pair) + ", {p:'P1'}));\n"
+              "  if(path==='/me') return Promise.resolve(res(" + str(me) + ", {}));\n"
+              "  const w=WAITS.shift();\n"
+              "  if(w===undefined || w==='net') return Promise.reject(new TypeError('Load failed'));\n"
+              "  return Promise.resolve(res(w, {})); }\n"
+              "const crow=window.crow;\n"
+              + boot +
+              "\nwindow.crowRemoteStart();\n"
+              "let spins=0;\n"
+              "setTimeout(function end(){ if(WAITS.length && ++spins<500) return setTimeout(end);\n"
+              "  setImmediate(()=>setImmediate(()=>\n"
+              "  console.log(JSON.stringify({shown, posts, ready})))); });\n")
+        done = subprocess.run([_node(), "-e", js], capture_output=True, text=True,
+                              encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    def test_the_phone_polls_the_pairing_and_rides_out_network_blips(self):
+        """#249, iPhone 2026-09-24: WebKit gave a held-open /pair up as a
+        network error after ~6 s. Now /pair answers 202 and the page polls
+        /pair/wait; a failed fetch or two is retried, not "unreachable"."""
+        if not _node():
+            self.skipTest("no node on this machine")
+        text = crow_core.REMOTE_PHONE_TEXT
+        out = self._pairing_run([202, "net", "net", 202, 200])
+        self.assertEqual(out["ready"], 1, out)
+        self.assertNotIn(text["unreachable"], out["shown"])
+        self.assertEqual(out["posts"][0], ["/pair", '{"t":"abc"}'])
+        self.assertEqual({p for p, _ in out["posts"][1:]}, {"/pair/wait"})
+        self.assertIn('{"p":"P1"}', [b for _, b in out["posts"][1:]])
+        # Five network failures in a row: now it is unreachable.
+        out = self._pairing_run(["net"] * 5)
+        self.assertEqual(out["ready"], 0)
+        self.assertEqual(out["shown"][-1], text["unreachable"])
+        # Deny and timeout keep their own lines.
+        self.assertEqual(self._pairing_run([202, 403])["shown"][-1], text["denied"])
+        self.assertEqual(self._pairing_run([410])["shown"][-1], text["expired"])
+
+    def test_a_paired_phone_on_a_stale_code_opens_the_chat(self):
+        """#249, iPhone 2026-09-24: the first QR URL came back from Chrome's
+        autocomplete, its #t= long spent. Any refusal asks /me first; a valid
+        cookie goes to the chat, never to "this code is no longer valid"."""
+        if not _node():
+            self.skipTest("no node on this machine")
+        text = crow_core.REMOTE_PHONE_TEXT
+        for pair, waits in ((401, []), (202, [410])):
+            out = self._pairing_run(waits, pair=pair, me=200)
+            self.assertEqual(out["ready"], 1, out)
+            self.assertNotIn(text["expired"], out["shown"])
+            self.assertIn("/me", [p for p, _ in out["posts"]])
+        # NEGATIVE: no valid cookie, and the stale code still says so.
+        out = self._pairing_run([], pair=401, me=401)
+        self.assertEqual(out["ready"], 0)
+        self.assertEqual(out["shown"][-1], text["expired"])
+        # The server's own 200 for a paired phone goes straight on.
+        self.assertEqual(self._pairing_run([], pair=200)["ready"], 1)
+
+    def test_the_phone_page_is_this_page_with_the_flag(self):
+        phone = crow_gui.stamped_page(remote=True)
+        desk = crow_gui.stamped_page()
+        self.assertIn("window.CROW_REMOTE = true;", phone)
+        self.assertIn('name="viewport"', phone)
+        self.assertIn("#wbtns,.grip,#remotetoggle{display:none", phone)
+        self.assertIn('"set_theme": "layout"', phone)
+        # NEGATIVE: the desktop's page has none of it, and no hook is left.
+        self.assertIn("window.CROW_REMOTE = false;", desk)
+        self.assertNotIn('name="viewport"', desk)
+        self.assertNotIn("#wbtns,.grip,#remotetoggle", desk)
+        for page in (phone, desk):
+            self.assertNotIn("__REMOTE", page)
+        self.assertEqual(self.mirrored().remote_page(), phone)
+
+
+class RemotePhoneLayerTests(unittest.TestCase):
+    """#249 step 0 -> code: robin's approved phone mockups (one-row composer,
+    drawers, goal bar, pinned approvals) live ONLY in the phone's variant of
+    the page. The desktop's page must not carry a byte of it."""
+
+    MARKERS = ("#mplus", "#mtools", "#mscrim", "#heldbar", "mobileTools",
+               "shortModel", "@media (max-width:700px)")
+
+    def test_the_phone_page_carries_the_layer(self):
+        phone = crow_gui.stamped_page(remote=True)
+        for marker in self.MARKERS:
+            self.assertIn(marker, phone, marker)
+        # The layer runs before the pairing starts, so its hooks are in place
+        # when the snapshot and the first pushes arrive.
+        self.assertLess(phone.index("function shortModel"),
+                        phone.index("if(window.CROW_REMOTE) window.crowRemoteStart();"))
+
+    def test_the_desktop_page_carries_none_of_it(self):
+        desk = crow_gui.stamped_page()
+        for marker in self.MARKERS:
+            self.assertNotIn(marker, desk, marker)
+        self.assertNotIn("__REMOTE_JS__", desk)
+
+    def test_a_hidden_goal_stays_hidden_on_the_phone(self):
+        """Found against the real server: `{"k":"goal","goal":null}` hides the
+        panel with [hidden], and a bare `#goalpanel.shut{display:grid}` would
+        have drawn an empty bar over the chat."""
+        css = crow_gui.REMOTE_CSS
+        self.assertIn("#goalpanel.shut:not([hidden]){display:grid", css)
+        self.assertNotIn("#goalpanel.shut{display:grid", css)
+
+    # A FAKE DOM, just enough for REMOTE_JS: every element records its
+    # classes, data-*, attributes and inline style, so a state can be
+    # compared as data. Timers run by hand.
+    FAKE_DOM = r"""
+const timers = []; let tid = 0, now = 0;
+globalThis.setTimeout = (f, ms) => { timers.push({id: ++tid, f, at: now + (ms || 0)}); return tid; };
+globalThis.clearTimeout = id => { const i = timers.findIndex(t => t.id === id); if(i >= 0) timers.splice(i, 1); };
+const flush = () => { while(timers.length) timers.shift().f(); };
+const advance = ms => { const end = now + ms;
+  for(;;){ timers.sort((a, b) => a.at - b.at);
+    if(!timers.length || timers[0].at > end) break;
+    const t = timers.shift(); now = t.at; t.f(); }
+  now = end; };
+class Style { constructor(){ this.m = {}; }
+  setProperty(k, v){ this.m[k] = String(v); } removeProperty(k){ delete this.m[k]; } }
+class CL { constructor(){ this.s = new Set(); }
+  add(c){ this.s.add(c); } remove(c){ this.s.delete(c); } contains(c){ return this.s.has(c); }
+  toggle(c, on){ if(on === undefined) on = !this.s.has(c); on ? this.s.add(c) : this.s.delete(c); return on; } }
+const listeners = [];
+class El { constructor(id){ this.id = id || ""; this.dataset = {}; this.style = new Style();
+    this.classList = new CL(); this.attrs = {}; this.children = []; this.hidden = false; }
+  appendChild(c){ this.children.push(c); return c; } append(...c){ c.forEach(x => this.appendChild(x)); }
+  prepend(c){ this.children.unshift(c); } insertBefore(c){ this.children.push(c); return c; }
+  remove(){} before(){} after(){}
+  setAttribute(k, v){ this.attrs[k] = String(v); } getAttribute(k){ return this.attrs[k] ?? null; }
+  removeAttribute(k){ delete this.attrs[k]; }
+  addEventListener(type, fn, opt){ listeners.push({el: this, type, fn, opt}); }
+  querySelector(){ return null; } querySelectorAll(){ return []; } closest(){ return null; }
+  get offsetWidth(){ return 0; } get offsetHeight(){ return 0; }
+  set innerHTML(v){ this._html = v; } get innerHTML(){ return this._html || ""; }
+  fire(type, ev){ listeners.filter(l => l.el === this && l.type === type).forEach(l => l.fn(ev || {})); }
+  click(){ listeners.filter(l => l.el === this && l.type === "click").forEach(l => l.fn({target: this})); } }
+const byId = {};
+const el = id => byId[id] || (byId[id] = new El(id));
+const html = el("<html>"), body = el("<body>");
+globalThis.document = {documentElement: html, body, hidden: false,
+  getElementById: el, createElement: () => new El(), querySelector: () => null,
+  querySelectorAll: () => [], addEventListener(type, fn, opt){ listeners.push({el: this, type, fn, opt}); }};
+globalThis.window = globalThis;
+globalThis.addEventListener = (type, fn, opt) => listeners.push({el: window, type, fn, opt});
+globalThis.STANDALONE = globalThis.STANDALONE || false;
+globalThis.matchMedia = q => ({matches: /standalone/.test(q) ? STANDALONE : true,
+  addEventListener(){}});
+globalThis.innerWidth = 390;
+globalThis.localStorage = {getItem: () => null, setItem(){}};
+globalThis.getComputedStyle = () => ({backgroundColor: "rgb(24, 24, 24)"});
+globalThis.ResizeObserver = class { observe(){} unobserve(){} };
+globalThis.MutationObserver = class { observe(){} };
+for (const d of ["rail", "code", "git", "browser"]) body.dataset[d] = "open";   // the desktop's stamp
+const flip = d => function(){ body.dataset[d] = body.dataset[d] === "shut" ? "open" : "shut"; };
+globalThis.crow = {toggleRail: flip("rail"), toggleCode: flip("code"), toggleGit: flip("git"),
+  toggleBrowser: flip("browser"), open(){}, reset(){}, settingsCat(){}, goalPanel(){},
+  queuedLine(){}, release(){}, viewBar(){}, mic(){}, micState(){}, showModel(){},
+  modelPlan(){ return []; }, ctx(){}, modeIs(){}, setTheme(){}, levelLabel(){ return ""; }};
+"""
+    PROBE = r"""
+const snap = () => JSON.stringify(["<html>", "<body>", "mscrim", "rail", "side", "main"]
+  .map(id => { const e = id === "mscrim" ? body.children.find(c => c.id === "mscrim") : el(id);
+    return [id, [...e.classList.s].sort(), e.dataset, e.style.m, e.attrs]; }));
+flush();
+const loaded = snap();
+const scrim = body.children.find(c => c.id === "mscrim");
+const gone = ["rail", "side"].map(id => el(id).classList.contains("m-gone"))
+  .concat([scrim.classList.contains("m-gone")]);
+crow.toggleRail(); flush();
+const opened = snap();
+const openGone = el("rail").classList.contains("m-gone") || scrim.classList.contains("m-gone");
+scrim.click(); flush();
+const closed = snap();
+crow.toggleCode(); flush(); crow.toggleCode(); flush();
+const closedAgain = snap();
+window.mobileTools(true); window.mobileTools(false);
+const sheet = snap();
+const touch = listeners.filter(l => /^touch/.test(l.type))
+  .map(l => [l.type, !!(l.opt && l.opt.passive)]);
+console.log(JSON.stringify({loaded, opened, closed, closedAgain, sheet, gone, openGone, touch}));
+"""
+
+    def run_phone_hooks(self) -> dict:
+        node = _node()
+        if not node:
+            self.skipTest("no node on this machine")
+        import subprocess
+        js = self.FAKE_DOM + crow_gui.REMOTE_JS + self.PROBE
+        done = subprocess.run([node, "-e", js], capture_output=True, text=True,
+                              encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    def test_a_closed_drawer_leaves_the_page_as_it_was_loaded(self):
+        """robin's iPhone, 2026-09-24: after a drawer had been open, Safari's
+        bars kept another tint and the page no longer scrolled, until a
+        reload. The closed state must BE the loaded state -- every class,
+        data-* attribute, attribute and inline style on html, body, the dim
+        layer, the drawers and #main -- and closed means out of the render
+        tree (display:none via .m-gone), not merely transparent or hidden."""
+        out = self.run_phone_hooks()
+        self.assertEqual(out["gone"], [True, True, True],
+                         "a closed drawer or the dim layer is still rendered at load")
+        self.assertNotEqual(out["opened"], out["loaded"])
+        self.assertFalse(out["openGone"], "an open drawer must be rendered")
+        self.assertEqual(out["closed"], out["loaded"])
+        self.assertEqual(out["closedAgain"], out["loaded"])
+        # NEGATIVE: the + sheet leaves no inline --toolsh ("0px") behind.
+        self.assertEqual(out["sheet"], out["loaded"])
+        self.assertIn(".m-gone{display:none!important}", crow_gui.REMOTE_CSS)
+
+    def test_no_touch_handler_can_hold_the_scroll(self):
+        """A vertical swipe must stay the browser's: the phone hooks listen
+        passively, and never to touchmove."""
+        out = self.run_phone_hooks()
+        self.assertTrue(out["touch"])
+        for kind, passive in out["touch"]:
+            self.assertNotEqual(kind, "touchmove")
+            self.assertTrue(passive, kind)
+        self.assertNotIn("preventDefault", crow_gui.REMOTE_JS)
+
+    def test_safari_takes_its_bar_tint_from_the_page(self):
+        """theme-color: one tag that follows the page's theme first (stamped
+        from THEME_BG), then one per colour scheme; html and body carry the
+        page's ground themselves."""
+        phone = crow_gui.stamped_page(remote=True)
+        want = crow_gui.THEME_BG.get(crow_gui.current_theme(), "#181818")
+        self.assertIn('<meta id="mtheme" name="theme-color" content="%s">' % want, phone)
+        self.assertIn('media="(prefers-color-scheme: light)"', phone)
+        self.assertIn('media="(prefers-color-scheme: dark)"', phone)
+        self.assertLess(phone.index('id="mtheme"'),
+                        phone.index('media="(prefers-color-scheme: light)"'))
+        self.assertNotIn("theme-color", crow_gui.stamped_page())
+        self.assertIn("background:var(--bg)}", crow_gui.REMOTE_CSS)
+
+    HEADER = r"""
+for (const id of ["helpmenu","modemenu","modelmenu","rootmenu","submenu","settings"]) el(id).hidden = true;
+const out = {};
+const cls = () => ["m-auto","m-hid","m-rev"].filter(c => body.classList.contains(c)).join(" ");
+const bar = el("bar"), flowEl = el("flow");
+const pull = (from, to) => { flowEl.fire("touchstart", {touches: [{clientX: 200, clientY: from}]});
+  flowEl.fire("touchend", {changedTouches: [{clientX: 200, clientY: to}]}); };
+out.load = cls();
+advance(4999); out.at4999 = cls();
+advance(1); out.at5000 = cls();
+pull(300, 320); out.shortPull = cls();
+pull(300, 420); out.pulled = cls();
+advance(7000); out.at7000 = cls();
+bar.fire("touchstart", {touches: [{clientX: 10, clientY: 10}]});
+advance(7999); out.touched7999 = cls();
+advance(1); out.touched8000 = cls();
+pull(200, 400); crow.toggleRail(); advance(30000); out.drawerOpen = cls();
+body.children.find(c => c.id === "mscrim").click(); advance(8000); out.drawerClosed = cls();
+flowEl.scrollTop = 900; flowEl.fire("scroll"); flowEl.scrollTop = 700; flowEl.fire("scroll");
+out.redrawScroll = cls();
+flowEl.fire("touchstart", {touches: [{clientX: 200, clientY: 500}]});
+flowEl.scrollTop = 500; flowEl.fire("scroll");
+out.scrolledUp = cls();
+const nudge = body.children.find(c => c.id === "mnudge");
+out.nudged = [];
+if(nudge){ advance(8000); out.nudged.push(cls()); nudge.click(); out.nudged.push(cls());
+  advance(8000); nudge.fire("touchstart", {touches: [{clientX: 200, clientY: 60}]});
+  out.nudged.push(cls()); }
+out.touch = listeners.filter(l => /^touch|^scroll/.test(l.type)).map(l => [l.type, !!(l.opt && l.opt.passive)]);
+console.log(JSON.stringify(out));
+"""
+
+    def run_header(self, standalone: bool) -> dict:
+        node = _node()
+        if not node:
+            self.skipTest("no node on this machine")
+        import subprocess
+        js = ("globalThis.STANDALONE = %s;\n" % ("true" if standalone else "false")
+              + self.FAKE_DOM + crow_gui.REMOTE_JS + self.HEADER)
+        done = subprocess.run([node, "-e", js], capture_output=True, text=True,
+                              encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    def test_the_home_screen_header_hides_and_a_pull_brings_it_back(self):
+        """robin, 2026-09-24: standalone only -- hidden 5 s after load; a
+        downward drag reveals it below the blur band; it stays 8 s and a touch
+        on it restarts that; it never hides while a drawer is open; scrolling
+        toward older messages reveals it too. Listeners passive."""
+        out = self.run_header(True)
+        self.assertEqual(out["load"], "m-auto")
+        self.assertEqual(out["at4999"], "m-auto")
+        self.assertEqual(out["at5000"], "m-auto m-hid")
+        self.assertEqual(out["shortPull"], "m-auto m-hid", "a 20 px wobble is no pull")
+        self.assertEqual(out["pulled"], "m-auto m-rev")
+        self.assertEqual(out["at7000"], "m-auto m-rev")
+        self.assertEqual(out["touched7999"], "m-auto m-rev")
+        self.assertEqual(out["touched8000"], "m-auto m-hid")
+        self.assertEqual(out["drawerOpen"], "m-auto m-rev")
+        self.assertEqual(out["drawerClosed"], "m-auto m-hid")
+        # the page's own scroll (a redraw) is no pull; a finger's is
+        self.assertEqual(out["redrawScroll"], "m-auto m-hid")
+        self.assertEqual(out["scrolledUp"], "m-auto m-rev")
+        # the nudge pill (robin): a tap or a touch on it brings the header back
+        self.assertEqual(out["nudged"], ["m-auto m-hid", "m-auto m-rev", "m-auto m-rev"])
+        self.assertIn("body.m-auto.m-hid #mnudge{display:flex", crow_gui.REMOTE_CSS)
+        # ...and the goal bar moves below the pill while the header is out
+        self.assertIn("body.m-auto:is(.m-hid,.m-rev) #panels{padding-top:40px}",
+                      crow_gui.REMOTE_CSS)
+        # robin: the subtasks card's X sits under the goal's X (#subpanel pads 10 px)
+        self.assertIn("margin-right:-10px}", crow_gui.REMOTE_CSS)
+        for kind, passive in out["touch"]:
+            self.assertNotEqual(kind, "touchmove")
+            self.assertTrue(passive, kind)
+
+    def test_the_safari_tab_keeps_its_header(self):
+        """NEGATIVE: outside standalone nothing hides, ever."""
+        out = self.run_header(False)
+        for key in ("load", "at5000", "pulled", "touched8000", "drawerClosed"):
+            self.assertEqual(out[key], "", key)
+
+    def test_the_phone_shows_no_reasoning_level(self):
+        """robin, 2026-09-24: the operating point fixes the level; the phone's
+        model chip and menu show none of it."""
+        self.assertIn("#model .lvl{display:none!important}", crow_gui.REMOTE_CSS)
+        self.assertIn('.filter(p => p.kind !== "level")', crow_gui.REMOTE_JS)
+
+
+class RemoteMirrorTests(RemoteCase):
+    """#249 "Expected result", RemoteMirrorTests: the eight bullets."""
+
+    # 1 -------------------------------------------------------------------
+    def test_a_line_from_the_phone_is_drawn_once_on_each_view(self):
+        api = self.mirrored()
+        ran = []
+        api._run = ran.append
+        self.assertTrue(self.as_phone(api.send, "hello"))
+        api._worker.join(5)
+        self.assertEqual(ran, ["hello"])
+        desk = [m for m in self.drained(api) if m.get("k") == "user"]
+        self.assertEqual([m["t"] for m in desk], ["hello"],
+                         "the desktop must draw the phone's line exactly once")
+        phone = [m for m in api._remote.got() if m.get("k") == "user"]
+        self.assertEqual(phone, [], "the phone drew its own line in go()")
+
+    def test_a_line_from_the_desktop_reaches_the_phone(self):
+        api = self.mirrored()
+        api._run = lambda text: None
+        api.send("from the desk")
+        api._worker.join(5)
+        self.assertEqual([m["t"] for m in api._remote.got()
+                          if m.get("k") == "user"], ["from the desk"])
+        self.assertIn("busy", [m.get("k") for m in api._remote.got()])
+        self.assertEqual([m for m in self.drained(api) if m.get("k") == "user"],
+                         [], "the desktop echoed its own line")
+
+    # 2 -------------------------------------------------------------------
+    def test_two_lines_mid_turn_are_one_queued_bubble_on_both_views(self):
+        api = self.mirrored()
+        api._busy = True
+        self.as_phone(api.send, "from the phone")
+        api.send("from the desk")
+        joined = "from the phone\n\nfrom the desk"
+        self.assertEqual(api._queued, joined)
+        desk = [m for m in self.drained(api) if m.get("k") == "queued"]
+        phone = [m for m in api._remote.got() if m.get("k") == "queued"]
+        self.assertEqual(desk[-1]["t"], joined)
+        self.assertEqual(phone[-1]["t"], joined)
+        self.assertEqual(api._queued_by, {PHONE, crow_gui.DESKTOP})
+
+        # AND IT RUNS AHEAD OF THE GOAL NUDGE (#264 unchanged).
+        ran = []
+        nudges = iter(["the nudge"])
+        api._run = ran.append
+        api._goal_nudge = lambda: next(nudges, None)
+        api._worker = threading.current_thread()
+        api._pump("the running turn")
+        self.assertEqual(ran, ["the running turn", joined, "the nudge"])
+
+    def test_the_page_holds_the_servers_text_and_draws_it_at_idle(self):
+        """The page half, run in node: `queuedLine(e)` takes the joined text
+        from the push, `idle()` releases it as the user's bubble."""
+        node = _node()
+        if not node:
+            self.skipTest("no node on this machine")
+        import subprocess
+        src = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        start = src.index("  queuedLine(e){")
+        end = src.index("  // #164. DAS ZIELPANEL")
+        rel = src.index("  release(){")
+        rel_end = src.index("  // #264. A Crow command is a first word")
+        js = ("const log=[];\n"
+              "const el={textContent:'',classList:{add(){},remove(){}}};\n"
+              "const $=s=>el; const go=el;\n"
+              "const crow={running:false,viewingOther:false,held:null,\n"
+              "  face(){}, user(t){log.push(['user',t]);}, userImages(i){},\n"
+              + src[start:end] + src[rel:rel_end] + "};\n"
+              "crow.queuedLine({k:'queued',t:'a\\n\\nb',i:[]});\n"
+              "crow.release();\n"
+              "console.log(JSON.stringify({log, held:crow.held}));\n")
+        done = subprocess.run([node, "-e", js], capture_output=True, text=True,
+                              encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        out = json.loads(done.stdout)
+        self.assertEqual(out["log"], [["user", "a\n\nb"]])
+        self.assertIsNone(out["held"])
+
+    # 3 -------------------------------------------------------------------
+    def test_the_phone_answers_and_the_desktop_card_closes(self):
+        api = self.mirrored()
+        said = []
+        thread = threading.Thread(
+            target=lambda: said.append(api._ask_page("run_command", "{}")),
+            daemon=True)
+        thread.start()
+        for _ in range(200):
+            if api._pending_ask is not None:
+                break
+            time.sleep(0.01)
+        self.assertIn("ask", [m.get("k") for m in api._remote.got()])
+        self.as_phone(api.answer, "yes")
+        thread.join(5)
+        self.assertEqual(said, ["yes"], "the blocked turn did not continue")
+        asked = [m for m in self.drained(api) if m.get("k") == "asked"]
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(asked[0]["t"], "allowed -- answered on phone")
+        # THE LATE CLICK CHANGES NOTHING: the first answer won.
+        api.answer("no")
+        self.assertEqual(api._answer, "yes")
+        self.assertEqual([m for m in api._remote.got() if m.get("k") == "asked"],
+                         [], "the phone got a card-close for its own answer")
+
+    # 4 -------------------------------------------------------------------
+    def test_yolo_from_the_phone_holds_on_both_views(self):
+        api = self.mirrored("--mode", "manual")
+        self.assertTrue(crow_core.needs_approval("run_command", api._args.mode))
+        self.as_phone(api.set_mode, "yolo")
+        self.assertEqual(api._args.mode, "yolo")
+        self.assertFalse(crow_core.needs_approval("run_command", api._args.mode),
+                         "an outside command would still ask")
+        for got in (self.drained(api), api._remote.got()):
+            modes = [m for m in got if m.get("k") == "mode"]
+            self.assertEqual(modes[-1]["name"], "yolo")
+
+    # 5 -------------------------------------------------------------------
+    def test_the_phone_opens_an_old_chat_and_the_desktop_stays(self):
+        """Mid-turn (a view) and idle (a real switch that pins the desktop):
+        either way the desktop's view is unchanged and it gets no replay."""
+        for busy in (True, False):
+            with self.subTest(busy=busy):
+                api = self.mirrored()
+                saved = self.saved_chat(api)
+                if busy:
+                    self.worker(api)
+                before = api._viewed_path()
+                desk_text = [m["content"] for m in api._conversation.payload()
+                             if m.get("role") == "user"]
+                self.as_phone(api.open, saved)
+                self.assertEqual(api._viewed_path(), before if busy
+                                 else api._views[crow_gui.DESKTOP],
+                                 "the desktop moved")
+                desk = self.drained(api)
+                kinds = [m.get("k") for m in desk]
+                for kind in ("clear", "user", "hello"):
+                    self.assertNotIn(kind, kinds, "the desktop got the replay")
+                phone = api._remote.got()
+                self.assertIn("clear", [m.get("k") for m in phone])
+                self.assertIn("the chat on disk",
+                              [m.get("t") for m in phone if m.get("k") == "user"])
+                if not busy:
+                    # PINNED to the chat it was reading -- written to disk by
+                    # the switch, so the same chat now has a path.
+                    pinned = api._views[crow_gui.DESKTOP]
+                    self.assertTrue(pinned)
+                    with open(pinned, encoding="utf-8") as fh:
+                        self.assertIn(desk_text[0], fh.read())
+                    self.assertIsNone(api._views.get(PHONE))
+                    self.assertTrue(api._same(api._current_path, saved))
+
+    # 6 -------------------------------------------------------------------
+    def test_a_worker_message_follows_each_clients_view(self):
+        api = self.mirrored()
+        saved = self.saved_chat(api)
+        api._views[PHONE] = saved                 # the phone reads elsewhere
+        api._worker = threading.current_thread()
+        api.push({"k": "text", "t": "streaming"})
+        desk = self.drained(api)
+        self.assertEqual(desk, [{"k": "text", "t": "streaming"}],
+                         "the live desktop must draw it, unstamped")
+        self.assertEqual(api._remote.got(), [], "the phone drew a turn it "
+                                                "does not look at")
+        # AND THE OTHER WAY ROUND: the desktop elsewhere keeps its #162 stamp.
+        api._views[PHONE] = None
+        api._views[crow_gui.DESKTOP] = saved
+        api.push({"k": "text", "t": "more"})
+        self.assertEqual(self.drained(api), [{"k": "text", "t": "more", "bg": True}])
+        self.assertEqual(api._remote.got(), [{"k": "text", "t": "more"}])
+
+    # 7 -------------------------------------------------------------------
+    def test_the_rail_reaches_both_with_their_own_marker(self):
+        api = self.mirrored()
+        saved = self.saved_chat(api)
+        api._views[PHONE] = saved
+        api._reload_rail()
+        desk = [m for m in self.drained(api) if m.get("k") == "rail"][-1]
+        phone = [m for m in api._remote.got() if m.get("k") == "rail"][-1]
+        self.assertTrue(desk["live_active"])
+        self.assertFalse(phone["live_active"])
+        mark = {r["path"]: r.get("active") for r in phone["rollovers"]}
+        self.assertTrue(mark.get(saved), "the phone's chat is not marked")
+        mark = {r["path"]: r.get("active") for r in desk["rollovers"]}
+        self.assertFalse(mark.get(saved), "the desktop marks the phone's chat")
+
+    # 8 -------------------------------------------------------------------
+    def test_a_log_only_note_reaches_neither_view(self):
+        api = self.mirrored()
+        note = crow_core.LOG_ONLY_NOTE_PREFIXES[0] + "12 messages dropped"
+        self.assertTrue(crow_core.note_is_log_only(note))
+        api.push({"k": "note", "t": note})
+        self.as_phone(api.push, {"k": "note", "t": note})
+        self.assertEqual(self.drained(api), [])
+        self.assertEqual(api._remote.published, [])
+        # COUNTER-PROBE: an ordinary note reaches both.
+        api.push({"k": "note", "t": "an ordinary note"})
+        self.assertEqual(len(self.drained(api)), 1)
+        self.assertEqual(len(api._remote.got()), 1)
+
+    def test_the_no_folder_note_goes_to_the_log_not_the_chat(self):
+        """robin, 2026-09-24 (phone screenshot): "no working directory --
+        writes are unbounded" is for crow.log. Live, from the phone, it
+        reaches neither view nor the notes band; a chat saved by an earlier
+        build that still carries it does not draw it on replay either."""
+        text = "no working directory -- writes are unbounded"
+        logs = tempfile.mkdtemp(prefix="crow-log-")
+        self.addCleanup(shutil.rmtree, logs, True)
+        self.addCleanup(setattr, crow_core, "LOG_FILE", crow_core.LOG_FILE)
+        self.addCleanup(setattr, crow_core, "ROOTS_FILE", crow_core.ROOTS_FILE)
+        crow_core.LOG_FILE = os.path.join(logs, "crow.log")
+        crow_core.ROOTS_FILE = os.path.join(logs, "roots.json")
+        api = self.mirrored()
+        self.a_chat(api)
+        self.as_phone(api.clear_root)
+        for got in (self.drained(api), api._remote.got()):
+            self.assertNotIn(text, [m.get("t") for m in got
+                                    if m.get("k") == "note"])
+        self.assertEqual(api._notes, [], "saved with the chat")
+        with open(crow_core.LOG_FILE, encoding="utf-8") as fh:
+            self.assertIn("[note] " + text, fh.read())
+        # THE OLD BAND: 32 copies in robin's session.json. Replay draws none.
+        old = [{"k": "note", "at": 1, "t": text}] * 32
+        api._remote.published.clear()
+        api._replay(api._conversation.payload(), old)
+        self.assertNotIn(text, [m.get("t") for m in self.drained(api)])
+        self.assertNotIn(text, [m.get("t") for m in api._remote.got()])
+        self.assertEqual(crow_core.clean_notes(old), [])
+
+    # -- the snapshot and the late joiner -----------------------------------
+    def test_ready_from_a_phone_answers_the_phone_only(self):
+        api = self.mirrored()
+        self.a_chat(api, "what the phone must see")
+        self.as_phone(api.ready)
+        # The title-bar icon may learn that a phone is here; nothing else.
+        self.assertEqual([m for m in self.drained(api) if m.get("k") != "remote"],
+                         [], "the desktop got a phone's replay")
+        got = api._remote.got()
+        kinds = [m.get("k") for m in got]
+        for kind in ("meta", "mode", "root", "clear", "user", "rail",
+                     "viewing", "chips"):
+            self.assertIn(kind, kinds)
+        self.assertIn("what the phone must see",
+                      [m.get("t") for m in got if m.get("k") == "user"])
+        self.assertEqual(api._page_loads, 0, "a phone counted as a page load")
+
+    def test_the_home_screen_app_keeps_its_header_out_of_the_blur(self):
+        """robin's iPhone (iOS 27, home-screen app), 2026-09-24: the header
+        row sat blurred and dimmed under the status bar. black-translucent
+        puts the page under the bar and iOS fills that inset with the Liquid
+        Glass scroll-edge blur, which reaches past the bar over the header.
+        The status bar is opaque (`default`, tinted from theme-color), so the
+        web view starts below it; black-translucent must not come back."""
+        phone = crow_gui.stamped_page(remote=True)
+        self.assertIn('name="apple-mobile-web-app-status-bar-style" content="default"',
+                      phone)
+        self.assertNotIn("black-translucent", phone)
+        # the bar's tint follows the page: a theme-color tag without media
+        # comes first, stamped from the window's ground.
+        self.assertLess(phone.index('<meta id="mtheme" name="theme-color"'),
+                        phone.index("apple-mobile-web-app-status-bar-style"))
+        # NEGATIVE: the desktop page carries no web-app tags at all.
+        self.assertNotIn("apple-mobile-web-app-status-bar-style",
+                         crow_gui.stamped_page())
+
+    def test_the_home_screen_app_moves_its_header_below_the_blur_band(self):
+        """robin's iPhone (iOS 27), 2026-09-24: a permanent offset under the
+        system's blur band was blurred at 8 px and ugly at 18/36 px. No fixed
+        offset any more: in standalone mode the header hides itself and comes
+        back as an overlay below the band (--safe-t + 18 px); --safe-t itself
+        stays the plain inset. The Safari tab and the desktop get none of it."""
+        phone = crow_gui.stamped_page(remote=True)
+        self.assertNotIn("@media (display-mode: standalone)", phone)
+        self.assertNotIn("inset-top,0px) + 8px", phone)
+        self.assertIn("--safe-t:env(safe-area-inset-top,0px);", phone)
+        self.assertIn("body.m-auto.m-rev #bar{top:calc(var(--safe-t) + 18px)", phone)
+        self.assertIn('matchMedia("(display-mode: standalone)")', phone)
+        self.assertNotIn("display-mode: standalone", crow_gui.stamped_page())
+        self.assertNotIn("m-auto", crow_gui.stamped_page())
+
+    def test_the_phone_page_brings_its_home_screen_tile(self):
+        """robin's iPhone, 2026-09-24: a generic "1" tile on the home screen.
+        The phone page names the tile, the manifest and the web-app title;
+        the desktop page carries none of it. The window's own drawer
+        (`remote_icon`) draws an opaque 180x180 PNG."""
+        phone = crow_gui.stamped_page(remote=True)
+        for tag in ('<link rel="apple-touch-icon" href="/apple-touch-icon.png">',
+                    '<link rel="manifest" href="/remote.webmanifest">',
+                    '<meta name="apple-mobile-web-app-title" content="Crow">',
+                    '<meta name="apple-mobile-web-app-capable" content="yes">',
+                    '<meta name="mobile-web-app-capable" content="yes">',
+                    '<meta name="apple-mobile-web-app-status-bar-style"'
+                    ' content="default">'):
+            self.assertIn(tag, phone)
+        self.assertNotIn("apple-touch-icon", crow_gui.stamped_page())
+        tile = crow_gui.remote_icon(180)
+        self.assertEqual(tile[12:16], b"IHDR")
+        self.assertEqual((int.from_bytes(tile[16:20], "big"),
+                          int.from_bytes(tile[20:24], "big"), tile[25]),
+                         (180, 180, 2))
+
+    def test_a_phone_reload_does_not_record_the_notes_again(self):
+        """robin's iPhone, 2026-09-24: ONE "no folder" note became 32 in
+        session.json (1 at at=1, 31 at at=5) and 15+ rows in the phone's chat.
+        `clear_root` ran once; every phone page load (`ready`) delivered its
+        snapshot through `push`, which records each note in `_notes` again --
+        1 -> 2 -> 4 -> ... -> 32 after five loads. A delivered snapshot is a
+        copy of what is already recorded, never a new note."""
+        api = self.mirrored()
+        self.a_chat(api)
+        api.push({"k": "note", "t": "an ordinary note"})
+        self.assertEqual(len(api._notes), 1)
+        for _ in range(5):
+            api._remote.published.clear()
+            self.as_phone(api.ready)
+            shown = [m for m in api._remote.got()
+                     if m.get("k") == "note" and m.get("t") == "an ordinary note"]
+            self.assertEqual(len(shown), 1, "the phone drew the note %d times"
+                             % len(shown))
+        self.assertEqual(len(api._notes), 1,
+                         "a phone reload recorded the notes again")
+
+    def test_the_snapshot_carries_an_open_question_and_the_queued_line(self):
+        api = self.mirrored()
+        api._busy = True
+        api._pending_ask = {"k": "ask", "name": "run_command", "args": "{}",
+                            "scope": ""}
+        api.send("held back")
+        snap = api.state_snapshot(PHONE)
+        kinds = [m.get("k") for m in snap]
+        self.assertIn("ask", kinds)
+        self.assertIn("busy", kinds)
+        self.assertEqual([m["t"] for m in snap if m.get("k") == "queued"],
+                         ["held back"])
+        # Collected, never delivered.
+        self.assertEqual([m for m in self.drained(api)
+                          if m.get("k") in ("meta", "clear")], [])
+
+    def test_a_phone_looking_elsewhere_gets_no_open_question(self):
+        """NEGATIVE: the ask belongs to the live turn, like the desktop's #162
+        rule -- a phone reading another chat does not get it."""
+        api = self.mirrored()
+        saved = self.saved_chat(api)
+        api._views[PHONE] = saved
+        api._pending_ask = {"k": "ask", "name": "x", "args": "", "scope": ""}
+        self.assertNotIn("ask", [m.get("k") for m in api.state_snapshot(PHONE)])
+
+
+class RemoteStagedImageTests(RemoteCase):
+    """#249, iPhone 2026-09-24: an image staged and sent on the phone kept its
+    chip in the DESKTOP's strip. The stage is one state for every client, so
+    every client hears when it empties -- at the point the images leave it,
+    on all three ways `send` takes (idle, queued mid-turn, another view).
+
+    The model server here refuses images (/props: no vision), so the real
+    `_run` consumes the stage and stops right after -- the one line the fix
+    is about, without a model."""
+
+    def _server(self) -> str:
+        import http.server
+
+        class Props(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"modalities": {"vision": false}}')
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Props)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return "http://127.0.0.1:%d/v1" % server.server_address[1]
+
+    def staged(self):
+        api = self.mirrored("--base-url", self._server())
+        path = os.path.join(self.dir, "shot.png")
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + b"\0" * 32)
+        self.as_phone(api.stage_image, path)
+        chips = [m for m in self.drained(api) if m.get("k") == "chips"]
+        self.assertEqual(len(chips[-1]["c"]), 1, "the desktop never saw the chip")
+        api._remote.published.clear()
+        return api
+
+    def assert_emptied(self, api):
+        self.assertEqual(api._staged_images, [])
+        desk = [m for m in self.drained(api) if m.get("k") == "chips"]
+        self.assertTrue(desk, "the desktop was never told the stage emptied")
+        self.assertEqual(desk[-1], {"k": "chips", "c": []},
+                         "the desktop's strip keeps the sent image")
+        phone = [m for m in api._remote.got() if m.get("k") == "chips"]
+        self.assertEqual(phone[-1], {"k": "chips", "c": []})
+
+    def test_idle_the_desktop_strip_empties(self):
+        api = self.staged()
+        self.assertTrue(self.as_phone(api.send, "what is this"))
+        api._worker.join(10)
+        self.assertFalse(api._worker.is_alive())
+        self.assert_emptied(api)
+
+    def test_mid_turn_the_desktop_strip_empties_when_the_line_runs(self):
+        api = self.staged()
+        api._busy = True
+        self.assertTrue(self.as_phone(api.send, "what is this"))
+        # HELD, NOT SENT: the images still ride the queued line, so the
+        # strip keeps them until the line leaves.
+        self.assertEqual(len(api._staged_images), 1)
+        self.assertNotIn({"k": "chips", "c": []}, self.drained(api))
+        real, first = api._run, []
+        api._run = lambda text: first.append(text) if not first else real(text)
+        api._worker = threading.current_thread()
+        api._pump("the running turn")
+        self.assertEqual(first, ["the running turn"])
+        self.assert_emptied(api)
+
+    def test_from_another_view_the_desktop_strip_empties(self):
+        api = self.staged()
+        saved = self.saved_chat(api)
+        api._views[PHONE] = saved                  # the phone reads elsewhere
+        self.assertTrue(self.as_phone(api.send, "what is this"))
+        api._worker.join(10)
+        self.assertFalse(api._worker.is_alive())
+        # The desktop is pinned to its own chat by the switch; the stage is
+        # not a chat's, so the empty strip reaches it unstamped anyway.
+        self.assertIsNotNone(api._views.get(crow_gui.DESKTOP))
+        self.assert_emptied(api)
+
+
+class RemoteSlashTests(RemoteCase):
+    """#249: `/remote` on/off/status/devices/forget, the dialog and the icon."""
+
+    def started(self):
+        crow_gui.REMOTE_FACTORY = _FakeRemote
+        crow_gui.lan_addresses = lambda: [("wlan0", "192.168.1.5"),
+                                          ("eth0", "10.0.0.7")]
+        api = self.api()
+        self.drained(api)
+        # the icon's watcher polls while `_remote` is its server -- let it go
+        self.addCleanup(setattr, api, "_remote", None)
+        return api
+
+    def test_it_is_on_every_list(self):
+        self.assertIn("/remote", crow_core.SLASH_COMMANDS)
+        self.assertIn("/remote", crow_gui.Api.WHAT_THEY_DO)
+        self.assertIn("/remote", crow.HELP)
+        self.assertIsNotNone(self.api().slash_answer("/remote status"))
+
+    def test_on_starts_persists_and_opens_the_dialog(self):
+        api = self.started()
+        said = api.slash_answer("/remote on")
+        self.assertIn("http://192.168.1.5:8765/", said)
+        self.assertTrue(api._remote.running())
+        self.assertTrue(crow_gui.remote_enabled())
+        out = self.drained(api)
+        dialog = [m for m in out if m.get("k") == "remotedlg"][-1]
+        self.assertTrue(dialog["open"])
+        self.assertEqual(dialog["ips"], [["wlan0", "192.168.1.5"],
+                                         ["eth0", "10.0.0.7"]])
+        self.assertEqual([d["name"] for d in dialog["devices"]],
+                         ["iPhone (Safari)"])
+        icon = [m for m in out if m.get("k") == "remote"][-1]
+        self.assertEqual((icon["on"], icon["online"]), (True, 1))
+        # THE DIALOG IS THE DESKTOP'S: no phone ever receives it.
+        self.assertNotIn("remotedlg", [m.get("k") for m in api._remote.got()])
+
+    def test_bare_remote_is_the_icon(self):
+        api = self.started()
+        api.slash_answer("/remote")
+        self.assertTrue(api._remote.running())
+        self.assertIn("remotedlg", [m.get("k") for m in self.drained(api)])
+        # The icon's click is the same call.
+        self.assertIn("crow.remoteOpen()", crow_gui.PAGE)
+        self.assertIn("remoteOpen(){ pywebview.api.remote_open()", crow_gui.PAGE)
+
+    def test_the_port_is_fixed_and_the_host_is_a_lan_address(self):
+        api = self.started()
+        api.slash_answer("/remote on")
+        self.assertEqual(api._remote.kw["port"], crow_core.REMOTE_PORT_DEFAULT)
+        self.assertEqual(api._remote.kw["host"], "192.168.1.5")
+        self.assertEqual(api._remote.kw["allowed"], crow_gui.REMOTE_ALLOWED)
+        api.remote_use_ip("10.0.0.7")
+        self.assertEqual(api._remote.kw["host"], "10.0.0.7")
+        self.assertEqual(crow_gui.remote_host_setting(), "10.0.0.7")
+
+    def test_no_lan_means_no_server(self):
+        """NEGATIVE: never 0.0.0.0 -- no LAN address, no listener."""
+        crow_gui.REMOTE_FACTORY = _FakeRemote
+        crow_gui.lan_addresses = lambda: []
+        api = self.api()
+        self.assertEqual(api.slash_answer("/remote on"), crow_core.REMOTE_NO_LAN)
+        self.assertIsNone(api._remote)
+        self.assertFalse(crow_gui.remote_enabled())
+
+    def test_off_stops_and_devices_stay(self):
+        api = self.started()
+        api.slash_answer("/remote on")
+        remote = api._remote
+        self.assertEqual(api.slash_answer("/remote off"), crow_core.REMOTE_OFF_LINE)
+        self.assertFalse(remote.running())
+        self.assertIsNone(api._remote)
+        self.assertFalse(crow_gui.remote_enabled())
+        self.assertEqual(remote.forgot, [])
+        self.assertIn("off", api.slash_answer("/remote status"))
+
+    def test_status_devices_and_forget(self):
+        api = self.started()
+        api.slash_answer("/remote on")
+        self.assertIn("http://192.168.1.5:8765/", api.slash_answer("/remote status"))
+        self.assertIn("iPhone (Safari)", api.slash_answer("/remote devices"))
+        said = api.slash_answer("/remote forget iphone")
+        self.assertIn("forgot", said)
+        self.assertEqual(api._remote.forgot, [PHONE])
+        self.assertIn("no single paired device",
+                      api.slash_answer("/remote forget nobody"))
+        self.assertEqual(api.slash_answer("/remote sideways"),
+                         crow_core.REMOTE_USAGE)
+
+    def test_a_new_device_waits_for_the_desktop_and_times_out_as_deny(self):
+        api = self.started()
+        api.slash_answer("/remote on")
+        self.drained(api)
+        before = crow_core.REMOTE_CONFIRM_S
+        self.addCleanup(setattr, crow_core, "REMOTE_CONFIRM_S", before)
+        crow_core.REMOTE_CONFIRM_S = 0.05
+        self.assertFalse(api._remote_confirm("iPhone (Safari)"))
+        out = self.drained(api)
+        self.assertEqual(out[0]["k"], "remoteask")
+        self.assertIn("wants to connect", out[0]["t"])
+        self.assertIn("denied", [m for m in out
+                                 if m.get("k") == "remoteasked"][0]["t"])
+        # ALLOW: the desktop's click lets it in.
+        crow_core.REMOTE_CONFIRM_S = 5
+        allowed = []
+        thread = threading.Thread(target=lambda: allowed.append(
+            api._remote_confirm("iPhone (Safari)")), daemon=True)
+        thread.start()
+        for _ in range(200):
+            if api._remote_asks:
+                break
+            time.sleep(0.01)
+        api.remote_allow(next(iter(api._remote_asks)), True)
+        thread.join(5)
+        self.assertEqual(allowed, [True])
+
+    def test_the_allow_request_shows_inside_the_open_remote_dialog(self):
+        """#249, iPhone 2026-09-24: the Remote dialog (z-index 80, modal)
+        covered the Allow/Deny bar above the input. Run in node with a small
+        DOM: while the dialog is open the request sits at the top of its
+        body and survives a refresh; closed, it is above the input; Allow
+        calls `remote_allow`; `remoteasked` clears it wherever it is."""
+        node = _node()
+        if not node:
+            self.skipTest("no node on this machine")
+        import subprocess
+        src = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        start = src.index("  remoteClose(){")
+        end = src.index("  // #249. DIE ANDERE SEITE HAT GEANTWORTET")
+        js = r"""
+const ALL=[];
+class El{
+  constructor(tag){ this.tag=tag; this.children=[]; this.parent=null; this.id="";
+    this.hidden=false; this.dataset={}; this.q={}; this.onclick=null;
+    const cl=new Set(); this.cls=cl;
+    this.classList={add:c=>cl.add(c), remove:c=>cl.delete(c), toggle(){},
+                    contains:c=>cl.has(c)};
+    ALL.push(this); }
+  set innerHTML(v){ this.q={}; } set textContent(v){
+    this.children.forEach(c=>c.parent=null); this.children=[]; this.q={}; }
+  set className(v){ v.split(" ").forEach(c=>this.cls.add(c)); }
+  querySelector(sel){ if(!this.q[sel]){ const e=new El(sel); e.parent=this;
+      e.children=[]; this.q[sel]=e; } return this.q[sel]; }
+  get firstChild(){ return this.children[0]||null; }
+  remove(){ if(this.parent){ const i=this.parent.children.indexOf(this);
+      if(i>=0) this.parent.children.splice(i,1); } this.parent=null; }
+  insertBefore(n, ref){ n.remove(); const i=ref?this.children.indexOf(ref):-1;
+    if(i<0) this.children.push(n); else this.children.splice(i,0,n); n.parent=this; }
+  appendChild(n){ this.insertBefore(n, null); }
+  get isConnected(){ let e=this; while(e.parent) e=e.parent; return e===ROOT; }
+}
+const ROOT=new El("root");
+const mk=id=>{ const e=new El("div"); e.id=id; ROOT.appendChild(e); return e; };
+const composer=mk("composer"), dlg=mk("remotedlg"); dlg.hidden=true;
+const box=new El("div"); box.id="box"; composer.appendChild(box);
+const document={createElement:t=>new El(t), querySelector(sel){
+  const m=/^#([\w-]+)(?:\[data-rid="([^"]*)"\])?$/.exec(sel);
+  return ALL.find(e=>e.isConnected && e.id===m[1]
+                     && (m[2]===undefined || e.dataset.rid===m[2])) || null; }};
+const $=s=>document.querySelector(s);
+const setInterval=()=>0, clearInterval=()=>0;
+const allowed=[];
+const pywebview={api:{remote_allow:(id,yes)=>{ allowed.push([id,yes]); return Promise.resolve(true); }}};
+const crow={mode:"manual", note(){},
+""" + src[start:end] + r"""};
+const where=()=>{ const p=$("#pairbar"); if(!p) return "none";
+  if(p.parent===composer) return "composer";
+  if(p.parent && p.parent.tag===".rbody" && p.parent.firstChild===p
+     && p.isConnected && p.cls.has("indlg")) return "dialog";
+  return "elsewhere"; };
+const out=[];
+const DLG={k:"remotedlg", open:true, fresh:true, url:"http://x/", svg:"", ips:[], devices:[]};
+crow.remoteDialog(DLG);
+crow.remoteAsk({k:"remoteask", id:1, name:"iPhone (Chrome)", t:"iPhone (Chrome) wants to connect", ttl:60});
+out.push(where());
+crow.remoteDialog(Object.assign({}, DLG, {fresh:false}));   // a device came or went
+out.push(where());
+$("#pairbar").querySelector(".yes").onclick();
+out.push(JSON.stringify(allowed));
+crow.remoteClose();
+out.push(where());
+crow.remoteDialog(DLG);
+out.push(where());
+crow.remoteAsked({k:"remoteasked", id:1, t:""});
+out.push(where());
+crow.remoteClose();
+crow.remoteAsk({k:"remoteask", id:2, name:"iPhone", t:"iPhone wants to connect", ttl:60});
+out.push(where());
+crow.remoteAsked({k:"remoteasked", id:2, t:""});
+out.push(where());
+console.log(JSON.stringify(out));
+"""
+        done = subprocess.run([node, "-e", js], capture_output=True, text=True,
+                              encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout),
+                         ["dialog", "dialog", "[[1,true]]", "composer", "dialog",
+                          "none", "composer", "none"])
+        self.assertIn("#pairbar.indlg{", crow_gui.PAGE)
+
+    def test_no_answer_is_none_and_the_server_is_told_the_timeout(self):
+        """None, not False: the server answers the phone 410 (expired) for a
+        question nobody answered, 403 only for a real Deny."""
+        api = self.started()
+        api.slash_answer("/remote on")
+        self.assertEqual(api._remote.kw["confirm_ttl"], crow_core.REMOTE_CONFIRM_S)
+        before = crow_core.REMOTE_CONFIRM_S
+        self.addCleanup(setattr, crow_core, "REMOTE_CONFIRM_S", before)
+        crow_core.REMOTE_CONFIRM_S = 0.05
+        self.assertIsNone(api._remote_confirm("iPhone (Safari)"))
+
+    def test_the_firewall_line_opens_the_lan_only(self):
+        line = crow_core.remote_firewall_line(8765, "192.168.1.5", "ufw")
+        self.assertIn("sudo ufw allow from 192.168.1.0/24 to any port 8765 "
+                      "proto tcp", line)
+        self.assertIn("192.168.1.0/24",
+                      crow_core.remote_firewall_line(8765, "192.168.1.5",
+                                                     "firewalld"))
+        self.assertEqual(crow_core.remote_firewall_line(8765, "192.168.1.5", ""),
+                         "")
+
+    def test_the_devices_live_in_the_secrets_store_beside_the_rest(self):
+        before = crow_core.SECRETS_FILE
+        self.addCleanup(setattr, crow_core, "SECRETS_FILE", before)
+        crow_core.SECRETS_FILE = os.path.join(self.dir, "secrets.json")
+        with open(crow_core.SECRETS_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"CROW_TAVILY_KEY": "kept"}, fh)
+        record = {"id": "d-1", "name": "iPhone", "token_sha256": "ab" * 32}
+        self.assertTrue(crow_core.remote_devices_save([record]))
+        self.assertEqual(crow_core.remote_devices_load(), [record])
+        self.assertEqual(crow_core.secret("CROW_TAVILY_KEY"), "kept")
+        # NEGATIVE: a store that does not parse is never overwritten.
+        with open(crow_core.SECRETS_FILE, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        self.assertFalse(crow_core.remote_devices_save([]))
+        with open(crow_core.SECRETS_FILE, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "{not json")
+
+    def test_a_phone_exit_never_closes_the_window(self):
+        api = self.api()
+        closed = []
+        api._window = types.SimpleNamespace(destroy=lambda: closed.append(1))
+        self.assertEqual(self.as_phone(api.slash_answer, "/exit"),
+                         crow_core.REMOTE_PHONE_EXIT)
+        self.assertEqual(closed, [])
+
+    # -- the phone icon in the title bar ------------------------------------
+    def test_the_icon_sits_left_of_the_three_panel_buttons(self):
+        src = (HERE / "crow_gui.py").read_text(encoding="utf-8")
+        bar = src[src.index('<div id="bar"'):src.index('<div id="wbtns"')]
+        order = [bar.index('id="%s"' % i) for i in
+                 ("mark", "remotetoggle", "codetoggle", "gittoggle",
+                  "browsertoggle")]
+        self.assertEqual(order, sorted(order))
+        icon = bar[bar.index('id="remotetoggle"'):bar.index('id="codetoggle"')]
+        self.assertIn('stroke-width="1.6"', icon)
+        self.assertIn('stroke="currentColor"', icon)
+        css = crow_gui.PAGE
+        self.assertIn("#remotetoggle{margin-left:auto;", css)
+        self.assertIn("#remotetoggle + #codetoggle{margin-left:0}", css)
+        self.assertIn("#remotetoggle{margin-right:9px}", css)
+        self.assertIn("#remotetoggle.live .rdot{display:block}", css)
+        self.assertIn("background:var(--ok)", css[css.index("#remotetoggle .rdot"):])
+        self.assertIn('case "remote": this.remoteState(e); break;', css)
+
+    def test_the_icon_state_follows_the_server(self):
+        api = self.started()
+        api.remote_open()
+        icon = [m for m in self.drained(api) if m.get("k") == "remote"][-1]
+        self.assertTrue(icon["on"])
+        self.assertEqual(icon["online"], 1)
+        api._remote.online[PHONE] = False
+        api._remote_state_push()
+        icon = [m for m in self.drained(api) if m.get("k") == "remote"][-1]
+        self.assertEqual(icon["online"], 0)
+        api.remote_stop()
+        icon = [m for m in self.drained(api) if m.get("k") == "remote"][-1]
+        self.assertFalse(icon["on"])
+
+
+# ============================================================ #249 stage 5
+#
+# THE HTTPS ADDRESS VIA TAILSCALE, Api side. The probe is a fake per case
+# (`crow_gui.TAILSCALE_PROBE`); the real CLI is never called.
+
+TS_NAME = "aios.tail77dcd2.ts.net"
+TS_CMD = "sudo tailscale serve --bg --https=443 http://127.0.0.1:8765"
+
+
+def _ts_probe(state: str):
+    named = state not in ("missing", "down")
+    return lambda port: {"state": state, "name": TS_NAME if named else "",
+                         "ip": "100.108.49.66" if named else "",
+                         "command": TS_CMD.replace("8765", str(port))}
+
+
+class RemoteTailnetTests(RemoteCase):
+    """#249 stage 5: the loopback listener while the tailnet can serve, the
+    HTTPS address as the dialog's network choice with one line per state."""
+
+    def started(self, state: str):
+        crow_gui.REMOTE_FACTORY = _FakeRemote
+        crow_gui.lan_addresses = lambda: [("wlan0", "192.168.1.5")]
+        crow_gui.TAILSCALE_PROBE = _ts_probe(state)
+        api = self.api()
+        self.drained(api)
+        self.addCleanup(setattr, api, "_remote", None)
+        return api
+
+    def dialog(self, api) -> dict:
+        return [m for m in self.drained(api) if m.get("k") == "remotedlg"][-1]
+
+    def test_the_loopback_listener_only_while_the_tailnet_can_serve(self):
+        for state, want in (("missing", ""), ("down", ""), ("https-off", TS_NAME),
+                            ("serve-missing", TS_NAME), ("ready", TS_NAME),
+                            ("funnel", "")):
+            with self.subTest(state=state):
+                api = self.started(state)
+                api.slash_answer("/remote on")
+                self.assertEqual(api._remote.kw["tailnet"], want)
+                # the chosen LAN address listens either way, never 0.0.0.0/100.x
+                self.assertEqual(api._remote.kw["host"], "192.168.1.5")
+                api.remote_stop(persist=False)
+
+    def test_the_https_choice_shows_the_missing_step_then_the_code(self):
+        import crow_remote
+        api = self.started("serve-missing")
+        with mock.patch.object(crow_remote, "qr_svg", lambda text: "QR:" + text):
+            api.slash_answer("/remote on")
+            d = self.dialog(api)
+            self.assertEqual((d["https"]["state"], d["https"]["on"]),
+                             ("serve-missing", False))
+            self.assertEqual(d["url"], "http://192.168.1.5:8765/")
+            self.assertEqual(d["svg"], "QR:http://192.168.1.5:8765/#t=pairing-token")
+            self.assertTrue(api.remote_use_https(True))
+            self.assertTrue(crow_gui.remote_https_setting())
+            d = self.dialog(api)
+            self.assertTrue(d["https"]["on"])
+            self.assertEqual(d["url"], "https://%s/" % TS_NAME)
+            self.assertEqual(d["svg"], "", "a code that would not open yet")
+            self.assertIn(TS_CMD, d["https"]["line"])
+            self.assertEqual(d["https"]["cmd"], TS_CMD)
+            self.assertEqual(d["hint"], "", "the ufw line is the LAN's")
+            # robin runs the command; the next look finds it ready, and the QR
+            # carries the SAME single-use code on the ts.net origin.
+            crow_gui.TAILSCALE_PROBE = _ts_probe("ready")
+            api.remote_use_https(True)
+            d = self.dialog(api)
+            self.assertIn("ready", d["https"]["line"])
+            self.assertEqual(d["https"]["cmd"], "")
+            self.assertEqual(d["svg"], "QR:https://%s/#t=pairing-token" % TS_NAME)
+            # back to the LAN: nothing restarts, the LAN code again
+            remote = api._remote
+            api.remote_use_https(False)
+            d = self.dialog(api)
+            self.assertIs(api._remote, remote)
+            self.assertEqual(d["svg"], "QR:http://192.168.1.5:8765/#t=pairing-token")
+
+    def test_every_state_has_its_line(self):
+        lines = {state: crow_core.remote_tailnet_line(state, TS_NAME, TS_CMD)
+                 for state in ("missing", "down", "https-off", "serve-missing",
+                               "funnel", "ready")}
+        self.assertEqual(len(set(lines.values())), 6)
+        self.assertIn("not installed", lines["missing"])
+        self.assertIn("sudo tailscale up", lines["down"])
+        self.assertIn("https://login.tailscale.com/admin/dns", lines["https-off"])
+        self.assertIn(TS_CMD, lines["serve-missing"])
+        self.assertIn("public", lines["funnel"])
+        self.assertIn("https://%s/" % TS_NAME, lines["ready"])
+        self.assertIn("pairs once more", lines["ready"])
+
+    def test_open_restarts_once_when_the_tailnet_came_up(self):
+        api = self.started("down")
+        api.slash_answer("/remote on")
+        first = api._remote
+        self.assertEqual(first.kw["tailnet"], "")
+        crow_gui.TAILSCALE_PROBE = _ts_probe("serve-missing")
+        api.remote_open()
+        self.assertIsNot(api._remote, first)
+        self.assertFalse(first.running())
+        self.assertEqual(api._remote.kw["tailnet"], TS_NAME)
+        self.assertTrue(crow_gui.remote_enabled())
+        # NEGATIVE: an unchanged tailnet restarts nothing
+        again = api._remote
+        crow_gui.TAILSCALE_PROBE = _ts_probe("ready")
+        api.remote_open()
+        self.assertIs(api._remote, again)
+
+    def test_a_phone_cannot_choose_the_address(self):
+        api = self.started("ready")
+        api.slash_answer("/remote on")
+        self.assertNotIn("remote_use_https", crow_gui.REMOTE_ALLOWED)
+        self.assertEqual(crow_gui.REMOTE_DESKTOP_BOUND["remote_use_https"],
+                         "desktop-only")
+        self.assertFalse(self.as_phone(api.remote_use_https, True))
+        self.assertFalse(crow_gui.remote_https_setting())
+
+    def test_the_dialog_draws_the_choice_and_the_line(self):
+        page = crow_gui.PAGE
+        self.assertIn('o.textContent="HTTPS · "+(https.name||"Tailscale")', page)
+        self.assertIn("pywebview.api.remote_use_https(true)", page)
+        self.assertIn('t.querySelector("span").textContent=https.line||""', page)
+
+
+# =================================================================== #290
+#
+# THE PHONE'S MICROPHONE: the clip is on disk, the Api transcribes it and the
+# words go to that phone's input field only.
+
+class RemotePhoneVoiceTests(RemoteCase):
+
+    def clip(self) -> str:
+        path = os.path.join(self.dir, "clip.m4a")
+        with open(path, "wb") as fh:
+            fh.write(b"\x00\x00\x00\x18ftypM4A ")
+        return path
+
+    def heard(self, api, text="Hallo Crow", why=None, boom=None):
+        path = self.clip()
+
+        def transcribe(p, stats=None):
+            self.assertEqual(p, path)
+            if boom:
+                raise boom
+            return text
+        with mock.patch.object(crow_voice, "file_available", lambda: why), \
+                mock.patch.object(crow_voice, "model_loaded", lambda: True), \
+                mock.patch.object(crow_voice, "transcribe_file", transcribe):
+            api._remote_heard(path, PHONE)
+        self.assertFalse(os.path.exists(path), "the clip was kept")
+        return [m for m in api._remote.got(PHONE) if m.get("k") == "heard"]
+
+    def test_the_words_go_to_that_phone_only_and_nothing_is_sent(self):
+        api = self.mirrored()
+        api._remote.ids.append("d-other")
+        before = len(api._conversation)
+        self.assertEqual(self.heard(api), [{"k": "heard", "text": "Hallo Crow"}])
+        self.assertNotIn("heard", [m.get("k") for m in api._remote.got("d-other")])
+        self.assertNotIn("heard", [m.get("k") for m in self.drained(api)])
+        self.assertEqual(len(api._conversation), before)
+        self.assertNotIn("user", [m.get("k") for m in api._remote.got(PHONE)])
+
+    def test_silence_a_missing_recogniser_and_a_failure_are_said_there(self):
+        api = self.mirrored()
+        self.assertEqual(self.heard(api, text=""),
+                         [{"k": "heard", "note": "nothing was said"}])
+        api._remote.published.clear()
+        why = "dictation needs faster-whisper -- pip install faster-whisper"
+        self.assertEqual(self.heard(api, why=why), [{"k": "heard", "note": why}])
+        api._remote.published.clear()
+        self.assertEqual(self.heard(api, boom=RuntimeError("bad clip")),
+                         [{"k": "heard", "note": "dictation failed: bad clip"}])
+
+    def test_the_server_gets_the_door_and_it_returns_at_once(self):
+        crow_gui.REMOTE_FACTORY = _FakeRemote
+        crow_gui.lan_addresses = lambda: [("wlan0", "192.168.1.5")]
+        api = self.api()
+        self.addCleanup(setattr, api, "_remote", None)
+        api.slash_answer("/remote on")
+        self.assertEqual(api._remote.kw["audio"], api._remote_audio)
+        gate, done = threading.Event(), threading.Event()
+
+        def slow(path, stats=None):
+            gate.wait(5)
+            done.set()
+            return "spaet"
+        with mock.patch.object(crow_voice, "file_available", lambda: None), \
+                mock.patch.object(crow_voice, "model_loaded", lambda: True), \
+                mock.patch.object(crow_voice, "transcribe_file", slow):
+            api._remote_audio(self.clip(), PHONE)     # returns while it waits
+            gate.set()
+            self.assertTrue(done.wait(5))
+            for _ in range(100):
+                if any(m.get("k") == "heard" for m in api._remote.got(PHONE)):
+                    break
+                time.sleep(0.02)
+        self.assertIn({"k": "heard", "text": "spaet"}, api._remote.got(PHONE))
+
+    # #290 SCOPE AMENDMENT: partials while speaking, coalesced per phone.
+    def numbered(self, n: int) -> str:
+        path = os.path.join(self.dir, "clip-%d.webm" % n)
+        with open(path, "wb") as fh:
+            fh.write(b"x" * n)
+        return path
+
+    def lane(self, api, gated=True, loaded=True):
+        """`_remote_audio` with a recogniser that waits for `gate` per clip and
+        records which clips it ran and how many ran at once."""
+        ran, running, peak, gate = [], [0], [0], threading.Semaphore(0)
+        lock = threading.Lock()
+
+        def transcribe(path, stats=None):
+            with lock:
+                running[0] += 1
+                peak[0] = max(peak[0], running[0])
+            if gated:
+                gate.acquire(timeout=5)
+            with lock:
+                running[0] -= 1
+            ran.append(os.path.basename(path))
+            if stats is not None:
+                stats["seconds"] = 2.5
+            return "words of " + os.path.basename(path)
+        patches = [mock.patch.object(crow_voice, "file_available", lambda: None),
+                   mock.patch.object(crow_voice, "model_loaded", lambda: loaded),
+                   mock.patch.object(crow_voice, "transcribe_file", transcribe)]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        return ran, peak, gate
+
+    def settled(self, api):
+        for _ in range(250):
+            with api._voice_lock:
+                if not any(v["busy"] for v in api._voice_lanes.values()):
+                    return
+            time.sleep(0.02)
+        self.fail("the lane never went idle")
+
+    def test_partials_are_coalesced_and_the_final_overtakes_them(self):
+        """One running at a time; of the partials waiting behind it only the
+        newest is kept; the final drops the waiting one AND silences the one
+        that was running when it came in. Every clip is deleted."""
+        api = self.mirrored()
+        ran, peak, gate = self.lane(api)
+        clips = {n: self.numbered(n) for n in (1, 2, 3, 4)}
+        api._remote_audio(clips[1], PHONE, seq=1, partial=True)   # starts, waits
+        for _ in range(100):
+            if api._voice_lanes[PHONE]["partial"] is None:
+                break
+            time.sleep(0.01)
+        api._remote_audio(clips[2], PHONE, seq=2, partial=True)   # waits
+        api._remote_audio(clips[3], PHONE, seq=3, partial=True)   # replaces 2
+        self.assertFalse(os.path.exists(clips[2]), "an overtaken partial was kept")
+        api._remote_audio(clips[4], PHONE, seq=4)                 # the final
+        self.assertFalse(os.path.exists(clips[3]), "the final left a partial waiting")
+        for _ in range(2):
+            gate.release()
+        self.settled(api)
+        self.assertEqual(ran, ["clip-1.webm", "clip-4.webm"])
+        self.assertEqual(peak[0], 1, "two transcriptions ran for one phone")
+        heard = [m for m in api._remote.got(PHONE) if m.get("k") == "heard"]
+        self.assertEqual(heard, [{"k": "heard", "seq": 4, "text": "words of clip-4.webm"}])
+        self.assertFalse(any(os.path.exists(c) for c in clips.values()))
+
+    def test_a_partial_after_the_final_is_dropped_and_one_before_is_pushed(self):
+        api = self.mirrored()
+        ran, _peak, _gate = self.lane(api, gated=False)
+        api._remote_audio(self.numbered(7), PHONE, seq=7, partial=True)
+        self.settled(api)
+        api._remote_audio(self.numbered(8), PHONE, seq=8)
+        self.settled(api)
+        late = self.numbered(6)
+        api._remote_audio(late, PHONE, seq=6, partial=True)       # arrived late
+        self.settled(api)
+        self.assertEqual(ran, ["clip-7.webm", "clip-8.webm"])
+        self.assertFalse(os.path.exists(late))
+        heard = [m for m in api._remote.got(PHONE) if m.get("k") == "heard"]
+        self.assertEqual(heard, [
+            {"k": "heard", "partial": True, "seq": 7, "text": "words of clip-7.webm"},
+            {"k": "heard", "seq": 8, "text": "words of clip-8.webm"}])
+
+    def test_the_model_loading_is_said_and_each_final_is_one_log_line(self):
+        api = self.mirrored()
+        self.lane(api, gated=False, loaded=False)
+        logged = []
+        with mock.patch.object(crow_core, "log_note",
+                               lambda text, kind="note": logged.append((kind, text))):
+            api._remote_audio(self.numbered(3), PHONE, seq=3, partial=True)
+            self.settled(api)
+            api._remote_audio(self.numbered(5), PHONE, seq=5)
+            self.settled(api)
+        heard = [m for m in api._remote.got(PHONE) if m.get("k") == "heard"]
+        self.assertEqual(heard[0], {"k": "heard", "loading": True})
+        voice = [t for k, t in logged if k == "voice"]
+        self.assertEqual(len(voice), 1, logged)
+        self.assertRegex(voice[0], r"^phone dictation: 5 bytes, 2\.5 s, transcribe \d+ ms$")
+
+    def test_a_failed_final_is_logged_with_its_error(self):
+        api = self.mirrored()
+        logged = []
+        path = self.numbered(9)
+
+        def broken(p, stats=None):
+            raise RuntimeError("bad clip")
+        with mock.patch.object(crow_voice, "file_available", lambda: None), \
+                mock.patch.object(crow_voice, "model_loaded", lambda: True), \
+                mock.patch.object(crow_voice, "transcribe_file", broken), \
+                mock.patch.object(crow_core, "log_note",
+                                  lambda text, kind="note": logged.append((kind, text))):
+            api._remote_heard(path, PHONE, 9)
+        self.assertEqual(logged, [("voice", logged[0][1])])
+        self.assertRegex(logged[0][1], r"^phone dictation: 9 bytes, 0\.0 s, transcribe \d+ ms, "
+                                       r"dictation failed: bad clip$")
+        self.assertIn({"k": "heard", "seq": 9, "note": "dictation failed: bad clip"},
+                      api._remote.got(PHONE))
+
+
+class RemotePhoneMicTests(unittest.TestCase):
+    """#290 on the page: in a secure context the 🎤 records (tap, tap), shows
+    the level, uploads the clip as kind audio and puts the pushed words into
+    the input without sending; on plain HTTP it keeps the keyboard hint. The
+    desktop's own dictation never lands on the phone."""
+
+    PRELUDE = r"""
+const T = __TEXT__;
+window.CROW_REMOTE_TEXT = T;
+const attached = [], notes = [], sent = [], fetched = [], passed = [], gum = [];
+let focused = false;
+crow.attach = t => attached.push(t); crow.note = t => notes.push(t);
+Object.assign(crow, {__HEARD__});
+crow.on = m => { passed.push(m.k); if(m.k === "heard") crow.heard(m); };
+crow.micState = e => passed.push(["micState", e.state, e.text, e.note]);
+el("in").focus = () => { focused = true; };
+Object.assign(el("in"), {value: "", readOnly: false, dispatchEvent(){}});
+Date.now = () => now;
+let LEVEL = 0.25, frameFn = null;
+// one animation frame per 50 ms of the fake clock, at the given input level
+const frames = (ms, lvl) => { LEVEL = lvl;
+  for(let t = 0; t < ms; t += 50){ now += 50;
+    if(frameFn){ const f = frameFn; frameFn = null; f(); } } };
+globalThis.pywebview = {api: new Proxy({}, {get: (_, n) => (...a) => { sent.push(n); return Promise.resolve(null); }})};
+globalThis.isSecureContext = SECURE;
+const track = {stopped: false, stop(){ this.stopped = true; }};
+Object.defineProperty(globalThis, "navigator", {configurable: true, value: {
+  mediaDevices: SECURE ? {getUserMedia: c => { gum.push(c); return Promise.resolve({getTracks: () => [track]}); }} : undefined}});
+globalThis.MediaRecorder = class { constructor(){ this.state = "inactive"; this.mimeType = "audio/mp4";
+    globalThis.lastRec = this; }
+  start(ms){ this.state = "recording"; this.slice = ms; }
+  stop(){ this.state = "inactive"; this.ondataavailable({data: {size: 5}}); this.onstop(); } };
+globalThis.AudioContext = class { createAnalyser(){ return {fftSize: 0, getFloatTimeDomainData(b){ b.fill(LEVEL); }}; }
+  createMediaStreamSource(){ return {connect(){}}; } resume(){} close(){} };
+globalThis.requestAnimationFrame = f => { frameFn = f; return 1; };
+globalThis.cancelAnimationFrame = () => { frameFn = null; };
+globalThis.Blob = class { constructor(parts, o){ this.size = parts.reduce((n, p) => n + (p.size || 0), 0); this.type = o.type; } };
+globalThis.fetch = (url, o) => { fetched.push([url, o.method, o.headers["Content-Type"], o.body.size, o.credentials]);
+  return Promise.resolve({ok: true, status: 202}); };
+"""
+    PROBE = r"""
+(async () => {
+  const tick = () => new Promise(r => setImmediate(r));
+  const mic = el("mic"), out = {};
+  crow.mic(); await tick(); await tick();
+  out.gum = gum.length; out.rec = mic.classList.contains("rec"); out.lvl = mic.style.m["--lvl"] || null;
+  crow.mic(); await tick(); await tick();
+  out.after = mic.classList.contains("rec"); out.track = track.stopped; out.fetched = fetched;
+  crow.on({k: "heard", text: "Hallo Crow"});
+  crow.on({k: "heard", note: "nothing was said"});
+  crow.micState({k: "mic", state: "off", text: "from the desktop", note: "desk note"});
+  crow.on({k: "text", t: "x"});
+  out.attached = attached; out.notes = notes; out.sent = sent; out.passed = passed;
+  out.focused = focused; out.hint = el("hint").textContent || ""; out.title = mic.title;
+  out.field = el("in").value;
+  console.log(JSON.stringify(out));
+})();
+"""
+    # #290 SCOPE AMENDMENT: partials, auto-stop on silence, the states, and
+    # (robin, 2026-09-24 ~23:30) the stop square and append-never-replace.
+    LIVE = r"""
+(async () => {
+  const tick = () => new Promise(r => setImmediate(r));
+  const mic = el("mic"), field = el("in"), hint = () => el("hint").textContent || "";
+  const out = {steps: []};
+  const step = name => out.steps.push([name, field.value, field.classList.contains("partial"),
+    field.readOnly, mic.classList.contains("rec"), !!mic.disabled, hint(),
+    lastRec ? lastRec.state : null]);
+  field.value = "Notiz:";                                    // typed before
+  crow.mic(); await tick(); await tick();
+  out.slice = lastRec.slice; step("listening");
+  lastRec.ondataavailable({data: {size: 3}});                // 1.5 s of audio
+  lastRec.ondataavailable({data: {size: 4}});                // 3 s
+  crow.on({k: "heard", partial: true, seq: 2, text: "Hallo"});
+  step("partial");
+  crow.on({k: "heard", partial: true, seq: 1, text: "Hal"});   // older: ignored
+  step("older partial");
+  crow.on({k: "heard", loading: true}); step("loading");
+  frames(400, 0.3);                                          // speech
+  frames(1900, 0.001); step("1.9 s of silence");
+  frames(200, 0.001); await tick(); step("2.1 s of silence");
+  crow.on({k: "heard", partial: true, seq: 3, text: "Hallo Cr"});   // after the stop
+  step("partial after the stop");
+  crow.on({k: "heard", seq: 3, text: "Hallo Crow"}); step("final");
+  // the second one appends to the first, and silence BEFORE speech stops nothing
+  crow.mic(); await tick(); await tick();
+  frames(3000, 0.001); step("second, 3 s quiet before speaking");
+  lastRec.ondataavailable({data: {size: 5}});
+  crow.on({k: "heard", partial: true, seq: 5, text: "und mehr"}); step("second partial");
+  crow.mic(); await tick(); step("tapped stop");
+  crow.on({k: "heard", seq: 6, text: "und mehr."}); step("second final");
+  // a field that already ends in whitespace gets no second space
+  field.value += "\n";
+  crow.mic(); await tick(); await tick(); crow.mic(); await tick();
+  crow.on({k: "heard", seq: 7, text: "Ende"}); step("third final");
+  // a failed final: the partial goes, the typed text stays, the phone says why
+  crow.mic(); await tick(); await tick();
+  lastRec.ondataavailable({data: {size: 2}});
+  crow.on({k: "heard", partial: true, seq: 9, text: "weg"});
+  crow.mic(); await tick();
+  crow.on({k: "heard", seq: 10, note: "dictation failed: bad clip"}); step("failed final");
+  out.fetched = fetched.map(f => [f[0], f[3]]); out.notes = notes; out.sent = sent;
+  out.attached = attached;
+  console.log(JSON.stringify(out));
+})();
+"""
+
+    @staticmethod
+    def heard_method() -> str:
+        """The page's own `heard(e){...}` -- the case the window's push reaches."""
+        found = re.search(r"\n  (heard\(e\)\{[^\n]*\}),\n", crow_gui.PAGE)
+        # none: an empty one, so the behaviour below is what fails, not this
+        return found.group(1) if found else "heard(e){}"
+
+    def run_mic(self, secure: bool, probe: "str | None" = None) -> dict:
+        node = _node()
+        if not node:
+            self.skipTest("no node on this machine")
+        import subprocess
+        layer = RemotePhoneLayerTests
+        js = ("globalThis.SECURE = %s;\n" % ("true" if secure else "false")
+              + layer.FAKE_DOM
+              + self.PRELUDE.replace("__TEXT__", json.dumps(crow_core.REMOTE_PHONE_TEXT))
+                            .replace("__HEARD__", self.heard_method())
+              + crow_gui.REMOTE_JS + (probe or self.PROBE))
+        done = subprocess.run([node, "-e", js], capture_output=True, text=True,
+                              encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout.strip().splitlines()[-1])
+
+    def test_https_records_uploads_and_fills_the_input_without_sending(self):
+        out = self.run_mic(True)
+        self.assertEqual(out["gum"], 1, "no recording was started")
+        self.assertTrue(out["rec"])
+        self.assertEqual(out["lvl"], "1.00", "no level on the ring")
+        self.assertFalse(out["after"])
+        self.assertTrue(out["track"], "the microphone stayed open")
+        self.assertEqual(out["fetched"], [["/upload?kind=audio&seq=1", "POST", "audio/mp4", 5,
+                                           "same-origin"]])
+        self.assertEqual(out["field"], "Hallo Crow")
+        self.assertEqual(out["notes"], ["nothing was said"])
+        self.assertNotIn("send", out["sent"])
+        self.assertNotIn("dictate_start", out["sent"])
+        # the desktop's dictation: its state and words stay on the desktop
+        self.assertIn(["micState", "off", "", ""], out["passed"])
+        self.assertNotIn("from the desktop", out["attached"])
+        self.assertIn('case "heard": this.heard(e); break;', crow_gui.PAGE)
+
+    def test_partials_silence_states_and_two_dictations_append(self):
+        """#290 scope amendment, live on robin's phone 2026-09-24: the ring
+        moved and nothing arrived, because the second tap was not obvious.
+        Now: greyed partial words after the typed text, a stop square while
+        recording, auto-stop 2 s after speech, "writing ..." until the final,
+        which replaces only the partial -- and the next dictation appends."""
+        out = self.run_mic(True, self.LIVE)
+        T = crow_core.REMOTE_PHONE_TEXT
+        steps = {s[0]: s[1:] for s in out["steps"]}
+        # (field, greyed, read-only, stop square, button disabled, hint, recorder)
+        self.assertEqual(out["slice"], 1500)
+        self.assertEqual(steps["listening"],
+                         ["Notiz:", False, True, True, False, T["miclisten"], "recording"])
+        self.assertEqual(steps["partial"],
+                         ["Notiz: Hallo", True, True, True, False, T["miclisten"], "recording"])
+        self.assertEqual(steps["older partial"][0], "Notiz: Hallo")
+        self.assertEqual(steps["loading"][5], T["micload"])
+        self.assertEqual(steps["1.9 s of silence"][6], "recording")
+        self.assertEqual(steps["2.1 s of silence"],
+                         ["Notiz: Hallo", True, True, False, True, T["micwrite"], "inactive"])
+        self.assertEqual(steps["partial after the stop"][0], "Notiz: Hallo")
+        self.assertEqual(steps["final"],
+                         ["Notiz: Hallo Crow", False, False, False, False, "", "inactive"])
+        self.assertEqual(steps["second, 3 s quiet before speaking"][6], "recording",
+                         "silence before any speech stopped the recording")
+        self.assertEqual(steps["second partial"][0], "Notiz: Hallo Crow und mehr")
+        self.assertEqual(steps["tapped stop"][5], T["micwrite"])
+        self.assertEqual(steps["second final"],
+                         ["Notiz: Hallo Crow und mehr.", False, False, False, False, "",
+                          "inactive"])
+        self.assertEqual(steps["third final"][0], "Notiz: Hallo Crow und mehr.\nEnde")
+        self.assertEqual(steps["failed final"][:3],
+                         ["Notiz: Hallo Crow und mehr.\nEnde", False, False])
+        self.assertEqual(out["notes"], ["dictation failed: bad clip"])
+        self.assertEqual(out["fetched"], [
+            ["/upload?kind=audio&partial=1&seq=1", 3],
+            ["/upload?kind=audio&partial=1&seq=2", 7],
+            ["/upload?kind=audio&seq=3", 12],
+            ["/upload?kind=audio&partial=1&seq=4", 5],
+            ["/upload?kind=audio&seq=5", 10],
+            ["/upload?kind=audio&seq=6", 5],
+            ["/upload?kind=audio&partial=1&seq=7", 2],
+            ["/upload?kind=audio&seq=8", 7]])
+        self.assertNotIn("send", out["sent"])
+        self.assertEqual(out["attached"], [])
+
+    def test_the_button_is_a_stop_square_while_it_records(self):
+        """robin, 2026-09-24: the microphone turns into a filled square while
+        recording -- currentColor, so both themes -- and keeps the ring and
+        the 44 px target."""
+        css = crow_gui.REMOTE_CSS
+        self.assertIn("#mic.rec svg{display:none}", css)
+        self.assertRegex(css, r'#mic\.rec::after\{content:"";[^}]*background:currentColor')
+        self.assertRegex(css, r"#remoteattach,#mic\{width:var\(--tap\);height:var\(--tap\)")
+        self.assertIn("#in.partial{color:var(--dim)}", css)
+
+    def test_plain_http_keeps_the_keyboard_hint(self):
+        out = self.run_mic(False)
+        self.assertEqual(out["gum"], 0)
+        self.assertEqual(out["fetched"], [])
+        self.assertTrue(out["focused"])
+        self.assertEqual(out["hint"], crow_core.REMOTE_PHONE_TEXT["dictate"])
+        self.assertIn("HTTPS (Tailscale)", out["hint"])
+        self.assertEqual(out["title"], "dictate: opens the keyboard")
 
 
 if __name__ == "__main__":

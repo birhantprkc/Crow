@@ -52,6 +52,8 @@
 #   curl -fsSL <raw>/install.sh | bash   no checkout: fetch CROW_REF (main)
 #   bash install.sh --models DIR         where the GGUFs live (linked, see below)
 #   bash install.sh --voice              also faster-whisper + sounddevice
+#   bash install.sh --tailscale          also the phone over HTTPS: what is missing
+#                                        for Tailscale, as commands (never sudo)
 #   bash install.sh --build-engine       build llama-server now (~20 min)
 #   bash install.sh --selftest           check this script, install nothing
 #
@@ -320,6 +322,155 @@ manifest_changes() {
          END { printf "%d %d\n", added + 0, changed + 0 }' "$1" "$2"
 }
 
+# --- Tailscale (--tailscale, #249 stage 5): READ, PRINT, NEVER RUN ----------
+# The phone's HTTPS address is `tailscale serve` in front of the mirror's
+# loopback listener. Every step that changes something needs root, and this
+# script never asks for a root password (see the head of the file), so
+# --tailscale only READS where this machine stands and prints the steps that
+# are still missing -- in order, each one exactly once. The reading is
+# crow_remote.tailscale_state, the same function the Remote dialog uses, so
+# the installer and the dialog cannot disagree about which step comes next.
+# Its only calls are `tailscale status --json` and `tailscale serve status
+# --json`, neither of which needs sudo.
+TAILSCALE_ADMIN_DNS="https://login.tailscale.com/admin/dns"
+TAILSCALE_KB_LINUX="https://tailscale.com/kb/1031/install-linux"
+TAILSCALE_DOWNLOAD="https://tailscale.com/download"
+TAILSCALE_IOS="https://apps.apple.com/app/tailscale/id1470499037"
+TAILSCALE_ANDROID="https://play.google.com/store/apps/details?id=com.tailscale.ipn"
+REMOTE_PORT_DEFAULT=8765     # crow_core.REMOTE_PORT_DEFAULT
+
+# The install line for this distribution, from an os-release file. Arch and
+# everything that says it is like Arch (Omarchy, EndeavourOS, CachyOS, Manjaro)
+# takes the package from `extra`; everything else takes Tailscale's own script,
+# which kb/1031 names for Debian, Ubuntu, Fedora and the rest.
+tailscale_install_line() {
+    local ids=""
+    # os-release is shell syntax by specification; read in a subshell so its
+    # variables never reach this script.
+    [ -f "$1" ] && ids="$( (. "$1" >/dev/null 2>&1; printf '%s %s' "${ID:-}" "${ID_LIKE:-}") )"
+    case " $ids " in
+        *" arch "*) printf 'sudo pacman -S tailscale\n' ;;
+        *)          printf 'curl -fsSL https://tailscale.com/install.sh | sh\n' ;;
+    esac
+}
+
+# remote_port out of settings.json, with crow_gui.remote_port_setting's rule:
+# an int in 1024-65535 (not a bool), else the default.
+remote_port_of() {
+    local port=""
+    if [ -n "$PY" ] && [ -f "$1" ]; then
+        port="$("$PY" - "$1" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    v = json.load(open(sys.argv[1], encoding="utf-8")).get("remote_port")
+except Exception:
+    v = None
+ok = isinstance(v, int) and not isinstance(v, bool) and 1024 <= v <= 65535
+print(v if ok else "")
+PYEOF
+)"
+    fi
+    printf '%s\n' "${port:-$REMOTE_PORT_DEFAULT}"
+}
+
+# "<state> <name> <phone>" -- the state is crow_remote.tailscale_state's
+# (missing, down, https-off, serve-missing, funnel, ready), <name> the ts.net
+# name or "-", <phone> 1 when an iOS or Android device is already in the
+# tailnet. Without python or the module: "missing - 0" when there is no
+# tailscale on PATH, else "unknown - 0", which prints every step after the
+# install.
+tailscale_probe() {
+    local cli="$1" port="$2"
+    local fallback="unknown - 0"
+    command -v tailscale >/dev/null 2>&1 || fallback="missing - 0"
+    [ -n "$PY" ] && [ -f "$cli/crow_remote.py" ] || { printf '%s\n' "$fallback"; return 0; }
+    "$PY" - "$cli" "$port" <<'PYEOF' 2>/dev/null || printf '%s\n' "$fallback"
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import crow_remote
+seen = {}
+def run(argv):
+    code, out = crow_remote._tailscale_run(argv)
+    if argv[1:] == ["status", "--json"] and code == 0:
+        seen["status"] = out
+    return code, out
+st = crow_remote.tailscale_state(int(sys.argv[2]), run=run)
+phone = 0
+try:
+    peers = (json.loads(seen.get("status") or "{}").get("Peer") or {}).values()
+    phone = int(any(str(p.get("OS", "")).lower() in ("ios", "android") for p in peers))
+except Exception:
+    pass
+print(st["state"], st["name"] or "-", phone)
+PYEOF
+}
+
+# The steps still missing, one `cmd`/`note` per line, for a state. Pure: the
+# state, the install line, the port, the name and the phone bit in, text out.
+tailscale_steps() {
+    local state="$1" install="$2" port="$3" name="$4" phone="$5" n=0
+    local serve="sudo tailscale serve --bg --https=443 http://127.0.0.1:$port"
+    say() { n=$((n + 1)); printf '  %d. %s\n' "$n" "$1"; }
+    case "$state" in
+        missing)
+            say "install Tailscale ($TAILSCALE_KB_LINUX):"
+            cmd "$install" ;;
+    esac
+    case "$state" in
+        missing|down|unknown)
+            say "start the daemon at every boot, then log in (prints a login URL):"
+            cmd "sudo systemctl enable --now tailscaled"
+            cmd "sudo tailscale up" ;;
+    esac
+    case "$state" in
+        missing|down|unknown|https-off)
+            say "admin console -> DNS -> HTTPS Certificates -> Enable HTTPS:"
+            cmd "$TAILSCALE_ADMIN_DNS" ;;
+    esac
+    case "$state" in
+        missing|down|unknown|https-off|serve-missing)
+            say "the one-time serve command (survives reboots, renews its certificate):"
+            cmd "$serve" ;;
+        funnel)
+            say "Funnel is on for $name:443 -- public on the internet. Crow refuses it; turn it off:"
+            cmd "sudo tailscale funnel --https=443 off" ;;
+    esac
+    if [ "$phone" != 1 ]; then
+        say "the phone: install Tailscale, log in with the SAME account:"
+        cmd "iPhone   $TAILSCALE_IOS"
+        cmd "Android  $TAILSCALE_ANDROID"
+    fi
+    if [ "$state" = ready ]; then
+        say "done: in Crow, /remote on -> Remote dialog -> HTTPS, then scan the QR:"
+        cmd "https://$name/"
+    else
+        say "then in Crow: /remote on -> Remote dialog -> HTTPS, then scan the QR"
+    fi
+}
+
+tailscale_screen() {
+    local cli="$1" port probe state name phone
+    port="$(remote_port_of "${XDG_CONFIG_HOME:-$HOME/.config}/crow/settings.json")"
+    probe="$(tailscale_probe "$cli" "$port")"
+    read -r state name phone <<< "$probe"
+    printf '\n  %sTailscale -- the phone from anywhere, over HTTPS%s (--tailscale)\n' "$B" "$Z"
+    case "$state" in
+        missing)       note "tailscale is not installed" ;;
+        down)          note "tailscale is installed but not running or not logged in" ;;
+        https-off)     note "logged in as $name; HTTPS certificates are off for this tailnet" ;;
+        serve-missing) note "logged in as $name, HTTPS on; nothing serves :443 -> 127.0.0.1:$port yet" ;;
+        funnel)        note "logged in as $name; Funnel is on for :443" ;;
+        ready)         note "ready: https://$name/ -> 127.0.0.1:$port" ;;
+        *)             note "state not readable here; the full list follows" ;;
+    esac
+    note "this script never runs sudo -- the lines below are yours to type:"
+    printf '\n'
+    tailscale_steps "$state" "$(tailscale_install_line /etc/os-release)" "$port" "$name" "$phone"
+    printf '\n'
+    note "all platforms: $TAILSCALE_DOWNLOAD"
+    note "the whole setup: https://github.com/$REPO_SLUG/blob/main/docs/user-guide/remote-tailscale.md"
+}
+
 # ---------------------------------------------------------------------------
 # Selftest -- checks that must pass and checks that must fail. Downloads
 # nothing, writes only into its own temp directory.
@@ -503,6 +654,94 @@ selftest() {
     check "NEGATIVE: an env file with a line of the user's own is kept, and named" \
           "$([ -f "$CROW_HOME/env" ] && grep -q MY_OWN_KEY "$CROW_HOME/env" \
              && printf '%s' "$out" | grep -q 'left alone' && echo 0 || echo 1)" "$out"
+
+    # --tailscale (#249 stage 5). The distro line, the port, and the probe
+    # against a FAKE `tailscale` on a PATH that holds nothing else -- the real
+    # CLI is never called from here, and neither is sudo. The fake logs every
+    # argv it is given, so "reads only" is checked rather than claimed.
+    printf 'ID=arch\n' > "$tmp/os-arch"
+    printf 'ID=cachyos\nID_LIKE=arch\n' > "$tmp/os-cachy"
+    printf 'ID=ubuntu\nID_LIKE=debian\n' > "$tmp/os-ubuntu"
+    printf 'ID=fedora\n' > "$tmp/os-fedora"
+    check "tailscale install line: Arch and Arch-likes use pacman" \
+          "$([ "$(tailscale_install_line "$tmp/os-arch")" = "sudo pacman -S tailscale" ] \
+             && [ "$(tailscale_install_line "$tmp/os-cachy")" = "sudo pacman -S tailscale" ] && echo 0 || echo 1)" \
+          "$(tailscale_install_line "$tmp/os-arch") | $(tailscale_install_line "$tmp/os-cachy")"
+    check "tailscale install line: Debian/Ubuntu/Fedora and unknown use kb/1031's script" \
+          "$(for f in os-ubuntu os-fedora os-none; do
+                 [ "$(tailscale_install_line "$tmp/$f")" = "curl -fsSL https://tailscale.com/install.sh | sh" ] || { echo 1; exit; }
+             done; echo 0)" "$(tailscale_install_line "$tmp/os-ubuntu")"
+    printf '{"remote_port": 9123}\n' > "$tmp/s-port.json"
+    printf '{"remote_port": true}\n' > "$tmp/s-bool.json"
+    printf '{"remote_port": 80}\n'   > "$tmp/s-low.json"
+    check "remote_port is read from settings.json; bool, <1024 and no file fall back to 8765" \
+          "$([ "$(remote_port_of "$tmp/s-port.json")" = 9123 ] && [ "$(remote_port_of "$tmp/s-bool.json")" = 8765 ] \
+             && [ "$(remote_port_of "$tmp/s-low.json")" = 8765 ] && [ "$(remote_port_of "$tmp/none.json")" = 8765 ] \
+             && echo 0 || echo 1)" \
+          "$(remote_port_of "$tmp/s-port.json")/$(remote_port_of "$tmp/s-bool.json")/$(remote_port_of "$tmp/s-low.json")"
+
+    if [ -n "$REPO" ] && [ -n "$PY" ]; then
+        mkdir -p "$tmp/ts/bin" "$tmp/ts/empty"
+        # #!/bin/sh and absolute paths: the fake runs with only its own
+        # directory on PATH.
+        cat > "$tmp/ts/bin/tailscale" <<'FAKE'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_TS/argv.log"
+case "$*" in
+    "status --json")       [ -f "$FAKE_TS/status.json" ] || exit 1; exec /bin/cat "$FAKE_TS/status.json" ;;
+    "serve status --json") [ -f "$FAKE_TS/serve.json" ]  || exit 1; exec /bin/cat "$FAKE_TS/serve.json" ;;
+esac
+exit 99
+FAKE
+        chmod +x "$tmp/ts/bin/tailscale"
+        local name="pc.tail1234.ts.net" probe
+        ts_probe() { FAKE_TS="$tmp/ts" PATH="$1" tailscale_probe "$REPO/cli" 8765; }
+
+        probe="$(ts_probe "$tmp/ts/empty")"
+        check "tailscale probe: nothing on PATH reads 'missing'" \
+              "$([ "$probe" = "missing - 0" ] && echo 0 || echo 1)" "$probe"
+        rm -f "$tmp/ts/status.json" "$tmp/ts/serve.json"
+        probe="$(ts_probe "$tmp/ts/bin")"
+        check "tailscale probe: a daemon that answers nothing reads 'down'" \
+              "$([ "$probe" = "down - 0" ] && echo 0 || echo 1)" "$probe"
+        printf '{"BackendState":"Running","Self":{"DNSName":"%s.","TailscaleIPs":["100.64.0.1"]},"CertDomains":[],"Peer":{}}\n' \
+               "$name" > "$tmp/ts/status.json"
+        probe="$(ts_probe "$tmp/ts/bin")"
+        check "tailscale probe: logged in without CertDomains reads 'https-off'" \
+              "$([ "$probe" = "https-off $name 0" ] && echo 0 || echo 1)" "$probe"
+        printf '{"BackendState":"Running","Self":{"DNSName":"%s.","TailscaleIPs":["100.64.0.1"]},"CertDomains":["%s"],"Peer":{"k":{"OS":"iOS"}}}\n' \
+               "$name" "$name" > "$tmp/ts/status.json"
+        printf '{}\n' > "$tmp/ts/serve.json"
+        probe="$(ts_probe "$tmp/ts/bin")"
+        check "tailscale probe: HTTPS on, no serve reads 'serve-missing', and sees the iPhone" \
+              "$([ "$probe" = "serve-missing $name 1" ] && echo 0 || echo 1)" "$probe"
+        printf '{"Web":{"%s:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8765"}}}}}\n' "$name" > "$tmp/ts/serve.json"
+        probe="$(ts_probe "$tmp/ts/bin")"
+        check "tailscale probe: serve pointing at 127.0.0.1:8765 reads 'ready'" \
+              "$([ "$probe" = "ready $name 1" ] && echo 0 || echo 1)" "$probe"
+        check "NEGATIVE: the probe ran nothing but 'status --json' and 'serve status --json'" \
+              "$(sort -u "$tmp/ts/argv.log" | grep -vxE 'status --json|serve status --json' >/dev/null && echo 1 || echo 0)" \
+              "$(sort -u "$tmp/ts/argv.log" | tr '\n' ';')"
+    fi
+
+    out="$(tailscale_steps missing "sudo pacman -S tailscale" 8765 - 0)"
+    check "tailscale steps from 'missing': install, daemon, login, HTTPS, serve, phone, in that order" \
+          "$(printf '%s' "$out" | awk '
+               /sudo pacman -S tailscale/ && !a {a=NR} /systemctl enable --now tailscaled/ && !b {b=NR}
+               /sudo tailscale up/ && !c {c=NR} /admin\/dns/ && !d {d=NR}
+               /tailscale serve --bg --https=443 http:\/\/127.0.0.1:8765/ && !e {e=NR} /id1470499037/ && !f {f=NR}
+               END { exit !(a && a<b && b<c && c<d && d<e && e<f) }' && echo 0 || echo 1)" "$out"
+    out="$(tailscale_steps serve-missing "x" 9123 pc.t.ts.net 1)"
+    check "tailscale steps from 'serve-missing': only serve, on the configured port" \
+          "$(printf '%s' "$out" | grep -q 'http://127.0.0.1:9123' \
+             && ! printf '%s' "$out" | grep -qE 'tailscale up|systemctl|admin/dns|pacman|apps.apple' && echo 0 || echo 1)" "$out"
+    out="$(tailscale_steps ready "x" 8765 pc.t.ts.net 1)"
+    check "NEGATIVE: 'ready' with a phone prints no command to type, only the address" \
+          "$(printf '%s' "$out" | grep -q 'sudo' && echo 1 \
+             || { printf '%s' "$out" | grep -q 'https://pc.t.ts.net/' && echo 0 || echo 1; })" "$out"
+    [ -n "$REPO" ] && check "NEGATIVE: the --tailscale code path never runs sudo, it only prints it" \
+          "$(sed -n '/^tailscale_install_line()/,/^# ---.*$/p' "$REPO/install.sh" \
+             | grep -vE '^\s*#|printf|cmd |note |serve=|say ' | grep -q 'sudo' && echo 1 || echo 0)"
 
     printf '\n%s%d checks, %d failed%s\n' "$B" "$((pass + fail))" "$fail" "$Z"
     [ "$fail" -eq 0 ] || return 1
@@ -1047,6 +1286,7 @@ final_screen() {
     fi
     printf '\n'
     note "The terminal client needs nothing but Python:  $PY $CROW_HOME/cli/crow.py"
+    [ "$WITH_TAILSCALE" = 1 ] || note "The phone from anywhere (HTTPS, Tailscale): re-run with --tailscale"
     note "The Linux page -- paths, the float rule, the escape hatches, troubleshooting:"
     note "https://github.com/$REPO_SLUG/blob/main/docs/user-guide/linux.md"
     printf '\n'
@@ -1075,6 +1315,7 @@ CROW_HOME="${CROW_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/crow}"
 CROW_REF="${CROW_REF:-main}"
 BUILD_ENGINE="${CROW_BUILD_ENGINE:-0}"
 WITH_VOICE=0
+WITH_TAILSCALE=0
 WITH_DESKTOP=1
 WITH_ENGINE=1
 MODELS_ARG=""
@@ -1092,6 +1333,7 @@ while [ $# -gt 0 ]; do
         --models)       MODELS_ARG="$2"; shift 2 ;;
         --ref)          CROW_REF="$2"; shift 2 ;;
         --voice)        WITH_VOICE=1; shift ;;
+        --tailscale)    WITH_TAILSCALE=1; shift ;;
         --build-engine) BUILD_ENGINE=1; shift ;;
         --no-engine)    WITH_ENGINE=0; shift ;;
         --no-desktop)   WITH_DESKTOP=0; shift ;;
@@ -1147,6 +1389,10 @@ install_desktop
 install_hyprland
 
 final_screen
+if [ "$WITH_TAILSCALE" = 1 ]; then
+    tailscale_screen "$CROW_HOME/cli"
+    printf '\n'
+fi
 
 [ -n "$SOURCE_TMP" ] && rm -rf "$SOURCE_TMP"
 exit 0

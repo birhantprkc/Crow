@@ -33,6 +33,14 @@ start lines, the terminal client first. Neither is started here.
 Run the checks against synthetic inputs, including ones that must fail, and exit.
 Downloads nothing.
 
+.PARAMETER Tailscale
+Print what is still missing for the phone's HTTPS address over Tailscale
+(install with winget, log in, Enable HTTPS in the admin console, the one-time
+`tailscale serve` line for an elevated shell, the phone app) and exit. Reads
+`tailscale status --json` and `tailscale serve status --json` only; installs,
+downloads and elevates nothing. From the one-liner:
+    &([scriptblock]::Create((irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1))) -Tailscale
+
 .PARAMETER NoPause
 Do not wait for ENTER at the end. The wait exists so the last screen -- the model
 to fetch and the two commands to run -- is still there to read; a script driving
@@ -50,12 +58,13 @@ A local package is never deleted afterwards; a downloaded one is.
 #>
 [CmdletBinding()]
 param(
-    [string] $Version   = "2.5.0",
+    [string] $Version   = "2.6.0",
     [string] $InstallTo = "$env:LOCALAPPDATA\Crow",
     [string] $SourceUrl = "",
     [switch] $Force,
     [switch] $NoPause,
-    [switch] $Selftest
+    [switch] $Selftest,
+    [switch] $Tailscale
 )
 
 $ErrorActionPreference = "Stop"
@@ -868,6 +877,188 @@ function Remove-StaleOld {
 
 
 # ---------------------------------------------------------------------------
+# Tailscale (-Tailscale, #249 stage 5): read, print, never run
+# ---------------------------------------------------------------------------
+# The phone's HTTPS address is `tailscale serve` in front of the mirror's
+# loopback listener. This script never elevates, so -Tailscale only READS where
+# this machine stands -- `tailscale status --json` and `tailscale serve status
+# --json`, the same two calls and the same state table as
+# cli\crow_remote.py:tailscale_state, which the Remote dialog uses -- and
+# prints the steps that are still missing, in order, each one once. It installs
+# nothing and downloads nothing, so it runs on an installed machine without
+# fetching the package again.
+#
+# The winget id is Tailscale.Tailscale, checked 2026-09-24 against
+# microsoft/winget-pkgs (manifests/t/Tailscale/Tailscale, 1.102.4, the
+# tailscale-setup-full .exe from pkgs.tailscale.com). kb/1022 itself names only
+# the .exe and .msi installers. The package is machine-scope, so winget asks
+# for elevation itself; this script does not.
+
+$TAILSCALE_WINGET   = "winget install --id Tailscale.Tailscale -e"
+$TAILSCALE_KB_WIN   = "https://tailscale.com/kb/1022/install-windows"
+$TAILSCALE_DOWNLOAD = "https://tailscale.com/download"
+$TAILSCALE_ADMIN    = "https://login.tailscale.com/admin/dns"
+$TAILSCALE_IOS      = "https://apps.apple.com/app/tailscale/id1470499037"
+$TAILSCALE_ANDROID  = "https://play.google.com/store/apps/details?id=com.tailscale.ipn"
+$REMOTE_PORT_DEFAULT = 8765   # crow_core.REMOTE_PORT_DEFAULT
+
+function Get-JsonProp {
+    param($Obj, [string] $Name)
+    if ($null -eq $Obj -or -not $Obj.PSObject) { return $null }
+    $p = $Obj.PSObject.Properties[$Name]
+    if ($p) { return $p.Value }
+    return $null
+}
+
+function Get-RemotePort {
+    <# remote_port out of settings.json, with crow_gui.remote_port_setting's
+    rule: an integer in 1024-65535 (never a bool), else 8765. #>
+    param([string] $SettingsPath)
+    try {
+        $s = Get-Content -LiteralPath $SettingsPath -Raw -ErrorAction Stop | ConvertFrom-Json
+    } catch { return $REMOTE_PORT_DEFAULT }
+    $v = Get-JsonProp $s "remote_port"
+    if (($v -is [int] -or $v -is [long]) -and $v -ge 1024 -and $v -le 65535) { return [int] $v }
+    return $REMOTE_PORT_DEFAULT
+}
+
+function Invoke-TailscaleRead {
+    <# The real seam: one call, 3 s at most (crow_remote.TAILSCALE_TIMEOUT), so
+    a hung daemon cannot hang the installer. Returns @{ Code; Out }. #>
+    param([string[]] $Argv)
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $Argv[0]
+        $psi.Arguments = ($Argv[1..($Argv.Count - 1)] -join ' ')
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError  = $true
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow  = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $stdout = $p.StandardOutput.ReadToEndAsync()
+        $null = $p.StandardError.ReadToEndAsync()
+        if (-not $p.WaitForExit(3000)) {
+            try { $p.Kill() } catch { }
+            return @{ Code = 1; Out = "" }
+        }
+        return @{ Code = $p.ExitCode; Out = $stdout.Result }
+    } catch {
+        return @{ Code = 1; Out = "" }
+    }
+}
+
+function Get-TailscaleState {
+    <# @{ State; Name; Phone } -- State is crow_remote.tailscale_state's:
+    missing, down, https-off, serve-missing, funnel, ready. Phone is $true when
+    an iOS or Android device is already in the tailnet. $Run is the seam the
+    selftest fills with a fake; it is only ever given the two read calls. #>
+    param([int] $Port, [string] $Exe, [scriptblock] $Run = { param($a) Invoke-TailscaleRead $a })
+    $out = [pscustomobject]@{ State = "missing"; Name = ""; Phone = $false }
+    if (-not $Exe) { return $out }
+    $out.State = "down"
+    $read = {
+        param([string[]] $a)
+        try { $r = & $Run $a } catch { return $null }
+        if (-not $r -or $r.Code -ne 0) { return $null }
+        try { return ($r.Out | ConvertFrom-Json) } catch { return $null }
+    }
+    $st = & $read @($Exe, "status", "--json")
+    if (-not $st) { return $out }
+    $peers = Get-JsonProp $st "Peer"
+    if ($peers) {
+        foreach ($p in $peers.PSObject.Properties) {
+            if (@("ios", "android") -contains ("" + (Get-JsonProp $p.Value "OS")).ToLower()) { $out.Phone = $true }
+        }
+    }
+    $name = ("" + (Get-JsonProp (Get-JsonProp $st "Self") "DNSName")).Trim().TrimEnd('.').ToLower()
+    if ((Get-JsonProp $st "BackendState") -ne "Running" -or -not $name) { return $out }
+    $out.Name = $name
+    $certs = @(Get-JsonProp $st "CertDomains" | ForEach-Object { ("" + $_).TrimEnd('.').ToLower() })
+    if ($certs -notcontains $name) { $out.State = "https-off"; return $out }
+    $sv  = & $read @($Exe, "serve", "status", "--json")
+    $key = $name + ":443"
+    if ((Get-JsonProp (Get-JsonProp $sv "AllowFunnel") $key) -eq $true) { $out.State = "funnel"; return $out }
+    $root  = Get-JsonProp (Get-JsonProp (Get-JsonProp (Get-JsonProp $sv "Web") $key) "Handlers") "/"
+    $proxy = ("" + (Get-JsonProp $root "Proxy")).TrimEnd('/').ToLower()
+    $want  = foreach ($s in @("http://", "")) { foreach ($h in @("127.0.0.1", "localhost")) { "$s${h}:$Port" } }
+    $out.State = if ($want -contains $proxy) { "ready" } else { "serve-missing" }
+    return $out
+}
+
+function Get-TailscaleSteps {
+    <# The missing steps for a state, as @{ Kind = 'step'|'cmd'; Text }. Pure. #>
+    param([string] $State, [int] $Port, [string] $Name = "", [bool] $Phone = $false)
+    $l = New-Object System.Collections.Generic.List[object]
+    $step = { param($t) $script:tsN++; $l.Add([pscustomobject]@{ Kind = 'step'; Text = "$($script:tsN). $t" }) }
+    $cmd  = { param($t) $l.Add([pscustomobject]@{ Kind = 'cmd'; Text = $t }) }
+    $script:tsN = 0
+    if ($State -eq "missing") {
+        & $step "install Tailscale (winget asks for elevation itself; or the installer from $TAILSCALE_KB_WIN):"
+        & $cmd  $TAILSCALE_WINGET
+    }
+    if (@("missing", "down", "unknown") -contains $State) {
+        & $step "log in: tray icon -> Log in, or in a terminal (prints a login URL):"
+        & $cmd  "tailscale up"
+    }
+    if (@("missing", "down", "unknown", "https-off") -contains $State) {
+        & $step "admin console -> DNS -> HTTPS Certificates -> Enable HTTPS:"
+        & $cmd  $TAILSCALE_ADMIN
+    }
+    if (@("missing", "down", "unknown", "https-off", "serve-missing") -contains $State) {
+        & $step "the one-time serve command, in an ELEVATED PowerShell (Run as administrator):"
+        & $cmd  "tailscale serve --bg --https=443 http://127.0.0.1:$Port"
+    }
+    if ($State -eq "funnel") {
+        & $step "Funnel is on for ${Name}:443 -- public on the internet. Crow refuses it; in an elevated PowerShell:"
+        & $cmd  "tailscale funnel --https=443 off"
+    }
+    if (-not $Phone) {
+        & $step "the phone: install Tailscale, log in with the SAME account:"
+        & $cmd  "iPhone   $TAILSCALE_IOS"
+        & $cmd  "Android  $TAILSCALE_ANDROID"
+    }
+    if ($State -eq "ready") {
+        & $step "done: in Crow, /remote on -> Remote dialog -> HTTPS, then scan the QR:"
+        & $cmd  "https://$Name/"
+    } else {
+        & $step "then in Crow: /remote on -> Remote dialog -> HTTPS, then scan the QR"
+    }
+    return $l.ToArray()
+}
+
+function Show-TailscaleSteps {
+    $port = Get-RemotePort (Join-Path $InstallTo "settings.json")
+    $exe  = (Get-Command tailscale -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+    if (-not $exe -and $env:ProgramFiles -and (Test-Path -LiteralPath (Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"))) {
+        $exe = Join-Path $env:ProgramFiles "Tailscale\tailscale.exe"
+    }
+    $ts = Get-TailscaleState -Port $port -Exe $exe
+    $global:LASTEXITCODE = 0
+    Write-Host ""
+    Write-Host "  Tailscale -- the phone from anywhere, over HTTPS (-Tailscale)" -ForegroundColor Cyan
+    $said = switch ($ts.State) {
+        "missing"       { "tailscale is not installed" }
+        "down"          { "tailscale is installed but not running or not logged in" }
+        "https-off"     { "logged in as $($ts.Name); HTTPS certificates are off for this tailnet" }
+        "serve-missing" { "logged in as $($ts.Name), HTTPS on; nothing serves :443 -> 127.0.0.1:$port yet" }
+        "funnel"        { "logged in as $($ts.Name); Funnel is on for :443" }
+        "ready"         { "ready: https://$($ts.Name)/ -> 127.0.0.1:$port" }
+    }
+    Write-Host "        $said" -ForegroundColor DarkGray
+    Write-Host "        this script never elevates -- the lines below are yours to run:" -ForegroundColor DarkGray
+    Write-Host ""
+    foreach ($s in (Get-TailscaleSteps -State $ts.State -Port $port -Name $ts.Name -Phone $ts.Phone)) {
+        if ($s.Kind -eq 'step') { Write-Host "  $($s.Text)" -ForegroundColor DarkGray }
+        else                    { Write-Host "    $($s.Text)" -ForegroundColor White }
+    }
+    Write-Host ""
+    Write-Host "        all platforms: $TAILSCALE_DOWNLOAD" -ForegroundColor DarkGray
+    Write-Host "        the whole setup: https://github.com/nibor1896/Crow/blob/main/docs/user-guide/remote-tailscale.md" -ForegroundColor DarkGray
+    Write-Host ""
+}
+
+
+# ---------------------------------------------------------------------------
 # Selftest
 # ---------------------------------------------------------------------------
 
@@ -1215,6 +1406,63 @@ function Invoke-Selftest {
     C "Format-Size: megabytes" ((Format-Size 506400000) -eq "482.9 MB")
     C "Format-Size: gigabytes" ((Format-Size 103000000000) -eq "95.93 GB")
 
+    # -Tailscale (#249 stage 5). The state is read through a FAKE seam -- the
+    # real CLI is never called from here, and the fake records every argv it
+    # is given, so "reads only" is checked rather than claimed.
+    $tsName = "pc.tail1234.ts.net"
+    $script:tsCalls = New-Object System.Collections.Generic.List[string]
+    $script:tsStatus = $null; $script:tsServe = $null
+    $fake = { param([string[]] $a)
+        $script:tsCalls.Add(($a[1..($a.Count - 1)] -join ' '))
+        $j = if ($a[1] -eq "status") { $script:tsStatus } elseif ($a[1] -eq "serve") { $script:tsServe } else { $null }
+        if ($null -eq $j) { return @{ Code = 1; Out = "" } }
+        return @{ Code = 0; Out = $j } }
+    C "tailscale: no executable reads 'missing'" ((Get-TailscaleState -Port 8765 -Exe "" -Run $fake).State -eq "missing")
+    C "tailscale: a daemon that answers nothing reads 'down'" ((Get-TailscaleState -Port 8765 -Exe "C:\fake\tailscale.exe" -Run $fake).State -eq "down")
+    $script:tsStatus = '{"BackendState":"Running","Self":{"DNSName":"' + $tsName + '."},"CertDomains":[],"Peer":{}}'
+    C "tailscale: logged in without CertDomains reads 'https-off'" ((Get-TailscaleState -Port 8765 -Exe "C:\fake\tailscale.exe" -Run $fake).State -eq "https-off")
+    $script:tsStatus = '{"BackendState":"Running","Self":{"DNSName":"' + $tsName + '."},"CertDomains":["' + $tsName + '"],"Peer":{"k":{"OS":"android"}}}'
+    $script:tsServe = '{}'
+    $r = Get-TailscaleState -Port 8765 -Exe "C:\fake\tailscale.exe" -Run $fake
+    C "tailscale: HTTPS on, no serve reads 'serve-missing'" ($r.State -eq "serve-missing" -and $r.Name -eq $tsName)
+    C "tailscale: and sees the Android phone"     ($r.Phone)
+    $script:tsServe = '{"Web":{"' + $tsName + ':443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8765"}}}}}'
+    C "tailscale: serve at 127.0.0.1:8765 reads 'ready'" ((Get-TailscaleState -Port 8765 -Exe "C:\fake\tailscale.exe" -Run $fake).State -eq "ready")
+    C "tailscale: and at another port does not"   ((Get-TailscaleState -Port 9123 -Exe "C:\fake\tailscale.exe" -Run $fake).State -eq "serve-missing")
+    $script:tsServe = '{"AllowFunnel":{"' + $tsName + ':443":true}}'
+    C "tailscale: Funnel on reads 'funnel'"       ((Get-TailscaleState -Port 8765 -Exe "C:\fake\tailscale.exe" -Run $fake).State -eq "funnel")
+    C "NEGATIVE: only the two read calls were made" (
+        @($script:tsCalls | Where-Object { $_ -ne "status --json" -and $_ -ne "serve status --json" }).Count -eq 0)
+
+    $all = (Get-TailscaleSteps -State "missing" -Port 8765) | ForEach-Object { $_.Text }
+    $at  = { param($p) for ($i = 0; $i -lt $all.Count; $i++) { if ($all[$i] -like $p) { return $i } }; return -1 }
+    C "tailscale steps from 'missing': winget, login, HTTPS, serve, phone, in order" (
+        (& $at "winget install --id Tailscale.Tailscale -e") -ge 0 -and
+        (& $at "winget install --id Tailscale.Tailscale -e") -lt (& $at "tailscale up") -and
+        (& $at "tailscale up") -lt (& $at "*admin/dns") -and
+        (& $at "*admin/dns") -lt (& $at "tailscale serve --bg --https=443 http://127.0.0.1:8765") -and
+        (& $at "tailscale serve --bg*") -lt (& $at "iPhone*"))
+    $few = ((Get-TailscaleSteps -State "serve-missing" -Port 9123 -Name "x" -Phone $true) | ForEach-Object { $_.Text }) -join "`n"
+    C "tailscale steps from 'serve-missing': only serve, on the configured port" (
+        $few -match '127\.0\.0\.1:9123' -and $few -notmatch 'winget|tailscale up|admin/dns|apps\.apple')
+    C "and says the serve line needs an elevated shell" ($few -match 'ELEVATED')
+    $done = ((Get-TailscaleSteps -State "ready" -Port 8765 -Name "pc.t.ts.net" -Phone $true) | ForEach-Object { $_.Text }) -join "`n"
+    C "NEGATIVE: 'ready' with a phone prints no command, only the address" ($done -notmatch 'tailscale ' -and $done -match 'https://pc\.t\.ts\.net/')
+
+    $sp = Join-Path $env:TEMP ("crow-selftest-s-" + [guid]::NewGuid().ToString("N") + ".json")
+    try {
+        Set-Content -LiteralPath $sp -Value '{"remote_port": 9123}' -Encoding ascii
+        $p1 = Get-RemotePort $sp
+        Set-Content -LiteralPath $sp -Value '{"remote_port": true}' -Encoding ascii
+        $p2 = Get-RemotePort $sp
+        Set-Content -LiteralPath $sp -Value '{"remote_port": 80}' -Encoding ascii
+        $p3 = Get-RemotePort $sp
+        C "remote_port is read; bool and <1024 fall back to 8765" ($p1 -eq 9123 -and $p2 -eq 8765 -and $p3 -eq 8765)
+    } finally {
+        Remove-Item -LiteralPath $sp -Force -ErrorAction SilentlyContinue
+    }
+    C "no settings file reads 8765"               ((Get-RemotePort (Join-Path $env:TEMP "crow-selftest-absent.json")) -eq 8765)
+
     Write-Host ""
     $total = $script:sOk + $script:sRed
     if ($script:sRed -gt 0) { Write-Host "RESULT: $($script:sRed) of $total FAILED" -ForegroundColor Red; return 1 }
@@ -1223,6 +1471,9 @@ function Invoke-Selftest {
 }
 
 if ($Selftest) { Exit-Run (Invoke-Selftest); return }
+# -Tailscale installs nothing and downloads nothing: it reads, prints the steps
+# still missing and ends. Run after the install, on the machine that has it.
+if ($Tailscale) { Show-TailscaleSteps; Exit-Run 0; return }
 
 # ---------------------------------------------------------------------------
 # Run
@@ -1801,6 +2052,13 @@ Write-Host ""
 # auf 8083. Eine Zeile, die den Standard noch einmal ausschreibt, liest sich wie
 # eine Bedingung.
 Write-Host "    python $InstallTo\cli\crow.py" -ForegroundColor White
+Write-Host ""
+
+# The phone from anywhere: -Tailscale prints the missing steps without
+# reinstalling anything (#249 stage 5).
+Write-Host "  The phone from anywhere (HTTPS over Tailscale) -- what is still missing:" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "    &([scriptblock]::Create((irm $INSTALL_URL))) -Tailscale" -ForegroundColor White
 Write-Host ""
 
 # The last screen is the only place these four commands appear -- the model, the

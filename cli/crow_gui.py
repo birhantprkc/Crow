@@ -43,6 +43,8 @@ rather than discovered at import time.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import contextvars
 import getpass
 import json
 import logging
@@ -56,6 +58,7 @@ import subprocess
 import threading
 import time
 import webbrowser
+from collections.abc import Iterator
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -695,7 +698,7 @@ MEMORY_ICON = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvm
 # ---------------------------------------------------------------- the page
 
 PAGE = r"""<!doctype html>
-<html lang="de" data-theme="__THEME__"><head><meta charset="utf-8">
+<html lang="de" data-theme="__THEME__"><head><meta charset="utf-8"><!--__REMOTE_HEAD__-->
 <style>
 :root{
   --accent:__ACCENT__; --bevel:__BEVEL__; --model:__TEXT__;
@@ -747,6 +750,21 @@ PAGE = r"""<!doctype html>
      it, and .turn centres inside it -- three rules that have to agree or the
      input box sits 5 px off the text above it. */
   --sbw:10px;
+  /* #280. THE COLUMN, ONCE. The chat and the composer are one column, and
+     robin wants the bubbles on the composer's edges: the user's right edge on
+     #box's right border, Crow's left edge on its left border. That holds only
+     while both boxes come out of the SAME numbers, so they are here and
+     nowhere else:
+       --colw     the text width, #box's width and .turn's content width;
+       --colpad   the inset from #flow's/#composer's inner edge to that text
+                  (was 30 + 10 on one side, 40 on the other -- equal by luck);
+       --reserve  the room the #233/#256 cards take on EACH side of #main,
+                  0 until the container query below sets it on both at once.
+     Both come out as min(--colw, #main - 2*--sbw - 2*--reserve - 2*--colpad),
+     centred. */
+  --colw:900px;
+  --colpad:40px;
+  --reserve:0px;
 }
 
 /* -- light ------------------------------------------------------------- */
@@ -848,6 +866,10 @@ body{background:var(--bg);color:var(--dim);font:13px/1.55 var(--ui);
    falsch: Flex teilt den Rest dann gleichmaessig und schoebe den Knopf in die
    Mitte der Leiste. */
 #codetoggle{margin-left:auto}
+/* #249. DAS TELEFON STEHT DAVOR und nimmt das `auto` mit; der Code-Knopf rueckt
+   dann dicht an seine zwei Nachbarn, die Luecke gehoert dem Telefon. */
+#remotetoggle{margin-left:auto;position:relative}
+#remotetoggle + #codetoggle{margin-left:0}
 #wbtns{display:flex;-webkit-app-region:no-drag}
 /* The buttons sit inside the drag region, so they opt out of it again --
    without this a click on 'close' starts a drag instead of closing. */
@@ -1311,9 +1333,10 @@ body[data-git="shut"] #git{display:none}
 #goalpanel .gh b{color:var(--text-faint);font-weight:600;letter-spacing:.2px}
 #goalpanel .gh .st{margin-left:auto;color:var(--dimmer)}
 #goalpanel .gh .st.ok{color:var(--ok)}
-#goalpanel .gx{background:none;border:0;color:var(--dimmer);font:inherit;
+/* #281: dasselbe `×` schliesst die Subtasks-Karte -- eine Regel, zwei Karten. */
+#goalpanel .gx,#subpanel .gx{background:none;border:0;color:var(--dimmer);font:inherit;
   font-size:16px;line-height:1;padding:0 0 0 4px;cursor:pointer}
-#goalpanel .gx:hover{color:var(--bad)}
+#goalpanel .gx:hover,#subpanel .gx:hover{color:var(--bad)}
 /* DAS ZIEL IST DIE UEBERSCHRIFT, nicht eine Zeile unter dem Wort "Goal": es
    bricht um, statt abgeschnitten zu werden, und traegt das Zeichen neben sich. */
 #goalpanel .gt{display:flex;gap:9px;align-items:flex-start;padding:0 15px 7px}
@@ -1358,8 +1381,12 @@ body[data-git="shut"] #git{display:none}
 #goalpanel li.running .m{color:var(--warn)}
 #goalpanel li.running .t{color:var(--text)}
 #goalpanel li.failed .m{color:var(--bad)}
+/* #289: UEBERSPRUNGEN IST NICHT ERLEDIGT -- kein Strich, kein Gruen, sondern
+   gedimmt mit dem Pfeil in Amber, derselben Farbe wie der Hinweis im Kopf. */
+#goalpanel li.skipped{color:var(--dimmer)}
+#goalpanel li.skipped .m,#goalpanel .gh .st.sk{color:var(--warn)}
 #goalpanel li.open .t{color:var(--text-faint)}
-#goalpanel li.done,#goalpanel li.failed{cursor:pointer}
+#goalpanel li.done,#goalpanel li.failed,#goalpanel li.skipped{cursor:pointer}
 /* #174: DIE KOSTENZEILE HAENGT AN IHREM SCHRITT. Sie sass mit 3px so dicht
    unter dem Text, dass sie bei einem umgebrochenen Schritt wie dessen fuenfte
    Zeile aussah; mit Luft darueber und einem eigenen Ton ist sie eine Fussnote. */
@@ -1420,7 +1447,8 @@ body[data-git="shut"] #git{display:none}
    flow and still centres in both directions. */
 #hello{min-height:100%;display:flex;flex-direction:column;align-items:center;
   justify-content:center;gap:26px;
-  max-width:960px;margin-inline:auto;padding:0 30px;text-align:center;
+  max-width:calc(var(--colw) + 2 * var(--colpad));margin-inline:auto;
+  padding:0 var(--colpad);text-align:center;
   font-size:19px;color:var(--text-faint);letter-spacing:.01em}
 /* SIZED IN THE PAGE, NOT IN THE FILE. Both drawings are 1024 square; a width
    here keeps them from filling the window, and `height:auto` keeps the square
@@ -1466,11 +1494,108 @@ body[data-git="shut"] #git{display:none}
 body[data-rail="shut"] #rail{width:0;overflow:hidden}
 /* IN THE TITLE BAR, so it survives the rail it hides. It is the one control
    that must not live in the thing it folds away. */
-#railtoggle,#codetoggle,#gittoggle,#browsertoggle{font:inherit;color:var(--dimmer);
+#railtoggle,#codetoggle,#gittoggle,#browsertoggle,#remotetoggle{font:inherit;color:var(--dimmer);
   background:transparent;border:1px solid transparent;border-radius:6px;
   cursor:pointer;display:flex;align-items:center;padding:3px 5px;margin-right:2px}
 #railtoggle:hover,#codetoggle:hover,#gittoggle:hover,
-#browsertoggle:hover{color:var(--accent);border-color:var(--bevel)}
+#browsertoggle:hover,#remotetoggle:hover{color:var(--accent);border-color:var(--bevel)}
+/* #249: an = Akzent mit Toenung wie ein offenes Panel; der Punkt = ein Telefon
+   ist gerade verbunden. Die Luecke nach rechts steht HIER, hinter der
+   gemeinsamen Regel, die jedem Knopf 2px gibt. */
+#remotetoggle{margin-right:9px}
+#remotetoggle.on{color:var(--accent);
+  background:color-mix(in srgb,var(--accent) 12%,transparent)}
+#remotetoggle .rdot{display:none;position:absolute;right:2px;top:2px;width:6px;
+  height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 2px var(--rail)}
+#remotetoggle.live .rdot{display:block}
+/* #249: der Dialog mit dem QR-Code und die Kopplungsleiste -- in der Form der
+   von robin abgenommenen Mockups (Schritt 0): das Blatt der Einstellungen,
+   nur kleiner; die Kopplungsfrage in der Form von #pendbar ueber der Eingabe. */
+#remotedlg{position:fixed;inset:0;z-index:80;display:grid;place-items:center;
+  background:var(--shadow-strong);padding-top:34px}
+#remotedlg[hidden]{display:none}
+#remotedlg .rsheet{width:min(720px,94vw);max-height:calc(100vh - 58px);display:flex;
+  flex-direction:column;background:var(--panel);border:1px solid var(--bevel);
+  border-radius:12px;box-shadow:0 24px 60px var(--shadow-strong);overflow:hidden}
+#remotedlg .rhead{display:flex;align-items:center;gap:10px;padding:13px 16px;
+  border-bottom:1px solid var(--line)}
+#remotedlg .rhead h2{margin:0;font-size:13px;font-weight:600;color:var(--text-strong)}
+#remotedlg .rhead .swlabel{margin-left:auto}
+#remotedlg .sclose{font:inherit;font-size:12px;cursor:pointer;background:transparent;
+  border:0;color:var(--dimmer);padding:2px 7px;border-radius:6px}
+#remotedlg .sclose:hover{background:var(--hover);color:var(--text-hover)}
+#remotedlg .rbody{overflow-y:auto;padding:18px 20px 16px;-webkit-user-select:text;
+  user-select:text}
+#remotedlg .rpair{display:flex;gap:20px;align-items:flex-start}
+#remotedlg .rqr{flex:none;width:188px;height:188px;border-radius:10px;background:#fff;
+  box-shadow:0 0 0 1px var(--line);overflow:hidden;display:grid;place-items:center}
+#remotedlg .rqr svg{width:100%;height:100%;display:block}
+#remotedlg .rinfo{flex:1;min-width:0;display:flex;flex-direction:column;gap:12px}
+#remotedlg h3{margin:0 0 6px;font-size:11px;font-weight:600;color:var(--text-soft);
+  letter-spacing:.08em;text-transform:uppercase}
+#remotedlg .rstep{color:var(--text);font-size:12.5px;line-height:1.5}
+#remotedlg .rurl{display:flex;gap:7px;align-items:center}
+#remotedlg .rurl code{flex:1;min-width:0;font-family:var(--mono);font-size:11.5px;
+  color:var(--text-soft);background:var(--code-bg);border:1px solid var(--line);
+  border-radius:6px;padding:6px 9px;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+#remotedlg .rurl button,#remotedlg .rdev button{font:inherit;font-size:11px;
+  cursor:pointer;padding:5px 12px;border-radius:6px;background:transparent;
+  border:1px solid var(--line);color:var(--dim)}
+#remotedlg .rurl button:hover{border-color:var(--bevel);color:var(--accent)}
+#remotedlg .rttl{font-size:11px;color:var(--dimmer);font-variant-numeric:tabular-nums}
+#remotedlg .rttl b{color:var(--gold);font-weight:600}
+#remotedlg .rhint{font-family:var(--mono);font-size:11px;color:var(--warn);
+  background:color-mix(in srgb,var(--warn) 8%,transparent);
+  border:1px solid color-mix(in srgb,var(--warn) 30%,transparent);
+  border-radius:6px;padding:7px 9px;word-break:break-all;white-space:pre-wrap}
+/* #249 Stufe 5: die Zeile zur HTTPS-Adresse -- gelb, bis sie bereit ist. */
+#remotedlg .rtail{display:flex;gap:7px;align-items:flex-start;font-family:var(--mono);
+  font-size:11px;color:var(--warn);background:color-mix(in srgb,var(--warn) 8%,transparent);
+  border:1px solid color-mix(in srgb,var(--warn) 30%,transparent);
+  border-radius:6px;padding:7px 9px;word-break:break-word;white-space:pre-wrap}
+#remotedlg .rtail[hidden]{display:none}
+#remotedlg .rtail span{flex:1;min-width:0}
+#remotedlg .rtail.ok{color:var(--ok);background:transparent;border-color:var(--line)}
+#remotedlg .rtail button{font:inherit;font-size:11px;cursor:pointer;flex:none;
+  background:transparent;border:1px solid var(--line);border-radius:5px;
+  padding:2px 8px;color:var(--dim)}
+#remotedlg .rqr.none{opacity:.18}
+#remotedlg .rdevs{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}
+#remotedlg .rdev{display:flex;align-items:center;gap:10px;padding:9px 0;
+  border-top:1px solid var(--raised)}
+#remotedlg .rdev:first-of-type{border-top:0}
+#remotedlg .rdev .ico{flex:none;color:var(--dimmer);display:flex}
+#remotedlg .rdev.live .ico{color:var(--ok)}
+#remotedlg .rdev .stext{flex:1;min-width:0}
+#remotedlg .rdev .sname{font-weight:600;font-size:12.5px;color:var(--text)}
+#remotedlg .rdev .sdesc{color:var(--dim);font-size:11.5px;margin-top:2px}
+#remotedlg .rdev.live .sdesc{color:var(--ok)}
+#remotedlg .rdev button{color:var(--bad-text);border-color:rgba(240,101,90,.40)}
+#remotedlg .rdev button:hover{background:rgba(240,101,90,.12)}
+#remotedlg .rfoot{margin-top:12px;color:var(--dimmer);font-size:11px}
+#pairbar{max-width:var(--colw);margin:0 auto -14px;padding:11px 13px 24px;
+  border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);
+  border-radius:10px;font-size:11.5px;color:var(--dim);
+  background:linear-gradient(90deg,transparent 0%,color-mix(in srgb,var(--accent) 16%,transparent) 50%,transparent 100%),var(--raised);
+  background-size:220% 100%,auto;
+  animation:pendsweep 2.6s ease-in-out infinite, pendglow 2.6s ease-in-out infinite}
+#pairbar.indlg{max-width:none;margin:0 0 16px;padding:11px 13px}
+#pairbar .top{display:flex;align-items:center;gap:10px}
+#pairbar .ph{color:var(--accent);display:flex}
+#pairbar .title{font-weight:600;color:var(--text)}
+#pairbar .hint{margin-left:auto;color:var(--dimmer);font-size:10.5px;
+  font-variant-numeric:tabular-nums}
+#pairbar .what{margin:6px 0 0 25px;color:var(--dim)}
+#pairbar .acts{display:flex;gap:8px;margin:10px 0 0 25px}
+#pairbar button{font:inherit;font-size:11.5px;cursor:pointer;border-radius:6px;
+  padding:4px 14px;background:transparent;border:1px solid var(--line);color:var(--dim)}
+#pairbar button.yes{color:var(--ok);border-color:rgba(78,201,143,.45)}
+#pairbar button.yes:hover{background:rgba(78,201,143,.12)}
+#pairbar button.no{color:var(--bad-text);border-color:rgba(240,101,90,.45)}
+#pairbar button.no:hover{background:rgba(240,101,90,.12)}
+@media (prefers-reduced-motion: reduce){#pairbar{animation:none;
+  background:color-mix(in srgb,var(--accent) 14%,transparent)}}
 /* #156. DER KNOPF SAGT, OB DAS PANEL STEHT. Mit zwei Panels an einer Leiste ist
    das keine Verzierung mehr, sondern die Antwort auf "wo ist mein Git-Panel
    hin" -- und weil das Wegklicken NUR hier geht (robins Ansage: kein zweites
@@ -1618,8 +1743,11 @@ details.rollcard pre.rtp{max-height:220px;overflow:auto;white-space:pre-wrap;
    ihre Mitte also --sbw/2 = 5 px links der Fenstermitte -- und die Maske,
    die sich an diese Mitte haelt, mit ihr. Links `10px + --sbw` macht die
    Box symmetrisch in #main: Spalte und Maske stehen auf der Mitte von #main. */
+/* #280: die zehn Pixel Luft sind seitdem Teil von --colpad (10 + 30 = 40,
+   dieselbe Zahl, die #composer traegt), und die Kartenreserve ist --reserve --
+   eine Variable, die #composer mit derselben Regel bekommt. */
 #flow{overflow-y:auto;padding:22px 0 26px;
-  padding-inline:calc(10px + var(--sbw)) 10px;flex:1;
+  padding-inline:calc(var(--sbw) + var(--reserve)) var(--reserve);flex:1;
   min-height:0;scroll-behavior:smooth;user-select:text;
   scrollbar-gutter:stable}
 /* CENTRED, NOT LEFT-HUGGING. max-width alone pins the column to the left edge
@@ -1634,7 +1762,8 @@ details.rollcard pre.rtp{max-height:220px;overflow:auto;white-space:pre-wrap;
    min-content-Breite, und `.you .txt` ist ein Grid-Item in einer `1fr`-Spur
    (= minmax(auto,1fr)) -- mit `break-word` bliebe die Blase so breit wie das
    Wort. Code-Bloecke sind `pre` und brechen weiterhin nie. */
-.turn{padding:0 30px;max-width:960px;margin-inline:auto;overflow-wrap:anywhere}
+.turn{padding:0 var(--colpad);max-width:calc(var(--colw) + 2 * var(--colpad));
+  margin-inline:auto;overflow-wrap:anywhere}
 .turn+.turn{margin-top:26px}
 /* #131. NO LABEL. The bubble says whose the line is; a three-letter prefix in
    front of it says it a second time, and the model's own turns never had one. */
@@ -1648,9 +1777,14 @@ details.rollcard pre.rtp{max-height:220px;overflow:auto;white-space:pre-wrap;
    fills the grid column and a two-word message is a full-width slab. */
 .you .txt{color:var(--text);white-space:pre-wrap;background:var(--raised);
   border:1px solid var(--line);border-radius:12px;padding:9px 13px;
-  justify-self:start;max-width:75%;box-sizing:border-box}
-.as{display:grid;grid-template-columns:38px 1fr;gap:2px}
-.as .m{color:var(--bevel);padding-top:1px}
+  justify-self:end;max-width:75%;box-sizing:border-box}
+/* #280. ONE COLUMN, TWO SIDES (robin, 2026-09-24). The user's bubble stands
+   on the RIGHT edge of the column -- which is #box's right border, see
+   --colw -- and Crow's text on the LEFT edge, which is #box's left border.
+   The `●` in a 38-px grid column in front of every answer went with it: it
+   put Crow's text 40 px inside the box's edge, and the side of the column now
+   says whose line it is, the reasoning #131 used for dropping the labels. */
+.as{display:block}
 .col{min-width:0}
 
 /* #131. THE TRACE. Same furniture as a reasoning block, one level up: it holds
@@ -2130,7 +2264,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 .askcard .elicfield input[type=checkbox]{margin:0}
 .askcard .elichint{color:var(--dimmer);font-size:10.5px;margin:-4px 0 8px
   calc(30% + 9px)}
-#pendbar{max-width:900px;margin:0 auto -14px;padding:9px 13px 22px;
+#pendbar{max-width:var(--colw);margin:0 auto -14px;padding:9px 13px 22px;
   border:1px solid color-mix(in srgb,var(--accent) 32%,transparent);
   border-radius:10px;color:var(--accent);font-size:11.5px;cursor:pointer;
   background:linear-gradient(90deg,transparent 0%,color-mix(in srgb,var(--accent) 20%,transparent) 50%,transparent 100%),var(--raised);
@@ -2140,7 +2274,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 /* #162. RUHIG, NICHT ALARMIEREND: ein Blick in einen anderen Chat ist ein
    normaler Zustand, kein Fehler. Deshalb der gedaempfte Rahmen und keine
    Animation -- die gehoert #pendbar, wo wirklich etwas wartet. */
-#viewbar{max-width:900px;margin:0 auto -14px;padding:9px 13px 22px;
+#viewbar{max-width:var(--colw);margin:0 auto -14px;padding:9px 13px 22px;
   border:1px solid var(--line);border-radius:10px;background:var(--raised);
   color:var(--dim);font-size:11.5px;display:flex;align-items:center;gap:10px}
 #viewbar[hidden]{display:none}
@@ -2167,6 +2301,16 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 #pendbar.open .body{display:block}
 #pendbar .what{display:block;color:var(--dim);white-space:pre-wrap;
   word-break:break-word;margin-bottom:6px;line-height:1.4}
+/* #285. The previews, or -- one click deeper -- the whole text; never both.
+   Deep, the body scrolls rather than pushing the composer off the screen. */
+#pendbar .whole{display:none}
+#pendbar.deep .brief{display:none}
+#pendbar.deep .whole{display:block}
+#pendbar.deep .body{max-height:50vh;overflow-y:auto}
+#pendbar .was,#pendbar .will,#pendbar .where{display:block}
+#pendbar .was{color:var(--bad)}
+#pendbar .will{color:var(--ok)}
+#pendbar .where{color:var(--dimmer);font-size:10.5px}
 #pendbar .acts{display:flex;gap:8px;margin-top:9px}
 #pendbar button{font:inherit;font-size:11.5px;cursor:pointer;border-radius:6px;
   padding:4px 12px;background:transparent;border:1px solid var(--line);
@@ -2194,7 +2338,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    A FLOOR OF FOUR SECONDS (robin, 2026-08-22) lives in the page, not here: an
    answer that arrives in 300 ms would flash past and read as nothing having
    happened at all. */
-.installbar{max-width:900px;margin:0 auto;padding:9px 13px;
+.installbar{max-width:var(--colw);margin:0 auto;padding:9px 13px;
   border:1px solid color-mix(in srgb,var(--accent) 32%,transparent);
   border-radius:10px;color:var(--accent);font-size:11.5px;
   background:linear-gradient(90deg,transparent 0%,color-mix(in srgb,var(--accent) 20%,transparent) 50%,transparent 100%),var(--raised);
@@ -2253,8 +2397,10 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
    `--comph` oberhalb, also teilen sich beide sonst kein Pixel. */
 /* #256: BEIDE SEITEN --sbw, aus demselben Grund wie links an #flow --
    die Maske steht auf der Mitte von #main, nicht 5 px links davon. */
-#composer{position:absolute;left:var(--sbw);right:var(--sbw);bottom:0;z-index:6;
-  padding:26px 40px 14px;
+/* #280: dieselben --sbw, --reserve und --colpad wie #flow und .turn. */
+#composer{position:absolute;bottom:0;z-index:6;
+  left:calc(var(--sbw) + var(--reserve));right:calc(var(--sbw) + var(--reserve));
+  padding:26px var(--colpad) 14px;
   background:linear-gradient(to bottom,transparent,var(--bg) 26px)}
 /* #233. WO PLATZ IST, WEICHT DIE SPALTE DEN KARTEN AUS. Die Karten
    bleiben absolut (#164), aber ueber der Leseflaeche lagen sie bei jeder
@@ -2277,12 +2423,10 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 @container chat (min-width:1100px){
   body:not([data-git="shut"]) #flow,
   #main:has(#goalpanel:not([hidden])) #flow,
-  #main:has(#subpanel:not([hidden])) #flow{
-    padding-inline:calc(10px + var(--sbw) + 306px) calc(10px + 306px)}
+  #main:has(#subpanel:not([hidden])) #flow,
   body:not([data-git="shut"]) #composer,
   #main:has(#goalpanel:not([hidden])) #composer,
-  #main:has(#subpanel:not([hidden])) #composer{
-    left:calc(var(--sbw) + 306px);right:calc(var(--sbw) + 306px)}
+  #main:has(#subpanel:not([hidden])) #composer{--reserve:306px}
 }
 /* DAS BAND LIEGT UEBER DEM PLATZHALTER, NICHT UEBER DER ZEILE (robin,
    2026-08-23). Eine eigene Zeile machte die Maske hoeher, sobald jemand zu
@@ -2310,14 +2454,14 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
 #box{border:1px solid var(--bevel);border-radius:8px;background:var(--panel);
   padding:9px 11px 8px;box-shadow:0 0 0 3px rgba(126,176,248,.06);
   transition:border-color .15s ease,box-shadow .15s ease;
-  /* 900, not 960: .turn spends 30px of its 960 on padding either side, so its
-     text starts at 900 wide. Matching that here puts this box's border on the
-     same edge as the text above it.
+  /* --colw (900), the width .turn's text runs at: .turn is --colw plus
+     --colpad either side. The same variable here puts this box's border on
+     the same edge as the text above it (#280: and on the bubbles' edges).
      ES WAR EINEN ABEND LANG 675 (robin, 2026-08-23), also ein Viertel schmaler,
      und robin hat es am selben Abend zurueckgenommen: gesehen ist die Maske,
      die unter ihrer eigenen Spalte steht, die ruhigere. Die Zahl steht hier
      mit ihrer Geschichte, damit sie niemand ein zweites Mal probiert. */
-  max-width:900px;margin-inline:auto}
+  max-width:var(--colw);margin-inline:auto}
 /* KEIN PLATZHALTER, WAEHREND GESPROCHEN WIRD. Das Band liegt ueber der Zeile,
    also stuenden sonst beide uebereinander und die ruhenden Punkte laesen sich
    als Zeichen im Satz -- genau so sah es am 2026-08-23 bei robin aus. */
@@ -2341,7 +2485,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   height:16px;line-height:14px;padding:0;border-radius:50%;font-size:11px;
   border:1px solid var(--bevel);background:var(--panel);color:inherit;
   cursor:pointer}
-.you img.sent{display:block;max-width:min(320px,70%);border-radius:8px;
+.you img.sent{display:block;justify-self:end;max-width:min(320px,70%);border-radius:8px;
   margin-top:6px;border:1px solid var(--bevel)}
 #in{flex:1;background:transparent;border:0;outline:0;resize:none;color:var(--text);
   font:inherit;font-size:13px;line-height:1.5;max-height:140px;user-select:text}
@@ -2771,7 +2915,8 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   border-top:1px solid var(--line);margin-top:3px}
 .cost .subshare{color:var(--sub)}
 .tool.sub .ico{color:var(--sub)}
-</style></head><body data-rail="__RAIL__" data-code="__CODE__" data-git="__GIT__" data-browser="__BROWSER__">
+</style>
+<style>/* __REMOTE_CSS__ */</style></head><body data-rail="__RAIL__" data-code="__CODE__" data-git="__GIT__" data-browser="__BROWSER__">
 
 <div id="bar" class="pywebview-drag-region" ondblclick="pywebview.api.maximise()">
   <!-- #119. LEFT OF THE WORDMARK, and it has to live in the TITLE BAR rather
@@ -2802,6 +2947,20 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
        wie der Rail-Knopf daneben, nimmt `currentColor` wie alles hier, und
        braucht keine Namensnennung. Derselbe Rahmen wie links, nur ist innen ein
        Prompt statt einer Spalte. -->
+  <!-- #249. DAS TELEFON, LINKS VON DEN DREI PANEL-KNOEPFEN und durch eine
+       Luecke von ihnen getrennt: es schaltet kein Panel, sondern oeffnet den
+       QR-/Geraete-Dialog (derselbe Weg wie ein nacktes `/remote`). Gezeichnet
+       wie die Nachbarn -- 1.6 Strich, `currentColor`. Aus heisst gedimmt wie
+       sie, an heisst Akzent mit Toenung, ein gruener Punkt heisst: ein Geraet
+       ist verbunden. Der Zustand kommt als `{"k":"remote"}`. -->
+  <button id="remotetoggle" class="pywebview-no-drag" onclick="crow.remoteOpen()"
+          title="Phone mirror: pair a phone on this network">
+    <svg viewBox="0 0 20 20" width="15" height="15" fill="none"
+         stroke="currentColor" stroke-width="1.6" stroke-linecap="round"
+         stroke-linejoin="round" aria-hidden="true">
+      <rect x="5.5" y="2.5" width="9" height="15" rx="2"></rect>
+      <line x1="8.8" y1="14.6" x2="11.2" y2="14.6"></line></svg><span
+      class="rdot" aria-hidden="true"></span></button>
   <button id="codetoggle" class="pywebview-no-drag" onclick="crow.toggleCode()"
           title="Show or hide the code panel">
     <svg viewBox="0 0 20 20" width="15" height="15" fill="none"
@@ -2846,6 +3005,14 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
     <div class="wb close" onclick="pywebview.api.close()">&#10005;</div>
   </div>
 </div>
+
+<!-- #249. DER QR-DIALOG DES TELEFON-SPIEGELS, nur auf dem Desktop. Der Inhalt
+     kommt ganz aus `{"k":"remotedlg"}`; jeder Name per textContent, nur das SVG
+     des eigenen QR-Kodierers als Markup. -->
+<div id="remotedlg" hidden onclick="if(event.target===this)crow.remoteClose()"></div>
+<!-- #249. AUF DEM TELEFON: das Warten auf das Allow des Desktops, und der Satz,
+     wenn es nicht gekoppelt ist. Auf dem Desktop bleibt es immer verborgen. -->
+<div id="remotepair" hidden></div>
 
 <div id="settings" hidden onclick="crow.settingsBackdrop(event)">
   <div class="sheet">
@@ -3060,7 +3227,10 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
            nichts delegiert hat. -->
       <div id="subpanel" hidden>
         <div class="sph" onclick="crow.subPanelFold()"><b>Subtasks</b>
-          <span class="st"></span></div>
+          <span class="st"></span><button class="gx" type="button"
+            title="hide this card -- running subtasks keep running"
+            aria-label="Close subtasks card"
+            onclick="crow.subPanelClose(event)">×</button></div>
         <div class="splive"></div>
         <button class="spfold" onclick="crow.subDoneFold()" hidden></button>
         <div class="spdone" hidden></div>
@@ -3177,6 +3347,12 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
                 <span class="dot"></span><span id="modename">auto</span></button>
               <div id="modemenu" hidden></div>
             </div>
+            <!-- #249: nur auf dem Telefon sichtbar -- dort gibt es kein Drop,
+                 also waehlt ein Dateifeld das Bild (Kamera oder Fotos). -->
+            <button id="remoteattach" hidden title="attach an image"
+                    onclick="document.getElementById('remotefile').click()">+</button>
+            <input id="remotefile" type="file" hidden
+                   onchange="crow.remoteUpload(this)">
             <button id="mic" onclick="crow.mic()" title="dictate">
               <svg viewBox="0 0 24 24" width="13" height="13" fill="none"
                    stroke="currentColor" stroke-width="2" stroke-linecap="round"
@@ -3184,7 +3360,7 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
                 <rect x="9" y="2" width="6" height="11" rx="3"></rect>
                 <path d="M5 10a7 7 0 0 0 14 0"></path>
                 <line x1="12" y1="17" x2="12" y2="21"></line></svg></button>
-            <button id="go" onclick="crow.go()" title="send">&#8593;</button></div>
+            <button id="go" onclick="crow.press()" title="send">&#8593;</button></div>
         </div>
       </div>
     </div>
@@ -3280,6 +3456,122 @@ code,.asktop code,#url,.cost{font-family:var(--mono)}
   </div>
 </div>
 
+<script>
+// #249. DIE TELEFONSEITE IST DIESE SEITE. `__REMOTE__` ist nur in der Fassung
+// wahr, die `crow_remote` einem gekoppelten Telefon ausliefert; auf dem Desktop
+// tut dieser Block nichts. Dort ist `pywebview.api` die Bruecke von pywebview,
+// hier ein Proxy mit denselben Namen und derselben Promise-Form: `api.x(...a)`
+// wird `POST /api/x` mit dem JSON-Array der Argumente. Keine Aufrufstelle der
+// Seite aendert sich. Was an Fenster oder Maschine des Desktops haengt
+// (`REMOTE_DESKTOP_BOUND`), beantwortet das Telefon selbst.
+window.CROW_REMOTE = __REMOTE__;
+if (window.CROW_REMOTE) (function(){
+  const BOUND = __REMOTE_BOUND__, TEXT = __REMOTE_TEXT__;
+  window.CROW_REMOTE_TEXT = TEXT;
+  const post = (path, body) => fetch(path, {method:"POST", credentials:"same-origin",
+    headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  const pairing = (on, text) => { const p=document.getElementById("remotepair");
+    if(!p) return; p.hidden=!on; p.textContent=text||""; };
+  const note = t => { if(window.crow && t) crow.note(t); };
+  const call = (name, args) => post("/api/"+name, args).then(r => {
+    if(r.status===401) pairing(true, TEXT.unpaired);
+    return r.ok ? r.json() : Promise.reject(new Error(String(r.status))); });
+  // COPY OHNE navigator.clipboard: der braucht einen sicheren Kontext, und
+  // http://192.168.x.x ist keiner. execCommand auf dem Tipp selbst geht.
+  function copyLocal(text){
+    const t=document.createElement("textarea"); t.value=String(text||"");
+    t.setAttribute("readonly",""); t.style.position="fixed"; t.style.opacity="0";
+    document.body.appendChild(t); t.select();
+    let ok=false; try{ ok=document.execCommand("copy"); }catch(_){ ok=false; }
+    t.remove(); return ok; }
+  const LOCAL = {
+    noop: () => null,
+    layout: () => true,
+    tab: () => { window.close(); return null; },
+    copy: text => copyLocal(text),
+    paste: () => "",
+    dictate: () => { note(TEXT.dictate); return null; },
+    root: () => { const p=window.prompt(TEXT.root, (window.crow && crow.root) || "");
+      return p ? call("choose_root", [p]) : null; },
+    link: url => { if(url) window.open(url, "_blank", "noopener"); return null; },
+    pane: () => null,
+    "desktop-only": () => null,
+  };
+  window.pywebview = {api: new Proxy({}, {get: (_, name) => (...args) => {
+    const how = BOUND[name];
+    if(how === "desktop") return call(name, args).then(r => { note(TEXT.ondesk); return r; });
+    const local = how === undefined ? null : LOCAL[how];
+    if(local){ try{ return Promise.resolve(local(...args)); }
+               catch(e){ return Promise.reject(e); } }
+    return call(name, args); }})};
+
+  // DER STROM. SSE, weil er nur in eine Richtung muss und `Last-Event-ID` von
+  // selbst mitbringt. iOS toetet ihn im Hintergrund stumm, also: verborgen ->
+  // zu, sichtbar -> wieder auf, mit der letzten Nummer (auch als ?last=).
+  let last = 0, es = null;
+  function feed(m){
+    if(!m || !window.crow) return;
+    if(m.k==="snapshot"){ crow.on({k:"clear"}); (m.items||[]).forEach(x => crow.on(x)); return; }
+    crow.on(m); }
+  function open(){
+    if(es || document.hidden) return;
+    es = new EventSource("/events" + (last ? "?last=" + last : ""));
+    es.onmessage = ev => { if(ev.lastEventId) last = Number(ev.lastEventId) || last;
+      let m; try { m = JSON.parse(ev.data); } catch(_) { return; }
+      feed(m); };
+    es.onerror = () => { if(es && es.readyState === 2){ es = null;
+      setTimeout(open, 3000); } }; }
+  function shut(){ if(es){ es.close(); es = null; } }
+  document.addEventListener("visibilitychange", () => document.hidden ? shut() : open());
+
+  // DAS KOPPELN. Der Code steht im Fragment (#t=...), das nie zum Server geht;
+  // er wird einmal gegen das Cookie getauscht und sofort aus der Adresse
+  // gestrichen, damit er weder im Verlauf noch auf dem Home-Bildschirm landet.
+  window.crowRemoteStart = function(){
+    document.documentElement.classList.add("remote");
+    const a=document.getElementById("remoteattach"); if(a) a.hidden=false;
+    // Kamera oder Fotos: iOS bietet beides fuer jede Bildart an.
+    const f=document.getElementById("remotefile"); if(f) f.accept="image/"+"*";
+    const go = () => { pairing(false); open();
+      window.dispatchEvent(new Event("pywebviewready")); };
+    // DAS FRAGMENT GEHT ZUERST, vor jeder Anfrage: was danach geschieht,
+    // kann die Adresse samt Code nicht mehr in Verlauf oder Lesezeichen tragen.
+    const m = /(?:^#|&)t=([^&]+)/.exec(location.hash);
+    if(m) history.replaceState(null, "", location.pathname + location.search);
+    if(!m){ go(); return; }
+    pairing(true, TEXT.wait);
+    // NIE EINE OFFENE ANFRAGE, WAEHREND EIN MENSCH ENTSCHEIDET (iPhone,
+    // 2026-09-24: WebKit gab ein gehaltenes /pair nach ~6 s als Netzfehler
+    // auf). /pair antwortet sofort 202 {p}, dann /pair/wait jede Sekunde.
+    // Ein einzelner Netzfehler ist kein Ende; erst MISS in Folge sind es.
+    // EIN ALTER CODE IST KEIN ENDE, WENN DAS COOKIE NOCH GILT (iPhone,
+    // 2026-09-24: Chromes Autovervollstaendigung trug das erste #t= noch).
+    // Der Server antwortet einem gekoppelten Telefon schon auf /pair mit 200;
+    // /me ist die zweite Sicherung fuer jede andere Absage.
+    const say = r => pairing(true, r.status===403 ? TEXT.denied
+      : r.status===429 ? TEXT.locked : TEXT.expired);
+    const done = r => fetch("/me", {credentials:"same-origin"})
+      .then(me => { if(me.ok) go(); else say(r); }, () => say(r));
+    const MISS = 5;
+    let misses = 0;
+    const poll = pid => {
+      if(document.hidden){ setTimeout(() => poll(pid), 1000); return; }
+      post("/pair/wait", {p: pid}).then(r => {
+        misses = 0;
+        if(r.status===202){ setTimeout(() => poll(pid), 1000); return; }
+        if(r.ok){ go(); return; }
+        done(r); },
+        () => { if(++misses >= MISS){ pairing(true, TEXT.unreachable); return; }
+                setTimeout(() => poll(pid), 1000); }); };
+    const begin = t => post("/pair", {t}).then(r => {
+      if(r.status===202) return r.json().then(j => poll(j.p));
+      if(r.ok){ go(); return; }
+      done(r); },
+      () => { if(++misses >= MISS){ pairing(true, TEXT.unreachable); return; }
+              setTimeout(() => begin(t), 1000); });
+    begin(decodeURIComponent(m[1])); };
+})();
+</script>
 <script>
 const $ = s => document.querySelector(s);
 const flow = $("#flow"), input = $("#in"), go = $("#go"), box = $("#box");
@@ -3539,6 +3831,8 @@ const crow = {
   // WHAT `fold` WILL MOVE NEXT TIME. Set by `start`, cleared by anything that
   // ends the trace: a new user line, a reset, a reopened chat.
   round: null, trace: null, traceN: 0,
+  // #264: {t, i} -- a line typed mid-turn, queued, drawn at the turn's end.
+  held: null,
   endTrace(){ this.round=null; this.trace=null; this.traceN=0; },
 
   // DRAWN, NOT RUN: the line carries the user's login name, which is a string
@@ -3644,7 +3938,7 @@ const crow = {
   start(){
     this.fold();
     const t=this.turn("");
-    t.innerHTML='<div class="as"><span class="m">&#9679;</span><div class="col"></div></div>';
+    t.innerHTML='<div class="as"><div class="col"></div></div>';
     this.col=t.querySelector(".col"); this.say=null; this.think=null;
     this.fence=null; this.blocks=[];
     // ONE CURSOR IN THE WHOLE FLOW. `reply_started` fires once per ROUND, not
@@ -5299,6 +5593,10 @@ const crow = {
     if(e.note){ this.note(e.note); }
   },
 
+  // #290: A PHONE'S OWN RECORDING, transcribed on the PC and pushed to that
+  // phone only. Into the box, never sent -- the rule micState states above.
+  heard(e){ if(e.text) this.attach(e.text); if(e.note) this.note(e.note); },
+
   // ONE PLACE THAT WRITES INTO THE BOX, and three callers use it: a finished
   // dictation, a dropped file, a pasted picture. Appended rather than assigned,
   // so half a typed line survives whatever arrives next.
@@ -5361,6 +5659,9 @@ const crow = {
   },
 
   idle(){ this.running=false; go.textContent="↑"; go.classList.remove("stop");
+    go.title="send";
+    // #264: the turn is over, so the line held behind it goes in now.
+    this.release();
     // #172: auch ein Zug, der scheitert oder abgebrochen wird, laesst keine
     // tickende Kachel zurueck -- sie behauptete sonst einen laufenden Aufruf.
     this.toolClockStop();
@@ -5370,7 +5671,7 @@ const crow = {
 
   busy(){ this.running=true; go.textContent="■ Stop"; go.classList.add("stop");
     $("#turnstate").textContent="…";
-    $("#hint").textContent="read timeout __TIMEOUT__ s"; },
+    $("#hint").textContent="read timeout __TIMEOUT__ s"; this.face(); },
 
   // #138c. Die Zeile ist angenommen und wartet -- auf den Memory-Nachlauf, der
   // nach `idle` noch auf demselben Thread laeuft.
@@ -5386,12 +5687,19 @@ const crow = {
   // AUS DEM EIGENEN ZUSTAND, NICHT AUS DER NACHRICHT: die Seite weiss seit
   // `viewBar`, wo sie steht. Ein Feld im Push waere dieselbe Tatsache ein
   // zweites Mal, und zwei Fassungen einer Tatsache koennen sich widersprechen.
-  queuedLine(){ this.running=true; go.textContent="■ Stop";
+  // #249: MIT `t` KOMMT DER ZUSAMMENGELEGTE TEXT VOM SERVER -- beide Ansichten
+  // halten dieselbe Blase, auch die Zeile des anderen Geraets. Ohne `t` (die
+  // eigene `hold()`-Antwort) bleibt das lokale `held`. Nie in einer fremden
+  // Ansicht: dort gehoert die Zeile einem anderen Chat (#264, viewBar).
+  queuedLine(e){ if(e && e.t!=null && !this.viewingOther)
+      this.held={t:e.t, i:e.i||[]};
+    this.running=true; go.textContent="■ Stop";
     go.classList.add("stop");
     $("#turnstate").textContent="…";
     $("#hint").textContent = this.viewingOther
       ? "queued for this chat -- it runs when the other turn is done"
-      : "queued -- the memory review is finishing"; },
+      : this.held ? "queued -- it goes in when this turn ends"
+      : "queued -- the memory review is finishing"; this.face(); },
 
   // #164. DAS ZIELPANEL. Ohne Ziel bleibt es weg -- kein leerer Rahmen.
   //
@@ -5407,6 +5715,12 @@ const crow = {
     clearInterval(this.goalTick);
     (this.stepTicks||[]).forEach(clearInterval); this.stepTicks=[];
     const done=g.status==="done";
+    // #289: ALL DONE OR SKIPPED, at least one skipped -- "complete with N
+    // skipped", never the green "Complete". The skipped steps are named in
+    // the head, so the thin phone bar shows them too.
+    const partial=g.status==="partial", skipped=g.skipped||[];
+    const skipText=!skipped.length ? ""
+      : (skipped.length===1 ? "step " : "steps ")+skipped.join(", ")+" skipped";
 
     // ZONE 1: die Kopfzeile. Nur das Wort und der Zustand -- alles Weitere hat
     // seinen eigenen Platz darunter.
@@ -5414,8 +5728,9 @@ const crow = {
     head.onclick=()=>{ p.classList.toggle("shut"); };
     const label=document.createElement("b"); label.textContent="Goal";
     const st=document.createElement("span");
-    st.className="st"+(done ? " ok" : "");
-    st.textContent=done ? "Complete" : "";
+    st.className="st"+(done ? " ok" : skipped.length ? " sk" : "");
+    st.textContent=done ? "Complete"
+      : partial ? "Complete · "+skipText : skipText;
     const shutBtn=document.createElement("button"); shutBtn.className="gx";
     shutBtn.textContent="×"; shutBtn.title="close this goal";
     shutBtn.onclick=ev=>{ ev.stopPropagation(); pywebview.api.close_goal(); };
@@ -5449,7 +5764,7 @@ const crow = {
     // #164: NUR WENN CROW ANGEFANGEN HAT. Ein Plan, der dasteht und auf die
     // Zeile wartet, die ihn anstoesst, hat noch keine Dauer -- und eine Uhr, die
     // ab dem Tippen laeuft, misst das Tippen (robin, 2026-08-31).
-    if(!done && g.begun) this.goalTick=setInterval(()=>{
+    if(!done && !partial && g.begun) this.goalTick=setInterval(()=>{
       if(!document.body.contains(meta)){ clearInterval(this.goalTick); return; }
       meta.textContent=drawMeta(base+(Date.now()-at)/1000); }, 1000);
 
@@ -5459,6 +5774,8 @@ const crow = {
     const list=document.createElement("ol");
     (g.steps||[]).forEach((s,i)=>{
       const li=document.createElement("li"); li.className=s.status;
+      // #289: why it was skipped -- the note robin or the model gave.
+      if(s.status==="skipped" && s.note) li.title=s.note;
       const mark=document.createElement("span"); mark.className="m";
       mark.innerHTML=this.svgStep(s.status);
       const body=document.createElement("span");
@@ -5519,6 +5836,8 @@ const crow = {
       +'<circle cx="12" cy="12" r="3.4" fill="currentColor" stroke="none"/></svg>';
     if(state==="failed") return o+'<circle cx="12" cy="12" r="9"/>'
       +'<path d="M9 9l6 6M15 9l-6 6"/></svg>';
+    if(state==="skipped") return o+'<circle cx="12" cy="12" r="9"/>'
+      +'<path d="M8 12h8M13 9l3 3-3 3"/></svg>';
     return o+'<circle cx="12" cy="12" r="9"/></svg>'; },
 
   // 89K statt 89234: im Kopf einer Anzeige zaehlt die Groessenordnung.
@@ -5536,6 +5855,9 @@ const crow = {
   viewBar(e){ const b=$("#viewbar");
     if(e.live){ b.hidden=true; b.textContent=""; this.viewingOther=false; return; }
     this.viewingOther=true;
+    // #264: a held line belongs to the chat it was typed in; this flow is
+    // another one. It runs there anyway and is drawn by that chat's replay.
+    this.held=null;
     b.textContent="";
     const what=document.createElement("span");
     // TEXTCONTENT, WEIL BEIDE NAMEN VON PLATTE KOMMEN -- dieselbe Regel, der die
@@ -5582,15 +5904,32 @@ const crow = {
     pywebview.api.send(text).then(()=>this.busy(), ()=>this.busy()); },
 
   // Only the delegation pair passes the gate -- a /reset or /model through it
-  // would yank state under a running pump -- and the stop gesture (button,
-  // plain line, Escape) stays exactly what it was.
+  // would yank state under a running pump.
   go(){ const text=input.value.trim();
     if(this.running && /^\/(delegate|subtasks)\b/i.test(text)){ this.fanout(text); return; }
     // #162. IN EINER FREMDEN ANSICHT IST DER KNOPF KEIN STOP. Der laufende Zug
     // gehoert einem anderen Chat; ihn von hier aus abzubrechen waere ein Stop
     // fuer etwas, das gar nicht auf dem Schirm steht. Getippt wird fuer DIESEN
     // Chat, und die Zeile wird eingereiht.
-    if(this.running && !this.viewingOther){ pywebview.api.stop(); return; }
+    // #264. A PLAIN LINE MID-TURN IS QUEUED, NOT A STOP. #165 promised it --
+    // "a typed line always has priority; the engine only runs when the queue
+    // is empty" -- and send()/_pump carry it out, but this gate sent every
+    // Enter to stop() since 4860300, so from the live chat the queue was
+    // unreachable.
+    // #264. AND NO LINE IS A STOP, whatever it starts with. #264 still stopped
+    // on a line that opened with "/", so a path (`/home/...`) typed mid-turn
+    // ended the turn and stayed in the box -- robin, live 2026-09-24. Now only
+    // an EMPTY Enter, the Stop button with an empty box, and Escape stop. A
+    // Crow command other than the delegation pair (/reset, /model, /goal ...)
+    // would yank state under the running pump, so it waits in the box and the
+    // hint says so; anything else -- a path included -- is queued.
+    if(this.running && !this.viewingOther){
+      if(!text){ pywebview.api.stop(); return; }
+      if(this.isCommand(text)){
+        $("#hint").textContent=text.split(/\s/)[0]
+          +" waits in the box until this turn ends -- Esc stops the turn";
+        return; }
+      this.hold(text); return; }
     if(!text) return;
     input.value=""; input.style.height="auto";
     this.user(text);
@@ -5606,6 +5945,46 @@ const crow = {
     pywebview.api.send(text).then(
       started => started ? this.busy() : this.idle(),
       () => this.idle()); },
+
+  // #264. THE HELD LINE. Drawn at the turn's `idle`, not now: drawn now it
+  // would stand in the middle of an answer that is still streaming. Two lines
+  // held are ONE message on the wire (send() joins them), so they are one
+  // bubble here too. Staged images ride the held line, as they would a sent one.
+  hold(text){
+    input.value=""; input.style.height="auto";
+    const imgs=this.stagedUrls(); this.stageRender([]);
+    this.held = this.held
+      ? {t:this.held.t+"\n\n"+text, i:this.held.i.concat(imgs)}
+      : {t:text, i:imgs};
+    this.face();
+    pywebview.api.send(text).then(()=>this.queuedLine(), ()=>this.queuedLine()); },
+
+  release(){ const h=this.held; if(!h) return;
+    this.held=null; this.user(h.t); this.userImages(h.i); },
+
+  // #264. A Crow command is a first word on the core's own list (`meta`
+  // carries SLASH_COMMANDS) -- not a prefix test, the rule `slash_answer` keeps
+  // for the same reason: `/usr/bin/env` opens a question, not a command.
+  isCommand(text){
+    return (this.slash||[]).indexOf(text.split(/\s/)[0].toLowerCase())>=0; },
+
+  // #264. THE BUTTON SAYS WHAT A CLICK DOES. #264 kept it on Stop whatever was
+  // in the box, and robin's line + click ended the turn with the line left in
+  // the box (live 2026-09-24). While a turn runs and the box holds a line that
+  // would be queued, the button reads "Queue" and a click queues it; with an
+  // empty box it is Stop. Escape stops either way.
+  face(){ if(!this.running) return;
+    const text=input.value.trim();
+    const q=!this.viewingOther && text && !this.isCommand(text);
+    go.textContent = q ? "↑ Queue" : "■ Stop";
+    go.classList.toggle("stop", !q);
+    go.title = q ? "queue this line -- it runs when this turn ends (Esc stops the turn)"
+                 : "stop"; },
+
+  press(){ if(this.running && !this.viewingOther){
+      const text=input.value.trim();
+      if(!text || this.isCommand(text)){ pywebview.api.stop(); return; } }
+    this.go(); },
 
   // #88: THE RELEASE LEVEL, and the menu is built from what the CORE says the
   // levels are -- never from a list written out here. A second copy of the
@@ -5703,9 +6082,16 @@ const crow = {
   // OPEN SURVIVES A REDRAW. The review can stage a second time while the tile
   // is already open, and collapsing it under the reader's hands would hide the
   // thing they were in the middle of reading.
+  //
+  // #285. THREE STATES, one click each: collapsed (title and counts), `open`
+  // (the 160-char previews), `open deep` (the whole text). robin could not
+  // tell an append from a swap mid-file: the preview showed only the new
+  // words, cut. Deep, a replace shows the entry it takes out above the one it
+  // puts in, and an add says where it lands. Both levels are drawn every
+  // time; the CSS picks one, so a redraw keeps the level too.
   pendState(items){
     const bar = $("#pendbar"), list = items || [];
-    if(!list.length){ bar.hidden = true; bar.classList.remove("open");
+    if(!list.length){ bar.hidden = true; bar.classList.remove("open", "deep");
                       bar.innerHTML = ""; return; }
     // `replace` is a line gained AND a line lost -- it is one entry and two
     // changes, and a count that showed it as one would understate what is
@@ -5720,27 +6106,41 @@ const crow = {
       + '<span class="plus"></span><span class="minus"></span>'
       + '<span class="hint"></span></span>'
       + '<span class="body">'
-      + list.map(()=>'<span class="what"></span>').join("")
       + '<span class="acts">'
       + '<button class="yes" onclick="crow.pendAnswer(true)">save to memory</button>'
       + '<button class="no" onclick="crow.pendAnswer(false)">discard</button>'
       + '</span></span>';
     bar.querySelector(".plus").textContent = "+" + plus;
     bar.querySelector(".minus").textContent = "\u2212" + minus;
-    bar.querySelector(".hint").textContent =
-      bar.classList.contains("open") ? "click to collapse" : "click to review";
-    const rows = bar.querySelectorAll(".what");
-    list.forEach((x,i)=>{ if(rows[i]) rows[i].textContent = x.text || ""; });
+    const body = bar.querySelector(".body"), acts = bar.querySelector(".acts");
+    const line = (cls, text) => { const s = document.createElement("span");
+      s.className = cls; s.textContent = text; return s; };
+    list.forEach(x => { const a = x.action || "add";
+      const row = document.createElement("span"); row.className = "what";
+      row.appendChild(line("brief", x.text || ""));
+      const whole = line("whole", "");
+      if(a === "replace" || a === "remove")
+        whole.appendChild(line("was", "\u2212 " + (x.old ||
+          "no single entry contains: " + (x.find || ""))));
+      if(a !== "remove") whole.appendChild(line("will", "+ " + (x.full || x.text || "")));
+      if(a === "add") whole.appendChild(line("where", "appended at the end"));
+      row.appendChild(whole);
+      body.insertBefore(row, acts); });
+    this.pendHint(bar);
     bar.hidden = false; },
 
   // The buttons live inside the tile, so a click on one would bubble up and
-  // toggle it shut on the way out.
+  // toggle it shut on the way out. #285: shut -> open -> deep -> shut.
   pendToggle(e){ if(e && e.target.closest("button")) return;
     const bar = $("#pendbar");
-    bar.classList.toggle("open");
-    const hint = bar.querySelector(".hint");
-    if(hint) hint.textContent =
-      bar.classList.contains("open") ? "click to collapse" : "click to review"; },
+    if(!bar.classList.contains("open")) bar.classList.add("open");
+    else if(!bar.classList.contains("deep")) bar.classList.add("deep");
+    else bar.classList.remove("open", "deep");
+    this.pendHint(bar); },
+
+  pendHint(bar){ const hint = bar.querySelector(".hint");
+    if(hint) hint.textContent = bar.classList.contains("deep") ? "click to collapse"
+      : bar.classList.contains("open") ? "click for the full text" : "click to review"; },
 
   pendAnswer(yes){ pywebview.api.answer_memory(!!yes); },
 
@@ -6152,7 +6552,11 @@ const crow = {
     if(here) rows.push({act:"toproj", label:"out of project", arg:"",
                         sep:!others.length});
     rows.push({sep:true});
-    rows.push({act:"arch", label:archived ? "restore" : "archive"});
+    // #261: A ROLLOVER HAS NOTHING TO BE RESTORED TO. It is
+    // the live chat's earlier half, not a chat of its own; the drawer is
+    // where it lives, and the note in the live chat points at its path.
+    if(!entry.rollover)
+      rows.push({act:"arch", label:archived ? "restore" : "archive"});
     rows.push({act:"del", label:"delete", danger:true});
     return rows; },
 
@@ -6471,7 +6875,11 @@ const crow = {
       if(!here.has(d.dataset.sub)) d.remove(); });
     const run=p.querySelectorAll(".splive .subcard").length;
     const fin=p.querySelectorAll(".spdone .subcard").length;
-    p.hidden=!(run+fin);
+    // #281. CLOSED BY ITS `×` for this chat until a NEW subtask starts
+    // (born unmarked) or a jump reopens it. `hidden` is the whole state, so
+    // the #233/#256 reserve on `#subpanel:not([hidden])` lets go with it.
+    const open=items.some(x=>x.here && !x.closed);
+    p.hidden=!(run+fin) || !open;
     p.querySelector(".sph .st").textContent=run+" running · "+fin+" finished";
     const fold=p.querySelector(".spfold"), done=p.querySelector(".spdone");
     fold.hidden=!fin;
@@ -6484,6 +6892,13 @@ const crow = {
 
   subPanelFold(){ $("#subpanel").classList.toggle("shut"); },
 
+  // #281. The `×`: hidden at once here, the mark in the registry. Closing is
+  // not cancelling -- no subtask is touched.
+  subPanelClose(ev){ if(ev) ev.stopPropagation();
+    $("#subpanel").hidden=true;
+    (this.subItems||[]).forEach(x=>{ if(x.here) x.closed=true; });
+    pywebview.api.close_subtasks(); },
+
   subDoneFold(){ const p=$("#subpanel"), done=p.querySelector(".spdone");
     done.hidden=!done.hidden; this.subPanel(this.subItems||[]); },
 
@@ -6492,6 +6907,10 @@ const crow = {
   // purpose, so the panel's own scrollTop is set instead.
   subReveal(d){
     const p=$("#subpanel"); p.classList.remove("shut");
+    // #281: a jump is the way back into a closed card.
+    if(p.hidden){ p.hidden=false;
+      (this.subItems||[]).forEach(x=>{ if(x.here) x.closed=false; });
+      pywebview.api.reopen_subtasks(); }
     const done=p.querySelector(".spdone");
     if(done.contains(d) && done.hidden){ done.hidden=false;
       this.subPanel(this.subItems||[]); }
@@ -6679,7 +7098,12 @@ const crow = {
     if(open) return;                       // zugeklappt: `set_browser_open` versteckt
     if(!this.tabs.length){ this.brNew(); return; }
     const t=this.brTab(this.tabOn);
-    if(t && t.at>=0) this.brSend(t.hist[t.at]); else pywebview.api.pane_show(); },
+    if(t && t.at>=0) this.brSend(this.brShown(t)); else pywebview.api.pane_show(); },
+
+  // #279. WHAT A TAB SHOWS: the model's capture for a render tab (the PNG,
+  // a still image), else the address. Unfolding a render tab that was filled
+  // while folded loads the capture, not the live WebGL page.
+  brShown(t){ return (t.shot && t.shotUrl) ? t.shotUrl : t.hist[t.at]; },
 
   // -- #175: die Reiter ----------------------------------------------------
   //
@@ -6719,10 +7143,13 @@ const crow = {
   // Der Screenshot ist, was das Modell wirklich gesehen hat; die Adresse steht
   // in der Zeile und laedt auf Enter live.
   //
-  // DAS PANEL KLAPPT SICH DAFUER AUF. Ein Tab, das in einem zugeklappten Panel
-  // entsteht, ist ein Ereignis, von dem niemand erfaehrt.
+  // #279: A FOLDED PANEL STAYS FOLDED. Until 2026-09-24 a render unfolded it
+  // (#201) and loaded the capture; robin had folded it to keep the card for
+  // the model, and its web process was respawned at 13:26:20 right after a
+  // render and crashed on. The render tab is filled either way; the capture
+  // is loaded when the panel is open, or when it is unfolded.
   brRendered(url, shot){
-    this.brUnfold();
+    const folded=document.body.dataset.browser==="shut";
     // #230: EIN REITER FUER DIE RENDERS DES MODELLS, nicht einer je Aufruf.
     // robin, 2026-09-23: "every time Crow opens a website it opens a new tab".
     // Zehn Renders waren zehn Reiter, die niemand schliesst. Der Render-Reiter
@@ -6736,13 +7163,15 @@ const crow = {
     // DAS BILD STEHT, NICHT DIE ADRESSE: die Meldung "brnav" ueber die
     // geladene PNG-Datei darf den Eintrag nicht ueberschreiben (#227).
     t.shot=true;
+    t.shotUrl=this.fileUrl(String(shot||""));
     this.tabOn=t.id;
     this.brDraw();
     $("#brurl").value=url||"";
+    if(folded) return;
     // DAS BILD ZUERST, weil es das ist, was das Modell gesehen hat -- die Seite
     // kann sich seitdem geaendert haben, und dann erzaehlt der Chat von etwas
     // anderem als der Schirm.
-    this.brSend(this.fileUrl(String(shot||""))); },
+    this.brSend(t.shotUrl); },
 
   // EINE SCHEIBE FUER ALLE REITER, also laedt ein Wechsel die Seite neu. Der
   // ehrliche Preis dafuer, dass ueberhaupt jede Seite geht: je Reiter ein
@@ -6751,7 +7180,7 @@ const crow = {
     const t=this.brTab(id);
     const url = t && t.at>=0 ? t.hist[t.at] : "";
     $("#brurl").value=url;
-    if(url) this.brSend(url); else this.brBlank(); },
+    if(url) this.brSend(this.brShown(t)); else this.brBlank(); },
 
   brClose(id, ev){
     if(ev) ev.stopPropagation();
@@ -6831,6 +7260,9 @@ const crow = {
   // einen Wimpernschlag lang an der Stelle, an der sie beim letzten Mal lag.
   brSend(url){
     if(!window.pywebview) return;
+    // #279: THE ONE DOOR, SHUT WHILE FOLDED. No path loads a page into a
+    // panel nobody can see; unfolding sends the tab's entry again.
+    if(document.body.dataset.browser==="shut") return;
     this.brPlace();
     pywebview.api.pane_go(url); },
 
@@ -7119,6 +7551,167 @@ const crow = {
   toggleArchive(){ $("#arch").classList.toggle("open");
     $("#archbar").classList.toggle("open"); },
 
+  // #249. DER TELEFON-SPIEGEL, Desktopseite: der Knopf oeffnet den Dialog
+  // (derselbe Weg wie ein nacktes /remote), der Zustand faerbt ihn.
+  remoteOpen(){ pywebview.api.remote_open().then(said => { if(said) this.note(said); }); },
+  remoteState(e){ const b=$("#remotetoggle"); if(!b) return;
+    b.classList.toggle("on", !!e.on);
+    b.classList.toggle("live", !!e.on && (e.online||0) > 0);
+    if(e.t) b.title=e.t; },
+  remoteClose(){ const d=$("#remotedlg"); if(!d) return;
+    d.hidden=true; this.remotePlaceAsk(); d.textContent=""; },
+  // #249, iPhone 2026-09-24: der Dialog (z-index 80, modal) DECKTE die Leiste
+  // ueber der Eingabe zu -- Allow war erst nach dem Schliessen erreichbar.
+  // Solange er offen ist, steht die Frage OBEN IN SEINEM KOERPER; zu, steht
+  // sie wieder ueber der Eingabe. Dasselbe Element, dieselben Knoepfe.
+  remotePlaceAsk(p){ p = p || $("#pairbar"); if(!p) return;
+    const d=$("#remotedlg"), body=d && !d.hidden ? d.querySelector(".rbody") : null;
+    if(body){ p.classList.add("indlg"); body.insertBefore(p, body.firstChild); }
+    else { p.classList.remove("indlg"); $("#composer").insertBefore(p, $("#box")); } },
+  remoteDialog(e){ const d=$("#remotedlg"); if(!d) return;
+    if(!e.open){ this.remoteClose(); return; }
+    // EIN NACHZIEHEN (ein Geraet kam oder ging) OEFFNET NICHTS, was zu ist.
+    if(!e.fresh && d.hidden) return;
+    // DIE FORM DES ABGENOMMENEN MOCKUPS (#249 Schritt 0): Kopf mit Schalter,
+    // links der Code, rechts Anleitung, Adresse, Netz, Laufzeit, Firewall;
+    // darunter die gekoppelten Geraete mit "revoke". Das Geruest als Markup,
+    // jeder Name und jede Adresse per textContent; das SVG ist das einzige
+    // fremde Markup und kommt aus Crows eigenem Kodierer (`qr_svg`).
+    const ttl = d.querySelector(".rttl b");
+    if(e.fresh || !ttl) this.remoteUntil = Date.now() + 1000*(e.ttl||120);
+    const ask=$("#pairbar");
+    d.textContent="";
+    const sheet=document.createElement("div"); sheet.className="rsheet";
+    sheet.innerHTML='<div class="rhead"><h2>Remote</h2>'
+      + '<span class="swlabel">server on</span><button class="sw on" title="/remote off"></button>'
+      + '<button class="sclose" title="close">&#10005;</button></div>'
+      + '<div class="rbody"><div class="rpair"><div class="rqr"></div><div class="rinfo">'
+      + '<div class="rstep">Point the iPhone camera at the code and tap the Safari '
+      + 'banner. You confirm the device here once.</div>'
+      + '<div><h3>Address</h3><div class="rurl"><code></code><button>copy</button></div></div>'
+      + '<div class="rnet" hidden><h3>Network</h3><div class="seg"></div></div>'
+      + '<div class="rtail" hidden><span></span><button hidden>copy</button></div>'
+      + '<div class="rttl">code valid for <b></b> · single use · a new one each time this opens</div>'
+      + '<div class="rhint" hidden></div></div></div>'
+      + '<div class="rdevs"><h3>Paired devices</h3><div class="rlist"></div>'
+      + '<div class="rfoot">Revoking ends its stream now and its cookie stops working. '
+      + '/remote off stops the server; paired devices stay paired.</div></div></div>';
+    sheet.querySelector(".sclose").onclick=()=>this.remoteClose();
+    sheet.querySelector(".sw").onclick=()=>pywebview.api.remote_stop()
+      .then(said => { if(said) this.note(said); });
+    sheet.querySelector(".rqr").innerHTML=e.svg||"";
+    sheet.querySelector(".rqr").classList.toggle("none", !e.svg);
+    sheet.querySelector(".rurl code").textContent=e.url||"";
+    sheet.querySelector(".rurl button").onclick=()=>pywebview.api.copy(e.url||"");
+    // #249 STUFE 5: DIE HTTPS-ADRESSE (Tailscale) ALS DRITTE WAHL IM NETZ.
+    // Gewaehlt zeigt sie ihren QR erst, wenn `tailscale serve` hierher zeigt;
+    // bis dahin die eine Zeile mit dem fehlenden Schritt (und dem Befehl).
+    const https=e.https||null, onHttps=!!(https && https.on);
+    if((e.ips||[]).length > 1 || https){
+      const net=sheet.querySelector(".rnet"), seg=net.querySelector(".seg");
+      (e.ips||[]).forEach(([iface, ip]) => { const o=document.createElement("button");
+        o.textContent=iface+" · "+ip; o.classList.toggle("on", ip===e.ip && !onHttps);
+        o.onclick=()=> (onHttps && ip===e.ip ? pywebview.api.remote_use_https(false)
+                        : pywebview.api.remote_use_ip(ip))
+          .then(said => { if(typeof said==="string" && said) this.note(said); });
+        seg.appendChild(o); });
+      if(https){ const o=document.createElement("button");
+        o.textContent="HTTPS · "+(https.name||"Tailscale"); o.classList.toggle("on", onHttps);
+        o.onclick=()=>pywebview.api.remote_use_https(true);
+        seg.appendChild(o); }
+      net.hidden=false; }
+    if(onHttps){ const t=sheet.querySelector(".rtail");
+      t.querySelector("span").textContent=https.line||"";
+      t.classList.toggle("ok", https.state==="ready");
+      if(https.cmd){ const c=t.querySelector("button"); c.hidden=false;
+        c.onclick=()=>pywebview.api.copy(https.cmd); }
+      t.hidden=false; }
+    if(e.hint){ const t=sheet.querySelector(".rhint"); t.textContent=e.hint; t.hidden=false; }
+    const PHONE='<svg viewBox="0 0 20 20" width="18" height="18" fill="none"'
+      + ' stroke="currentColor" stroke-width="1.6" stroke-linecap="round"'
+      + ' stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="2.5"'
+      + ' width="9" height="15" rx="2"></rect><line x1="8.8" y1="14.6" x2="11.2"'
+      + ' y2="14.6"></line></svg>';
+    const list=sheet.querySelector(".rlist");
+    (e.devices||[]).forEach(dev => {
+      const row=document.createElement("div"); row.className="rdev"+(dev.online?" live":"");
+      row.innerHTML='<span class="ico">'+PHONE+'</span><div class="stext">'
+        + '<div class="sname"></div><div class="sdesc"></div></div><button>revoke</button>';
+      row.querySelector(".sname").textContent=dev.name||dev.id||"";
+      row.querySelector(".sdesc").textContent=dev.online ? "connected" : "paired";
+      row.querySelector("button").onclick=()=>pywebview.api.remote_forget(dev.id)
+        .then(said => { if(said) this.note(said); });
+      list.appendChild(row); });
+    if(!(e.devices||[]).length){ const n=document.createElement("div");
+      n.className="rfoot"; n.textContent="none yet"; list.appendChild(n); }
+    d.appendChild(sheet); d.hidden=false;
+    this.remotePlaceAsk(ask);
+    const b=sheet.querySelector(".rttl b");
+    const tick=()=>{ if(!b.isConnected){ clearInterval(this.remoteTick); return; }
+      const left=Math.max(0, Math.round((this.remoteUntil-Date.now())/1000));
+      b.textContent=Math.floor(left/60)+":"+String(left%60).padStart(2,"0"); };
+    clearInterval(this.remoteTick); tick(); this.remoteTick=setInterval(tick, 1000); },
+  // EIN NEUES GERAET FRAGT: die Leiste ueber der Eingabe, in der Form von
+  // #pendbar (abgenommenes Mockup j) -- keine Karte im Verlauf, weil das
+  // Koppeln nicht zum Gespraech gehoert. Die Antwort landet als Notiz.
+  remoteAsk(e){
+    const old=$("#pairbar"); if(old) old.remove();
+    const p=document.createElement("div"); p.id="pairbar"; p.dataset.rid=String(e.id);
+    p.innerHTML='<span class="top"><span class="ph"><svg viewBox="0 0 20 20" width="15"'
+      + ' height="15" fill="none" stroke="currentColor" stroke-width="1.6"'
+      + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<rect x="5.5" y="2.5" width="9" height="15" rx="2"></rect>'
+      + '<line x1="8.8" y1="14.6" x2="11.2" y2="14.6"></line></svg></span>'
+      + '<span class="title"></span><span class="hint"></span></span>'
+      + '<div class="what">it gets full control, at the current level <b class="lvl"></b></div>'
+      + '<div class="acts"><button class="yes">Allow</button>'
+      + '<button class="no">Deny</button></div>';
+    p.querySelector(".title").textContent=e.t||e.name||"";
+    p.querySelector(".lvl").textContent=this.mode||"";
+    const answer = yes => { p.querySelector(".acts").innerHTML="";
+      pywebview.api.remote_allow(e.id, yes); };
+    p.querySelector(".yes").onclick=()=>answer(true);
+    p.querySelector(".no").onclick=()=>answer(false);
+    const until=Date.now()+1000*(e.ttl||120), hint=p.querySelector(".hint");
+    const tick=()=>{ if(!p.isConnected) return clearInterval(t);
+      const left=Math.max(0, Math.round((until-Date.now())/1000));
+      hint.textContent="expires in "+Math.floor(left/60)+":"+String(left%60).padStart(2,"0"); };
+    const t=setInterval(tick, 1000); tick();
+    this.remotePlaceAsk(p); },
+  remoteAsked(e){
+    const p=document.querySelector('#pairbar[data-rid="'+String(e.id)+'"]');
+    if(p) p.remove();
+    if(e.t) this.note(e.t); },
+  // #249. DIE ANDERE SEITE HAT GEANTWORTET: die offene Karte hier schliesst
+  // mit dem Satz des Kerns ("allowed -- answered on phone"), statt weiter eine
+  // Frage zu stellen, die schon entschieden ist.
+  asked(e){
+    const said=e.t||"";
+    const close = card => { const row=card.querySelector(".askrow");
+      if(!row || !row.querySelector("button")) return;
+      card.querySelectorAll("[data-field]").forEach(el => { el.disabled=true; });
+      row.innerHTML='<span class="askdone"></span>';
+      row.querySelector(".askdone").textContent=said; };
+    if(e.what==="elicit"){
+      document.querySelectorAll(".askcard[data-elicit]").forEach(c => {
+        if(e.id==null || c.dataset.elicit===String(e.id)) close(c); });
+      return; }
+    if(e.what==="ask"){
+      document.querySelectorAll(".askcard").forEach(c => {
+        if(c.dataset.elicit!==undefined || c.dataset.rid!==undefined
+           || c.classList.contains("ghcard")) return;
+        close(c); });
+      return; }
+    if(said) this.note(said); },
+  // #249, TELEFONSEITE: kein Drop, also ein Dateifeld -> /upload -> stage_image.
+  remoteUpload(el){ const f=el.files && el.files[0]; el.value=""; if(!f) return;
+    fetch("/upload", {method:"POST", credentials:"same-origin",
+      headers:{"Content-Type": f.type || "application/octet-stream"}, body:f})
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(String(r.status))))
+      .then(j => pywebview.api.stage_image(j && j.path))
+      .then(res => { if(res && res.chips) this.stageRender(res.chips); },
+            err => this.note(((window.CROW_REMOTE_TEXT || {}).upload || "") + " (" + err.message + ")")); },
+
   on(msg){
     const e=typeof msg==="string" ? JSON.parse(msg) : msg;
     // #162. WAS EIN HINTERGRUNDZUG SAGT, WIRD VERWORFEN -- nicht gepuffert. Der
@@ -7155,6 +7748,7 @@ const crow = {
       // be copied into the sheet when it opened; the ribbon is a name and three
       // window buttons now, so the number goes where somebody looks it up.
       case "meta": $("#aboutver").textContent=e.version;
+        if(e.slash) this.slash=e.slash;
         if(e.rail) $("#rail").style.setProperty("--railw", e.rail+"px");
         // THE TITLE, NOT A CHIP (#119). Set rather than interpolated for the same reason every
         // other name here is: it is a string that arrived over the bridge.
@@ -7226,10 +7820,18 @@ const crow = {
       case "ghcode": this.ghCode(e); break;
       case "ghdone": this.ghDone(e); break;
       case "mic": this.micState(e); break;
+      case "heard": this.heard(e); break;
       case "drop": this.dropped(e.paths); break;
       case "idle": this.idle(); break;
       case "busy": this.busy(); break;
-      case "queued": this.queuedLine(); break;
+      case "queued": this.queuedLine(e); break;
+      // #249: der Telefon-Spiegel -- Knopf, Dialog, Kopplungskarte, und die
+      // Karte, die auf der anderen Seite beantwortet wurde.
+      case "remote": this.remoteState(e); break;
+      case "remotedlg": this.remoteDialog(e); break;
+      case "remoteask": this.remoteAsk(e); break;
+      case "remoteasked": this.remoteAsked(e); break;
+      case "asked": this.asked(e); break;
       case "viewing": this.viewBar(e); break;
       case "goal": this.goalPanel(e.goal); break;
     }
@@ -7238,11 +7840,14 @@ const crow = {
 window.crow = crow;
 
 input.addEventListener("input",()=>{ input.style.height="auto";
-  input.style.height=Math.min(input.scrollHeight,140)+"px"; });
+  input.style.height=Math.min(input.scrollHeight,140)+"px"; crow.face(); });
 input.addEventListener("focus",()=>box.classList.add("focus"));
 input.addEventListener("blur",()=>box.classList.remove("focus"));
 input.addEventListener("keydown",e=>{
-  if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); crow.go(); }
+  // #264: an Enter that confirms an input method's composition is the IME's,
+  // not a submit (UI Events: isComposing; keyCode 229 on older WebKit).
+  if(e.key==="Enter" && !e.shiftKey && !e.isComposing && e.keyCode!==229){
+    e.preventDefault(); crow.go(); }
   if(e.key==="Escape" && crow.running) pywebview.api.stop(); });
 
 // BOTH HAVE TO BE PREVENTED, and dragover is the one people forget: without it
@@ -7510,6 +8115,10 @@ new ResizeObserver(() => crow.brPlace()).observe($("#brbody"));
 // (min-width:0), #main traegt die Mindestbreite der Maske.
 
 window.addEventListener("pywebviewready",()=>{ pywebview.api.ready(); input.focus(); });
+// #249: kein pywebview auf dem Telefon, also kein `pywebviewready` von aussen --
+// die Bruecke oben koppelt, oeffnet den Strom und feuert es selbst.
+/* __REMOTE_JS__ */
+if(window.CROW_REMOTE) window.crowRemoteStart();
 </script></body></html>
 """
 
@@ -7527,6 +8136,1171 @@ PAGE_PLACEHOLDER = ('<!doctype html><html><head><meta charset="utf-8">'
                     '</style></head><body></body></html>')
 
 
+# ------------------------------------------------------------- #249 remote
+#
+# EIN `Api`, MEHRERE ANSICHTEN. Das Fenster und jedes gekoppelte Telefon rufen
+# dieselben Methoden und bekommen dieselben Pushes; jedes hat nur seine eigene
+# Chat-Ansicht und sein eigenes Layout. WER GERADE RUFT, steht in einer
+# ContextVar: pywebview-Aufrufe tragen den Default "desktop", der
+# `/api`-Verteiler in `crow_remote` setzt die Geraete-ID pro Anfrage. Der
+# Worker-Thread startet mit leerem Kontext und ist damit NIEMANDES Client --
+# seine Pushes werden nach Ansicht verteilt, nicht nach Aufrufer.
+
+DESKTOP = "desktop"
+# DER ERSATZ, SOLANGE `crow_remote` FEHLT. Das Modul kommt aus einem eigenen
+# Zweig; ohne es ist jeder Aufrufer das Fenster, und genau so verhielt sich
+# diese Datei vor #249.
+_CLIENT_FALLBACK: "contextvars.ContextVar[str]" = contextvars.ContextVar(
+    "crow_client", default=DESKTOP)
+# WOHIN EIN PUSH GEHT, wenn eine Ansichtsaktion ihn auf ihren Aufrufer
+# beschraenkt (`Api._only`). None heisst: die normale Regel in `Api.push`.
+_TO: "contextvars.ContextVar[tuple | None]" = contextvars.ContextVar(
+    "crow_push_to", default=None)
+# `Api.state_snapshot` sammelt, statt zuzustellen: eine Liste hier, und jeder
+# Push dieses Kontexts landet in ihr und NIRGENDS sonst.
+_CAPTURE: "contextvars.ContextVar[list | None]" = contextvars.ContextVar(
+    "crow_push_capture", default=None)
+_REMOTE_MODULE: list = []          # [crow_remote or None], einmal aufgeloest
+
+
+def remote_module() -> object:
+    """`crow_remote`, or None where this install does not have it. Resolved
+    ONCE: a failed import searches sys.path again on every call, and `push`
+    asks for the client on every message."""
+    if not _REMOTE_MODULE:
+        try:
+            import crow_remote as found
+        except ImportError:
+            found = None
+        _REMOTE_MODULE.append(found)
+    return _REMOTE_MODULE[0]
+
+
+def _client_var() -> "contextvars.ContextVar[str]":
+    """The one ContextVar that names the caller -- the server's, if it exists,
+    so the `/api` dispatcher and this file read the same variable."""
+    found = getattr(remote_module(), "CLIENT", None)
+    return found if found is not None else _CLIENT_FALLBACK
+
+
+def _client() -> str:
+    """Who is calling: "desktop", or a paired device's id."""
+    return _client_var().get() or DESKTOP
+
+
+@contextlib.contextmanager
+def as_client(client: str) -> Iterator[None]:
+    """Run the block as `client` -- the per-client loops (rail, bar) and the
+    suite use it; the HTTP dispatcher sets the same variable itself."""
+    var = _client_var()
+    token = var.set(client or DESKTOP)
+    try:
+        yield
+    finally:
+        var.reset(token)
+
+
+# #249 DECISION 5, AS A TABLE THE SUITE COUNTS. Every `pywebview.api.<name>`
+# the page calls is in exactly ONE of the two: proxied 1:1 to this Api from a
+# phone, or bound to the desktop window/machine with what the phone does
+# instead. A method added to the page and to neither fails
+# `RemoteApiParityTests` until somebody decides.
+REMOTE_PROXIED = frozenset({
+    "answer", "answer_elicit", "answer_memory", "archive_chat", "choose_model",
+    "choose_root", "clear_root", "close_goal", "close_subtasks",
+    "create_project", "delegate_favorites_set", "delete_chat", "discard_live",
+    "drop_project", "git_commit_now", "git_refresh", "github_account_click",
+    "github_cancel", "github_client_id_set", "github_disconnect",
+    "github_view", "mcp_add", "mcp_confirm", "mcp_refresh", "mcp_remove",
+    "mcp_view", "open", "openrouter_set", "path_info", "provider_borrow",
+    "provider_key", "provider_model_set", "provider_oauth", "provider_pick",
+    "provider_refresh", "provider_signout", "provider_token", "provider_view",
+    "ready", "rename", "reopen_subtasks", "reset", "roll_tail", "send",
+    "set_chat_root", "set_mode", "set_reasoning", "set_server_key",
+    "set_tools", "skills", "stop", "toggle_server", "toggle_skill",
+    "tools_cleared", "unstage_image", "update_check", "update_start",
+    "view_live",
+})
+# WAS DAS TELEFON STATTDESSEN TUT, je Schluessel ein Satz. Die Seite liest
+# die Schluessel (`__REMOTE_BOUND__`), dieser Text ist fuer Menschen.
+REMOTE_PHONE_DOES = {
+    "noop": "nothing: the phone has no window to move, size or maximise",
+    "layout": "phone-local: each device keeps its own layout; the desktop's "
+              "settings are never written",
+    "tab": "closes the phone's tab, never the desktop window",
+    "copy": "phone clipboard via document.execCommand('copy') on the tap",
+    "paste": "the native paste in the input field",
+    "dictate": "#290: on the HTTPS (Tailscale) address the phone records "
+               "itself (MediaRecorder -> POST /upload?kind=audio -> Whisper "
+               "here -> its own input field); on plain HTTP the keyboard's "
+               "own dictation",
+    "upload": "file input -> POST /upload -> stage_image(<temp path>)",
+    "root": "a path field (and the recent roots) -> choose_root(path)",
+    "link": "opens in a new phone tab",
+    "desktop": "runs on the desktop, where the file/browser is; the phone "
+               "shows a note",
+    "pane": "the desktop pane keeps working; the phone shows the URL and "
+            "the render_page screenshot, never a live pane",
+    "desktop-only": "never served to a phone (the pairing controls)",
+}
+REMOTE_DESKTOP_BOUND = {
+    "maximise": "noop", "minimise": "noop", "begin_move": "noop",
+    "begin_resize": "noop", "set_geometry": "noop", "geometry": "noop",
+    "rail_width": "layout", "code_width": "layout",
+    "set_rail_open": "layout", "set_code_open": "layout",
+    "set_git_open": "layout", "set_browser_open": "layout",
+    "set_project_open": "layout", "set_theme": "layout",
+    "close": "tab", "copy": "copy", "paste_clipboard": "paste",
+    "dictate_start": "dictate", "dictate_stop": "dictate",
+    "stage_image": "upload", "pick_root": "root", "open_url": "link",
+    "reveal_path": "desktop", "roll_show": "desktop",
+    "provider_authorise": "desktop",
+    "pane_go": "pane", "pane_show": "pane", "pane_hide": "pane",
+    "pane_place": "pane", "pane_cover": "pane",
+    "remote_open": "desktop-only", "remote_allow": "desktop-only",
+    "remote_forget": "desktop-only", "remote_use_ip": "desktop-only",
+    "remote_use_https": "desktop-only",
+    "remote_stop": "desktop-only",
+}
+# WAS EIN TELEFON UEBER HTTP RUFEN DARF: das Proxierte plus die gebundenen,
+# deren Ersatz doch auf dem Desktop landet. Alles andere beantwortet der
+# Server mit 404 -- auch die 15 oeffentlichen Methoden, die die Seite nie ruft.
+REMOTE_ALLOWED = REMOTE_PROXIED | frozenset(
+    name for name, how in REMOTE_DESKTOP_BOUND.items()
+    if how in ("upload", "desktop"))
+# ZUSTAND, DER ALLEN GEHOERT. Eine Ansichtsaktion eines Telefons (sein
+# `open`) bindet ggf. einen neuen Ordner -- das ist keine Ansicht, sondern
+# der gemeinsame Stand, und jede Sicht muss ihn lesen.
+REMOTE_SHARED_KINDS = frozenset({"mode", "root", "tools", "up", "down",
+                                 "reasoning", "git", "goal", "pend",
+                                 "chips", "thoughts"})
+# WAS EIN FRISCHES TELEFON AUS DEM GEDAECHTNIS BEKOMMT: die letzte Fassung
+# jeder dieser Nachrichten. "up"/"down" teilen sich einen Platz.
+_STICKY_KINDS = frozenset({"up", "down", "reasoning", "git", "pend",
+                           "thoughts"})
+
+# DIE HAKEN FUER DIE TELEFONSEITE. Die Desktopseite ersetzt alle drei durch
+# nichts; `stamped_page(remote=True)` fuellt sie. Die eigentliche Handy-CSS
+# kommt spaeter in `REMOTE_CSS` dazu -- hier steht nur, was der Mirror braucht.
+REMOTE_HEAD = ('<meta name="viewport" content="width=device-width,'
+               'initial-scale=1,viewport-fit=cover">'
+               # #249: Safari's bar tint. The first tag (no media) follows the
+               # page's theme -- stamped here, kept in step by REMOTE_JS; the
+               # two after it only speak if it is gone.
+               '<meta id="mtheme" name="theme-color" content="__THEMEBG__">'
+               '<meta name="theme-color" media="(prefers-color-scheme: light)"'
+               ' content="#ffffff">'
+               '<meta name="theme-color" media="(prefers-color-scheme: dark)"'
+               ' content="#181818">'
+               # robin's iPhone, 2026-09-24: "Add to Home Screen" drew a
+               # generic "1" tile. The tile, the title and standalone mode.
+               #
+               # THE STATUS BAR IS OPAQUE (`default`), NOT black-translucent.
+               # robin's iPhone (iOS 27, home-screen app): with the page under
+               # a translucent bar, iOS fills that inset with the Liquid Glass
+               # scroll-edge blur, and the band reaches ~35 pt below the bar,
+               # over the header's icons -- although the page's own solid
+               # ground (body padding --safe-t) was already painted there.
+               # The blur is drawn by the system above the web view; no CSS or
+               # meta tag switches it off and safe-area-inset-top does not
+               # grow with it. With `default` the web view starts below the
+               # bar, iOS 26+ tints the bar from theme-color (the first tag
+               # above follows the page theme), and there is no inset to blur.
+               # iOS caches this with the home-screen icon: an icon added
+               # before this change keeps the old bar until it is re-added.
+               '<link rel="apple-touch-icon" href="/apple-touch-icon.png">'
+               '<link rel="manifest" href="/remote.webmanifest">'
+               '<meta name="apple-mobile-web-app-title" content="Crow">'
+               '<meta name="apple-mobile-web-app-capable" content="yes">'
+               '<meta name="mobile-web-app-capable" content="yes">'
+               '<meta name="apple-mobile-web-app-status-bar-style"'
+               ' content="default">')
+# (the stamped colour is THEME_BG's, the ground the window itself paints)
+REMOTE_CSS = """
+/* #249: auf dem Telefon bleibt die Titelleiste als Kopf -- sie traegt Rail,
+   Code, Git, Browser und Hilfe. Weg sind nur Fensterknoepfe, Zieh- und
+   Greifzonen und der Telefonknopf selbst. */
+#wbtns,.grip,#remotetoggle{display:none !important}
+#remotetoggle + #codetoggle{margin-left:auto}
+#bar{-webkit-app-region:no-drag}
+#remotepair{position:fixed;inset:0;z-index:50;display:grid;place-items:center;
+  background:var(--bg);color:var(--text);padding:24px;text-align:center}
+#remotepair[hidden]{display:none}
+""" + r"""
+/* #249 THE PHONE LAYER. Only in the phone variant of PAGE (REMOTE_CSS), only below 700 px.
+   Same PAGE, same elements, same handlers; this block only rearranges them.
+   REMOTE_HEAD carries the viewport meta (viewport-fit=cover), without which
+   iOS lays it out at 980 px and env(safe-area-inset-*) stays 0. The design
+   is robin's approved step-0 mockups (2026-09-24). */
+@media (max-width:700px){
+
+/* ---- the column: the #280 variables, not the selectors ------------------ */
+:root{
+  --sbw:0px;           /* iOS draws overlay scrollbars */
+  --colpad:14px;       /* #flow / .turn / #composer inset */
+  --reserve:0px;       /* no card column beside the chat */
+  --barh:48px;
+  --tap:44px;          /* Apple HIG minimum target */
+  --drawer:min(86vw,340px);
+  --safe-t:env(safe-area-inset-top,0px);
+  --safe-b:env(safe-area-inset-bottom,0px);
+  --safe-l:env(safe-area-inset-left,0px);
+  --safe-r:env(safe-area-inset-right,0px);
+}
+html{overflow-x:clip}
+html,body{height:100dvh;overscroll-behavior:none;-webkit-text-size-adjust:100%;
+  background:var(--bg)}
+body{padding:var(--safe-t) var(--safe-r) 0 var(--safe-l);
+  -webkit-tap-highlight-color:transparent}
+
+/* ---- window chrome: gone ------------------------------------------------ */
+#railgrip,#codegrip{display:none!important}
+
+/* ---- the title bar becomes the app header ------------------------------
+   Same buttons, same onclick; only the window part (drag region, min/max/
+   close) is hidden. The rail button opens the rail drawer, the three on the
+   right open the code / git / browser drawers. */
+#bar{height:var(--barh);padding:0 4px;gap:0;background:var(--bg);
+  border-bottom:1px solid var(--line-soft)}
+#railtoggle,#codetoggle,#gittoggle,#browsertoggle,#help{
+  min-width:var(--tap);min-height:var(--tap);justify-content:center;
+  margin:0;border-radius:10px}
+#railtoggle svg,#codetoggle svg,#gittoggle svg,#browsertoggle svg{
+  width:19px;height:19px}
+#mark{font-size:12.5px;margin:0 4px}
+#bar #codetoggle{margin-left:auto}
+#help{font-size:12.5px;padding:0 10px}
+#helpmenu button{min-height:var(--tap);font-size:14px}
+/* The toggles light when their drawer is open (page rule), not per setting. */
+
+/* ---- the chat fills the screen ------------------------------------------ */
+#body{position:relative;background:var(--bg)}
+#main{min-width:0;border-radius:0;
+  container-type:normal}          /* fixed children anchor to the viewport */
+#flow{padding-top:14px;
+  /* fitFlow writes padding-bottom inline; the pinned card adds its height */
+  padding-bottom:calc(var(--comph,0px) + var(--askh,0px) + 12px)!important;
+  scroll-behavior:auto;-webkit-overflow-scrolling:touch}
+.you .txt{max-width:86%}
+.md table{max-width:100%}
+.code pre,.cost{max-width:100%}
+.turn{min-width:0}
+
+/* ---- drawers: rail left, code / browser / git right ---------------------
+   transform, never width: a panel parked at width 0 in a flex row, or pushed
+   off-canvas with `left`, still widens the layout box and iOS zooms out. */
+#rail,#side{position:fixed;top:0;bottom:0;z-index:90;
+  width:var(--drawer)!important;overflow:hidden;
+  padding-top:var(--safe-t);padding-bottom:var(--safe-b);
+  box-shadow:0 0 40px var(--shadow-strong);
+  transition:transform .22s cubic-bezier(.3,.7,.2,1);visibility:hidden}
+#rail{left:0;transform:translateX(-105%);padding-left:var(--safe-l)}
+#side{right:0;transform:translateX(105%);padding-right:var(--safe-r);
+  width:min(94vw,440px)!important}
+body:not([data-rail="shut"]) #rail{transform:none;visibility:visible}
+body:not([data-code="shut"]) #side,
+body:not([data-browser="shut"]) #side{transform:none;visibility:visible}
+@media (prefers-reduced-motion:reduce){#rail,#side{transition:none}}
+#side>*{visibility:inherit}
+#railhead,#codehead,#brhead{min-height:var(--barh)}
+#new,#codewipe,#brnew{min-height:36px;padding:0 14px;font-size:13px}
+.sess{padding:11px 12px 12px 14px;min-height:var(--tap)}
+.sess .t{font-size:14px}
+.sess .s{font-size:12px}
+.proj{min-height:var(--tap);padding:8px 10px}
+.proj .t{font-size:13px}
+#archbar{min-height:var(--tap);padding:0 12px}
+#toolcalls .tchd,#codefiles .tchd,.gitgrp .tchd{min-height:var(--tap);font-size:13px}
+#toolcalls .tool .hd{min-height:40px;font-size:12.5px}
+.cwcopy{min-height:36px;padding:0 14px}
+#toolcalls .tcclear{min-height:36px;padding:0 14px;font-size:12.5px}
+
+/* Closed drawers and the dim layer leave the render tree (REMOTE_JS settle). */
+.m-gone{display:none!important}
+/* The dim layer behind an open drawer (REMOTE_JS adds #mscrim). */
+#mscrim{position:fixed;inset:0;z-index:85;background:var(--shadow-strong);
+  opacity:0;pointer-events:none;transition:opacity .2s}
+body.m-drawer #mscrim{opacity:1;pointer-events:auto}
+
+/* ---- the home-screen app's header (robin, iOS 27, 2026-09-24) -----------
+   iOS draws a blur band ~35 pt under the status bar that nothing switches
+   off; a permanent offset was either blurred (8 px) or ugly (18/36 px). So in
+   standalone mode only (REMOTE_JS adds .m-auto there) the header leaves: 5 s
+   after load and after its last use it slides up and out of the layout, and
+   the chat takes the space. A pull-down brings it back as an overlay BELOW
+   the band (--safe-t + 18 px), sharp, for 8 s -- never while a drawer, menu
+   or the + sheet is open. The Safari tab and the desktop never get .m-auto. */
+body.m-auto #bar{transition:transform .22s cubic-bezier(.3,.7,.2,1)}
+body.m-auto.m-hid #bar,body.m-auto.m-rev #bar{position:fixed;left:0;right:0;z-index:70;
+  padding-left:calc(4px + var(--safe-l));padding-right:calc(4px + var(--safe-r))}
+body.m-auto.m-hid #bar{top:var(--safe-t);
+  transform:translateY(calc(-100% - var(--safe-t) - 20px))}
+body.m-auto.m-rev #bar{top:calc(var(--safe-t) + 18px);transform:none;
+  background:var(--bg);border-bottom:1px solid var(--line);
+  box-shadow:0 6px 18px var(--shadow)}
+/* ...and the strip above it (status bar + 18 px) is filled, or the chat shows
+   through it (robin, 2026-09-24). Only plain background lies in the blur band.
+   On .m-hid too, so it leaves with the bar instead of vanishing first. */
+body.m-auto.m-hid #bar::before,body.m-auto.m-rev #bar::before{content:"";
+  position:absolute;left:0;right:0;bottom:100%;height:calc(var(--safe-t) + 19px);
+  background:var(--bg);pointer-events:none}
+/* While it is gone, a small pill in the top middle (below the band, so
+   sharp) says "there is a header here": a tap or a pull on it brings it back.
+   The 96x44 hit area is invisible; only the 36x5 pill shows. */
+#mnudge{display:none}
+body.m-auto.m-hid #mnudge{display:flex;position:fixed;z-index:70;
+  top:calc(var(--safe-t) + 6px);left:50%;transform:translateX(-50%);
+  width:96px;height:44px;align-items:center;justify-content:center;
+  border:0;padding:0;background:none;cursor:pointer;
+  animation:mnudge-in .3s ease-out}
+#mnudge::after{content:"";width:36px;height:5px;border-radius:3px;
+  background:var(--dim);box-shadow:0 0 0 4px var(--bg)}
+@keyframes mnudge-in{from{opacity:0}to{opacity:1}}
+/* The goal/sub bars sit at the top of #main; while the header is out of
+   the layout they move down below the pill (robin: the pill lay on the goal
+   bar), and #flow's padding follows. Also while revealed, so they don't jump. */
+body.m-auto:is(.m-hid,.m-rev) #panels{padding-top:40px}
+body.m-auto:is(.m-hid,.m-rev) #main:has(#goalpanel:not([hidden])) #flow,
+body.m-auto:is(.m-hid,.m-rev) #main:has(#subpanel:not([hidden])) #flow{padding-top:96px}
+body.m-auto:is(.m-hid,.m-rev) #main:has(#goalpanel:not([hidden])):has(#subpanel:not([hidden])) #flow{padding-top:148px}
+@media (prefers-reduced-motion:reduce){body.m-auto #bar{transition:none}
+  body.m-auto.m-hid #mnudge{animation:none}}
+
+/* git: the card from #panels becomes a right drawer of its own */
+body[data-git="shut"] #git{display:none}
+body:not([data-git="shut"]) #git{position:fixed;top:0;bottom:0;right:0;z-index:90;
+  width:min(94vw,440px);border-radius:0;border:0;
+  padding-top:var(--safe-t);padding-bottom:var(--safe-b)}
+body:not([data-git="shut"]) #panels{z-index:95}   /* out of #panels' stacking context */
+#githead{min-height:var(--barh);padding:0 15px}
+#gituser{min-height:var(--tap);padding:0 6px;font-size:12px}
+.gline,.grow{min-height:36px;font-size:12.5px}
+.gcommit input{font-size:16px;min-height:var(--tap)}
+.gcommit button{min-height:var(--tap)}
+
+/* ---- goal: a thin bar under the header; tap expands it ------------------ */
+#panels{top:0;left:0;right:0;width:auto;height:auto;max-height:78%;
+  padding:8px var(--colpad) 0;gap:8px}
+#main:has(#goalpanel:not([hidden])) #panels{padding-bottom:10px;
+  background:linear-gradient(var(--bg) 70%,transparent)}
+#main:has(#goalpanel:not([hidden])) #flow,
+#main:has(#subpanel:not([hidden])) #flow{padding-top:64px}
+#main:has(#goalpanel:not([hidden])):has(#subpanel:not([hidden])) #flow{padding-top:116px}
+#goalpanel{border-radius:12px;font-size:12.5px;max-height:100%}
+#goalpanel .gh{min-height:var(--tap);padding:0 6px 0 14px}
+#goalpanel .gx,#subpanel .gx{min-width:var(--tap);min-height:var(--tap);
+  font-size:20px;padding:0}
+#goalpanel .gt .tx{font-size:14px}
+#goalpanel li{padding:9px 0 11px}
+/* collapsed: one 44 px row -- icon, title, n/m, state (#289), close */
+#goalpanel.shut:not([hidden]){display:grid;grid-template-columns:auto minmax(0,1fr) auto auto auto;
+  align-items:center;cursor:pointer}
+#goalpanel.shut .gh{display:contents}
+#goalpanel.shut .gh b{display:none}
+#goalpanel.shut .gh .st{grid-column:4;grid-row:1;margin:0;padding-left:8px;
+  font-variant-numeric:tabular-nums;white-space:nowrap}   /* #289: beside n/m */
+#goalpanel.shut .gh .gx{grid-column:5;grid-row:1}
+#goalpanel.shut .gt{display:contents}
+#goalpanel.shut .gi{grid-column:1;grid-row:1;padding-left:14px;margin:0 9px 0 0}
+#goalpanel.shut .gt .tx{grid-column:2;grid-row:1;font-size:13px;font-weight:600;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#goalpanel.shut .gm{grid-column:3;grid-row:1;padding:0 0 0 8px;font-size:12px;
+  white-space:nowrap}
+#goalpanel.shut .gm{max-width:5.2em;overflow:hidden}     /* "2/5 · …" -> "2/5" */
+#goalpanel.shut .gh .st:empty{display:none}
+#subpanel{border-radius:12px}
+#subpanel .sph{min-height:var(--tap);padding:0 0 0 5px;
+  margin-right:-10px}     /* over #subpanel's 10 px: its X lines up with the goal's */
+#subpanel.shut{max-height:var(--tap)}
+
+/* ---- composer (robin, 2026-09-24): ONE row, like iMessage ----------------
+   One frame (#box), one 44 pt row:  [+ 44][input, grows up to 5 lines][send/Stop 44]
+   The context is the frame's top 2 px (a background layer, clipped by the
+   radius). Everything else -- attach, dictate, mode, model, folder, the
+   stats and the hint -- is in #mtools, which the + opens ABOVE the composer.
+   A dot on the + shows the mode's colour. Staged images: a strip above the row. */
+#composer{left:0;right:0;padding:10px var(--colpad) calc(8px + var(--safe-b));
+  background:linear-gradient(to bottom,transparent,var(--bg) 10px)}
+#viewbar,#pendbar{margin-bottom:-12px;font-size:12.5px}
+#viewbar button,#pendbar button{min-height:40px;padding:0 14px}
+#box,#box.focus,#box.drag{box-shadow:none}
+#box{--fillc:var(--ok);padding:4px;border-radius:26px;display:flex;
+  flex-direction:column;gap:4px;
+  background:
+    linear-gradient(var(--fillc),var(--fillc)) 0 0/calc(var(--ctxp,0) * 100%) 2px no-repeat,
+    linear-gradient(var(--line),var(--line)) 0 0/100% 2px no-repeat,
+    var(--panel)}
+#box.cw{--fillc:var(--warn)}
+#box.cb{--fillc:var(--bad)}
+#mctx{position:absolute;left:0;right:0;top:0;height:12px;z-index:2;cursor:pointer}
+#stage{padding:10px 8px 2px;gap:8px;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
+#stage[hidden]{display:none}
+#stage::-webkit-scrollbar{display:none}
+#stage .imgchip{flex:none}
+#stage .imgchip img{height:56px;border-radius:10px}
+/* the remove x: 24 px visible, 40 px hit box (transparent border) */
+#stage .imgchip button{width:40px;height:40px;top:-12px;right:-12px;line-height:22px;
+  font-size:14px;border:8px solid transparent;background-clip:padding-box;
+  box-shadow:inset 0 0 0 1px var(--bevel)}
+#line{align-items:flex-end;gap:4px;margin:0}
+#in{font-size:16px;line-height:22px;max-height:calc(5 * 22px + 22px);
+  padding:11px 6px;align-self:center}  /* 16px: iOS zooms on focus below it */
+#in:placeholder-shown{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#mplus,#go{flex:none;width:var(--tap);height:var(--tap);padding:0!important;margin:0;
+  border-radius:50%;box-sizing:border-box;border:1px solid;display:grid;
+  place-items:center;cursor:pointer;position:relative}
+#go{font-size:0!important;color:var(--on-solid);background:var(--accent);
+  border-color:var(--accent)}
+#go::before{content:"";position:absolute;inset:0;margin:auto;width:20px;height:20px;background:currentColor;
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M10 16V4M4.5 9.5 10 4l5.5 5.5' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat;
+  mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M10 16V4M4.5 9.5 10 4l5.5 5.5' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat}
+#go.stop{color:var(--bad-text);background:rgba(240,101,90,.16);
+  border-color:rgba(240,101,90,.55)}
+#go.stop::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect x='5' y='5' width='10' height='10' rx='2'/%3E%3C/svg%3E");mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect x='5' y='5' width='10' height='10' rx='2'/%3E%3C/svg%3E")}
+:root[data-theme="light"] #go.stop{color:var(--bad)}
+#mplus{color:var(--dim);background:transparent;border-color:var(--line)}
+#mplus::before{content:"";width:20px;height:20px;background:currentColor;
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M10 4v12M4 10h12' stroke='%23000' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E") center/contain no-repeat;
+  mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M10 4v12M4 10h12' stroke='%23000' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E") center/contain no-repeat;transition:transform .15s}
+body.m-tools #mplus{color:var(--accent);border-color:var(--accent)}
+body.m-tools #mplus::before{transform:rotate(45deg)}
+/* the mode dot, top-right corner of the + */
+#mplus::after{content:"";position:absolute;top:1px;right:1px;width:10px;height:10px;
+  border-radius:50%;box-shadow:0 0 0 2px var(--panel);background:var(--dimmer)}
+#mplus[data-mode="manual"]::after{background:var(--text-strong)}
+#mplus[data-mode="allowedit"]::after{background:var(--ok)}
+#mplus[data-mode="auto"]::after{background:var(--gold)}
+#mplus[data-mode="yolo"]::after{background:var(--bad);box-shadow:0 0 0 2px var(--panel),0 0 6px rgba(240,101,90,.9)}
+#foot{display:none}
+
+/* ---- #mtools: the + sheet, above the composer --------------------------- */
+#mtools{position:absolute;left:var(--colpad);right:var(--colpad);
+  bottom:calc(100% - 2px);z-index:8;display:flex;flex-direction:column;gap:8px;
+  padding:10px;background:var(--panel);border:1px solid var(--bevel);border-radius:18px;
+  box-shadow:0 -10px 34px var(--shadow-strong);
+  transform:translateY(8px);opacity:0;visibility:hidden;
+  transition:transform .16s ease,opacity .16s ease,visibility 0s .16s}
+body.m-tools #mtools{transform:none;opacity:1;visibility:visible;transition-delay:0s}
+@media (prefers-reduced-motion:reduce){#mtools{transition:none}}
+.mr2,.mr3{display:flex;gap:8px;align-items:center;min-width:0}
+.mr4{display:flex;flex-wrap:wrap;column-gap:0;row-gap:2px;padding:2px 6px 0;
+  font-size:11.5px;line-height:16px;color:var(--dimmer);font-variant-numeric:tabular-nums}
+.mr4>*:not(:empty)~*:not(:empty)::before{content:" · ";white-space:pre}
+.mr4 #ctx{display:inline;white-space:nowrap}
+.mr4 #ctx:not(:empty)::after{content:" context"}
+#turnstate{white-space:nowrap}
+#turnstate:empty,#hint:empty{display:none}
+#hint{width:auto;flex:none;min-width:0;max-width:100%;font-size:11.5px;text-align:left;
+  white-space:normal;overflow:visible}
+#remoteattach,#mic{width:var(--tap);height:var(--tap);flex:none;display:grid;
+  place-items:center;padding:0;border-radius:50%;color:var(--dim);cursor:pointer;
+  border:1px solid var(--line);background:transparent;box-sizing:border-box;margin:0}
+#mic svg{width:17px;height:17px}
+#remoteattach svg{width:19px;height:19px}
+#remoteattach:active,#mic:active{background:var(--hover)}
+/* #290: the phone's own recording. The ring follows the level (--lvl 0..1,
+   set per frame from an AnalyserNode) instead of the desktop's breathing. */
+#mic.rec{animation:none;box-shadow:0 0 0 calc(2px + var(--lvl,0) * 7px) rgba(126,176,248,.35);
+  transition:box-shadow .07s linear}
+/* robin, 2026-09-24: while it records, the button IS the stop -- a filled
+   square in the button's own colour (so both themes), the ring still around
+   it, the 44 px target unchanged. The microphone comes back with the class. */
+#mic.rec svg{display:none}
+#mic.rec::after{content:"";width:12px;height:12px;border-radius:2px;background:currentColor}
+/* the partial transcript: provisional, so the whole field greys until the
+   final arrives. A textarea colours all of its text or none of it, and an
+   overlay would have to match iOS's wrapping and scrolling to the pixel. */
+#in.partial{color:var(--dim)}
+#modewrap{flex:none}
+#modelwrap{flex:1 1 0;min-width:0;display:flex}
+#rootwrap{flex:1 1 0;min-width:0;display:flex}
+#subwrap{display:none!important}
+#mode,#model,#root{height:var(--tap);box-sizing:border-box;margin:0;
+  border:1px solid var(--line);border-radius:22px;padding:0 14px;
+  display:flex;align-items:center;gap:6px;font-size:13px;line-height:1;
+  white-space:nowrap;min-width:0}
+#model{width:100%}
+#root{width:100%;max-width:none;overflow:hidden;text-overflow:ellipsis;display:block;
+  line-height:42px;text-align:left}
+#root::before{content:"folder  ";color:var(--dimmer);white-space:pre}
+#model::before{content:"model";color:var(--dimmer);margin-right:2px}
+#model b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-weight:500;line-height:1}
+#model .lvl{display:none!important}   /* no level on the phone (robin) */
+/* menus that open upward from the composer: full width, big rows */
+#modemenu,#rootmenu,#modelmenu,#submenu{position:fixed;left:8px;right:8px;
+  bottom:calc(var(--comph,0px) + var(--toolsh,0px) + 4px);z-index:60;min-width:0;max-width:none;width:auto;
+  max-height:60dvh;overflow:auto}
+#modemenu button,#rootmenu button,#modelmenu button,#submenu .row{
+  min-height:var(--tap);padding:9px 12px;font-size:13px}
+#menu button{min-height:var(--tap);font-size:13.5px}
+
+/* ---- trace, thinking, cards --------------------------------------------- */
+details.trace>summary,details.think>summary,details.rollcard summary{
+  min-height:36px;font-size:12.5px}
+.tbody{font-size:13px}
+.say{font-size:14.5px;line-height:1.6}
+.cost{font-size:11px}
+.copy{min-height:32px}
+
+/* A PENDING approval / elicit / GitHub card leaves the flow and pins
+   directly above the input. Answered, its buttons are replaced by
+   `.askdone` and the same card drops back into the transcript. */
+.ask:has(.askrow button){position:fixed;z-index:7;left:var(--colpad);
+  right:var(--colpad);bottom:calc(var(--comph,0px) - 4px);
+  margin:0;padding:0;max-width:none}
+.ask:has(.askrow button) .askcard{background:var(--panel);
+  box-shadow:0 -6px 24px var(--shadow),0 0 0 1px rgba(229,192,75,.40);
+  max-height:42dvh;overflow:auto;background-image:linear-gradient(rgba(229,192,75,.07),rgba(229,192,75,.07))}
+.asktop{font-size:13px}
+.asktop code{font-size:12px;display:-webkit-box;-webkit-line-clamp:4;
+  -webkit-box-orient:vertical;overflow:hidden}
+.askrow{gap:8px}
+.askrow button{min-height:var(--tap);font-size:13.5px;padding:0 16px;flex:1 1 auto;
+  border-radius:10px}
+.askcard .elicfield{flex-wrap:wrap}
+.askcard .eliclabel{flex-basis:100%}
+.askcard .elicfield input[type=text],.askcard .elicfield input[type=number],
+.askcard .elicfield select{font-size:16px;min-height:var(--tap)}
+.askcard .elichint{margin-left:0}
+
+/* ---- settings: a full-screen sheet, categories as a scrolling strip ----- */
+#settings{padding:0;place-items:stretch}
+#settings .sheet{width:100%;height:100dvh;border:0;border-radius:0;
+  padding-top:var(--safe-t)}
+#settings .shead{min-height:var(--barh);padding:0 4px 0 16px}
+#settings .shead h2{font-size:16px}
+#settings .sclose{min-width:var(--tap);min-height:var(--tap);font-size:17px}
+#settings .sbody{flex-direction:column}
+#scats{width:auto;flex-direction:row;overflow-x:auto;border-right:0;
+  border-bottom:1px solid var(--line);padding:8px 10px;gap:6px;
+  scrollbar-width:none;overscroll-behavior-x:contain;
+  -webkit-mask-image:linear-gradient(90deg,#000 88%,transparent);
+  mask-image:linear-gradient(90deg,#000 88%,transparent)}
+#scats::-webkit-scrollbar{display:none}
+#scats button{flex:none;min-height:38px;padding:0 14px;font-size:13.5px;
+  border-radius:19px;border:1px solid var(--line)}
+#scats button.on{border-color:var(--accent);color:var(--accent);
+  background:color-mix(in srgb,var(--accent) 12%,transparent)}
+#spane{padding:14px 16px calc(24px + var(--safe-b))}
+#spane h3{font-size:12px}
+.shint,.mcpsaid,.mcpbad{font-size:13px}
+.srow{padding:12px 0;gap:12px;align-items:center}
+.srow .sname{font-size:14px}
+.srow .sdesc{font-size:12.5px}
+/* iOS switch look (51x31) inside a 65x45 hit box: the border is transparent */
+.sw{width:65px;height:45px;border:7px solid transparent;border-radius:23px;
+  background-clip:padding-box}
+.sw.on{background-clip:padding-box}   /* the page's .sw.on shorthand resets it */
+.sw::after{width:27px;height:27px;top:2px;left:2px}
+.sw.on::after{transform:translateX(20px)}
+#themes button{min-height:var(--tap);flex:1}
+.fold{min-height:var(--tap);align-items:center;margin-top:10px;padding-top:6px}
+.fold .sname{font-size:14px}
+.msel,.keyrow input,.sform input,.sform textarea,.mcpkey,#mcpline,#brurl{
+  font-size:16px;min-height:var(--tap)}
+.keyrow{flex-wrap:wrap}
+.keyrow input{flex:1 1 100%}
+.keyrow button,.sform button,#updbtn,.subout{min-height:var(--tap);font-size:13.5px;
+  padding:0 16px;flex:1 1 auto}
+/* MCP: head wraps to two lines, tool rows put the class segment under the text */
+.mcphead{flex-wrap:wrap;align-items:center;row-gap:6px;padding-top:12px}
+.mcphead .sname{font-size:14px}
+.mcphead .cmd{order:5;flex-basis:100%;font-size:12px}
+.mcphead .count{margin-left:auto}
+.mcphead button{min-height:36px;padding:0 12px;font-size:12.5px}
+.mcpbar{flex-wrap:wrap}
+.mcptools .srow{flex-wrap:wrap}
+.mcptools .srow .stext{flex:1 1 100%}
+.seg button{min-height:36px;padding:0 14px;font-size:12.5px}
+.mcptools .srow .seg{margin-right:auto}
+#subs{flex-direction:column}
+.sub{flex:none}
+
+/* ---- the browser drawer ------------------------------------------------- */
+.brnav{min-width:var(--tap);min-height:var(--tap);font-size:16px}
+.brtab{min-height:36px}
+}
+
+/* the held line (#264): the queued bubble above the input, every width */
+#heldbar{display:grid;justify-items:end;gap:3px;max-width:var(--colw);
+  margin:0 auto 8px}
+#heldbar .txt{color:var(--text-soft);white-space:pre-wrap;background:transparent;
+  border:1px dashed var(--bevel);border-radius:12px;padding:8px 13px;max-width:75%}
+#heldbar .hl{font-size:10.5px;color:var(--dimmer)}
+#heldbar .hl b{color:var(--accent);font-weight:600}
+@media (max-width:700px){
+  #heldbar .txt{max-width:86%;font-size:14px}
+  #heldbar .hl{font-size:11.5px}
+}
+"""
+# #249. DIE TELEFONHAKEN, nur in der Telefonfassung (`stamped_page(remote=True)`):
+# Schubladen, Zielleiste, festgesteckte Freigaben, die einzeilige Eingabe mit
+# dem +-Blatt, die gehaltene Zeile. Die Desktopseite bekommt davon nichts.
+REMOTE_JS = r"""
+// #249 THE PHONE HOOKS. Runs after PAGE's own script, only in the phone variant of PAGE.
+// Nothing here draws content; it only decides which drawer is out, keeps the
+// layout per device, and measures the pinned card for #flow's padding.
+(function(){
+  const phone = window.matchMedia("(max-width:700px)");
+  const body = document.body, main = document.getElementById("main");
+  const DRAWERS = ["rail","code","git","browser"];
+
+  // 1. LAYOUT IS PER DEVICE (decision 3). The shim answers set_*_open and
+  //    set_theme on the phone itself; the theme is remembered here, per device.
+  const store = (k,v) => { try{ localStorage.setItem("crow."+k, v); }catch(e){} };
+  const load = k => { try{ return localStorage.getItem("crow."+k); }catch(e){ return null; } };
+  const theme = load("theme"); if(theme) document.documentElement.dataset.theme = theme;
+  // Safari's bars take their tint from theme-color (REMOTE_HEAD). The first
+  // tag has no media query, so it wins; it follows the page's own theme.
+  const tint = () => { const m = document.getElementById("mtheme");
+    if(m) m.setAttribute("content", getComputedStyle(document.body).backgroundColor); };
+  const setTheme = crow.setTheme;
+  crow.setTheme = function(name){ store("theme", name);
+    const r = setTheme.apply(this, arguments); tint(); return r; };
+  tint();
+
+  // 2. DRAWERS. The page stamps data-rail/-code/-git/-browser from the desktop's
+  //    settings; on the phone every drawer starts closed and one is out at most.
+  //
+  //    CLOSED MEANS GONE (robin's iPhone, iOS 26, 2026-09-24): after a drawer
+  //    had been open, Safari's bars kept a different tint and a vertical swipe
+  //    no longer moved the page, until a reload. A closed drawer and the dim
+  //    layer used to stay in the render tree -- fixed, full height, edge to
+  //    edge, `visibility:hidden` or `opacity:0` -- where Safari samples fixed
+  //    boxes for its bar tint and WebKit keeps their scrollers (#sessions,
+  //    #codebody) in its scrolling tree. Now they leave it: `.m-gone`
+  //    (display:none) once the slide-out has run, exactly as at load.
+  const scrim = document.createElement("div"); scrim.id = "mscrim";
+  body.appendChild(scrim);
+  const railEl = document.getElementById("rail"), sideEl = document.getElementById("side");
+  const SLIDE = 260, timers = new Map();
+  const isOpen = d => body.dataset[d] !== "shut";
+  const holders = () => [[railEl, isOpen("rail")],
+    [sideEl, isOpen("code") || isOpen("browser")],
+    [scrim, DRAWERS.some(isOpen)]];
+  function settle(now){
+    body.classList.toggle("m-drawer", DRAWERS.some(isOpen));
+    holders().forEach(([el, open]) => { if(!el) return;
+      clearTimeout(timers.get(el)); timers.delete(el);
+      if(open){ el.classList.remove("m-gone"); return; }
+      if(now) el.classList.add("m-gone");
+      else timers.set(el, setTimeout(() => { timers.delete(el);
+        if(phone.matches) el.classList.add("m-gone"); }, SLIDE)); });
+  }
+  // Back into the tree BEFORE the flip, one layout in between, so the slide-in
+  // has a closed position to start from.
+  function reveal(name){
+    const el = name === "rail" ? railEl : (name === "code" || name === "browser") ? sideEl : null;
+    [el, scrim].forEach(x => { if(x){ clearTimeout(timers.get(x)); timers.delete(x);
+      x.classList.remove("m-gone"); void x.offsetWidth; } });
+  }
+  function shutAll(){ DRAWERS.forEach(d => { body.dataset[d] = "shut"; }); settle(false); }
+  if(phone.matches){ DRAWERS.forEach(d => { body.dataset[d] = "shut"; }); settle(true); }
+  const wrap = (fn, name) => function(){
+    if(!phone.matches) return fn.apply(this, arguments);
+    DRAWERS.forEach(d => { if(d!==name) body.dataset[d] = "shut"; });
+    if(!isOpen(name)) reveal(name);
+    const r = fn.apply(this, arguments);            // the page flips its own
+    settle(false);
+    return r;
+  };
+  crow.toggleRail = wrap(crow.toggleRail, "rail");
+  crow.toggleCode = wrap(crow.toggleCode, "code");
+  crow.toggleGit = wrap(crow.toggleGit, "git");
+  crow.toggleBrowser = wrap(crow.toggleBrowser, "browser");
+  scrim.addEventListener("click", () => shutAll());
+  // Picking a chat or "new" closes the rail: the chat is what you came for.
+  ["open","reset"].forEach(k => { const f = crow[k];
+    crow[k] = function(){ if(phone.matches) shutAll(); return f.apply(this, arguments); }; });
+
+  // The chosen settings category scrolls into the chip strip.
+  const cat = crow.settingsCat;
+  crow.settingsCat = function(){ const r = cat.apply(this, arguments);
+    const on = document.querySelector("#scats .on");
+    if(phone.matches && on) on.scrollIntoView({inline:"center", block:"nearest"});
+    return r; };
+
+  // Swipe: from the left edge opens the rail, from the right edge the code
+  // drawer; a swipe the other way on an open drawer closes it.
+  let t0 = null;
+  window.addEventListener("touchstart", e => {
+    if(!phone.matches || e.touches.length!==1) return;
+    const p = e.touches[0]; t0 = {x:p.clientX, y:p.clientY, w:innerWidth};
+  }, {passive:true});
+  window.addEventListener("touchend", e => {
+    if(!t0) return; const p = e.changedTouches[0];
+    const dx = p.clientX - t0.x, dy = p.clientY - t0.y, s = t0; t0 = null;
+    if(Math.abs(dx) < 60 || Math.abs(dy) > Math.abs(dx) * 0.6) return;
+    const open = DRAWERS.find(d => body.dataset[d] !== "shut");
+    if(open){ if((open==="rail") === (dx < 0)) shutAll(); return; }
+    if(dx > 0 && s.x < 24) crow.toggleRail();
+    else if(dx < 0 && s.x > s.w - 24) crow.toggleCode();
+  }, {passive:true});
+
+  // 2b. THE HOME-SCREEN APP'S HEADER (standalone only; see REMOTE_CSS
+  //     `.m-auto`). Hidden 5 s after load and after its last use; a
+  //     downward drag on the chat (or a pull-down at the top) brings it back
+  //     for 8 s. Passive listeners on touchstart/touchend/scroll only -- the
+  //     swipe stays the browser's, the bounce with it.
+  const standalone = window.matchMedia("(display-mode: standalone)");
+  if(phone.matches && standalone.matches) (function(){
+    const bar = document.getElementById("bar"), flow = document.getElementById("flow");
+    const LOAD = 5000, SHOWN = 8000, PULL = 30;
+    let timer = null;
+    body.classList.add("m-auto");
+    const shown = id => { const e = document.getElementById(id); return !!e && !e.hidden; };
+    const busy = () => DRAWERS.some(isOpen) || body.classList.contains("m-tools")
+      || ["helpmenu","modemenu","modelmenu","rootmenu","submenu","settings"].some(shown)
+      || (document.getElementById("menu") || {classList:{contains:()=>false}}).classList.contains("on");
+    const arm = ms => { clearTimeout(timer);
+      timer = setTimeout(() => { timer = null;
+        if(busy()){ arm(SHOWN); return; }
+        body.classList.remove("m-rev"); body.classList.add("m-hid"); }, ms); };
+    const reveal = () => { if(body.classList.contains("m-hid")){
+        body.classList.remove("m-hid"); body.classList.add("m-rev"); }
+      if(body.classList.contains("m-rev")) arm(SHOWN); };
+    arm(LOAD);
+    // the nudge: a pill that stands in for the gone header (REMOTE_CSS)
+    const nudge = document.createElement("button"); nudge.id = "mnudge";
+    nudge.type = "button"; nudge.setAttribute("aria-label", "Show header");
+    nudge.addEventListener("touchstart", reveal, {passive:true});
+    nudge.addEventListener("click", reveal);
+    body.appendChild(nudge);
+    // any touch on the header, or a drawer/menu/sheet opened from it, restarts it
+    bar.addEventListener("touchstart", () => {
+      if(!body.classList.contains("m-hid"))
+        arm(body.classList.contains("m-rev") ? SHOWN : LOAD); }, {passive:true});
+    // A FINGER, NOT A REDRAW: the page scrolls #flow itself (a chat switch,
+    // a reload's snapshot), so a scroll only counts while a finger is down or
+    // its momentum runs (1 s after it lifts).
+    let y0 = null, finger = false, lift = null;
+    flow.addEventListener("touchstart", e => { finger = true; clearTimeout(lift);
+      last = flow.scrollTop || 0;
+      y0 = e.touches && e.touches.length === 1 ? e.touches[0].clientY : null; }, {passive:true});
+    flow.addEventListener("touchend", e => {
+      const p = e.changedTouches && e.changedTouches[0];
+      if(y0 !== null && p && p.clientY - y0 > PULL) reveal();
+      y0 = null; clearTimeout(lift); lift = setTimeout(() => { finger = false; }, 1000); },
+      {passive:true});
+    let last = flow.scrollTop || 0;
+    flow.addEventListener("scroll", () => { const now = flow.scrollTop || 0;
+      if(finger && now < last - PULL){ reveal(); last = now; }
+      else if(now > last || !finger) last = now; }, {passive:true});
+    window.crowHeader = {reveal, busy};
+  })();
+
+  // 3. THE GOAL STARTS AS A THIN BAR. goalPanel keeps `shut` across redraws,
+  //    so the first draw on this device sets it once. In the bar the head is
+  //    `display:contents`, so a tap on the title has to open it here.
+  const gp = document.getElementById("goalpanel");
+  const goalPanel = crow.goalPanel;
+  crow.goalPanel = function(g){
+    if(phone.matches && !gp.dataset.m){ gp.dataset.m = "1"; gp.classList.add("shut"); }
+    return goalPanel.apply(this, arguments);
+  };
+  gp.addEventListener("click", e => {
+    if(!phone.matches || e.target.closest(".gh")) return;   // the page's own
+    if(gp.classList.contains("shut")) gp.classList.remove("shut");
+  });
+  document.getElementById("flow").addEventListener("click", () => {
+    if(phone.matches && !gp.hidden) gp.classList.add("shut"); });
+
+  // 4. THE PINNED CARD'S HEIGHT goes into #flow's bottom padding (mobile.css),
+  //    so the last line of the transcript is never under it.
+  const ro = new ResizeObserver(measure);
+  let watched = null;
+  function measure(){
+    const card = phone.matches && [...document.querySelectorAll(".ask")]
+      .find(a => a.querySelector(".askrow button"));
+    if(card !== watched){ if(watched) ro.unobserve(watched);
+      watched = card || null; if(watched) ro.observe(watched); }
+    if(card) main.style.setProperty("--askh", (card.offsetHeight + 8) + "px");
+    else main.style.removeProperty("--askh");
+  }
+  new MutationObserver(measure).observe(document.getElementById("flow"),
+    {childList:true, subtree:true});
+  // 5. THE COMPOSER (robin: remove nothing, shorten). Only on a phone.
+  if(phone.matches) composer();
+  function composer(){
+    const box = document.getElementById("box"), line = document.getElementById("line"),
+          go = document.getElementById("go"), foot = document.getElementById("foot"),
+          input = document.getElementById("in"), ctx = document.getElementById("ctx");
+    // ONE ROW (robin, 2026-09-24): [+][input][send/Stop], all 44 pt. The +
+    // opens #mtools above the composer with every other control, moved there
+    // from #foot / #acts (same ids, same handlers).
+    const $id = x => document.getElementById(x);
+    input.placeholder = "Message or /command";
+    const plus = document.createElement("button");
+    plus.id = "mplus"; plus.type = "button"; plus.title = "attach, dictate, mode, model, folder";
+    plus.setAttribute("aria-expanded", "false");
+    line.prepend(plus); line.appendChild(go);
+    const tools = document.createElement("div"); tools.id = "mtools";
+    document.getElementById("composer").appendChild(tools);
+    const row = c => { const d = document.createElement("div"); d.className = c;
+      tools.appendChild(d); return d; };
+    const r2 = row("mr2"), r3 = row("mr3"), r4 = row("mr4");
+    const setOpen = on => { body.classList.toggle("m-tools", on);
+      plus.setAttribute("aria-expanded", String(on));
+      if(on) main.style.setProperty("--toolsh", tools.offsetHeight + 8 + "px");
+      else main.style.removeProperty("--toolsh"); };
+    plus.addEventListener("click", () => setOpen(!body.classList.contains("m-tools")));
+    document.addEventListener("click", e => {
+      if(!body.classList.contains("m-tools")) return;
+      // #290: the sheet holds the 🎤, the only way to stop a recording
+      if($id("mic").classList.contains("rec")) return;
+      if(e.target.closest("#mtools,#mplus,#modemenu,#modelmenu,#rootmenu")) return;
+      setOpen(false); });
+    window.mobileTools = setOpen;
+    // the mode, visible at a glance: a dot on the + in the mode's colour
+    const modeIs = crow.modeIs;
+    crow.modeIs = function(name){ plus.dataset.mode = name; return modeIs.apply(this, arguments); };
+    // attach: the shim's own #remoteattach (file field -> /upload ->
+    // stage_image), drawn as a paperclip and moved into the sheet.
+    const att = $id("remoteattach");
+    att.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"'
+      + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<path d="M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2'
+      + 'l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l7.9-7.9"/></svg>';
+    $id("remotefile").multiple = false;
+    r2.append(att, $id("mic"), $id("modewrap"), $id("modelwrap"));
+    r3.append($id("rootwrap"));
+    r4.append($id("turnstate"), ctx, $id("hint"));
+    // THE HELD LINE (#264 + #249): the queued bubble above the input, drawn
+    // from crow.held, which queuedLine fills from the pushed text.
+    const composerEl = $id("composer");
+    function drawHeld(by){ let h = $id("heldbar"); const held = crow.held;
+      if(!held || !held.t){ if(h) h.remove(); return; }
+      if(!h){ h = document.createElement("div"); h.id = "heldbar";
+        h.innerHTML = '<div class="txt"></div><div class="hl"><b>queued</b><span></span></div>';
+        composerEl.insertBefore(h, box); }
+      h.querySelector(".txt").textContent = held.t;
+      h.querySelector(".hl span").textContent = " · goes in when this turn ends"
+        + (by === "desktop" ? " · from the desktop" : ""); }
+    ["queuedLine","release","viewBar"].forEach(k => { const f = crow[k];
+      crow[k] = function(e){ const r = f.apply(this, arguments);
+        drawHeld(k === "queuedLine" && e ? e.by : undefined); return r; }; });
+    // the model: a short name on the chip, the full one in the title and menu.
+    const showModel = crow.showModel;
+    crow.showModel = function(){ const r = showModel.apply(this, arguments);
+      const b = document.querySelector("#model b");
+      const lv = document.querySelector("#model .lvl"); if(lv) lv.remove();
+      if(b && this.modelName){ b.textContent = shortModel(this.modelName);
+        document.getElementById("model").title = this.modelName; }
+      return r; };
+    // NO REASONING LEVEL ON THE PHONE (robin, 2026-09-24): the operating
+    // point fixes it (manifests/operating-point.json reasoning_fixed), so the
+    // menu lists models only; the chip shows the family name only.
+    const plan = crow.modelPlan;
+    crow.modelPlan = function(){ return plan.apply(this, arguments)
+      .filter(p => p.kind !== "level"); };
+    // the context: a 2 px line on the box's top edge, coloured like #ctx .fill.
+    const bar = document.createElement("div"); bar.id = "mctx";
+    box.appendChild(bar);
+    const ctxFn = crow.ctx;
+    crow.ctx = function(tokens, limit){ const r = ctxFn.apply(this, arguments);
+      const share = limit > 0 ? Math.min(1, tokens / limit) : 0;
+      box.style.setProperty("--ctxp", share);
+      box.classList.toggle("cw", share >= .5 && share < .85);
+      box.classList.toggle("cb", share >= .85);
+      bar.title = ctx.textContent ? "context " + ctx.textContent : "";
+      return r; };
+    // tap on the line: the sheet with the numbers
+    bar.addEventListener("click", () => setOpen(true));
+    crow.showModel();
+  }
+  // THE FAMILY ONLY (robin, 2026-09-24): the first run of letters, capitalised,
+  // at most 8 characters. "Qwen3.8-Flash-Next" -> "Qwen", "Gemma-5-12B" ->
+  // "Gemma", "claude-sonnet-5" -> "Claude", "qwen/qwen3.8-flash" -> "Qwen".
+  function shortModel(name){
+    const bare = String(name).split("/").pop();
+    const fam = (bare.match(/^[A-Za-z]+/) || [bare])[0];
+    const cap = fam.charAt(0).toUpperCase() + fam.slice(1);
+    return cap.length > 8 ? cap.slice(0, 7) + "…" : cap;
+  }
+
+  // 6. THE MICROPHONE (#290), on every phone width. The desktop's microphone
+  //    is not the phone's, and the desktop's dictation (its "mic" pushes) is
+  //    not this phone's either: its state and its text stay on the desktop.
+  //    HTTPS (Tailscale): the phone records itself -- MediaRecorder, first tap
+  //    starts, the button turns into a stop square with a level ring, and a
+  //    second tap OR ~2 s of silence after speech stops it. Every PARTIAL_MS
+  //    the recording so far goes to /upload?kind=audio&partial=1&seq=N (the
+  //    timeslice chunks concatenated are a valid file) and the PC's Whisper
+  //    answers {"k":"heard","partial":true} to THIS phone only: greyed words
+  //    after what was in the field. The final clip (no partial=1) replaces
+  //    the partial with the real words -- APPENDED, never sent, so tap, talk,
+  //    tap, talk builds one message. Plain HTTP has no getUserMedia (not a
+  //    secure context): a tap focuses the input so the keyboard's own 🎤 is
+  //    one tap away.
+  const mic = document.getElementById("mic"), field = document.getElementById("in");
+  const hint = document.getElementById("hint");
+  const WORDS = window.CROW_REMOTE_TEXT || {};
+  const canRecord = !!(window.isSecureContext && navigator.mediaDevices
+    && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+  const MAX_REC = 300000;              // crow_voice.MAX_SECONDS, in ms
+  // MEASURED, NOT GUESSED (2026-09-24, faster-whisper small int8 on this PC's
+  // CPU, the GPU belongs to the LLM): 5 s of speech 1.25-1.4 s, 10 s 1.4 s,
+  // 15 s 1.5 s. So a partial every 1.5 s keeps up for the length of a
+  // sentence; past that the PC coalesces -- it never runs two for one phone
+  // and keeps only the newest waiting partial -- so a slow one makes the
+  // updates rarer, never a queue.
+  const PARTIAL_MS = 1500;
+  // SPEECH, THEN SILENCE. The AnalyserNode's peak (0..1, not the ring's
+  // normalised level, which rescales itself to any room) above SPEECH_LVL for
+  // SPEECH_MS is speech; after that, SILENCE_MS below it stops the recording.
+  // Before any speech nothing stops: a person who taps and then thinks is not
+  // finished.
+  const SPEECH_LVL = 0.04, SPEECH_MS = 200, SILENCE_MS = 2000;
+  // THE FINAL CAN BE SLOW -- the first dictation loads (or downloads) the
+  // model, ~52 s on robin's first try -- but a push that never comes must not
+  // keep the field read-only for good.
+  const WRITE_MS = 180000;
+  // A PAGE-WIDE COUNTER, SEEDED WITH THE CLOCK: the PC drops a partial whose
+  // seq is not above the last final's, and a reloaded page that counted from
+  // 0 again would have every partial dropped.
+  let seq = Date.now();
+  let rec = null;
+  // THE DICTATION IN FLIGHT: `base` is the field before it began (typed text
+  // or an earlier dictation -- it stays), `shown` the newest seq on screen.
+  let dict = null, writeCap = 0;
+  // ONE SPACE BETWEEN, none when the field is empty or already ends in
+  // whitespace: the rule for the partial and the final alike, so the final
+  // does not jump.
+  const join = (had, text) => had + (had && !/\s$/.test(had) ? " " : "") + text;
+  const show = (text, partial) => {
+    field.value = join(dict.base, text);
+    field.classList.toggle("partial", !!partial);
+    // the autogrow listener owns the height (see attach)
+    field.dispatchEvent(new Event("input")); };
+  const say = s => { hint.textContent = s || ""; };
+  const micIdle = () => { mic.disabled = !!dict; mic.classList.remove("rec");
+    mic.style.removeProperty("--lvl");
+    mic.title = !canRecord ? "dictate: opens the keyboard"
+              : dict ? "writing it down"
+              : "dictate: tap to record, tap again to stop"; };
+  // THE END OF A DICTATION, whichever way it ends: the field is writable
+  // again, black again, and holds `base` plus whatever the final said.
+  function dictDone(text){
+    if(!dict) return;
+    clearTimeout(writeCap);
+    if(text) show(text, false); else { field.value = dict.base;
+      field.classList.remove("partial"); field.dispatchEvent(new Event("input")); }
+    field.readOnly = false; dict = null; say(""); micIdle();
+    if(text){ field.focus(); field.selectionStart = field.selectionEnd = field.value.length; } }
+  function upload(clip, type, partial){
+    const n = ++seq;
+    return fetch("/upload?kind=audio" + (partial ? "&partial=1" : "") + "&seq=" + n,
+      {method: "POST", credentials: "same-origin",
+       headers: {"Content-Type": type}, body: clip})
+      .then(res => { if(!res.ok) throw new Error(String(res.status)); }); }
+  function recStart(){
+    // THE AUDIO GRAPH IS BUILT IN THE TAP: iOS starts an AudioContext only
+    // inside a user gesture, and getUserMedia's promise is no longer one.
+    let ctx = null;
+    try { const AC = window.AudioContext || window.webkitAudioContext;
+      ctx = AC ? new AC() : null; } catch(_) { ctx = null; }
+    rec = {stop: () => {}};                        // a second tap before the grant
+    const claim = rec;
+    navigator.mediaDevices.getUserMedia({audio: true}).then(stream => {
+      if(rec !== claim){ stream.getTracks().forEach(t => t.stop()); return; }
+      const chunks = [], r = new MediaRecorder(stream);
+      const type = () => String(r.mimeType || "audio/mp4").split(";")[0];
+      let raf = 0, cap = 0;
+      // read-only while it is provisional: a letter typed between two partials
+      // would be overwritten by the next one
+      dict = {base: field.value, shown: 0};
+      field.readOnly = true;
+      if(ctx){ try { const an = ctx.createAnalyser(); an.fftSize = 512;
+          ctx.createMediaStreamSource(stream).connect(an);
+          const buf = new Float32Array(an.fftSize); let peak = 0.02;
+          let loud = 0, quiet = 0, spoke = false;
+          // the desktop band's scale (crow.voice): a running peak that decays
+          const tick = () => { an.getFloatTimeDomainData(buf);
+            let m = 0; for(let i = 0; i < buf.length; i++) m = Math.max(m, Math.abs(buf[i]));
+            peak = Math.max(m, peak * 0.97, 0.02);
+            mic.style.setProperty("--lvl", Math.min(1, m / peak).toFixed(2));
+            // the clock, not a frame count: iOS throttles rAF
+            const t = Date.now();
+            if(m > SPEECH_LVL){ quiet = 0; loud = loud || t;
+              if(t - loud >= SPEECH_MS) spoke = true; }
+            else { loud = 0;
+              if(spoke){ quiet = quiet || t;
+                if(t - quiet >= SILENCE_MS && rec){ rec.stop(); return; } } }
+            raf = requestAnimationFrame(tick); };
+          if(ctx.resume) ctx.resume(); tick(); } catch(_) {} }
+      r.ondataavailable = ev => { if(ev.data && ev.data.size) chunks.push(ev.data);
+        // still recording: everything so far, for the greyed words. A failed
+        // partial is not said -- the final will be, or will say why.
+        if(r.state === "recording" && chunks.length)
+          upload(new Blob(chunks, {type: type()}), type(), true).catch(() => {}); };
+      r.onstop = () => { clearTimeout(cap); cancelAnimationFrame(raf);
+        stream.getTracks().forEach(t => t.stop());
+        if(ctx && ctx.close) ctx.close();
+        rec = null;
+        const clip = new Blob(chunks, {type: type()});
+        if(!clip.size){ dictDone(""); return; }
+        say(WORDS.micwrite); micIdle();
+        writeCap = setTimeout(() => { dictDone(""); crow.note(WORDS.micsend || ""); }, WRITE_MS);
+        upload(clip, type(), false)
+          .catch(err => { dictDone("");
+            crow.note((WORDS.micsend || "") + " (" + err.message + ")"); }); };
+      rec = {stop: () => { if(r.state !== "inactive") r.stop(); }};
+      r.start(PARTIAL_MS);
+      mic.classList.add("rec"); mic.title = "stop and write it down";
+      say(WORDS.miclisten);
+      cap = setTimeout(() => rec && rec.stop(), MAX_REC);
+    }, err => { rec = null; micIdle(); if(ctx && ctx.close) ctx.close();
+      crow.note((WORDS.micdenied || "") + " (" + ((err && err.name) || err) + ")"); });
+  }
+  crow.mic = function(){
+    if(!canRecord){ field.focus();
+      hint.textContent = WORDS.dictate || ""; return; }
+    if(rec){ const r = rec; rec = null; r.stop(); micIdle(); return; }
+    if(dict) return;                               // still writing the last one
+    recStart(); };
+  // WHAT THE PC SAYS ABOUT IT: `loading` while the model loads, a partial
+  // (older than what is shown: ignored), the final (words or a note). Words
+  // that arrive with no dictation in flight -- a reloaded page -- are appended
+  // the old way, through the page's own heard.
+  const heard = crow.heard;
+  crow.heard = function(e){
+    if(!dict) return e.partial || e.loading ? undefined : heard.call(this, e);
+    if(e.loading){ say(WORDS.micload); return; }
+    if(e.partial){
+      if(!rec || !(e.seq > dict.shown)) return;
+      dict.shown = e.seq; say(WORDS.miclisten); show(e.text || "", true); return; }
+    dictDone(e.text || "");
+    if(e.note) crow.note(e.note); };
+  const micState = crow.micState;
+  crow.micState = function(e){
+    const r = micState.call(this, Object.assign({}, e, {state: "off", blocked: "", text: "", note: ""}));
+    if(rec) mic.classList.add("rec"); else micIdle();
+    return r; };
+  micIdle();
+
+  phone.addEventListener("change", () => { measure();
+    if(phone.matches){ DRAWERS.forEach(d => { body.dataset[d] = "shut"; }); settle(true); }
+    else [railEl, sideEl, scrim].forEach(x => x && x.classList.remove("m-gone")); });
+})();
+"""
+
+
+def stamped_page(remote: bool = False) -> str:
+    """PAGE with every placeholder filled -- the window's page, or (#249) the
+    phone's variant of the SAME page with `__REMOTE__` set. One chain for both,
+    so the phone cannot drift from what the desktop draws."""
+    page = (PAGE.replace("__BG__", CROW_BG)
+                .replace("__ACCENT__", CROW_ACCENT_HEX)
+                .replace("__BEVEL__", BANNER_BEVEL_HEX)
+                .replace("__TEXT__", CROW_TEXT_HEX)
+                .replace("__TIMEOUT__", "%.0f" % READ_TIMEOUT_S)
+                # ON THE ELEMENT BEFORE THE PAGE IS HANDED OVER, not applied by
+                # a script after load. A window that painted itself dark and
+                # then switched would show the wrong theme for a frame on every
+                # single start -- and the frame is exactly the moment somebody
+                # looks at it.
+                .replace("__THEME__", current_theme())
+                .replace("__MEMICON__", MEMORY_ICON)
+                # #119. THE SAME REASON THE THEME IS STAMPED HERE: a rail that
+                # was drawn open and then folded away by a script after load
+                # would do it on every start, and that frame is the moment
+                # somebody is looking at the window.
+                .replace("__RAIL__", "open" if rail_open() else "shut")
+                .replace("__CODE__", "open" if code_open() else "shut")
+                # #156: dieselbe Regel wie fuer Rail und Code -- der Zustand
+                # steht auf dem Element, bevor die Seite uebergeben wird.
+                .replace("__GIT__", "open" if git_open() else "shut")
+                .replace("__BROWSER__", "open" if browser_open() else "shut")
+                .replace("__CODEW__", str(code_width_setting()))
+                .replace("__MARKDARK__", mark_svg("dark"))
+                # WHO MOVES THE WINDOW, stamped on the page for the reason the
+                # theme is stamped on it: the answer decides what the first
+                # mousedown on the title bar does, and a script that worked it
+                # out after load would be one frame late on every start.
+                .replace("__NATIVEDRAG__",
+                         "false" if crow_platform.IS_WINDOWS else "true")
+                .replace("__MARKLIGHT__", mark_svg("light")))
+    # #249. DIE HAKEN ZULETZT, damit kein Ersatz oben in einem Haken landet.
+    head = REMOTE_HEAD.replace("__THEMEBG__",
+                               THEME_BG.get(current_theme(), THEME_BG["dark"]))
+    return (page.replace("<!--__REMOTE_HEAD__-->", head if remote else "")
+                .replace("/* __REMOTE_CSS__ */", REMOTE_CSS if remote else "")
+                .replace("/* __REMOTE_JS__ */", REMOTE_JS if remote else "")
+                .replace("__REMOTE_BOUND__", json.dumps(REMOTE_DESKTOP_BOUND)
+                         if remote else "{}")
+                .replace("__REMOTE_TEXT__", json.dumps(
+                    crow_core.REMOTE_PHONE_TEXT if remote else {}))
+                .replace("__REMOTE__", "true" if remote else "false"))
+
+
+def remote_enabled() -> bool:
+    """#249: `remote_enabled` in settings.json -- the mirror starts with the
+    window when true. Set by `/remote on`, cleared by `/remote off`."""
+    return read_settings().get("remote_enabled") is True
+
+
+def remote_port_setting() -> int:
+    """#249: the fixed port (`remote_port`), the core's default for anything
+    that is not a port. Fixed because the phone's cookie belongs to one
+    origin."""
+    value = read_settings().get("remote_port")
+    if isinstance(value, int) and not isinstance(value, bool) \
+            and 1024 <= value <= 65535:
+        return value
+    return crow_core.REMOTE_PORT_DEFAULT
+
+
+def remote_host_setting() -> str:
+    """#249: the LAN address last chosen in the dialog (`remote_host`), or ""
+    for "the first LAN address"."""
+    value = read_settings().get("remote_host")
+    return value if isinstance(value, str) else ""
+
+
+def remote_https_setting() -> bool:
+    """#249 stage 5: `remote_https` -- the dialog shows the Tailscale HTTPS
+    address instead of the LAN one. Only what is SHOWN; the LAN address is
+    listened on either way."""
+    return read_settings().get("remote_https") is True
+
+
+# #249 STAGE 5: WHO ANSWERS "WHERE DOES TAILSCALE STAND". None heisst
+# `crow_remote.tailscale_state`; die Suite setzt eine Attrappe ein, damit kein
+# Fall je die echte CLI aufruft.
+TAILSCALE_PROBE = None
+
+
+def tailscale_probe(port: int) -> dict:
+    """`crow_remote.tailscale_state(port)`, or "missing" where this install
+    lacks it or the probe breaks -- a mirror without HTTPS is still a mirror."""
+    probe = TAILSCALE_PROBE or getattr(remote_module(), "tailscale_state", None)
+    fallback = {"state": "missing", "name": "", "ip": "", "command": ""}
+    if probe is None:
+        return fallback
+    try:
+        found = probe(port)
+    except Exception:                  # noqa: BLE001 -- no tailnet is an answer
+        return fallback
+    return dict(fallback, **found) if isinstance(found, dict) else fallback
+
+
+def lan_addresses() -> "list[tuple[str, str]]":
+    """`crow_platform.lan_addresses()`, or [] where this install lacks it."""
+    probe = getattr(crow_platform, "lan_addresses", None)
+    if probe is None:
+        return []
+    try:
+        return list(probe())
+    except Exception:                  # noqa: BLE001 -- no LAN is an answer
+        return []
+
+
+# DIE FABRIK DES SERVERS. None heisst `crow_remote.Remote`; die Suite setzt
+# hier einen Doppelgaenger ein, damit kein Fall je einen echten Port oeffnet.
+REMOTE_FACTORY = None
+
+
 ICON_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crow.ico")
 
 # THE SAME BIRD IN THE FORMAT THE OTHER PLATFORM CAN READ. `crow.ico` is a
@@ -7542,6 +9316,20 @@ ICON_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "crow.ico")
 # one as the app icon would put two birds in the product.
 ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
 ICON_SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
+
+
+def remote_icon(size: int) -> "bytes | None":
+    """#249: the phone's home-screen tile -- the window's own bird on the
+    crow ground, opaque (iOS fills transparency with black). None when this
+    build ships no icon; `crow_remote` answers 404 then."""
+    source = icon_png(256 if size <= 256 else 512)
+    if not source:
+        return None
+    module = remote_module()
+    if module is None:
+        return None
+    with open(source, "rb") as fh:
+        return module.touch_icon(fh.read(), size, CROW_BG)
 
 
 def icon_png(size: int = 256) -> str:
@@ -8071,6 +9859,11 @@ class Turn(TurnEvents):
                    "t": crow_core.ABORT_NOTE})
 
     def round_finished(self, timings: dict) -> None:
+        # #289: EVERY ROUND READS goal.json, and the bar moves when a step
+        # did -- whoever moved it. Until here only goal_set/goal_step results
+        # repainted, so a hand edit stayed invisible for a whole turn.
+        if self._goal_reload:
+            self._goal_reload(moved=True)
         rc, cc = timings.get("_reasoning_chars"), timings.get("_content_chars")
         if isinstance(rc, int) and isinstance(cc, int) and rc + cc > 0:
             self._reasoning_chars += rc
@@ -8079,9 +9872,10 @@ class Turn(TurnEvents):
             self.share = 100.0 * self._reasoning_chars / total
 
     def cache_promise_broken(self) -> None:
-        self._put({"k": "note",
-                   "t": "the restored cache did not hold -- "
-                        "that prefill was the whole history"})
+        # #262: a diagnostic about the server's cache, not about
+        # the conversation -- it goes to crow.log, not into the flow.
+        crow_core.log_note("the restored cache did not hold -- "
+                           "that prefill was the whole history", "turn")
 
     def tool_started(self, name: str, arguments: str) -> None:
         # DIE ROHEN ARGUMENTE REISEN MIT, nicht nur die gekuerzte Zeile. Die
@@ -8444,6 +10238,16 @@ class InWindowPane:
         self.covered = False      # something of Crow's lies over the rect
         self.own = 0              # loads Crow asked for and not yet committed
         self.last = ""            # the last address reported to the page
+        # #279. A PANE NOBODY SEES HOLDS NO PAGE. `parked`: hidden by a fold,
+        # an empty tab or a minimize, and the view was sent to about:blank so
+        # no WebGL keeps the card; `last` is kept so `show()` brings it back.
+        self.parked = False
+        # #279: one reload after a crash of a page someone was looking at,
+        # never a second (#204's guard) -- reset by the next load of Crow's own.
+        self.revived = False
+        # #279: a turn runs against a local model server; the view renders
+        # without the GPU until it ends (see `throttle`).
+        self.throttled = False
         self._overlay = None
         self._view = None
         self._ctx = None
@@ -8528,6 +10332,8 @@ class InWindowPane:
         view.connect("web-process-terminated", self._terminated)
         self._overlay.add_overlay(view)
         self._ctx, self._view = ctx, view
+        # #279: a view first built during a turn starts throttled.
+        self._policy()
         return view
 
     # -- what the page asks for (any thread) --------------------------------
@@ -8539,10 +10345,15 @@ class InWindowPane:
 
     def go(self, url: str) -> None:
         self.wanted = True
+        self.parked = False
+        self.revived = False
         self.own += 1
         self._idle(self._load, url)
 
     def hide(self) -> None:
+        # #279: `_apply` parks the page too -- a hidden view with a live
+        # WebGL page kept its web process on the card (2026-09-24: respawned
+        # at 13:26:20 while the panel was folded, then crashed on and on).
         self.wanted = False
         self._idle(self._apply)
 
@@ -8552,7 +10363,26 @@ class InWindowPane:
         # white rectangle in a dark panel -- the reason `brBlank` exists.
         if self._view is not None and self.last:
             self.wanted = True
+            if self.parked:
+                # #279: parked on hide, so the page is loaded again.
+                self.parked = False
+                self.own += 1
+                self._idle(self._load, self.last)
+                return
         self._idle(self._apply)
+
+    def holds_page(self) -> bool:
+        """#279: a page is loaded in the view, parked pages not counted."""
+        return self._view is not None and bool(self.last) and not self.parked
+
+    def throttle(self, on: bool) -> None:
+        """#279 D. While a turn runs against the local model server, the
+        panel's view renders without the GPU (WebKitSettings
+        hardware-acceleration-policy NEVER); ALWAYS again when it ends.
+        Only this view: the chat page is pywebview's own and keeps its
+        settings."""
+        self.throttled = bool(on)
+        self._idle(self._policy)
 
     def cover(self, covered: bool) -> None:
         self.covered = bool(covered)
@@ -8563,7 +10393,35 @@ class InWindowPane:
 
     # -- GTK main thread ----------------------------------------------------
 
+    def _policy(self) -> bool:
+        view = self._view
+        if view is None:
+            return False
+        try:
+            from gi.repository import WebKit2
+            p = WebKit2.HardwareAccelerationPolicy
+            view.get_settings().set_hardware_acceleration_policy(
+                p.NEVER if self.throttled else p.ALWAYS)
+        except Exception:              # noqa: BLE001 -- a throttle, never fatal
+            pass
+        return False
+
+    def _park(self) -> None:
+        """#279 B. Nobody sees the pane: its page goes, the web process keeps
+        nothing on the card. GTK main thread only."""
+        if self.parked or self._view is None or not self.last:
+            return
+        self.parked = True
+        try:
+            self._view.load_uri("about:blank")
+        except Exception:              # noqa: BLE001
+            pass
+
     def _load(self, url: str) -> bool:
+        if not self.wanted:
+            # #279: a load that was overtaken by a hide is not made at all.
+            self.own = 0
+            return False
         try:
             self._build().load_uri(url)
         except Exception as exc:       # noqa: BLE001 -- said, never silent
@@ -8584,6 +10442,10 @@ class InWindowPane:
                 self._overlay.queue_resize()
         else:
             view.hide()
+            if not self.wanted:
+                # #279: hidden by a fold, a blank tab or a minimize -- not
+                # merely covered by a sheet for a moment.
+                self._park()
         return False
 
     def committed(self, uri: str) -> "dict | None":
@@ -8594,7 +10456,8 @@ class InWindowPane:
         "push" when the page moved by itself: a link, a form, pushState. The
         page keeps the per-tab history and needs to know which one it was.
         """
-        if not uri:
+        if not uri or self.parked:
+            # #279: the about:blank of a park is not a navigation of the tab.
             return None
         if self.own > 0:
             self.own = 0
@@ -8633,7 +10496,9 @@ class InWindowPane:
             uri = action.get_request().get_uri()
         except Exception:              # noqa: BLE001
             uri = ""
-        if pane_url_ok(uri):
+        # #279: only a pane someone sees opens a page -- a parked or hidden
+        # view loads nothing behind the user's back.
+        if pane_url_ok(uri) and self.wanted and not self.parked:
             self._idle(lambda: (self._view.load_uri(uri), False)[1])
         return None
 
@@ -8644,8 +10509,52 @@ class InWindowPane:
                     "the panel's %d MB ceiling (#226)" % PANE_MEMORY_LIMIT_MB)
         else:
             text = "the page in the browser panel stopped (%s)" % why
-        self.last = ""
-        self._on_event({"k": "note", "t": text})
+        dead, self.last = self.last, ""
+        # #279 C. ONE RELOAD, FOR A PAGE SOMEONE WAS LOOKING AT, AFTER A
+        # CRASH. Not after the memory ceiling (it would grow again), not after
+        # Crow's own terminate, never a second time for the same load (#204):
+        # a driver that fails under a full card fails the retry as well.
+        again = (why == "crashed" and self.wanted and not self.parked
+                 and not self.revived and pane_url_ok(dead)
+                 and dead != "about:blank")
+        if again:
+            self.revived = True
+            self.last = dead
+        else:
+            self.wanted = False
+        if why != "terminated-by-api":
+            self._on_event({"k": "note", "t": text})
+        self._idle(self._after_death, dead if again else "")
+
+    def _after_death(self, url: str) -> bool:
+        """#279 C. 2026-09-24 ~13:47: after six panel crashes the window
+        stopped repainting until robin moved it. The dead view is taken out
+        of the overlay's picture and the window is asked to draw again; the
+        one reload, if any, goes after that. GTK main thread only."""
+        view = self._view
+        if view is not None:
+            try:
+                view.hide()
+            except Exception:          # noqa: BLE001
+                pass
+        overlay = self._overlay
+        if overlay is not None:
+            try:
+                overlay.queue_resize()
+                overlay.queue_draw()
+                top = overlay.get_toplevel()
+                if top is not None:
+                    top.queue_draw()
+            except Exception:          # noqa: BLE001
+                pass
+        if url and view is not None:
+            self.own += 1
+            try:
+                view.load_uri(url)
+            except Exception:          # noqa: BLE001
+                self.wanted = False
+        self._apply()
+        return False
 
     def _download(self, _ctx, download) -> None:
         """WHERE IT WENT, SAID ONCE. WebKit's default destination is the XDG
@@ -8663,6 +10572,15 @@ class InWindowPane:
 
 class Api:
     """What the page may call. Nothing here touches a widget; it queues."""
+
+    # #249: WHAT AN Api BUILT WITHOUT `__init__` STILL NEEDS. The suite makes
+    # bare instances (`Api.__new__`) for one method at a time; `push` must not
+    # fall over on them for want of the mirror's fields. Never written through
+    # the class: the setters below write into the instance.
+    _remote = None
+    _views: dict = {}
+    _movers: frozenset = frozenset()
+    _route_lock = threading.RLock()
 
     def __init__(self, args: argparse.Namespace) -> None:
         self._args = args
@@ -8780,7 +10698,13 @@ class Api:
         # Modell richtig (`-np 1`, ein Slot, #143) und fuer die OBERFLAECHE falsch:
         # lesen kostet den Server nichts. Getrennt wird deshalb die Ansicht, nie
         # der Zug.
-        self._view_path: str | None = None
+        #
+        # #249: JE CLIENT EINE ANSICHT. `_view_path` ist seitdem eine
+        # Eigenschaft, die den Eintrag des AUFRUFERS liest und schreibt
+        # (`_client()`: "desktop" oder die Geraete-ID); fehlt ein Eintrag, ist
+        # das `None` von oben -- der laufende Chat. Ein Telefon, das einen Chat
+        # wechselt, bewegt damit das Fenster nie, und umgekehrt.
+        self._views: dict[str, str | None] = {}
         # #162. WELCHE CHATS FERTIG GEWORDEN SIND, WAEHREND NIEMAND HINSAH.
         #
         # Ein Zug, der im Hintergrund endet, hat sonst keinen Ort, an dem er das
@@ -8902,10 +10826,69 @@ class Api:
         # been chosen, because from then on it would outrank the real opening
         # line forever". A borrowed root is that same guess.
         self._root_chosen: bool = False
+        # #249. DER TELEFON-SPIEGEL. `_remote` ist der laufende
+        # `crow_remote.Remote` oder None; alles andere hier ist, was ein
+        # zweiter Bildschirm braucht, um denselben Stand zu sehen.
+        self._remote = None
+        # #290: one lane per phone for its dictation -- see `_remote_audio`.
+        self._voice_lock = threading.Lock()
+        self._voice_lanes: dict = {}
+        # Wer die gepufferte Zeile getippt hat -- bei #264s Zusammenlegen
+        # zwei Geraete. Sie folgen ihr in den Chat, alle anderen bleiben.
+        self._queued_by: set = set()
+        # Wer beim naechsten echten Wechsel mitgeht (`_hand_over`).
+        self._movers: frozenset = frozenset()
+        # Die offene Frage und die offene Server-Frage, als Push: ein Telefon,
+        # das spaeter dazukommt, muss dieselbe Karte sehen.
+        self._pending_ask: "dict | None" = None
+        self._pending_elicit: "dict | None" = None
+        # Die letzte Fassung der Zustaende, die nur Hintergrundfaeden kennen.
+        self._sticky: dict = {}
+        # Die Subtask-Signatur je Geraet; die des Fensters bleibt `_subs_sig`.
+        self._subs_sigs: dict = {}
+        # Offene Kopplungsfragen: id -> [Event, erlaubt].
+        self._remote_asks: dict = {}
+        self._remote_ask_n = 0
+        self._remote_seen = None
+        # EIN SCHLOSS UM ZUSTELLEN UND SCHNAPPSCHUSS: `crow_remote` nimmt die
+        # Sequenznummer VOR `state_snapshot`; baut der Schnappschuss unter
+        # demselben Schloss wie `push`, kann kein Push dazwischen landen und
+        # doppelt ankommen.
+        self._route_lock = threading.RLock()
 
     # -- outward -----------------------------------------------------------
 
-    def push(self, message: dict) -> None:
+    def push(self, message: dict, to: "tuple | list | None" = None) -> None:
+        """One message out: to the desktop's queue, and (#249) to the phones.
+
+        WHO GETS IT (#249), in this order -- the first rule that applies wins:
+
+        1. `to` given: exactly those clients ("desktop" and/or device ids).
+           Per-client messages (`rail`, `viewing`, `subs`) are built once per
+           client and pushed with `to`, each carrying its own "viewed" marker.
+        2. A kind in `REMOTE_SHARED_KINDS` (mode, root, model, goal, git ...):
+           everybody. It is state all views share, whoever caused it.
+        3. Inside `_only(...)` (a view action: `_view_other`, `view_live`, a
+           replay, a phone's `ready`): only those clients. A phone's replay
+           never reaches the desktop's `_out`.
+        4. From the worker thread (nobody's client): every client whose view
+           is the live chat. The DESKTOP keeps its #162 rule unchanged -- it
+           always gets the message, stamped `bg` while it looks elsewhere;
+           a phone looking elsewhere simply does not get it.
+        5. Anything else: everybody.
+
+        The desktop's `_out` therefore receives exactly what it received
+        before #249 whenever no phone is involved; the phones get the same
+        dicts through `Remote.publish(message, to=...)`.
+        """
+        # #249: `state_snapshot` sammelt, statt zuzustellen. Vor allem anderen,
+        # damit ein Schnappschuss weder Kostenzeilen noch Notizen mitschreibt.
+        captured = _CAPTURE.get()
+        if captured is not None:
+            if not (message.get("k") in crow_core.LOG_ONLY_NOTE_KINDS
+                    and crow_core.note_is_log_only(message.get("t"))):
+                captured.append(message)
+            return
         # #162. WAS DER LAUFENDE ZUG SAGT, GEHOERT IN SEINEN CHAT -- nicht in
         # den, der gerade offen ist. Der Absender entscheidet das, nicht der
         # Nachrichtentyp: kommt der Aufruf aus dem Worker-Thread, gehoert er zum
@@ -8932,15 +10915,135 @@ class Api:
         # vergessen, sich einzutragen. `at` ist die Zahl der Nachrichten vor der
         # Marke -- das ist ihr Ort, und er gilt auch nach einem Neustart, weil
         # die Nachrichten selbst gespeichert werden.
+        # #262. DIE LETZTE TUER FUER CROWS EIGENE STATUSZEILEN: was
+        # `note_is_log_only` erkennt, geht in crow.log statt auf die Seite und
+        # ins Notizband -- auch wenn eine neue Aufrufstelle es doch pusht.
+        if (message.get("k") in crow_core.LOG_ONLY_NOTE_KINDS
+                and crow_core.note_is_log_only(message.get("t"))):
+            if not self._replaying:
+                crow_core.log_note(str(message.get("t")), message.get("k"))
+            return
         if (not self._replaying
                 and message.get("k") in crow_core.SESSION_NOTE_KINDS):
             self._notes.append(dict(message, at=len(self._conversation)))
             del self._notes[:-crow_core.SESSION_NOTES_MAX]
-        if (message.get("k") != "rail"
-                and self._view_path is not None
-                and threading.current_thread() is self._worker):
-            message = dict(message, bg=True)
-        self._out.put(message)
+        kind = message.get("k")
+        if kind in _STICKY_KINDS:
+            self._remember(message)
+        worker = threading.current_thread() is self._worker
+        with self._route_lock:
+            audience = self._audience(kind, to, worker)
+            if audience is None or DESKTOP in audience:
+                desk = message
+                # #162, UNVERAENDERT: DIE ANSICHT DES FENSTERS entscheidet den
+                # Stempel -- nicht die des Aufrufers.
+                # #249: der Bild-Stage gehoert keinem Chat -- ein leerer Stage
+                # aus einem Hintergrundzug gilt auch fuer das Fenster.
+                if (kind not in ("rail", "chips")
+                        and self._views.get(DESKTOP) is not None
+                        and worker):
+                    desk = dict(message, bg=True)
+                self._out.put(desk)
+            remote = self._remote
+            if remote is None:
+                return
+            if audience is None:
+                remote.publish(message)
+                return
+            devices = [c for c in audience if c != DESKTOP]
+            if devices:
+                remote.publish(message, to=devices)
+
+    def _audience(self, kind, to, worker: bool) -> "tuple | None":
+        """Rules 1-5 of `push`: the clients, or None for everybody."""
+        if to is not None:
+            return tuple(to)
+        if kind in REMOTE_SHARED_KINDS:
+            return None
+        scoped = _TO.get()
+        if scoped is not None:
+            return scoped
+        if worker and kind != "rail":
+            return (DESKTOP,) + tuple(d for d in self._device_ids()
+                                      if self._views.get(d) is None)
+        return None
+
+    def _remember(self, message: dict) -> None:
+        """#249: the last word of a state only a background thread knows, for
+        `state_snapshot`. A partial `up` (a reset sends model None) is merged
+        into the last full one rather than replacing it."""
+        kind = message.get("k")
+        sticky = self.__dict__.setdefault("_sticky", {})
+        if kind in ("up", "down"):
+            last = sticky.get("conn") or {}
+            if kind == "up" and last.get("k") == "up":
+                merged = dict(last)
+                merged.update({k: v for k, v in message.items()
+                               if v is not None})
+                sticky["conn"] = merged
+            else:
+                sticky["conn"] = dict(message)
+            return
+        sticky[kind] = dict(message)
+
+    # ---- #249: wer schaut, und wohin
+
+    @property
+    def _view_path(self) -> "str | None":
+        """#162's view, per CLIENT since #249: the caller's entry."""
+        return self._views.get(_client())
+
+    @_view_path.setter
+    def _view_path(self, value: "str | None") -> None:
+        self.__dict__.setdefault("_views", {})[_client()] = value
+
+    def _set_view(self, client: str, value: "str | None") -> None:
+        self.__dict__.setdefault("_views", {})[client] = value
+
+    def _push_to(self, message: dict, clients) -> None:
+        """Rule 1 of `push`, and the old one-argument call when no phone is
+        paired -- so a desktop-only window pushes exactly as before #249."""
+        clients = tuple(clients)
+        if self._remote is None:
+            if DESKTOP in clients:
+                self.push(message)
+            return
+        if clients:
+            self.push(message, to=clients)
+
+    def _device_ids(self) -> list:
+        remote = self._remote
+        if remote is None:
+            return []
+        try:
+            return list(remote.device_ids())
+        except Exception:              # noqa: BLE001 -- no phones is an answer
+            return []
+
+    def _clients(self) -> list:
+        """The desktop and every paired device -- the views that exist."""
+        return [DESKTOP] + self._device_ids()
+
+    def _live_clients(self) -> list:
+        """The clients whose view is the live chat."""
+        return [c for c in self._clients() if self._views.get(c) is None]
+
+    def _peers(self, include_self: bool = False) -> tuple:
+        """The clients that look at the same chat as the caller."""
+        me = _client()
+        mine = self._views.get(me)
+        return tuple(c for c in self._clients()
+                     if (include_self or c != me)
+                     and self._views.get(c) == mine)
+
+    @contextlib.contextmanager
+    def _only(self, *clients) -> Iterator[None]:
+        """Rule 3 of `push`: every push in the block goes to `clients` only."""
+        token = _TO.set(tuple(clients))
+        try:
+            yield
+        finally:
+            _TO.reset(token)
 
     def announce_elicit(self, asks: list) -> None:
         """The core says a server is asking; the page gets the newest question.
@@ -8950,12 +11053,21 @@ class Api:
         window has to push and a terminal has to prompt in line.
         """
         if asks:
-            self.push({"k": "elicit", "ask": asks[-1]})
+            message = {"k": "elicit", "ask": asks[-1]}
+            self._pending_elicit = message        # #249: for a late phone
+            self.push(message)
 
     def answer_elicit(self, ident: int, action: str, values) -> str:
         """What a person typed, handed back to the waiting server. "" when it
         went through; the sentence why, when it did not."""
-        return crow_core.answer_elicitation(int(ident), str(action), values) or ""
+        said = crow_core.answer_elicitation(int(ident), str(action), values) or ""
+        if not said:
+            pending = self._pending_elicit
+            if pending and (pending.get("ask") or {}).get("id") == int(ident):
+                self._pending_elicit = None
+            self._push_asked("elicit", {"accept": "sent", "decline": "declined"}
+                             .get(str(action), "dismissed"), int(ident))
+        return said
 
     def pump(self) -> None:
         """One thread, forever: queue -> page. The only place JS is called.
@@ -9084,11 +11196,29 @@ class Api:
         return self._tools_cleared
 
     def ready(self) -> None:
+        # #249. EIN TELEFON, DAS SEINE SEITE GELADEN HAT, bekommt den Stand --
+        # und nur es. Kein zweiter Start: `adopt_root`, `_probe` und der
+        # Seitenzaehler gehoeren dem Fenster, das Telefon schaut nur zu.
+        client = _client()
+        if client != DESKTOP:
+            items = self.state_snapshot(client)
+            # DELIVERED, NOT PUSHED (robin's iPhone, 2026-09-24: one "no
+            # folder" note became 32 in session.json and 15+ rows on the
+            # phone). The snapshot is a copy of state that is already
+            # recorded; through `push` every note in it was appended to
+            # `_notes` again (and its cost line stamped on the live chat), so
+            # each phone page load doubled the band.
+            remote = self._remote
+            if remote is not None:
+                with self._route_lock:
+                    for message in items:
+                        remote.publish(message, to=[client])
+            self._remote_state_push()
+            return
         self._page_loads += 1
-        self.push({"k": "meta", "rail": rail_width_setting(),
-                   "version": client_version() or "",
-                   "url": self._args.base_url, "tools": len(TOOLS),
-                   "execute": bool(self._args.execute_tools)})
+        self.push(self._meta_message())
+        if self._remote is not None:
+            self._remote_state_push(force=True)
         threading.Thread(target=self._mic_probe, daemon=True).start()
         if self._page_loads > 1:
             self._ready_again()
@@ -9144,6 +11274,92 @@ class Api:
         self._draw_live()
         threading.Thread(target=self._probe, kwargs={"redraw": True},
                          daemon=True).start()
+
+    def _meta_message(self) -> dict:
+        """The page's header facts, as `ready()` sends them to a new page."""
+        return {"k": "meta", "rail": rail_width_setting(),
+                "version": client_version() or "",
+                "url": self._args.base_url, "tools": len(TOOLS),
+                "execute": bool(self._args.execute_tools),
+                # #264: the page tells a command from a path mid-turn.
+                "slash": list(crow_core.SLASH_COMMANDS)}
+
+    # ---- #249: the state a fresh phone page needs
+
+    def state_snapshot(self, client: str) -> list:
+        """#249: everything a fresh page for `client` needs, as the messages
+        that would have drawn it -- nothing here is a second rendering.
+
+        FROM THE SOURCES THAT EXIST: the header (`meta`, mode, root, the last
+        `up`/`reasoning`/`git`/`pend` any thread pushed), the chat THIS client
+        looks at replayed the way `view_live`/`_view_other` replay it, its bar
+        and counter, the rail and subtasks with its own markers, the staged
+        chips, the goal panel, and -- only while the client looks at the live
+        chat, like the desktop's #162 rule -- the open question and the turn's
+        busy/queued state.
+
+        BUILT UNDER THE ROUTING LOCK: `crow_remote` takes the stream's sequence
+        number before calling this, and a push that slipped in between would
+        arrive twice. Collected, never delivered (`_CAPTURE`)."""
+        box: list = []
+        with self._route_lock:
+            token = _CAPTURE.set(box)
+            try:
+                with as_client(client):
+                    self._snapshot_into(client)
+            finally:
+                _CAPTURE.reset(token)
+        return box
+
+    def _snapshot_into(self, client: str) -> None:
+        """`state_snapshot`'s body, run as `client` with every push captured."""
+        self.push(self._meta_message())
+        self.push({"k": "mode", "name": getattr(self._args, "mode", DEFAULT_MODE),
+                   "modes": self.mode_menu()})
+        self.push(self._root_message())
+        self.push({"k": "tools", "on": bool(self._args.execute_tools)})
+        for key in ("conn", "reasoning", "git", "pend", "thoughts"):
+            kept = self._sticky.get(key)
+            if kept:
+                self.push(dict(kept))
+        self.push({"k": "clear"})
+        self._hello()
+        view = self._views.get(client)
+        if view is None:
+            self._replay(self._conversation.payload(), self._notes, guard=False)
+            tokens = self._context_tokens
+        elif view:
+            try:
+                restored = load_session(self._endpoint()["base_url"], None,
+                                        view, model=self._model, with_kv=False)
+            except Exception:          # noqa: BLE001 -- an empty flow says it
+                restored = None
+            messages, tokens = (restored[0], restored[1]) if restored else ([], 0)
+            self._replay(messages, crow_core.session_notes(view), guard=False)
+        else:
+            tokens = 0
+        self.push(self._where_message())
+        self._push_cost_for(self._viewed_path(), tokens)
+        self.push(self._rail_message())
+        self.push({"k": "subs", "items": self._subs_items()})
+        self.push({"k": "chips", "c": self._image_chips()})
+        if view is not None:
+            return
+        if self._pending_ask is not None:
+            self.push(dict(self._pending_ask))
+        if self._pending_elicit is not None:
+            self.push(dict(self._pending_elicit))
+        if self._busy:
+            self.push({"k": "busy"})
+            # OHNE `_queue_lock`: `send` pusht unter ihm, also nimmt es erst
+            # dieses und dann das Routing-Schloss -- hier umgekehrt waere ein
+            # Deadlock. Drei Lesezugriffe, jeder fuer sich atomar.
+            queued, target = self._queued, self._queued_to
+            by = sorted(self._queued_by)
+            if queued is not None and target is None:
+                self.push({"k": "queued", "t": queued,
+                           "i": [c["url"] for c in self._image_chips()],
+                           "by": by[0] if by else DESKTOP})
 
     # ---- #92: the working directory ------------------------------------
 
@@ -9520,6 +11736,7 @@ class Api:
         self.push({"k": "note", "t": "no working directory -- writes are unbounded"})
 
     ARCHIVE_PREFIX = "chat-"
+    ROLLOVER_PREFIX = "rollover-"
 
     @staticmethod
     def _same(one: "str | None", other: "str | None") -> bool:
@@ -9553,7 +11770,7 @@ class Api:
                    "share": (kept or {}).get("share"),
                    "tokens": tokens, "n_ctx": self._n_ctx})
 
-    def _say_where(self) -> None:
+    def _say_where(self, clients=None) -> None:
         """Was die Leiste ueber der Eingabe sagt, aus dem aktuellen Zustand.
 
         EIN ORT, WEIL SIE SONST STEHENBLEIBT. Sie wurde beim Hinsehen gesetzt
@@ -9561,17 +11778,30 @@ class Api:
         der laengst fertig war (robin, 2026-08-30). Jeder Zustandswechsel, der
         sie betrifft, ruft jetzt hierher, und sie liest, statt sich zu merken.
         """
+        # #249: JE CLIENT SEINE LEISTE. Der Worker ist niemandes Client, also
+        # sagt er es allen; jede andere Aktion nur ihrem Aufrufer -- die
+        # Ansicht, ueber die sie spricht, ist seine.
+        if clients is None:
+            clients = (self._clients()
+                       if threading.current_thread() is self._worker
+                       else (_client(),))
+        for client in clients:
+            with as_client(client):
+                message = self._where_message()
+            self._push_to(message, (client,))
+
+    def _where_message(self) -> dict:
+        """The bar's message for the CALLING client's view."""
         if self._view_path is None:
-            self.push({"k": "viewing", "live": True,
-                       "title": self._live_title(), "running": None})
-            return
+            return {"k": "viewing", "live": True,
+                    "title": self._live_title(), "running": None}
         title = ("new chat" if not self._view_path else
                  (self._stored_title(self._view_path)
                   or os.path.basename(self._view_path)))
-        self.push({"k": "viewing", "live": False, "title": title,
-                   # LEER, WENN NICHTS MEHR LAEUFT. Der Name des Chats, in dem
-                   # zuletzt gearbeitet wurde, ist keine Auskunft ueber jetzt.
-                   "running": self._live_title() if self._busy else None})
+        return {"k": "viewing", "live": False, "title": title,
+                # LEER, WENN NICHTS MEHR LAEUFT. Der Name des Chats, in dem
+                # zuletzt gearbeitet wurde, ist keine Auskunft ueber jetzt.
+                "running": self._live_title() if self._busy else None}
 
     def _mark_done(self, path: "str | None") -> None:
         """Ein Zug ist fertig geworden, waehrend jemand woanders hinsah.
@@ -9606,10 +11836,22 @@ class Api:
             if not name.endswith(".json"):
                 continue
             if not (name.startswith(self.ARCHIVE_PREFIX)
-                    or name.startswith("rollover-")):
+                    or name.startswith(self.ROLLOVER_PREFIX)):
                 continue
             path = os.path.join(folder, name)
             if not os.path.isfile(path):   # the archiv/ folder, and anything like it
+                continue
+            # #261. A ROLLOVER IS NOT A CHAT, IT IS THE SAME
+            # CHAT'S EARLIER HALF. Listed here, every cut added an entry beside
+            # the live chat, titled by whatever user-role line opened the
+            # segment (robin, 2026-09-23: "[The tool budget for this turn is
+            # ..." and "Hey", both "rolled over"). They are kept on disk where
+            # the rollover note points and listed in the archive drawer
+            # (`_archived`). The one exception is a rollover somebody opened:
+            # it is then the chat in the window and has to stand in the rail.
+            if (name.startswith(self.ROLLOVER_PREFIX)
+                    and not self._same(path, self._current_path)
+                    and not self._same(path, self._viewed_path())):
                 continue
             # THE OPEN ONE STAYS IN THE LIST, MARKED WHERE IT IS. Filtering it
             # out here made a click MOVE the chat out of the list and into the
@@ -9647,21 +11889,11 @@ class Api:
         before anyone names it -- and it is read the same way whether the
         conversation is on disk or still in the window.
         """
-        # #153: die Rollover-Note ist die erste User-Zeile jeder Fortsetzung
-        # und jedes Folge-Archivs -- als Titel gelesen sieht das Archiv aus
-        # wie "die ganze Session", direkt neben dem offenen Chat. Das Praefix
-        # kommt aus dem Kern-Template, keine zweite Kopie des Wortlauts.
-        note = crow_core.ROLLOVER_NOTE.split("{", 1)[0]
-        for message in messages or []:
-            if message.get("role") == "user":
-                # #142: blocks title by their words, like everywhere else.
-                first = crow_core.message_text(
-                    message.get("content") or "").strip().splitlines()
-                if first and first[0]:
-                    if first[0].startswith(note):
-                        continue
-                    return first[0][:cls.TITLE_MAX]
-        return None
+        # #153 skipped the rollover note; #261 skips every
+        # Crow note (budget, goal nudge, ...) and carries the title across the
+        # cut. The one rule lives in the core: `crow_core.chat_title`.
+        line = crow_core.chat_title(messages)
+        return line[:cls.TITLE_MAX] if line else None
 
     @classmethod
     def _stored_title(cls, path: str) -> str | None:
@@ -9730,8 +11962,9 @@ class Api:
             return {"path": path, "title": name, "meta": ""}
         messages = data.get("messages") or []
         given = (data.get("crow_title") or "").strip()[:cls.TITLE_MAX]
-        kind = "rolled over" if name.startswith("rollover-") else "put aside"
-        return {"path": path,
+        rolled = name.startswith(cls.ROLLOVER_PREFIX)
+        kind = "rolled over" if rolled else "put aside"
+        return {"path": path, "rollover": rolled,
                 "title": given or cls._first_line(messages) or name,
                 # #119. THE CHAT'S OWN BOUNDARY IS ITS PROJECT MEMBERSHIP, and it
                 # is read here because this is the one read of the file. There is
@@ -9956,7 +12189,8 @@ class Api:
         "/budget": "cap the thinking per request; /budget <tokens>|off to set "
                    "it. The prompt is unchanged, so it costs no prefill.",
         "/goal": "set the goal this chat works towards; /goal <title> then one "
-                 "step per line, or `title | step | step`. /goal off clears it.",
+                 "step per line, or `title | step | step`. /goal off clears it; "
+                 "/goal skip <n> [reason] gives step n up and moves on.",
         "/thoughts": "fold the reasoning blocks open, or closed again.",
         "/image": "hold an image for the next line; /image <path>, or drop one.",
         "/delegate": "hand a task to the remote subtask model; /delegate <task>. "
@@ -9966,6 +12200,8 @@ class Api:
                    "collect fetches the verdict.",
         "/reset": "drop the context. The chat stays where it is.",
         "/context": "how much of the window the conversation is using.",
+        "/remote": "the phone mirror on this network: the QR code and the "
+                   "paired devices; /remote on|off|status|devices|forget <name>.",
         "/exit": "close the window.",
         "/quit": "close the window.",
     }
@@ -10013,6 +12249,8 @@ class Api:
             return self._drop_context()
         if word == "/context":
             return self._context_line()
+        if word == "/remote":
+            return self._remote_command(parts[1:])
         if word == "/mode":
             return self._mode_command(parts[1:])
         if word == "/model":
@@ -10044,6 +12282,10 @@ class Api:
             answer = crow_core.verify_start(self._conversation)
             self._sub_watch()
             return answer
+        # #249: from a phone, /exit leaves the phone's tab -- never the
+        # desktop window, the same rule as the close button (decision 5).
+        if _client() != DESKTOP:
+            return crow_core.REMOTE_PHONE_EXIT
         self.close()          # /exit, /quit
         return "closing."
 
@@ -10310,6 +12552,10 @@ class Api:
             self._conversation.repin_memory(
                 crow_core.prompt_head(crow_core.get_root()))
             self.push_goal(force=True)
+        else:
+            # #289: `/goal` read the file -- the bar shows what it read. Live
+            # 2026-09-24 the answer said 4/9 while the bar still said 3/9.
+            self.push_goal()
         return said
 
     # #165. WIE VIELE ZUEGE EIN ZIEL OHNE EINE MENSCHLICHE ZEILE FAHREN DARF.
@@ -10354,6 +12600,13 @@ class Api:
         # Die Fehlerklassen des laufenden Schritts, gezaehlt von
         # `crow_core.goal_trouble_scan` (#202).
         self._goal_trouble: dict = {}
+        # #268: die Fang-Serie des Schritts (`crow_core.goal_render_scan`) und
+        # ob der naechste Zug zuerst rollen soll.
+        self._goal_renders: dict = {}
+        self._goal_roll_due = False
+        # #282: Stop pauses the engine until a typed line -- every
+        # caller of this method is one, or is the goal going away.
+        self._goal_paused = False
 
     def _goal_cut(self, turns: int) -> int:
         """Die letzten `turns` Motorzuege aus der Geschichte nehmen. #202.
@@ -10381,12 +12634,14 @@ class Api:
             return 0
         self._notes = [n for n in self._notes if n.get("at", 0) <= cut]
         self._timings = [t for t in self._timings if t.get("at", 0) <= cut]
-        # ROBIN SIEHT, DASS ETWAS VERSCHWUNDEN IST. Geschichte still zu
-        # loeschen waere schlimmer als der Kreis: beim naechsten Blick fehlten
-        # Nachrichten, und nichts sagte warum.
-        self.push({"k": "note",
-                   "t": "goal mode: %d message%s of an empty loop dropped from "
-                        "the history" % (dropped, "" if dropped == 1 else "s")})
+        # NICHT STILL, ABER NICHT IM CHAT (#262, robin 2026-09-23):
+        # die Zeile stand bis hier im Verlauf und fuellte ihn -- "157 messages
+        # of an empty loop dropped" und gleich danach 52 mehr. Sie ist ein
+        # Diagnosefakt und steht jetzt mit Zeitstempel in crow.log. Was robin
+        # sieht, ist "goal mode stopped", wenn die Bremse endgueltig greift.
+        crow_core.log_note("goal mode: %d message%s of an empty loop dropped "
+                           "from the history"
+                           % (dropped, "" if dropped == 1 else "s"), "goal")
         return dropped
 
     def _goal_brake(self, goal: dict, nxt: int) -> "tuple[bool, str | None]":
@@ -10407,12 +12662,11 @@ class Api:
         und der naechste Anstoss waere nur der naechste Kreis.
         """
         payload = self._conversation.payload()
-        answer = crow_core.goal_last_answer(payload)
-        mark = crow_core.goal_answer_mark(answer)
+        mark = crow_core.goal_turn_mark(payload)
         if mark is None:
             # Noch keine Antwort in diesem Gespraech: nichts zu beurteilen.
             return (True, None)
-        empty = crow_core.goal_answer_empty(answer)
+        empty = crow_core.goal_turn_empty(payload)
         if self._goal_recovery:
             # Das hier ist die Antwort auf die Erholungszeile.
             self._goal_recovery = False
@@ -10479,13 +12733,26 @@ class Api:
         in eckigen Klammern wie die Rollover-Notiz, damit `_spoken_carry` ihn
         beim naechsten Schnitt NICHT als robins eigene Worte mitnimmt.
         """
-        if crow_core.INTERRUPT.is_set():
-            return None
         goal = crow_core.goal_load()
         if not goal or goal.get("status") == crow_core.GOAL_DONE:
             return None
         nxt = crow_core.goal_next_open(goal)
         if nxt is None:
+            return None
+        # #282. STOP IS A PAUSE, and the flag above could not carry
+        # it: `run_turn` consumes INTERRUPT when it ends the stopped turn
+        # (crow_core.run_turn, `if owns_turn_state: INTERRUPT.clear()`), so by
+        # the time the pump asked here the flag was down and the next turn went
+        # out at once -- robin, live 2026-09-24: "Stop, and the goal engine
+        # instantly starts the next turn". `stop()` sets this one; only a typed
+        # line (`_goal_reset`) lifts it.
+        # The flag still counts when it is up: a Stop between two turns (the
+        # memory review after `idle`) lands after `run_turn` has returned.
+        if getattr(self, "_goal_paused", False) or crow_core.INTERRUPT.is_set():
+            self.push({"k": "note",
+                       "t": "goal mode paused: you pressed Stop. Step %d is "
+                            "open -- the next line you send resumes it."
+                            % (nxt + 1)})
             return None
         # #202. DIE BREMSE VOR DEN DECKELN, und vor jedem Zaehler: was zuletzt
         # zurueckkam, entscheidet, ob es ueberhaupt einen Sinn hat, noch einmal
@@ -10510,6 +12777,7 @@ class Api:
             self._goal_step, self._goal_step_turns = nxt, 0
             # Die Fehlerklassen gehoeren dem Schritt wie der Zaehler (#202).
             self._goal_trouble = {}
+            self._goal_renders = {}                            # #268
         self._goal_step_turns += 1
         if self._goal_step_turns > self.GOAL_STEP_TURN_CAP:
             self.push({"k": "note",
@@ -10523,6 +12791,9 @@ class Api:
         # ehrlicherweise noch nicht fertig ist, blieb deshalb als offener Kreis
         # stehen, waehrend das Panel minutenlang stillstand. Wer den naechsten
         # Schritt anstoesst, weiss auch, dass er ab jetzt laeuft.
+        # #289: A STEP THAT FAILED ONCE, read before `goal_step_begin` sets it
+        # running again -- the status is what says it failed.
+        retry = crow_core.goal_retry_note(goal, nxt)
         if goal["steps"][nxt]["status"] != crow_core.GOAL_RUNNING:
             crow_core.goal_step_begin(nxt)
             self.push_goal()
@@ -10539,14 +12810,58 @@ class Api:
         if start is not None:
             crow_core.goal_trouble_scan(payload, start, self._goal_trouble,
                                         new_step=new_step)
+        # #268 + #277. DIE FANG-SERIE WIRD JEDEN ZUG GEZAEHLT, auch wenn #202
+        # gleich spricht: am 2026-09-24 stand der Render-Zaehler hinter dem
+        # Trouble-Return, und die drei schwarzen Fangs von s97-s111 wurden
+        # nie gesehen. Ohne Zuganfang -- ein Rollover MITTEN im Zug, die neue
+        # Payload beginnt mit der Rollover-Notiz -- ist die ganze Payload der
+        # Rest dieses Zugs; was der Schnitt mitgetragen hat und schon
+        # gezaehlt war, filtert `seen`. Nur die ZAEHLUNG ist vorgezogen, der
+        # Anstoss von #202 hat weiter den Vortritt.
+        crow_core.goal_render_scan(payload, 0 if start is None else start,
+                                   self._goal_renders, new_step=new_step)
+        # #289. THE RETRY QUOTES THE FAILURE, and it comes first: it is said
+        # once, the turn after the `failed`, and the short "still open" line
+        # below would otherwise swallow it (same step, the model worked).
+        # Counted is already, above -- #202 and #268 speak on the next turn.
+        if retry is not None:
+            return crow_core.goal_retry_nudge(goal, nxt, retry)
         due = crow_core.goal_trouble_due(self._goal_trouble)
         if due:
-            self.push({"k": "note",
-                       "t": "goal mode, step %d: the same failure keeps coming "
-                            "back -- %s. The nudge names the way around it."
-                            % (nxt + 1, "; ".join(crow_core.goal_trouble_label(e)
-                                                  for e in due))})
+            # #262: the NUDGE is unchanged and still goes to the
+            # model; only robin's copy of it moved from the flow to crow.log.
+            crow_core.log_note("goal mode, step %d: the same failure keeps "
+                               "coming back -- %s. The nudge names the way "
+                               "around it."
+                               % (nxt + 1, "; ".join(
+                                   crow_core.goal_trouble_label(e)
+                                   for e in due)), "goal")
             return crow_core.goal_trouble_nudge(nxt + 1, due)
+        # #268. DERSELBE FANG, IMMER WIEDER: drei feste Fangs in Folge ein
+        # Anstoss zum Halbieren, sechs ein erzwungener Rollover, dessen
+        # erste Zeile auflistet, was versucht wurde. Nach dem Trouble-Block,
+        # damit #202 unveraendert zuerst spricht (gezaehlt ist schon, oben).
+        stuck = crow_core.goal_render_due(self._goal_renders)
+        if stuck is not None:
+            text = crow_core.goal_render_nudge(nxt + 1, self._goal_renders,
+                                               rolled=stuck == "roll")
+            page = crow_core._render_page_state(self._goal_renders) or {}
+            self.push({"k": "note",
+                       "t": "goal mode, step %d: %d captures in a row came "
+                            "back the same -- %s"
+                            % (nxt + 1, page.get("streak", 0),
+                               "the context rolls over, carrying what was "
+                               "tried" if stuck == "roll"
+                               else "the nudge says to bisect")})
+            if stuck == "roll":
+                self._goal_roll_due = True
+                # The cut leaves the loop behind; the one roll stays spent.
+                # #277: the counted paths stay, or the captures the cut
+                # carries would start the next streak.
+                self._goal_renders = {
+                    "rolls": self._goal_renders.get("rolls", 0),
+                    "seen": self._goal_renders.get("seen", [])}
+            return text
         # #202. NICHT HUNDERTMAL DERSELBE BLOCK. Der volle Anstoss ist 330 Byte
         # Anweisung; byteweise identisch vor jedem Zug wiederholt ist er selbst
         # schon das Muster, das das Modell dann fortsetzt -- und er sagt beim
@@ -10561,8 +12876,9 @@ class Api:
         return ("[Goal mode. %d of %d steps done. Next is step %d: %s\n"
                 "Do it now. Call goal_step with 'done' only once you have "
                 "verified it, then continue with the step after that. If it "
-                "cannot be done, call goal_step with 'failed' and say why.]"
-                % (done, total, nxt + 1, goal["steps"][nxt]["text"]))
+                "cannot be done, call goal_step with 'failed' and say why.%s]"
+                % (done, total, nxt + 1, goal["steps"][nxt]["text"],
+                   crow_core.goal_nudge_evidence(goal, nxt)))  # #267
 
     def close_goal(self) -> None:
         """Das Ziel wegraeumen. Das Gegenstueck zum Setzen, im Panel selbst.
@@ -10576,6 +12892,24 @@ class Api:
         self.push_goal(force=True)
         self._conversation.repin_memory(
             crow_core.prompt_head(crow_core.get_root()))
+
+    def close_subtasks(self) -> None:
+        """#281. The `×` of the Subtasks card: hide it for the open chat.
+
+        ONLY A VIEW MARK -- nothing is cancelled, a running subtask keeps
+        running and keeps its rail row and chip. Every record of the open chat
+        gets the mark, so the card stays shut through chat switches and a
+        restart; a NEW subtask is born unmarked and brings the card back.
+        """
+        crow_core.subtask_close(
+            [r["i"] for r in self._subs_items() if r["here"]], True)
+        self._push_subs()
+
+    def reopen_subtasks(self) -> None:
+        """#281. The way back: a jump from the chip menu or a rail row."""
+        crow_core.subtask_close(
+            [r["i"] for r in self._subs_items() if r["here"]], False)
+        self._push_subs()
 
     def _surface(self) -> None:
         """#211. Der Schnitt sagt der Seite, was sie weiss -- einmal, gebuendelt.
@@ -10607,7 +12941,7 @@ class Api:
                    else [list(g) for g in crow_core.reasoning_menu_groups_for(name)]})
         self.push_goal(force=True)
 
-    def push_goal(self, force: bool = False) -> None:
+    def push_goal(self, force: bool = False, moved: bool = False) -> None:
         """Was die Seite ueber das Ziel wissen muss. Ohne Ziel: nichts.
 
         KEIN LEERER RAHMEN (robin, 2026-08-30): das Panel erscheint nur, wenn
@@ -10619,12 +12953,21 @@ class Api:
         die nichts sagt, ist der Grund, warum `_subs_sig` existiert. `force`
         zeichnet trotzdem -- fuer die Wege, die die ganze Seite neu aufbauen und
         bei denen die alte Signatur nichts mehr ueber den Bildschirm aussagt.
+
+        #289: `moved` IS THE PER-ROUND CALL (`Turn.round_finished`). It draws
+        only when a step or the goal changed state -- not for the token count,
+        which grows every round and is drawn at the turn's end. A goal.json
+        edited outside the goal tools (robin's hand skip, 2026-09-24) reached
+        the page only at the end of the NEXT turn: nothing else read the file.
         """
         goal = crow_core.goal_load()
         sig = json.dumps(goal, sort_keys=True) if goal else ""
+        shape = crow_core.goal_shape(goal)
+        if moved and not force and shape == getattr(self, "_goal_shape", None):
+            return
         if not force and sig == getattr(self, "_goal_sig", None):
             return
-        self._goal_sig = sig
+        self._goal_sig, self._goal_shape = sig, shape
         if not goal:
             self.push({"k": "goal", "goal": None})
             return
@@ -10633,6 +12976,8 @@ class Api:
             "title": goal["title"],
             "status": goal.get("status") or "open",
             "done": done, "total": total,
+            # #289: the numbers of the skipped steps, for the head of the bar.
+            "skipped": crow_core.goal_skipped(goal),
             "seconds": round(crow_core.goal_seconds(goal), 1),
             # OB DIE UHR UEBERHAUPT LAEUFT. Die Seite tickt selbst weiter (#164),
             # sonst stuende sie zwischen zwei Schritten still -- aber sie tat es
@@ -10693,6 +13038,14 @@ class Api:
         # window they used to travel to the server as an ordinary question --
         # the input's own placeholder offers /tools, so the one it names is
         # answered where it is typed. #94 widened that to all of them.
+        #
+        # #249. DIE ANDEREN ANSICHTEN SEHEN DIE ZEILE AUCH. Der Absender hat sie
+        # schon gezeichnet (`go()`), also geht das `user` an die, die denselben
+        # Chat ansehen -- nie an ihn selbst, und ohne Telefon an niemanden.
+        caller = _client()
+        stripped = (text or "").strip()
+        if stripped and stripped.split()[0].lower() in crow_core.SLASH_COMMANDS:
+            self._push_to({"k": "user", "t": text}, self._peers())
         answer = self.slash_answer(text)
         if answer is not None:
             # AN EMPTY ANSWER IS "HANDLED, AND ALREADY SAID". `/mode <name>`
@@ -10729,8 +13082,22 @@ class Api:
                 # der gerade rechnet. Ohne das Ziel liefe die Zeile im falschen
                 # Gespraech und waere von aussen nicht von einem Versehen zu
                 # unterscheiden.
+                # #264. A SECOND LINE JOINS THE FIRST, it does not replace it.
+                # The page drew both; replacing lost the first silently. Only
+                # for the same chat -- a line meant for another one is a new
+                # decision about where the next turn runs, as before.
+                if self._queued is not None and self._queued_to == self._view_path:
+                    text = self._queued + "\n\n" + text
+                    self._queued_by.add(caller)
+                else:
+                    self._queued_by = {caller}
                 self._queued, self._queued_to = text, self._view_path
-                self.push({"k": "queued"})
+                # #249: MIT DEM TEXT. Beide Ansichten zeigen dieselbe gehaltene
+                # Blase -- die zusammengelegte, nicht die eigene Haelfte -- und
+                # zeichnen sie beim `idle`. An alle, die diesen Chat ansehen.
+                self._push_to({"k": "queued", "t": text,
+                               "i": [c["url"] for c in self._image_chips()],
+                               "by": caller}, self._peers(include_self=True))
                 return True
             # #165: EINE GETIPPTE ZEILE SETZT DEN MOTOR-ZAEHLER ZURUECK. Der
             # Deckel sichert gegen einen Plan, der ohne Aufsicht im Kreis
@@ -10744,10 +13111,26 @@ class Api:
             self._goal_reset()
             self._busy = True
             INTERRUPT.clear()
-            self._worker = threading.Thread(target=self._pump, args=(text,),
-                                            daemon=True)
-            self._worker.start()
-            return True
+            # #249: WER WOANDERS HINSIEHT, MEINT DIESEN CHAT. Die Zeile laeuft
+            # dort -- der Wechsel passiert im Worker vor dem Zug, wie bei einer
+            # gepufferten Zeile (#162), und nur der Absender geht mit.
+            target = self._view_path
+            peers = self._peers()
+            images = [c["url"] for c in self._image_chips()]
+            self._worker = threading.Thread(
+                target=self._pump, args=(text,),
+                kwargs={"target": target, "by": {caller}}
+                if target is not None else {}, daemon=True)
+            worker = self._worker
+        # #249: die anderen Ansichten zeichnen die Zeile, ihre Bilder, und
+        # stehen ab jetzt auf Stop -- wie der Absender nach seinem `go()`.
+        # VOR dem Start, sonst kaeme das erste Denken des Zuges vor der Zeile
+        # an; und ausserhalb des Locks, weil `push` sein eigenes nimmt.
+        if target is None and peers:
+            self._push_to({"k": "user", "t": text, "i": images}, peers)
+            self._push_to({"k": "busy"}, peers)
+        worker.start()
+        return True
 
     def stop(self) -> None:
         # #143 E2: STOP REACHES THE SUBTASKS TOO. The flag stops the local
@@ -10755,6 +13138,8 @@ class Api:
         # still delivers is dropped and its card ends "interrupted".
         INTERRUPT.set()
         crow_core.cancel_subtasks()
+        # #282: and the goal engine pauses -- see `_goal_nudge`.
+        self._goal_paused = True
 
     # ------------------------------------------------------------ #142 images
 
@@ -10830,17 +13215,46 @@ class Api:
         self._answer = "no"
         self._asked.clear()
         scope = crow_core.approval_scope(name, arguments)
-        self.push({"k": "ask", "name": name, "args": arguments,
-                   "scope": scope[1] if scope else ""})
+        ask = {"k": "ask", "name": name, "args": arguments,
+               "scope": scope[1] if scope else ""}
+        # #249: kept for a phone that connects while the question is open.
+        self._pending_ask = ask
+        self.push(ask)
         # Woken by answer(); the flag is also set when the window goes away, so
         # a closed window is a refusal rather than a hang.
-        self._asked.wait()
+        try:
+            self._asked.wait()
+        finally:
+            self._pending_ask = None
         return self._answer
 
     def answer(self, what: str) -> None:
-        """The page's click on an open question. Anything unknown is "no"."""
+        """The page's click on an open question. Anything unknown is "no".
+
+        #249: THE FIRST ANSWER WINS. Desktop and phone both show the card;
+        the late click finds the question already answered and changes
+        nothing, and the other view's card closes on `asked`."""
+        if self._asked.is_set():
+            return
         self._answer = what if what in ("yes", "always") else "no"
+        self._pending_ask = None
         self._asked.set()
+        self._push_asked("ask", {"yes": "allowed", "always":
+                                 "allowed, and from now on"}.get(
+                                     self._answer, "declined"))
+
+    def _push_asked(self, what: str, verdict: str = "",
+                    ident=None) -> None:
+        """#249: tell every OTHER view that this card was answered here."""
+        by = _client()
+        others = tuple(c for c in self._clients() if c != by)
+        if not others:
+            return
+        message = {"k": "asked", "what": what, "by": by,
+                   "t": crow_core.remote_answered_note(by, verdict)}
+        if ident is not None:
+            message["id"] = ident
+        self._push_to(message, others)
 
     def mode_menu(self) -> list:
         """#88's levels, for the dropdown. Built from the core, not from a list.
@@ -10867,15 +13281,23 @@ class Api:
         THE GLOW LINE STILL FIRES on yes, through the same `memory` kind the
         ungated path uses. The gate changed who decides, not what a person sees
         afterwards -- a write that happened is still announced.
+
+        #285. AND ONE THAT DID NOT, as a note where the tile was. The empty
+        answer used to redraw an empty -- hidden -- tile and nothing else, so a
+        refused, duplicate or expired write vanished under robin's click.
         """
         if yes:
-            saved = crow_core.approve_pending()
+            saved, failed = crow_core.approve_pending()
             if saved:
                 self.push({"k": "memory", "t": "Memory updated",
                            "n": len(saved)})
+            if failed:
+                self.push({"k": "note",
+                           "t": crow_core.pending_failed_note(failed)})
         else:
             crow_core.decline_pending()
         self.push({"k": "pend", "items": crow_core.pending_view()})
+        self._push_asked("memory", "kept" if yes else "dropped")
 
     def set_mode(self, name: str) -> None:
         """Switch the release level, from the dropdown. Never mid-turn.
@@ -11004,71 +13426,81 @@ class Api:
         # Datei im Regal fuer einen Klick.
         if not self._switching and self._worker and self._worker.is_alive():
             self._view_path = ""
-            self.push({"k": "clear"})
-            self._hello()
-            self._say_where()
-            # Ein leerer Chat hat keinen Kontext, und das muss dastehen: der
-            # Zaehler des laufenden Chats waere hier eine Zahl ueber ein
-            # Gespraech, das es noch nicht gibt.
-            self.push({"k": "cost", "line": "", "share": None,
-                       "tokens": 0, "n_ctx": self._n_ctx})
+            # #249: eine Ansicht -- nur der Aufrufer sieht die leere Flaeche.
+            with self._only(_client()):
+                self.push({"k": "clear"})
+                self._hello()
+                self._say_where()
+                # Ein leerer Chat hat keinen Kontext, und das muss dastehen:
+                # der Zaehler des laufenden Chats waere hier eine Zahl ueber
+                # ein Gespraech, das es noch nicht gibt.
+                self.push({"k": "cost", "line": "", "share": None,
+                           "tokens": 0, "n_ctx": self._n_ctx})
             self._reload_rail()
             return
         self._view_path = None
         ok, kept = self._leave()
         if not ok:
-            self.push({"k": "fail",
-                       "t": "the chat could not be put aside -- nothing changed"})
+            with self._only(_client()):
+                self.push({"k": "fail", "t": "the chat could not be put aside "
+                                             "-- nothing changed"})
             return
-        if kept:
-            self.push({"k": "note", "t": "put aside as %s"
-                                         % os.path.basename(kept)})
-        self._conversation.reset()
-        self._current_path = None
-        self._current_title = None
-        # #143. The fresh chat needs a fresh delegation frame at once: without
-        # this push the page kept the previous chat's `here` values and drew
-        # no card for anything delegated in here -- measured 2026-08-27 as a
-        # fan-out with rail rows and no cards. Same drop `open()` does.
-        self._subs_sig = ""
-        self._push_subs()
-        # #119 OVERTURNS #101's ANSWER FOR THIS ONE EVENT. A new chat used to
-        # start from the template in roots.json; robin, on the built window:
-        # "ein neuer Chat soll immer wurzellos sein".
-        #
-        # WHY THE TEMPLATE STOPPED BEING HARMLESS. `_bind_root` writes `active`,
-        # so moving one chat into a project made that project the ground every
-        # later chat started on -- and with the rail GROUPED by the boundary,
-        # that is a new chat appearing inside a project nobody put it in. The
-        # template was invisible while it only decided what a tool could write.
-        #
-        # THE OTHER TWO CALLERS ARE UNTOUCHED: opening a chat that never chose
-        # still falls back to the template, and so does the launch -- which is
-        # the case #92 added it for. `_adopt_chat_root` is no longer one answer
-        # for three events, and the docstring there says so.
-        self._adopt_chat_root(None, fresh=True)
-        # #121. `Conversation.reset` dropped the old chat's pin; this takes the
-        # new one. A fresh chat is rootless by the decision above, so what it
-        # gets is the profile and a line saying there is no project -- until the
-        # user moves it into one, which re-pins through `_bind_root`.
-        self._pin_memory(None)
-        self._notes = []              # #173: ein neuer Chat hat keine Marken
-        self._timings = []            # #171: und keine Zuege
-        self._context_tokens = 0
-        self._promised_warm = False
-        self.push({"k": "clear"})     # the page no longer guesses; see crow.reset
-        self._hello()
-        # SESSION.JSON GOES WITH IT, and only after the chat has been read back
-        # off disk above. It still holds the conversation just put aside; left
-        # there, the next launch would restore it as the open chat AND list the
-        # archive file next to it -- the same chat twice, from one click.
-        self._forget_live()
-        self._reload_rail()
-        # #162: derselbe Nachtrag wie in `open` -- ein neuer Chat ist keine
-        # Ansicht mehr, also darf die Leiste nicht stehenbleiben.
-        self._say_where()
-        self.push({"k": "cost", "line": "", "share": None, "tokens": 0,
-                   "n_ctx": self._n_ctx})
+        # #249: WER DEN LAUFENDEN CHAT ANSAH UND NICHT MITGEHT, BLEIBT DORT --
+        # als Ansicht des eben weggelegten. Vor dem ersten Push, damit sein
+        # Bildschirm weder `clear` noch den neuen Chat bekommt.
+        pinned = self._pin_others(self._current_path or "", None)
+        with self._only(*self._live_clients()):
+            if kept:
+                self.push({"k": "note", "t": "put aside as %s"
+                                             % os.path.basename(kept)})
+            self._conversation.reset()
+            self._current_path = None
+            self._current_title = None
+            # #143. The fresh chat needs a fresh delegation frame at once: without
+            # this push the page kept the previous chat's `here` values and drew
+            # no card for anything delegated in here -- measured 2026-08-27 as a
+            # fan-out with rail rows and no cards. Same drop `open()` does.
+            self._subs_sig = ""
+            self._push_subs()
+            # #119 OVERTURNS #101's ANSWER FOR THIS ONE EVENT. A new chat used to
+            # start from the template in roots.json; robin, on the built window:
+            # "ein neuer Chat soll immer wurzellos sein".
+            #
+            # WHY THE TEMPLATE STOPPED BEING HARMLESS. `_bind_root` writes `active`,
+            # so moving one chat into a project made that project the ground every
+            # later chat started on -- and with the rail GROUPED by the boundary,
+            # that is a new chat appearing inside a project nobody put it in. The
+            # template was invisible while it only decided what a tool could write.
+            #
+            # THE OTHER TWO CALLERS ARE UNTOUCHED: opening a chat that never chose
+            # still falls back to the template, and so does the launch -- which is
+            # the case #92 added it for. `_adopt_chat_root` is no longer one answer
+            # for three events, and the docstring there says so.
+            self._adopt_chat_root(None, fresh=True)
+            # #121. `Conversation.reset` dropped the old chat's pin; this takes the
+            # new one. A fresh chat is rootless by the decision above, so what it
+            # gets is the profile and a line saying there is no project -- until the
+            # user moves it into one, which re-pins through `_bind_root`.
+            self._pin_memory(None)
+            self._notes = []              # #173: ein neuer Chat hat keine Marken
+            self._timings = []            # #171: und keine Zuege
+            self._context_tokens = 0
+            self._promised_warm = False
+            self.__dict__["_subs_sigs"] = {}
+            self.push({"k": "clear"})     # the page no longer guesses; see crow.reset
+            self._hello()
+            # SESSION.JSON GOES WITH IT, and only after the chat has been read back
+            # off disk above. It still holds the conversation just put aside; left
+            # there, the next launch would restore it as the open chat AND list the
+            # archive file next to it -- the same chat twice, from one click.
+            self._forget_live()
+            self._reload_rail()
+            # #162: derselbe Nachtrag wie in `open` -- ein neuer Chat ist keine
+            # Ansicht mehr, also darf die Leiste nicht stehenbleiben.
+            self._say_where()
+            self.push({"k": "cost", "line": "", "share": None, "tokens": 0,
+                       "n_ctx": self._n_ctx})
+        self._say_where(pinned)
 
     def _archive(self) -> str | None:
         """Write the open conversation to its own file. Its path, or None.
@@ -11308,10 +13740,55 @@ class Api:
         # Blick wieder ein Wechsel -- aber `_current_path` zeigt noch auf den
         # Chat, in dem gearbeitet wurde, und ohne diese Zeile vergliche die
         # naechste ihn mit sich selbst und taete gar nichts.
+        was = self._view_path
         self._view_path = None
         if self._current_path and os.path.abspath(path) == os.path.abspath(
                 self._current_path):
+            # #249: WER WOANDERS STAND, BEKOMMT DEN LAUFENDEN CHAT GEZEICHNET.
+            # Ohne das stand die Ansicht auf "live", der Bildschirm aber noch
+            # auf dem alten Chat -- fuer ein Telefon, das ein Wechsel am
+            # Fenster dort festgehalten hat, der Normalfall.
+            if was is not None:
+                self._view_path = was
+                self.view_live()
             return
+        # #249: bis zum Wechsel gehoert jede Meldung dem Aufrufer allein.
+        with self._only(_client()):
+            ok = self._open_read(path)
+        if ok is None:
+            return
+        restored = ok
+        pinned = self._pin_others(self._current_path or "", path)
+        with self._only(*self._live_clients()):
+            self._open_switch(path, restored)
+        self._say_where(pinned)
+
+    def _pin_others(self, left: str, new: "str | None") -> list:
+        """#249: before the live chat changes under everybody, every OTHER
+        client that was looking at it stays where it was -- as a view of the
+        chat just put aside (`left`) -- and a client that was already looking
+        at `new` is simply live in it now. The caller and `_movers` (who typed
+        the queued line) follow the switch. Returns who changed, for the bar.
+
+        robin, 2026-09-23: switching the chat on the phone never switches the
+        desktop, and the other way round."""
+        keep = set(self._movers) | {_client()}
+        changed = []
+        for client in self._clients():
+            if client in keep:
+                continue
+            view = self._views.get(client)
+            if view is None:
+                self._set_view(client, left)
+                changed.append(client)
+            elif new and self._same(view, new):
+                self._set_view(client, None)
+                changed.append(client)
+        return changed
+
+    def _open_read(self, path: str) -> "tuple | None":
+        """`open`'s first half: read the other chat, write this one away.
+        The restored tuple, or None when nothing may change."""
         # THE OTHER CHAT IS READ FIRST, and only then is this one let go of. The
         # order used to be the other way round, so an archive that turned out to
         # be unreadable had already cost the open chat a write.
@@ -11339,13 +13816,17 @@ class Api:
             # named and with nothing in it is a leftover and stays refused.
             if not self._stored_title(path):
                 self.push({"k": "fail", "t": "empty: %s" % os.path.basename(path)})
-                return
+                return None
             restored = ([], 0, False)
         ok, _ = self._leave()
         if not ok:
             self.push({"k": "fail", "t": "the open chat could not be "
                                          "put aside -- nothing changed"})
-            return
+            return None
+        return restored
+
+    def _open_switch(self, path: str, restored) -> None:
+        """`open`'s second half: the switch, drawn for the live clients."""
         messages, tokens, kv = restored
         self._conversation = Conversation(self._args.system)
         self._conversation.restore(messages)
@@ -11380,6 +13861,7 @@ class Api:
         # "Ich kann die Subtasks nicht mehr anklicken." The signature is
         # dropped so the push fires even though nothing changed.
         self._subs_sig = ""
+        self.__dict__["_subs_sigs"] = {}
         self._push_subs()
         # #162. AUCH DER ECHTE WECHSEL RAEUMT DIE MARKE WEG UND SAGT, WO MAN
         # STEHT. Beides fehlte, und beides faellt genau dann auf, wenn der Zug
@@ -11411,7 +13893,15 @@ class Api:
         einloest. Ein dritter Leser von `session_memory` waere eine dritte Stelle,
         die entscheidet, was der Kopf dieses Chats ist; der Kopienzaehler in der
         Suite haelt genau das fest, und er hat recht behalten.
+
+        #249: DIE ANSICHT DES AUFRUFERS, und nur er bekommt das Neuzeichnen.
+        Ein Telefon, das einen Chat oeffnet, bewegt das Fenster nicht.
         """
+        with self._only(_client()):
+            self._view_other_scoped(path)
+
+    def _view_other_scoped(self, path: str) -> None:
+        """`_view_other`'s body, inside the caller's `_only` scope."""
         try:
             restored = load_session(self._endpoint()["base_url"], None,
                                     path, model=self._model, with_kv=False)
@@ -11442,7 +13932,7 @@ class Api:
         self._push_cost_for(path, tokens)
         self._reload_rail()
 
-    def _hand_over(self, target: str) -> None:
+    def _hand_over(self, target: str, by=None) -> None:
         """Den Chat wechseln, weil die naechste Zeile einen anderen meint.
 
         LAEUFT IM WORKER, ZWISCHEN ZWEI ZUEGEN. `_switching` haelt die beiden
@@ -11460,6 +13950,21 @@ class Api:
         woanders, bekommt er seinen Chat zurueck: der Wechsel passiert unter ihm
         hindurch, und was er sieht, hat er selbst gewaehlt.
         """
+        # #249: WER DIE ZEILE GETIPPT HAT, GEHT MIT (`by`, bei #264s
+        # Zusammenlegen mehrere); alle anderen bleiben, wo sie sind. Der
+        # Worker selbst ist niemandes Client, also handelt er hier im Namen
+        # des ersten Tippers -- das Fenster, wenn es dabei war, wie bisher.
+        movers = frozenset(by) if by else frozenset({_client()})
+        lead = DESKTOP if DESKTOP in movers else sorted(movers)[0]
+        with as_client(lead):
+            self._movers = movers
+            try:
+                self._hand_over_as(target)
+            finally:
+                self._movers = frozenset()
+
+    def _hand_over_as(self, target: str) -> None:
+        """`_hand_over`'s body, run as the client who typed the line."""
         watching = self._view_path
         self._switching = True
         try:
@@ -11495,12 +14000,18 @@ class Api:
             return
         self._view_path = None
         self._done_paths.discard(self._current_path or "")
-        self.push({"k": "clear"})
-        self._draw_live()
+        # #249: das Neuzeichnen gehoert dem, der zurueckkehrt.
+        with self._only(_client()):
+            self.push({"k": "clear"})
+            self._draw_live()
 
     def _draw_live(self) -> None:
         """The live chat, drawn from memory: `view_live` after its clear, and
-        #209's reloaded page, which starts empty."""
+        #209's reloaded page, which starts empty. #249: for the caller only."""
+        with self._only(_client()):
+            self._draw_live_scoped()
+
+    def _draw_live_scoped(self) -> None:
         self._hello()
         # #173: AUS DEM BAND IM SPEICHER, nicht von Platte -- aus demselben
         # Grund, aus dem die Nachrichten aus `payload()` kommen: die Datei ist
@@ -11519,7 +14030,8 @@ class Api:
     # reverse, the first time either spelling changed.
     ARCHIVE_DIR = crow_core.ARCHIVE_DIR
 
-    def _replay(self, messages: list, notes: "list | None" = None) -> None:
+    def _replay(self, messages: list, notes: "list | None" = None,
+                guard: bool = True) -> None:
         """Draw a restored conversation the way a live one is drawn.
 
         THROUGH THE SAME SINK, and that is the whole fix. The first version
@@ -11552,25 +14064,50 @@ class Api:
 
         # DIE SPERRE UM DEN GANZEN DURCHLAUF: `push` schreibt jede Marke mit,
         # und ohne sie verdoppelte sich das Band bei jedem Zurueckwechseln.
-        self._replaying = True
+        # #249: `guard=False` fuer den Schnappschuss -- der sammelt nur, und
+        # die Sperre ist eine Instanz-Flagge, die sonst eine Notiz des
+        # laufenden Zuges verschluckte.
+        if guard:
+            self._replaying = True
         try:
             _replay_rows(self, messages, upto)
             # Was nach der letzten Nachricht passiert ist, steht auch nach ihr.
             upto(len(messages))
         finally:
-            self._replaying = False
+            if guard:
+                self._replaying = False
 
     def _archived(self) -> list:
-        """What the user put away, out of .crow/archiv/. Same shape as the rest."""
-        folder = os.path.join(os.path.dirname(SESSION_FILE) or ".", self.ARCHIVE_DIR)
+        """What the user put away, out of .crow/archiv/, and the rollover
+        archives. Same shape as the rest.
+
+        #261: THE ROLLOVERS STAY WHERE THEY ARE. The rollover
+        note names their path and the model reads it with read_file, so they
+        are listed in place (session folder), never moved into archiv/. The
+        one open in the window stands in the rail instead (`_archives`).
+        """
+        session = os.path.dirname(SESSION_FILE) or "."
+        folder = os.path.join(session, self.ARCHIVE_DIR)
         out = []
         try:
             names = sorted(os.listdir(folder), reverse=True)
         except OSError:
-            return out
+            names = []
         for name in names:
             path = os.path.join(folder, name)
             if not name.endswith(".json") or not os.path.isfile(path):
+                continue
+            out.append(self._entry_of(path, name))
+        try:
+            names = sorted(os.listdir(session), reverse=True)
+        except OSError:
+            names = []
+        for name in names:
+            path = os.path.join(session, name)
+            if (not name.startswith(self.ROLLOVER_PREFIX)
+                    or not name.endswith(".json") or not os.path.isfile(path)
+                    or self._same(path, self._current_path)
+                    or self._same(path, self._viewed_path())):
                 continue
             out.append(self._entry_of(path, name))
         return out
@@ -11592,9 +14129,18 @@ class Api:
         had drawn it last. They all come through here now, so the rail cannot
         contradict itself.
         """
+        # #249: JE CLIENT EINE RAIL, jede mit ihrer eigenen "angesehen"-Marke;
+        # der Inhalt ist fuer alle derselbe.
+        for client in self._clients():
+            with as_client(client):
+                message = self._rail_message()
+            self._push_to(message, (client,))
+
+    def _rail_message(self) -> dict:
+        """The rail as the CALLING client sees it (its viewed chat marked)."""
         spare = 1 if self._conversation.has_system else 0
         turns = len(self._conversation) - spare
-        self.push({"k": "rail",
+        return ({"k": "rail",
                    "title": self._live_title(),
                    "meta": ("no turn yet" if turns <= 0 else
                             "%d messages%s" % (turns, " · cache warm"
@@ -12768,7 +15314,21 @@ class Api:
         write_settings(doc)
         if not open_:
             self.pane_hide()
+        # #279: a fold mid-turn counts from the next render on, not the next turn.
+        crow_core.render_panel_set(self._panel_on_card(doc))
         return bool(open_)
+
+    def _panel_on_card(self, doc: "dict | None" = None) -> bool:
+        """#279 A. Is the browser panel a GPU client next to render_page?
+        Open (settings.json `browser_open`), or its view still holds a page."""
+        if doc is None:
+            doc = read_settings()
+        if doc.get("browser_open") is True:
+            return True
+        pane = getattr(self, "_inwin", None)
+        if pane is not None:
+            return bool(pane.holds_page())
+        return bool(getattr(self, "_browser_shown", False))
 
     # -- #175: die Scheibe -----------------------------------------------------
     #
@@ -12872,6 +15432,7 @@ class Api:
             if not pane_url_ok(url):
                 return "error: the browser panel opens http, https and file only"
             self._inwin.go(url)
+            crow_core.render_panel_set(True)          # #279
             return url
         try:
             win = self._pane()
@@ -13226,6 +15787,469 @@ class Api:
         """
         self.push({"k": "mic", "state": "off", "blocked": crow_voice.available() or ""})
 
+    # ------------------------------------------------------------ #249 remote
+    #
+    # DER SPIEGEL FUERS TELEFON. Der Server ist `crow_remote`; hier steht nur,
+    # was das Fenster an ihm haelt: Start und Stopp, die Kopplungsfrage, der
+    # QR-Dialog, der Knopf in der Titelleiste und die eine Tuer, durch die ein
+    # Telefon diese Api ruft.
+
+    def remote_page(self) -> str:
+        """The phone's page: this window's PAGE with `__REMOTE__` set."""
+        return stamped_page(remote=True)
+
+    def _remote_call(self, name: str, args: list) -> object:
+        """`/api/<name>` from a phone. `crow_remote` has set the caller's id
+        and checked the allowlist; this checks it again, because a name
+        outside it reaching `getattr` would be every public method at once."""
+        if name not in REMOTE_ALLOWED:
+            raise KeyError(name)
+        return getattr(self, name)(*list(args or []))
+
+    def _remote_host(self) -> str:
+        """The LAN address to bind: the one chosen in the dialog while it is
+        still there, else the first one `crow_platform` ranks. Never 0.0.0.0."""
+        found = [ip for _iface, ip in lan_addresses()]
+        want = remote_host_setting()
+        if want and want in found:
+            return want
+        return found[0] if found else ""
+
+    def _remote_running(self) -> bool:
+        remote = self._remote
+        try:
+            return bool(remote is not None and remote.running())
+        except Exception:              # noqa: BLE001 -- a dead server is off
+            return False
+
+    def remote_start(self, persist: bool = True) -> str:
+        """Start the mirror on the LAN address and the fixed port. The
+        sentence for the person; `remote_enabled` is set only once it runs."""
+        if self._remote_running():
+            return crow_core.remote_on_line(self._remote.url)
+        module = remote_module()
+        factory = REMOTE_FACTORY or getattr(module, "Remote", None)
+        if factory is None:
+            return crow_core.REMOTE_MISSING
+        host = self._remote_host()
+        if not host:
+            return crow_core.REMOTE_NO_LAN
+        port = remote_port_setting()
+        store = (module.DeviceStore(crow_core.remote_devices_load,
+                                    crow_core.remote_devices_save)
+                 if module is not None else None)
+        # #249 STAGE 5: the loopback listener for `tailscale serve` only while
+        # the tailnet is up and not funneled to the internet (TAILNET_BINDABLE).
+        self._remote_ts = tailscale_probe(port)
+        remote = factory(host=host, port=port, page=self.remote_page,
+                         call=self._remote_call, allowed=REMOTE_ALLOWED,
+                         snapshot=self.state_snapshot,
+                         confirm=self._remote_confirm,
+                         confirm_ttl=crow_core.REMOTE_CONFIRM_S, store=store,
+                         upload_dir=os.path.join(PASTE_DIR, "remote"),
+                         log=lambda line: crow_core.log_note(line, "remote"),
+                         icon=remote_icon,
+                         tailnet=self._remote_tailnet(self._remote_ts),
+                         audio=self._remote_audio)
+        try:
+            remote.start()
+        except (OSError, ValueError) as exc:
+            crow_core.log_note("remote: could not listen on %s:%d: %s"
+                               % (host, port, exc), "remote")
+            return crow_core.remote_start_failed(host, port, exc)
+        self._remote = remote
+        if persist:
+            doc = read_settings()
+            doc["remote_enabled"] = True
+            write_settings(doc)
+        crow_core.log_note("remote: listening on %s" % remote.url, "remote")
+        self._remote_state_push(force=True)
+        threading.Thread(target=self._remote_watch, args=(remote,),
+                         daemon=True).start()
+        return crow_core.remote_on_line(remote.url)
+
+    def remote_stop(self, persist: bool = True) -> str:
+        """`/remote off`: the server stops, every stream ends, the devices stay
+        paired -- they reconnect without scanning once it is on again."""
+        remote, self._remote = self._remote, None
+        if remote is not None:
+            try:
+                remote.stop()
+            except Exception:          # noqa: BLE001 -- off is off
+                pass
+            crow_core.log_note("remote: stopped", "remote")
+        if persist:
+            doc = read_settings()
+            doc["remote_enabled"] = False
+            write_settings(doc)
+        self._remote_state_push(force=True)
+        self._push_to({"k": "remotedlg", "open": False}, (DESKTOP,))
+        return crow_core.REMOTE_OFF_LINE
+
+    def remote_open(self) -> str:
+        """The phone icon and a bare `/remote`: start the mirror if it is off,
+        then show the QR dialog with a fresh single-use pairing code.
+
+        #249 STAGE 5: Tailscale is asked again on every open, and a mirror
+        whose loopback listener no longer matches it (the tailnet came up, or
+        went to Funnel, after the start) is restarted once -- so the one-time
+        `tailscale serve` command works without a /remote off and on."""
+        said = self.remote_start()
+        if not self._remote_running():
+            return said
+        ts = tailscale_probe(remote_port_setting())
+        if self._remote_tailnet(ts) != getattr(self._remote, "tailnet", ""):
+            self.remote_stop(persist=False)
+            said = self.remote_start()
+            if not self._remote_running():
+                return said
+        self._remote_ts = ts
+        self._remote_dialog(fresh=True)
+        return said
+
+    @staticmethod
+    def _remote_tailnet(ts: dict) -> str:
+        """The ts.net name to add the loopback listener for, or ""."""
+        module = remote_module()
+        bindable = getattr(module, "TAILNET_BINDABLE", frozenset())
+        return ts.get("name", "") if ts.get("state") in bindable else ""
+
+    def remote_forget(self, name: str) -> str:
+        """`/remote forget <name>` and the dialog's button: revoke one device;
+        its stream ends and its cookie is refused from now on."""
+        name = str(name or "").strip()
+        if not name:
+            return crow_core.REMOTE_USAGE
+        if self._remote is not None:
+            done = bool(self._remote.forget(name))
+        else:
+            done = self._forget_stored(name)
+        if done:
+            self._remote_dialog(fresh=False)
+            self._remote_state_push(force=True)
+        return crow_core.remote_forget_text(name, done)
+
+    @staticmethod
+    def _forget_stored(name: str) -> bool:
+        """Revoke a device while the server is off: straight out of the store,
+        matched the way `Remote.forget` matches (id, exact name, prefix)."""
+        want = name.casefold()
+        records = crow_core.remote_devices_load()
+        hit = ([r for r in records if str(r.get("id", "")).casefold() == want]
+               or [r for r in records
+                   if str(r.get("name", "")).casefold() == want]
+               or [r for r in records
+                   if str(r.get("name", "")).casefold().startswith(want)])
+        if len(hit) != 1:
+            return False
+        return crow_core.remote_devices_save(
+            [r for r in records if r is not hit[0]])
+
+    def remote_use_ip(self, ip: str) -> str:
+        """The dialog's address switch: remember the choice and listen there.
+        A phone paired on the other address scans again -- the cookie belongs
+        to the origin, and the origin is the address."""
+        if ip not in [found for _iface, found in lan_addresses()]:
+            return crow_core.REMOTE_NO_LAN
+        doc = read_settings()
+        doc["remote_host"] = ip
+        doc["remote_https"] = False
+        write_settings(doc)
+        if self._remote is not None:
+            self.remote_stop(persist=False)
+        said = self.remote_start()
+        if self._remote_running():
+            self._remote_dialog(fresh=True)
+        return said
+
+    def remote_use_https(self, on) -> bool:
+        """#249 stage 5, the dialog's "HTTPS · Tailscale" choice: show that
+        address and its QR (or, until it is ready, the step that is missing).
+        Nothing restarts -- the LAN address keeps listening, the loopback
+        listener is there whenever the tailnet is. Desktop-only."""
+        if _client() != DESKTOP:
+            return False
+        doc = read_settings()
+        doc["remote_https"] = bool(on)
+        write_settings(doc)
+        self._remote_ts = tailscale_probe(remote_port_setting())
+        self._remote_dialog(fresh=False)
+        return True
+
+    def _remote_audio(self, path: str, device: str, seq: "int | None" = None,
+                      partial: bool = False) -> None:
+        """#290: a phone's recording is on disk. Transcribe it on a thread and
+        push the words to THAT phone only, `{"k":"heard"}` -- into its input
+        field, never sent, the desktop's rule for dictation. The clip is
+        deleted either way; nothing of it is kept.
+
+        COALESCED PER PHONE, because a partial arrives every 1.5 s and one
+        takes ~1.3-1.5 s on the CPU (measured 2026-09-24, see REMOTE_JS
+        section 6): never two transcriptions for one phone at once, only the
+        NEWEST waiting partial is kept (an older one would only be overtaken),
+        a final goes before any partial, and a partial whose seq is not above
+        the last final's is dropped -- whether it arrives late or is running
+        when the final comes in."""
+        drop = []
+        with self._voice_lock:
+            lane = self._voice_lanes.setdefault(
+                device, {"busy": False, "partial": None, "finals": [], "done": 0})
+            waiting = lane["partial"]
+            if not partial:
+                if seq is not None:
+                    lane["done"] = max(lane["done"], seq)
+                if waiting:
+                    drop.append(waiting[0])
+                    lane["partial"] = None
+                lane["finals"].append((path, seq))
+            elif seq is None or seq <= lane["done"] or (waiting and waiting[1] >= seq):
+                drop.append(path)
+            else:
+                if waiting:
+                    drop.append(waiting[0])
+                lane["partial"] = (path, seq)
+            start = not lane["busy"] and bool(lane["partial"] or lane["finals"])
+            if start:
+                lane["busy"] = True
+        for clip in drop:
+            try:
+                os.remove(clip)
+            except OSError:
+                pass
+        if start:
+            threading.Thread(target=self._voice_lane, args=(device,),
+                             name="crow-remote-voice", daemon=True).start()
+
+    def _voice_lane(self, device: str) -> None:
+        """The one worker of a phone's lane: finals first, then the newest
+        partial, until nothing waits."""
+        while True:
+            with self._voice_lock:
+                lane = self._voice_lanes[device]
+                if lane["finals"]:
+                    (path, seq), partial = lane["finals"].pop(0), False
+                elif lane["partial"]:
+                    (path, seq), partial = lane["partial"], True
+                    lane["partial"] = None
+                else:
+                    lane["busy"] = False
+                    return
+            try:
+                self._remote_heard(path, device, seq, partial)
+            except Exception:              # noqa: BLE001 -- the lane must go on
+                pass
+
+    def _voice_stale(self, device: str, seq: "int | None") -> bool:
+        """A partial the final has overtaken."""
+        with self._voice_lock:
+            lane = self._voice_lanes.get(device)
+            return seq is None or bool(lane and seq <= lane["done"])
+
+    def _remote_heard(self, path: str, device: str, seq: "int | None" = None,
+                      partial: bool = False) -> None:
+        tagged = {"seq": seq} if seq is not None else {}
+        stats: dict = {}
+        started = time.monotonic()
+        try:
+            why = crow_voice.file_available()
+            if why:
+                said = {"k": "heard", "note": why}
+            else:
+                # THE FIRST ONE LOADS THE MODEL -- or downloads it, ~52 s on
+                # robin's first try -- and the phone says so meanwhile.
+                if not crow_voice.model_loaded():
+                    self._push_to({"k": "heard", "loading": True}, (device,))
+                text = crow_voice.transcribe_file(path, stats)
+                said = ({"k": "heard", "text": text} if text
+                        else {"k": "heard", "note": "nothing was said"})
+        except Exception as exc:       # noqa: BLE001 -- said, not raised
+            said = {"k": "heard", "note": "dictation failed: %s" % exc}
+        finally:
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = 0
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        if partial:
+            # A PARTIAL IS WORDS OR NOTHING: its silence and its failure are
+            # the final's to say. Nor is it pushed once the final is in.
+            if said.get("text") and not self._voice_stale(device, seq):
+                self._push_to(dict({"k": "heard", "partial": True, "text": said["text"]},
+                                   **tagged), (device,))
+            return
+        # ONE LINE PER DICTATION in crow.log: what came in, how long it took,
+        # and why it failed if it did. The words themselves are not logged.
+        crow_core.log_note("phone dictation: %d bytes, %.1f s, transcribe %d ms%s"
+                           % (size, stats.get("seconds", 0.0),
+                              (time.monotonic() - started) * 1000,
+                              ", " + said["note"] if said.get("note") else ""),
+                           "voice")
+        self._push_to(dict(said, **tagged), (device,))
+
+    def remote_allow(self, ident, yes) -> bool:
+        """The desktop's Allow / Deny on a new device. Desktop-only: a phone
+        may never answer its own -- or another phone's -- pairing."""
+        if _client() != DESKTOP:
+            return False
+        try:
+            pending = self._remote_asks.get(int(ident))
+        except (TypeError, ValueError):
+            return False
+        if pending is None:
+            return False
+        pending[1] = bool(yes)
+        pending[0].set()
+        return True
+
+    def _remote_confirm(self, name: str) -> "bool | None":
+        """Called by the server on a thread of its own after /pair: put the
+        card on the desktop and WAIT, like `_ask_page`. True allow, False
+        deny, None nobody answered in time -- which pairs nothing either: a
+        photographed QR must not pair because nobody was there."""
+        self._remote_ask_n += 1
+        ident = self._remote_ask_n
+        pending = [threading.Event(), False]
+        self._remote_asks[ident] = pending
+        self._push_to({"k": "remoteask", "id": ident, "name": name,
+                       "t": crow_core.remote_ask_line(name),
+                       "ttl": crow_core.REMOTE_CONFIRM_S}, (DESKTOP,))
+        answered = pending[0].wait(crow_core.REMOTE_CONFIRM_S)
+        self._remote_asks.pop(ident, None)
+        allowed = bool(answered and pending[1])
+        self._push_to({"k": "remoteasked", "id": ident,
+                       "t": crow_core.remote_asked_line(name, allowed,
+                                                        answered)},
+                      (DESKTOP,))
+        if allowed:
+            self._remote_dialog(fresh=False)
+        return allowed if answered else None
+
+    def _remote_devices(self) -> list:
+        """The paired devices -- live from the server, else from the store."""
+        if self._remote is not None:
+            try:
+                return list(self._remote.devices())
+            except Exception:          # noqa: BLE001 -- fall back to disk
+                pass
+        return [{k: v for k, v in d.items() if k != "token_sha256"}
+                for d in crow_core.remote_devices_load()]
+
+    def _remote_firewall(self) -> str:
+        """The one line that opens the port, if a Linux firewall is up."""
+        remote = self._remote
+        host = getattr(remote, "host", "") or self._remote_host()
+        return crow_core.remote_firewall_line(remote_port_setting(), host,
+                                              crow_core.firewall_active())
+
+    def _remote_status(self) -> str:
+        """`/remote status`."""
+        on = self._remote_running()
+        return crow_core.remote_status_text(
+            on=on, url=self._remote.url if on else "",
+            devices=self._remote_devices(),
+            firewall=self._remote_firewall())
+
+    def _remote_dialog(self, fresh: bool) -> None:
+        """The QR dialog, to the desktop only. `fresh` mints a new single-use
+        pairing code; a refresh (a device came, went, was forgotten) keeps
+        the one on screen."""
+        remote = self._remote
+        if remote is None:
+            self._push_to({"k": "remotedlg", "open": False}, (DESKTOP,))
+            return
+        if fresh or not getattr(self, "_remote_pair", ""):
+            self._remote_pair = remote.new_pairing()
+        module = remote_module()
+        qr = getattr(module, "qr_svg", None)
+        try:
+            svg = qr(self._remote_pair) if qr else ""
+        except Exception:              # noqa: BLE001 -- the URL is still there
+            svg = ""
+        devices = [{"id": d.get("id", ""), "name": d.get("name", ""),
+                    "online": bool(d.get("online"))}
+                   for d in self._remote_devices()]
+        url, hint = remote.url, self._remote_firewall()
+        # #249 STAGE 5: the HTTPS address as a network choice. Its QR carries
+        # the same single-use code on the ts.net origin, and only once
+        # `tailscale serve` points here; until then the choice shows the step
+        # that is missing instead of a code that would not open.
+        ts = getattr(self, "_remote_ts", None) or tailscale_probe(remote.port)
+        https = {"state": ts.get("state", "missing"), "name": ts.get("name", ""),
+                 "line": crow_core.remote_tailnet_line(
+                     ts.get("state", "missing"), ts.get("name", ""),
+                     ts.get("command", "")),
+                 "cmd": (ts.get("command", "")
+                         if ts.get("state") == "serve-missing" else ""),
+                 "on": remote_https_setting()}
+        if https["on"]:
+            live = getattr(remote, "tailnet_url", "")
+            ready = https["state"] == "ready" and bool(live)
+            url = live or (("https://%s/" % https["name"]) if https["name"] else "")
+            hint = ""
+            try:
+                svg = (qr(live + "#t=" + self._remote_pair.split("#t=", 1)[1])
+                       if ready and qr else "")
+            except Exception:          # noqa: BLE001 -- the URL is still there
+                svg = ""
+        self._push_to({"k": "remotedlg", "open": True, "fresh": bool(fresh),
+                       "url": url, "svg": svg,
+                       "ip": getattr(remote, "host", ""),
+                       "ips": [[iface, ip] for iface, ip in lan_addresses()],
+                       "https": https,
+                       "devices": devices, "hint": hint,
+                       "ttl": getattr(module, "PAIR_TTL", 120.0)},
+                      (DESKTOP,))
+
+    def _remote_state_push(self, force: bool = False) -> None:
+        """The title-bar icon: on or off, and how many phones are connected.
+        Desktop-only, and only on change unless `force`."""
+        on = self._remote_running()
+        online = (sum(1 for d in self._remote_devices() if d.get("online"))
+                  if on else 0)
+        state = (on, online)
+        if not force and state == self._remote_seen:
+            return
+        self._remote_seen = state
+        self._push_to({"k": "remote", "on": on, "online": online,
+                       "t": crow_core.remote_icon_title(on, online)},
+                      (DESKTOP,))
+
+    def _remote_watch(self, remote) -> None:
+        """While this server runs: the icon's dot follows who is connected,
+        and an open dialog's device list with it. A poll, because a stream
+        that a locked phone drops never says goodbye."""
+        seen = None
+        while self._remote is remote:
+            try:
+                devices = [(d.get("id"), bool(d.get("online")))
+                           for d in remote.devices()]
+            except Exception:          # noqa: BLE001 -- stopped under us
+                return
+            if devices != seen:
+                if seen is not None:
+                    self._remote_dialog(fresh=False)
+                seen = devices
+            self._remote_state_push()
+            time.sleep(2.0)
+
+    def _remote_command(self, rest: list) -> str:
+        """`/remote`, the window's answer. Bare = the icon (start, dialog)."""
+        sub = rest[0].lower() if rest else ""
+        if sub in ("", "on"):
+            return self.remote_open()
+        if sub == "off":
+            return self.remote_stop()
+        if sub == "status":
+            return self._remote_status()
+        if sub == "devices":
+            return crow_core.remote_devices_text(self._remote_devices())
+        if sub == "forget":
+            return self.remote_forget(" ".join(rest[1:]))
+        return crow_core.REMOTE_USAGE
+
     def close(self) -> None:
         """Both copies of the open chat, then the window.
 
@@ -13238,7 +16262,15 @@ class Api:
         the server's KV slot on every single turn -- the one thing the core
         says to do once, on the way out.
         """
+        # #249: A PHONE ASKING TO CLOSE CLOSES ITS TAB, never this window --
+        # the page does that itself; this is the door for anything else.
+        if _client() != DESKTOP:
+            return
         INTERRUPT.set()
+        # #249: the mirror goes with the window; `remote_enabled` stays, so it
+        # comes back with the next one.
+        if self._remote is not None:
+            self.remote_stop(persist=False)
         try:
             if self._current_path:
                 self._archive()            # the rail's copy, else a turn behind
@@ -13310,7 +16342,9 @@ class Api:
             # all in a fresh chat (robin, 2026-08-27, screenshot 2). One side
             # computing both in the same breath cannot drift, and a wrong
             # frame heals on the next tick.
-            row["here"] = parent == (self._current_path or "")
+            # #249: "DER OFFENE CHAT" IST DER DES AUFRUFERS -- das Telefon kann
+            # einen anderen offen haben als das Fenster.
+            row["here"] = parent == (self._viewed_path() or "")
             items.append(row)
         return items
 
@@ -13318,14 +16352,28 @@ class Api:
         """One `subs` event per CHANGE, never per tick. The signature carries
         the clock's whole second, so a running subtask updates about once a
         second and a settled registry is silent."""
-        items = self._subs_items()
-        # `here` is in the signature: a chat switch flips it without touching
-        # state or clock, and the page must hear about exactly that.
-        sig = json.dumps([[r["i"], r["st"], int(r["s"]), r["tok"],
-                           bool(r["path"]), r["here"]] for r in items])
-        if sig != self._subs_sig:
-            self._subs_sig = sig
-            self.push({"k": "subs", "items": items})
+        # #249: JE CLIENT, weil `here` an seiner Ansicht haengt; die Signatur
+        # des Fensters bleibt `_subs_sig`, die der Geraete stehen daneben.
+        for client in self._clients():
+            with as_client(client):
+                items = self._subs_items()
+            # `here` is in the signature: a chat switch flips it without
+            # touching state or clock, and the page must hear about exactly
+            # that. #281: `closed` too -- the card's close changes nothing else.
+            sig = json.dumps([[r["i"], r["st"], int(r["s"]), r["tok"],
+                               bool(r["path"]), r["here"],
+                               r.get("closed", False)]
+                              for r in items])
+            if client == DESKTOP:
+                if sig == self._subs_sig:
+                    continue
+                self._subs_sig = sig
+            else:
+                sigs = self.__dict__.setdefault("_subs_sigs", {})
+                if sig == sigs.get(client):
+                    continue
+                sigs[client] = sig
+            self._push_to({"k": "subs", "items": items}, (client,))
 
     def _subs_ticker(self, stopped: "threading.Event") -> None:
         """Beside the turn, because the turn thread is the one that blocks in
@@ -13363,12 +16411,26 @@ class Api:
         # #154: der Digest-Cap, gleiche Tuer -- fehlt der Schluessel, gilt der
         # Kern-Default; 0 schaltet ab. Der Setter frisst Unsinn selbst.
         crow_core.rollover_digest_set(doc.get("rollover_digest_tokens"))
+        # #274: the esbuild the user named for build_bundle, same door -- a
+        # key that is gone again clears it.
+        crow_core.bundler_set(doc.get("bundler"))
+        # #267: the judge's bar, same door; nonsense is the default.
+        crow_core.judge_threshold_set(doc.get("judge_threshold"))
+        # #263: tool-result clearing, same door. Missing key: the endpoint
+        # default (on at home, off remote); 0 switches it off.
+        crow_core.context_clear_set(doc.get("context_clear_at"))
+        # #269: the file tools' check table, same door.
+        crow_core.syntax_checks_set(doc.get("syntax_checks"))
+        # #279: the browser panel as the card's second client, same door --
+        # render_page then needs 1,536 MiB free instead of 512.
+        crow_core.render_panel_set(self._panel_on_card(doc))
         try:
             return max(0, int(doc.get("turn_token_budget") or 0))
         except (TypeError, ValueError):
             return 0
 
-    def _pump(self, text: str) -> None:
+    def _pump(self, text: str, target: "str | None" = None,
+              by: "set | None" = None) -> None:
         """#138c. Ein Zug nach dem anderen, auf einem Thread.
 
         DIE SCHLEIFE IST DER GANZE MECHANISMUS. `_run` endet erst nach dem
@@ -13386,8 +16448,23 @@ class Api:
         einzige mehr, und nur ein Neustart loeste das.
         """
         stop = False
+        # #279 D: the panel's page renders without the GPU while the turns run
+        # on the local model server -- off again on both ways out below.
+        self._pane_throttle(True)
         try:
+            # #249: eine Zeile aus einer fremden Ansicht -- erst dorthin, dann
+            # laufen. Das Neuzeichnen hat die getippte Zeile geloescht, also
+            # kommt sie hier fuer alle, die jetzt dort stehen, zurueck.
+            if target is not None:
+                self._hand_over(target, by)
+                self.push({"k": "user", "t": text})
+                self.push({"k": "busy"})
             while True:
+                # #289: THE BAR BEFORE THE TURN TOO. goal.json can change
+                # while nothing runs (edited by hand, or by another window on
+                # the same folder); the turn after would show the old plan
+                # until it ended.
+                self.push_goal()
                 self._run(text)
                 # #162. FERTIG, UND NIEMAND SAH HIN. Die Ausgabe dieses Zuges
                 # wurde verworfen, weil sie in einen Chat gehoerte, der nicht auf
@@ -13395,7 +16472,9 @@ class Api:
                 # er sich melden kann. Ein Sprung in den Chat waere die andere
                 # Moeglichkeit und die falsche: sie nimmt dem Nutzer den Chat
                 # weg, in dem er gerade schreibt.
-                if self._view_path is not None:
+                # #249: "NIEMAND" HEISST JETZT: kein Client sah den laufenden
+                # Chat -- ein Telefon, das zusah, hat ihn gelesen.
+                if not self._live_clients():
                     self._mark_done(self._current_path)
                 # #165. DAS PANEL NACH JEDEM ZUG, denn der Zug hat vielleicht
                 # gerade einen Schritt abgehakt.
@@ -13403,6 +16482,12 @@ class Api:
                 with self._queue_lock:
                     text, self._queued = self._queued, None
                     target, self._queued_to = self._queued_to, None
+                    by, self._queued_by = set(self._queued_by), set()
+                    if text is not None:
+                        # #264 / #165: a queued line is a typed line, and a
+                        # typed line resets the engine's caps and counters --
+                        # until now only the idle `send` path did.
+                        self._goal_reset()
                     if text is None:
                         # #165. DER MOTOR. Eine getippte Zeile hat immer Vorrang
                         # -- sie steht oben --, aber wenn keine wartet und der
@@ -13430,6 +16515,7 @@ class Api:
                     # 2026-08-31: "zeigt weiterhin aktiver turn, obwohl turn
                     # durch". Nach dem Lock, weil ein Push kein Lock braucht.
                     self._reload_rail()
+                    self._pane_throttle(False)
                     return
                 # #162. DER WECHSEL LIEGT ZWISCHEN DEN ZUEGEN, nie in einem.
                 # Hier ist der vorige fertig und der naechste noch nicht
@@ -13437,7 +16523,7 @@ class Api:
                 # werden darf, ohne einem laufenden Zug seine Conversation zu
                 # entziehen.
                 if target is not None:
-                    self._hand_over(target)
+                    self._hand_over(target, by)
                 INTERRUPT.clear()
                 # DIE SEITE ERFAEHRT, DASS DAS WARTEN VORBEI IST. Sie steht
                 # seit `send` auf gesperrt, aber mit dem Wartehinweis darunter;
@@ -13451,10 +16537,26 @@ class Api:
                 # #162: mit dem Text faellt auch sein Ziel. Ein Ziel ohne Zeile
                 # waere ein Wechsel, den niemand angefordert hat.
                 self._queued_to = None
+                self._queued_by = set()
             # DERSELBE GRUND WIE OBEN, und dieser Weg braucht ihn mehr: ein Zug,
             # der wirft, hinterliesse sonst eine Kachel, die ewig rechnet.
             self._reload_rail()
+            self._pane_throttle(False)
             raise
+
+    def _pane_throttle(self, on: bool) -> None:
+        """#279 D. The browser panel's view off the GPU while a turn runs on
+        the LOCAL model server, which holds the card; a remote endpoint leaves
+        the card free, so nothing is throttled then. Never fatal."""
+        pane = getattr(self, "_inwin", None)
+        if pane is None:
+            return
+        if on:
+            try:
+                on = not self._endpoint()["remote"]
+            except Exception:          # noqa: BLE001 -- unknown: leave it be
+                on = False
+        pane.throttle(on)
 
     def _run(self, text: str) -> None:
         # #152, zweiter Akt -- robins Retest: der Kern prueft `should_roll`
@@ -13473,8 +16575,11 @@ class Api:
                       # siehe `_surface`.
                       surface_reload=self._surface)
         rolled = False
-        if crow_core.should_roll(self._context_tokens, self._n_ctx,
-                                 crow_core.ROLLOVER_AT):
+        # #268: a stuck render loop asks for the cut below the threshold too.
+        forced = getattr(self, "_goal_roll_due", False)
+        self._goal_roll_due = False
+        if forced or crow_core.should_roll(self._context_tokens, self._n_ctx,
+                                           crow_core.ROLLOVER_AT):
             spot0 = self._endpoint()
             sampling0 = crow_core.sampling_for(self._model, self._reasoning)
             # #154: VOR roll_over, auf dem noch warmen Praefix.
@@ -13554,6 +16659,12 @@ class Api:
         if not rolled:
             staged, self._staged_images = self._staged_images, []
             if staged:
+                # #249: DER STAGE GEHOERT ALLEN, also erfaehrt jede Ansicht,
+                # dass er leer ist -- hier, wo er leer wird, fuer alle drei
+                # Wege von `send` (frei, gepuffert, andere Ansicht). Vorher
+                # ging ein [] nur an die Mitleser des freien Wegs, und der
+                # Chip blieb auf dem Desktop stehen, den das Telefon schickte.
+                self.push({"k": "chips", "c": self._image_chips()})
                 early = self._endpoint()
                 refuse = (None if early["remote"]
                           else crow_core.refuse_images(early["base_url"]))
@@ -13836,37 +16947,9 @@ def main(argv: list[str] | None = None) -> int:
             "      The terminal client needs nothing: python cli/crow.py\n")
         return 2
 
-    page = (PAGE.replace("__BG__", CROW_BG)
-                .replace("__ACCENT__", CROW_ACCENT_HEX)
-                .replace("__BEVEL__", BANNER_BEVEL_HEX)
-                .replace("__TEXT__", CROW_TEXT_HEX)
-                .replace("__TIMEOUT__", "%.0f" % READ_TIMEOUT_S)
-                # ON THE ELEMENT BEFORE THE PAGE IS HANDED OVER, not applied by
-                # a script after load. A window that painted itself dark and
-                # then switched would show the wrong theme for a frame on every
-                # single start -- and the frame is exactly the moment somebody
-                # looks at it.
-                .replace("__THEME__", current_theme())
-                .replace("__MEMICON__", MEMORY_ICON)
-                # #119. THE SAME REASON THE THEME IS STAMPED HERE: a rail that
-                # was drawn open and then folded away by a script after load
-                # would do it on every start, and that frame is the moment
-                # somebody is looking at the window.
-                .replace("__RAIL__", "open" if rail_open() else "shut")
-                .replace("__CODE__", "open" if code_open() else "shut")
-                # #156: dieselbe Regel wie fuer Rail und Code -- der Zustand
-                # steht auf dem Element, bevor die Seite uebergeben wird.
-                .replace("__GIT__", "open" if git_open() else "shut")
-                .replace("__BROWSER__", "open" if browser_open() else "shut")
-                .replace("__CODEW__", str(code_width_setting()))
-                .replace("__MARKDARK__", mark_svg("dark"))
-                # WHO MOVES THE WINDOW, stamped on the page for the reason the
-                # theme is stamped on it: the answer decides what the first
-                # mousedown on the title bar does, and a script that worked it
-                # out after load would be one frame late on every start.
-                .replace("__NATIVEDRAG__",
-                         "false" if crow_platform.IS_WINDOWS else "true")
-                .replace("__MARKLIGHT__", mark_svg("light")))
+    # #249: the chain lives in `stamped_page`, shared with the phone's
+    # variant of the same page.
+    page = stamped_page()
 
     api = Api(args)
     # #127. BEFORE THE WINDOW: the shell reads the application id when it
@@ -13937,6 +17020,12 @@ def main(argv: list[str] | None = None) -> int:
     if not crow_platform.IS_WINDOWS:
         window.events.before_show += api.pane_embed
     threading.Thread(target=api.pump, daemon=True).start()
+    # #249: `remote_enabled` -- the mirror starts with the window, so the
+    # phone's home-screen icon works whenever Crow is open. Its sentence goes
+    # to crow.log; a window must open even when the LAN is not there.
+    if remote_enabled():
+        crow_core.log_note("remote: " + api.remote_start(persist=False),
+                           "remote")
     # The styles can only be set once the window exists, so this runs as the
     # start-up callback rather than beside create_window.
     def styles(*_) -> None:

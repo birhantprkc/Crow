@@ -9,7 +9,7 @@ is here.
 
 | | |
 |---|---|
-| [Install](user-guide/install.md) | requirements, both installers, the model download, updating, where everything lands |
+| [Install](user-guide/install.md) | requirements, both installers, the model download, updating, where everything lands; optional `--voice`, `--tailscale` / `-Tailscale` |
 | [Window](user-guide/window.md) | the client, panel by panel: pinned cards, selection and links, layout |
 | [Linux](user-guide/linux.md) | install, the paths table, the engine build, memory scopes for server, render and command, optional helpers, the window on Wayland, troubleshooting |
 | [Memory](user-guide/memory.md) | what is written, by whom, and the gate |
@@ -20,12 +20,14 @@ is here.
 | [MCP servers](user-guide/mcp.md) | stdio, elicitation, commands |
 | [MCP over HTTP](user-guide/mcp-http.md) | headers, OAuth, sessions |
 | [Remote models](user-guide/remote-models.md) | subscriptions, keys, dialects, routing |
+| [Phone (remote)](user-guide/remote.md) | `/remote`, pairing, the two addresses, the phone microphone |
+| [Phone over Tailscale](user-guide/remote-tailscale.md) | HTTPS from anywhere: `install.sh --tailscale` / `install.ps1 -Tailscale`, [download](https://tailscale.com/download), [iPhone](https://apps.apple.com/app/tailscale/id1470499037), [Android](https://play.google.com/store/apps/details?id=com.tailscale.ipn), admin console, the one `tailscale serve` line, checks, undo |
 
 ## Reference
 
 | | |
 |---|---|
-| [Tools](reference/tools.md) | the twenty-seven built in, plus MCP |
+| [Tools](reference/tools.md) | the twenty-eight built in, plus MCP |
 | [Server flags](reference/server-flags.md) | what the inference server is started with, and why each flag is there |
 | [Client flags](reference/client-flags.md) | what `crow` and the window take |
 | [Reasoning levels](reference/reasoning-levels.md) | `low`, `medium`, `high`, and the thinking budget |
