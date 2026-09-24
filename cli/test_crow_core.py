@@ -13910,6 +13910,119 @@ class CrowOwnsTheBrowserItStartsTests(unittest.TestCase):
         self.assertIn("Edge", said)
 
 
+class ALocalPageKeepsItsQueryTests(unittest.TestCase):
+    """#272. `render_page("index.html?view=albedo")` war am 2026-09-24
+    "no such page", obwohl index.html dalag (session.json msg 36/37): die ganze
+    Zeichenkette ging an isfile. Der Diorama-Auftrag verlangt
+    `index.html?shot=<view>&w=<px>` fuer jeden Review-Screenshot. Hier laeuft
+    das Werkzeug bis zum Browserstart; der Browser ist ein Stellvertreter, der
+    die Adresse aus argv aufschreibt und ein Bild ablegt."""
+
+    def setUp(self) -> None:
+        self.dir = os.path.realpath(tempfile.mkdtemp(prefix="crow-q272-"))
+        self.page = os.path.join(self.dir, "index.html")
+        with open(self.page, "w", encoding="utf-8") as fh:
+            fh.write("<p>hi")
+        self.root = crow_core.get_root()
+        crow_core.set_root(self.dir)
+        self.argv: "list[list[str]]" = []
+        self.pixels = b"same"
+        crow_core._LAST_CAPTURES.clear()
+
+    def tearDown(self) -> None:
+        crow_core.set_root(self.root)
+        crow_core._LAST_CAPTURES.clear()
+        crow_core._RENDER_RIDE.clear()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _render(self, path: str) -> str:
+        test = self
+
+        class Browser:
+            pid, returncode = 4242, 0
+
+            def __init__(self, argv, **_):
+                test.argv.append(list(argv))
+                shot = [a for a in argv if a.startswith("--screenshot=")]
+                with open(shot[0].split("=", 1)[1], "wb") as fh:
+                    fh.write(test.pixels)
+
+            def wait(self, timeout=None):
+                return 0
+
+        with mock.patch.object(crow_core, "find_browser", lambda: "/bin/chromium"), \
+                mock.patch.object(crow_platform, "devtools_pipe", lambda: None), \
+                mock.patch.object(crow_platform, "render_scope_prefix", lambda: []), \
+                mock.patch.object(crow_platform, "render_gl_mode", lambda: "swiftshader"), \
+                mock.patch.object(crow_core.subprocess, "Popen", Browser):
+            return crow_core.tool_render_page(path)
+
+    def test_the_query_reaches_the_browser(self):
+        said = self._render("index.html?shot=default&w=960")
+        self.assertFalse(said.startswith("error"), said)
+        self.assertEqual(self.argv[-1][-1],
+                         Path(self.page).as_uri() + "?shot=default&w=960")
+
+    def test_the_fragment_reaches_the_browser(self):
+        said = self._render("index.html#stall")
+        self.assertFalse(said.startswith("error"), said)
+        self.assertEqual(self.argv[-1][-1], Path(self.page).as_uri() + "#stall")
+
+    def test_a_missing_file_is_still_no_such_page_and_names_the_file(self):
+        said = self._render("gone.html?shot=default")
+        self.assertEqual(said, "error: no such page: %s"
+                         % os.path.join(self.dir, "gone.html"))
+        self.assertEqual(self.argv, [], "no browser for a missing page")
+
+    def test_a_file_really_named_with_a_query_wins(self):
+        """POSIX erlaubt `?` im Namen; die echte Datei geht vor dem Schnitt."""
+        if os.name == "nt":
+            self.skipTest("`?` is not allowed in a Windows file name")
+        odd = os.path.join(self.dir, "odd?x.html")
+        with open(odd, "w", encoding="utf-8") as fh:
+            fh.write("<p>odd")
+        said = self._render("odd?x.html")
+        self.assertFalse(said.startswith("error"), said)
+        self.assertEqual(self.argv[-1][-1], Path(odd).as_uri())
+        self.assertTrue(self.argv[-1][-1].endswith("odd%3Fx.html"))
+
+    def test_different_queries_are_different_captures(self):
+        """#175-Nachtrag: byte-gleich gegen DIESELBE Adresse ist ein Verdacht;
+        eine andere Ansicht derselben Datei ist eine andere Seite."""
+        self._render("index.html?shot=default")
+        other = self._render("index.html?shot=stall")
+        self.assertNotIn("byte-identical", other)
+        again = self._render("index.html?shot=stall")
+        self.assertIn("byte-identical", again)
+        self.assertNotEqual(
+            crow_core._cache_key("render_page", '{"path":"index.html?shot=default"}'),
+            crow_core._cache_key("render_page", '{"path":"index.html?shot=stall"}'))
+
+    def test_file_url_windows_drive_unc_and_posix(self):
+        """RFC 8089 E.2/E.3, gegen die gemessene Ausgabe von
+        PureWindowsPath.as_uri() (Python 3.14.7) -- auf Linux pruefbar."""
+        self.assertEqual(crow_core._file_url(r"C:\a b\x.html", nt=True),
+                         "file:///C:/a%20b/x.html")
+        self.assertEqual(crow_core._file_url(r"C:\a b\x#y.html", nt=True),
+                         "file:///C:/a%20b/x%23y.html")
+        self.assertEqual(crow_core._file_url(r"\\srv\share\a b.html", nt=True),
+                         "file://srv/share/a%20b.html")
+        for p in ("/tmp/a b/x#1.html", "/tmp/x%.html", "/tmp/ü.html"):
+            self.assertEqual(crow_core._file_url(p, nt=False),
+                             Path(p).as_uri() if os.name != "nt" else
+                             "file://" + urllib.parse.quote(p))
+
+    def test_the_console_source_with_a_query_is_still_the_page(self):
+        """#253s Quellzeile: die Konsole nennt die Seite MIT Query."""
+        with open(self.page, "w", encoding="utf-8") as fh:
+            fh.write("line one\nline two\n")
+        line = ('[1:2:0924/110000.0:INFO:CONSOLE(2)] "x" , source: %s'
+                '?shot=default&w=960 (2)' % Path(self.page).as_uri())
+        got = crow_core._source_line(line, self.page)
+        self.assertIsNotNone(got)
+        self.assertEqual(got[1].strip(), "line two")
+
+
 class TheRenderNeverHandsOverABrokenMirrorTests(unittest.TestCase):
     """#175-Nachtrag (2026-09-20): der Fang allein luegt. Gemessen an drei
     Varianten einer animierten WebGL-Seite: byte-identische 92.027 Bytes,

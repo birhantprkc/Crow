@@ -21,7 +21,8 @@ own class.
 |---|---|
 | class | `executing` — it starts a process and writes a file |
 | browser | Chrome, then Edge; every candidate resolved through environment variables |
-| target | a file in the working area, or an `http(s)` URL |
+| target | a file in the working area, or an `http(s)` URL. A local page keeps a `?query` / `#fragment` (`index.html?shot=default&w=960`, #272): the file is checked without it, then the percent-encoded `file://` URL (drive letter / UNC per RFC 8089) gets it back. A file really named with `?` or `#` wins. A missing file is `no such page: <file>` |
+| dedupe | the byte-identical warning (#175) keys on the full URL, so `?shot=default` and `?shot=stall` are two pages |
 | output | `<root>/.crow/renders/render-<stamp>.png`, plus the console lines from stderr |
 | isolation | its own `--user-data-dir` per run. Without it Chrome hands the job to a running instance and returns exit 0 with no screenshot |
 | driving (Linux) | `--remote-debugging-pipe` (fd 3/4, NUL-separated CDP JSON, no library): load, run `wait_ms` **real** milliseconds, `Page.captureScreenshot`. A page with no load event after 15 s is captured anyway |

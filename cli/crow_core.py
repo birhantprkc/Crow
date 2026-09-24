@@ -948,8 +948,11 @@ TOOLS = [
         "console output. Use it to SEE what you built -- then read_image the screenshot. "
         "Do not drive a browser through run_command; this one is supervised and always "
         "comes back. A local file opens as file://, where module imports are blocked "
-        "-- render the build_bundle output, not the module source page.",
-        {"path": dict(_STR, description="A file in the working area, or an http(s) URL."),
+        "-- render the build_bundle output, not the module source page. A local page "
+        "keeps a ?query or #fragment (index.html?shot=default&w=960): the page reads "
+        "it from location.search / location.hash.",
+        {"path": dict(_STR, description="A file in the working area (optionally with "
+                                        "?query / #fragment), or an http(s) URL."),
          "wait_ms": {"type": "integer",
                      "description": "How long the page runs after loading before the "
                                     "screenshot, in real milliseconds. Default 4000, "
@@ -9291,9 +9294,16 @@ def _source_line(line: str, page: "str | None") -> "tuple[str, str] | None":
     m = _CONSOLE_SOURCE.search(line)
     if not m or not page or not m.group(1).startswith("file://"):
         return None
-    from urllib.parse import unquote
-    path = unquote(m.group(1)[len("file://"):])
-    if os.name == "nt":
+    # #272: SEIT DIE SEITE EINE ?query TRAGEN DARF, steht sie auch in der
+    # Konsolenquelle ("source: file:///.../index.html?shot=default&w=960
+    # (12)"). Die Datei ist der PFAD-Teil der Adresse, nicht alles hinter
+    # "file://" -- sonst fragt isfile nach "index.html?shot=..." und der
+    # #253-Hinweis auf die eigene Zeile der Seite faellt still weg.
+    parts = urllib.parse.urlsplit(m.group(1))
+    path = urllib.parse.unquote(parts.path)
+    if parts.netloc:                                # UNC: file://host/share
+        path = "//" + parts.netloc + path
+    elif os.name == "nt":
         path = path.lstrip("/")
     path = os.path.realpath(path)
     home = os.path.dirname(os.path.realpath(page))
@@ -9750,6 +9760,68 @@ def _render_over_devtools(dt: _Devtools, url: str, w: int, h: int, wait: int,
                                                      time.monotonic() - t0)
 
 
+# #272. WAS HINTER DEM DATEINAMEN STEHT, GEHOERT DER SEITE, NICHT DER PLATTE.
+# Gemessen 2026-09-24 im Diorama-Lauf (session.json msg 36/37):
+# `render_page("index.html?view=albedo")` kam als "error: no such page:
+# .../index.html?view=albedo" zurueck, obwohl index.html dalag -- die ganze
+# Zeichenkette ging an os.path.isfile. Der Aufgabentext verlangt
+# `index.html?shot=<view>&w=<px>` fuer JEDEN Review-Screenshot; das Modell gab
+# die Schalter in der Adresse auf und schrieb in sein Gedaechtnis "a file://
+# page also rejects a ?query". Die Adresse kann es (RFC 8089 laesst query und
+# fragment zu, die WHATWG-URL parst sie fuer file: wie fuer jedes Schema,
+# location.search liest sie) -- nur das Werkzeug liess sie nicht durch.
+#
+# DIE REIHENFOLGE ENTSCHEIDET: erst der ganze Pfad, dann der abgeschnittene.
+# POSIX erlaubt `?` und `#` in Dateinamen; eine Datei, die WIRKLICH so heisst,
+# gewinnt immer. Und der Fehler nennt die fehlende DATEI, nicht die Adresse --
+# die muss das Modell reparieren, und #202s Phantomzaehler soll sie als Pfad
+# wiedererkennen.
+_PAGE_SUFFIX_SAFE = "/?#&=+;:,@!$'()*%~[]"
+
+
+def _file_url(path: str, nt: "bool | None" = None) -> str:
+    """Die file://-Adresse eines absoluten Pfads, prozentkodiert (RFC 8089).
+
+    VORHER STAND HIER "file:///" + path, unkodiert: ein Leerzeichen ging roh an
+    Chromium, und ein `#` im Dateinamen schnitt den Pfad dort ab. Dasselbe
+    Ergebnis wie `pathlib.Path.as_uri()` (gemessen, Python 3.14.7), aber als
+    reine Funktion mit `nt` als Schalter: `PureWindowsPath.as_uri()` ist seit
+    3.14 abgekuendigt, `nturl2path` auch, und die Windows-Form soll auf Linux
+    pruefbar sein. Das Laufwerk bleibt (`file:///C:/a%20b/x.html`, RFC 8089
+    E.2), UNC wird Host (`file://srv/share/x.html`, E.3).
+    """
+    nt = (os.name == "nt") if nt is None else nt
+    if nt:
+        path = path.replace("\\", "/")
+        if re.match(r"^[A-Za-z]:", path):
+            return "file:///" + path[:2] + urllib.parse.quote(path[2:])
+        if path.startswith("//"):
+            return "file:" + urllib.parse.quote(path)
+    return "file:///" + urllib.parse.quote(path.lstrip("/"))
+
+
+def _page_target(path: str) -> "tuple[str | None, str]":
+    """(Datei, Adresse) einer lokalen Seite, oder (None, die fehlende Datei).
+
+    `index.html?shot=default&w=960` -> index.html im Arbeitsbereich und ihre
+    file://-Adresse MIT `?shot=default&w=960`; ebenso ein `#fragment`. Im
+    Suffix wird nur kodiert, was in einer Adresse nicht stehen darf (ein
+    Leerzeichen); ein `%xx`, das schon da ist, bleibt.
+    """
+    whole = os.path.abspath(_rooted(path))          # #177
+    if os.path.isfile(whole):
+        return whole, _file_url(whole)
+    cut = min((i for i in (path.find("?"), path.find("#")) if i >= 0),
+              default=-1)
+    if cut <= 0:
+        return None, whole
+    base = os.path.abspath(_rooted(path[:cut]))
+    if not os.path.isfile(base):
+        return None, base
+    return base, _file_url(base) + urllib.parse.quote(path[cut:],
+                                                      safe=_PAGE_SUFFIX_SAFE)
+
+
 def tool_render_page(path: str, wait_ms: int | None = None,
                      width: int | None = None, height: int | None = None,
                      **_) -> str:
@@ -9838,13 +9910,10 @@ def tool_render_page(path: str, wait_ms: int | None = None,
         url = target
         page_file = None
     else:
-        target = _rooted(target)                    # #177
-        if not os.path.isfile(target):
-            return "error: no such page: %s" % target
-        # lstrip, damit ein POSIX-Pfad nicht `file:////tmp/...` ergibt: unter
-        # Windows beginnt der Pfad mit dem Laufwerk, unter Linux mit `/`.
-        url = "file:///" + target.replace(os.sep, "/").lstrip("/")
-        page_file = target
+        # #272: die DATEI pruefen, ?query/#fragment dahinter mitnehmen.
+        page_file, url = _page_target(target)
+        if page_file is None:
+            return "error: no such page: %s" % url
 
     exe = find_browser()
     if exe is None:
