@@ -6,6 +6,26 @@
 (#249 stage 5, #290). Crow never runs a Tailscale command that changes anything; it reads the
 state and the Remote dialog shows the next step.
 
+## 0. The installer route
+
+The installers read where this machine stands (`tailscale status --json`, `tailscale serve status
+--json`) and print only the steps still missing, in the order below. Neither runs sudo or elevates.
+
+| OS | command |
+|---|---|
+| Linux | `bash install.sh --tailscale` · no checkout: `curl -fsSL https://raw.githubusercontent.com/nibor1896/Crow/main/install.sh \| bash -s -- --tailscale` |
+| Windows | `&([scriptblock]::Create((irm https://raw.githubusercontent.com/nibor1896/Crow/main/install.ps1))) -Tailscale` — prints the steps and exits, installs nothing |
+
+| downloads | |
+|---|---|
+| all platforms | [tailscale.com/download](https://tailscale.com/download) |
+| iPhone | [App Store](https://apps.apple.com/app/tailscale/id1470499037) |
+| Android | [Google Play](https://play.google.com/store/apps/details?id=com.tailscale.ipn) |
+| Linux | [kb/1031](https://tailscale.com/kb/1031/install-linux) |
+| Windows | [kb/1022](https://tailscale.com/kb/1022/install-windows) · `winget install --id Tailscale.Tailscale -e` (id from [winget-pkgs](https://github.com/microsoft/winget-pkgs/tree/master/manifests/t/Tailscale/Tailscale); kb/1022 names only the .exe/.msi) |
+
+Sections 2–5 are the same steps by hand.
+
 ## 1. What and why
 
 | | |
@@ -20,8 +40,8 @@ state and the Remote dialog shows the next step.
 
 | step | |
 |---|---|
-| iPhone | App Store → **Tailscale** → log in |
-| Android | Play Store → **Tailscale** → log in |
+| iPhone | [App Store → **Tailscale**](https://apps.apple.com/app/tailscale/id1470499037) → log in |
+| Android | [Play Store → **Tailscale**](https://play.google.com/store/apps/details?id=com.tailscale.ipn) → log in |
 | account | the **same** account on the phone and the PC — a second account is a second tailnet |
 
 ## 3. Install on the PC
@@ -32,7 +52,7 @@ state and the Remote dialog shows the next step.
 | Debian / Ubuntu / Fedora | `curl -fsSL https://tailscale.com/install.sh \| sh` | [kb/1031](https://tailscale.com/kb/1031/install-linux) |
 | Debian / Ubuntu, by hand | the per-release `curl … noarmor.gpg` / `… tailscale-keyring.list` lines, then `sudo apt-get update && sudo apt-get install tailscale` | [pkgs.tailscale.com/stable](https://pkgs.tailscale.com/stable/) |
 | Fedora, by hand | `sudo dnf config-manager --add-repo https://pkgs.tailscale.com/stable/fedora/tailscale.repo` then `sudo dnf install tailscale` | [pkgs.tailscale.com/stable](https://pkgs.tailscale.com/stable/). Fedora 41+ ships dnf5, whose `config-manager` syntax differs — **not verified** |
-| Windows | the `.exe` installer from [tailscale.com/download](https://tailscale.com/download/windows), then tray icon → **Log in** | [kb/1022](https://tailscale.com/kb/1022/install-windows) |
+| Windows | the `.exe` installer from [tailscale.com/download](https://tailscale.com/download/windows), or `winget install --id Tailscale.Tailscale -e`; then tray icon → **Log in** | [kb/1022](https://tailscale.com/kb/1022/install-windows); winget id: [winget-pkgs](https://github.com/microsoft/winget-pkgs/tree/master/manifests/t/Tailscale/Tailscale) |
 
 Start and log in (Linux):
 
@@ -99,7 +119,7 @@ The Remote dialog's status line for the HTTPS choice, and the fix:
 
 | dialog says | fix |
 |---|---|
-| Tailscale is not installed | section 3 |
+| Tailscale is not installed | section 3, or `install.sh --tailscale` / `install.ps1 -Tailscale` |
 | Tailscale is installed but not connected | `sudo systemctl enable --now tailscaled`, `sudo tailscale up` |
 | HTTPS certificates are off for this tailnet | section 4, then reopen the dialog |
 | one-time setup … `sudo tailscale serve …` | run it (section 5), reopen the dialog |

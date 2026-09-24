@@ -265,7 +265,7 @@ that failed this session is skipped.
 | The spot answered | Meaning | The chain |
 |---|---|---|
 | 429, 408, 5xx, a timeout, "provider returned error", an empty reply | this spot is sick right now | next spot; at most three sick spots |
-| 403 (a model gated to agentic harnesses, a moderation flag), "no endpoints found", 402 on a **paid** favourite | this spot will not serve this client | next spot; up to six refusals, not counted against the three |
+| 403 (a model gated to agentic harnesses, a moderation flag), "no endpoints found", a retired free slug's 404 ("unavailable for free", #284), 402 on a **paid** favourite | this spot will not serve this client | next spot; up to six refusals, not counted against the three |
 | 401, 402 on a **free** spot (the account is below zero), a schema error | the key, the account or the request is wrong | stops. Every spot would answer the same way |
 
 A spot that failed is skipped for the rest of the session, with its reason. A spot that hit a stop

@@ -30,7 +30,7 @@ phone. Window only; the terminal says "stage 2" (#249).
 | address | reach | phone 🎤 | set up |
 |---|---|---|---|
 | `http://<LAN IP>:8765/` | same Wi-Fi only | keyboard dictation only (no HTTPS) | none; firewall line in the dialog |
-| `https://<pc>.<tailnet>.ts.net/` | anywhere, Tailscale on | records, Whisper on the PC | [Tailscale setup](remote-tailscale.md) |
+| `https://<pc>.<tailnet>.ts.net/` | anywhere, Tailscale on | records, Whisper on the PC | [Tailscale setup](remote-tailscale.md); `bash install.sh --tailscale` / `install.ps1 -Tailscale` print the missing steps |
 
 - Each address is its own origin: a phone paired on one pairs once more on the other.
 - The mirror listens on the chosen LAN address, plus `127.0.0.1:<port>` while Tailscale is up (the
@@ -50,6 +50,9 @@ bash install.sh --voice          # faster-whisper (+ PyAV, its decoder) and soun
 ```
 
 Without it the phone shows `dictation needs faster-whisper -- pip install faster-whisper`.
+
+Unlike the desktop 🎤, the phone's recording reaches the PC as a file: each clip (partial and final) is written to the
+window's upload folder as `remote-voice-*`, transcribed, and deleted either way.
 
 Each dictation is one `crow.log` line: `[voice] phone dictation: <bytes> bytes, <s> s, transcribe <ms> ms[, error]`.
 
@@ -77,4 +80,4 @@ Each dictation is one `crow.log` line: `[voice] phone dictation: <bytes> bytes, 
 | phone cannot load the LAN address | same Wi-Fi? run the firewall line the dialog shows (e.g. `sudo ufw allow from 192.168.2.0/24 to any port 8765 proto tcp`) |
 | the LAN IP changed (DHCP) | the dialog lists the new address; the phone pairs once more. A DHCP reservation in the router keeps it fixed |
 | "this phone is not paired" | `/remote` on the desktop, scan the new QR |
-| HTTPS address | [Tailscale troubleshooting](remote-tailscale.md#troubleshooting) |
+| HTTPS address | [Tailscale troubleshooting](remote-tailscale.md#8-troubleshooting) |

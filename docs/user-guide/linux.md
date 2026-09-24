@@ -32,6 +32,7 @@ bash install.sh --models ~/Projects/models/qwen3.8-flash-next
 |---|---|
 | `--models DIR` | where the GGUFs live. Makes `$CROW_HOME/models` a link to it |
 | `--voice` | also `faster-whisper` and `sounddevice` for the composer's microphone |
+| `--tailscale` | also print what is still missing for the phone over HTTPS — see [Phone over Tailscale](#phone-over-tailscale) |
 | `--build-engine` | build `llama-server` now instead of printing the line (~20 minutes) |
 | `--no-desktop` | no `.desktop` entry, no icons, no Hyprland rule |
 | `--no-engine` | do not look for the engine at all |
@@ -247,6 +248,29 @@ bash install.sh --voice
 `faster-whisper` and `sounddevice` into the same venv. The dictation model (`faster-whisper-small`,
 ~486 MB) is fetched by the window on the first click on the microphone, not by the installer.
 `sounddevice` needs PortAudio from the distribution (`sudo pacman -S --needed portaudio`).
+
+---
+
+## Phone over Tailscale
+
+```bash
+bash install.sh --tailscale
+curl -fsSL https://raw.githubusercontent.com/nibor1896/Crow/main/install.sh | bash -s -- --tailscale
+```
+
+Reads `tailscale status --json` and `tailscale serve status --json` (no sudo) and prints only the
+steps still missing, in this order. It never runs them.
+
+| state | printed |
+|---|---|
+| no `tailscale` | Arch/Omarchy and Arch-likes: `sudo pacman -S tailscale`; Debian/Ubuntu/Fedora/other: `curl -fsSL https://tailscale.com/install.sh \| sh` ([kb/1031](https://tailscale.com/kb/1031/install-linux)) |
+| not running / not logged in | `sudo systemctl enable --now tailscaled`, `sudo tailscale up` |
+| HTTPS off | [admin console → DNS](https://login.tailscale.com/admin/dns) → Enable HTTPS |
+| no serve | `sudo tailscale serve --bg --https=443 http://127.0.0.1:<remote_port>` (8765 unless `remote_port` is set) |
+| no phone in the tailnet | [iPhone](https://apps.apple.com/app/tailscale/id1470499037) · [Android](https://play.google.com/store/apps/details?id=com.tailscale.ipn) |
+| ready | `https://<pc>.<tailnet>.ts.net/` |
+
+Full setup and troubleshooting: [Phone over Tailscale](remote-tailscale.md).
 
 ---
 
