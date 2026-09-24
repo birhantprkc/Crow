@@ -12114,6 +12114,12 @@ def _esbuild_caches() -> "list[tuple[str, str]]":
     (dated 09-19 -- the one #212 names), and npx keeps its packages under
     `~/.npm/_npx/<hash>/node_modules` (esbuild 0.28.1 there). Both honour an
     override variable, which is read first.
+
+    #274: deno's default is `$XDG_CACHE_HOME/deno` (`deno info`: "DENO_DIR
+    location: ~/.cache/deno") -- the XDG BASE, not Crow's own
+    `cache_dir()` below it. This line said `cache_dir()/deno` = ~/.cache/crow/
+    deno until 2026-09-24; the npx copy hid it on 09-22, and when that cache
+    was gone the diorama run found nothing and lost four rounds.
     """
     home = os.path.expanduser("~")
     if crow_platform.IS_WINDOWS:
@@ -12124,7 +12130,7 @@ def _esbuild_caches() -> "list[tuple[str, str]]":
     else:
         default = (os.path.join(home, "Library", "Caches", "deno")
                    if sys.platform == "darwin"
-                   else os.path.join(crow_platform.cache_dir(), "deno"))
+                   else os.path.join(crow_platform.user_cache_base(), "deno"))
         deno = os.environ.get("DENO_DIR") or default
         npm = os.environ.get("npm_config_cache") or os.path.join(home, ".npm")
         exe = os.path.join("bin", "esbuild")
@@ -12133,11 +12139,33 @@ def _esbuild_caches() -> "list[tuple[str, str]]":
              "npx cache")]
 
 
+# #274: the esbuild the user named -- `bundler` in settings.json (the window
+# reads it per turn, like the #145 caps) or `--bundler` (the terminal, once).
+# An environment variable cannot be the user's way in: the window starts from
+# a desktop entry, and an `export` inside run_command is a child shell that
+# never reaches this process -- the 2026-09-24 run tried exactly that.
+_BUNDLER: "str | None" = None
+
+
+def bundler_set(path) -> None:
+    """The window per turn, the terminal once; a non-path or blank clears it."""
+    global _BUNDLER
+    _BUNDLER = (os.path.expanduser(path.strip())
+                if isinstance(path, str) and path.strip() else None)
+
+
+def bundler_path() -> "str | None":
+    return _BUNDLER
+
+
 def find_esbuild(start: str) -> "tuple[str | None, str, str, list[str]]":
     """(path, version, where it was found, everything searched).
 
     THE ORDER IS A STATEMENT ABOUT WHOSE ESBUILD IT IS. `CROW_ESBUILD` pins one
-    for a measurement. Then the project's own, nearest node_modules first,
+    for a measurement. The `bundler` setting is the user's standing choice
+    (#274) -- the way to name one the search deliberately skips, such as
+    another program's node_modules. Both answer `--version` like every other
+    candidate; a named binary is not trusted blind. Then the project's own, nearest node_modules first,
     walking up the way node's resolution does -- a pinned project version is
     the one its lockfile was written against. Then one on PATH, which somebody
     installed on purpose. The runtime caches come last and the newest version
@@ -12159,6 +12187,12 @@ def find_esbuild(start: str) -> "tuple[str | None, str, str, list[str]]":
         hit = _try(pinned, "CROW_ESBUILD")
         if hit:
             return pinned, hit[0], hit[1], searched
+    chosen = bundler_path()
+    if chosen:
+        searched.append("bundler setting: %s" % chosen)
+        hit = _try(chosen, "bundler setting")
+        if hit:
+            return chosen, hit[0], hit[1], searched
     here = os.path.abspath(start if os.path.isdir(start) else os.path.dirname(start))
     while True:
         searched.append(os.path.join(here, "node_modules"))
@@ -12428,11 +12462,20 @@ def tool_build_bundle(entry: str = "", out: str = "", global_name: str = "",
     deadline = started + BUNDLE_TIMEOUT
     exe, version, where, searched = find_esbuild(entry)
     if not exe:
+        # #274: the routes that work, with their paths. The old last clause,
+        # "pin one with CROW_ESBUILD", sent the model into an `export` in
+        # run_command -- a child shell, which never reaches this process.
+        link = os.path.join(get_root() or os.path.dirname(entry),
+                            "node_modules", ".bin", "esbuild")
+        settings = os.path.join(crow_platform.config_dir(), "settings.json")
         return ("error: no bundler found -- no esbuild answered in any of these "
-                "places:\n  " + "\n  ".join(searched) + "\nDo not flatten the "
-                "library by hand: tell the user a bundler is missing (a project "
-                "node_modules with esbuild is enough), or pin one with "
-                "CROW_ESBUILD=/path/to/esbuild.")
+                "places:\n  " + "\n  ".join(searched) + "\nWhat works: (1) an "
+                "esbuild you found (check `<path> --version` first) linked (or copied) into "
+                f"the working area as {link} -- the next build_bundle finds it; "
+                f"(2) tell the user to set \"bundler\": \"<path>\" in {settings} "
+                "(read every turn, no restart) or to start crow with --bundler "
+                "<path>. An environment variable exported in run_command does "
+                "NOT reach Crow. Do not flatten the library by hand.")
     base = os.path.dirname(entry)
     logs: "list[str]" = []
     counts = [0, 0]

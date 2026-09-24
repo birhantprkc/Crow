@@ -26,6 +26,7 @@
 | flag | default | what |
 |---|---|---|
 | `--turn-token-budget N` | `0` (off) | decoded tokens one turn may spend before it is told to answer |
+| `--bundler PATH` | unset | the esbuild `build_bundle` uses before its own search; the window's `bundler` setting (#274) |
 | `--subtask-max-tokens N` | `0` (= the output cap, 16384 unless `CROW_MAX_TOKENS` sets it) | output cap for one delegated subtask |
 
 The retry cap needs no flag: the fourth identical failing call to an uncached tool is refused

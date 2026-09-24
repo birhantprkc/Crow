@@ -705,6 +705,12 @@ class ShowReasoningTests(unittest.TestCase):
     def test_the_flag_is_off_by_default(self):
         self.assertFalse(crow.build_parser().parse_args([]).show_reasoning)
 
+    def test_the_bundler_flag_names_an_esbuild(self):
+        """#274: the terminal's twin of the window's `bundler` setting."""
+        self.assertIsNone(crow.build_parser().parse_args([]).bundler)
+        self.assertEqual(crow.build_parser().parse_args(
+            ["--bundler", "/opt/esb/esbuild"]).bundler, "/opt/esb/esbuild")
+
     def test_the_flag_turns_it_on(self):
         self.assertTrue(crow.build_parser().parse_args(["--show-reasoning"]).show_reasoning)
 

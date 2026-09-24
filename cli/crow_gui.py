@@ -13477,6 +13477,9 @@ class Api:
         # #154: der Digest-Cap, gleiche Tuer -- fehlt der Schluessel, gilt der
         # Kern-Default; 0 schaltet ab. Der Setter frisst Unsinn selbst.
         crow_core.rollover_digest_set(doc.get("rollover_digest_tokens"))
+        # #274: the esbuild the user named for build_bundle, same door -- a
+        # key that is gone again clears it.
+        crow_core.bundler_set(doc.get("bundler"))
         # #267: the judge's bar, same door; nonsense is the default.
         crow_core.judge_threshold_set(doc.get("judge_threshold"))
         # #263: tool-result clearing, same door. Missing key: the endpoint

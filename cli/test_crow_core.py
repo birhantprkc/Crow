@@ -17564,6 +17564,7 @@ class BuildBundleTests(unittest.TestCase):
         for key in ("FAKE_ARGV_LOG", "FAKE_MODE", "FAKE_CSS", "FAKE_EXPORTS", "FAKE_ORPHAN_PID"):
             os.environ.pop(key, None)
         crow_core._ESBUILD_VERSION.clear()
+        crow_core.bundler_set(None)
         for folder in (self.root, self.caches, self.empty):
             shutil.rmtree(folder, ignore_errors=True)
 
@@ -17627,6 +17628,91 @@ class BuildBundleTests(unittest.TestCase):
         self.assertIn(os.path.join(self.caches, "deno"), out)
         self.assertIn("Do not flatten the library by hand", out)
         self.assertFalse(os.path.exists(os.path.join(self.root, "app.html")))
+
+    def test_no_bundler_names_the_routes_the_model_and_the_user_actually_have(self):
+        """#274: the 2026-09-24 diorama run was told to "pin one with
+        CROW_ESBUILD=...", exported it inside run_command -- a child shell,
+        which can never reach Crow's own environment -- and got the same error
+        again. The sentence names what works: a link inside the working area,
+        and the `bundler` setting, with the file it lives in."""
+        entry = self._write("app.js", "export const x = 1;\n")
+        out = crow_core.tool_build_bundle(entry, "app.html")
+        self.assertIn(os.path.join(self.root, "node_modules", ".bin", "esbuild"), out)
+        self.assertIn('"bundler"', out)
+        self.assertIn(os.path.join(crow_platform.config_dir(), "settings.json"), out)
+        self.assertIn("--bundler", out)
+        self.assertIn("does NOT reach Crow", out)
+        self.assertNotIn("pin one with CROW_ESBUILD", out)
+
+    def test_the_bundler_setting_comes_before_the_project_copy(self):
+        """#274: `bundler` in settings.json (the window, per turn) or --bundler
+        (the terminal) names an esbuild the search would not find -- another
+        program's node_modules, which is deliberately never searched. A pin for
+        one launch, CROW_ESBUILD, still comes first."""
+        chosen = self._fake(os.path.join(self.caches, "elsewhere", "esbuild"), "0.28.1")
+        self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"), "0.28.2")
+        entry = self._write("app.js", "")
+        crow_core.bundler_set(chosen)
+        self.assertEqual(crow_core.find_esbuild(entry)[:3],
+                         (chosen, "0.28.1", "bundler setting"))
+        pinned = self._fake(os.path.join(self.caches, "pin", "esbuild"), "0.27.0")
+        os.environ["CROW_ESBUILD"] = pinned
+        self.assertEqual(crow_core.find_esbuild(entry)[:3],
+                         (pinned, "0.27.0", "CROW_ESBUILD"))
+
+    def test_a_bundler_setting_that_does_not_answer_is_named_and_passed_over(self):
+        """NEGATIVE: the setting is not trusted blind. A path that is no esbuild
+        (here: nothing at all) falls through to the search, and the error names
+        the setting so the user sees which value is wrong."""
+        dead = os.path.join(self.caches, "gone", "esbuild")
+        crow_core.bundler_set(dead)
+        entry = self._write("app.js", "")
+        out = crow_core.tool_build_bundle(entry, "app.html")
+        self.assertTrue(out.startswith("error: no bundler found"), out)
+        self.assertIn("bundler setting: %s" % dead, out)
+        project = self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))
+        self.assertEqual(crow_core.find_esbuild(entry)[0], project)
+
+    def test_bundler_set_takes_a_path_or_nothing(self):
+        crow_core.bundler_set("  ")
+        self.assertIsNone(crow_core.bundler_path())
+        crow_core.bundler_set(42)
+        self.assertIsNone(crow_core.bundler_path())
+        crow_core.bundler_set("~/x/esbuild")
+        self.assertEqual(crow_core.bundler_path(), os.path.expanduser("~/x/esbuild"))
+
+    @unittest.skipIf(sys.platform in ("win32", "darwin"), "the XDG default is Linux's")
+    def test_the_deno_cache_is_deno_s_own_directory_not_crow_s(self):
+        """#274, THE DEFECT THE STUB IN setUp HID: the real default was
+        `crow_platform.cache_dir()/deno` = ~/.cache/crow/deno, while deno keeps
+        its esbuild under ~/.cache/deno (`deno info`: "DENO_DIR location:
+        ~/.cache/deno"). The 2026-09-24 run missed the 0.25.5
+        there and lost four rounds."""
+        real = self._saved[1]
+        saved = {k: os.environ.get(k) for k in ("HOME", "XDG_CACHE_HOME", "DENO_DIR")}
+        try:
+            os.environ["HOME"] = self.caches
+            os.environ.pop("XDG_CACHE_HOME", None)
+            os.environ.pop("DENO_DIR", None)
+            deno = dict((label, pattern) for pattern, label in real())["deno cache"]
+            self.assertEqual(deno, os.path.join(self.caches, ".cache", "deno", "dl",
+                                                "esbuild-*", "esbuild-*"))
+            os.environ["XDG_CACHE_HOME"] = os.path.join(self.caches, "xdg")
+            deno = dict((label, pattern) for pattern, label in real())["deno cache"]
+            self.assertTrue(deno.startswith(os.path.join(self.caches, "xdg", "deno", "dl")),
+                            deno)
+            # And the search finds it there.
+            crow_core._esbuild_caches = real
+            found = self._fake(os.path.join(self.caches, "xdg", "deno", "dl",
+                                            "esbuild-0.25.5-1", "esbuild-linux-x64"), "0.25.5")
+            self.assertEqual(crow_core.find_esbuild(self._write("app.js", ""))[:3],
+                             (found, "0.25.5", "deno cache"))
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     def test_a_module_entry_runs_the_iife_argv_and_says_what_it_wrote(self):
         self._fake(os.path.join(self.root, "node_modules", ".bin", "esbuild"))

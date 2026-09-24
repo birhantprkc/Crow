@@ -27,7 +27,7 @@ the model — that is a separate line, printed at the end of the run.
 | **wl-clipboard** | Linux only, and only for pasting an image into the window. `xclip` under X11 |
 | **pywebview** | Window only, ~2 MB. Installed by `install.ps1` and by `install.sh` |
 | **Node** | Optional, never required, installed by neither script. Used by MCP servers started with `npx` or `node`, and by the syntax check `write_file`/`append_file`/`edit_file` run over `.js`/`.mjs`/`.cjs` files and inline HTML scripts (`node --check`, 5 s, first error only, #251). Without node the check is skipped and the write result has no syntax line — the write itself is unaffected, on both systems. Both preflights report it as a warning |
-| **esbuild** | Optional, for `build_bundle` only (#212). Never downloaded: Crow uses one already on the machine — `$CROW_ESBUILD`, a project's `node_modules`, `PATH`, then the deno and npx caches. Without one, `build_bundle` says so and writes nothing |
+| **esbuild** | Optional, for `build_bundle` only (#212). Never downloaded: Crow uses one already on the machine — `$CROW_ESBUILD`, the `bundler` setting (#274), a project's `node_modules`, `PATH`, then the deno and npx caches. Without one, `build_bundle` says so and writes nothing |
 | **bubblewrap** | Linux only, optional. The in-window browser panel's web process runs sandboxed only when `bwrap` exists (#226). The preflight warns without it |
 | **systemd-run** | Linux only, optional. With a reachable user manager, `render_page`'s browser (6 GiB) and `run_command`'s shell (8 GiB) run in a memory-bounded scope of their own (#213, #218); without it they are bounded by their clocks only. The preflight warns without it |
 
