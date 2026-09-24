@@ -1358,6 +1358,35 @@ class SpentBudgetTests(TurnLoopCase):
         self.turn(talk, max_tool_rounds=0)
         self.assertIn(("budget", 0), self.events.log)
 
+    def test_the_budget_is_said_after_the_last_tool_round(self):
+        """#278. 2026-09-24: 6 of 6 budget turns decoded one more round --
+        reasoning and a call, 298-4,290 tokens -- only to have the call
+        refused. With budget N the turn is N tool rounds and the forced
+        answer: N + 1 requests, and BUDGET_SPENT right after a tool result."""
+        talk = self.conversation()
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))])
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.dir}),
+                                cid="c2")])
+        # A model that always asks for one more: text AND a call in round 3.
+        self.serve([{"content": "here is where I got to"},
+                    _call_delta("read_file", json.dumps({"path": "x"}),
+                                cid="c3")])
+        self.serve([{"content": "the answer after a refused round"}])
+        result = self.turn(talk, max_tool_rounds=2)
+        self.assertEqual(len(self.bodies), 3,
+                         "a round was decoded only to have its call refused")
+        self.assertEqual(result.cost.rounds, 3)
+        self.assertEqual(self.events.names.count("tool_start"), 2)
+        payload = talk.payload()
+        spent = [n for n, m in enumerate(payload)
+                 if m["role"] == "user" and m["content"] == crow_core.BUDGET_SPENT]
+        self.assertEqual(len(spent), 1)
+        self.assertEqual(payload[spent[0] - 1]["role"], "tool")
+        self.assertEqual(payload[-1]["content"], "here is where I got to")
+        self.assertIsNone(payload[-1].get("tool_calls"))
+        self.assertIn(("budget", 2), self.events.log)
+        self.assertPrefixIsWhole(talk)
+
     def test_a_turn_that_stays_inside_the_budget_never_says_it(self):
         talk = self.conversation()
         self.serve([{"content": "no tools needed"}])
@@ -16438,6 +16467,44 @@ class TheGoalOutlivesEverythingTests(unittest.TestCase):
         goal = crow_core.goal_step_end(0, now=230.0)
         self.assertEqual(goal["steps"][0]["seconds"], 90.0)
         self.assertEqual(goal["steps"][0]["tokens"], 700)
+
+    def test_running_said_again_keeps_the_clock_of_the_running_step(self):
+        """#275. 2026-09-24, diorama run: the engine began step 2 at 10:07,
+        the model called goal_step(2, running) at 11:21 (session.json msg
+        148), and goal.json read started 11:21, seconds 0, tokens 0 -- the
+        73.5 min before were never billed. A running step said to be running
+        is the same state; the whole window lands on the step at the end."""
+        self.counter()
+        self.a_goal()
+        crow_core.goal_tokens_seen(1000)
+        crow_core.goal_step_begin(1, now=100.0)
+        crow_core.goal_tokens_seen(5000)
+        again = json.loads(crow_core.tool_goal_step(2, "running"))
+        self.assertTrue(again["ok"], again)
+        step = crow_core.goal_load()["steps"][1]
+        self.assertEqual(step["started"], 100.0, "the running clock restarted")
+        self.assertEqual(step["started_tokens"], 1000)
+        crow_core.goal_tokens_seen(6000)
+        goal = crow_core.goal_step_end(1, note="seen", now=4600.0)
+        self.assertEqual(goal["steps"][1]["seconds"], 4500.0)
+        self.assertEqual(goal["steps"][1]["tokens"], 5000)
+
+    def test_the_note_of_a_running_call_is_kept(self):
+        """#275: the tool answered ok and threw the note away -- in the run
+        it was the one line that said step 2 was NOT verified. It stays until
+        done/failed write theirs."""
+        self.counter()
+        self.a_goal()
+        crow_core.goal_step_begin(0, now=100.0)
+        crow_core.tool_goal_step(1, "running", note="judge 1/10, not verified")
+        self.assertEqual(crow_core.goal_load()["steps"][0]["note"],
+                         "judge 1/10, not verified")
+        crow_core.tool_goal_step(1, "running")
+        self.assertEqual(crow_core.goal_load()["steps"][0]["note"],
+                         "judge 1/10, not verified",
+                         "an empty running note wiped the last one")
+        goal = crow_core.goal_step_end(0, ok=False, note="gave up", now=200.0)
+        self.assertEqual(goal["steps"][0]["note"], "gave up")
 
     def test_a_complete_goal_is_open_again_once_a_step_reopens(self):
         """"Complete" darf nicht stehen bleiben, waehrend an einem Schritt

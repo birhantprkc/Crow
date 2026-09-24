@@ -192,6 +192,10 @@ a step off writes only `<root>/.crow/goal.json` and moves no byte of the prompt.
 the plan, the file carries the state — see
 [goals and subagents](../user-guide/goals-and-subagents.md).
 
+`running` on a step that is already running changes nothing on its clock: `started` and the token
+mark stay, so the whole stretch is billed when it closes (#275). A `note` given with `running` is
+stored on the step; `done`/`failed` replace it with theirs.
+
 A `done` is not taken on the model's word alone (#250). `goal_step(…, "done", note)` is refused
 when its own note reports a failure ("in spirit", "with deviation", "cannot be created",
 "unreachable", …), and when it has no note on a step last reported `failed`. A user's plan may

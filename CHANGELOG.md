@@ -45,7 +45,8 @@ Tickets open until robin's live check unless marked closed.
   hint reads a source URL that carries a query. The #175 byte-identical check keys on the full URL, so two views are two
   pages. 7 new tests, all red without the fix. The browser receiving the query is tested with a mocked browser only. No
   live render was run.
-
+- **The round that spent the tool budget was decoded and thrown away** (#278): 2026-09-24, 6 of 6 budget turns decoded one more round (298-4,290 tokens, 11,240 / 271 s in total) whose call was then refused. The budget is now said after the last tool round; a budget turn is 24 tool rounds + the answer (25 requests, was 26). `--max-tool-rounds 0` unchanged; the budget value stays 24.
+- **`goal_step running` on the running step restarted its clock** (#275): 2026-09-24, step 2's 73.5 min (10:07-11:21) and their tokens vanished from goal.json (`seconds 0, tokens 0`), and the note of that call was dropped. A repeated `running` keeps `started`; its note is stored.
 
 ## 2.5.0 — 2026-09-23
 
