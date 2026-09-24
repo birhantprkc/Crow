@@ -19842,10 +19842,16 @@ _SEEN: dict[tuple, str] = {}
 # #212: `build_bundle` is #93's run_command-after-edit_file case exactly. Edit a
 # source, build again with the same arguments -- the ordinary loop -- and a
 # cached answer would report the bundle from before the fix.
+# #273: `render_page` is the same loop with a picture. 2026-09-24, session.json
+# msg 72/74/76: edit `work/iso-test.html`, render it with the same arguments,
+# and the answer was the capture from BEFORE the edit under "The result was,
+# and still is:" -- the model then saved "render_page DEDUPES an identical
+# (path,width,height) triple" to memory. A missing page still stops at
+# RETRY_CAP, and #175's byte-identical check still names a frozen canvas.
 NEVER_CACHED = frozenset({"run_command", "memory", "skill",
                           "git_status", "git_diff", "git_log",
                           "git_commit", "git_push", "github_connect",
-                          "build_bundle"})
+                          "build_bundle", "render_page"})
 READ_GATED = frozenset({"write_file", "edit_file"})
 
 

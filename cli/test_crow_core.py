@@ -8432,6 +8432,22 @@ class TheStdioConnectionTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertNotIn("already called", second)
 
+    def test_a_render_after_an_edit_is_a_new_render(self):
+        """#273: edit, then the identical render_page -- the second call must
+        run, not replay the capture from before the edit (2026-09-24 msg 76)."""
+        crow_core._SEEN.clear()
+        self.addCleanup(crow_core._SEEN.clear)
+        shots = iter(["render-1.png before", "render-2.png after"])
+        real = crow_core.run_tool
+        crow_core.run_tool = lambda name, arguments: next(shots)
+        self.addCleanup(setattr, crow_core, "run_tool", real)
+        args = '{"path": "work/iso-test.html"}'
+        first, repeat_a = crow_core.run_tool_cached("render_page", args)
+        second, repeat_b = crow_core.run_tool_cached("render_page", args)
+        self.assertFalse(repeat_b)
+        self.assertEqual(second, "render-2.png after")
+        self.assertNotIn("already called", second)
+
     def test_a_built_in_is_still_answered_from_the_turn_cache(self):
         """NEGATIVE: the exemption is for foreign processes, not the removal of
         the guard that closed the 2026-08-09 turn -- eight identical reads of a
