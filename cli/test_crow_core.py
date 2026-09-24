@@ -14290,9 +14290,10 @@ class ALocalPageKeepsItsQueryTests(unittest.TestCase):
         self.assertNotIn("byte-identical", other)
         again = self._render("index.html?shot=stall")
         self.assertIn("byte-identical", again)
-        self.assertNotEqual(
-            crow_core._cache_key("render_page", '{"path":"index.html?shot=default"}'),
-            crow_core._cache_key("render_page", '{"path":"index.html?shot=stall"}'))
+        # #273: render_page is never cached at all, so no view can be
+        # answered from another view's (or its own earlier) capture.
+        self.assertIsNone(
+            crow_core._cache_key("render_page", '{"path":"index.html?shot=default"}'))
 
     def test_file_url_windows_drive_unc_and_posix(self):
         """RFC 8089 E.2/E.3, gegen die gemessene Ausgabe von
