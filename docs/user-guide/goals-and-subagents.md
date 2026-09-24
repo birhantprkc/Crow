@@ -71,8 +71,12 @@ also needs:
 
 - *A capture from this goal in the note.* A path to a `.png`/`.jpg`/`.webp` that exists and was
   written after the goal was created. A bare name such as `render-20260923-232855.png` is looked up
-  in `.crow/renders/`. A step that only plans ("Think and plan: … write PLAN.md") is exempt, unless
-  it also builds.
+  in `.crow/renders/`. A step that only plans is exempt: its leading phrase (before the first `:`,
+  `,` or `(`) starts with think/plan/research/read/outline, and it names no making verb (build,
+  implement, render, draw, code, write the page). "verify"/"fix" later in such a step count as
+  planning when it writes a document (`.md`, plan, notes, report), so "Think and plan: …, verify
+  findings, write PLAN.md" is exempt and "Verify offline via file://, fix, report fps" is not.
+  The refusal says so.
 - *The judge's bar, when a judge scored the step.* If [`judge`](../reference/tools.md#judge-266)
   stored a verdict on the step, its lowest score must be at least the threshold: **8** by default,
   `judge_threshold` in `settings.json` (window) or `--judge-threshold N` (terminal). The refusal

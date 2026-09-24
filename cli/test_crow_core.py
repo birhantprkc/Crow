@@ -16227,6 +16227,41 @@ class AVisualStepNeedsAPictureTests(unittest.TestCase):
     def test_a_planning_step_needs_no_picture(self):
         self.assertTrue(self.step(1, "done", "PLAN.md written")["ok"])
 
+    DIORAMA_STEP_1 = ("Think and plan: read DIORAMA-PROMPT.md, research open "
+                      "questions with delegate subtasks, verify findings, "
+                      "write PLAN.md (scene layout on the voxel grid, "
+                      "rendering architecture, perf budget, risks)")
+
+    def diorama(self, *steps):
+        return {"title": "Neon night market voxel diorama",
+                "steps": [{"text": t} for t in steps]}
+
+    def test_a_planning_step_that_verifies_findings_needs_no_picture(self):
+        """#267 follow-up, 2026-09-24 run: 'verify findings' in the planning
+        step made it visual, and its `done` on PLAN.md was refused."""
+        goal = self.diorama(self.DIORAMA_STEP_1)
+        self.assertFalse(crow_core.goal_step_needs_render(goal, 0))
+        crow_core.goal_command("Neon night market voxel diorama | %s | Build "
+                               "geometry + camera" % self.DIORAMA_STEP_1)
+        self.assertTrue(self.step(1, "done", "PLAN.md written")["ok"])
+
+    def test_verify_and_build_steps_keep_the_gate(self):
+        """NEGATIVE: robin's step 9 and a build step stay visual, and a
+        planning lead does not excuse a step that builds or checks the page."""
+        goal = self.diorama("Verify offline via file://, fix, report fps",
+                            "Build geometry + camera, lights and fog",
+                            "Think and plan the page, then build it",
+                            "plan and build the scene",
+                            "Plan: verify the page loads")
+        for n in range(5):
+            self.assertTrue(crow_core.goal_step_needs_render(goal, n),
+                            goal["steps"][n]["text"])
+
+    def test_the_refusal_says_planning_steps_are_exempt(self):
+        out = self.step(2, "done", "geometry done")
+        self.assertFalse(out["ok"])
+        self.assertIn("Planning steps are exempt", out["error"])
+
     def test_a_non_visual_goal_is_unchanged(self):
         """NEGATIVE: a parser is not asked for a screenshot."""
         crow_core.goal_command("tokenizer | build it | test it")

@@ -907,11 +907,14 @@ def reasoning_change_rerenders(current: str | None, wanted: str | None,
 # send, and a manifest is data, not a licence to widen the request body.
 #
 # `presence_penalty` IS THE FIFTH (2026-09-18), AND IT IS HERE BECAUSE ITS ABSENCE
-# WAS A VALUE. crow-nest's `serve` fills an absent field with its data sheet's
-# NON-THINKING row, 1.5, applied over every token of the answer -- while
-# llama-server reads an absent field as 0.0. So the same client ran the same
-# model under two samplers and nobody had chosen either: the rule MIN_P already
-# states, met from the other side. It travels exactly like top_k: absent unless
+# WAS A VALUE. On 2026-09-18 crow-nest's `serve` filled an absent field with its
+# data sheet's NON-THINKING row, 1.5, applied over every token of the answer --
+# while llama-server reads an absent field as 0.0. So the same client ran the
+# same model under two samplers and nobody had chosen either: the rule MIN_P
+# already states, met from the other side. crow-nest has since changed its
+# default (#91, 56e0297: absent = 0; #111 fills temperature/top_p/top_k/min_p
+# from the model card's row, presence_penalty not), and a server default can
+# change again: the field stays, and Crow sends its 0.0 explicitly. It travels exactly like top_k: absent unless
 # the model's manifest entry names it, so no request that exists today changes.
 SAMPLING_FIELDS = ("temperature", "top_p", "min_p", "top_k", "presence_penalty")
 
@@ -6692,8 +6695,9 @@ def stream_reply(
         body["top_k"] = top_k
     if presence_penalty is not None:
         # ABSENT BY DEFAULT, LIKE top_k, AND SENT FOR THE OPPOSITE REASON: not to
-        # add a penalty but to stop a server adding its own. crow-nest reads an
-        # absent field as 1.5 over the whole answer, llama-server as 0.0 -- see
+        # add a penalty but to stop a server adding its own. crow-nest read an
+        # absent field as 1.5 over the whole answer until #91 (56e0297; 0 since,
+        # not taken from the model card by #111), llama-server reads 0.0 -- see
         # SAMPLING_FIELDS. 0.0 IS A VALUE and must travel, hence `is not None`.
         body["presence_penalty"] = presence_penalty
     # #225: a fixed point is sent its word on every request.
@@ -11619,44 +11623,79 @@ def tool_edit_file(path: str, old: str = "", new: "str | None" = None, **_) -> s
                 f"{READ_SCOPE_HINT}. Call read_file on it, then edit.")
     if state[0] == "changed":
         return f"error: refusing to edit {path}: {READ_STALE}"
+    # #283. THE FILE IS READ AS IT IS (newline=""), not through universal
+    # newlines: reading CRLF as LF and writing with newline="" turned every
+    # line of a CRLF file into LF on a one-line edit (measured: 40 CRLF ->
+    # 0 CRLF). 'old' is matched against the LF view -- read_file shows LF --
+    # and only the matched span is replaced in the real text.
     try:
-        with open(path, encoding="utf-8") as fh:
-            data = fh.read()
+        with open(path, encoding="utf-8", newline="") as fh:
+            raw = fh.read()
     except OSError as exc:
         return f"error: could not read {path}: {exc}"
+    data, to_raw = _eol_view(raw)
+    old = old.replace("\r\n", "\n")
+    new = new.replace("\r\n", "\n")
     hits = data.count(old)
+    note = ""
     if hits == 0:
         # #276. Measured 2026-09-23/24: 16 of 147 edit_file calls missed,
         # 3 of them on a uniform indentation drift alone (the space after
         # read_file's "N:" copied into every line) -- those land here, under
         # the narrow rule _edit_by_indent spells out, and say so.
         shifted = _edit_by_indent(data, old, new)
-        if shifted is not None:
-            text, lines, why = shifted
-            try:
-                with open(path, "w", encoding="utf-8", newline="") as fh:
-                    fh.write(text)
-            except OSError as exc:
-                return f"error: could not write {path}: {exc}"
-            _mark_read(path)
-            return (f"replaced 1 occurrence in {path} -- matched only after "
-                    f"ignoring indentation: {why} ({lines})"
-                    + _edit_check(path, data))
-        # THE FIRST LINE STAYS WHAT IT WAS: #202's brake keys on it. What
-        # follows is the text the model needs to fix its call -- 12 of the 15
-        # reconstructable misses had a region >= 0.85 similar to 'old'.
-        return f"error: 'old' does not appear in {path}" + _edit_miss_hint(data, old)
-    if hits > 1:
+        if shifted is None:
+            # THE FIRST LINE STAYS WHAT IT WAS: #202's brake keys on it. What
+            # follows is the text the model needs to fix its call -- 12 of the
+            # 15 reconstructable misses had a region >= 0.85 similar to 'old'.
+            return (f"error: 'old' does not appear in {path}"
+                    + _edit_miss_hint(data, old))
+        start, end, new, lines, why = shifted
+        note = (" -- matched only after ignoring indentation: %s (%s)"
+                % (why, lines))
+    elif hits > 1:
         return f"error: 'old' appears {hits} times in {path} -- include more context to make it unique"
+    else:
+        start = data.index(old)
+        end = start + len(old)
+    rs, re_ = to_raw(start), to_raw(end)
+    text = raw[:rs] + new.replace("\n", _eol_for(raw, raw[rs:re_])) + raw[re_:]
     try:
         with open(path, "w", encoding="utf-8", newline="") as fh:
-            fh.write(data.replace(old, new, 1))
+            fh.write(text)
     except OSError as exc:
         return f"error: could not write {path}: {exc}"
     # #215-H: THE EDIT MOVED THE STAMP, and crow made the move -- without this
     # the model's own second edit would read as someone else's change.
     _mark_read(path)
-    return f"replaced 1 occurrence in {path}" + _edit_check(path, data)
+    return f"replaced 1 occurrence in {path}" + note + _edit_check(path, raw)
+
+
+def _eol_view(raw: str):
+    """#283. The text with every CRLF read as LF, and the map from an offset
+    in that view back to the offset in `raw`. A lone CR or LF stays what it
+    is, so a file with mixed endings keeps the lines the edit did not touch."""
+    import bisect
+
+    if "\r\n" not in raw:
+        return raw, lambda i: i
+    crs = []                        # view offsets of the LFs that had a CR
+    for n, m in enumerate(re.finditer("\r\n", raw)):
+        crs.append(m.start() - n)
+    return (raw.replace("\r\n", "\n"),
+            lambda i: i + bisect.bisect_left(crs, i))
+
+
+def _eol_for(raw: str, span: str) -> str:
+    """#283. The line ending the replacement is written with: the one the
+    replaced span used, and when it held no line break, the file's
+    majority. An LF file stays LF, a CRLF file stays CRLF."""
+    for text in (span, raw):
+        crlf = text.count("\r\n")
+        lf = text.count("\n") - crlf
+        if crlf or lf:
+            return "\r\n" if crlf > lf else "\n"
+    return "\n"
 
 
 # #276. What a missed 'old' is answered with, and where that stops: a file
@@ -11717,12 +11756,14 @@ def _say_pad(pad: str) -> str:
 
 
 def _edit_by_indent(data: str, old: str, new: str
-                    ) -> "tuple[str, str, str] | None":
+                    ) -> "tuple[int, int, str, str, str] | None":
     """#276. The one inexact match edit_file accepts: 'old' is whole lines,
     exactly ONE window of the file equals it line by line after strip(), the
     indentation differs by the SAME prefix on every non-blank line, and every
-    non-blank line of 'new' can take that same shift. Returns (the new file
-    text, "a-b", what differed), or None -- then the miss is reported.
+    non-blank line of 'new' can take that same shift. Returns (start, end of
+    the replaced span in `data`, the shifted 'new', "a-b", what differed), or
+    None -- then the miss is reported. A span, not the whole text, so the
+    caller can write it into the file's own line endings (#283).
 
     NOT WHITESPACE IN GENERAL. Collapsing every whitespace run would also have
     caught the one measured line-wrap miss, but then the replaced span is no
@@ -11772,7 +11813,7 @@ def _edit_by_indent(data: str, old: str, new: str
     else:
         why = "'old' differed from the file only in trailing whitespace"
     lines = "lines %d-%d" % (s + 1, s + m) if m > 1 else "line %d" % (s + 1)
-    return data[:start] + "\n".join(out) + data[end:], lines, why
+    return start, end, "\n".join(out), lines, why
 
 
 def _edit_miss_hint(data: str, old: str) -> str:
@@ -18034,6 +18075,18 @@ _GOAL_PLANNING = re.compile(r"(?i)^\W*(?:think|plan|research|read|outline|"
                             r"design doc|write (?:the |a )?plan)\b")
 _GOAL_BUILDS = re.compile(r"(?i)\b(?:build|implement|render|draw|code|write "
                           r"(?:the )?(?:page|html|shader|scene)|fix|verify)\b")
+# #267 follow-up, 2026-09-24 diorama run: "Think and plan: read
+# DIORAMA-PROMPT.md, research ..., verify findings, write PLAN.md (...)" was
+# refused `done` because "verify" is a build verb. The step's LEADING PHRASE
+# (before the first ':', ',' or '(') says what kind of step it is; "verify"
+# and "fix" further on are part of planning when the step's deliverable is a
+# document. A real making verb anywhere ("build", "render", "write the page")
+# still makes it visual, so "Think and plan the page, then build it" keeps
+# the gate, and so does robin's "Verify offline via file://, fix, report fps".
+_GOAL_MAKES = re.compile(r"(?i)\b(?:build|implement|render|draw|code|write "
+                         r"(?:the )?(?:page|html|shader|scene))\b")
+_GOAL_DOC = re.compile(r"(?i)(?:\.(?:md|txt|rst)\b|\b(?:plan|notes|report|"
+                       r"design doc)\b)")
 _GOAL_IMAGE_CITED = re.compile(r"[^\s'\"`(),;<>\[\]]+\.(?:png|jpe?g|webp)\b",
                                re.I)
 
@@ -18086,7 +18139,15 @@ def goal_step_needs_render(goal: "dict | None", index: int) -> bool:
     if not 0 <= index < len(steps):
         return False
     text = str(steps[index].get("text") or "")
-    return not (_GOAL_PLANNING.search(text) and not _GOAL_BUILDS.search(text))
+    head = re.split(r"[:,(]", text, maxsplit=1)[0]
+    if not _GOAL_PLANNING.search(head) or _GOAL_BUILDS.search(head):
+        return True
+    if _GOAL_MAKES.search(text):
+        return True
+    # Only "verify"/"fix" past the leading phrase: planning, when the rest of
+    # the step names a document it writes ("Plan: verify the page" does not).
+    return (bool(_GOAL_BUILDS.search(text))
+            and not _GOAL_DOC.search(text[len(head):]))
 
 
 def _render_candidates(cited: str) -> "list[str]":
@@ -18138,7 +18199,11 @@ def goal_evidence_refusal(goal: "dict | None", index: int,
                 "capture, call judge on it, then report done with the capture's "
                 "path in the note (e.g. %s/render-YYYYMMDD-HHMMSS.png). If "
                 "nothing can be rendered, call goal_step with 'failed' and say "
-                "why." % (index + 1, where.replace(os.sep, "/")))
+                "why. (Planning steps are exempt: one that starts with "
+                "think/plan/research/read and writes a document such as "
+                "PLAN.md needs no picture. This step's text reads as making "
+                "or checking something visible.)"
+                % (index + 1, where.replace(os.sep, "/")))
     verdict = goal["steps"][index].get("judge")
     low = verdict.get("min") if isinstance(verdict, dict) else None
     if isinstance(low, (int, float)) and low < JUDGE_THRESHOLD:
