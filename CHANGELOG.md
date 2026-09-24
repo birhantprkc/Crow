@@ -191,7 +191,9 @@ robin's live check unless the ticket says otherwise.
 - **#288** counts a tool result's hosts by URL only: a host that appears there as a bare name, and nowhere else,
   is refused.
 - **#269/#251 need node on PATH** for JS/HTML; neither installer installs node.
-- `check_gui_prereqs` fails on 12 glyphs missing from Google Sans Code, as on 2.5.0 (0c3e392).
+- `check_gui_prereqs` (not in CI) reports 2 of 3 prerequisites: point (ii) fails on 13 glyphs missing from
+  Google Sans Code (both shipped faces, 26 problems) — the 12 of 2.5.0 (0c3e392) plus U+1F3A4 🎤, new with the phone
+  microphone (#290, 4d753af; `cli/crow_core.py:18037`, `cli/crow_gui.py:8740`). Measured 2026-09-24 at 0a0304b.
 - Still open from 2.5.0: the Windows installer bundle (#196); `sampling_no_thinking`'s presence_penalty 1.5 (#246).
 
 ## 2.5.0 — 2026-09-23
