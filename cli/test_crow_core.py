@@ -3040,6 +3040,13 @@ class SpotFallbackTests(unittest.TestCase):
                          ("global", "the key was refused (401)"))
         self.assertEqual(verdict('HTTP 404: {"error":{"message":"No endpoints '
                                  'found for unit/x:free."}}')[0], "spot")
+        # #284: a retired free slug, the 404 of 2026-09-24's diorama run
+        self.assertEqual(verdict(
+            'HTTP 404 from https://openrouter.ai/api/v1/chat/completions: '
+            '{"error":{"message":"This model is unavailable for free. The paid '
+            'version is available now - use this slug instead: '
+            'inclusionai/ling-3.0-flash-vl","code":404}}',
+            "inclusionai/ling-3.0-flash-vl:free"), ("spot", "no longer free (404)"))
         for sick in ('HTTP 429 from u: rate-limited upstream',
                      'HTTP 404 from u: {"error":{"message":"Provider '
                      'returned error","code":404}}',

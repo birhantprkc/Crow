@@ -23790,6 +23790,11 @@ def _spot_verdict(detail: str, model: str = "") -> "tuple[str, str]":
         if "moderation" in low or "flagged" in low:
             return "spot", "moderation flag (403)"
         return "spot", "forbidden for this client (403)"
+    # #284: a retired free slug ("This model is unavailable for free. The
+    # paid version is available now") will never answer again -- its word
+    # "unavailable" must not reach _RETRYABLE and cost a transient attempt.
+    if "unavailable for free" in low:
+        return "spot", "no longer free%s" % (" (%d)" % code if code else "")
     if any(m in low for m in _SPOT_REFUSED):
         return "spot", "no provider serves it%s" % (" (%d)" % code if code else "")
     if code in _TRANSIENT_CODES or any(m in low for m in _RETRYABLE):
