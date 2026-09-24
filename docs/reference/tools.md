@@ -286,6 +286,30 @@ then the directory check, and only then touch the disk.
 | directories (#244) | a path holding a control character (`pipeline.py\n`) is refused every time, naming the stripped path when that is clean. When the parent is missing, the first missing name is compared with the directories beside it (#221's edit metric, or a proper prefix of exactly one: `w` → `work`) and refused **once** with `did you mean: …` and `Nothing was created`; the identical call again creates it. Every created directory is said: `(new directory: X)`. Measured in the stored sessions: `testcases/w/fs.py` beside `testcases/work` (2026-09-18), 6 of 111 write paths held a control character, 4 of them a trailing newline |
 | arguments | `file_path` is taken as `path`, and for `write_file` `file_text` as `content` ([Argument names](#argument-names-207-214-215)) |
 
+### `edit_file` when 'old' misses (#276)
+
+The first line stays `error: 'old' does not appear in <path>` (the goal brake counts it).
+Below it:
+
+| case | answer |
+|---|---|
+| a region resembles 'old' | `The closest text is at lines a-b (similarity r).`, then either `It differs only in whitespace: …` (indentation, tabs against spaces, line breaks) or up to 6 `file N:` / `old:` line pairs; then the file lines with 2 lines of context in `N: text` form (at most 24 lines, 160 chars each, 2,500 chars in all) |
+| nothing resembles it | `No part of the file resembles 'old'. read_file it again …` |
+| file over 2 MiB | the first line only |
+
+One inexact match is applied: 'old' is whole lines, exactly one window of the file equals it
+line by line after `strip()`, every non-blank line differs by the same leading-whitespace prefix,
+and every non-blank line of 'new' can take that shift. Then 'new' is shifted the same way and the
+result says so: `replaced 1 occurrence in P -- matched only after ignoring indentation: 'old'
+had 1 leading space too many on every line, and 'new' was shifted the same way (lines 112-129)`.
+The syntax check (#269) runs as on an exact edit. Inner whitespace, tabs against spaces, uneven
+indentation, a wrapped line and two candidate windows are never applied.
+
+Measured 2026-09-23/24 (robin's diorama runs, 147 `edit_file` calls): 16 missed. Reconstructed:
+3 uniform indentation (applied now; the m292 replay is byte-identical to the model's own retry),
+1 line wrap, 6 one-token drift, 3 non-contiguous lines, 2 stale after the model's own edit,
+1 not reconstructable. CRLF, tabs and escaped quotes: 0.
+
 ### `search_text` and `find_files` (#207, #215)
 
 Both walk the tree with one shared prune list (`.git node_modules __pycache__ .venv venv build

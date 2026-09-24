@@ -11505,6 +11505,9 @@ def tool_edit_file(path: str, old: str = "", new: "str | None" = None, **_) -> s
     A patch format would be more expressive and needs fuzzy matching to survive
     a model that mis-remembers whitespace. Exact match plus a uniqueness check
     fails loudly instead of guessing, which is the behaviour worth having first.
+    #276 widens it by exactly one measured case -- a uniform indentation drift
+    with one unambiguous window (_edit_by_indent) -- and answers every other
+    miss with the closest text instead of one bare line (_edit_miss_hint).
     """
     path = _rooted(path)                            # #177
     outside = _outside_root(path)                   # #92, and before the read rule
@@ -11537,7 +11540,26 @@ def tool_edit_file(path: str, old: str = "", new: "str | None" = None, **_) -> s
         return f"error: could not read {path}: {exc}"
     hits = data.count(old)
     if hits == 0:
-        return f"error: 'old' does not appear in {path}"
+        # #276. Measured 2026-09-23/24: 16 of 147 edit_file calls missed,
+        # 3 of them on a uniform indentation drift alone (the space after
+        # read_file's "N:" copied into every line) -- those land here, under
+        # the narrow rule _edit_by_indent spells out, and say so.
+        shifted = _edit_by_indent(data, old, new)
+        if shifted is not None:
+            text, lines, why = shifted
+            try:
+                with open(path, "w", encoding="utf-8", newline="") as fh:
+                    fh.write(text)
+            except OSError as exc:
+                return f"error: could not write {path}: {exc}"
+            _mark_read(path)
+            return (f"replaced 1 occurrence in {path} -- matched only after "
+                    f"ignoring indentation: {why} ({lines})"
+                    + _edit_check(path, data))
+        # THE FIRST LINE STAYS WHAT IT WAS: #202's brake keys on it. What
+        # follows is the text the model needs to fix its call -- 12 of the 15
+        # reconstructable misses had a region >= 0.85 similar to 'old'.
+        return f"error: 'old' does not appear in {path}" + _edit_miss_hint(data, old)
     if hits > 1:
         return f"error: 'old' appears {hits} times in {path} -- include more context to make it unique"
     try:
@@ -11549,6 +11571,240 @@ def tool_edit_file(path: str, old: str = "", new: "str | None" = None, **_) -> s
     # the model's own second edit would read as someone else's change.
     _mark_read(path)
     return f"replaced 1 occurrence in {path}" + _edit_check(path, data)
+
+
+# #276. What a missed 'old' is answered with, and where that stops: a file
+# larger than this gets the bare line (the search is per line, not free), and
+# the hint is bounded so a miss never costs more context than a ranged read.
+EDIT_HINT_MAX_BYTES = 2 * 1024 * 1024
+EDIT_HINT_LINES = 24
+EDIT_HINT_WIDTH = 160
+EDIT_HINT_CHARS = 2500
+EDIT_HINT_DIFFS = 6
+
+
+def _lead(line: str) -> str:
+    return line[:len(line) - len(line.lstrip())]
+
+
+def _old_lines(old: str) -> "tuple[list[str], bool]":
+    """'old' as lines, and whether it ended in a newline."""
+    lines = old.split("\n")
+    trail = len(lines) > 1 and lines[-1] == ""
+    if trail:
+        lines.pop()
+    return lines, trail
+
+
+def _indent_shift(region: "list[str]", olds: "list[str]") -> "tuple[str, str] | None":
+    """The ONE leading-whitespace difference between the file's lines and
+    'old''s: ("-", x) when every non-blank line of 'old' carries x more,
+    ("+", x) when every one lacks x, ("", "") when the indentation agrees.
+    None when the lines disagree among themselves, or tabs meet spaces --
+    then there is no single shift that could be applied to 'new'."""
+    shift = None
+    for have, said in zip(region, olds):
+        if not said.strip():
+            continue
+        fi, oi = _lead(have), _lead(said)
+        if oi.startswith(fi):
+            step = ("-", oi[len(fi):])
+        elif fi.startswith(oi):
+            step = ("+", fi[len(oi):])
+        else:
+            return None
+        if not step[1]:
+            step = ("", "")
+        if shift is None:
+            shift = step
+        elif step != shift:
+            return None
+    return shift
+
+
+def _say_pad(pad: str) -> str:
+    if pad == " " * len(pad):
+        return "%d leading space%s" % (len(pad), "" if len(pad) == 1 else "s")
+    if pad == "\t" * len(pad):
+        return "%d leading tab%s" % (len(pad), "" if len(pad) == 1 else "s")
+    return "%d characters of leading whitespace" % len(pad)
+
+
+def _edit_by_indent(data: str, old: str, new: str
+                    ) -> "tuple[str, str, str] | None":
+    """#276. The one inexact match edit_file accepts: 'old' is whole lines,
+    exactly ONE window of the file equals it line by line after strip(), the
+    indentation differs by the SAME prefix on every non-blank line, and every
+    non-blank line of 'new' can take that same shift. Returns (the new file
+    text, "a-b", what differed), or None -- then the miss is reported.
+
+    NOT WHITESPACE IN GENERAL. Collapsing every whitespace run would also have
+    caught the one measured line-wrap miss, but then the replaced span is no
+    longer whole lines and nobody knows how 'new' should be indented -- in
+    Python that is a change of meaning. Aider draws the same line
+    (replace_part_with_missing_leading_whitespace: one uniform offset, applied
+    to the replacement too); Codex' first-match trim has no uniqueness check.
+    """
+    if "\r" in old or len(data) > EDIT_HINT_MAX_BYTES:
+        return None
+    olds, trail = _old_lines(old)
+    if not any(line.strip() for line in olds):
+        return None
+    flines = data.split("\n")
+    fstrip = [line.strip() for line in flines]
+    key = [line.strip() for line in olds]
+    m = len(key)
+    wins = [s for s in range(len(flines) - m + 1)
+            if fstrip[s] == key[0] and fstrip[s:s + m] == key]
+    if len(wins) != 1:
+        return None
+    s = wins[0]
+    region = flines[s:s + m]
+    shift = _indent_shift(region, olds)
+    if shift is None:
+        return None
+    sign, pad = shift
+    out = []
+    for line in new.split("\n"):
+        if line.strip() and sign == "-":
+            if not line.startswith(pad):
+                return None
+            line = line[len(pad):]
+        elif line.strip() and sign == "+":
+            line = pad + line
+        out.append(line)
+    start = sum(len(line) + 1 for line in flines[:s])
+    end = start + len("\n".join(region))
+    if trail and end < len(data):
+        end += 1
+    if sign == "-":
+        why = ("'old' had %s too many on every line, and 'new' was shifted "
+               "the same way" % _say_pad(pad))
+    elif sign == "+":
+        why = ("'old' had %s too few on every line, and 'new' was indented "
+               "the same way" % _say_pad(pad))
+    else:
+        why = "'old' differed from the file only in trailing whitespace"
+    lines = "lines %d-%d" % (s + 1, s + m) if m > 1 else "line %d" % (s + 1)
+    return data[:start] + "\n".join(out) + data[end:], lines, why
+
+
+def _edit_miss_hint(data: str, old: str) -> str:
+    """#276. Where the text 'old' meant most likely is, and what differs --
+    the part the bare "does not appear" never said. Aider answers a missed
+    SEARCH block the same way ("Did you mean to match some of these actual
+    lines", find_similar_lines). Bounded: EDIT_HINT_LINES lines of the file,
+    EDIT_HINT_DIFFS differing lines, EDIT_HINT_CHARS in all."""
+    import difflib
+
+    if not data or len(data) > EDIT_HINT_MAX_BYTES:
+        return ""
+    flines = data.split("\n")
+    olds, _ = _old_lines(old)
+    m = len(olds)
+    index: "dict[str, list[int]]" = {}
+    for i, line in enumerate(flines):
+        if line.strip():
+            index.setdefault(line.strip(), []).append(i)
+    # WINDOWS VOTED FOR BY LINES THAT SURVIVED INTACT, then -- when none did,
+    # as with a one-line 'old' holding one wrong token -- by the lines closest
+    # to 'old''s longest ones. A line found everywhere ('}') votes for nothing.
+    votes: "dict[int, int]" = {}
+    for j, said in enumerate(olds):
+        hits = index.get(said.strip(), ()) if said.strip() else ()
+        if len(hits) > 50:
+            continue
+        for i in hits:
+            votes[i - j] = votes.get(i - j, 0) + 1
+    if not votes and len(index) <= 20000:
+        longest = sorted(range(m), key=lambda j: -len(olds[j].strip()))[:3]
+        for j in longest:
+            if not olds[j].strip():
+                continue
+            for near in difflib.get_close_matches(olds[j].strip(), list(index),
+                                                  n=3, cutoff=0.6):
+                for i in index[near][:50]:
+                    votes[i - j] = votes.get(i - j, 0) + 1
+    if not votes:
+        return ("\nNo part of the file resembles 'old'. read_file it again and"
+                " copy 'old' from what it shows.")
+    top = sorted(votes, key=lambda s: -votes[s])[:5]
+    said = "\n".join(olds)
+
+    def clamp(s: int) -> int:
+        return max(0, min(s, len(flines) - m)) if len(flines) >= m else 0
+
+    scored = []
+    for s in {clamp(s) for s in top}:
+        have = "\n".join(flines[s:s + m])
+        scored.append((difflib.SequenceMatcher(None, have, said,
+                                               autojunk=False).ratio(), -s))
+    ratio, s = max(scored)
+    s = -s
+    region = flines[s:s + m]
+    # A WHITESPACE-ONLY MISS MAY SPAN ANOTHER NUMBER OF LINES: 'old' wrapped a
+    # line the file holds whole (measured, 2026-09-24 m226).
+    flat = " ".join(said.split())
+    for a, k in ((a, k) for a in (s, s - 1, s + 1) for k in range(1, m + 3)):
+        if 0 <= a and a + k <= len(flines) and " ".join(
+                "\n".join(flines[a:a + k]).split()) == flat:
+            s, region = a, flines[a:a + k]
+            break
+    if len(region) != m:
+        ratio = difflib.SequenceMatcher(None, "\n".join(region), said,
+                                        autojunk=False).ratio()
+    head = ("\nThe closest text is at %s (similarity %.2f)."
+            % ("lines %d-%d" % (s + 1, s + len(region)) if len(region) > 1
+               else "line %d" % (s + 1), ratio))
+    if " ".join("\n".join(region).split()) == flat:
+        shift = (_indent_shift(region, olds)
+                 if len(region) == m else None)
+        if shift and shift[0]:
+            what = ("every line of 'old' has %s too %s"
+                    % (_say_pad(shift[1]), "many" if shift[0] == "-" else "few"))
+            if shift == ("-", " "):
+                what += " (read_file's \"N: \" prefix, space included, is not part of the line)"
+        elif len(region) != m:
+            what = ("line breaks: 'old' spreads over %d line(s) what the file"
+                    " holds in %d"
+                    % (m, len(region)))
+        elif ("\t" in "".join(region)) != ("\t" in said):
+            what = "tabs against spaces"
+        else:
+            what = "indentation, spaces or line breaks"
+        body = [" It differs only in whitespace: %s." % what]
+    else:
+        body = [" What differs (file line, then 'old'):"]
+        shown = 0
+        ops = difflib.SequenceMatcher(None, region, olds, autojunk=False).get_opcodes()
+        for tag, i1, i2, j1, j2 in ops:
+            if tag == "equal":
+                continue
+            for i in range(i1, i2):
+                if shown < EDIT_HINT_DIFFS:
+                    body.append("  file %d: %s" % (s + i + 1,
+                                                   region[i].rstrip()[:EDIT_HINT_WIDTH]))
+                shown += 1
+            for j in range(j1, j2):
+                if shown < EDIT_HINT_DIFFS:
+                    body.append("  old%s: %s" % (" " * (len(str(s + i2)) + 2),
+                                                 olds[j].rstrip()[:EDIT_HINT_WIDTH]))
+                shown += 1
+        if shown > EDIT_HINT_DIFFS:
+            body.append("  [%d more differing lines]" % (shown - EDIT_HINT_DIFFS))
+    lo = max(0, s - 2)
+    hi = min(len(flines), s + len(region) + 2, lo + EDIT_HINT_LINES)
+    shown_lines = ["%d: %s" % (n + 1, flines[n].rstrip()[:EDIT_HINT_WIDTH])
+                   for n in range(lo, hi)]
+    tail = ("Copy 'old' from these lines as they are now, without the \"N: \" "
+            "prefix:")
+    out = head + "\n".join(body) + "\n" + tail + "\n" + "\n".join(shown_lines)
+    if hi < s + len(region):
+        out += "\n[%d more lines -- read_file %d-%d]" % (s + len(region) - hi, hi + 1,
+                                                       s + len(region))
+    if len(out) > EDIT_HINT_CHARS:
+        out = out[:EDIT_HINT_CHARS].rsplit("\n", 1)[0] + "\n[cut]"
+    return out
 
 
 def _edit_check(path: str, before: str) -> str:

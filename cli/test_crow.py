@@ -3085,7 +3085,8 @@ class EditFileHitCountTests(ToolLayerCase):
 
     def test_the_count_is_on_raw_text_with_no_whitespace_tolerance(self):
         """MEASURED BEHAVIOUR, and the first thing a fuzzy rebuild changes:
-        'call(a,  b)' with two spaces does not match 'call(a, b)'."""
+        'call(a,  b)' with two spaces does not match 'call(a, b)'. #276 forgives
+        leading indentation only, so this still misses."""
         path = self._make("code.py", "call(a,  b)\n")
         crow.tool_read_file(path)
         self.assertIn("does not appear",
@@ -3105,6 +3106,143 @@ class EditFileHitCountTests(ToolLayerCase):
         crow.tool_read_file(first)
         self.assertIn("before editing it",
                       crow.tool_edit_file(second, old="alpha", new="beta"))
+
+
+class EditFileMissTests(ToolLayerCase):
+    """#276. A missed 'old' is answered with the closest text and what differs,
+    and a miss on uniform indentation alone lands -- nothing wider.
+
+    Measured 2026-09-23/24 over robin's diorama runs: 16 of 147 edit_file calls
+    missed; 3 on a uniform indentation drift (1 space from read_file's "N: "
+    prefix, twice), 1 on a line wrap, the other 12 on text that is not in the
+    file. The bare "does not appear" line gave the model nothing to fix.
+    """
+
+    SRC = ("def f(a):\n"
+           "    x = a + 1\n"
+           "    y = x * 2\n"
+           "    return y\n"
+           "\n"
+           "def g():\n"
+           "    return 7\n")
+
+    def _miss(self, old, new="z = 0", text=None, name="code.py"):
+        path = self._make(name, self.SRC if text is None else text)
+        crow.tool_read_file(path)
+        return path, crow.tool_edit_file(path, old=old, new=new)
+
+    def test_the_first_line_stays_what_the_goal_brake_keys_on(self):
+        path, result = self._miss("    y = x * 3\n")
+        self.assertEqual(result.split("\n")[0], f"error: 'old' does not appear in {path}")
+        self.assertIn("\n", result)
+
+    def test_a_miss_names_the_closest_line_and_what_differs(self):
+        path, result = self._miss("    y = x * 3\n")
+        self.assertIn("closest text is at line 3", result)
+        self.assertIn("file 3:     y = x * 2", result)
+        self.assertIn("old   :     y = x * 3", result)
+        self.assertIn("3:     y = x * 2", result)
+        self.assertEqual(self._text(path), self.SRC)
+
+    def test_a_multi_line_miss_points_at_the_region(self):
+        """The measured m284 shape: 17 lines right, one token wrong."""
+        path, result = self._miss("    x = a + 1\n    y = x * 9\n    return y\n")
+        self.assertIn("closest text is at lines 2-4", result)
+        self.assertIn("file 3:     y = x * 2", result)
+        self.assertNotIn("file 2:", result)
+
+    def test_a_line_wrap_is_named_a_whitespace_difference(self):
+        text = "total = first + second + third\n"
+        path, result = self._miss("total = first +\n    second + third\n", text=text)
+        self.assertIn("differs only in whitespace", result)
+        self.assertIn("line breaks", result)
+        self.assertEqual(self._text(path), text)
+
+    def test_nothing_alike_says_so(self):
+        _path, result = self._miss("completely unrelated words here\n")
+        self.assertIn("No part of the file resembles 'old'", result)
+
+    def test_the_hint_is_bounded(self):
+        text = "".join("line_%04d = %d\n" % (n, n) for n in range(3000))
+        old = "".join("line_%04d = X%d\n" % (n, n) for n in range(100, 180))
+        _path, result = self._miss(old, text=text)
+        self.assertIn("closest text", result)
+        self.assertLessEqual(len(result.split("\n", 1)[1]), sys.modules[crow.tool_edit_file.__module__].EDIT_HINT_CHARS)
+
+    def test_uniform_extra_indentation_lands_and_new_is_shifted(self):
+        """m290: every line one space deeper than the file, 'new' likewise."""
+        path, result = self._miss("     x = a + 1\n     y = x * 2\n",
+                                  new="     x = a + 2\n     y = x * 3\n")
+        self.assertIn("replaced 1 occurrence", result)
+        self.assertIn("1 leading space too many", result)
+        self.assertIn("lines 2-3", result)
+        self.assertEqual(self._text(path), self.SRC.replace(
+            "x = a + 1\n    y = x * 2", "x = a + 2\n    y = x * 3"))
+
+    def test_uniform_missing_indentation_lands_and_new_is_indented(self):
+        path, result = self._miss("y = x * 2\nreturn y", new="y = x * 4\nif y:\n    return y")
+        self.assertIn("too few", result)
+        self.assertEqual(self._text(path), self.SRC.replace(
+            "    y = x * 2\n    return y",
+            "    y = x * 4\n    if y:\n        return y"))
+
+    def test_the_shifted_edit_is_syntax_checked_like_any_other(self):
+        """#269's check runs on this path too, on the text it left."""
+        core = sys.modules[crow.tool_edit_file.__module__]
+        with mock.patch.object(core, "syntax_check",
+                               return_value="\nsyntax check (stub): ok"):
+            path, result = self._miss("      return 7", new="      return (")
+        self.assertIn("\n    return (\n", self._text(path))
+        self.assertIn("ignoring indentation", result)
+        self.assertIn("replaced 1 occurrence", result)
+        self.assertIn("syntax check", result)
+
+    def test_two_windows_after_indentation_refuse(self):
+        text = "if a:\n    go()\nif b:\n    go()\n"
+        path, result = self._miss("      go()\n", text=text)
+        self.assertIn("does not appear", result)
+        self.assertIn("closest text", result)
+        self.assertEqual(self._text(path), text)
+
+    def test_uneven_indentation_refuses(self):
+        path, result = self._miss("     x = a + 1\n      y = x * 2\n",
+                                  new="     x = 0\n      y = 0\n")
+        self.assertIn("does not appear", result)
+        self.assertIn("closest text", result)
+        self.assertEqual(self._text(path), self.SRC)
+
+    def test_tabs_against_spaces_refuse(self):
+        path, result = self._miss("\tx = a + 1\n\ty = x * 2\n", new="\tx = 0\n")
+        self.assertIn("does not appear", result)
+        self.assertIn("differs only in whitespace", result)
+        self.assertEqual(self._text(path), self.SRC)
+
+    def test_a_new_that_cannot_take_the_shift_refuses(self):
+        """'old' one space too deep, but a line of 'new' is not: no single
+        shift exists, so nothing is guessed."""
+        path, result = self._miss("     x = a + 1\n", new="     x = 0\nq = 1\n")
+        self.assertIn("does not appear", result)
+        self.assertIn("1 leading space too many", result)
+        self.assertEqual(self._text(path), self.SRC)
+
+    def test_inner_whitespace_stays_exact(self):
+        """Only leading (and trailing) whitespace is forgiven: 'call(a,  b)'
+        with two spaces is still not 'call(a, b)'."""
+        text = "call(a,  b)\n"
+        path, result = self._miss("call(a, b)", new="x", text=text)
+        self.assertIn("does not appear", result)
+        self.assertIn("differs only in whitespace", result)
+        self.assertEqual(self._text(path), text)
+
+    def test_two_different_misses_count_as_the_same_refusal(self):
+        """#202's brake keys on the first line; the hint below it varies."""
+        _p, one = self._miss("    y = x * 3\n", name="a.py")
+        _q, two = self._miss("    return 8\n", name="b.py")
+        self.assertNotEqual(one.split("\n", 1)[1], two.split("\n", 1)[1])
+        seen = lambda _path: True  # noqa: E731
+        core = sys.modules[crow.tool_edit_file.__module__]
+        self.assertEqual(core.goal_trouble_of("edit_file", one, seen)[1],
+                         core.goal_trouble_of("edit_file", two, seen)[1])
 
 
 class ReadKeyTests(ToolLayerCase):
