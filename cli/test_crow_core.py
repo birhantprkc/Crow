@@ -2370,6 +2370,82 @@ class ThinkOnlyCloseTests(TurnLoopCase):
         result = self.turn(talk)
         self.assertTrue(any("no visible answer" in i for i in result.incidents),
                         "the silent close left no incident")
+        # #259: and the second silence is SHOWN, not dropped.
+        last = [m for m in talk.payload() if m.get("role") == "assistant"][-1]
+        self.assertTrue(crow_core.is_surfaced(last["content"]))
+        self.assertIn("still head only", last["content"])
+
+
+class TheForcedAnswerIsAlwaysVisibleTests(TurnLoopCase):
+    """#259. 2026-09-23, diorama goal run, session messages
+    262-263 and engine.log 20:14:38Z: after BUDGET_SPENT the forced round came
+    back `content chunks 0, reasoning chunks 710, finish tool_calls` -- a whole
+    report written inside the think block, then a discarded call. The window
+    showed nothing. The turn now shows the reasoning, marked as such."""
+
+    class Sink(crow_core.ReplyEvents):
+        def __init__(self):
+            self.said = []
+
+        def answer_text(self, piece):
+            self.said.append(piece)
+
+    def _spent(self, forced_deltas):
+        sink = self.Sink()
+        self.events.reply_events = lambda: sink
+        talk = self.conversation()
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))])
+        self.serve(forced_deltas)
+        result = self.turn(talk, max_tool_rounds=0)
+        last = [m for m in talk.payload() if m["role"] == "assistant"][-1]
+        return result, last, sink
+
+    def test_the_live_shape_reasoning_then_a_call_is_shown(self):
+        result, last, sink = self._spent(
+            [{"reasoning_content": "What was run: list_dir. Not done: step 7."},
+             _call_delta("read_file", json.dumps({"path": "x"}), cid="c9")])
+        self.assertTrue(crow_core.is_surfaced(last["content"]), last)
+        self.assertIn("after the tool budget was spent", last["content"])
+        self.assertIn("Not done: step 7.", last["content"])
+        self.assertIn("Not done: step 7.", "".join(sink.said),
+                      "the window was not told")
+        self.assertEqual(last.get("reasoning_content"),
+                         "What was run: list_dir. Not done: step 7.",
+                         "the reasoning left the prefix")
+        self.assertIsNone(last.get("tool_calls"), "a discarded call was kept")
+        self.assertTrue(any("after the budget stop" in i
+                            for i in result.incidents), result.incidents)
+
+    def test_reasoning_only_is_shown_without_a_nudge_round(self):
+        result, last, _ = self._spent([{"reasoning_content": "all in the head"}])
+        self.assertIn("all in the head", last["content"])
+        self.assertEqual(len(self.bodies), 2, "an extra round was bought")
+
+    def test_nothing_at_all_still_says_something(self):
+        """Budget 1: the first call runs, the second is refused, the forced
+        round is empty on both channels -- the line counts what DID run."""
+        talk = self.conversation()
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.work}))])
+        self.serve([_call_delta("list_dir", json.dumps({"path": self.dir}))])
+        self.serve([{"content": ""}])
+        self.turn(talk, max_tool_rounds=1)
+        last = [m for m in talk.payload() if m["role"] == "assistant"][-1]
+        self.assertTrue(crow_core.is_surfaced(last["content"]))
+        self.assertIn("no reasoning either. 1 tool call ran this turn",
+                      last["content"])
+
+    def test_a_spoken_forced_answer_is_left_alone(self):
+        """NEGATIVE CONTROL: the model said it itself."""
+        result, last, sink = self._spent([{"reasoning_content": "hmm"},
+                                          {"content": "here is where I got to"}])
+        self.assertEqual(last["content"], "here is where I got to")
+        self.assertFalse(any("no visible answer" in i for i in result.incidents))
+
+    def test_a_long_think_block_keeps_its_tail(self):
+        text = "x" * 9000 + "THE CONCLUSION"
+        _, last, _ = self._spent([{"reasoning_content": text}])
+        self.assertTrue(last["content"].endswith("THE CONCLUSION"))
+        self.assertLess(len(last["content"]), crow_core.SURFACED_CHARS + 200)
 
 
 class BrokenStreamRetryTests(TurnLoopCase):
@@ -15178,6 +15254,59 @@ class TheReplannedGoalKeepsItsMarksTests(unittest.TestCase):
         self.assertEqual([s["status"] for s in goal["steps"]],
                          ["open", "open"])
 
+    def test_notes_and_step_bills_ride_with_the_mark(self):
+        """#260, the live case: `carried: done 6/9` and then
+        `note: ""` on all nine steps. The whole step record rides."""
+        crow_core.goal_start(
+            "Old plan", ["read the code", "write it", "prove it"], now=1000.0)
+        crow_core.goal_tokens_seen(0)
+        crow_core.goal_step_begin(0, now=1001.0)
+        crow_core.goal_step_end(0, tokens=10,
+                                note="Verified by screenshot: a.png", now=1010.0)
+        crow_core.goal_step_end(1, ok=False, note="the build fails at line 3",
+                                now=1020.0)
+        before = crow_core.goal_load()
+        out = json.loads(crow_core.tool_goal_set(
+            "New plan", ["Read the code", "write it", "prove it"]))
+        self.assertEqual(out["carried"], {"done": 1, "of": 3, "matched": 2})
+        after = crow_core.goal_load()
+        for n in (0, 1):
+            for field in crow_core._GOAL_CARRIED_FIELDS:
+                self.assertEqual(after["steps"][n].get(field),
+                                 before["steps"][n].get(field),
+                                 "step %d lost %s" % (n + 1, field))
+        self.assertEqual(after["steps"][0]["note"], "Verified by screenshot: a.png")
+        self.assertEqual(after["steps"][0]["text"], "Read the code",
+                         "the new plan's wording was replaced by the old")
+        self.assertEqual(after["steps"][2]["note"], "")
+        for field in crow_core._GOAL_CARRIED_TOTALS:
+            self.assertEqual(after.get(field), before.get(field), field)
+
+    def test_a_carried_failed_note_still_guards_done(self):
+        """#250 reads the note of a failed step; carried without it, a bare
+        `done` after the replan slipped through."""
+        crow_core.goal_start("Old", ["read the code", "write it"], now=1000.0)
+        crow_core.goal_step_end(0, ok=False, note="no 3D here", now=1010.0)
+        crow_core.tool_goal_set("New", ["read the code", "write it"])
+        out = json.loads(crow_core.tool_goal_step(1, "done"))
+        self.assertFalse(out["ok"])
+        self.assertIn("no 3D here", out["error"])
+
+    def test_the_next_step_is_not_billed_the_whole_goal(self):
+        """`spent` rides with `last_spent`: the next step is billed what came
+        after the last transition, not everything the goal ever cost."""
+        crow_core.goal_start("Old", ["read the code", "write it"], now=1000.0)
+        goal = crow_core.goal_load()
+        goal["spent"] = goal["last_spent"] = 5000
+        crow_core.goal_write(goal)
+        crow_core.goal_step_end(0, now=1010.0)
+        crow_core.tool_goal_set("New", ["read the code", "write it"])
+        goal = crow_core.goal_load()
+        goal["spent"] += 30
+        crow_core.goal_write(goal)
+        crow_core.goal_step_end(1, now=1020.0)
+        self.assertEqual(crow_core.goal_load()["steps"][1]["tokens"], 30)
+
     def test_no_goal_before_no_carry(self):
         out = json.loads(crow_core.tool_goal_set(
             "Fresh", ["step one", "step two"]))
@@ -18197,6 +18326,41 @@ class TheEngineKnowsAnEmptyLoopWhenItSeesOneTests(unittest.TestCase):
             self.answer("ok", [("write_file", "{}")])))
         self.assertFalse(crow_core.goal_answer_empty(
             self.answer("I read the log and it ends at line 40")))
+
+    def test_a_working_turn_that_ends_silent_is_not_empty(self):
+        """#259, the live case: 24 tool calls, then the forced
+        answer with content "" -- judged by its last message it was empty,
+        and three such turns cut 157 messages of work and stopped the goal."""
+        turn = [{"role": "user", "content": "[Goal mode, step 7 still open. Continue.]"},
+                self.answer("", [("read_file", '{"path": "a.js"}')]),
+                {"role": "tool", "content": "...", "tool_call_id": "c0"},
+                {"role": "user", "content": crow_core.BUDGET_SPENT},
+                self.answer("")]
+        self.assertTrue(crow_core.goal_answer_empty(turn[-1]))
+        self.assertFalse(crow_core.goal_turn_empty(turn))
+
+    def test_a_turn_with_no_tool_is_judged_by_its_answer(self):
+        """GEGENPROBE: `I` and nothing else is still the loop #202 brakes."""
+        turn = [{"role": "user", "content": "[Goal mode, step 1 still open. Continue.]"},
+                self.answer("I")]
+        self.assertTrue(crow_core.goal_turn_empty(turn))
+        surfaced = crow_core.surfaced_answer("thinking only", forced=False)
+        self.assertTrue(crow_core.goal_turn_empty(turn[:1] + [self.answer(surfaced)]),
+                        "a surfaced think block counted as the model speaking")
+
+    def test_the_turn_mark_sees_the_calls_before_the_last_answer(self):
+        """Two turns that both end on "" but read different files are not an
+        echo; the same text over the same calls still is."""
+        def turn(path):
+            return [{"role": "user", "content": "[Goal mode, step 1 still open. Continue.]"},
+                    self.answer("", [("read_file", json.dumps({"path": path}))]),
+                    {"role": "tool", "content": "...", "tool_call_id": "c0"},
+                    self.answer("")]
+        self.assertNotEqual(crow_core.goal_turn_mark(turn("a.js")),
+                            crow_core.goal_turn_mark(turn("b.js")))
+        self.assertEqual(crow_core.goal_turn_mark(turn("a.js")),
+                         crow_core.goal_turn_mark(turn("a.js")))
+        self.assertIsNone(crow_core.goal_turn_mark([{"role": "user", "content": "hi"}]))
 
     def test_the_cut_takes_the_nudges_with_the_answers(self):
         """Geschnitten wird am ANSTOSS: ein Zug faengt mit Crows Zeile an, und

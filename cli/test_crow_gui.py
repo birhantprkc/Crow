@@ -9946,6 +9946,28 @@ class TheGoalEngineBrakesOnAnEmptyLoopTests(ApiCase):
         self.assertIsNotNone(api._goal_nudge(), "the engine gave up on a turn "
                                                 "that did the work")
 
+    def test_working_turns_that_end_on_a_silent_forced_answer_do_not_brake(self):
+        """#259, 2026-09-23: three budget-stopped turns, each of
+        them with tool calls, each ending on a forced answer with content "".
+        The brake read three empty answers, cut 157 messages of work and --
+        after one more such turn -- stopped the goal at 6/9."""
+        api = self.api()
+        api._conversation.append("user", "start please")
+        api._conversation.append("assistant", "will do")
+        for n in range(crow_core.GOAL_LOOP_ANSWERS + 1):
+            nudge = api._goal_nudge()
+            self.assertIsNotNone(nudge, "the goal stopped after %d turns" % n)
+            self.assertNotIn("Your last answers were empty", nudge)
+            api._conversation.append("user", nudge)
+            api._conversation.append(
+                "assistant", "", tool_calls=[{"id": "c0", "name": "read_file",
+                                              "arguments": '{"path": "f%d"}' % n}])
+            api._conversation.append("tool", "...", tool_call_id="c0")
+            api._conversation.append("user", crow_core.BUDGET_SPENT)
+            api._conversation.append("assistant", "")
+        self.assertFalse(any("dropped from the history" in t
+                             for t in self.notes(api)), self.notes(api))
+
     def test_three_identical_answers_brake_even_when_they_are_not_empty(self):
         """Die zweite Tuer in dieselbe Bremse: derselbe Satz mit demselben
         Aufruf, dreimal -- laenger als zwei Zeichen und trotzdem ein Kreis."""
