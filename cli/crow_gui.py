@@ -8372,6 +8372,13 @@ body.m-auto.m-hid #mnudge{display:flex;position:fixed;z-index:70;
 #mnudge::after{content:"";width:36px;height:5px;border-radius:3px;
   background:var(--dim);box-shadow:0 0 0 4px var(--bg)}
 @keyframes mnudge-in{from{opacity:0}to{opacity:1}}
+/* The goal/sub bars sit at the top of #main; while the header is out of
+   the layout they move down below the pill (robin: the pill lay on the goal
+   bar), and #flow's padding follows. Also while revealed, so they don't jump. */
+body.m-auto:is(.m-hid,.m-rev) #panels{padding-top:40px}
+body.m-auto:is(.m-hid,.m-rev) #main:has(#goalpanel:not([hidden])) #flow,
+body.m-auto:is(.m-hid,.m-rev) #main:has(#subpanel:not([hidden])) #flow{padding-top:96px}
+body.m-auto:is(.m-hid,.m-rev) #main:has(#goalpanel:not([hidden])):has(#subpanel:not([hidden])) #flow{padding-top:148px}
 @media (prefers-reduced-motion:reduce){body.m-auto #bar{transition:none}
   body.m-auto.m-hid #mnudge{animation:none}}
 

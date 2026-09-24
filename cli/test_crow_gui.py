@@ -13658,6 +13658,9 @@ console.log(JSON.stringify(out));
         # the nudge pill (robin): a tap or a touch on it brings the header back
         self.assertEqual(out["nudged"], ["m-auto m-hid", "m-auto m-rev", "m-auto m-rev"])
         self.assertIn("body.m-auto.m-hid #mnudge{display:flex", crow_gui.REMOTE_CSS)
+        # ...and the goal bar moves below the pill while the header is out
+        self.assertIn("body.m-auto:is(.m-hid,.m-rev) #panels{padding-top:40px}",
+                      crow_gui.REMOTE_CSS)
         for kind, passive in out["touch"]:
             self.assertNotEqual(kind, "touchmove")
             self.assertTrue(passive, kind)
