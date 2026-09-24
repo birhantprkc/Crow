@@ -139,7 +139,7 @@ Everything below is in the screenshot at the top of this page.
 | | |
 |---|---|
 | [**Tools**](docs/reference/tools.md) | 28 built in, plus every MCP server you add |
-| [**Memory**](docs/user-guide/memory.md) | two plain-text stores, per project and per person, written only after you approve |
+| [**Memory**](docs/user-guide/memory.md) | two plain-text stores, per project and per person; the model writes its own notes, the background review asks first |
 | [**Skills**](docs/user-guide/skills.md) | procedures the model keeps and rewrites; name and description in the prompt, body on request |
 | [**Goals**](docs/user-guide/goals-and-subagents.md) | a plan in the pinned head, the state in a file — it survives a rollover and a restart |
 | [**Subagents**](docs/user-guide/goals-and-subagents.md) | `delegate` / `subtasks` / `collect`, up to 16 at once, on a remote spot |

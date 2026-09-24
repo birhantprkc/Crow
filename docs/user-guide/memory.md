@@ -13,8 +13,8 @@ Two files. Plain text, `§` on its own line between entries, editable by hand.
 |---|---|
 | Limits come from | `MAX_TOOL_BYTES`. 16,000 B is ~4,000 tokens, so 4 chars buy 1 token |
 | 4,000 chars is | a quarter of one tool read. Bigger than that and `read_file` is cheaper |
-| Head cost, both stores plus one skill | 633 chars = 158 tokens = **0.09 %** of the usable window |
-| Empty stores cost | nothing. No entries, no block, byte 0 unchanged |
+| Head cost | measured 2026-09-24 in a goal chat: the whole head 5,731 chars, the two store blocks ~3.9k of it (~1k tokens) |
+| Empty stores cost | nothing. No entries, no block, the prefix unchanged |
 
 ## Rules
 
@@ -38,21 +38,23 @@ every saved cache. Binding a different folder re-pins and says what the prefill 
 
 The head opens with the working area, then one line of static machine facts — OS, CPU, RAM, GPU name and total
 VRAM, probed once per process (`crow_platform.machine_facts`) — and the rule that a tool's limit is not the
-machine's. Never free memory or anything that moves: it is byte 0 of the prefix. Existing chats keep their pinned
+machine's. Never free memory or anything that moves: the head follows the fixed base prompt, so an unchanged head keeps the cached prefix. Existing chats keep their pinned
 head; a new chat, a folder change or a rollover pins the new one.
 
 ## Who writes it
 
 | | |
 |---|---|
-| Trigger | `MEMORY_REVIEW_AT` = **0.20 / 0.50 / 0.75** of the context window |
+| In a turn | the model's own `memory` call writes at once, at every approval level -- no question |
+| The review | `memory` and `skill` writes, gated (below) |
+| Review trigger | `MEMORY_REVIEW_AT` = **0.20 / 0.50 / 0.75** of the context window |
 | Each mark fires | once. The mark is written to the chat file and travels with it |
 | A turn crossing several marks | fires once, at the highest |
 | Off with | `--no-review` |
 | Before it writes | **it asks.** The proposed entries wait on a chip in the composer; nothing reaches the file until you press it |
 | Nobody answers | they expire after **300 s** and are dropped. Nothing is ever written by a timer |
 | Ask nothing, write always | `--no-memory-approval` |
-| When it saves | one line in the chat, per entry, at the moment it lands |
+| When it saves | a `Memory updated` line: per entry when the review writes unasked, one per `save to memory` click when gated |
 
 ## The gate
 
@@ -66,8 +68,9 @@ and it stays there until you answer.
 | | |
 |---|---|
 | Collapsed | the title, lines **gained** in green and **lost** in red. A `replace` is one entry and both |
-| Click | opens every proposed entry in full, and the two answers |
-| `save to memory` | writes through the same `memory` tool the model uses. The cap, the duplicate check and the injection scan all still answer |
+| First click | a preview of every proposed entry (160 chars), and the two answers |
+| Second click | the full text: a `replace` shows `− old entry` above `+ new entry` (it keeps the old entry's place in the file), an `add` is marked "appended at the end" |
+| `save to memory` | writes through the same `memory` tool the model uses. The cap, the duplicate check and the injection scan all still answer, and what did not land is said: `Memory: not saved -- already in memory / over the 4,000-char limit / expired` (#285) |
 | `discard` | nothing is written |
 | No answer | the entries expire after 300 s and are dropped. **Nothing is ever written by a timer** |
 | New chat | the questions go with it |

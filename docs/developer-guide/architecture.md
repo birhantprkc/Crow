@@ -2,15 +2,16 @@
 
 # Architecture
 
-Five modules under `cli/`. Line counts measured 2026-09-23 on `release-2026-09-23` (0311d0d).
+Six modules under `cli/`. Line counts measured 2026-09-24 on local main (3e0ccc2).
 
 | | lines | holds |
 |---|---|---|
-| `crow_core.py` | 22361 | every rule both surfaces obey: tools, the turn loop, memory, skills, MCP, remote providers, sessions |
-| `crow_gui.py` | 14096 | the window. Page, pywebview API, the browser pane, and nothing a rule depends on |
-| `crow.py` | 2579 | the terminal client. Screen, slash commands, `VERSION` |
-| `crow_platform.py` | 1098 | the platform seam: where things live, how a process is found and killed, per OS |
+| `crow_core.py` | 25408 | every rule both surfaces obey: tools, the turn loop, memory, skills, MCP, remote providers, sessions |
+| `crow_gui.py` | 16733 | the window. Page, pywebview API, the browser pane, and nothing a rule depends on |
+| `crow.py` | 2622 | the terminal client. Screen, slash commands, `VERSION` |
+| `crow_platform.py` | 1435 | the platform seam: where things live, how a process is found and killed, per OS |
 | `crow_voice.py` | 238 | dictation: microphone and recogniser only |
+| `crow_remote.py` | 1248 | the phone mirror (#249): LAN HTTP + SSE server, pairing, devices, stdlib QR |
 
 ## The split
 
