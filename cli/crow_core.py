@@ -11623,44 +11623,79 @@ def tool_edit_file(path: str, old: str = "", new: "str | None" = None, **_) -> s
                 f"{READ_SCOPE_HINT}. Call read_file on it, then edit.")
     if state[0] == "changed":
         return f"error: refusing to edit {path}: {READ_STALE}"
+    # #283. THE FILE IS READ AS IT IS (newline=""), not through universal
+    # newlines: reading CRLF as LF and writing with newline="" turned every
+    # line of a CRLF file into LF on a one-line edit (measured: 40 CRLF ->
+    # 0 CRLF). 'old' is matched against the LF view -- read_file shows LF --
+    # and only the matched span is replaced in the real text.
     try:
-        with open(path, encoding="utf-8") as fh:
-            data = fh.read()
+        with open(path, encoding="utf-8", newline="") as fh:
+            raw = fh.read()
     except OSError as exc:
         return f"error: could not read {path}: {exc}"
+    data, to_raw = _eol_view(raw)
+    old = old.replace("\r\n", "\n")
+    new = new.replace("\r\n", "\n")
     hits = data.count(old)
+    note = ""
     if hits == 0:
         # #276. Measured 2026-09-23/24: 16 of 147 edit_file calls missed,
         # 3 of them on a uniform indentation drift alone (the space after
         # read_file's "N:" copied into every line) -- those land here, under
         # the narrow rule _edit_by_indent spells out, and say so.
         shifted = _edit_by_indent(data, old, new)
-        if shifted is not None:
-            text, lines, why = shifted
-            try:
-                with open(path, "w", encoding="utf-8", newline="") as fh:
-                    fh.write(text)
-            except OSError as exc:
-                return f"error: could not write {path}: {exc}"
-            _mark_read(path)
-            return (f"replaced 1 occurrence in {path} -- matched only after "
-                    f"ignoring indentation: {why} ({lines})"
-                    + _edit_check(path, data))
-        # THE FIRST LINE STAYS WHAT IT WAS: #202's brake keys on it. What
-        # follows is the text the model needs to fix its call -- 12 of the 15
-        # reconstructable misses had a region >= 0.85 similar to 'old'.
-        return f"error: 'old' does not appear in {path}" + _edit_miss_hint(data, old)
-    if hits > 1:
+        if shifted is None:
+            # THE FIRST LINE STAYS WHAT IT WAS: #202's brake keys on it. What
+            # follows is the text the model needs to fix its call -- 12 of the
+            # 15 reconstructable misses had a region >= 0.85 similar to 'old'.
+            return (f"error: 'old' does not appear in {path}"
+                    + _edit_miss_hint(data, old))
+        start, end, new, lines, why = shifted
+        note = (" -- matched only after ignoring indentation: %s (%s)"
+                % (why, lines))
+    elif hits > 1:
         return f"error: 'old' appears {hits} times in {path} -- include more context to make it unique"
+    else:
+        start = data.index(old)
+        end = start + len(old)
+    rs, re_ = to_raw(start), to_raw(end)
+    text = raw[:rs] + new.replace("\n", _eol_for(raw, raw[rs:re_])) + raw[re_:]
     try:
         with open(path, "w", encoding="utf-8", newline="") as fh:
-            fh.write(data.replace(old, new, 1))
+            fh.write(text)
     except OSError as exc:
         return f"error: could not write {path}: {exc}"
     # #215-H: THE EDIT MOVED THE STAMP, and crow made the move -- without this
     # the model's own second edit would read as someone else's change.
     _mark_read(path)
-    return f"replaced 1 occurrence in {path}" + _edit_check(path, data)
+    return f"replaced 1 occurrence in {path}" + note + _edit_check(path, raw)
+
+
+def _eol_view(raw: str):
+    """#283. The text with every CRLF read as LF, and the map from an offset
+    in that view back to the offset in `raw`. A lone CR or LF stays what it
+    is, so a file with mixed endings keeps the lines the edit did not touch."""
+    import bisect
+
+    if "\r\n" not in raw:
+        return raw, lambda i: i
+    crs = []                        # view offsets of the LFs that had a CR
+    for n, m in enumerate(re.finditer("\r\n", raw)):
+        crs.append(m.start() - n)
+    return (raw.replace("\r\n", "\n"),
+            lambda i: i + bisect.bisect_left(crs, i))
+
+
+def _eol_for(raw: str, span: str) -> str:
+    """#283. The line ending the replacement is written with: the one the
+    replaced span used, and when it held no line break, the file's
+    majority. An LF file stays LF, a CRLF file stays CRLF."""
+    for text in (span, raw):
+        crlf = text.count("\r\n")
+        lf = text.count("\n") - crlf
+        if crlf or lf:
+            return "\r\n" if crlf > lf else "\n"
+    return "\n"
 
 
 # #276. What a missed 'old' is answered with, and where that stops: a file
@@ -11721,12 +11756,14 @@ def _say_pad(pad: str) -> str:
 
 
 def _edit_by_indent(data: str, old: str, new: str
-                    ) -> "tuple[str, str, str] | None":
+                    ) -> "tuple[int, int, str, str, str] | None":
     """#276. The one inexact match edit_file accepts: 'old' is whole lines,
     exactly ONE window of the file equals it line by line after strip(), the
     indentation differs by the SAME prefix on every non-blank line, and every
-    non-blank line of 'new' can take that same shift. Returns (the new file
-    text, "a-b", what differed), or None -- then the miss is reported.
+    non-blank line of 'new' can take that same shift. Returns (start, end of
+    the replaced span in `data`, the shifted 'new', "a-b", what differed), or
+    None -- then the miss is reported. A span, not the whole text, so the
+    caller can write it into the file's own line endings (#283).
 
     NOT WHITESPACE IN GENERAL. Collapsing every whitespace run would also have
     caught the one measured line-wrap miss, but then the replaced span is no
@@ -11776,7 +11813,7 @@ def _edit_by_indent(data: str, old: str, new: str
     else:
         why = "'old' differed from the file only in trailing whitespace"
     lines = "lines %d-%d" % (s + 1, s + m) if m > 1 else "line %d" % (s + 1)
-    return data[:start] + "\n".join(out) + data[end:], lines, why
+    return start, end, "\n".join(out), lines, why
 
 
 def _edit_miss_hint(data: str, old: str) -> str:

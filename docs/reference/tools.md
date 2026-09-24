@@ -316,6 +316,22 @@ Measured 2026-09-23/24 (robin's diorama runs, 147 `edit_file` calls): 16 missed.
 1 line wrap, 6 one-token drift, 3 non-contiguous lines, 2 stale after the model's own edit,
 1 not reconstructable. CRLF, tabs and escaped quotes: 0.
 
+### `edit_file` and line endings (#283)
+
+The file is read as it is (`newline=""`). 'old' and 'new' are matched against the file with every
+CRLF read as LF, which is what `read_file` shows. Only the matched span is replaced. Lines the edit
+does not touch keep their bytes, including a file with mixed endings. The line breaks in 'new' take
+the ending of the span they replace. When that span has no line break, they take the file's
+majority. A lone CR stays as it is.
+
+| file (40 lines) | CRLF / LF after a one-line edit, before #283 | after |
+|---|---|---|
+| CRLF | 0 / 40 | 40 / 0 |
+| 20 CRLF + 20 LF, edit in the LF half | 0 / 40 | 20 / 20 |
+
+`write_file` and `append_file` write the bytes they are given (`newline=""`). `append_file`'s
+added final `\n` is LF.
+
 ### `search_text` and `find_files` (#207, #215)
 
 Both walk the tree with one shared prune list (`.git node_modules __pycache__ .venv venv build

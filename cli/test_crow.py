@@ -3251,6 +3251,64 @@ class EditFileMissTests(ToolLayerCase):
                          core.goal_trouble_of("edit_file", two, seen)[1])
 
 
+class EditFileKeepsLineEndingsTests(ToolLayerCase):
+    """#283. edit_file read through universal newlines and wrote with
+    newline="": one edited line of a CRLF file turned all 40 CRLF into LF
+    (measured 2026-09-24 at 57ed521). The lines an edit does not touch keep
+    their bytes, and the replacement takes the ending of what it replaces."""
+
+    CRLF = "".join("line %d\r\n" % n for n in range(1, 41))
+
+    def _edit(self, text, old, new):
+        path = self._make("f.txt", text)
+        crow.tool_read_file(path)
+        result = crow.tool_edit_file(path, old=old, new=new)
+        with open(path, "rb") as fh:
+            return result, fh.read()
+
+    @staticmethod
+    def _ends(data):
+        crlf = data.count(b"\r\n")
+        return crlf, data.count(b"\n") - crlf
+
+    def test_one_line_edit_keeps_a_crlf_file_crlf(self):
+        result, data = self._edit(self.CRLF, "line 7", "LINE 7")
+        self.assertIn("replaced 1 occurrence", result)
+        self.assertEqual(self._ends(data), (40, 0))
+        self.assertEqual(data, self.CRLF.replace("line 7\r", "LINE 7\r")
+                         .encode())
+
+    def test_a_multi_line_lf_old_matches_and_new_lines_take_crlf(self):
+        result, data = self._edit(self.CRLF, "line 7\nline 8\n",
+                                  "L7\nL8\nL8b\n")
+        self.assertIn("replaced 1 occurrence", result)
+        self.assertEqual(self._ends(data), (41, 0))
+        self.assertIn(b"line 6\r\nL7\r\nL8\r\nL8b\r\nline 9\r\n", data)
+
+    def test_the_indentation_fallback_keeps_crlf(self):
+        text = "".join("  line %d\r\n" % n for n in range(1, 41))
+        result, data = self._edit(text, "line 9\nline 10\n", "L9\nL10\n")
+        self.assertIn("ignoring indentation", result)
+        self.assertEqual(self._ends(data), (40, 0))
+        self.assertIn(b"  line 8\r\n  L9\r\n  L10\r\n  line 11\r\n", data)
+
+    def test_a_mixed_file_keeps_both_halves(self):
+        text = (self.CRLF[:len(self.CRLF) // 2]
+                + "".join("tail %d\n" % n for n in range(20)))
+        before = self._ends(text.encode())
+        result, data = self._edit(text, "tail 3\ntail 4\n", "T3\nT4\n")
+        self.assertIn("replaced 1 occurrence", result)
+        self.assertEqual(self._ends(data), before)
+        self.assertEqual(data, text.replace("tail 3\ntail 4\n", "T3\nT4\n")
+                         .encode())
+
+    def test_an_lf_file_is_unchanged_by_the_new_path(self):
+        """NEGATIVE: LF in, LF out, byte for byte what replace() gave."""
+        text = "a\nb\nc\n"
+        _result, data = self._edit(text, "b\n", "B\nB2\n")
+        self.assertEqual(data, b"a\nB\nB2\nc\n")
+
+
 class ReadKeyTests(ToolLayerCase):
     """_key is normcase+abspath (crow.py:1687), so what counts as "the same file"
     is decided by the platform and not by the string the model happened to send.
