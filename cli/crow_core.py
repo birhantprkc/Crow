@@ -17217,12 +17217,48 @@ def goal_message_text(message: "dict | None") -> str:
     return content if isinstance(content, str) else ""
 
 
+# #258. THE LINES `run_turn` ITSELF WRITES INSIDE ONE TURN. They are user
+# messages, but they do not open a turn: the round behind them belongs to the
+# turn the nudge (or robin's line) opened.
+_GOAL_IN_TURN_NOTES = (BUDGET_SPENT, TOKEN_BUDGET_SPENT, THINK_ONLY_NUDGE)
+
+
 def goal_last_answer(messages: "list | None") -> "dict | None":
-    """Die letzte Antwort des Modells in dieser Geschichte, oder None."""
+    """Die letzte Antwort des Modells, mit den Werkzeugaufrufen IHRES ZUGES.
+
+    #258. DER ZUG WIRD BEURTEILT, NICHT SEINE LETZTE NACHRICHT. Ein Zug, der
+    sein Werkzeugbudget aufbraucht, endet auf der erzwungenen Runde -- und
+    deren Aufrufe werden verworfen (`unanswerable` in `run_turn`), ihr Content
+    ist oft leer. Allein gelesen sah diese Nachricht aus wie `I`: live am
+    2026-09-23 las die Bremse drei Zuege mit je 24 Werkzeugrunden als "leer",
+    schnitt 157 Nachrichten Arbeit weg (20:05:47Z, COLD 106,376 Token) und
+    danach den Erholungszug mit 25 Runden (20:15:07Z, COLD 106,336 Token).
+
+    Zurueckgegeben wird eine KOPIE der letzten Antwort, deren `tool_calls`
+    alle Aufrufe des Zuges tragen -- ab der Zeile, die ihn eroeffnet hat;
+    Crows eigene Protokollzeilen im Zug (Budget, Denk-Stups) eroeffnen keinen.
+    Damit sagen `goal_answer_empty` und `goal_answer_mark` ueber den ZUG aus:
+    wer gearbeitet hat, ist nicht leer, und zwei Zuege sind nur dann gleich,
+    wenn sie dieselben Aufrufe mit denselben Argumenten gemacht haben.
+    """
+    last = None
+    calls: list = []
     for message in reversed(messages or []):
-        if message.get("role") == "assistant":
-            return message
-    return None
+        role = message.get("role")
+        if role == "assistant":
+            if last is None:
+                last = message
+            calls[:0] = list(message.get("tool_calls") or [])
+        elif role == "user":
+            if goal_message_text(message) in _GOAL_IN_TURN_NOTES:
+                continue
+            break
+    if last is None:
+        return None
+    answer = dict(last)
+    if calls:
+        answer["tool_calls"] = calls
+    return answer
 
 
 def goal_answer_mark(message: "dict | None") -> "str | None":

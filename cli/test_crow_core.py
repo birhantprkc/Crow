@@ -18230,6 +18230,63 @@ class TheEngineKnowsAnEmptyLoopWhenItSeesOneTests(unittest.TestCase):
                   {"role": "assistant", "content": "read it"}]
         self.assertTrue(crow_core.goal_worked_on_nudge(worked))
 
+    def budget_turn(self, nudge, paths):
+        """#258: a turn that spends its tool budget, as `run_turn`
+        stores it -- one call per round, then BUDGET_SPENT and the forced
+        round, whose calls were discarded and whose content is empty."""
+        turn = [{"role": "user", "content": nudge}]
+        for n, path in enumerate(paths):
+            turn.append(self.answer("", [("read_file", '{"path": "%s"}' % path)]))
+            turn.append({"role": "tool", "content": "...", "tool_call_id": "c0"})
+        turn.append({"role": "assistant", "content": "",
+                     "reasoning_content": "I would read one more file"})
+        turn.append({"role": "user", "content": crow_core.BUDGET_SPENT})
+        turn.append({"role": "assistant", "content": "",
+                     "reasoning_content": "the forced round, calls discarded"})
+        return turn
+
+    def test_a_turn_that_spent_its_tool_budget_is_not_empty(self):
+        """#258, robin's session of 2026-09-23 in small: messages
+        212..263 were 25 tool rounds, BUDGET_SPENT and a forced round with
+        empty content. Read alone, that last message is `""` -- the brake
+        cut the whole turn (52 messages) and the engine re-prefilled 106,336
+        tokens cold. The turn is judged, not its last line."""
+        head = [{"role": "system", "content": "SYS"},
+                {"role": "user", "content": "build it"}]
+        messages = head + self.budget_turn("[Goal mode. Step 7 is open.]",
+                                           ["a.js", "b.js", "c.js"])
+        answer = crow_core.goal_last_answer(messages)
+        self.assertFalse(crow_core.goal_answer_empty(answer))
+        self.assertEqual(len(answer["tool_calls"]), 3)
+        # the stored message itself is untouched: the view is a copy
+        self.assertNotIn("tool_calls", messages[-1])
+
+    def test_two_budget_turns_on_different_files_are_different_answers(self):
+        """GEGENPROBE on the echo half: three budget-spending turns all end on
+        `""` with no calls, so their last messages hashed alike -- the brake's
+        second way to call real work a loop."""
+        one = self.budget_turn("[Goal mode, step 7 still open. Continue.]", ["a.js"])
+        two = self.budget_turn("[Goal mode, step 7 still open. Continue.]", ["b.js"])
+        self.assertNotEqual(
+            crow_core.goal_answer_mark(crow_core.goal_last_answer(one)),
+            crow_core.goal_answer_mark(crow_core.goal_last_answer(two)))
+
+    def test_a_turn_starts_at_its_nudge_not_at_the_one_before(self):
+        """GEGENPROBE: the calls of the PREVIOUS turn do not rescue an empty
+        one -- a nudge answered with `I` is still empty behind a working turn."""
+        messages = self.budget_turn("[Goal mode. Step 7 is open.]", ["a.js"])
+        messages += [{"role": "user", "content": "[Goal mode, step 7 still open. Continue.]"},
+                     self.answer("I")]
+        self.assertTrue(crow_core.goal_answer_empty(crow_core.goal_last_answer(messages)))
+        # and the think-only nudge inside a turn does not open a new one
+        worked = [{"role": "user", "content": "[Goal mode. Step 7 is open.]"},
+                  self.answer("", [("read_file", "{}")]),
+                  {"role": "tool", "content": "...", "tool_call_id": "c0"},
+                  {"role": "assistant", "content": "", "reasoning_content": "hm"},
+                  {"role": "user", "content": crow_core.THINK_ONLY_NUDGE},
+                  self.answer("I")]
+        self.assertFalse(crow_core.goal_answer_empty(crow_core.goal_last_answer(worked)))
+
     def test_a_turn_without_a_tool_call_does_not(self):
         """GEGENPROBE ZWEIMAL: wer nichts getan hat, bekommt den ganzen Block
         noch einmal -- und eine getippte Zeile ist ueberhaupt kein Anstoss."""
