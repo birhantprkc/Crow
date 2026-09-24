@@ -7047,6 +7047,70 @@ class SessionSearchTests(unittest.TestCase):
         self.assertNotIn("fts5", json.dumps(crow_core.TOOLS))
 
 
+class RolloverSegmentsAreSearchableTests(unittest.TestCase):
+    """#287. A rollover moves a long chat's earlier half into
+    `session/rollover-*.json`, and #261 keeps those out of the rail. The index
+    took its list from the rail, so on 2026-09-24 0 of 6 segments on robin's
+    disk were searchable."""
+
+    _write = staticmethod(SessionSearchTests._write)
+    find = SessionSearchTests.find
+
+    def setUp(self) -> None:
+        SessionSearchTests.setUp(self)
+        self.segment = os.path.join(self.dir, "rollover-20260924-192638.json")
+        self._write(self.segment, "", [
+            ("user", "Hey"),
+            ("assistant", "GBUFFER complete, the depth pass is next.")])
+
+    def test_the_search_list_has_the_segment_and_the_rail_list_does_not(self):
+        """Two lists, two questions: which chats there are, and where
+        something was said. #261 is the first, and it must stay as it is."""
+        self.assertIn(self.segment, crow_core.index_sources(self.live))
+        self.assertIn(self.live, crow_core.index_sources(self.live))
+        self.assertIn(self.old, crow_core.index_sources(self.live))
+        self.assertNotIn(self.segment, crow_core.rail_sources(self.live))
+        self.assertTrue(all(os.path.basename(p).startswith(("session", "chat-"))
+                            for p in crow_core.rail_sources(self.live)))
+
+    def test_a_word_only_in_the_segment_is_found_there(self):
+        """The hit's path is the segment, so a following read_file lands on the
+        text that is no longer in the open context."""
+        hits = self.find("GBUFFER complete")
+        self.assertEqual([h["path"] for h in hits], [self.segment])
+        self.assertEqual(hits[0]["chat"], "Hey (before the cut, 2026-09-24 19:26)")
+
+    def test_a_segment_is_named_after_its_chat(self):
+        """The rollover note points back at the chat's archive, and the hit
+        carries that chat's name -- the rule the rail uses (#261)."""
+        note = crow_core.ROLLOVER_NOTE.format(
+            tokens=180145, transcript=self.segment[:-5] + ".md", lines=5223,
+            path=self.old, where="", spoken="", digest="")
+        self._write(self.segment, "", [
+            ("user", note),
+            ("assistant", "GBUFFER complete.")])
+        self.assertEqual([h["chat"] for h in self.find("GBUFFER")],
+                         ["Alte Messung (before the cut, 2026-09-24 19:26)"])
+
+    def test_the_tool_names_the_path(self):
+        """Without the path the model knows THAT it was said, not where to read
+        it back."""
+        real = crow_core.search_sessions
+        crow_core.search_sessions = lambda q, n: real(
+            q, n, db_path=self.db, session_file=self.live)
+        self.addCleanup(setattr, crow_core, "search_sessions", real)
+        self.assertIn(self.segment, crow_core.tool_session_search("GBUFFER"))
+
+    def test_a_chat_put_aside_is_searchable_in_the_next_chats_first_turn(self):
+        """THE MISSING session.json ROW. "neu" writes the open chat to
+        `session/chat-*.json` and deletes session.json until the new chat's
+        first turn has ended. A search inside that turn found neither."""
+        aside = os.path.join(self.dir, "chat-20260924-160100.json")
+        os.replace(self.live, aside)
+        self.assertEqual([h["path"] for h in self.find("slot-save-path")], [aside])
+        self.assertIn(aside, crow_core.rail_sources(self.live))
+
+
 class TheMachineIsAFactAndMemoryMayNotContradictItTests(_MemoryFixture):
     """#270. 2026-09-24 09:53 the diorama run wrote "Machine has NO GPU:
     Chromium is software GL" into its project memory, and its answers said

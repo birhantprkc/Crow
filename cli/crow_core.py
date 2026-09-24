@@ -8938,22 +8938,80 @@ def fts5_available() -> bool:
         return False
 
 
-def index_sources(session_file: str | None = None) -> "list[str]":
-    """Every chat file the index covers: the live one and the archive.
+ROLLOVER_PREFIX = "rollover-"
 
-    ONE LIST, so that "searchable" and "in the rail" cannot drift apart. The
-    window draws its rail out of the same two places.
+
+def _session_files(folder: str, prefix: str) -> "list[str]":
+    """`<prefix>*.json` in one folder, sorted. A missing folder is no files."""
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    return [os.path.join(folder, name) for name in names
+            if name.startswith(prefix) and name.endswith(".json")
+            and os.path.isfile(os.path.join(folder, name))]
+
+
+def rail_sources(session_file: str | None = None) -> "list[str]":
+    """Every file that is a chat of its own: the live one, the ones put aside
+    beside it, and the archive.
+
+    NO ROLLOVER, and that is #261: a segment is the same chat's earlier half,
+    not a second chat. The window keeps its own copy of this rule
+    (`_archives`); this list is the one the index starts from.
+
+    #287: THE CHATS PUT ASIDE ARE IN IT. "neu" writes the open chat to
+    `session/chat-*.json` -- beside session.json, not in `archiv/` -- and
+    deletes session.json until the next turn has ended. A search in that first
+    turn found neither: the live file was gone, so its rows were dropped, and
+    the chat that had just been put aside was in no list at all. Measured
+    2026-09-24: index.db written at 14:02:40.580Z, 19 ms after the first reply
+    of a fresh chat (6117 tok, 0 cached) asked for two tools, and `files`
+    held the one archive row and no session.json.
     """
     live = session_file or SESSION_FILE
+    folder = os.path.dirname(live) or "."
     out = [live] if os.path.exists(live) else []
-    folder = os.path.join(os.path.dirname(live) or ".", ARCHIVE_DIR)
-    try:
-        for name in sorted(os.listdir(folder)):
-            if name.startswith("chat-") and name.endswith(".json"):
-                out.append(os.path.join(folder, name))
-    except OSError:
-        pass
+    out += _session_files(folder, "chat-")
+    out += _session_files(os.path.join(folder, ARCHIVE_DIR), "chat-")
     return out
+
+
+def index_sources(session_file: str | None = None) -> "list[str]":
+    """Every chat file the index covers: the rail's list and the rollovers.
+
+    #287: TWO LISTS, BECAUSE THEY ANSWER TWO QUESTIONS. The rail asks "which
+    chats are there", and a rollover segment is not one (#261). Search asks
+    "where was this said", and the earlier half of a long goal run is exactly
+    where. Coupled into one list, #261 took every segment out of the search as
+    well: 0 of 6 on robin's disk were searchable on 2026-09-24. A segment moved
+    into `archiv/` by hand is still one, so both folders are read.
+    """
+    live = session_file or SESSION_FILE
+    folder = os.path.dirname(live) or "."
+    return (rail_sources(live)
+            + _session_files(folder, ROLLOVER_PREFIX)
+            + _session_files(os.path.join(folder, ARCHIVE_DIR), ROLLOVER_PREFIX))
+
+
+def index_title(path: str, data: dict) -> str:
+    """What a hit from this file is called.
+
+    A SEGMENT SAYS WHICH CHAT AND WHICH HALF. It carries no `crow_title` of its
+    own; `chat_title` follows the rollover note back to the chat's name, the
+    same rule the rail uses. "(before the cut, <date>)" tells the reader that
+    the text is no longer in the open context and that `path` is where to
+    `read_file` it.
+    """
+    name = os.path.basename(path)
+    title = ((data.get("crow_title") or "").strip()
+             or chat_title(data.get("messages") or []) or name)
+    if not name.startswith(ROLLOVER_PREFIX):
+        return title
+    stamp = re.match(r"rollover-(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)", name)
+    when = ("%s-%s-%s %s:%s" % stamp.groups() if stamp else
+            time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(path))))
+    return "%s (before the cut, %s)" % (title, when)
 
 
 def _index_connect(db_path: str | None = None):
@@ -9006,7 +9064,7 @@ def sync_index(db_path: str | None = None,
             except Exception:               # noqa: BLE001 - unreadable is not indexed
                 con.execute("DELETE FROM files WHERE path = ?", (path,))
                 continue
-            title = (data.get("crow_title") or os.path.basename(path)).strip()
+            title = index_title(path, data)
             for i, message in enumerate(data.get("messages") or []):
                 # #142: blocks index by their words, not their base64.
                 body = message_text(message.get("content") or "").strip()
@@ -9083,7 +9141,10 @@ def tool_session_search(query: str, limit: int | None = None) -> str:
         text = hit["text"]
         if len(text) > SEARCH_SNIPPET:
             text = text[:SEARCH_SNIPPET] + " [...]"
-        out.append("\n-- %s (%s) --\n%s" % (hit["chat"], hit["role"], text))
+        # #287: THE PATH IS PART OF THE HIT. A segment's text is out of the
+        # open context, and `read_file` on this path is the way back to it.
+        out.append("\n-- %s (%s) %s --\n%s" % (hit["chat"], hit["role"],
+                                               hit["path"], text))
     return "\n".join(out)
 
 
