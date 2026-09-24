@@ -10288,7 +10288,9 @@ def _source_line(line: str, page: "str | None") -> "tuple[str, str] | None":
     # #253-Hinweis auf die eigene Zeile der Seite faellt still weg.
     parts = urllib.parse.urlsplit(m.group(1))
     path = urllib.parse.unquote(parts.path)
-    if parts.netloc:                                # UNC: file://host/share
+    if re.match(r"^[A-Za-z]:", parts.netloc):       # file://D:\x (no third /)
+        path = parts.netloc + path
+    elif parts.netloc:                              # UNC: file://host/share
         path = "//" + parts.netloc + path
     elif os.name == "nt":
         path = path.lstrip("/")
@@ -19184,8 +19186,12 @@ _TROUBLE_SIGNATURE = (
     re.compile(r"^\s*((?:[A-Za-z_][\w.]*)?(?:Error|Exception)\b:?.*)$", re.M),
     re.compile(r"(unexpected EOF while looking for matching .+)"),
 )
+# WINDOWS ZUERST (windows-latest CI, 2026-09-24): `D:\a\_temp\x\a.py` hat
+# keinen Schraegstrich, also blieb der Pfad stehen und zwei gleiche Weigerungen
+# an zwei Dateien zaehlten als zwei verschiedene.
 _TROUBLE_PATHLIKE = re.compile(
-    r"(?:~|\.{1,2})?/[^\s'\"`,;:()]+|\b[\w.-]+/[\w./-]+")
+    r"\b[A-Za-z]:[\\/][^\s'\"`,;()]+|\b[\w.-]+\\[\w.\\-]+"
+    r"|(?:~|\.{1,2})?/[^\s'\"`,;:()]+|\b[\w.-]+/[\w./-]+")
 
 
 def _trouble_norm(text: str) -> str:

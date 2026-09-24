@@ -15299,7 +15299,7 @@ class TheConsoleSaysWhoseSpellingFailedTests(unittest.TestCase):
 
     def test_five_arguments_to_renderbuffer_storage_are_counted(self):
         line = ('"WebGL: INVALID_ENUM: renderbufferStorage: invalid '
-                'internalformat", source: file://%s (13)' % self.page)
+                'internalformat", source: %s (13)' % crow_core._file_url(self.page))
         hints = crow_core._console_hints([line, line, line], self.API,
                                          self.page)
         self.assertEqual(len(hints), 1, "one hint per call site: %r" % hints)
@@ -15316,7 +15316,7 @@ class TheConsoleSaysWhoseSpellingFailedTests(unittest.TestCase):
         shader failure, not a signature slip -- and line 14 here is a
         four-argument call."""
         line = ('"WebGL: INVALID_ENUM: renderbufferStorage: invalid '
-                'internalformat", source: file://%s (14)' % self.page)
+                'internalformat", source: %s (14)' % crow_core._file_url(self.page))
         self.assertEqual(crow_core._console_hints([line], self.API,
                                                   self.page), [])
 
@@ -15326,7 +15326,7 @@ class TheConsoleSaysWhoseSpellingFailedTests(unittest.TestCase):
         other = os.path.join(outside, "x.html")
         shutil.copy(self.page, other)
         line = ('"WebGL: INVALID_ENUM: renderbufferStorage: invalid '
-                'internalformat", source: file://%s (13)' % other)
+                'internalformat", source: %s (13)' % crow_core._file_url(other))
         self.assertEqual(crow_core._console_hints([line], self.API,
                                                   self.page), [])
 
