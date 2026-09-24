@@ -13465,10 +13465,15 @@ class RemotePhoneLayerTests(unittest.TestCase):
     # classes, data-*, attributes and inline style, so a state can be
     # compared as data. Timers run by hand.
     FAKE_DOM = r"""
-const timers = []; let tid = 0;
-globalThis.setTimeout = (f, ms) => { timers.push({id: ++tid, f}); return tid; };
+const timers = []; let tid = 0, now = 0;
+globalThis.setTimeout = (f, ms) => { timers.push({id: ++tid, f, at: now + (ms || 0)}); return tid; };
 globalThis.clearTimeout = id => { const i = timers.findIndex(t => t.id === id); if(i >= 0) timers.splice(i, 1); };
 const flush = () => { while(timers.length) timers.shift().f(); };
+const advance = ms => { const end = now + ms;
+  for(;;){ timers.sort((a, b) => a.at - b.at);
+    if(!timers.length || timers[0].at > end) break;
+    const t = timers.shift(); now = t.at; t.f(); }
+  now = end; };
 class Style { constructor(){ this.m = {}; }
   setProperty(k, v){ this.m[k] = String(v); } removeProperty(k){ delete this.m[k]; } }
 class CL { constructor(){ this.s = new Set(); }
@@ -13486,6 +13491,7 @@ class El { constructor(id){ this.id = id || ""; this.dataset = {}; this.style = 
   querySelector(){ return null; } querySelectorAll(){ return []; } closest(){ return null; }
   get offsetWidth(){ return 0; } get offsetHeight(){ return 0; }
   set innerHTML(v){ this._html = v; } get innerHTML(){ return this._html || ""; }
+  fire(type, ev){ listeners.filter(l => l.el === this && l.type === type).forEach(l => l.fn(ev || {})); }
   click(){ listeners.filter(l => l.el === this && l.type === "click").forEach(l => l.fn({target: this})); } }
 const byId = {};
 const el = id => byId[id] || (byId[id] = new El(id));
@@ -13495,7 +13501,9 @@ globalThis.document = {documentElement: html, body, hidden: false,
   querySelectorAll: () => [], addEventListener(type, fn, opt){ listeners.push({el: this, type, fn, opt}); }};
 globalThis.window = globalThis;
 globalThis.addEventListener = (type, fn, opt) => listeners.push({el: window, type, fn, opt});
-globalThis.matchMedia = () => ({matches: true, addEventListener(){}});
+globalThis.STANDALONE = globalThis.STANDALONE || false;
+globalThis.matchMedia = q => ({matches: /standalone/.test(q) ? STANDALONE : true,
+  addEventListener(){}});
 globalThis.innerWidth = 390;
 globalThis.localStorage = {getItem: () => null, setItem(){}};
 globalThis.getComputedStyle = () => ({backgroundColor: "rgb(24, 24, 24)"});
@@ -13583,6 +13591,74 @@ console.log(JSON.stringify({loaded, opened, closed, closedAgain, sheet, gone, op
                         phone.index('media="(prefers-color-scheme: light)"'))
         self.assertNotIn("theme-color", crow_gui.stamped_page())
         self.assertIn("background:var(--bg)}", crow_gui.REMOTE_CSS)
+
+    HEADER = r"""
+for (const id of ["helpmenu","modemenu","modelmenu","rootmenu","submenu","settings"]) el(id).hidden = true;
+const out = {};
+const cls = () => ["m-auto","m-hid","m-rev"].filter(c => body.classList.contains(c)).join(" ");
+const bar = el("bar"), flowEl = el("flow");
+const pull = (from, to) => { flowEl.fire("touchstart", {touches: [{clientX: 200, clientY: from}]});
+  flowEl.fire("touchend", {changedTouches: [{clientX: 200, clientY: to}]}); };
+out.load = cls();
+advance(4999); out.at4999 = cls();
+advance(1); out.at5000 = cls();
+pull(300, 320); out.shortPull = cls();
+pull(300, 420); out.pulled = cls();
+advance(7000); out.at7000 = cls();
+bar.fire("touchstart", {touches: [{clientX: 10, clientY: 10}]});
+advance(7999); out.touched7999 = cls();
+advance(1); out.touched8000 = cls();
+pull(200, 400); crow.toggleRail(); advance(30000); out.drawerOpen = cls();
+body.children.find(c => c.id === "mscrim").click(); advance(8000); out.drawerClosed = cls();
+flowEl.scrollTop = 900; flowEl.fire("scroll"); flowEl.scrollTop = 700; flowEl.fire("scroll");
+out.redrawScroll = cls();
+flowEl.fire("touchstart", {touches: [{clientX: 200, clientY: 500}]});
+flowEl.scrollTop = 500; flowEl.fire("scroll");
+out.scrolledUp = cls();
+out.touch = listeners.filter(l => /^touch|^scroll/.test(l.type)).map(l => [l.type, !!(l.opt && l.opt.passive)]);
+console.log(JSON.stringify(out));
+"""
+
+    def run_header(self, standalone: bool) -> dict:
+        node = _node()
+        if not node:
+            self.skipTest("no node on this machine")
+        import subprocess
+        js = ("globalThis.STANDALONE = %s;\n" % ("true" if standalone else "false")
+              + self.FAKE_DOM + crow_gui.REMOTE_JS + self.HEADER)
+        done = subprocess.run([node, "-e", js], capture_output=True, text=True,
+                              encoding="utf-8", timeout=30)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return json.loads(done.stdout)
+
+    def test_the_home_screen_header_hides_and_a_pull_brings_it_back(self):
+        """robin, 2026-09-24: standalone only -- hidden 5 s after load; a
+        downward drag reveals it below the blur band; it stays 8 s and a touch
+        on it restarts that; it never hides while a drawer is open; scrolling
+        toward older messages reveals it too. Listeners passive."""
+        out = self.run_header(True)
+        self.assertEqual(out["load"], "m-auto")
+        self.assertEqual(out["at4999"], "m-auto")
+        self.assertEqual(out["at5000"], "m-auto m-hid")
+        self.assertEqual(out["shortPull"], "m-auto m-hid", "a 20 px wobble is no pull")
+        self.assertEqual(out["pulled"], "m-auto m-rev")
+        self.assertEqual(out["at7000"], "m-auto m-rev")
+        self.assertEqual(out["touched7999"], "m-auto m-rev")
+        self.assertEqual(out["touched8000"], "m-auto m-hid")
+        self.assertEqual(out["drawerOpen"], "m-auto m-rev")
+        self.assertEqual(out["drawerClosed"], "m-auto m-hid")
+        # the page's own scroll (a redraw) is no pull; a finger's is
+        self.assertEqual(out["redrawScroll"], "m-auto m-hid")
+        self.assertEqual(out["scrolledUp"], "m-auto m-rev")
+        for kind, passive in out["touch"]:
+            self.assertNotEqual(kind, "touchmove")
+            self.assertTrue(passive, kind)
+
+    def test_the_safari_tab_keeps_its_header(self):
+        """NEGATIVE: outside standalone nothing hides, ever."""
+        out = self.run_header(False)
+        for key in ("load", "at5000", "pulled", "touched8000", "drawerClosed"):
+            self.assertEqual(out[key], "", key)
 
     def test_the_phone_shows_no_reasoning_level(self):
         """robin, 2026-09-24: the operating point fixes the level; the phone's
@@ -13856,16 +13932,19 @@ class RemoteMirrorTests(RemoteCase):
                          crow_gui.stamped_page())
 
     def test_the_home_screen_app_moves_its_header_below_the_blur_band(self):
-        """robin's iPhone (iOS 27), 2026-09-24, after 76930c8: the opaque bar
-        did not help -- the home-screen app still blurred the header, the
-        Safari tab never did. Only in standalone mode the top inset grows by
-        the band, so the header sits below it; the tab keeps the plain inset."""
+        """robin's iPhone (iOS 27), 2026-09-24: a permanent offset under the
+        system's blur band was blurred at 8 px and ugly at 18/36 px. No fixed
+        offset any more: in standalone mode the header hides itself and comes
+        back as an overlay below the band (--safe-t + 18 px); --safe-t itself
+        stays the plain inset. The Safari tab and the desktop get none of it."""
         phone = crow_gui.stamped_page(remote=True)
-        at = phone.index("@media (display-mode: standalone)")
-        rule = phone[at:phone.index("}", phone.index("{", at) + 1) + 1]
-        self.assertIn("--safe-t:calc(env(safe-area-inset-top,0px) + 8px)", rule)
+        self.assertNotIn("@media (display-mode: standalone)", phone)
+        self.assertNotIn("inset-top,0px) + 8px", phone)
         self.assertIn("--safe-t:env(safe-area-inset-top,0px);", phone)
+        self.assertIn("body.m-auto.m-rev #bar{top:calc(var(--safe-t) + 18px)", phone)
+        self.assertIn('matchMedia("(display-mode: standalone)")', phone)
         self.assertNotIn("display-mode: standalone", crow_gui.stamped_page())
+        self.assertNotIn("m-auto", crow_gui.stamped_page())
 
     def test_the_phone_page_brings_its_home_screen_tile(self):
         """robin's iPhone, 2026-09-24: a generic "1" tile on the home screen.

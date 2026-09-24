@@ -8263,15 +8263,6 @@ REMOTE_CSS = """
   --safe-l:env(safe-area-inset-left,0px);
   --safe-r:env(safe-area-inset-right,0px);
 }
-/* #249, robin's iPhone (iOS 27), NUR ALS HOME-BILDSCHIRM-APP: das System legt
-   seinen Blur-Streifen ~35 pt unter die Statusleiste, ueber den Kopf -- auch
-   mit der deckenden Statusleiste (76930c8 half nicht), und
-   safe-area-inset-top waechst nicht mit. Also rueckt der Kopf dort um den
-   Streifen tiefer (36 px war zu viel, robin 17:20: 18 px, dann 8 px); im Safari-Tab
-   gibt es den Streifen nicht. */
-@media (display-mode: standalone){
-  :root{--safe-t:calc(env(safe-area-inset-top,0px) + 8px)}
-}
 html{overflow-x:clip}
 html,body{height:100dvh;overscroll-behavior:none;-webkit-text-size-adjust:100%;
   background:var(--bg)}
@@ -8346,6 +8337,24 @@ body:not([data-browser="shut"]) #side{transform:none;visibility:visible}
 #mscrim{position:fixed;inset:0;z-index:85;background:var(--shadow-strong);
   opacity:0;pointer-events:none;transition:opacity .2s}
 body.m-drawer #mscrim{opacity:1;pointer-events:auto}
+
+/* ---- the home-screen app's header (robin, iOS 27, 2026-09-24) -----------
+   iOS draws a blur band ~35 pt under the status bar that nothing switches
+   off; a permanent offset was either blurred (8 px) or ugly (18/36 px). So in
+   standalone mode only (REMOTE_JS adds .m-auto there) the header leaves: 5 s
+   after load and after its last use it slides up and out of the layout, and
+   the chat takes the space. A pull-down brings it back as an overlay BELOW
+   the band (--safe-t + 18 px), sharp, for 8 s -- never while a drawer, menu
+   or the + sheet is open. The Safari tab and the desktop never get .m-auto. */
+body.m-auto #bar{transition:transform .22s cubic-bezier(.3,.7,.2,1)}
+body.m-auto.m-hid #bar,body.m-auto.m-rev #bar{position:fixed;left:0;right:0;z-index:70;
+  padding-left:calc(4px + var(--safe-l));padding-right:calc(4px + var(--safe-r))}
+body.m-auto.m-hid #bar{top:var(--safe-t);
+  transform:translateY(calc(-100% - var(--safe-t) - 20px))}
+body.m-auto.m-rev #bar{top:calc(var(--safe-t) + 18px);transform:none;
+  background:var(--bg);border-bottom:1px solid var(--line);
+  box-shadow:0 6px 18px var(--shadow)}
+@media (prefers-reduced-motion:reduce){body.m-auto #bar{transition:none}}
 
 /* git: the card from #panels becomes a right drawer of its own */
 body[data-git="shut"] #git{display:none}
@@ -8704,6 +8713,52 @@ REMOTE_JS = r"""
     if(dx > 0 && s.x < 24) crow.toggleRail();
     else if(dx < 0 && s.x > s.w - 24) crow.toggleCode();
   }, {passive:true});
+
+  // 2b. THE HOME-SCREEN APP'S HEADER (standalone only; see REMOTE_CSS
+  //     `.m-auto`). Hidden 5 s after load and after its last use; a
+  //     downward drag on the chat (or a pull-down at the top) brings it back
+  //     for 8 s. Passive listeners on touchstart/touchend/scroll only -- the
+  //     swipe stays the browser's, the bounce with it.
+  const standalone = window.matchMedia("(display-mode: standalone)");
+  if(phone.matches && standalone.matches) (function(){
+    const bar = document.getElementById("bar"), flow = document.getElementById("flow");
+    const LOAD = 5000, SHOWN = 8000, PULL = 30;
+    let timer = null;
+    body.classList.add("m-auto");
+    const shown = id => { const e = document.getElementById(id); return !!e && !e.hidden; };
+    const busy = () => DRAWERS.some(isOpen) || body.classList.contains("m-tools")
+      || ["helpmenu","modemenu","modelmenu","rootmenu","submenu","settings"].some(shown)
+      || (document.getElementById("menu") || {classList:{contains:()=>false}}).classList.contains("on");
+    const arm = ms => { clearTimeout(timer);
+      timer = setTimeout(() => { timer = null;
+        if(busy()){ arm(SHOWN); return; }
+        body.classList.remove("m-rev"); body.classList.add("m-hid"); }, ms); };
+    const reveal = () => { if(body.classList.contains("m-hid")){
+        body.classList.remove("m-hid"); body.classList.add("m-rev"); }
+      if(body.classList.contains("m-rev")) arm(SHOWN); };
+    arm(LOAD);
+    // any touch on the header, or a drawer/menu/sheet opened from it, restarts it
+    bar.addEventListener("touchstart", () => {
+      if(!body.classList.contains("m-hid"))
+        arm(body.classList.contains("m-rev") ? SHOWN : LOAD); }, {passive:true});
+    // A FINGER, NOT A REDRAW: the page scrolls #flow itself (a chat switch,
+    // a reload's snapshot), so a scroll only counts while a finger is down or
+    // its momentum runs (1 s after it lifts).
+    let y0 = null, finger = false, lift = null;
+    flow.addEventListener("touchstart", e => { finger = true; clearTimeout(lift);
+      last = flow.scrollTop || 0;
+      y0 = e.touches && e.touches.length === 1 ? e.touches[0].clientY : null; }, {passive:true});
+    flow.addEventListener("touchend", e => {
+      const p = e.changedTouches && e.changedTouches[0];
+      if(y0 !== null && p && p.clientY - y0 > PULL) reveal();
+      y0 = null; clearTimeout(lift); lift = setTimeout(() => { finger = false; }, 1000); },
+      {passive:true});
+    let last = flow.scrollTop || 0;
+    flow.addEventListener("scroll", () => { const now = flow.scrollTop || 0;
+      if(finger && now < last - PULL){ reveal(); last = now; }
+      else if(now > last || !finger) last = now; }, {passive:true});
+    window.crowHeader = {reveal, busy};
+  })();
 
   // 3. THE GOAL STARTS AS A THIN BAR. goalPanel keeps `shut` across redraws,
   //    so the first draw on this device sets it once. In the bar the head is
