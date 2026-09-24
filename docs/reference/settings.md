@@ -35,6 +35,7 @@ when its `crow_root` points there, and nothing else records it.
 | `remote_enabled` | `false` | the phone mirror (`/remote`) starts with the window; set by `/remote on` and the phone icon, cleared by `/remote off` (#249) |
 | `remote_port` | `8765` | the mirror's fixed port — fixed so a paired phone keeps its origin across restarts; values outside 1024–65535 fall back to the default (#249) |
 | `remote_host` | unset (= the first LAN address `crow_platform` ranks) | the LAN address picked in the QR dialog; never `0.0.0.0` (#249) |
+| `remote_https` | `false` | the QR dialog shows the Tailscale HTTPS address (`https://<pc>.<tailnet>.ts.net/`) instead of the LAN one; the LAN address listens either way. Set by the dialog's network switch. See [Phone over Tailscale](../user-guide/remote-tailscale.md) (#249 stage 5) |
 
 The delegate favourites live in `providers.json` (`delegate_favorites`), not here — set them
 from the OpenRouter page of the settings sheet. So does the judge's pin (#266):

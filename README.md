@@ -148,6 +148,7 @@ Everything below is in the screenshot at the top of this page.
 | [**Session search**](docs/user-guide/session-search.md) | SQLite FTS5 over every archived conversation; the real messages, not a summary |
 | [**MCP**](docs/user-guide/mcp.md) | stdio and [Streamable HTTP](docs/user-guide/mcp-http.md), with OAuth, elicitation and per-tool classes |
 | [**Remote models**](docs/user-guide/remote-models.md) | OpenRouter, Anthropic, OpenAI — key or sign-in. The default is always this machine |
+| [**Phone**](docs/user-guide/remote.md) | `/remote`: the window on a paired phone — LAN, or HTTPS from anywhere [via Tailscale](docs/user-guide/remote-tailscale.md), phone 🎤 included |
 | [**Voice**](docs/user-guide/window.md) | dictation into the composer, `faster-whisper` locally, nothing written to disk |
 | [**Secrets**](docs/reference/settings.md) | a file with an ACL instead of an environment variable every child process inherits |
 
@@ -190,7 +191,7 @@ Everything is under [`docs/`](docs/README.md).
 
 | | |
 |---|---|
-| **User guide** | [Install](docs/user-guide/install.md) · [Window](docs/user-guide/window.md) · [Linux](docs/user-guide/linux.md) · [Memory](docs/user-guide/memory.md) · [Skills](docs/user-guide/skills.md) · [Goals and subagents](docs/user-guide/goals-and-subagents.md) · [Browser](docs/user-guide/browser.md) · [Session search](docs/user-guide/session-search.md) · [MCP servers](docs/user-guide/mcp.md) · [MCP over HTTP](docs/user-guide/mcp-http.md) · [Remote models](docs/user-guide/remote-models.md) |
+| **User guide** | [Install](docs/user-guide/install.md) · [Window](docs/user-guide/window.md) · [Linux](docs/user-guide/linux.md) · [Memory](docs/user-guide/memory.md) · [Skills](docs/user-guide/skills.md) · [Goals and subagents](docs/user-guide/goals-and-subagents.md) · [Browser](docs/user-guide/browser.md) · [Session search](docs/user-guide/session-search.md) · [MCP servers](docs/user-guide/mcp.md) · [MCP over HTTP](docs/user-guide/mcp-http.md) · [Remote models](docs/user-guide/remote-models.md) · [Phone](docs/user-guide/remote.md) · [Phone over Tailscale](docs/user-guide/remote-tailscale.md) |
 | **Reference** | [Tools](docs/reference/tools.md) · [Server flags](docs/reference/server-flags.md) · [Client flags](docs/reference/client-flags.md) · [Reasoning levels](docs/reference/reasoning-levels.md) · [Settings](docs/reference/settings.md) · [mcp.json](docs/reference/mcp-json.md) |
 | **Operating points** | [The four lines](docs/operating-points.md) · [Measurements](docs/measurements/README.md) · [Placement sweep](docs/measurements/flash-next-placement.md) · [MCP cost](docs/measurements/mcp-cost.md) |
 | **Developer guide** | [Architecture](docs/developer-guide/architecture.md) · [Testing](docs/developer-guide/testing.md) · [Repo](docs/developer-guide/repo.md) · [Not built](docs/developer-guide/not-built.md) |

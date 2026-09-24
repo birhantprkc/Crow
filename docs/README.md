@@ -20,6 +20,8 @@ is here.
 | [MCP servers](user-guide/mcp.md) | stdio, elicitation, commands |
 | [MCP over HTTP](user-guide/mcp-http.md) | headers, OAuth, sessions |
 | [Remote models](user-guide/remote-models.md) | subscriptions, keys, dialects, routing |
+| [Phone (remote)](user-guide/remote.md) | `/remote`, pairing, the two addresses, the phone microphone |
+| [Phone over Tailscale](user-guide/remote-tailscale.md) | HTTPS from anywhere: install, admin console, the one `tailscale serve` line, checks, undo |
 
 ## Reference
 
