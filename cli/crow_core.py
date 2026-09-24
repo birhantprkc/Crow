@@ -17672,7 +17672,226 @@ atexit.register(forget_mcp_servers)
 SLASH_COMMANDS = ("/help", "/tools", "/mcp", "/mode", "/model", "/reasoning",
                   "/budget",
                   "/thoughts", "/image", "/delegate", "/subtasks", "/verify",
-                  "/goal", "/reset", "/context", "/exit", "/quit")
+                  "/goal", "/reset", "/context", "/remote", "/exit", "/quit")
+
+
+# #249. THE PHONE MIRROR'S WORDS AND ITS SMALL DECISIONS. The server is
+# `crow_remote.py`, the window wires it; what either surface SAYS about it
+# lives here, so the terminal's "not yet" and the window's status line cannot
+# drift into two descriptions of one feature.
+#
+# THE PORT IS FIXED, NOT PICKED FREE. A paired phone keeps a cookie for
+# `http://<ip>:<port>`; a port chosen anew at every start would be a new
+# origin, and every phone would have to scan again after each restart. 8765 is
+# free on this machine and in every manifest (llama-server 8081-8083, serve
+# 8099, checked 2026-09-24).
+REMOTE_PORT_DEFAULT = 8765
+# A NEW DEVICE WAITS THIS LONG FOR THE DESKTOP'S ALLOW, then it is a deny: a
+# photographed QR must never pair because nobody was at the desk to refuse.
+REMOTE_CONFIRM_S = 60.0
+REMOTE_TUI_NOTE = ("/remote is window-only for now (stage 2): open the Crow "
+                   "window and type /remote there to pair a phone.")
+REMOTE_USAGE = "/remote [on|off|status|devices|forget <name>]"
+REMOTE_MISSING = ("the phone mirror is not part of this install "
+                  "(cli/crow_remote.py is missing).")
+REMOTE_NO_LAN = ("no LAN address to listen on -- connect this machine to the "
+                 "home network first. The mirror never listens on 0.0.0.0.")
+
+
+REMOTE_OFF_LINE = ("phone mirror off -- paired devices stay paired and "
+                   "reconnect once it is on again.")
+REMOTE_PHONE_EXIT = ("/exit on the phone leaves this tab only -- the desktop "
+                     "window keeps running.")
+
+
+def remote_on_line(url: str) -> str:
+    """The answer to `/remote on` once the server listens."""
+    return ("phone mirror on at %s -- scan the QR code with the phone's "
+            "camera (same Wi-Fi)." % url)
+
+
+def remote_start_failed(host: str, port: int, why) -> str:
+    """The answer when the port cannot be had."""
+    return ("the phone mirror could not listen on %s:%d (%s). Another program "
+            "may hold the port -- set remote_port in settings.json."
+            % (host, int(port), why))
+
+
+def remote_forget_text(name: str, done: bool) -> str:
+    """`/remote forget <name>`."""
+    if done:
+        return "forgot %s -- it has to scan the QR code to come back." % name
+    return ("no single paired device matches %r -- /remote devices lists "
+            "them." % name)
+
+
+def remote_asked_line(name: str, allowed: bool, answered: bool) -> str:
+    """What the desktop's pairing card says once it is settled."""
+    if allowed:
+        return "%s is paired" % name
+    return ("denied" if answered
+            else "no answer within %d s -- denied" % int(REMOTE_CONFIRM_S))
+
+
+def remote_icon_title(on: bool, online: int) -> str:
+    """The title-bar phone icon's tooltip."""
+    if not on:
+        return "Phone mirror: pair a phone on this network"
+    if online:
+        return "Phone mirror on -- %d phone%s connected" % (
+            online, "" if online == 1 else "s")
+    return "Phone mirror on -- no phone connected"
+
+
+def remote_answered_note(by: str, verdict: str = "") -> str:
+    """What the OTHER view's card says once one side has answered it:
+    "allowed -- answered on phone"."""
+    where = "answered on the desktop" if by == "desktop" else "answered on phone"
+    return "%s -- %s" % (verdict, where) if verdict else where
+
+
+# #249: THE PHONE PAGE'S OWN SENTENCES, stamped into it as one JSON object.
+REMOTE_PHONE_TEXT = {
+    "wait": "waiting for the desktop to allow this phone …",
+    "denied": "the desktop said no. Scan the QR code again to retry.",
+    "expired": "this code is no longer valid -- type /remote on the desktop "
+               "and scan the new QR code.",
+    "locked": "too many attempts -- pairing is locked for 10 minutes.",
+    "unpaired": "this phone is not paired -- type /remote in the Crow window "
+                "and scan the QR code.",
+    "unreachable": "the desktop cannot be reached -- is Crow running on the "
+                   "same network?",
+    "ondesk": "opened on the desktop",
+    "dictate": "use the keyboard's dictation key -- the phone's microphone "
+               "needs HTTPS",
+    "upload": "the image could not be sent",
+    "root": "folder on the desktop",
+}
+
+
+def remote_ask_line(name: str) -> str:
+    """The desktop's pairing card: a new device, named by what it said it is."""
+    return "%s wants to connect" % (" ".join(str(name or "").split())
+                                    or "a device")
+
+
+def remote_devices_text(devices: "list[dict]") -> str:
+    """`/remote devices`: one line per paired device, newest contact first."""
+    if not devices:
+        return "no paired devices -- /remote on shows the QR code."
+    rows = sorted(devices, key=lambda d: d.get("last_seen") or 0, reverse=True)
+    out = []
+    for d in rows:
+        seen = d.get("last_seen")
+        when = (time.strftime("%Y-%m-%d %H:%M", time.localtime(seen))
+                if isinstance(seen, (int, float)) and seen > 0 else "never")
+        out.append("  %s%s  · last seen %s" % (
+            d.get("name") or d.get("id") or "?",
+            "  · online" if d.get("online") else "", when))
+    return "paired devices:\n" + "\n".join(out)
+
+
+def remote_status_text(*, on: bool, url: str, devices: "list[dict]",
+                       firewall: str = "") -> str:
+    """`/remote status`: on or off, where, who -- and the firewall line if one
+    is in the way. Nothing here changes anything."""
+    head = ("the phone mirror is on at %s" % url) if on else \
+        "the phone mirror is off -- /remote on starts it."
+    online = sum(1 for d in devices if d.get("online"))
+    lines = [head, "%d paired device%s, %d online" % (
+        len(devices), "" if len(devices) == 1 else "s", online)]
+    if firewall:
+        lines.append(firewall)
+    return "\n".join(lines)
+
+
+def firewall_active() -> str:
+    """"ufw", "firewalld" or "" -- which Linux firewall is running, if any.
+
+    ASKED, NEVER CHANGED (#249): the mirror prints the one command that opens
+    its port for the LAN and leaves the decision to the person. `systemctl
+    is-active` needs no root, unlike `ufw status`."""
+    if crow_platform.IS_WINDOWS or not shutil.which("systemctl"):
+        return ""
+    for unit in ("ufw", "firewalld"):
+        try:
+            done = subprocess.run(["systemctl", "is-active", "--quiet", unit],
+                                  capture_output=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if done.returncode == 0:
+            return unit
+    return ""
+
+
+def remote_firewall_line(port: int, host: str, active: str) -> str:
+    """The one command that lets the LAN reach `port`, for the firewall that is
+    `active`, or "". The source is the host's /24 -- the home network, never
+    the world."""
+    parts = str(host or "").split(".")
+    lan = (".".join(parts[:3]) + ".0/24") if len(parts) == 4 else "<your-lan>/24"
+    if active == "ufw":
+        return ("ufw is active; to let the phone in: sudo ufw allow from %s "
+                "to any port %d proto tcp" % (lan, int(port)))
+    if active == "firewalld":
+        return ("firewalld is active; to let the phone in: sudo firewall-cmd "
+                "--add-rich-rule='rule family=\"ipv4\" source address=\"%s\" "
+                "port port=\"%d\" protocol=\"tcp\" accept'" % (lan, int(port)))
+    return ""
+
+
+# #249: THE PAIRED DEVICES LIVE IN THE SECRETS STORE, under this key, as a
+# list of records `{id, name, created, last_seen, token_sha256}` -- only the
+# hash, never the cookie. `secret()` reads string values only, so a list here
+# is invisible to every other reader of the file.
+REMOTE_DEVICES_KEY = "remote_devices"
+
+
+def remote_devices_load() -> "list[dict]":
+    """The paired devices, or []. Never raises (see `_secret_stored`)."""
+    found = _secret_stored().get(REMOTE_DEVICES_KEY)
+    if not isinstance(found, list):
+        return []
+    return [d for d in found if isinstance(d, dict)]
+
+
+def remote_devices_save(devices: "list[dict]") -> bool:
+    """Write the device list back into the store, keeping every other entry.
+
+    A STORE THAT DOES NOT PARSE IS NOT OVERWRITTEN. `_secret_stored` reads a
+    broken file as "empty", and writing that empty back plus one list would
+    delete every key the user put there by hand. Atomic (temp file + replace)
+    and owner-only, like the token store."""
+    doc: dict = {}
+    if os.path.exists(SECRETS_FILE):
+        try:
+            with open(SECRETS_FILE, encoding="utf-8-sig") as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError):
+            log_note("remote: %s is not readable JSON; the device list was "
+                     "not written" % SECRETS_FILE, "remote")
+            return False
+        if not isinstance(doc, dict):
+            log_note("remote: %s is not a JSON object; the device list was "
+                     "not written" % SECRETS_FILE, "remote")
+            return False
+    doc[REMOTE_DEVICES_KEY] = [dict(d) for d in devices]
+    try:
+        os.makedirs(os.path.dirname(SECRETS_FILE) or ".", exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".secrets-",
+                                   dir=os.path.dirname(SECRETS_FILE) or ".")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=1)
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, SECRETS_FILE)
+    except OSError as exc:
+        log_note("remote: the device list could not be written: %s" % exc,
+                 "remote")
+        return False
+    return True
 
 
 def goal_command(argument: str) -> "tuple[str, dict | None, bool]":

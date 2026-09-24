@@ -5366,6 +5366,38 @@ class TheYoloAcceptTests(unittest.TestCase):
             ["--mode", "yolo"]).mode, "yolo")
 
 
+class RemoteSlashTests(unittest.TestCase):
+    """#249: `/remote` is on the shared list, so the terminal must answer it --
+    and in stage 1 the answer is the core's "window-only for now", never a
+    question to the model about the word."""
+
+    def _run(self, line):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = crow.run_slash(line, conversation=crow.Conversation("SYS"),
+                                    mode="auto", show_reasoning=False,
+                                    context_tokens=0, n_ctx=200000,
+                                    rollover_at=0.9, session=False)
+        return result, out.getvalue()
+
+    def test_it_is_on_the_shared_list_and_in_the_help(self):
+        self.assertIn("/remote", crow.SLASH_COMMANDS)
+        self.assertIn("/remote", crow.HELP)
+
+    def test_every_form_is_answered_window_only(self):
+        import crow_core
+        for line in ("/remote", "/remote on", "/remote status",
+                     "/remote forget iPhone"):
+            result, said = self._run(line)
+            self.assertTrue(result.handled, line)
+            self.assertIn(crow_core.REMOTE_TUI_NOTE, said, line)
+            self.assertIn("stage 2", said)
+
+    def test_a_longer_word_is_not_the_command(self):
+        """NEGATIVE: `/remotely` is somebody's question, not ours."""
+        result, _ = self._run("/remotely")
+        self.assertFalse(result.handled)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-
