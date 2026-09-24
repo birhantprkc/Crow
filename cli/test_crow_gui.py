@@ -3380,6 +3380,17 @@ class TheVoiceModuleTests(unittest.TestCase):
                                    lambda p: [0.0] * (crow_voice.MIN_FRAMES - 1)):
                 self.assertEqual(crow_voice.transcribe_file("/tmp/tap.m4a"), "")
             self.assertEqual(len(asked), 1)
+            # #290: the clip's length, for the log line
+            stats = {}
+            crow_voice.transcribe_file("/tmp/clip.m4a", stats)
+            self.assertEqual(stats, {"seconds": 2.0})
+
+    def test_the_model_says_whether_it_is_loaded(self):
+        """#290: the phone shows "loading the speech model" until it is."""
+        with mock.patch.object(crow_voice, "_model", None):
+            self.assertFalse(crow_voice.model_loaded())
+        with mock.patch.object(crow_voice, "_model", object()):
+            self.assertTrue(crow_voice.model_loaded())
 
     def test_the_phone_path_needs_only_the_recogniser(self):
         """NEGATIVE: no microphone and no sounddevice on the PC must not block
@@ -14836,12 +14847,13 @@ class RemotePhoneVoiceTests(RemoteCase):
     def heard(self, api, text="Hallo Crow", why=None, boom=None):
         path = self.clip()
 
-        def transcribe(p):
+        def transcribe(p, stats=None):
             self.assertEqual(p, path)
             if boom:
                 raise boom
             return text
         with mock.patch.object(crow_voice, "file_available", lambda: why), \
+                mock.patch.object(crow_voice, "model_loaded", lambda: True), \
                 mock.patch.object(crow_voice, "transcribe_file", transcribe):
             api._remote_heard(path, PHONE)
         self.assertFalse(os.path.exists(path), "the clip was kept")
@@ -14877,11 +14889,12 @@ class RemotePhoneVoiceTests(RemoteCase):
         self.assertEqual(api._remote.kw["audio"], api._remote_audio)
         gate, done = threading.Event(), threading.Event()
 
-        def slow(path):
+        def slow(path, stats=None):
             gate.wait(5)
             done.set()
             return "spaet"
         with mock.patch.object(crow_voice, "file_available", lambda: None), \
+                mock.patch.object(crow_voice, "model_loaded", lambda: True), \
                 mock.patch.object(crow_voice, "transcribe_file", slow):
             api._remote_audio(self.clip(), PHONE)     # returns while it waits
             gate.set()
@@ -14891,6 +14904,125 @@ class RemotePhoneVoiceTests(RemoteCase):
                     break
                 time.sleep(0.02)
         self.assertIn({"k": "heard", "text": "spaet"}, api._remote.got(PHONE))
+
+    # #290 SCOPE AMENDMENT: partials while speaking, coalesced per phone.
+    def numbered(self, n: int) -> str:
+        path = os.path.join(self.dir, "clip-%d.webm" % n)
+        with open(path, "wb") as fh:
+            fh.write(b"x" * n)
+        return path
+
+    def lane(self, api, gated=True, loaded=True):
+        """`_remote_audio` with a recogniser that waits for `gate` per clip and
+        records which clips it ran and how many ran at once."""
+        ran, running, peak, gate = [], [0], [0], threading.Semaphore(0)
+        lock = threading.Lock()
+
+        def transcribe(path, stats=None):
+            with lock:
+                running[0] += 1
+                peak[0] = max(peak[0], running[0])
+            if gated:
+                gate.acquire(timeout=5)
+            with lock:
+                running[0] -= 1
+            ran.append(os.path.basename(path))
+            if stats is not None:
+                stats["seconds"] = 2.5
+            return "words of " + os.path.basename(path)
+        patches = [mock.patch.object(crow_voice, "file_available", lambda: None),
+                   mock.patch.object(crow_voice, "model_loaded", lambda: loaded),
+                   mock.patch.object(crow_voice, "transcribe_file", transcribe)]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        return ran, peak, gate
+
+    def settled(self, api):
+        for _ in range(250):
+            with api._voice_lock:
+                if not any(v["busy"] for v in api._voice_lanes.values()):
+                    return
+            time.sleep(0.02)
+        self.fail("the lane never went idle")
+
+    def test_partials_are_coalesced_and_the_final_overtakes_them(self):
+        """One running at a time; of the partials waiting behind it only the
+        newest is kept; the final drops the waiting one AND silences the one
+        that was running when it came in. Every clip is deleted."""
+        api = self.mirrored()
+        ran, peak, gate = self.lane(api)
+        clips = {n: self.numbered(n) for n in (1, 2, 3, 4)}
+        api._remote_audio(clips[1], PHONE, seq=1, partial=True)   # starts, waits
+        for _ in range(100):
+            if api._voice_lanes[PHONE]["partial"] is None:
+                break
+            time.sleep(0.01)
+        api._remote_audio(clips[2], PHONE, seq=2, partial=True)   # waits
+        api._remote_audio(clips[3], PHONE, seq=3, partial=True)   # replaces 2
+        self.assertFalse(os.path.exists(clips[2]), "an overtaken partial was kept")
+        api._remote_audio(clips[4], PHONE, seq=4)                 # the final
+        self.assertFalse(os.path.exists(clips[3]), "the final left a partial waiting")
+        for _ in range(2):
+            gate.release()
+        self.settled(api)
+        self.assertEqual(ran, ["clip-1.webm", "clip-4.webm"])
+        self.assertEqual(peak[0], 1, "two transcriptions ran for one phone")
+        heard = [m for m in api._remote.got(PHONE) if m.get("k") == "heard"]
+        self.assertEqual(heard, [{"k": "heard", "seq": 4, "text": "words of clip-4.webm"}])
+        self.assertFalse(any(os.path.exists(c) for c in clips.values()))
+
+    def test_a_partial_after_the_final_is_dropped_and_one_before_is_pushed(self):
+        api = self.mirrored()
+        ran, _peak, _gate = self.lane(api, gated=False)
+        api._remote_audio(self.numbered(7), PHONE, seq=7, partial=True)
+        self.settled(api)
+        api._remote_audio(self.numbered(8), PHONE, seq=8)
+        self.settled(api)
+        late = self.numbered(6)
+        api._remote_audio(late, PHONE, seq=6, partial=True)       # arrived late
+        self.settled(api)
+        self.assertEqual(ran, ["clip-7.webm", "clip-8.webm"])
+        self.assertFalse(os.path.exists(late))
+        heard = [m for m in api._remote.got(PHONE) if m.get("k") == "heard"]
+        self.assertEqual(heard, [
+            {"k": "heard", "partial": True, "seq": 7, "text": "words of clip-7.webm"},
+            {"k": "heard", "seq": 8, "text": "words of clip-8.webm"}])
+
+    def test_the_model_loading_is_said_and_each_final_is_one_log_line(self):
+        api = self.mirrored()
+        self.lane(api, gated=False, loaded=False)
+        logged = []
+        with mock.patch.object(crow_core, "log_note",
+                               lambda text, kind="note": logged.append((kind, text))):
+            api._remote_audio(self.numbered(3), PHONE, seq=3, partial=True)
+            self.settled(api)
+            api._remote_audio(self.numbered(5), PHONE, seq=5)
+            self.settled(api)
+        heard = [m for m in api._remote.got(PHONE) if m.get("k") == "heard"]
+        self.assertEqual(heard[0], {"k": "heard", "loading": True})
+        voice = [t for k, t in logged if k == "voice"]
+        self.assertEqual(len(voice), 1, logged)
+        self.assertRegex(voice[0], r"^phone dictation: 5 bytes, 2\.5 s, transcribe \d+ ms$")
+
+    def test_a_failed_final_is_logged_with_its_error(self):
+        api = self.mirrored()
+        logged = []
+        path = self.numbered(9)
+
+        def broken(p, stats=None):
+            raise RuntimeError("bad clip")
+        with mock.patch.object(crow_voice, "file_available", lambda: None), \
+                mock.patch.object(crow_voice, "model_loaded", lambda: True), \
+                mock.patch.object(crow_voice, "transcribe_file", broken), \
+                mock.patch.object(crow_core, "log_note",
+                                  lambda text, kind="note": logged.append((kind, text))):
+            api._remote_heard(path, PHONE, 9)
+        self.assertEqual(logged, [("voice", logged[0][1])])
+        self.assertRegex(logged[0][1], r"^phone dictation: 9 bytes, 0\.0 s, transcribe \d+ ms, "
+                                       r"dictation failed: bad clip$")
+        self.assertIn({"k": "heard", "seq": 9, "note": "dictation failed: bad clip"},
+                      api._remote.got(PHONE))
 
 
 class RemotePhoneMicTests(unittest.TestCase):
@@ -14909,17 +15041,26 @@ Object.assign(crow, {__HEARD__});
 crow.on = m => { passed.push(m.k); if(m.k === "heard") crow.heard(m); };
 crow.micState = e => passed.push(["micState", e.state, e.text, e.note]);
 el("in").focus = () => { focused = true; };
+Object.assign(el("in"), {value: "", readOnly: false, dispatchEvent(){}});
+Date.now = () => now;
+let LEVEL = 0.25, frameFn = null;
+// one animation frame per 50 ms of the fake clock, at the given input level
+const frames = (ms, lvl) => { LEVEL = lvl;
+  for(let t = 0; t < ms; t += 50){ now += 50;
+    if(frameFn){ const f = frameFn; frameFn = null; f(); } } };
 globalThis.pywebview = {api: new Proxy({}, {get: (_, n) => (...a) => { sent.push(n); return Promise.resolve(null); }})};
 globalThis.isSecureContext = SECURE;
 const track = {stopped: false, stop(){ this.stopped = true; }};
 Object.defineProperty(globalThis, "navigator", {configurable: true, value: {
   mediaDevices: SECURE ? {getUserMedia: c => { gum.push(c); return Promise.resolve({getTracks: () => [track]}); }} : undefined}});
-globalThis.MediaRecorder = class { constructor(){ this.state = "inactive"; this.mimeType = "audio/mp4"; }
-  start(){ this.state = "recording"; }
+globalThis.MediaRecorder = class { constructor(){ this.state = "inactive"; this.mimeType = "audio/mp4";
+    globalThis.lastRec = this; }
+  start(ms){ this.state = "recording"; this.slice = ms; }
   stop(){ this.state = "inactive"; this.ondataavailable({data: {size: 5}}); this.onstop(); } };
-globalThis.AudioContext = class { createAnalyser(){ return {fftSize: 0, getFloatTimeDomainData(b){ b.fill(0.25); }}; }
+globalThis.AudioContext = class { createAnalyser(){ return {fftSize: 0, getFloatTimeDomainData(b){ b.fill(LEVEL); }}; }
   createMediaStreamSource(){ return {connect(){}}; } resume(){} close(){} };
-globalThis.requestAnimationFrame = () => 0; globalThis.cancelAnimationFrame = () => {};
+globalThis.requestAnimationFrame = f => { frameFn = f; return 1; };
+globalThis.cancelAnimationFrame = () => { frameFn = null; };
 globalThis.Blob = class { constructor(parts, o){ this.size = parts.reduce((n, p) => n + (p.size || 0), 0); this.type = o.type; } };
 globalThis.fetch = (url, o) => { fetched.push([url, o.method, o.headers["Content-Type"], o.body.size, o.credentials]);
   return Promise.resolve({ok: true, status: 202}); };
@@ -14938,6 +15079,55 @@ globalThis.fetch = (url, o) => { fetched.push([url, o.method, o.headers["Content
   crow.on({k: "text", t: "x"});
   out.attached = attached; out.notes = notes; out.sent = sent; out.passed = passed;
   out.focused = focused; out.hint = el("hint").textContent || ""; out.title = mic.title;
+  out.field = el("in").value;
+  console.log(JSON.stringify(out));
+})();
+"""
+    # #290 SCOPE AMENDMENT: partials, auto-stop on silence, the states, and
+    # (robin, 2026-09-24 ~23:30) the stop square and append-never-replace.
+    LIVE = r"""
+(async () => {
+  const tick = () => new Promise(r => setImmediate(r));
+  const mic = el("mic"), field = el("in"), hint = () => el("hint").textContent || "";
+  const out = {steps: []};
+  const step = name => out.steps.push([name, field.value, field.classList.contains("partial"),
+    field.readOnly, mic.classList.contains("rec"), !!mic.disabled, hint(),
+    lastRec ? lastRec.state : null]);
+  field.value = "Notiz:";                                    // typed before
+  crow.mic(); await tick(); await tick();
+  out.slice = lastRec.slice; step("listening");
+  lastRec.ondataavailable({data: {size: 3}});                // 1.5 s of audio
+  lastRec.ondataavailable({data: {size: 4}});                // 3 s
+  crow.on({k: "heard", partial: true, seq: 2, text: "Hallo"});
+  step("partial");
+  crow.on({k: "heard", partial: true, seq: 1, text: "Hal"});   // older: ignored
+  step("older partial");
+  crow.on({k: "heard", loading: true}); step("loading");
+  frames(400, 0.3);                                          // speech
+  frames(1900, 0.001); step("1.9 s of silence");
+  frames(200, 0.001); await tick(); step("2.1 s of silence");
+  crow.on({k: "heard", partial: true, seq: 3, text: "Hallo Cr"});   // after the stop
+  step("partial after the stop");
+  crow.on({k: "heard", seq: 3, text: "Hallo Crow"}); step("final");
+  // the second one appends to the first, and silence BEFORE speech stops nothing
+  crow.mic(); await tick(); await tick();
+  frames(3000, 0.001); step("second, 3 s quiet before speaking");
+  lastRec.ondataavailable({data: {size: 5}});
+  crow.on({k: "heard", partial: true, seq: 5, text: "und mehr"}); step("second partial");
+  crow.mic(); await tick(); step("tapped stop");
+  crow.on({k: "heard", seq: 6, text: "und mehr."}); step("second final");
+  // a field that already ends in whitespace gets no second space
+  field.value += "\n";
+  crow.mic(); await tick(); await tick(); crow.mic(); await tick();
+  crow.on({k: "heard", seq: 7, text: "Ende"}); step("third final");
+  // a failed final: the partial goes, the typed text stays, the phone says why
+  crow.mic(); await tick(); await tick();
+  lastRec.ondataavailable({data: {size: 2}});
+  crow.on({k: "heard", partial: true, seq: 9, text: "weg"});
+  crow.mic(); await tick();
+  crow.on({k: "heard", seq: 10, note: "dictation failed: bad clip"}); step("failed final");
+  out.fetched = fetched.map(f => [f[0], f[3]]); out.notes = notes; out.sent = sent;
+  out.attached = attached;
   console.log(JSON.stringify(out));
 })();
 """
@@ -14949,7 +15139,7 @@ globalThis.fetch = (url, o) => { fetched.push([url, o.method, o.headers["Content
         # none: an empty one, so the behaviour below is what fails, not this
         return found.group(1) if found else "heard(e){}"
 
-    def run_mic(self, secure: bool) -> dict:
+    def run_mic(self, secure: bool, probe: "str | None" = None) -> dict:
         node = _node()
         if not node:
             self.skipTest("no node on this machine")
@@ -14959,7 +15149,7 @@ globalThis.fetch = (url, o) => { fetched.push([url, o.method, o.headers["Content
               + layer.FAKE_DOM
               + self.PRELUDE.replace("__TEXT__", json.dumps(crow_core.REMOTE_PHONE_TEXT))
                             .replace("__HEARD__", self.heard_method())
-              + crow_gui.REMOTE_JS + self.PROBE)
+              + crow_gui.REMOTE_JS + (probe or self.PROBE))
         done = subprocess.run([node, "-e", js], capture_output=True, text=True,
                               encoding="utf-8", timeout=30)
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -14972,9 +15162,9 @@ globalThis.fetch = (url, o) => { fetched.push([url, o.method, o.headers["Content
         self.assertEqual(out["lvl"], "1.00", "no level on the ring")
         self.assertFalse(out["after"])
         self.assertTrue(out["track"], "the microphone stayed open")
-        self.assertEqual(out["fetched"], [["/upload?kind=audio", "POST", "audio/mp4", 5,
+        self.assertEqual(out["fetched"], [["/upload?kind=audio&seq=1", "POST", "audio/mp4", 5,
                                            "same-origin"]])
-        self.assertEqual(out["attached"], ["Hallo Crow"])
+        self.assertEqual(out["field"], "Hallo Crow")
         self.assertEqual(out["notes"], ["nothing was said"])
         self.assertNotIn("send", out["sent"])
         self.assertNotIn("dictate_start", out["sent"])
@@ -14982,6 +15172,62 @@ globalThis.fetch = (url, o) => { fetched.push([url, o.method, o.headers["Content
         self.assertIn(["micState", "off", "", ""], out["passed"])
         self.assertNotIn("from the desktop", out["attached"])
         self.assertIn('case "heard": this.heard(e); break;', crow_gui.PAGE)
+
+    def test_partials_silence_states_and_two_dictations_append(self):
+        """#290 scope amendment, live on robin's phone 2026-09-24: the ring
+        moved and nothing arrived, because the second tap was not obvious.
+        Now: greyed partial words after the typed text, a stop square while
+        recording, auto-stop 2 s after speech, "writing ..." until the final,
+        which replaces only the partial -- and the next dictation appends."""
+        out = self.run_mic(True, self.LIVE)
+        T = crow_core.REMOTE_PHONE_TEXT
+        steps = {s[0]: s[1:] for s in out["steps"]}
+        # (field, greyed, read-only, stop square, button disabled, hint, recorder)
+        self.assertEqual(out["slice"], 1500)
+        self.assertEqual(steps["listening"],
+                         ["Notiz:", False, True, True, False, T["miclisten"], "recording"])
+        self.assertEqual(steps["partial"],
+                         ["Notiz: Hallo", True, True, True, False, T["miclisten"], "recording"])
+        self.assertEqual(steps["older partial"][0], "Notiz: Hallo")
+        self.assertEqual(steps["loading"][5], T["micload"])
+        self.assertEqual(steps["1.9 s of silence"][6], "recording")
+        self.assertEqual(steps["2.1 s of silence"],
+                         ["Notiz: Hallo", True, True, False, True, T["micwrite"], "inactive"])
+        self.assertEqual(steps["partial after the stop"][0], "Notiz: Hallo")
+        self.assertEqual(steps["final"],
+                         ["Notiz: Hallo Crow", False, False, False, False, "", "inactive"])
+        self.assertEqual(steps["second, 3 s quiet before speaking"][6], "recording",
+                         "silence before any speech stopped the recording")
+        self.assertEqual(steps["second partial"][0], "Notiz: Hallo Crow und mehr")
+        self.assertEqual(steps["tapped stop"][5], T["micwrite"])
+        self.assertEqual(steps["second final"],
+                         ["Notiz: Hallo Crow und mehr.", False, False, False, False, "",
+                          "inactive"])
+        self.assertEqual(steps["third final"][0], "Notiz: Hallo Crow und mehr.\nEnde")
+        self.assertEqual(steps["failed final"][:3],
+                         ["Notiz: Hallo Crow und mehr.\nEnde", False, False])
+        self.assertEqual(out["notes"], ["dictation failed: bad clip"])
+        self.assertEqual(out["fetched"], [
+            ["/upload?kind=audio&partial=1&seq=1", 3],
+            ["/upload?kind=audio&partial=1&seq=2", 7],
+            ["/upload?kind=audio&seq=3", 12],
+            ["/upload?kind=audio&partial=1&seq=4", 5],
+            ["/upload?kind=audio&seq=5", 10],
+            ["/upload?kind=audio&seq=6", 5],
+            ["/upload?kind=audio&partial=1&seq=7", 2],
+            ["/upload?kind=audio&seq=8", 7]])
+        self.assertNotIn("send", out["sent"])
+        self.assertEqual(out["attached"], [])
+
+    def test_the_button_is_a_stop_square_while_it_records(self):
+        """robin, 2026-09-24: the microphone turns into a filled square while
+        recording -- currentColor, so both themes -- and keeps the ring and
+        the 44 px target."""
+        css = crow_gui.REMOTE_CSS
+        self.assertIn("#mic.rec svg{display:none}", css)
+        self.assertRegex(css, r'#mic\.rec::after\{content:"";[^}]*background:currentColor')
+        self.assertRegex(css, r"#remoteattach,#mic\{width:var\(--tap\);height:var\(--tap\)")
+        self.assertIn("#in.partial{color:var(--dim)}", css)
 
     def test_plain_http_keeps_the_keyboard_hint(self):
         out = self.run_mic(False)

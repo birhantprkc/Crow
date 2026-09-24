@@ -290,14 +290,15 @@ class Remote:
                  log: Callable[[str], None] = lambda s: None,
                  icon: "Callable[[int], bytes | None] | None" = None,
                  tailnet: str = "",
-                 audio: "Callable[[str, str], None] | None" = None):
+                 audio: "Callable[..., None] | None" = None):
         self.host = host
         self.port = port
         # #249 stage 5: the ts.net name `tailscale serve` answers for, or "".
         # Set, it adds the loopback listener its proxy forwards to.
         self.tailnet = (tailnet or "").strip().rstrip(".").lower()
-        # #290: called with (clip path, device id) once a phone's recording is
-        # on disk; it must return at once -- the transcript goes back as a push.
+        # #290: called with (clip path, device id, seq=, partial=) once a
+        # phone's recording -- or the part of it so far -- is on disk; it must
+        # return at once. The transcript goes back as a push.
         self._audio = audio
         self._page = page
         self._call = call
@@ -918,9 +919,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _upload(self, dev: str):
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-        kind = (parse_qs(urlsplit(self.path).query).get("kind") or ["image"])[0]
+        query = parse_qs(urlsplit(self.path).query)
+        kind = (query.get("kind") or ["image"])[0]
         if kind == "audio":
-            return self._upload_audio(ctype, dev)
+            return self._upload_audio(ctype, dev, query)
         if not ctype.startswith("image/"):
             return self.plain(415, "images only")
         raw = self._read_body(MAX_UPLOAD)
@@ -933,15 +935,27 @@ class _Handler(BaseHTTPRequestHandler):
             f.write(raw)
         self.json(200, {"path": target})
 
-    def _upload_audio(self, ctype: str, dev: str):
+    def _upload_audio(self, ctype: str, dev: str, query: dict):
         """#290: a phone's recording. 202 AT ONCE, the transcript follows as a
         push to this device only: the first dictation loads the recogniser,
         and iOS gave up on a held request after about 6 s (see PAIR_POLL).
-        The clip belongs to the `audio` callable from here on -- it deletes it."""
+        The clip belongs to the `audio` callable from here on -- it deletes it.
+
+        `partial=1&seq=N` is the recording SO FAR, sent while it goes on; the
+        clip without `partial` is the final one. `seq` orders them: the owner
+        drops a partial that is not newer than what it already has, so a
+        partial without one cannot be placed and is refused."""
         if self.owner._audio is None:
             return self.plain(501, "no recogniser on this desktop")
         if not ctype.startswith("audio/"):
             return self.plain(415, "audio only")
+        partial = (query.get("partial") or [""])[0] == "1"
+        try:
+            seq = int((query.get("seq") or [""])[0])
+        except ValueError:
+            seq = None
+        if partial and seq is None:
+            return self.plain(400, "a partial needs seq")
         raw = self._read_body(MAX_UPLOAD)
         if raw is None:
             return
@@ -952,7 +966,7 @@ class _Handler(BaseHTTPRequestHandler):
         with os.fdopen(fd, "wb") as f:
             f.write(raw)
         try:
-            self.owner._audio(target, dev)
+            self.owner._audio(target, dev, seq=seq, partial=partial)
         except Exception as exc:           # noqa: BLE001 - the page gets the reason
             try:
                 os.remove(target)

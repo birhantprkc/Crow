@@ -8602,6 +8602,15 @@ body.m-tools #mtools{transform:none;opacity:1;visibility:visible;transition-dela
    set per frame from an AnalyserNode) instead of the desktop's breathing. */
 #mic.rec{animation:none;box-shadow:0 0 0 calc(2px + var(--lvl,0) * 7px) rgba(126,176,248,.35);
   transition:box-shadow .07s linear}
+/* robin, 2026-09-24: while it records, the button IS the stop -- a filled
+   square in the button's own colour (so both themes), the ring still around
+   it, the 44 px target unchanged. The microphone comes back with the class. */
+#mic.rec svg{display:none}
+#mic.rec::after{content:"";width:12px;height:12px;border-radius:2px;background:currentColor}
+/* the partial transcript: provisional, so the whole field greys until the
+   final arrives. A textarea colours all of its text or none of it, and an
+   overlay would have to match iOS's wrapping and scrolling to the pixel. */
+#in.partial{color:var(--dim)}
 #modewrap{flex:none}
 #modelwrap{flex:1 1 0;min-width:0;display:flex}
 #rootwrap{flex:1 1 0;min-width:0;display:flex}
@@ -9014,21 +9023,77 @@ REMOTE_JS = r"""
   //    is not the phone's, and the desktop's dictation (its "mic" pushes) is
   //    not this phone's either: its state and its text stay on the desktop.
   //    HTTPS (Tailscale): the phone records itself -- MediaRecorder, first tap
-  //    starts, second tap stops, a level ring on the button -- and the clip
-  //    goes through /upload?kind=audio. The PC's Whisper answers with
-  //    {"k":"heard"} to THIS phone only (crow.heard), and the words land in
-  //    its input field, never sent. Plain HTTP has no getUserMedia (not a secure context): a tap
-  //    focuses the input so the keyboard's own 🎤 is one tap away.
+  //    starts, the button turns into a stop square with a level ring, and a
+  //    second tap OR ~2 s of silence after speech stops it. Every PARTIAL_MS
+  //    the recording so far goes to /upload?kind=audio&partial=1&seq=N (the
+  //    timeslice chunks concatenated are a valid file) and the PC's Whisper
+  //    answers {"k":"heard","partial":true} to THIS phone only: greyed words
+  //    after what was in the field. The final clip (no partial=1) replaces
+  //    the partial with the real words -- APPENDED, never sent, so tap, talk,
+  //    tap, talk builds one message. Plain HTTP has no getUserMedia (not a
+  //    secure context): a tap focuses the input so the keyboard's own 🎤 is
+  //    one tap away.
   const mic = document.getElementById("mic"), field = document.getElementById("in");
+  const hint = document.getElementById("hint");
   const WORDS = window.CROW_REMOTE_TEXT || {};
   const canRecord = !!(window.isSecureContext && navigator.mediaDevices
     && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
   const MAX_REC = 300000;              // crow_voice.MAX_SECONDS, in ms
+  // MEASURED, NOT GUESSED (2026-09-24, faster-whisper small int8 on this PC's
+  // CPU, the GPU belongs to the LLM): 5 s of speech 1.25-1.4 s, 10 s 1.4 s,
+  // 15 s 1.5 s. So a partial every 1.5 s keeps up for the length of a
+  // sentence; past that the PC coalesces -- it never runs two for one phone
+  // and keeps only the newest waiting partial -- so a slow one makes the
+  // updates rarer, never a queue.
+  const PARTIAL_MS = 1500;
+  // SPEECH, THEN SILENCE. The AnalyserNode's peak (0..1, not the ring's
+  // normalised level, which rescales itself to any room) above SPEECH_LVL for
+  // SPEECH_MS is speech; after that, SILENCE_MS below it stops the recording.
+  // Before any speech nothing stops: a person who taps and then thinks is not
+  // finished.
+  const SPEECH_LVL = 0.04, SPEECH_MS = 200, SILENCE_MS = 2000;
+  // THE FINAL CAN BE SLOW -- the first dictation loads (or downloads) the
+  // model, ~52 s on robin's first try -- but a push that never comes must not
+  // keep the field read-only for good.
+  const WRITE_MS = 180000;
+  // A PAGE-WIDE COUNTER, SEEDED WITH THE CLOCK: the PC drops a partial whose
+  // seq is not above the last final's, and a reloaded page that counted from
+  // 0 again would have every partial dropped.
+  let seq = Date.now();
   let rec = null;
-  const micIdle = () => { mic.disabled = false; mic.classList.remove("rec");
+  // THE DICTATION IN FLIGHT: `base` is the field before it began (typed text
+  // or an earlier dictation -- it stays), `shown` the newest seq on screen.
+  let dict = null, writeCap = 0;
+  // ONE SPACE BETWEEN, none when the field is empty or already ends in
+  // whitespace: the rule for the partial and the final alike, so the final
+  // does not jump.
+  const join = (had, text) => had + (had && !/\s$/.test(had) ? " " : "") + text;
+  const show = (text, partial) => {
+    field.value = join(dict.base, text);
+    field.classList.toggle("partial", !!partial);
+    // the autogrow listener owns the height (see attach)
+    field.dispatchEvent(new Event("input")); };
+  const say = s => { hint.textContent = s || ""; };
+  const micIdle = () => { mic.disabled = !!dict; mic.classList.remove("rec");
     mic.style.removeProperty("--lvl");
-    mic.title = canRecord ? "dictate: tap to record, tap again to stop"
-                          : "dictate: opens the keyboard"; };
+    mic.title = !canRecord ? "dictate: opens the keyboard"
+              : dict ? "writing it down"
+              : "dictate: tap to record, tap again to stop"; };
+  // THE END OF A DICTATION, whichever way it ends: the field is writable
+  // again, black again, and holds `base` plus whatever the final said.
+  function dictDone(text){
+    if(!dict) return;
+    clearTimeout(writeCap);
+    if(text) show(text, false); else { field.value = dict.base;
+      field.classList.remove("partial"); field.dispatchEvent(new Event("input")); }
+    field.readOnly = false; dict = null; say(""); micIdle();
+    if(text){ field.focus(); field.selectionStart = field.selectionEnd = field.value.length; } }
+  function upload(clip, type, partial){
+    const n = ++seq;
+    return fetch("/upload?kind=audio" + (partial ? "&partial=1" : "") + "&seq=" + n,
+      {method: "POST", credentials: "same-origin",
+       headers: {"Content-Type": type}, body: clip})
+      .then(res => { if(!res.ok) throw new Error(String(res.status)); }); }
   function recStart(){
     // THE AUDIO GRAPH IS BUILT IN THE TAP: iOS starts an AudioContext only
     // inside a user gesture, and getUserMedia's promise is no longer one.
@@ -9040,41 +9105,73 @@ REMOTE_JS = r"""
     navigator.mediaDevices.getUserMedia({audio: true}).then(stream => {
       if(rec !== claim){ stream.getTracks().forEach(t => t.stop()); return; }
       const chunks = [], r = new MediaRecorder(stream);
+      const type = () => String(r.mimeType || "audio/mp4").split(";")[0];
       let raf = 0, cap = 0;
+      // read-only while it is provisional: a letter typed between two partials
+      // would be overwritten by the next one
+      dict = {base: field.value, shown: 0};
+      field.readOnly = true;
       if(ctx){ try { const an = ctx.createAnalyser(); an.fftSize = 512;
           ctx.createMediaStreamSource(stream).connect(an);
           const buf = new Float32Array(an.fftSize); let peak = 0.02;
+          let loud = 0, quiet = 0, spoke = false;
           // the desktop band's scale (crow.voice): a running peak that decays
           const tick = () => { an.getFloatTimeDomainData(buf);
             let m = 0; for(let i = 0; i < buf.length; i++) m = Math.max(m, Math.abs(buf[i]));
             peak = Math.max(m, peak * 0.97, 0.02);
             mic.style.setProperty("--lvl", Math.min(1, m / peak).toFixed(2));
+            // the clock, not a frame count: iOS throttles rAF
+            const t = Date.now();
+            if(m > SPEECH_LVL){ quiet = 0; loud = loud || t;
+              if(t - loud >= SPEECH_MS) spoke = true; }
+            else { loud = 0;
+              if(spoke){ quiet = quiet || t;
+                if(t - quiet >= SILENCE_MS && rec){ rec.stop(); return; } } }
             raf = requestAnimationFrame(tick); };
           if(ctx.resume) ctx.resume(); tick(); } catch(_) {} }
-      r.ondataavailable = ev => { if(ev.data && ev.data.size) chunks.push(ev.data); };
+      r.ondataavailable = ev => { if(ev.data && ev.data.size) chunks.push(ev.data);
+        // still recording: everything so far, for the greyed words. A failed
+        // partial is not said -- the final will be, or will say why.
+        if(r.state === "recording" && chunks.length)
+          upload(new Blob(chunks, {type: type()}), type(), true).catch(() => {}); };
       r.onstop = () => { clearTimeout(cap); cancelAnimationFrame(raf);
         stream.getTracks().forEach(t => t.stop());
         if(ctx && ctx.close) ctx.close();
-        rec = null; micIdle();
-        const type = String(r.mimeType || "audio/mp4").split(";")[0];
-        const clip = new Blob(chunks, {type});
-        if(!clip.size) return;
-        fetch("/upload?kind=audio", {method: "POST", credentials: "same-origin",
-          headers: {"Content-Type": type}, body: clip})
-          .then(res => { if(!res.ok) throw new Error(String(res.status)); })
-          .catch(err => crow.note((WORDS.micsend || "") + " (" + err.message + ")")); };
+        rec = null;
+        const clip = new Blob(chunks, {type: type()});
+        if(!clip.size){ dictDone(""); return; }
+        say(WORDS.micwrite); micIdle();
+        writeCap = setTimeout(() => { dictDone(""); crow.note(WORDS.micsend || ""); }, WRITE_MS);
+        upload(clip, type(), false)
+          .catch(err => { dictDone("");
+            crow.note((WORDS.micsend || "") + " (" + err.message + ")"); }); };
       rec = {stop: () => { if(r.state !== "inactive") r.stop(); }};
-      r.start();
+      r.start(PARTIAL_MS);
       mic.classList.add("rec"); mic.title = "stop and write it down";
+      say(WORDS.miclisten);
       cap = setTimeout(() => rec && rec.stop(), MAX_REC);
     }, err => { rec = null; micIdle(); if(ctx && ctx.close) ctx.close();
       crow.note((WORDS.micdenied || "") + " (" + ((err && err.name) || err) + ")"); });
   }
   crow.mic = function(){
     if(!canRecord){ field.focus();
-      document.getElementById("hint").textContent = WORDS.dictate || ""; return; }
+      hint.textContent = WORDS.dictate || ""; return; }
     if(rec){ const r = rec; rec = null; r.stop(); micIdle(); return; }
+    if(dict) return;                               // still writing the last one
     recStart(); };
+  // WHAT THE PC SAYS ABOUT IT: `loading` while the model loads, a partial
+  // (older than what is shown: ignored), the final (words or a note). Words
+  // that arrive with no dictation in flight -- a reloaded page -- are appended
+  // the old way, through the page's own heard.
+  const heard = crow.heard;
+  crow.heard = function(e){
+    if(!dict) return e.partial || e.loading ? undefined : heard.call(this, e);
+    if(e.loading){ say(WORDS.micload); return; }
+    if(e.partial){
+      if(!rec || !(e.seq > dict.shown)) return;
+      dict.shown = e.seq; say(WORDS.miclisten); show(e.text || "", true); return; }
+    dictDone(e.text || "");
+    if(e.note) crow.note(e.note); };
   const micState = crow.micState;
   crow.micState = function(e){
     const r = micState.call(this, Object.assign({}, e, {state: "off", blocked: "", text: "", note: ""}));
@@ -10733,6 +10830,9 @@ class Api:
         # `crow_remote.Remote` oder None; alles andere hier ist, was ein
         # zweiter Bildschirm braucht, um denselben Stand zu sehen.
         self._remote = None
+        # #290: one lane per phone for its dictation -- see `_remote_audio`.
+        self._voice_lock = threading.Lock()
+        self._voice_lanes: dict = {}
         # Wer die gepufferte Zeile getippt hat -- bei #264s Zusammenlegen
         # zwei Geraete. Sie folgen ihr in den Chat, alle anderen bleiben.
         self._queued_by: set = set()
@@ -15876,31 +15976,118 @@ class Api:
         self._remote_dialog(fresh=False)
         return True
 
-    def _remote_audio(self, path: str, device: str) -> None:
+    def _remote_audio(self, path: str, device: str, seq: "int | None" = None,
+                      partial: bool = False) -> None:
         """#290: a phone's recording is on disk. Transcribe it on a thread and
         push the words to THAT phone only, `{"k":"heard"}` -- into its input
         field, never sent, the desktop's rule for dictation. The clip is
-        deleted either way; nothing of it is kept."""
-        threading.Thread(target=self._remote_heard, args=(path, device),
-                         name="crow-remote-voice", daemon=True).start()
+        deleted either way; nothing of it is kept.
 
-    def _remote_heard(self, path: str, device: str) -> None:
+        COALESCED PER PHONE, because a partial arrives every 1.5 s and one
+        takes ~1.3-1.5 s on the CPU (measured 2026-09-24, see REMOTE_JS
+        section 6): never two transcriptions for one phone at once, only the
+        NEWEST waiting partial is kept (an older one would only be overtaken),
+        a final goes before any partial, and a partial whose seq is not above
+        the last final's is dropped -- whether it arrives late or is running
+        when the final comes in."""
+        drop = []
+        with self._voice_lock:
+            lane = self._voice_lanes.setdefault(
+                device, {"busy": False, "partial": None, "finals": [], "done": 0})
+            waiting = lane["partial"]
+            if not partial:
+                if seq is not None:
+                    lane["done"] = max(lane["done"], seq)
+                if waiting:
+                    drop.append(waiting[0])
+                    lane["partial"] = None
+                lane["finals"].append((path, seq))
+            elif seq is None or seq <= lane["done"] or (waiting and waiting[1] >= seq):
+                drop.append(path)
+            else:
+                if waiting:
+                    drop.append(waiting[0])
+                lane["partial"] = (path, seq)
+            start = not lane["busy"] and bool(lane["partial"] or lane["finals"])
+            if start:
+                lane["busy"] = True
+        for clip in drop:
+            try:
+                os.remove(clip)
+            except OSError:
+                pass
+        if start:
+            threading.Thread(target=self._voice_lane, args=(device,),
+                             name="crow-remote-voice", daemon=True).start()
+
+    def _voice_lane(self, device: str) -> None:
+        """The one worker of a phone's lane: finals first, then the newest
+        partial, until nothing waits."""
+        while True:
+            with self._voice_lock:
+                lane = self._voice_lanes[device]
+                if lane["finals"]:
+                    (path, seq), partial = lane["finals"].pop(0), False
+                elif lane["partial"]:
+                    (path, seq), partial = lane["partial"], True
+                    lane["partial"] = None
+                else:
+                    lane["busy"] = False
+                    return
+            try:
+                self._remote_heard(path, device, seq, partial)
+            except Exception:              # noqa: BLE001 -- the lane must go on
+                pass
+
+    def _voice_stale(self, device: str, seq: "int | None") -> bool:
+        """A partial the final has overtaken."""
+        with self._voice_lock:
+            lane = self._voice_lanes.get(device)
+            return seq is None or bool(lane and seq <= lane["done"])
+
+    def _remote_heard(self, path: str, device: str, seq: "int | None" = None,
+                      partial: bool = False) -> None:
+        tagged = {"seq": seq} if seq is not None else {}
+        stats: dict = {}
+        started = time.monotonic()
         try:
             why = crow_voice.file_available()
             if why:
                 said = {"k": "heard", "note": why}
             else:
-                text = crow_voice.transcribe_file(path)
+                # THE FIRST ONE LOADS THE MODEL -- or downloads it, ~52 s on
+                # robin's first try -- and the phone says so meanwhile.
+                if not crow_voice.model_loaded():
+                    self._push_to({"k": "heard", "loading": True}, (device,))
+                text = crow_voice.transcribe_file(path, stats)
                 said = ({"k": "heard", "text": text} if text
                         else {"k": "heard", "note": "nothing was said"})
         except Exception as exc:       # noqa: BLE001 -- said, not raised
             said = {"k": "heard", "note": "dictation failed: %s" % exc}
         finally:
             try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = 0
+            try:
                 os.remove(path)
             except OSError:
                 pass
-        self._push_to(said, (device,))
+        if partial:
+            # A PARTIAL IS WORDS OR NOTHING: its silence and its failure are
+            # the final's to say. Nor is it pushed once the final is in.
+            if said.get("text") and not self._voice_stale(device, seq):
+                self._push_to(dict({"k": "heard", "partial": True, "text": said["text"]},
+                                   **tagged), (device,))
+            return
+        # ONE LINE PER DICTATION in crow.log: what came in, how long it took,
+        # and why it failed if it did. The words themselves are not logged.
+        crow_core.log_note("phone dictation: %d bytes, %.1f s, transcribe %d ms%s"
+                           % (size, stats.get("seconds", 0.0),
+                              (time.monotonic() - started) * 1000,
+                              ", " + said["note"] if said.get("note") else ""),
+                           "voice")
+        self._push_to(dict(said, **tagged), (device,))
 
     def remote_allow(self, ident, yes) -> bool:
         """The desktop's Allow / Deny on a new device. Desktop-only: a phone

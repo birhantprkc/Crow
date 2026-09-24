@@ -235,16 +235,27 @@ def _decode(path: str):
     return decode_audio(str(path), sampling_rate=SAMPLE_RATE)
 
 
-def transcribe_file(path: str) -> str:
+def transcribe_file(path: str, stats: "dict | None" = None) -> str:
     """A recorded clip in, the words out; "" when it is too short or silent.
 
     The sibling of `stop()`: the same model, the same settings, the same
     "a mis-click pastes nothing" floor. The file is read, never deleted --
-    the caller owns it."""
+    the caller owns it. `stats`, when given, gets the clip's length in
+    `seconds` as soon as it is decoded -- for the log line, even when the
+    recogniser then fails."""
     audio = _decode(path)
+    if stats is not None:
+        stats["seconds"] = len(audio) / SAMPLE_RATE
     if len(audio) < MIN_FRAMES:
         return ""
     return _transcribe(audio)
+
+
+def model_loaded() -> bool:
+    """#290: is the model in memory? False before the first dictation, which
+    loads it -- or, on a machine without install.ps1's copy, downloads the
+    486 MB first (~52 s on robin's first try). The phone says so meanwhile."""
+    return _model is not None
 
 
 def load_model():

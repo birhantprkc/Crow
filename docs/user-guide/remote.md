@@ -40,7 +40,7 @@ phone. Window only; the terminal says "stage 2" (#249).
 
 | page | 🎤 |
 |---|---|
-| HTTPS address | tap = record, tap = stop, ring = level. The clip goes to the PC, Whisper (`faster-whisper`, the window's dictation model) writes the text into **this phone's** input field. Nothing is sent until you send |
+| HTTPS address | tap = record: the 🎤 becomes a ■ stop button with a level ring, hint `listening …`. Every 1.5 s the words so far appear greyed in **this phone's** input field (Whisper on the PC, `faster-whisper small`, CPU). Stop = tap ■ or ~2 s of silence after you spoke; `writing …` until the final text replaces the grey. Each dictation is **appended** to what is already in the field (typed or dictated, one space between), so tap, talk, tap, talk builds one message. Nothing is sent until you send. First use: `loading the speech model …` (~52 s if it still has to download) |
 | plain HTTP | focuses the input: use the keyboard's own 🎤 (iOS: Settings → General → Keyboard → Enable Dictation) |
 
 Needs the voice extra on the PC:
@@ -50,6 +50,12 @@ bash install.sh --voice          # faster-whisper (+ PyAV, its decoder) and soun
 ```
 
 Without it the phone shows `dictation needs faster-whisper -- pip install faster-whisper`.
+
+Each dictation is one `crow.log` line: `[voice] phone dictation: <bytes> bytes, <s> s, transcribe <ms> ms[, error]`.
+
+| clip (CPU, `small` int8) | 5 s | 10 s | 15 s |
+|---|---|---|---|
+| transcribe | 1.25–1.4 s | 1.4 s | 1.5 s |
 
 ## Security
 

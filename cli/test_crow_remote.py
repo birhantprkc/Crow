@@ -769,15 +769,16 @@ class AudioUploadTests(unittest.TestCase):
 
     def setUp(self):
         self.heard = []
-        self.h = Harness(self, audio=lambda path, dev: self.heard.append((path, dev)))
+        self.h = Harness(self, audio=lambda path, dev, seq=None, partial=False:
+                         self.heard.append((path, dev, seq, partial)))
 
     def test_a_paired_phone_uploads_a_clip(self):
         dev, cookie = self.h.pair()
         r, data = self.h.request("POST", "/upload?kind=audio", b"\x00\x00\x00\x18ftypM4A ",
                                  {"Content-Type": "audio/mp4"}, cookie=cookie)
         self.assertEqual(r.status, 202, data)
-        (path, who), = self.heard
-        self.assertEqual(who, dev)
+        (path, who, seq, partial), = self.heard
+        self.assertEqual((who, seq, partial), (dev, None, False))
         self.assertEqual(os.path.dirname(path), self.h.upload_dir)
         self.assertTrue(path.endswith(".m4a"))
         with open(path, "rb") as f:
@@ -807,7 +808,7 @@ class AudioUploadTests(unittest.TestCase):
                              cookie=cookie)
         self.assertEqual(r.status, 501)
 
-        def broken(path, dev):
+        def broken(path, dev, **kw):
             raise RuntimeError("no thread")
         self.h.remote._audio = broken
         _, cookie = self.h.pair()
@@ -815,6 +816,23 @@ class AudioUploadTests(unittest.TestCase):
                               cookie=cookie)
         self.assertEqual(r.status, 500)
         self.assertEqual(os.listdir(self.h.upload_dir), [])
+
+
+    def test_a_partial_and_the_final_carry_their_seq(self):
+        """#290 scope amendment: `partial=1&seq=N` is the recording so far,
+        the clip without `partial` the final one; both reach the owner with
+        their seq, which is what orders them. A partial without a seq cannot
+        be ordered and is refused before its body is stored."""
+        dev, cookie = self.h.pair()
+        for query in ("partial=1&seq=41", "seq=42"):
+            r, data = self.h.request("POST", "/upload?kind=audio&" + query, b"clip",
+                                     {"Content-Type": "audio/webm"}, cookie=cookie)
+            self.assertEqual(r.status, 202, data)
+        self.assertEqual([h[1:] for h in self.heard], [(dev, 41, True), (dev, 42, False)])
+        r, _ = self.h.request("POST", "/upload?kind=audio&partial=1", b"clip",
+                              {"Content-Type": "audio/webm"}, cookie=cookie)
+        self.assertEqual(r.status, 400)
+        self.assertEqual(len(self.heard), 2)
 
 
 class DeviceNameTests(unittest.TestCase):

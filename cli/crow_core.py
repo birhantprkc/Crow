@@ -18038,6 +18038,9 @@ REMOTE_PHONE_TEXT = {
                "-- for now use the keyboard's \U0001f3a4",
     "micdenied": "the microphone did not open",
     "micsend": "the recording could not be sent",
+    "miclisten": "listening … tap ■ or stop talking to finish",
+    "micwrite": "writing …",
+    "micload": "loading the speech model … the first time takes a while",
     "upload": "the image could not be sent",
     "root": "folder on the desktop",
 }
