@@ -1501,26 +1501,84 @@ body[data-rail="shut"] #rail{width:0;overflow:hidden}
 #remotetoggle{margin-right:9px}
 #remotetoggle.on{color:var(--accent);
   background:color-mix(in srgb,var(--accent) 12%,transparent)}
-#remotetoggle .rdot{display:none;position:absolute;right:1px;top:2px;width:6px;
-  height:6px;border-radius:50%;background:var(--ok)}
+#remotetoggle .rdot{display:none;position:absolute;right:2px;top:2px;width:6px;
+  height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 2px var(--rail)}
 #remotetoggle.live .rdot{display:block}
-/* #249: der Dialog mit dem QR-Code, und die Kopplungskarte. */
-#remotedlg{position:fixed;inset:0;z-index:40;display:grid;place-items:center;
-  background:color-mix(in srgb,var(--bg) 70%,transparent)}
+/* #249: der Dialog mit dem QR-Code und die Kopplungsleiste -- in der Form der
+   von robin abgenommenen Mockups (Schritt 0): das Blatt der Einstellungen,
+   nur kleiner; die Kopplungsfrage in der Form von #pendbar ueber der Eingabe. */
+#remotedlg{position:fixed;inset:0;z-index:80;display:grid;place-items:center;
+  background:var(--shadow-strong);padding-top:34px}
 #remotedlg[hidden]{display:none}
-#remotedlg .rsheet{background:var(--bg);border:1px solid var(--line);
-  border-radius:12px;padding:18px 20px;width:340px;max-width:92vw;
-  box-shadow:0 8px 30px var(--shadow)}
-#remotedlg .rqr{background:var(--on-solid);border-radius:8px;padding:10px;
-  display:grid;place-items:center}
-#remotedlg .rqr svg{width:220px;height:220px}
-#remotedlg .rurl{font-family:var(--mono);font-size:12px;margin:10px 0;
-  word-break:break-all;-webkit-user-select:text;user-select:text}
-#remotedlg .rdev{display:flex;justify-content:space-between;gap:8px;
-  font-size:12px;padding:4px 0;border-top:1px solid var(--line)}
-#remotedlg .rhint{font-size:11px;color:var(--dim);margin-top:8px;
-  white-space:pre-wrap;-webkit-user-select:text;user-select:text}
-#remotedlg .rrow{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+#remotedlg .rsheet{width:min(720px,94vw);max-height:calc(100vh - 58px);display:flex;
+  flex-direction:column;background:var(--panel);border:1px solid var(--bevel);
+  border-radius:12px;box-shadow:0 24px 60px var(--shadow-strong);overflow:hidden}
+#remotedlg .rhead{display:flex;align-items:center;gap:10px;padding:13px 16px;
+  border-bottom:1px solid var(--line)}
+#remotedlg .rhead h2{margin:0;font-size:13px;font-weight:600;color:var(--text-strong)}
+#remotedlg .rhead .swlabel{margin-left:auto}
+#remotedlg .sclose{font:inherit;font-size:12px;cursor:pointer;background:transparent;
+  border:0;color:var(--dimmer);padding:2px 7px;border-radius:6px}
+#remotedlg .sclose:hover{background:var(--hover);color:var(--text-hover)}
+#remotedlg .rbody{overflow-y:auto;padding:18px 20px 16px;-webkit-user-select:text;
+  user-select:text}
+#remotedlg .rpair{display:flex;gap:20px;align-items:flex-start}
+#remotedlg .rqr{flex:none;width:188px;height:188px;border-radius:10px;background:#fff;
+  box-shadow:0 0 0 1px var(--line);overflow:hidden;display:grid;place-items:center}
+#remotedlg .rqr svg{width:100%;height:100%;display:block}
+#remotedlg .rinfo{flex:1;min-width:0;display:flex;flex-direction:column;gap:12px}
+#remotedlg h3{margin:0 0 6px;font-size:11px;font-weight:600;color:var(--text-soft);
+  letter-spacing:.08em;text-transform:uppercase}
+#remotedlg .rstep{color:var(--text);font-size:12.5px;line-height:1.5}
+#remotedlg .rurl{display:flex;gap:7px;align-items:center}
+#remotedlg .rurl code{flex:1;min-width:0;font-family:var(--mono);font-size:11.5px;
+  color:var(--text-soft);background:var(--code-bg);border:1px solid var(--line);
+  border-radius:6px;padding:6px 9px;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+#remotedlg .rurl button,#remotedlg .rdev button{font:inherit;font-size:11px;
+  cursor:pointer;padding:5px 12px;border-radius:6px;background:transparent;
+  border:1px solid var(--line);color:var(--dim)}
+#remotedlg .rurl button:hover{border-color:var(--bevel);color:var(--accent)}
+#remotedlg .rttl{font-size:11px;color:var(--dimmer);font-variant-numeric:tabular-nums}
+#remotedlg .rttl b{color:var(--gold);font-weight:600}
+#remotedlg .rhint{font-family:var(--mono);font-size:11px;color:var(--warn);
+  background:color-mix(in srgb,var(--warn) 8%,transparent);
+  border:1px solid color-mix(in srgb,var(--warn) 30%,transparent);
+  border-radius:6px;padding:7px 9px;word-break:break-all;white-space:pre-wrap}
+#remotedlg .rdevs{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}
+#remotedlg .rdev{display:flex;align-items:center;gap:10px;padding:9px 0;
+  border-top:1px solid var(--raised)}
+#remotedlg .rdev:first-of-type{border-top:0}
+#remotedlg .rdev .ico{flex:none;color:var(--dimmer);display:flex}
+#remotedlg .rdev.live .ico{color:var(--ok)}
+#remotedlg .rdev .stext{flex:1;min-width:0}
+#remotedlg .rdev .sname{font-weight:600;font-size:12.5px;color:var(--text)}
+#remotedlg .rdev .sdesc{color:var(--dim);font-size:11.5px;margin-top:2px}
+#remotedlg .rdev.live .sdesc{color:var(--ok)}
+#remotedlg .rdev button{color:var(--bad-text);border-color:rgba(240,101,90,.40)}
+#remotedlg .rdev button:hover{background:rgba(240,101,90,.12)}
+#remotedlg .rfoot{margin-top:12px;color:var(--dimmer);font-size:11px}
+#pairbar{max-width:var(--colw);margin:0 auto -14px;padding:11px 13px 24px;
+  border:1px solid color-mix(in srgb,var(--accent) 45%,transparent);
+  border-radius:10px;font-size:11.5px;color:var(--dim);
+  background:linear-gradient(90deg,transparent 0%,color-mix(in srgb,var(--accent) 16%,transparent) 50%,transparent 100%),var(--raised);
+  background-size:220% 100%,auto;
+  animation:pendsweep 2.6s ease-in-out infinite, pendglow 2.6s ease-in-out infinite}
+#pairbar .top{display:flex;align-items:center;gap:10px}
+#pairbar .ph{color:var(--accent);display:flex}
+#pairbar .title{font-weight:600;color:var(--text)}
+#pairbar .hint{margin-left:auto;color:var(--dimmer);font-size:10.5px;
+  font-variant-numeric:tabular-nums}
+#pairbar .what{margin:6px 0 0 25px;color:var(--dim)}
+#pairbar .acts{display:flex;gap:8px;margin:10px 0 0 25px}
+#pairbar button{font:inherit;font-size:11.5px;cursor:pointer;border-radius:6px;
+  padding:4px 14px;background:transparent;border:1px solid var(--line);color:var(--dim)}
+#pairbar button.yes{color:var(--ok);border-color:rgba(78,201,143,.45)}
+#pairbar button.yes:hover{background:rgba(78,201,143,.12)}
+#pairbar button.no{color:var(--bad-text);border-color:rgba(240,101,90,.45)}
+#pairbar button.no:hover{background:rgba(240,101,90,.12)}
+@media (prefers-reduced-motion: reduce){#pairbar{animation:none;
+  background:color-mix(in srgb,var(--accent) 14%,transparent)}}
 /* #156. DER KNOPF SAGT, OB DAS PANEL STEHT. Mit zwei Panels an einer Leiste ist
    das keine Verzierung mehr, sondern die Antwort auf "wo ist mein Git-Panel
    hin" -- und weil das Wegklicken NUR hier geht (robins Ansage: kein zweites
@@ -7415,61 +7473,97 @@ const crow = {
     if(!e.open){ this.remoteClose(); return; }
     // EIN NACHZIEHEN (ein Geraet kam oder ging) OEFFNET NICHTS, was zu ist.
     if(!e.fresh && d.hidden) return;
+    // DIE FORM DES ABGENOMMENEN MOCKUPS (#249 Schritt 0): Kopf mit Schalter,
+    // links der Code, rechts Anleitung, Adresse, Netz, Laufzeit, Firewall;
+    // darunter die gekoppelten Geraete mit "revoke". Das Geruest als Markup,
+    // jeder Name und jede Adresse per textContent; das SVG ist das einzige
+    // fremde Markup und kommt aus Crows eigenem Kodierer (`qr_svg`).
+    const ttl = d.querySelector(".rttl b");
+    if(e.fresh || !ttl) this.remoteUntil = Date.now() + 1000*(e.ttl||120);
     d.textContent="";
     const sheet=document.createElement("div"); sheet.className="rsheet";
-    const head=document.createElement("div"); head.className="rrow";
-    head.style.justifyContent="space-between"; head.style.marginTop="0";
-    const h=document.createElement("b"); h.textContent="Phone mirror";
-    const x=document.createElement("button"); x.className="sclose"; x.textContent="✕";
-    x.onclick=()=>this.remoteClose(); head.append(h, x); sheet.appendChild(head);
-    // DAS SVG IST DAS EINZIGE MARKUP: es kommt aus Crows eigenem Kodierer
-    // (`crow_remote.qr_svg`), nie von aussen.
-    const qr=document.createElement("div"); qr.className="rqr"; qr.innerHTML=e.svg||"";
-    sheet.appendChild(qr);
-    const url=document.createElement("div"); url.className="rurl"; url.textContent=e.url||"";
-    sheet.appendChild(url);
+    sheet.innerHTML='<div class="rhead"><h2>Remote</h2>'
+      + '<span class="swlabel">server on</span><button class="sw on" title="/remote off"></button>'
+      + '<button class="sclose" title="close">&#10005;</button></div>'
+      + '<div class="rbody"><div class="rpair"><div class="rqr"></div><div class="rinfo">'
+      + '<div class="rstep">Point the iPhone camera at the code and tap the Safari '
+      + 'banner. You confirm the device here once.</div>'
+      + '<div><h3>Address</h3><div class="rurl"><code></code><button>copy</button></div></div>'
+      + '<div class="rnet" hidden><h3>Network</h3><div class="seg"></div></div>'
+      + '<div class="rttl">code valid for <b></b> · single use · a new one each time this opens</div>'
+      + '<div class="rhint" hidden></div></div></div>'
+      + '<div class="rdevs"><h3>Paired devices</h3><div class="rlist"></div>'
+      + '<div class="rfoot">Revoking ends its stream now and its cookie stops working. '
+      + '/remote off stops the server; paired devices stay paired.</div></div></div>';
+    sheet.querySelector(".sclose").onclick=()=>this.remoteClose();
+    sheet.querySelector(".sw").onclick=()=>pywebview.api.remote_stop()
+      .then(said => { if(said) this.note(said); });
+    sheet.querySelector(".rqr").innerHTML=e.svg||"";
+    sheet.querySelector(".rurl code").textContent=e.url||"";
+    sheet.querySelector(".rurl button").onclick=()=>pywebview.api.copy(e.url||"");
     if((e.ips||[]).length > 1){
-      const sel=document.createElement("select");
-      e.ips.forEach(([iface, ip]) => { const o=document.createElement("option");
-        o.value=ip; o.textContent=ip+"  ("+iface+")"; o.selected = ip===e.ip;
-        sel.appendChild(o); });
-      sel.onchange=()=>pywebview.api.remote_use_ip(sel.value)
-        .then(said => { if(said) this.note(said); });
-      sheet.appendChild(sel); }
+      const net=sheet.querySelector(".rnet"), seg=net.querySelector(".seg");
+      e.ips.forEach(([iface, ip]) => { const o=document.createElement("button");
+        o.textContent=iface+" · "+ip; o.classList.toggle("on", ip===e.ip);
+        o.onclick=()=>pywebview.api.remote_use_ip(ip)
+          .then(said => { if(said) this.note(said); });
+        seg.appendChild(o); });
+      net.hidden=false; }
+    if(e.hint){ const t=sheet.querySelector(".rhint"); t.textContent=e.hint; t.hidden=false; }
+    const PHONE='<svg viewBox="0 0 20 20" width="18" height="18" fill="none"'
+      + ' stroke="currentColor" stroke-width="1.6" stroke-linecap="round"'
+      + ' stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="2.5"'
+      + ' width="9" height="15" rx="2"></rect><line x1="8.8" y1="14.6" x2="11.2"'
+      + ' y2="14.6"></line></svg>';
+    const list=sheet.querySelector(".rlist");
     (e.devices||[]).forEach(dev => {
-      const row=document.createElement("div"); row.className="rdev";
-      const n=document.createElement("span");
-      n.textContent=dev.name + (dev.online ? "  · online" : "");
-      const f=document.createElement("button"); f.textContent="forget";
-      f.onclick=()=>pywebview.api.remote_forget(dev.id)
+      const row=document.createElement("div"); row.className="rdev"+(dev.online?" live":"");
+      row.innerHTML='<span class="ico">'+PHONE+'</span><div class="stext">'
+        + '<div class="sname"></div><div class="sdesc"></div></div><button>revoke</button>';
+      row.querySelector(".sname").textContent=dev.name||dev.id||"";
+      row.querySelector(".sdesc").textContent=dev.online ? "connected" : "paired";
+      row.querySelector("button").onclick=()=>pywebview.api.remote_forget(dev.id)
         .then(said => { if(said) this.note(said); });
-      row.append(n, f); sheet.appendChild(row); });
-    if(e.hint){ const t=document.createElement("div"); t.className="rhint";
-      t.textContent=e.hint; sheet.appendChild(t); }
-    const row=document.createElement("div"); row.className="rrow";
-    const off=document.createElement("button"); off.textContent="turn off";
-    off.onclick=()=>pywebview.api.remote_stop().then(said => { if(said) this.note(said); });
-    row.appendChild(off); sheet.appendChild(row);
-    d.appendChild(sheet); d.hidden=false; },
-  // EIN NEUES GERAET FRAGT: die Karte im Verlauf, wie eine Freigabe (#88).
+      list.appendChild(row); });
+    if(!(e.devices||[]).length){ const n=document.createElement("div");
+      n.className="rfoot"; n.textContent="none yet"; list.appendChild(n); }
+    d.appendChild(sheet); d.hidden=false;
+    const b=sheet.querySelector(".rttl b");
+    const tick=()=>{ if(!b.isConnected){ clearInterval(this.remoteTick); return; }
+      const left=Math.max(0, Math.round((this.remoteUntil-Date.now())/1000));
+      b.textContent=Math.floor(left/60)+":"+String(left%60).padStart(2,"0"); };
+    clearInterval(this.remoteTick); tick(); this.remoteTick=setInterval(tick, 1000); },
+  // EIN NEUES GERAET FRAGT: die Leiste ueber der Eingabe, in der Form von
+  // #pendbar (abgenommenes Mockup j) -- keine Karte im Verlauf, weil das
+  // Koppeln nicht zum Gespraech gehoert. Die Antwort landet als Notiz.
   remoteAsk(e){
-    const d=document.createElement("div"); d.className="turn ask";
-    d.innerHTML='<div class="askcard"><div class="asktop"><b>phone mirror</b>'
-      + '<code></code></div><div class="askrow">'
-      + '<button class="yes">allow</button><button class="no">deny</button></div></div>';
-    const card=d.querySelector(".askcard"); card.dataset.rid=String(e.id);
-    card.querySelector("code").textContent=e.t||e.name||"";
-    const answer = yes => { card.querySelector(".askrow").innerHTML=
-        '<span class="askdone"></span>';
+    const old=$("#pairbar"); if(old) old.remove();
+    const p=document.createElement("div"); p.id="pairbar"; p.dataset.rid=String(e.id);
+    p.innerHTML='<span class="top"><span class="ph"><svg viewBox="0 0 20 20" width="15"'
+      + ' height="15" fill="none" stroke="currentColor" stroke-width="1.6"'
+      + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<rect x="5.5" y="2.5" width="9" height="15" rx="2"></rect>'
+      + '<line x1="8.8" y1="14.6" x2="11.2" y2="14.6"></line></svg></span>'
+      + '<span class="title"></span><span class="hint"></span></span>'
+      + '<div class="what">it gets full control, at the current level <b class="lvl"></b></div>'
+      + '<div class="acts"><button class="yes">Allow</button>'
+      + '<button class="no">Deny</button></div>';
+    p.querySelector(".title").textContent=e.t||e.name||"";
+    p.querySelector(".lvl").textContent=this.mode||"";
+    const answer = yes => { p.querySelector(".acts").innerHTML="";
       pywebview.api.remote_allow(e.id, yes); };
-    card.querySelector(".yes").onclick=()=>answer(true);
-    card.querySelector(".no").onclick=()=>answer(false);
-    flow.appendChild(d); this.bottom(); },
+    p.querySelector(".yes").onclick=()=>answer(true);
+    p.querySelector(".no").onclick=()=>answer(false);
+    const until=Date.now()+1000*(e.ttl||120), hint=p.querySelector(".hint");
+    const tick=()=>{ if(!p.isConnected) return clearInterval(t);
+      const left=Math.max(0, Math.round((until-Date.now())/1000));
+      hint.textContent="expires in "+Math.floor(left/60)+":"+String(left%60).padStart(2,"0"); };
+    const t=setInterval(tick, 1000); tick();
+    $("#composer").insertBefore(p, $("#box")); },
   remoteAsked(e){
-    const card=document.querySelector('.askcard[data-rid="'+String(e.id)+'"]');
-    if(!card){ if(e.t) this.note(e.t); return; }
-    card.querySelector(".askrow").innerHTML='<span class="askdone"></span>';
-    card.querySelector(".askdone").textContent=e.t||""; },
+    const p=document.querySelector('#pairbar[data-rid="'+String(e.id)+'"]');
+    if(p) p.remove();
+    if(e.t) this.note(e.t); },
   // #249. DIE ANDERE SEITE HAT GEANTWORTET: die offene Karte hier schliesst
   // mit dem Satz des Kerns ("allowed -- answered on phone"), statt weiter eine
   // Frage zu stellen, die schon entschieden ist.
@@ -7904,6 +7998,7 @@ new ResizeObserver(() => crow.brPlace()).observe($("#brbody"));
 window.addEventListener("pywebviewready",()=>{ pywebview.api.ready(); input.focus(); });
 // #249: kein pywebview auf dem Telefon, also kein `pywebviewready` von aussen --
 // die Bruecke oben koppelt, oeffnet den Strom und feuert es selbst.
+/* __REMOTE_JS__ */
 if(window.CROW_REMOTE) window.crowRemoteStart();
 </script></body></html>
 """
@@ -8076,6 +8171,559 @@ REMOTE_CSS = """
 #remotepair{position:fixed;inset:0;z-index:50;display:grid;place-items:center;
   background:var(--bg);color:var(--text);padding:24px;text-align:center}
 #remotepair[hidden]{display:none}
+""" + r"""
+/* #249 THE PHONE LAYER. Only in the phone variant of PAGE (REMOTE_CSS), only below 700 px.
+   Same PAGE, same elements, same handlers; this block only rearranges them.
+   REMOTE_HEAD carries the viewport meta (viewport-fit=cover), without which
+   iOS lays it out at 980 px and env(safe-area-inset-*) stays 0. The design
+   is robin's approved step-0 mockups (2026-09-24). */
+@media (max-width:700px){
+
+/* ---- the column: the #280 variables, not the selectors ------------------ */
+:root{
+  --sbw:0px;           /* iOS draws overlay scrollbars */
+  --colpad:14px;       /* #flow / .turn / #composer inset */
+  --reserve:0px;       /* no card column beside the chat */
+  --barh:48px;
+  --tap:44px;          /* Apple HIG minimum target */
+  --drawer:min(86vw,340px);
+  --safe-t:env(safe-area-inset-top,0px);
+  --safe-b:env(safe-area-inset-bottom,0px);
+  --safe-l:env(safe-area-inset-left,0px);
+  --safe-r:env(safe-area-inset-right,0px);
+}
+html{overflow-x:clip}
+html,body{height:100dvh;overscroll-behavior:none;-webkit-text-size-adjust:100%}
+body{padding:var(--safe-t) var(--safe-r) 0 var(--safe-l);
+  -webkit-tap-highlight-color:transparent}
+
+/* ---- window chrome: gone ------------------------------------------------ */
+#railgrip,#codegrip{display:none!important}
+
+/* ---- the title bar becomes the app header ------------------------------
+   Same buttons, same onclick; only the window part (drag region, min/max/
+   close) is hidden. The rail button opens the rail drawer, the three on the
+   right open the code / git / browser drawers. */
+#bar{height:var(--barh);padding:0 4px;gap:0;background:var(--bg);
+  border-bottom:1px solid var(--line-soft)}
+#railtoggle,#codetoggle,#gittoggle,#browsertoggle,#help{
+  min-width:var(--tap);min-height:var(--tap);justify-content:center;
+  margin:0;border-radius:10px}
+#railtoggle svg,#codetoggle svg,#gittoggle svg,#browsertoggle svg{
+  width:19px;height:19px}
+#mark{font-size:12.5px;margin:0 4px}
+#bar #codetoggle{margin-left:auto}
+#help{font-size:12.5px;padding:0 10px}
+#helpmenu button{min-height:var(--tap);font-size:14px}
+/* The toggles light when their drawer is open (page rule), not per setting. */
+
+/* ---- the chat fills the screen ------------------------------------------ */
+#body{position:relative;background:var(--bg)}
+#main{min-width:0;border-radius:0;
+  container-type:normal}          /* fixed children anchor to the viewport */
+#flow{padding-top:14px;
+  /* fitFlow writes padding-bottom inline; the pinned card adds its height */
+  padding-bottom:calc(var(--comph,0px) + var(--askh,0px) + 12px)!important;
+  scroll-behavior:auto;-webkit-overflow-scrolling:touch}
+.you .txt{max-width:86%}
+.md table{max-width:100%}
+.code pre,.cost{max-width:100%}
+.turn{min-width:0}
+
+/* ---- drawers: rail left, code / browser / git right ---------------------
+   transform, never width: a panel parked at width 0 in a flex row, or pushed
+   off-canvas with `left`, still widens the layout box and iOS zooms out. */
+#rail,#side{position:fixed;top:0;bottom:0;z-index:90;
+  width:var(--drawer)!important;overflow:hidden;
+  padding-top:var(--safe-t);padding-bottom:var(--safe-b);
+  box-shadow:0 0 40px var(--shadow-strong);
+  transition:transform .22s cubic-bezier(.3,.7,.2,1);visibility:hidden}
+#rail{left:0;transform:translateX(-105%);padding-left:var(--safe-l)}
+#side{right:0;transform:translateX(105%);padding-right:var(--safe-r);
+  width:min(94vw,440px)!important}
+body:not([data-rail="shut"]) #rail{transform:none;visibility:visible}
+body:not([data-code="shut"]) #side,
+body:not([data-browser="shut"]) #side{transform:none;visibility:visible}
+@media (prefers-reduced-motion:reduce){#rail,#side{transition:none}}
+#side>*{visibility:inherit}
+#railhead,#codehead,#brhead{min-height:var(--barh)}
+#new,#codewipe,#brnew{min-height:36px;padding:0 14px;font-size:13px}
+.sess{padding:11px 12px 12px 14px;min-height:var(--tap)}
+.sess .t{font-size:14px}
+.sess .s{font-size:12px}
+.proj{min-height:var(--tap);padding:8px 10px}
+.proj .t{font-size:13px}
+#archbar{min-height:var(--tap);padding:0 12px}
+#toolcalls .tchd,#codefiles .tchd,.gitgrp .tchd{min-height:var(--tap);font-size:13px}
+#toolcalls .tool .hd{min-height:40px;font-size:12.5px}
+.cwcopy{min-height:36px;padding:0 14px}
+#toolcalls .tcclear{min-height:36px;padding:0 14px;font-size:12.5px}
+
+/* The dim layer behind an open drawer (mobile.js adds #mscrim). */
+#mscrim{position:fixed;inset:0;z-index:85;background:var(--shadow-strong);
+  opacity:0;pointer-events:none;transition:opacity .2s}
+body.m-drawer #mscrim{opacity:1;pointer-events:auto}
+
+/* git: the card from #panels becomes a right drawer of its own */
+body[data-git="shut"] #git{display:none}
+body:not([data-git="shut"]) #git{position:fixed;top:0;bottom:0;right:0;z-index:90;
+  width:min(94vw,440px);border-radius:0;border:0;
+  padding-top:var(--safe-t);padding-bottom:var(--safe-b)}
+body:not([data-git="shut"]) #panels{z-index:95}   /* out of #panels' stacking context */
+#githead{min-height:var(--barh);padding:0 15px}
+#gituser{min-height:var(--tap);padding:0 6px;font-size:12px}
+.gline,.grow{min-height:36px;font-size:12.5px}
+.gcommit input{font-size:16px;min-height:var(--tap)}
+.gcommit button{min-height:var(--tap)}
+
+/* ---- goal: a thin bar under the header; tap expands it ------------------ */
+#panels{top:0;left:0;right:0;width:auto;height:auto;max-height:78%;
+  padding:8px var(--colpad) 0;gap:8px}
+#main:has(#goalpanel:not([hidden])) #panels{padding-bottom:10px;
+  background:linear-gradient(var(--bg) 70%,transparent)}
+#main:has(#goalpanel:not([hidden])) #flow,
+#main:has(#subpanel:not([hidden])) #flow{padding-top:64px}
+#main:has(#goalpanel:not([hidden])):has(#subpanel:not([hidden])) #flow{padding-top:116px}
+#goalpanel{border-radius:12px;font-size:12.5px;max-height:100%}
+#goalpanel .gh{min-height:var(--tap);padding:0 6px 0 14px}
+#goalpanel .gx,#subpanel .gx{min-width:var(--tap);min-height:var(--tap);
+  font-size:20px;padding:0}
+#goalpanel .gt .tx{font-size:14px}
+#goalpanel li{padding:9px 0 11px}
+/* collapsed: one 44 px row -- icon, title, n/m, close */
+#goalpanel.shut:not([hidden]){display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;
+  align-items:center;cursor:pointer}
+#goalpanel.shut .gh{display:contents}
+#goalpanel.shut .gh b{display:none}
+#goalpanel.shut .gh .st{grid-column:3;grid-row:1;margin:0;padding-left:8px;
+  font-variant-numeric:tabular-nums}
+#goalpanel.shut .gh .gx{grid-column:4;grid-row:1}
+#goalpanel.shut .gt{display:contents}
+#goalpanel.shut .gi{grid-column:1;grid-row:1;padding-left:14px;margin:0 9px 0 0}
+#goalpanel.shut .gt .tx{grid-column:2;grid-row:1;font-size:13px;font-weight:600;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#goalpanel.shut .gm{grid-column:3;grid-row:1;padding:0 0 0 8px;font-size:12px;
+  white-space:nowrap}
+#goalpanel.shut .gm{max-width:5.2em;overflow:hidden}     /* "2/5 · …" -> "2/5" */
+#goalpanel.shut .gh .st:empty{display:none}
+#subpanel{border-radius:12px}
+#subpanel .sph{min-height:var(--tap);padding:0 0 0 5px}
+#subpanel.shut{max-height:var(--tap)}
+
+/* ---- composer (robin, 2026-09-24): ONE row, like iMessage ----------------
+   One frame (#box), one 44 pt row:  [+ 44][input, grows up to 5 lines][send/Stop 44]
+   The context is the frame's top 2 px (a background layer, clipped by the
+   radius). Everything else -- attach, dictate, mode, model, folder, the
+   stats and the hint -- is in #mtools, which the + opens ABOVE the composer.
+   A dot on the + shows the mode's colour. Staged images: a strip above the row. */
+#composer{left:0;right:0;padding:10px var(--colpad) calc(8px + var(--safe-b));
+  background:linear-gradient(to bottom,transparent,var(--bg) 10px)}
+#viewbar,#pendbar{margin-bottom:-12px;font-size:12.5px}
+#viewbar button,#pendbar button{min-height:40px;padding:0 14px}
+#box,#box.focus,#box.drag{box-shadow:none}
+#box{--fillc:var(--ok);padding:4px;border-radius:26px;display:flex;
+  flex-direction:column;gap:4px;
+  background:
+    linear-gradient(var(--fillc),var(--fillc)) 0 0/calc(var(--ctxp,0) * 100%) 2px no-repeat,
+    linear-gradient(var(--line),var(--line)) 0 0/100% 2px no-repeat,
+    var(--panel)}
+#box.cw{--fillc:var(--warn)}
+#box.cb{--fillc:var(--bad)}
+#mctx{position:absolute;left:0;right:0;top:0;height:12px;z-index:2;cursor:pointer}
+#stage{padding:10px 8px 2px;gap:8px;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
+#stage[hidden]{display:none}
+#stage::-webkit-scrollbar{display:none}
+#stage .imgchip{flex:none}
+#stage .imgchip img{height:56px;border-radius:10px}
+/* the remove x: 24 px visible, 40 px hit box (transparent border) */
+#stage .imgchip button{width:40px;height:40px;top:-12px;right:-12px;line-height:22px;
+  font-size:14px;border:8px solid transparent;background-clip:padding-box;
+  box-shadow:inset 0 0 0 1px var(--bevel)}
+#line{align-items:flex-end;gap:4px;margin:0}
+#in{font-size:16px;line-height:22px;max-height:calc(5 * 22px + 22px);
+  padding:11px 6px;align-self:center}  /* 16px: iOS zooms on focus below it */
+#in:placeholder-shown{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#mplus,#go{flex:none;width:var(--tap);height:var(--tap);padding:0!important;margin:0;
+  border-radius:50%;box-sizing:border-box;border:1px solid;display:grid;
+  place-items:center;cursor:pointer;position:relative}
+#go{font-size:0!important;color:var(--on-solid);background:var(--accent);
+  border-color:var(--accent)}
+#go::before{content:"";position:absolute;inset:0;margin:auto;width:20px;height:20px;background:currentColor;
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M10 16V4M4.5 9.5 10 4l5.5 5.5' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat;
+  mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M10 16V4M4.5 9.5 10 4l5.5 5.5' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat}
+#go.stop{color:var(--bad-text);background:rgba(240,101,90,.16);
+  border-color:rgba(240,101,90,.55)}
+#go.stop::before{-webkit-mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect x='5' y='5' width='10' height='10' rx='2'/%3E%3C/svg%3E");mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect x='5' y='5' width='10' height='10' rx='2'/%3E%3C/svg%3E")}
+:root[data-theme="light"] #go.stop{color:var(--bad)}
+#mplus{color:var(--dim);background:transparent;border-color:var(--line)}
+#mplus::before{content:"";width:20px;height:20px;background:currentColor;
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M10 4v12M4 10h12' stroke='%23000' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E") center/contain no-repeat;
+  mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M10 4v12M4 10h12' stroke='%23000' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E") center/contain no-repeat;transition:transform .15s}
+body.m-tools #mplus{color:var(--accent);border-color:var(--accent)}
+body.m-tools #mplus::before{transform:rotate(45deg)}
+/* the mode dot, top-right corner of the + */
+#mplus::after{content:"";position:absolute;top:1px;right:1px;width:10px;height:10px;
+  border-radius:50%;box-shadow:0 0 0 2px var(--panel);background:var(--dimmer)}
+#mplus[data-mode="manual"]::after{background:var(--text-strong)}
+#mplus[data-mode="allowedit"]::after{background:var(--ok)}
+#mplus[data-mode="auto"]::after{background:var(--gold)}
+#mplus[data-mode="yolo"]::after{background:var(--bad);box-shadow:0 0 0 2px var(--panel),0 0 6px rgba(240,101,90,.9)}
+#foot{display:none}
+
+/* ---- #mtools: the + sheet, above the composer --------------------------- */
+#mtools{position:absolute;left:var(--colpad);right:var(--colpad);
+  bottom:calc(100% - 2px);z-index:8;display:flex;flex-direction:column;gap:8px;
+  padding:10px;background:var(--panel);border:1px solid var(--bevel);border-radius:18px;
+  box-shadow:0 -10px 34px var(--shadow-strong);
+  transform:translateY(8px);opacity:0;visibility:hidden;
+  transition:transform .16s ease,opacity .16s ease,visibility 0s .16s}
+body.m-tools #mtools{transform:none;opacity:1;visibility:visible;transition-delay:0s}
+@media (prefers-reduced-motion:reduce){#mtools{transition:none}}
+.mr2,.mr3{display:flex;gap:8px;align-items:center;min-width:0}
+.mr4{display:flex;flex-wrap:wrap;column-gap:0;row-gap:2px;padding:2px 6px 0;
+  font-size:11.5px;line-height:16px;color:var(--dimmer);font-variant-numeric:tabular-nums}
+.mr4>*:not(:empty)~*:not(:empty)::before{content:" · ";white-space:pre}
+.mr4 #ctx{display:inline;white-space:nowrap}
+.mr4 #ctx:not(:empty)::after{content:" context"}
+#turnstate{white-space:nowrap}
+#turnstate:empty,#hint:empty{display:none}
+#hint{width:auto;flex:none;min-width:0;max-width:100%;font-size:11.5px;text-align:left;
+  white-space:normal;overflow:visible}
+#remoteattach,#mic{width:var(--tap);height:var(--tap);flex:none;display:grid;
+  place-items:center;padding:0;border-radius:50%;color:var(--dim);cursor:pointer;
+  border:1px solid var(--line);background:transparent;box-sizing:border-box;margin:0}
+#mic svg{width:17px;height:17px}
+#remoteattach svg{width:19px;height:19px}
+#remoteattach:active,#mic:active{background:var(--hover)}
+#modewrap{flex:none}
+#modelwrap{flex:1 1 0;min-width:0;display:flex}
+#rootwrap{flex:1 1 0;min-width:0;display:flex}
+#subwrap{display:none!important}
+#mode,#model,#root{height:var(--tap);box-sizing:border-box;margin:0;
+  border:1px solid var(--line);border-radius:22px;padding:0 14px;
+  display:flex;align-items:center;gap:6px;font-size:13px;line-height:1;
+  white-space:nowrap;min-width:0}
+#model{width:100%}
+#root{width:100%;max-width:none;overflow:hidden;text-overflow:ellipsis;display:block;
+  line-height:42px;text-align:left}
+#root::before{content:"folder  ";color:var(--dimmer);white-space:pre}
+#model::before{content:"model";color:var(--dimmer);margin-right:2px}
+#model b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-weight:500;line-height:1}
+#model .lvl{display:none!important}   /* no level on the phone (robin) */
+/* menus that open upward from the composer: full width, big rows */
+#modemenu,#rootmenu,#modelmenu,#submenu{position:fixed;left:8px;right:8px;
+  bottom:calc(var(--comph,0px) + var(--toolsh,0px) + 4px);z-index:60;min-width:0;max-width:none;width:auto;
+  max-height:60dvh;overflow:auto}
+#modemenu button,#rootmenu button,#modelmenu button,#submenu .row{
+  min-height:var(--tap);padding:9px 12px;font-size:13px}
+#menu button{min-height:var(--tap);font-size:13.5px}
+
+/* ---- trace, thinking, cards --------------------------------------------- */
+details.trace>summary,details.think>summary,details.rollcard summary{
+  min-height:36px;font-size:12.5px}
+.tbody{font-size:13px}
+.say{font-size:14.5px;line-height:1.6}
+.cost{font-size:11px}
+.copy{min-height:32px}
+
+/* A PENDING approval / elicit / GitHub card leaves the flow and pins
+   directly above the input. Answered, its buttons are replaced by
+   `.askdone` and the same card drops back into the transcript. */
+.ask:has(.askrow button){position:fixed;z-index:7;left:var(--colpad);
+  right:var(--colpad);bottom:calc(var(--comph,0px) - 4px);
+  margin:0;padding:0;max-width:none}
+.ask:has(.askrow button) .askcard{background:var(--panel);
+  box-shadow:0 -6px 24px var(--shadow),0 0 0 1px rgba(229,192,75,.40);
+  max-height:42dvh;overflow:auto;background-image:linear-gradient(rgba(229,192,75,.07),rgba(229,192,75,.07))}
+.asktop{font-size:13px}
+.asktop code{font-size:12px;display:-webkit-box;-webkit-line-clamp:4;
+  -webkit-box-orient:vertical;overflow:hidden}
+.askrow{gap:8px}
+.askrow button{min-height:var(--tap);font-size:13.5px;padding:0 16px;flex:1 1 auto;
+  border-radius:10px}
+.askcard .elicfield{flex-wrap:wrap}
+.askcard .eliclabel{flex-basis:100%}
+.askcard .elicfield input[type=text],.askcard .elicfield input[type=number],
+.askcard .elicfield select{font-size:16px;min-height:var(--tap)}
+.askcard .elichint{margin-left:0}
+
+/* ---- settings: a full-screen sheet, categories as a scrolling strip ----- */
+#settings{padding:0;place-items:stretch}
+#settings .sheet{width:100%;height:100dvh;border:0;border-radius:0;
+  padding-top:var(--safe-t)}
+#settings .shead{min-height:var(--barh);padding:0 4px 0 16px}
+#settings .shead h2{font-size:16px}
+#settings .sclose{min-width:var(--tap);min-height:var(--tap);font-size:17px}
+#settings .sbody{flex-direction:column}
+#scats{width:auto;flex-direction:row;overflow-x:auto;border-right:0;
+  border-bottom:1px solid var(--line);padding:8px 10px;gap:6px;
+  scrollbar-width:none;overscroll-behavior-x:contain;
+  -webkit-mask-image:linear-gradient(90deg,#000 88%,transparent);
+  mask-image:linear-gradient(90deg,#000 88%,transparent)}
+#scats::-webkit-scrollbar{display:none}
+#scats button{flex:none;min-height:38px;padding:0 14px;font-size:13.5px;
+  border-radius:19px;border:1px solid var(--line)}
+#scats button.on{border-color:var(--accent);color:var(--accent);
+  background:color-mix(in srgb,var(--accent) 12%,transparent)}
+#spane{padding:14px 16px calc(24px + var(--safe-b))}
+#spane h3{font-size:12px}
+.shint,.mcpsaid,.mcpbad{font-size:13px}
+.srow{padding:12px 0;gap:12px;align-items:center}
+.srow .sname{font-size:14px}
+.srow .sdesc{font-size:12.5px}
+/* iOS switch look (51x31) inside a 65x45 hit box: the border is transparent */
+.sw{width:65px;height:45px;border:7px solid transparent;border-radius:23px;
+  background-clip:padding-box}
+.sw.on{background-clip:padding-box}   /* the page's .sw.on shorthand resets it */
+.sw::after{width:27px;height:27px;top:2px;left:2px}
+.sw.on::after{transform:translateX(20px)}
+#themes button{min-height:var(--tap);flex:1}
+.fold{min-height:var(--tap);align-items:center;margin-top:10px;padding-top:6px}
+.fold .sname{font-size:14px}
+.msel,.keyrow input,.sform input,.sform textarea,.mcpkey,#mcpline,#brurl{
+  font-size:16px;min-height:var(--tap)}
+.keyrow{flex-wrap:wrap}
+.keyrow input{flex:1 1 100%}
+.keyrow button,.sform button,#updbtn,.subout{min-height:var(--tap);font-size:13.5px;
+  padding:0 16px;flex:1 1 auto}
+/* MCP: head wraps to two lines, tool rows put the class segment under the text */
+.mcphead{flex-wrap:wrap;align-items:center;row-gap:6px;padding-top:12px}
+.mcphead .sname{font-size:14px}
+.mcphead .cmd{order:5;flex-basis:100%;font-size:12px}
+.mcphead .count{margin-left:auto}
+.mcphead button{min-height:36px;padding:0 12px;font-size:12.5px}
+.mcpbar{flex-wrap:wrap}
+.mcptools .srow{flex-wrap:wrap}
+.mcptools .srow .stext{flex:1 1 100%}
+.seg button{min-height:36px;padding:0 14px;font-size:12.5px}
+.mcptools .srow .seg{margin-right:auto}
+#subs{flex-direction:column}
+.sub{flex:none}
+
+/* ---- the browser drawer ------------------------------------------------- */
+.brnav{min-width:var(--tap);min-height:var(--tap);font-size:16px}
+.brtab{min-height:36px}
+}
+
+/* the held line (#264): the queued bubble above the input, every width */
+#heldbar{display:grid;justify-items:end;gap:3px;max-width:var(--colw);
+  margin:0 auto 8px}
+#heldbar .txt{color:var(--text-soft);white-space:pre-wrap;background:transparent;
+  border:1px dashed var(--bevel);border-radius:12px;padding:8px 13px;max-width:75%}
+#heldbar .hl{font-size:10.5px;color:var(--dimmer)}
+#heldbar .hl b{color:var(--accent);font-weight:600}
+@media (max-width:700px){
+  #heldbar .txt{max-width:86%;font-size:14px}
+  #heldbar .hl{font-size:11.5px}
+}
+"""
+# #249. DIE TELEFONHAKEN, nur in der Telefonfassung (`stamped_page(remote=True)`):
+# Schubladen, Zielleiste, festgesteckte Freigaben, die einzeilige Eingabe mit
+# dem +-Blatt, die gehaltene Zeile. Die Desktopseite bekommt davon nichts.
+REMOTE_JS = r"""
+// #249 THE PHONE HOOKS. Runs after PAGE's own script, only in the phone variant of PAGE.
+// Nothing here draws content; it only decides which drawer is out, keeps the
+// layout per device, and measures the pinned card for #flow's padding.
+(function(){
+  const phone = window.matchMedia("(max-width:700px)");
+  const body = document.body, main = document.getElementById("main");
+  const DRAWERS = ["rail","code","git","browser"];
+
+  // 1. LAYOUT IS PER DEVICE (decision 3). The shim answers set_*_open and
+  //    set_theme on the phone itself; the theme is remembered here, per device.
+  const store = (k,v) => { try{ localStorage.setItem("crow."+k, v); }catch(e){} };
+  const load = k => { try{ return localStorage.getItem("crow."+k); }catch(e){ return null; } };
+  const theme = load("theme"); if(theme) document.documentElement.dataset.theme = theme;
+  const setTheme = crow.setTheme;
+  crow.setTheme = function(name){ store("theme", name); return setTheme.apply(this, arguments); };
+
+  // 2. DRAWERS. The page stamps data-rail/-code/-git/-browser from the desktop's
+  //    settings; on the phone every drawer starts closed and one is out at most.
+  const scrim = document.createElement("div"); scrim.id = "mscrim";
+  body.appendChild(scrim);
+  function shutAll(except){
+    DRAWERS.forEach(d => { if(d!==except) body.dataset[d] = "shut"; });
+    body.classList.toggle("m-drawer", !!except && body.dataset[except]!=="shut");
+  }
+  if(phone.matches) shutAll(null);
+  const wrap = (fn, name) => function(){
+    if(!phone.matches) return fn.apply(this, arguments);
+    DRAWERS.forEach(d => { if(d!==name) body.dataset[d] = "shut"; });
+    const r = fn.apply(this, arguments);            // the page flips its own
+    body.classList.toggle("m-drawer", body.dataset[name] !== "shut");
+    return r;
+  };
+  crow.toggleRail = wrap(crow.toggleRail, "rail");
+  crow.toggleCode = wrap(crow.toggleCode, "code");
+  crow.toggleGit = wrap(crow.toggleGit, "git");
+  crow.toggleBrowser = wrap(crow.toggleBrowser, "browser");
+  scrim.addEventListener("click", () => shutAll(null));
+  // Picking a chat or "new" closes the rail: the chat is what you came for.
+  ["open","reset"].forEach(k => { const f = crow[k];
+    crow[k] = function(){ if(phone.matches) shutAll(null); return f.apply(this, arguments); }; });
+
+  // The chosen settings category scrolls into the chip strip.
+  const cat = crow.settingsCat;
+  crow.settingsCat = function(){ const r = cat.apply(this, arguments);
+    const on = document.querySelector("#scats .on");
+    if(phone.matches && on) on.scrollIntoView({inline:"center", block:"nearest"});
+    return r; };
+
+  // Swipe: from the left edge opens the rail, from the right edge the code
+  // drawer; a swipe the other way on an open drawer closes it.
+  let t0 = null;
+  window.addEventListener("touchstart", e => {
+    if(!phone.matches || e.touches.length!==1) return;
+    const p = e.touches[0]; t0 = {x:p.clientX, y:p.clientY, w:innerWidth};
+  }, {passive:true});
+  window.addEventListener("touchend", e => {
+    if(!t0) return; const p = e.changedTouches[0];
+    const dx = p.clientX - t0.x, dy = p.clientY - t0.y, s = t0; t0 = null;
+    if(Math.abs(dx) < 60 || Math.abs(dy) > Math.abs(dx) * 0.6) return;
+    const open = DRAWERS.find(d => body.dataset[d] !== "shut");
+    if(open){ if((open==="rail") === (dx < 0)) shutAll(null); return; }
+    if(dx > 0 && s.x < 24) crow.toggleRail();
+    else if(dx < 0 && s.x > s.w - 24) crow.toggleCode();
+  }, {passive:true});
+
+  // 3. THE GOAL STARTS AS A THIN BAR. goalPanel keeps `shut` across redraws,
+  //    so the first draw on this device sets it once. In the bar the head is
+  //    `display:contents`, so a tap on the title has to open it here.
+  const gp = document.getElementById("goalpanel");
+  const goalPanel = crow.goalPanel;
+  crow.goalPanel = function(g){
+    if(phone.matches && !gp.dataset.m){ gp.dataset.m = "1"; gp.classList.add("shut"); }
+    return goalPanel.apply(this, arguments);
+  };
+  gp.addEventListener("click", e => {
+    if(!phone.matches || e.target.closest(".gh")) return;   // the page's own
+    if(gp.classList.contains("shut")) gp.classList.remove("shut");
+  });
+  document.getElementById("flow").addEventListener("click", () => {
+    if(phone.matches && !gp.hidden) gp.classList.add("shut"); });
+
+  // 4. THE PINNED CARD'S HEIGHT goes into #flow's bottom padding (mobile.css),
+  //    so the last line of the transcript is never under it.
+  const ro = new ResizeObserver(measure);
+  let watched = null;
+  function measure(){
+    const card = phone.matches && [...document.querySelectorAll(".ask")]
+      .find(a => a.querySelector(".askrow button"));
+    if(card !== watched){ if(watched) ro.unobserve(watched);
+      watched = card || null; if(watched) ro.observe(watched); }
+    main.style.setProperty("--askh", card ? (card.offsetHeight + 8) + "px" : "0px");
+  }
+  new MutationObserver(measure).observe(document.getElementById("flow"),
+    {childList:true, subtree:true});
+  // 5. THE COMPOSER (robin: remove nothing, shorten). Only on a phone.
+  if(phone.matches) composer();
+  function composer(){
+    const box = document.getElementById("box"), line = document.getElementById("line"),
+          go = document.getElementById("go"), foot = document.getElementById("foot"),
+          input = document.getElementById("in"), ctx = document.getElementById("ctx");
+    // ONE ROW (robin, 2026-09-24): [+][input][send/Stop], all 44 pt. The +
+    // opens #mtools above the composer with every other control, moved there
+    // from #foot / #acts (same ids, same handlers).
+    const $id = x => document.getElementById(x);
+    input.placeholder = "Message or /command";
+    const plus = document.createElement("button");
+    plus.id = "mplus"; plus.type = "button"; plus.title = "attach, dictate, mode, model, folder";
+    plus.setAttribute("aria-expanded", "false");
+    line.prepend(plus); line.appendChild(go);
+    const tools = document.createElement("div"); tools.id = "mtools";
+    document.getElementById("composer").appendChild(tools);
+    const row = c => { const d = document.createElement("div"); d.className = c;
+      tools.appendChild(d); return d; };
+    const r2 = row("mr2"), r3 = row("mr3"), r4 = row("mr4");
+    const setOpen = on => { body.classList.toggle("m-tools", on);
+      plus.setAttribute("aria-expanded", String(on));
+      main.style.setProperty("--toolsh", on ? tools.offsetHeight + 8 + "px" : "0px"); };
+    plus.addEventListener("click", () => setOpen(!body.classList.contains("m-tools")));
+    document.addEventListener("click", e => {
+      if(!body.classList.contains("m-tools")) return;
+      if(e.target.closest("#mtools,#mplus,#modemenu,#modelmenu,#rootmenu")) return;
+      setOpen(false); });
+    window.mobileTools = setOpen;
+    // the mode, visible at a glance: a dot on the + in the mode's colour
+    const modeIs = crow.modeIs;
+    crow.modeIs = function(name){ plus.dataset.mode = name; return modeIs.apply(this, arguments); };
+    // attach: the shim's own #remoteattach (file field -> /upload ->
+    // stage_image), drawn as a paperclip and moved into the sheet.
+    const att = $id("remoteattach");
+    att.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"'
+      + ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+      + '<path d="M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2'
+      + 'l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l7.9-7.9"/></svg>';
+    $id("remotefile").multiple = false;
+    r2.append(att, $id("mic"), $id("modewrap"), $id("modelwrap"));
+    r3.append($id("rootwrap"));
+    r4.append($id("turnstate"), ctx, $id("hint"));
+    // THE HELD LINE (#264 + #249): the queued bubble above the input, drawn
+    // from crow.held, which queuedLine fills from the pushed text.
+    const composerEl = $id("composer");
+    function drawHeld(by){ let h = $id("heldbar"); const held = crow.held;
+      if(!held || !held.t){ if(h) h.remove(); return; }
+      if(!h){ h = document.createElement("div"); h.id = "heldbar";
+        h.innerHTML = '<div class="txt"></div><div class="hl"><b>queued</b><span></span></div>';
+        composerEl.insertBefore(h, box); }
+      h.querySelector(".txt").textContent = held.t;
+      h.querySelector(".hl span").textContent = " · goes in when this turn ends"
+        + (by === "desktop" ? " · from the desktop" : ""); }
+    ["queuedLine","release","viewBar"].forEach(k => { const f = crow[k];
+      crow[k] = function(e){ const r = f.apply(this, arguments);
+        drawHeld(k === "queuedLine" && e ? e.by : undefined); return r; }; });
+    // mic: the desktop microphone is not the phone's. A tap focuses the input
+    // so the dictation key on the iOS keyboard is one tap away.
+    const mic = document.getElementById("mic");
+    crow.mic = function(){ input.focus();
+      document.getElementById("hint").textContent = "dictate with the keyboard's microphone key"; };
+    const micState = crow.micState;
+    crow.micState = function(){ const r = micState.apply(this, arguments);
+      mic.disabled = false; mic.classList.remove("rec");
+      mic.title = "dictate: opens the keyboard"; return r; };
+    mic.disabled = false; mic.title = "dictate: opens the keyboard";
+    // the model: a short name on the chip, the full one in the title and menu.
+    const showModel = crow.showModel;
+    crow.showModel = function(){ const r = showModel.apply(this, arguments);
+      const b = document.querySelector("#model b");
+      const lv = document.querySelector("#model .lvl"); if(lv) lv.remove();
+      if(b && this.modelName){ b.textContent = shortModel(this.modelName);
+        document.getElementById("model").title = this.modelName; }
+      return r; };
+    // NO REASONING LEVEL ON THE PHONE (robin, 2026-09-24): the operating
+    // point fixes it (manifests/operating-point.json reasoning_fixed), so the
+    // menu lists models only; the chip shows the family name only.
+    const plan = crow.modelPlan;
+    crow.modelPlan = function(){ return plan.apply(this, arguments)
+      .filter(p => p.kind !== "level"); };
+    // the context: a 2 px line on the box's top edge, coloured like #ctx .fill.
+    const bar = document.createElement("div"); bar.id = "mctx";
+    box.appendChild(bar);
+    const ctxFn = crow.ctx;
+    crow.ctx = function(tokens, limit){ const r = ctxFn.apply(this, arguments);
+      const share = limit > 0 ? Math.min(1, tokens / limit) : 0;
+      box.style.setProperty("--ctxp", share);
+      box.classList.toggle("cw", share >= .5 && share < .85);
+      box.classList.toggle("cb", share >= .85);
+      bar.title = ctx.textContent ? "context " + ctx.textContent : "";
+      return r; };
+    // tap on the line: the sheet with the numbers
+    bar.addEventListener("click", () => setOpen(true));
+    crow.showModel();
+  }
+  // THE FAMILY ONLY (robin, 2026-09-24): the first run of letters, capitalised,
+  // at most 8 characters. "Qwen3.8-Flash-Next" -> "Qwen", "Gemma-5-12B" ->
+  // "Gemma", "claude-sonnet-5" -> "Claude", "qwen/qwen3.8-flash" -> "Qwen".
+  function shortModel(name){
+    const bare = String(name).split("/").pop();
+    const fam = (bare.match(/^[A-Za-z]+/) || [bare])[0];
+    const cap = fam.charAt(0).toUpperCase() + fam.slice(1);
+    return cap.length > 8 ? cap.slice(0, 7) + "…" : cap;
+  }
+
+  phone.addEventListener("change", () => { measure(); if(phone.matches) shutAll(null); });
+})();
 """
 
 
@@ -8117,6 +8765,7 @@ def stamped_page(remote: bool = False) -> str:
     # #249. DIE HAKEN ZULETZT, damit kein Ersatz oben in einem Haken landet.
     return (page.replace("<!--__REMOTE_HEAD__-->", REMOTE_HEAD if remote else "")
                 .replace("/* __REMOTE_CSS__ */", REMOTE_CSS if remote else "")
+                .replace("/* __REMOTE_JS__ */", REMOTE_JS if remote else "")
                 .replace("__REMOTE_BOUND__", json.dumps(REMOTE_DESKTOP_BOUND)
                          if remote else "{}")
                 .replace("__REMOTE_TEXT__", json.dumps(
@@ -14759,7 +15408,8 @@ class Api:
         pending = [threading.Event(), False]
         self._remote_asks[ident] = pending
         self._push_to({"k": "remoteask", "id": ident, "name": name,
-                       "t": crow_core.remote_ask_line(name)}, (DESKTOP,))
+                       "t": crow_core.remote_ask_line(name),
+                       "ttl": crow_core.REMOTE_CONFIRM_S}, (DESKTOP,))
         answered = pending[0].wait(crow_core.REMOTE_CONFIRM_S)
         self._remote_asks.pop(ident, None)
         allowed = bool(answered and pending[1])
@@ -14819,7 +15469,8 @@ class Api:
                        "url": remote.url, "svg": svg,
                        "ip": getattr(remote, "host", ""),
                        "ips": [[iface, ip] for iface, ip in lan_addresses()],
-                       "devices": devices, "hint": self._remote_firewall()},
+                       "devices": devices, "hint": self._remote_firewall(),
+                       "ttl": getattr(module, "PAIR_TTL", 120.0)},
                       (DESKTOP,))
 
     def _remote_state_push(self, force: bool = False) -> None:

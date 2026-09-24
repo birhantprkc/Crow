@@ -13348,6 +13348,44 @@ class RemoteApiParityTests(RemoteCase):
         self.assertEqual(self.mirrored().remote_page(), phone)
 
 
+class RemotePhoneLayerTests(unittest.TestCase):
+    """#249 step 0 -> code: robin's approved phone mockups (one-row composer,
+    drawers, goal bar, pinned approvals) live ONLY in the phone's variant of
+    the page. The desktop's page must not carry a byte of it."""
+
+    MARKERS = ("#mplus", "#mtools", "#mscrim", "#heldbar", "mobileTools",
+               "shortModel", "@media (max-width:700px)")
+
+    def test_the_phone_page_carries_the_layer(self):
+        phone = crow_gui.stamped_page(remote=True)
+        for marker in self.MARKERS:
+            self.assertIn(marker, phone, marker)
+        # The layer runs before the pairing starts, so its hooks are in place
+        # when the snapshot and the first pushes arrive.
+        self.assertLess(phone.index("function shortModel"),
+                        phone.index("if(window.CROW_REMOTE) window.crowRemoteStart();"))
+
+    def test_the_desktop_page_carries_none_of_it(self):
+        desk = crow_gui.stamped_page()
+        for marker in self.MARKERS:
+            self.assertNotIn(marker, desk, marker)
+        self.assertNotIn("__REMOTE_JS__", desk)
+
+    def test_a_hidden_goal_stays_hidden_on_the_phone(self):
+        """Found against the real server: `{"k":"goal","goal":null}` hides the
+        panel with [hidden], and a bare `#goalpanel.shut{display:grid}` would
+        have drawn an empty bar over the chat."""
+        css = crow_gui.REMOTE_CSS
+        self.assertIn("#goalpanel.shut:not([hidden]){display:grid", css)
+        self.assertNotIn("#goalpanel.shut{display:grid", css)
+
+    def test_the_phone_shows_no_reasoning_level(self):
+        """robin, 2026-09-24: the operating point fixes the level; the phone's
+        model chip and menu show none of it."""
+        self.assertIn("#model .lvl{display:none!important}", crow_gui.REMOTE_CSS)
+        self.assertIn('.filter(p => p.kind !== "level")', crow_gui.REMOTE_JS)
+
+
 class RemoteMirrorTests(RemoteCase):
     """#249 "Expected result", RemoteMirrorTests: the eight bullets."""
 
